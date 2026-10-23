@@ -5,29 +5,14 @@
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .errors import RequestValidationError
 
 
-# Allowed request kinds
+# The only request kind the Critic accepts.
 COORDINATOR_INBOX = "coordinator_inbox"
-DECISION_REQUEST = "critic_decision_request"
-KB_DRAFT_REQUEST = "kb_draft_request"
-KB_HINT_REQUEST = "kb_hint_request"
-OBJECTION_REQUEST = "objection_signal"
-
-REQUEST_KINDS: frozenset[str] = frozenset(
-    {
-        COORDINATOR_INBOX,
-        DECISION_REQUEST,
-        KB_DRAFT_REQUEST,
-        KB_HINT_REQUEST,
-        OBJECTION_REQUEST,
-    }
-)
 
 
 CRITICAL_CONTEXT_KEYS: tuple[str, ...] = ("model", "framework")
@@ -45,6 +30,21 @@ class Proposal:
     action_name: str | None = None
     predicted_gain_pct: float | None = None
 
+    @classmethod
+    def from_payload(cls, *, msg_id: str, from_agent: str, payload: dict[str, Any], seq: int | None) -> Proposal:
+        """Build a proposal, lifting a string ``action_name`` and a numeric ``predicted_gain_pct`` out of ``payload``."""
+        action_name = payload.get("action_name") if isinstance(payload.get("action_name"), str) else None
+        gain_raw = payload.get("predicted_gain_pct")
+        predicted_gain_pct = float(gain_raw) if isinstance(gain_raw, (int, float)) else None
+        return cls(
+            msg_id=msg_id,
+            from_agent=from_agent,
+            payload=payload,
+            seq=seq,
+            action_name=action_name,
+            predicted_gain_pct=predicted_gain_pct,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """Return the proposal as a plain dict via :func:`dataclasses.asdict`."""
         return asdict(self)
@@ -59,27 +59,9 @@ class CriticRequest:
     session_id: str
     decision_id: str | None = None
     raw_prompt: str | None = None
-    messages: list[dict[str, Any]] = field(default_factory=list)
     context: dict[str, Any] = field(default_factory=dict)
-    decision: dict[str, Any] = field(default_factory=dict)
     proposals: list[Proposal] = field(default_factory=list)
     options: dict[str, Any] = field(default_factory=dict)
-    raw: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return the request as a plain JSON-serialisable dict."""
-        out: dict[str, Any] = {
-            "kind": self.kind,
-            "session_id": self.session_id,
-            "decision_id": self.decision_id,
-            "raw_prompt": self.raw_prompt,
-            "messages": list(self.messages),
-            "context": dict(self.context),
-            "decision": dict(self.decision),
-            "proposals": [p.to_dict() for p in self.proposals],
-            "options": dict(self.options),
-        }
-        return out
 
 
 # Parsing
@@ -133,25 +115,17 @@ def parse_request(raw: dict[str, Any]) -> CriticRequest:
         raise RequestValidationError(f"top-level must be an object, got {type(raw).__name__}")
 
     kind = _require_str(raw, "kind", where="request")
-    if kind not in REQUEST_KINDS:
-        raise RequestValidationError(f"request: kind {kind!r} is not in {sorted(REQUEST_KINDS)!r}")
+    if kind != COORDINATOR_INBOX:
+        raise RequestValidationError(f"request: kind {kind!r} is not {COORDINATOR_INBOX!r}")
     session_id = _require_str(raw, "session_id", where="request")
 
     decision_id = _optional_str(raw, "decision_id", where="request")
-    if decision_id is None and kind in (DECISION_REQUEST, OBJECTION_REQUEST):
-        decision_id = f"dec_{uuid.uuid4().hex[:12]}"
 
     raw_prompt = _optional_str(raw, "raw_prompt", where="request")
-    if kind == COORDINATOR_INBOX and not (raw_prompt and raw_prompt.strip()):
+    if not (raw_prompt and raw_prompt.strip()):
         raise RequestValidationError("coordinator_inbox: raw_prompt must be a non-empty string")
 
-    messages = _optional_list(raw, "messages", where="request")
-    for i, msg in enumerate(messages):
-        if not isinstance(msg, dict):
-            raise RequestValidationError(f"request.messages[{i}] must be an object, got {type(msg).__name__}")
-
     context = _optional_dict(raw, "context", where="request")
-    decision = _optional_dict(raw, "decision", where="request")
     options = _optional_dict(raw, "options", where="request")
 
     proposals_raw = _optional_list(raw, "proposals", where="request")
@@ -165,34 +139,16 @@ def parse_request(raw: dict[str, Any]) -> CriticRequest:
         seq = prop.get("seq")
         if seq is not None and not isinstance(seq, int):
             raise RequestValidationError(f"request.proposals[{i}].seq must be int when present")
-        action_name = payload.get("action_name") if isinstance(payload.get("action_name"), str) else None
-        gain_raw = payload.get("predicted_gain_pct")
-        if isinstance(gain_raw, (int, float)):
-            predicted_gain_pct: float | None = float(gain_raw)
-        else:
-            predicted_gain_pct = None
-        proposals.append(
-            Proposal(
-                msg_id=msg_id,
-                from_agent=from_agent,
-                payload=payload,
-                seq=seq,
-                action_name=action_name,
-                predicted_gain_pct=predicted_gain_pct,
-            )
-        )
+        proposals.append(Proposal.from_payload(msg_id=msg_id, from_agent=from_agent, payload=payload, seq=seq))
 
     return CriticRequest(
         kind=kind,
         session_id=session_id,
         decision_id=decision_id,
         raw_prompt=raw_prompt,
-        messages=messages,
         context=context,
-        decision=decision,
         proposals=proposals,
         options=options,
-        raw=dict(raw),
     )
 
 
@@ -200,11 +156,6 @@ __all__ = [
     "COORDINATOR_INBOX",
     "CRITICAL_CONTEXT_KEYS",
     "CriticRequest",
-    "DECISION_REQUEST",
-    "KB_DRAFT_REQUEST",
-    "KB_HINT_REQUEST",
-    "OBJECTION_REQUEST",
     "Proposal",
-    "REQUEST_KINDS",
     "parse_request",
 ]

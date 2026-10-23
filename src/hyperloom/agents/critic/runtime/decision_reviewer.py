@@ -10,16 +10,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen
-from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS
 
 
 from .errors import (
-    InboxParseError,
     IntentEnvelopeValidationError,
     ReviewValidationError,
-    RuntimeAdapterError,
 )
+from .importance_mapping import CRITIC_IMPORTANCE_CEILING
 from .inbox_parser import parse_inbox_prompt
 from .intent_envelope import (
     Intent,
@@ -29,19 +27,14 @@ from .intent_envelope import (
     build_idle_intent,
     build_review_verdict_intent,
 )
-from .kb_client import KBClient
 from .kb_writer import KBWriter, WriteContext
 from .request_models import (
-    COORDINATOR_INBOX,
     CRITICAL_CONTEXT_KEYS,
     CriticRequest,
-    DECISION_REQUEST,
-    KB_DRAFT_REQUEST,
     Proposal,
     parse_request,
 )
 from .scope_builder import build_scope, scope_cache_key
-from .session_memory import SessionMemory
 
 
 # Review-constraints taxonomy: proposals split into four classes and the bundle-level ``approve_requires`` collapses a
@@ -150,10 +143,7 @@ class JudgeBundle:
     missing_context: list[str] = field(default_factory=list)
     required_context: list[str] = field(default_factory=list)
     proposals: list[dict[str, Any]] = field(default_factory=list)
-    messages: list[dict[str, Any]] = field(default_factory=list)
-    decision: dict[str, Any] = field(default_factory=dict)
     kb_priors_by_proposal: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
-    kb_priors_for_decision: list[dict[str, Any]] = field(default_factory=list)
     # Audit trail for the historical KB prior reads; consumed by the Coordinator.
     kb_priors_trace: dict[str, Any] = field(default_factory=dict)
     kb_read_skipped_reason: str | None = None
@@ -171,10 +161,7 @@ class JudgeBundle:
             "missing_context": list(self.missing_context),
             "required_context": list(self.required_context),
             "proposals": [dict(p) for p in self.proposals],
-            "messages": [dict(m) for m in self.messages],
-            "decision": dict(self.decision),
             "kb_priors_by_proposal": {k: [dict(p) for p in v] for k, v in self.kb_priors_by_proposal.items()},
-            "kb_priors_for_decision": [dict(p) for p in self.kb_priors_for_decision],
             "kb_priors_trace": dict(self.kb_priors_trace),
             "kb_read_skipped_reason": self.kb_read_skipped_reason,
             "review_constraints": dict(self.review_constraints),
@@ -190,9 +177,7 @@ class CommitOutcome:
     session_id: str
     decision_id: str | None
     intent_envelope: dict[str, Any] | None = None
-    decision_review: dict[str, Any] | None = None
     kb_writes: list[dict[str, Any]] = field(default_factory=list)
-    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serialisable copy of the commit outcome."""
@@ -201,12 +186,9 @@ class CommitOutcome:
             "session_id": self.session_id,
             "decision_id": self.decision_id,
             "kb_writes": [dict(w) for w in self.kb_writes],
-            "notes": list(self.notes),
         }
         if self.intent_envelope is not None:
             out["intent_envelope"] = self.intent_envelope
-        if self.decision_review is not None:
-            out["critic_decision_review"] = self.decision_review
         return out
 
 
@@ -234,22 +216,10 @@ def _review_verdict(item: dict[str, Any], target: str, verdict: str, advice_text
 class DecisionReviewer:
     """Orchestrator for the Critic prepare/commit lifecycle."""
 
-    def __init__(
-        self,
-        *,
-        session_memory: SessionMemory | None = None,
-        kb_client: KBClient | None = None,
-        kb_writer: KBWriter | None = None,
-    ):
-        """Wire up the reviewer with its memory, KB client and writer."""
-        self.session_memory = session_memory or SessionMemory()
-        if kb_writer is None:
-            if kb_client is None:
-                from .in_memory_kb_client import InMemoryKBClient
-
-                kb_client = InMemoryKBClient()
-            kb_writer = KBWriter(kb_client, session_memory=self.session_memory)
+    def __init__(self, *, kb_writer: KBWriter):
+        """Wire up the reviewer with its KB writer and the session memory that writer shares."""
         self.kb_writer = kb_writer
+        self.session_memory = kb_writer.session_memory
 
     # Phase 1: prepare-review
     def prepare_review(self, raw_request: dict[str, Any]) -> JudgeBundle:
@@ -266,8 +236,6 @@ class DecisionReviewer:
         bundle.merged_context = merge.merged
         bundle.missing_context = list(merge.missing_keys)
         bundle.proposals = [p.to_dict() for p in req.proposals]
-        bundle.messages = list(req.messages)
-        bundle.decision = dict(req.decision)
         bundle.review_constraints = self._review_constraints(req.proposals)
         known = req.options.get("known_actions")
         if isinstance(known, list) and known:
@@ -279,11 +247,6 @@ class DecisionReviewer:
             bundle.required_context = critical_missing
             bundle.kb_read_skipped_reason = "missing_critical_context"
             bundle.notes.append("model and/or framework unknown — KB priors not fetched")
-            return bundle
-
-        # Skip KB reads only if explicitly disabled or inappropriate kind.
-        if req.kind in (KB_DRAFT_REQUEST,):
-            bundle.kb_read_skipped_reason = "kb_draft_does_not_need_priors"
             return bundle
 
         # KB reads disabled wholesale (operator switch) → reflect in bundle.
@@ -303,28 +266,25 @@ class DecisionReviewer:
         return bundle
 
     def _fetch_kb_priors(self, bundle: JudgeBundle, req: CriticRequest, merged: dict[str, Any]) -> None:
-        """Read the KB priors for each proposal, or for the decision, into ``bundle`` with their audit trail."""
+        """Read the KB priors for each proposal into ``bundle`` with their audit trail."""
         scope = build_scope(req.context, session_context=merged, require_critical=False)
         # Hide "unknown" so the service doesn't filter to literal "unknown" rows.
         scope_filter = {k: v for k, v in scope.items() if v != "unknown"}
         ctx = WriteContext(session_id=req.session_id, review_id=req.decision_id)
         prior_limit = int(os.environ.get("CRITIC_KB_PRIOR_LIMIT", "5"))
-        lookups = [(p.msg_id, self._topic_for_proposal(p)) for p in req.proposals] or [
-            (None, self._topic_for_decision(req))
-        ]
         priors_requests: list[dict[str, Any]] = []
-        for msg_id, topic in lookups:
+        for proposal in req.proposals:
+            topic = self._topic_for_proposal(proposal)
             priors = self.kb_writer.list_priors(scope=scope_filter, kind=None, topic=topic, limit=prior_limit, ctx=ctx)
             hits = priors.get("priors") or []
-            if msg_id is None:
-                bundle.kb_priors_for_decision = hits
-            else:
-                bundle.kb_priors_by_proposal[msg_id] = hits
-            priors_requests.append({"msg_id": msg_id, "topic": topic, "cache": priors.get("cache"), "count": len(hits)})
+            bundle.kb_priors_by_proposal[proposal.msg_id] = hits
+            priors_requests.append(
+                {"msg_id": proposal.msg_id, "topic": topic, "cache": priors.get("cache"), "count": len(hits)}
+            )
 
         bundle.kb_priors_trace = {
             "configured": True,
-            "mode": "per_proposal" if req.proposals else "per_decision",
+            "mode": "per_proposal",
             "client_mode": os.environ.get("CRITIC_KB_CLIENT_MODE", ""),
             "scope_filter": dict(scope_filter),
             "limit": prior_limit,
@@ -356,30 +316,15 @@ class DecisionReviewer:
             decision_id=req.decision_id,
         )
         session_ctx = self.session_memory.load_context(req.session_id)
-
-        if req.kind == COORDINATOR_INBOX:
-            self._commit_coordinator_inbox(req, review, outcome, session_ctx)
-        elif req.kind == DECISION_REQUEST:
-            self._commit_decision_request(req, review, outcome, session_ctx)
-        elif req.kind == KB_DRAFT_REQUEST:
-            self._commit_kb_draft(req, review, outcome, session_ctx)
-        else:
-            raise ReviewValidationError(f"commit_review does not support kind={req.kind!r}")
+        self._commit_coordinator_inbox(req, review, outcome, session_ctx)
         return outcome
 
     # Implementation helpers
     def _populate_inbox(self, req: CriticRequest) -> None:
         """Parse proposals from a coordinator-inbox prompt, in place."""
-        if req.kind != COORDINATOR_INBOX:
-            return
         if req.proposals:
             return
-        if not req.raw_prompt:
-            return
-        try:
-            parsed = parse_inbox_prompt(req.raw_prompt)
-        except InboxParseError:
-            return
+        parsed = parse_inbox_prompt(req.raw_prompt)
         if not req.context:
             req.context.update({k: parsed.shared_state[k] for k in parsed.shared_state})
         # Filter out proposals already handled in this session (idempotency).
@@ -394,7 +339,7 @@ class DecisionReviewer:
         """Return the per-bundle review constraints payload."""
         constraints: dict[str, Any] = {
             "allowed_verdicts": sorted(ALLOWED_VERDICTS),
-            "ceiling_importance": 0.84,
+            "ceiling_importance": CRITIC_IMPORTANCE_CEILING,
         }
         if not proposals:
             constraints["approve_requires"] = list(_APPROVE_REQUIRES_PATCH_LANDING)
@@ -423,16 +368,6 @@ class DecisionReviewer:
         if isinstance(body, str) and body.strip():
             return body.strip()
         return f"proposal-{proposal.msg_id}"
-
-    def _topic_for_decision(self, req: CriticRequest) -> str:
-        """Derive the KB lookup topic for a decision-level review."""
-        decision = req.decision
-        if isinstance(decision, dict):
-            for key in ("topic", "summary", "target"):
-                value = decision.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-        return f"decision-{req.decision_id or req.session_id}"
 
     # ---- coordinator_inbox commit ------------------------------------
     def _commit_coordinator_inbox(
@@ -488,7 +423,6 @@ class DecisionReviewer:
             self.session_memory.append_decision(
                 req.session_id,
                 {
-                    "ts": now_iso(timespec="microseconds"),
                     "target_proposal_msg_id": target,
                     "verdict": verdict,
                     "reasoning": item.get("reasoning"),
@@ -512,110 +446,6 @@ class DecisionReviewer:
 
         outcome.intent_envelope = build_envelope(intents).to_dict()
 
-    # ---- decision_request commit -------------------------------------
-    def _commit_decision_request(
-        self,
-        req: CriticRequest,
-        review: dict[str, Any],
-        outcome: CommitOutcome,
-        session_ctx: dict[str, Any],
-    ) -> None:
-        """Commit a decision-request review and persist it."""
-        for k in ("verdict", "reason"):
-            if k not in review:
-                raise ReviewValidationError(f"decision_request review missing required key {k!r}")
-        if review["verdict"] not in {"adopt", "reject", "revise", "needs_info"}:
-            raise ReviewValidationError(
-                f"decision_request review.verdict {review['verdict']!r} not in adopt|reject|revise|needs_info"
-            )
-        decision_review = {
-            "kind": "critic_decision_review",
-            "session_id": req.session_id,
-            "decision_id": req.decision_id,
-            "verdict": review["verdict"],
-            "confidence": review.get("confidence", "medium"),
-            "reason": review["reason"],
-            "recommendation": review.get("recommendation", ""),
-            "basis": review.get("basis", "mixed"),
-            "kb_evidence": review.get("kb_evidence") or [],
-            "session_evidence": review.get("session_evidence") or [],
-            "required_context": review.get("required_context") or [],
-            "notes": review.get("notes") or [],
-        }
-        self.session_memory.append_decision(
-            req.session_id,
-            {
-                "ts": now_iso(timespec="microseconds"),
-                "decision_review": decision_review,
-            },
-        )
-        # Translate the verdict into a KB write verdict.
-        verdict_for_kb = {
-            "adopt": "approve",
-            "reject": "reject",
-            "revise": "redirect",
-            "needs_info": "needs_review",
-        }[review["verdict"]]
-        kb_payload = {
-            "verdict": verdict_for_kb,
-            "reasoning": review.get("reason", ""),
-            "packet_evidence": review.get("session_evidence") or [],
-            "kb_evidence": review.get("kb_evidence") or [],
-            "risks": review.get("risks") or [],
-            "confidence": review.get("confidence", "medium"),
-            "predicted_gain_pct": review.get("predicted_gain_pct"),
-        }
-        ctx = WriteContext(
-            session_id=req.session_id,
-            review_id=req.decision_id,
-            source_type=f"critic_decision_{review['verdict']}",
-            topic=review.get("topic") or (req.decision.get("summary") if isinstance(req.decision, dict) else None),
-        )
-        write_res = self.kb_writer.write_verdict(
-            verdict=kb_payload,
-            packet_context=req.context,
-            session_context=session_ctx,
-            ctx=ctx,
-        )
-        outcome.kb_writes.append(
-            {
-                "trigger": "decision_request",
-                "result": write_res.to_dict(),
-            }
-        )
-        outcome.decision_review = decision_review
-
-    # ---- kb_draft commit ----------------------------------------------
-    def _commit_kb_draft(
-        self,
-        req: CriticRequest,
-        review: dict[str, Any],
-        outcome: CommitOutcome,
-        session_ctx: dict[str, Any],
-    ) -> None:
-        """Commit a kb-draft review by batch-writing the drafts to KB."""
-        drafts = review.get("kb_drafts") or []
-        if not isinstance(drafts, list):
-            raise ReviewValidationError("kb_draft commit expects review.kb_drafts list")
-        ctx = WriteContext(
-            session_id=req.session_id,
-            review_id=req.decision_id,
-            source_type="critic_kb_draft",
-        )
-        res = self.kb_writer.write_kb_drafts(
-            kb_drafts=drafts,
-            packet_context=req.context,
-            session_context=session_ctx,
-            ctx=ctx,
-        )
-        outcome.kb_writes.append({"trigger": "kb_draft", "result": res.to_dict()})
-        outcome.decision_review = {
-            "kind": "critic_kb_draft",
-            "session_id": req.session_id,
-            "kb_drafts_attempted": len(drafts),
-            "kb_writes": [w["result"] for w in outcome.kb_writes],
-        }
-
     def _maybe_write_kb_for_verdict(
         self,
         verdict_item: dict[str, Any],
@@ -630,28 +460,19 @@ class DecisionReviewer:
         # Only persist when the SKILL opted in.
         if not verdict_item.get("persist_to_kb"):
             return
-        ctx = WriteContext(
-            session_id=req.session_id,
-            review_id=req.decision_id,
-            source_type=f"critic_verdict_{verdict}",
-            topic=verdict_item.get("topic"),
+        res = self.kb_writer.write_verdict(
+            verdict=verdict_item,
+            packet_context=req.context,
+            session_context=session_ctx,
+            ctx=WriteContext(session_id=req.session_id, review_id=req.decision_id),
         )
-        try:
-            res = self.kb_writer.write_verdict(
-                verdict=verdict_item,
-                packet_context=req.context,
-                session_context=session_ctx,
-                ctx=ctx,
-            )
-            outcome.kb_writes.append(
-                {
-                    "trigger": "review_verdict",
-                    "target_proposal_msg_id": verdict_item.get("target_proposal_msg_id"),
-                    "result": res.to_dict(),
-                }
-            )
-        except RuntimeAdapterError as exc:
-            outcome.notes.append(f"kb_write_skipped: {exc}")
+        outcome.kb_writes.append(
+            {
+                "trigger": "review_verdict",
+                "target_proposal_msg_id": verdict_item.get("target_proposal_msg_id"),
+                "result": res.to_dict(),
+            }
+        )
 
 
 __all__ = [

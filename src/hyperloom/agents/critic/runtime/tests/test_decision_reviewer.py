@@ -36,7 +36,7 @@ def reviewer(tmp_path):
     sm = SessionMemory(root=tmp_path / "sm")
     kb = InMemoryKBClient()
     writer = KBWriter(kb, session_memory=sm)
-    return DecisionReviewer(session_memory=sm, kb_writer=writer), kb, sm
+    return DecisionReviewer(kb_writer=writer), kb, sm
 
 
 def _coordinator_request(prompt: str, session_id: str = "sess_a") -> dict:
@@ -301,17 +301,11 @@ def test_prepare_review_unknown_action_falls_back_to_evidence_producer(reviewer)
 
 
 def test_prepare_review_no_proposals_uses_strict_default(reviewer):
-    """No inbox proposals: the strict checklist stays the safe default."""
+    """No inbox proposals: the strict checklist stays the safe default and no KB lookup runs."""
     rev, _, _ = reviewer
-    bundle = rev.prepare_review(
-        {
-            "kind": "critic_decision_request",
-            "session_id": "sess_nop",
-            "context": {"model": "qwen3-14b", "framework": "sglang"},
-            "messages": [{"role": "coordinator", "content": "decide"}],
-            "decision": {"summary": "land patch x"},
-        }
-    )
+    request = _coordinator_request("=== Inbox for critic ===\n(no new messages)\n", "sess_nop")
+    request["context"] = {"model": "qwen3-14b", "framework": "sglang"}
+    bundle = rev.prepare_review(request)
     constraints = bundle.review_constraints
     assert constraints["approve_requires"] == [
         "comparable_before_after_benchmark",
@@ -321,18 +315,18 @@ def test_prepare_review_no_proposals_uses_strict_default(reviewer):
     ]
     assert "proposal_action_classes" not in constraints
     assert "bundle_action_class" not in constraints
+    assert bundle.kb_priors_by_proposal == {}
+    assert bundle.kb_priors_trace["configured"] is True
+    assert bundle.kb_priors_trace["requests"] == []
 
 
 def test_prepare_review_skips_kb_when_critical_context_missing(reviewer):
     rev, kb, sm = reviewer
-    bundle = rev.prepare_review(
-        {
-            "kind": "critic_decision_request",
-            "session_id": "sess_b",
-            "messages": [{"role": "coordinator", "content": "decide"}],
-            "decision": {"summary": "adopt patch x"},
-        }
+    prompt = (
+        "=== Inbox for critic ===\n"
+        "  seq=1 msg_id=aaa from=orchestration topic=proposal payload={'action_name': 'kernel_opt'}\n"
     )
+    bundle = rev.prepare_review(_coordinator_request(prompt, "sess_b"))
     assert bundle.required_context == ["model", "framework"]
     assert bundle.kb_read_skipped_reason == "missing_critical_context"
 
@@ -549,47 +543,13 @@ def test_commit_review_invalid_verdict_raises(reviewer):
         )
 
 
-def test_commit_review_kb_draft_request_writes_drafts(reviewer):
+def test_commit_review_empty_target_raises(reviewer):
     rev, kb, sm = reviewer
-    request = {
-        "kind": "kb_draft_request",
-        "session_id": "sess_kbd",
-        "context": {
-            "model": "qwen3-14b",
-            "framework": "sglang",
-            "model_family": "qwen",
-            "workload": "decode",
-            "precision": "fp8",
-        },
-    }
-    review = {
-        "kb_drafts": [
-            {
-                "category": "kernel_optimization",
-                "action": "Patched the active dispatch path.",
-                "lesson": "Active dispatch path must be kept in sync.",
-                "tags": ["dispatch"],
-                "result": {"status": "KEEP", "gain_pct": 4.2},
-                "confidence": 0.9,
-            }
-        ]
-    }
-    outcome = rev.commit_review(request, review)
-    assert outcome.kind == "kb_draft_request"
-    assert outcome.kb_writes and outcome.kb_writes[0]["trigger"] == "kb_draft"
-    assert outcome.decision_review["kind"] == "critic_kb_draft"
-    assert outcome.decision_review["kb_drafts_attempted"] == 1
-
-
-def test_commit_review_kb_draft_non_list_raises(reviewer):
-    rev, kb, sm = reviewer
-    request = {
-        "kind": "kb_draft_request",
-        "session_id": "sess_kbd2",
-        "context": {"model": "qwen3-14b", "framework": "sglang"},
-    }
-    with pytest.raises(ReviewValidationError, match="kb_drafts list"):
-        rev.commit_review(request, {"kb_drafts": {"not": "a list"}})
+    with pytest.raises(ReviewValidationError, match="missing"):
+        rev.commit_review(
+            _coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_d2"),
+            {"review_verdicts": [{"target_proposal_msg_id": "", "verdict": "approve"}]},
+        )
 
 
 def test_commit_review_no_proposals_emits_idle_observation(reviewer):
@@ -629,56 +589,6 @@ def test_commit_review_persists_to_kb_when_flagged(reviewer):
     )
     assert any(w["trigger"] == "review_verdict" for w in outcome.kb_writes)
     assert kb.all_rows()
-
-
-def test_decision_request_prepare_with_full_context(reviewer):
-    rev, kb, sm = reviewer
-    bundle = rev.prepare_review(
-        {
-            "kind": "critic_decision_request",
-            "session_id": "sess_g",
-            "messages": [{"role": "coordinator", "content": "adopt patch x?"}],
-            "context": {
-                "model": "deepseek-r1-0528-fp8",
-                "framework": "sglang",
-                "model_family": "deepseek",
-                "workload": "decode",
-                "precision": "fp8",
-            },
-            "decision": {"summary": "adopt patch x"},
-        }
-    )
-    assert bundle.required_context == []
-    assert bundle.kb_read_skipped_reason is None
-
-
-def test_decision_request_commit_emits_decision_review(reviewer):
-    rev, kb, sm = reviewer
-    request = {
-        "kind": "critic_decision_request",
-        "session_id": "sess_h",
-        "messages": [{"role": "coordinator", "content": "adopt?"}],
-        "context": {
-            "model": "deepseek-r1-0528-fp8",
-            "framework": "sglang",
-            "model_family": "deepseek",
-            "workload": "decode",
-            "precision": "fp8",
-        },
-        "decision": {"summary": "adopt patch x"},
-    }
-    rev.prepare_review(request)
-    review = {
-        "verdict": "adopt",
-        "reason": "no contradicting kb prior; benchmark within tolerance",
-        "recommendation": "rerun final benchmark after cache clear",
-        "basis": "session",
-        "session_evidence": ["benchmark.after.gain_pct"],
-    }
-    outcome = rev.commit_review(request, review)
-    assert outcome.decision_review is not None
-    assert outcome.decision_review["verdict"] == "adopt"
-    assert outcome.kb_writes
 
 
 def test_kb_priors_cache_hit_avoids_second_kb_call(reviewer):
@@ -733,7 +643,7 @@ def test_kb_priors_trace_records_scope_and_requests(tmp_path):
         }
     )
     writer = KBWriter(kb, session_memory=sm)
-    rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
+    rev = DecisionReviewer(kb_writer=writer)
     prompt = (
         "=== Shared session state ===\n"
         "model=qwen3-14b framework=sglang workload=decode precision=fp8\n"

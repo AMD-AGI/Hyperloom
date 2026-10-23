@@ -50,17 +50,6 @@ class KBClient(Protocol):
     def upsert(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Insert or update a single entry via ``POST /api/kb/upsert``."""
 
-    def batch_insert(
-        self,
-        items: list[dict[str, Any]],
-        *,
-        on_conflict: str = "upsert",
-    ) -> dict[str, Any]:
-        """Insert many entries via ``POST /api/kb/batch_insert``."""
-
-    def add_edges(self, edges: list[dict[str, Any]]) -> dict[str, Any]:
-        """Create graph edges via ``POST /api/kb/edges/add``."""
-
 
 # ---------------------------------------------------------------------------
 class HTTPKBClient:
@@ -102,22 +91,6 @@ class HTTPKBClient:
     def upsert(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Insert or update a single entry via ``POST /api/kb/upsert``."""
         return self._request("/api/kb/upsert", payload)
-
-    def batch_insert(
-        self,
-        items: list[dict[str, Any]],
-        *,
-        on_conflict: str = "upsert",
-    ) -> dict[str, Any]:
-        """Insert many entries via ``POST /api/kb/batch_insert``."""
-        return self._request(
-            "/api/kb/batch_insert",
-            {"items": items, "on_conflict": on_conflict},
-        )
-
-    def add_edges(self, edges: list[dict[str, Any]]) -> dict[str, Any]:
-        """Create graph edges via ``POST /api/kb/edges/add``."""
-        return self._request("/api/kb/edges/add", {"edges": edges})
 
     # Internal — request / retry
     def _request(self, path: str, body: dict[str, Any]) -> dict[str, Any]:

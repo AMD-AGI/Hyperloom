@@ -218,66 +218,6 @@ class InMemoryKBClient:
         row.updated_at = now
         return {"row": row.to_dict(), "created": False, "warnings": warnings}
 
-    # batch_insert
-    def batch_insert(
-        self,
-        items: list[dict[str, Any]],
-        *,
-        on_conflict: str = "upsert",
-    ) -> dict[str, Any]:
-        """Insert many rows, optionally erroring on key conflicts."""
-        self._maybe_fail("batch_insert")
-        if on_conflict not in ("upsert", "error"):
-            raise KBValidationError(f"batch_insert: on_conflict must be upsert|error, got {on_conflict!r}")
-        results: list[dict[str, Any]] = []
-        for item in items:
-            if on_conflict == "upsert":
-                results.append(self.upsert(item))
-            else:
-                key = (
-                    json_scope_key(_normalise_scope(item["scope"])),
-                    item["kind"],
-                    item["slug"],
-                )
-                if key in self._index:
-                    raise KBValidationError(f"batch_insert: conflict on {key!r}; use on_conflict=upsert")
-                results.append(self.upsert(item))
-        return {"results": results, "count": len(results)}
-
-    # add_edges
-    def add_edges(self, edges: list[dict[str, Any]]) -> dict[str, Any]:
-        """Add directed edges, auto-mirroring ``contradicts`` edges."""
-        self._maybe_fail("edges/add")
-        added: list[dict[str, Any]] = []
-        mirrored_to: list[dict[str, Any]] = []
-        mirror_skipped: list[dict[str, Any]] = []
-        for edge in edges:
-            kind = edge.get("kind")
-            src = edge.get("from_id")
-            dst = edge.get("to_id")
-            if not (kind and src and dst):
-                raise KBValidationError(f"edges/add: missing kind/from_id/to_id: {edge!r}")
-            row_src = self._rows.get(src)
-            if row_src is None:
-                # Source missing → standard 404 in real service.
-                mirror_skipped.append({"edge": edge, "reason": "src_missing"})
-                continue
-            bucket = row_src.edges.setdefault(kind, [])
-            if dst not in bucket:
-                bucket.append(dst)
-            added.append({"from_id": src, "to_id": dst, "kind": kind})
-            # Auto-mirror for ``contradicts``.
-            if kind == "contradicts":
-                row_dst = self._rows.get(dst)
-                if row_dst is None:
-                    mirror_skipped.append({"edge": edge, "reason": "dst_missing"})
-                    continue
-                back = row_dst.edges.setdefault(kind, [])
-                if src not in back:
-                    back.append(src)
-                mirrored_to.append({"from_id": dst, "to_id": src, "kind": kind})
-        return {"added": added, "mirrored_to": mirrored_to, "mirror_skipped": mirror_skipped}
-
     # Test helpers
     def all_rows(self) -> list[dict[str, Any]]:
         """Return serialised copies of every stored row (test helper)."""

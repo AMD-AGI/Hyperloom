@@ -60,48 +60,6 @@ def test_upsert_missing_field_raises():
         kb.upsert({"kind": "pitfall", "slug": "x", "importance": 0.5})
 
 
-def test_contradicts_edge_auto_mirrors():
-    kb = InMemoryKBClient()
-    a = kb.upsert(
-        {
-            "scope": _scope(),
-            "kind": "pitfall",
-            "slug": "a-aaaaaa",
-            "importance": 0.5,
-        }
-    )["row"]["id"]
-    b = kb.upsert(
-        {
-            "scope": _scope(),
-            "kind": "pitfall",
-            "slug": "b-bbbbbb",
-            "importance": 0.5,
-        }
-    )["row"]["id"]
-    out = kb.add_edges([{"kind": "contradicts", "from_id": a, "to_id": b}])
-    assert {"from_id": a, "to_id": b, "kind": "contradicts"} in out["added"]
-    assert any(m["from_id"] == b and m["to_id"] == a for m in out["mirrored_to"])
-    rows = kb.all_rows()
-    by_id = {r["id"]: r for r in rows}
-    assert b in by_id[a]["edges"]["contradicts"]
-    assert a in by_id[b]["edges"]["contradicts"]
-
-
-def test_contradicts_with_missing_target_records_skip():
-    kb = InMemoryKBClient()
-    a = kb.upsert(
-        {
-            "scope": _scope(),
-            "kind": "pitfall",
-            "slug": "a-aaaaaa",
-            "importance": 0.5,
-        }
-    )["row"]["id"]
-    out = kb.add_edges([{"kind": "contradicts", "from_id": a, "to_id": "ghost"}])
-    assert out["mirror_skipped"]
-    assert out["mirror_skipped"][0]["reason"] == "dst_missing"
-
-
 def test_list_returns_only_matching_scope_after_normalisation():
     kb = InMemoryKBClient()
     kb.upsert(
@@ -172,16 +130,6 @@ def test_simulate_failure_drains_one_failure_per_endpoint():
         kb.upsert({"scope": _scope(), "kind": "pitfall", "slug": "abcdef-2", "importance": 0.5})
     out = kb.upsert({"scope": _scope(), "kind": "pitfall", "slug": "abcdef-3", "importance": 0.5})
     assert out["created"] is True
-
-
-def test_batch_insert_with_upsert_on_conflict():
-    kb = InMemoryKBClient()
-    items = [
-        {"scope": _scope(), "kind": "pitfall", "slug": "abcdef-1", "importance": 0.5},
-        {"scope": _scope(), "kind": "pitfall", "slug": "abcdef-2", "importance": 0.5},
-    ]
-    out = kb.batch_insert(items)
-    assert out["count"] == 2
 
 
 def test_list_default_excludes_deleted_rows():

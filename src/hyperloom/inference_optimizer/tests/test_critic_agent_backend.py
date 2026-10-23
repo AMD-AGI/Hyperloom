@@ -1587,7 +1587,6 @@ def test_build_kb_priors_trace_counts_and_reference():
             "requests": [{"msg_id": "p1", "count": 2}],
         },
         "kb_priors_by_proposal": {"p1": [{"slug": "a"}, {"slug": "b"}]},
-        "kb_priors_for_decision": [],
         "kb_read_skipped_reason": None,
     }
     review = {"review_verdicts": [{"verdict": "approve", "kb_evidence": ["k"]}]}
@@ -1602,7 +1601,6 @@ def test_build_kb_priors_trace_carries_skip_reason():
     judge_bundle = {
         "kb_priors_trace": {},
         "kb_priors_by_proposal": {},
-        "kb_priors_for_decision": [],
         "kb_read_skipped_reason": "kb_unreachable",
     }
     trace = CriticAgentBackend._build_kb_priors_trace(judge_bundle, None)
@@ -1624,7 +1622,6 @@ def _kb_trace_judge_bundle() -> dict[str, Any]:
             },
         ],
         "kb_priors_by_proposal": {"p1": []},
-        "kb_priors_for_decision": [],
         "kb_priors_trace": {
             "configured": True,
             "mode": "per_proposal",
@@ -1918,7 +1915,6 @@ async def test_critic_cache_blocks_preserve_transport_prompt(
             "required_context",
             "proposals",
             "kb_priors_by_proposal",
-            "kb_priors_for_decision",
             "kb_read_skipped_reason",
             "review_constraints",
             "notes",

@@ -76,26 +76,6 @@ def test_upsert_normalization_warning_and_merge() -> None:
     assert "importance_protected" in res3["warnings"]
 
 
-def test_batch_insert_conflict_modes() -> None:
-    kb = InMemoryKBClient(time_fn=lambda: 1.0)
-    with pytest.raises(KBValidationError):
-        kb.batch_insert([], on_conflict="bogus")
-
-    item = {"scope": {"model": "m"}, "kind": "technique", "slug": "slug-aaaa", "importance": 0.5}
-    kb.batch_insert([item], on_conflict="error")
-    with pytest.raises(KBValidationError):
-        kb.batch_insert([item], on_conflict="error")
-
-
-def test_add_edges_branches() -> None:
-    kb = InMemoryKBClient(time_fn=lambda: 1.0)
-    with pytest.raises(KBValidationError):
-        kb.add_edges([{"kind": "relates_to"}])
-
-    out = kb.add_edges([{"kind": "relates_to", "from_id": "missing", "to_id": "x"}])
-    assert out["mirror_skipped"][0]["reason"] == "src_missing"
-
-
 def test_require_and_optional_validators() -> None:
     with pytest.raises(RequestValidationError):
         _require_str({"k": 5}, "k", where="t")

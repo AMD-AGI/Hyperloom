@@ -9,7 +9,6 @@ import pytest
 
 from hyperloom.agents.critic.runtime.request_models import (
     COORDINATOR_INBOX,
-    DECISION_REQUEST,
     CriticRequest,
     Proposal,
     parse_request,
@@ -44,37 +43,12 @@ def test_parse_coordinator_inbox_requires_raw_prompt():
         )
 
 
-def test_parse_decision_request_assigns_decision_id_when_missing():
-    req = parse_request(
-        {
-            "kind": DECISION_REQUEST,
-            "session_id": "sess_1",
-            "messages": [{"role": "coordinator", "content": "hi"}],
-            "context": {"model": "Qwen3-14B", "framework": "sglang"},
-            "decision": {"summary": "adopt patch x"},
-        }
-    )
-    assert req.kind == DECISION_REQUEST
-    assert req.decision_id is not None
-    assert req.decision_id.startswith("dec_")
-    assert req.context == {"model": "Qwen3-14B", "framework": "sglang"}
-    assert req.messages and req.messages[0]["role"] == "coordinator"
-
-
-def test_parse_decision_request_keeps_explicit_decision_id():
-    req = parse_request(
-        {
-            "kind": DECISION_REQUEST,
-            "session_id": "sess_1",
-            "decision_id": "dec_known",
-        }
-    )
-    assert req.decision_id == "dec_known"
-
-
-def test_parse_unknown_kind_rejected():
+@pytest.mark.parametrize(
+    "kind", ["wat", "critic_decision_request", "kb_draft_request", "kb_hint_request", "objection_signal"]
+)
+def test_parse_non_inbox_kind_rejected(kind):
     with pytest.raises(RequestValidationError, match="kind"):
-        parse_request({"kind": "wat", "session_id": "sess_1"})
+        parse_request({"kind": kind, "session_id": "sess_1", "raw_prompt": "x"})
 
 
 def test_parse_missing_session_rejected():
@@ -149,18 +123,7 @@ def test_parse_proposal_missing_msg_id():
         )
 
 
-def test_parse_messages_must_be_dicts():
-    with pytest.raises(RequestValidationError, match="messages"):
-        parse_request(
-            {
-                "kind": DECISION_REQUEST,
-                "session_id": "s",
-                "messages": ["not-a-dict"],
-            }
-        )
-
-
-def test_to_dict_round_trip_preserves_proposal_fields():
+def test_proposal_to_dict_carries_parse_defaults():
     req = parse_request(
         {
             "kind": COORDINATOR_INBOX,
@@ -175,7 +138,7 @@ def test_to_dict_round_trip_preserves_proposal_fields():
             ],
         }
     )
-    d = req.to_dict()
-    assert d["proposals"][0]["msg_id"] == "m1"
-    assert d["proposals"][0]["action_name"] == "baseline"
-    assert d["proposals"][0]["predicted_gain_pct"] is None
+    d = req.proposals[0].to_dict()
+    assert d["msg_id"] == "m1"
+    assert d["action_name"] == "baseline"
+    assert d["predicted_gain_pct"] is None

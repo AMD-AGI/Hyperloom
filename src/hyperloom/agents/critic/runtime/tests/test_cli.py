@@ -116,8 +116,6 @@ def test_replay_dead_letter_dispatches_queued_records(tmp_path):
     common = {"attempts": 1, "last_error": "boom"}
     # Endpoints stored in the DLQ use filesystem-safe names (no "/").
     dlq.append("upsert", {"id": "kb_x", "kind": "pitfall", "scope": {}}, **common)
-    dlq.append("batch_insert", {"items": [{"id": "kb_y", "kind": "recipe", "scope": {}}]}, **common)
-    dlq.append("list", {"scope_filter": {}, "limit": 5}, **common)
 
     out_path = tmp_path / "replay2.json"
     rc = main(
@@ -135,7 +133,6 @@ def test_replay_dead_letter_dispatches_queued_records(tmp_path):
     assert isinstance(summary, dict)
 
     client = InMemoryKBClient()
-    _replay_dispatch(client, "edges/add", {"edges": []})
     with pytest.raises(RuntimeAdapterError):
         _replay_dispatch(client, "nope", {})
 
