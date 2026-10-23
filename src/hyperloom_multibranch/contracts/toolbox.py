@@ -160,7 +160,9 @@ class TestProgress:
 
 @dataclass(frozen=True)
 class MeasurementCapacity:
-    """How many cards the toolbox can still measure on: what the scheduler checks ``measurement_cards < workload.tp`` against.
+    """How many cards the toolbox can still measure on. The scheduler stops a session when ``usable_cards`` falls below
+    the cards one test needs (``scheduling.events.no_measurement_cards``), and bounds how many tests run at once by
+    ``measurement_cards`` (``scheduling.widening``).
 
     ``total_cards`` is the card pool the toolbox owns; ``usable_cards`` is the total minus the cards that are lost for
     good (a card whose holder processes were not provably gone is never leased again). Quarantining a node does not
