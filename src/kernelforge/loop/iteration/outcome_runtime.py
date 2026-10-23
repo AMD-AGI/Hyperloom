@@ -45,6 +45,7 @@ from kernelforge.loop.lessons import (
 )
 from kernelforge.loop.merge_candidates import case_spreads, cases_beating_reference
 from kernelforge.loop.run_state import (
+    ITERATION_RESULT,
     LoopStanding,
     RunState,
     apply_iteration,

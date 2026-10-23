@@ -8,6 +8,7 @@ from __future__ import annotations
 import time
 
 from kernelforge.loop.handoffs import HandoffStore
+from kernelforge.loop.loop_log import LOOP_BANNER, kernel_line
 from kernelforge.loop.iteration.iteration_types import IterationResult
 from kernelforge.loop.prompt_view import MAX_RECENT_ATTEMPT_LINES, render_long_horizon_header
 from kernelforge.loop.run_state import LoopStateStore, MAX_PINNED_ITERATIONS, RunState
@@ -117,8 +118,8 @@ class CampaignReportMixin:
             )
             print(self._supervisor_banner())
 
-        print("Starting autonomous iteration loop")
-        print(f"  Kernel: {self.ic.kernel_file}")
+        print(LOOP_BANNER)
+        print(kernel_line(self.ic.kernel_file))
         print(f"  Target: {self.ic.target_wall_ms} ms")
         print(
             f"  Budget: {self.ic.max_time_hours}h "

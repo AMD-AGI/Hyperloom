@@ -14,6 +14,13 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from kernelforge.loop.experiments_layout import (
+    ARCHIVE_TIME_FORMAT,
+    CANDIDATE_META,
+    ExperimentsLayout,
+    iteration_tag,
+    tagged_iteration,
+)
 from kernelforge.tools.durable_io import atomic_write_text, fsync_directory
 
 log = logging.getLogger(__name__)
@@ -72,7 +79,8 @@ class CandidateArchive:
     """Per-run store of full iteration solutions + measurements."""
 
     def __init__(self, workspace_dir: str, kernel_file: str = ""):
-        self.root = Path(workspace_dir) / "forge_experiments" / "candidates"
+        self._layout = ExperimentsLayout.of(workspace_dir)
+        self.root = self._layout.candidates
         self.index_path = self.root / "index.jsonl"
         # Snapshot file basename — use the real kernel filename so the archived copy is instantly recognizable (e.g.
         # flash_attn_kernel.py).
@@ -93,7 +101,7 @@ class CandidateArchive:
             self._mark_degraded(f"create {self.root}", e)
 
     def _iter_dir(self, iteration: int) -> Path:
-        return self.root / f"iter_{iteration:03d}"
+        return self._layout.candidate(iteration)
 
     def _mark_degraded(self, operation: str, error: Exception) -> None:
         self.degraded = True
@@ -129,13 +137,6 @@ class CandidateArchive:
             handle.flush()
             os.fsync(handle.fileno())
 
-    @staticmethod
-    def _iteration_from_dir(path: Path) -> int | None:
-        suffix = path.name.removeprefix("iter_")
-        if not suffix.isdigit():
-            return None
-        return int(suffix)
-
     def _inspect_complete_meta(
         self,
         directory: Path,
@@ -143,11 +144,11 @@ class CandidateArchive:
     ) -> tuple[str, dict | None]:
         """Classify metadata without treating transient I/O as corruption."""
         try:
-            meta = json.loads((directory / "meta.json").read_text())
+            meta = json.loads((directory / CANDIDATE_META).read_text())
         except FileNotFoundError:
             return "incomplete", None
         except OSError as error:
-            self._mark_degraded(f"read {directory / 'meta.json'}", error)
+            self._mark_degraded(f"read {directory / CANDIDATE_META}", error)
             return "unavailable", None
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
             return "incomplete", None
@@ -245,7 +246,7 @@ class CandidateArchive:
             scan_unavailable = True
 
         for directory in directories:
-            iteration = self._iteration_from_dir(directory)
+            iteration = tagged_iteration(directory.name)
             if iteration is None:
                 continue
             try:
@@ -326,7 +327,7 @@ class CandidateArchive:
         return {
             "complete": True,
             "iteration": rec.iteration,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": time.strftime(ARCHIVE_TIME_FORMAT),
             "commit_hash": rec.commit_hash,
             "decision": rec.decision,
             "kept": rec.kept,
@@ -392,7 +393,7 @@ class CandidateArchive:
             temp_dir = Path(
                 tempfile.mkdtemp(
                     dir=str(self.root),
-                    prefix=f".iter_{rec.iteration:03d}.tmp-",
+                    prefix=f".{iteration_tag(rec.iteration)}.tmp-",
                 )
             )
 
@@ -411,7 +412,7 @@ class CandidateArchive:
 
             # 5) Structured metadata.
             meta = self._metadata(rec)
-            self._write_text(temp_dir / "meta.json", json.dumps(meta, indent=2))
+            self._write_text(temp_dir / CANDIDATE_META, json.dumps(meta, indent=2))
             fsync_directory(temp_dir)
             os.rename(temp_dir, d)
             temp_dir = None

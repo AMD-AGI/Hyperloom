@@ -25,6 +25,19 @@ log = logging.getLogger(__name__)
 
 SERIALIZED_DRIVER_NAME = "forge_lane_driver.py"
 DEVICE_LOCK_SENTINEL = ".forge-device-bench.lock"
+LANE_ROOT_PREFIX = "forge-lanes-"
+_LANE_RATIONALE_PREFIX, _LANE_RATIONALE_SUFFIX = "lane ", " of a fan-out round"
+
+
+def lane_rationale(lane_id: str) -> str:
+    """The rationale a lane's candidate is archived with, which says only which lane of its round produced it."""
+    return f"{_LANE_RATIONALE_PREFIX}{lane_id}{_LANE_RATIONALE_SUFFIX}"
+
+
+def is_lane_rationale(text: str) -> bool:
+    """Whether ``text`` is a rationale ``lane_rationale`` wrote."""
+    lane_id = text.removeprefix(_LANE_RATIONALE_PREFIX).removesuffix(_LANE_RATIONALE_SUFFIX)
+    return lane_id.isdecimal() and text == lane_rationale(lane_id)
 
 
 def campaign_device_lock_path(workspace: str | Path) -> Path:
@@ -312,7 +325,7 @@ async def run_lanes(
     parent = Path(parent_dir).resolve()
     driver_relative = _lane_driver(source=source, driver=driver)
     await _require_room(source=source, parent=parent, lane_count=len(lanes))
-    root = Path(tempfile.mkdtemp(prefix="forge-lanes-", dir=str(parent)))
+    root = Path(tempfile.mkdtemp(prefix=LANE_ROOT_PREFIX, dir=str(parent)))
     try:
         lane_dirs = [root / lane.lane_id for lane in lanes]
         for lane_dir in lane_dirs:

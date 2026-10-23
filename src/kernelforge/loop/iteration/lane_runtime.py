@@ -14,7 +14,8 @@ from dataclasses import replace
 from pathlib import Path
 
 from kernelforge.loop.agent_extras import declared_extras
-from kernelforge.loop.fanout import LanePlan, LaneResult, run_lanes
+from kernelforge.loop.experiments_layout import LANE_PLAN_GLOB, ROUND_CONTEXT, ExperimentsLayout, lane_plan_name
+from kernelforge.loop.fanout import LanePlan, LaneResult, lane_rationale, run_lanes
 from kernelforge.loop.iteration.iteration_types import HeldRound, IterationResult, _StagedMerge, _append_finding
 from kernelforge.loop.merge_candidates import (
     MERGE_ATTEMPT_STALL_THRESHOLD,
@@ -390,17 +391,15 @@ class LaneRuntimeMixin:
         return _StagedMerge(merge_pair, merge_diff)
 
     def _orchestration_root(self, iteration: int) -> Path:
-        return Path(self.ic.workspace_dir).resolve() / "forge_experiments" / "orchestration" / f"iter_{iteration:03d}"
+        return ExperimentsLayout.of(Path(self.ic.workspace_dir).resolve()).round(iteration)
 
     def _lane_plan_path(self, iteration: int, lane: int) -> Path:
-        """Where one lane's plan lives, lane 1 keeping the historical name."""
-        if lane <= 1:
-            return self._orchestration_root(iteration) / "optimization_plan.md"
-        return self._orchestration_root(iteration) / f"lane_{lane:03d}.md"
+        """Where one lane's plan lives."""
+        return self._orchestration_root(iteration) / lane_plan_name(lane)
 
     def _lane_queue_path(self) -> Path:
         """Where a round's unspent candidates wait for the iteration that measures them."""
-        return Path(self.ic.workspace_dir).resolve() / "forge_experiments" / "orchestration" / "lane_queue.json"
+        return ExperimentsLayout.of(Path(self.ic.workspace_dir).resolve()).lane_queue
 
     def _persist_lane_queue(self) -> None:
         """Publish what this round has bought and not yet measured."""
@@ -480,7 +479,7 @@ class LaneRuntimeMixin:
         manifest = self._lane_plan_manifest_path(iteration)
         manifest.unlink(missing_ok=True)
         keep = {self._lane_plan_path(iteration, lane) for lane in range(2, len(published) + 1)}
-        for stale in self._orchestration_root(iteration).glob("lane_[0-9][0-9][0-9].md"):
+        for stale in self._orchestration_root(iteration).glob(LANE_PLAN_GLOB):
             if stale not in keep:
                 stale.unlink()
         for lane, plan in enumerate(published, start=1):
@@ -567,7 +566,7 @@ class LaneRuntimeMixin:
 
         root = self._orchestration_root(iteration)
         atomic_write_json(
-            root / "context.json",
+            root / ROUND_CONTEXT,
             context.to_prompt_dict(),
         )
         if result.dispatch_plan is not None:

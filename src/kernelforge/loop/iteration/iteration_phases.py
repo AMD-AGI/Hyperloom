@@ -23,7 +23,9 @@ from kernelforge.loop.iteration.iteration_types import (
     _append_finding,
 )
 from kernelforge.loop.merge_candidates import merge_plan
-from kernelforge.loop.run_state import complete_orchestration_probe, make_event
+from kernelforge.loop.loop_log import iteration_header
+from kernelforge.loop.run_state import ITERATION_STARTED, complete_orchestration_probe, make_event
+from kernelforge.loop.fanout import lane_rationale
 from kernelforge.orchestrator.orchestration import OrchestrationInfrastructureError
 from kernelforge.tools.process_reaping import processes_under
 
@@ -67,13 +69,7 @@ class IterationPhasesMixin:
 
         self._update_search_policy(iteration)
 
-        print(
-            f"--- Iteration {iteration} "
-            f"(best mean case speedup: {self.best_mean_case_speedup:.6f}x, "
-            f"remaining: {self._time_remaining() / 60:.0f} min) ---"
-            if self.best_mean_case_speedup is not None
-            else f"--- Iteration {iteration} ---"
-        )
+        print(iteration_header(iteration, self.best_mean_case_speedup, self._time_remaining()))
         roofline_progress = self._render_roofline_progress()
         if roofline_progress:
             print(roofline_progress)
@@ -88,7 +84,7 @@ class IterationPhasesMixin:
         self.run_state.iteration = iteration
         self.state_store.append_event(
             make_event(
-                "iteration_started",
+                ITERATION_STARTED,
                 iteration,
                 best_before_ms=self.best_wall_ms,
                 best_before_mean_case_speedup=self.best_mean_case_speedup,
@@ -139,7 +135,7 @@ class IterationPhasesMixin:
         elif queued_lane is not None:
             unmeasured_result = None
             commit_hash = ""
-            rationale = f"lane {queued_lane.lane_id} of a fan-out round"
+            rationale = lane_rationale(queued_lane.lane_id)
             attempt_source = self._read_kernel_source()
             attempt_diff = self._working_tree_diff()
             reusable_benchmark = None
