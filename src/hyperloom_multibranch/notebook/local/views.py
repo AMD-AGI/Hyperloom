@@ -63,6 +63,7 @@ class _BranchDraft:
     head: str = ""
     stop_reason: str | None = None
     stopped_at: float | None = None
+    repairs: str = ""
 
     def node(self) -> BranchNode:
         return BranchNode(
@@ -74,6 +75,7 @@ class _BranchDraft:
             stop_reason=self.stop_reason,
             opened_at=self.opened_at,
             stopped_at=self.stopped_at,
+            repairs=self.repairs,
         )
 
 
@@ -109,9 +111,12 @@ def _apply_event(
         if draft is not None:
             draft.stop_reason, draft.stopped_at = event.reason, at
     elif draft is None:
-        branches[event.branch] = _BranchDraft(event.branch, event.kind, event.from_commit, at, event.from_branch)
+        branches[event.branch] = _BranchDraft(
+            event.branch, event.kind, event.from_commit, at, event.from_branch, repairs=event.repairs
+        )
     else:
         draft.origin, draft.start_commit, draft.from_branch = event.kind, event.from_commit, event.from_branch
+        draft.repairs = event.repairs or draft.repairs
         draft.opened_at = min(draft.opened_at, at)
 
 

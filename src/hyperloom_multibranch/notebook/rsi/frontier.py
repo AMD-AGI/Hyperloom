@@ -9,8 +9,9 @@
 fallback of every other (:mod:`rsi.scorers` says where the others come from and how to write one). The envelope,
 :func:`enveloped`, then holds every scorer to the same guarantees: a branch scored on its own short record keeps
 ``new_branch_floor_pct`` until :data:`SETTLED_TESTS` of its explore tests have ended, as the judge's grace counts them,
-so a flat start does not stop it before it has tried a few directions; a candidate waiting for its confirm raises the
-score to its own gain; the headroom and the Amdahl ceiling cap it; and it is never negative. :class:`ScorerGuard` keeps a
+so a flat start does not stop it before it has tried a few directions; a repair branch that young scores at least the
+gain of the blocked candidate it repairs; a candidate waiting for its confirm raises the score to its own gain; the
+headroom and the Amdahl ceiling cap it; and it is never negative. :class:`ScorerGuard` keeps a
 session scored when its scorer fails: ``frontier-v1`` scores the branch it failed on, and after :data:`FALLBACK_LIMIT`
 failures the whole session.
 
@@ -25,6 +26,7 @@ failures the whole session.
 * ``observing``: 1 while a kernel-layer direction the branch tested lately may still be paying off;
 * ``headroom_pct``: how far the head's recorded value is from the roofline bound PRELUDE recorded for the metric;
 * ``amdahl_ceiling_pct``: the most that speeding up the head's largest op could gain, when the head was profiled;
+* ``repairing_pct``: the gain of the blocked candidate a young repair branch repairs, in points over the baseline;
 * ``pending_pct``: the gain of the branch's best candidate waiting for its confirm, in points over the baseline.
 
 ``frontier-v1`` expects the prior where there is one, else the trend, and a branch under observation keeps at least
@@ -95,13 +97,16 @@ SCORER_LABEL = re.compile(r"[a-z][a-z0-9._-]{1,63}")
 CORE_BASES = frozenset({FrontierBasis.TREND, FrontierBasis.PRIOR, FrontierBasis.OBSERVING, FrontierBasis.CUSTOM})
 #: The bases of an estimate read off the branch's own short record, which the new-branch floor holds up.
 _FLOORED = frozenset({FrontierBasis.TREND, FrontierBasis.CUSTOM})
+REPAIRING_COMPONENT = "repairing_pct"
 PENDING_COMPONENT = "pending_pct"
 HEADROOM_COMPONENT = "headroom_pct"
 AMDAHL_COMPONENT = "amdahl_ceiling_pct"
 #: Set to 1 in the components of a branch ``frontier-v1`` scored because the session's scorer failed on it.
 FALLBACK_COMPONENT = "scorer_fallback"
 #: The components the envelope and the guard write, which a scorer's estimate may not hold.
-RESERVED_COMPONENTS = frozenset({PENDING_COMPONENT, HEADROOM_COMPONENT, AMDAHL_COMPONENT, FALLBACK_COMPONENT})
+RESERVED_COMPONENTS = frozenset(
+    {REPAIRING_COMPONENT, PENDING_COMPONENT, HEADROOM_COMPONENT, AMDAHL_COMPONENT, FALLBACK_COMPONENT}
+)
 #: How many failures of its scorer a session takes before ``frontier-v1`` scores the rest of it.
 FALLBACK_LIMIT = 3
 
@@ -213,14 +218,16 @@ class Readings:
 
     ``observing`` is whether a kernel-layer direction the branch tested within the observation period may still be
     paying off, ``headroom_pct`` how far its head is below the roofline bound (:func:`headroom_pct`),
-    ``amdahl_pct`` the ceiling of the head's largest op (:func:`largest_ceiling_pct`), and ``pending_pct`` the gain of
-    its best candidate waiting for its confirm, in points over the baseline.
+    ``amdahl_pct`` the ceiling of the head's largest op (:func:`largest_ceiling_pct`), ``pending_pct`` the gain of
+    its best candidate waiting for its confirm, and ``repairing_pct`` the gain of the blocked candidate a repair branch
+    was opened to repair, both in points over the baseline.
     """
 
     observing: bool = False
     headroom_pct: float | None = None
     amdahl_pct: float | None = None
     pending_pct: float | None = None
+    repairing_pct: float | None = None
 
 
 @dataclass(frozen=True)
@@ -336,14 +343,19 @@ def enveloped(
     estimate: Estimate, branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings
 ) -> FrontierScore:
     """``estimate`` held to the envelope every scorer gets. ``basis`` names the envelope's part where it changed the
-    score: the new-branch floor of a young branch scored on its own record, the gain of a candidate waiting for its
-    confirm, or the headroom or the Amdahl ceiling that capped it."""
+    score: the new-branch floor of a young branch scored on its own record, the blocked gain a young repair branch
+    repairs, the gain of a candidate waiting for its confirm, or the headroom or the Amdahl ceiling that capped it."""
 
     policy = context.policy
     expected, basis = estimate.expected_gain_pct, estimate.basis
     components = dict(estimate.components)
-    if basis in _FLOORED and is_young(branch, t_s, policy) and expected < policy.new_branch_floor_pct:
+    young = is_young(branch, t_s, policy)
+    if basis in _FLOORED and young and expected < policy.new_branch_floor_pct:
         expected, basis = policy.new_branch_floor_pct, FrontierBasis.NEW
+    if readings.repairing_pct is not None and young:
+        components[REPAIRING_COMPONENT] = readings.repairing_pct
+        if readings.repairing_pct > expected:
+            expected, basis = readings.repairing_pct, FrontierBasis.REPAIR
     if readings.pending_pct is not None:
         components[PENDING_COMPONENT] = readings.pending_pct
         if readings.pending_pct > expected:
@@ -451,19 +463,37 @@ def score_branch(
         headroom_pct=headroom_pct(ceiling, row.head_value.get(policy.metric)),
         amdahl_pct=largest_ceiling_pct(snapshot.op_shares.get(row.head_commit)),
         pending_pct=_pending_pct(snapshot, row, policy.metric),
+        repairing_pct=_repairing_pct(snapshot, row, policy.metric),
     )
     return (guard or ScorerGuard()).score(branch, snapshot.taken_at - session_start(snapshot), context, readings)
 
 
-def _pending_pct(snapshot: NotebookSnapshot, row: BranchProgress, metric: str) -> float | None:
-    """The best of ``row``'s candidates waiting for their confirm, in points over the baseline, the score's unit."""
+def _over_head(snapshot: NotebookSnapshot, row: BranchProgress, metric: str, values: Sequence[float]) -> float | None:
+    """The best of ``values`` over ``row``'s head, in points over the baseline, the score's unit."""
 
     anchor = snapshot.baseline.values.get(metric) if snapshot.baseline is not None else None
     head = row.head_value.get(metric)
     if not anchor or not head:
         return None
-    gains = [(item.value - head) / anchor * 100.0 for item in row.pending if item.metric == metric]
-    return max(gains, default=None)
+    return max(((value - head) / anchor * 100.0 for value in values), default=None)
+
+
+def _pending_pct(snapshot: NotebookSnapshot, row: BranchProgress, metric: str) -> float | None:
+    """The best of ``row``'s candidates waiting for their confirm."""
+
+    return _over_head(snapshot, row, metric, [item.value for item in row.pending if item.metric == metric])
+
+
+def _repairing_pct(snapshot: NotebookSnapshot, row: BranchProgress, metric: str) -> float | None:
+    """The blocked candidate ``row``'s branch was opened to repair, read as a pending candidate is; ``None`` for a
+    branch that repairs nothing."""
+
+    node = next((item for item in snapshot.lineage.branches if item.branch == row.branch), None)
+    if node is None or not node.repairs:
+        return None
+    record = next((item for item in snapshot.records if item.request.request_id == node.repairs), None)
+    value = record.judgement.recorded_value.get(metric) if record is not None and record.judgement else None
+    return _over_head(snapshot, row, metric, [value] if value is not None else [])
 
 
 def score_progress(
@@ -572,6 +602,7 @@ __all__ = [
     "OBSERVATION_SECONDS",
     "PENDING_COMPONENT",
     "REFERENCE_BUDGET_SECONDS",
+    "REPAIRING_COMPONENT",
     "RESERVED_COMPONENTS",
     "SCORER_LABEL",
     "SETTLED_TESTS",

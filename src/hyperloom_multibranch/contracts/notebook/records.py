@@ -179,7 +179,8 @@ class LineageEvent:
     """A branch starting (``from_commit``), splitting off ``from_branch`` with fix ``commit_id``, or stopping.
 
     ``ROOT`` records the baseline commit ``commit_id`` the integration branch starts from, and may name the digest of
-    its recipe (``Recipe.digest()``); a judgement names the recipe digest of every other commit.
+    its recipe (``Recipe.digest()``); a judgement names the recipe digest of every other commit. The ``OPEN`` of a
+    repair branch names in ``repairs`` the test whose blocked gain it was opened to repair.
     """
 
     kind: LineageKind
@@ -189,6 +190,7 @@ class LineageEvent:
     from_branch: str = ""
     reason: str = ""
     recipe_digest: str | None = None
+    repairs: str = ""
 
 
 @dataclass(frozen=True)
@@ -440,6 +442,7 @@ class BranchNode:
     stop_reason: str | None = None
     opened_at: float = 0.0
     stopped_at: float | None = None
+    repairs: str = ""
 
 
 @dataclass(frozen=True)
