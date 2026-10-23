@@ -133,6 +133,8 @@ RSI_ARCHIVE_DEFAULT = "/shared_nfs/hyperloom/rsi-archive/"
 MAGPIE_RUNNER_GPU_TYPES = ("mi300x", "mi355x")
 #: The options an inferencex workload requires and an agentx one refuses.
 SEQUENCE_LENGTHS = ("isl", "osl")
+#: The argparse action of an option the user may give more than once, each giving one more value.
+REPEATABLE = "append"
 
 
 class EnvironmentIncomplete(RuntimeError):
@@ -237,7 +239,7 @@ def _add_specialist_input_options(run: argparse.ArgumentParser) -> None:
     run.add_argument(
         "--specialist-prompt",
         dest="specialist_prompts",
-        action="append",
+        action=REPEATABLE,
         type=Path,
         default=None,
         metavar="FILE",
@@ -247,7 +249,7 @@ def _add_specialist_input_options(run: argparse.ArgumentParser) -> None:
     run.add_argument(
         "--autonomous-agent",
         dest="agents",
-        action="append",
+        action=REPEATABLE,
         default=None,
         metavar="SOURCE",
         help=(
@@ -258,7 +260,7 @@ def _add_specialist_input_options(run: argparse.ArgumentParser) -> None:
     run.add_argument(
         "--reference",
         dest="references",
-        action="append",
+        action=REPEATABLE,
         default=None,
         metavar="NAME=DIR",
         help="A directory of reference material the specialists read; repeatable. It is copied to MB-reference/NAME"
