@@ -22,12 +22,18 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from hyperloom.sandbox.socket import Role
-from hyperloom.sandbox.tests.e2b_standin.envd_host import ENVD_ENV, EnvdHost, interpreter_binds, unavailable_reason
+from hyperloom.sandbox.tests.e2b_standin.envd_host import (
+    ENVD_ENV,
+    EnvdHost,
+    interpreter_binds,
+    unavailable_reason,
+    without_network,
+)
 from hyperloom.sandbox.tests.e2b_standin.http_api import serve_api
 from hyperloom.sandbox.tests.e2b_standin.proxy import serve_proxy
 from hyperloom.sandbox.tests.e2b_standin.service import ControlPlane, StandInTemplate
 
-__all__ = ["ENVD_ENV", "StandIn", "StandInTemplate", "interpreter_binds", "unavailable_reason"]
+__all__ = ["ENVD_ENV", "StandIn", "StandInTemplate", "interpreter_binds", "unavailable_reason", "without_network"]
 
 _ROLES: tuple[Role, ...] = ("measurement", "subrun", "dev")
 

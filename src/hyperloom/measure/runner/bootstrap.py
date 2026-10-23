@@ -8,20 +8,26 @@ script. It prepares the runner's software, then replaces itself with ``python -m
 command the local sandbox starts too (:mod:`hyperloom.measure.local_templates`), so the sandbox's own process is the
 runner. The steps, each of which ends the script with ``runner_start_failed`` when it fails:
 
-1. The source. With ``HYPERLOOM_SOURCE_SHA`` (a full commit hash) and ``HYPERLOOM_SOURCE_REPO`` it fetches that commit
-   into ``$HYPERLOOM_SCRATCH_DIR/hl-src``; a fetch by full hash returns that commit or fails, so git, not the network,
-   vouches for the content. Without a hash, ``HYPERLOOM_SOURCE_DIR`` names a checkout the image or the test already
-   has.
+1. The cache. A measurement sandbox has no network: there is no git, no package index and no pip configuration in
+   play. The commit's source and every wheel ``requirements/runner.lock`` pins are in the runner cache, a directory on
+   shared storage that the template mounts read-only (``HYPERLOOM_RUNNER_CACHE``, ``/runner-cache`` when unset; layout
+   and builder in :mod:`hyperloom.measure.runner.cache_layout` and :mod:`hyperloom.measure.runner.cache_build`).
+   ``HYPERLOOM_SOURCE_SHA`` (a full commit hash) names the entry. The script first checks it with the sandbox's own
+   interpreter in isolated mode (``-I``): the entry has a manifest (a build that did not finish has none), the source is
+   the tree the manifest recorded, and every pinned wheel is there with its recorded size. What is missing is named in
+   the failure. The same step writes ``$HYPERLOOM_SCRATCH_DIR/runner-wheels.lock``, the manifest's wheels each pinned to
+   its recorded hash.
 2. A virtual environment, ``$HYPERLOOM_SCRATCH_DIR/hl-venv``, made by ``HYPERLOOM_BASE_PYTHON`` (``python3``). In the
    framework image ``python3`` is ``/opt/venv``, and a venv made with ``--system-site-packages`` does not see what is
    installed there (torch, sglang, aiter), so the script drops a ``.pth`` file into the new venv that adds the source
-   (``<source>/src``) and then the base interpreter's site directories, with their own ``.pth`` files processed, as
+   (``<entry>/source/src``) and then the base interpreter's site directories, with their own ``.pth`` files processed, as
    ``site.addsitedir`` does. The venv's own packages come first.
-3. ``pip install --require-hashes --no-deps -r requirements/runner.lock`` into that venv, after the ``.pth`` is in
-   place: a pin the base already has is satisfied and left alone, every other one is installed and must match its hash,
-   so nothing is resolved on the sandbox. ``PIP_INDEX_URL``, ``PIP_FIND_LINKS`` and the like are the template's
-   environment; the script sets no index.
-4. A check that the runner imports, so a broken install ends the script instead of leaving the application waiting.
+3. ``pip install --isolated --no-index --find-links <entry>/wheels --only-binary=:all: --require-hashes --no-deps -r
+   runner-wheels.lock`` into that venv, after the ``.pth`` is in place: a pin the base already has is satisfied and left
+   alone, every other one is installed from the cache and must match its hash. ``--isolated`` makes pip ignore
+   ``PIP_INDEX_URL``, ``PIP_FIND_LINKS`` and the like, so the template's environment cannot point it anywhere else.
+4. A check that the runner imports, so a broken install ends the script instead of leaving the application waiting. Python
+   writes its bytecode below ``$HYPERLOOM_SCRATCH_DIR/pycache``, never into the cache's source tree.
 5. ``HYPERLOOM_CODE_REVISION`` is set to the commit and the runner replaces the script. The runner's remaining
    arguments are the script's own (``--spec-wait-sec`` and so on); ``--in``, ``--out`` and ``--scratch`` come from
    ``HYPERLOOM_IN_DIR``, ``HYPERLOOM_OUT_DIR`` and ``HYPERLOOM_SCRATCH_DIR`` (``/in``, ``/out``, ``/scratch``).
@@ -35,24 +41,35 @@ reads the failure instead of waiting for a runner that never came. Every step ru
 ``HYPERLOOM_SIGNING_KEY_FILE``: the key file exists before the script starts, and nothing the script installs or builds
 needs it; the runner takes it from its own environment.
 
+When the template sets ``HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256``, only the entry whose manifest file has that SHA-256 is
+accepted: the host takes the value from the builder's result and so binds the sandbox to the build it made. Without it the
+manifest vouches only for the entry it sits in, so the cache directory must then be writable by the builder alone.
+
 ``BOOTSTRAP_SCRIPT`` is POSIX ``sh`` with a ``#!/bin/sh`` line, so it runs the same whether a template hands it over as
 a file or as the argument of ``sh -c``; one text serves the hosted template and the stand-in the contract suite runs.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from hyperloom.measure.runner import cache_layout
+
 __all__ = ["BOOTSTRAP_SCRIPT", "runner_start_command"]
 
 #: ``$0`` of ``sh -c`` is a name for messages, ``$@`` are the runner's own arguments.
 _NAME = "hyperloom-runner-bootstrap"
 
-BOOTSTRAP_SCRIPT = r"""#!/bin/sh
+_SCRIPT = r"""#!/bin/sh
 set -eu
 
 SCRATCH=${HYPERLOOM_SCRATCH_DIR:-/scratch}
 IN_DIR=${HYPERLOOM_IN_DIR:-/in}
 OUT_DIR=${HYPERLOOM_OUT_DIR:-/out}
 BASE_PY=${HYPERLOOM_BASE_PYTHON:-python3}
+CACHE=${@CACHE_ENV@:-@DEFAULT_CACHE@}
+SHA=${HYPERLOOM_SOURCE_SHA:-}
+REQS=$SCRATCH/@REQUIREMENTS_FILE@
 VENV=$SCRATCH/hl-venv
 LOG=${TMPDIR:-/tmp}/hl-bootstrap.$$.log
 STEP=start
@@ -98,24 +115,14 @@ step() {
     }
 }
 
-if [ -n "${HYPERLOOM_SOURCE_SHA:-}" ]; then
-    SRC=$SCRATCH/hl-src
-    case $HYPERLOOM_SOURCE_SHA in
-        *[!0-9a-f]*) refuse source "HYPERLOOM_SOURCE_SHA is not a lowercase hexadecimal commit hash" ;;
-    esac
-    [ ${#HYPERLOOM_SOURCE_SHA} -eq 40 ] || [ ${#HYPERLOOM_SOURCE_SHA} -eq 64 ] ||
-        refuse source "HYPERLOOM_SOURCE_SHA is not a full commit hash"
-    [ -n "${HYPERLOOM_SOURCE_REPO:-}" ] || refuse source "HYPERLOOM_SOURCE_REPO is not set"
-    step clean-source rm -rf "$SRC"
-    step git-init git init -q "$SRC"
-    step git-fetch git -C "$SRC" fetch -q --depth 1 "$HYPERLOOM_SOURCE_REPO" "$HYPERLOOM_SOURCE_SHA"
-    step git-checkout git -C "$SRC" checkout -q --detach FETCH_HEAD
-    export HYPERLOOM_CODE_REVISION=$HYPERLOOM_SOURCE_SHA
-else
-    SRC=${HYPERLOOM_SOURCE_DIR:-}
-    [ -n "$SRC" ] || refuse source "neither HYPERLOOM_SOURCE_SHA nor HYPERLOOM_SOURCE_DIR is set"
-fi
-[ -f "$SRC/requirements/runner.lock" ] || refuse source "the source has no requirements/runner.lock"
+[ -n "$SHA" ] || refuse cache "HYPERLOOM_SOURCE_SHA is not set"
+step cache "$BASE_PY" -I - "$CACHE" "$SHA" "$REQS" <<'PY'
+@CACHE_CHECK@
+PY
+SRC=$CACHE/$SHA/source
+WHEELS=$CACHE/$SHA/wheels
+export HYPERLOOM_CODE_REVISION=$SHA
+export PYTHONPYCACHEPREFIX=$SCRATCH/pycache
 
 step scratch mkdir -p "$SCRATCH"
 step venv "$BASE_PY" -m venv --clear "$VENV"
@@ -135,14 +142,21 @@ lines = [source, *(f"import site; site.addsitedir({path!r})" for path in base_di
 with open(os.path.join(sysconfig.get_path("purelib"), "hyperloom-runner.pth"), "w") as pth:
     pth.write("\n".join(lines) + "\n")
 PY
-step lock "$VENV/bin/python" -m pip install --require-hashes --no-deps --disable-pip-version-check --no-input \
-    -r "$SRC/requirements/runner.lock"
+step lock "$VENV/bin/python" -m pip --isolated install --no-index --find-links "$WHEELS" --only-binary=:all: \
+    --require-hashes --no-deps --disable-pip-version-check --no-input -r "$REQS"
 step import "$VENV/bin/python" -c "import hyperloom.measure.runner.__main__"
 
 rm -f "$LOG"
 export HYPERLOOM_BOOTSTRAP_STARTED_UNIX=$STARTED HYPERLOOM_BOOTSTRAP_ENDED_UNIX=$(now)
 exec "$VENV/bin/python" -m hyperloom.measure.runner run --in "$IN_DIR" --out "$OUT_DIR" --scratch "$SCRATCH" "$@"
 """
+
+BOOTSTRAP_SCRIPT = (
+    _SCRIPT.replace("@CACHE_ENV@", cache_layout.CACHE_ENV)
+    .replace("@DEFAULT_CACHE@", cache_layout.DEFAULT_CACHE_DIR)
+    .replace("@REQUIREMENTS_FILE@", cache_layout.REQUIREMENTS_FILE)
+    .replace("@CACHE_CHECK@", Path(cache_layout.__file__).read_text(encoding="utf-8").rstrip("\n"))
+)
 
 
 def runner_start_command(*runner_args: str) -> tuple[str, ...]:

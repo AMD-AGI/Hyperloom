@@ -42,6 +42,7 @@ from hyperloom.sandbox.tests.e2b_standin import (
     StandInTemplate,
     interpreter_binds,
     unavailable_reason,
+    without_network,
 )
 
 log = logging.getLogger(__name__)
@@ -141,7 +142,8 @@ def local_harness() -> Iterator[Harness]:
 def standin_harness(workdir: Path, rig: Rig) -> Iterator[Harness]:
     """The stand-in's leg: its sealed template starts the runner's own start-up script on ``rig``.
 
-    The script builds a venv, installs the rig's hash lock and starts the rig's runner, which answers a sheet like
+    The sandbox has no network, as a measurement sandbox has none, and sees the rig's runner cache read-only. The script
+    builds a venv, installs the rig's hash lock from the cache and starts the rig's runner, which answers a sheet like
     :data:`FAKE_RUNNER` does, so the suite's sealed tests also exercise the script inside a sandbox.
     """
     from hyperloom.sandbox.e2b import E2BSandboxProvider
@@ -154,7 +156,7 @@ def standin_harness(workdir: Path, rig: Rig) -> Iterator[Harness]:
             "runner",
             "measurement",
             sealed=True,
-            start=runner_start_command(),
+            start=without_network(runner_start_command()),
             binds=(*interpreter_binds(), str(rig.root)),
             envs=rig.sandbox_env(),
         ),
