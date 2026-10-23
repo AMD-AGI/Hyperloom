@@ -75,3 +75,31 @@ def test_local_mode_still_warns_on_zero_gpus(monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert "rocm-smi sees 0 GPUs" in out
+
+
+def _raise_missing_rocm_smi(*_args, **_kwargs):
+    raise FileNotFoundError("rocm-smi")
+
+
+class _FailedProc:
+    returncode = 1
+    stdout = ""
+
+
+@pytest.mark.parametrize(
+    ("run", "skip_reason"),
+    [
+        (_raise_missing_rocm_smi, "rocm_smi_unavailable"),
+        (lambda *_a, **_k: _FailedProc(), "rocm_smi_failed"),
+    ],
+)
+def test_unprobeable_rocm_smi_is_recorded_as_a_skipped_step(monkeypatch, run, skip_reason):
+    monkeypatch.setattr(preflight.subprocess, "run", run)
+
+    outcome = preflight._check_gpu_visibility()
+
+    assert outcome == {
+        "status": "skipped",
+        "skip_reason": skip_reason,
+        "detail": {"visible": None, "tp_requested": None, "warn": None},
+    }

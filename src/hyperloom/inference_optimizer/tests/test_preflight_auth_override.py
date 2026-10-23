@@ -32,7 +32,7 @@ from hyperloom.inference_optimizer.cli.parser import _build_parser
 
 @pytest.fixture
 def stub_install_steps(monkeypatch, tmp_path):
-    """Stub out heavyweight install steps so _preflight(argparse.Namespace()) is fast."""
+    """Stub out heavyweight install steps so _preflight() is fast."""
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setattr(cli_preflight, "_load_dotenv_fallback", lambda: None)
     # Stub the kernel-agent env fallback (it hard-fails when missing).

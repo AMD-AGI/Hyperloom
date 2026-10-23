@@ -1610,11 +1610,11 @@ def _emit_preflight_diagnostics(
         print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url}")
     else:
         print("  ANTHROPIC_BASE_URL  = <unset> — no LLM base URL resolved; Claude SDK will fail")
-    kb_enabled = not bool(getattr(args, "degraded_kb", False))
     pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
-    kb_reason = getattr(args, "kb_degraded_reason", None) or "-"
+    kb_degraded_reason = getattr(args, "kb_degraded_reason", None)
+    kb_reason = kb_degraded_reason or "-"
     pr_reason = getattr(args, "pr_degraded_reason", None) or "-"
-    kb_status = "OK" if kb_enabled else f"DEGRADED ({kb_reason})"
+    kb_status = f"DEGRADED ({kb_reason})" if kb_degraded_reason else "OK"
     pr_status = "OK" if pr_enabled else f"DEGRADED ({pr_reason})"
     print(f"  kb_status           = {kb_status}")
     print(f"  pr_monitor_status   = {pr_status}")
