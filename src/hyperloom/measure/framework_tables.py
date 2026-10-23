@@ -8,16 +8,21 @@ f"{AITER_ROOT_DIR}/aiter/configs/<default>.csv")`` and a property of ``AITER_CON
 ``self.get_config_file("AITER_CONFIG_X", AITER_CONFIG_X, "<tuned>")``. The default file is what the variable names when
 unset, and ``<tuned>`` is the pattern of the per-model tables aiter merges into it. The file is parsed, never imported:
 importing aiter loads the GPU stack, and a parse that finds nothing just means no variable has a default to redirect.
+
+``table_key`` is the one place that says which columns identify a row when aiter merges the tables a variable lists; the
+tuned-table rules of ``hyperloom.measure`` (rows laid over a default table) read the key from it and nowhere else.
 """
 
 from __future__ import annotations
 
 import ast
+import csv
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["AITER_VARIABLE_PREFIX", "TableVariable", "read_variables"]
+__all__ = ["AITER_VARIABLE_PREFIX", "TableVariable", "read_variables", "table_key"]
 
 log = logging.getLogger(__name__)
 
@@ -90,3 +95,23 @@ def read_variables(core: Path) -> dict[str, TableVariable]:
         return {}
     tuned = _tuned_names(tree)
     return {name: TableVariable(file, tuned[name]) for name, file in _module_defaults(tree).items() if name in tuned}
+
+
+def table_key(configs: Path, tuned: str, columns: Collection[str]) -> tuple[str, ...] | None:
+    """The columns aiter identifies a row of the variable's merged tables by; ``None`` when it checks none.
+
+    This is what ``AITER_CONFIG.update_config_files`` (``jit/core.py``) does with the tables a variable lists: the key is
+    the header of the table's untuned sibling (``tuned`` with its last ``tuned`` read as ``untuned``, in ``configs``, the
+    install's ``aiter/configs``) plus ``cu_num``, ``gfx`` and ``_tag``, kept to the ``columns`` the merged tables have.
+    Two rows with one key make aiter rewrite the files it was given and raise. With no untuned sibling aiter merges
+    without checking, so there is no key. The sibling's header is read from the install's own file; only the three
+    added columns are aiter's rule written down, and this is the one place that does.
+    """
+    untuned = "untuned".join(tuned.rsplit("tuned", 1))
+    try:
+        with (configs / f"{untuned}.csv").open(newline="", encoding="utf-8") as handle:
+            header = next(csv.reader(handle), [])
+    except (OSError, ValueError, csv.Error):
+        return None
+    wanted = [*header, *(name for name in ("cu_num", "gfx", "_tag") if name not in header)]
+    return tuple(dict.fromkeys(name for name in wanted if name in columns))

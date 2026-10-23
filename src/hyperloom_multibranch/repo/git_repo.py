@@ -13,13 +13,14 @@ import asyncio
 import json
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.contracts.recipe import (
     PATCH_ROOT,
     ComponentPatches,
+    KernelArtifact,
     PatchRef,
     Recipe,
     RecipeDelta,
@@ -33,10 +34,12 @@ from hyperloom.measure.compile import (
     UnsupportedComponentError,
     apply_patch_stack,
     locate_installed_package,
+    patch_targets,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, RepoMerge
-from hyperloom_multibranch.repo.merge import carry
+from hyperloom_multibranch.repo.merge import Stored, carry
+from hyperloom_multibranch.repo.rebase import Files
 
 RECIPE_FILE = "recipe.json"
 _UPDATE_REF = "update-ref"
@@ -69,17 +72,29 @@ def _ref(branch: str) -> str:
     return f"refs/heads/{branch}"
 
 
+def _read(path: Path) -> bytes | None:
+    return path.read_bytes() if path.is_file() else None
+
+
 class GitExperimentRepo:
     """Writes commits with plumbing and moves a branch by compare-and-swap on its ref.
 
     No working tree or index is involved, so writers on different branches never contend, and two writers racing on one
-    branch leave exactly one commit on it.
+    branch leave exactly one commit on it. ``aiter_configs`` is the aiter install a merge that unites two kernel tables
+    reads their shape key from, the image's when ``None``.
     """
 
-    def __init__(self, path: Path, blobs: BlobStore, locator: PackageLocator = locate_installed_package) -> None:
+    def __init__(
+        self,
+        path: Path,
+        blobs: BlobStore,
+        locator: PackageLocator = locate_installed_package,
+        aiter_configs: Path | None = None,
+    ) -> None:
         self._path = path.resolve()
         self._blobs = blobs
         self._locator = locator
+        self._aiter_configs = aiter_configs
         # An inherited GIT_* (GIT_DIR inside a hook or `git rebase --exec`) would aim every command at another
         # repository, so none reaches git and GIT_DIR names this one.
         inherited = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
@@ -120,7 +135,8 @@ class GitExperimentRepo:
         if parent is None:
             raise ValueError(f"{candidate} is the root commit; it carries no change")
         recipes = [await self.read_recipe(commit) for commit in (parent, resolved, onto)]
-        return await asyncio.to_thread(carry, onto, *recipes, self._apply_to_package)
+        stored = Stored(self._stack_files, self._table_bytes, self._put_patch, self._blobs.put, self._aiter_configs)
+        return await asyncio.to_thread(carry, onto, *recipes, stored)
 
     async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: Sequence[str]) -> str:
         recipe = apply(await self.read_recipe(onto), delta)
@@ -135,8 +151,7 @@ class GitExperimentRepo:
             raise BranchMoved(f"{branch} is no longer at {commit}: {moved.err}")
 
     async def store_patch(self, component: str, text: str) -> PatchRef:
-        sha256 = await asyncio.to_thread(self._blobs.put, text.encode())
-        return PatchRef(f"{PATCH_ROOT}/{component}/{sha256}.patch", sha256)
+        return await asyncio.to_thread(self._put_patch, component, text)
 
     async def patch_text(self, commit: str, path: str) -> str:
         recipe = await self.read_recipe(commit)
@@ -151,11 +166,29 @@ class GitExperimentRepo:
         files += [(kernel.ref, kernel.sha256) for kernel in recipe.kernels]
         await asyncio.to_thread(self._write_files, files, destination)
 
-    def _apply_to_package(self, component: ComponentPatches) -> None:
+    def _table_bytes(self, artifact: KernelArtifact) -> bytes:
+        return self._blobs.get(artifact.sha256)
+
+    def _put_patch(self, component: str, text: str) -> PatchRef:
+        sha256 = self._blobs.put(text.encode())
+        return PatchRef(f"{PATCH_ROOT}/{component}/{sha256}.patch", sha256)
+
+    def _stack_files(self, component: ComponentPatches, paths: Collection[str]) -> Files:
         layout = COMPONENT_LAYOUTS.get(component.component)
         if layout is None:
             raise UnsupportedComponentError(f"{component.component} has no package layout; its patches cannot apply")
-        apply_patch_stack(component, layout, self._locator(layout), self._blobs)
+        package = self._locator(layout)
+        root = apply_patch_stack(component, layout, package, self._blobs)
+        touched = [
+            target
+            for patch in component.patches
+            for target in patch_targets(self._blobs.get(patch.sha256).decode(), layout.upstream_prefix, patch.path)
+        ]
+        files = {path: _read(package.path / path) for path in (*paths, *touched)}
+        files.update(
+            {entry.path: None if entry.blob is None else self._blobs.get(entry.blob) for entry in root.entries}
+        )
+        return files
 
     def _write_files(self, files: Sequence[tuple[str, str]], destination: Path) -> None:
         for path, sha256 in files:

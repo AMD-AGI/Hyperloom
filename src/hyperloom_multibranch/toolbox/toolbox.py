@@ -30,6 +30,7 @@ from hyperloom_multibranch.contracts.notebook.interfaces import (
 )
 from hyperloom_multibranch.contracts.notebook.records import ClaimKey, Withdrawal
 from hyperloom_multibranch.contracts.toolbox import (
+    BranchLease,
     CancelOutcome,
     MeasurementCapacity,
     NodeHealth,
@@ -214,6 +215,20 @@ class RealToolbox:
 
         return MeasurementCapacity.unknown()
 
+    async def lease_branch_sandbox(self, branch_id: str, cards: int) -> BranchLease:
+        """Hold ``cards`` of the toolbox's cards and a working directory of their own for ``branch_id``'s agent.
+
+        The cards leave the measurement pool until :meth:`release_branch_sandbox` or :meth:`close`; see
+        :class:`~hyperloom_multibranch.contracts.toolbox.BranchLease`. A toolbox whose backend has no cards of its own
+        to lease refuses with ``unsupported_kind``; a backend that leases raises ``lease_exists`` and
+        ``lease_leaves_no_measurement`` as :class:`RequestRejected`.
+        """
+
+        raise RequestRejected("this toolbox's backend has no cards to lease", "unsupported_kind")
+
+    async def release_branch_sandbox(self, lease_id: str) -> None:
+        """Return the cards of a lease; idempotent, and safe to call from several tasks at once."""
+
     async def put_attachment(self, attachment_id: str, kind: Literal["file", "dir"], data: bytes) -> AttachmentRef:
         """Keep ``data`` in the session's blob store for a repro request to carry; see the interface."""
 
@@ -221,12 +236,14 @@ class RealToolbox:
             raise RequestRejected("this toolbox has no blob store for attachments", "attachments_unsupported")
         return store_attachment(self.blobs, attachment_id, kind, data)
 
-    async def put_kernel_artifact(self, kind: KernelKind, target: str, env: str, data: bytes) -> KernelArtifact:
+    async def put_kernel_artifact(
+        self, kind: KernelKind, target: str, env: str, data: bytes, rows_only: bool = False
+    ) -> KernelArtifact:
         """Keep a tuned table in the session's blob store, the one the experiment repository reads; see the interface."""
 
         if self.blobs is None:
             raise RequestRejected("this toolbox has no blob store for kernel artifacts", "attachments_unsupported")
-        artifact = mint_kernel_artifact(kind, target, env, data)
+        artifact = mint_kernel_artifact(kind, target, env, data, rows_only)
         self._kernel_variables.bind(artifact)
         self.blobs.put(data)
         return artifact
@@ -321,17 +338,27 @@ class RealToolbox:
         self._tool_jobs.setdefault(request.branch, []).append(job_id)
         return job_id
 
+    @property
+    def analysis_tools(self) -> tuple[str, ...]:
+        """The analysis tools this toolbox serves: those of :data:`ANALYSIS_TOOLS` its tool registry holds.
+
+        The one answer to "which analysis tools does this toolbox serve": the MCP surface advertises exactly these and
+        :meth:`submit_analysis` refuses the others, both from the registry the toolbox was built with.
+        """
+        held = self._tools.tool_names if self._tools is not None else ()
+        return tuple(tool for tool in ANALYSIS_TOOLS if tool in held)
+
     def _analysis_jobs(self, tool: str) -> ToolJobs:
         if self._tools is None:
             raise RequestRejected("this toolbox serves no asynchronous tools", CODE_NO_EXECUTOR)
-        if tool in ANALYSIS_TOOLS and tool not in self._tools.tool_names:
+        if tool in ANALYSIS_TOOLS and tool not in self.analysis_tools:
             raise RequestRejected(f"{tool!r} is not run by this toolbox's backend", CODE_TOOL_UNAVAILABLE)
         return self._tools
 
     async def submit_analysis(
         self, branch: str, tool: str, params: Mapping[str, Any], profile_request_id: str = ""
     ) -> str:
-        """Start ``tracelens`` or ``roofline`` for ``branch`` on its head commit; returns the job id at once.
+        """Start ``tracelens`` or ``roofline`` (those of :attr:`analysis_tools`) for ``branch`` on its head commit; returns the job id at once.
 
         The commit is the head of the branch in the experiment repository, read here at submission; it is never taken
         from ``params``. ``profile_request_id`` is kept only for a PROFILE test of that commit, whichever branch ran it.
@@ -493,10 +520,15 @@ class RealToolbox:
 
     # --- running -------------------------------------------------------------------------------------------------
 
+    def _parallel_limit(self) -> int | None:
+        """The most tests the toolbox's own cards run at once; ``None`` for a backend that has none to count."""
+
+        return None
+
     def _pump(self) -> None:
         if self._closed:
             return
-        while (item := self._queue.take()) is not None:
+        while (item := self._queue.take(self._parallel_limit())) is not None:
             item.started_at = self._clock()
             self._tasks[item.request_id] = asyncio.create_task(self._run(item))
 

@@ -26,23 +26,35 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.outside_facts import (
+    ENV_CONC,
+    ENV_ISL,
+    ENV_MAGPIE_EVAL_LIMIT,
+    ENV_MAGPIE_EVAL_TASKS,
+    ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS,
+    ENV_NUM_PROMPTS,
+    ENV_NUM_WARMUPS,
+    ENV_OSL,
+    ENV_RANDOM_RANGE_RATIO,
+    ENV_RUN_EVAL,
+)
 from hyperloom.contracts.recipe import RecipeError
 
 #: ``benchmark`` keys that fix what is measured.
 SURFACE_BENCH_KEYS: tuple[str, ...] = ("framework", "model", "benchmark_script")
 #: ``benchmark.envs`` keys that fix the workload shape and the evaluation.
 SURFACE_ENV_KEYS: tuple[str, ...] = (
-    "ISL",
-    "OSL",
-    "RANDOM_RANGE_RATIO",
-    "MAGPIE_EVAL_TASKS",
-    "MAGPIE_EVAL_LIMIT",
-    "MAGPIE_EVAL_TOKENIZED_REQUESTS",
+    ENV_ISL,
+    ENV_OSL,
+    ENV_RANDOM_RANGE_RATIO,
+    ENV_MAGPIE_EVAL_TASKS,
+    ENV_MAGPIE_EVAL_LIMIT,
+    ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS,
 )
 #: Request counts that follow from the concurrency level; compared per point, not hashed.
-POINT_ENV_KEYS: tuple[str, ...] = ("NUM_PROMPTS", "NUM_WARMUPS")
+POINT_ENV_KEYS: tuple[str, ...] = (ENV_NUM_PROMPTS, ENV_NUM_WARMUPS)
 #: Decided by the test request; recorded beside the hash, never part of it.
-REQUEST_ENV_KEYS: tuple[str, ...] = ("CONC", "RUN_EVAL")
+REQUEST_ENV_KEYS: tuple[str, ...] = (ENV_CONC, ENV_RUN_EVAL)
 #: Model files whose content shapes the measurement: configuration and tokenizer, never weights.
 MODEL_FILE_NAMES: frozenset[str] = frozenset(
     {
@@ -183,7 +195,7 @@ def check_point(
     """Hold one point to its request: concurrency, ``RUN_EVAL`` and the canonical request counts for it."""
 
     envs = benchmark_envs(config)
-    expected = {"CONC": str(concurrency), "RUN_EVAL": "true" if accuracy else "false", **reference}
+    expected = {ENV_CONC: str(concurrency), ENV_RUN_EVAL: "true" if accuracy else "false", **reference}
     wrong = {key: (want, _text(envs.get(key))) for key, want in expected.items() if _text(envs.get(key)) != want}
     if wrong:
         detail = "; ".join(f"{key}: expected {want!r}, point has {got!r}" for key, (want, got) in wrong.items())

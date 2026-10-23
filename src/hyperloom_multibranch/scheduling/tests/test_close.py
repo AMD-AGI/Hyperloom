@@ -22,6 +22,7 @@ import pytest
 
 from hyperloom.common.io import append_jsonl, atomic_write_json
 from hyperloom.common.owner_scope import local_owner_scope
+from hyperloom.common.rule_pack import rule_pack_identity
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
@@ -173,6 +174,7 @@ def layout(tmp_path: Path) -> SessionLayout:
     layout = create_session(tmp_path / "workspace", "model", CLOCK)
     SessionManifest(
         code_version=CodeVersion("0.0", RAN_ON),
+        rule_pack=dict(rule_pack_identity()),
         session_id=layout.session_id,
         started_at=NOW,
         deadline=NOW + BUDGET_SECONDS,
@@ -230,6 +232,9 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     store = FakeRecipeStore(champion={"metric": "optimized_throughput", "session_id": "older", "value": 1000.0})
     stopper = _clean()
     author, curator = ScriptedCompletion(), ScriptedCompletion()
+    reading = {"kind": "container_resources", "memory_peak_bytes": 2048, "oom_kill": 0}
+    (layout.logs / "agents").mkdir(parents=True, exist_ok=True)
+    (layout.logs / "agents" / "resources.jsonl").write_text(json.dumps(reading) + "\n", "utf-8")
 
     report = await _closer(layout, notebook, stopper, final, RemoteRecipeClient(store), author, curator).close(
         SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP
@@ -253,6 +258,7 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     assert (knowledge["lesson_curation"]["status"], knowledge["lesson_curation"]["reason"]) == (SKIPPED, NO_LESSONS)
     assert curator.calls == [] and knowledge["lessons"]["status"] == SKIPPED
     assert breakdown["metadata"]["session"]["code_revision"] == RAN_ON
+    assert breakdown["metadata"]["container_resources"] == reading
     assert breakdown["close"]["final"]["commit_id"] == CHOSEN
     assert breakdown["close"]["selection"]["chosen"]["commit"] == CHOSEN
     assert (breakdown["close"]["selection"]["metric"], breakdown["close"]["selection"]["primary_conc"]) == (METRIC, 64)

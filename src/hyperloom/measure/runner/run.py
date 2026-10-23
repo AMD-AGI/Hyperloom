@@ -17,6 +17,7 @@ from pathlib import Path
 
 import yaml
 
+from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.contracts.measurement import AttachmentRef, FailureClass
 from hyperloom.measure import signing
 from hyperloom.measure.docs import DocumentError
@@ -85,7 +86,7 @@ def _version() -> str:
 
 
 def _visible(environ: MutableMapping[str, str]) -> list[int]:
-    return [int(p) for p in environ.get("ROCR_VISIBLE_DEVICES", "").split(",") if p.strip().isdigit()]
+    return [int(p) for p in environ.get(ROCR_VISIBLE_DEVICES_ENV, "").split(",") if p.strip().isdigit()]
 
 
 def _load_key(environ: MutableMapping[str, str]):
@@ -200,7 +201,7 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
             placed=placed,
             pid_dir=ctx.work / "pids",
             inferencex_path=inferencex,
-            visible_devices=ctx.environ.get("ROCR_VISIBLE_DEVICES"),
+            visible_devices=ctx.environ.get(ROCR_VISIBLE_DEVICES_ENV),
             farm=farm,
         )
         points = [

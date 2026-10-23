@@ -11,7 +11,7 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
-from hyperloom.contracts.recipe import RecipeDelta
+from hyperloom.contracts.recipe import KernelArtifact, RecipeDelta
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook.peers import (
     BranchLogEntry,
@@ -179,7 +179,8 @@ class LineageEvent:
     """A branch starting (``from_commit``), splitting off ``from_branch`` with fix ``commit_id``, or stopping.
 
     ``ROOT`` records the baseline commit ``commit_id`` the integration branch starts from, and may name the digest of
-    its recipe (``Recipe.digest()``); a judgement names the recipe digest of every other commit.
+    its recipe (``Recipe.digest()``); a judgement names the recipe digest of every other commit. The ``OPEN`` of a
+    repair branch names in ``repairs`` the test whose blocked gain it was opened to repair.
     """
 
     kind: LineageKind
@@ -189,6 +190,7 @@ class LineageEvent:
     from_branch: str = ""
     reason: str = ""
     recipe_digest: str | None = None
+    repairs: str = ""
 
 
 @dataclass(frozen=True)
@@ -440,6 +442,7 @@ class BranchNode:
     stop_reason: str | None = None
     opened_at: float = 0.0
     stopped_at: float | None = None
+    repairs: str = ""
 
 
 @dataclass(frozen=True)
@@ -543,7 +546,9 @@ class PeerReplay:
     """The change another branch's test ``request_id`` tried, to test on ``parent_commit``, the caller's head.
 
     It is that test's own delta, not the difference between the two heads, which would carry ``branch``'s earlier
-    commits too. ``layer`` is the deepest layer the change reaches, the one its intent claims.
+    commits too; a component new to the caller's head takes the upstream it had where the test was made. ``layer`` is
+    the deepest layer the change reaches, the one its intent claims. ``replaces`` are the head's kernel artifacts the
+    change's take the place of: a target loads one artifact of a kind, so the test runs without them.
     """
 
     request_id: str
@@ -551,6 +556,7 @@ class PeerReplay:
     parent_commit: str
     delta: RecipeDelta
     layer: IntentLayer
+    replaces: tuple[KernelArtifact, ...] = ()
 
 
 @dataclass(frozen=True)

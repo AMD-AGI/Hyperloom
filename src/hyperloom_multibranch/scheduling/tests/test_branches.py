@@ -312,7 +312,7 @@ async def test_an_admitted_repair_is_cut_and_opens_at_its_commit_with_its_k_its_
     assert bench.sessions.repairs == {"b02": repair}
     assert bench.sessions.quota_at_start["b02"] == 2
     view = {branch.branch: branch for branch in (await bench.notebook.lineage()).branches}
-    assert (view["b02"].start_commit, view["b02"].origin) == (fix, LineageKind.OPEN)
+    assert (view["b02"].start_commit, view["b02"].origin, view["b02"].repairs) == (fix, LineageKind.OPEN, "r1")
     logged = json.loads((tmp_path / "MB-decisions.jsonl").read_text().splitlines()[-1])
     assert (logged["kind"], logged["branch"]) == ("repair", "b02")
 

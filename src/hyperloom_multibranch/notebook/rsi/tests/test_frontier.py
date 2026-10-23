@@ -202,6 +202,34 @@ def test_a_candidate_waiting_for_its_confirm_lifts_the_score_to_its_gain_in_poin
     assert capped is not None and capped.basis is FrontierBasis.HEADROOM
 
 
+async def test_a_young_repair_branch_scores_at_least_the_gain_of_the_blocked_candidate_it_repairs(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    root = tmp_path / "notebook"
+    observer = await scripted_session(root, clock)
+    scheduler = LocalNotebook(root, Writer(Role.SCHEDULER, "scheduler"), clock=clock)
+    toolbox, gate = (LocalNotebook(root, Writer(role, role.value), clock=clock) for role in (Role.TOOLBOX, Role.GATE))
+
+    async def judged(request_id: str, branch: str, verdict: Verdict, conclusion: Conclusion, value: float) -> None:
+        await toolbox.write_request(request(request_id, intent(branch, "c1", target=request_id)))
+        await toolbox.write_result(result(request_id))
+        found = judgement(0.2, (request_id,), verdict=verdict, recorded={METRIC: value})
+        await gate.write_judgement(request_id, found, conclusion)
+
+    await judged("x1", "s1", Verdict.BLOCKED, Conclusion.REPAIR_REQUESTED, 1092.0)
+    opened = LineageEvent(LineageKind.OPEN, "s3", from_commit="c1", reason="repair branch of s1", repairs="x1")
+    await scheduler.record_lineage(opened)
+    young = _scores(await observer.snapshot())["s3"]
+    for n in range(SETTLED_TESTS):
+        await judged(f"n{n}", "s3", Verdict.FLAT, Conclusion.RECORDED_ONLY, 1040.0)
+    settled = _scores(await observer.snapshot())["s3"]
+
+    assert young is not None and young.basis is FrontierBasis.REPAIR
+    assert young.expected_gain_pct == pytest.approx(5.2) and young.components["repairing_pct"] == pytest.approx(5.2)
+    assert settled is not None and settled.basis is FrontierBasis.TREND and "repairing_pct" not in settled.components
+
+
 async def test_the_branchs_test_count_leaves_out_the_tests_still_waiting_for_a_result(tmp_path: Path) -> None:
     clock = FakeClock()
     observer = await scripted_session(tmp_path / "notebook", clock)

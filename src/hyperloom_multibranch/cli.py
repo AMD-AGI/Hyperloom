@@ -157,7 +157,8 @@ def _add_branch_options(run: argparse.ArgumentParser) -> None:
         type=Path,
         default=None,
         metavar="FILE",
-        help="A direction for one specialist; repeatable, each opens one branch at the root within --max-branches.",
+        help="A direction for one specialist; repeatable, each opens one branch where EXPLORE starts, "
+        "within --max-branches.",
     )
     run.add_argument(
         "--autonomous-agent",

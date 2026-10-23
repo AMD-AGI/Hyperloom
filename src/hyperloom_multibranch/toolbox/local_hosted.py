@@ -29,9 +29,11 @@ from hyperloom.measure.local import SUPPORTED_KINDS
 from hyperloom.measure.framework_base import framework_envs
 from hyperloom.measure.local_templates import local_runner_template
 from hyperloom.sandbox.local import LocalSandboxProvider
-from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity
+from hyperloom.sandbox.templates import LocalTemplate
+from hyperloom_multibranch.contracts.toolbox import BranchLease, MeasurementCapacity
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
+from hyperloom_multibranch.toolbox.branch_leases import BranchLeases
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
@@ -50,6 +52,7 @@ __all__ = [
 #: One node serves at most eight cards, so at most ``8 / TP`` tests run at once (handover 5, item 7).
 MAX_CARDS_PER_NODE = 8
 _SANDBOXES, _ARCHIVE, _SUBMISSIONS = "sandboxes", "archive", "toolbox/submissions.jsonl"
+_BRANCH_SANDBOXES = "branch-sandboxes"
 _FRAMEWORK = "framework"
 _TOOL_RESULTS = "tool-results"
 _POLL_INTERVAL_SEC = 2.0
@@ -73,6 +76,7 @@ class LocalHostedToolbox(RealToolbox):
 
     backend: HostedMeasurementBackend
     provider: LocalSandboxProvider
+    leases: BranchLeases
     sandboxes: Path
     _reported_cards: frozenset[int] = frozenset()
 
@@ -84,10 +88,22 @@ class LocalHostedToolbox(RealToolbox):
 
     async def measurement_capacity(self) -> MeasurementCapacity:
         """The provider's card pool, less the cards it lost for good (``provider.quarantined``); node quarantine does
-        not reduce it."""
+        not reduce it. The cards leased to branch sandboxes are in ``leased_cards``."""
 
-        total = self.provider.pool.total
-        return MeasurementCapacity(total, total - len(self._leaked()))
+        return self.leases.capacity()
+
+    async def lease_branch_sandbox(self, branch_id: str, cards: int) -> BranchLease:
+        """Take ``cards`` cards from the provider's pool for ``branch_id``'s agent, waiting for running tests to
+        give them back like a measurement sandbox does; see :class:`BranchLeases`."""
+
+        return await self.leases.lease(branch_id, cards)
+
+    async def release_branch_sandbox(self, lease_id: str) -> None:
+        self.leases.release(lease_id)
+        self._pump()
+
+    def _parallel_limit(self) -> int:
+        return self.leases.tests_at_once()
 
     async def start(self) -> None:
         """Start, after taking back the leaks an earlier run of this host recorded in the notebook."""
@@ -136,6 +152,7 @@ class LocalHostedToolbox(RealToolbox):
 
     async def close(self) -> None:
         await super().close()
+        self.leases.close()
         await asyncio.to_thread(self.backend.close)
         await asyncio.to_thread(self.provider.close)
         await self._housekeeping()  # a sandbox that could not be reaped at shutdown has leaked its cards too
@@ -239,10 +256,15 @@ class LocalOptions:
     framework_configs: str | None = None
 
 
-def _provider(session: LocalSession, cards: tuple[int, ...], options: LocalOptions) -> LocalSandboxProvider:
-    template = local_runner_template(
+def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTemplate:
+    return local_runner_template(
         f"runner-{session.tp}", gpus=session.tp, python=options.python, envs=options.runner_envs
     )
+
+
+def _provider(
+    session: LocalSession, cards: tuple[int, ...], template: LocalTemplate, options: LocalOptions
+) -> LocalSandboxProvider:
     framework = framework_envs(Path(session.session_dir) / _FRAMEWORK, options.framework_configs)
     template = replace(template, envs={**template.envs, **framework})
     return LocalSandboxProvider(
@@ -304,7 +326,8 @@ def build_local_toolbox(
         max_parallel_tests=parallel,
         poll_interval_sec=options.poll_interval_sec,
     )
-    provider = _provider(session, cards, options)
+    template = _runner_template(session, options)
+    provider = _provider(session, cards, template, options)
     backend = _started(provider, config)
     executor = HostedExecutor(
         backend,
@@ -327,6 +350,7 @@ def build_local_toolbox(
         tuning=ToolboxTuning(policy=_capped(options.policy, parallel), max_infra_retries=options.max_infra_retries),
     )
     toolbox.backend, toolbox.provider, toolbox.trace_root = backend, provider, directory
+    toolbox.leases = BranchLeases(provider, directory / _BRANCH_SANDBOXES, tp, template.envs)
     toolbox.sandboxes = directory / _SANDBOXES
     toolbox.blobs = spec.blobs
     return toolbox

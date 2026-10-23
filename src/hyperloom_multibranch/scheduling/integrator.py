@@ -423,15 +423,19 @@ class Integrator:
         The champion is judged by the rule every candidate is judged by, so EXPLORE opens on it only where it
         improved on the baseline ``root`` just anchored, and every later gain is still measured from ``root``. It is
         no specialist's commit: nothing offered it, so no merge attempt records it, and the regression set it would
-        run is empty before EXPLORE. A champion whose recipe ``root`` carries already, whose test did not measure or
-        that the rule gate does not stack leaves the head at ``root``.
+        run is empty before EXPLORE. A champion whose recipe ``root`` carries already, whose test did not measure,
+        that the toolbox refuses or that the rule gate does not stack leaves the head at ``root``: the session
+        explores from the baseline it anchored rather than ending before EXPLORE for a commit nothing of it needs.
         """
 
         replay = champion.on(await self._repo.read_recipe(root), root)
         if replay is None:
             return self._record_champion(root, champion.canonical_id, ALREADY_ON_HEAD)
         request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, root, replay.delta)
-        return await self._tests.judged(request, partial(self._stack_champion, replay))
+        try:
+            return await self._tests.judged(request, partial(self._stack_champion, replay))
+        except RequestRejected as exc:
+            return self._record_champion(root, champion.canonical_id, f"the toolbox refused the replay: {exc.reason}")
 
     async def _stack_champion(self, replay: WarmReplay, request_id: str) -> str:
         root = replay.parent_commit

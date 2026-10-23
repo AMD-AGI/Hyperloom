@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from hyperloom.contracts.recipe import PatchRef, Recipe, RecipeDelta, ValueChange
+from hyperloom.contracts.recipe import KernelArtifact, PatchRef, Recipe, RecipeDelta, ValueChange
 
 
 class BranchMoved(RuntimeError):
@@ -31,19 +31,43 @@ class PatchConflict:
 
 
 @dataclass(frozen=True)
+class RebasedPatch:
+    """A candidate's patch ``path`` of ``component`` that did not apply where the merge puts it, carried as ``patch``:
+    its change merged three ways into the files the stack before it leaves, where no line is changed by both."""
+
+    component: str
+    path: str
+    patch: PatchRef
+
+
+@dataclass(frozen=True)
+class UnitedTable:
+    """A kernel slot both sides filled with tables neither of which holds every row of the other, carried as ``table``:
+    the rows of the candidate's ``theirs`` and the head's ``ours`` as one table, one row to a shape."""
+
+    theirs: KernelArtifact
+    ours: KernelArtifact
+    table: KernelArtifact
+
+
+@dataclass(frozen=True)
 class RepoMerge:
     """A candidate commit's own change, relative to its parent, carried onto ``onto``.
 
     ``delta`` turns ``onto``'s recipe into the merged one. Where both changed a server argument or an environment
     variable, the candidate's value is taken and the setting listed in ``config_conflicts`` as ``onto``'s value
     before the candidate's. ``patch_conflicts`` are the patches that do not apply to the installed package where the
-    merge puts them; ``delta`` leaves them out.
+    merge puts them; ``delta`` leaves them out. ``rebased_patches`` are the candidate's patches ``delta`` carries
+    rebased onto the stack before them in place of the originals. ``united_tables`` are the kernel slots ``delta``
+    fills with a union of both sides' tables in place of the candidate's.
     """
 
     onto: str
     delta: RecipeDelta
     config_conflicts: tuple[ValueChange, ...] = ()
     patch_conflicts: tuple[PatchConflict, ...] = ()
+    rebased_patches: tuple[RebasedPatch, ...] = ()
+    united_tables: tuple[UnitedTable, ...] = ()
 
     @property
     def clean(self) -> bool:
@@ -94,4 +118,4 @@ class ExperimentRepo(Protocol):
         """Write every patch and kernel file ``commit``'s recipe names under ``destination``, at the path it names."""
 
 
-__all__ = ["BranchMoved", "ExperimentRepo", "PatchConflict", "RepoMerge"]
+__all__ = ["BranchMoved", "ExperimentRepo", "PatchConflict", "RebasedPatch", "RepoMerge", "UnitedTable"]

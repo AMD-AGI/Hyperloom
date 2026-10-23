@@ -162,15 +162,15 @@ def test_the_role_defines_the_layers_an_intent_names():
     assert "or a kernel's tuned table, and source for any other code change" in prompt
 
 
-def test_the_role_sends_a_tuned_table_through_put_kernel_artifact_whole_and_one_per_variable():
+def test_the_role_sends_tuned_rows_through_put_kernel_artifact_one_table_per_variable():
     prompt = role_prompt(WORKLOAD)
 
-    assert "A tuned table goes into the recipe through put_kernel_artifact" in prompt
-    assert "put the whole table for its variable, one table per variable" in prompt
-    assert "add the artifact it returns to the delta's add_kernels" in prompt
+    assert "A tuned table goes into the recipe through put_kernel_artifact, one table per variable" in prompt
+    assert "the artifact it returns goes into the delta's add_kernels" in prompt
     assert "never point a variable at a file of yours or set it from code" in prompt
-    assert "replaces the image's default table for that variable" in prompt
-    assert "carry the default's rows for the other shapes as well as the tuned ones" in prompt
+    assert "put only the rows you tuned with rows_only=true" in prompt
+    assert "a row overrides the image's default row for the same shape" in prompt
+    assert "If your head's recipe already has a table for that variable, yours replaces it" in prompt
     assert any("put_kernel_artifact" in direction for direction in DIRECTIONS)
 
 
@@ -268,7 +268,7 @@ def test_the_gemm_direction_and_the_role_put_a_path_switch_before_hand_picked_ro
     (direction,) = [text for text in DIRECTIONS if text.startswith("GEMM tuning:")]
     prompt = role_prompt(WORKLOAD)
 
-    assert "switch its kernel path before picking rows by hand" in direction
+    assert "first switch it to a kernel family with tuned rows or a stronger default" in direction
     assert "picking a tile or a split-K for it without timing it is a guess" in prompt
     assert "a row at a padded M covers every batch size that pads to it" in prompt
 
@@ -478,3 +478,36 @@ def test_a_launch_shows_the_latest_entries_cut_to_size_and_how_the_last_session_
     assert "[e4] result: entry 4" not in prompt and "[e5] result: entry 5" in prompt
     assert f"[e99] result (s1-17): {'x' * (ENTRY_CHARS - 3)}...\n" in prompt
     assert "Your previous session ended: the agent CLI exited 1." in prompt
+
+
+def test_the_role_checks_bandwidth_copies_and_a_flat_fusion_before_spending_tests():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "each launch costs about 1.5 us on MI355X" in prompt
+    assert "2 to 4 us" not in prompt
+    assert "divide the bytes it must move per call" in prompt
+    assert "near the device's HBM bandwidth no kernel change pays" in prompt
+    assert "Count the copy, cast and elementwise kernels in a decode step" in prompt
+    assert "compare each kernel's count and time with the parent's profile" in prompt
+    assert "A speculative or MTP draft gains its accept length" in prompt
+
+
+def test_the_directions_name_shape_whitelists_unpassed_switches_and_settings_nothing_reads():
+    fast_path, settings = DIRECTIONS[0], DIRECTIONS[3]
+
+    assert "a whitelist or table keyed by the model's shape" in fast_path
+    assert "which model files pass its switch" in fast_path
+    assert "Before testing a setting, grep where it is read" in settings
+    assert "Bound a scheduler setting" in settings
+
+
+def test_the_gemm_direction_asks_for_the_table_read_and_marks_borrowed_rows_as_untimed():
+    gemm = DIRECTIONS[1]
+
+    assert gemm.startswith("GEMM tuning:")
+    assert "tune the aiter and hipBLASLt GEMM configurations" not in gemm
+    assert "check which table each shape actually reads" in gemm
+    assert "switch it to a kernel family with tuned rows or a stronger default" in gemm
+    assert "rows borrowed from tuned tables of the same kernel family at nearby shapes are an untimed guess" in gemm
+    assert "rows_only=true" in gemm
+    assert "several shapes in one test" in gemm

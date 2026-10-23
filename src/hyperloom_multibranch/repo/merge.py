@@ -4,19 +4,23 @@
 """A candidate commit's own change carried onto another commit's recipe, for the integrator's merge.
 
 The change is what the candidate's recipe changed from its parent's. A server argument or environment variable both
-sides changed takes the candidate's value and is listed; a kernel slot both sides filled has no value to prefer, so
-the merge is refused. A component travels only for the patches it gains or loses, with its upstream commit where
+sides changed takes the candidate's value and is listed; a kernel slot both sides filled is decided by the two tables
+when one holds every row of the other, since a target loads one table and the wider one serves every shape the
+narrower did, and otherwise takes a new table of both tables' rows, refused when a shape is in both with other rows.
+A component travels only for the patches it gains or loses, with its upstream commit where
 those patches create a component the other side lacks: every component is built from the installed package of the
 session's fixed base image, so a recipe's upstream pin is provenance no merge can act on, and a component the
 candidate records without patching it changes nothing a test would build. The merged patch stacks are applied to the
 installed package as the toolbox applies them when it builds a test's environment, so a conflict shows before the
-merge test is paid for.
+merge test is paid for. A patch the candidate brings that does not apply there is rebased by a three-way merge of the
+files it touches, and is a conflict only where a line is changed by both sides.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import replace
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 from hyperloom.contracts.recipe import (
     ComponentChange,
@@ -33,31 +37,85 @@ from hyperloom.contracts.recipe import (
     apply,
     diff,
 )
-from hyperloom.measure.compile import PatchApplyError
-from hyperloom_multibranch.contracts.repo import PatchConflict, RepoMerge
+from hyperloom.measure.compile import KernelLoadError, PatchApplyError, kernel_load_env, kernel_rows_only
+from hyperloom_multibranch.contracts.repo import PatchConflict, RebasedPatch, RepoMerge, UnitedTable
+from hyperloom_multibranch.repo.rebase import Files, merge_files, patch_between
+from hyperloom_multibranch.toolbox.kernel_artifacts import (
+    KernelRowsConflict,
+    KernelRowsError,
+    mint_kernel_artifact,
+    union_rows,
+)
 
-#: Applies a component's patch stack to the installed package; raises ``PatchApplyError`` when one does not apply.
-PatchCheck = Callable[[ComponentPatches], None]
+#: Applies a component's patch stack to the installed package, and returns every file a patch of it touches and each of
+#: the given paths as the stack leaves them; raises ``PatchApplyError`` when a patch does not apply.
+StackFiles = Callable[[ComponentPatches, Collection[str]], Files]
+#: Reads a kernel table's bytes, for the two that fill one slot.
+TableBytes = Callable[[KernelArtifact], bytes]
+#: Keeps a patch file of a component, as the experiment repository's ``store_patch`` does.
+PatchStore = Callable[[str, str], PatchRef]
+#: Keeps a kernel table's bytes in the session's blob store, as the toolbox's ``put_kernel_artifact`` does.
+TableStore = Callable[[bytes], str]
+#: How many conflicting shapes a refusal names.
+_NAMED_SHAPES = 8
 
 
-def carry(onto: str, base: Recipe, candidate: Recipe, ours: Recipe, check: PatchCheck) -> RepoMerge:
+@dataclass(frozen=True)
+class Stored:
+    """What a merge consults beyond the three recipes: the installed packages a patch stack has to apply to, the bytes
+    behind a kernel artifact, and the stores a rebased patch and a united table are kept in. ``aiter_configs`` is the
+    aiter install a union reads a table's shape key from, the image's when ``None``."""
+
+    stack_files: StackFiles
+    kernel_table: TableBytes
+    store_patch: PatchStore
+    store_table: TableStore
+    aiter_configs: Path | None = None
+
+
+@dataclass(frozen=True)
+class _Kernels:
+    """The kernel artifacts a merge carries, and the slots among them it fills with a union of both sides' tables."""
+
+    added: tuple[KernelArtifact, ...]
+    united: tuple[UnitedTable, ...]
+
+
+@dataclass(frozen=True)
+class _Settled:
+    """Where the patches of merged stacks that do not apply went: left out, rebased, or ``held`` by the stack already."""
+
+    conflicts: tuple[PatchConflict, ...] = ()
+    rebased: tuple[RebasedPatch, ...] = ()
+    held: frozenset[str] = field(default_factory=frozenset)
+
+
+def carry(onto: str, base: Recipe, candidate: Recipe, ours: Recipe, stored: Stored) -> RepoMerge:
     """``candidate``'s change from ``base``, its parent's recipe, carried onto ``ours``, the recipe of ``onto``."""
     change = diff(base, candidate)
     if change.base_image_changed:
         raise RecipeError("the candidate changes the base image, which a session keeps")
+    kernels = _added_kernels(base, candidate, ours, stored)
     delta = RecipeDelta(
         config=_config(change),
         components=_components(base, candidate, ours),
-        add_kernels=_added_kernels(base, candidate, ours),
+        add_kernels=kernels.added,
         remove_kernels=_removed_kernels(base, candidate, ours),
     )
     merged = apply(ours, delta)
-    conflicts = [
-        conflict
-        for touched in delta.components
-        for conflict in _stack_conflicts(merged.component(touched.component), check)
-    ]
-    return RepoMerge(onto, _without(delta, conflicts), _config_conflicts(change, diff(base, ours)), tuple(conflicts))
+    brought = {patch.path for touched in delta.components for patch in touched.add_patches}
+    settled = _joined(
+        _settle(merged.component(name), candidate.component(name), brought, stored)
+        for name in (touched.component for touched in delta.components)
+    )
+    return RepoMerge(
+        onto,
+        _without(delta, settled),
+        _config_conflicts(change, diff(base, ours)),
+        settled.conflicts,
+        settled.rebased,
+        kernels.united,
+    )
 
 
 def _config(change: RecipeDiff) -> ConfigDelta:
@@ -99,18 +157,33 @@ def _component_change(name: str, base: Recipe, candidate: Recipe, ours: Recipe) 
     return ComponentChange(name, add_patches=added, remove_patches=removed)
 
 
-def _added_kernels(base: Recipe, candidate: Recipe, ours: Recipe) -> tuple[KernelArtifact, ...]:
-    added = [artifact for artifact in candidate.kernels if artifact not in base.kernels]
-    for artifact in added:
-        _refuse_if_both_moved(artifact.slot, _in_slot(base, artifact.slot), _in_slot(ours, artifact.slot), artifact)
-    return tuple(artifact for artifact in added if artifact not in ours.kernels)
+def _added_kernels(base: Recipe, candidate: Recipe, ours: Recipe, stored: Stored) -> _Kernels:
+    """Each artifact the candidate added, in the slot it fills: it lands where no other side moved the slot, the wider
+    of two tables when one holds every row of the other, and a union of both tables' rows otherwise."""
+    carried, united = [], []
+    for artifact in (artifact for artifact in candidate.kernels if artifact not in base.kernels):
+        current = _in_slot(ours, artifact.slot)
+        if current is None or current in (_in_slot(base, artifact.slot), artifact):
+            carried.append(artifact)
+            continue
+        wider = wider_table(artifact, current, stored.kernel_table)
+        if wider is None:
+            wider = _united(artifact, current, stored)
+            united.append(UnitedTable(artifact, current, wider))
+        carried.append(wider)
+    return _Kernels(
+        tuple(artifact for artifact in carried if artifact not in ours.kernels),
+        tuple(union for union in united if union.table not in ours.kernels),
+    )
 
 
 def _removed_kernels(base: Recipe, candidate: Recipe, ours: Recipe) -> tuple[str, ...]:
     kept = {artifact.slot for artifact in candidate.kernels}
     dropped = [artifact for artifact in base.kernels if artifact.slot not in kept]
     for artifact in dropped:
-        _refuse_if_both_moved(artifact.slot, artifact, _in_slot(ours, artifact.slot), None)
+        current = _in_slot(ours, artifact.slot)
+        if current is not None and current != artifact:
+            raise _both_moved(artifact.slot)
     return tuple(artifact.ref for artifact in dropped if artifact in ours.kernels)
 
 
@@ -118,57 +191,151 @@ def _in_slot(recipe: Recipe, slot: tuple[KernelKind, str]) -> KernelArtifact | N
     return next((artifact for artifact in recipe.kernels if artifact.slot == slot), None)
 
 
-def _refuse_if_both_moved(
-    slot: tuple[KernelKind, str],
-    was: KernelArtifact | None,
-    current: KernelArtifact | None,
-    wanted: KernelArtifact | None,
-) -> None:
-    if current is not None and current not in (was, wanted):
-        kind, target = slot
-        raise RecipeError(f"both sides replaced the {kind.value} kernel for {target}")
+def wider_table(wanted: KernelArtifact, current: KernelArtifact, table: TableBytes) -> KernelArtifact | None:
+    """Whichever of two artifacts filling one slot serves every shape the other does: the one whose table holds every
+    row of the other's under the same header, or ``None`` when neither does and only a union of their rows would serve
+    both. The narrower table is dropped whole rather than merged into the wider, so the slot keeps a table some branch
+    tuned and measured as it stands.
+
+    An artifact put as rows over the image's default table is an override of the shapes it names, not a table of the
+    shapes it serves, so it is never the narrower of a pair and never compared.
+    """
+
+    if kernel_rows_only(wanted) or kernel_rows_only(current):
+        return None
+    theirs, mine = table(wanted), table(current)
+    if _holds(theirs, mine):
+        return wanted
+    if _holds(mine, theirs):
+        return current
+    return None
 
 
-def _stack_conflicts(component: ComponentPatches | None, check: PatchCheck) -> list[PatchConflict]:
-    """The patches of ``component`` that do not apply after the ones before them that do."""
-    if component is None or not component.patches or _applies(component, check):
-        return []
-    applied: list[PatchRef] = []
-    conflicts = []
-    for patch in component.patches:
-        try:
-            check(replace(component, patches=(*applied, patch)))
-        except PatchApplyError as error:
-            conflicts.append(PatchConflict(component.component, patch.path, str(error)))
-            continue
-        applied.append(patch)
-    return conflicts
+def _united(theirs: KernelArtifact, ours: KernelArtifact, stored: Stored) -> KernelArtifact:
+    """The rows of both tables as one table of their slot, kept in the blob store; refused when a shape is in both with
+    other rows, when the two do not load through one variable, and when they are not one kind of table."""
 
-
-def _applies(component: ComponentPatches, check: PatchCheck) -> bool:
     try:
-        check(component)
+        env, other = kernel_load_env(theirs), kernel_load_env(ours)
+        flags = kernel_rows_only(theirs), kernel_rows_only(ours)
+    except KernelLoadError as error:
+        raise _both_moved(theirs.slot, str(error)) from error
+    if env != other:
+        raise _both_moved(theirs.slot, f"one table loads through {env}, the other through {other}")
+    tables = stored.kernel_table(theirs), stored.kernel_table(ours)
+    try:
+        data = union_rows(*tables, env, rows_only=flags, configs=stored.aiter_configs)
+    except KernelRowsConflict as error:
+        raise _both_moved(theirs.slot, f"{len(error.shapes)} shapes differ: {_shapes(error.shapes)}") from error
+    except KernelRowsError as error:
+        raise _both_moved(theirs.slot, str(error)) from error
+    united = mint_kernel_artifact(theirs.kind, theirs.target, env, data, rows_only=flags[0])
+    stored.store_table(data)
+    return united
+
+
+def _shapes(shapes: Sequence[Mapping[str, str]]) -> str:
+    named = "; ".join(" ".join(f"{name}={value}" for name, value in shape.items()) for shape in shapes[:_NAMED_SHAPES])
+    return named + (f"; and {len(shapes) - _NAMED_SHAPES} more" if len(shapes) > _NAMED_SHAPES else "")
+
+
+def _holds(wider: bytes, narrower: bytes) -> bool:
+    """Whether ``wider`` is a table under the same header as ``narrower`` with every row of it."""
+
+    header, rows = _table(wider)
+    other_header, other_rows = _table(narrower)
+    return bool(header) and header == other_header and rows >= other_rows
+
+
+def _table(data: bytes) -> tuple[bytes, frozenset[bytes]]:
+    """A table's header and the set of its rows; the header is empty for bytes that are no table at all."""
+
+    header, *body = data.splitlines() or [b""]
+    return header.strip(), frozenset(line for line in body if line.strip())
+
+
+def _both_moved(slot: tuple[KernelKind, str], reason: str = "") -> RecipeError:
+    kind, target = slot
+    return RecipeError(f"both sides replaced the {kind.value} kernel for {target}" + (f": {reason}" if reason else ""))
+
+
+def _settle(
+    component: ComponentPatches | None, theirs: ComponentPatches | None, brought: Collection[str], stored: Stored
+) -> _Settled:
+    """Each patch of ``component`` that does not apply after the ones before it that do: rebased where the candidate
+    ``brought`` it and no line overlaps, held where the stack before it already makes its change, a conflict
+    otherwise."""
+    if component is None or not component.patches or _apply_error(component, stored.stack_files) is None:
+        return _Settled()
+    applied: list[PatchRef] = []
+    conflicts, rebased, held = [], [], set()
+    for patch in component.patches:
+        stack = replace(component, patches=tuple(applied))
+        error = _apply_error(replace(stack, patches=(*applied, patch)), stored.stack_files)
+        if error is None:
+            applied.append(patch)
+            continue
+        text = _rebased_text(stack, theirs, patch, stored) if theirs is not None and patch.path in brought else None
+        if text is None:
+            conflicts.append(PatchConflict(component.component, patch.path, error))
+        elif text:
+            applied.append(stored.store_patch(component.component, text))
+            rebased.append(RebasedPatch(component.component, patch.path, applied[-1]))
+        else:
+            held.add(patch.path)
+    return _Settled(tuple(conflicts), tuple(rebased), frozenset(held))
+
+
+def _rebased_text(stack: ComponentPatches, theirs: ComponentPatches, patch: PatchRef, stored: Stored) -> str | None:
+    """``patch``'s change from the candidate's stack before it, merged three ways into the files ``stack`` leaves, as
+    a patch over ``stack``: empty when ``stack`` already makes the change, ``None`` when a line is changed by both."""
+    index = theirs.patches.index(patch)
+    try:
+        changed = stored.stack_files(replace(theirs, patches=theirs.patches[: index + 1]), ())
+        original = stored.stack_files(replace(theirs, patches=theirs.patches[:index]), changed)
+        current = stored.stack_files(stack, changed)
     except PatchApplyError:
-        return False
-    return True
+        return None
+    merged = merge_files(original, current, changed)
+    return None if merged is None else patch_between(stack.component, current, merged)
 
 
-def _without(delta: RecipeDelta, conflicts: Sequence[PatchConflict]) -> RecipeDelta:
-    """``delta`` with every conflicting patch left out: not added when the candidate brings it, dropped otherwise."""
-    if not conflicts:
+def _apply_error(component: ComponentPatches, stack_files: StackFiles) -> str | None:
+    try:
+        stack_files(component, ())
+    except PatchApplyError as error:
+        return str(error)
+    return None
+
+
+def _joined(settled: Iterable[_Settled]) -> _Settled:
+    parts = list(settled)
+    return _Settled(
+        tuple(conflict for part in parts for conflict in part.conflicts),
+        tuple(rebased for part in parts for rebased in part.rebased),
+        frozenset().union(*(part.held for part in parts)),
+    )
+
+
+def _without(delta: RecipeDelta, settled: _Settled) -> RecipeDelta:
+    """``delta`` with every conflicting patch left out, not added when the candidate brings it and dropped otherwise;
+    a rebased patch in place of the candidate's, and none for one the stack already holds."""
+    if not (settled.conflicts or settled.rebased or settled.held):
         return delta
     changes = []
     for change in delta.components:
-        failed = {conflict.path for conflict in conflicts if conflict.component == change.component}
+        failed = {conflict.path for conflict in settled.conflicts if conflict.component == change.component}
+        moved = {rebased.path: rebased.patch for rebased in settled.rebased if rebased.component == change.component}
         brought = {patch.path for patch in change.add_patches}
+        kept = (patch for patch in change.add_patches if patch.path not in failed | settled.held)
         changes.append(
             replace(
                 change,
-                add_patches=tuple(patch for patch in change.add_patches if patch.path not in failed),
+                add_patches=tuple(moved.get(patch.path, patch) for patch in kept),
                 remove_patches=(*change.remove_patches, *sorted(failed - brought)),
             )
         )
     return replace(delta, components=tuple(changes))
 
 
-__all__ = ["PatchCheck", "carry"]
+__all__ = ["PatchStore", "StackFiles", "Stored", "TableBytes", "TableStore", "carry", "wider_table"]

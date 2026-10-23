@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol
 
+from hyperloom.common.outside_facts import SGLANG_IMAGE_WORKSPACE, TUNABLEOP_TABLE_ENV
 from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.contracts.recipe import (
     DIGEST_PREFIX,
@@ -47,23 +48,28 @@ from hyperloom.contracts.recipe import (
     RecipeError,
     apply,
 )
+from hyperloom.measure.framework_rows import DEFAULT_TABLE_PLACEHOLDER
+from hyperloom.measure.framework_tables import AITER_VARIABLE_PREFIX
 
 ATTACH_PLACEHOLDER = "${HL_ATTACH:%s}"
 #: ``KernelArtifact.metadata["load"] = {"via": ..., ...}`` says how the service picks an artifact up. Only one form is supported:
 #: the file is attached and the named environment variable points at it (gemm tuning tables).
 KERNEL_LOAD_KEY = "load"
 LOAD_VIA_ENV_FILE = "env_file"
+#: ``metadata["load"]["rows_only"] = true``: the file holds only the specialist's tuned rows, and the variable names the
+#: image's default table and then the file. Only an aiter table variable can list tables, so only one carries it.
+LOAD_ROWS_ONLY_KEY = "rows_only"
 #: Kernel kinds whose artifacts are loaded as files through a variable; others have no loading convention yet.
 LOADABLE_KERNEL_KINDS = frozenset({KernelKind.GEMM})
 #: Variables whose value PyTorch turns into one file per device: TunableOp reads ``<stem><ordinal><extension>`` (``x.csv``
 #: is read as ``x0.csv`` on device 0, ``x1.csv`` on device 1; the ordinal counts the devices the process sees, so a test
 #: on N cards reads 0..N-1). A table loaded through one of them is placed under the name the variable holds and under the
 #: name of each of the ``DEVICE_ORDINALS`` of a node, so a test on any number of its cards finds its file.
-PER_DEVICE_TABLE_ENVS = frozenset({"PYTORCH_TUNABLEOP_FILENAME"})
+PER_DEVICE_TABLE_ENVS = frozenset({TUNABLEOP_TABLE_ENV})
 DEVICE_ORDINALS = range(8)
 TABLE_EXTENSION = ".csv"
 #: Directories an editable-installed source tree may live in and still count as part of the image.
-IMAGE_SOURCE_ROOTS = ("/sgl-workspace", "/opt", "/app", "/usr")
+IMAGE_SOURCE_ROOTS = (SGLANG_IMAGE_WORKSPACE, "/opt", "/app", "/usr")
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -440,8 +446,15 @@ def kernel_attachments(
         placed = _table_attachments(artifact, env_name)
         for attachment in placed:
             attachments.setdefault(attachment.id, attachment)
-        envs[env_name] = attachment_placeholder(placed[0])
+        envs[env_name] = _table_value(artifact, placed[0])
     return tuple(attachments.values()), envs
+
+
+def _table_value(artifact: KernelArtifact, table: AttachmentRef) -> str:
+    """What the variable holds: the table's placeholder, behind the image's default table for a rows-only table."""
+
+    placeholder = attachment_placeholder(table)
+    return os.pathsep.join([DEFAULT_TABLE_PLACEHOLDER, placeholder]) if kernel_rows_only(artifact) else placeholder
 
 
 def _table_attachments(artifact: KernelArtifact, env_name: str) -> tuple[AttachmentRef, ...]:
@@ -471,6 +484,24 @@ def kernel_load_env(artifact: KernelArtifact) -> str:
     if not isinstance(env_name, str) or not _ENV_NAME.fullmatch(env_name):
         raise KernelLoadError(f"{artifact.ref}: metadata.{KERNEL_LOAD_KEY}.env must name an environment variable")
     return env_name
+
+
+def kernel_rows_only(artifact: KernelArtifact) -> bool:
+    """Whether ``artifact`` holds only tuned rows to load over the image's default table.
+
+    Raises:
+        KernelLoadError: When it says so for a variable that cannot list tables, or says it with a value that is no bool.
+    """
+    load = artifact.metadata.get(KERNEL_LOAD_KEY)
+    rows_only = load.get(LOAD_ROWS_ONLY_KEY, False) if isinstance(load, Mapping) else False
+    if not isinstance(rows_only, bool):
+        raise KernelLoadError(f"{artifact.ref}: metadata.{KERNEL_LOAD_KEY}.{LOAD_ROWS_ONLY_KEY} must be true or false")
+    if rows_only and not kernel_load_env(artifact).startswith(AITER_VARIABLE_PREFIX):
+        raise KernelLoadError(
+            f"{artifact.ref}: rows_only lays rows over the image's default table, which only an aiter table variable "
+            f"({AITER_VARIABLE_PREFIX}*) has; {kernel_load_env(artifact)} loads one whole file"
+        )
+    return rows_only
 
 
 # --- compile -------------------------------------------------------------------------------------------------------------
@@ -551,6 +582,7 @@ __all__ = [
     "compile_environment",
     "kernel_attachments",
     "kernel_load_env",
+    "kernel_rows_only",
     "locate_installed_package",
     "patch_targets",
 ]

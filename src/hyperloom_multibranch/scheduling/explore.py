@@ -366,7 +366,9 @@ class Explorer:
 
     async def _held(self, specialists: Mapping[str, SpecialistStatus]) -> dict[str, HoldReason]:
         snapshot = await self._notebook.snapshot()
-        return held_branches(self._roster.entries(), snapshot.progress, snapshot.records, specialists)
+        return held_branches(
+            self._roster.entries(), snapshot.progress, snapshot.records, specialists, self._clock.now()
+        )
 
     async def _stop_given_up(self) -> bool:
         """Stop every live branch whose specialist gave up and has no candidate waiting for its confirm: nothing of

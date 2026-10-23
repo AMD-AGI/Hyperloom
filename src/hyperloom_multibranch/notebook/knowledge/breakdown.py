@@ -9,8 +9,9 @@ export has its own schema version and its own sections:
 * ``metadata``: the session profile, the manifest fingerprint of each activity, and ``session``, the block Pulse reads
   for both flows (the session id, the source revision the session ran on, and the Claw session, framework image and
   node a hosted run is given). In a hosted run it also holds, as written, what the run leaves in the session directory:
-  ``plugs``, ``hosted_measurement`` and ``container_resources``, and the records ``measurement_sandboxes`` (one per
-  test, keyed by ``request_id`` as ``tests`` are) and ``specialist_resources``.
+  ``plugs`` and ``hosted_measurement``, and the records ``measurement_sandboxes`` (one per test, keyed by
+  ``request_id`` as ``tests`` are). From the agent runner's samples it holds ``specialist_resources``, one record per
+  specialist, and ``container_resources``, the container's last reading.
 * ``baseline``: the root's recorded values, dispersion and thresholds.
 * ``lineage``: every commit and branch, with when each was made, opened or stopped, and a commit's recipe digest when
   its writer named it.
@@ -35,6 +36,11 @@ from pathlib import Path
 
 from hyperloom.common.io import atomic_write_json
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
+from hyperloom.orchestrator.specialists.resources import (
+    CONTAINER_RECORD_KIND,
+    RESOURCES_RELATIVE_PATH,
+    SPECIALIST_RECORD_KIND,
+)
 from hyperloom_multibranch.contracts.notebook.peers import SandboxFacts
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, TestRecord
 from hyperloom_multibranch.notebook.codec import encode
@@ -51,15 +57,11 @@ SESSION_VARIABLES = {
     "node_name": "NODE_NAME",
 }
 #: The records a hosted run appends in the session directory, by the ``metadata`` key the breakdown copies them under.
-HOSTED_RECORDS = {
-    "measurement_sandboxes": Path("hosted/measurement_sandboxes.jsonl"),
-    "specialist_resources": Path("agents/resources.jsonl"),
-}
+HOSTED_RECORDS = {"measurement_sandboxes": Path("hosted/measurement_sandboxes.jsonl")}
 #: The documents a hosted run writes in the session directory, by the ``metadata`` key the breakdown copies them under.
 HOSTED_DOCUMENTS = {
     "plugs": Path("plugs.resolved.json"),
     "hosted_measurement": Path("hosted/measurement_stats.json"),
-    "container_resources": Path("agents/container_resources.json"),
 }
 
 
@@ -120,6 +122,21 @@ def session_metadata(
     return {"session_id": session_id, "code_revision": code_revision or None, **named}
 
 
+def _rows(path: Path) -> list[object] | None:
+    """The rows of the JSON lines file ``path``, without a row that is no JSON, as a half-written last line is;
+    ``None`` when there is no such file."""
+
+    if not path.is_file():
+        return None
+    rows: list[object] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
 def hosted_records(session_dir: Path | None) -> dict[str, object]:
     """What a hosted run left in ``session_dir``, as written, by its ``metadata`` key: each :data:`HOSTED_DOCUMENTS`
     file's document, and each :data:`HOSTED_RECORDS` file's rows. A file that is not there gives no key; a document
@@ -134,16 +151,28 @@ def hosted_records(session_dir: Path | None) -> dict[str, object]:
         except (FileNotFoundError, json.JSONDecodeError):
             continue
     for key, relative in HOSTED_RECORDS.items():
-        path = session_dir / relative
-        if not path.is_file():
-            continue
-        rows: list[object] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        found[key] = rows
+        rows = _rows(session_dir / relative)
+        if rows is not None:
+            found[key] = rows
+    return found
+
+
+def agent_resources(runner_dir: Path | None) -> dict[str, object]:
+    """What the agent runner sampled under ``runner_dir``, the session directory it was given, by its ``metadata``
+    key: each specialist's record as ``specialist_resources``, and as ``container_resources`` the container's last
+    reading, whose peaks and kill count cover the run up to it. No samples give neither key, and no container reading
+    gives no ``container_resources``."""
+
+    rows = _rows(runner_dir / RESOURCES_RELATIVE_PATH) if runner_dir is not None else None
+    if rows is None:
+        return {}
+    records = [row for row in rows if isinstance(row, dict)]
+    found: dict[str, object] = {
+        "specialist_resources": [row for row in records if row.get("kind") == SPECIALIST_RECORD_KIND]
+    }
+    readings = [row for row in records if row.get("kind") == CONTAINER_RECORD_KIND]
+    if readings:
+        found["container_resources"] = readings[-1]
     return found
 
 
@@ -161,6 +190,7 @@ def build_breakdown(
     kb_write_back: RemoteWriteResult | None = None,
     knowledge: Mapping[str, object] | None = None,
     session_dir: Path | None = None,
+    runner_dir: Path | None = None,
     environ: Mapping[str, str] | None = None,
     code_revision: str | None = None,
 ) -> dict[str, object]:
@@ -169,9 +199,10 @@ def build_breakdown(
     ``final`` is the commit final selection chose; ``selection`` is how the scheduler chose it, such as its candidates
     and their measurements, as JSON-ready data. ``knowledge`` is what CLOSE's knowledge steps did, as the
     ``rsi.session`` close reports them (``KnowledgeClose.document()``); ``close`` has it only when given.
-    ``session_dir`` is where a hosted run's records are read from, and ``environ`` its variables (the process's by
-    default); ``code_revision`` is the source revision the session's manifest recorded at start, which a process that
-    exports another run's session, such as ``final-only``, does not have in its environment.
+    ``session_dir`` is where a hosted run's records are read from, ``runner_dir`` the agent runner's session directory,
+    and ``environ`` the run's variables (the process's by default); ``code_revision`` is the source revision the
+    session's manifest recorded at start, which a process that exports another run's session, such as ``final-only``,
+    does not have in its environment.
     """
 
     close: dict[str, object] = {
@@ -190,6 +221,7 @@ def build_breakdown(
             "manifest_fingerprints": encode(snapshot.fingerprints),
             "session": session_metadata(snapshot, os.environ if environ is None else environ, code_revision),
             **hosted_records(session_dir),
+            **agent_resources(runner_dir),
         },
         "baseline": encode(snapshot.baseline),
         "lineage": encode(snapshot.lineage),
@@ -219,6 +251,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "SESSION_VARIABLES",
     "MeasurementUsage",
+    "agent_resources",
     "build_breakdown",
     "hosted_records",
     "measurement_usage",

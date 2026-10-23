@@ -6,7 +6,7 @@ notebook in step.
 
 Opening a branch records its ``OPEN`` lineage, cuts it in the experiment repository at its start commit, starts its
 specialist there and gives it its K; the session's briefs keep the focus a branch the scheduler opens in a batch was
-opened with. A user branch opens the same way at the root commit, on the direction the user wrote for it, which its
+opened with. A user branch opens the same way where EXPLORE starts, on the direction the user wrote for it, which its
 started decision records. A repair the fork desk admitted is opened the same way at the commit its blocked
 candidate was measured against, however far the branch that asked for it has committed past that commit meanwhile:
 the repair lands on its own branch, and the integrator carries a commit's own change onto the integration head. A
@@ -74,6 +74,9 @@ STARTED_K = 1
 #: the session owner's decision (board #54); a repair that waited in the fork desk's queue counts from leaving it.
 REPAIR_BRANCH_SECONDS = 2 * 3600.0
 REPAIR_TIME_LIMIT_REASON = f"a repair branch runs at most {REPAIR_BRANCH_SECONDS / 3600:g} hours"
+#: Clock seconds from its entry into the roster for which the judge may neither stop a repair branch nor lower its K:
+#: a kernel numerics fix takes longer to show than the first few tests a new branch is scored on.
+REPAIR_PROTECTED_SECONDS = 90 * 60.0
 
 
 @dataclass(frozen=True)
@@ -346,8 +349,9 @@ class BranchControl:
             self._briefs.for_branch(entry.branch, launch.focus)
         if entry.origin.cut_by_scheduler:
             reason = f"{entry.origin.value} branch" + (f" of {entry.from_branch}" if entry.from_branch else "")
+            repairs = launch.repair.judgement.request_ids[0] if launch.repair is not None else ""
             await self._notebook.record_lineage(
-                LineageEvent(LineageKind.OPEN, entry.branch, from_commit=start_commit, reason=reason)
+                LineageEvent(LineageKind.OPEN, entry.branch, from_commit=start_commit, reason=reason, repairs=repairs)
             )
             await self._repo.create_branch(entry.branch, start_commit)
         await self.push_quota()

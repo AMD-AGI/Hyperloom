@@ -17,13 +17,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, NamedTuple
 
+from hyperloom.common.outside_facts import CONTEXT_LENGTH_FLAGS, ENV_MAX_MODEL_LEN
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
 
 #: The point variable InferenceX derives the evaluation's ``max_length`` from.
-EVAL_CONTEXT_ENV = "MAX_MODEL_LEN"
+EVAL_CONTEXT_ENV = ENV_MAX_MODEL_LEN
 #: The server flags that set the context length a server serves, by the framework that takes them.
-CONTEXT_FLAGS = ("--context-length", "--max-model-len")
+CONTEXT_FLAGS = CONTEXT_LENGTH_FLAGS
 
 
 class EvalContextError(RecipeError):

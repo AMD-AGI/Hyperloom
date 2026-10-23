@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from hyperloom_multibranch.contracts.notebook.records import OpShares
-from hyperloom_multibranch.contracts.toolbox import QueueState, Toolbox
+from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, QueueState, Toolbox
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy
 from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
@@ -28,7 +28,7 @@ MB_MIN_USEFUL_COLD_STARTS = 2
 class WideningSignals:
     """``cold_start_seconds`` is ``None`` before the toolbox's first sandbox cold start, and ``min_useful_seconds``
     then leaves the cold starts out, so it reads low. ``toolbox_headroom`` is negative while more tests wait than the
-    global cap leaves room for."""
+    cap in force leaves room for."""
 
     min_useful_seconds: float
     cold_start_seconds: float | None
@@ -44,10 +44,18 @@ def min_useful_seconds(frontier: FrontierPolicy, queue_state: QueueState) -> flo
     return max(frontier.window_seconds, start_up)
 
 
-def toolbox_headroom(caps: RosterCaps, queue_state: QueueState) -> int:
-    """Tests the toolbox would still start at once under the session's global cap, net of what runs and waits."""
+def toolbox_headroom(
+    caps: RosterCaps, queue_state: QueueState, capacity: MeasurementCapacity, cards_per_test: int
+) -> int:
+    """Tests the toolbox would still start at once, net of what runs and waits: under the session's global cap, and
+    under the tests the measurement cards allow at once, since a branch sandbox's lease holds cards no test runs on.
+    A toolbox with no card pool of its own reads under the cap alone.
+    """
 
-    return caps.max_parallel_tests - queue_state.running - queue_state.queued
+    allowed = caps.max_parallel_tests
+    if capacity.known:
+        allowed = min(allowed, capacity.measurement_cards // cards_per_test)
+    return allowed - queue_state.running - queue_state.queued
 
 
 def refill_focus(asked: tuple[str, ...], count: int, shares: OpShares | None) -> tuple[str, ...]:
@@ -74,17 +82,19 @@ class Widening:
     ``frontier`` is the scoring's own policy, so the trend window here is the one the judge's expected gains rest on.
     """
 
-    def __init__(self, toolbox: Toolbox, roster: Roster, frontier: FrontierPolicy) -> None:
+    def __init__(self, toolbox: Toolbox, roster: Roster, frontier: FrontierPolicy, cards_per_test: int) -> None:
         self._toolbox = toolbox
         self._roster = roster
         self._frontier = frontier
+        self._cards_per_test = cards_per_test
 
     async def signals(self) -> WideningSignals:
         state = await self._toolbox.queue_state()
+        capacity = await self._toolbox.measurement_capacity()
         return WideningSignals(
             min_useful_seconds=min_useful_seconds(self._frontier, state),
             cold_start_seconds=state.cold_start_seconds,
-            toolbox_headroom=toolbox_headroom(self._roster.caps, state),
+            toolbox_headroom=toolbox_headroom(self._roster.caps, state, capacity, self._cards_per_test),
         )
 
 

@@ -21,6 +21,7 @@ from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import ToolResultPointer
+from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox.mcp_tools import (
     McpSpecialistTokens,
@@ -77,6 +78,16 @@ class Stack:
         with urllib.request.urlopen(request, timeout=10) as response:
             return json.loads(response.read())
 
+    def advertised(self, as_branch: str = "b1") -> dict[str, Any]:
+        """The ``start_analysis`` entry of ``tools/list``: what a specialist is told it may start."""
+        token = self.server.issue_token(f"specialist-{as_branch}", as_branch)
+        headers = {"Content-Type": "application/json", "X-Hyperloom-Token": token}
+        message = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
+        with urllib.request.urlopen(urllib.request.Request(self.server.url, message, headers), timeout=10) as response:
+            tools = json.loads(response.read())["result"]["tools"]
+        (entry,) = (tool for tool in tools if tool["name"] == "start_analysis")
+        return entry
+
     async def start(self, as_branch: str = "b1", /, **arguments: Any) -> dict[str, Any]:
         return await asyncio.to_thread(self.call, as_branch, "start_analysis", **arguments)
 
@@ -93,8 +104,10 @@ def _shares(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(op_shares_module, "read_op_shares", lambda result: dict(SHARES))
 
 
-async def _stack(tmp_path: Path, *, with_tools: bool = True) -> AsyncIterator[Stack]:
-    tools = {name: _Analysis(name) for name in ("tracelens", "roofline", "profile")}
+async def _stack(
+    tmp_path: Path, *, with_tools: bool = True, names: tuple[str, ...] = ("tracelens", "roofline", "profile")
+) -> AsyncIterator[Stack]:
+    tools = {name: _Analysis(name) for name in names}
     holder: list[_Capture] = []
 
     def make(notebook: LocalNotebook) -> ToolJobs:
@@ -125,6 +138,12 @@ async def _stack(tmp_path: Path, *, with_tools: bool = True) -> AsyncIterator[St
 @pytest.fixture
 async def stack(tmp_path: Path) -> AsyncIterator[Stack]:
     async for item in _stack(tmp_path):
+        yield item
+
+
+@pytest.fixture
+async def roofline_only_stack(tmp_path: Path) -> AsyncIterator[Stack]:
+    async for item in _stack(tmp_path, names=("roofline", "profile")):
         yield item
 
 
@@ -193,10 +212,45 @@ async def test_a_caller_cannot_profile_another_branch(stack: Stack) -> None:
     assert request.branch == "b2" and request.params["commit_id"] == PARENT  # b2's own head, never b1's
 
 
+def test_the_schema_and_the_description_name_the_analysis_tools_the_toolbox_serves(stack: Stack) -> None:
+    entry = stack.advertised()
+    served = stack.rig.toolbox.analysis_tools
+    assert served == ("tracelens", "roofline") and set(stack.jobs.tool_names) >= set(served)  # type: ignore[union-attr]
+    assert entry["inputSchema"]["properties"]["tool"]["enum"] == list(served)
+    assert "tracelens" in entry["description"] and "roofline" in entry["description"]
+
+
+def test_a_registered_tool_that_is_not_an_analysis_tool_is_not_advertised(stack: Stack) -> None:
+    assert "profile" in stack.jobs.tool_names  # type: ignore[union-attr]
+    entry = stack.advertised()
+    assert "profile" not in entry["inputSchema"]["properties"]["tool"]["enum"]
+    assert entry["inputSchema"]["properties"]["tool"]["description"] == "One of: tracelens, roofline."
+
+
+async def test_a_tool_the_registry_does_not_hold_is_not_advertised_and_is_refused(roofline_only_stack: Stack) -> None:
+    stack = roofline_only_stack
+    entry = stack.advertised()
+    assert stack.rig.toolbox.analysis_tools == ("roofline",)
+    assert entry["inputSchema"]["properties"]["tool"]["enum"] == ["roofline"]
+    assert "tracelens" not in entry["description"] and "required for tracelens" not in json.dumps(entry)
+    assert "must be one of ['roofline']" in await stack.refused(tool="tracelens", profile_request_id="r1")
+    with pytest.raises(RequestRejected) as stale:  # the guard stays for a caller that does not go through the schema
+        await stack.rig.toolbox.submit_analysis("b1", "tracelens", {}, "r1")
+    assert stale.value.code == "tool_unavailable_on_backend"
+
+
+async def test_a_toolbox_without_a_tool_executor_advertises_no_analysis_tool(stack_without_tools: Stack) -> None:
+    entry = stack_without_tools.advertised()
+    assert stack_without_tools.rig.toolbox.analysis_tools == ()
+    assert "enum" not in entry["inputSchema"]["properties"]["tool"] and "no analysis tool" in entry["description"]
+
+
 @pytest.mark.parametrize("tool", ["profile", "build", "nonesuch"])
 async def test_any_other_tool_is_refused_with_its_reason(stack: Stack, tool: str) -> None:
-    text = await stack.refused(tool=tool)
-    assert "tool_not_allowed" in text and "tracelens and roofline" in text
+    assert "must be one of ['tracelens', 'roofline']" in await stack.refused(tool=tool)
+    with pytest.raises(RequestRejected) as raised:  # the toolbox's own refusal, for a caller outside the MCP schema
+        await stack.rig.toolbox.submit_analysis("b1", tool, {})
+    assert raised.value.code == "tool_not_allowed" and "tracelens and roofline" in raised.value.reason
     assert stack.tools["profile"].requests == []
 
 

@@ -11,8 +11,9 @@ only; the notebook's search and record reads are shared across branches, as the 
 * ``submit_test``, ``test_result``, ``cancel_test`` and ``queue_state`` go through the toolbox interface;
 * ``wait_test`` blocks on one test of the branch until its record says it is over or the wait runs out, and then
   reports how far it has got (the toolbox's ``progress``);
-* ``start_analysis`` starts ``tracelens`` or ``roofline`` on the branch's head commit (an
-  :class:`~.analysis.AnalysisStarter`, the real toolbox);
+* ``start_analysis`` starts one of the analysis tools the toolbox serves (``tracelens``, ``roofline``: its
+  :attr:`~.analysis.AnalysisStarter.analysis_tools`, which the tool's schema and description list, no more) on the
+  branch's head commit (an :class:`~.analysis.AnalysisStarter`, the real toolbox);
 * ``poll_inbox`` reads the branch's inbox, one page at a time (:data:`POLL_INBOX_MAX_ITEMS` items at most);
 * the ``notebook_*`` tools are the notebook's own specialist tools (lookup, claim, release, search, record, branch log,
   brief), bound per call to the notebook handle of the caller's branch.
@@ -38,6 +39,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
+from hyperloom.common.outside_facts import TUNABLEOP_ENABLED_ENV, TUNABLEOP_TABLE_ENV, TUNABLEOP_TUNING_ENV
 from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, Purpose, TestKind
 from hyperloom.contracts.measurement import TestRequest as MeasuredRequest
 from hyperloom.contracts.recipe import KernelKind
@@ -64,7 +66,8 @@ from hyperloom_multibranch.contracts.toolbox import (
     ToolboxError,
 )
 from hyperloom_multibranch.notebook.tools import ERROR, notebook_tools
-from hyperloom_multibranch.toolbox.analysis import ANALYSIS_TOOLS, CODE_NO_EXECUTOR, AnalysisStarter
+from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, AnalysisStarter
+from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.notebook.learning_search import LearningFinder
@@ -143,23 +146,50 @@ _SUBMIT_TEST: dict[str, Any] = {
     "required": ["kind", "purpose", "parent_commit"],
     "additionalProperties": False,
 }
-# The commit is the branch head, read by the server; a request that names a commit or a branch is refused by the schema.
-_START_ANALYSIS: dict[str, Any] = {
-    "type": _OBJECT,
-    "properties": {
-        "tool": {"type": _STRING, "description": f"One of: {', '.join(ANALYSIS_TOOLS)}."},
-        "params": {
-            "type": _OBJECT,
-            "description": "The tool's own parameters. trace_input, commit_id and profile_request_id are set by the server and refused here.",
+_ANALYSIS_BLURBS = {TRACELENS_TOOL: "analyse a trace", ROOFLINE_TOOL: "profile, then analyse"}
+
+
+def _start_analysis_schema(served: Sequence[str]) -> dict[str, Any]:
+    """The ``start_analysis`` schema: ``tool`` is one of ``served``, the tools the toolbox serves, and nothing else.
+
+    The commit is the branch head, read by the server; a request that names a commit or a branch is refused by the
+    schema. With nothing served ``tool`` has no ``enum``, so a call reaches the toolbox's own refusal by name.
+    """
+    profile_note = (
+        "required for tracelens, checked by the server" if TRACELENS_TOOL in served else "checked by the server"
+    )
+    tool: dict[str, Any] = {"type": _STRING, "description": f"One of: {', '.join(served) or 'none served here'}."}
+    if served:
+        tool["enum"] = list(served)
+    return {
+        "type": _OBJECT,
+        "properties": {
+            "tool": tool,
+            "params": {
+                "type": _OBJECT,
+                "description": "The tool's own parameters. trace_input, commit_id and profile_request_id are set by the server and refused here.",
+            },
+            "profile_request_id": {
+                "type": _STRING,
+                "description": f"The id of a profile test of this branch's head commit, run by any branch, whose trace is analysed; {profile_note}.",
+            },
         },
-        "profile_request_id": {
-            "type": _STRING,
-            "description": "The id of a profile test of this branch's head commit, run by any branch, whose trace is analysed; required for tracelens, checked by the server.",
-        },
-    },
-    "required": ["tool"],
-    "additionalProperties": False,
-}
+        "required": ["tool"],
+        "additionalProperties": False,
+    }
+
+
+def _start_analysis_description(served: Sequence[str]) -> str:
+    if not served:
+        return "This toolbox serves no analysis tool: every call is refused by name."
+    named = " or ".join(f"{name} ({_ANALYSIS_BLURBS[name]})" if name in _ANALYSIS_BLURBS else name for name in served)
+    return (
+        f"Start {named} for this branch; returns the job id at once and the result arrives in poll_inbox. The commit "
+        "analysed is this branch's head, set by the server; with a profile_request_id of any branch's profile test of "
+        "it the pointer carries its op shares."
+    )
+
+
 _PUT_KERNEL_ARTIFACT: dict[str, Any] = {
     "type": _OBJECT,
     "properties": {
@@ -177,11 +207,25 @@ _PUT_KERNEL_ARTIFACT: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "The environment variable the service reads the table's path from: an aiter table, e.g. "
-                "AITER_CONFIG_GEMM_A8W8, or a TunableOp results file, PYTORCH_TUNABLEOP_FILENAME (the delta must also "
-                "set PYTORCH_TUNABLEOP_ENABLED=1 and PYTORCH_TUNABLEOP_TUNING=0)."
+                f"AITER_CONFIG_GEMM_A8W8, or a TunableOp results file, {TUNABLEOP_TABLE_ENV} (the delta must also "
+                f"set {TUNABLEOP_ENABLED_ENV}=1 and {TUNABLEOP_TUNING_ENV}=0)."
             ),
         },
-        "content": {"type": _STRING, "minLength": 1, "description": "The whole table as UTF-8 text, a CSV."},
+        "content": {
+            "type": _STRING,
+            "minLength": 1,
+            "description": "The table as UTF-8 text, a CSV: the whole table, or with rows_only just your tuned rows.",
+        },
+        "rows_only": {
+            "type": _BOOLEAN,
+            "description": (
+                "Only for an aiter table (AITER_CONFIG_*). content is just the rows you tuned, under the header of "
+                "the image's table. The test loads the image's default table for the env and then your rows, and a "
+                "shape in both is read from your rows, so you need not carry the default's rows. Give each shape "
+                "once and keep the columns that identify it (M, N, K and the rest of the key, cu_num; gfx may be "
+                "left out), else the test is refused before its server starts."
+            ),
+        },
     },
     "required": ["kind", "target", "env", "content"],
     "additionalProperties": False,
@@ -305,7 +349,8 @@ def _put_kernel_artifact(
             data = arguments["content"].encode()
         except UnicodeEncodeError as exc:
             raise InvalidParamsError("content is not UTF-8 text") from exc
-        call = toolbox.put_kernel_artifact(KernelKind(arguments["kind"]), arguments["target"], arguments["env"], data)
+        kind, rows_only = KernelKind(arguments["kind"]), arguments.get("rows_only", False)
+        call = toolbox.put_kernel_artifact(kind, arguments["target"], arguments["env"], data, rows_only)
         try:
             artifact = await _on(home, call)
         except RequestRejected as exc:
@@ -325,7 +370,9 @@ def _register_put_kernel_artifact(server: McpServer, toolbox: Toolbox, home: asy
             "to its target for the session. Any branch may then put its own table (new content, its own reference) "
             "under that target; only a table of another target name for the same env is refused, as "
             "kernel_variable_taken, and its message names the bound target. The same table put twice, by any branch, "
-            "is the same artifact."
+            "is the same artifact. With rows_only the table is just the rows you tuned: the test reads the image's "
+            "default table for the env and then your rows, a shape in both from your rows, so you need not upload "
+            "the default's rows."
         ),
         schema=_PUT_KERNEL_ARTIFACT,
         handler=_put_kernel_artifact(toolbox, home),
@@ -673,14 +720,11 @@ def register_specialist_tools(
         handler=_queue_state(toolbox, toolbox_loop),
         **own,
     )
+    served = options.analysis.analysis_tools if options.analysis is not None else ()
     server.register(
         "start_analysis",
-        description=(
-            "Start tracelens (analyse a trace) or roofline (profile, then analyse) for this branch; returns the job "
-            "id at once and the result arrives in poll_inbox. The commit analysed is this branch's head, set by the "
-            "server; with a profile_request_id of any branch's profile test of it the pointer carries its op shares."
-        ),
-        schema=_START_ANALYSIS,
+        description=_start_analysis_description(served),
+        schema=_start_analysis_schema(served),
         handler=_start_analysis(options.analysis, toolbox_loop),
         **own,
     )

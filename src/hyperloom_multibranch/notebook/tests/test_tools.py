@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
+from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, KernelKind, RecipeDelta
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer, intent_fingerprint
 from hyperloom_multibranch.contracts.notebook.peers import Validity, Verdict
@@ -117,6 +117,26 @@ async def test_the_replay_tool_replays_another_branchs_test_by_its_request_id_on
     for both_or_neither in ({"request_id": "r1", "canonical_id": "inference:older"}, {}):
         assert (await _call(tools, "replay", **both_or_neither)).startswith(f"{ERROR} name a champion's canonical_id")
     assert (await _call(tools_of("s3"), "replay", request_id="r1")).startswith(f"{ERROR} no replay of r1")
+
+
+async def test_a_peer_replay_says_which_kernel_of_the_heads_it_tests_in_place_of(tools_of: Tools) -> None:
+    own = KernelArtifact(KernelKind.GEMM, "qkv_proj", "kernel/gemm/head.csv", "b" * 64)
+    theirs = replace(own, ref="kernel/gemm/peer.csv", sha256="d" * 64)
+    on_head = PeerReplay("r7", "s1", "c3", RecipeDelta(add_kernels=(theirs,)), IntentLayer.KERNEL, (own,))
+
+    async def peer_replay(request_id: str) -> PeerReplay:
+        return on_head
+
+    tools = tools_of("s3", SimpleNamespace(peer_replay=peer_replay))
+
+    first, replaced, claim, change = (await _call(tools, "replay", request_id="r7")).splitlines()
+
+    assert first == "replay of r7, the change s1 tested, on your head c3"
+    assert replaced == (
+        "it replaces your head's gemm kernel head.csv for qkv_proj: a target loads one of a kind, so this tests s1's "
+        "in place of yours, not on top of it"
+    )
+    assert 'layer "kernel"' in claim and RecipeDelta.from_document(json.loads(change)) == on_head.delta
 
 
 async def test_every_tool_is_named_for_the_notebook_and_takes_only_its_declared_arguments(tools_of: Tools) -> None:

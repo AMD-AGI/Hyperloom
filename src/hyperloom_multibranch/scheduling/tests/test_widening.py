@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.contracts.notebook.records import OpShares
-from hyperloom_multibranch.contracts.toolbox import QueueState
+from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, QueueState
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy
 from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -29,6 +29,10 @@ from hyperloom_multibranch.toolbox.tests.helpers import ScriptedExecutor, build,
 METRIC = "output_throughput"
 THREE_HOURS = 3 * 3600.0
 CAPS = RosterCaps(max_branches=4, max_k_per_branch=2, max_parallel_tests=8)
+
+
+def _cards(usable: int, *, leased: int = 0) -> MeasurementCapacity:
+    return MeasurementCapacity(usable, usable, leased_cards=leased)
 
 
 def _queue(*, running: int = 0, queued: int = 0, cold_start: float | None = None) -> QueueState:
@@ -61,7 +65,19 @@ def test_before_the_first_cold_start_the_cold_starts_are_left_out() -> None:
 
 @pytest.mark.parametrize(("running", "queued", "headroom"), [(0, 0, 8), (5, 1, 2), (8, 3, -3)])
 def test_headroom_is_the_global_cap_less_what_runs_and_waits(running: int, queued: int, headroom: int) -> None:
-    assert toolbox_headroom(CAPS, _queue(running=running, queued=queued)) == headroom
+    assert toolbox_headroom(CAPS, _queue(running=running, queued=queued), _cards(16), 2) == headroom
+
+
+def test_the_cards_a_branch_sandbox_holds_bound_the_headroom_below_the_cap() -> None:
+    """A lease takes cards out of measurement, and the judge is told how many tests are left, not the cap."""
+
+    assert toolbox_headroom(CAPS, _queue(), _cards(16, leased=8), 2) == 4
+    assert toolbox_headroom(CAPS, _queue(running=2), _cards(16, leased=8), 2) == 2
+    assert toolbox_headroom(CAPS, _queue(), _cards(16, leased=12), 4) == 1
+
+
+def test_a_toolbox_with_no_card_pool_reads_under_the_cap_alone() -> None:
+    assert toolbox_headroom(CAPS, _queue(running=1), MeasurementCapacity.unknown(), 2) == 7
 
 
 class _Toolbox:
@@ -71,12 +87,15 @@ class _Toolbox:
     async def queue_state(self) -> QueueState:
         return self.state
 
+    async def measurement_capacity(self) -> MeasurementCapacity:
+        return _cards(16)
+
 
 def test_signals_read_the_queue_the_toolbox_reports_now(tmp_path: Path) -> None:
     frontier = FrontierPolicy(METRIC, window_seconds=60.0)
     toolbox = _Toolbox(_queue(running=2, queued=1))
     roster = Roster(CAPS, tmp_path / "MB-roster.json", Clock(now=lambda: 0.0))
-    widening = Widening(toolbox, roster, frontier)
+    widening = Widening(toolbox, roster, frontier, cards_per_test=2)
 
     assert asyncio.run(widening.signals()) == WideningSignals(SPECIALIST_START_SECONDS, None, 5)
     toolbox.state = _queue(running=2, cold_start=100.0)
@@ -86,7 +105,7 @@ def test_signals_read_the_queue_the_toolbox_reports_now(tmp_path: Path) -> None:
 def test_the_cold_start_the_real_toolbox_measured_is_what_the_signals_carry_to_the_judge(tmp_path: Path) -> None:
     rig = build(tmp_path, executor=ScriptedExecutor([lambda job: ok(job, cold_start_seconds=82.2)]))
     roster = Roster(CAPS, tmp_path / "MB-roster.json", Clock(now=lambda: 0.0))
-    widening = Widening(rig.toolbox, roster, FrontierPolicy(METRIC, window_seconds=60.0))
+    widening = Widening(rig.toolbox, roster, FrontierPolicy(METRIC, window_seconds=60.0), cards_per_test=1)
 
     async def signals_after_a_test() -> tuple[WideningSignals, WideningSignals]:
         before = await widening.signals()

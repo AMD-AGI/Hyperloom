@@ -39,6 +39,14 @@ def test_capacity_rejects_more_usable_cards_than_the_pool() -> None:
     assert MeasurementCapacity(4, 4).known is True
 
 
+def test_leased_cards_are_usable_cards_no_test_runs_on() -> None:
+    capacity = MeasurementCapacity(8, 7, leased_cards=2)
+    assert (capacity.usable_cards, capacity.measurement_cards) == (7, 5)
+    assert MeasurementCapacity(8, 7).leased_cards == 0
+    with pytest.raises(ValueError, match="leased_cards 8 must be between 0 and usable_cards 7"):
+        MeasurementCapacity(8, 7, leased_cards=8)
+
+
 def test_unknown_capacity_says_so() -> None:
     unknown = MeasurementCapacity.unknown()
     assert (unknown.known, unknown.total_cards, unknown.usable_cards) == (False, 0, 0)

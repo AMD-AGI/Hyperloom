@@ -36,6 +36,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.rule_pack import rule_pack_identity
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.versions import socket_versions
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
@@ -505,7 +506,7 @@ class Session:
             self._settings.judge_interval_seconds,
             scoring,
             self._dashboard(scoring),
-            Widening(self._toolbox, self._roster, scoring.policy),
+            Widening(self._toolbox, self._roster, scoring.policy, self._settings.workload.tp),
             self._similarity,
             self._events,
             self._lifecycle,
@@ -599,6 +600,7 @@ class Session:
     def _write_manifest(self, budget: SessionBudget, version: CodeVersion) -> None:
         SessionManifest(
             code_version=version,
+            rule_pack=dict(rule_pack_identity()),
             session_id=self._layout.session_id,
             started_at=budget.started_at,
             deadline=budget.deadline,

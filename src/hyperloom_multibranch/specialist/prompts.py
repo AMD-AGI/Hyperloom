@@ -172,16 +172,29 @@ stop your branch. Then take another of the session's directions, preferring one 
 What has found gains on ROCm before, in any direction:
 - server.log first: a backend that fell back (hipBLASLt, an eager or plain torch path, CUDA graphs off) or JIT \
 compiles on the first requests (a cold cache a startup prewarm removes) cost more than any setting gains.
-- Kernel boundaries add up: inside a CUDA graph each launch costs some 2 to 4 us, on every layer and every step. \
-Folding a small kernel (a split-K reduce, a sort, a quantize, an elementwise op) into the kernel that consumes its \
-output often gains where tuning the kernel itself does not.
+- Kernel boundaries add up: inside a CUDA graph each launch costs about 1.5 us on MI355X, on every layer and every \
+step; a trace shows more, since the profiler adds time to each launch. Folding a small kernel (a split-K reduce, a \
+sort, a quantize, an elementwise op) into the kernel that consumes its output often gains where tuning the kernel \
+itself does not.
+- Before working on a top operator, divide the bytes it must move per call (the weights it reads, the state it reads \
+and writes) by its time: near the device's HBM bandwidth no kernel change pays whatever its share (a large \
+device-to-device copy measures about 5 TB/s on MI355X), so take the next operator.
+- Count the copy, cast and elementwise kernels in a decode step and trace each to the source line that launches it: \
+a strided view made contiguous or a scale written in the other layout costs a full read and write, and folding the \
+layout change into its producer or consumer removes it.
+- When a fusion measures flat and its log line shows it ran, profile it and compare each kernel's count and time \
+with the parent's profile: a new copy, or a neighbour that slowed, names what ate the gain.
+- A speculative or MTP draft gains its accept length divided by how much longer a verify step takes than a plain \
+one: read both from one test's server.log before tuning draft settings, and drop it when the verify step costs more \
+plain steps than the tokens it accepts.
 - Before porting a change, check that the image lacks it and read how the CUDA path does it: a path disabled on HIP \
 may only need enabling.
 - Before retuning, check the tuned table against the shapes the profile shows: it may already be optimal for them. \
-A tuned table goes into the recipe through put_kernel_artifact: put the whole table for its variable, one table per \
-variable, and add the artifact it returns to the delta's add_kernels; never point a variable at a file of yours or \
-set it from code. The table put replaces the image's default table for that variable, so it must carry the default's \
-rows for the other shapes as well as the tuned ones. The first table put for a variable binds it to a target name \
+A tuned table goes into the recipe through put_kernel_artifact, one table per variable, and the artifact it returns \
+goes into the delta's add_kernels; never point a variable at a file of yours or set it from code. For an aiter \
+table, put only the rows you tuned with rows_only=true: they are read over the image's default tables, and a row \
+overrides the image's default row for the same shape. If your head's recipe already has a table for that variable, \
+yours replaces it, so your put must carry that table's rows as well as yours. The first table put for a variable binds it to a target name \
 for the session, not to a branch: put your own table under that target; kernel_variable_taken refuses only a second \
 target name for the same variable. A PyTorch TunableOp table is tuned offline: put the tuned CSV with env \
 "PYTORCH_TUNABLEOP_FILENAME" and run with PYTORCH_TUNABLEOP_ENABLED=1 and PYTORCH_TUNABLEOP_TUNING=0; tuning \

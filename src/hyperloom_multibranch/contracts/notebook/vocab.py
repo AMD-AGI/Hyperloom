@@ -155,15 +155,17 @@ class FrontierBasis(str, Enum):
 
     ``trend`` is the branch's own recent gain; ``prior`` what similar archived branches still gained; ``observing`` the
     floor of a branch whose kernel-layer direction may still pay off; ``new`` the floor of a branch too young to have a
-    trend; ``pending`` the gain of a measured candidate waiting for its confirm; ``headroom`` the roofline bound that
-    capped any of them; ``amdahl`` the most that speeding up the head's largest op could gain, which capped any of them;
-    ``custom`` the estimate of a scorer other than the built-in formula, whose components say what it read.
+    trend; ``repair`` the gain of the blocked candidate a young repair branch was opened to repair; ``pending`` the gain
+    of a measured candidate waiting for its confirm; ``headroom`` the roofline bound that capped any of them; ``amdahl``
+    the most that speeding up the head's largest op could gain, which capped any of them; ``custom`` the estimate of a
+    scorer other than the built-in formula, whose components say what it read.
     """
 
     TREND = "trend"
     PRIOR = "prior"
     OBSERVING = "observing"
     NEW = "new"
+    REPAIR = "repair"
     PENDING = "pending"
     HEADROOM = "headroom"
     AMDAHL = "amdahl"

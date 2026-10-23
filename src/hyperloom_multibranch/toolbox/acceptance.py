@@ -16,6 +16,7 @@ from collections.abc import Callable, Collection
 from dataclasses import dataclass, replace
 from typing import Protocol
 
+from hyperloom.common.outside_facts import TUNABLEOP_ENABLED_ENV, TUNABLEOP_TABLE_ENV, TUNABLEOP_TUNING_ENV
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError, apply
 from hyperloom.measure.compile import BaseImageMismatchError
@@ -32,19 +33,17 @@ from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKin
 
 
 #: PyTorch tunes a GEMM shape the first time a server runs it when TunableOp is switched on (the value ``1``, nothing else
-#: enables it) and tuning is not switched off (the value ``0``, nothing else disables it).
-_TUNABLEOP_ENABLED = "PYTORCH_TUNABLEOP_ENABLED"
-_TUNABLEOP_TUNING = "PYTORCH_TUNABLEOP_TUNING"
-_TUNABLEOP_TABLE = "PYTORCH_TUNABLEOP_FILENAME"
+#: enables it) and tuning is not switched off (the value ``0``, nothing else disables it); the variables are named in
+#: ``hyperloom.common.outside_facts``.
 ONLINE_TUNING_CODE = "online_tuning_unsupported"
 CONTEXT_BELOW_EVAL_CODE = "context_below_eval"
 ONLINE_TUNING_REASON = (
-    f"{_TUNABLEOP_ENABLED}=1 without {_TUNABLEOP_TUNING}=0 tunes every GEMM shape the first time the server runs it: at "
+    f"{TUNABLEOP_ENABLED_ENV}=1 without {TUNABLEOP_TUNING_ENV}=0 tunes every GEMM shape the first time the server runs it: at "
     "boot, in the warmup, and for each new prompt length of the evaluation. The test then takes a time no candidate "
     "controls and ends at the attempt timeout, and the tuned results file is lost with the server. For tuned GEMMs "
     "put an offline-tuned table with put_kernel_artifact (kind gemm): an aiter table (env such as "
-    f"AITER_CONFIG_GEMM_BF16), or a TunableOp table (env {_TUNABLEOP_TABLE}, with {_TUNABLEOP_ENABLED}=1 and "
-    f"{_TUNABLEOP_TUNING}=0 in the launch envs; the file is placed for every device ordinal TunableOp reads)"
+    f"AITER_CONFIG_GEMM_BF16), or a TunableOp table (env {TUNABLEOP_TABLE_ENV}, with {TUNABLEOP_ENABLED_ENV}=1 and "
+    f"{TUNABLEOP_TUNING_ENV}=0 in the launch envs; the file is placed for every device ordinal TunableOp reads)"
 )
 
 # Every purpose whose result the InferenceX rule gate reads an eval score from: explore and confirm are compared,
@@ -81,7 +80,7 @@ def _check_explore_changes_something(request: TestRequest) -> None:
 def _check_online_tuning(candidate: Recipe) -> None:
     """Refuse a candidate that tunes GEMMs while its test runs: its length follows the shapes the test happens to meet."""
     envs = candidate.launch.envs
-    if envs.get(_TUNABLEOP_ENABLED) == "1" and envs.get(_TUNABLEOP_TUNING) != "0":
+    if envs.get(TUNABLEOP_ENABLED_ENV) == "1" and envs.get(TUNABLEOP_TUNING_ENV) != "0":
         raise RequestRejected(ONLINE_TUNING_REASON, ONLINE_TUNING_CODE)
 
 
