@@ -28,6 +28,7 @@ from kernelforge.loop import runner as runner_module
 from kernelforge.loop.analysis_refresh_policy import AnalysisRefreshDecision
 from kernelforge.loop.archive import CandidateRecord
 from kernelforge.loop.device_hazard import MAX_BLOCKED_ITERATIONS
+from kernelforge.loop.lessons import SummaryOutcome
 from kernelforge.loop.reporting import KeepBundle, KeepIdentity, KeepScore, _round_budget_lines
 from kernelforge.loop.round_budget import (
     ADMISSION_SESSION_SEC,
@@ -620,7 +621,7 @@ def _lane_agent_factory(edits):
     """An agent that writes the edit its lane was assigned, in that lane's copy."""
 
     def factory(lane_dir, _serialized_driver):
-        async def agent(_kernel_file, prompt):
+        async def agent(_kernel_file, prompt, session_sink=None):
             path = Path(lane_dir) / "kernel.py"
             for plan, (old, new) in edits.items():
                 if plan in prompt:
@@ -636,7 +637,7 @@ def _recording_lane_factory(seen):
     """A lane agent that records everything the round handed it."""
 
     def factory(lane_dir, serialized_driver):
-        async def agent(kernel_file, prompt):
+        async def agent(kernel_file, prompt, session_sink=None):
             seen.append(
                 {
                     "lane_dir": lane_dir,
@@ -1377,7 +1378,7 @@ async def test_a_lane_that_wrote_nothing_is_never_queued(tmp_path, monkeypatch):
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
 
     def factory(_lane_dir, _serialized_driver):
-        async def agent(_kernel_file, _prompt):
+        async def agent(_kernel_file, _prompt, session_sink=None):
             return None
 
         return agent
@@ -6901,7 +6902,7 @@ async def _fake_summarizer(_prompt: str) -> str:
 
 
 def test_record_lesson_writes_a_carried_lane_lesson_without_asking(tmp_path, monkeypatch, capsys):
-    """The lane already answered, in its round. An empty answer is the machine fallback."""
+    """The lane already answered, in its round. An answer without a record is the machine fallback, naming why."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     store = _attach_lessons(loop, workspace)
     asked = {"n": 0}
@@ -6912,34 +6913,59 @@ def test_record_lesson_writes_a_carried_lane_lesson_without_asking(tmp_path, mon
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
                 "session_started": True,
                 "summarize": counting,
-                "lesson": "lane 2 widened the loads",
             },
+            lane_record=SummaryOutcome(text="lane 2 widened the loads"),
         )
     )
     asyncio.run(
         loop._record_lesson(
-            iteration=4,
             result=_lesson_result(iteration=4),
             decision="REVERT_PERF",
             session_sink={
                 "session_started": True,
                 "summarize": counting,
-                "lesson": "",
                 "findings": "compile error: invalid cast",
             },
+            lane_record=SummaryOutcome(reason="session replied with no text"),
         )
     )
 
     assert asked["n"] == 0
     assert store.read(3).startswith("lane 2 widened the loads")
     assert store.read(4).startswith("(no agent summary)")
-    assert "the lane's session gave no record in its round" in capsys.readouterr().out
+    assert "session replied with no text" in capsys.readouterr().out
+
+
+async def test_a_lane_without_a_record_names_why_in_its_lesson(tmp_path, monkeypatch, capsys):
+    """A provider that cannot resume the lane session leaves a reason, and the queue carries it into the lesson."""
+    loop, workspace = _reduction_loop(tmp_path, monkeypatch)
+    store = _attach_lessons(loop, workspace)
+
+    await loop._fill_lane_queue(
+        agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
+        lane_plans=["tune prefill"],
+    )
+    queued = json.loads(loop._lane_queue_path().read_text(encoding="utf-8"))["candidates"]
+    loop._lane_queue = []
+    loop._restore_lane_queue()
+    lane = loop._take_lane_candidate()
+    await loop._record_lesson(
+        result=_lesson_result(iteration=1),
+        decision="REVERT_PERF",
+        session_sink={"session_started": True, "plan": lane.plan},
+        diff_summary=loop._diff_summary_from_diff(lane.diff),
+        lane_record=lane.lesson,
+    )
+
+    assert [entry["lesson_reason"] for entry in queued] == ["provider cannot resume the session"]
+    assert lane.lesson == SummaryOutcome(reason="provider cannot resume the session")
+    assert "Summary unavailable: provider cannot resume the session" in store.read(1)
+    assert "[lesson] no summary (provider cannot resume the session)" in capsys.readouterr().out
 
 
 def test_record_lesson_writes_narrative_and_outcome(tmp_path, monkeypatch):
@@ -6950,7 +6976,6 @@ def test_record_lesson_writes_narrative_and_outcome(tmp_path, monkeypatch):
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -6974,7 +6999,6 @@ def test_record_lesson_falls_back_to_gate_findings(tmp_path, monkeypatch):
 
     asyncio.run(
         loop._record_lesson(
-            iteration=4,
             result=_lesson_result(iteration=4),
             decision="REVERT_PERF",
             session_sink={
@@ -7000,7 +7024,6 @@ def test_record_lesson_outcome_only_records_machine_verdict(tmp_path, monkeypatc
 
     asyncio.run(
         loop._record_lesson(
-            iteration=4,
             result=_lesson_result(iteration=4),
             decision="REVERT_PERF",
             # Nothing to summarize and nothing observed: no narrative is possible.
@@ -7032,7 +7055,6 @@ def test_record_lesson_scopes_the_negative_to_the_measured_suite(tmp_path, monke
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7066,7 +7088,6 @@ def test_record_lesson_carries_an_undisproven_cannot_into_the_scope(tmp_path, mo
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7108,7 +7129,6 @@ def test_record_lesson_carries_a_refuted_cannot_as_an_open_direction(tmp_path, m
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7136,7 +7156,6 @@ def test_record_lesson_keeps_a_restricted_lanes_scope(tmp_path, monkeypatch):
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7159,7 +7178,6 @@ def test_record_lesson_says_when_no_premise_was_recorded(tmp_path, monkeypatch):
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7190,7 +7208,6 @@ def test_an_unreadable_kernel_is_not_reported_as_a_kernel_that_dropped_it(tmp_pa
     store = _attach_lessons(loop, workspace)
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7265,7 +7282,6 @@ def test_a_pin_that_moved_to_a_sibling_file_is_not_reported_as_dropped(tmp_path,
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7293,7 +7309,6 @@ def test_a_source_that_cannot_be_parsed_is_not_a_source_that_dropped_the_pin(tmp
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7326,7 +7341,6 @@ def test_an_iteration_that_measured_no_negative_is_not_reopenable(tmp_path, monk
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(kept=True, mean_case_speedup=1.2),
             decision="KEEP",
             session_sink={
@@ -7356,7 +7370,6 @@ def test_an_in_session_gate_rejection_is_a_measured_negative(tmp_path, monkeypat
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="NO_CHANGES",
             session_sink={
@@ -7404,7 +7417,6 @@ def test_a_kept_iteration_that_measured_negatives_in_session_is_reopenable(tmp_p
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(kept=True, mean_case_speedup=1.2),
             decision="KEEP",
             session_sink={
@@ -7438,7 +7450,6 @@ def test_a_document_without_the_marker_is_unknown_not_negative_free(tmp_path, mo
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(kept=True, mean_case_speedup=1.2),
             decision="KEEP",
             session_sink={
@@ -7472,7 +7483,6 @@ def test_a_record_that_never_answered_the_disproof_question_says_so(tmp_path, mo
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(kept=True, mean_case_speedup=1.2),
             decision="KEEP",
             session_sink={
@@ -7495,7 +7505,6 @@ def test_the_loops_own_negative_overrides_a_record_that_claims_none(tmp_path, mo
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7521,7 +7530,6 @@ def test_a_crash_is_a_measured_negative(tmp_path, monkeypatch):
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(crashed=True, validation_passed=False, mean_case_speedup=None),
             decision="CRASH",
             session_sink={
@@ -7559,7 +7567,6 @@ def test_a_machine_written_document_is_decided_by_the_loops_verdict_alone(tmp_pa
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(kept=True, mean_case_speedup=1.2),
             decision="KEEP",
             session_sink={
@@ -7590,7 +7597,6 @@ def test_one_unreadable_sibling_does_not_indict_the_constant_it_holds(tmp_path, 
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7622,7 +7628,6 @@ def test_an_unscored_case_is_not_recorded_as_a_case_that_was_measured(tmp_path, 
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7679,7 +7684,6 @@ def test_a_scope_that_cannot_be_written_says_so(tmp_path, monkeypatch, capsys):
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7706,7 +7710,6 @@ def test_handoff_carries_the_scope_of_the_iterations_lesson(tmp_path, monkeypatc
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7756,7 +7759,6 @@ def test_record_lesson_skips_an_empty_iteration(tmp_path, monkeypatch):
 
     asyncio.run(
         loop._record_lesson(
-            iteration=5,
             result=_lesson_result(iteration=5),
             decision="NO_CHANGES",
             session_sink={"session_started": False, "summarize": None},
@@ -7776,7 +7778,6 @@ def test_record_lesson_keeps_outcome_when_no_diff_summary_fails(tmp_path, monkey
 
     asyncio.run(
         loop._record_lesson(
-            iteration=10,
             result=_lesson_result(
                 iteration=10,
                 session_end_reason="turn_cap",
@@ -7811,7 +7812,6 @@ def test_record_lesson_uses_progress_when_no_diff_summary_is_unavailable(tmp_pat
 
     asyncio.run(
         loop._record_lesson(
-            iteration=11,
             result=_lesson_result(
                 iteration=11,
                 session_end_reason="turn_cap",
@@ -7850,7 +7850,6 @@ def test_record_lesson_without_an_agent_session(tmp_path, monkeypatch):
 
     asyncio.run(
         loop._record_lesson(
-            iteration=6,
             result=_lesson_result(iteration=6),
             decision="KEEP",
             session_sink={},
@@ -7874,7 +7873,6 @@ def test_record_lesson_skips_the_summarizer_with_no_time_left(tmp_path, monkeypa
 
     asyncio.run(
         loop._record_lesson(
-            iteration=7,
             result=_lesson_result(iteration=7),
             decision="REVERT_PERF",
             session_sink={
@@ -7904,7 +7902,6 @@ def test_record_lesson_still_summarizes_when_no_session_can_be_admitted(tmp_path
 
     asyncio.run(
         loop._record_lesson(
-            iteration=9,
             result=_lesson_result(iteration=9),
             decision="REVERT_PERF",
             session_sink={
@@ -7926,7 +7923,6 @@ def test_record_lesson_survives_a_failing_summarizer(tmp_path, monkeypatch, caps
 
     asyncio.run(
         loop._record_lesson(
-            iteration=8,
             result=_lesson_result(iteration=8),
             decision="CRASH",
             session_sink={
@@ -7960,7 +7956,6 @@ def test_record_lesson_falls_back_when_summary_cannot_be_persisted(tmp_path, mon
     monkeypatch.setattr(store, "write", fail_first_write)
     asyncio.run(
         loop._record_lesson(
-            iteration=12,
             result=_lesson_result(iteration=12),
             decision="REVERT_VALIDATION",
             session_sink={

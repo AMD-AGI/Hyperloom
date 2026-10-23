@@ -682,6 +682,7 @@ class _Attempt(NamedTuple):
     reusable_benchmark: object | None
     optimization_plan_path: str
     optimization_plan_executable: bool
+    lane_record: SummaryOutcome | None = None
 
 
 @dataclass
@@ -1956,7 +1957,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             lane: LanePlan,
             lane_dir: Path,
             serialized_driver: Path,
-        ) -> str:
+        ) -> SummaryOutcome:
             # The session edits the lane's own copy, so it is handed that copy's kernel rather than the canonical one.
             # The record turn resumes that session now: the round deletes this copy as soon as it returns.
             sink: dict = {}
@@ -1964,12 +1965,12 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             await call(
                 str(lane_dir / kernel_relative),
                 _lane_prompt(lane.plan, serialized_driver=serialized_driver),
-                **declared_extras(call, {"session_sink": sink}),
+                session_sink=sink,
             )
             lesson = await self._request_lesson(iteration, sink.get("end_reason", ""), sink.get("summarize"))
             if not lesson:
                 print(f"  [lane {lane.lane_id}] no lesson from its session ({lesson.reason})")
-            return lesson.text
+            return lesson
 
         results = await run_lanes(
             workspace_dir=self.ic.workspace_dir,
@@ -4013,26 +4014,23 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
     async def _record_lesson(
         self,
         *,
-        iteration: int,
         result: IterationResult,
         decision: str,
         session_sink: dict,
         diff_summary: str = "",
+        lane_record: SummaryOutcome | None = None,
     ) -> None:
         """Write this iteration's free-form factual session record."""
+        iteration = result.iteration
         store = getattr(self, "lessons", None)
         if store is None or session_sink.get("session_started") is not True:
             # No agent ran this iteration (e.g. the baseline measurement path): there is no exploration to record.
             return
 
         # A lane's record was taken in its round. None means this iteration ran the session itself.
-        lane_lesson = session_sink.get("lesson")
-        if lane_lesson is None:
+        record = lane_record
+        if record is None:
             record = await self._request_lesson(iteration, result.session_end_reason, session_sink.get("summarize"))
-        elif lane_lesson:
-            record = SummaryOutcome(text=lane_lesson)
-        else:
-            record = SummaryOutcome(reason="the lane's session gave no record in its round")
         if record and store.write(iteration, record.text) is None:
             record = SummaryOutcome(reason="failed to persist lesson document")
         has_narrative = bool(record)
@@ -5537,8 +5535,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 plan=session_sink.get("plan", ""),
             )
 
-        # The verdict is now known, so ask the just-finished implementer session to record what it explored, then
-        # stamp the measured outcome onto the same document.
+        # The verdict is now known, so record what the session explored and stamp the measured outcome onto it.
         decision_label = _decision_label(result)
         if merge_diff and merge_pair is not None:
             print(
@@ -5561,11 +5558,11 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             self._diff_summary(commit_hash) if commit_hash else self._diff_summary_from_diff(attempt.attempt_diff)
         )
         await self._record_lesson(
-            iteration=iteration,
             result=result,
             decision=decision_label,
             session_sink=session_sink,
             diff_summary=iteration_diff_summary,
+            lane_record=attempt.lane_record,
         )
 
         # Record this iteration into the cross-iteration experience ledger.
@@ -5627,6 +5624,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             agents.orchestration_service,
             callbacks.on_iteration,
         )
+        lane_record = None
         # Only an orchestrated round synthesizes a plan; every other way of
         # sourcing an attempt leaves the iteration without one.
         optimization_plan_path = ""
@@ -5652,7 +5650,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             session_sink["plan"] = queued_lane.plan
             self._bind_session_producer(session_sink, queued_lane.agent_profile_id)
             session_sink["session_started"] = True
-            session_sink["lesson"] = queued_lane.lesson
+            lane_record = queued_lane.lesson
             print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
         elif merge_diff and merge_pair is not None:
             unmeasured_result = None
@@ -5772,6 +5770,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             reusable_benchmark=reusable_benchmark,
             optimization_plan_path=optimization_plan_path,
             optimization_plan_executable=optimization_plan_executable,
+            lane_record=lane_record,
         )
 
     async def _collect_session_candidate(
@@ -5987,7 +5986,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             decision_label=decision_label,
         )
         await self._record_lesson(
-            iteration=iteration,
             result=result,
             decision=decision_label,
             session_sink=session_sink,
@@ -6299,6 +6297,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             reusable_benchmark,
             _optimization_plan_path,
             optimization_plan_executable,
+            _lane_record,
         ) = attempt
         # Snapshot the best-so-far BEFORE this iteration is measured, so the archive can record the true delta vs
         # the standard it had to beat (run_one_iteration mutates self.best_wall_ms on an improvement).

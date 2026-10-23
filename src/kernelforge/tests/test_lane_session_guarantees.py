@@ -154,38 +154,6 @@ def test_a_lane_session_sink_reaches_an_agent_that_declares_it(tmp_path, monkeyp
     assert "progress_log" in sink
 
 
-def test_a_lane_does_not_pass_a_session_sink_to_an_agent_that_omits_it(tmp_path):
-    """An agent written before the sink existed is still called with the kernel and the plan."""
-    config, workspace = _campaign(tmp_path)
-    seen: list[tuple[str, str]] = []
-
-    def make_agent(_config, _setup, usage=None):
-        async def agent(kernel_path: str, plan: str) -> str:
-            seen.append((kernel_path, plan))
-            return plan
-
-        return agent
-
-    session = cli_lanes._make_lane_agent_factory(
-        make_agent=make_agent,
-        config=config,
-        binding=cli_lanes.LaneBinding(
-            workspace_dir=str(workspace),
-            driver=str(workspace / "forge_driver.py"),
-            source_files=[str(workspace / "src" / "kernel.py")],
-        ),
-        setup=agent_module.ImplementerSetup(
-            agent_module.ImplementerTask(program_md="Optimize VALUE."),
-            session=agent_module.SessionOptions(agent_backend="claude"),
-        ),
-    )(str(_tree(tmp_path / "lanes" / "1")), None)
-    kernel = str(tmp_path / "lanes" / "1" / "src" / "kernel.py")
-
-    asyncio.run(session(kernel, "plan 2", session_sink={"session_started": True}))
-
-    assert seen == [(kernel, "plan 2")]
-
-
 def test_a_hookless_provider_is_given_no_hooks_to_drop(tmp_path, monkeypatch):
     """The gate's callbacks are built for the provider that runs them, or not at all.
 

@@ -10,8 +10,9 @@ import logging
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from kernelforge.loop.lessons import SummaryOutcome
 from kernelforge.tools.git import git, git_async
 
 from kernelforge.tools.process_reaping import (
@@ -63,10 +64,10 @@ class LaneResult:
     diff: str = ""
     error: str = ""
     agent_profile_id: str = ""
-    # Taken while the lane copy still exists. The round deletes that copy on
-    # return, so the measuring iteration and a later process read this text
-    # from the queue rather than resuming the session.
-    lesson: str = ""
+    # The session's record, or why it has none, taken while the lane copy still
+    # exists. The round deletes that copy on return, so the measuring iteration
+    # and a later process read it from the queue rather than resuming the session.
+    lesson: SummaryOutcome = field(default_factory=SummaryOutcome)
     # What this lane's teardown found, carried structured rather than folded
     # into ``error``. The two say different things to different readers: the
     # error is why THIS lane produced nothing, which costs the round one
@@ -92,18 +93,22 @@ class LaneResult:
             "plan": self.plan,
             "diff": self.diff,
             "agent_profile_id": self.agent_profile_id,
-            "lesson": self.lesson,
+            "lesson": self.lesson.text,
+            "lesson_reason": self.lesson.reason,
         }
 
     @classmethod
     def from_dict(cls, entry: dict) -> "LaneResult":
-        """One queued candidate. A record written before lessons were carried restores with none."""
+        """One queued candidate. An entry holding neither a lesson nor its reason restores with a reason saying so."""
+        text, reason = str(entry.get("lesson") or ""), str(entry.get("lesson_reason") or "")
+        if not text and not reason:
+            reason = "the lane queue held no record for this lane"
         return cls(
             lane_id=str(entry["lane_id"]),
             plan=str(entry["plan"]),
             diff=str(entry["diff"]),
             agent_profile_id=str(entry.get("agent_profile_id") or ""),
-            lesson=str(entry.get("lesson") or ""),
+            lesson=SummaryOutcome(text=text, reason=reason),
         )
 
 
@@ -311,7 +316,7 @@ async def run_lanes(
     *,
     workspace_dir: str,
     lanes: Sequence[LanePlan],
-    session: Callable[[LanePlan, Path, Path], Awaitable[str]],
+    session: Callable[[LanePlan, Path, Path], Awaitable[SummaryOutcome]],
     parent_dir: str,
     driver: str,
 ) -> list[LaneResult]:
@@ -347,7 +352,6 @@ async def run_lanes(
             # has to survive a lane that failed for a reason of its own -- and a session that raised is exactly the
             # lane most likely to have left something running.
             reaped: ReapReport | None = None
-            lesson = ""
             try:
                 try:
                     lesson = await session(lane, lane_dir, serialized_driver)
@@ -375,7 +379,7 @@ async def run_lanes(
                 lane_id=lane.lane_id,
                 plan=lane.plan,
                 diff=diff,
-                lesson=lesson or "",
+                lesson=lesson,
                 reaped=reaped,
             )
 
