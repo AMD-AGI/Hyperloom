@@ -1606,10 +1606,7 @@ def _emit_preflight_diagnostics(
     print(f"  aiter jit cache     = {cache_line}")
     print(f"  benchmark_timeout   = {hard_timeout}s")
     print(f"  benchmark_silence   = {silence_timeout}s")
-    if anthropic_base_url:
-        print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url}")
-    else:
-        print("  ANTHROPIC_BASE_URL  = <unset> — no LLM base URL resolved; Claude SDK will fail")
+    print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url or '<unset>'}")
     pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
     kb_degraded_reason = getattr(args, "kb_degraded_reason", None)
     kb_reason = kb_degraded_reason or "-"
@@ -1943,11 +1940,7 @@ def _persist_install_event(args: argparse.Namespace | None, session_dir: Path) -
 
 
 def _export_llm_endpoints() -> tuple[str, str]:
-    """Resolve and export the Anthropic and OpenAI base URLs.
-
-    Explicit operator values on each side are preserved; a missing side falls
-    back to the other.
-    """
+    """Resolve and export the Anthropic and OpenAI base URLs; at least one is non-empty after credential validation."""
     anthropic_url, openai_url = _resolve_llm_endpoints()
     # A subscription token needs no endpoint: the Claude CLI knows where to go.
     skip_anthropic_export = (
@@ -2276,9 +2269,7 @@ def _validate_explicit_server_limits(args: argparse.Namespace) -> None:
     validate_server_args(effective, resolve_serving_model_path(model, model_base=pins.get("HL_MODEL_BASE")))
 
 
-def _preflight(
-    args: argparse.Namespace,
-) -> tuple[str, str]:
+def _preflight(args: argparse.Namespace) -> tuple[str, str]:
     """Auto-install missing runtime deps and export auth aliases."""
     _pin_resumed_session_args(args)
     install_event = _begin_install_event(args)
@@ -2380,8 +2371,7 @@ def _preflight(
         action=lambda: _ensure_python_sdks(sys.executable, pip_extra),
     )
 
-    # --- Resolve Anthropic + OpenAI base URLs (split entrypoints) --- Explicit operator values on each side are
-    # preserved; a missing side falls back to the other.
+    # --- Resolve Anthropic + OpenAI base URLs (split entrypoints) ---
     resolved_urls = _export_llm_endpoints()
 
     # --- ROCm env hygiene + GPU/shm sanity (defensive WARN-only) ---
@@ -2432,7 +2422,7 @@ def _preflight(
         ),
     )
 
-    # 1e.
+    # 1d.
     _run_install_step(
         install_event,
         step_id="check_serving_framework",

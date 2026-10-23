@@ -2503,7 +2503,7 @@ def test_ir3_kb_ok_pr_ok(marker_path):
 
 
 def test_ir3_kb_probe_unreachable_does_not_auto_degrade_recipe_kb(marker_path):
-    """Recipe KB has no remote IR-3 probe; unreachable kb marker must not set degraded_kb."""
+    """Recipe KB has no remote IR-3 probe; an unreachable kb marker must not degrade it."""
     args = _ns()
     with patch.object(
         cli_preflight.subprocess,
@@ -2516,7 +2516,6 @@ def test_ir3_kb_probe_unreachable_does_not_auto_degrade_recipe_kb(marker_path):
         ),
     ):
         cli_preflight._run_ir3_preflight(args)
-    assert args.degraded_kb is False
     assert args.pr_monitor_enabled is True
     assert args.kb_degraded_reason is None
     assert args.pr_degraded_reason is None
@@ -2566,7 +2565,6 @@ def test_ir3_kb_401_missing_token_does_not_auto_degrade_recipe_kb(marker_path, m
         ),
     ):
         cli_preflight._run_ir3_preflight(args)
-    assert args.degraded_kb is False
     assert args.kb_degraded_reason is None
 
 

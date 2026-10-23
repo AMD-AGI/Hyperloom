@@ -6,10 +6,11 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from typing import NamedTuple, NoReturn
 
-from hyperloom.common.visible_devices import probe_rocm_smi_gpus
+from hyperloom.common.visible_devices import rocm_smi_gpu_count
 
 
 class _Probe(NamedTuple):
@@ -22,10 +23,12 @@ class _Probe(NamedTuple):
 
 def _rocm_smi_visible_gpus() -> tuple[int | None, str | None]:
     """GPU count ``rocm-smi`` reports, else ``(None, skip_reason)`` when it cannot answer."""
-    probe = probe_rocm_smi_gpus()
-    if probe.failure is not None:
-        return None, f"rocm_smi_{probe.failure}"
-    return probe.count, None
+    try:
+        return rocm_smi_gpu_count(), None
+    except subprocess.CalledProcessError:
+        return None, "rocm_smi_failed"
+    except (OSError, subprocess.SubprocessError):
+        return None, "rocm_smi_unavailable"
 
 
 def _device_visibility_split(python_exe: str | None, visible: int | None) -> str:
