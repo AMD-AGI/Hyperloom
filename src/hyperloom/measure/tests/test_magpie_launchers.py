@@ -50,7 +50,7 @@ def test_the_launcher_a_point_names_is_copied_into_its_checkout_executable(tmp_p
 
     placed = checkout / "benchmarks" / LAUNCHER
     assert placed.read_text() == "export SGLANG_USE_AITER=1\n"
-    assert stat.S_IMODE(placed.stat().st_mode) == 0o755
+    assert stat.S_IMODE(placed.stat().st_mode) == 0o700
     assert not list((checkout / "benchmarks").glob(".*.tmp")), "no half-written copy is left"
 
 
