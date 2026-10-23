@@ -243,13 +243,18 @@ class Toolbox(Protocol):
         ``attachments_unsupported``) and stores nothing when the data is refused.
         """
 
-    async def put_kernel_artifact(self, kind: KernelKind, target: str, env: str, data: bytes) -> KernelArtifact:
+    async def put_kernel_artifact(
+        self, kind: KernelKind, target: str, env: str, data: bytes, rows_only: bool = False
+    ) -> KernelArtifact:
         """Store the tuned table ``data`` in the session's blob store and return the artifact a delta carries.
 
         ``env`` is the variable the service reads the table's path from (``metadata["load"]``, ``via`` ``env_file``);
         ``target`` is the operator or shape the table serves, the merge slot of the artifact. The reference is minted
         from the content, ``kernel/<kind>/<target>/<sha256><ext>``, so the same table put twice, by any branch, gives
-        the same artifact. A variable loads one table of one target: the first target put for it binds it. Raises
+        the same artifact. A variable loads one table of one target: the first target put for it binds it.
+        ``rows_only`` (an aiter table variable only) says ``data`` is just the tuned rows, which the test reads over the
+        image's default table for the variable, a shape in both taken from the rows (``metadata["load"]["rows_only"]``).
+        Raises
         :class:`RequestRejected` (``kernel_artifact_invalid``, ``kernel_variable_taken``, ``attachments_unsupported``)
         and stores nothing when the table is refused.
         """

@@ -181,7 +181,21 @@ _PUT_KERNEL_ARTIFACT: dict[str, Any] = {
                 "set PYTORCH_TUNABLEOP_ENABLED=1 and PYTORCH_TUNABLEOP_TUNING=0)."
             ),
         },
-        "content": {"type": _STRING, "minLength": 1, "description": "The whole table as UTF-8 text, a CSV."},
+        "content": {
+            "type": _STRING,
+            "minLength": 1,
+            "description": "The table as UTF-8 text, a CSV: the whole table, or with rows_only just your tuned rows.",
+        },
+        "rows_only": {
+            "type": _BOOLEAN,
+            "description": (
+                "Only for an aiter table (AITER_CONFIG_*). content is just the rows you tuned, under the header of "
+                "the image's table. The test loads the image's default table for the env and then your rows, and a "
+                "shape in both is read from your rows, so you need not carry the default's rows. Give each shape "
+                "once and keep the columns that identify it (M, N, K and the rest of the key, cu_num; gfx may be "
+                "left out), else the test is refused before its server starts."
+            ),
+        },
     },
     "required": ["kind", "target", "env", "content"],
     "additionalProperties": False,
@@ -305,7 +319,8 @@ def _put_kernel_artifact(
             data = arguments["content"].encode()
         except UnicodeEncodeError as exc:
             raise InvalidParamsError("content is not UTF-8 text") from exc
-        call = toolbox.put_kernel_artifact(KernelKind(arguments["kind"]), arguments["target"], arguments["env"], data)
+        kind, rows_only = KernelKind(arguments["kind"]), arguments.get("rows_only", False)
+        call = toolbox.put_kernel_artifact(kind, arguments["target"], arguments["env"], data, rows_only)
         try:
             artifact = await _on(home, call)
         except RequestRejected as exc:
@@ -325,7 +340,9 @@ def _register_put_kernel_artifact(server: McpServer, toolbox: Toolbox, home: asy
             "to its target for the session. Any branch may then put its own table (new content, its own reference) "
             "under that target; only a table of another target name for the same env is refused, as "
             "kernel_variable_taken, and its message names the bound target. The same table put twice, by any branch, "
-            "is the same artifact."
+            "is the same artifact. With rows_only the table is just the rows you tuned: the test reads the image's "
+            "default table for the env and then your rows, a shape in both from your rows, so you need not upload "
+            "the default's rows."
         ),
         schema=_PUT_KERNEL_ARTIFACT,
         handler=_put_kernel_artifact(toolbox, home),

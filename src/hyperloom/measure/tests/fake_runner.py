@@ -163,8 +163,10 @@ def _attached_env_files(spec: MeasurementSpec, root: Path, out: Path, names: lis
     served = yaml.safe_load(substitute(spec.config[0].yaml, _place(spec, root))) or {}
     held = {}
     for name in names:
-        path = Path(served["benchmark"]["envs"][name])
+        listed = str(served["benchmark"]["envs"][name]).split(os.pathsep)
+        path = Path(listed[-1])
         held[name] = {
+            "listed": listed[:-1],
             "path": str(path),
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             "directory": {

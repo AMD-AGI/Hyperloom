@@ -221,12 +221,14 @@ class RealToolbox:
             raise RequestRejected("this toolbox has no blob store for attachments", "attachments_unsupported")
         return store_attachment(self.blobs, attachment_id, kind, data)
 
-    async def put_kernel_artifact(self, kind: KernelKind, target: str, env: str, data: bytes) -> KernelArtifact:
+    async def put_kernel_artifact(
+        self, kind: KernelKind, target: str, env: str, data: bytes, rows_only: bool = False
+    ) -> KernelArtifact:
         """Keep a tuned table in the session's blob store, the one the experiment repository reads; see the interface."""
 
         if self.blobs is None:
             raise RequestRejected("this toolbox has no blob store for kernel artifacts", "attachments_unsupported")
-        artifact = mint_kernel_artifact(kind, target, env, data)
+        artifact = mint_kernel_artifact(kind, target, env, data, rows_only)
         self._kernel_variables.bind(artifact)
         self.blobs.put(data)
         return artifact

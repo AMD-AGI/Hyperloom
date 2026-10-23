@@ -48,7 +48,8 @@ from hyperloom.measure.boot_watch import BOOT_CANCEL_REASON, BootGuard, boot_lim
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure, decides_test
 from hyperloom.measure.farm import FarmError, build_farm, place_farm, server_python, verify_farm
-from hyperloom.measure.framework_copies import private_framework
+from hyperloom.measure.framework_copies import PrivateFramework, private_framework
+from hyperloom.measure.framework_rows import RowsOnlyRefused
 from hyperloom.measure.magpie_launchers import install_launchers
 from hyperloom.measure.profile_client import ProfileClientError, patch_profile_client
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces
@@ -177,7 +178,7 @@ class LocalMeasurementBackend:
     def run_test(self, call: TestCall) -> TestOutcome:
         """Run ``call`` to the end and return its outcome; the inference server is reclaimed when this returns."""
         _validate(call)
-        with _PROCESS_LOCK, _rebuilt_environment(call) as call, private_framework(call) as private:
+        with _PROCESS_LOCK, _rebuilt_environment(call) as call, _framework_tables(call) as private:
             call = private.call
             if call.kind == _PROFILE:
                 _patch_profile_client(call)
@@ -191,6 +192,16 @@ class LocalMeasurementBackend:
         if call.kind == _PROFILE:
             _gather_traces(run)
         return _outcome(run)
+
+
+@contextlib.contextmanager
+def _framework_tables(call: TestCall) -> Iterator[PrivateFramework]:
+    """``private_framework``, with a table it cannot lay out refused the way the backend refuses any call it cannot run."""
+    try:
+        with private_framework(call) as private:
+            yield private
+    except RowsOnlyRefused as exc:
+        raise TestCallRefused(str(exc)) from exc
 
 
 # --- validation ---------------------------------------------------------------------------------------------------

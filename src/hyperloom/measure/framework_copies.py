@@ -9,6 +9,10 @@ names the private copy (what aiter reads when it is unset, merged tables include
 are copied into the same directory and named by their copy. The merge aiter does for a variable that lists several
 tables writes the de-duplicated rows back into its sources, which are now the test's own files.
 
+A value that lists ``DEFAULT_TABLE_PLACEHOLDER`` beside a file of tuned rows (a rows-only kernel table) is the image's
+default table for that variable plus those rows; ``framework_rows`` takes the rows' shapes out of the default's copy
+first, since aiter rewrites its sources and raises on a shape both carry, and the result says how many it took out.
+
 What no variable redirects is checked instead: the shared tables are hashed against the snapshot before and after the
 test, anything that differs is put back, and the result says so (``framework_base.json``, covered by the signature).
 aiter writes the merged view of a variable to ``/tmp/aiter_configs`` whatever the environment says, and local sandboxes
@@ -21,12 +25,13 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import fnmatch
+import hashlib
 import json
 import logging
 import os
 import shutil
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,6 +53,7 @@ from hyperloom.measure.framework_base import (
     tree_files,
 )
 from hyperloom.measure.framework_merge import MergeView
+from hyperloom.measure.framework_rows import DEFAULT_TABLE_PLACEHOLDER, RowsOnlyRefused, lay_rows_over
 from hyperloom.measure.framework_tables import AITER_VARIABLE_PREFIX
 from hyperloom.measure.socket import TestCall
 
@@ -79,11 +85,15 @@ class _Redirect:
         self._tables = private / "tables"
         self._points = private / "points"
         self.copied: dict[str, list[dict[str, str]]] = {}
+        self.rows_only: dict[str, dict[str, Any]] = {}
         self.hook: Path | None = None
 
     def value(self, name: str, value: str) -> str:
         """``value`` with each table it lists replaced by a private copy; a path that is no file stays as it was."""
-        return os.pathsep.join(self._copy(name, part) for part in value.split(os.pathsep))
+        parts = value.split(os.pathsep)
+        if DEFAULT_TABLE_PLACEHOLDER in parts:
+            return self._rows_over_default(name, [part for part in parts if part != DEFAULT_TABLE_PLACEHOLDER])
+        return os.pathsep.join(self._copy(name, part) for part in parts)
 
     def _copy(self, name: str, part: str) -> str:
         """The private copy of the table ``part`` names; every point that names the same table gets the same path.
@@ -96,16 +106,47 @@ class _Redirect:
         source = Path(part)
         if not part or not source.is_file():
             return part
-        digest = file_sha256(source)
-        target = self._tables / name / digest[:_TABLE_DIGEST_CHARS] / source.name
+        return self._place(name, part, file_sha256(source), lambda target: shutil.copyfile(source, target))
+
+    def _place(self, name: str, source: str, digest: str, write: Callable[[Path], object]) -> str:
+        target = self._tables / name / digest[:_TABLE_DIGEST_CHARS] / Path(source).name
         if not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
-        table = {"source": part, "sha256": digest, "copy": str(target)}
+            write(target)
+        table = {"source": source, "sha256": digest, "copy": str(target)}
         listed = self.copied.setdefault(name, [])
         if table not in listed:
             listed.append(table)
         return str(target)
+
+    def _rows_over_default(self, name: str, rows: list[str]) -> str:
+        """The tables aiter reads for ``name`` when it is unset, minus the shapes ``rows`` tunes, then ``rows``.
+
+        A default table that keeps all its rows is the private copy ``default`` names; one that loses some is written
+        beside the rows' copy, named by what it now holds.
+        """
+        variable = self._snapshot.variables.get(name)
+        defaults = [Path(part) for part in (self.default(name) or "").split(os.pathsep) if Path(part).is_file()]
+        if not defaults:
+            raise RowsOnlyRefused(
+                f"{name} has no default table in this image to lay the rows over: the install does not declare it, "
+                "or ships no table for it. The rows alone would be read as the whole table"
+            )
+        copies = [self._copy(name, part) for part in rows]
+        over = lay_rows_over(defaults, [Path(copy) for copy in copies], self._configs, variable and variable.tuned)
+        self.rows_only[name] = over.document()
+        listed = [
+            self._place_kept(name, path, over.kept[path]) if path in over.kept else str(path) for path in defaults
+        ]
+        return os.pathsep.join([*listed, *copies])
+
+    def _place_kept(self, name: str, private: Path, data: bytes) -> str:
+        """The default table ``private`` is a copy of, as it is read once its overridden rows are out."""
+        with contextlib.suppress(ValueError):
+            private = self._snapshot.source / private.relative_to(self._configs)
+        return self._place(
+            name, str(private), hashlib.sha256(data).hexdigest(), lambda target: target.write_bytes(data)
+        )
 
     def default(self, name: str) -> str | None:
         """What aiter reads for ``name`` when it is unset, as private files: its default table and the per-model ones.
@@ -182,6 +223,27 @@ class _Redirect:
         return sorted(changed)
 
 
+def refuse_default_table(call: TestCall, why: str) -> None:
+    """Refuse a call that names the image's default table when there are no private tables to resolve it from.
+
+    Left in the environment the name would be a path aiter skips, and the test would read the rows alone.
+
+    Raises:
+        RowsOnlyRefused: When an environment of the call lists ``DEFAULT_TABLE_PLACEHOLDER``.
+    """
+    environments = [dict(call.env_overrides)]
+    environments += [
+        server_environment(yaml.safe_load(Path(point).read_text(encoding=_UTF8)) or {}) for point in call.points
+    ]
+    for envs in environments:
+        named = sorted(str(name) for name, value in envs.items() if DEFAULT_TABLE_PLACEHOLDER in str(value))
+        if named:
+            raise RowsOnlyRefused(
+                f"{named} lists the image's default table next to tuned rows, which needs the test's private "
+                f"copies of the framework tables, and the test has none ({why})"
+            )
+
+
 def _private_base() -> str | None:
     """The sandbox's own ``work`` directory when the process runs in one, so the copies go with the sandbox."""
     root = os.environ.get(_SANDBOX_ROOT_ENV)
@@ -214,6 +276,7 @@ class _TestBase:
             "restore_failed": [],
             "redirected": [],
             "point_tables": {},
+            "rows_only": {},
             "private_rewritten": [],
             "merge_isolation": "shared",
             "merge_reason": "no private directory",
@@ -241,6 +304,7 @@ class _TestBase:
             return self._shared(call, f"the private copies cannot be made: {type(exc).__name__}: {exc}")
 
     def _shared(self, call: TestCall, reason: str) -> PrivateFramework:
+        refuse_default_table(call, reason)
         self.document.update(isolation="none", reason=reason)
         return PrivateFramework(call)
 
@@ -261,6 +325,7 @@ class _TestBase:
             matches_session=private_sha == self._session,
             redirected=sorted(values),
             point_tables=redirect.provenance(),
+            rows_only=redirect.rows_only,
         )
         isolated = dataclasses.replace(call, points=points, env_overrides={**call.env_overrides, **values, **hook_env})
         return PrivateFramework(isolated, frozenset(values))
@@ -326,6 +391,7 @@ def private_framework(call: TestCall) -> Iterator[PrivateFramework]:
     """
     directory = os.environ.get(SNAPSHOT_ENV)
     if not directory:
+        refuse_default_table(call, f"{SNAPSHOT_ENV} is not set")
         yield PrivateFramework(call)
         return
     base = _TestBase(Path(directory), os.environ.get(SESSION_SHA_ENV))

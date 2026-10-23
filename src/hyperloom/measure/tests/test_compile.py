@@ -34,6 +34,7 @@ from hyperloom.measure.compile import (
     locate_installed_package,
 )
 from hyperloom.measure.attachments import place_attachments, substitute
+from hyperloom.measure.framework_rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.spec import Attachment
 from hyperloom.measure.tests._recipes import IMAGE, PREFIX, git_patch, put_patch, recipe_with, sha, write_tree
 from hyperloom.measure.tests.tunableop_table import NODE_CARDS, TUNABLEOP_ENV, TUNABLEOP_TABLE, tunableop_reads
@@ -218,6 +219,34 @@ def test_gemm_table_is_attached_and_loaded_through_its_variable(blobs, base):
     assert attachment == AttachmentRef(attachment.id, "file", sha(b"table"))
     assert env.envs == {"AITER_CONFIG_GEMM_BF16": "${HL_ATTACH:" + attachment.id + "}"}
     assert env.recipe.kernels == (kernel(**LOAD),)
+
+
+ROWS_ONLY = {"load": {**LOAD["load"], "rows_only": True}}
+
+
+def test_a_rows_only_table_is_loaded_behind_the_default_table_of_its_variable(blobs, base):
+    blobs.put(b"table")
+
+    env = compile_with(recipe_with(), RecipeDelta(add_kernels=(kernel(**ROWS_ONLY),)), blobs, base)
+
+    (attachment,) = env.attachments
+    assert env.envs == {"AITER_CONFIG_GEMM_BF16": f"{DEFAULT_TABLE_PLACEHOLDER}:${{HL_ATTACH:{attachment.id}}}"}
+    assert kernel(**ROWS_ONLY) != kernel(**LOAD), "the same bytes loaded as rows are another artifact"
+
+
+@pytest.mark.parametrize(
+    ("load", "message"),
+    [
+        ({"via": "env_file", "env": TUNABLEOP_ENV, "rows_only": True}, "only an aiter table variable"),
+        ({**LOAD["load"], "rows_only": "yes"}, "rows_only must be true or false"),
+    ],
+    ids=["a-variable-that-loads-one-whole-file", "not-a-bool"],
+)
+def test_rows_only_where_there_is_no_default_table_to_lay_the_rows_over_is_refused(blobs, base, load, message):
+    blobs.put(b"table")
+
+    with pytest.raises(KernelLoadError, match=message):
+        compile_with(recipe_with(), RecipeDelta(add_kernels=(kernel(load=load),)), blobs, base)
 
 
 @pytest.mark.parametrize("home", ["run", "run.1"], ids=["plain_directory", "directory_with_a_dot"])

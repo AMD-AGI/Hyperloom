@@ -36,8 +36,10 @@ from hyperloom.measure.framework_base import (
     tree_files,
 )
 from hyperloom.measure.framework_copies import private_framework
-from hyperloom.measure.local import LocalMeasurementBackend
+from hyperloom.measure.framework_rows import DEFAULT_TABLE_PLACEHOLDER
+from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.socket import SessionFacts, TestCall
+from hyperloom.measure.tests.aiter_excerpts import A8W8_HEADER, A8W8_ROWS, A8W8_UNTUNED, csv_text
 from hyperloom.measure.tests.framework_fixtures import (
     DAMAGED,
     PRISTINE,
@@ -538,3 +540,119 @@ def test_two_concurrent_tests_that_give_one_variable_different_tables_each_read_
         assert evidence["merge_patched_processes"] == 1
         merged_dirs.add(evidence["merge_dir"])
     assert len(merged_dirs) == 2 and not shared.exists(), "the shared directory was not written"
+
+
+MODEL_TABLES = ["a_gemm_tuned.csv", "b_gemm_tuned.csv"]
+
+
+@pytest.fixture
+def a8w8_tables(configs: Path) -> None:
+    """The stand-in's default table and its two per-model tables hold lines of aiter's a8w8 tables, untuned sibling too."""
+    (configs / "gemm_untuned.csv").write_text(A8W8_UNTUNED, encoding="utf-8")
+    default, a, b = configs / SHARED_GEMM, *(configs / "model_configs" / name for name in MODEL_TABLES)
+    for path, rows in ((default, A8W8_ROWS[:2]), (a, A8W8_ROWS[2:3]), (b, A8W8_ROWS[3:])):
+        path.write_text(csv_text(A8W8_HEADER, *rows), encoding="utf-8")
+
+
+def _rows_point(tmp_path: Path, *rows: str) -> tuple[Path, str]:
+    """A point whose variable names the image's default tables and then a file of ``rows``; the rows' text."""
+    text = csv_text(A8W8_HEADER, *rows)
+    file = tmp_path / "rows.csv"
+    file.write_text(text, encoding="utf-8")
+    return _point(tmp_path, AITER_CONFIG_GEMM=f"{DEFAULT_TABLE_PLACEHOLDER}{os.pathsep}{file}"), text
+
+
+def _read_listed(env: dict[str, str]) -> list[tuple[str, list[str]]]:
+    """The tables aiter would merge for the variable, each with its lines below the header, while the server runs."""
+    listed = _paths(env["AITER_CONFIG_GEMM"])
+    return [(path.name, path.read_text(encoding="utf-8").splitlines()[1:]) for path in listed]
+
+
+def test_rows_listed_behind_the_default_table_are_laid_over_it_and_the_shape_they_share_is_taken_out_of_it(
+    tmp_path: Path, configs: Path, a8w8_tables: None, session: Path, server: _Server
+) -> None:
+    faster = A8W8_ROWS[1].replace(",17.9602,", ",12.5,")
+    new_shape = A8W8_ROWS[1].replace(",128,1536,5120,", ",96,1536,5120,")
+    point, rows = _rows_point(tmp_path, faster, new_shape)
+    shared = tree_files(configs)
+    read: list[list[tuple[str, list[str]]]] = []
+    server.act = lambda env: read.append(_read_listed(env))
+
+    evidence = _run(tmp_path, "t", point)
+
+    names = [name for name, _ in read[0]]
+    assert names[0] == SHARED_GEMM and names[-1] == "rows.csv" and sorted(names[1:-1]) == MODEL_TABLES, (
+        "what aiter reads when the variable is unset, then the rows"
+    )
+    assert dict(read[0]) == {
+        SHARED_GEMM: [A8W8_ROWS[0]],  # the row of the shape the rows tune is gone; the other chip's row stays
+        "a_gemm_tuned.csv": [A8W8_ROWS[2]],
+        "b_gemm_tuned.csv": [A8W8_ROWS[3]],
+        "rows.csv": [faster, new_shape],
+    }
+    assert all(configs not in path.parents for path in _paths(server.envs[0]["AITER_CONFIG_GEMM"]))
+    assert tree_files(configs) == shared and evidence is not None and evidence["framework_base_changed"] is False
+    key = ["M", "N", "K", "q_dtype_w", "cu_num", "gfx"]
+    assert evidence["rows_only"] == {
+        "AITER_CONFIG_GEMM": {"key": key, "rows": 2, "overridden": 1, "dropped": {SHARED_GEMM: 1}}
+    }
+    assert rows == (tmp_path / "rows.csv").read_text(), "the rows file the point named is untouched"
+
+
+def test_rows_that_share_no_shape_with_the_default_tables_leave_every_one_of_them_as_it_is(
+    tmp_path: Path, configs: Path, a8w8_tables: None, session: Path, server: _Server
+) -> None:
+    point, _ = _rows_point(tmp_path, A8W8_ROWS[1].replace(",128,1536,5120,", ",96,1536,5120,"))
+    read: list[list[tuple[str, list[str]]]] = []
+    server.act = lambda env: read.append(_read_listed(env))
+
+    evidence = _run(tmp_path, "t", point)
+
+    assert dict(read[0][:-1]) == {
+        SHARED_GEMM: list(A8W8_ROWS[:2]),
+        "a_gemm_tuned.csv": [A8W8_ROWS[2]],
+        "b_gemm_tuned.csv": [A8W8_ROWS[3]],
+    }
+    assert evidence is not None and evidence["rows_only"]["AITER_CONFIG_GEMM"]["overridden"] == 0
+
+
+def test_rows_that_cannot_be_laid_over_the_default_table_refuse_the_test_before_its_server_starts(
+    tmp_path: Path, configs: Path, a8w8_tables: None, session: Path, server: _Server
+) -> None:
+    columns = A8W8_HEADER.split(",")
+    without_chip = ",".join(c for c in columns if c != "cu_num")
+    rows = tmp_path / "rows.csv"
+    rows.write_text(csv_text(without_chip, A8W8_ROWS[0].replace(",80,", ",")), encoding="utf-8")
+    point = _point(tmp_path, AITER_CONFIG_GEMM=f"{DEFAULT_TABLE_PLACEHOLDER}{os.pathsep}{rows}")
+
+    with pytest.raises(TestCallRefused, match=r"lack the column\(s\) \['cu_num'\]"):
+        _run(tmp_path, "t", point)
+
+    assert server.envs == [], "no server was started"
+
+
+@pytest.mark.parametrize("snapshot", ["none", "unusable"])
+def test_a_test_without_private_tables_is_refused_when_its_variable_names_the_default_table(
+    tmp_path: Path, configs: Path, server: _Server, monkeypatch: pytest.MonkeyPatch, snapshot: str
+) -> None:
+    if snapshot == "unusable":
+        monkeypatch.setenv(SNAPSHOT_ENV, str(tmp_path / "no-such-snapshot"))
+    point, _ = _rows_point(tmp_path, A8W8_ROWS[1])
+
+    with pytest.raises(TestCallRefused, match="needs the test's private copies"):
+        _run(tmp_path, "t", point)
+
+    assert server.envs == [], "the rows alone would have been read as the whole table"
+
+
+def test_rows_over_a_variable_with_no_default_table_in_the_image_refuse_the_test_before_its_server_starts(
+    tmp_path: Path, configs: Path, a8w8_tables: None, session: Path, server: _Server
+) -> None:
+    rows = tmp_path / "rows.csv"
+    rows.write_text(csv_text(A8W8_HEADER, A8W8_ROWS[1]), encoding="utf-8")
+    point = _point(tmp_path, AITER_CONFIG_NOT_DECLARED=f"{DEFAULT_TABLE_PLACEHOLDER}{os.pathsep}{rows}")
+
+    with pytest.raises(TestCallRefused, match="AITER_CONFIG_NOT_DECLARED has no default table in this image"):
+        _run(tmp_path, "t", point)
+
+    assert server.envs == [], "the rows alone would have been read as the whole table"
