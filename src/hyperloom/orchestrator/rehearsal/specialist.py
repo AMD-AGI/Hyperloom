@@ -81,23 +81,16 @@ class ScriptedSpecialist:
         steps: The dispatches to serve, in order.
         clock: The clock each step's duration is charged to.
         task_ids: Every task id that asked for a step, in order.
-        workspaces: Every workspace it wrote into, in order.
     """
 
     steps: tuple[SpecialistStep, ...]
     clock: VirtualClock = field(default_factory=VirtualClock)
     task_ids: list[str] = field(default_factory=list)
-    workspaces: list[Path] = field(default_factory=list)
 
     @property
     def served(self) -> int:
         """int: How many dispatches have been answered."""
         return len(self.task_ids)
-
-    @property
-    def retried(self) -> bool:
-        """bool: Whether a later dispatch arrived under a task id no earlier one used."""
-        return len(set(self.task_ids)) > 1
 
     async def run(self, request: SpecialistSpawn) -> SpecialistSubprocessResult:
         """Play the next step into the request's workspace and report it.
@@ -122,7 +115,6 @@ class ScriptedSpecialist:
             )
         step = self.steps[self.served]
         self.task_ids.append(task_id)
-        self.workspaces.append(workspace)
 
         workspace.mkdir(parents=True, exist_ok=True)
         process_log = workspace / "process.log"
@@ -151,7 +143,6 @@ class ScriptedSpecialist:
 
         elapsed = _HUNG_ELAPSED_SEC if step.outcome == HUNG else step.duration_sec
         self.clock.advance(elapsed)
-        self.clock.mark(f"specialist:{step.name or step.outcome}:{task_id}")
         return SpecialistSubprocessResult(
             done_payload=payload,
             exit_code=step.exit_code if step.exit_code is not None else _exit_code_for(step.outcome),

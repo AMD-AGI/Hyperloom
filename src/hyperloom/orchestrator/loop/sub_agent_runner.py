@@ -28,7 +28,7 @@ from ..bus.resource_lock import (
     Lease,
     SqliteLeaseBackend,
 )
-from ..policy.gate import PolicyDenied
+from ..policy.denial import PolicyDenied
 from ..state.task_registry import IllegalTransition, Task, TaskRegistry
 from hyperloom.inference_optimizer.trace.task_progress import ProgressReporter, progress_scope
 
@@ -86,7 +86,7 @@ class SubAgentResult:
             * ``"policy_{rule}"`` (e.g.
               ``"policy_path_outside_session_dir"``): a
               ``PolicyDenied`` dispatch rejection, keyed on
-              :attr:`PolicyDenied.rule <..policy.gate.PolicyDenied.rule>`.
+              :attr:`PolicyDenied.rule <..policy.denial.PolicyDenied.rule>`.
               The task never ran, so the result is ``cancelled`` and the
               failure ledgers never see it; the rule stays readable on the
               task row's terminal evidence.

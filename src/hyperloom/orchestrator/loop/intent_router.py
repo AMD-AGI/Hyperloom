@@ -30,8 +30,8 @@ from .verdicts import (
 )
 from hyperloom.common.coerce import to_int, to_unix
 from ..bus.message_bus import Message
+from ..policy.denial import PolicyDenied
 from ..policy.gate import (
-    PolicyDenied,
     PRUNE_BRANCH_SCOPE_FAMILY,
     PRUNE_BRANCH_SCOPE_QUEUED,
 )

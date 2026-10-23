@@ -13,8 +13,9 @@ import pytest
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR
 from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK,
+    _framework_plateau,
     _lever_attempts,
-    _patch_lever_dry,
+    _patch_lever_evidence,
     _trailing_no_keep,
 )
 
@@ -133,8 +134,8 @@ def test_empty_rounds_alone_run_the_source_arm_dry(tmp_path: Path):
             task=_task(f"local_explore:{i}"), done_payload={}, run_error=_GATE_ERROR
         )
 
-    dry, evidence = _patch_lever_dry(stub.shared_state, {})
-    assert dry is True
+    evidence = _patch_lever_evidence(stub.shared_state, {})
+    assert _framework_plateau(evidence).source_dry is True
     assert evidence["source_consecutive_no_keep"] == DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
 
 

@@ -491,7 +491,6 @@ def test_targeted_build_params_pass_policy_gate(tmp_path):
     gate = PolicyGate(
         role_registry={"orchestration": orch_role},
         session_dir=session_dir,
-        strict_paths=True,
     )
     action = TargetedBuildAction(
         gap_id="gap.enablement.fp4_moe",

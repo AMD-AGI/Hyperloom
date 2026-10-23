@@ -3811,7 +3811,7 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
                     payload={
                         "target_agent": "kernel_agent",
                         "kind": "trace_analyze",
-                        "params": {"trace_input": "/tmp/fake-trace.json.gz"},
+                        "params": {"trace_input": str(session_dir / "fake-trace.json.gz")},
                     },
                 ),
             )
@@ -3830,7 +3830,7 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
             assert r.payload["source"] == "programmatic_handler"
 
             # And the handler did receive merged payload (params flattened in).
-            assert captured["payload"].get("trace_input") == "/tmp/fake-trace.json.gz"
+            assert captured["payload"].get("trace_input") == str(session_dir / "fake-trace.json.gz")
             assert captured["session_dir"] == session_dir
         finally:
             await c.stop()
@@ -3969,8 +3969,8 @@ async def test_coordinator_streams_batch_results_and_dedups_final_record(
                         "kind": "integrate",
                         "params": {
                             "kernel_id": "k001",
-                            "patch_path": "/tmp/k001.py",
-                            "target_file": "/p/moe_op.py",
+                            "patch_path": str(session_dir / "k001.py"),
+                            "target_file": str(session_dir / "moe_op.py"),
                             # no base_tput intentionally
                         },
                     },
@@ -4016,8 +4016,8 @@ async def test_coordinator_does_not_overwrite_explicit_base_tput_on_integrate(
                         "kind": "integrate",
                         "params": {
                             "kernel_id": "k009",
-                            "patch_path": "/tmp/k009.py",
-                            "target_file": "/p/rmsnorm.py",
+                            "patch_path": str(session_dir / "k009.py"),
+                            "target_file": str(session_dir / "rmsnorm.py"),
                             "base_tput": 4200.0,  # operator override
                         },
                     },

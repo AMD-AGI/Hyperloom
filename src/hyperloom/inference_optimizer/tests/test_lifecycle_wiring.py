@@ -171,7 +171,7 @@ async def test_handle_request_emits_start_and_end(session_dir, monkeypatch, tmp_
             payload={
                 "target_agent": "kernel_agent",
                 "kind": "trace_analyze",
-                "params": {"trace_input": "/tmp/trace-A.json.gz"},
+                "params": {"trace_input": str(session_dir / "trace-A.json.gz")},
             },
         )
         await c.router.handle_intent("orchestration", intent)
@@ -183,7 +183,7 @@ async def test_handle_request_emits_start_and_end(session_dir, monkeypatch, tmp_
         # START carries the input trace path; no duration yet.
         assert start["status"] == "START"
         assert start["label"] == "TraceLens"
-        assert start["artifacts"]["trace_input"] == "/tmp/trace-A.json.gz"
+        assert start["artifacts"]["trace_input"] == str(session_dir / "trace-A.json.gz")
         assert "duration_s" not in start
 
         # END carries the produced artifact + a measured duration.
@@ -230,7 +230,7 @@ async def test_handle_request_end_surfaces_tracelens_report_paths(
             payload={
                 "target_agent": "kernel_agent",
                 "kind": "trace_analyze",
-                "params": {"trace_input": "/tmp/trace-B.json.gz"},
+                "params": {"trace_input": str(session_dir / "trace-B.json.gz")},
             },
         )
         await c.router.handle_intent("orchestration", intent)
@@ -262,7 +262,7 @@ async def test_handle_request_failed_handler_emits_error(session_dir, monkeypatc
             payload={
                 "target_agent": "kernel_agent",
                 "kind": "trace_analyze",
-                "params": {"trace_input": "/tmp/t.json.gz"},
+                "params": {"trace_input": str(session_dir / "t.json.gz")},
             },
         )
         await c.router.handle_intent("orchestration", intent)
@@ -367,7 +367,7 @@ async def test_handle_request_cache_hit_emits_lone_end(session_dir, monkeypatch)
             payload={
                 "target_agent": "kernel_agent",
                 "kind": "trace_analyze",
-                "params": {"trace_input": "/tmp/trace.json.gz"},
+                "params": {"trace_input": str(session_dir / "trace.json.gz")},
             },
         )
         await c.router.handle_intent("orchestration", intent)
@@ -401,9 +401,10 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
             "cached_kernel_request",
             lambda kind, payload: None,
         )
+        patch_path = str(session_dir / "p.patch")
         rejection = {
             "kernel_id": "tg001",
-            "patch_path": "/tmp/p.patch",
+            "patch_path": patch_path,
             "target_file": "/tmp/t.py",
             "attempt_count": 3,
         }
@@ -415,7 +416,7 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
 
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel_agent", "kind": "integrate", "params": {"patch_path": "/tmp/p.patch"}},
+            payload={"target_agent": "kernel_agent", "kind": "integrate", "params": {"patch_path": patch_path}},
         )
         await c.router.handle_intent("orchestration", intent)
 
@@ -423,7 +424,7 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
         assert [e["status"] for e in ig] == ["END"], f"want lone END, got {ig}"
         assert ig[0]["detail"] == "rejected"
         assert ig[0]["label"] == "Integrate"
-        assert ig[0]["artifacts"]["patch_path"] == "/tmp/p.patch"
+        assert ig[0]["artifacts"]["patch_path"] == patch_path
     finally:
         await c.stop()
 
