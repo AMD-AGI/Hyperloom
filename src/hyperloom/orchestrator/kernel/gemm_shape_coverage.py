@@ -118,7 +118,6 @@ def align_shapes_to_aiter_keys(
     shapes: Iterable[Shape],
     *,
     max_shapes: int = 64,
-    max_m: int = 0,
 ) -> tuple[list[Shape], dict[str, Any]]:
     """Re-key observed shapes onto the M values aiter will actually look up."""
     observed = sorted({(int(m), int(n), int(k)) for m, n, k in shapes if min(m, n, k) > 0})
@@ -126,7 +125,7 @@ def align_shapes_to_aiter_keys(
         return [], {"observed": 0, "aligned": 0, "dropped": 0, "unchanged": True}
 
     nk_pairs = sorted({(n, k) for _m, n, k in observed})
-    ladder = _pow2_ladder(max(max(m for m, _, _ in observed), int(max_m or 0)))
+    ladder = _pow2_ladder(max(m for m, _, _ in observed))
 
     ladder_rows = {(m, n, k) for n, k in nk_pairs for m in ladder}
     fine_rows = {(aiter_padded_m_fine(m), n, k) for m, n, k in observed} - ladder_rows
@@ -523,13 +522,6 @@ def tuned_fmoe_csv_rows(path: str | Path) -> list[dict[str, str]]:
     return out
 
 
-def _fmoe_candidate_row_for_dispatch(
-    record: dict[str, str],
-    candidate_rows: dict[FmoeDispatchKey, dict[str, str]],
-) -> dict[str, str] | None:
-    return candidate_rows.get(fmoe_dispatch_lookup_key(record))
-
-
 def fmoe_tuned_config_coverage(
     candidate_rows: Iterable[dict[str, str]],
     requested_dispatches: Iterable[dict[str, str]],
@@ -553,7 +545,7 @@ def fmoe_tuned_config_coverage(
             default_count += 1
             uncovered.append(record)
             continue
-        row = _fmoe_candidate_row_for_dispatch(record, by_key)
+        row = by_key.get(fmoe_dispatch_lookup_key(record))
         if row is None:
             uncovered.append(record)
             continue
