@@ -2419,10 +2419,7 @@ def _settle_custom_specialist_only(args: argparse.Namespace) -> None:
 
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
-    # First, before anything is opened or seeded: a refused plug flag must leave nothing behind, and a refused resume
-    # must leave the session as it was (budget, stop reason and crash count untouched).
-    resume_from = getattr(args, "resume_from", None)
-    plug_manifest = resolve_plug_manifest(args, Path(resume_from).expanduser().resolve() if resume_from else None)
+    plug_manifest = resolve_plug_manifest(args)  # first: a refused flag must leave any session as it was
     nodes_resolved = _resolve_run_topology(args)
     _settle_custom_specialist_only(args)
 

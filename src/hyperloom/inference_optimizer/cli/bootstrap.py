@@ -53,13 +53,14 @@ from ..model_config_utils import summarize_model_config
 log = logging.getLogger(__name__)
 
 
-def resolve_plug_manifest(args: argparse.Namespace, resume_dir: Path | None) -> ResolvedManifest:
+def resolve_plug_manifest(args: argparse.Namespace) -> ResolvedManifest:
     """Resolve the plug manifest for this run and check it can start; exit 2 on a configuration error.
 
     Reads and writes nothing in a session: it runs before the session is opened or seeded, so a refused flag leaves
-    nothing behind. ``resume_dir`` is the ``--resume-from`` directory, whose ``plugs.resolved.json`` is read back
-    before any flag is applied; ``None`` for a fresh run.
+    nothing behind. On a resume, the ``plugs.resolved.json`` of the ``--resume-from`` directory is read back
+    before any flag is applied.
     """
+    resume_from = getattr(args, "resume_from", None)
     registry = builtin_registry()
     try:
         sources = ManifestSources(
@@ -68,7 +69,7 @@ def resolve_plug_manifest(args: argparse.Namespace, resume_dir: Path | None) -> 
             overrides_path=os.environ.get("HYPERLOOM_MANIFEST_OVERRIDES") or None,
             cli_plugs=tuple(getattr(args, "plug", None) or ()),
             cli_configs=tuple(getattr(args, "plug_config", None) or ()),
-            resumed=read_resolved(resume_dir) if resume_dir is not None else None,
+            resumed=read_resolved(Path(resume_from).expanduser().resolve()) if resume_from else None,
         )
         manifest = resolve_manifest(registry, sources)
         PlugHost(manifest, registry, session_dir=None).plan()

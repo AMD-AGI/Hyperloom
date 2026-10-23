@@ -22,7 +22,8 @@ from hyperloom.plugs.events_local import LocalProgressEvents
 
 def prepare_plug_host(args, session_dir: Path):
     """Resolve against ``session_dir`` as a resume would, then bind the result to it."""
-    return open_plug_host(resolve_plug_manifest(args, session_dir), session_dir)
+    args.resume_from = str(session_dir)
+    return open_plug_host(resolve_plug_manifest(args), session_dir)
 
 
 def _args(*extra: str):
