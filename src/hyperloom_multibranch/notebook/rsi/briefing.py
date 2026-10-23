@@ -255,7 +255,10 @@ class CrossSessionBriefing(StartupBriefProvider):
     async def peer_replay(self, request_id: str) -> PeerReplay:
         """The change another branch's test ``request_id`` tried, to test on this branch's head, with the head's kernel
         artifacts it replaces; ``ValueError`` says why there is none: the test is this branch's own or changed nothing,
-        was made on this head already, or this head has or cannot take it."""
+        was made on this head already, or this head has or cannot take it.
+
+        A component the head does not have takes the upstream it had on the commit the test was made on, which the
+        test's change does not name when that commit had the component already."""
 
         request = (await self.notebook.record(request_id)).request
         if request.branch == self.branch:
@@ -268,15 +271,45 @@ class CrossSessionBriefing(StartupBriefProvider):
         if request.parent_commit == head:
             raise ValueError(f"{request_id} tested this change on your head {head}; there is nothing to replay")
         recipe = await self.repo.read_recipe(head)
+        delta = await self._with_upstreams(self.repo, request.delta, recipe, request.parent_commit)
         try:
-            replayed = apply(recipe, request.delta)
+            replayed = apply(recipe, delta)
         except RecipeError as exc:
             raise ValueError(f"the change {request_id} tested no longer applies to your head {head}: {exc}") from exc
         if replayed == recipe:
             raise ValueError(f"your head {head} already has the change {request_id} tested")
-        added = {artifact.slot for artifact in request.delta.add_kernels}
+        added = {artifact.slot for artifact in delta.add_kernels}
         replaces = tuple(item for item in recipe.kernels if item.slot in added and item not in replayed.kernels)
-        return PeerReplay(request_id, request.branch, head, request.delta, delta_layer(request.delta), replaces)
+        return PeerReplay(request_id, request.branch, head, delta, delta_layer(delta), replaces)
+
+    @staticmethod
+    async def _with_upstreams(repo: RecipeReads, delta: RecipeDelta, head: Recipe, tested_on: str) -> RecipeDelta:
+        """``delta`` with each component ``head`` does not have, and the change names no upstream for, given the one
+        it has in ``tested_on``'s recipe; ``delta`` itself when there is none, or that recipe cannot be read."""
+
+        unnamed = {
+            change.component
+            for change in delta.components
+            if head.component(change.component) is None and None in (change.upstream_repo, change.upstream_ref)
+        }
+        if not unnamed:
+            return delta
+        try:
+            source = await repo.read_recipe(tested_on)
+        except (KeyError, RuntimeError, ValueError) as exc:
+            log.warning("could not read %s for the upstream of %s: %s", tested_on, ", ".join(sorted(unnamed)), exc)
+            return delta
+        changes = []
+        for change in delta.components:
+            known = source.component(change.component) if change.component in unnamed else None
+            if known is not None:
+                change = replace(
+                    change,
+                    upstream_repo=change.upstream_repo or known.upstream_repo,
+                    upstream_ref=change.upstream_ref or known.upstream_ref,
+                )
+            changes.append(change)
+        return replace(delta, components=tuple(changes))
 
     async def _recall(self, snapshot: NotebookSnapshot) -> Recall | None:
         if self.experiences is None or snapshot.profile is None:

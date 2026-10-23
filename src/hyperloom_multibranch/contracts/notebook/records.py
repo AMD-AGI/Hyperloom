@@ -543,9 +543,9 @@ class PeerReplay:
     """The change another branch's test ``request_id`` tried, to test on ``parent_commit``, the caller's head.
 
     It is that test's own delta, not the difference between the two heads, which would carry ``branch``'s earlier
-    commits too. ``layer`` is the deepest layer the change reaches, the one its intent claims. ``replaces`` are the
-    head's kernel artifacts the change's take the place of: a target loads one artifact of a kind, so the test runs
-    without them.
+    commits too; a component new to the caller's head takes the upstream it had where the test was made. ``layer`` is
+    the deepest layer the change reaches, the one its intent claims. ``replaces`` are the head's kernel artifacts the
+    change's take the place of: a target loads one artifact of a kind, so the test runs without them.
     """
 
     request_id: str
