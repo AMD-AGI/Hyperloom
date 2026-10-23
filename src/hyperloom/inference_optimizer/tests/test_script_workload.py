@@ -87,6 +87,16 @@ def test_prepare_refuses_an_import_after_the_compiler_loaded(tmp_path):
         _prepare(tmp_path, tmp_path / "ws", late)
     assert not (tmp_path / "ws" / "optimization").exists()
     assert not (tmp_path / "ws" / "benchmark").exists()
+    assert (tmp_path / "ws" / "record_stderr.log").exists()
+
+
+def test_a_failing_script_keeps_its_recording_log(tmp_path, capsys):
+    broken = SCRIPT.replace("model = apply(model)", 'model = apply(model)\nraise RuntimeError("missing dependency")')
+    with pytest.raises(subprocess.CalledProcessError):
+        _prepare(tmp_path, tmp_path / "ws", broken)
+    assert "missing dependency" in (tmp_path / "ws" / "record_stderr.log").read_text()
+    assert "record_stderr.log" in capsys.readouterr().err
+    assert not (tmp_path / "ws" / "optimization").exists()
 
 
 def test_prepare_warns_on_an_import_after_torch(tmp_path, capsys):

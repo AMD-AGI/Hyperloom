@@ -105,6 +105,18 @@ def _record(benchmark: Path, args: argparse.Namespace) -> dict:
     return json.loads(result.stdout.splitlines()[-1])
 
 
+def _discard_partial_workspace(workspace: Path) -> None:
+    """Remove what a failed prepare created so it can run again, keeping the script's recording logs."""
+    benchmark = workspace / "benchmark"
+    logs = sorted(benchmark.glob("record_*.log"))
+    for log in logs:
+        shutil.move(log, workspace / log.name)
+    shutil.rmtree(workspace / "optimization", ignore_errors=True)
+    shutil.rmtree(benchmark, ignore_errors=True)
+    if logs:
+        print(f"The script's output while recording is kept in {workspace}/record_stderr.log", file=sys.stderr)
+
+
 def prepare(args: argparse.Namespace) -> Path:
     """Create the workspace and record the references; refuse to touch an existing one."""
     workspace = args.workspace.resolve()
@@ -122,8 +134,7 @@ def prepare(args: argparse.Namespace) -> Path:
         prepared = True
     finally:
         if not prepared:
-            shutil.rmtree(root, ignore_errors=True)
-            shutil.rmtree(benchmark, ignore_errors=True)
+            _discard_partial_workspace(workspace)
     print(f"Recorded {report['calls']} calls; rel-L2 limits {report['rel_l2_limits']}")
     return workspace
 
