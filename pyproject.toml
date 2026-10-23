@@ -523,13 +523,13 @@ cyclomatic-complexity = 20
 # limit: cognitive complexity weights nesting, so a value past 30 is a function
 # a reader has to re-read rather than read.
 cognitive-complexity = 30
-# Physical lines, ``def`` through the last line, decorators excluded, comments
-# and docstrings included: a function no longer fits one screen past 80, and
-# most of this tree's functions stay well under (the review trigger is ~60).
-function-lines = 80
-# pylint R1702 default: past five nested blocks, the innermost line depends on
-# six conditions at once; extract the inner loop or invert a condition.
-nested-blocks = 5
+# Lines of code in the body: the ``def`` lines, decorators, blank, comment and
+# docstring lines do not count. Past 50 a function rarely does one thing; split
+# it along its steps.
+function-lines = 50
+# Past four nested blocks the innermost line depends on five conditions at
+# once; extract the inner loop or invert a condition.
+nested-blocks = 4
 # pylint R0913 default: past five, a call site no longer reads as a sentence and the
 # values travel together anyway -- pass the object they come from, or name them in a
 # dataclass. ``self``/``cls`` and ``*args``/``**kwargs`` do not count; keyword-only
@@ -609,10 +609,13 @@ extend-select = [
     "LOG",  # correct logging API use
     "A",  # do not shadow builtins
     "C4",  # comprehension / collection-call idioms
+    "B006",  # no mutable default arguments
+    "B012",  # no return / break / continue inside finally
 ]
 # Still off pending a team decision -- each rewrites hundreds of lines that the
-# open PRs touch: "I" (import sorting), "UP" (pyupgrade). "B", "SIM" and the
-# rest of "RUF" carry a backlog and belong behind a ratchet, not a hard gate.
+# open PRs touch: "I" (import sorting), "UP" (pyupgrade). The rest of "B",
+# "SIM" and the rest of "RUF" carry a backlog and belong behind a ratchet, not a
+# hard gate.
 
 [tool.ruff.lint.flake8-builtins]
 # ``aiter`` is AMD's kernel library, imported under its own name throughout;

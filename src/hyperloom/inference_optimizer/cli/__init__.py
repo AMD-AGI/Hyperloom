@@ -618,7 +618,7 @@ def _reject_unusable_claude_model(chosen: str, *, allow_custom: bool) -> None:
 
 
 def _catalog_probe_candidates(
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
     *,
     claude_follows_codex: bool,
 ) -> list[tuple[str, str]]:
@@ -629,9 +629,9 @@ def _catalog_probe_candidates(
     """
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
-    if not anthropic_url and resolved_urls is not None:
+    if not anthropic_url:
         anthropic_url = resolved_urls[0]
-    if not openai_url and resolved_urls is not None:
+    if not openai_url:
         openai_url = resolved_urls[1]
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
     # OpenAI-side key only.
@@ -655,7 +655,7 @@ def _catalog_probe_candidates(
 
 
 def _probe_claude_catalog(
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
     *,
     chosen: str,
     claude_follows_codex: bool,
@@ -696,7 +696,7 @@ def _probe_claude_catalog(
 
 def _validate_and_resolve_claude_model(
     args: argparse.Namespace,
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
     *,
     claude_follows_codex: bool | None = None,
 ) -> set[str] | None:
@@ -775,7 +775,7 @@ def _validate_and_resolve_claude_model(
 
 def _resolve_models_for_run(
     args: argparse.Namespace,
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
     *,
     claude_follows_codex: bool | None = None,
     codex_follows_claude: bool | None = None,
@@ -871,7 +871,7 @@ def _probe_critic_review_model(
 
 def _smoke_test_codex_model(
     args: argparse.Namespace,
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
 ) -> None:
     """WARN-only catalog check for ``--codex-model`` on an OpenAI-only launch, where it becomes the orchestration model.
 
@@ -880,7 +880,7 @@ def _smoke_test_codex_model(
     openai_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
     if not openai_url:
         openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
-    if not openai_url and resolved_urls is not None:
+    if not openai_url:
         openai_url = resolved_urls[1]
     # OpenAI-side key only.
     openai_key = os.environ.get("OPENAI_API_KEY", "")
