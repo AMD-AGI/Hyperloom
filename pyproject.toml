@@ -644,7 +644,7 @@ ignorelist = ["aiter"]
 "src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
 "src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
 # The import sits under the comment block explaining why the attribute name is
-# shared with kernelforge.llm rather than redeclared here.
+# shared with kernelforge.agent_backends rather than redeclared here.
 "src/kernelforge/fusion/llm_failure.py" = ["E402"]
 # Sphinx reads the module-level name ``copyright``.
 "docs/conf.py" = ["A001"]
@@ -652,7 +652,7 @@ ignorelist = ["aiter"]
 # ``subprocess.run(input=...)`` and ``BaseHTTPRequestHandler.log_message(format, ...)``.
 # Renaming them would break keyword callers / the override.
 "src/hyperloom/orchestrator/actions/executors/_git.py" = ["A002"]
-"src/kernelforge/llm/git.py" = ["A002"]
+"src/kernelforge/tools/git.py" = ["A002"]
 "src/hyperloom_kb/http_service.py" = ["A002"]
 # Naive local-time timestamps are part of these files' on-disk / directory-name
 # formats (persisted ``isoformat()`` strings, log-clock parsing); making them

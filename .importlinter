@@ -164,6 +164,7 @@ forbidden_modules =
     kernelforge.rewrite_by_flydsl
     kernelforge.roofline_ceiling
     kernelforge.tracker
+    kernelforge.workspace
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **

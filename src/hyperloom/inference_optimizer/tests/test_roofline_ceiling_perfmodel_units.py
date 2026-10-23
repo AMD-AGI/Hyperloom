@@ -597,9 +597,14 @@ def _load_small_moe_meta(tmp_path: Path, **over) -> rc.ModelMeta:
     return rc.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=16384))
 
 
+def _launched_with(tmp_path: Path, server_args: str):
+    """A run state whose baseline anchor launched with ``server_args``."""
+    return _state(tmp_path, {"envs": {"EXTRA_SGLANG_ARGS": server_args}})
+
+
 def test_uniform_moe_runtime_quantization_reaches_perfmodel(tmp_path):
     meta = _load_small_moe_meta(tmp_path)
-    state = SimpleNamespace(last_baseline={"extra_args": "--quantization fp8 --dtype bfloat16"})
+    state = _launched_with(tmp_path, "--quantization fp8 --dtype bfloat16")
     rt = rc.resolve_runtime_dtype(state, meta)
     applied = rc.apply_runtime_dtype(meta, rt)
     breakdown = _perfmodel(applied, concurrency=1, precision_tag=rt.compute_precision_tag)
@@ -629,7 +634,7 @@ def test_runtime_general_dtype_preserves_experts_stored_elsewhere(
 ):
     """An override names one precision, so it misses fp4 experts under bf16 attention."""
     meta = _load_small_moe_meta(tmp_path, expert_dtype="fp4")
-    rt = rc.resolve_runtime_dtype(SimpleNamespace(last_baseline={"extra_args": server_args}), meta)
+    rt = rc.resolve_runtime_dtype(_launched_with(tmp_path, server_args), meta)
     applied = rc.apply_runtime_dtype(meta, rt)
 
     assert (applied.weight_bytes, applied.active_weight_bytes, applied.expert_weight_bytes) == expected_bytes
@@ -653,7 +658,7 @@ def test_declaring_the_experts_at_the_general_precision_is_not_a_second_precisio
     tmp_path, server_args, expected_bytes
 ):
     """A config that writes ``expert_dtype`` out and one that leaves it inherited describe one model."""
-    state = SimpleNamespace(last_baseline={"extra_args": server_args})
+    state = _launched_with(tmp_path, server_args)
     inherited = _load_small_moe_meta(tmp_path / "inherited")
     declared = _load_small_moe_meta(tmp_path / "declared", expert_dtype="bfloat16")
     applied = [rc.apply_runtime_dtype(meta, rc.resolve_runtime_dtype(state, meta)) for meta in (inherited, declared)]
@@ -679,7 +684,7 @@ def test_runtime_dtype_noop_preserves_moe_metadata(tmp_path):
 )
 def test_prequantized_moe_runtime_dtype_keeps_checkpoint_bytes(tmp_path, server_args, source):
     meta = _load_small_moe_meta(tmp_path, quantization_config={"quant_method": "fp8"}, expert_dtype="fp4")
-    rt = rc.resolve_runtime_dtype(SimpleNamespace(last_baseline={"extra_args": server_args}), meta)
+    rt = rc.resolve_runtime_dtype(_launched_with(tmp_path, server_args), meta)
 
     assert rt.source == source
     assert rt.weight_dtype_bytes == 1.0
@@ -689,7 +694,7 @@ def test_prequantized_moe_runtime_dtype_keeps_checkpoint_bytes(tmp_path, server_
 
 def test_cli_fp8_still_overrides_a_uniform_fp4_checkpoint(tmp_path):
     meta = _load_small_moe_meta(tmp_path, quantization_config={"quant_method": "fp4"})
-    rt = rc.resolve_runtime_dtype(SimpleNamespace(last_baseline={"extra_args": "--quantization fp8"}), meta)
+    rt = rc.resolve_runtime_dtype(_launched_with(tmp_path, "--quantization fp8"), meta)
     applied = rc.apply_runtime_dtype(meta, rt)
 
     assert rt.source == "server_args_quantization"
@@ -699,9 +704,9 @@ def test_cli_fp8_still_overrides_a_uniform_fp4_checkpoint(tmp_path):
     assert rc.apply_runtime_dtype(applied, rt) == applied
 
 
-def test_runtime_dtype_still_scales_dense_weights():
+def test_runtime_dtype_still_scales_dense_weights(tmp_path):
     meta = _dense_meta(weight_bytes=16384, active_weight_bytes=16384)
-    rt = rc.resolve_runtime_dtype(SimpleNamespace(last_baseline={"extra_args": "--dtype fp8"}), meta)
+    rt = rc.resolve_runtime_dtype(_launched_with(tmp_path, "--dtype fp8"), meta)
     applied = rc.apply_runtime_dtype(meta, rt)
 
     assert rt.source == "server_args_dtype"
@@ -726,7 +731,7 @@ def _state(tmp_path: Path, benchmark: dict, **attrs):
     from types import SimpleNamespace
 
     base = dict(
-        last_baseline={"extras": {"materialized_config": str(cfg)}},
+        baseline_config_path=str(cfg),
         gpu_type="mi300x",
         model_path="",
         precision="",
@@ -777,7 +782,7 @@ def test_runtime_workload_defaults_concurrency_to_one(tmp_path):
 def test_runtime_workload_survives_an_unreadable_baseline_yaml(tmp_path):
     from types import SimpleNamespace
 
-    st = SimpleNamespace(last_baseline={"extras": {"materialized_config": str(tmp_path / "gone.yaml")}})
+    st = SimpleNamespace(baseline_config_path=str(tmp_path / "gone.yaml"))
     assert rc.resolve_runtime_workload(st).concurrency == 1
 
 

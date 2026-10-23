@@ -19,7 +19,7 @@ from typing import Any, Optional
 import click
 
 from hyperloom.common.llm_config import AGENT_BACKEND_CHOICES
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 from kernelforge.option_groups import option_group
 
 from . import __version__

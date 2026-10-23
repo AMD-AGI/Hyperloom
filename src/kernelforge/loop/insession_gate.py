@@ -18,12 +18,12 @@ import stat
 import sys
 from typing import Any
 
-from kernelforge.llm.workspace_policy import (
+from kernelforge.workspace.edit_policy import (
     PROTECTED_GLOBS,
     is_protected_path,
     protected_path_inventory,
 )
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 from kernelforge.loop.gate_settings import GateMeasurement, GateScope
 from kernelforge.loop.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
 from kernelforge.evaluation.scoring import (

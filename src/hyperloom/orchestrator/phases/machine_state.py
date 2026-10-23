@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import time
 from dataclasses import dataclass
 from typing import Any, NamedTuple
@@ -78,8 +77,6 @@ OPTIMIZATION_RESERVE_PCT: float = 0.50
 
 # Wall-clock ceiling for an unbounded run (``max_minutes`` == 0): the container lifetime.
 DEFAULT_LONGRUN_MAX_MINUTES: int = 14 * 24 * 60
-# Reference window the absolute per-phase cap applies its budget fraction to.
-PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES: int = 24 * 60
 
 
 # Plateau judgment defaults (CLI --plateau-* flags); kept here for pure callers + tests.
@@ -446,27 +443,6 @@ def phase_budget_remaining_seconds(
     return max(0.0, total - phase_elapsed_seconds(state, now_unix=now_unix))
 
 
-def effective_max_minutes(state: Any) -> float:
-    """Session minutes for deadline/cap math; unbounded runs use the 14-day ceiling."""
-    mm = _max_minutes(state)
-    return mm if mm > 0 else float(DEFAULT_LONGRUN_MAX_MINUTES)
-
-
-def phase_cap_seconds(state: Any) -> float | None:
-    """Absolute wall-clock ceiling (seconds) for the current phase."""
-    budget = state.phase_budget_pct
-    phase = (state.phase or "").upper()
-    if phase not in budget:
-        return None
-    pct = float(budget[phase])
-    if pct <= 0.0:
-        # Zero fraction = no wall-clock allowed, as opposed to no cap at all.
-        return 0.0
-    proportional = effective_max_minutes(state) * 60.0 * pct
-    abs_cap = math.ceil(PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES * pct) * 60.0
-    return float(min(proportional, abs_cap))
-
-
 def session_remaining_seconds(
     state: Any,
     *,
@@ -518,7 +494,7 @@ def phase_status_summary(
     """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable."""
     phase = (state.phase or "").strip().upper() or "UNSET"
     elapsed = int(phase_elapsed_seconds(state, now_unix=now_unix))
-    # ``remaining`` paces this entry; the absolute cap reads ``cumulative``.
+    # ``remaining`` paces this entry; ``cumulative`` totals every entry.
     cumulative = int(phase_cumulative_seconds(state, now_unix=now_unix))
     budget_pct_for_phase = state.phase_budget_pct.get(phase, 0.0)
     remaining = phase_budget_remaining_seconds(state, now_unix=now_unix)
@@ -943,7 +919,6 @@ def _budget_predicate_inputs(
     remaining_sec = phase_budget_remaining_seconds(state, now_unix=now_unix)
     budget: dict[str, Any] = {
         "remaining_sec": remaining_sec,
-        "cap_sec": phase_cap_seconds(state),
         "entry_elapsed_sec": phase_elapsed_seconds(state, now_unix=now_unix),
         "cumulative_elapsed_sec": phase_cumulative_seconds(state, now_unix=now_unix),
         "current_balance": remaining_sec,
@@ -1127,8 +1102,8 @@ def _extend_budget_to_sweep_grant(budget: dict[str, Any], state: Any, *, now_uni
     """Widen SWEEP's budget to cover the conc_sweep it granted and is still waiting on.
 
     SWEEP's only work is the sweep it enqueued on entry, whose budget is already clamped to the session clock. The
-    per-phase cap is a share of the whole session (5% of three hours is nine minutes) and would otherwise cancel that
-    sweep mid-ladder. The widened numbers are what the predicate compares, so a replay of the frozen inputs reaches
+    per-entry budget is a share of the remaining session (5% of three hours is nine minutes) and would otherwise cancel
+    that sweep mid-ladder. The widened numbers are what the predicate compares, so a replay of the frozen inputs reaches
     the same decision.
     """
     grant_left = (_number(state.conc_sweep_granted_until_unix) or 0.0) - float(now_unix)
@@ -1139,10 +1114,6 @@ def _extend_budget_to_sweep_grant(budget: dict[str, Any], state: Any, *, now_uni
         budget["remaining_sec"] = grant_left
         if "current_balance" in budget:
             budget["current_balance"] = grant_left
-    cap = _number(budget.get("cap_sec"))
-    cumulative = _number(budget.get("cumulative_elapsed_sec")) or 0.0
-    if cap is not None and cap < cumulative + grant_left:
-        budget["cap_sec"] = cumulative + grant_left
 
 
 def workflow_predicate_inputs(
@@ -1237,7 +1208,6 @@ def _budget_exit(
     budget: dict[str, Any],
     *,
     exhausted_reason: str,
-    cap_reason: str,
     evidence: dict[str, Any],
 ) -> tuple[str, dict[str, Any]] | None:
     remaining = _number(budget.get("remaining_sec"))
@@ -1250,9 +1220,6 @@ def _budget_exit(
     }
     if remaining is not None and remaining <= 0.0:
         return exhausted_reason, timing
-    cap = _number(budget.get("cap_sec"))
-    if cap is not None and cumulative >= cap:
-        return cap_reason, timing
     return None
 
 
@@ -1301,7 +1268,6 @@ def _framework_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None
     return _budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="optimize_phase_budget_exhausted",
-        cap_reason="optimize_budget_cap",
         evidence=arms,
     )
 
@@ -1356,7 +1322,6 @@ def _kernel_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     return _budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="kernel_phase_budget_exhausted",
-        cap_reason="kernel_budget_cap",
         evidence={"rejected_kernel_count": int(plateau.get("rejected_kernel_count") or 0)},
     )
 
@@ -1386,7 +1351,6 @@ def _sweep_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     return _budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="sweep_budget_exhausted",
-        cap_reason="sweep_budget_cap",
         evidence={"sweep_status": status} if status else {},
     )
 

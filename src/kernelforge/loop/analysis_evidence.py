@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 from kernelforge.kernel_backends.constants import resolve_language_dirs
 from kernelforge.orchestrator.contracts import CaseEvidence, EvidenceRef, OrchestrationContext
 from kernelforge.orchestrator.supervisor import latest_supervisor_ruling_path

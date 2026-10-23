@@ -14,10 +14,10 @@ from hyperloom.orchestrator.trace_analysis import tracelens_arch_benchmark as ta
 
 @pytest.fixture(scope="module")
 def tla():
-    """Import tracelens_analysis as a module without executing main()."""
-    from hyperloom.orchestrator.trace_analysis import tracelens_analysis
+    """Import the TraceLens-checkout module without executing ``main()``."""
+    from hyperloom.orchestrator.trace_analysis import _tracelens_checkout
 
-    return tracelens_analysis
+    return _tracelens_checkout
 
 
 _VISIBLE_DEVICE_VARS = (

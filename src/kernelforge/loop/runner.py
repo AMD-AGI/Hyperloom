@@ -30,9 +30,9 @@ from typing import Any, NamedTuple
 from hyperloom.common.unified_diff import touched_paths
 
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
-from kernelforge.llm.process_reaping import processes_under
-from kernelforge.llm.workspace_policy import is_protected_path
-from kernelforge.llm.git import git, git_bytes
+from kernelforge.tools.process_reaping import processes_under
+from kernelforge.workspace.edit_policy import is_protected_path
+from kernelforge.tools.git import git, git_bytes
 from kernelforge.config import Config
 from kernelforge.evaluation.correctness.canonical import accept_candidate
 from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline

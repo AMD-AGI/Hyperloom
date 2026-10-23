@@ -278,7 +278,7 @@ def test_no_root_is_ever_probed_for(tmp_path, output_dir, monkeypatch):
         raise AssertionError("warm replay must not probe for an apply root")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.integrate_patch._resolve_framework_root",
+        "hyperloom.orchestrator.actions.executors._patch_sources._resolve_framework_root",
         _fail,
     )
     _git_repo(tmp_path / "sglang", "vllm/fp8.py", "# fp8 module\noriginal = True\n")

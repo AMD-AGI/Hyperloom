@@ -55,6 +55,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
 )
 from ..phases.machine_state import PHASE_ENABLEMENT, record_lifecycle_event
+from .resume_source_layers import install_kept_source_layers
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
 from ..framework.artifacts import candidate_key
@@ -79,10 +80,10 @@ from ..kernel.geak_config import (
     _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
 )
-from ..state.round_store import ABANDONED, BOOTED, FAILED
+from ..state.round_store import ABANDONED, FAILED
 from ..state.task_registry import Task
 from ..actions.executors.benchmark_result import is_valid_measurement
-from ..actions.executors.integrate_patch import KEEP_STATUSES
+from ..actions.executors._integrate_vocabulary import KEEP_STATUSES
 from ..actions.executors._accuracy_gate import (
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
     BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
@@ -95,6 +96,7 @@ from ..actions.executors._accuracy_gate import (
     accuracy_passed,
 )
 from ..knowledge.agent_kb import PatchKB
+from .launch_controls import kept_launch_controls
 from .proposals import PendingProposal
 from ..measurement.integrate_performance import integrate_measurement_fields
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
@@ -1699,9 +1701,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # next round's anchor has no snapshot, and the session degrades to
         # output grading permanently after the first KEEP.
         current_best.update(graded_axes_of(cand_source))
-        for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
-            if bv.get(_ctrl_key):
-                current_best[_ctrl_key] = bv.get(_ctrl_key)
+        current_best.update(kept_launch_controls(bv, previous))
         if bv.get("effective_extra_server_args"):
             current_best["effective_extra_server_args"] = dedupe_extra_server_args(
                 strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
@@ -1882,17 +1882,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     floor = float(getattr(self.shared_state.enablement, "accuracy_floor", 0.0) or 0.0)
                     generation = int(getattr(self.shared_state.enablement, "revalidation_generation", 0) or 0)
                     if accuracy_meets_floor(acc, floor):
-                        self.shared_state.enablement.succeeded = True
-                        self.shared_state.enablement.validation_pending = False
-                        self.shared_state.enablement.revalidation_task_id = ""
-                        self.shared_state.enablement.origin = ""
-                        self.shared_state.enablement.pending = False
-                        await self._coord.enablement_lane.settle_enablement_round(
-                            BOOTED, reason="revalidation_promoted"
-                        )
-                        # This promote is the lane's terminal: the KEEP that
-                        # preceded it was provisional, so the round that landed
-                        # it did not close the lane.
                         enablement_event.record_revalidation_outcome(
                             generation=generation,
                             promoted=True,
@@ -1900,10 +1889,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
                             accuracy=acc,
                             accuracy_floor=floor,
                         )
-                        await self._coord.enablement_lane.close_lane_event(
-                            outcome=enablement_event.OUTCOME_SUCCEEDED,
-                            reason="revalidation promoted",
-                        )
+                        # This promote is the lane's terminal: the KEEP that
+                        # preceded it was provisional, so the round that landed
+                        # it did not close the lane.
+                        await self._coord.enablement_lane.close_booted(reason="revalidation promoted")
                     else:
                         # Sub-floor accuracy on the tracked revalidation: rearm the
                         # specialist loop without clearing the frozen trigger identity.
@@ -1937,8 +1926,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     self.shared_state.enablement.origin = ""
                     self.shared_state.enablement.pending = False
             else:
-                self.shared_state.enablement.origin = ""
-                self.shared_state.enablement.pending = False
+                await self._coord.enablement_lane.on_baseline_promoted()
             changed = True
         # Performance / accuracy / config / wall-clock describe the anchor run, so they only
         # move when the anchor itself moves; otherwise the recorded reference
@@ -3585,14 +3573,14 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # (1c) Combined PRELUDE replay: no benchmark verdict survived the
         # restart, so restore both Recipe and Kernel trees before continuing.
         await self._resume_recover_pending_warm_replay(report)
-        # (1d) Orphaned revalidation tasks: if enablement_validation_pending is set
-        # but the tracked revalidation task is already terminal, unstick the window
-        # so a fresh revalidation can be enqueued -- closed and charged to the
+        # (1d) Orphaned revalidation tasks: if enablement_validation_pending is set but the tracked revalidation task
+        # is already terminal, unstick the window so a fresh revalidation can be enqueued -- closed and charged to the
         # stall counter, or reopened uncharged when the run cancelled the row.
         await self._resume_recover_pending_revalidation(report)
-        # (2) Orphaned KEEPs: replay integrate_patch KEEPs
-        # that crashed before the append landed; surface ambiguous ones loudly.
+        # (2) Replay orphaned KEEPs that crashed before the append, then (2b) put the kept source patches on the tree.
         await self._resume_recover_orphaned_keeps(report)
+        if halt := install_kept_source_layers(state, self.session_dir, report):
+            raise IntegrateRecoveryIncomplete(halt)
 
         # (3) A config with no stack behind it cannot be reproduced.
         if state.current_best and not state.optimization_stack:
@@ -3627,8 +3615,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     }
                 )
 
-        # (4) Validation-watermark compensation: unvalidated KEEPs are reported
-        # and one full-stack rebench is enqueued to measure them.
+        # (4) Validation-watermark compensation: report unvalidated KEEPs and enqueue one full-stack rebench for them.
         if state.optimization_stack_has_unvalidated_keeps():
             stack = [e for e in (state.optimization_stack or []) if isinstance(e, dict)]
             vlen = int(state.cumulative_gain_validated_stack_len or 0)
@@ -3759,7 +3746,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         Returns:
             A summary ``{"reversed": [...], "failed": [...]}``.
         """
-        from ..actions.executors.integrate_patch import restore_pending_integrate
+        from ..actions.executors._patch_git import restore_pending_integrate
         from ..actions.executors.source_tree_identity import settle_replaced_tree, tree_replaced
 
         if tree_replaced(pending, gone_scope):

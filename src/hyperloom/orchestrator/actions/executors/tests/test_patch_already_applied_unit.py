@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors import integrate_patch as ip
+from hyperloom.orchestrator.actions.executors import _patch_git as patch_git
 from hyperloom.orchestrator.actions.executors._nogit_patch import (
     _apply_patch_no_git,
     _reverse_applies_cleanly,
@@ -155,9 +155,9 @@ def test_git_channel_superset_then_subset_is_a_noop(tmp_path):
     sup = _patch(patches, "superset.patch", _SUPERSET)
     sub = _patch(patches, "subset.patch", _SUBSET)
 
-    ok, err, _ = ip._git_apply_collect_feedback(src, sup)
+    ok, err, _ = patch_git._git_apply_collect_feedback(src, sup)
     assert ok, err
-    ok2, err2, fb2 = ip._git_apply_collect_feedback(src, sub)
+    ok2, err2, fb2 = patch_git._git_apply_collect_feedback(src, sub)
     assert ok2, err2
     assert fb2 is None
     assert "new_alpha" in (src / "mod" / "alpha.py").read_text(encoding="utf-8")
@@ -172,6 +172,6 @@ def test_git_channel_unrelated_patch_still_fails(tmp_path):
     patches.mkdir()
     bad = _patch(patches, "bad.patch", _UNRELATED)
 
-    ok, err, fb = ip._git_apply_collect_feedback(src, bad)
+    ok, err, fb = patch_git._git_apply_collect_feedback(src, bad)
     assert not ok
     assert fb is not None

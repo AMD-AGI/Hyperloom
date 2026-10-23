@@ -531,6 +531,31 @@ async def test_running_tasks_reader_reports_in_flight_task(coordinator_with_mock
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phase", "kinds", "order_note"),
+    [
+        ("FRAMEWORK_AGENT", ("explore", "integrate_patch"), "integrate_patch dispatches before any queued explore"),
+        ("FRAMEWORK_AGENT", ("explore",), None),
+        ("SWEEP", ("explore", "integrate_patch"), None),
+    ],
+)
+async def test_running_tasks_reader_states_the_backlog_dispatch_order(coordinator_with_mocks, phase, kinds, order_note):
+    """A phase that dispatches one kind first says so, since a later-queued task of that kind still runs ahead."""
+    c = coordinator_with_mocks
+    try:
+        c.shared_state.phase = phase
+        for i, kind in enumerate(kinds):
+            await c.tasks.create(kind=kind, params={}, idempotency_key=f"k-backlog-{i}")
+        out = c.conversation._context_running_tasks_reader()
+        assert "queued backlog: " in out
+        assert "dispatches before" in out if order_note else "dispatches before" not in out
+        if order_note:
+            assert order_note in out
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
     """extend_lease pushes out both the task TTL and every lane row it holds."""
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType

@@ -273,9 +273,9 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "OPTIMIZE exhausted both levers: neither configuration search nor source/upstream landing had leverage left."
     ),
     "optimize_phase_budget_exhausted": "OPTIMIZE spent its phase budget.",
-    "optimize_budget_cap": "OPTIMIZE reached the absolute per-phase wall-clock cap.",
     # Retired reason names, kept so a report over an archived session still explains what it is reading. Some no longer
     # sit in STOP_REASON_VOCAB at all, so these keys are a superset of the vocabulary rather than a mirror of it.
+    "optimize_budget_cap": "OPTIMIZE reached the absolute per-phase wall-clock cap.",
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
     "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",
     "global_converged": (
