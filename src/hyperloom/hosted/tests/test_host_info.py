@@ -127,6 +127,16 @@ def test_a_local_path_is_not_a_result_archive(env, value):
     assert "only s3://<bucket>/<prefix> or unset" in raised.value.invalid[Var.RESULT_ARCHIVE]
 
 
+@pytest.mark.parametrize(
+    ("value", "prefix"),
+    [("s3://results-bucket", ""), ("s3://results-bucket/", ""), ("s3://results-bucket/hl/runs/", "hl/runs")],
+)
+def test_an_s3_archive_prefix_is_kept_as_written(env, value, prefix):
+    env[Var.RESULT_ARCHIVE] = value
+
+    assert read_host_info(env).result_archive.prefix == prefix
+
+
 def test_mcp_is_required_by_default_and_droppable(env):
     del env[Var.MCP_PORT], env[Var.MCP_TOKEN]
 
@@ -174,6 +184,10 @@ def test_missing_and_malformed_inputs_are_reported_together(env):
         (Var.RESULT_ARCHIVE, "s3://UPPER_bucket/p", "bucket is not a valid"),
         (Var.RESULT_ARCHIVE, "s3://results-bucket/a/../b", "prefix must not contain"),
         (Var.RESULT_ARCHIVE, "s3://results-bucket/a//b", "prefix must not contain"),
+        (Var.RESULT_ARCHIVE, "s3://results-bucket/a/./b", "prefix must not contain"),
+        (Var.RESULT_ARCHIVE, "s3://results-bucket/a/.", "prefix must not contain"),
+        (Var.RESULT_ARCHIVE, "s3://results-bucket//a", "prefix must not contain"),
+        (Var.RESULT_ARCHIVE, "s3://results-bucket/a//", "prefix must not contain"),
         (Var.RESULT_ARCHIVE, "s3://results-bucket/p?x=1", "only s3://<bucket>/<prefix> or unset"),
         (Var.RUN_CREATED_AT, "yesterday", "ISO 8601"),
         (Var.RUN_CREATED_AT, "2026-10-01T12:30:00", "UTC offset"),

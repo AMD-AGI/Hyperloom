@@ -32,7 +32,7 @@ from collections.abc import Collection, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from urllib.parse import urlsplit
 
 
@@ -355,10 +355,12 @@ def _archive_location(value: str) -> ArchiveLocation:
         raise ValueError("only s3://<bucket>/<prefix> or unset (shared storage) is accepted")
     if not _BUCKET_RE.match(parts.netloc):
         raise ValueError("bucket is not a valid S3 bucket name")
-    segments = PurePosixPath(parts.path).parts[1:] if parts.path else ()
-    if "//" in parts.path.strip("/") or ".." in segments or "." in segments:
+    # Split the raw path: S3 keys are literal, so a path normaliser would accept a malformed prefix as another one.
+    raw = parts.path.removeprefix("/").removesuffix("/")
+    segments = raw.split("/") if raw else []
+    if any(segment in ("", ".", "..") for segment in segments):
         raise ValueError("prefix must not contain empty, '.' or '..' segments")
-    return ArchiveLocation(bucket=parts.netloc, prefix="/".join(segments))
+    return ArchiveLocation(bucket=parts.netloc, prefix=raw)
 
 
 def _needed_names(require: Collection[HostGroup]) -> frozenset[str]:
