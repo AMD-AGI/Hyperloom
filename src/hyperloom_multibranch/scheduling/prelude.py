@@ -63,11 +63,11 @@ from hyperloom_multibranch.notebook.knowledge.warm_start import (
     replay_leads,
     warm_leads,
 )
-from hyperloom_multibranch.notebook.codec import decode
 from hyperloom_multibranch.scheduling.budget import BudgetExhausted, HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.manifest import read_workload
 from hyperloom_multibranch.scheduling.prelude_reader import (
     ChildProfile,
     PreludeArtifacts,
@@ -179,7 +179,7 @@ def reused_prelude(session: Path, workload: Workload, image_digest: str) -> Reus
     earlier = SessionLayout(session)
     try:
         child = _rooted_child(earlier.decisions)
-        ran = decode(Workload, read_json_strict(earlier.manifest)["settings"]["workload"])
+        ran = read_workload(earlier.manifest)
         root = Recipe.from_document(read_json_strict(earlier.root_recipe))
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise ValueError(f"{session} holds no completed PRELUDE: {exc}") from exc

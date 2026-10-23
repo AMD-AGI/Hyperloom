@@ -22,7 +22,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.common.jsonio import read_json_strict
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom.measure.compile import BlobError, BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
@@ -43,6 +42,7 @@ from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.final import FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.llm import Completion
+from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_close_knowledge
 
 #: The single-lineage CLOSE's status when no Recipe KB is configured.
@@ -71,16 +71,6 @@ def step_lines(steps: Mapping[str, CloseStep]) -> list[str]:
     return [
         f"{name.replace('_', ' ').capitalize()}: {step.status} {step.reason}".rstrip() for name, step in steps.items()
     ]
-
-
-def _code_revision(manifest: Path) -> str | None:
-    """The source revision the session ran on, as its manifest recorded it at start; ``None`` where it names none."""
-
-    try:
-        version = read_json_strict(manifest, require_dict=True).get("code_version")
-    except (OSError, ValueError):
-        return None
-    return (str(version.get("git_sha") or "") or None) if isinstance(version, Mapping) else None
 
 
 @dataclass(frozen=True)
@@ -188,7 +178,7 @@ class SessionExports:
             kb_write_back=kb_write_back,
             knowledge=stepped,
             session_dir=self._layout.root,
-            code_revision=_code_revision(self._layout.manifest),
+            code_revision=read_manifest(self._layout.manifest).code_version.git_sha or None,
         )
         breakdown = write_breakdown(self._layout.reports, document)
         dashboard = await self._dashboard.write(queue)

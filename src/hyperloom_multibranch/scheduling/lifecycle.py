@@ -29,18 +29,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
-import importlib.metadata
 import logging
 import math
-import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_json
-from hyperloom.common.jsonio import read_json_strict
-from hyperloom.common.provenance import detect_code_revision
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.versions import socket_versions
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
@@ -49,7 +44,7 @@ from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
 from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.codec import decode, encode
+from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.rsi.authoring import session_challenger
 from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
 from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS, FrontierPolicy, FrontierScoring, ScorerGuard
@@ -76,6 +71,7 @@ from hyperloom_multibranch.scheduling.integrator import Integrator, LlmPatchReso
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, Judge
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.llm import Completion, recorded
+from hyperloom_multibranch.scheduling.manifest import CodeVersion, SessionManifest, code_version, read_manifest
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.prelude import (
@@ -137,8 +133,6 @@ COMPLETED_REASONS = frozenset(
         SessionStopReason.JUDGE_STOPPED,
     }
 )
-#: The distribution this package ships in (pyproject.toml ``[project] name``).
-MB_DISTRIBUTION = "hyperloom-inference_optimizer"
 CUT_SHORT = "CLOSE was cut short after a stop signal"
 NO_CARDS_LEFT = "the toolbox has fewer usable cards than one test needs, so FINAL could not run"
 
@@ -291,7 +285,7 @@ class Session:
 
         candidates = await self._final_candidates()
         self._choose(self._recorded_frontier_policy())
-        self._challenger = read_json_strict(self._layout.manifest)["policy_versions"].get(CHALLENGER_KEY) == "1"
+        self._challenger = read_manifest(self._layout.manifest).policy_versions.get(CHALLENGER_KEY) == "1"
         total = budget_seconds(self._settings.max_hours)
         budget = SessionBudget(self._clock.now() - total, total)
         self._in_final = True
@@ -462,14 +456,14 @@ class Session:
             "challenger": self._challenger,
         }
         self._decisions.record(Decision(DecisionKind.PRELUDE, "frontier policy", detail=detail))
-        manifest = read_json_strict(self._layout.manifest)
-        atomic_write_json(self._layout.manifest, {**manifest, "policy_versions": self._policy_versions()})
+        manifest = read_manifest(self._layout.manifest)
+        replace(manifest, policy_versions=self._policy_versions()).write(self._layout.manifest)
 
     def _recorded_frontier_policy(self) -> PolicyChoice:
         """The frontier policy the manifest records, rebuilt from its label: a run over a session that already chose
         one scores with that choice instead of calibrating again, so the label the manifest holds stays true."""
 
-        label = read_json_strict(self._layout.manifest)["policy_versions"][FRONTIER_POLICY_KEY]
+        label = read_manifest(self._layout.manifest).policy_versions[FRONTIER_POLICY_KEY]
         choice = named_frontier_choice(label, self._frontier.policy, f"{label}: the policy the session recorded")
         if choice is None:
             raise ValueError(f"the frontier policy {label} the manifest records names no scorer any more")
@@ -602,16 +596,15 @@ class Session:
         self._decisions.record(Decision(DecisionKind.PHASE, name, detail=detail))
 
     def _write_manifest(self, budget: SessionBudget, version: CodeVersion) -> None:
-        document = {
-            "code_version": encode(version),
-            "session_id": self._layout.session_id,
-            "started_at": budget.started_at,
-            "deadline": budget.deadline,
-            "settings": encode(self._settings),
-            "metric": self._settings.workload.metric,
-            "policy_versions": self._policy_versions(),
-        }
-        atomic_write_json(self._layout.manifest, document)
+        SessionManifest(
+            code_version=version,
+            session_id=self._layout.session_id,
+            started_at=budget.started_at,
+            deadline=budget.deadline,
+            settings=self._settings,
+            metric=self._settings.workload.metric,
+            policy_versions=self._policy_versions(),
+        ).write(self._layout.manifest)
 
 
 def challenger_session(session_id: str) -> bool:
@@ -651,12 +644,10 @@ def persisted_run(root: Path) -> PersistedRun:
         raise ValueError(f"{root} is not a directory")
     layout = SessionLayout(root)
     try:
-        manifest = read_json_strict(layout.manifest, require_dict=True)
-        settings = decode(RunSettings, manifest["settings"])
-        ran_on = decode(CodeVersion, manifest["code_version"])
+        manifest = read_manifest(layout.manifest)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise ValueError(f"{root} is no multi-branch session that ran: {exc}") from exc
-    here = code_version()
+    ran_on, here = manifest.code_version, code_version()
     if ran_on != here:
         raise ValueError(
             f"the session in {root} ran on {ran_on} and this build is {here}; FINAL and CLOSE read back what that "
@@ -664,26 +655,7 @@ def persisted_run(root: Path) -> PersistedRun:
         )
     if not layout.root_recipe.is_file():
         raise ValueError(f"the session in {root} committed no root, so FINAL has nothing to validate")
-    return PersistedRun(layout, settings, ended_before_final(layout))
-
-
-@dataclass(frozen=True)
-class CodeVersion:
-    """The installed package version and the source revision :func:`detect_code_revision` reports: the source
-    tree's commit, else the revision baked into the image; empty where there is none."""
-
-    package: str
-    git_sha: str
-
-
-def code_version() -> CodeVersion:
-    """This scheduler's :class:`CodeVersion`. Blocks on git."""
-
-    try:
-        package = importlib.metadata.version(MB_DISTRIBUTION)
-    except importlib.metadata.PackageNotFoundError:
-        package = ""
-    return CodeVersion(package, detect_code_revision(os.environ))
+    return PersistedRun(layout, manifest.settings, ended_before_final(layout))
 
 
 __all__ = [
@@ -698,13 +670,11 @@ __all__ = [
     "PINNED_EVIDENCE",
     "FRONTIER_POLICY_KEY",
     "NO_CARDS_LEFT",
-    "CodeVersion",
     "PersistedRun",
     "Session",
     "SessionHost",
     "SessionOutcome",
     "SessionServices",
-    "code_version",
     "persisted_run",
     "challenger_session",
     "pinned_frontier_choice",

@@ -53,6 +53,9 @@ from hyperloom_multibranch.scheduling.exports import (
 from hyperloom_multibranch.scheduling.tests.peer_fakes import ScriptedCompletion
 from hyperloom_multibranch.scheduling.final import FinalCandidate, FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
+from hyperloom_multibranch.scheduling.manifest import CodeVersion, SessionManifest
+from hyperloom_multibranch.scheduling.roster import RosterCaps
+from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, RunSettings, Workload
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_EXPERIENCE_KB
 from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH, ProcessRecord
 from hyperloom_multibranch.scheduling.stops import SessionStopReason, StopReport
@@ -79,6 +82,16 @@ CHOICE = FinalChoice(
 LEFTOVER = ProcessRecord(4242, 4242, 0.0, "b01", ("sleep", "600"), "scope")
 BUDGET_SECONDS = 2 * 3600.0
 KB_URL = "HYPERLOOM_KB_URL"
+#: The source revision the manifest of these sessions records, which the breakdown reports the session as having run on.
+RAN_ON = "7c1d9a204"
+SETTINGS = RunSettings(
+    Workload("org/model", "vllm", 8, 16, "fp8", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 1024)),
+    max_hours=BUDGET_SECONDS / 3600.0,
+    max_gpu_hours=0.0,
+    max_llm_usd=0.0,
+    caps=RosterCaps(3, 2, 8),
+    judge_interval_seconds=600.0,
+)
 
 
 class RecordingStopper:
@@ -155,7 +168,19 @@ async def notebook(tmp_path: Path) -> LocalNotebook:
 
 @pytest.fixture
 def layout(tmp_path: Path) -> SessionLayout:
-    return create_session(tmp_path / "workspace", "model", CLOCK)
+    """A session directory as the run that reached CLOSE left it, the manifest its first act wrote included."""
+
+    layout = create_session(tmp_path / "workspace", "model", CLOCK)
+    SessionManifest(
+        code_version=CodeVersion("0.0", RAN_ON),
+        session_id=layout.session_id,
+        started_at=NOW,
+        deadline=NOW + BUDGET_SECONDS,
+        settings=SETTINGS,
+        metric=METRIC,
+        policy_versions={},
+    ).write(layout.manifest)
+    return layout
 
 
 AUTHOR_MODEL = "author-model"
@@ -227,6 +252,7 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     # The session wrote no learning, so the pool holds none to curate and the curator is not asked.
     assert (knowledge["lesson_curation"]["status"], knowledge["lesson_curation"]["reason"]) == (SKIPPED, NO_LESSONS)
     assert curator.calls == [] and knowledge["lessons"]["status"] == SKIPPED
+    assert breakdown["metadata"]["session"]["code_revision"] == RAN_ON
     assert breakdown["close"]["final"]["commit_id"] == CHOSEN
     assert breakdown["close"]["selection"]["chosen"]["commit"] == CHOSEN
     assert (breakdown["close"]["selection"]["metric"], breakdown["close"]["selection"]["primary_conc"]) == (METRIC, 64)
