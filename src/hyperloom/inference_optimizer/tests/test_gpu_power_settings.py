@@ -21,6 +21,7 @@ from hyperloom.common.gpu_power_settings import (
     declared_setting_problems,
     read_gpu_power_settings,
     read_node_power_settings,
+    reading_matches,
     visible_gpu_indices,
 )
 
@@ -60,8 +61,8 @@ def _no_node_command():
 def test_the_settings_are_read_from_amd_smi_json():
     settings = read_gpu_power_settings(run=_fake_run)
     assert settings == {
-        0: {"power_cap_w": 1400.0, "perf_level": "auto"},
-        1: {"power_cap_w": 1000.0, "perf_level": "determinism"},
+        0: {"power_cap_w": 1400.0, "perf_level": "auto", "sclk_max_mhz": None},
+        1: {"power_cap_w": 1000.0, "perf_level": "determinism", "sclk_max_mhz": None},
     }
 
 
@@ -75,8 +76,8 @@ def test_a_failing_amd_smi_is_an_error_not_an_empty_reading():
 
 def test_declared_settings_are_checked_per_card():
     settings = read_gpu_power_settings(run=_fake_run)
-    assert declared_setting_problems(settings, power_cap_w=1000.0, gpus={1}) == []
-    problems = declared_setting_problems(settings, power_cap_w=1000.0, perf_level="determinism")
+    assert declared_setting_problems(settings, DeclaredPowerSettings(power_cap_w=1000.0), gpus={1}) == []
+    problems = declared_setting_problems(settings, DeclaredPowerSettings(power_cap_w=1000.0, perf_level="determinism"))
     assert problems == [
         "GPU 0 power cap is 1400.0 W, declared 1000 W",
         "GPU 0 perf level is 'auto', declared 'determinism'",
@@ -116,6 +117,113 @@ def test_declared_node_settings_are_checked():
     ]
 
 
+def _clock(mhz, filled=8):
+    """amd-smi's ``metric --clock`` block: eight ``gfx_<n>`` slots, the first *filled* backed by an XCD."""
+    na = {"clk": "N/A", "min_clk": "N/A", "max_clk": "N/A"}
+    slots = {
+        f"gfx_{n}": {"clk": {"value": 1000}, "min_clk": {"value": 500}, "max_clk": {"value": mhz}}
+        for n in range(filled)
+    }
+    return {**slots, **{f"gfx_{n}": dict(na) for n in range(filled, 8)}}
+
+
+class TestSclkLimit:
+    """The graphics clock's maximum, read, recorded and asserted alongside the cap and perf level."""
+
+    def _run(self, clocks=None):
+        def _run(cmd, **_kwargs):
+            if "--clock" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, json.dumps({"gpu_data": clocks}), "")
+            return _fake_run(cmd)
+
+        return _run
+
+    def test_the_limit_is_read_from_the_filled_xcd_slots(self):
+        clocks = [{"gpu": 0, "clock": _clock(2100, filled=1)}, {"gpu": 1, "clock": _clock(2400)}]
+        settings = read_gpu_power_settings(run=self._run(clocks))
+        assert (settings[0]["sclk_max_mhz"], settings[1]["sclk_max_mhz"]) == (2100.0, 2400.0)
+
+    def test_a_declared_limit_is_checked_per_card(self):
+        assert declared_setting_problems({}, DeclaredPowerSettings(sclk_max_mhz=1500)) == [
+            "no GPU the session can use was reported by amd-smi"
+        ]
+        cards = {gpu: {"sclk_max_mhz": mhz} for gpu, mhz in enumerate([1500.0, 2400.0, None])}
+        problems = declared_setting_problems(cards, DeclaredPowerSettings(sclk_max_mhz=1500))
+        assert problems == [
+            "GPU 1 sclk max is 2400.0 MHz, declared 1500 MHz",
+            "GPU 2 sclk max is unreadable MHz, declared 1500 MHz",
+        ]
+
+    @pytest.mark.parametrize(
+        ("got", "ok"), [(1500.4, True), (1499.6, True), (1501.0, False), (None, False), (True, False)]
+    )
+    def test_a_reading_matches_only_within_rounding(self, got, ok):
+        assert reading_matches(got, 1500) is ok
+
+    def test_the_limit_is_asserted_independently_of_the_level(self, monkeypatch):
+        """A card at auto whose default limit is the declared one satisfies the declaration."""
+        from hyperloom.inference_optimizer.cli.bootstrap import resolve_gpu_power_settings
+
+        monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+        monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        cards = {0: {"power_cap_w": 1400.0, "perf_level": "auto", "sclk_max_mhz": 2400.0}}
+        record, error = resolve_gpu_power_settings(
+            DeclaredPowerSettings(sclk_max_mhz=2400), nodes=1, read=lambda: cards
+        )
+        assert (error, record["declared"]) == ("", {"sclk_max_mhz": 2400})
+
+    def test_a_limit_mismatch_after_an_apply_is_not_blamed_on_the_apply(self, monkeypatch):
+        """The apply sets the cap and level only; a limit the cards are not at was never the apply's to set."""
+        from hyperloom.inference_optimizer.cli.bootstrap import resolve_gpu_power_settings
+
+        monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+        monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        cards = {0: {"power_cap_w": 1400.0, "perf_level": "auto", "sclk_max_mhz": 2400.0}}
+        declared = DeclaredPowerSettings(power_cap_w=1000.0, sclk_max_mhz=1500)
+        _, error = resolve_gpu_power_settings(declared, nodes=1, read=lambda: cards, just_applied=True)
+        assert error == (
+            "the GPUs did not take the power settings just applied: GPU 0 power cap is 1400.0 W, declared 1000 W; "
+            "the GPUs are not at the declared power settings (set them with amd-smi before launch): "
+            "GPU 0 sclk max is 2400.0 MHz, declared 1500 MHz"
+        )
+
+    def test_a_launch_asserts_the_declared_limit(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from hyperloom.inference_optimizer.cli import bootstrap
+
+        seen: list[DeclaredPowerSettings] = []
+        monkeypatch.setattr(
+            bootstrap, "_established_gpu_power_settings", lambda declared, **kw: seen.append(declared) or ({}, "")
+        )
+        bootstrap.resolve_launch_gpu_power(SimpleNamespace(gpu_sclk_max_mhz=1500), nodes=1, owner="s")
+        assert seen[0].sclk_max_mhz == 1500
+
+    def test_a_resume_reasserts_the_archived_limit(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from hyperloom.inference_optimizer.cli import bootstrap
+
+        seen: list[DeclaredPowerSettings] = []
+        monkeypatch.setattr(
+            bootstrap, "_established_gpu_power_settings", lambda declared, **kw: seen.append(declared) or ({}, "")
+        )
+        state = SimpleNamespace(gpu_power_settings={"declared": {"sclk_max_mhz": 1500}}, nodes=1, session_id="s")
+        bootstrap.resume_gpu_power_settings(SimpleNamespace(apply_gpu_power_settings=False), state)
+        assert seen[0].sclk_max_mhz == 1500
+
+    @pytest.mark.parametrize(("value", "ok"), [("1500", True), ("1500.5", False), ("0", False), ("-1", False)])
+    def test_the_flag_takes_a_positive_whole_number_of_mhz(self, value, ok):
+        from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+        argv = ["optimize", "--model", "m", "--framework", "vllm", "--gpu-sclk-max-mhz", value]
+        if ok:
+            assert _build_parser().parse_args(argv).gpu_sclk_max_mhz == int(value)
+        else:
+            with pytest.raises(SystemExit):
+                _build_parser().parse_args(argv)
+
+
 class TestResolve:
     def _resolve(self, monkeypatch, **kw):
         from hyperloom.inference_optimizer.cli.bootstrap import resolve_gpu_power_settings
@@ -127,7 +235,7 @@ class TestResolve:
         from hyperloom.common import gpu_power_settings
 
         monkeypatch.setattr(gpu_power_settings, "read_node_power_settings", kw.pop("read_node", None) or _node_reader())
-        fields = ("power_cap_w", "perf_level", "npm", "node_power_limit_w")
+        fields = ("power_cap_w", "perf_level", "sclk_max_mhz", "npm", "node_power_limit_w")
         declared = DeclaredPowerSettings(**{key: value for key in fields if (value := kw.pop(key, None)) is not None})
         return resolve_gpu_power_settings(declared, **kw)
 
@@ -195,7 +303,7 @@ class TestResolve:
         record, error = self._resolve(monkeypatch)
         assert error == ""
         assert record["declared"] == {}
-        assert record["observed"]["1"] == {"power_cap_w": 1000.0, "perf_level": "determinism"}
+        assert record["observed"]["1"] == {"power_cap_w": 1000.0, "perf_level": "determinism", "sclk_max_mhz": None}
 
     def test_a_declared_cap_the_cards_are_not_at_refuses(self, monkeypatch):
         _, error = self._resolve(monkeypatch, power_cap_w=1000.0)

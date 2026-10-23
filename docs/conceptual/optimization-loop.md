@@ -282,16 +282,21 @@ serving card power throttled for at least 10% of the phase is listed in
 throttled share and mean clock: its throughput was set by the power cap, not by
 its clock limit. This is only reported; nothing changes the cards.
 
-The optimizer never changes power settings during a session. The power cap and
-DPM performance level decide how much of the card's throughput is available at
-what power, so they are part of the measurement contract, and setting them is
-privileged and card-wide. By default, set them with `amd-smi set --power-cap` /
-`--perf-level` before launch; `--gpu-power-cap-w` and `--gpu-perf-level` then
+The optimizer never changes power settings during a session. The power cap, the
+DPM performance level and the graphics clock's maximum (sclk) decide how much of
+the card's throughput is available at what power, so they are part of the
+measurement contract, and setting them is privileged and card-wide. By default,
+set them with `amd-smi set --power-cap` / `--perf-level` / `-L sclk max` before
+launch; `--gpu-power-cap-w`, `--gpu-perf-level` and `--gpu-sclk-max-mhz` then
 assert them, the way `--compute-partition-mode` asserts a partition mode: the
 session refuses to start (and to resume) if a card it uses is at a different
-value. The observed cap and perf level are recorded in the platform
-fingerprint whether or not they are asserted. Neither can be checked on a
-multi-node session, so asserting one there refuses.
+value. The observed cap, perf level and sclk limit are recorded in the platform
+fingerprint whether or not they are asserted. None can be checked on a
+multi-node session, so asserting one there refuses. The sclk limit is read from
+`amd-smi metric --clock`, where a limit set with `-L` shows; it is a ceiling,
+not a locked clock, so under load a card may run below it. The limit is only
+ever asserted: `--apply-gpu-power-settings` sets the cap and perf level, not the
+limit.
 
 Node Power Management (NPM, MI350 series) is the node-wide counterpart: when it
 is enabled, firmware holds the sum of every card's power to a node limit and
