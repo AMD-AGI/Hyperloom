@@ -35,16 +35,16 @@ import click
 )
 @click.option(
     "--verify-below",
-    default=0.02,
-    show_default=True,
+    default=None,
     type=click.FloatRange(min=0.0),
-    help="Time again a round whose recorded paired lower bound is below this gain (0.02 = 2%)",
+    help="Time again a round whose recorded paired lower bound is below this gain (default: every round when "
+    "several --gpus are given, else 0.02 = 2%)",
 )
 @click.option(
-    "--devices",
+    "--gpus",
     default="",
-    help="Comma-separated HIP_VISIBLE_DEVICES values, one arm timed on each at once (default: one at a time on the "
-    "inherited device)",
+    help="Comma-separated cards (HIP_VISIBLE_DEVICES), one arm timed on each at once; give several only when the "
+    "node runs this campaign alone (default: one arm at a time on the inherited card)",
 )
 @click.option(
     "--bench-timeout-sec",
@@ -58,8 +58,8 @@ def forge_ablate(
     pairs: int,
     null_control_pairs: int,
     max_hours: float,
-    verify_below: float,
-    devices: str,
+    verify_below: float | None,
+    gpus: str,
     bench_timeout_sec: int,
 ) -> None:
     """Price each kept round beside the version before it, from its recorded paired timing unless that is doubtful,
@@ -68,6 +68,7 @@ def forge_ablate(
     Writes forge_experiments/ablation.json and ablation.md and refreshes the dashboard. A rerun keeps every
     arm already priced against the same best commit.
     """
+    from kernelforge.evaluation.gpu_choice import parse_cards
     from kernelforge.loop.ablation import ABLATION_MD, AblationError, AblationOptions, ablate
     from kernelforge.loop.dashboard import publish_dashboard
     from kernelforge.loop.run_state import WorkspaceLockError
@@ -81,7 +82,7 @@ def forge_ablate(
                     pairs=pairs,
                     null_pairs=null_control_pairs,
                     verify_below=verify_below,
-                    devices=tuple(device.strip() for device in devices.split(",") if device.strip()),
+                    gpus=tuple(parse_cards(gpus)),
                     timeout_sec=bench_timeout_sec,
                 ),
             )

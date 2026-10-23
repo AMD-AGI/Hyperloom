@@ -23,9 +23,11 @@ from kernelforge.cli.lanes import LaneBinding
 from kernelforge.cli.options import (
     AgentRuntimeOptions,
     CeilingSwitch,
+    DeviceOptions,
     GpuOptions,
     _agent_runtime_options,
     _agent_runtime_overrides,
+    _device_options,
     _gpu_options,
     _resolve_skill_dirs,
     _roofline_ceiling_option,
@@ -1193,6 +1195,7 @@ class ForgeLoopRequest:
     probe: SpecialistProbeOptions
     early_stop: EarlyStopOptions
     paired: PairedKeepOptions
+    device: DeviceOptions
     baseline_json: str
     resume: bool
 
@@ -1546,6 +1549,7 @@ class ForgeLoopRequest:
             "back to FORGE_SPECIALIST_PROBE_SCRATCH_ROOT when unset.",
         ),
     ),
+    _device_options,
     option_group(
         "early_stop",
         EarlyStopOptions,
@@ -1624,6 +1628,9 @@ class ForgeLoopRequest:
 def forge_loop(request: ForgeLoopRequest):
     """Run ONE Forge IterationLoop as a standalone subprocess (CLI-ized kernel backend)."""
     workspace_dir = request.campaign.workspace_dir
+    # Before anything starts a process: every child, agents and benches alike, sees only this card.
+    gpu_choice = request.device.choice()
+    gpu_choice.pin()
     resume = request.resume
     max_hours = request.budget.max_hours
     result_json = request.artifacts.result_json
@@ -1874,6 +1881,7 @@ def forge_loop(request: ForgeLoopRequest):
     iter_config.paired_keep = request.paired.paired_keep
     iter_config.null_control_pairs = request.paired.null_control_pairs
     iter_config.null_control_every = request.paired.null_control_every
+    iter_config.gpu = gpu_choice
     iter_config.early_stop = EarlyStopPolicy(
         enabled=request.early_stop.early_stop,
         window_hours=request.early_stop.early_stop_window_hours,

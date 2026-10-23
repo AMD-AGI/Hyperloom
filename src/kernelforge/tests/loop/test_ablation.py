@@ -163,11 +163,21 @@ async def test_recorded_rounds_are_believed_unless_their_bound_is_low(tmp_path: 
 async def test_arms_are_timed_side_by_side_one_per_device(tmp_path: Path, monkeypatch) -> None:
     workspace, _ = _campaign(tmp_path)
     timed = _spy(monkeypatch)
-    report = await ablate(workspace, options=_options(devices=("0", "1")))
+    report = await ablate(workspace, options=_options(gpus=("0", "1")))
     assert report["completed"] is True
     assert {device for _, device in timed} == {"0", "1"}
     assert {tree.split("-")[-2] for tree, _ in timed} == {"0", "1"}
     assert _git(workspace, "worktree", "list").count("\n") == 1
+
+
+async def test_with_several_gpus_every_recorded_round_is_timed_again(tmp_path: Path) -> None:
+    # A recorded gain can be a phantom; several GPUs time every round in the time a few would take.
+    phantom = {"mode": "paired", "pairs": 3, "mean": 1.03, "lower": 1.028}
+    workspace, commits = _campaign(tmp_path, bars=dict.fromkeys(range(1, 5), phantom))
+    report = await ablate(workspace, options=_options(gpus=("0", "1")))
+    assert {report["ladder"][commit]["source"] for commit in commits} == {"remeasured"}
+    assert report["ladder"][commits[3]]["within_noise"] is True
+    assert report["ladder"][commits[3]]["recorded"]["mean"] == pytest.approx(0.03)
 
 
 async def test_a_rerun_prices_only_what_the_budget_did_not_reach(tmp_path: Path, monkeypatch) -> None:

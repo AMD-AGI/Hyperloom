@@ -38,6 +38,7 @@ from kernelforge.tools.git import git, git_bytes
 from kernelforge.config import Config
 from kernelforge.evaluation.correctness.canonical import accept_candidate
 from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
+from kernelforge.evaluation.gpu_choice import DEVICE_ENV, GpuChoice, free_card
 from kernelforge.loop.direction_ledger import DirectionLedger
 from kernelforge.loop.early_stop import EarlyStopPolicy, EarlyStopStanding, early_stop_standing
 from kernelforge.loop.experience import ExperienceLedger
@@ -582,6 +583,7 @@ class IterationConfig:
     serving_speedup: float | None = None
     # Stop before the budget once every known direction is mined out; off keeps the loop running through stalls.
     early_stop: EarlyStopPolicy = field(default_factory=EarlyStopPolicy)
+    gpu: GpuChoice = field(default_factory=GpuChoice)
     # Decide KEEP by timing the incumbent beside each candidate, against an A-vs-A noise floor measured the same way.
     paired_keep: bool = False
     null_control_pairs: int = 5
@@ -3490,6 +3492,20 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         )
         shown = f"{value:.4%}" if value is not None else f"not measured ({measurement.failure})"
         print(f"  [null control] A-vs-A noise floor {shown}")
+
+    async def _ensure_free_gpu(self, iteration: int) -> None:
+        """Before the round touches the device, move off a card someone else has taken (``--gpu-pool``)."""
+        current = os.environ.get(DEVICE_ENV, self.ic.gpu.gpu)
+
+        def waiting(taken: list[str]) -> None:
+            print(f"  [gpu] every card of the pool is taken {taken}; waiting {self.ic.gpu.poll_sec}s")
+            self.state_store.append_event(make_event("gpu_wait", iteration, taken=taken))
+
+        card = await free_card(self.ic.gpu, current, on_wait=waiting)
+        if card != current:
+            os.environ[DEVICE_ENV] = card
+            print(f"  [gpu] card {current or '(inherited)'} is taken; moving to card {card}")
+            self.state_store.append_event(make_event("gpu_switch", iteration, previous=current, card=card))
 
     def _ledger(self) -> DirectionLedger | None:
         """The campaign's direction ledger, kept only while early stop is on."""
@@ -6647,6 +6663,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         """
         # First, so this iteration's supervisor and planning both see what the operator posted.
         self._consume_operator_messages(iteration)
+        await self._ensure_free_gpu(iteration)
         await self._refresh_noise_floor_if_due(iteration)
         supervisor_due = False
         supervisor_reason = ""

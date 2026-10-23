@@ -54,6 +54,11 @@ from kernelforge.cli.options import AgentRuntimeOptions, _agent_runtime_options,
     help="Pairs that time the reviewed kernel beside the best, extended to five while a slowdown is not ruled out",
 )
 @click.option(
+    "--gpu",
+    default=None,
+    help="Card the review's checks and timing run on (HIP_VISIBLE_DEVICES); default: the inherited one",
+)
+@click.option(
     "--bench-timeout-sec",
     default=900,
     show_default=True,
@@ -68,6 +73,7 @@ def forge_finalize(
     guides: tuple[str, ...],
     review_rounds: int,
     pairs: int,
+    gpu: str | None,
     bench_timeout_sec: int,
     agent: AgentRuntimeOptions,
 ) -> None:
@@ -77,11 +83,13 @@ def forge_finalize(
     and finalize.md; the per-round commits stay on the forge-history branch.
     """
     from kernelforge.config import Config
+    from kernelforge.evaluation.gpu_choice import GpuChoice
     from kernelforge.finalize import FINALIZE_MD, DeliveryOptions, FinalizeError, finalize_campaign
     from kernelforge.finalize.review import make_review_fn
     from kernelforge.loop.dashboard import publish_dashboard
     from kernelforge.loop.run_state import WorkspaceLockError
 
+    GpuChoice(gpu=(gpu or "").strip()).pin()
     config = Config.from_env(workspace=workspace, **_agent_runtime_overrides(agent))
     try:
         report = asyncio.run(

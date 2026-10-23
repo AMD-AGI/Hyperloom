@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import click
 
+from kernelforge.evaluation.gpu_choice import GpuChoice, parse_cards
 from kernelforge.option_groups import option_group
 
 
@@ -82,6 +83,56 @@ def _gpu_options(gpu_type_help: str):
             help=gpu_type_help,
         ),
     )
+
+
+@dataclass(frozen=True)
+class DeviceOptions:
+    """The card a campaign works on, and the pool it moves through when someone else takes it."""
+
+    gpu_card: str | None
+    gpu_pool: str
+    gpu_free_vram_mb: int
+    gpu_poll_sec: int
+
+    def choice(self) -> GpuChoice:
+        return GpuChoice(
+            gpu=(self.gpu_card or "").strip(),
+            pool=tuple(parse_cards(self.gpu_pool)),
+            free_vram_mb=self.gpu_free_vram_mb,
+            poll_sec=self.gpu_poll_sec,
+        )
+
+
+_device_options = option_group(
+    "device",
+    DeviceOptions,
+    click.option(
+        "--gpu",
+        "gpu_card",
+        default=None,
+        help="Card to work on (HIP_VISIBLE_DEVICES for every process the campaign starts); default: the inherited one",
+    ),
+    click.option(
+        "--gpu-pool",
+        default="",
+        help="Comma-separated cards to move to, before a round, when someone else has taken the current one; "
+        "the round waits while every card of the pool is taken (default: stay on --gpu)",
+    ),
+    click.option(
+        "--gpu-free-vram-mb",
+        default=1024,
+        show_default=True,
+        type=click.IntRange(min=0),
+        help="A card with less used memory than this counts as free",
+    ),
+    click.option(
+        "--gpu-poll-sec",
+        default=60,
+        show_default=True,
+        type=click.IntRange(min=1),
+        help="How often a round waiting for a free card of the pool looks again",
+    ),
+)
 
 
 def _roofline_ceiling_option(help_text: str):

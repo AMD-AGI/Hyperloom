@@ -5,9 +5,9 @@
 
 The ladder is each kept version beside the version before it. Under paired KEEP every round was kept on exactly that
 timing, read in one window, so the ladder is read from those records; a round whose recorded lower bound is low is
-timed again before it is believed, and rounds kept without a paired timing are timed here. Then what does not pay
-is reverted from the best, alone, and every change at once (the start): a cost is how much slower the kernel runs
-without it. Arms run side by side, one per device given.
+timed again before it is believed (every round, when several GPUs time side by side), and rounds kept without a
+paired timing are timed here. Then what does not pay is reverted from the best, alone, and every change at once
+(the start): a cost is how much slower the kernel runs without it. Arms run side by side, one per GPU given.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from pathlib import Path
 from kernelforge.evaluation.benchmark.paired import measure_pairs
 from kernelforge.evaluation.benchmark.runner import BenchRun
 from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
+from kernelforge.evaluation.gpu_choice import DEVICE_ENV
 from kernelforge.evaluation.scoring import keep_t_critical, noise_floor_from_null, paired_keep_floor
 from kernelforge.loop.campaign_config import CampaignConfigStore
 from kernelforge.loop.direction_ledger import keep_gains
@@ -35,6 +36,7 @@ from kernelforge.tools.durable_io import atomic_write_text
 
 ABLATION_JSON, ABLATION_MD = "ablation.json", "ablation.md"
 ALL_OFF = "all_off"
+SINGLE_GPU_VERIFY_BELOW = 0.02
 
 
 class ArmStatus(str, Enum):
@@ -173,11 +175,19 @@ class AblationOptions:
 
     pairs: int = 3
     null_pairs: int = 5
-    # A round whose recorded one-sided lower bound sits below this gain is timed again before it is believed.
-    verify_below: float = 0.02
-    # One value of HIP_VISIBLE_DEVICES per arm timed at once; none times one arm at a time on the inherited device.
-    devices: tuple[str, ...] = ()
+    # A round whose recorded one-sided lower bound sits below this gain is timed again before it is believed. None:
+    # every round when several GPUs time side by side (as fast as a few, and a recorded gain can be a phantom),
+    # else SINGLE_GPU_VERIFY_BELOW.
+    verify_below: float | None = None
+    # One card per arm timed at once (HIP_VISIBLE_DEVICES); none times one arm at a time on the inherited device.
+    gpus: tuple[str, ...] = ()
     timeout_sec: int = 900
+
+    @property
+    def verify_threshold(self) -> float:
+        if self.verify_below is not None:
+            return self.verify_below
+        return math.inf if len(self.gpus) > 1 else SINGLE_GPU_VERIFY_BELOW
 
 
 def recorded_rung(event: dict) -> tuple[dict, dict | None] | None:
@@ -194,11 +204,11 @@ def recorded_rung(event: dict) -> tuple[dict, dict | None] | None:
 class _Slot:
     """One device, and the two trees an arm on it is timed in."""
 
-    def __init__(self, workspace: Path, index: int, device: str):
+    def __init__(self, workspace: Path, index: int, gpu: str):
         sibling = workspace.parent / f"{workspace.name}.forge-ablate-{index}"
         self.best_tree = DetachedWorktree(workspace, f"{sibling}-best")
         self.variant_tree = DetachedWorktree(workspace, f"{sibling}-variant")
-        self.env = {"HIP_VISIBLE_DEVICES": device} if device else None
+        self.env = {DEVICE_ENV: gpu} if gpu else None
 
     def remove(self) -> None:
         self.best_tree.remove()
@@ -231,7 +241,7 @@ class _Ablation:
         self.scored = frozenset(state.baseline_case_times) - frozenset(state.unscored_cases) or None
         self.snr, self.bench_repeat = config.snr_threshold, int(config.bench_repeat)
         self.driver_rel = driver.relative_to(workspace)
-        self.slots = [_Slot(workspace, index, device) for index, device in enumerate(options.devices or ("",))]
+        self.slots = [_Slot(workspace, index, gpu) for index, gpu in enumerate(options.gpus or ("",))]
         previous = self._read()
         self.report = previous if previous.get("best_commit") == self.best else {}
         self.report |= {"best_commit": self.best, "base_commit": self.base, "pairs": options.pairs}
@@ -367,7 +377,7 @@ class _Ablation:
             recorded = self._rung_from_record(commit, floor)
             if recorded is not None:
                 ladder[commit] = recorded | shape | {"source": "recorded"}
-                if recorded["cost"]["lower"] >= self.options.verify_below:
+                if recorded["cost"]["lower"] >= self.options.verify_threshold:
                     continue
             extra = {"recorded": recorded["cost"]} if recorded is not None else {}
             source = "remeasured" if recorded is not None else "measured"

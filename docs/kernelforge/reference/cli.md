@@ -176,6 +176,23 @@ a `--resume` with or without the flag continues the same campaign under the rule
 | `--null-control-pairs <n>` | 5 | Pairs of the incumbent beside itself that measure the noise floor. |
 | `--null-control-every <n>` | 0 | Re-measure the noise floor every n iterations; 0 measures it once. |
 
+### GPU
+
+By default the campaign works on whatever device it inherits. `--gpu` pins one
+card: every process the campaign starts, agents and benchmarks alike, sees only
+`HIP_VISIBLE_DEVICES=<gpu>`. With `--gpu-pool`, right before each round the
+campaign reads every card's used memory with `rocm-smi`; it keeps its card while
+that is below `--gpu-free-vram-mb`, moves to the first free card of the pool
+otherwise (`gpu_switch` event), and waits while every card of the pool is taken
+(`gpu_wait`). When `rocm-smi` cannot answer, the card stays.
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `--gpu <card>` | inherited | Card every process of the campaign sees. |
+| `--gpu-pool <cards>` | none | Comma-separated cards to move to when someone else has taken the current one. |
+| `--gpu-free-vram-mb <mb>` | `1024` | A card with less used memory than this counts as free. |
+| `--gpu-poll-sec <s>` | `60` | How often a round waiting for a free card looks again. |
+
 ### Early stop
 
 Off by default: the loop runs through stalls until its budget ends. With `--early-stop` it keeps a ledger of
@@ -261,7 +278,9 @@ version before it. Under `--paired-keep` every round was kept on exactly that
 timing, read in one window, and recorded with its one-sided 95% bounds and
 per-case gains; the ladder is read from those records at no cost. A round whose
 recorded lower bound is below `--verify-below` is timed again before it is
-believed, and a round kept without a paired timing is timed here. Each rung
+believed (with several `--gpus`, every round is: as fast as timing a few, and a
+recorded gain can be a phantom), and a round kept without a paired timing is timed
+here. Each rung
 reports its gain, the sign of its gain in every case, its changed lines, where
 the number comes from (`recorded`, `remeasured`, `measured`), and a verdict
 against the noise floor: `pays`, `within noise`, or `hurts`.
@@ -273,8 +292,8 @@ driver's correctness suite is marked `required_for_correctness` rather than
 timed, a revert that conflicts with a later change `not_separable`, and a
 variant whose driver differs `driver_changed`. The noise floor is the
 campaign's own A-vs-A null control when it ran one, and is measured here (best
-beside best) otherwise. With `--devices`, arms are timed side by side, one per
-device, each in its own pair of worktrees.
+beside best) otherwise. With `--gpus`, arms are timed side by side, one per
+GPU, each in its own pair of worktrees.
 
 Results go to `forge_experiments/ablation.json` and `ablation.md` after every
 arm, and to the dashboard. What the budget does not reach is `skipped_budget`,
@@ -288,8 +307,8 @@ running, and it refuses the same tasks as `--paired-keep`.
 | `--pairs <n>` | `3` | Pairs timed per arm. |
 | `--null-control-pairs <n>` | `5` | Pairs of the best kernel beside itself that set the noise floor. |
 | `--max-hours <h>` | `2.0` | Budget for the whole ablation. |
-| `--verify-below <f>` | `0.02` | Time again a round whose recorded paired lower bound is below this gain. |
-| `--devices <list>` | inherited device, one arm at a time | Comma-separated `HIP_VISIBLE_DEVICES` values; one arm is timed on each at once. |
+| `--verify-below <f>` | every round with several `--gpus`, else `0.02` | Time again a round whose recorded paired lower bound is below this gain. |
+| `--gpus <cards>` | inherited card, one arm at a time | Comma-separated cards; one arm is timed on each at once. Give several only when the node runs this campaign alone. |
 | `--bench-timeout-sec <s>` | `900` | Timeout of one benchmark or correctness run. |
 
 ```bash
@@ -341,6 +360,7 @@ best commit forge-loop recorded.
 | `--review-guide <file>` | none | A file of the kernel repository's own rules for its language (for SIKL's FlyDSL kernels, its `flydsl-kernel-code-cleanup` skill), read by the review first. Repeatable. |
 | `--review-rounds <n>` | `2` | Review sessions at most. |
 | `--pairs <n>` | `3` | Pairs timing the reviewed kernel beside the best. |
+| `--gpu <card>` | inherited | Card the review's checks and timing run on. |
 | `--bench-timeout-sec <s>` | `900` | Timeout of one benchmark or correctness run. |
 | `--model <id>` | provider default | Model of the review agent. |
 | `--agent-backend <name>` | `auto` | Registered local Agent provider of the review agent. |

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from kernelforge.evaluation.gpu_choice import GpuChoice
 from kernelforge.tools import process_reaping
 from kernelforge.tools.process_reaping import ReapReport
 from kernelforge.agent_backends import AgentRunResult
@@ -2405,6 +2406,7 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
         bench_timeout_sec=300,
         bench_repeat=1,
         paired_keep=False,
+        gpu=GpuChoice(),
         nproc_per_node=1,
         build_dir=None,
         baseline_wall_ms=5.0,
