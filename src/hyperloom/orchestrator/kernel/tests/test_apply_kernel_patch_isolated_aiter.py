@@ -562,6 +562,49 @@ def test_revert_exposes_runtime_jit_restore_failure(
     assert target.read_text(encoding="utf-8") == original
 
 
+def test_a_retried_revert_that_succeeds_reports_no_issues(
+    tmp_path,
+    monkeypatch,
+):
+    _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+    site = aiter_pkg.parent
+    target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
+    original = '#include <hip/hip_runtime.h>\nextern "C" void kernel() {}\n'
+    target.write_text(original, encoding="utf-8")
+    patch = tmp_path / "v1_forge.cu"
+    patch.write_text(
+        '#include <hip/hip_runtime.h>\nextern "C" void kernel() { int x = 2; }\n',
+        encoding="utf-8",
+    )
+    (aiter_pkg / "jit" / "build" / "stale.so").write_text("stale", encoding="utf-8")
+    applied = akp.apply_kernel_patch(
+        akp.KernelPatchRequest(patch_path=patch, target_file=target, backup_root=tmp_path / "backups", kernel_id="k007")
+    )
+    assert applied["status"] == "ok", applied
+    jit_build_dir = aiter_pkg / "jit" / "build"
+    attempts: list[int] = []
+
+    def _restore_once_it_is_retried(*_args, **_kwargs) -> dict:
+        attempts.append(1)
+        if len(attempts) == 1:
+            return {"status": "failed", "error": "simulated restore failure"}
+        return {"status": "ok", "restored_to": str(jit_build_dir)}
+
+    monkeypatch.setattr(akp, "_restore_aiter_jit_build", _restore_once_it_is_retried)
+
+    failed = akp.revert_kernel_patch(applied["manifest_path"])
+    retried = akp.revert_kernel_patch(applied["manifest_path"])
+
+    assert failed["status"] == "partial"
+    assert failed["revert_issues"][0]["kind"] == "jit_build_restore"
+    assert retried["status"] == "ok"
+    assert "revert_issues" not in retried
+    assert "skipped_untrusted_backups" not in retried
+    assert retried["jit_build_restore"]["status"] == "ok"
+    assert json.loads(Path(applied["manifest_path"]).read_text(encoding="utf-8"))["status"] == "reverted"
+    assert target.read_text(encoding="utf-8") == original
+
+
 def test_finalize_keeps_patch_and_deletes_local_backups(
     tmp_path,
 ):

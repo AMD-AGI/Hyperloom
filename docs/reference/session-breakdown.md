@@ -34,10 +34,55 @@ The top-level `schema_version` field is a stable string. New exports use the
 recorded-timeline wire shape:
 
 ```json
-"schema_version": "hyperloom.session_breakdown.v6.0"
+"schema_version": "hyperloom.session_breakdown.v6.1"
 ```
 
-V6 is a breaking cutover for the timeline: each action records its own event
+6.1 changes three things inside the 6 major, an exception to the compatibility
+rules below: it renames one key, removes keys no producer populated or that
+only carried a constant, and reports two unmeasured figures as null. `throughput_tok_s_per_gpu` in
+`outcome.baseline`, `outcome.final` and the `baseline` event's `measurement` is
+now `output_throughput`, and the old key is no longer written. The value is
+unchanged: the whole-server output throughput, not a per-GPU figure. Archived
+6.0 documents and documents exported by 1.1.x carry the old key, so readers must
+accept both keys or migrate. Within 6.1, `perf.output_tput_per_gpu` also carries
+its value on the `baseline` event and on stack validation rows.
+
+6.1 also removes keys that no producer ever populated. Each carries the
+disposition `removed in 6.1, never populated`:
+
+- `framework_agent` `policy.force_exit_budget_pct`, `policy.variant_timeout_sec`
+  and `policy.overtime_kill_ratio`
+- `kernel_agent` `trace_analyze_runs[].trace_validate_ref`
+- `critic_review.iteration` on framework proposals
+- `kernel_agent` `geak.product.cfg_hash` and `geak.product.final_overlay_digest`
+- `kernel_agent` `entry.budget_remaining_sec`
+- `roofline` event `ext.actions[].kernel_roofline.kernels[].rocprof_roofline`
+
+The `event_id` and `ordinal` row-scope declarations are removed from the schema
+types: they were already stripped before export and never appeared on the wire.
+`conc_sweep` `points[].budget_remaining_sec` is unchanged.
+
+Two keys that only ever carried a constant are removed with the disposition
+`removed in 6.1, constant`: `roofline` event
+`ext.actions[].kernel_roofline.kernels[].roofline_measured` (always `false`;
+`roofline_source` states whether a row's bound is analytical or a placeholder)
+and `baseline` event `ext.actions[].convergence` (always `insufficient_rounds`).
+
+Two figures are null instead of a fabricated default when they were not
+measured or not provided. `outcome.validation.attributed_gain_pct` and
+`unattributed_gain_pct` are null when no adoption could be measured, rather than
+`0.0`, and `empty` on `framework_agent` runs is null when the producer did not
+report it, rather than `false`. `kernel_agent` `entry.snapshot_staleness` is the
+string `"absent"` or `"fresh"`.
+
+Re-exporting a 6.0 session directory reads its old `baseline`
+event, so `outcome.baseline.output_throughput` is null while `outcome.final` and
+the gain keep their values, and `metadata.workflow.contract_digest` keeps the
+digest recorded at session creation rather than the one pinned by the packaged
+workflow-evaluation schema. The default output path overwrites the archived
+`<session_dir>/session_breakdown.json`; pass `--output` to keep it.
+
+V6 was the preceding cutover, for the timeline: each action records its own event
 while it runs, so an event's `start_time` is when the work began rather than
 when its artefacts were written, and the KERNEL and BASELINE projections are no
 longer emitted. Consumers that ordered events around the old collapsed windows
@@ -69,8 +114,12 @@ Compatibility rules:
   the major version. Consumers must tolerate unknown keys.
 * **Renamed, removed, or semantically changed** fields of a result section
   require a major bump; `enablement` is outside that rule, as the stability
-  guarantee below records. Only one version is written per session; there is
-  no parallel write of the previous version's file.
+  guarantee below records, and so are the 6.1 changes declared above: the
+  rename of `throughput_tok_s_per_gpu` to `output_throughput`, the removal of
+  keys no producer populated, and the null reporting of unmeasured
+  `attributed_gain_pct`, `unattributed_gain_pct` and run `empty`. Only one
+  version is written per session; there is no parallel write of the previous
+  version's file.
 * **Missing data** is always represented as `null`, `[]`, or `{}` —
   never as a default / fabricated value. Consumers MUST treat
   missing data as "not available".
@@ -89,7 +138,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
 
 ```text
 {
-  "schema_version": "hyperloom.session_breakdown.v6.0",
+  "schema_version": "hyperloom.session_breakdown.v6.1",
   "exported_at_utc": "2026-05-17T12:34:56.789Z",
   "exporter_version": "session-breakdown-1.0.0",
 
@@ -119,7 +168,7 @@ export; it was a strict subset and so disagreed with `metadata.warnings`
 about the same export.
 
 The V6 surface is identified by
-`metadata.versions.schema_version = "hyperloom.session_breakdown.v6.0"`. Startup
+`metadata.versions.schema_version = "hyperloom.session_breakdown.v6.1"`. Startup
 source events are stored in execution order under `reports/sbd_v6/timeline/`;
 writer failures are reported through `metadata.warnings` rather than being
 indistinguishable from a stage that never ran.
@@ -176,7 +225,7 @@ keep their values, with any recognizable credential inside a value masked.
 Replaying a session takes credentials from its own environment, never from the
 breakdown.
 
-`metadata.grading` — which axis this session was configured to grade on:
+`metadata.grading` — the grading mode this session was started in:
 `benchmark_mode` (`agentx` or `synthetic`), `objective`, and the `tput_guard`
 that rides along with the interactivity objective (`enabled`, `noise_pct`).
 
@@ -188,12 +237,14 @@ document is the output axis by construction, so without this block a consumer
 cannot tell the two kinds of session apart — and on the canonical corpus the
 two axes differ by roughly two orders of magnitude.
 
-This is the session-level *setting*. What a promotion was actually decided on
-is `outcome.validation.graded_on`, read off the promotion itself. On a session
-that promoted anything the two agree, because a comparison that cannot supply
-the configured axis pair fails rather than settling for another axis — nothing
-is ever promoted off-objective. Neither field resolves the other even so: a
-session can be configured for an axis and promote nothing on it.
+`grading.objective` is a mode marker written when the session starts: an
+interactivity session always carries `e2e_norm_intvty_p90`, which is not the
+axis promotions are decided on. The deciding axis is
+`outcome.validation.graded_on` (and `outcome.final.graded_on`), read off the
+promotion itself (`e2e_norm_intvty_p50` on an AgentX replay). A session that
+adopted nothing has no `graded_on`; one that adopted but never validated
+reports the adoption axis.
+
 `tput_guard.noise_pct` is null on a session that predates the band being
 recorded.
 
@@ -215,6 +266,8 @@ benchmark config path, attempt history (in case the baseline required
 retries), and the `BenchmarkInvocation` record needed to **replay**
 the exact baseline benchmark.
 
+Disposition: `baseline.throughput_tok_s_per_gpu` (6.0) → `baseline.output_throughput` (6.1).
+
 `baseline.invocation.framework_args_source` is one of:
 
 * `log_non_default_args`: Most authoritative (parsed from the
@@ -234,9 +287,11 @@ breakdown. Do not assume it contains every env var the session ran with.
 `baseline.perf` and `final.perf` carry the AgentX axes the measurement
 reported, each an explicit `null` where nothing measured it. Absent would
 be indistinguishable from an axis the framework failed to report, and zero
-reads as "measured, and it was zero", so a synthetic run publishes nulls
-throughout. The set is `common/perf_metric.py:GRADED_AXIS_KEYS`, which both
-publishing projections read, and it is grouped as:
+reads as "measured, and it was zero", so the AgentX-only axes stay `null`
+in a synthetic run, while `output_tput_per_gpu` carries a value whenever the
+tensor-parallel degree is known. The set is
+`common/perf_metric.py:GRADED_AXIS_KEYS`, which both publishing projections
+read, and it is grouped as:
 
 * the objective and its two guards — `e2e_norm_intvty_p50`,
   `e2e_norm_intvty_p90`, `output_tput_per_gpu`;
@@ -270,20 +325,21 @@ downstream consumers:
 
 | Field                              | Meaning                                                                                   |
 |------------------------------------|-------------------------------------------------------------------------------------------|
-| `throughput_tok_s_per_gpu`         | Validated end-of-session throughput. The headline number. See the scope note below.        |
-| `cumulative_gain_pct_validated`    | Validated cumulative gain vs `baseline.throughput_tok_s_per_gpu`. The headline %.          |
+| `output_throughput`                | Validated end-of-session output throughput. The headline number. See the scope note below. |
+| `cumulative_gain_pct_validated`    | Validated cumulative gain vs `baseline.output_throughput`. The headline %.                   |
 | `action_path`                      | Ordered list of `action:variant` labels that made the final stack — the recipe.            |
 | `extra_server_args`                | The exact extra args needed to reproduce the final config.                                 |
 | `extra_envs`                       | The exact env overrides needed to reproduce the final config (allowlisted, no secrets).    |
 | `invocation`                       | Same shape as `baseline.invocation`; lets a consumer replay the final benchmark.          |
 | `closing_phase_entered`            | True iff Coordinator entered the closing phase cleanly (vs SIGTERM exit).                  |
 
-> **Scope of `throughput_tok_s_per_gpu`: whole-server total in `throughput_unit`, not per-GPU.**
-> The key name is a misnomer held fixed by this contract; do not divide it by a GPU count.
+> **Scope of `output_throughput`: whole-server total in `throughput_unit`, not per-GPU.**
+> Do not divide it by a GPU count.
 > `cumulative_gain_pct_validated` is a ratio of two such numbers and is unaffected.
+> Disposition: `throughput_tok_s_per_gpu` (6.0) → `output_throughput` (6.1).
 
 > Consumer best practice: index on
-> `(session.session_id, final.throughput_tok_s_per_gpu,
+> `(session.session_id, final.output_throughput,
 > final.cumulative_gain_pct_validated, workload.model_name,
 > workload.gpu_type)`. Everything else is detail.
 
@@ -361,14 +417,14 @@ The following example shows a complete `session_breakdown.json` for a finished G
 
 ```text
 {
-  "schema_version": "hyperloom.session_breakdown.v6.0",
+  "schema_version": "hyperloom.session_breakdown.v6.1",
   "exported_at_utc": "2026-05-17T14:02:15.001Z",
   "exporter_version": "session-breakdown-1.0.0",
 
   "metadata": {
     "exported_at_utc": "2026-05-17T14:02:15.001Z",
     "versions": {
-      "schema_version": "hyperloom.session_breakdown.v6.0",
+      "schema_version": "hyperloom.session_breakdown.v6.1",
       "hyperloom": "a1b2c3d",
       "framework": "sglang",
       "framework_version": "0.5.21",
@@ -434,14 +490,14 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "stage_reached": "CLOSE",
 
     "baseline": {
-        "throughput_tok_s_per_gpu": 100.0,
+        "output_throughput": 100.0,
       "accuracy": 0.812,
       "ttft_mean_ms": 0.0,
       "e2el_mean_ms": 0.0,
       "perf": {
         "e2e_norm_intvty_p50": null,
         "e2e_norm_intvty_p90": null,
-        "output_tput_per_gpu": null,
+        "output_tput_per_gpu": 25.0,
         "duration_seconds": null,
         "request_error_rate": null,
         "ttft_p50_ms": null,
@@ -476,12 +532,12 @@ The following example shows a complete `session_breakdown.json` for a finished G
     },
 
     "final": {
-      "throughput_tok_s_per_gpu": 150.0,
+      "output_throughput": 150.0,
       "graded_on": "output_throughput",
       "perf": {
         "e2e_norm_intvty_p50": null,
         "e2e_norm_intvty_p90": null,
-        "output_tput_per_gpu": null,
+        "output_tput_per_gpu": 37.5,
         "duration_seconds": null,
         "request_error_rate": null,
         "ttft_p50_ms": null,
@@ -603,7 +659,11 @@ The Hyperloom team commits to the following compatibility guarantees.
 1. Never removing or renaming a documented field of a result section within
    a major `schema_version`. Such changes require a major bump, as the `v5.0`
    optimization cutover did, and every removed or renamed field is given a
-   disposition in the section it left. `enablement` is outside this guarantee:
+   disposition in the section it left. The 6.1 changes (the
+   rename of `throughput_tok_s_per_gpu` to `output_throughput`, the removal of
+   keys no producer populated, and null reporting of unmeasured
+   `attributed_gain_pct`, `unattributed_gain_pct` and run `empty`) are a
+   declared exception to this rule, recorded under Versioning. `enablement` is outside this guarantee:
    it reports on the runtime a session built rather than on its results, is
    emitted as `{}` whenever no enablement ran, and its fields move with the
    runtime they describe — every field the round ledger replaced is still given

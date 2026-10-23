@@ -12,7 +12,6 @@ import logging
 import os
 import re
 import shutil
-import stat
 from pathlib import Path
 from typing import Optional
 
@@ -42,12 +41,7 @@ def _is_staged_harness_name(name: str) -> bool:
     return bool(_STAGED_HARNESS_RE.match(name))
 
 
-def _prepare_author_harness(
-    author_harness_path: str,
-    harness_path: str,
-    *,
-    inherited: bool,
-) -> tuple[bool, str, bool]:
+def _prepare_author_harness(author_harness_path: str) -> tuple[bool, str, bool]:
     """Prepare the in-worktree harness target without exposing an outside path."""
     if not author_harness_path:
         return True, "", False
@@ -59,11 +53,6 @@ def _prepare_author_harness(
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists() or target.is_symlink():
             return False, "author harness staging target already exists", True
-        if inherited:
-            source = Path(harness_path)
-            if not source.is_file():
-                return True, "", False
-            shutil.copy2(source, target)
     except OSError as exc:
         if created_parent:
             with contextlib.suppress(OSError):
@@ -72,14 +61,8 @@ def _prepare_author_harness(
     return True, "", False
 
 
-def _finish_author_harness(
-    author_harness_path: str,
-    harness_path: str,
-    *,
-    inherited: bool,
-    author_ok: bool,
-) -> tuple[bool, str]:
-    """Publish a fresh harness, verify an inherited one, and remove staging."""
+def _finish_author_harness(author_harness_path: str, harness_path: str, *, author_ok: bool) -> tuple[bool, str]:
+    """Publish the authored harness and remove staging."""
     if not author_harness_path:
         return True, ""
     target = Path(author_harness_path)
@@ -87,16 +70,7 @@ def _finish_author_harness(
     ok = True
     reason = ""
     try:
-        if inherited:
-            if not target.is_file() or not final.is_file():
-                ok = False
-                reason = "inherited harness disappeared during authoring"
-            elif target.read_bytes() != final.read_bytes() or stat.S_IMODE(target.stat().st_mode) != stat.S_IMODE(
-                final.stat().st_mode
-            ):
-                ok = False
-                reason = "author modified the inherited harness"
-        elif author_ok and target.is_file():
+        if author_ok and target.is_file():
             final.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(target, final)
     except OSError as exc:
@@ -195,7 +169,7 @@ def _author_baseline_harness(
     for attempt in range(1, attempts + 1):
         Path(harness_path).unlink(missing_ok=True)
         staging = _author_harness_target(repo_root, out)
-        ready, reason, _deterministic = _prepare_author_harness(staging, harness_path, inherited=False)
+        ready, reason, _deterministic = _prepare_author_harness(staging)
         if not ready:
             return False, reason
         target = staging or harness_path
@@ -212,7 +186,7 @@ def _author_baseline_harness(
             AuthorWorkspace(workdir=repo_root or ".", log_path=str(out / "harness_author.log"), target_files=[target]),
             dataclasses.replace(agent, timeout_s=_agent_timeout_sec()),
         )
-        published, error = _finish_author_harness(staging, harness_path, inherited=False, author_ok=rc == 0)
+        published, error = _finish_author_harness(staging, harness_path, author_ok=rc == 0)
         if rc != 0:
             return False, f"harness author exited {rc}"
         if not published:

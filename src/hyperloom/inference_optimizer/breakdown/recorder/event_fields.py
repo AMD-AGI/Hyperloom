@@ -33,6 +33,7 @@ __all__ = [
     "now_iso_seconds",
     "summarize_hot_kernels",
     "summarize_warnings",
+    "text",
     "text_or_none",
     "worst_status",
 ]
@@ -95,6 +96,11 @@ def bool_or_none(value: Any) -> bool | None:
     return None if value is None else bool(value)
 
 
+def text(value: Any) -> str:
+    """Coerce to a plain string, treating ``None`` as empty."""
+    return str(value or "")
+
+
 def text_or_none(value: Any) -> str | None:
     """Distinguish "not recorded" from "recorded empty".
 
@@ -110,9 +116,10 @@ def text_or_none(value: Any) -> str | None:
 def graded_axes(source: Any) -> dict[str, Any]:
     """The graded axes a measurement carries, as explicit nulls where it carries none.
 
-    A synthetic run measures none of them and an AgentX round can be missing any one. Absent keys would leave a
-    reader unable to tell an unmeasured axis from one the framework failed to report, and zero reads as "measured,
-    and it was zero", so every axis is always present.
+    A synthetic run measures none of the AgentX-only axes (``output_tput_per_gpu`` is set whenever TP is known) and
+    an AgentX round can be missing any one. Absent keys would leave a reader unable to tell an unmeasured axis from
+    one the framework failed to report, and zero reads as "measured, and it was zero", so every axis is always
+    present.
 
     Recorded beside a round's output-axis figures rather than instead of them: an AgentX session is ranked on the
     median interactivity percentile with the slow tail and output throughput held as guards, and none of that is

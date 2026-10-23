@@ -99,7 +99,7 @@ def render_conc_sweep_curve(
     """Render a throughput-vs-interactivity PNG from a ``conc_sweep_summary.json``."""
     try:
         return _render(payload, Path(out_path), options)
-    except Exception:
+    except (ImportError, OSError):
         log.debug("conc_sweep_plot: render failed", exc_info=True)
         return None
 
@@ -214,6 +214,19 @@ def _ceiling_series(
     return [p[0] for p in pairs], [p[1] for p in pairs]
 
 
+def _chart_title(options: ConcCurveOptions, agentic: bool) -> str:
+    parts = [options.model_label or "Model"]
+    if options.gpu_label:
+        parts.append(options.gpu_label)
+    # An agentic replay takes its request shapes from the trace corpus, so the session's ISL/OSL are inert
+    # placeholders and naming them would misreport what was measured.
+    if agentic:
+        parts.append("Agentic")
+    elif options.isl or options.osl:
+        parts.append(f"ISL={options.isl} OSL={options.osl}")
+    return "Concurrency Sweep — Throughput vs Interactivity\n" + " | ".join(parts)
+
+
 def _render(payload: dict[str, Any] | str | Path, out_path: Path, options: ConcCurveOptions) -> Path | None:
     import matplotlib
 
@@ -228,11 +241,8 @@ def _render(payload: dict[str, Any] | str | Path, out_path: Path, options: ConcC
     agentic = is_agentx_mode(data.get("benchmark_mode"))
     axes = _axes_for_metric(metric, tp_eff)
 
-    baseline_pts = (data.get("baseline") or {}).get("points") or []
-    optimized_pts = (data.get("optimized") or {}).get("points") or []
-
-    bx, by, bc = _arm_series(baseline_pts, tp_eff, axes)
-    ox, oy, oc = _arm_series(optimized_pts, tp_eff, axes)
+    bx, by, bc = _arm_series((data.get("baseline") or {}).get("points") or [], tp_eff, axes)
+    ox, oy, oc = _arm_series((data.get("optimized") or {}).get("points") or [], tp_eff, axes)
 
     # Need at least the baseline to draw something useful.
     if not bx and not ox:
@@ -254,8 +264,7 @@ def _render(payload: dict[str, Any] | str | Path, out_path: Path, options: ConcC
     # The roofline is a decode-only output_throughput bound computed from the session's ISL/OSL, and
     # ``_ceiling_series`` returns it in that axis pair's units.
     if options.draw_ceiling and not agentic and metric == GRADED_OUTPUT:
-        ceiling_data = data.get("roofline_ceiling") or {}
-        cx, cy = _ceiling_series(ceiling_data, tp_eff)
+        cx, cy = _ceiling_series(data.get("roofline_ceiling") or {}, tp_eff)
         if cx:
             ax.plot(cx, cy, "--", color=ceiling_c, linewidth=1.2, label="Theoretical peak (roofline)")
 
@@ -280,20 +289,7 @@ def _render(payload: dict[str, Any] | str | Path, out_path: Path, options: ConcC
     ax.set_xlabel(axes.x_label, fontsize=10, color=fg)
     ax.set_ylabel(axes.y_label, fontsize=10, color=fg)
 
-    title_parts = [options.model_label or "Model"]
-    if options.gpu_label:
-        title_parts.append(options.gpu_label)
-    # An agentic replay takes its request shapes from the trace corpus, so the session's ISL/OSL are inert
-    # placeholders and naming them would misreport what was measured.
-    if agentic:
-        title_parts.append("Agentic")
-    elif options.isl or options.osl:
-        title_parts.append(f"ISL={options.isl} OSL={options.osl}")
-    ax.set_title(
-        "Concurrency Sweep — Throughput vs Interactivity\n" + " | ".join(title_parts),
-        fontsize=11,
-        color=fg,
-    )
+    ax.set_title(_chart_title(options, agentic), fontsize=11, color=fg)
 
     ax.grid(True, alpha=0.3, color=grid_c)
     ax.tick_params(colors=fg)

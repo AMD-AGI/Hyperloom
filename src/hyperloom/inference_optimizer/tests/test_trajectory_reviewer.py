@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import pytest
+
 from hyperloom.orchestrator.knowledge.trajectory_reviewer import (
     _exhausted_clusters,
     _stalled_cycle_count,
@@ -184,16 +186,6 @@ def test_build_trajectory_digest_with_dead_clusters(tmp_path):
     assert "non-promoting attempts" in result
 
 
-def test_load_journal_entries_is_empty_for_a_corrupt_journal(tmp_path):
-    """A journal that cannot be parsed yields an empty entry list."""
-    from hyperloom.orchestrator.knowledge import trajectory_reviewer as tr
-
-    path = tr.Journal._journal_path(tmp_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{not json", encoding="utf-8")
-    assert tr._load_journal_entries(tmp_path, _FakeState()) == []
-
-
 def test_build_trajectory_digest_snaps_without_direction_returns_empty(tmp_path):
     """Snapshots present but no dominant direction + no dead/stall -> ""."""
     # A snapshot dominant_direction cannot resolve, with no stall and no exhausted clusters, produces no lines ->
@@ -207,8 +199,8 @@ def test_build_trajectory_digest_snaps_without_direction_returns_empty(tmp_path)
     assert result == ""
 
 
-def test_build_trajectory_digest_outer_exception_returns_empty(tmp_path, monkeypatch):
-    """An unexpected error inside the digest builder is swallowed."""
+def test_build_trajectory_digest_propagates_builder_failure(tmp_path, monkeypatch):
+    """A failure inside the digest builder reaches the caller, which owns the advisory fallback."""
     from hyperloom.orchestrator.knowledge import trajectory_reviewer as tr
 
     def boom(*_a, **_k):
@@ -216,4 +208,5 @@ def test_build_trajectory_digest_outer_exception_returns_empty(tmp_path, monkeyp
 
     monkeypatch.setattr(tr, "_exhausted_clusters", boom)
     state = _FakeState(macro_cycle=1, explore_search={})
-    assert build_trajectory_digest(tmp_path, state) == ""
+    with pytest.raises(RuntimeError, match="kaboom"):
+        build_trajectory_digest(tmp_path, state)

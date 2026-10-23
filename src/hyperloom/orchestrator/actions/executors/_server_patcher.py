@@ -182,6 +182,18 @@ def _subdir_is_release_branch(name: str) -> bool:
     return name.endswith(f"_{_RELEASE_BRANCH_SUFFIX}")
 
 
+def _nearest_not_newer(available: dict[tuple[int, ...], Path], running: tuple[int, ...]) -> Path | None:
+    """The newest entry not newer than ``running``, preferring its own minor series."""
+    if len(running) >= 2:
+        same_minor = [vt for vt in available if vt[:2] == running[:2] and vt <= running]
+        if same_minor:
+            return available[max(same_minor)]
+    not_higher = [vt for vt in available if vt <= running]
+    if not_higher:
+        return available[max(not_higher)]
+    return None
+
+
 def _resolve_versioned_patches_dir(
     patches_root: Path,
     version: str,
@@ -217,16 +229,7 @@ def _resolve_versioned_patches_dir(
         if vt in available and _subdir_is_release_branch(d.name) is not want_branch:
             continue
         available[vt] = d
-    if not available:
-        return None
-    if len(running) >= 2:
-        same_minor = [vt for vt in available if vt[:2] == running[:2] and vt <= running]
-        if same_minor:
-            return available[max(same_minor)]
-    not_higher = [vt for vt in available if vt <= running]
-    if not_higher:
-        return available[max(not_higher)]
-    return None
+    return _nearest_not_newer(available, running)
 
 
 # Public API
@@ -298,7 +301,7 @@ def _detect_installed_sglang_version() -> str | None:
     """Return the locally-installed SGLang version, or ``None`` if unimportable."""
     try:
         import sglang  # type: ignore[import-not-found]
-    except Exception:  # noqa: BLE001
+    except (ImportError, OSError):
         return None
     return (getattr(sglang, "__version__", "") or "").strip() or None
 
@@ -326,14 +329,9 @@ def resolve_sglang_patch_set() -> str:
 
 def _gc_patch_deferred_to_pods() -> bool:
     """True on a multi-node controller, where the pod fan-out applies the patch."""
-    try:
-        from ._multi_node_env import is_multi_node
-    except Exception:  # noqa: BLE001
-        return False
-    try:
-        return bool(is_multi_node())
-    except Exception:  # noqa: BLE001
-        return False
+    from ._multi_node_env import is_multi_node
+
+    return is_multi_node()
 
 
 def _ensure_sglang_gc_patched(
@@ -468,16 +466,7 @@ def _resolve_vllm_patch_file(patches_dir: Path, version: str) -> Path | None:
             if vt and vt in available:
                 return available[vt]
     running = _version_tuple(version)
-    if running is None:
-        return None
-    if len(running) >= 2:
-        same_minor = [vt for vt in available if vt[:2] == running[:2] and vt <= running]
-        if same_minor:
-            return available[max(same_minor)]
-    not_higher = [vt for vt in available if vt <= running]
-    if not_higher:
-        return available[max(not_higher)]
-    return None
+    return _nearest_not_newer(available, running) if running else None
 
 
 def _probe_isolated_vllm() -> tuple[str, Path] | None:

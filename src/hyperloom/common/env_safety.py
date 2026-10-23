@@ -12,6 +12,7 @@ import logging
 import os
 import re
 from collections.abc import Mapping
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +76,13 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
         "LLM_PROXY_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_CUSTOM_HEADERS",
+        # Hosted measurement: a sandbox API key per role, the application's MCP token and the path of a sealed
+        # runner's signing key. Only a name listed here is removed from a child process's environment.
+        "HYPERLOOM_MCP_TOKEN",
+        "HYPERLOOM_SANDBOX_KEY_DEV",
+        "HYPERLOOM_SANDBOX_KEY_MEASUREMENT",
+        "HYPERLOOM_SANDBOX_KEY_SUBRUN",
+        "HYPERLOOM_SIGNING_KEY_FILE",
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
@@ -422,6 +430,46 @@ def filter_untrusted_env_mapping(
     return allowed, dropped
 
 
+# Env vars whose value names a config file the serving stack reads unconditionally: aiter's tuned-GEMM loader skips
+# its merge default and pd.read_csv's exactly the AITER_CONFIG_* path when one is set, so a missing file kills the
+# server at config load instead of falling back to the default table. Values that are not file paths (e.g. geak's
+# JSON-payload AITER_CONFIG) do not carry the trailing underscore and stay untouched.
+FILE_REFERENCING_ENV_PREFIXES: tuple[str, ...] = ("AITER_CONFIG_",)
+
+
+def _is_file(path: str) -> bool:
+    # Path.is_file() raises for an unreadable parent or an overlong name (before Python 3.14); such a path is not a
+    # file the server can read either, and one proposal must not crash what checks it.
+    try:
+        return Path(path).is_file()
+    except OSError:
+        return False
+
+
+def ungrounded_env_file_reason(envs: Mapping[str, object] | None) -> str | None:
+    """Return why ``envs`` cannot be served if one names a config file that does not exist, else ``None``.
+
+    Grounds file-like env values the way patch targets are grounded: a proposal may point a config env at an
+    artifact only a later (possibly rejected) authoring step would create, and the server would die at config load.
+    The check is existence-only; anything already on disk (a promoted, durable artifact) passes. A set value is a
+    ``:``-joined list of paths (see ``csvs_aiter_will_load``), so every non-empty element must exist, not only the
+    first.
+    """
+    for raw_key, raw_value in (envs or {}).items():
+        key = str(raw_key or "").strip().upper()
+        value = str(raw_value or "").strip()
+        if not key.startswith(FILE_REFERENCING_ENV_PREFIXES) or not value:
+            continue
+        missing = [p for p in (part.strip() for part in value.split(":")) if p and not _is_file(p)]
+        if missing:
+            return (
+                f"{key} points at {value}, whose element(s) {':'.join(missing)} do not exist; the server would read it "
+                "unconditionally and die at config load. Point it at a file a stage wrote (the gemm_tuning action "
+                "writes tuned-GEMM CSVs) or leave it unset to use the default config table."
+            )
+    return None
+
+
 OPERATOR_EXTRA_ENV_VAR = "INFERENCE_OPTIMIZER_EXTRA_ENV"
 
 
@@ -517,6 +565,7 @@ __all__ = [
     "BLOCKED_EXTERNAL_ENV_NAMES",
     "BLOCKED_UNTRUSTED_ENV_NAMES",
     "BLOCKED_VARIANT_ENV_NAMES",
+    "FILE_REFERENCING_ENV_PREFIXES",
     "GPU_MASK_ENV_NAMES",
     "OPERATOR_EXTRA_ENV_VAR",
     "SENSITIVE_ENV_NAME_MARKERS",
@@ -534,5 +583,6 @@ __all__ = [
     "redact_secret_values",
     "scrub_benchmark_process_env",
     "scrub_child_process_env",
+    "ungrounded_env_file_reason",
     "valid_env_key",
 ]

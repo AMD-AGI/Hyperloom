@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -55,7 +56,7 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
                 **event,
             }
             append_jsonl(audit_path, row, make_parents=True, fmt=JsonLineFormat(sort_keys=True))
-        except Exception:
+        except (OSError, TypeError, ValueError):
             log.debug("recipe_snapshot audit append failed", exc_info=True)
         # The same hook feeds the warm_start event, which claims only the reads
         # served while T0's own lookup is open. Kept separate from the append
@@ -90,6 +91,24 @@ def _build_recipe_kb_dispatcher(
     return kb
 
 
+def _mirror_stack_fingerprint_meta(
+    state: SharedState,
+    stack_fp: Mapping[str, Any],
+    image_digest: str,
+) -> None:
+    """Copy usable stack fingerprint fields onto SharedState for the CLOSE-time recipe write."""
+    if not stack_fp:
+        return
+    merged_meta = dict(state.stack_fingerprint_meta)
+    for key, value in stack_fp.items():
+        if value not in (None, "", "unknown"):
+            merged_meta[str(key)] = value
+    if image_digest and image_digest != "unknown":
+        merged_meta["image_digest"] = image_digest
+    if merged_meta:
+        state.stack_fingerprint_meta = merged_meta
+
+
 def _bootstrap_recipe_kb(
     args: argparse.Namespace,
     *,
@@ -103,7 +122,6 @@ def _bootstrap_recipe_kb(
         return None
 
     kb = _build_recipe_kb_dispatcher(args)
-
     state = SharedState.load_or_init(session_dir)
     workload = (
         state.model_name
@@ -114,16 +132,7 @@ def _bootstrap_recipe_kb(
     hw = state.gpu_type or manifest.get("gpu_type", "") or "unknown_gpu"
     stack_fp = manifest.get("stack_fingerprint") or {}
     image_digest = manifest.get("image") or ""
-    # Mirror version + image fingerprint onto SharedState for the CLOSE-time recipe write.
-    if isinstance(stack_fp, dict) and stack_fp:
-        merged_meta = dict(getattr(state, "stack_fingerprint_meta", {}) or {})
-        for key, value in stack_fp.items():
-            if value not in (None, "", "unknown"):
-                merged_meta[str(key)] = value
-        if image_digest and image_digest != "unknown":
-            merged_meta["image_digest"] = image_digest
-        if merged_meta:
-            state.stack_fingerprint_meta = merged_meta
+    _mirror_stack_fingerprint_meta(state, stack_fp, image_digest)
     extra_attrs = {
         "framework_name": state.framework or manifest.get("framework", ""),
         "model_class": state.model_class or "",
@@ -150,11 +159,7 @@ def _bootstrap_recipe_kb(
                 )
                 args.kb_degraded_reason = getattr(args, "kb_degraded_reason", None) or "recipe_scope_invalid"
                 return kb
-            t0_kb = RemoteWarmRecipeAdapter(
-                HyperloomRemoteKB.from_env(),
-                warm_start_dir,
-                recipe_scope,
-            )
+            t0_kb = RemoteWarmRecipeAdapter(HyperloomRemoteKB.from_env(), warm_start_dir, recipe_scope)
             _publish_section_dirs(session_dir, warm_start_dir)
         else:
             _attach_recipe_audit_hook(kb, session_dir)
@@ -174,7 +179,8 @@ def _bootstrap_recipe_kb(
         )
         if kb is None:
             print("Recipe KB       : REMOTE (KB Store current Recipe warm replay)")
-    except Exception as exc:  # noqa: BLE001 — defensive
+    except Exception as exc:
+        log.warning("T0 recipe-snapshot anchor failed mid-flight: %s", exc, exc_info=True)
         print(
             f"WARNING: T0 recipe-snapshot anchor failed mid-flight: {exc}\nContinuing without warm-start.",
             file=sys.stderr,

@@ -12,9 +12,9 @@ import tempfile
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from kernelforge.llm.git import git, git_async
+from kernelforge.tools.git import git, git_async
 
-from kernelforge.llm.process_reaping import (
+from kernelforge.tools.process_reaping import (
     ReapReport,
     install_child_subreaper,
     reap_processes_under,
@@ -49,6 +49,7 @@ class LaneResult:
     plan: str
     diff: str = ""
     error: str = ""
+    agent_profile_id: str = ""
     # What this lane's teardown found, carried structured rather than folded
     # into ``error``. The two say different things to different readers: the
     # error is why THIS lane produced nothing, which costs the round one
@@ -324,6 +325,7 @@ async def run_lanes(
                 # that cost hours as a deliberate no-op.
                 diff = _tracked_diff(lane_dir)
             except Exception as error:  # noqa: BLE001 - reported as a lost lane
+                log.warning("fanout lane %s lost: %s", lane.lane_id, error)
                 return LaneResult(
                     lane_id=lane.lane_id,
                     plan=lane.plan,

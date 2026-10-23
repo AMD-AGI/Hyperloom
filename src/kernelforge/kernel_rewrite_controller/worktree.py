@@ -16,11 +16,11 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
-from kernelforge.llm.git import GitError, git
-from kernelforge.llm.workspace_policy import FORGE_LOOP_OUTPUT_DIRNAME
+from kernelforge.tools.git import GitError, git
+from kernelforge.workspace.edit_policy import FORGE_LOOP_OUTPUT_DIRNAME
 from kernelforge.loop.editable_repo import (
     RepoLock,
     acquire_repo_lock,

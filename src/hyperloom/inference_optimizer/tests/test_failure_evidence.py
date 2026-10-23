@@ -123,6 +123,7 @@ class TestFailureFromVariantOutcome:
             "error_class": "server_init_dead",
             "error_excerpt": "AssertionError: batch_size == 1",
             "reason": "warmup_failed",
+            "failure_attribution": FAILURE_ATTRIBUTION_UNKNOWN,
             "server_log_path": "/runs/v00/server.log",
             "workspace": "/runs/v00",
             "raw_result_path": None,
@@ -155,7 +156,11 @@ class TestFailureFromVariantOutcome:
             "variant",
         ):
             assert key in fe, f"missing key: {key}"
-        assert fe["attribution"] == FAILURE_ATTRIBUTION_UNKNOWN
+
+    def test_attribution_is_the_one_the_producer_classified(self):
+        vo = self._make_vo(error_class="capability_unsupported", failure_attribution=FAILURE_ATTRIBUTION_ENVIRONMENT)
+        fe = failure_from_variant_outcome(task_id="t1", round_id="r1", vo=vo)
+        assert fe["attribution"] == FAILURE_ATTRIBUTION_ENVIRONMENT
 
     def test_stage_defaults_to_decision_when_absent(self):
         vo = self._make_vo()

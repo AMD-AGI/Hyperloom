@@ -73,7 +73,6 @@ class _StubTaskRegistry:
 
 @pytest.fixture
 def coord(tmp_path: Path, monkeypatch) -> Coordinator:
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = SharedState(
@@ -107,9 +106,7 @@ def test_prelude_initial_roofline_task_contract(coord: Coordinator):
         "unset_envs": ["OLD_BACKEND"],
         "args_mode": "replace",
     }
-    coord.shared_state.last_baseline = {
-        "benchmark_script": "magpie_serving_bench.sh",
-    }
+    coord.shared_state.baseline_benchmark_script = "magpie_serving_bench.sh"
 
     task = asyncio.run(
         coord.phase_prelude.enqueue_internal_analysis_task(reason="prelude_initial"),
@@ -146,6 +143,64 @@ def test_prelude_initial_roofline_uses_baseline_server_args(
     assert task.params["base_extra_args"] == "--attention-backend AITER"
     assert "--enable-torch-compile" not in task.params["base_extra_args"]
     assert "fp8" not in task.params["base_extra_args"]
+
+
+def _anchor_baseline_yaml(state: SharedState, tmp_path: Path, args: str) -> None:
+    cfg = tmp_path / "baseline_anchor.yaml"
+    cfg.write_text(f"benchmark:\n  envs:\n    EXTRA_SGLANG_ARGS: '{args}'\n", encoding="utf-8")
+    state.baseline_config_path = str(cfg)
+
+
+def test_prelude_initial_roofline_boots_the_anchor_being_promoted(coord: Coordinator, tmp_path: Path):
+    """Promotion enqueues this roofline before ``last_baseline`` records the anchor, which still names the failed try."""
+    state = coord.shared_state
+    failed = tmp_path / "failed.yaml"
+    failed.write_text("benchmark:\n  envs:\n    EXTRA_SGLANG_ARGS: '--context-length 6144'\n", encoding="utf-8")
+    state.last_baseline = {"status": "failed", "extras": {"materialized_config": str(failed)}}
+    _anchor_baseline_yaml(state, tmp_path, "--dsa-decode-backend tilelang --context-length 6144")
+
+    task = asyncio.run(coord.phase_prelude.enqueue_internal_analysis_task(reason="prelude_initial"))
+
+    assert task.params["base_extra_args"] == "--dsa-decode-backend tilelang --context-length 6144"
+
+
+@pytest.mark.parametrize(
+    ("current_best", "expected"),
+    [
+        ({"action": "baseline", "tput": 100.0}, "--dsa-decode-backend tilelang --context-length 6144"),
+        (
+            {
+                "action": "explore",
+                "tput": 110.0,
+                "extra_server_args": "--context-length 8192 --chunked-prefill-size 8192",
+            },
+            "--dsa-decode-backend tilelang --context-length 6144 --context-length 8192 --chunked-prefill-size 8192",
+        ),
+        (
+            {
+                "action": "explore",
+                "extra_server_args": "--chunked-prefill-size 8192",
+                "remove_args": ["--context-length"],
+            },
+            "--dsa-decode-backend tilelang --chunked-prefill-size 8192",
+        ),
+        (
+            {"action": "explore", "extra_server_args": "--tp 2", "args_mode": "replace"},
+            "--tp 2",
+        ),
+    ],
+    ids=["baseline", "delta-overrides", "removal", "replace-snapshot"],
+)
+def test_later_roofline_layers_the_stack_over_the_baseline_args(
+    coord: Coordinator, tmp_path: Path, current_best: dict[str, Any], expected: str
+):
+    """The profiler boots from the benchmark config, so a stack delta alone drops the baseline's own launch flags."""
+    _anchor_baseline_yaml(coord.shared_state, tmp_path, "--dsa-decode-backend tilelang --context-length 6144")
+    coord.shared_state.current_best = current_best
+
+    task = asyncio.run(coord.phase_prelude.enqueue_internal_analysis_task(reason="cycle_start"))
+
+    assert task.params["base_extra_args"] == expected
 
 
 def test_prelude_initial_roofline_boots_the_configuration_enablement_established(coord: Coordinator, tmp_path: Path):

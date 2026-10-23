@@ -30,6 +30,7 @@ does not land -- and can never produce an unmeasured KEEP.
 from __future__ import annotations
 
 import ast
+import logging
 import re
 import subprocess
 from collections.abc import Sequence
@@ -42,11 +43,10 @@ from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _commit_strip_level,
     _patch_touched_paths,
 )
-from hyperloom.orchestrator.actions.executors.integrate_patch import (
-    _git_apply,
-    _git_restore_to_head,
-)
+from hyperloom.orchestrator.actions.executors._patch_git import _git_apply, _git_restore_to_head
 from hyperloom.orchestrator.specialists.patch_safety import patch_file_targets
+
+log = logging.getLogger(__name__)
 
 STRATEGY_STRICT = "strict"
 STRATEGY_THREE_WAY = "three_way"
@@ -324,11 +324,11 @@ def _reject_reason(repo: Path, relative: str, resolved: str) -> str:
 def _resolver_backend() -> str:
     """The agent backend a resolver would call, or ``""`` when none can.
 
-    Forge's rewrite lane picks its backend with
-    :func:`preferred_agent_backend`, and the last rung of this ladder is a
-    forge call like any other: an OpenAI-only box has to reach Codex here for
-    the same reason it reaches Codex there, or every overlapping-region lane on
-    that box falls back to the dropped patch this module exists to stop.
+    A resolver is one completion request, not an agent session, so it follows
+    the credentials through :func:`preferred_agent_backend` whichever agent CLI
+    the roles run on, the DeepSeek Harness included. An OpenAI-only box has to
+    reach Codex here, or every overlapping-region lane on that box falls back to
+    the dropped patch this module exists to stop.
     """
     from hyperloom.common.llm_config import (
         AGENT_BACKEND_CODEX,
@@ -539,6 +539,7 @@ async def _resolve_conflicts(
             # optional SDK; its failures share no base class, and an escape
             # would abort integration with a marked-up tree still on disk.
             except Exception as failure:  # noqa: BLE001 - a broken resolver costs the lane, nothing else
+                log.warning("conflict resolver failed for %s: %s", relative, failure)
                 return strategy, f"{relative}: resolver call failed ({failure!r})"
             if error:
                 return strategy, error

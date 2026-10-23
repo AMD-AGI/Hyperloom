@@ -425,12 +425,6 @@ def test_drain_instrumentation_tolerates_an_executor_without_one():
 
     assert _drain_instrumentation(object()) is None
 
-    class _Angry:
-        def drain_instrumentation_report(self):
-            raise RuntimeError("nope")
-
-    assert _drain_instrumentation(_Angry())["error"].startswith("RuntimeError")
-
 
 # Exception-path cuda-graph classification
 @pytest.mark.asyncio
@@ -592,10 +586,10 @@ async def test_lifecycle_saves_when_session_dir_has_state_json(tmp_path):
     assert saves.count(str(session_dir)) >= 2
 
 
-# Lifecycle START defensive except
+# Lifecycle START emit
 @pytest.mark.asyncio
-async def test_lifecycle_start_emit_failure_is_swallowed(tmp_path, monkeypatch):
-    """record_lifecycle_event raising on the START emit must not abort the run."""
+async def test_lifecycle_start_emit_bug_propagates(tmp_path, monkeypatch):
+    """record_lifecycle_event is in-memory, so a failure on the START emit is a bug and surfaces."""
     state = _state()
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
@@ -613,16 +607,14 @@ async def test_lifecycle_start_emit_failure_is_swallowed(tmp_path, monkeypatch):
 
     p1, p2 = _patch_subs(_profile_success("/tmp/t.gz"), _ta_ok(md))
     executor = RooflineExecutor(shared_state=state)
-    with p1, p2:
-        result = await executor(_ctx(tmp_path))
-
-    assert result["status"] == "succeeded"
+    with p1, p2, pytest.raises(RuntimeError, match="lifecycle START boom"):
+        await executor(_ctx(tmp_path))
 
 
-# Lifecycle END defensive except
+# Lifecycle END emit
 @pytest.mark.asyncio
-async def test_lifecycle_end_emit_failure_is_swallowed(tmp_path, monkeypatch):
-    """record_lifecycle_event raising on the END emit must not fail the run."""
+async def test_lifecycle_end_emit_bug_propagates(tmp_path, monkeypatch):
+    """record_lifecycle_event is in-memory, so a failure on the END emit is a bug and surfaces."""
     state = _state()
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
@@ -640,10 +632,9 @@ async def test_lifecycle_end_emit_failure_is_swallowed(tmp_path, monkeypatch):
 
     p1, p2 = _patch_subs(_profile_success("/tmp/t.gz"), _ta_ok(md))
     executor = RooflineExecutor(shared_state=state)
-    with p1, p2:
-        result = await executor(_ctx(tmp_path))
+    with p1, p2, pytest.raises(RuntimeError, match="lifecycle END boom"):
+        await executor(_ctx(tmp_path))
 
-    assert result["status"] == "succeeded"
     assert calls["n"] >= 2
 
 
@@ -682,3 +673,13 @@ def test_make_roofline_executor_returns_instance():
     assert isinstance(exe, RooflineExecutor)
     assert exe.shared_state is state
     assert rf.RooflineExecutor is RooflineExecutor
+
+
+async def test_orphan_reap_failure_propagates(monkeypatch, tmp_path):
+    def _boom(_session_dir):
+        raise OSError("pidfile scan failed")
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._server_lifecycle.reap_orphaned_servers", _boom)
+
+    with pytest.raises(OSError, match="pidfile scan failed"):
+        await rf._reap_session_orphans(tmp_path)

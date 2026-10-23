@@ -24,13 +24,14 @@ from typing import Any, Callable
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
 from hyperloom.inference_optimizer.framework_registry import python_package
-from .agentx_context import corpus_lines, grading_lines
+from .agentx_context import corpus_lines, grading_lines, launch_ownership_lines
 from .proposal_schemas import (
     EXPLORE_VARIANT_CONTRACT,
     EXPLORE_VARIANT_EXAMPLE,
     UPSTREAM_CANDIDATE_CONTRACT,
     UPSTREAM_CANDIDATE_EXAMPLE,
 )
+from .speculative_decoding_focus import speculative_decoding_focus
 from ..measurement.runtime_findings import CORRECTNESS_FIX_MAX_DROP_PCT, CORRECTNESS_FIX_RULES
 
 from ..specialists.domains import (
@@ -731,25 +732,24 @@ def _focus_framework_rewrite_specialist(
         "of cost dominate and neither one owns a GPU kernel, so neither appears in",
         "a kernel breakdown: **redundant recomputation** and **host stalls**.",
         "",
-        "**Rewrite pattern taxonomy** (the categories the evidence is labelled with)",
-        "- **(a) memoize a step- or block-invariant computation.** A pure function",
-        "  called with arguments it already received. Cache the result.",
-        "- **(b) hoist a loop-invariant computation out of the loop.** The value is",
-        "  logically the same each iteration but rebuilt from scratch, so a cache",
-        "  keyed on tensor identity would never hit. Compute once per outer",
-        "  iteration and pass it in. **This is usually an enabler**: on its own it",
-        "  measures flat, and its value is that it makes (a) start hitting.",
-        "- **(c) eliminate a host round-trip or a device-to-host sync.** An object",
-        "  collective agreeing on a shape the ranks could derive locally; an",
+        "**Rewrite pattern taxonomy** (the categories the evidence is labelled with; the backticked name is its id)",
+        "- **(a) `memoize_invariant`: memoize a step- or block-invariant computation.** A pure function called",
+        "  with arguments it already received. Cache the result.",
+        "- **(b) `hoist_loop_invariant`: hoist a loop-invariant computation out of the loop.** The value is",
+        "  logically the same each iteration but rebuilt from scratch, so a cache keyed on tensor identity would",
+        "  never hit. Compute once per outer iteration and pass it in. **This is usually an enabler**: on its own",
+        "  it measures flat, and its value is that it makes (a) start hitting.",
+        "- **(c) `eliminate_host_round_trip` / `eliminate_host_sync`: eliminate a host round-trip or a",
+        "  device-to-host sync.** An object collective agreeing on a shape the ranks could derive locally; an",
         "  `.item()` / `.tolist()` / `.cpu()` on the hot path.",
-        "- **(d) fuse adjacent collectives, GEMMs or concatenations.** Several",
-        "  same-shape payloads issued separately; pack them and issue one.",
-        "- **(e) swap an operator implementation for a vendor kernel.** Read this",
-        "  off the GPU kernel breakdown, not the host evidence.",
-        "- **(f) keep a tensor resident on the device.** A table rebuilt on the",
-        "  host and re-uploaded on every use.",
-        "- **(g) drop no-op glue.** A dtype cast to the dtype the tensor already",
-        "  has; an intermediate materialised only to be immediately consumed.",
+        "- **(d) `fuse_collectives`: fuse adjacent collectives, GEMMs or concatenations.** Several same-shape",
+        "  payloads issued separately; pack them and issue one.",
+        "- **(e) `swap_vendor_kernel`: swap an operator implementation for a vendor kernel.** Read this off the",
+        "  GPU kernel breakdown, not the host evidence.",
+        "- **(f) `keep_device_resident`: keep a tensor resident on the device.** A table rebuilt on the host and",
+        "  re-uploaded on every use.",
+        "- **(g) `drop_noop_glue`: drop no-op glue.** A dtype cast to the dtype the tensor already has; an",
+        "  intermediate materialised only to be immediately consumed.",
         "",
         "**Cache-key recipe (get this wrong and you ship a correctness bug)**",
         "- Key on the COMPLETE argument identity: for a tensor,",
@@ -829,6 +829,11 @@ def _focus_custom_specialist(inp: SpecialistPromptInputs) -> list[str]:
     return text.splitlines() if text else []
 
 
+def _focus_speculative_decoding_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the speculative-decoding focus for this session's target model."""
+    return speculative_decoding_focus(model_name=inp.model_name, model_path=inp.model_path, model_info=inp.model_info)
+
+
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
     "serving_specialist": _focus_serving_specialist,
     "framework_rewrite_specialist": _focus_framework_rewrite_specialist,
@@ -836,6 +841,7 @@ _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]
     "comm_specialist": _focus_comm_specialist,
     "compiler_specialist": _focus_compiler_specialist,
     "system_specialist": _focus_system_specialist,
+    "speculative_decoding_specialist": _focus_speculative_decoding_specialist,
     "candidate_discovery_specialist": _focus_candidate_discovery_specialist,
     "research_scout_specialist": _focus_research_scout_specialist,
     "static_recon_specialist": _focus_static_recon_specialist,
@@ -928,6 +934,9 @@ class SpecialistPromptInputs:
     # Framework package directory relative to the worktree; empty without a worktree.
     worktree_package_dir: str = ""
 
+    # Target model identity warmed from SharedState.model_name / model_path; "" => not recorded.
+    model_name: str = ""
+    model_path: str = ""
     # Structured model architecture features mirrored from SharedState.model_info;
     # machine-parseable companion to ``arch_notes``. Empty dict => not warmed.
     model_info: dict[str, Any] = field(default_factory=dict)
@@ -996,7 +1005,8 @@ def _authors_patches(inp: SpecialistPromptInputs) -> bool:
 #: something to raise the sights from. ``enablement_specialist`` is absent
 #: because its ladder book says climb only as far as runnability needs;
 #: ``framework_rewrite_specialist`` because it authors source rewrites and
-#: nothing else, and already carries its own "Where the wins are" taxonomy.
+#: nothing else, and already carries its own "Where the wins are" taxonomy;
+#: ``speculative_decoding_specialist`` because its focus names no flags at all.
 _THROUGHPUT_AUTHORING_DOMAINS = frozenset(
     {
         "serving_specialist",
@@ -1298,18 +1308,15 @@ def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
 # Section 0 — Mandate (deliverable contract + run status)
 def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     """Render §0: deliverable contract, run status, and task-kind brief."""
-    from hyperloom.inference_optimizer.framework_registry import format_primary_metric
-
     # Deliverable line based on scope × mode.
-    scope = (inp.scope or "domain").lower()
-    if scope == "freeform":
-        anchor = inp.task_description.split("\n")[0].strip()[:120] if inp.task_description else ""
+    if inp.scope == "freeform":
+        anchor = inp.task_description.split("\n")[0].strip()[:120]
         deliverable = "freeform investigation — see task description"
     else:
-        anchor = inp.gap_canonical_id or ""
+        anchor = inp.gap_canonical_id
         if not _authors_patches(inp):
             deliverable = "findings and up to 6 ranked config variants (read-only; no patch)"
-        elif scope == "domains":
+        elif inp.scope == "domains":
             deliverable = "a coupled patch spanning multiple domains + up to 6 ranked config variants"
         else:
             deliverable = "a source patch and/or up to 6 ranked config variants addressing the gap below"
@@ -1321,25 +1328,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     ]
     if anchor:
         rows.append(f"- anchor: `{anchor}`")
-
-    has_status = inp.baseline_tput > 0 or inp.keep_threshold_pct > 0
-    if has_status:
-        rows.append("")
-        rows.append("Run status (read-only context; do NOT re-state these as your own measurements):")
-        fw = inp.framework or None
-        if inp.baseline_tput > 0:
-            rows.append(f"- baseline: {format_primary_metric(fw, inp.baseline_tput)}")
-        if inp.current_tput > 0:
-            rows.append(f"- current best: {format_primary_metric(fw, inp.current_tput)}")
-        if inp.cumulative_gain_validated != 0:
-            rows.append(f"- validated cumulative gain: {inp.cumulative_gain_validated:+.2f}%")
-        if inp.keep_threshold_pct > 0:
-            rows.append(f"- KEEP threshold this cycle: {inp.keep_threshold_pct:.2f}%")
-        if inp.applied_stack:
-            stack_items = ", ".join(
-                f"{e.get('variant_name', '?')} ({e.get('gain_pct', 0):+.2f}%)" for e in inp.applied_stack[:6]
-            )
-            rows.append(f"- applied stack: {stack_items}")
+    rows.extend(_mandate_run_status(inp))
 
     rows.extend(
         [
@@ -1350,8 +1339,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
         ]
     )
 
-    kind = (inp.task_kind or "").strip()
-    brief = _TASK_KIND_BRIEFS.get(kind, "")
+    brief = _TASK_KIND_BRIEFS.get(inp.task_kind.strip(), "")
     if brief:
         rows.extend(["", brief])
 
@@ -1375,8 +1363,6 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
             ]
         )
         for att in inp.prior_attempts[:20]:
-            if not isinstance(att, dict):
-                continue
             ref = str(att.get("ref") or "").strip()
             if not ref:
                 continue
@@ -1387,6 +1373,29 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
             why_str = f" — {why}" if why else ""
             rows.append(f"  - {ref} [{status}]{gain_str}{why_str}")
 
+    return rows
+
+
+def _mandate_run_status(inp: SpecialistPromptInputs) -> list[str]:
+    """Render §0's read-only run status; empty until a baseline or a KEEP threshold exists."""
+    from hyperloom.inference_optimizer.framework_registry import format_primary_metric
+
+    if not (inp.baseline_tput > 0 or inp.keep_threshold_pct > 0):
+        return []
+    rows = ["", "Run status (read-only context; do NOT re-state these as your own measurements):"]
+    if inp.baseline_tput > 0:
+        rows.append(f"- baseline: {format_primary_metric(inp.framework, inp.baseline_tput)}")
+    if inp.current_tput > 0:
+        rows.append(f"- current best: {format_primary_metric(inp.framework, inp.current_tput)}")
+    if inp.cumulative_gain_validated != 0:
+        rows.append(f"- validated cumulative gain: {inp.cumulative_gain_validated:+.2f}%")
+    if inp.keep_threshold_pct > 0:
+        rows.append(f"- KEEP threshold this cycle: {inp.keep_threshold_pct:.2f}%")
+    if inp.applied_stack:
+        stack_items = ", ".join(
+            f"{e.get('variant_name', '?')} ({e.get('gain_pct', 0):+.2f}%)" for e in inp.applied_stack[:6]
+        )
+        rows.append(f"- applied stack: {stack_items}")
     return rows
 
 
@@ -1428,6 +1437,7 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         # The corpus fixes the request shape, so ISL/OSL carry no information.
         workload_rows += corpus_lines(inp.agentx_corpus_shape)
         workload_rows += grading_lines(inp.agentx_grading, inp.agentx_backend)
+        workload_rows += launch_ownership_lines(inp.agentx_backend)
     else:
         if inp.isl > 0:
             workload_rows.append(f"- ISL (input seq len): {inp.isl}")
@@ -1738,8 +1748,8 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
         The rendered roofline-evidence section lines.
     """
     rows = ["## 4a. ROOFLINE EVIDENCE", ""]
-    ev = inp.roofline_evidence or {}
-    if not isinstance(ev, dict) or not ev:
+    ev = inp.roofline_evidence
+    if not ev:
         rows.append(
             "(none — no fresh roofline snapshot has been recorded yet. "
             "The Coordinator auto-enqueues `roofline` at the end of "
@@ -1753,8 +1763,8 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(f"**TraceLens snapshot #{snap_id}**")
         rows.append("")
 
-    summary = ev.get("executive_summary") or {}
-    if isinstance(summary, dict) and summary:
+    summary = ev.get("executive_summary")
+    if summary:
         rows.append("**Executive Summary:**")
         for label, key in (
             ("Compute %", "compute_pct"),
@@ -1772,53 +1782,13 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
                 rows.append(f"- {label}: {val}")
         rows.append("")
 
-    roofline = ev.get("kernel_roofline_top15") or []
-    if isinstance(roofline, list) and roofline:
-        rows.append(
-            "**Kernel roofline "
-            "(kernel_id | name | gpu_pct | bound | AI | eff_pct | "
-            "compute_pct | bandwidth_pct | action):**"
-        )
-        rows.append("")
-        rows.append("| kernel_id | name | gpu_pct | bound | AI | eff_pct | compute_pct | bandwidth_pct | action |")
-        rows.append("|---|---|---:|---|---:|---:|---:|---:|---|")
-        for k in roofline:
-            if not isinstance(k, dict):
-                continue
-            kid = str(k.get("kernel_id") or "")
-            name = str(k.get("name") or "")
-            gpu_pct = k.get("gpu_pct")
-            gpu_pct_str = f"{float(gpu_pct):.2f}%" if isinstance(gpu_pct, (int, float)) else "—"
-            bound = str(k.get("bound_type") or k.get("bottleneck") or "")
-            ai = k.get("arithmetic_intensity")
-            if ai is None:
-                ai = k.get("flops_per_byte")
-            ai_str = f"{float(ai):.3g}" if isinstance(ai, (int, float)) else "—"
-            eff = k.get("efficiency_percent")
-            eff_str = f"{float(eff):.2f}%" if isinstance(eff, (int, float)) else "—"
-            comp = k.get("compute_utilization_pct")
-            comp_str = f"{float(comp):.2f}%" if isinstance(comp, (int, float)) else "—"
-            bw = k.get("bandwidth_utilization_pct")
-            bw_str = f"{float(bw):.2f}%" if isinstance(bw, (int, float)) else "—"
-            actions = k.get("recommended_actions") or []
-            action = str(k.get("suggestion") or "")
-            if not action and isinstance(actions, list) and actions:
-                action = str(actions[0])
-            rows.append(
-                f"| `{kid}` | {name} | {gpu_pct_str} | {bound} | {ai_str} | "
-                f"{eff_str} | {comp_str} | {bw_str} | {action} |"
-            )
-        rows.append("")
-
-    hot = ev.get("hot_kernels_top15") or []
-    if isinstance(hot, list) and hot:
+    hot = ev.get("hot_kernels_top15")
+    if hot:
         rows.append("**Top hot kernels (kernel_id | name | gpu_pct | bottleneck | source_file):**")
         rows.append("")
         rows.append("| kernel_id | name | gpu_pct | bottleneck | source_file |")
         rows.append("|---|---|---:|---|---|")
         for k in hot:
-            if not isinstance(k, dict):
-                continue
             kid = str(k.get("kernel_id") or "")
             name = str(k.get("name") or "")
             gpu_pct = k.get("gpu_pct")
@@ -1833,7 +1803,7 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
         rows.extend(directive)
         rows.append("")
 
-    analysis_path = str(ev.get("analysis_md_path") or "")
+    analysis_path = ev.get("analysis_md_path")
     if analysis_path:
         rows.append(f"**Full analysis.md path:** `{analysis_path}`")
         rows.append("")

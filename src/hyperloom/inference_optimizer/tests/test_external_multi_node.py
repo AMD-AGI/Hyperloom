@@ -15,6 +15,7 @@ import time
 import types
 from pathlib import Path
 
+import httpx
 import pytest
 
 from hyperloom.inference_optimizer.cli.multi_node import _prepare_multi_node_state
@@ -694,7 +695,7 @@ def _fake_serving_httpx(
                 budgets.append(timeout)
             return _Resp(completion_status, {"usage": {"completion_tokens": completion_tokens}})
 
-    return types.SimpleNamespace(Client=_Client)
+    return types.SimpleNamespace(Client=_Client, HTTPError=httpx.HTTPError)
 
 
 @pytest.mark.parametrize(
@@ -729,9 +730,8 @@ def test_probe_thresholds_survive_a_junk_environment(monkeypatch: pytest.MonkeyP
     assert serving_probe._int_env("HYPERLOOM_MN_COMPLETION_PROBE_TOKENS", 8) == 8
 
 
-def test_cluster_is_serving_survives_a_transport_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unreachable endpoint is a \"not serving\" answer, never an exception."""
-    from hyperloom.inference_optimizer.multi_node._internal import serving_probe
+def _exploding_httpx(failure: BaseException) -> types.SimpleNamespace:
+    """Stand-in httpx whose every GET raises ``failure``."""
 
     class _Exploding:
         def __init__(self, timeout: object = None) -> None:
@@ -744,11 +744,30 @@ def test_cluster_is_serving_survives_a_transport_error(monkeypatch: pytest.Monke
             return False
 
         def get(self, _url: str, timeout: float | None = None) -> object:
-            raise ConnectionError("connection refused")
+            raise failure
 
-    monkeypatch.setitem(sys.modules, "httpx", types.SimpleNamespace(Client=_Exploding))
+    return types.SimpleNamespace(Client=_Exploding, HTTPError=httpx.HTTPError)
+
+
+@pytest.mark.parametrize("failure", [httpx.ConnectError("connection refused"), ValueError("not json")])
+def test_cluster_is_serving_survives_an_expected_probe_failure(
+    monkeypatch: pytest.MonkeyPatch, failure: BaseException
+) -> None:
+    """An unreachable endpoint or an unreadable body is a \"not serving\" answer, never an exception."""
+    from hyperloom.inference_optimizer.multi_node._internal import serving_probe
+
+    monkeypatch.setitem(sys.modules, "httpx", _exploding_httpx(failure))
 
     assert serving_probe.cluster_is_serving(_AGGREGATED_STATE, pd_mode="aggregated", timeout_s=5) is False
+
+
+def test_cluster_is_serving_lets_an_unexpected_error_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer.multi_node._internal import serving_probe
+
+    monkeypatch.setitem(sys.modules, "httpx", _exploding_httpx(KeyError("data")))
+
+    with pytest.raises(KeyError, match="data"):
+        serving_probe.cluster_is_serving(_AGGREGATED_STATE, pd_mode="aggregated", timeout_s=5)
 
 
 def test_cluster_is_serving_without_httpx_is_not_evidence(monkeypatch: pytest.MonkeyPatch) -> None:

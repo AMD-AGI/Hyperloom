@@ -18,7 +18,8 @@ from typing import Any, Optional
 
 import click
 
-from kernelforge.llm.git import git
+from hyperloom.common.llm_config import AGENT_BACKEND_CHOICES
+from kernelforge.tools.git import git
 from kernelforge.option_groups import option_group
 
 from . import __version__
@@ -78,8 +79,7 @@ log = logging.getLogger("forge_fusion")
 
 # Exit code for "the run never reached the model".
 EXIT_LLM_UNAVAILABLE = 3
-# Exit code for "infrastructure failure before fusion was attempted": no git workspace, harness could not be authored,
-# etc.
+# Exit code for "infrastructure failure before fusion was attempted" (no git workspace, harness not authored, etc.).
 EXIT_INFRASTRUCTURE_FAILURE = 4
 
 
@@ -351,6 +351,23 @@ def _discover_by_llm(inputs: _DiscoveryInputs) -> _Discovery:
     return _Discovery(recipes)
 
 
+def _discover(inputs: _DiscoveryInputs, discover_mode: str, fuse_kernel: str, dry_run: bool) -> _Discovery:
+    """Locate the run's fusion recipes the way ``discover_mode`` names."""
+    if discover_mode == "anchored":
+        return _discover_anchored(inputs, fuse_kernel, dry_run)
+    if discover_mode == "llm":
+        return _discover_by_llm(inputs)
+    if inputs.repo_scope:
+        # ``patterns`` matches a fixed template library against the trace and never asks a model anything, so there is
+        # nothing in it that could explore a repository.
+        raise click.UsageError("--repo-scope requires --discover llm or --discover anchored")
+    return _Discovery(
+        build_recipes(
+            inputs.diagnosis, model_path=inputs.model_path, install=inputs.install, decode_batch=inputs.decode_batch
+        )
+    )
+
+
 def _log_located_recipes(discovery: _Discovery, *, dry_run: bool) -> None:
     """Say what discovery located, and when it located nothing, why -- which is not always a verdict."""
     if discovery.recipes:
@@ -410,7 +427,7 @@ def _run_author_only(authored: list, run: _FusionRun, ab_hint: str) -> int:
     out, repo_root = run.out, run.repo_root
     harness_path = str(out / "kernel_harness.py")
     author_harness_path = _author_harness_target(repo_root, out)
-    ready, harness_error, harness_fatal = _prepare_author_harness(author_harness_path, harness_path, inherited=False)
+    ready, harness_error, harness_fatal = _prepare_author_harness(author_harness_path)
     if not ready:
         _append_author_rejection(str(out / "author.log"), harness_error)
         log.error("author harness preparation failed: %s", harness_error)
@@ -441,12 +458,7 @@ def _run_author_only(authored: list, run: _FusionRun, ab_hint: str) -> int:
         ),
         dataclasses.replace(run.author, timeout_s=_agent_timeout_sec()),
     )
-    harness_ok, harness_error = _finish_author_harness(
-        author_harness_path,
-        harness_path,
-        inherited=False,
-        author_ok=rc == 0,
-    )
+    harness_ok, harness_error = _finish_author_harness(author_harness_path, harness_path, author_ok=rc == 0)
     if not harness_ok:
         rc = _author_rc_after_harness(rc, harness_ok=harness_ok)
         _append_author_rejection(str(out / "author.log"), harness_error)
@@ -485,7 +497,7 @@ def _echo_run_summary(manifest: dict[str, Any], path: Path, recipes: list, compi
     )
 
 
-def _exit_code_for_run(llm_error, loop_result) -> None:
+def _exit_code_for_run(llm_error, loop: Optional[dict[str, Any]]) -> None:
     """Leave non-zero when the run failed for a reason an exit-code watcher must see.
 
     The manifest is the contract, but a run that never reached the model, or one
@@ -495,14 +507,14 @@ def _exit_code_for_run(llm_error, loop_result) -> None:
     if llm_error is not None:
         raise SystemExit(EXIT_LLM_UNAVAILABLE)
     if (
-        loop_result is not None
-        and not loop_result.kept
-        and loop_result.termination_reason in ("no_git_workspace", "harness_author_failed", "serving_unconfirmed")
+        loop is not None
+        and not loop["kept"]
+        and loop["termination_reason"] in ("no_git_workspace", "harness_author_failed", "serving_unconfirmed")
     ):
         raise SystemExit(EXIT_INFRASTRUCTURE_FAILURE)
 
 
-def _settle_single_patch_workspace(run: _FusionRun, top_recipe, outcome: RunOutcome, exported_ok: bool):
+def _settle_single_patch_workspace(run: _FusionRun, top_recipe, exported_ok: bool):
     """Export what a single-patch run produced and put the framework tree back as it was.
 
     None of this runs for the other two paths. The multi-patch nomination already
@@ -511,9 +523,7 @@ def _settle_single_patch_workspace(run: _FusionRun, top_recipe, outcome: RunOutc
     bogus discard; a compile_pass claim likewise runs inside its own restore
     transaction and authors no modules.
     """
-    artifacts = outcome.artifacts
-    if outcome.patches is not None or outcome.compile_pass is not None:
-        return artifacts
+    artifacts = None
     repo_root, out, pristine_dir = run.repo_root, run.out, run.pristine_dir
     # Only export a patch when the run produced a USABLE fusion (validate path: kernel parity + speedup AND
     # serving survived).
@@ -746,7 +756,7 @@ class FuseRequest:
         FuseAgentOptions,
         click.option(
             "--agent-backend",
-            type=click.Choice(["auto", "claude", "codex"]),
+            type=click.Choice(["auto", *AGENT_BACKEND_CHOICES]),
             default="auto",
             show_default=True,
             help="Registered Agent provider for discovery and authoring.",
@@ -850,7 +860,7 @@ def run(request: FuseRequest) -> None:
         return
 
     trace_path, model_path, framework = request.trace_path, request.model_path, request.framework
-    stages, agent, smoke, layout = request.stages, request.agent, request.smoke, request.layout
+    stages, agent = request.stages, request.agent
     _require_run_options(trace_path, model_path, framework, request.output_dir)
     fuse_kernel = request.discovery.fuse_kernel.strip()
     discover_mode = _resolve_discover_mode(fuse_kernel, request.discovery.discover_mode)
@@ -897,36 +907,22 @@ def run(request: FuseRequest) -> None:
     )
 
     model_type = str(load_model_config(model_path).get("model_type") or "")
-    if request.repo_scope and discover_mode == "patterns":
-        # ``patterns`` matches a fixed template library against the trace and never asks a model anything, so there is
-        # nothing in it that could explore a repository.
-        raise click.UsageError("--repo-scope requires --discover llm or --discover anchored")
-    install = FrameworkInstall(framework, request.framework_root)
     inputs = _DiscoveryInputs(
         trace_path=trace_path,
         model_path=model_path,
         model_type=model_type,
-        install=install,
+        install=FrameworkInstall(framework, request.framework_root),
         decode_batch=decode_batch,
-        attn_tp_size=layout.attn_tp_size,
+        attn_tp_size=request.layout.attn_tp_size,
         diagnosis=diagnosis,
         repo_scope=request.repo_scope,
         out=out,
         agent_factory=require_agent_backend,
     )
-    if discover_mode == "anchored":
-        discovery = _discover_anchored(inputs, fuse_kernel, stages.dry_run)
-    elif discover_mode == "llm":
-        discovery = _discover_by_llm(inputs)
-    else:
-        discovery = _Discovery(
-            build_recipes(diagnosis, model_path=model_path, install=install, decode_batch=decode_batch)
-        )
-    recipes = discovery.recipes
-    anchor_report = discovery.anchor_report
-    llm_error = discovery.llm_error
-    top_recipe = recipes[0] if recipes else None
+    discovery = _discover(inputs, discover_mode, fuse_kernel, stages.dry_run)
+    recipes, anchor_report, llm_error = discovery.recipes, discovery.anchor_report, discovery.llm_error
     _log_located_recipes(discovery, dry_run=stages.dry_run)
+    split = _split_nomination(recipes, stages.fuse_all_confirmed)
 
     def publish(outcome: RunOutcome) -> tuple[dict[str, Any], Path]:
         """Write the run's manifest, as complete as the run has so far got.
@@ -940,7 +936,7 @@ def run(request: FuseRequest) -> None:
         manifest = build_manifest(
             ManifestSubject(framework=framework, model_path=model_path, model_type=model_type, diagnosis=diagnosis),
             LocatedFusions(
-                recipe=top_recipe,
+                recipe=split.top_recipe,
                 candidates=recipes,
                 anchor=anchor_report.to_dict() if anchor_report is not None else None,
             ),
@@ -952,153 +948,138 @@ def run(request: FuseRequest) -> None:
             manifest["agent_sandbox_mode"] = selected_agent.runtime.sandbox_mode
         return manifest, write_manifest(manifest, out)
 
-    validation = None
-    artifacts = None
-    loop_manifest = None
-    compile_pass_outcome: Optional[CompilePassOutcome] = None
-    loop_result = None
-    # Multi-patch nomination outputs: patches_out is the list of sibling envelopes (None on the combine / single-patch
-    # escape hatch so build_manifest omits the key and the legacy shape stays byte-identical); nomination_summary is
-    # the round's counts.
-    patches_out: Optional[list[dict[str, Any]]] = None
-    nomination_summary: Optional[dict[str, Any]] = None
-
-    split = _split_nomination(recipes, top_recipe, stages.fuse_all_confirmed)
-    claims, deferred = split.claims, split.deferred
-    top_recipe = split.top_recipe
-    fuse_all_confirmed = split.fuse_all_confirmed
-    multi_patch = split.multi_patch
-
-    if not stages.dry_run and top_recipe is not None:
-        repo_root = _framework_repo_root(top_recipe.source_file, request.framework_root)
-        # Snapshot the pristine model source BEFORE authoring so a patch can be produced even when the framework is a
-        # non-git pip install (git diff would otherwise be empty -> patch=null -> integrate skips the KEPT fusion).
-        pristine_dir = _snapshot_fusion_source(
-            repo_root, top_recipe.source_file, out, extra_files=top_recipe.extra_files
-        )
-        # combine folds every recipe into one unit; multi-patch authors each non-claim recipe as its own sibling and
-        # runs any claims separately.
-        authored = recipes if fuse_all_confirmed else (deferred if multi_patch else [top_recipe])
-        ab_hint = (
-            f"forge-fuse validates at the KERNEL level (compile + SNR parity + "
-            f"microbench speedup), decode batch {decode_batch} isl {smoke.ab_isl} osl {smoke.ab_osl}"
-        )
-        target_speedup = DEFAULT_TARGET_SPEEDUP
-        run_arch = _run_target_arch(request.gpu_arch)
-        fusion_run = _FusionRun(
-            out=out,
-            repo_root=repo_root,
-            pristine_dir=pristine_dir,
-            framework_root=request.framework_root,
-            repo_scope=request.repo_scope,
-            session=ServingSession(
-                framework,
-                model_path,
-                request.gpu,
-                smoke.ab_isl,
-                smoke.ab_osl,
-                server_extra=smoke.server_extra,
-                tp=layout.tp,
-                block_size=layout.block_size,
-                max_model_len=layout.max_model_len,
-            ),
-            author=AuthorAgent(
-                backend=require_agent_backend, gpu=request.gpu, model=llm_model, max_turns=agent.max_turns
-            ),
-            gpu_arch=run_arch,
-            target_speedup=target_speedup,
-        )
-
-        exported_ok = False
-
-        # The multi-patch nomination runs BOTH pipelines when a run discovered both kinds: each compile-pass claim
-        # through its config A/B, every authored fusion through the kernel autoloop, and every keeper becomes an
-        # independent sibling in patches[].
-        if multi_patch and stages.validate:
-            patches_out, compile_pass_outcome, loop_result, withheld = _run_multi_patch_nomination(
-                split,
-                fusion_run,
-                _LoopPlan(author=stages.author, max_recipes=request.max_recipes),
-                _campaign_runtime(fusion_run, agent, llm_model),
-                publish,
-            )
-            if loop_result is not None:
-                validation = loop_result.best
-                loop_manifest = loop_result.to_dict()
-            # Strongest sibling fills the legacy singular ``artifacts`` slot so the combine-era salvage / timeout path
-            # keeps finding a patch.
-            if patches_out:
-                strongest = patches_out[0]
-                artifacts = FusionArtifacts(
-                    patch=strongest.get("patch_path"),
-                    repo_root=strongest.get("kernel_repo") or repo_root,
-                )
-                # Mirror the strongest patch under the legacy ``fusion.patch`` name.
-                _mirror_legacy_patch(strongest.get("patch_path"), out)
-            exported_ok = bool(patches_out)
-            nomination_summary = {
-                "candidates_seen": len(recipes),
-                "resolved": len(claims) + len(authored),
-                "selected": len(patches_out),
-                # Resolved targets the lane ceiling never funded, so a starved round is not read as "everything ran
-                # and kept nothing".
-                "withheld": withheld,
-            }
-        elif top_recipe.candidate_kind == "compile_pass":
-            compile_pass_outcome, artifacts = _run_single_compile_pass_claim(
-                top_recipe,
-                fusion_run.claim_serving(),
-                ClaimGate(validate=stages.validate, target_speedup=target_speedup),
-                ClaimExport(out, repo_root, pristine_dir),
-            )
-            exported_ok = compile_pass_outcome.kept
-        elif stages.validate:
-            # Validate-driven outer loop: per recipe, author -> kernel-validate -> serving-smoke with cross-attempt
-            # experience injection; early-exit on the first result that is KEPT (kernel parity + speedup AND survives
-            # serving).
-            loop_result = _run_fusion_autoloop(
-                authored,
-                fusion_run,
-                _LoopPlan(author=stages.author, combine=fuse_all_confirmed),
-                _campaign_runtime(fusion_run, agent, llm_model),
-            )
-            validation = loop_result.best
-            loop_manifest = loop_result.to_dict()
-            exported_ok = loop_result.kept
-            log.info(
-                "fusion loop finished: kept=%s speedup=%s attempts=%d termination=%s",
-                loop_result.kept,
-                validation.kernel_speedup if validation else None,
-                len(loop_result.history),
-                loop_result.termination_reason,
-            )
-        elif stages.author:
-            rc = _run_author_only(authored, fusion_run, ab_hint)
-            exported_ok = rc == 0
-            log.info("author finished rc=%s (no validation requested)", rc)
-
-        artifacts = _settle_single_patch_workspace(
-            fusion_run,
-            top_recipe,
-            RunOutcome(artifacts=artifacts, compile_pass=compile_pass_outcome, patches=patches_out),
-            exported_ok,
-        )
-
+    outcome = RunOutcome()
+    if not stages.dry_run and split.top_recipe is not None:
+        author = AuthorAgent(backend=require_agent_backend, gpu=request.gpu, model=llm_model, max_turns=agent.max_turns)
+        outcome = _run_fusion_stages(request, recipes, split, author, publish)
     manifest, path = publish(
-        RunOutcome(
-            patches=patches_out,
-            validation=validation,
-            artifacts=artifacts,
-            loop=loop_manifest,
-            compile_pass=compile_pass_outcome,
+        dataclasses.replace(
+            outcome,
             verdict_override=_verdict_override(llm_error, anchor_report, stages.dry_run),
             error=(llm_error.to_dict() if llm_error is not None else None),
-            nomination=nomination_summary,
         )
     )
     log.info("wrote manifest: %s (verdict=%s)", path, manifest["verdict"])
-    _echo_run_summary(manifest, path, recipes, compile_pass_outcome, validation)
-    _exit_code_for_run(llm_error, loop_result)
+    _echo_run_summary(manifest, path, recipes, outcome.compile_pass, outcome.validation)
+    _exit_code_for_run(llm_error, outcome.loop)
+
+
+def _run_fusion_stages(
+    request: FuseRequest, recipes: list, split: _NominationSplit, author: AuthorAgent, publish
+) -> RunOutcome:
+    """Author, validate and export what discovery located, as the outcome the run's manifest reports."""
+    top_recipe, stages, smoke, layout = split.top_recipe, request.stages, request.smoke, request.layout
+    out = Path(request.output_dir)
+    repo_root = _framework_repo_root(top_recipe.source_file, request.framework_root)
+    # Snapshot the pristine model source BEFORE authoring so a patch can be produced even when the framework is a
+    # non-git pip install (git diff would otherwise be empty -> patch=null -> integrate skips the KEPT fusion).
+    pristine_dir = _snapshot_fusion_source(repo_root, top_recipe.source_file, out, extra_files=top_recipe.extra_files)
+    fusion_run = _FusionRun(
+        out=out,
+        repo_root=repo_root,
+        pristine_dir=pristine_dir,
+        framework_root=request.framework_root,
+        repo_scope=request.repo_scope,
+        session=ServingSession(
+            request.framework,
+            request.model_path,
+            request.gpu,
+            smoke.ab_isl,
+            smoke.ab_osl,
+            server_extra=smoke.server_extra,
+            tp=layout.tp,
+            block_size=layout.block_size,
+            max_model_len=layout.max_model_len,
+        ),
+        author=author,
+        gpu_arch=_run_target_arch(request.gpu_arch),
+        target_speedup=DEFAULT_TARGET_SPEEDUP,
+    )
+    if not (split.multi_patch and stages.validate):
+        return _run_single_patch(request, fusion_run, recipes, split)
+    # The multi-patch nomination runs BOTH pipelines when a run discovered both kinds: each compile-pass claim
+    # through its config A/B, every authored fusion through the kernel autoloop, and every keeper becomes an
+    # independent sibling in patches[].
+    patches, compile_pass, loop_result, withheld = _run_multi_patch_nomination(
+        split,
+        fusion_run,
+        _LoopPlan(author=stages.author, max_recipes=request.max_recipes),
+        _campaign_runtime(fusion_run, request.agent, author.model),
+        publish,
+    )
+    artifacts = None
+    # Strongest sibling fills the legacy singular ``artifacts`` slot so the combine-era salvage / timeout path
+    # keeps finding a patch.
+    if patches:
+        strongest = patches[0]
+        artifacts = FusionArtifacts(
+            patch=strongest.get("patch_path"), repo_root=strongest.get("kernel_repo") or repo_root
+        )
+        # Mirror the strongest patch under the legacy ``fusion.patch`` name.
+        _mirror_legacy_patch(strongest.get("patch_path"), out)
+    return RunOutcome(
+        validation=loop_result.best if loop_result is not None else None,
+        artifacts=artifacts,
+        loop=loop_result.to_dict() if loop_result is not None else None,
+        compile_pass=compile_pass,
+        patches=patches,
+        nomination={
+            "candidates_seen": len(recipes),
+            "resolved": len(split.claims) + len(split.deferred),
+            "selected": len(patches),
+            # Resolved targets the lane ceiling never funded, so a starved round is not read as "everything ran
+            # and kept nothing".
+            "withheld": withheld,
+        },
+    )
+
+
+def _run_single_patch(request: FuseRequest, run: _FusionRun, recipes: list, split: _NominationSplit) -> RunOutcome:
+    """Fuse the run's one patch: claim its compile pass, or author it, validating when asked, and export it."""
+    stages, top_recipe = request.stages, split.top_recipe
+    if top_recipe.candidate_kind == "compile_pass":
+        compile_pass, artifacts = _run_single_compile_pass_claim(
+            top_recipe,
+            run.claim_serving(),
+            ClaimGate(validate=stages.validate, target_speedup=run.target_speedup),
+            ClaimExport(run.out, run.repo_root, run.pristine_dir),
+        )
+        return RunOutcome(artifacts=artifacts, compile_pass=compile_pass)
+    # combine folds every recipe into one unit; multi-patch authors each non-claim recipe as its own sibling and
+    # runs any claims separately.
+    authored = recipes if split.fuse_all_confirmed else (split.deferred if split.multi_patch else [top_recipe])
+    if stages.validate:
+        # Validate-driven outer loop: per recipe, author -> kernel-validate -> serving-smoke with cross-attempt
+        # experience injection; early-exit on the first result that is KEPT (kernel parity + speedup AND survives
+        # serving).
+        loop_result = _run_fusion_autoloop(
+            authored,
+            run,
+            _LoopPlan(author=stages.author, combine=split.fuse_all_confirmed),
+            _campaign_runtime(run, request.agent, run.author.model),
+        )
+        log.info(
+            "fusion loop finished: kept=%s speedup=%s attempts=%d termination=%s",
+            loop_result.kept,
+            loop_result.best.kernel_speedup if loop_result.best else None,
+            len(loop_result.history),
+            loop_result.termination_reason,
+        )
+        return RunOutcome(
+            validation=loop_result.best,
+            loop=loop_result.to_dict(),
+            artifacts=_settle_single_patch_workspace(run, top_recipe, loop_result.kept),
+        )
+    exported_ok = False
+    if stages.author:
+        ab_hint = (
+            "forge-fuse validates at the KERNEL level (compile + SNR parity + microbench speedup), "
+            f"decode batch {request.decode.decode_batch} isl {request.smoke.ab_isl} osl {request.smoke.ab_osl}"
+        )
+        rc = _run_author_only(authored, run, ab_hint)
+        exported_ok = rc == 0
+        log.info("author finished rc=%s (no validation requested)", rc)
+    return RunOutcome(artifacts=_settle_single_patch_workspace(run, top_recipe, exported_ok))
 
 
 def _campaign_runtime(run: _FusionRun, agent: FuseAgentOptions, llm_model: Optional[str]) -> CampaignRuntime:
@@ -1363,12 +1344,14 @@ class _NominationSplit:
     multi_patch: bool
 
 
-def _split_nomination(recipes: list, top_recipe, fuse_all_confirmed: bool) -> _NominationSplit:
+def _split_nomination(recipes: list, fuse_all_confirmed: bool) -> _NominationSplit:
     """Divide the recipes by candidate kind, narrowing a combine run to its claim."""
     claims = [r for r in recipes if r.candidate_kind == "compile_pass"]
     deferred = [r for r in recipes if r.candidate_kind != "compile_pass"]
     if not (fuse_all_confirmed and claims and deferred):
-        return _NominationSplit(claims, deferred, top_recipe, fuse_all_confirmed, not fuse_all_confirmed)
+        return _NominationSplit(
+            claims, deferred, recipes[0] if recipes else None, fuse_all_confirmed, not fuse_all_confirmed
+        )
     log.info(
         "combine: claiming compile pass %s first; deferring %s",
         claims[0].pattern_id,

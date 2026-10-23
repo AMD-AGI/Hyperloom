@@ -40,12 +40,17 @@ _COMPOSERS = (
     (_grid_runner, "_build_variant_yaml"),
 )
 
-#: Argument writers are the composers, their profile/merge/guard helpers, and
-#: the final seal. The profile helper call chain is checked below; repairs write
-#: back through the re-seal.
+#: The functions allowed to write the argument env: the phases a composer delegates
+#: to -- each source merged in turn, the profiler flags, the caller's removals and the
+#: final guards -- all of which run above the seal, plus the composer that still writes
+#: the env itself, the seal, and the re-seal a repair is written back through.
 _WRITERS = frozenset(
     {
-        "materialize_config_with_envs",
+        "_seed_reference_launch",
+        "_merge_caller_overrides",
+        "_settle_merged_server_args",
+        "_apply_caller_removals",
+        "_restate_profile_capture",
         "add_server_arg_unless_pinned",
         "_finalize_framework_server_args",
         "_build_variant_yaml",
@@ -168,8 +173,8 @@ def test_profile_argument_writers_only_run_through_the_sealed_composer():
         "_apply_vllm_profile": (_profile_setup, "_apply_framework_profile"),
         "_apply_sglang_profile": (_profile_setup, "_apply_framework_profile"),
         "_apply_framework_profile": (_profile_setup, "prepare_profile"),
-        "prepare_profile": (_workload_envs, "materialize_config_with_envs"),
-        "apply_atom_profile_caps": (_workload_envs, "materialize_config_with_envs"),
+        "prepare_profile": (_workload_envs, "_shape_request_window"),
+        "apply_atom_profile_caps": (_workload_envs, "_restate_profile_capture"),
     }
     calls = {name: [] for name in owners}
     for path in sorted(_PACKAGE.rglob("*.py")):
@@ -185,13 +190,19 @@ def test_profile_argument_writers_only_run_through_the_sealed_composer():
                 name = call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", "")
                 if name in calls:
                     calls[name].append((path, node.name, call.lineno))
-    seal_line = _seal_call(_function(_workload_envs, "materialize_config_with_envs").body)[1].lineno
+    composer = _function(_workload_envs, "materialize_config_with_envs")
+    seal_line = _seal_call(composer.body)[1].lineno
+    phase_lines = {
+        call.func.id: call.lineno
+        for call in ast.walk(composer)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+    }
     for name, (module, function) in owners.items():
         assert calls[name], f"{name} is no longer composed"
         for path, caller, line in calls[name]:
             assert (path, caller) == (Path(module.__file__), function), f"unsealed call to {name}: {path}:{line}"
             if module is _workload_envs:
-                assert line < seal_line
+                assert phase_lines[function] < seal_line, f"{function} runs after the seal"
 
 
 def test_the_census_sees_a_writer_that_renames_everything_it_touches():

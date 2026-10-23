@@ -25,6 +25,9 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     recipe_canonical_id,
 )
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
+from hyperloom.orchestrator.knowledge.recipe_journal import (
+    recipe_attrs_from_state,
+)
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 
 
@@ -357,62 +360,27 @@ def test_close_does_not_clobber_better_best_config(tmp_path: Path) -> None:
     assert row["stack_fingerprint"].get("vllm_version") == "0.6.0"
 
 
-# KEEP'd kernel optimizations (incl.
-def _seed_kept_kernel(coord: Coordinator) -> None:
-    """Populate SharedState as a KEEP'd + E2E-integrated kernel leaves it."""
-    ss = coord.shared_state
-    ss.kernel_opt_attempts = {
-        "k006": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 1.3202,
-            "last_artifact_path": "/x/optimized_versions/v1_n128_launch_tuning.cu",
-            "last_source_file": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
-        },
-    }
-    ss.kernel_integrate_attempts = {
-        "k006|/x/optimized_versions/v1_n128_launch_tuning.cu|": {
-            "kernel_id": "k006",
-            "patch_path": "/x/optimized_versions/v1_n128_launch_tuning.cu",
-            "best_gain_pct": -0.094,
-            "last_decision": "NEEDS_REVIEW",
-            "attempts": [
-                {"decision": "NEEDS_REVIEW", "new_tput": 2477.82, "gain_pct": -0.094},
-            ],
-        },
-    }
-
-
-def test_build_recipe_attrs_surfaces_kept_kernel(tmp_path: Path) -> None:
-    """``_build_recipe_attrs_from_state`` emits a ``kernel_optimizations`` entry carrying micro_speedup + E2E outcome."""
+def test_close_finalize_keeps_the_kernel_optimizations_an_earlier_session_recorded(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
-    _seed_kept_kernel(coord)
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
-    kopts = attrs.get("kernel_optimizations") or []
-    assert kopts, "KEEP'd kernel k006 missing from recipe attrs"
-    k = next((x for x in kopts if x.get("kernel_id") == "k006"), None)
-    assert k is not None, f"k006 not in {kopts}"
-    assert k["micro_speedup"] == 1.3202
-    assert k["decision"] == "KEEP"
-    assert k["source_file"] == ("/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu")
-    assert k["e2e_gain_pct"] == -0.094
-    assert k["e2e_tput"] == 2477.82
-    assert k["integrated"] is True
-    assert k["e2e_decision"] == "NEEDS_REVIEW"
+    cid = _expected_cid()
+    prior = {"kernel_id": "k006", "micro_speedup": 1.3202, "decision": "KEEP", "e2e_gain_pct": -0.094}
+    coord.recipe_kb.put_recipe(
+        canonical_id=cid,
+        model=_MODEL,
+        hardware=_HW,
+        framework_name=_FW,
+        framework_version=_FWV,
+        precision=_PREC,
+        best_config={"name": "good", "tput": "1000"},
+        best_throughput=1000.0,
+        extras={"kernel_optimizations": [prior]},
+    )
 
+    assert coord.recipe_journal.finalize_recipe_and_journal()["result_type"] == "written"
 
-def test_close_finalize_persists_kept_kernel_to_kb(tmp_path: Path) -> None:
-    """After CLOSE finalize, recipe.json carries the KEEP'd kernel under ``kernel_optimizations``."""
-    coord = _make_coordinator(tmp_path)
-    _seed_kept_kernel(coord)
-    coord.recipe_journal.finalize_recipe_and_journal()
-    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
-    assert row is not None
-    kopts = row.get("kernel_optimizations") or []
-    ids = [k.get("kernel_id") for k in kopts]
-    assert "k006" in ids, f"k006 not persisted to KB: {row.get('kernel_optimizations')}"
-    k006 = next(k for k in kopts if k.get("kernel_id") == "k006")
-    assert k006["micro_speedup"] == 1.3202
-    assert k006["e2e_gain_pct"] == -0.094
+    row = coord.recipe_kb.get_recipe(canonical_id=cid)
+    assert row["version"] == 2
+    assert [(k["kernel_id"], k["micro_speedup"]) for k in row["kernel_optimizations"]] == [("k006", 1.3202)]
 
 
 # A bare-baseline CLOSE whose tput exceeds a historical best must NOT overwrite the validated best_config.
@@ -468,7 +436,7 @@ def test_best_config_reads_stack_args_from_canonical_server_key(
         }
     ]
     ss.cumulative_gain_validated = 10.0
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
+    attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
     assert attrs["best_config"]["extra_server_args"] == ("--page-size 32 --schedule-policy lpm"), (
         "stack-layer launch args must be read from the canonical "
         "extra_server_args key; got "
@@ -574,62 +542,6 @@ def test_lift_then_validation_leaves_the_recipe_publishable(tmp_path: Path) -> N
     assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid())["best_throughput"] == 1100.0
 
 
-# kernel_optimizations[].e2e_decision must carry the integrate verdict, not only the micro-layer decision.
-def test_kernel_e2e_decision_reflects_integrate_revert(tmp_path: Path) -> None:
-    coord = _make_coordinator(tmp_path)
-    ss = coord.shared_state
-    ss.kernel_opt_attempts = {
-        "k007": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 2.42,
-            "last_artifact_path": "/x/optimized_versions/v1_multirow.cu",
-            "last_source_file": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
-        },
-    }
-    ss.kernel_integrate_attempts = {
-        "k007|/x/optimized_versions/v1_multirow.cu|": {
-            "kernel_id": "k007",
-            "best_gain_pct": -1.0488865062914727,
-            "last_decision": "REVERT",
-            "attempts": [
-                {"decision": "REVERT", "new_tput": 2784.0072254162687, "gain_pct": -1.0488865062914727},
-            ],
-        },
-    }
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
-    kopts = attrs.get("kernel_optimizations") or []
-    k = next((x for x in kopts if x.get("kernel_id") == "k007"), None)
-    assert k is not None, f"k007 missing from {kopts}"
-    assert k["decision"] == "KEEP"
-    assert k["e2e_decision"] == "REVERT"
-    assert k["integrated"] is True
-    assert round(k["e2e_gain_pct"], 2) == -1.05
-
-
-def test_kernel_e2e_decision_micro_only_when_not_integrated(
-    tmp_path: Path,
-) -> None:
-    """A micro-KEEP kernel that never reached integrate has empty e2e_decision and integrated is False."""
-    coord = _make_coordinator(tmp_path)
-    ss = coord.shared_state
-    ss.kernel_opt_attempts = {
-        "k009": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 1.241,
-            "last_artifact_path": "/x/optimized_versions/v1_multirow.cu",
-            "last_source_file": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
-        },
-    }
-    ss.kernel_integrate_attempts = {}
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
-    kopts = attrs.get("kernel_optimizations") or []
-    k = next((x for x in kopts if x.get("kernel_id") == "k009"), None)
-    assert k is not None
-    assert k["decision"] == "KEEP"
-    assert k["integrated"] is False
-    assert k["e2e_decision"] == ""
-
-
 # sessions[] entry must carry throughput_before/after, a date, and stack actions.
 def test_session_entry_carries_throughput_date_and_actions(
     tmp_path: Path,
@@ -648,7 +560,7 @@ def test_session_entry_carries_throughput_date_and_actions(
     ]
     ss.cumulative_gain_validated = 7.5
     ss.cumulative_gain_validated_stack_len = 2
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
+    attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
     sessions = attrs.get("sessions") or []
     assert sessions, "no session entry emitted"
     s = sessions[0]
@@ -953,14 +865,13 @@ def test_finalize_reports_error_when_authority_read_fails(tmp_path: Path) -> Non
     coord = _make_coordinator(tmp_path)
     before = _seed_recipe_with_lesson(coord)
     _fail_authoritative_read(coord)
-    out = coord.recipe_journal.finalize_recipe_and_journal()
-    assert out == {
-        "status": "error",
-        "reason": "RuntimeError",
-        "backend": "local",
-        "result_type": _close_out.RESULT_TRANSPORT_FAILED,
-        "error_class": "RuntimeError",
-    }
+    out = coord.recipe_journal.ensure_recipe_finalized(source="close")
+    assert (out["status"], out["reason"], out["result_type"], out["error_class"]) == (
+        "error",
+        "RuntimeError",
+        _close_out.RESULT_TRANSPORT_FAILED,
+        "RuntimeError",
+    )
     assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) == before
 
 
@@ -971,14 +882,13 @@ def test_finalize_reports_error_when_put_recipe_fails(tmp_path: Path) -> None:
         raise OSError("disk full")
 
     coord.recipe_kb.put_recipe = _boom
-    out = coord.recipe_journal.finalize_recipe_and_journal()
-    assert out == {
-        "status": "error",
-        "reason": "OSError",
-        "backend": "local",
-        "result_type": _close_out.RESULT_TRANSPORT_FAILED,
-        "error_class": "OSError",
-    }
+    out = coord.recipe_journal.ensure_recipe_finalized(source="close")
+    assert (out["status"], out["reason"], out["result_type"], out["error_class"]) == (
+        "error",
+        "OSError",
+        _close_out.RESULT_TRANSPORT_FAILED,
+        "OSError",
+    )
 
 
 def _fact_write_for_three_kept_variants(coord) -> None:
@@ -1017,7 +927,9 @@ def _fact_write_for_three_kept_variants(coord) -> None:
     ],
     ids=["write-os-error", "read-store-error", "read-value-error"],
 )
-def test_fact_write_hook_records_every_variant_when_the_recipe_store_fails(tmp_path: Path, method, failure) -> None:
+def test_fact_write_hook_records_every_variant_when_the_recipe_store_fails(
+    tmp_path: Path, caplog, method, failure
+) -> None:
     """A cross-session KB failure must not cost the session its later variants' rows."""
     coord = _make_coordinator(tmp_path)
 
@@ -1030,6 +942,10 @@ def test_fact_write_hook_records_every_variant_when_the_recipe_store_fails(tmp_p
 
     assert [row["variant_name"] for row in coord.shared_state.attempts] == ["v0", "v1", "v2"]
     assert [entry.variant_name for entry in coord.recipe_journal.ensure_journal().entries] == ["v0", "v1", "v2"]
+    warnings = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    assert warnings == [
+        f"recipe KB write for task t-ledger variant v{i} failed: {type(failure).__name__}: {failure}" for i in range(3)
+    ]
 
 
 def test_fact_write_hook_lets_an_unexpected_recipe_store_error_propagate(tmp_path: Path) -> None:

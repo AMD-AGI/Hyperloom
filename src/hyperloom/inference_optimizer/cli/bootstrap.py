@@ -19,6 +19,7 @@ from typing import Any
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
+from hyperloom.common.gpu_power_settings import DeclaredPowerSettings
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.actions.executors._workload_envs import (
@@ -276,6 +277,11 @@ _MAX_LATENCY_MS = "max_latency_ms"
 _MAX_POWER_W = "max_power_w"
 _MAX_PER_GPU_POWER_W = "max_per_gpu_power_w"
 _NODES = "nodes"
+_GPU_POWER_CAP_W = "gpu_power_cap_w"
+_GPU_PERF_LEVEL = "gpu_perf_level"
+_NODE_POWER_MANAGEMENT = "node_power_management"
+_NODE_POWER_LIMIT_W = "node_power_limit_w"
+_DECLARED = "declared"
 
 
 def constraint_budgets_from_args(args: Any) -> dict[str, Any]:
@@ -302,80 +308,180 @@ def constraint_budget_resume_conflict(args: Any, state: Any) -> str:
     )
 
 
-def resolve_launch_gpu_power(args: Any, *, nodes: int) -> dict[str, Any]:
-    """The launch's GPU power settings record; exits 2 before anything runs when the declared settings cannot be
-    applied or a requested power budget cannot be measured or checked."""
-    from hyperloom.common.gpu_power_settings import visible_gpu_indices
+def _established_gpu_power_settings(
+    declared: Any, *, nodes: int, apply: bool, owner: str
+) -> tuple[dict[str, Any], str]:
+    """Apply the declared settings when permitted, then check and record them; ``(record, error)``.
 
-    gpu_power, error = resolve_gpu_power_settings(
-        power_cap_w=getattr(args, "gpu_power_cap_w", None),
-        perf_level=getattr(args, "gpu_perf_level", None),
+    The check after applying is the one an operator-set value gets, so a set that did not take is caught the same way.
+    """
+    from hyperloom.common.gpu_power_settings import GpuPowerSettingsError
+
+    from . import gpu_power_apply
+
+    applied: dict[str, Any] = {}
+    try:
+        if apply:
+            applied = gpu_power_apply.apply_for_session(declared, nodes=nodes, owner=owner)
+        else:
+            gpu_power_apply.warn_about_orphaned_cards()
+    except GpuPowerSettingsError as exc:
+        return {}, f"cannot apply the declared GPU power settings: {exc}"
+    record, error = resolve_gpu_power_settings(declared, nodes=nodes, just_applied=bool(applied))
+    if applied:
+        record["applied"] = applied
+    return record, error
+
+
+def _per_gpu_launch_error(args: Any, available_gpus: set[int] | None) -> str:
+    return per_gpu_power_budget_error(
+        getattr(args, _MAX_PER_GPU_POWER_W, None),
+        total_w=getattr(args, _MAX_POWER_W, None),
+        available_gpus=available_gpus,
+    )
+
+
+def resolve_launch_gpu_power(args: Any, *, nodes: int, owner: str) -> dict[str, Any]:
+    """The launch's GPU power settings record; exits 2 before anything runs when the declared settings cannot be
+    applied or a requested power budget cannot be measured or checked. Nothing is applied when a budget is refused."""
+    from hyperloom.common.gpu_power_settings import GpuPowerSettingsError, visible_gpu_indices
+
+    gpu_power: dict[str, Any] = {}
+    mask: set[int] | None = None
+    error = power_budget_unmeasurable_error(
+        total_w=getattr(args, _MAX_POWER_W, None),
+        per_gpu_w=getattr(args, _MAX_PER_GPU_POWER_W, None),
         nodes=nodes,
+        framework=_requested_framework(args),
     )
-    observed = {int(gpu) for gpu in (gpu_power.get("observed") or {})} or None
-    error = (
-        error
-        or power_budget_unmeasurable_error(
-            total_w=getattr(args, _MAX_POWER_W, None),
-            per_gpu_w=getattr(args, _MAX_PER_GPU_POWER_W, None),
+    if not error and getattr(args, _MAX_PER_GPU_POWER_W, None):
+        try:
+            mask = visible_gpu_indices()
+        except GpuPowerSettingsError as exc:
+            error = f"--max-per-gpu-power-w cannot be checked against the visible cards: {exc}"
+        else:
+            error = _per_gpu_launch_error(args, mask) if mask is not None else ""
+    if not error:
+        gpu_power, error = _established_gpu_power_settings(
+            DeclaredPowerSettings(
+                power_cap_w=getattr(args, _GPU_POWER_CAP_W, None),
+                perf_level=getattr(args, _GPU_PERF_LEVEL, None) or "",
+                npm=getattr(args, _NODE_POWER_MANAGEMENT, None) or "",
+                node_power_limit_w=getattr(args, _NODE_POWER_LIMIT_W, None),
+            ),
             nodes=nodes,
-            framework=_requested_framework(args),
+            apply=bool(getattr(args, "apply_gpu_power_settings", False)),
+            owner=owner,
         )
-        or per_gpu_power_budget_error(
-            getattr(args, _MAX_PER_GPU_POWER_W, None),
-            total_w=getattr(args, _MAX_POWER_W, None),
-            available_gpus=visible_gpu_indices() or observed,
-        )
-    )
+    if not error and mask is None:
+        # No mask, so the cards amd-smi reported are the ones the session may use; only known after reading them.
+        error = _per_gpu_launch_error(args, {int(gpu) for gpu in (gpu_power.get("observed") or {})} or None)
     if error:
         print(f"ERROR: {error}.", file=sys.stderr)
         sys.exit(2)
     return gpu_power
 
 
+def resume_gpu_power_settings(args: Any, state: Any) -> tuple[dict[str, Any], str]:
+    """The resumed session's power settings: an omitted flag re-asserts the archived value; ``(record, error)``.
+
+    A session that applied its settings restored them when it exited, so its resume must apply them again.
+    """
+    archived = dict(getattr(state, "gpu_power_settings", None) or {})
+    declared = dict(archived.get(_DECLARED) or {})
+    apply = bool(getattr(args, "apply_gpu_power_settings", False))
+    record, error = _established_gpu_power_settings(
+        DeclaredPowerSettings(
+            power_cap_w=getattr(args, _GPU_POWER_CAP_W, None) or declared.get("power_cap_w"),
+            perf_level=getattr(args, _GPU_PERF_LEVEL, None) or declared.get("perf_level") or "",
+            npm=getattr(args, _NODE_POWER_MANAGEMENT, None) or declared.get("npm") or "",
+            node_power_limit_w=getattr(args, _NODE_POWER_LIMIT_W, None) or declared.get("node_power_limit_w"),
+        ),
+        nodes=max(int(getattr(args, _NODES, 1) or 1), int(getattr(state, _NODES, 1) or 1)),
+        apply=apply,
+        owner=str(getattr(state, "session_id", "") or ""),
+    )
+    if error and archived.get("applied") and not apply:
+        error += (
+            "; this session applied its power settings itself and restored them when it exited, so pass "
+            "--apply-gpu-power-settings to apply them again"
+        )
+    return record, error
+
+
+def _node_power_settings(declared: DeclaredPowerSettings) -> tuple[dict[str, Any] | None, str]:
+    """The node's NPM reading and why the declared values do not hold; ``(None, "")`` when it cannot be read and
+    nothing about it was declared (an amd-smi before ROCm 7.2, or a GPU without NPM)."""
+    from hyperloom.common.gpu_power_settings import (
+        GpuPowerSettingsError,
+        declared_node_problems,
+        read_node_power_settings,
+    )
+
+    try:
+        node = read_node_power_settings()
+    except GpuPowerSettingsError as exc:
+        if any(declared.node_row().values()):
+            return None, f"the declared node power management settings cannot be checked: {exc}"
+        return None, ""
+    problems = declared_node_problems(node, declared)
+    if problems:
+        return node, "the node is not at the declared power management settings (NPM is set on the BMC): " + "; ".join(
+            problems
+        )
+    return node, ""
+
+
 def resolve_gpu_power_settings(
+    declared_settings: DeclaredPowerSettings,
     *,
-    power_cap_w: float | None,
-    perf_level: str | None,
     nodes: int,
     read: Any = None,
+    just_applied: bool = False,
 ) -> tuple[dict[str, Any], str]:
-    """Read the cards' power settings and check the declared ones; ``(record, error)``.
+    """Read the cards' and the node's power settings and check the declared ones; ``(record, error)``.
 
-    ``record`` is what the session stores and the platform fingerprint shows: the declared values and what each card
-    reported. ``error`` is non-empty when a declared value does not hold, or cannot be checked, and the launch must stop.
-    Nothing is set here; the operator sets power cap and perf level with ``amd-smi set`` before launch.
+    ``record`` is what the session stores and the platform fingerprint shows: the declared values, what each card
+    reported and, where amd-smi reports it, the node's NPM state and limit. ``error`` is non-empty when a declared value
+    does not hold, or cannot be checked, and the launch must stop. Nothing is set here: the operator sets the cap and
+    perf level with ``amd-smi set`` before launch, or ``--apply-gpu-power-settings`` set them just before this check;
+    NPM is set on the BMC.
     """
     from hyperloom.common.gpu_power_settings import (
         GpuPowerSettingsError,
         declared_setting_problems,
-        normalize_perf_level,
         read_gpu_power_settings,
         visible_gpu_indices,
     )
 
-    declared: dict[str, Any] = {}
-    if power_cap_w is not None:
-        declared["power_cap_w"] = float(power_cap_w)
-    if perf_level:
-        declared["perf_level"] = normalize_perf_level(perf_level)
+    declared = declared_settings.as_record()
     if nodes >= 2:
         if declared:
             return {}, (
-                "--gpu-power-cap-w / --gpu-perf-level cannot be checked on a multi-node session: they describe the "
-                "benchmark nodes' cards, which this process cannot read, and an unverifiable assertion is not a "
-                "satisfied one"
+                "--gpu-power-cap-w / --gpu-perf-level / --node-power-management / --node-power-limit-w cannot be "
+                "checked on a multi-node session: they describe the benchmark nodes' cards, which this process cannot "
+                "read, and an unverifiable assertion is not a satisfied one"
             )
         return {}, ""
+    # The node's settings need neither the cards' reading nor the mask, so only a card declaration refuses without them.
+    cards_declared = any(declared_settings.as_row().values())
     try:
         observed = (read or read_gpu_power_settings)()
     except GpuPowerSettingsError as exc:
-        if declared:
-            return {"declared": declared}, f"the declared GPU power settings cannot be checked: {exc}"
-        return {}, ""
-    gpus = visible_gpu_indices()
+        if cards_declared:
+            return {_DECLARED: declared}, f"the declared GPU power settings cannot be checked: {exc}"
+        if not declared:
+            node, _ = _node_power_settings(declared_settings)
+            return ({"node": node} if node is not None else {}), ""
+        observed = {}
+    try:
+        gpus = visible_gpu_indices()
+    except GpuPowerSettingsError as exc:
+        if cards_declared:
+            return {_DECLARED: declared}, f"the declared GPU power settings cannot be checked: {exc}"
+        gpus = None
     record = {
-        "declared": declared,
+        _DECLARED: declared,
         "observed": {str(gpu): row for gpu, row in sorted(observed.items()) if gpus is None or gpu in gpus},
     }
     problems = declared_setting_problems(
@@ -384,12 +490,16 @@ def resolve_gpu_power_settings(
         perf_level=declared.get("perf_level"),
         gpus=gpus,
     )
-    if problems:
-        return record, (
-            "the GPUs are not at the declared power settings (set them with amd-smi before launch): "
-            + "; ".join(problems)
-        )
-    return record, ""
+    node, node_error = _node_power_settings(declared_settings)
+    if node is not None:
+        record["node"] = node
+    why = (
+        "the GPUs did not take the power settings just applied"
+        if just_applied
+        else "the GPUs are not at the declared power settings (set them with amd-smi before launch)"
+    )
+    errors = [f"{why}: " + "; ".join(problems)] if problems else []
+    return record, "; ".join(errors + [node_error] if node_error else errors)
 
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
@@ -470,7 +580,7 @@ def _seed_shared_state(
     # KB architecture tags from config.json; fresh-launch only.
     _cfg_tags = _load_model_config_tags(str(args.model))
 
-    # Persisted for the session breakdown; the runtime reads the env directly.
+    # The only read of the backend choice; every later decision reads the persisted record.
     _kernel_optimizer_record = "forge" if forge_explicitly_enabled() else "geak"
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority base for the baseline server args.
