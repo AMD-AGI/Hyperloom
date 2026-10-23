@@ -244,25 +244,6 @@ def test_resolving_the_user_does_not_touch_the_umask(monkeypatch, restore_umask)
     assert os.umask(0o022) == 0o022
 
 
-def test_set_group_shared_umask_sets_it(restore_umask):
-    run_as_mod.set_group_shared_umask()
-    assert os.umask(0o022) == 0o007
-
-
-@needs_root
-def test_files_the_app_creates_after_the_umask_is_set_are_group_writable(shared_tmp, restore_umask):
-    spec = resolve_run_as(UNPRIVILEGED)
-    assert spec is not None
-    spec.share_tree(shared_tmp)
-    run_as_mod.set_group_shared_umask()
-    (shared_tmp / "rebuilt.py").write_text("x", encoding="utf-8")
-    (shared_tmp / "newdir").mkdir()
-    assert stat.S_IMODE((shared_tmp / "rebuilt.py").stat().st_mode) == 0o660
-    assert (shared_tmp / "rebuilt.py").stat().st_gid == spec.gid
-    assert (shared_tmp / "newdir").stat().st_mode & stat.S_ISGID
-    assert (shared_tmp / "newdir").stat().st_gid == spec.gid
-
-
 @needs_root
 def test_read_only_share_gives_the_group_read_and_search_but_not_write(shared_tmp):
     spec = resolve_run_as(UNPRIVILEGED)
@@ -290,3 +271,103 @@ def test_writable_share_modes(shared_tmp):
     spec.share_tree(shared_tmp / "d")
     assert stat.S_IMODE((shared_tmp / "d").stat().st_mode) == 0o2770
     assert stat.S_IMODE((shared_tmp / "d" / "f").stat().st_mode) == 0o660
+
+
+# ---- review r2: a demoted child cannot make the app write elsewhere, and holds no capability ----
+@needs_root
+def test_a_child_planting_the_redaction_temp_name_cannot_make_the_app_overwrite_a_file(shared_tmp):
+    from hyperloom.common.env_safety import redact_file_in_place
+
+    spec = resolve_run_as(UNPRIVILEGED)
+    assert spec is not None
+    workspace = shared_tmp / "ws"
+    workspace.mkdir()
+    log = workspace / "process.log"
+    log.write_text("token ghp_abcdef123456\n", encoding="utf-8")
+    victim = shared_tmp / "victim"  # root's file, which the child can neither read nor write
+    victim.write_text("keep me", encoding="utf-8")
+    victim.chmod(0o600)
+    spec.share_tree(workspace, sticky=True)
+    log.chmod(0o600)
+    planted = _run_as_unprivileged(f"ln -s {victim} {workspace}/process.log.redacting")
+    assert planted.returncode == 0, planted.stderr
+    redact_file_in_place(log)
+    assert victim.read_text(encoding="utf-8") == "keep me"
+    assert "ghp_abcdef" not in log.read_text(encoding="utf-8")
+    assert not (workspace / "process.log.redacting").exists()
+
+
+_CAP_PROBE = (
+    "grep -E '^(CapInh|CapPrm|CapEff|CapAmb|NoNewPrivs):' /proc/self/status; "
+    "setpriv --reuid=12345 true 2>/dev/null; echo setuid_back_rc=$?"
+)
+_CAP_ONLY_APP = """
+import json, subprocess, sys
+a = json.loads(sys.argv[1])
+r = subprocess.run(a["cmd"], user=a["uid"], group=a["gid"], extra_groups=a["groups"], capture_output=True, text=True)
+print(r.stdout, end="")
+"""
+
+
+def _probe_fields(text: str) -> dict[str, str]:
+    return dict(
+        line.replace(":", "=").replace("\t", "").split("=", 1)
+        for line in text.splitlines()
+        if "=" in line or ":" in line
+    )
+
+
+@needs_root
+def test_a_demoted_child_of_a_root_app_holds_no_capability_and_cannot_setuid_back():
+    spec = resolve_run_as(UNPRIVILEGED)
+    assert spec is not None
+    done = subprocess.run(
+        spec.command(["/bin/sh", "-c", _CAP_PROBE]), capture_output=True, text=True, check=False, **spec.popen_kwargs()
+    )
+    fields = _probe_fields(done.stdout)
+    assert {k: int(fields[k], 16) for k in ("CapInh", "CapPrm", "CapEff", "CapAmb")} == dict.fromkeys(
+        ("CapInh", "CapPrm", "CapEff", "CapAmb"), 0
+    ), done.stdout
+    assert fields["NoNewPrivs"] == "1"
+    assert fields["setuid_back_rc"] != "0"
+
+
+@needs_root
+def test_a_demoted_child_of_a_capability_only_app_holds_no_capability_and_cannot_setuid_back():
+    """The documented non-root setup: the app has CAP_SETUID/SETGID/KILL as ambient capabilities, not uid 0."""
+    import json
+
+    python = "/usr/bin/python3"
+    if not os.access(python, os.X_OK):
+        pytest.skip("needs a system python the unprivileged app uid can run")
+    spec = resolve_run_as(UNPRIVILEGED)
+    assert spec is not None
+    caps = "+setuid,+setgid,+kill"
+    app = [
+        "setpriv", "--reuid=12345", "--regid=12345", "--clear-groups",
+        f"--inh-caps={caps}", f"--ambient-caps={caps}", "--",
+        python, "-I", "-c", _CAP_ONLY_APP,
+    ]  # fmt: skip
+    arguments = {
+        "cmd": spec.command(["/bin/sh", "-c", _CAP_PROBE]),
+        "uid": spec.uid,
+        "gid": spec.gid,
+        "groups": list(spec.groups),
+    }
+    done = subprocess.run([*app, json.dumps(arguments)], capture_output=True, text=True, check=False)
+    fields = _probe_fields(done.stdout)
+    assert done.returncode == 0, done.stderr
+    assert [int(fields[k], 16) for k in ("CapInh", "CapPrm", "CapEff", "CapAmb")] == [0, 0, 0, 0], done.stdout
+    assert fields["NoNewPrivs"] == "1"
+    assert fields["setuid_back_rc"] != "0"
+    # Control: the same app without the drop hands the capabilities over, so the probe can tell.
+    bare = {**arguments, "cmd": ["/bin/sh", "-c", _CAP_PROBE]}
+    leaked = subprocess.run([*app, json.dumps(bare)], capture_output=True, text=True, check=False)
+    assert int(_probe_fields(leaked.stdout)["CapAmb"], 16) != 0, leaked.stdout
+    assert _probe_fields(leaked.stdout)["setuid_back_rc"] == "0"
+
+
+def test_resolving_a_user_without_the_drop_tool_is_refused(monkeypatch):
+    monkeypatch.setattr(run_as_mod.shutil, "which", lambda _name: None)
+    with pytest.raises(RunAsError, match="setpriv"):
+        resolve_run_as(UNPRIVILEGED if _account_exists(UNPRIVILEGED) else "daemon")

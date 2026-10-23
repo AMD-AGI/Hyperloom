@@ -17,6 +17,10 @@ _IDENTITY: tuple[str, ...] = ("-c", "user.name=hyperloom", "-c", "user.email=hyp
 
 _GIT_TIMEOUT_SEC = 600.0
 
+#: What git makes here must stay readable by a specialist that runs as another
+#: account (its worktree reads these objects), whatever umask the app runs under.
+_GIT_UMASK = 0o022
+
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
 
@@ -46,6 +50,7 @@ def _git(repo: Path, tree: Path, *args: str) -> subprocess.CompletedProcess[str]
         text=True,
         timeout=_GIT_TIMEOUT_SEC,
         check=False,
+        umask=_GIT_UMASK,
     )
 
 
@@ -88,11 +93,14 @@ def snapshot_tree(tree: Path, repo: Path, *, refresh: bool) -> tuple[Path | None
                     text=True,
                     timeout=_GIT_TIMEOUT_SEC,
                     check=False,
+                    umask=_GIT_UMASK,
                 )
                 if cp.returncode != 0:
                     return None, _failure("init", cp)
                 (repo / "info").mkdir(parents=True, exist_ok=True)
                 (repo / "info" / "exclude").write_text("".join(f"{p}\n" for p in _EXCLUDES), encoding="utf-8")
+                (repo / "info" / "exclude").chmod(0o644)
+                (repo / "info").chmod(0o755)
             cp = _git(repo, tree, "add", "-A", "--", ".")
             if cp.returncode != 0:
                 return None, _failure("add", cp)

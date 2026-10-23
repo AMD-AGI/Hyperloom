@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from hyperloom.common.nofollow import rewrite_lines_nofollow
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES as _GPU_MASK_ENV_NAMES
 
 import json
@@ -531,31 +532,16 @@ def redact_secret_values(text: str) -> str:
 
 
 def redact_file_in_place(path: os.PathLike[str] | str, *, mode: int = 0o600) -> None:
-    """Stream-redact ``path`` with :func:`redact_secret_values` and restrict mode."""
-    from pathlib import Path
+    """Stream-redact ``path`` with :func:`redact_secret_values` and restrict mode.
 
-    target = Path(path)
-    tmp = target.with_name(target.name + ".redacting")
-    changed = False
+    The file sits in a directory a less-privileged account may write, so the
+    redacted copy is staged and moved without following any link there
+    (:func:`hyperloom.common.nofollow.rewrite_lines_nofollow`). A failure
+    leaves the file as it was.
+    """
     try:
-        with target.open("r", encoding="utf-8", errors="replace") as source:
-            with tmp.open("w", encoding="utf-8") as destination:
-                for line in source:
-                    redacted = redact_secret_values(line)
-                    changed = changed or redacted != line
-                    destination.write(redacted)
-        if changed:
-            tmp.chmod(mode)
-            tmp.replace(target)
-        else:
-            tmp.unlink()
-        target.chmod(mode)
+        rewrite_lines_nofollow(path, redact_secret_values, mode=mode)
     except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            # The temp file is already gone or unreachable; nothing left to clean.
-            pass
         return
 
 

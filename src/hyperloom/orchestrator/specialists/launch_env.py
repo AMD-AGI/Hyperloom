@@ -13,7 +13,6 @@ from hyperloom.common.run_as import (
     RunAs,
     RunAsError,
     missing_launch_capabilities,
-    set_group_shared_umask,
     specialist_run_as,
 )
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
@@ -65,7 +64,7 @@ def apply_gpu_env(env: dict[str, str], workspace: Path, gpu_ids: Sequence[int], 
 def resolve_launch_user(gpu_lease: object | None) -> RunAs | None:
     """The account to run a local specialist as, or ``None`` for no change.
 
-    Naming one also sets the app's own umask (``set_group_shared_umask``).
+    Reads the environment and the capability set only; it changes nothing.
 
     Raises:
         RunAsError: The configured user is unusable, or the specialist runs in
@@ -79,8 +78,6 @@ def resolve_launch_user(gpu_lease: object | None) -> RunAs | None:
     missing = missing_launch_capabilities() if run_as is not None else []
     if missing:
         raise RunAsError(f"running a specialist as another user needs root or {', '.join(missing)}")
-    if run_as is not None:
-        set_group_shared_umask()
     return run_as
 
 
@@ -102,7 +99,7 @@ def prepare_demote(
         return {}
     run_as.share_tree(workspace, sticky=True)
     for private in private_files:
-        if private.exists():
+        if private.is_file() and not private.is_symlink():
             private.chmod(0o600)
     if worktree is not None and workspace not in worktree.parents:
         run_as.share_tree(worktree)

@@ -97,7 +97,9 @@ def parse_dsh_session_trace(dsh_home: str | Path) -> AgentTrace:
     tool_calls: list[dict[str, Any]] = []
     replies: list[str] = []
     error = ""
-    paths = sorted(Path(dsh_home).glob(_SESSION_LOG_GLOB))
+    home = Path(dsh_home).resolve()
+    # The account that ran dsh owns this tree: read only what really sits under it, never what a link points to.
+    paths = sorted(p for p in home.glob(_SESSION_LOG_GLOB) if not p.is_symlink() and p.resolve().is_relative_to(home))
     for path in paths:
         records = _session_records(path)
         steps += [usage for usage in map(step_usage, records) if usage]

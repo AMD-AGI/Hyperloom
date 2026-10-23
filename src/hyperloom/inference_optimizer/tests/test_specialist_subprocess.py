@@ -1507,10 +1507,10 @@ async def test_a_launch_the_ray_path_refuses_leaves_the_apps_umask_alone(tmp_pat
 
 
 @pytest.mark.skipif(not _account_exists(_DEMOTE_USER), reason=f"no {_DEMOTE_USER!r} account")
-async def test_a_launch_that_names_a_user_sets_the_apps_umask(tmp_path, monkeypatch, restore_umask):
+async def test_a_launch_that_names_a_user_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask):
     monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
     await _run_spawn(tmp_path, monkeypatch)
-    assert os.umask(0o022) == 0o007
+    assert os.umask(0o022) == 0o022
 
 
 async def test_a_launch_with_no_user_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask):
@@ -1603,7 +1603,7 @@ async def test_a_launch_without_the_capability_to_stop_the_child_is_refused(tmp_
     refused = await disp.run(spawn)
     assert "specialist user refused" in (refused.error or "")
     assert "CAP_KILL" in (refused.error or "")
-    assert os.umask(0o022) == 0o022  # a refused launch leaves the app's umask alone
+    assert os.umask(0o022) == 0o022
 
 
 def test_the_capability_mask_names_what_is_missing():
@@ -1669,9 +1669,7 @@ echo '{"gap_canonical_id": "gap.test.example", "domain": "serving_specialist", "
 
 
 @_demote_skip
-async def test_every_demoted_specialist_gets_git_and_its_mcp_config_with_the_umask_already_007(
-    monkeypatch, restore_umask
-):
+async def test_every_demoted_specialist_gets_git_and_its_mcp_config_with_the_app_umask_007(monkeypatch, restore_umask):
     import shutil
     import tempfile
 
@@ -1829,3 +1827,123 @@ def test_the_archive_does_not_copy_an_applied_patch_the_child_replaced_with_a_li
     ]
     assert leaked == []
     assert archive is not None
+
+
+# ---- review r2: the snapshot's objects stay readable, and no app write follows a child's link -------------
+@_demote_skip
+def test_a_snapshot_refreshed_between_two_demoted_tasks_stays_readable_to_git(monkeypatch, restore_umask):
+    import shutil
+    import tempfile
+
+    from hyperloom.orchestrator.specialists.tree_snapshot import snapshot_tree
+
+    base = Path(tempfile.mkdtemp(prefix="d16s."))
+    try:
+        base.chmod(0o755)
+        tree = base / "installed"
+        tree.mkdir()
+        (tree / "mod.py").write_text("x = 1\n", encoding="utf-8")
+        repo = base / "snap.git"
+        os.umask(0o077)  # an app that runs under a strict umask must not hide the objects it commits
+        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+        run_as = specialist_run_as()
+        git_env = {
+            "PATH": os.environ["PATH"],
+            "HOME": run_as.home,
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "safe.directory",
+        }
+        for number in (1, 2):
+            if number == 2:
+                (tree / "mod.py").write_text("x = 2\n", encoding="utf-8")  # a kept integrate changed the tree
+            assert snapshot_tree(tree, repo, refresh=True) == (repo, "")
+            workspace = base / f"ws{number}"
+            worktree, err = subprocess_._setup_worktree(repo, workspace / "worktree", f"task-{number}")
+            assert worktree is not None, err
+            kwargs = prepare_demote(run_as, workspace, worktree, {}, ())
+            for args in (["status", "--porcelain"], ["log", "--oneline", "-1"], ["diff"]):
+                done = subprocess.run(
+                    ["git", *args],
+                    cwd=worktree,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env={**git_env, "GIT_CONFIG_VALUE_0": str(worktree)},
+                    **kwargs,
+                )
+                assert done.returncode == 0, (number, args, done.stderr)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_a_symlink_left_at_the_prompt_name_is_not_written_through(tmp_path, monkeypatch):
+    victim = tmp_path / "victim"
+    victim.write_text("app only", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "prompt.md").symlink_to(victim)
+    (workspace / "process.log").symlink_to(victim)
+    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=tmp_path, default_max_turns=1)
+    runner._write_prompt(workspace, "sys", "user")
+    assert victim.read_text(encoding="utf-8") == "app only"
+    assert "sys" in (workspace / "prompt.md").read_text(encoding="utf-8")
+    assert not (workspace / "prompt.md").is_symlink()
+
+
+async def test_the_dispatcher_does_not_write_the_prompt_or_log_through_a_planted_link(tmp_path, monkeypatch):
+    victim = tmp_path / "victim"
+    victim.write_text("app only", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    for name in ("prompt.md", "process.log", "process.log.redacting"):
+        (workspace / name).symlink_to(victim)
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_USER", raising=False)
+    await _run_spawn(tmp_path, monkeypatch)
+    assert victim.read_text(encoding="utf-8") == "app only"
+    assert not (workspace / "prompt.md").is_symlink()
+
+
+def test_the_dsh_home_is_not_written_through_a_link_the_account_left(tmp_path):
+    from hyperloom.orchestrator.specialists import dsh_launch
+
+    victim_dir = tmp_path / "elsewhere"
+    victim_dir.mkdir()
+    victim_dir.chmod(0o755)
+    (victim_dir / "AGENTS.md").write_text("app only", encoding="utf-8")
+    home = tmp_path / "ws" / ".dsh"
+    home.parent.mkdir()
+    home.symlink_to(victim_dir)
+    with pytest.raises(subprocess_.SpecialistAgentUnavailableError):
+        dsh_launch._prepare_home(home, instructions="i", patch="p")
+    assert (victim_dir / "AGENTS.md").read_text(encoding="utf-8") == "app only"
+    assert victim_dir.stat().st_mode & 0o777 == 0o755
+    real = tmp_path / "ws2" / ".dsh"
+    real.mkdir(parents=True)
+    (real / "AGENTS.md").symlink_to(victim_dir / "AGENTS.md")
+    dsh_launch._prepare_home(real, instructions="i", patch="p")
+    assert (victim_dir / "AGENTS.md").read_text(encoding="utf-8") == "app only"
+    assert (real / "AGENTS.md").read_text(encoding="utf-8") == "i"
+
+
+def test_dsh_profiles_are_not_removed_through_a_linked_home(tmp_path):
+    from hyperloom.orchestrator.specialists import dsh_launch
+
+    victim_dir = tmp_path / "elsewhere"
+    (victim_dir / "profiles").mkdir(parents=True)
+    (tmp_path / "ws").mkdir()
+    (tmp_path / "ws" / ".dsh").symlink_to(victim_dir)
+    dsh_launch.remove_dsh_profiles(tmp_path / "ws")
+    assert (victim_dir / "profiles").is_dir()
+
+
+def test_the_dsh_trace_does_not_read_a_session_log_through_a_link(tmp_path):
+    from hyperloom.inference_optimizer.trace.parse_dsh_session import parse_dsh_session_trace
+
+    outside = tmp_path / "outside"
+    (outside / "x").mkdir(parents=True)
+    (outside / "x" / "session.v3.jsonl").write_text('{"type": "session"}\n', encoding="utf-8")
+    home = tmp_path / ".dsh"
+    (home / "sessions").mkdir(parents=True)
+    (home / "sessions" / "a").symlink_to(outside)
+    trace = parse_dsh_session_trace(home)
+    assert "no session log" in trace.error

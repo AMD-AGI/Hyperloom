@@ -95,3 +95,61 @@ def test_the_base_itself_may_be_reached_through_a_link(tmp_path: Path):
     (tmp_path / "alias").symlink_to(real)
     write_text_nofollow(tmp_path / "alias", ("f",), "x")
     assert (real / "f").read_text(encoding="utf-8") == "x"
+
+
+def test_rewriting_lines_never_follows_a_planted_staging_name(tmp_path):
+    from hyperloom.common.nofollow import rewrite_lines_nofollow
+
+    victim = tmp_path / "victim"
+    victim.write_text("keep", encoding="utf-8")
+    log = tmp_path / "process.log"
+    log.write_text("secret 1\nplain\n", encoding="utf-8")
+    (tmp_path / "process.log.redacting").symlink_to(victim)
+    rewrite_lines_nofollow(log, lambda line: line.replace("secret", "xxxxxx"))
+    assert victim.read_text(encoding="utf-8") == "keep"
+    assert log.read_text(encoding="utf-8") == "xxxxxx 1\nplain\n"
+    assert not (tmp_path / "process.log.redacting").exists()
+    assert (log.stat().st_mode & 0o777) == 0o600
+
+
+def test_rewriting_an_unchanged_file_leaves_no_staging_file_and_follows_nothing(tmp_path):
+    from hyperloom.common.nofollow import rewrite_lines_nofollow
+
+    victim = tmp_path / "victim"
+    victim.write_text("keep", encoding="utf-8")
+    log = tmp_path / "process.log"
+    log.write_text("plain\n", encoding="utf-8")
+    (tmp_path / "process.log.redacting").symlink_to(victim)
+    rewrite_lines_nofollow(log, lambda line: line)
+    assert victim.read_text(encoding="utf-8") == "keep"
+    assert not os.path.lexists(tmp_path / "process.log.redacting")
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+def test_rewriting_refuses_a_link_at_the_file_itself(tmp_path, kind):
+    from hyperloom.common.nofollow import rewrite_lines_nofollow
+
+    victim = tmp_path / "victim"
+    victim.write_text("secret\n", encoding="utf-8")
+    log = tmp_path / "process.log"
+    if kind == "symlink":
+        log.symlink_to(victim)
+    else:
+        os.link(victim, log)
+    with pytest.raises(OSError):
+        rewrite_lines_nofollow(log, lambda line: "x\n")
+    assert victim.read_text(encoding="utf-8") == "secret\n"
+    assert not os.path.lexists(tmp_path / "process.log.redacting")
+
+
+def test_creating_a_file_replaces_a_planted_link_and_never_writes_through_it(tmp_path):
+    from hyperloom.common.nofollow import create_nofollow
+
+    victim = tmp_path / "victim"
+    victim.write_text("keep", encoding="utf-8")
+    (tmp_path / "process.log").symlink_to(victim)
+    with create_nofollow(tmp_path, ("process.log",)) as handle:
+        handle.write("new")
+    assert victim.read_text(encoding="utf-8") == "keep"
+    assert (tmp_path / "process.log").read_text(encoding="utf-8") == "new"
+    assert not (tmp_path / "process.log").is_symlink()

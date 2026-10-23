@@ -53,7 +53,12 @@ from hyperloom.common.llm_config import (
 from hyperloom.common.env_safety import (
     redact_file_in_place,
 )
-from hyperloom.common.nofollow import read_text_nofollow, regular_files_nofollow, write_text_nofollow
+from hyperloom.common.nofollow import (
+    create_nofollow,
+    read_text_nofollow,
+    regular_files_nofollow,
+    write_text_nofollow,
+)
 from hyperloom.common.run_as import RunAs, RunAsError
 from hyperloom.common.proctree import collect_tree, kill_tree
 
@@ -484,8 +489,17 @@ class SpecialistSubprocessDispatcher:
         )
         request.workspace.mkdir(parents=True, exist_ok=True)
         prompt_file = request.workspace / "prompt.md"
-        prompt_file.write_text(request.user_prompt, encoding="utf-8")
-        prompt_file.chmod(0o600)
+        # A reused workspace may hold a link the previous run's account planted at this name.
+        try:
+            write_text_nofollow(request.workspace, (prompt_file.name,), request.user_prompt)
+        except OSError as exc:
+            return SpecialistSubprocessResult(
+                done_payload=None,
+                exit_code=None,
+                elapsed_seconds=0.0,
+                process_log_path=str(request.workspace / _PROCESS_LOG_NAME),
+                error=f"cannot write the specialist prompt: {exc!r}",
+            )
         process_log = request.workspace / _PROCESS_LOG_NAME
         # Poll worktree first (prompt-advertised path), then workspace as fallback.
         done_candidates: list[Path] = []
@@ -622,21 +636,16 @@ class SpecialistSubprocessDispatcher:
                     proc_started = time.monotonic()
                 else:
                     proc_started = time.monotonic()
-                    log_fh = process_log.open("w", encoding="utf-8")
-                    try:
-                        process_log.chmod(0o600)
-                    except OSError:
-                        # Tightening the mode is advisory; the run continues on filesystems
-                        # that reject chmod.
-                        pass
                     stdin_fh: Any = None
                     try:
+                        # Created fresh (never through a name the previous run's account planted), owner-only.
+                        log_fh = create_nofollow(request.workspace, (process_log.name,))
                         demote = await asyncio.to_thread(
                             prepare_demote, run_as, request.workspace, request.worktree, env, (prompt_file, process_log)
                         )
                         stdin_fh = prompt_file.open("rb")
                         proc = subprocess.Popen(
-                            cmd,
+                            cmd if run_as is None else run_as.command(cmd),
                             stdin=stdin_fh,
                             stdout=log_fh,
                             stderr=subprocess.STDOUT,
@@ -646,7 +655,8 @@ class SpecialistSubprocessDispatcher:
                             **demote,
                         )
                     except (FileNotFoundError, OSError) as exc:
-                        log_fh.close()
+                        if log_fh is not None:
+                            log_fh.close()
                         return SpecialistSubprocessResult(
                             done_payload=None,
                             exit_code=None,

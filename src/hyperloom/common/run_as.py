@@ -19,6 +19,15 @@ The switch is made by ``subprocess.Popen(user=, group=, extra_groups=)``
 (:meth:`RunAs.popen_kwargs`), which runs in the forked child before ``exec``
 without a Python ``preexec_fn``; ``preexec_fn`` is unsafe in a process that
 runs threads, and the app runs MCP and event threads.
+
+Changing uid does not clear capabilities for an app that is not root: a
+non-root app that holds CAP_SETUID/SETGID/KILL as ambient or inheritable
+capabilities hands them to the child across ``exec``, and the child could
+switch back to the app's uid. The child's command is therefore started through
+``setpriv`` (:meth:`RunAs.command`), which clears the inheritable and ambient
+sets and sets ``no_new_privs`` before it executes the real command, so the
+child has no capability and can regain none through a file capability or a
+set-uid binary. (``preexec_fn`` could do the same, but is the hazard above.)
 """
 
 from __future__ import annotations
@@ -26,10 +35,11 @@ from __future__ import annotations
 import grp
 import os
 import pwd
+import shutil
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, MutableMapping
+from typing import Any, Iterable, MutableMapping, Sequence
 
 from hyperloom.common.env import env_str
 from hyperloom.common.nofollow import read_text_nofollow
@@ -44,10 +54,9 @@ _GROUP_RW = stat.S_IRGRP | stat.S_IWGRP
 _GROUP_RWX_SETGID = _GROUP_RW | stat.S_IXGRP | stat.S_ISGID
 _GROUP_R = stat.S_IRGRP
 _GROUP_RX_SETGID = _GROUP_R | stat.S_IXGRP | stat.S_ISGID
-# The app's own umask once a specialist user is set: the group may read and write,
-# others get nothing. What the app creates (a sync's reset and apply rebuild
-# worktree files as the app) stays group-writable.
-_APP_UMASK = _CHILD_UMASK
+_DROP_TOOL = "setpriv"
+# What the demoted command runs under: no inheritable or ambient capability and no way to gain one by exec.
+_DROP_ARGS = ("--no-new-privs", "--inh-caps=-all", "--ambient-caps=-all", "--")
 
 
 class RunAsError(ValueError):
@@ -63,6 +72,20 @@ class RunAs:
     gid: int
     groups: tuple[int, ...]
     home: str
+    drop_tool: str = ""
+
+    def command(self, cmd: Sequence[str]) -> list[str]:
+        """``cmd`` prefixed so that the demoted child holds no capability and can gain none.
+
+        Run as the child's first program, after the uid switch and before ``cmd``:
+        it clears the inheritable and ambient capability sets (which a non-root
+        app's CAP_SETUID/SETGID/KILL would otherwise pass on) and sets
+        ``no_new_privs``. Without a ``drop_tool`` the command is returned as it
+        is; :func:`resolve_run_as` always sets one.
+        """
+        if not self.drop_tool:
+            return list(cmd)
+        return [self.drop_tool, *_DROP_ARGS, *cmd]
 
     def popen_kwargs(self) -> dict[str, Any]:
         """Keyword arguments for ``subprocess.Popen`` that start the child as this user."""
@@ -96,7 +119,7 @@ class RunAs:
 
         ``git worktree add`` creates the ``<worktree>/.git`` gitfile and its
         ``<repo>/.git/worktrees/<name>`` admin dir under the app's group and,
-        once the app's umask is 007, without other-read, so the child's git
+        under a restrictive app umask, without other-read, so the child's git
         would fail. Both are shared read-only, as is search (not write) on the
         ``worktrees`` directory above the admin dir. A worktree with no gitfile (a snapshot)
         needs nothing.
@@ -190,22 +213,19 @@ def resolve_run_as(user: str | None) -> RunAs | None:
     if 0 in groups:
         root_group = grp.getgrgid(0).gr_name
         raise RunAsError(f"{SPECIALIST_USER_ENV}={name!r} is in group {root_group!r} (gid 0)")
-    return RunAs(user=entry.pw_name, uid=entry.pw_uid, gid=entry.pw_gid, groups=groups, home=entry.pw_dir)
+    drop_tool = shutil.which(_DROP_TOOL)
+    if drop_tool is None:
+        raise RunAsError(
+            f"{SPECIALIST_USER_ENV}={name!r}: {_DROP_TOOL} (util-linux) is needed to drop the child's capabilities"
+        )
+    return RunAs(
+        user=entry.pw_name, uid=entry.pw_uid, gid=entry.pw_gid, groups=groups, home=entry.pw_dir, drop_tool=drop_tool
+    )
 
 
 def specialist_run_as() -> RunAs | None:
     """Resolve ``HYPERLOOM_SPECIALIST_USER``; ``None`` (today's behaviour) when unset or blank. No side effects."""
     return resolve_run_as(env_str(SPECIALIST_USER_ENV))
-
-
-def set_group_shared_umask() -> None:
-    """Make this process's own umask grant its group full access and others none (0o007).
-
-    A launcher calls it once it has decided to demote, so files the app itself
-    (re)creates in a specialist's worktree, such as a sync's reset and apply,
-    stay group-writable. Process-wide; never call it when no user was named.
-    """
-    os.umask(_APP_UMASK)
 
 
 _CAPABILITIES = {"CAP_KILL": 5, "CAP_SETGID": 6, "CAP_SETUID": 7}

@@ -22,7 +22,7 @@ import errno
 import os
 import stat
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import IO, Callable, Iterator, Sequence
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -65,13 +65,13 @@ def read_text_nofollow(path: Path | str) -> str:
     return read_bytes_nofollow(path).decode("utf-8")
 
 
-def write_text_nofollow(base: Path, rel: Sequence[str], text: str, *, mode: int = 0o600) -> Path:
-    """Write ``text`` to ``base/<rel...>``, creating missing directories, and return the path.
+def create_nofollow(base: Path, rel: Sequence[str], *, mode: int = 0o600) -> IO[str]:
+    """Create ``base/<rel...>`` fresh and return it open for text writing.
 
-    Directories on the way are opened without following links. An existing
-    entry at the final name (a symlink, a hard link, a FIFO) is unlinked, never
-    written through, and the file is created fresh with ``O_EXCL``. ``mode`` (owner-only by
-    default) is subject to the process umask, as for any new file.
+    Directories on the way are opened without following links and created when
+    missing. An existing entry at the final name (a symlink, a hard link, a
+    FIFO) is unlinked, never written through, and the file is created with
+    ``O_EXCL``. ``mode`` (owner-only by default) is subject to the process umask.
     """
     *dirs, name = rel
     dir_fd = _open_below(base, dirs, create=True)
@@ -79,11 +79,61 @@ def write_text_nofollow(base: Path, rel: Sequence[str], text: str, *, mode: int 
         with contextlib.suppress(FileNotFoundError):
             os.unlink(name, dir_fd=dir_fd)
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=dir_fd)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
     finally:
         os.close(dir_fd)
+    return os.fdopen(fd, "w", encoding="utf-8")
+
+
+def write_text_nofollow(base: Path, rel: Sequence[str], text: str, *, mode: int = 0o600) -> Path:
+    """Write ``text`` to ``base/<rel...>`` as :func:`create_nofollow` creates it, and return the path."""
+    with create_nofollow(base, rel, mode=mode) as handle:
+        handle.write(text)
     return Path(base, *rel)
+
+
+def rewrite_lines_nofollow(path: Path | str, transform: Callable[[str], str], *, mode: int = 0o600) -> None:
+    """Rewrite the regular file ``path`` line by line through ``transform``, in place, without following links.
+
+    The result is staged in ``<name>.redacting`` beside the file, created fresh
+    (an entry already there is unlinked, never written through) and moved over
+    the file only when ``transform`` changed something. A symlink, a FIFO or a
+    multiply linked file at ``path`` is refused. The file ends with ``mode``.
+    Raises ``OSError`` when it cannot be done; a staged file is removed first.
+    """
+    target = Path(path)
+    name, staged = target.name, target.name + ".redacting"
+    dir_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        src_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+        with os.fdopen(src_fd, "r", encoding="utf-8", errors="replace") as source:
+            info = os.fstat(src_fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise OSError(errno.EINVAL, "not a plain regular file", str(target))
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(staged, dir_fd=dir_fd)
+            out_fd = os.open(
+                staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=dir_fd
+            )
+            try:
+                changed = False
+                with os.fdopen(out_fd, "w", encoding="utf-8") as destination:
+                    for line in source:
+                        new = transform(line)
+                        changed = changed or new != line
+                        destination.write(new)
+                    destination.flush()
+                    os.fchmod(out_fd, mode)
+                if changed:
+                    os.replace(staged, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                else:
+                    os.unlink(staged, dir_fd=dir_fd)
+                    os.fchmod(src_fd, mode)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(staged, dir_fd=dir_fd)
+                raise
+    finally:
+        os.close(dir_fd)
 
 
 def regular_files_nofollow(base: Path, subdir: str, suffixes: Sequence[str]) -> Iterator[Path]:
