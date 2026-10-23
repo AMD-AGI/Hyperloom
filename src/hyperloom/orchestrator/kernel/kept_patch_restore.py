@@ -77,7 +77,10 @@ def restore_kept_patches_on_pods(backup_roots: Iterable[Path]) -> list[Path]:
                 f"sending kept kernel file {send.target_file} to the pods failed: {exc}"
             ) from exc
     if fanout.records_by_host:
-        cleanup = _dispatch_multinode_finalize(fanout.records_by_host)
+        try:
+            cleanup = _dispatch_multinode_finalize(fanout.records_by_host)
+        except (OSError, subprocess.SubprocessError) as exc:
+            cleanup = {"status": "failed", "error": str(exc)}
         if cleanup.get("status") != "ok":
             log.warning("kept kernel files restored, but their pod-side backups were not all deleted: %s", cleanup)
     return [send.target_file for send in sends]

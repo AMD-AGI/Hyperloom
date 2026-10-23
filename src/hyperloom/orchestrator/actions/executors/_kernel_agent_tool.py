@@ -99,8 +99,8 @@ def _maybe_apply_kernel_patch(
 ) -> HandlerResult:
     """Apply a kernel patch via the kernel-agent ``apply_kernel_patch`` tool.
 
-    Backs the apply up under the session's patches dir, where the multi-node
-    adoption finds kept patches to restore, then delegates to the tool with
+    Backs the apply up under the session's patches dir, where a multi-node
+    resume finds kept patches to restore, then delegates to the tool with
     rebuild / dry-run / target options pulled from the payload.
 
     Args:

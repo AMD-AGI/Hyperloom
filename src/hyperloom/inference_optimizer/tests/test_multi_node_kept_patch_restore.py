@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -140,6 +142,35 @@ async def test_a_kept_file_the_pods_refuse_halts_the_resume(
 
     assert str(target) in str(halted.value)
     assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+
+
+def _cleanup_reports_failure(records_by_host: dict) -> dict:
+    return {"status": "partial", "returncode": 1}
+
+
+def _cleanup_times_out(records_by_host: dict) -> dict:
+    raise subprocess.TimeoutExpired("hyperloom multi-node finalize-patch", 120)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cleanup", [_cleanup_reports_failure, _cleanup_times_out], ids=["reports-failure", "times-out"]
+)
+async def test_a_failed_backup_cleanup_leaves_the_resume_running(
+    coord: Coordinator,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    cleanup: Callable[[dict], dict],
+) -> None:
+    target = _keep_one_kernel_file(coord, tmp_path)
+    _record_sends(monkeypatch)
+    monkeypatch.setattr(restore, "_dispatch_multinode_finalize", cleanup)
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert {"kind": "restored_kept_kernel_files", "files": [str(target)]} in report["fixes"]
+    assert "pod-side backups were not all deleted" in caplog.text
 
 
 @pytest.mark.asyncio
