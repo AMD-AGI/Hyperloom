@@ -12,7 +12,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import RenderedSection, as_dict, md_kv_list, md_table, register_renderer
+from hyperloom.inference_optimizer.breakdown.recorder.event_fields import as_dict
+
+from ..base import RenderedSection, md_kv_list, md_table, register_renderer
 
 _ATTEMPT_COLUMNS = ("attempt", "status", "failure_kind", "reason")
 _BUILD_COLUMNS = ("component", "ref", "gpu_arch", "ok", "failure_class")

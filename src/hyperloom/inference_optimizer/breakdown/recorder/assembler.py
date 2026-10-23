@@ -16,26 +16,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import dict_rows
 from hyperloom.common.jsonio import read_json
 
-# Re-exported: callers have always named the section tuples through the
-# assembler, and they now live in a leaf module the event writers can share.
-from .sections import (
-    BASELINE_EVENT_SECTIONS,
-    CONC_SWEEP_EVENT_SECTIONS,
-    ENABLEMENT_EVENT_SECTIONS,
-    EVENT_SECTIONS,
-    FRAMEWORK_EVENT_SECTIONS,
-    KERNEL_EVENT_SECTIONS,
-    PHASE_EVENT_SECTIONS,
-    ROOFLINE_EVENT_SECTIONS,
-    STACK_EVENT_SECTIONS,
-    WARM_REPLAY_EVENT_SECTIONS,
-    WARM_START_EVENT_SECTIONS,
-    may_hold_event,
-    section_glob,
-    slug,
-)
+from .close_out import STATUS_PENDING
+from .sections import EVENT_SECTIONS, may_hold_event, section_glob, slug
 
 _UNREADABLE = object()
 
@@ -191,18 +176,14 @@ def _compose_write_back(out: dict[str, Any]) -> dict[str, Any] | None:
     if arc is None and attempts is None:
         return None
     block = dict(arc) if isinstance(arc, dict) else {}
-    rows = [row for row in attempts if isinstance(row, dict)] if isinstance(attempts, list) else []
+    rows = dict_rows(attempts)
     rows.sort(key=lambda row: int(row.get("attempt") or 0))
     block["attempts"] = rows
     if not block.get("status"):
         # Attempts but no settled arc: opened, then the process died before
         # anything answered. Not a failure the store never returned.
-        block["status"] = _WRITE_BACK_PENDING
+        block["status"] = STATUS_PENDING
     return block
-
-
-#: Mirrors ``close_out.STATUS_PENDING``, spelled out to break an import cycle.
-_WRITE_BACK_PENDING = "pending"
 
 
 def close_steps(session_dir: Path | str) -> list[dict[str, Any]]:
@@ -214,8 +195,7 @@ def close_steps(session_dir: Path | str) -> list[dict[str, Any]]:
     close = assemble_parts(session_dir, warnings=[]).get("close")
     if not isinstance(close, dict):
         return []
-    steps = close.get("steps")
-    return [row for row in steps if isinstance(row, dict)] if isinstance(steps, list) else []
+    return dict_rows(close.get("steps"))
 
 
 def _compose_versions(out: dict[str, Any]) -> None:
@@ -278,8 +258,7 @@ def event_parts(sections: tuple[str, ...], *, event: str = "") -> dict[str, list
     the rows that come back may still include other events', and callers pick
     out their own with :func:`~.event_rows.rows_for_event` as before.
 
-    Raises :exc:`SessionNotBoundError` when no session is bound, as do the
-    per-event wrappers below, which only name their own section tuple.
+    Raises :exc:`SessionNotBoundError` when no session is bound.
     """
     from ...session.session_binding import bound_session  # local: avoid import cycle
 
@@ -290,11 +269,7 @@ def event_parts(sections: tuple[str, ...], *, event: str = "") -> dict[str, list
         only_sections=tuple(sections),
         only_event=event,
     )
-    parts: dict[str, list[dict[str, Any]]] = {}
-    for section in sections:
-        rows = assembled.get(section)
-        parts[section] = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
-    return parts
+    return {section: dict_rows(assembled.get(section)) for section in sections}
 
 
 def recorded_section(section: str, *, detail: str = "") -> list[dict[str, Any]]:
@@ -324,56 +299,6 @@ def recorded_rows(section: str, *, event: str) -> list[dict[str, Any]]:
     from .event_rows import rows_for_event  # local: avoid an import cycle at module load
 
     return rows_for_event(recorded_section(section, detail=f"reading back the rows of event {event}"), event)
-
-
-def kernel_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the KERNEL substreams of the bound session, keyed by section."""
-    return event_parts(KERNEL_EVENT_SECTIONS, event=event)
-
-
-def roofline_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the roofline substreams of the bound session, keyed by section."""
-    return event_parts(ROOFLINE_EVENT_SECTIONS, event=event)
-
-
-def baseline_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the baseline substreams of the bound session, keyed by section."""
-    return event_parts(BASELINE_EVENT_SECTIONS, event=event)
-
-
-def conc_sweep_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the conc-sweep substreams of the bound session, keyed by section."""
-    return event_parts(CONC_SWEEP_EVENT_SECTIONS, event=event)
-
-
-def enablement_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the enablement substreams of the bound session, keyed by section."""
-    return event_parts(ENABLEMENT_EVENT_SECTIONS, event=event)
-
-
-def phase_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the phase substreams of the bound session, keyed by section."""
-    return event_parts(PHASE_EVENT_SECTIONS, event=event)
-
-
-def stack_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the stack-ledger substreams of the bound session, keyed by section."""
-    return event_parts(STACK_EVENT_SECTIONS, event=event)
-
-
-def warm_replay_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the warm-replay substreams of the bound session, keyed by section."""
-    return event_parts(WARM_REPLAY_EVENT_SECTIONS, event=event)
-
-
-def warm_start_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the warm-start substreams of the bound session, keyed by section."""
-    return event_parts(WARM_START_EVENT_SECTIONS, event=event)
-
-
-def framework_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the framework substreams of the bound session, keyed by section."""
-    return event_parts(FRAMEWORK_EVENT_SECTIONS, event=event)
 
 
 def _drop_event_rows(out: dict[str, Any]) -> None:

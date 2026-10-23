@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import RenderedSection, as_dict, fmt_pct, md_table, register_renderer
+from hyperloom.inference_optimizer.breakdown.recorder.event_fields import as_dict
+
+from ..base import RenderedSection, fmt_pct, md_table, register_renderer
 from ._framework import config_attempts, config_tally
 
 #: How many measured variants the table lists before it stops. Ordered by gain,

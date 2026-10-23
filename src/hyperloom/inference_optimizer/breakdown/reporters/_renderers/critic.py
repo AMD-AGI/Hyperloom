@@ -19,13 +19,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.common.coerce import dict_rows
+from hyperloom.inference_optimizer.breakdown.recorder.event_fields import as_dict
 from hyperloom.inference_optimizer.protocol.intent import DEFAULT_IDLE_BODY
 
 from ..base import (
     RenderedSection,
-    as_dict,
     critic_iterations_of,
-    dict_rows,
     md_kv_list,
     md_table,
     register_renderer,

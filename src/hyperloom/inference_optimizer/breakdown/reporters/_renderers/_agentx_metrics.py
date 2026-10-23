@@ -13,7 +13,9 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from ..base import as_dict, md_kv_list
+from hyperloom.inference_optimizer.breakdown.recorder.event_fields import as_dict
+
+from ..base import md_kv_list
 
 #: ``perf`` key -> label, ordered as a reader needs them rather than alphabetically: the objective, then the two
 #: guards that can veto it, then the comparability inputs a pair is refused on, then the latency detail, then what

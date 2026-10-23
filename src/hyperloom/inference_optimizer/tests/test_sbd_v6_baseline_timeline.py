@@ -25,7 +25,8 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     record_action_decision,
 )
 from hyperloom.inference_optimizer.breakdown.recorder import baseline_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import baseline_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import BASELINE_EVENT_SECTIONS
 from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
 from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EVENT_STATUS_INTERRUPTED
 from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
@@ -440,10 +441,13 @@ def test_one_action_can_be_assembled_on_its_own(tmp_path: Path) -> None:
     _recorder(task_id="t-1").finish(_measured())
     _recorder(task_id="t-2").finish(_failed())
 
-    action = assemble_baseline_action(baseline_event_parts(), event="prelude:0:baseline", task_id="t-2")
+    action = assemble_baseline_action(event_parts(BASELINE_EVENT_SECTIONS), event="prelude:0:baseline", task_id="t-2")
     assert action is not None
     assert action["status"] == "failed"
-    assert assemble_baseline_action(baseline_event_parts(), event="prelude:0:baseline", task_id="t-9") is None
+    assert (
+        assemble_baseline_action(event_parts(BASELINE_EVENT_SECTIONS), event="prelude:0:baseline", task_id="t-9")
+        is None
+    )
 
 
 def test_a_killed_session_leaves_an_interrupted_event_with_its_rows(tmp_path: Path) -> None:
@@ -482,7 +486,7 @@ def test_assembling_the_same_rows_twice_gives_the_same_event(tmp_path: Path) -> 
     recorder.end_run(run_index=index, result=_measured())
     recorder.finish(_measured())
 
-    parts = baseline_event_parts()
+    parts = event_parts(BASELINE_EVENT_SECTIONS)
     once = assemble_baseline_action(parts, event="prelude:0:baseline", task_id="t-1")
     twice = assemble_baseline_action(parts, event="prelude:0:baseline", task_id="t-1")
     assert once == twice
@@ -583,7 +587,7 @@ async def test_an_inner_step_measurement_records_into_the_event_that_asked_for_i
 
     # The guest opens and closes nothing: the host owns the shell, and here there is no host to open one.
     assert read_timeline_events(tmp_path) == []
-    action = assemble_baseline_action(baseline_event_parts(host), event=host, task_id="t-exec")
+    action = assemble_baseline_action(event_parts(BASELINE_EVENT_SECTIONS, event=host), event=host, task_id="t-exec")
     assert action is not None
     assert action["status"] == "succeeded"
     assert action["measurement"]["output_throughput"] == pytest.approx(15630.28)

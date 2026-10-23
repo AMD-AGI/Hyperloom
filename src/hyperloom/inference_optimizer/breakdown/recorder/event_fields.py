@@ -26,15 +26,12 @@ __all__ = [
     "bounded_block",
     "clip",
     "failure_row",
-    "float_or_none",
     "graded_axes",
-    "int_or_none",
     "now_iso_micros",
     "now_iso_seconds",
     "summarize_hot_kernels",
     "summarize_warnings",
     "text",
-    "text_or_none",
     "worst_status",
 ]
 
@@ -76,16 +73,6 @@ def as_list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, (list, tuple)) else []
 
 
-def int_or_none(value: Any) -> int | None:
-    """Finite-int coercion; rejects ``bool``, ``None``, non-finite floats."""
-    return to_int(value)
-
-
-def float_or_none(value: Any) -> float | None:
-    """Finite-float coercion; rejects ``bool``, ``None``, ``nan``/``inf``."""
-    return to_float(value)
-
-
 def bool_or_none(value: Any) -> bool | None:
     """``bool(value)`` when a value was recorded, else ``None``.
 
@@ -99,18 +86,6 @@ def bool_or_none(value: Any) -> bool | None:
 def text(value: Any) -> str:
     """Coerce to a plain string, treating ``None`` as empty."""
     return str(value or "")
-
-
-def text_or_none(value: Any) -> str | None:
-    """Distinguish "not recorded" from "recorded empty".
-
-    V6 reserves ``None`` for a field nothing produced; ``""`` means the producer
-    ran and had nothing to say, so a caller that does not know passes ``None``.
-    """
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
 
 
 def graded_axes(source: Any) -> dict[str, Any]:
@@ -129,7 +104,7 @@ def graded_axes(source: Any) -> dict[str, Any]:
     from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, graded_axes_of
 
     axes = graded_axes_of(source)
-    return {key: float_or_none(axes.get(key)) for key in GRADED_AXIS_KEYS}
+    return {key: to_float(axes.get(key)) for key in GRADED_AXIS_KEYS}
 
 
 def summarize_hot_kernels(rows: Any) -> dict[str, Any]:
@@ -142,9 +117,9 @@ def summarize_hot_kernels(rows: Any) -> dict[str, Any]:
                 "name": clip(row.get("name"), 200),
                 "op_name": clip(row.get("op_name"), 200),
                 "category": str(row.get("category") or ""),
-                "gpu_time_us": float_or_none(row.get("gpu_time_us")),
-                "gpu_pct": float_or_none(row.get("gpu_pct")),
-                "count": int_or_none(row.get("count")),
+                "gpu_time_us": to_float(row.get("gpu_time_us")),
+                "gpu_pct": to_float(row.get("gpu_pct")),
+                "count": to_int(row.get("count")),
             }
         )
     return {"count": len(candidates), "top": top}

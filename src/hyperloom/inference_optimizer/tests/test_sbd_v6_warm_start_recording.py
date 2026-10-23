@@ -299,13 +299,14 @@ def test_finalize_closes_a_lookup_that_outlived_its_process(_bound_session):
 
 
 def test_the_closing_fragment_carries_only_exported_fields(_bound_session):
-    from hyperloom.inference_optimizer.breakdown.recorder.assembler import warm_start_event_parts
+    from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+    from hyperloom.inference_optimizer.breakdown.recorder.sections import WARM_START_EVENT_SECTIONS
     from hyperloom.inference_optimizer.breakdown.recorder.warm_start_event import SECTION_EVENT
 
     recorder = _recorder()
     recorder.finish(match_status=MATCH_MISS)
 
-    rows = warm_start_event_parts(recorder.event_id)[SECTION_EVENT]
+    rows = event_parts(WARM_START_EVENT_SECTIONS, event=recorder.event_id)[SECTION_EVENT]
     assert sorted({key for row in rows for key in row}) == [
         "end_time",
         "event_id",

@@ -19,7 +19,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._common import _dict_rows, _mapping
+from hyperloom.common.coerce import dict_rows
+
+from ..recorder.event_fields import as_dict
 
 __all__ = ["collect_v6_critic"]
 
@@ -34,4 +36,4 @@ def collect_v6_critic(recorded: Any = None) -> dict[str, Any]:
         dict[str, Any]: ``{"iterations": [...]}``. An empty ``iterations`` says
         the critic never completed a review, which is itself an answer.
     """
-    return {"iterations": _dict_rows(_mapping(recorded).get("iterations"))}
+    return {"iterations": dict_rows(as_dict(recorded).get("iterations"))}

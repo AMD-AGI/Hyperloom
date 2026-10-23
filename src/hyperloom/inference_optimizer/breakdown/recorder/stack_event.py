@@ -24,12 +24,12 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from hyperloom.common.coerce import text_or_none as _text_or_none, to_float as _float_or_none
+
 from .event_fields import (
     as_list as _as_list,
-    float_or_none as _float_or_none,
     graded_axes as _graded_axes,
     now_iso_seconds as _now,
-    text_or_none as _text_or_none,
 )
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows

@@ -20,7 +20,8 @@ from hyperloom.common.deadline import Deadline
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.inference_optimizer.breakdown.collectors.v6_close import collect_v6_close
 from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts, phase_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts, event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import PHASE_EVENT_SECTIONS
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
@@ -1219,7 +1220,9 @@ class TestEveryTerminalReachesAWrittenReport:
             assert transition["ts_unix"] == transition["evidence"]["predicate_inputs"]["now_unix"]
             assert state.pending_escalate_hint == ""
             assert assemble_parts(coord.session_dir)["outcome"]["stage_reached_recorded"] == "close"
-            prior, _ = phase_event.assemble_phase_ext(phase_event_parts(), event=phase_event.phase_event_id(phase, 0))
+            prior, _ = phase_event.assemble_phase_ext(
+                event_parts(PHASE_EVENT_SECTIONS), event=phase_event.phase_event_id(phase, 0)
+            )
             assert prior["open"] is False
             assert prior["duration_sec"] is not None
             if phase in {"FRAMEWORK_AGENT", "KERNEL_AGENT"}:
@@ -1232,7 +1235,7 @@ class TestEveryTerminalReachesAWrittenReport:
                     assert internal["ext"]["exit"]["reason"] == transition_reason
                 else:
                     assert internal["ext"]["outcome"]["exit_reason"] == transition_reason
-            close, _ = phase_event.assemble_phase_ext(phase_event_parts(), event="close:0:phase")
+            close, _ = phase_event.assemble_phase_ext(event_parts(PHASE_EVENT_SECTIONS), event="close:0:phase")
             actions = {row["task_id"]: row for row in close["actions"]["rows"]}
             receipts = transition["evidence"]["close_steps"]
             for step in ("report", "session_breakdown"):

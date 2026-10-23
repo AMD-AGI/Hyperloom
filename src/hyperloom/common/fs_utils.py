@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared filesystem-classification helpers."""
+"""Shared filesystem-classification and path helpers."""
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 # Mounts that can be revoked mid-run: a process whose cwd lives on one sees relative-path writes fail with ENOENT
 # after a flap, so callers place anything they must keep writing to on local disk instead.
@@ -62,3 +63,11 @@ def _path_fstype(path: str) -> str:
 def is_network_fs(path: str) -> bool:
     """True when ``path`` is backed by a revocable network filesystem."""
     return _path_fstype(path).lower() in _NETWORK_FS_TYPES
+
+
+def relative_posix(path: Path, root: Path) -> str:
+    """``path`` relative to ``root`` as a POSIX string, both resolved; ``str(path)`` when it is not under ``root``."""
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except (ValueError, OSError):
+        return str(path)

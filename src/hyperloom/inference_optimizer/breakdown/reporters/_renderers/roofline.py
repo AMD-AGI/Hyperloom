@@ -18,10 +18,11 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from hyperloom.common.coerce import dict_rows
+from hyperloom.inference_optimizer.breakdown.recorder.event_fields import as_dict
+
 from ..base import (
     RenderedSection,
-    as_dict,
-    dict_rows,
     events_of,
     fmt_pct,
     md_kv_list,

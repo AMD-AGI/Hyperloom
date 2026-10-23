@@ -1542,7 +1542,8 @@ class TestKernelE2EMeasurementPromotion:
     async def test_promotion_recorder_keeps_gain_objective_separate_from_output(
         self, coord, monkeypatch, explicit_output
     ):
-        from hyperloom.inference_optimizer.breakdown.recorder.assembler import kernel_event_parts
+        from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+        from hyperloom.inference_optimizer.breakdown.recorder.sections import KERNEL_EVENT_SECTIONS
         from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
             ROUTE_FORGE,
             SOURCE_GEMM_TUNING,
@@ -1575,7 +1576,7 @@ class TestKernelE2EMeasurementPromotion:
             phase._open_kernel_timeline(route=ROUTE_FORGE, route_reason="unit", from_phase="")
             await phase._handle_gemm_tuning_result(result)
             recorder = phase.timeline()
-            ext, _status = assemble_kernel_ext(kernel_event_parts(), event=recorder.event_id)
+            ext, _status = assemble_kernel_ext(event_parts(KERNEL_EVENT_SECTIONS), event=recorder.event_id)
 
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(gain)
         # The gain is graded on the session's own axis, and the run says which

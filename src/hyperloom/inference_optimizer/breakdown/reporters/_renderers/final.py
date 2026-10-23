@@ -14,11 +14,11 @@ from __future__ import annotations
 from typing import Any
 
 from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
+from hyperloom.inference_optimizer.breakdown.recorder.event_fields import as_dict
 
 from ..base import (
     Decision,
     RenderedSection,
-    as_dict,
     close_of,
     events_of,
     fmt_pct,

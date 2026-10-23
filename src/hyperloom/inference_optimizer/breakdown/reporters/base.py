@@ -10,7 +10,9 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
-from hyperloom.common.coerce import to_float
+from hyperloom.common.coerce import dict_rows, to_float
+
+from ..recorder.event_fields import as_dict
 
 log = logging.getLogger(__name__)
 
@@ -19,10 +21,8 @@ __all__ = [
     "RenderedSection",
     "RendererFn",
     "REGISTRY",
-    "as_dict",
     "close_of",
     "critic_iterations_of",
-    "dict_rows",
     "events_of",
     "outcome_of",
     "register_renderer",
@@ -33,26 +33,6 @@ __all__ = [
     "timeline_of",
     "validation_of",
 ]
-
-
-def as_dict(value: Any) -> dict[str, Any]:
-    """Narrow a breakdown section to a mapping, since no producer is schema-checked."""
-    return value if isinstance(value, dict) else {}
-
-
-def dict_rows(value: Any) -> list[dict[str, Any]]:
-    """Narrow a recorded row array to the mappings in it.
-
-    Args:
-        value: A row array as read off an event's ``ext``.
-
-    Returns:
-        The entries that are dicts, in order; ``[]`` when the value is not a
-        list.
-    """
-    if not isinstance(value, list):
-        return []
-    return [row for row in value if isinstance(row, dict)]
 
 
 def timeline_of(breakdown: Any) -> list[dict[str, Any]]:

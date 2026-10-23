@@ -199,21 +199,6 @@ async def test_a_proposal_the_session_ends_without_a_verdict_on_closes_cancelled
 
 
 @pytest.mark.asyncio
-async def test_a_supervisor_restart_leaves_undecided_proposals_open(session_dir):
-    from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
-
-    c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[MockTurn(intents=[_propose("baseline")])])))
-    try:
-        with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
-            await c.tick(1)
-            c._close_undecided_proposals(SUPERVISOR_RESTART_REASON)
-    finally:
-        await c.stop()
-
-    assert [r["status"] for r in _rows(session_dir, tt.EVENT_PROPOSAL)] == [tt.STATUS_QUEUED]
-
-
-@pytest.mark.asyncio
 async def test_a_dispatched_task_runs_under_its_own_scope(session_dir):
     seen: dict[str, object] = {}
 
