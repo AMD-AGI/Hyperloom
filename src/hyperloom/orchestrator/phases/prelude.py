@@ -55,8 +55,9 @@ from ..loop.time_budget import (
 from ..collaborator import CoordinatorCollaborator
 from .warm_replay_stack import (
     commit_warm_replay_overlays,
+    committing_overlays,
     replayed_patch_refs as _replayed_patch_refs,
-    uncommit_warm_replay_overlays,
+    uncommit_promoted_overlays,
     warm_patch_trees as _warm_patch_trees,
     warm_replay_source_layer,
 )
@@ -1482,11 +1483,12 @@ class PreludePhase(CoordinatorCollaborator):
                     "target_repo": str(target_path),
                 }
             promoted.append(str(target_path))
-        commit = commit_warm_replay_overlays(result)
-        if commit.failed:
-            failure = "the replayed overlays cannot be committed to the framework tree: " + "; ".join(commit.failed)
+        self.shared_state.warm_replay_pending = committing_overlays(self.shared_state.warm_replay_pending or {})
+        self.shared_state.save(self.session_dir)
+        if failed := commit_warm_replay_overlays(result):
+            failure = "the replayed overlays cannot be committed to the framework tree: " + "; ".join(failed)
             return False, {"status": "failed", "failure": failure}
-        return True, {"status": "promoted", "target_repo": promoted[0], "target_repos": promoted, **commit.record()}
+        return True, {"status": "promoted", "target_repo": promoted[0], "target_repos": promoted}
 
     def rollback_combined_warm(self, result: dict[str, Any], task: "Task | None") -> dict[str, Any]:
         """Restore both Recipe and Kernel halves of a combined replay."""
@@ -1506,6 +1508,7 @@ class PreludePhase(CoordinatorCollaborator):
             if not recipe_manifest and not backups:
                 restores.append({"ok": False, "errors": [f"recipe:{target}:missing_snapshot_manifest"]})
                 continue
+            uncommit_promoted_overlays(pending, target, str(tree.get("pre_sha") or ""))
             restores.append(
                 _revert_warm_patch_state(
                     target,
@@ -2252,7 +2255,6 @@ class PreludePhase(CoordinatorCollaborator):
             self._warm_replay_candidate(result, task, params),
             entry_extra=entry_extra,
         ):
-            uncommit_warm_replay_overlays(promotion)
             # Cleared the keep threshold against the baseline yet did not
             # beat the adopted configuration on its graded objective.
             return self._reject_warm_replay_as_drift(

@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 from ..actions.executors._git import _git_head_sha, _run_git_cp
 from ..actions.executors._nogit_patch import _is_git_tree
@@ -110,43 +110,41 @@ def warm_replay_source_layer(result: Mapping[str, Any], session_dir: str | Path,
     }
 
 
-_OVERLAY_HEADS_KEY = "overlay_commit_heads"
+# Set on the pending replay record, and persisted, before the promotion commits the overlays.
+_OVERLAYS_COMMITTED_KEY = "recipe_overlays_committed"
 
 
-class OverlayCommit(NamedTuple):
-    """What committing a promoted warm replay's overlays did."""
-
-    #: The HEAD each tree had before the commit, for every tree a commit advanced.
-    advanced: dict[str, str]
-    #: Why a tree's overlays could not be committed, one line each.
-    failed: list[str]
-
-    def record(self) -> dict[str, dict[str, str]]:
-        """The promotion fields :func:`uncommit_warm_replay_overlays` reads back."""
-        return {_OVERLAY_HEADS_KEY: dict(self.advanced)}
+def committing_overlays(pending: Mapping[str, Any]) -> dict[str, Any]:
+    """The pending replay record to persist before the promotion commits, so any later rollback undoes the commit."""
+    return {**pending, _OVERLAYS_COMMITTED_KEY: True}
 
 
-def commit_warm_replay_overlays(result: Mapping[str, Any]) -> OverlayCommit:
-    """Commit the overlays a promoted warm replay applied on each git framework tree.
+def commit_warm_replay_overlays(result: Mapping[str, Any]) -> list[str]:
+    """Commit the overlays a promoted warm replay applied on each git framework tree; return why a tree could not be.
 
     Every integrate_patch candidate stashes a dirty tree before it applies, so overlays left uncommitted would be
     benched away from every candidate after the promotion. A root that is not a git tree holds them as written.
     """
-    commit = OverlayCommit({}, [])
+    failed = []
     for root_text, overlays in _landed_overlays(result).items():
         root = Path(root_text)
         if not _is_git_tree(root):
             continue
-        head = _git_head_sha(root)
         ok, note = _git_commit_kept(root, "hyperloom KEEP replay_warm_recipe", _patch_touched_paths(root, overlays))
         if not ok:
-            commit.failed.append(f"{root}: {note or 'git commit failed'}")
-        elif not note:
-            commit.advanced[root_text] = head
-    return commit
+            failed.append(f"{root}: {note or 'git commit failed'}")
+    return failed
 
 
-def uncommit_warm_replay_overlays(promotion: Mapping[str, Any]) -> None:
-    """Move each tree the promotion committed back to its prior HEAD, leaving the overlays for the rollback."""
-    for root, head in (promotion.get(_OVERLAY_HEADS_KEY) or {}).items():
-        _run_git_cp(["-C", root, "reset", "-q", "--soft", head], timeout=30.0)
+def uncommit_promoted_overlays(pending: Mapping[str, Any], root: str, pre_sha: str) -> None:
+    """Move ``root`` back to ``pre_sha`` when the promotion committed the overlays on it, leaving them for the restore.
+
+    The restore requires HEAD at ``pre_sha``. Only a single commit directly on ``pre_sha`` is undone; any other HEAD is
+    left for the restore to refuse.
+    """
+    if not pending.get(_OVERLAYS_COMMITTED_KEY) or not pre_sha:
+        return
+    head = _git_head_sha(root)
+    parent = _run_git_cp(["-C", root, "rev-parse", "HEAD^"], timeout=30.0)
+    if head and head != pre_sha and parent is not None and parent.stdout.strip() == pre_sha:
+        _run_git_cp(["-C", root, "reset", "-q", "--soft", pre_sha], timeout=30.0)

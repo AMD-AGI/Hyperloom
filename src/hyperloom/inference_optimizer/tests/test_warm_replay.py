@@ -59,6 +59,7 @@ class _StubSharedState(SharedState):
                 {
                     "warm_replay_attempted": bool(self.warm_replay_attempted),
                     "warm_replay_outcome": dict(self.warm_replay_outcome or {}),
+                    "warm_replay_pending": dict(self.warm_replay_pending or {}),
                 }
             ),
             encoding="utf-8",
@@ -3375,4 +3376,54 @@ def test_a_warm_replay_whose_overlays_cannot_be_committed_is_not_adopted(tmp_pat
     assert coord.shared_state.warm_replay_outcome["status"] == "promotion_failed"
     assert "cannot be committed" in coord.shared_state.warm_replay_outcome["reason"]
     assert _tree_git(tree, "status", "--porcelain") == ""
+    assert (tree / "python" / "sglang" / "srt" / "environ.py").read_text(encoding="utf-8") == _STOCK_ENVIRON
+
+
+def test_a_commit_failing_on_one_tree_leaves_every_tree_stock(tmp_path):
+    from hyperloom.orchestrator.actions.executors.baseline import _apply_warm_patches, _stamp_warm_patch_outcome
+
+    trees = [_stock_sglang_tree(tmp_path / name) for name in ("sglang", "tuning")]
+    stock_heads = [_tree_git(tree, "rev-parse", "HEAD").strip() for tree in trees]
+    params = {
+        "baseline_tput_anchor": 600.0,
+        "required_patch_timeline": True,
+        "patches": [
+            {"patch_file": f"patch/overlays/000001/0{i}.patch", "patch_content": _PPE_OVERLAY, "framework_root": str(t)}
+            for i, t in enumerate(trees)
+        ],
+        "extra_server_args": "--recipe",
+        "extra_envs": {},
+    }
+    workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
+    workspace.mkdir(parents=True)
+    result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, "", workspace), params)
+    hook = trees[1] / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+
+    coord.phase_prelude.promote_warm_replay(result, task=_StubTask(params=params))
+
+    assert coord.shared_state.warm_replay_outcome["status"] == "promotion_failed"
+    for tree, stock_head in zip(trees, stock_heads):
+        assert _tree_git(tree, "rev-parse", "HEAD").strip() == stock_head
+        assert (tree / "python" / "sglang" / "srt" / "environ.py").read_text(encoding="utf-8") == _STOCK_ENVIRON
+
+
+def test_a_resume_rolls_back_a_replay_that_died_after_committing_its_overlays(tmp_path):
+    coord, tree, result, params = _replayed_on_a_git_tree(tmp_path)
+    stock_head = _tree_git(tree, "rev-parse", "HEAD").strip()
+    coord.shared_state.warm_replay_pending = {"task_id": "warm", "recipe_patch_trees": result["warm_patch_trees"]}
+    promoted, _ = coord.phase_prelude._resolve_promoted_recipe_checkout(result, _StubTask(params=params))
+    assert promoted
+
+    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    coord.shared_state.warm_replay_pending = persisted["warm_replay_pending"]
+    rollback = coord.phase_prelude.rollback_combined_warm({}, None)
+
+    assert rollback["errors"] == []
+    assert _tree_git(tree, "rev-parse", "HEAD").strip() == stock_head
     assert (tree / "python" / "sglang" / "srt" / "environ.py").read_text(encoding="utf-8") == _STOCK_ENVIRON
