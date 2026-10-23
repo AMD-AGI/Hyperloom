@@ -556,17 +556,17 @@ async def test_resume_commits_the_reinstalled_source_layer_on_a_git_tree(coord: 
 
 @pytest.mark.asyncio
 async def test_a_candidate_after_resume_still_sees_the_kept_source_layer(coord: Coordinator, tmp_path: Path) -> None:
-    from hyperloom.orchestrator.actions.executors import _git as git_helpers
-    from hyperloom.orchestrator.actions.executors import _patch_git as patch_git
+    from hyperloom.orchestrator.actions.executors._git import _git_head_sha
+    from hyperloom.orchestrator.actions.executors._patch_git import _git_reset_clean, _git_stash_if_dirty
 
     tree = _git_framework_tree(tmp_path)
     _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})])
 
     await coord.writeback._resume_consistency_pass()
-    accepted_head = git_helpers._git_head_sha(tree)
-    stash_state, _ = patch_git._git_stash_if_dirty(tree)
+    accepted_head = _git_head_sha(tree)
+    stash_state, _ = _git_stash_if_dirty(tree)
     (tree / "v1" / "mla.py").write_text("candidate mla\n", encoding="utf-8")
-    reverted, _ = patch_git._git_reset_clean(tree, accepted_head)
+    reverted, _ = _git_reset_clean(tree, accepted_head)
 
     assert stash_state == "clean"
     assert _git(tree, "stash", "list") == ""
