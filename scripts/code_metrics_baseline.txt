@@ -64,6 +64,8 @@ cyclomatic-complexity src/hyperloom/orchestrator/trace_analysis/bypass_trace_ana
 cyclomatic-complexity src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::main 44
 dead-code src/hyperloom/orchestrator/actions/executors/_grid_runner.py::SessionDirField.__get__:objtype 1
 dead-code src/kernelforge/loop/run_state.py::WorkspaceLock.__exit__:exc_value 1
+directory-entries src/hyperloom/common 57
+directory-entries src/hyperloom/orchestrator/actions/executors 83
 duplicated-lines src/hyperloom/inference_optimizer/breakdown/collectors/sessions.py 19
 duplicated-lines src/hyperloom/inference_optimizer/breakdown/recorder/recorder.py 28
 duplicated-lines src/hyperloom/inference_optimizer/multi_node/scripts/kernel_node_ops.py 13
@@ -80,12 +82,12 @@ duplicated-lines src/hyperloom/inference_optimizer/tests/test_cli_bootstrap.py 3
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_cli_bootstrap_coverage_unit.py 380
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_close_phase_sequencer.py 42
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_column_kb.py 68
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_common_utils.py 863
+duplicated-lines src/hyperloom/inference_optimizer/tests/test_common_utils.py 785
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_conc_sweep.py 44
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_coordinator_async_methods_coverage_unit.py 18
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_coordinator_sync_helpers_coverage_unit.py 15
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_coverage_boost_unit.py 44
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_coverage_gap_units.py 660
+duplicated-lines src/hyperloom/inference_optimizer/tests/test_coverage_gap_units.py 581
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_coverage_margin3_unit.py 161
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_decision_framework.py 18
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_eval_result_dir_wiring.py 66
@@ -299,7 +301,6 @@ function-lines src/hyperloom/inference_optimizer/cli/kb.py::_bootstrap_recipe_kb
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_context_window 116
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_model_config_compat 71
 function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_prepare_multi_node_state 76
-function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_replay_kernel_patches_for_multi_node 73
 function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 929
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_emit_preflight_diagnostics 65
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_inferencex 51
@@ -375,7 +376,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::samp
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_published_service_ready_async 70
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 113
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_workers_ready_async 52
-function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::restart_server_for_round 101
+function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::restart_server_for_round 99
 function-lines src/hyperloom/orchestrator/actions/executors/_nogit_patch.py::_apply_patch_no_git 105
 function-lines src/hyperloom/orchestrator/actions/executors/_partition_shape.py::validate_session_shape 97
 function-lines src/hyperloom/orchestrator/actions/executors/_patch_artifacts.py::_validate_aiter_gemm_artifacts 51
@@ -798,7 +799,7 @@ module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2681
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2569
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1759
 module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2551
-module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1804
+module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1800
 module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1417
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2045
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1578
@@ -820,7 +821,7 @@ module-lines src/hyperloom/orchestrator/phases/framework.py 3038
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4102
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 1994
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2504
-module-lines src/hyperloom/orchestrator/policy/gate.py 1577
+module-lines src/hyperloom/orchestrator/policy/gate.py 1576
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2556
 module-lines src/hyperloom/orchestrator/specialists/runner.py 1451
