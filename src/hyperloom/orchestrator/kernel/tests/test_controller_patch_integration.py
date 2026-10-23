@@ -1607,3 +1607,42 @@ def test_a_git_probe_propagates_an_unexpected_failure(monkeypatch: pytest.Monkey
     monkeypatch.setattr(integration, "_git_output", _git_failing_with(TypeError("bad repo")))
     with pytest.raises(TypeError, match="bad repo"):
         _GIT_PROBES[probe][0]()
+
+
+@pytest.mark.asyncio
+async def test_a_controller_keep_is_reinstalled_on_a_fresh_tree(tmp_path: Path) -> None:
+    """A KEEP the Controller committed is part of current_best, so a resume onto a stock tree has to put it back."""
+    from hyperloom.orchestrator.source_snapshot import install_source_layers
+
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="reinstall",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    coordinator = _coordinator(session_dir, repo)
+
+    async def _validate(_publication):
+        return {"status": "ok", "decision": "KEEP", "base_tput": 100.0, "new_tput": 130.0, "gain_pct": 30.0}
+
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=coordinator.shared_state,
+        record_keep=coordinator.writeback.record_integrate_keep,
+        validator=_validate,
+    )
+    assert summary.kept_count == 1
+    _git(repo, "reset", "--hard", base)
+    _git(repo, "clean", "-fdq")
+    installed = install_source_layers(coordinator.shared_state.optimization_stack)
+
+    assert installed.failed == []
+    assert installed.unreproducible == []
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 2\n"

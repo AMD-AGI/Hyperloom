@@ -60,6 +60,11 @@ from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
 from ..framework.artifacts import candidate_key
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
+from ..source_snapshot import (
+    report_missing_source_snapshot,
+    source_layer_handles as _source_layer_handles,
+    variant_source_layer as _variant_source_layer,
+)
 from ..state.shared_state import SharedState, resolve_graded_comparison
 from ..bus.message_bus import Message
 from hyperloom.inference_optimizer.session.resume_guard import confirmed_stopped_scope
@@ -399,35 +404,6 @@ class _PromoteOutcome:
     early_return: bool = False
 
 
-def _source_layer_handles(result: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the source-layer fields a ``source_patch`` lift must carry.
-
-    Every field here has to survive the hop from the executor result into the
-    optimization_stack entry, where ``build_env_spec`` reads it. Assembling them
-    in one place is what keeps a second lift path from forwarding a subset and
-    degrading the overlay it feeds.
-
-    Args:
-        result: An integrate_patch KEEP result.
-
-    Returns:
-        dict[str, Any]: Handles to merge into the lift. ``source_snapshot_complete``
-            is present only when the result recorded it, so entries predating the
-            field still fall back to reading their manifest.
-    """
-    handles: dict[str, Any] = {
-        "source_snapshot": result.get("source_snapshot") or "",
-        "source_manifest": result.get("source_manifest") or "",
-        "target_files": [str(path) for path in (result.get("target_files") or []) if str(path).strip()],
-        "framework_root": result.get("framework_root") or "",
-        "base_sha": result.get("base_sha") or "",
-        "source_import_root": result.get("source_import_root") or "",
-    }
-    if "source_snapshot_complete" in result:
-        handles["source_snapshot_complete"] = bool(result["source_snapshot_complete"])
-    return handles
-
-
 def _baseline_perf_axes(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
     if not snapshot:
         return {}
@@ -629,25 +605,6 @@ def _variant_launch_controls(bv: Mapping[str, Any]) -> dict[str, Any]:
         fields["effective_extra_server_args"] = dedupe_extra_server_args(
             strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
         )
-    return fields
-
-
-def _variant_source_layer(bv: Mapping[str, Any]) -> dict[str, Any]:
-    fields: dict[str, Any] = {}
-    for key in ("source_snapshot", "source_manifest", "source_import_root", "framework_root", "base_sha"):
-        value = bv.get(key)
-        if value:
-            fields[key] = str(value)
-    # Copied unconditionally: False is the meaningful value that marks a
-    # snapshot unusable, so truthiness must not drop it.
-    if "source_snapshot_complete" in bv:
-        fields["source_snapshot_complete"] = bool(bv["source_snapshot_complete"])
-    target_files = [str(path) for path in (bv.get("target_files") or []) if str(path).strip()]
-    if target_files:
-        fields["target_files"] = target_files
-    scope = str(bv.get("scope") or "").strip()
-    if scope:
-        fields["scope"] = scope
     return fields
 
 
@@ -1243,6 +1200,7 @@ class WritebackCollaborator(GeakRevalidation):
                 **({"backend": "forge", "engine": "forge_fusion"} if is_fusion else {}),
                 # Preserve committed source-layer identity for recipe export.
                 **{key: result[key] for key in ("scope", "operator_id", "base_sha", "keep_commit") if result.get(key)},
+                **(_source_layer_handles(result) if result.get("scope") == "source_patch" else {}),
             },
         )
         if not lifted:
@@ -1833,6 +1791,7 @@ class WritebackCollaborator(GeakRevalidation):
         if _already_stacked(self.shared_state.optimization_stack, request, launch.variant_name):
             return
         stack_entry = self._stack_entry(request, launch)
+        report_missing_source_snapshot(stack_entry, request.task_kind, launch.variant_name)
         self.shared_state.optimization_stack.append(stack_entry)
         # Mirror the append into gain_per_stack_entry so the two lists stay index-aligned.
         self.shared_state.append_stack_gain_entry(
