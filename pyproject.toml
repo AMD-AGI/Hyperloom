@@ -75,6 +75,19 @@ forge = [
     "anthropic>=0.40",
     "hyperloom-inference_optimizer[llm]",
 ]
+# The measurement runner inside a sealed sandbox: it reads the YAML config and signs its result manifest. The sealed
+# runner installs ``requirements/runner.lock``, this list compiled with hashes, and never resolves this list itself.
+# The framework stack (torch, triton, sglang, aiter) is the framework image's and must not be listed here.
+#
+# ``lm_eval[api]`` is the accuracy pass's client: 0.4.13, the release that the ref ``inference_optimizer/cli/preflight.py``
+# pins (``_LM_EVAL_PINNED_REF``). It comes from PyPI, not as that ref's GitHub archive, because GitHub does not keep an
+# archive's checksum stable and a hash lock must not depend on one. ``tenacity`` is what its ``api`` models import.
+runner = [
+    "PyYAML>=6.0",
+    "cryptography>=42",
+    "lm_eval[api]==0.4.13",
+    "tenacity",
+]
 # ROCm Compute Profiler (rocprof-compute) Python requirements. Nothing in this
 # repository imports them: they satisfy the profiler, whose binary is supplied
 # by the ROCm image or system package. Without this extra, kernelforge
