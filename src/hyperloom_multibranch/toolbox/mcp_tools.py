@@ -11,8 +11,9 @@ only; the notebook's search and record reads are shared across branches, as the 
 * ``submit_test``, ``test_result``, ``cancel_test`` and ``queue_state`` go through the toolbox interface;
 * ``wait_test`` blocks on one test of the branch until its record says it is over or the wait runs out, and then
   reports how far it has got (the toolbox's ``progress``);
-* ``start_analysis`` starts ``tracelens`` or ``roofline`` on the branch's head commit (an
-  :class:`~.analysis.AnalysisStarter`, the real toolbox);
+* ``start_analysis`` starts one of the analysis tools the toolbox serves (``tracelens``, ``roofline``: its
+  :attr:`~.analysis.AnalysisStarter.analysis_tools`, which the tool's schema and description list, no more) on the
+  branch's head commit (an :class:`~.analysis.AnalysisStarter`, the real toolbox);
 * ``poll_inbox`` reads the branch's inbox, one page at a time (:data:`POLL_INBOX_MAX_ITEMS` items at most);
 * the ``notebook_*`` tools are the notebook's own specialist tools (lookup, claim, release, search, record, branch log,
   brief), bound per call to the notebook handle of the caller's branch.
@@ -65,7 +66,8 @@ from hyperloom_multibranch.contracts.toolbox import (
     ToolboxError,
 )
 from hyperloom_multibranch.notebook.tools import ERROR, notebook_tools
-from hyperloom_multibranch.toolbox.analysis import ANALYSIS_TOOLS, CODE_NO_EXECUTOR, AnalysisStarter
+from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, AnalysisStarter
+from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.notebook.learning_search import LearningFinder
@@ -144,23 +146,50 @@ _SUBMIT_TEST: dict[str, Any] = {
     "required": ["kind", "purpose", "parent_commit"],
     "additionalProperties": False,
 }
-# The commit is the branch head, read by the server; a request that names a commit or a branch is refused by the schema.
-_START_ANALYSIS: dict[str, Any] = {
-    "type": _OBJECT,
-    "properties": {
-        "tool": {"type": _STRING, "description": f"One of: {', '.join(ANALYSIS_TOOLS)}."},
-        "params": {
-            "type": _OBJECT,
-            "description": "The tool's own parameters. trace_input, commit_id and profile_request_id are set by the server and refused here.",
+_ANALYSIS_BLURBS = {TRACELENS_TOOL: "analyse a trace", ROOFLINE_TOOL: "profile, then analyse"}
+
+
+def _start_analysis_schema(served: Sequence[str]) -> dict[str, Any]:
+    """The ``start_analysis`` schema: ``tool`` is one of ``served``, the tools the toolbox serves, and nothing else.
+
+    The commit is the branch head, read by the server; a request that names a commit or a branch is refused by the
+    schema. With nothing served ``tool`` has no ``enum``, so a call reaches the toolbox's own refusal by name.
+    """
+    profile_note = (
+        "required for tracelens, checked by the server" if TRACELENS_TOOL in served else "checked by the server"
+    )
+    tool: dict[str, Any] = {"type": _STRING, "description": f"One of: {', '.join(served) or 'none served here'}."}
+    if served:
+        tool["enum"] = list(served)
+    return {
+        "type": _OBJECT,
+        "properties": {
+            "tool": tool,
+            "params": {
+                "type": _OBJECT,
+                "description": "The tool's own parameters. trace_input, commit_id and profile_request_id are set by the server and refused here.",
+            },
+            "profile_request_id": {
+                "type": _STRING,
+                "description": f"The id of a profile test of this branch's head commit, run by any branch, whose trace is analysed; {profile_note}.",
+            },
         },
-        "profile_request_id": {
-            "type": _STRING,
-            "description": "The id of a profile test of this branch's head commit, run by any branch, whose trace is analysed; required for tracelens, checked by the server.",
-        },
-    },
-    "required": ["tool"],
-    "additionalProperties": False,
-}
+        "required": ["tool"],
+        "additionalProperties": False,
+    }
+
+
+def _start_analysis_description(served: Sequence[str]) -> str:
+    if not served:
+        return "This toolbox serves no analysis tool: every call is refused by name."
+    named = " or ".join(f"{name} ({_ANALYSIS_BLURBS[name]})" if name in _ANALYSIS_BLURBS else name for name in served)
+    return (
+        f"Start {named} for this branch; returns the job id at once and the result arrives in poll_inbox. The commit "
+        "analysed is this branch's head, set by the server; with a profile_request_id of any branch's profile test of "
+        "it the pointer carries its op shares."
+    )
+
+
 _PUT_KERNEL_ARTIFACT: dict[str, Any] = {
     "type": _OBJECT,
     "properties": {
@@ -691,14 +720,11 @@ def register_specialist_tools(
         handler=_queue_state(toolbox, toolbox_loop),
         **own,
     )
+    served = options.analysis.analysis_tools if options.analysis is not None else ()
     server.register(
         "start_analysis",
-        description=(
-            "Start tracelens (analyse a trace) or roofline (profile, then analyse) for this branch; returns the job "
-            "id at once and the result arrives in poll_inbox. The commit analysed is this branch's head, set by the "
-            "server; with a profile_request_id of any branch's profile test of it the pointer carries its op shares."
-        ),
-        schema=_START_ANALYSIS,
+        description=_start_analysis_description(served),
+        schema=_start_analysis_schema(served),
         handler=_start_analysis(options.analysis, toolbox_loop),
         **own,
     )

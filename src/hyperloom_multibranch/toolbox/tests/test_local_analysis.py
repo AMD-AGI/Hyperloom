@@ -120,10 +120,18 @@ async def test_a_specialist_analyses_the_trace_of_its_profile_test_on_the_real_l
     assert [(item.kind.value, item.pointer) for item in page.items if item.pointer == job] == [("tool_result", job)]
 
 
-async def test_roofline_is_refused_by_name_on_the_local_backend(local: Local) -> None:
-    text = await local.stack.refused(tool="roofline")
-    assert "tool_unavailable_on_backend" in text and "no_tool_executor" not in text
+async def test_the_local_backend_advertises_only_the_analysis_tool_it_serves(local: Local) -> None:
+    entry = local.stack.advertised()
     assert local.toolbox._tools.tool_names == ("tracelens",)  # type: ignore[union-attr]
+    assert entry["inputSchema"]["properties"]["tool"]["enum"] == list(local.toolbox.analysis_tools) == ["tracelens"]
+    assert "roofline" not in entry["description"] and "roofline" not in json.dumps(entry["inputSchema"])
+
+
+async def test_roofline_is_refused_on_the_local_backend(local: Local) -> None:
+    assert "must be one of ['tracelens']" in await local.stack.refused(tool="roofline")
+    with pytest.raises(RequestRejected) as stale:  # the toolbox's own guard, for a client with an older tool list
+        await local.toolbox.submit_analysis("b1", "roofline", {})
+    assert stale.value.code == "tool_unavailable_on_backend"
 
 
 @pytest.mark.parametrize("with_profile", [True, False])

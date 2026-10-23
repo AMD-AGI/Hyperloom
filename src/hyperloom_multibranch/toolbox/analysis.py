@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a specialist may start from the MCP service: ``tracelens`` and ``roofline`` on its own branch's commit.
+"""What a specialist may start from the MCP service: ``tracelens`` and ``roofline`` on its own branch's commit, those
+of them the toolbox's tool registry serves (:attr:`AnalysisStarter.analysis_tools`).
 
 The caller names the tool and its own parameters. The commit the analysis is about is never the caller's: it is the
 head of the caller's branch in the experiment repository, read here. ``profile_request_id`` is kept only when the
@@ -31,6 +32,7 @@ from hyperloom_multibranch.toolbox.tools.op_shares import COMMIT_PARAM, PROFILE_
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
 from hyperloom_multibranch.toolbox.tools.tracelens_report import REPORT_ROUTE, WORKLOAD_HINTS, split_hint
 
+#: The ceiling of what a specialist may start; the toolbox serves those of them its registry holds, never more.
 ANALYSIS_TOOLS = (TRACELENS_TOOL, ROOFLINE_TOOL)
 CODE_TOOL_NOT_ALLOWED = "tool_not_allowed"
 CODE_SERVER_OWNED_PARAM = "server_owned_param"
@@ -52,6 +54,10 @@ _POINT_CONFIG_MAX_BYTES = 1 << 20
 
 class AnalysisStarter(Protocol):
     """What the MCP route calls; :class:`~hyperloom_multibranch.toolbox.toolbox.RealToolbox` implements it."""
+
+    @property
+    def analysis_tools(self) -> tuple[str, ...]:
+        """The tools of :data:`ANALYSIS_TOOLS` this toolbox serves: the ones its tool registry holds, in that order."""
 
     async def submit_analysis(
         self, branch: str, tool: str, params: Mapping[str, Any], profile_request_id: str = ""

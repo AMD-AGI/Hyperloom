@@ -338,17 +338,27 @@ class RealToolbox:
         self._tool_jobs.setdefault(request.branch, []).append(job_id)
         return job_id
 
+    @property
+    def analysis_tools(self) -> tuple[str, ...]:
+        """The analysis tools this toolbox serves: those of :data:`ANALYSIS_TOOLS` its tool registry holds.
+
+        The one answer to "which analysis tools does this toolbox serve": the MCP surface advertises exactly these and
+        :meth:`submit_analysis` refuses the others, both from the registry the toolbox was built with.
+        """
+        held = self._tools.tool_names if self._tools is not None else ()
+        return tuple(tool for tool in ANALYSIS_TOOLS if tool in held)
+
     def _analysis_jobs(self, tool: str) -> ToolJobs:
         if self._tools is None:
             raise RequestRejected("this toolbox serves no asynchronous tools", CODE_NO_EXECUTOR)
-        if tool in ANALYSIS_TOOLS and tool not in self._tools.tool_names:
+        if tool in ANALYSIS_TOOLS and tool not in self.analysis_tools:
             raise RequestRejected(f"{tool!r} is not run by this toolbox's backend", CODE_TOOL_UNAVAILABLE)
         return self._tools
 
     async def submit_analysis(
         self, branch: str, tool: str, params: Mapping[str, Any], profile_request_id: str = ""
     ) -> str:
-        """Start ``tracelens`` or ``roofline`` for ``branch`` on its head commit; returns the job id at once.
+        """Start ``tracelens`` or ``roofline`` (those of :attr:`analysis_tools`) for ``branch`` on its head commit; returns the job id at once.
 
         The commit is the head of the branch in the experiment repository, read here at submission; it is never taken
         from ``params``. ``profile_request_id`` is kept only for a PROFILE test of that commit, whichever branch ran it.
