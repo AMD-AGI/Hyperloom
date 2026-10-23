@@ -11,8 +11,8 @@ Protocol (one JSON line each way per variant), matching hyperloom-eval::
         "match": str, "duration_sec": float}
 
 Noise, failures, and wall time are owned by the oracle; this module only forwards requests and shapes
-``VariantResult`` rows. Answers are kept for the Coordinator's lifetime: the warmup and decision rounds bench the
-same variant and the oracle answers once.
+``VariantResult`` rows. Every bench is forwarded, a repeat included, so a re-measurement costs its wall time and
+reads whatever the oracle measures for it.
 """
 
 from __future__ import annotations
@@ -130,14 +130,12 @@ class ReplayGpuBackend:
     def __init__(self, *, oracle_fd: int | None = None, time_scale: float = 1.0) -> None:
         self._oracle = _OracleClient(oracle_fd, time_scale)
         self._coordinator: Any = None
-        self._answered: dict[tuple, tuple[Any, float | None]] = {}
         self._launched: dict[frozenset, float] = {}
         self._accuracy_drops: dict[str, float] = {}
 
     def bind_coordinator(self, coordinator: Any) -> None:
         """Answer for ``coordinator``: anchors and accuracy read its shared state; earlier answers are dropped."""
         self._coordinator = coordinator
-        self._answered.clear()
         self._launched.clear()
         self._accuracy_drops.clear()
 
@@ -165,12 +163,6 @@ class ReplayGpuBackend:
         results: list[Any] = []
         for variant in kwargs.get("grid") or []:
             key = (variant.name, variant.extra_server_args, json.dumps(variant.extra_envs, sort_keys=True))
-            if key in self._answered:
-                result, drop = self._answered[key]
-                if drop is not None:
-                    self._accuracy_drops[slot] = drop
-                results.append(result)
-                continue
             answer = await self._oracle.measure(
                 {
                     "name": variant.name,
@@ -224,7 +216,6 @@ class ReplayGpuBackend:
             drop = float(drop) if isinstance(drop, (int, float)) else None
             if drop is not None:
                 self._accuracy_drops[slot] = drop
-            self._answered[key] = (result, drop)
             results.append(result)
         return results
 

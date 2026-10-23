@@ -84,21 +84,21 @@ def test_explore_benches_and_reads_accuracy_through_the_installed_backend(tmp_pa
     assert explore.parse_eval_results(tmp_path)["accuracy"] == pytest.approx(0.85)
 
 
-def test_an_answer_is_kept_across_grids_and_its_launch_anchors_the_next(tmp_path: Path):
-    oracle = _Oracle([_reply(10.0), _reply(5.0)])
+def test_a_repeated_bench_is_measured_again_and_its_latest_launch_anchors_the_next(tmp_path: Path):
+    oracle = _Oracle([_reply(10.0), _reply(12.0), _reply(5.0)])
     backend = ReplayGpuBackend(oracle_fd=oracle.fd, time_scale=0.0)
     backend.bind_coordinator(_coordinator())
     v1 = GridVariant(name="v1", extra_server_args="--a")
-    first = asyncio.run(backend.run_grid(base_extra_args="", grid=[v1], output_root=tmp_path / "warmup"))
-    again = asyncio.run(backend.run_grid(base_extra_args="", grid=[v1], output_root=tmp_path / "decision"))
+    first = asyncio.run(backend.run_grid(base_extra_args="", grid=[v1], output_root=tmp_path / "first"))
+    again = asyncio.run(backend.run_grid(base_extra_args="", grid=[v1], output_root=tmp_path / "rebench"))
     on_top = asyncio.run(
         backend.run_grid(
             base_extra_args="--a", grid=[GridVariant(name="v2", extra_server_args="--b")], output_root=tmp_path / "next"
         )
     )
-    assert len(oracle.asked) == 2
-    assert again[0] is first[0]
-    assert on_top[0].output_throughput == pytest.approx(110.0 * 1.05)
+    assert len(oracle.asked) == 3
+    assert (first[0].output_throughput, again[0].output_throughput) == (pytest.approx(110.0), pytest.approx(112.0))
+    assert on_top[0].output_throughput == pytest.approx(112.0 * 1.05)
 
 
 def test_accuracy_is_the_baseline_less_the_drop_answered_for_the_slot(tmp_path: Path):
