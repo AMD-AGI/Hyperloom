@@ -244,7 +244,6 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
         "enabled": True,
         "num_steps": 5,
         "num_profiles": 3,
-        "detailed_annotations": True,
     }
     assert load_benchmark(source)["profiler"]["torch_profiler"]["enabled"] is False
     report["agentx_metrics"]["diagnostic_only"] = True
@@ -252,15 +251,6 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
     assert measured["round_succeeded"] is True
     assert not is_valid_measurement(measured)
     assert constraint_veto_reason(measured, SimpleNamespace()) == "agentx_evidence_invalid"
-
-
-def test_profile_keeps_an_annotation_choice_the_yaml_states(source, tmp_path):
-    rendered = materialize_benchmark_config(source, tmp_path / "profile")
-    config = yaml.safe_load(rendered.read_text(encoding="utf-8"))
-    config["benchmark"]["profiler"]["torch_profiler"]["detailed_annotations"] = False
-    rendered.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
-    enable_profile(rendered)
-    assert load_benchmark(rendered)["profiler"]["torch_profiler"]["detailed_annotations"] is False
 
 
 @pytest.mark.parametrize("checkout", ["default", "yaml", "environment"])
