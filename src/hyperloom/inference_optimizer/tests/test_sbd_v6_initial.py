@@ -730,7 +730,7 @@ def _stub_preflight_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight, "_validate_credentials", lambda: None)
     monkeypatch.setattr(framework_kb, "prepare_kb_environment", lambda: None)
     monkeypatch.setattr(preflight, "_ensure_python_sdks", lambda *_args: None)
-    monkeypatch.setattr(preflight, "_resolve_llm_endpoints", lambda: ("", ""))
+    monkeypatch.setattr(preflight, "_export_llm_endpoints", lambda: ("", ""))
     monkeypatch.setattr(preflight, "_normalize_hip_visible_devices", lambda: None)
     monkeypatch.setattr(preflight, "_check_gpu_visibility", lambda: None)
     monkeypatch.setattr(preflight, "_check_shm_disk", lambda: None)

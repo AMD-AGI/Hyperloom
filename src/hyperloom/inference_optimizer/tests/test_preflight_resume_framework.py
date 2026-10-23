@@ -66,7 +66,7 @@ def _run_preflight_to_serving_check(monkeypatch, args) -> list[tuple[str, str]]:
 
     monkeypatch.setattr(preflight, "_resolve_framework_build", fake_resolve_build)
     monkeypatch.setattr(preflight, "_run_install_step", run_install_step)
-    monkeypatch.setattr(preflight, "_resolve_llm_endpoints", lambda: ("", ""))
+    monkeypatch.setattr(preflight, "_export_llm_endpoints", lambda: ("", ""))
     monkeypatch.setattr(preflight, "_normalize_hip_visible_devices", lambda: None)
     monkeypatch.delenv(preflight.SKIP_FRAMEWORK_CHECK_ENV, raising=False)
     monkeypatch.delenv("BENCHMARK_BASE_URL", raising=False)

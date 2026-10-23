@@ -1579,7 +1579,7 @@ def _check_agent_cli() -> None:
 def _emit_preflight_diagnostics(
     *,
     magpie_python: str,
-    anthropic_base_url: str | None,
+    anthropic_base_url: str,
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
     """One canonical, grep-friendly diagnostics block at the end of preflight."""
@@ -1881,15 +1881,13 @@ def _run_install_step(
     return result
 
 
-def _resolved_provider_mode(resolved_urls: tuple[str, str] | None) -> str | None:
-    anthropic_url, openai_url = resolved_urls or ("", "")
+def _resolved_provider_mode(resolved_urls: tuple[str, str]) -> str:
+    anthropic_url, openai_url = resolved_urls
     if anthropic_url and openai_url:
         return "mixed"
     if anthropic_url:
         return "anthropic"
-    if openai_url:
-        return "openai"
-    return None
+    return "openai"
 
 
 @dataclass(frozen=True)
@@ -1900,7 +1898,7 @@ class PreflightRuntime:
     benchmark_python: str
     magpie_python: str
     inferencex_path: str
-    resolved_urls: tuple[str, str] | None
+    resolved_urls: tuple[str, str]
 
 
 def _finish_install_event(event: dict[str, Any], *, args: argparse.Namespace | None, runtime: PreflightRuntime) -> None:
@@ -1947,16 +1945,13 @@ def _persist_install_event(args: argparse.Namespace | None, session_dir: Path) -
             log.debug("failed to persist SBD V6 install-event write warning", exc_info=exc)
 
 
-def _export_llm_endpoints() -> tuple[str, str] | None:
-    """Resolve and export the Anthropic and OpenAI base URLs, or None when neither is configured.
+def _export_llm_endpoints() -> tuple[str, str]:
+    """Resolve and export the Anthropic and OpenAI base URLs.
 
     Explicit operator values on each side are preserved; a missing side falls
     back to the other.
     """
     anthropic_url, openai_url = _resolve_llm_endpoints()
-    if not anthropic_url and not openai_url:
-        print("Preflight: WARNING — no LLM base URL set; Claude/Codex SDKs will fail at first call")
-        return None
     # A subscription token needs no endpoint: the Claude CLI knows where to go.
     skip_anthropic_export = (
         not os.environ.get("ANTHROPIC_BASE_URL", "").strip()
@@ -2286,7 +2281,7 @@ def _validate_explicit_server_limits(args: argparse.Namespace | None) -> None:
 
 def _preflight(
     args: argparse.Namespace | None = None,
-) -> tuple[str, str] | None:
+) -> tuple[str, str]:
     """Auto-install missing runtime deps and export auth aliases."""
     _pin_resumed_session_args(args)
     install_event = _begin_install_event(args)
@@ -2485,7 +2480,7 @@ def _preflight(
         category="diagnostic",
         action=lambda: _emit_preflight_diagnostics(
             magpie_python=magpie_python,
-            anthropic_base_url=(resolved_urls[0] if resolved_urls is not None else None),
+            anthropic_base_url=resolved_urls[0],
             args=args,
         ),
     )

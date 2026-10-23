@@ -1327,7 +1327,7 @@ def test_validate_claude_model_rejects_unsupported_arg(monkeypatch, capsys):
 
     args = _make_args(claude_model="claude-opus-4-5")
     with pytest.raises(SystemExit) as exc_info:
-        cli._validate_and_resolve_claude_model(args, None)
+        cli._validate_and_resolve_claude_model(args, ("", ""))
     assert exc_info.value.code == 2
     assert probe_calls == []
     err = capsys.readouterr().err
@@ -1347,7 +1347,7 @@ def test_validate_claude_model_custom_allowed_when_optout_set(monkeypatch, capsy
         lambda **kw: {"my-org/custom-claude", "gpt-5.4"},
     )
     args = _make_args(claude_model="my-org/custom-claude")
-    catalog = cli._validate_and_resolve_claude_model(args, None)
+    catalog = cli._validate_and_resolve_claude_model(args, ("", ""))
 
     assert args.claude_model == "my-org/custom-claude"
     assert "my-org/custom-claude" in catalog
@@ -1366,7 +1366,7 @@ def test_validate_claude_model_custom_optout_no_amd_fallback(monkeypatch, capsys
     )
     args = _make_args(claude_model="my-org/custom-claude")
     with pytest.raises(SystemExit) as exc_info:
-        cli._validate_and_resolve_claude_model(args, None)
+        cli._validate_and_resolve_claude_model(args, ("", ""))
     assert exc_info.value.code == 2
     assert args.claude_model == "my-org/custom-claude"
     err = capsys.readouterr().err
@@ -1383,7 +1383,7 @@ def test_validate_claude_model_custom_optout_rejects_empty(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
     args = _make_args(claude_model="")
     with pytest.raises(SystemExit) as exc_info:
-        cli._validate_and_resolve_claude_model(args, None)
+        cli._validate_and_resolve_claude_model(args, ("", ""))
     assert exc_info.value.code == 2
     assert "is empty" in capsys.readouterr().err
 
@@ -1398,7 +1398,7 @@ def test_validate_claude_model_custom_allowed_by_default(monkeypatch, capsys):
         lambda **kw: {"my-org/custom-claude", "gpt-5.4"},
     )
     args = _make_args(claude_model="my-org/custom-claude")
-    catalog = cli._validate_and_resolve_claude_model(args, None)
+    catalog = cli._validate_and_resolve_claude_model(args, ("", ""))
 
     assert args.claude_model == "my-org/custom-claude"
     assert "my-org/custom-claude" in catalog
@@ -1415,7 +1415,7 @@ def test_validate_claude_model_deepseek_allowed_by_default(monkeypatch, capsys):
         lambda **kw: {"deepseek-v4-pro"},
     )
     args = _make_args(claude_model="deepseek-v4-pro")
-    catalog = cli._validate_and_resolve_claude_model(args, None)
+    catalog = cli._validate_and_resolve_claude_model(args, ("", ""))
 
     assert args.claude_model == "deepseek-v4-pro"
     assert "deepseek-v4-pro" in catalog
@@ -1446,7 +1446,7 @@ def test_validate_claude_model_custom_explicitly_disabled_still_hard_gates(monke
     monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
     args = _make_args(claude_model="my-org/custom-claude")
     with pytest.raises(SystemExit) as exc_info:
-        cli._validate_and_resolve_claude_model(args, None)
+        cli._validate_and_resolve_claude_model(args, ("", ""))
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
     assert "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1" in err
@@ -1463,7 +1463,7 @@ def test_validate_claude_model_opus_5_in_catalog_keeps_choice(monkeypatch, capsy
         lambda **kw: {"claude-opus-5", "claude-opus-4-6", "gpt-5.4"},
     )
     args = _make_args(claude_model="claude-opus-5")
-    cli._validate_and_resolve_claude_model(args, None)
+    cli._validate_and_resolve_claude_model(args, ("", ""))
 
     assert args.claude_model == "claude-opus-5"
     assert "confirmed in gateway catalog" in capsys.readouterr().out
@@ -1477,7 +1477,7 @@ def test_validate_claude_model_4_7_in_catalog_keeps_choice(monkeypatch, capsys):
         lambda **kw: {"claude-opus-4-7", "claude-opus-4-6", "gpt-5.4"},
     )
     args = _make_args(claude_model="claude-opus-4-7")
-    catalog = cli._validate_and_resolve_claude_model(args, None)
+    catalog = cli._validate_and_resolve_claude_model(args, ("", ""))
 
     assert args.claude_model == "claude-opus-4-7"
     assert "claude-opus-4-7" in catalog
@@ -1500,7 +1500,7 @@ def test_validate_claude_model_probes_anthropic_url_in_dual_entry(monkeypatch):
 
     monkeypatch.setattr(cli, "_probe_llm_catalog", _capture)
     args = _make_args(claude_model="claude-opus-4-7")
-    cli._validate_and_resolve_claude_model(args, None)
+    cli._validate_and_resolve_claude_model(args, ("", ""))
 
     assert seen["base_url"] == "https://api.anthropic.com"
     assert seen["api_key"] == "anthropic-user-token"
@@ -1524,7 +1524,7 @@ def test_validate_claude_model_falls_back_to_openai_url_single_gateway(monkeypat
 
     monkeypatch.setattr(cli, "_probe_llm_catalog", _capture)
     args = _make_args(claude_model="claude-opus-4-7")
-    cli._validate_and_resolve_claude_model(args, None)
+    cli._validate_and_resolve_claude_model(args, ("", ""))
 
     assert seen["base_url"] == "https://gateway.example/v1"
     assert seen["api_key"] == "gateway-key"
@@ -1549,7 +1549,7 @@ def test_validate_claude_model_skips_probe_for_oauth_only(monkeypatch, capsys):
 
     monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
     args = _make_args(claude_model="claude-opus-5")
-    result = cli._validate_and_resolve_claude_model(args, None)
+    result = cli._validate_and_resolve_claude_model(args, ("", ""))
 
     assert result is None
     assert args.claude_model == "claude-opus-5"
@@ -1649,7 +1649,7 @@ def test_validate_claude_model_still_probes_when_oauth_accompanies_an_api_key(mo
 
     monkeypatch.setattr(cli, "_probe_llm_catalog", _capture)
     args = _make_args(claude_model="claude-opus-5")
-    cli._validate_and_resolve_claude_model(args, None)
+    cli._validate_and_resolve_claude_model(args, ("", ""))
 
     assert seen["api_key"] == "anthropic-user-token"
 
@@ -1674,7 +1674,7 @@ def test_validate_claude_model_split_entry_no_models_route_proceeds(monkeypatch,
 
     monkeypatch.setattr(cli, "_probe_llm_catalog", _probe)
     args = _make_args(claude_model="claude-opus-4-7")
-    result = cli._validate_and_resolve_claude_model(args, None)
+    result = cli._validate_and_resolve_claude_model(args, ("", ""))
 
     # Only the Anthropic side is probed.
     assert probed == ["https://api.deepseek.com/anthropic"]
@@ -1696,7 +1696,7 @@ def test_validate_claude_model_split_entry_auth_error_refuses(monkeypatch):
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: None)
     args = _make_args(claude_model="claude-opus-4-7")
     with pytest.raises(SystemExit) as exc:
-        cli._validate_and_resolve_claude_model(args, None)
+        cli._validate_and_resolve_claude_model(args, ("", ""))
     assert exc.value.code == 2
 
 
@@ -1720,7 +1720,7 @@ def test_catalog_probe_retries_the_other_side_only_when_a_route_is_missing(monke
     monkeypatch.setattr(cli, "_probe_llm_catalog", _probe)
     args = _make_args(claude_model="deepseek-v4-pro")
 
-    catalog = cli._validate_and_resolve_claude_model(args, None)
+    catalog = cli._validate_and_resolve_claude_model(args, ("", ""))
 
     assert probed == ["https://api.deepseek.com/anthropic", "https://api.deepseek.com/v1"]
     assert catalog == {"deepseek-v4-pro", "deepseek-v4-flash"}
@@ -1751,7 +1751,7 @@ def test_catalog_probe_does_not_retry_the_other_side_when_a_gateway_is_flaky(mon
     monkeypatch.setattr(cli, "_probe_llm_catalog", _probe)
     args = _make_args(claude_model="claude-opus-5")
 
-    assert cli._validate_and_resolve_claude_model(args, None) is None
+    assert cli._validate_and_resolve_claude_model(args, ("", "")) is None
     assert probed == ["https://llm.amd.example/Anthropic"]
     assert args.claude_model == "claude-opus-5"
     assert "cannot verify" in capsys.readouterr().out.lower()
@@ -1766,7 +1766,7 @@ def test_validate_claude_model_custom_model_warns_when_catalog_unreachable(monke
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: None)
 
     args = _make_args(claude_model="my-org/custom-claude")
-    result = cli._validate_and_resolve_claude_model(args, None)
+    result = cli._validate_and_resolve_claude_model(args, ("", ""))
 
     assert result is None
     assert args.claude_model == "my-org/custom-claude"
@@ -1784,7 +1784,7 @@ def test_validate_claude_model_4_7_missing_falls_back_to_4_6(monkeypatch, capsys
         lambda **kw: {"claude-opus-4-6", "claude-opus-4-5", "gpt-5.4"},
     )
     args = _make_args(claude_model="claude-opus-4-7")
-    cli._validate_and_resolve_claude_model(args, None)
+    cli._validate_and_resolve_claude_model(args, ("", ""))
 
     assert args.claude_model == "claude-opus-4-6"
     out = capsys.readouterr().out
@@ -1802,7 +1802,7 @@ def test_validate_claude_model_opus_5_missing_falls_back_to_next_rung(monkeypatc
         lambda **kw: {"claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "gpt-5.4"},
     )
     args = _make_args(claude_model="claude-opus-5")
-    cli._validate_and_resolve_claude_model(args, None)
+    cli._validate_and_resolve_claude_model(args, ("", ""))
 
     assert args.claude_model == "claude-opus-4-8"
     out = capsys.readouterr().out
@@ -1819,7 +1819,7 @@ def test_validate_claude_model_fallback_walks_the_allowlist_order(monkeypatch, c
         lambda **kw: {"claude-opus-4-7", "claude-opus-4-6", "gpt-5.4"},
     )
     args = _make_args(claude_model="claude-opus-5")
-    cli._validate_and_resolve_claude_model(args, None)
+    cli._validate_and_resolve_claude_model(args, ("", ""))
 
     assert args.claude_model == "claude-opus-4-7"
 
@@ -1835,7 +1835,7 @@ def test_validate_claude_model_neither_in_catalog_aborts(monkeypatch, capsys):
     args = _make_args(claude_model="claude-opus-4-7")
 
     with pytest.raises(SystemExit) as exc_info:
-        cli._validate_and_resolve_claude_model(args, None)
+        cli._validate_and_resolve_claude_model(args, ("", ""))
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
     assert "claude-opus-5" in err
@@ -1852,7 +1852,7 @@ def test_validate_claude_model_aborts_when_catalog_unreachable(monkeypatch, caps
     args = _make_args(claude_model="claude-opus-4-7")
 
     with pytest.raises(SystemExit) as exc_info:
-        cli._validate_and_resolve_claude_model(args, None)
+        cli._validate_and_resolve_claude_model(args, ("", ""))
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
     assert "gateway catalog unreachable" in err
@@ -2108,7 +2108,7 @@ def test_openai_only_deploy_walks_the_codex_ladder_before_deriving_claude(monkey
 
     assert cli._claude_model_should_follow_codex() is True
     args = _make_args(codex_model="gpt-5.6-sol", critic_mock=True)
-    cli._resolve_models_for_run(args, None)
+    cli._resolve_models_for_run(args, ("", ""))
 
     assert args.codex_model == "gpt-5.5"
     assert args.claude_model == "gpt-5.5"
@@ -2130,7 +2130,7 @@ def test_openai_only_ladder_runs_even_with_a_mock_critic(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.4"})
 
     args = _make_args(codex_model="gpt-5.6-sol", critic_mock=True)
-    cli._resolve_models_for_run(args, None)
+    cli._resolve_models_for_run(args, ("", ""))
 
     assert args.codex_model == "gpt-5.4"
     assert args.claude_model == "gpt-5.4"
