@@ -284,7 +284,7 @@ class LocalAgentSandbox:
         merged["TMPDIR"] = str(self.tmp)
         merged.update(env)
         merged = {name: value for name, value in merged.items() if name not in GPU_MASK_ENV_NAMES}
-        merged["ROCR_VISIBLE_DEVICES"] = ",".join(map(str, self.cards))
+        merged["HIP_VISIBLE_DEVICES"] = ",".join(map(str, self.cards))
         merged[MARKER] = str(self.root)
         merged["PATH"] = os.pathsep.join(filter(None, [str(self.root / BIN_DIR), merged.get("PATH")]))
         return merged

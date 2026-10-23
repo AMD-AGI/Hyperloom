@@ -43,18 +43,22 @@ TAIL_LINES = 20
 
 DOCKER_SHIM = """#!/usr/bin/env python3
 # Runs `docker exec` and `docker cp` in place, for an agent written to drive a container; the sandbox has no daemon.
-# A ROCR_VISIBLE_DEVICES the agent passes names cards of its own container, numbered from 0: it is read as indices
-# into the sandbox's cards, since set as given it would reach every card of the host.
+# A device mask the agent passes names cards of its own container, numbered from 0: it is read as indices into the
+# sandbox's cards, which HIP_VISIBLE_DEVICES holds, and set there alone, since set as given it would reach any card of
+# the host, or, as ROCR_VISIBLE_DEVICES under HIP_VISIBLE_DEVICES, none.
 import os, shutil, subprocess, sys
 
+MASKS = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+
+
 def own_cards(value):
-    cards = os.environ.get("ROCR_VISIBLE_DEVICES", "").split(",")
+    cards = os.environ.get("HIP_VISIBLE_DEVICES", "").split(",")
     if not value.strip():
         return ",".join(cards)
     try:
         return ",".join(cards[int(index)] for index in value.split(","))
     except (ValueError, IndexError):
-        sys.exit(f"docker exec: ROCR_VISIBLE_DEVICES={value} names a card beyond the sandbox's {len(cards)}")
+        sys.exit(f"docker exec: a device mask of {value} names a card beyond the sandbox's {len(cards)}")
 
 args = sys.argv[1:]
 if args[:1] == ["exec"]:
@@ -63,7 +67,10 @@ if args[:1] == ["exec"]:
         flag = rest.pop(0)
         if flag in ("-e", "--env"):
             name, _, value = rest.pop(0).partition("=")
-            env[name] = own_cards(value) if name == "ROCR_VISIBLE_DEVICES" else value
+            if name in MASKS:
+                env["HIP_VISIBLE_DEVICES"] = own_cards(value)
+            else:
+                env[name] = value
         elif flag in ("-w", "--workdir"):
             cwd = rest.pop(0)
     sys.exit(subprocess.call(rest[1:], cwd=cwd, env=env))
@@ -305,8 +312,8 @@ def onboarding_prompt(spec: AgentSpec, source: str, checkout: Path, commit: str,
 
 ONBOARDING_PROMPT = """\
 You are onboarding a third-party LLM-serving optimization agent so it can run unattended in a sandbox. Your working
-directory is the agent's checkout, {checkout}, a clone of {source} at {commit}. Read its README, its docs and its
-entry points before you answer. Every file the agent writes (its config, the packs or scripts the install adds, its session
+directory is the agent's checkout, {checkout}, a clone of {source} at {commit}. Read its README, its docs and its entry
+points before you answer. Every file the agent writes (its config, the packs or scripts the install adds, its session
 and run directories) must be in that checkout or in "workspace", never in {source}: give absolute paths under them.
 
 It will optimize this workload, and every value its config needs must come from here, not be invented. "server_args"
@@ -316,9 +323,10 @@ on top of them:
 
 The sandbox:
 - has the session's image and framework and no docker daemon. It sees only the GPUs in "cards", numbered from 0
-  (ROCR_VISIBLE_DEVICES is set): a GPU id the agent's config gives is one of those, 0 the first; never set
-  ROCR_VISIBLE_DEVICES, HIP_VISIBLE_DEVICES or CUDA_VISIBLE_DEVICES in a command of your own. A `docker` on PATH runs `docker exec [-w DIR] [-e K=V] CONTAINER CMD...` as CMD in DIR and `docker cp
-  C:SRC DST` as a copy, so an agent written to drive a container works when its config names any container;
+  (HIP_VISIBLE_DEVICES is set): a GPU id the agent's config gives is one of those, 0 the first; never set
+  ROCR_VISIBLE_DEVICES, HIP_VISIBLE_DEVICES or CUDA_VISIBLE_DEVICES in a command of your own. A `docker` on PATH runs
+  `docker exec [-w DIR] [-e K=V] CONTAINER CMD...` as CMD in DIR and `docker cp C:SRC DST` as a copy, so an agent
+  written to drive a container works when its config names any container;
 - shares the host with other servers: `pkill`, `pgrep` and `killall` reach only the agent's own processes, but turn
   off any other sweep that kills what holds GPU memory, and give the agent's servers a port no one else uses;
 - the agent edits the framework source in "workspace", in place, and launches its servers from it;

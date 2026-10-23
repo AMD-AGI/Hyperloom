@@ -189,24 +189,18 @@ async def test_a_ref_that_cannot_be_checked_out_fails_every_attempt(tmp_path: Pa
     assert not sandbox.ran
 
 
-def test_the_docker_shim_reads_a_device_index_the_agent_gives_as_one_of_its_own_cards(tmp_path: Path) -> None:
+def test_the_docker_shim_reads_a_device_mask_the_agent_gives_as_indices_into_its_own_cards(tmp_path: Path) -> None:
     docker = Path(agent_env(tmp_path)["PATH"].split(os.pathsep)[0]) / "docker"
-    sandbox = {**os.environ, "ROCR_VISIBLE_DEVICES": "5,7"}
+    sandbox = {**os.environ, "HIP_VISIBLE_DEVICES": "5,7"}
+    sandbox.pop("ROCR_VISIBLE_DEVICES", None)
 
-    def visible(index: str) -> subprocess.CompletedProcess[str]:
-        argv = [
-            str(docker),
-            "exec",
-            "-e",
-            f"ROCR_VISIBLE_DEVICES={index}",
-            "c",
-            "sh",
-            "-c",
-            "echo $ROCR_VISIBLE_DEVICES",
-        ]
+    def visible(name: str, index: str) -> subprocess.CompletedProcess[str]:
+        show = 'echo "$HIP_VISIBLE_DEVICES/${ROCR_VISIBLE_DEVICES:-unset}"'
+        argv = [str(docker), "exec", "-e", f"{name}={index}", "c", "sh", "-c", show]
         return subprocess.run(argv, env=sandbox, capture_output=True, text=True)
 
-    assert visible("0").stdout.strip() == "5" and visible("1,0").stdout.strip() == "7,5"
-    assert visible("").stdout.strip() == "5,7"
-    refused = visible("2")
+    assert visible("ROCR_VISIBLE_DEVICES", "0").stdout.strip() == "5/unset"
+    assert visible("HIP_VISIBLE_DEVICES", "1,0").stdout.strip() == "7,5/unset"
+    assert visible("CUDA_VISIBLE_DEVICES", "").stdout.strip() == "5,7/unset"
+    refused = visible("ROCR_VISIBLE_DEVICES", "2")
     assert refused.returncode != 0 and "card" in refused.stderr
