@@ -26,7 +26,7 @@ from kernelforge.knowledge.wiki_tool.contract import (
 )
 
 if TYPE_CHECKING:
-    from kernelforge.agent_backends.base import AgentBackend
+    from kernelforge.agent_backends.base import AgentBackend, AgentRuntimeConfig
     from kernelforge.agent_backends.registry import AgentProvider
     from kernelforge.config import Config
 
@@ -88,3 +88,17 @@ def require_mcp_backend(tool: KnowledgeWikiTool | None, backend: AgentBackend | 
         raise ValueError(
             f"the knowledge base needs an MCP-capable backend, but the {role} backend {backend.name} is not"
         )
+
+
+def require_mcp_runtime(tool: KnowledgeWikiTool | None, runtime: AgentRuntimeConfig, role: str) -> None:
+    """Refuse a configured knowledge base on a runtime whose backend is built later, by what its providers declare.
+
+    That backend is the runtime's provider or, when that one is unavailable, its fallback, so both must keep the tools.
+    """
+    if tool is None:
+        return
+    from kernelforge.agent_backends.registry import get_agent_provider
+
+    for provider in (runtime.provider, runtime.fallback_provider):
+        if provider:
+            require_mcp_backend(tool, get_agent_provider(provider), role)

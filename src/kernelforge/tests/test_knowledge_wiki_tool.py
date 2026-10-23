@@ -449,7 +449,17 @@ def test_the_supervisor_gets_the_tools(tmp_path, wiki, log, monkeypatch):
     _assert_offered(backend.specs[0], KnowledgeWikiTool.from_config(config), "supervisor")
 
 
-def test_a_supervisor_provider_without_mcp_is_refused_when_the_supervisor_is_built(tmp_path, wiki, log, monkeypatch):
+@pytest.mark.parametrize(
+    ("provider", "model", "fallback"),
+    [
+        ("deepseek", "deepseek-test", "claude"),
+        # The first pass runs on deepseek whenever codex turns out to be unavailable.
+        ("codex", "gpt-codex-test", "deepseek"),
+    ],
+)
+def test_a_supervisor_that_could_run_without_mcp_is_refused_when_it_is_built(
+    tmp_path, wiki, log, monkeypatch, provider, model, fallback
+):
     built: list[object] = []
     monkeypatch.setattr(
         "kernelforge.agent_backends.registry.create_registered_backend",
@@ -457,8 +467,9 @@ def test_a_supervisor_provider_without_mcp_is_refused_when_the_supervisor_is_bui
     )
     config = Config(
         workspace=str(tmp_path),
-        agent_backend="deepseek",
-        agent_model="deepseek-test",
+        agent_backend=provider,
+        agent_model=model,
+        agent_fallback_provider=fallback,
         agent_precheck=False,
         knowledge_wiki_root=str(wiki),
         knowledge_wiki_log=str(log),

@@ -8,6 +8,7 @@ from kernelforge.knowledge.wiki_tool.tool import (
     SERVER_KEY,
     KnowledgeWikiTool,
     require_mcp_backend,
+    require_mcp_runtime,
     wiki_servers,
     wiki_tool_names,
 )
@@ -17,6 +18,7 @@ __all__ = [
     "SERVER_KEY",
     "KnowledgeWikiTool",
     "require_mcp_backend",
+    "require_mcp_runtime",
     "wiki_servers",
     "wiki_tool_names",
 ]
