@@ -402,7 +402,7 @@ class Reconciler:
         """Re-read the facts the gate's resource rules judge against."""
         self._resources.update(
             self._shared_state,
-            rounds=await self._rounds.excluding(now_unix),
+            rounds=await self._rounds.open_rounds(),
             live_task_ids=[t.task_id for t in await self._tasks.running()],
         )
 

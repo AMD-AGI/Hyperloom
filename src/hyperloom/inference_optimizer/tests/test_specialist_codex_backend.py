@@ -11,6 +11,7 @@ import stat
 import subprocess
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -163,7 +164,6 @@ async def test_openai_only_deployment_runs_the_specialist_on_the_codex_cli(
             system_prompt="be a research scout",
             user_prompt="find the gap",
             disallowed_tools=frozenset(),
-            max_turns=2,
             deadline=Deadline.after(60.0),
         )
     )
@@ -217,7 +217,6 @@ async def test_codex_home_is_per_task_and_outside_any_temp_dir(
             system_prompt="sys",
             user_prompt="usr",
             disallowed_tools=frozenset(),
-            max_turns=1,
             deadline=Deadline.after(60.0),
         )
     )
@@ -278,13 +277,13 @@ def _build_cmd(tmp_path: Path, **cfg_overrides: object) -> list[str]:
             for k, v in _os.environ.items()
             if k in agent_cli_config._SPECIALIST_ENV_ALLOWLIST | agent_cli_config._SPECIALIST_SECRET_ENV_ALLOWLIST
         }
-        cmd, _ = dispatcher._build_codex_launch(
-            workspace=workspace,
-            worktree=worktree,
-            system_prompt="SYSTEM_INSTRUCTION_SENTINEL",
-            base_env=base_env,
-            probe_sandbox=False,
-        )
+        with mock.patch.object(sp, "probe_codex_sandbox_capability", return_value=True):
+            cmd, _ = dispatcher._build_codex_launch(
+                workspace=workspace,
+                worktree=worktree,
+                system_prompt="SYSTEM_INSTRUCTION_SENTINEL",
+                base_env=base_env,
+            )
         return cmd
     return dispatcher._build_claude_cmd(
         system_prompt_file=workspace / "system_prompt.md",
@@ -396,21 +395,6 @@ def test_codex_specialist_rejects_read_only_sandbox(
     monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "read-only")
     with pytest.raises(SpecialistAgentUnavailableError, match="read-only"):
         _build_cmd(tmp_path, codex_executable="/usr/bin/codex")
-
-
-def test_codex_argv_appends_operator_escape_hatch_before_the_prompt(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``extra_codex_args`` must not displace the positional prompt."""
-    _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
-    cmd = _build_cmd(
-        tmp_path,
-        codex_executable="/usr/bin/codex",
-        extra_codex_args=("--ephemeral",),
-    )
-    assert cmd[-2] == "--ephemeral"
-    assert cmd[-1] == "-"
 
 
 @pytest.mark.parametrize("shape", [_ANTHROPIC_ONLY_ENV, _BOTH_CONFIGURED_ENV, {}])
@@ -562,7 +546,6 @@ async def test_missing_codex_runtime_fails_the_task_instead_of_spawning_claude(
             system_prompt="sys",
             user_prompt="usr",
             disallowed_tools=frozenset(),
-            max_turns=1,
             deadline=Deadline.after(60.0),
         )
     )
@@ -592,7 +575,6 @@ async def test_unconfigured_codex_gateway_fails_the_task(
             system_prompt="sys",
             user_prompt="usr",
             disallowed_tools=frozenset(),
-            max_turns=1,
             deadline=Deadline.after(60.0),
         )
     )
@@ -878,7 +860,6 @@ async def test_codex_secret_opt_out_masks_parent_provider_secrets_before_resolut
             system_prompt="system",
             user_prompt="user",
             disallowed_tools=frozenset(),
-            max_turns=1,
             deadline=Deadline.after(10.0),
             gpu_lease=lease,
         )
@@ -943,7 +924,6 @@ async def test_codex_child_receives_provider_env_without_secrets_or_prompt_in_ar
             system_prompt="SYSTEM_ROLE_SENTINEL",
             user_prompt="FULL_USER_PROMPT_SENTINEL",
             disallowed_tools=frozenset(),
-            max_turns=1,
             deadline=Deadline.after(10.0),
         )
     )
@@ -1000,7 +980,6 @@ async def test_workspace_write_fails_closed_when_bwrap_probe_fails(
             system_prompt="system",
             user_prompt="user",
             disallowed_tools=frozenset(),
-            max_turns=1,
             deadline=Deadline.after(10.0),
         )
     )
@@ -1066,7 +1045,6 @@ async def test_ray_codex_launch_uses_replace_env_and_prompt_file_stdin(
             system_prompt="ray system",
             user_prompt="ray user prompt",
             disallowed_tools=frozenset(),
-            max_turns=1,
             gpu_ids=(0,),
             deadline=Deadline.after(10.0),
             gpu_lease=lease,
@@ -1141,7 +1119,6 @@ async def test_codex_mcp_config_is_translated_without_credentials_in_config_or_a
             system_prompt="mcp system",
             user_prompt="mcp user",
             disallowed_tools=frozenset(),
-            max_turns=1,
             deadline=Deadline.after(10.0),
         )
     )
@@ -1237,7 +1214,6 @@ async def test_codex_mcp_env_rejects_control_and_provider_collisions_before_laun
             system_prompt="system",
             user_prompt="user",
             disallowed_tools=frozenset(),
-            max_turns=1,
             deadline=Deadline.after(10.0),
             gpu_lease=lease,
         )
@@ -1341,7 +1317,6 @@ async def test_codex_structured_failure_is_propagated_and_redacted(
             system_prompt="system",
             user_prompt="user",
             disallowed_tools=frozenset(),
-            max_turns=1,
             deadline=Deadline.after(10.0),
         )
     )

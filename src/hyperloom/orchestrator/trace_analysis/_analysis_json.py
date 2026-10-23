@@ -12,8 +12,10 @@ TraceLens owns the parse/group/prose/impact/order/cap and writes a typed
 expands each task's ``members[]`` into one candidate per member, lifts the task
 scalars and TraceLens metrics verbatim (``gpu_pct := pct_e2e``), then resolves
 each device symbol through TraceLens' single ``resolve_kernel_source`` and stamps
-the resolution onto the row. Host-only classification (patchability, backends,
-category, shapes) is applied afterwards by ``tracelens_analysis`` over these rows.
+the resolution onto the row; TraceLens also owns the native-vs-Triton routing,
+so importing this module requires TraceLens. Host-only classification
+(patchability, backends, category, shapes) is applied afterwards by
+``tracelens_analysis`` over these rows.
 
 Ordering is TraceLens' already: tasks by descending summed member impact, members
 within a task by descending ``impact_score``. This reader preserves that order and
@@ -28,7 +30,7 @@ from typing import Any
 
 from hyperloom.common.coerce import first_str, to_float
 
-from ._kernel_source import ResolveResult, resolve_source_verdict
+from TraceLens.TraceUtils.kernel_source import ResolveResult, resolve_kernel_source
 
 
 def load_report_tasks(analysis_json: str | Path, *, framework: str = "") -> list[dict[str, Any]]:
@@ -125,7 +127,7 @@ def _resolve_member_source(candidate: dict[str, Any], *, framework: str = "") ->
     which the host-only patchability gate then drops to ``skipped_kernels``.
     """
     symbol = str(candidate.get("device_kernel_name") or candidate.get("name") or "")
-    result: ResolveResult = resolve_source_verdict(
+    result: ResolveResult = resolve_kernel_source(
         symbol,
         kernel_file=str(candidate.get("kernel_launcher_path") or ""),
         op_name=str(candidate.get("name") or ""),

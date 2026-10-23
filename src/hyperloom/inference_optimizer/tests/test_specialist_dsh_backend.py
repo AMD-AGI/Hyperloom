@@ -199,7 +199,6 @@ async def _run(dispatcher: Any, tmp_path: Path, **overrides: Any) -> Any:
         "system_prompt": "be a research scout",
         "user_prompt": "find the gap",
         "disallowed_tools": frozenset({"KillShell"}),
-        "max_turns": 2,
         "deadline": Deadline.after(60.0),
     }
     kwargs.update(overrides)

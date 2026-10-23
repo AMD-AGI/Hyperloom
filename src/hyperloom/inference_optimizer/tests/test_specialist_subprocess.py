@@ -37,6 +37,7 @@ from hyperloom.orchestrator.specialists import subprocess_, wall_budget
 from hyperloom.orchestrator.specialists import launch_env
 from hyperloom.orchestrator.specialists.launch_env import prepare_demote
 from hyperloom.orchestrator.specialists.agent_cli_config import _build_specialist_env
+from hyperloom.orchestrator.specialists.leaf import build_leaf_agents_json
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
@@ -1037,7 +1038,6 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
             system_prompt="sys",
             user_prompt="usr",
             disallowed_tools=frozenset(),
-            max_turns=1,
             gpu_ids=(0, 1),
             deadline=Deadline.after(60.0),
             gpu_lease=lease,
@@ -1119,7 +1119,6 @@ async def test_a_gpu_actor_that_cannot_launch_fails_the_specialist_with_its_stac
                 system_prompt="sys",
                 user_prompt="usr",
                 disallowed_tools=frozenset(),
-                max_turns=1,
                 deadline=Deadline.after(60.0),
                 gpu_lease=lease,
             )
@@ -1161,7 +1160,6 @@ async def test_run_clears_stale_wall_budget_extension(
             system_prompt="sys",
             user_prompt="usr",
             disallowed_tools=frozenset(),
-            max_turns=1,
             deadline=Deadline.after(60.0),
             gpu_lease=lease,
         )
@@ -1228,8 +1226,6 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
         model="claude-test",
         mcp_config_path="/tmp/mcp.json",
         framework_source_roots=(str(framework), str(framework)),
-        extra_claude_args=("--debug",),
-        leaf_agents_json='{"researcher": {"description": "test"}}',
     )
     cmd = SpecialistSubprocessDispatcher(cfg)._build_claude_cmd(
         system_prompt_file=system_prompt_file,
@@ -1248,9 +1244,8 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
     denied = set(cmd[deny_idx].split(","))
     assert "KillShell" in denied
     assert "SlashCommand" in denied
-    assert cmd[cmd.index("--agents") + 1] == cfg.leaf_agents_json
+    assert cmd[cmd.index("--agents") + 1] == build_leaf_agents_json()
     assert cmd[cmd.index("--mcp-config") + 1] == "/tmp/mcp.json"
-    assert cmd[-1] == "--debug"
     add_dirs = [cmd[i + 1] for i, value in enumerate(cmd[:-1]) if value == "--add-dir"]
     # Worktree first, workspace second, then each distinct framework root.
     # integrate_patch is the only writer of source; the specialist gets neither.
@@ -1463,7 +1458,6 @@ async def _spawn_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gpu_ids: t
             system_prompt="sys",
             user_prompt="usr",
             disallowed_tools=frozenset(),
-            max_turns=1,
             gpu_ids=gpu_ids,
             deadline=Deadline.after(5.0),
         )
@@ -1505,7 +1499,6 @@ async def _run_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **spawn_kw
         system_prompt="sys",
         user_prompt="usr",
         disallowed_tools=frozenset(),
-        max_turns=1,
         deadline=Deadline.after(5.0),
         **spawn_kwargs,
     )
@@ -1643,7 +1636,6 @@ def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, mon
         system_prompt="sys",
         user_prompt="usr",
         disallowed_tools=frozenset(),
-        max_turns=1,
         deadline=Deadline.after(5.0),
     )
     request.workspace.mkdir()
@@ -1756,7 +1748,6 @@ async def test_a_launch_without_the_capability_to_stop_the_child_is_refused(tmp_
         system_prompt="sys",
         user_prompt="usr",
         disallowed_tools=frozenset(),
-        max_turns=1,
         deadline=Deadline.after(5.0),
     )
     refused = await disp.run(spawn)
