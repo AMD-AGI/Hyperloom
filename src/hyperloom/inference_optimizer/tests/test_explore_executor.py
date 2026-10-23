@@ -370,7 +370,7 @@ def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
     assert evidence["observed_server_launch_flags"] == ""
     assert evidence["observed_server_config"]["max_running_requests"] == 512
     # The env is stamped from the recipe; the argv key holds the launch command, not an env value.
-    assert evidence["observed_server_env"] == _RECIPE_ENV
+    assert evidence["requested_server_env"] == _RECIPE_ENV
 
     # chaojhou 4: last_baseline is an attempt entry that never carries launch_evidence,
     # so a stack with no current best is unknown rather than read from it.
@@ -379,6 +379,7 @@ def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
 
     state = SimpleNamespace(current_best_measurement={"launch_evidence": evidence})
     observed_config, observed_env = observed_launch_from_state(state)
+    assert observed_env == _RECIPE_ENV
     kwargs = _noop_filter_kwargs(tmp_path, observed_server_config=observed_config, observed_server_env=observed_env)
 
     _, dropped = filter_baseline_noop_variants([_variant(_RESTATES_ARGV)], **kwargs)

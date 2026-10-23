@@ -20,16 +20,11 @@ from hyperloom.common.launch_log_evidence import (
     observed_model_binding_from_log,
     observed_server_config_from_log,
     observed_server_identity_from_log,
+    operand_digest,
 )
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 log = logging.getLogger(__name__)
-
-
-def _digest_operand(value: str) -> str:
-    """Digest a model operand: two digests compare, the paths could not travel."""
-    text = str(value or "").strip()
-    return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}" if text else ""
 
 
 def _binding_from_vllm_identity(identity: dict[str, Any]) -> dict[str, Any]:
@@ -46,9 +41,9 @@ def _binding_from_vllm_identity(identity: dict[str, Any]) -> dict[str, Any]:
     if not model:
         return {}
     return {
-        "model_digest": _digest_operand(model),
-        "tokenizer_digest": _digest_operand(str(identity.get("tokenizer") or "")),
-        "served_model_digest": _digest_operand(str(identity.get("served_model_name") or "")),
+        "model_digest": operand_digest(model),
+        "tokenizer_digest": operand_digest(str(identity.get("tokenizer") or "")),
+        "served_model_digest": operand_digest(str(identity.get("served_model_name") or "")),
         "tp": str(identity.get("tensor_parallel_size", 1)),
         "dp": str(identity.get("data_parallel_size", 1)),
         "pp": str(identity.get("pipeline_parallel_size", 1)),
@@ -61,9 +56,9 @@ def _binding_from_identity(identity: dict[str, Any]) -> dict[str, Any]:
     if not model:
         return {}
     return {
-        "model_digest": _digest_operand(model),
-        "tokenizer_digest": _digest_operand(str(identity.get("tokenizer_path") or "")),
-        "served_model_digest": _digest_operand(str(identity.get("served_model_name") or "")),
+        "model_digest": operand_digest(model),
+        "tokenizer_digest": operand_digest(str(identity.get("tokenizer_path") or "")),
+        "served_model_digest": operand_digest(str(identity.get("served_model_name") or "")),
         "tp": str(identity.get("tp_size") or ""),
         "dp": str(identity.get("dp_size") or ""),
         "pp": "",
@@ -189,12 +184,10 @@ def build_launch_evidence(
         "framework": resolved_framework,
         "model_path": requested_model,
         "requested_server_args": requested_args,
-        "requested_server_flags": requested_args,
         "requested_server_env": requested_env,
         "actual_server_log_path": actual_server_log or "",
-        "observed_server_env": dict(requested_env),
         **_observed_launch_from_log(actual_server_log, resolved_framework),
-        "requested_model_digest": _digest_operand(requested_model),
+        "requested_model_digest": operand_digest(requested_model),
         "warm_reuse": _warm_reuse_record(actual_server_log, slot, caller_reused_ready_server),
     }
 

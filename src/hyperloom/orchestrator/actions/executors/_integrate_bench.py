@@ -190,7 +190,6 @@ class BenchStageMixin:
         model_path = resolve_session_model_path(
             params=params,
             state_model_path=bench_leg.state_model_path,
-            for_serving=True,
         )
         gpu_type = str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
         benchmark_script = sanitize_script_name(params.get("benchmark_script"))

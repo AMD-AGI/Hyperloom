@@ -3209,9 +3209,7 @@ class KernelPhase(CoordinatorCollaborator):
             "kernel_id": f"gemm_tune_{tuner_name}",
             "source": "forge_gemm_tuning",
             "base_tput": base_tput,
-            "model_path": resolve_session_model_path(
-                state_model_path=str(self.shared_state.model_path or ""), for_serving=True
-            ),
+            "model_path": resolve_session_model_path(state_model_path=str(self.shared_state.model_path or "")),
             "extra_server_args": self._gemm_candidate_server_args(tuner_name),
             "extra_envs": test_envs,
             "keep_threshold_pct": 1.0,
