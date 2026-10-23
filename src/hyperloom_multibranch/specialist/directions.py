@@ -22,10 +22,13 @@ DIRECTIONS = (
     "helper is called and which model files pass its switch. Fix the cause with a source patch or the "
     "setting that removes it; errors and warnings in the log are leads, and untuned GEMM shapes belong to the GEMM "
     "tuning branch.",
-    "GEMM tuning: from the GEMM shapes the profile shows for this workload (decode and prefill), tune the aiter and "
-    "hipBLASLt GEMM configurations for those shapes, and test each tuned table as the kernel artifact put_kernel_artifact "
-    "returns. Fill the shapes the server.log reports as untuned first; for a shape with no tuned row, switch its "
-    "kernel path before picking rows by hand.",
+    "GEMM tuning: for the GEMM shapes the profile shows for this workload (decode and prefill), first check which "
+    "table each shape actually reads in the server.log's tuned-config lookups; a shape already on its best row in the "
+    "image's table needs nothing. For a shape the log reports as untuned, first switch it to a kernel family with "
+    "tuned rows or a stronger default; rows borrowed from tuned tables of the same kernel family at nearby shapes are "
+    "an untimed guess, so say so in your branch log. Put only your rows with put_kernel_artifact and rows_only=true, "
+    "carrying the rows of a table your head already has for that variable, and test several shapes in one test "
+    "rather than one shape per test.",
     "Fusion: fuse the elementwise work around the GEMMs and the attention (rmsnorm with the residual add, silu with "
     "mul, rope) with a source patch or a kernel, starting from the operators the profile ranks highest.",
     "Server arguments and environment variables: yours is the one branch that tests settings alone; test the settings "

@@ -268,7 +268,7 @@ def test_the_gemm_direction_and_the_role_put_a_path_switch_before_hand_picked_ro
     (direction,) = [text for text in DIRECTIONS if text.startswith("GEMM tuning:")]
     prompt = role_prompt(WORKLOAD)
 
-    assert "switch its kernel path before picking rows by hand" in direction
+    assert "first switch it to a kernel family with tuned rows or a stronger default" in direction
     assert "picking a tile or a split-K for it without timing it is a guess" in prompt
     assert "a row at a padded M covers every batch size that pads to it" in prompt
 
@@ -499,3 +499,15 @@ def test_the_directions_name_shape_whitelists_unpassed_switches_and_settings_not
     assert "which model files pass its switch" in fast_path
     assert "Before testing a setting, grep where it is read" in settings
     assert "Bound a scheduler setting" in settings
+
+
+def test_the_gemm_direction_asks_for_the_table_read_and_marks_borrowed_rows_as_untimed():
+    gemm = DIRECTIONS[1]
+
+    assert gemm.startswith("GEMM tuning:")
+    assert "tune the aiter and hipBLASLt GEMM configurations" not in gemm
+    assert "check which table each shape actually reads" in gemm
+    assert "switch it to a kernel family with tuned rows or a stronger default" in gemm
+    assert "rows borrowed from tuned tables of the same kernel family at nearby shapes are an untimed guess" in gemm
+    assert "rows_only=true" in gemm
+    assert "several shapes in one test" in gemm
