@@ -219,7 +219,9 @@ def test_bad_json_is_an_error_naming_the_file(monkeypatch: pytest.MonkeyPatch, t
     assert str(path) in str(caught.value)
 
 
-@pytest.mark.parametrize("schema", ["topology-handoff/v2", "topology-handoff/v0", "other/v1", "vendor.topology-handoff/v1", None])
+@pytest.mark.parametrize(
+    "schema", ["topology-handoff/v2", "topology-handoff/v0", "other/v1", "vendor.topology-handoff/v1", None]
+)
 def test_unknown_schema_is_refused(schema: object, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _set_valid_legacy_env(monkeypatch)
     doc = _rayjob_doc(tmp_path)
@@ -229,7 +231,9 @@ def test_unknown_schema_is_refused(schema: object, monkeypatch: pytest.MonkeyPat
         doc["schema"] = schema
     path = _write(tmp_path / "topology.json", doc)
     monkeypatch.setenv(topo.TOPOLOGY_FILE_ENV, str(path))
-    expected = "unsupported schema major" if schema and schema.startswith("topology-handoff/") else "is not a topology-handoff"
+    expected = (
+        "unsupported schema major" if schema and schema.startswith("topology-handoff/") else "is not a topology-handoff"
+    )
     with pytest.raises(topo.TopologyHandoffError, match=expected) as caught:
         ext.external_service_url()
     assert str(path) in str(caught.value)
