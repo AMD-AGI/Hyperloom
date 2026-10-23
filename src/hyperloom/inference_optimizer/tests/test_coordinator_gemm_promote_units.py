@@ -214,52 +214,27 @@ class _Bus:
 class TestGemmE2eCandidates:
     """Guard rails deciding which tuning results reach the E2E validator."""
 
-    def test_geak_result_yields_the_tuned_dispatch_csv(self, tmp_path):
-        coord = _coord(tmp_path, baseline_tput=200.0)
-        cands = coord.phase_kernel._gemm_e2e_candidates(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.1,
-                "backend": "geak",
-                "tuned_file": "/tuned/gemm.csv",
-            }
-        )
-        assert len(cands) == 1
-        assert cands[0]["tuner"] == "a8w8_blockscale_tuned_gemm"
-        assert cands[0]["envs"] == {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tuned/gemm.csv"}
-        assert cands[0]["micro_speedup"] == pytest.approx(1.1)
-
-    @pytest.mark.parametrize(
-        "overrides",
-        [
-            {"status": "failed"},
-            {"decision": "REVERT"},
-            {"best_speedup": 1.0},
-            {"best_speedup": object()},
-            {"tuned_file": ""},
-        ],
-    )
-    def test_geak_result_yields_nothing_without_a_usable_keep(self, tmp_path, overrides):
-        coord = _coord(tmp_path, baseline_tput=200.0)
-        result = {
-            "status": "ok",
-            "decision": "KEEP",
-            "best_speedup": 1.1,
-            "backend": "geak",
-            "tuned_file": "/tuned/gemm.csv",
-        }
-        result.update(overrides)
-        assert coord.phase_kernel._gemm_e2e_candidates(result) == []
-
-    def test_non_dict_result_is_rejected(self, tmp_path):
+    def test_tuner_rows_and_tuned_file_without_candidates_yield_nothing(self, tmp_path):
         coord = _coord(tmp_path, baseline_tput=100.0)
-        assert coord.phase_kernel._gemm_e2e_candidates({}) == []
+        result = {
+            "backend": "forge",
+            "tuned_file": "/tuned/gemm.csv",
+            "tuners_run": [
+                {
+                    "tuner": "fmoe_ck",
+                    "status": "ok",
+                    "candidate": True,
+                    "env_var": "AITER_CONFIG_FMOE",
+                    "env_value": "/tuned/moe.csv",
+                }
+            ],
+        }
+        assert coord.phase_kernel._gemm_canonical_candidates(result) == []
 
     def test_a_forced_split_k_candidate_reaches_e2e(self, tmp_path):
         """split-K benefit is e2e-only, so micro reports ``no_improvement``."""
         coord = _coord(tmp_path, baseline_tput=100.0)
-        cands = coord.phase_kernel._gemm_e2e_candidates(
+        cands = coord.phase_kernel._gemm_canonical_candidates(
             {
                 "backend": "forge",
                 "candidates": [
@@ -295,7 +270,7 @@ class TestGemmE2eCandidates:
     def test_moe_and_dense_stay_independent_candidates(self, tmp_path):
         """One call tunes both, and each earns its own KEEP/REVERT."""
         coord = _coord(tmp_path, baseline_tput=100.0)
-        cands = coord.phase_kernel._gemm_e2e_candidates(
+        cands = coord.phase_kernel._gemm_canonical_candidates(
             {
                 "backend": "forge",
                 "candidates": [
@@ -310,7 +285,7 @@ class TestGemmE2eCandidates:
     def test_the_producer_verdict_is_not_re_derived_from_the_tuner_rows(self, tmp_path):
         """The producer's list is authoritative once it names any candidate."""
         coord = _coord(tmp_path, baseline_tput=100.0)
-        cands = coord.phase_kernel._gemm_e2e_candidates(
+        cands = coord.phase_kernel._gemm_canonical_candidates(
             {
                 "backend": "forge",
                 "candidates": [
@@ -334,7 +309,7 @@ class TestGemmE2eCandidates:
     def test_a_candidate_with_no_env_is_not_offered(self, tmp_path):
         """Nothing to apply means nothing an e2e run could validate."""
         coord = _coord(tmp_path, baseline_tput=100.0)
-        cands = coord.phase_kernel._gemm_e2e_candidates(
+        cands = coord.phase_kernel._gemm_canonical_candidates(
             {
                 "backend": "forge",
                 "candidates": [
@@ -345,30 +320,10 @@ class TestGemmE2eCandidates:
         )
         assert [c["tuner"] for c in cands] == ["usable"]
 
-    def test_an_envelope_without_candidates_still_reads_the_tuner_rows(self, tmp_path):
-        """The pre-candidates envelope and the GEAK backend keep working."""
-        coord = _coord(tmp_path, baseline_tput=100.0)
-        cands = coord.phase_kernel._gemm_e2e_candidates(
-            {
-                "backend": "forge",
-                "tuners_run": [
-                    {
-                        "tuner": "fmoe_ck",
-                        "status": "ok",
-                        "improved_shapes": 3,
-                        "env_var": "AITER_CONFIG_FMOE",
-                        "env_value": "/tuned/moe.csv",
-                        "best_micro_speedup": 1.4,
-                    }
-                ],
-            }
-        )
-        assert [c["tuner"] for c in cands] == ["fmoe_ck"]
-
     def test_a_multi_variable_candidate_leaves_the_singular_pair_empty(self, tmp_path):
         """The singular pair is only unambiguous for a one-variable candidate."""
         coord = _coord(tmp_path, baseline_tput=100.0)
-        (cand,) = coord.phase_kernel._gemm_e2e_candidates(
+        (cand,) = coord.phase_kernel._gemm_canonical_candidates(
             {
                 "backend": "forge",
                 "candidates": [
@@ -379,46 +334,6 @@ class TestGemmE2eCandidates:
         assert cand["envs"] == {"A": "1", "B": "2"}
         assert cand["env_var"] == ""
         assert cand["env_value"] == ""
-
-    def test_forge_result_yields_one_candidate_per_improved_tuner(self, tmp_path):
-        coord = _coord(tmp_path, baseline_tput=100.0)
-        cands = coord.phase_kernel._gemm_e2e_candidates(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "backend": "forge",
-                "tuners_run": [
-                    {
-                        "tuner": "fmoe_ck",
-                        "status": "ok",
-                        "candidate": True,
-                        "env_var": "AITER_CONFIG_FMOE",
-                        "env_value": "/cfg/fmoe.csv",
-                        "best_micro_speedup": 1.3,
-                    },
-                    {"tuner": "skipped_one", "status": "ok", "improved_shapes": 0},
-                    {"tuner": "failed_one", "status": "failed", "candidate": True},
-                ],
-            }
-        )
-        assert [c["tuner"] for c in cands] == ["fmoe_ck"]
-        assert cands[0]["envs"] == {"AITER_CONFIG_FMOE": "/cfg/fmoe.csv"}
-
-    def test_forge_result_ignores_a_tuned_file(self, tmp_path):
-        """tuned_file is the GEAK shape; forge must come from tuners_run."""
-        coord = _coord(tmp_path, baseline_tput=100.0)
-        assert (
-            coord.phase_kernel._gemm_e2e_candidates(
-                {
-                    "status": "ok",
-                    "decision": "KEEP",
-                    "best_speedup": 1.2,
-                    "backend": "forge",
-                    "tuned_file": "/tuned/gemm.csv",
-                }
-            )
-            == []
-        )
 
 
 class TestQueueFusionSiblings:
@@ -748,13 +663,10 @@ class TestForgeGemmRuntimeConfigMerge:
         result = {
             "backend": "forge",
             "precision": "bf16",
-            "tuners_run": [
+            "candidates": [
                 {
-                    "status": "ok",
-                    "candidate": True,
                     "tuner": "a8w8_blockscale_bpreshuffle",
-                    "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE",
-                    "env_value": str(candidate),
+                    "env": {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(candidate)},
                 }
             ],
         }
@@ -779,14 +691,8 @@ class TestForgeGemmRuntimeConfigMerge:
         result = {
             "backend": "forge",
             "precision": "fp8",
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "candidate": True,
-                    "tuner": "a8w8_blockscale",
-                    "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
-                    "env_value": str(missing_candidate),
-                }
+            "candidates": [
+                {"tuner": "a8w8_blockscale", "env": {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": str(missing_candidate)}}
             ],
         }
 
@@ -827,21 +733,9 @@ class TestForgeGemmRuntimeConfigMerge:
 
         result = {
             "backend": "forge",
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "tuner": "fmoe_ck",
-                    "improved_shapes": 2,
-                    "env_var": "AITER_CONFIG_FMOE",
-                    "env_value": str(fmoe_candidate),
-                },
-                {
-                    "status": "ok",
-                    "tuner": "dense_bf16",
-                    "improved_shapes": 1,
-                    "env_var": "AITER_CONFIG_DENSE",
-                    "env_value": str(dense_candidate),
-                },
+            "candidates": [
+                {"tuner": "fmoe_ck", "env": {"AITER_CONFIG_FMOE": str(fmoe_candidate)}},
+                {"tuner": "dense_bf16", "env": {"AITER_CONFIG_DENSE": str(dense_candidate)}},
             ],
         }
 
@@ -881,15 +775,7 @@ class TestForgeGemmRuntimeConfigMerge:
         )
         result = {
             "backend": "forge",
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "tuner": "dense_bf16",
-                    "improved_shapes": 1,
-                    "env_var": "AITER_CONFIG_DENSE",
-                    "env_value": str(dense_candidate),
-                },
-            ],
+            "candidates": [{"tuner": "dense_bf16", "env": {"AITER_CONFIG_DENSE": str(dense_candidate)}}],
         }
 
         await phase._validate_gemm_tuning_e2e(result)
@@ -928,21 +814,9 @@ class TestForgeGemmRuntimeConfigMerge:
 
         result = {
             "backend": "forge",
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "tuner": "fmoe_ck",
-                    "improved_shapes": 1,
-                    "env_var": "AITER_CONFIG_FMOE",
-                    "env_value": str(first),
-                },
-                {
-                    "status": "ok",
-                    "tuner": "dense_bf16",
-                    "improved_shapes": 1,
-                    "env_var": "AITER_CONFIG_DENSE",
-                    "env_value": str(second),
-                },
+            "candidates": [
+                {"tuner": "fmoe_ck", "env": {"AITER_CONFIG_FMOE": str(first)}},
+                {"tuner": "dense_bf16", "env": {"AITER_CONFIG_DENSE": str(second)}},
             ],
         }
 
@@ -968,15 +842,7 @@ class TestForgeGemmRuntimeConfigMerge:
         monkeypatch.setattr(phase, "_merge_gemm_candidate_with_runtime", lambda _env_var, env_value: env_value)
         result = {
             "backend": "forge",
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "tuner": "dense_bf16",
-                    "improved_shapes": 1,
-                    "env_var": "AITER_CONFIG_DENSE",
-                    "env_value": str(candidate),
-                }
-            ],
+            "candidates": [{"tuner": "dense_bf16", "env": {"AITER_CONFIG_DENSE": str(candidate)}}],
         }
 
         await phase._validate_gemm_tuning_e2e(result)
@@ -1025,25 +891,9 @@ class TestForgeGemmRuntimeConfigMerge:
             "workspace": str(tmp_path / "gemm"),
             "recommended_env": {"AITER_CONFIG_FMOE": "/raw.csv"},
             "extra_envs": {"AITER_CONFIG_FMOE": "/raw.csv"},
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "tuner": "fmoe_ck",
-                    "improved_shapes": 2,
-                    "env_var": "AITER_CONFIG_FMOE",
-                    "env_value": str(fmoe_candidate),
-                    "best_micro_speedup": 1.2,
-                },
-                {
-                    "status": "ok",
-                    "tuner": "dense_bf16",
-                    "improved_shapes": 1,
-                    "env_var": "AITER_CONFIG_DENSE",
-                    "env_value": str(dense_candidate),
-                    "best_micro_speedup": 1.1,
-                },
-                {"status": "failed", "tuner": "ignored"},
-                {"status": "ok", "tuner": "no_env", "improved_shapes": 1},
+            "candidates": [
+                {"tuner": "fmoe_ck", "env": {"AITER_CONFIG_FMOE": str(fmoe_candidate)}, "best_micro_speedup": 1.2},
+                {"tuner": "dense_bf16", "env": {"AITER_CONFIG_DENSE": str(dense_candidate)}, "best_micro_speedup": 1.1},
             ],
         }
 
@@ -1082,10 +932,7 @@ class TestForgeGemmRuntimeConfigMerge:
             "precision": "bf16",
             "recommended_env": {"AITER_CONFIG": "/raw.csv"},
             "extra_envs": {"AITER_CONFIG": "/raw.csv"},
-            "tuners_run": [
-                {"status": "failed", "tuner": "bad"},
-                {"status": "ok", "tuner": "zero", "improved_shapes": 0},
-            ],
+            "candidates": [],
         }
 
         await phase._validate_gemm_tuning_e2e(result)
@@ -1118,15 +965,7 @@ class TestForgeGemmRuntimeConfigMerge:
         result = {
             "backend": "forge",
             "precision": "bf16",
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "tuner": "dense_bf16",
-                    "improved_shapes": 1,
-                    "env_var": "AITER_CONFIG_DENSE",
-                    "env_value": str(dense_candidate),
-                },
-            ],
+            "candidates": [{"tuner": "dense_bf16", "env": {"AITER_CONFIG_DENSE": str(dense_candidate)}}],
         }
 
         await phase._validate_gemm_tuning_e2e(result)
@@ -1180,9 +1019,7 @@ class TestBf16DenseFallbackIsInternalToForge:
                 "precision": "fp8",
                 "framework": "sglang",
                 "micro_decision": "no_improvement",
-                "tuners_run": [
-                    {"status": "no_improvement", "tuner": "a8w8", "improved_shapes": 0},
-                ],
+                "candidates": [],
             }
 
         monkeypatch.setattr(krh_mod, "run_gemm_tuning_handler", _fake_run_gemm)
@@ -1251,15 +1088,7 @@ class TestHandleGemmTuningResult:
                 "requires_e2e_validation": True,
                 "recommended_env": {"AITER_DENSE": "/dense.json"},
                 "extra_envs": {"AITER_DENSE": "/dense.json"},
-                "tuners_run": [
-                    {
-                        "status": "ok",
-                        "improved_shapes": 3,
-                        "tuner": "dense_gemm",
-                        "env_var": "AITER_DENSE",
-                        "env_value": "/dense.json",
-                    }
-                ],
+                "candidates": [{"tuner": "dense_gemm", "env": {"AITER_DENSE": "/dense.json"}}],
             }
         )
 
@@ -1288,15 +1117,7 @@ class TestHandleGemmTuningResult:
                 "requires_e2e_validation": True,
                 "recommended_env": {"AITER_DENSE": "/dense.json"},
                 "extra_envs": {"AITER_DENSE": "/dense.json"},
-                "tuners_run": [
-                    {
-                        "status": "ok",
-                        "improved_shapes": 3,
-                        "tuner": "dense_gemm",
-                        "env_var": "AITER_DENSE",
-                        "env_value": "/dense.json",
-                    }
-                ],
+                "candidates": [{"tuner": "dense_gemm", "env": {"AITER_DENSE": "/dense.json"}}],
             }
         )
 
@@ -1330,15 +1151,7 @@ class TestHandleGemmTuningResult:
                 "requires_e2e_validation": True,
                 "recommended_env": {"AITER_DENSE": env_value},
                 "extra_envs": {"AITER_DENSE": env_value},
-                "tuners_run": [
-                    {
-                        "status": "ok",
-                        "improved_shapes": 3,
-                        "tuner": "dense_gemm",
-                        "env_var": "AITER_DENSE",
-                        "env_value": env_value,
-                    }
-                ],
+                "candidates": [{"tuner": "dense_gemm", "env": {"AITER_DENSE": env_value}}],
             }
 
         monkeypatch.setattr(
@@ -1380,15 +1193,7 @@ class TestHandleGemmTuningResult:
                 "requires_e2e_validation": True,
                 "recommended_env": {"AITER_DENSE": "/dense.json"},
                 "extra_envs": {"AITER_DENSE": "/dense.json"},
-                "tuners_run": [
-                    {
-                        "status": "ok",
-                        "improved_shapes": 3,
-                        "tuner": "dense_gemm",
-                        "env_var": "AITER_DENSE",
-                        "env_value": "/dense.json",
-                    }
-                ],
+                "candidates": [{"tuner": "dense_gemm", "env": {"AITER_DENSE": "/dense.json"}}],
             }
         )
 
@@ -1396,7 +1201,7 @@ class TestHandleGemmTuningResult:
         assert not coord.shared_state.gemm_tuning_attempts[0].get("tuned_file")
 
     @pytest.mark.asyncio
-    async def test_geak_promotes_on_the_measured_tput_not_the_micro_speedup(self, tmp_path, monkeypatch):
+    async def test_promotes_on_the_measured_tput_not_the_micro_speedup(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
         tuned = tmp_path / "gemm.csv"
         tuned.write_text("token,model_dim\n1,2\n", encoding="utf-8")
@@ -1412,47 +1217,25 @@ class TestHandleGemmTuningResult:
             {
                 "status": "ok",
                 "decision": "KEEP",
-                "best_speedup": 1.4,
-                "backend": "geak",
-                "tuned_file": str(tuned),
+                "backend": "forge",
+                "candidates": [
+                    {
+                        "tuner": "a8w8_blockscale_tuned_gemm",
+                        "env": {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": str(tuned)},
+                        "best_micro_speedup": 1.4,
+                    }
+                ],
             }
         )
 
         assert len(fake.calls) == 1
         stack = coord.shared_state.optimization_stack
         assert len(stack) == 1
-        assert stack[0]["variant_name"] == "geak_a8w8_blockscale_tuned_gemm"
-        assert stack[0]["backend"] == "geak"
+        assert stack[0]["variant_name"] == "forge_a8w8_blockscale_tuned_gemm"
         # 150.0 measured, not baseline * best_speedup (140.0).
         assert stack[0]["tput"] == pytest.approx(150.0)
         assert coord.shared_state.current_best["tput"] == pytest.approx(150.0)
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(50.0)
-
-    @pytest.mark.asyncio
-    async def test_geak_promotes_nothing_when_the_measurement_reverts(self, tmp_path, monkeypatch):
-        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
-        tuned = tmp_path / "gemm.csv"
-        tuned.write_text("token,model_dim\n1,2\n", encoding="utf-8")
-        fake = _make_integrate([{"decision": "REVERT", "new_tput": 90.0, "gain_pct": -10.0}])
-        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
-        monkeypatch.setattr(
-            KernelPhase,
-            "_merge_gemm_candidate_with_runtime",
-            lambda _self, _env_var, env_value: env_value,
-        )
-
-        await coord.phase_kernel._handle_gemm_tuning_result(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.4,
-                "backend": "geak",
-                "tuned_file": str(tuned),
-            }
-        )
-
-        assert coord.shared_state.optimization_stack == []
-        assert not coord.shared_state.current_best
 
 
 class TestKernelE2EMeasurementPromotion:
@@ -2106,12 +1889,7 @@ class TestValidateForgeGemmTuningE2E:
             "recommended_env": {"X": "1"},
             "extra_envs": {"X": "1"},
             "requires_e2e_validation": True,
-            "tuners_run": [
-                "not-a-dict",
-                {"status": "failed", "improved_shapes": 5, "env_var": "A", "env_value": "1"},
-                {"status": "ok", "improved_shapes": 0, "env_var": "B", "env_value": "2"},
-                {"status": "ok", "improved_shapes": 3, "env_var": "", "env_value": ""},
-            ],
+            "candidates": [{"tuner": "unknown", "env": {"": ""}}],
         }
         await coord.phase_kernel._validate_gemm_tuning_e2e(result)
 
@@ -2133,7 +1911,7 @@ class TestValidateForgeGemmTuningE2E:
         result = {
             "requires_e2e_validation": True,
             "micro_decision": "no_improvement",
-            "tuners_run": [{"status": "ok", "improved_shapes": 0}],
+            "candidates": [],
         }
         await coord.phase_kernel._validate_gemm_tuning_e2e(result)
 
@@ -2160,15 +1938,10 @@ class TestValidateForgeGemmTuningE2E:
             },
             "extra_envs": {},
             "requires_e2e_validation": True,
-            "tuners_run": [
+            "candidates": [
                 {
-                    "status": "ok",
-                    "candidate": True,
-                    "improved_shapes": 0,
                     "tuner": "vllm_dense_tunableop",
-                    "env_var": "PYTORCH_TUNABLEOP_FILENAME",
-                    "env_value": "/tunableop.csv",
-                    "env_vars": {
+                    "env": {
                         "PYTHONPATH": "/candidate/site",
                         "HL_TUNABLEOP_MODE": "candidate",
                         "HL_TUNABLEOP_FILE": "/tunableop.csv",
@@ -2215,14 +1988,10 @@ class TestValidateForgeGemmTuningE2E:
         monkeypatch.setattr(krh_mod, "integrate_handler", fake)
         result = {
             "workspace": str(tmp_path),
-            "tuners_run": [
+            "candidates": [
                 {
-                    "status": "ok",
-                    "candidate": True,
                     "tuner": "combined_aiter",
-                    "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
-                    "env_value": str(dense),
-                    "env_vars": {
+                    "env": {
                         "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": str(dense),
                         "AITER_CONFIG_FMOE": str(moe),
                     },
@@ -2271,23 +2040,9 @@ class TestValidateForgeGemmTuningE2E:
                 "AITER_DENSE": "/dense.json",
             },
             "requires_e2e_validation": True,
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "improved_shapes": 5,
-                    "tuner": "fmoe_ck",
-                    "env_var": "AITER_CONFIG_FMOE",
-                    "env_value": str(fmoe_candidate),
-                    "best_micro_speedup": 1.2,
-                },
-                {
-                    "status": "ok",
-                    "improved_shapes": 3,
-                    "tuner": "dense_gemm",
-                    "env_var": "AITER_DENSE",
-                    "env_value": "/dense.json",
-                    "best_micro_speedup": 1.1,
-                },
+            "candidates": [
+                {"tuner": "fmoe_ck", "env": {"AITER_CONFIG_FMOE": str(fmoe_candidate)}, "best_micro_speedup": 1.2},
+                {"tuner": "dense_gemm", "env": {"AITER_DENSE": "/dense.json"}, "best_micro_speedup": 1.1},
             ],
         }
         await coord.phase_kernel._validate_gemm_tuning_e2e(result)
@@ -2349,16 +2104,7 @@ class TestValidateForgeGemmTuningE2E:
             "recommended_env": {"X": "1"},
             "extra_envs": {"X": "1"},
             "requires_e2e_validation": True,
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "improved_shapes": 2,
-                    "tuner": "dense",
-                    "env_var": "X",
-                    "env_value": "1",
-                    "best_micro_speedup": 1.05,
-                },
-            ],
+            "candidates": [{"tuner": "dense", "env": {"X": "1"}, "best_micro_speedup": 1.05}],
         }
         await coord.phase_kernel._validate_gemm_tuning_e2e(result)
 
@@ -2376,16 +2122,7 @@ class TestValidateForgeGemmTuningE2E:
             "recommended_env": {"X": "1"},
             "extra_envs": {"X": "1"},
             "requires_e2e_validation": True,
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "improved_shapes": 4,
-                    "tuner": "dense",
-                    "env_var": "X",
-                    "env_value": "1",
-                    "best_micro_speedup": 1.05,
-                },
-            ],
+            "candidates": [{"tuner": "dense", "env": {"X": "1"}, "best_micro_speedup": 1.05}],
         }
         await coord.phase_kernel._validate_gemm_tuning_e2e(result)
 
@@ -2409,16 +2146,7 @@ class TestValidateForgeGemmTuningE2E:
             "recommended_env": {"X": "1"},
             "extra_envs": {"X": "1"},
             "requires_e2e_validation": True,
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "improved_shapes": 2,
-                    "tuner": "dense",
-                    "env_var": "X",
-                    "env_value": "1",
-                    "best_micro_speedup": 1.1,
-                },
-            ],
+            "candidates": [{"tuner": "dense", "env": {"X": "1"}, "best_micro_speedup": 1.1}],
         }
         await coord.phase_kernel._validate_gemm_tuning_e2e(result)
 
@@ -2448,16 +2176,7 @@ class TestValidateForgeGemmTuningE2E:
             "recommended_env": {"X": "1"},
             "extra_envs": {"X": "1"},
             "requires_e2e_validation": True,
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "improved_shapes": 2,
-                    "tuner": "dense",
-                    "env_var": "X",
-                    "env_value": "1",
-                    "best_micro_speedup": 1.1,
-                },
-            ],
+            "candidates": [{"tuner": "dense", "env": {"X": "1"}, "best_micro_speedup": 1.1}],
         }
         await coord.phase_kernel._validate_gemm_tuning_e2e(result)
 
@@ -2498,15 +2217,12 @@ class TestValidateForgeGemmTuningE2E:
         result = {
             "workspace": str(tmp_path),
             "requires_e2e_validation": True,
-            "tuners_run": [
+            "candidates": [
                 {
-                    "status": "ok",
-                    "improved_shapes": 2,
                     "tuner": "a8w8_blockscale_bpreshuffle",
-                    "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE",
-                    "env_value": str(candidate),
+                    "env": {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(candidate)},
                     "best_micro_speedup": 1.2,
-                },
+                }
             ],
         }
         await coord.phase_kernel._validate_gemm_tuning_e2e(result)
@@ -2525,16 +2241,7 @@ class TestForgeGemmE2EApplyGate:
             "recommended_env": {"X": "1"},
             "extra_envs": {"X": "1"},
             "requires_e2e_validation": True,
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "improved_shapes": 2,
-                    "tuner": "dense",
-                    "env_var": "X",
-                    "env_value": "1",
-                    "best_micro_speedup": 1.1,
-                },
-            ],
+            "candidates": [{"tuner": "dense", "env": {"X": "1"}, "best_micro_speedup": 1.1}],
         }
 
     @staticmethod

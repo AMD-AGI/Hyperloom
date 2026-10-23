@@ -255,60 +255,6 @@ def _candidate_envs(raw: object) -> dict[str, str]:
     return {str(key): str(value) for key, value in raw.items() if str(key).strip() and str(value).strip()}
 
 
-def _legacy_tuner_candidates(result: Mapping[str, Any]) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    for row in result.get("tuners_run") or []:
-        if not isinstance(row, dict):
-            continue
-        # partial_output is a real artifact: the tuner wrote fewer rows than shapes it was given (the grouped
-        # batch budget ran out), but the rows it did write are deployable.
-        if row.get("status") not in ("ok", "partial_output"):
-            continue
-        # improved_shapes can never exceed 0 for tuners with no comparable baseline -- TunableOp never times the
-        # untuned dispatch, the candidate-CSV fallback has no per-shape Pre/Post table, and a hipblaslt-only bf16
-        # run has no torch candidate to measure against.
-        if (
-            not row.get("candidate")
-            and int(row.get("improved_shapes") or 0) <= 0
-            and int(row.get("unverified_shapes") or 0) <= 0
-        ):
-            continue
-        env_var = _first_text(row, "env_var").strip()
-        env_value = _first_text(row, "env_value").strip()
-        envs = _candidate_envs(row.get("env_vars"))
-        if env_var and env_value:
-            envs.setdefault(env_var, env_value)
-        if envs:
-            candidates.append(
-                {
-                    "tuner": row.get("tuner") or "unknown",
-                    "env_var": env_var,
-                    "env_value": env_value,
-                    "envs": envs,
-                    "micro_speedup": _as_float(row.get("best_micro_speedup"), 1.0),
-                }
-            )
-    return candidates
-
-
-def _a8w8_blockscale_candidate(result: Mapping[str, Any]) -> dict[str, Any]:
-    tuned_file = _first_text(result, "tuned_file").strip()
-    micro_speedup = _as_float(result.get("best_speedup"), 0.0)
-    keeps = _first_text(result, "decision").strip().upper() == "KEEP" and _first_text(
-        result, "status"
-    ).strip().lower() in {"ok", "complete", "completed", "succeeded", "success"}
-    if not (tuned_file and micro_speedup > 1.0 and keeps):
-        return {}
-    env_var = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"
-    return {
-        "tuner": "a8w8_blockscale_tuned_gemm",
-        "env_var": env_var,
-        "env_value": tuned_file,
-        "envs": {env_var: tuned_file},
-        "micro_speedup": micro_speedup,
-    }
-
-
 def _observed_identity_digest(declared: str, flags: str, server_identity: Mapping[str, Any]) -> str:
     payload = json.dumps(
         {
@@ -3269,19 +3215,6 @@ class KernelPhase(CoordinatorCollaborator):
             )
         return candidates
 
-    def _gemm_e2e_candidates(self, result: dict[str, Any]) -> list[dict[str, Any]]:
-        """Reduce a GEMM tuning result to the env sets worth E2E-validating."""
-        candidates = self._gemm_canonical_candidates(result)
-        # The rebuild's status gate cannot see a forced candidate, so it runs only when the producer named none: the
-        # pre-``candidates[]`` envelope and GEAK.
-        if not candidates:
-            candidates = _legacy_tuner_candidates(result)
-        if not candidates and str(result.get("backend") or "").strip().lower() != "forge":
-            fallback = _a8w8_blockscale_candidate(result)
-            if fallback:
-                candidates.append(fallback)
-        return candidates
-
     def _close_gemm_e2e_without_candidates(self, result: dict[str, Any]) -> None:
         log.info("gemm tuning: no candidates to E2E validate")
         result["decision"] = "REVERT"
@@ -3499,7 +3432,7 @@ class KernelPhase(CoordinatorCollaborator):
     ) -> dict[str, Any] | None:
         from ..measurement.integrate_performance import integrate_measurement_fields
 
-        backend = _first_text(result, "backend").strip().lower() or "geak"
+        backend = _first_text(result, "backend").strip().lower() or "forge"
         tuner_name = cand["tuner"]
         tput, gain_pct = _integrate_tput_and_gain(verdict)
         tuned_file = _candidate_tuned_file(env, cand["env_var"])
@@ -3595,7 +3528,7 @@ class KernelPhase(CoordinatorCollaborator):
         """Sequentially E2E-validate each tuning candidate's env independently."""
         from ..actions.executors._aiter_jit import drop_serving_so_for_envs
 
-        candidates = self._gemm_e2e_candidates(result)
+        candidates = self._gemm_canonical_candidates(result)
         if not candidates:
             self._close_gemm_e2e_without_candidates(result)
             return
