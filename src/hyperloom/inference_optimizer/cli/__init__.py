@@ -93,6 +93,7 @@ from .credentials import (
 )
 from .multi_node import (
     _prepare_multi_node_state as _prepare_multi_node_state,
+    _resolve_gpus_per_node,
     _resolve_mn_backend as _resolve_mn_backend,
 )
 from .quantization import (
@@ -2224,12 +2225,7 @@ def _resolve_run_topology(args: argparse.Namespace) -> int:
         _resolve_workload_knobs(args)
     tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
     ep_resolved = max(1, int(getattr(args, "ep", 1) or 1))
-    # Resolve gpus_per_node from the explicit CLI flag or the policy default.
-    gpn_attr = getattr(args, "gpus_per_node", None)
-    if gpn_attr is not None:
-        gpus_per_node_resolved = int(gpn_attr)
-    else:
-        gpus_per_node_resolved = 8
+    gpus_per_node_resolved = _resolve_gpus_per_node(args)
 
     # Project before ``_preflight``: ``check_gpu_visibility`` reads ``$TP`` to warn when the run asks for more
     # shards than rocm-smi can see.

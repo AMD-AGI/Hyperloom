@@ -32,7 +32,8 @@ _SUPPORTED_MAJOR = 1
 _BACKENDS = ("rayjob", "infera")
 
 # Every legacy variable the file describes. When a file is in force these are read
-# from it only (empty when the file omits them), never from the process env.
+# from it only (empty when the file omits them), never from the process env, except
+# the two in FLAG_OWNED_NAMES.
 COVERED_NAMES = (
     "INFERENCE_OPTIMIZER_MN_BACKEND",
     "INFERENCE_OPTIMIZER_NODES",
@@ -47,6 +48,11 @@ COVERED_NAMES = (
     "HYPERLOOM_MN_EXT_DECODE_IPS",
     "HYPERLOOM_MN_EXT_WORKER_IPS",
 )
+
+# ``optimize`` exports these two from ``--nodes`` and ``--gpus-per-node`` before it builds any state. A value in
+# the environment is the operator's flag, so it wins over the file's (as ``--mn-backend`` does); the file fills in
+# only what the environment leaves unset.
+FLAG_OWNED_NAMES = ("INFERENCE_OPTIMIZER_NODES", "INFERENCE_OPTIMIZER_GPUS_PER_NODE")
 
 # File field each legacy variable comes from, for the disagreement warning.
 _FIELD_OF = {
@@ -207,7 +213,9 @@ def _warn_on_disagreement(path: str, overlay: dict[str, str]) -> None:
     differing = tuple(
         f"{_FIELD_OF[name]} ({name})"
         for name in COVERED_NAMES
-        if os.environ.get(name, "").strip() and _normalise(name, os.environ[name]) != overlay[name]
+        if name not in FLAG_OWNED_NAMES
+        and os.environ.get(name, "").strip()
+        and _normalise(name, os.environ[name]) != overlay[name]
     )
     if not differing or (path, differing) in _WARNED:
         return
@@ -234,8 +242,18 @@ def topology_file_overlay() -> dict[str, str] | None:
 
 
 def handoff_lookup() -> Lookup:
-    """Return ``name -> value``: the file's view of covered names when a file is in force, else the env."""
+    """Return ``name -> value``: the file's view of covered names when a file is in force, else the env.
+
+    The exception is :data:`FLAG_OWNED_NAMES`: a value set in the environment, which ``optimize`` does from its
+    flags, wins over the file.
+    """
     overlay = topology_file_overlay()
     if overlay is None:
         return lambda name: os.environ.get(name, "")
-    return lambda name: overlay[name] if name in overlay else os.environ.get(name, "")
+
+    def lookup(name: str) -> str:
+        if name in FLAG_OWNED_NAMES and os.environ.get(name, "").strip():
+            return os.environ[name]
+        return overlay[name] if name in overlay else os.environ.get(name, "")
+
+    return lookup

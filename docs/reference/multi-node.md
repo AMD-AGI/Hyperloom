@@ -43,8 +43,12 @@ its path and Hyperloom reads that file instead of the variables below: `backend`
 for infera. A file that cannot be used (unreadable, not JSON, unsupported schema
 major, missing or malformed field) stops the run with an error naming the file;
 there is no silent fallback to the variables. If both are present the file wins
-and a warning names the fields that differ. `--mn-backend` still overrides the
-file's `backend`; without it the file's `backend` is the launch backend. With `TOPOLOGY_HANDOFF_FILE` unset,
+and a warning names the fields that differ. The launch flags win over the file:
+`--mn-backend` over its `backend`, `--gpus-per-node` over its `gpus_per_node`, and
+`--nodes` over its `nodes`. Without `--mn-backend` the file's `backend` is the
+launch backend, and without `--gpus-per-node` its `gpus_per_node` is used (else 8);
+`--nodes` defaults to 1, so the file's `nodes` never turns a single-node launch
+into a multi-node one. With `TOPOLOGY_HANDOFF_FILE` unset,
 the variables below apply unchanged.
 
 The following table lists all hand-off variables.

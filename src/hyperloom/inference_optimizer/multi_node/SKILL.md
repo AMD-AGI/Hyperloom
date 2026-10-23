@@ -79,7 +79,9 @@ JSON file (`"schema": "topology-handoff/v1"`) that is read instead of the env
 vars below. It carries `backend`, `nodes`, `gpus_per_node`, `service_url` and the
 `ray` or `infera` block; credentials are file paths. A file that cannot be used
 is an error naming the file (no fallback to the env vars); when both are present
-the file wins and a warning names the differing fields. Unset: the env vars apply
+the file wins and a warning names the differing fields, except that the launch
+flags `--nodes`, `--gpus-per-node` and `--mn-backend` win over the file's
+`nodes`, `gpus_per_node` and `backend`. Unset: the env vars apply
 unchanged.
 
 **Common (both backends)**

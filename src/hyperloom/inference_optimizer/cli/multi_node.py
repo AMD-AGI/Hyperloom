@@ -13,6 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from ..multi_node import TopologyHandoffError, topology_file_overlay
 from ..session.paths import (
     session_dir as _session_dir_resolve,
 )
@@ -22,21 +23,36 @@ log = logging.getLogger(__name__)
 
 def _topology_file_overlay() -> dict[str, str] | None:
     """The TOPOLOGY_HANDOFF_FILE view of the hand-off, or exit 2 naming the file when it cannot be used."""
-    from ..multi_node._internal.topology_file import TopologyHandoffError, topology_file_overlay
-
     try:
         return topology_file_overlay()
     except TopologyHandoffError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(2)
+        raise SystemExit(2) from exc
 
 
 def _hand_off_service_url() -> str:
     """The handed-over cluster's URL; a named but unusable topology file exits 2 before any state is built."""
     from ..multi_node._internal.external_state import external_service_url
 
-    _topology_file_overlay()
-    return external_service_url()
+    try:
+        return external_service_url()
+    except TopologyHandoffError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+
+def _resolve_gpus_per_node(args: argparse.Namespace) -> int:
+    """GPUs per node for this run: --gpus-per-node > $TOPOLOGY_HANDOFF_FILE gpus_per_node > 8.
+
+    The file is consulted only for a multi-node run, the only kind that reads a hand-off.
+    """
+    flag = getattr(args, "gpus_per_node", None)
+    if flag is not None:
+        return int(flag)
+    from_file = ((_topology_file_overlay() if int(args.nodes) >= 2 else None) or {}).get(
+        "INFERENCE_OPTIMIZER_GPUS_PER_NODE", ""
+    )
+    return int(from_file) if from_file else 8
 
 
 def _resolve_mn_backend(args: argparse.Namespace) -> str:

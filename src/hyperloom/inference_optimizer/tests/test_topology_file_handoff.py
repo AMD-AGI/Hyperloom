@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -290,7 +291,7 @@ def test_disagreement_with_legacy_variables_warns_naming_the_fields(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     doc = _rayjob_doc(tmp_path)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "4")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "infera")
     monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.9.9.9")
     monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", doc["service_url"])  # agrees: must not be named
     monkeypatch.setenv("HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN", "a-different-secret")
@@ -298,13 +299,13 @@ def test_disagreement_with_legacy_variables_warns_naming_the_fields(
         state = _state_from_file(monkeypatch, _write(tmp_path / "t.json", doc))
     messages = [r.getMessage() for r in caplog.records if r.name == topo.log.name]
     assert len(messages) == 1
-    assert "nodes (INFERENCE_OPTIMIZER_NODES)" in messages[0]
+    assert "backend (INFERENCE_OPTIMIZER_MN_BACKEND)" in messages[0]
     assert "ray.head_ip (HYPERLOOM_MN_EXT_HEAD_IP)" in messages[0]
     assert "ray.dashboard_token_file (HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN)" in messages[0]
     assert "service_url" not in messages[0]
     assert "a-different-secret" not in messages[0]
     assert "tok-abc123" not in messages[0]
-    assert (state["nodes"], state["head_pod_ip"]) == (2, "10.0.0.12"), "the file must win"
+    assert (state["backend"], state["head_pod_ip"]) == ("rayjob", "10.0.0.12"), "the file must win"
 
     caplog.clear()
     ext.build_external_state_from_env()
@@ -367,3 +368,82 @@ def test_launch_with_an_unusable_topology_file_exits_2_naming_the_file(
     with pytest.raises(SystemExit) as caught_backend:
         _resolve_mn_backend(_optimize_args())
     assert caught_backend.value.code == 2
+
+
+# ---- the launch flags win over the file's counts ------------------------------------------------------------------
+@pytest.fixture
+def _restore_environ():
+    """``_resolve_run_topology`` exports the launch shape into ``os.environ``; put it back afterwards."""
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
+
+
+def _launch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, doc: dict[str, Any], *flags: str) -> argparse.Namespace:
+    """Run the topology step of ``optimize`` against a hand-off file, the way a launch does."""
+    from hyperloom.inference_optimizer.cli import _resolve_run_topology
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+    for name in ("TP", "EP", "INFERENCE_OPTIMIZER_SERVER_ARGS", "INFERENCE_OPTIMIZER_EXTRA_ENV", "SKIP_VARIANTS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(topo.TOPOLOGY_FILE_ENV, str(_write(tmp_path / "topology.json", doc)))
+    _session(monkeypatch, tmp_path)
+    args = _build_parser().parse_args(["optimize", "--model", "/models/test", "--no-kernel", *flags])
+    args.nodes_resolved = _resolve_run_topology(args)
+    return args
+
+
+@pytest.mark.usefixtures("_restore_environ")
+def test_a_single_node_launch_is_single_node_whatever_the_file_says(monkeypatch, tmp_path: Path) -> None:
+    from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
+
+    args = _launch(monkeypatch, tmp_path, _rayjob_doc(tmp_path), "--nodes", "1")  # the file says nodes=2
+    assert args.nodes_resolved == 1
+    assert ext.build_external_state_from_env()["nodes"] == 1
+    assert is_multi_node() is False
+
+
+@pytest.mark.usefixtures("_restore_environ")
+def test_the_nodes_flag_is_what_state_stores_not_the_files_count(monkeypatch, tmp_path: Path) -> None:
+    doc = _infera_doc(tmp_path, prefill=[], decode=[], worker=["10.0.1.4", "10.0.1.5"])  # the file says nodes=2
+    args = _launch(monkeypatch, tmp_path, doc, "--nodes", "3")
+    assert args.nodes_resolved == 3
+    _prepare_multi_node_state(args)
+    saved = json.loads(resolve_state_file().read_text(encoding="utf-8"))
+    assert saved["nodes"] == 3
+
+
+@pytest.mark.usefixtures("_restore_environ")
+def test_without_the_gpus_flag_the_file_fills_it_in_and_the_gates_and_state_agree(monkeypatch, tmp_path: Path) -> None:
+    doc = _infera_doc(tmp_path, prefill=[], decode=[], worker=["10.0.1.4", "10.0.1.5"])  # gpus_per_node = 4
+    args = _launch(monkeypatch, tmp_path, doc, "--nodes", "2")
+    assert os.environ["INFERENCE_OPTIMIZER_GPUS_PER_NODE"] == "4"
+    _prepare_multi_node_state(args)
+    saved = json.loads(resolve_state_file().read_text(encoding="utf-8"))
+    assert saved["gpus_per_node"] == 4
+
+
+@pytest.mark.usefixtures("_restore_environ")
+def test_the_gpus_flag_wins_over_the_file(monkeypatch, tmp_path: Path) -> None:
+    doc = _infera_doc(tmp_path, prefill=[], decode=[], worker=["10.0.1.4", "10.0.1.5"])  # gpus_per_node = 4
+    args = _launch(monkeypatch, tmp_path, doc, "--nodes", "2", "--gpus-per-node", "2")
+    _prepare_multi_node_state(args)
+    saved = json.loads(resolve_state_file().read_text(encoding="utf-8"))
+    assert saved["gpus_per_node"] == 2
+
+
+@pytest.mark.usefixtures("_restore_environ")
+def test_a_launch_does_not_warn_about_the_counts_it_exported_itself(monkeypatch, tmp_path: Path, caplog) -> None:
+    doc = _infera_doc(tmp_path, prefill=[], decode=[], worker=["10.0.1.4", "10.0.1.5"])
+    args = _launch(monkeypatch, tmp_path, doc, "--nodes", "3", "--gpus-per-node", "2")
+    topo._WARNED.clear()
+    with caplog.at_level(logging.WARNING):
+        _prepare_multi_node_state(args)
+    assert "overrides the legacy hand-off variables" not in caplog.text
+
+
+def test_outside_optimize_the_file_still_supplies_the_counts(monkeypatch, tmp_path: Path) -> None:
+    """With nothing exported by a launch, the file is the source, as before."""
+    state = _state_from_file(monkeypatch, _write(tmp_path / "t.json", _rayjob_doc(tmp_path)))
+    assert (state["nodes"], state["gpus_per_node"]) == (2, 8)

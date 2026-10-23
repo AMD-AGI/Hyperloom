@@ -566,14 +566,16 @@ variable naming a file that is unreadable, not valid JSON, of an unsupported
 schema major, or missing a required field is an error that names the file and
 the problem; Hyperloom does not fall back to the legacy variables. If legacy
 variables are also set and differ from the file, the file wins and a warning
-names the differing fields.
+names the differing fields. The exceptions are `--nodes`, `--gpus-per-node` and
+`--mn-backend`: a launch flag always wins over the file, so a `--nodes 1` run is
+single-node and a `--nodes 3` run is stored as three nodes whatever the file says.
 
 Without `TOPOLOGY_HANDOFF_FILE`, `HYPERLOOM_MN_EXT_SERVICE_URL` is the only variable
 that tells the optimizer a cluster is ready; the rest describe how to reach it.
 
 | Variable | Backend | Required | Description |
 |----------|---------|----------|-------------|
-| `TOPOLOGY_HANDOFF_FILE` | both | No | Path to a TopologyHandoff v1 JSON file (`"schema": "topology-handoff/v1"`) the platform wrote. When set (non-empty) it is the hand-off and the `HYPERLOOM_MN_EXT_*`, `INFERENCE_OPTIMIZER_MN_BACKEND`, `INFERENCE_OPTIMIZER_NODES` and `INFERENCE_OPTIMIZER_GPUS_PER_NODE` variables are not read for the fields it carries. When unset, the variables below apply unchanged. |
+| `TOPOLOGY_HANDOFF_FILE` | both | No | Path to a TopologyHandoff v1 JSON file (`"schema": "topology-handoff/v1"`) the platform wrote. When set (non-empty) it is the hand-off and the `HYPERLOOM_MN_EXT_*` and `INFERENCE_OPTIMIZER_MN_BACKEND` variables are not read for the fields it carries. The launch flags win over it: `--mn-backend` over `backend`, `--gpus-per-node` over `gpus_per_node`, and `--nodes` over `nodes` (`optimize` exports `INFERENCE_OPTIMIZER_NODES` and `INFERENCE_OPTIMIZER_GPUS_PER_NODE` from the flags, and a value set there is never replaced by the file's); the file fills in `backend` and `gpus_per_node` when their flag is omitted. When unset, the variables below apply unchanged. |
 | `HYPERLOOM_MN_EXT_SERVICE_URL` | both | **yes** | Benchmark frontend URL (`http(s)://…`; infera frontend typically `:8000`). Its presence triggers external mode. |
 | `HYPERLOOM_MN_EXT_SSH_KEY` | infera | **yes** | Private SSH key already authorized on the pods (the platform installs the public half at create time). |
 | `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` | infera | PD | Prefill / decode pod IPs (comma-separated) for PD-disaggregated runs. |
