@@ -43,9 +43,10 @@ class RebasedPatch:
 @dataclass(frozen=True)
 class UnitedTable:
     """A kernel slot both sides filled with tables neither of which holds every row of the other, carried as ``table``:
-    the rows of the candidate's ``theirs`` and the head's ``ours`` as one table, one row to a shape. Where both tuned a
-    shape to other rows, ``table`` keeps the head's row, measured on the head already, and ``kept_head_shapes`` names
-    those shapes by their key columns."""
+    the rows of the candidate's ``theirs`` and the head's ``ours`` as one table, one row to a shape, and ``ours`` itself
+    when that union is its rows. Where both set a shape to other rows, ``table`` takes the candidate's row if the head's
+    is still the merge base's, and the head's row otherwise, measured on the head already; ``kept_head_shapes`` names by
+    their key columns the shapes whose head's row won though the candidate had moved it from the base."""
 
     theirs: KernelArtifact
     ours: KernelArtifact
@@ -61,8 +62,9 @@ class RepoMerge:
     variable, the candidate's value is taken and the setting listed in ``config_conflicts`` as ``onto``'s value
     before the candidate's. ``patch_conflicts`` are the patches that do not apply to the installed package where the
     merge puts them; ``delta`` leaves them out. ``rebased_patches`` are the candidate's patches ``delta`` carries
-    rebased onto the stack before them in place of the originals. ``united_tables`` are the kernel slots ``delta``
-    fills with a union of both sides' tables in place of the candidate's.
+    rebased onto the stack before them in place of the originals. ``united_tables`` are the kernel slots both sides
+    filled that ``delta`` fills with a union of their tables in place of the candidate's, or leaves at ``onto``'s table
+    where the union is its rows and a shape of the candidate's lost to the head's row.
     """
 
     onto: str

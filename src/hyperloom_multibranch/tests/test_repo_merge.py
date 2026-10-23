@@ -42,7 +42,9 @@ from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import (
     B01_HEAD,
     B01_NEW,
     B01_SHARED,
+    B06_HEAD,
     B06_NEW,
+    B06_SHARED,
     B09_NEW,
     ENV,
     SHARED,
@@ -392,6 +394,62 @@ def test_a_replay_stacks_a_kernel_slot_as_the_merge_fills_it(configs):
     assert (stack_kernel_slot(theirs, head, stored),) == merged
     refused = _rows_only("b02", "304,1,4096,4096,19.8"), _kernel("head", "304,1,4096,4096,23.1")
     assert stack_kernel_slot(*refused, stored) is None
+
+
+#: ``B01_HEAD``'s shapes at another time: neither the head's row nor the candidate's.
+B01_BASE = tuple(row.replace(",0,20.0,", ",0,30.0,") for row in B01_HEAD)
+
+
+def _named(shapes) -> set[str]:
+    return {" ".join(f"{k}={shape[k]}" for k in "MNK") for shape in shapes}
+
+
+def test_a_union_of_only_the_head_s_rows_carries_no_kernel(configs):
+    """Every shape the candidate differs on the head also tuned: the head's table stays, and the kept shapes are named."""
+
+    base = _aiter(csv_text(SHARED[:2]))
+    head, theirs = _aiter(csv_text(SHARED, B01_HEAD)), _aiter(csv_text(SHARED[:2], B01_SHARED))
+
+    merge = carry("i1", _filled(base), _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+
+    assert merge.delta.add_kernels == ()
+    assert apply(_filled(head), merge.delta).kernels == (head,)
+    (united,) = merge.united_tables
+    assert (united.theirs, united.ours, united.table) == (theirs, head, head)
+    assert _named(united.kept_head_shapes) == {"M=64 N=34816 K=5120", "M=64 N=5120 K=17408"}
+
+
+def test_a_candidate_s_retune_of_a_row_the_head_left_as_in_base_lands(configs):
+    base = _aiter(csv_text(SHARED, B01_HEAD))
+    head, theirs = _aiter(csv_text(SHARED, B01_HEAD, B09_NEW)), _aiter(csv_text(SHARED, B01_SHARED))
+
+    merge = carry("i1", _filled(base), _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+
+    (united,) = merge.delta.add_kernels
+    assert TABLES[united.sha256] == union_rows(TABLES[theirs.sha256], csv_text(SHARED, B09_NEW), ENV, configs=configs)
+    assert merge.united_tables == (UnitedTable(theirs, head, united),)
+
+
+def test_only_a_shape_both_sides_moved_from_base_keeps_the_head_s_row_and_is_named(configs):
+    """The head retuned a shape the candidate left as in base, and both retuned another: the head's rows serve both,
+    and only the second is named."""
+
+    base = _aiter(csv_text(SHARED, B06_HEAD, B01_BASE))
+    head = _aiter(csv_text(SHARED, B06_SHARED, B01_HEAD))
+    theirs = _aiter(csv_text(SHARED, B06_HEAD, B01_SHARED, B01_NEW))
+
+    merge = carry("i1", _filled(base), _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+
+    (united,) = merge.delta.add_kernels
+    assert TABLES[united.sha256] == union_rows(csv_text(B01_NEW), TABLES[head.sha256], ENV, configs=configs)
+    (kept_from,) = merge.united_tables
+    assert _named(kept_from.kept_head_shapes) == {"M=64 N=34816 K=5120", "M=64 N=5120 K=17408"}
+
+
+def test_a_replay_keeps_the_head_s_table_where_the_union_is_its_rows(configs):
+    head, theirs = _aiter(csv_text(SHARED, B01_HEAD)), _aiter(csv_text(SHARED[:2], B01_SHARED))
+
+    assert stack_kernel_slot(theirs, head, Stored(_applies, _table, _store, _keep, configs)) == head
 
 
 def test_a_candidate_on_another_base_image_does_not_merge():
