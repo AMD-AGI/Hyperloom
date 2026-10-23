@@ -277,7 +277,9 @@ async def test_a_table_no_hit_names_is_not_exercised_under_the_planner_and_not_o
 
     assert (planned.status, planned.rows, planned.rows_hit) == (TABLE_NOT_EXERCISED, 4, 0), planned
     assert planned.reason == "aiter logged no hit at all"
-    assert unasked.status == TABLE_NOT_OBSERVABLE and "logs a hit only under" in unasked.reason
+    assert unasked.status == TABLE_NOT_OBSERVABLE
+    assert unasked.reason is not None and unasked.reason.startswith("not every server log of the test holds a hit line")
+    assert "AITER_LOG_TUNED_CONFIG" not in unasked.reason, "the planner sets it on every point; nobody is asked to"
 
 
 async def test_a_table_a_hit_names_is_exercised_under_the_planner(tmp_path: Path) -> None:

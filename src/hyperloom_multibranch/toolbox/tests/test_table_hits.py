@@ -37,6 +37,17 @@ MERGED = "/work/hl-framework-x/merged/a8w8_blockscale_bpreshuffle_tuned_gemm.csv
 BF16_MERGED = "/work/hl-framework-x/merged/bf16_tuned_gemm.csv"
 HITS_ON = "AITER_LOG_TUNED_CONFIG"
 
+
+def assert_says_the_logs_lacked_hit_lines(reason: str | None) -> None:
+    """The reason of a table whose hits no log shows: the logs lacked hit lines, and the specialist is asked to do nothing
+    about the environment (every planned point already sets the variable)."""
+    assert reason is not None
+    assert reason.startswith("not every server log of the test holds a hit line of any table"), reason
+    assert "may have been hit unseen" in reason and "does not print" in reason
+    for asks_for_the_variable in (HITS_ON, "=1", "Put ", "envs"):
+        assert asks_for_the_variable not in reason, reason
+
+
 #: The kernel names of the rows of ``B01_NEW`` (``gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,...``).
 _KERNEL = {tuple(int(cell) for cell in row.split(",")[2:5]): row.split(",")[9] for row in (*B01_NEW, *B01_HEAD)}
 ROW_1_34816 = (1, 34816, 5120)
@@ -183,7 +194,7 @@ def test_with_no_hit_logging_a_table_with_no_hit_is_not_observable_not_not_exerc
         (hits,) = session.read(point)
         assert hits.status == TABLE_NOT_OBSERVABLE and hits.rows == 4
         assert hits.rows_hit is None and hits.hit_lines is None, "an unknown count is not a zero"
-        assert "AITER_LOG_TUNED_CONFIG=1" in hits.reason and "logs a hit only under" in hits.reason
+        assert_says_the_logs_lacked_hit_lines(hits.reason)
     assert "not observable" in describe(hits) and "unknown" in describe(hits)
 
 
@@ -202,7 +213,7 @@ def test_one_server_that_logged_no_hit_keeps_the_table_not_observable_whatever_a
     mixed = (session.point(hits=0, name="point-0.yaml"), session.point(hits=1, name="point-1.yaml"))
     (hits,) = session.read(*mixed)
     assert hits.status == TABLE_NOT_OBSERVABLE and hits.rows_hit is None
-    assert "AITER_LOG_TUNED_CONFIG=1" in hits.reason
+    assert_says_the_logs_lacked_hit_lines(hits.reason)
     (hits,) = session.read()
     assert hits.status == TABLE_NOT_OBSERVABLE, "no point asks for hits and one server's log shows none"
     session.log(MISS, IMAGE_ROW_HIT, name="variant_00_c32/server.log")

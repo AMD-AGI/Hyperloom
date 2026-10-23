@@ -75,9 +75,8 @@ _WHY_NO_LOG = "the test landed no server log"
 _WHY_LOG_UNREAD = "{count} server log(s) could not be read"
 _WHY_LINES_UNREAD = "{count} log line(s) report a tuned lookup in a form this reader cannot read"
 _WHY_NOT_LOGGED = (
-    "aiter logs a hit only under {env}, which not every point of the test sets, and not every server log shows a hit "
-    "line: a table with no hit here may have been hit unseen. Put {env}=1 in the test's envs to count the hits of this "
-    "table"
+    "not every server log of the test holds a hit line of any table (for instance, an engine that does not print "
+    "aiter's tuned-lookup hits), so a table with no hit here may have been hit unseen"
 )
 _WHY_ELSEWHERE = "{count} aiter lookup(s) hit rows of other tables and none hit a row of this one"
 _WHY_NO_HITS = "aiter logged no hit at all"
@@ -259,7 +258,7 @@ def _verdict(table: _Table, scan: _Scan) -> TableHits:
         )
     gaps = _gaps(scan)
     if gaps or not scan.hits_logged:
-        reason = "; ".join(gaps) or _WHY_NOT_LOGGED.format(env=AITER_LOG_TUNED_CONFIG_ENV)
+        reason = "; ".join(gaps) or _WHY_NOT_LOGGED
         return _unobserved(artifact, table.env, reason, rows=len(table.rows))
     reason = _WHY_ELSEWHERE.format(count=scan.hit_lines) if scan.hit_lines else _WHY_NO_HITS
     return TableHits(

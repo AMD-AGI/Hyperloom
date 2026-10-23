@@ -89,8 +89,9 @@ async def test_a_test_whose_server_logged_no_hit_says_its_table_is_not_observabl
     assert (hits.status, hits.rows, hits.rows_hit) == (TABLE_NOT_OBSERVABLE, 4, None)
     (finding,) = outcome.runtime_findings
     assert finding.startswith(
-        f"kernel table gemm ({ENV}): not observable, aiter logs a hit only under AITER_LOG_TUNED_CONFIG"
+        f"kernel table gemm ({ENV}): not observable, not every server log of the test holds a hit line of any table"
     )
+    assert "AITER_LOG_TUNED_CONFIG" not in finding, "a finding does not ask the specialist to set the variable"
     assert finding.endswith("whether its rows were hit is unknown")
 
 
