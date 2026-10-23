@@ -89,6 +89,7 @@ from kernelforge.loop.round_budget import (
 )
 from kernelforge.loop.run_state import (
     MAX_PINNED_ITERATIONS,
+    NOISE_FLOOR_FILE,
     ORCHESTRATION_CIRCUIT_OPEN,
     SESSION_COMPLETED,
     SESSION_PAUSED,
@@ -191,7 +192,6 @@ from kernelforge.tracker import CampaignSegment, ExperimentTracker, Experiment, 
 log = logging.getLogger(__name__)
 
 # The A-vs-A noise floor a paired KEEP must clear, with how and when it was measured.
-NOISE_FLOOR_FILE = "noise_floor.json"
 
 # How many recent iteration outcomes the long-horizon prompt header is built from.
 LONG_HORIZON_OUTCOME_WINDOW = max(
@@ -3421,11 +3421,15 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
     def _paired_keep_bar(self, paired: PairedMeasurement) -> dict:
         floor = paired_keep_floor(self._noise_floor())
         lower = paired_lower_bound(paired.scores)
+        mean = (sum(paired.scores) / len(paired.scores)) if paired.scores else None
+        # This round's own gain over the version before it, read in one window: forge-ablate prices the round from it.
         return {
             "mode": "paired",
             "pairs": len(paired.pairs),
-            "mean": (sum(paired.scores) / len(paired.scores)) if paired.scores else None,
+            "mean": mean,
             "lower": round(lower, 6) if lower is not None else None,
+            "upper": round(2 * mean - lower, 6) if lower is not None and mean is not None else None,
+            "cases": {case: round(ratio, 6) for case, ratio in paired.case_means().items()},
             "floor": floor,
             "passes": passes_paired_keep(paired.scores, floor=floor),
             "retries": len(paired.retries),

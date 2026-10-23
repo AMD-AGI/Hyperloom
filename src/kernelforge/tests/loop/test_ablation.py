@@ -13,7 +13,7 @@ from click.testing import CliRunner
 
 from kernelforge.cli import main
 from kernelforge.loop import ablation as ablation_module
-from kernelforge.loop.ablation import ALL_OFF, AblationError, ablate
+from kernelforge.loop.ablation import ALL_OFF, AblationError, AblationOptions, ablate
 from kernelforge.loop.campaign_config import CampaignConfigStore, CampaignInputs, create_campaign_config
 from kernelforge.loop.dashboard import publish_dashboard
 from kernelforge.loop.run_state import BestRecord, LoopStateStore, RunState, make_event
@@ -46,7 +46,8 @@ def _git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *identity, *args], capture_output=True, text=True, check=True).stdout
 
 
-def _campaign(tmp_path: Path, keeps=KEEPS) -> tuple[Path, list[str]]:
+def _campaign(tmp_path: Path, keeps=KEEPS, bars=None) -> tuple[Path, list[str]]:
+    """``bars``: the keep_bar each KEEP recorded, None for a KEEP kept without a paired timing."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "driver.py").write_text(DRIVER)
@@ -78,6 +79,7 @@ def _campaign(tmp_path: Path, keeps=KEEPS) -> tuple[Path, list[str]]:
                 commit_hash=commits[-1],
                 direction_id=f"d{iteration}",
                 best_after_mean_case_speedup=score,
+                keep_bar=(bars or {}).get(iteration),
             )
         )
     store.save(
@@ -94,66 +96,96 @@ def _campaign(tmp_path: Path, keeps=KEEPS) -> tuple[Path, list[str]]:
     return workspace, commits
 
 
-async def test_each_kept_change_is_priced_beside_the_best(tmp_path: Path) -> None:
-    workspace, (c1, c2, c3, c4) = _campaign(tmp_path)
-    report = await ablate(workspace, pairs=2, null_pairs=2)
-    arms = report["arms"]
-    best_ms = 0.85 * 0.8
-    assert list(arms) == [ALL_OFF, c1, c2, c3, c4]
-    assert arms[ALL_OFF]["cost"]["mean"] == pytest.approx(1.0 / best_ms - 1)
-    assert arms[c1]["cost"]["mean"] == pytest.approx(0.85 / best_ms - 1)
-    assert arms[c3]["cost"]["mean"] == pytest.approx(0.9 * 0.8 / best_ms - 1)
-    assert arms[c1]["within_noise"] is False and arms[c1]["direction_id"] == "d1"
-    assert arms[c1]["gain_when_kept"] == pytest.approx(0.25)
-    assert arms[c2]["status"] == "not_separable"
-    assert arms[c4]["status"] == "required_for_correctness" and "SNR" in arms[c4]["detail"]
-    combined = (0.85 / best_ms) * (0.9 * 0.8 / best_ms) - 1
-    assert report["singles_combined"] == pytest.approx(combined)
-    assert report["unpriced"] == 2 and report["completed"] is True
-    assert report["additivity"] == pytest.approx(combined / (1.0 / best_ms - 1))
-    assert report["noise_floor"] == 0.0
-    root = workspace / "forge_experiments"
-    assert "not_separable" in (root / "ablation.md").read_text()
-    assert _git(workspace, "worktree", "list").count("\n") == 1
-    html = publish_dashboard(root).read_text()
-    assert "Ablation" in html and "needed for correctness" in html and "tangled with a later change" in html
+def _options(**overrides) -> AblationOptions:
+    return AblationOptions(**({"pairs": 2, "null_pairs": 2} | overrides))
 
 
-async def test_the_ladder_prices_each_round_beside_the_version_before_it(tmp_path: Path) -> None:
+def _spy(monkeypatch) -> list[tuple]:
+    """Record each timing as (incumbent tree, its device), and still time it."""
+    timed = []
+    real = ablation_module.measure_pairs
+
+    async def spy(candidate, incumbent, **kwargs):
+        timed.append((Path(incumbent.cwd).name, (incumbent.env or {}).get("HIP_VISIBLE_DEVICES")))
+        return await real(candidate, incumbent, **kwargs)
+
+    monkeypatch.setattr(ablation_module, "measure_pairs", spy)
+    return timed
+
+
+async def test_each_round_is_priced_and_only_what_does_not_pay_is_reverted(tmp_path: Path) -> None:
     workspace, (c1, c2, c3, c4) = _campaign(tmp_path)
-    report = await ablate(workspace, pairs=2, null_pairs=2)
-    ladder = report["ladder"]
+    report = await ablate(workspace, options=_options())
+    ladder, arms = report["ladder"], report["arms"]
     assert list(ladder) == [c1, c2, c3, c4] and ladder[c2]["parent"] == c1
-    # Every rung is timed, even the one whose change cannot be reverted alone or fails correctness without the next.
+    # Kept without a paired timing, every round is timed here, even one that cannot be reverted alone.
+    assert {rung["source"] for rung in ladder.values()} == {"measured"}
     assert ladder[c1]["cost"]["mean"] == pytest.approx(1.0 / 0.8 - 1)
     assert ladder[c2]["cost"]["mean"] == pytest.approx(0.8 / 0.72 - 1)
     assert ladder[c3]["cost"]["mean"] == pytest.approx(0.72 / 0.68 - 1)
     assert ladder[c4]["within_noise"] is True and ladder[c4]["cost"]["mean"] == pytest.approx(0.0)
     assert ladder[c2]["cases"] == pytest.approx({"m=16": 0.8 / 0.72 - 1, "m=8": 0.8 / 0.72 - 1})
-    assert ladder[c2]["lines"] == 2
-    assert report["ladder_combined"] == pytest.approx(1.0 / 0.68 - 1) and report["ladder_unpriced"] == 0
-    text = (workspace / "forge_experiments" / "ablation.md").read_text()
+    assert ladder[c2]["lines"] == 2 and ladder[c1]["direction_id"] == "d1"
+    # Only the round that does not pay is reverted, beside the all-off arm.
+    assert list(arms) == [ALL_OFF, c4]
+    assert arms[ALL_OFF]["cost"]["mean"] == pytest.approx(1.0 / (0.85 * 0.8) - 1)
+    assert arms[c4]["status"] == "required_for_correctness" and "SNR" in arms[c4]["detail"]
+    assert report["ladder_combined"] == pytest.approx(1.0 / 0.68 - 1) and report["completed"] is True
+    assert report["noise_floor"] == 0.0 and report["noise_floor_source"] == "measured"
+    root = workspace / "forge_experiments"
+    text = (root / "ablation.md").read_text()
     assert "## Round by round" in text and "- within noise: `" + c4[:12] + "`" in text
-    html = publish_dashboard(workspace / "forge_experiments").read_text()
-    assert "round, beside the version before it" in html
+    assert _git(workspace, "worktree", "list").count("\n") == 1
+    html = publish_dashboard(root).read_text()
+    assert "round, beside the version before it" in html and "needed for correctness" in html
+
+
+async def test_recorded_rounds_are_believed_unless_their_bound_is_low(tmp_path: Path, monkeypatch) -> None:
+    sure = {"mode": "paired", "pairs": 3, "mean": 1.25, "lower": 1.24, "cases": {"m=8": 1.25, "m=16": 1.25}}
+    low = {"mode": "paired", "pairs": 3, "mean": 1.012, "lower": 1.004, "upper": 1.02}
+    workspace, (c1, c2, c3, c4) = _campaign(tmp_path, bars={1: sure, 2: sure, 3: sure, 4: low})
+    (workspace / "forge_experiments" / "noise_floor.json").write_text('{"value": 0.003}')
+    timed = _spy(monkeypatch)
+    report = await ablate(workspace, options=_options())
+    ladder = report["ladder"]
+    assert [ladder[c]["source"] for c in (c1, c2, c3, c4)] == ["recorded", "recorded", "recorded", "remeasured"]
+    assert ladder[c1]["cost"]["mean"] == pytest.approx(0.25) and ladder[c1]["cases"]["m=8"] == pytest.approx(0.25)
+    assert ladder[c4]["recorded"]["upper"] == pytest.approx(0.02)
+    # Timed again, the low round reads as what it is: nothing.
+    assert ladder[c4]["within_noise"] is True and ladder[c4]["cost"]["mean"] == pytest.approx(0.0)
+    assert report["noise_floor"] == 0.003 and report["noise_floor_source"] == "campaign"
+    # One rung timed again and the all-off arm; reverting the low round breaks correctness, so it is not timed; no
+    # null control.
+    assert len(timed) == 2 and list(report["arms"]) == [ALL_OFF, c4]
+    assert report["arms"][c4]["status"] == "required_for_correctness"
+
+
+async def test_arms_are_timed_side_by_side_one_per_device(tmp_path: Path, monkeypatch) -> None:
+    workspace, _ = _campaign(tmp_path)
+    timed = _spy(monkeypatch)
+    report = await ablate(workspace, options=_options(devices=("0", "1")))
+    assert report["completed"] is True
+    assert {device for _, device in timed} == {"0", "1"}
+    assert {tree.split("-")[-2] for tree, _ in timed} == {"0", "1"}
+    assert _git(workspace, "worktree", "list").count("\n") == 1
 
 
 async def test_a_rerun_prices_only_what_the_budget_did_not_reach(tmp_path: Path, monkeypatch) -> None:
     workspace, commits = _campaign(tmp_path)
-    first = await ablate(workspace, pairs=2, null_pairs=2, max_hours=1e-9)
-    assert {arm["status"] for arm in first["arms"].values()} == {"skipped_budget"}
+    first = await ablate(workspace, max_hours=1e-9, options=_options())
+    assert {rung["status"] for rung in first["ladder"].values()} == {"skipped_budget"}
     assert first["completed"] is False and first["noise_floor"] is not None
     assert "rerun forge-ablate" in (workspace / "forge_experiments" / "ablation.md").read_text()
 
-    second = await ablate(workspace, pairs=2, null_pairs=2)
-    assert second["completed"] is True and second["arms"][commits[0]]["status"] == "measured"
+    second = await ablate(workspace, options=_options())
+    assert second["completed"] is True and second["ladder"][commits[0]]["status"] == "measured"
 
     async def no_timing(*_args, **_kwargs):
         raise AssertionError("a settled arm was timed again")
 
     monkeypatch.setattr(ablation_module, "measure_pairs", no_timing)
-    third = await ablate(workspace, pairs=2, null_pairs=2)
-    assert third["arms"] == second["arms"]
+    third = await ablate(workspace, options=_options())
+    assert third["arms"] == second["arms"] and third["ladder"] == second["ladder"]
 
 
 async def test_a_campaign_that_kept_nothing_is_refused(tmp_path: Path) -> None:

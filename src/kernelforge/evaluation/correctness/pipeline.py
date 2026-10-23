@@ -85,6 +85,7 @@ async def run_validation_pipeline(
     driver_script: str,
     snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
     timeout_per_stage: int = 1800,
+    env: dict[str, str] | None = None,
 ) -> ValidationReport:
     """Run the driver's complete correctness suite once."""
     result = await test_correctness(
@@ -92,6 +93,7 @@ async def run_validation_pipeline(
         driver_args=[],
         snr_threshold=snr_threshold,
         timeout_sec=timeout_per_stage,
+        env=env,
     )
     return ValidationReport(
         results=[

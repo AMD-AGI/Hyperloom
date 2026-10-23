@@ -34,20 +34,41 @@ import click
     help="Budget; changes not reached are marked skipped_budget and a rerun prices them",
 )
 @click.option(
+    "--verify-below",
+    default=0.02,
+    show_default=True,
+    type=click.FloatRange(min=0.0),
+    help="Time again a round whose recorded paired lower bound is below this gain (0.02 = 2%)",
+)
+@click.option(
+    "--devices",
+    default="",
+    help="Comma-separated HIP_VISIBLE_DEVICES values, one arm timed on each at once (default: one at a time on the "
+    "inherited device)",
+)
+@click.option(
     "--bench-timeout-sec",
     default=900,
     show_default=True,
     type=click.IntRange(min=1),
     help="Timeout of one benchmark or correctness run",
 )
-def forge_ablate(workspace: str, pairs: int, null_control_pairs: int, max_hours: float, bench_timeout_sec: int) -> None:
-    """Time each kept version beside the one before it, and the best kernel beside itself with each kept change
-    reverted and with all of them reverted.
+def forge_ablate(
+    workspace: str,
+    pairs: int,
+    null_control_pairs: int,
+    max_hours: float,
+    verify_below: float,
+    devices: str,
+    bench_timeout_sec: int,
+) -> None:
+    """Price each kept round beside the version before it, from its recorded paired timing unless that is doubtful,
+    and time the best kernel without each round that does not pay, and without every change.
 
     Writes forge_experiments/ablation.json and ablation.md and refreshes the dashboard. A rerun keeps every
     arm already priced against the same best commit.
     """
-    from kernelforge.loop.ablation import ABLATION_MD, AblationError, ablate
+    from kernelforge.loop.ablation import ABLATION_MD, AblationError, AblationOptions, ablate
     from kernelforge.loop.dashboard import publish_dashboard
     from kernelforge.loop.run_state import WorkspaceLockError
 
@@ -55,10 +76,14 @@ def forge_ablate(workspace: str, pairs: int, null_control_pairs: int, max_hours:
         asyncio.run(
             ablate(
                 workspace,
-                pairs=pairs,
-                null_pairs=null_control_pairs,
                 max_hours=max_hours,
-                timeout_sec=bench_timeout_sec,
+                options=AblationOptions(
+                    pairs=pairs,
+                    null_pairs=null_control_pairs,
+                    verify_below=verify_below,
+                    devices=tuple(device.strip() for device in devices.split(",") if device.strip()),
+                    timeout_sec=bench_timeout_sec,
+                ),
             )
         )
     except WorkspaceLockError as error:

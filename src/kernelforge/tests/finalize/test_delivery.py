@@ -175,6 +175,20 @@ async def test_findings_left_by_a_round_go_to_the_next_and_a_failed_review_deliv
     assert finalize["final_commit"] == _git(workspace, "rev-parse", "HEAD").strip()
 
 
+async def test_a_review_of_words_alone_is_kept_without_timing(tmp_path: Path, monkeypatch) -> None:
+    from kernelforge.finalize import delivery
+
+    async def no_timing(*_args, **_kwargs):
+        raise AssertionError("a review that changed no code was checked")
+
+    monkeypatch.setattr(delivery, "run_validation_pipeline", no_timing)
+    workspace, _, _ = _campaign(tmp_path)
+    reworded = DELIVERED.replace("# round 2: split K four ways, measured 1.25x\n# round 3: tried 8 ways, slower\n", "")
+    report = await finalize_campaign(workspace, review_fn=_reviewer([reworded, reworded], []))
+    assert report["gates"] == {"kept": True, "reason": "", "same_code": True}
+    assert "# round 4: kept 4" in (workspace / "kernel.py").read_text()
+
+
 def test_the_review_is_told_which_rounds_pay(tmp_path: Path) -> None:
     from kernelforge.finalize.delivery import pricing_text
 

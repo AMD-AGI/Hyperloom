@@ -112,6 +112,8 @@ class BenchRun:
     repeat: int = 1
     # Where the driver runs; None inherits the loop's own working directory.
     cwd: str | None = None
+    # Set over the inherited environment, e.g. the one device this run may use.
+    env: dict[str, str] | None = None
 
 
 def bench_command(run: BenchRun) -> list[str]:
@@ -357,6 +359,7 @@ async def bench_wallclock(
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
         cwd=run.cwd,
+        env={**os.environ, **run.env} if run.env else None,
     )
     communicate = asyncio.ensure_future(proc.communicate())
     try:

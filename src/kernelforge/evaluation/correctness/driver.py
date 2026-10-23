@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import sys
 
@@ -18,8 +19,9 @@ async def test_correctness(
     driver_args: list[str] | None = None,
     snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
     timeout_sec: int = 120,
+    env: dict[str, str] | None = None,
 ) -> dict:
-    """Run a kernel test driver and extract its SNR pre-filter verdict."""
+    """Run a kernel test driver and extract its SNR pre-filter verdict; ``env`` is set over the inherited one."""
     cmd = [sys.executable, driver_script] + (driver_args or [])
 
     proc = await asyncio.create_subprocess_exec(
@@ -27,6 +29,7 @@ async def test_correctness(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
+        env={**os.environ, **env} if env else None,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)

@@ -56,6 +56,7 @@ _TERMINAL_SESSION_STATUSES = {
 ORCHESTRATION_CIRCUIT_CLOSED = "closed"
 ORCHESTRATION_CIRCUIT_OPEN = "open"
 ORCHESTRATION_CIRCUIT_HALF_OPEN = "half_open"
+
 ORCHESTRATION_CIRCUIT_STATES = frozenset(
     {
         ORCHESTRATION_CIRCUIT_CLOSED,
@@ -63,6 +64,9 @@ ORCHESTRATION_CIRCUIT_STATES = frozenset(
         ORCHESTRATION_CIRCUIT_HALF_OPEN,
     }
 )
+
+# The A-vs-A noise floor of paired KEEP: its value, the pair scores it came from, and its earlier values.
+NOISE_FLOOR_FILE = "noise_floor.json"
 
 
 @dataclass

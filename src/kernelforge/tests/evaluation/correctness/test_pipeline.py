@@ -64,6 +64,7 @@ def test_validation_runs_driver_full_suite_once(monkeypatch):
             "driver_args": [],
             "snr_threshold": 31.0,
             "timeout_sec": 123,
+            "env": None,
         }
     ]
 

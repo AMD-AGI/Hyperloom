@@ -255,33 +255,32 @@ kernelforge forge-dashboard --workspace <ws> --port 8765
 
 ## forge-ablate
 
-Prices each change a finished forge-loop campaign kept, in two ways. The ladder
-times every kept version in pairs beside the version before it, in one
-session: what each round really gained, set beside the gain the campaign
-recorded when it kept it (that one was read against a best measured hours
-earlier). Each rung also reports its changed lines and the sign of its gain in
-every case, and a verdict: `pays`, `within noise`, or `hurts`. A round that does
-not pay is a candidate to remove before the kernel is delivered.
+Prices each change a finished forge-loop campaign kept, telling the rounds that
+carry the kernel from the passengers. The ladder is each kept version beside the
+version before it. Under `--paired-keep` every round was kept on exactly that
+timing, read in one window, and recorded with its one-sided 95% bounds and
+per-case gains; the ladder is read from those records at no cost. A round whose
+recorded lower bound is below `--verify-below` is timed again before it is
+believed, and a round kept without a paired timing is timed here. Each rung
+reports its gain, the sign of its gain in every case, its changed lines, where
+the number comes from (`recorded`, `remeasured`, `measured`), and a verdict
+against the noise floor: `pays`, `within noise`, or `hurts`.
 
-Then every commit from the campaign's base to its best is reverted on its own,
-in a git worktree next to the workspace, and the best kernel is timed in pairs
-beside that variant; one more arm (`all_off`) is the kernel the campaign started
-from. A variant that fails the driver's correctness suite is marked
-`required_for_correctness` rather than timed, a revert that conflicts with a
-later change `not_separable`, and a variant whose driver differs
-`driver_changed`. A cost is how much slower the kernel runs without the change,
-with one-sided 95% bounds, flagged `within noise` when the bounds reach the
-noise floor measured first (best beside best). The single costs, and the
-ladder's rounds, are combined as independent speedups compose and set beside the
-all-off cost: changes that only pay together look cheap one at a time, and the
-ratio says how far the singles can be read on their own.
+Then only what does not pay is reverted from the best, alone, in a git worktree
+next to the workspace, and timed in pairs beside the best; one more arm
+(`all_off`) is the kernel the campaign started from. A variant that fails the
+driver's correctness suite is marked `required_for_correctness` rather than
+timed, a revert that conflicts with a later change `not_separable`, and a
+variant whose driver differs `driver_changed`. The noise floor is the
+campaign's own A-vs-A null control when it ran one, and is measured here (best
+beside best) otherwise. With `--devices`, arms are timed side by side, one per
+device, each in its own pair of worktrees.
 
 Results go to `forge_experiments/ablation.json` and `ablation.md` after every
-arm, and to the dashboard. The ladder is timed first, then the all-off arm, then
-the reverts, largest recorded gain first; what the budget does not reach is
-`skipped_budget`, and a rerun against the same best commit prices only what is
-not settled. The command takes the workspace lock, so it refuses a campaign
-forge-loop is still running, and it refuses the same tasks as `--paired-keep`.
+arm, and to the dashboard. What the budget does not reach is `skipped_budget`,
+and a rerun against the same best commit prices only what is not settled. The
+command takes the workspace lock, so it refuses a campaign forge-loop is still
+running, and it refuses the same tasks as `--paired-keep`.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
@@ -289,6 +288,8 @@ forge-loop is still running, and it refuses the same tasks as `--paired-keep`.
 | `--pairs <n>` | `3` | Pairs timed per arm. |
 | `--null-control-pairs <n>` | `5` | Pairs of the best kernel beside itself that set the noise floor. |
 | `--max-hours <h>` | `2.0` | Budget for the whole ablation. |
+| `--verify-below <f>` | `0.02` | Time again a round whose recorded paired lower bound is below this gain. |
+| `--devices <list>` | inherited device, one arm at a time | Comma-separated `HIP_VISIBLE_DEVICES` values; one arm is timed on each at once. |
 | `--bench-timeout-sec <s>` | `900` | Timeout of one benchmark or correctness run. |
 
 ```bash
@@ -313,7 +314,9 @@ Delivers a finished forge-loop campaign as one reviewed commit. Run it after
    runs on the sources. Findings left go to the next session, up to
    `--review-rounds`. A lint command that already failed on the starting kernel
    is reported, not held against the review.
-3. If the review changed anything, the driver's correctness suite runs on it and
+3. A review that changed only comments, docstrings or layout (the same syntax
+   tree without docstrings) is kept without further checks. If it changed code,
+   the driver's correctness suite runs on it and
    it is timed in pairs beside the campaign's best (extended to five pairs while a
    slowdown is not ruled out). A reviewed kernel that fails, or whose one-sided 95%
    upper bound of best/reviewed time sits below 1 minus the ablation's noise floor,

@@ -460,7 +460,8 @@ bench that failed: it counts as no attempt, and its round adds no time to the ea
 from the `round_cost` events. `noise_floor.json` exists only with `--paired-keep`: the A-vs-A noise floor, the pair scores it came from and
 its earlier values. The incumbent's worktree for paired timing is `<workspace>.forge-incumbent`, beside the
 workspace rather than in it. `ablation.json` and `ablation.md` are written by `kernelforge forge-ablate` after the
-run: each round's gain beside the version before it (the ladder), each kept change's cost to the best kernel,
+run: each round's gain beside the version before it (the ladder, read from each KEEP's `keep_bar`, whose
+`upper` and per-case `cases` are recorded for it), the cost to the best kernel of each round that does not pay,
 the all-off arm and their noise floor. `finalize.json` and `finalize.md` are written by `kernelforge forge-finalize`, which squashes
 the campaign into one reviewed commit and keeps its per-round commits on the `forge-history` branch; each review
 session is recorded in `finalize/review_N.md`. A rerun reuses every arm

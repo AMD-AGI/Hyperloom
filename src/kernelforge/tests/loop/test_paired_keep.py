@@ -183,7 +183,12 @@ async def test_a_candidate_is_kept_only_when_it_beats_the_incumbent_beside_it(
     bench, paired = await IterationLoop._measure_paired(loop, 3)
     assert bench["success"] and len(bench["measurements"]) == 3
     assert bench["paired"]["scores"] == pytest.approx([1.2 / candidate_speed] * 3)
-    assert IterationLoop._paired_keep_bar(loop, paired)["passes"] is kept
+    bar = IterationLoop._paired_keep_bar(loop, paired)
+    assert bar["passes"] is kept
+    # The round's own gain over the version before it, recorded for forge-ablate's ladder.
+    assert bar["upper"] == pytest.approx(1.2 / candidate_speed) and bar["lower"] == pytest.approx(1.2 / candidate_speed)
+    assert list(bar["cases"].values()) == pytest.approx([1.2 / candidate_speed] * len(bar["cases"]))
+    assert bar["cases"]
     assert loop.events[0]["type"] == "incumbent_tree_reset"
 
 

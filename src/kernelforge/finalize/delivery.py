@@ -11,6 +11,7 @@ per-round history stays on its own branch.
 
 from __future__ import annotations
 
+import ast
 import fnmatch
 import json
 import random
@@ -60,6 +61,21 @@ def _read_json(path: Path) -> dict:
         return json.loads(path.read_text())
     except (OSError, ValueError):
         return {}
+
+
+def code_of(source: str) -> str | None:
+    """The source's syntax tree without docstrings, comments or layout; None when it does not parse."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        documented = isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        if documented and node.body and isinstance(node.body[0], ast.Expr):
+            value = node.body[0].value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                node.body = node.body[1:] or [ast.Pass()]
+    return ast.dump(tree)
 
 
 def lint_failures(cwd: Path, commands: tuple[str, ...], files: tuple[str, ...]) -> dict[str, str]:
@@ -247,11 +263,29 @@ class _Delivery:
             measured = measured.extended(await measure_pairs(reviewed, best, pairs=1, **timing))
         return _timing(measured, self.floor)
 
+    def _only_words_changed(self, changed: list[str]) -> bool:
+        """Whether the review changed comments, docstrings and layout only: the same code, so nothing to check."""
+        for path in changed:
+            shown = subprocess.run(
+                ["git", "-C", str(self.workspace), "show", f"HEAD:{path}"], capture_output=True, text=True
+            )
+            file = self.workspace / path
+            if not path.endswith(".py") or shown.returncode != 0 or not file.is_file():
+                return False
+            before = code_of(shown.stdout)
+            if before is None or before != code_of(file.read_text(encoding="utf-8")):
+                return False
+        return True
+
     async def _gate(self) -> None:
         """Keep the review only if the kernel it leaves is still correct and no slower than the best."""
         changed = self.report["review"]["changed"]
         if not changed:
             self.report["gates"] = {"kept": False, "reason": "the review changed nothing"}
+            return
+        if self._only_words_changed(changed):
+            self.report["gates"] = {"kept": True, "reason": "", "same_code": True}
+            self._save()
             return
         validation = await run_validation_pipeline(
             driver_script=str(self.workspace / self.driver_rel),

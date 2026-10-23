@@ -51,6 +51,11 @@ class PairedMeasurement:
     def retries(self) -> list[str]:
         return [retry for pair in self.pairs for retry in pair.retries]
 
+    def case_means(self) -> dict[str, float]:
+        """Each case's mean incumbent/candidate ratio over the pairs: a real change moves every case one way."""
+        cases = sorted({case for pair in self.pairs for case in pair.case_ratios})
+        return {case: statistics.fmean(pair.case_ratios[case] for pair in self.pairs) for case in cases}
+
     def extended(self, other: PairedMeasurement) -> PairedMeasurement:
         return PairedMeasurement(self.pairs + other.pairs, other.failure)
 
