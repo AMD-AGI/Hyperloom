@@ -1723,3 +1723,73 @@ async def test_every_demoted_specialist_gets_git_and_its_mcp_config_with_the_uma
         assert mcp.stat().st_mode & 0o077 == 0  # the original stays the app's
     finally:
         shutil.rmtree(base, ignore_errors=True)
+
+
+@_demote_skip
+def test_a_worktree_made_under_umask_007_is_readable_to_git_once_prepared(tmp_path, monkeypatch, restore_umask):
+    import shutil
+    import tempfile
+
+    base = Path(tempfile.mkdtemp(prefix="d16c."))
+    try:
+        base.chmod(0o755)
+        repo = base / "framework"
+        init_git_repo(repo)
+        os.umask(0o007)
+        worktree = base / "ws" / "worktree"
+        worktree.parent.mkdir(parents=True)
+        worktree.parent.chmod(0o755)
+        # The shape the review reproduced: the app's own git, under its own umask, makes the worktree.
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "sp", str(worktree)], check=True)
+        assert (worktree / ".git").stat().st_mode & 0o004 == 0
+        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+        run_as = specialist_run_as()
+        kwargs = prepare_demote(run_as, worktree.parent, worktree, {}, ())
+        for args in (["status", "--porcelain"], ["diff"]):
+            done = subprocess.run(
+                ["git", *args],
+                cwd=worktree,
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    "PATH": os.environ["PATH"],
+                    "HOME": run_as.home,
+                    "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "safe.directory",
+                    "GIT_CONFIG_VALUE_0": str(worktree),
+                },
+                **kwargs,
+            )
+            assert done.returncode == 0, (args, done.stderr)
+        # Read-only: the child cannot write the admin dir it was shown.
+        admin = Path((worktree / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip())
+        assert admin.stat().st_mode & 0o020 == 0 or admin.stat().st_gid != run_as.gid
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_done_file_the_integrator_reads_is_not_followed_through_a_link(tmp_path: Path):
+    from hyperloom.orchestrator.actions.executors._patch_sources import _read_done_payload
+
+    app_only = tmp_path / "app_only.json"
+    app_only.write_text('{"app_secret": 1}', encoding="utf-8")
+    (tmp_path / "specialist_done.json").symlink_to(app_only)
+    assert _read_done_payload(tmp_path) is None
+
+
+def test_the_round_archive_does_not_copy_a_file_a_child_linked_to(tmp_path: Path):
+    from hyperloom.orchestrator.enablement.artifacts import _archive_copy
+
+    class _Archive:
+        recorded: list = []
+
+        def record(self, role, dest):
+            self.recorded.append((role, dest))
+
+    secret = tmp_path / "secret"
+    secret.write_text("s", encoding="utf-8")
+    (tmp_path / "specialist_done.json").symlink_to(secret)
+    dest = tmp_path / "out" / "specialist_done.json"
+    _archive_copy(_Archive(), "r", tmp_path / "specialist_done.json", dest, child_written=True)
+    assert not dest.exists() and _Archive.recorded == []
