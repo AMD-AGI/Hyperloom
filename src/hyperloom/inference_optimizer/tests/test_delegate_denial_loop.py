@@ -569,7 +569,9 @@ def test_explore_grid_coverage_tells_a_variant_removal_from_the_base_one():
     """On a replacing base the runner applies only the variant's removal, so a removal the base also names is new."""
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.actions.executors.measured_variants import explore_grid_already_covered
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.measured_variants import (
+        explore_grid_already_covered,
+    )
 
     base = {"base_tput": 800.0, "base_extra_args": "--x 1", "base_remove_args": ["--foo"], "base_args_mode": "replace"}
     kept = {"name": "keeps_foo", "extra_args": "--foo 1 --b 1", "args_mode": "replace"}
