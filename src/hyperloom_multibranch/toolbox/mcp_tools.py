@@ -166,10 +166,16 @@ _TEST_RESULT_GUIDE = (
     "server_boot.weights_load and its siblings are parts of server_boot. unaccounted_seconds is the part of the wall "
     "time no phase covers, so the phases and it add up to it; both are empty or null on a result recorded without them."
 )
+_KERNEL_TUNE_PARAMS_NOTE = (
+    " For kernel_tune, params.test_request_id is required: a call without it is refused (test_required)."
+)
 _KERNEL_TUNE_GUIDE = (
-    " kernel_tune: params.test_request_id names a test whose server log reports untuned GEMM shapes (aiter's 'not found "
-    "tuned config' lines), and params.shapes, a list of {env, M, N, K, ...} (env is an AITER_CONFIG_GEMM_* variable), "
-    "tunes shapes of yours instead; params.timeout_sec bounds the tuning. It runs Forge's tuner on one card leased for the "
+    " kernel_tune: params.test_request_id is required, with or without shapes: it names a test whose landed output "
+    "the tool reads, and the test says which model, framework and precision the tuning is for. Its server log reports "
+    "untuned GEMM shapes (aiter's 'not found tuned config' lines), which are what is tuned. params.shapes, a list of "
+    "{env, M, N, K, ...} (env is an AITER_CONFIG_GEMM_* variable), is optional: it replaces the shapes of that log with "
+    "shapes of yours, for that test's model, framework and precision; it does not stand in for test_request_id. "
+    "params.timeout_sec bounds the tuning. It runs Forge's tuner on one card leased for the "
     "job, so it is refused (lease_leaves_no_measurement) when no card can be spared from measurement, and its result "
     "arrives in poll_inbox: per table, the tuned rows as a rows-only CSV for put_kernel_artifact(rows_only=true), each "
     "row checked against the reference GEMM (a row that failed or could not be checked is listed with verified=false "
@@ -189,13 +195,15 @@ def _start_analysis_schema(served: Sequence[str]) -> dict[str, Any]:
     tool: dict[str, Any] = {"type": _STRING, "description": f"One of: {', '.join(served) or 'none served here'}."}
     if served:
         tool["enum"] = list(served)
+    params_note = _KERNEL_TUNE_PARAMS_NOTE if KERNEL_TUNE_TOOL in served else ""
     return {
         "type": _OBJECT,
         "properties": {
             "tool": tool,
             "params": {
                 "type": _OBJECT,
-                "description": "The tool's own parameters. trace_input, commit_id, profile_request_id and landed_dir are set by the server and refused here.",
+                "description": "The tool's own parameters. trace_input, commit_id, profile_request_id and landed_dir are set by the server and refused here."
+                + params_note,
             },
             "profile_request_id": {
                 "type": _STRING,

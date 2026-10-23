@@ -96,6 +96,26 @@ async def test_the_local_toolbox_advertises_the_tuner_where_it_can_spare_a_card_
     )
 
 
+async def test_the_advertisement_says_a_test_request_id_is_required_and_the_server_refuses_shapes_alone(
+    make: Any,
+) -> None:
+    """A specialist read the old text as "shapes alone will do" and got test_required: both places now say otherwise."""
+    served = await make(cards=2)
+    entry = served.stack.advertised()
+    description = entry["description"]
+    assert "params.test_request_id is required" in description, "the tool's description"
+    assert "names a test whose landed output the tool reads" in description
+    assert "model, framework and precision" in description, "what the test is for"
+    assert "params.shapes" in description and "is optional" in description
+    assert "replaces the shapes of that log" in description and "does not stand in for test_request_id" in description
+    params = entry["inputSchema"]["properties"]["params"]["description"]
+    assert "test_request_id is required" in params and "test_required" in params, "the schema's own description"
+
+    text = await served.stack.refused(tool="kernel_tune", params={"shapes": [SHAPE]})  # what the text warns of
+    assert text.startswith("rejected (test_required):") and "name it with test_request_id" in text
+    assert untouched(served.rig)
+
+
 async def test_a_specialist_starts_the_tuner_on_a_test_and_its_rows_reach_its_inbox(make: Any) -> None:
     served = await make(cards=2)
     reply = await served.stack.start(tool="kernel_tune", params={"test_request_id": TEST_ID})
