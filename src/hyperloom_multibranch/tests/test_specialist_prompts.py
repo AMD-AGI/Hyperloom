@@ -563,3 +563,13 @@ def test_the_attention_and_fusion_directions_name_the_cache_layout_and_the_epilo
     assert "revise the patch your head already has for that writer instead of adding a second one" in attention
     assert "into the GEMM epilogue that consumes it" in fusion
     assert "profile again once a large kernel on the path got faster" in fusion
+
+
+def test_the_role_and_gemm_direction_tune_with_kernel_tune_when_it_is_served():
+    prompt = role_prompt(WORKLOAD)
+    gemm = DIRECTIONS[1]
+
+    assert 'start_analysis with tool "kernel_tune"' in prompt
+    assert "rows marked verified=false are never put" in prompt
+    assert "its microseconds are advice, the test is the measurement" in prompt
+    assert "When start_analysis lists kernel_tune, tune the untuned shapes with it" in gemm

@@ -27,7 +27,8 @@ DIRECTIONS = (
     "tuning branch.",
     "GEMM tuning: for the GEMM shapes the profile shows for this workload (decode and prefill), first check which "
     "table each shape actually reads in the server.log's tuned-config lookups; a shape already on its best row in the "
-    "image's table needs nothing. For a shape the log reports as untuned, first switch it to a kernel family with "
+    "image's table needs nothing. When start_analysis lists kernel_tune, tune the untuned shapes with it before "
+    "anything else. For a shape the log reports as untuned, first switch it to a kernel family with "
     "tuned rows or a stronger default; rows borrowed from tuned tables of the same kernel family at nearby shapes are "
     "an untimed guess, so say so in your branch log. Put only your rows with put_kernel_artifact and rows_only=true, "
     "carrying the rows of a table your head already has for that variable, and test several shapes in one test "
