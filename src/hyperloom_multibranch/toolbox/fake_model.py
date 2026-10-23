@@ -20,7 +20,7 @@ import hashlib
 import math
 import random
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal
@@ -29,6 +29,7 @@ from hyperloom.measure.accuracy import RESULT_METRICS
 from hyperloom.contracts.measurement import (
     AccuracyValue,
     FailureClass,
+    RequestClasses,
     RoundValue,
     SandboxFacts,
     TestKind,
@@ -351,3 +352,28 @@ class FakeMeasurer:
             return ()
         score = self.config.accuracy_scores.get(request.delta.fingerprint(), self.config.accuracy_score)
         return (AccuracyValue(self.config.accuracy_task, self.config.accuracy_metric, score + rng.gauss(0, 0.001)),)
+
+
+def classes_of_rounds(rounds: Sequence[RoundValue]) -> tuple[RequestClasses, ...]:
+    """What the failed requests of an AgentX test's measured rounds are, from the figures the fake gave those rounds.
+
+    One entry for each measured round, in round order: its requests are the round's ``completed_requests`` and its
+    failed ones its ``failed_requests`` (the error rate is their ratio). The fake models no reply that a client finds
+    nothing in, so every failed request is a transport failure; the no-content counts are zeros it knows, not counts it
+    could not read. A fake round leaves no export, so none is named.
+    """
+    points = list(dict.fromkeys(item.concurrency for item in rounds))
+    return tuple(
+        RequestClasses(
+            points.index(item.concurrency),
+            concurrency=item.concurrency,
+            requests_total=item.completed_requests,
+            failed_total=item.failed_requests,
+            failed_transport=item.failed_requests,
+            failed_no_content=0,
+            failed_empty=0,
+            failed_short=0,
+        )
+        for item in rounds
+        if item.phase == "measure" and item.completed_requests is not None and item.failed_requests is not None
+    )

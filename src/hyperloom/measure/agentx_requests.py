@@ -15,9 +15,11 @@ decision and no threshold of ours. Each such request is classed by what the serv
   ``InvalidInferenceResultError``). It is ``empty`` when the server produced zero output tokens and ``short`` when it
   produced one or more.
 
-The client does not export an output token count for a request it counted failed, so ``empty`` and ``short`` are told
-apart only for an export whose failed line carries one. Otherwise they are not computed and the result says so: a count
-that cannot be read is never written as zero.
+The client as released does not export an output token count for a request it counted failed. The runner patches the
+client it runs (``measure.runner.aiperf_patch``) so that the line of a reply it found nothing in carries the server's
+count as ``error_osl``: ``empty`` and ``short`` are told apart, exactly, when every no-content failure's line carries
+one. Otherwise they are not computed and the result says so (an export of a client the runner did not patch, or a reply
+that gave no count): a count that cannot be read is never written as zero.
 """
 
 from __future__ import annotations
@@ -31,12 +33,12 @@ from typing import BinaryIO, NamedTuple
 from hyperloom.common.outside_facts import (
     AIPERF_ERROR_CLASS_KEY,
     AIPERF_ERROR_KEY,
+    AIPERF_ERROR_OUTPUT_LENGTH_METRIC,
     AIPERF_EXPORT_DIR,
     AIPERF_EXPORT_FILE,
     AIPERF_INVALID_REPLY_ERROR,
     AIPERF_METADATA_KEY,
     AIPERF_METRICS_KEY,
-    AIPERF_OUTPUT_LENGTH_METRIC,
     AIPERF_PHASE_KEY,
     AIPERF_PROFILING_PHASE,
 )
@@ -55,6 +57,8 @@ _UNREADABLE = "the export could not be read ({kind})"
 _OUTSIDE = "the export is not below the test's output"
 _BAD_LINES = "{count} line(s) of the export are not a request record, so no count of it can be trusted"
 _NO_REQUESTS = "the export holds no profiling request"
+#: Recorded in a result and compared when the result is reverified: a change of wording breaks the reverification of
+#: every result recorded with the old one.
 _UNSPLIT = (
     "the client's export carries no output token count for a request it counted failed, so {count} of the "
     "{no_content} no-content failures cannot be told empty from short"
@@ -63,7 +67,7 @@ _UNSPLIT = (
 
 class _Line(NamedTuple):
     """One request of the export: whether it is a profiling one, its error (``None`` when the client counted it
-    successful) and its output token count (``None`` when the line holds none)."""
+    successful) and the output token count of a failed request (``None`` when the line holds none)."""
 
     profiling: bool
     error: Mapping[str, object] | None
@@ -102,7 +106,7 @@ def export_files(round_dir: Path) -> list[Path]:
 
 def _output_tokens(payload: Mapping[str, object]) -> int | None:
     metrics = payload.get(AIPERF_METRICS_KEY)
-    entry = metrics.get(AIPERF_OUTPUT_LENGTH_METRIC) if isinstance(metrics, Mapping) else None
+    entry = metrics.get(AIPERF_ERROR_OUTPUT_LENGTH_METRIC) if isinstance(metrics, Mapping) else None
     value = entry.get("value") if isinstance(entry, Mapping) else entry
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 

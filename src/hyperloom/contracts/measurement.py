@@ -642,8 +642,9 @@ class RequestClasses:
 
     ``failed_no_content`` is ``failed_empty`` (the server produced zero output tokens) plus ``failed_short`` (it
     produced one or more and the client still counted the answer failed: the client's own decision, no threshold of
-    ours). The client's export carries no output token count for a request it counted failed, so the two are told
-    apart only when it does; otherwise both are ``None`` and ``reason`` says so.
+    ours). The client as released exports no output token count for a request it counted failed; the one the runner
+    patches does, for a reply it found nothing in. The two are told apart when every no-content failure's line carries
+    one; otherwise both are ``None`` and ``reason`` says so.
 
     A count that could not be computed is ``None`` and ``reason`` says why: never zero. A consumer that needs a count
     it finds ``None`` has no answer, not an answer of "none".

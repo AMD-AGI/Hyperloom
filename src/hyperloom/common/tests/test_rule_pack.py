@@ -58,14 +58,17 @@ shape (?:\s+is)? \s+ M:\d+, \s+ N:\d+, \s+ K:\d+ ,?
 _LITERALS: dict[str, str | list[str]] = {
     "AIPERF_ERROR_CLASS_KEY": "type",
     "AIPERF_ERROR_KEY": "error",
+    "AIPERF_ERROR_OUTPUT_LENGTH_METRIC": "error_osl",
     "AIPERF_EXPORT_DIR": "aiperf_artifacts",
     "AIPERF_EXPORT_FILE": "profile_export.jsonl",
     "AIPERF_INVALID_REPLY_ERROR": "InvalidInferenceResultError",
     "AIPERF_METADATA_KEY": "metadata",
     "AIPERF_METRICS_KEY": "metrics",
-    "AIPERF_OUTPUT_LENGTH_METRIC": "output_sequence_length",
+    "AIPERF_OUTPUT_LENGTH_FILE": "src/aiperf/metrics/types/output_sequence_length_metric.py",
+    "AIPERF_PARSER_FILE": "src/aiperf/records/inference_result_parser.py",
     "AIPERF_PHASE_KEY": "benchmark_phase",
     "AIPERF_PROFILING_PHASE": "profiling",
+    "AIPERF_SUBMODULE": "utils/aiperf",
     "AITER_LOG_TUNED_CONFIG_ENV": "AITER_LOG_TUNED_CONFIG",
     "AITER_MERGED_VIEW_DIR": "/tmp/aiter_configs",
     "AITER_TUNED_HIT": _AITER_TUNED_HIT,
@@ -151,9 +154,9 @@ def _fresh(code: str, pack: str | None) -> subprocess.CompletedProcess[str]:
 
 def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
-    assert pack.version == "3"
+    assert pack.version == "4"
     assert Counter(entry.kind for entry in pack.entries.values()) == {
-        Kind.NAMES: 10,
+        Kind.NAMES: 11,
         Kind.LOG_REGEX: 11,
         Kind.ENV_DEFAULT: 1,
     }
@@ -294,7 +297,7 @@ def test_a_session_whose_pack_cannot_be_used_stops_at_import_naming_the_entry(
 
 
 def test_the_recorded_identity_is_the_digest_of_the_bytes_read_and_is_stable(tmp_path: Path) -> None:
-    expected = {"version": "3", "digest": "sha256:" + hashlib.sha256(DEFAULT_PACK_PATH.read_bytes()).hexdigest()}
+    expected = {"version": "4", "digest": "sha256:" + hashlib.sha256(DEFAULT_PACK_PATH.read_bytes()).hexdigest()}
     assert rule_pack_identity() == expected
     assert rule_pack_identity() == rule_pack_identity()
     elsewhere = _fresh(_SHOW, None)

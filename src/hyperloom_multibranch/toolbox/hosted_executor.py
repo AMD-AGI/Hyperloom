@@ -61,7 +61,12 @@ from hyperloom.orchestrator.actions.executors.benchmark_result import extract_be
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.acceptance import backend_kind
-from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
+from hyperloom_multibranch.toolbox.attempts import (
+    UNMEASURED_KINDS,
+    MeasurementRefused,
+    TestJob,
+    carries_request_classes,
+)
 from hyperloom_multibranch.toolbox.reverify import (
     first_hash_difference,
     first_request_classes_difference,
@@ -88,8 +93,6 @@ _MEASURE = "measure"
 _UTF8 = "utf-8"
 #: A profiled round, and a repro case's server, run once with no warmup: neither is a statistic.
 _NO_WARMUP = RoundPlan(warmup_rounds=0)
-#: The kinds whose result holds no measured round: a profile names its traces, a repro its verdict.
-_UNMEASURED_KINDS = (TestKind.PROFILE, TestKind.REPRO)
 _REASON_DETAIL_CHARS = 300
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
 
@@ -202,7 +205,7 @@ class HostedExecutor:
             kind=backend_kind(request.kind),  # type: ignore[arg-type]
             prep=_SWEEP if request.kind is TestKind.SWEEP or len(accepted.points) > 1 else "grid",
             accuracy=request.accuracy,
-            rounds=_NO_WARMUP if request.kind in _UNMEASURED_KINDS else RoundPlan.from_env(),
+            rounds=_NO_WARMUP if request.kind in UNMEASURED_KINDS else RoundPlan.from_env(),
             meta=TestMeta(
                 purpose=request.purpose.value,
                 priority=job.priority,
@@ -273,11 +276,7 @@ class HostedExecutor:
 
         The exports are read in a worker thread: one holds a line for every request of a round.
         """
-        if (
-            self._workload is not WorkloadKind.AGENTX
-            or result.validity is not Validity.SUCCEEDED
-            or request.kind in _UNMEASURED_KINDS
-        ):
+        if not carries_request_classes(self._workload, request, result.validity):
             return result
         concurrencies = _concurrencies_of(call.points)
         classes = await asyncio.to_thread(read_round_classes, outcome.rounds, Path(call.output_dir), concurrencies)
@@ -444,7 +443,7 @@ def _measured_values(
     rule gate, which reads measure-phase rounds, finds nothing to compare. A repro test measures nothing either: it
     reports a verdict. Every other kind must hold a readable measured round.
     """
-    if request.kind in _UNMEASURED_KINDS:
+    if request.kind in UNMEASURED_KINDS:
         return (), ()
     rounds = _round_values(outcome.rounds, accepted.points)
     if not any(r.phase == _MEASURE for r in rounds):

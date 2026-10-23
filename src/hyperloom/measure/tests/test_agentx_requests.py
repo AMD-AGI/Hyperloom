@@ -88,23 +88,54 @@ def test_warmup_requests_are_in_no_count_and_a_line_without_a_phase_is_a_profili
     assert _counts(_read(_round(tmp_path, lines))) == (1, 0, 0, 0, 0, 0)
 
 
-def test_empty_and_short_are_told_apart_by_the_output_token_count_when_the_export_gives_one(tmp_path: Path) -> None:
+def test_empty_and_short_are_told_apart_exactly_by_the_output_token_count_the_patched_client_exports(
+    tmp_path: Path,
+) -> None:
     records = [export.served(n) for n in range(4)]
     records += [export.no_content(10, output_tokens=0), export.no_content(11, output_tokens=1)]
-    records += [export.no_content(12, output_tokens=5), export.refused(13)]
+    records += [export.no_content(12, output_tokens=5), export.no_content(13, output_tokens=0), export.refused(14)]
     classes = _read(_round(tmp_path, export.text(*records)))
-    assert _counts(classes) == (8, 4, 1, 3, 1, 2)
+    assert _counts(classes) == (9, 5, 1, 4, 2, 2), (
+        "two zero-token replies are empty, a one-token and a five-token short"
+    )
     assert classes.reason == ""
 
 
-def test_the_pinned_clients_failed_lines_carry_no_token_count_so_empty_and_short_are_not_computed(
+def test_a_client_that_exports_no_token_count_on_a_failed_line_leaves_empty_and_short_not_computed(
     tmp_path: Path,
 ) -> None:
+    """An export of the client as released: the old exports of a run the runner did not patch the client of."""
     records = [export.served(n) for n in range(6)] + [export.no_content(10), export.no_content(11), export.refused(12)]
     classes = _read(_round(tmp_path, export.text(*records)))
     assert _counts(classes) == (9, 3, 1, 2, None, None), "the split is None, not 0: nothing says how many were empty"
-    assert "no output token count" in classes.reason
-    assert "2 of the 2 no-content failures cannot be told empty from short" in classes.reason
+    assert classes.reason == (
+        "the client's export carries no output token count for a request it counted failed, so 2 of the 2 no-content "
+        "failures cannot be told empty from short"
+    ), "recorded results hold this text and are compared with it when reverified: it is not reworded"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(-1, id="negative"),
+        pytest.param("3", id="text"),
+        pytest.param(True, id="bool"),
+        pytest.param(1.5, id="float"),
+    ],
+)
+def test_a_token_count_that_is_not_a_count_is_no_count(tmp_path: Path, value: object) -> None:
+    damaged = export.no_content(2, output_tokens=0)
+    damaged["metrics"]["error_osl"]["value"] = value
+    classes = _read(_round(tmp_path, export.text(export.served(1), damaged)))
+    assert (classes.failed_no_content, classes.failed_empty, classes.failed_short) == (1, None, None)
+
+
+def test_the_output_length_of_a_served_request_is_not_the_count_of_a_failed_one(tmp_path: Path) -> None:
+    """``output_sequence_length`` is the metric of a request the client counted successful; only ``error_osl`` counts."""
+    failed = export.no_content(2)
+    failed["metrics"]["output_sequence_length"] = {"value": 4, "unit": "tokens"}
+    classes = _read(_round(tmp_path, export.text(export.served(1), failed)))
+    assert (classes.failed_no_content, classes.failed_empty, classes.failed_short) == (1, None, None)
 
 
 def test_a_split_that_only_some_failed_lines_support_is_not_computed_either(tmp_path: Path) -> None:
@@ -264,6 +295,13 @@ def test_the_example_lines_the_rule_pack_holds_read_as_the_pack_says_they_do(tmp
     """The pack's own examples are the reader's fixtures: a fact moved in a pack must move them too."""
     facts = yaml.safe_load(DEFAULT_PACK_PATH.read_text(encoding="utf-8"))["facts"]
     lines = [e[e.index(": {") + 2 :] for e in facts["aiperf_request_export"]["examples"] if ": {" in e]
-    assert len(lines) == 4, "a served request, a refused one, an unreachable one and a reply with nothing in it"
-    classes = _read(_round(tmp_path, lines))
-    assert _counts(classes) == (4, 3, 2, 1, None, None)
+    expected = [
+        ("a served request", (1, 0, 0, 0, 0, 0)),
+        ("a refused request", (1, 1, 1, 0, 0, 0)),
+        ("an unreachable server", (1, 1, 1, 0, 0, 0)),
+        ("a no-content reply of the client as released", (1, 1, 0, 1, None, None)),
+        ("a no-content reply of the patched client: nothing produced", (1, 1, 0, 1, 1, 0)),
+    ]
+    assert len(lines) == len(expected)
+    for index, (line, (what, counts)) in enumerate(zip(lines, expected)):
+        assert _counts(_read(_round(tmp_path / str(index), [line]))) == counts, what

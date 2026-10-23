@@ -28,12 +28,24 @@ from typing import NamedTuple, Protocol
 from hyperloom.contracts.measurement import (
     Attempt,
     FailureClass,
+    TestKind,
     TestRequest,
     TestResult,
     Validity,
 )
+from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 
 DEFAULT_MAX_INFRA_RETRIES = 3
+#: The kinds whose result holds no measured round: a profile names its traces, a repro its verdict.
+UNMEASURED_KINDS = (TestKind.PROFILE, TestKind.REPRO)
+
+
+def carries_request_classes(workload: WorkloadKind, request: TestRequest, validity: Validity) -> bool:
+    """Whether a result counts, for each measured round, the requests its client marked failed by class.
+
+    Only a succeeded test of an AgentX campaign does, and only a kind that has measured rounds.
+    """
+    return workload is WorkloadKind.AGENTX and validity is Validity.SUCCEEDED and request.kind not in UNMEASURED_KINDS
 
 
 class MeasurementRefused(Exception):

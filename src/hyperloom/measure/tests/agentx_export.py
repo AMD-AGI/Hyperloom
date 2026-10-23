@@ -1,16 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Lines of aiperf's per-request export (``profile_export.jsonl``), as the pinned replay client writes them.
+"""Lines of aiperf's per-request export (``profile_export.jsonl``), in the shapes the pinned replay client writes them.
 
-No export of a real AgentX run was reachable when these were written, so every shape is rebuilt from the client's own
-source and documentation at the commit InferenceX pins (``SemiAnalysisAI/aiperf`` 754356e): the metadata keys and the
-successful and cancelled records are those of ``docs/tutorials/working-with-profile-exports.md``; the error of a refused
-request is what ``aiohttp_client.py`` builds (the status as ``code``, its reason phrase as ``type``); the error of a
-request that never reached a server is ``ErrorDetails.from_exception`` (the exception's class name as ``type``, its repr
-as ``message``); and the reply the client found nothing in is ``InvalidInferenceResultError``, whose ``message`` is the
-exception's repr (the notes it carries are not in it) and whose failed record keeps only the input token count
-(``inference_result_parser.py``). Fields the writer leaves out when they are ``None`` (``exclude_none``) are left out.
+No export of a real AgentX run was reachable. The shapes of a failed request are those the pinned client
+(``SemiAnalysisAI/aiperf`` 754356e) wrote when its own parser, metric processor and export writer were run on a
+constructed reply with the server token counts InferenceX asks for: a request that got no reply has no metric at all, a
+reply the client found nothing in has the input token count the server reported and, with the runner's patch, the
+output one as ``error_osl`` (the name is written out here, not read from the rule pack, so a pack that renames it
+breaks the tests). The metadata keys and the successful and cancelled records are those of
+``docs/tutorials/working-with-profile-exports.md``; the error of a refused request is what ``aiohttp_client.py`` builds
+(the status as ``code``, its reason phrase as ``type``). Fields the writer leaves out when they are ``None``
+(``exclude_none``) are left out.
 """
 
 from __future__ import annotations
@@ -21,7 +22,10 @@ from typing import Any
 BASE_NS = 1_759_813_207_000_000_000
 INVALID_REPLY = {
     "type": "InvalidInferenceResultError",
-    "message": "InvalidInferenceResultError('Invalid inference result')",
+    "message": (
+        "InvalidInferenceResultError('Invalid inference result: No responses with actual content were received from "
+        "the server (only usage/metadata, null/empty data, or [DONE] markers)')"
+    ),
     "cause_chain": ["InvalidInferenceResultError"],
 }
 
@@ -56,12 +60,8 @@ def served(number: int, *, phase: str = "profiling", output_tokens: int = 9) -> 
     return {"metadata": metadata, "metrics": metrics}
 
 
-def _failed(number: int, phase: str, error: dict[str, Any], **extra: Any) -> dict[str, Any]:
-    return {
-        "metadata": _metadata(number, phase),
-        "metrics": {"error_isl": {"value": 550, "unit": "tokens"}, **extra},
-        "error": error,
-    }
+def _failed(number: int, phase: str, error: dict[str, Any], metrics: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {"metadata": _metadata(number, phase), "metrics": metrics or {}, "error": error}
 
 
 def refused(number: int, *, status: int = 503, reason: str = "Service Unavailable", phase: str = "profiling") -> dict:
@@ -87,10 +87,12 @@ def cancelled(number: int, *, phase: str = "profiling") -> dict[str, Any]:
 
 
 def no_content(number: int, *, phase: str = "profiling", output_tokens: int | None = None) -> dict[str, Any]:
-    """A reply the client found nothing in. The pinned client exports no output token count for it; a record that has
-    one (``output_tokens``) is what a client that kept the count would write."""
-    extra = {} if output_tokens is None else {"output_sequence_length": {"value": output_tokens, "unit": "tokens"}}
-    return _failed(number, phase, INVALID_REPLY, **extra)
+    """A reply the client found nothing in. The client as released exports only the input token count the server
+    reported for it; the patched one (``output_tokens``) also exports the output one."""
+    metrics: dict[str, Any] = {"error_isl": {"value": 550, "unit": "tokens"}}
+    if output_tokens is not None:
+        metrics["error_osl"] = {"value": output_tokens, "unit": "tokens"}
+    return _failed(number, phase, INVALID_REPLY, metrics)
 
 
 def text(*records: dict[str, Any]) -> list[str]:

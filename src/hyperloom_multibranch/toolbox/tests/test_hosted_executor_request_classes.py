@@ -4,7 +4,7 @@
 """A succeeded AgentX test carries, for each measured round, how its failed requests split and where the export is (#117).
 
 The executor is the real one over the hosted backend and the local sandbox provider. The stand-in runner writes the
-round's per-request export (the lines of ``agentx_export``, rebuilt from the pinned client's source) into the files the
+round's per-request export (the lines of ``agentx_export``, in the shapes the pinned client writes) into the files the
 bundle signs; what is read is what the bundle landed and the notebook stored. The pointer is checked against the
 archived manifest, which is the proof that the runner kept the export in the signed bundle.
 """
@@ -69,8 +69,21 @@ async def test_a_result_counts_each_failed_request_by_class_and_the_notebook_kee
     (classes,) = result.request_classes
     assert (classes.point, classes.requests_total) == (0, 10)
     assert (classes.failed_total, classes.failed_transport, classes.failed_no_content) == (4, 3, 1)
-    assert (classes.failed_empty, classes.failed_short) == (None, None), "the pinned client's export cannot tell them"
+    assert (classes.failed_empty, classes.failed_short) == (None, None), "the client as released cannot tell them"
     assert "cannot be told empty from short" in classes.reason
+
+
+async def test_the_export_of_the_patched_client_splits_the_no_content_failures_exactly_and_reverifies(
+    tmp_path: Path, rig
+) -> None:
+    records = [export.served(n) for n in range(6)] + [export.refused(6), export.cancelled(7)]
+    records += [export.no_content(8, output_tokens=0), export.no_content(9, output_tokens=0)]
+    records += [export.no_content(10, output_tokens=4)]
+    executor, result = await _result(tmp_path, rig, **_with_export(export.text(*records)))
+    (classes,) = result.request_classes
+    assert (classes.requests_total, classes.failed_transport, classes.failed_no_content) == (11, 2, 3)
+    assert (classes.failed_empty, classes.failed_short, classes.reason) == (2, 1, "")
+    await executor.reverify(result)
 
 
 async def test_the_runner_keeps_the_export_in_the_signed_bundle_and_the_result_points_at_it(

@@ -37,13 +37,14 @@ from hyperloom_multibranch.contracts.toolbox import (
     WorkloadKind,
 )
 from hyperloom_multibranch.contracts.gate import ResultUnverified
-from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
+from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob, carries_request_classes
 from hyperloom_multibranch.toolbox.fake_model import (
     AttemptOutcome,
     AttemptConstraints,
     FakeMeasurer,
     FakeToolboxConfig,
     Fate,
+    classes_of_rounds,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
@@ -123,6 +124,7 @@ _MEASURED_FIELDS = (
     "signing_key_fingerprint",
     "spec_fingerprint",
     "surface_sha256",
+    "request_classes",
 )
 
 
@@ -130,11 +132,15 @@ class FakeExecutor:
     """One attempt, faked: draws the fate, picks the node (away from ``avoid_nodes``, best effort) and measures.
 
     A drawn measurement failure is a :class:`MeasurementRefused`, as the hosted executor raises it for a rejected spec
-    or a result that fails verification. ``gate`` holds attempts back until it is set (``autorun=False``).
+    or a result that fails verification. ``gate`` holds attempts back until it is set (``autorun=False``). A result of
+    an AgentX ``workload`` counts the failed requests of its measured rounds by class, as the hosted executor's does.
     """
 
-    def __init__(self, config: FakeToolboxConfig, *, autorun: bool = True) -> None:
+    def __init__(
+        self, config: FakeToolboxConfig, *, autorun: bool = True, workload: WorkloadKind = WorkloadKind.INFERENCEX
+    ) -> None:
         self.config = config
+        self._workload = workload
         self.now = config.start_time
         self.gate = asyncio.Event()
         if autorun:
@@ -187,6 +193,9 @@ class FakeExecutor:
         request_id, measured = request.request_id or "", outcome.fate is Fate.OK
         validity = Validity.SUCCEEDED if measured else self._failed_validity(outcome)
         digest = hashlib.sha256(f"{request_id}/{validity.value}".encode()).hexdigest()
+        classes = (
+            classes_of_rounds(outcome.rounds) if carries_request_classes(self._workload, request, validity) else ()
+        )
         return TestResult(
             request_id=request_id,
             validity=validity,
@@ -205,6 +214,7 @@ class FakeExecutor:
             gpu_seconds=gpu_seconds,
             profile_location=f"tests/{request_id}/profile" if measured and request.kind is TestKind.PROFILE else "",
             cold_start_seconds=self.config.attempt_seconds,
+            request_classes=classes,
         )
 
     @staticmethod
@@ -250,7 +260,7 @@ class FakeToolbox(RealToolbox):
     ) -> None:
         log_path = wiring.log_path
         self.config = config or FakeToolboxConfig()
-        self.executor = FakeExecutor(self.config, autorun=autorun)
+        self.executor = FakeExecutor(self.config, autorun=autorun, workload=wiring.workload_kind)
         self.notebook = notebook if notebook is not None else MemoryNotebook()
         self._scratch = None if log_path else tempfile.TemporaryDirectory(prefix="fake-toolbox-")
         path = log_path or Path(self._scratch.name) / "submissions.jsonl"  # type: ignore[union-attr]
