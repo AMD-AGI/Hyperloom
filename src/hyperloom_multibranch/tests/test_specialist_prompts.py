@@ -546,3 +546,10 @@ def test_the_role_says_what_geak_s_reference_directories_hold(tmp_path):
     assert "perf_knowledge/expert_skills/tuning" in prompt
     assert "kernel_workflow/knowledge/learned" in prompt
     assert "perf_knowledge" not in role_prompt(WORKLOAD, references={"notes": tmp_path / "notes"})
+
+
+def test_the_role_reads_a_table_s_hits_before_calling_it_flat():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "table_hits says, per kernel table the test loaded, how many of its rows aiter read" in prompt
+    assert "a table marked not_exercised measured nothing of its rows" in prompt

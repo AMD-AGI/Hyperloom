@@ -214,7 +214,10 @@ use os.environ.setdefault: a variable the recipe already sets silently wins, and
 the change.
 - Before tuning a GEMM, check which path it actually takes: the server.log's tuned-config lookups name the table \
 each shape reads, and a table for a path the model no longer reaches changes nothing. After the exact M, the lookup \
-tries M padded up, so a row at a padded M covers every batch size that pads to it.
+tries M padded up, so a row at a padded M covers every batch size that pads to it. A test result's \
+table_hits says, per kernel table the test loaded, how many of its rows aiter read: a table marked not_exercised \
+measured nothing of its rows, so a flat result says nothing about them; fix the shapes or the path before you call \
+the table flat.
 - A GEMM shape with no tuned row has gained most by switching to a kernel family with tuned rows or a stronger \
 default (block-scale to a per-token, per-channel preshuffled GEMM on a requantized weight copy); picking a tile or a \
 split-K for it without timing it is a guess.
