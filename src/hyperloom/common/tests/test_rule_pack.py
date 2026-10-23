@@ -132,6 +132,15 @@ def _set(entry: str, field: str, value: object) -> Callable[[Facts], None]:
 
 def _forget_role(facts: Facts) -> None:
     del facts["pytorch_tunableop_env"]["names"]["tuning"]
+    del facts["pytorch_tunableop_env"]["image_check"]
+
+
+def _rename_sglang_flag(facts: Facts) -> None:
+    """The flag a changed fact names, and the help its image check is pinned to, which shows the renamed flag."""
+    entry = facts["context_length_flags"]
+    entry["names"]["sglang"] = "--ctx"
+    example = entry["image_check"][0]["examples"]["pass"][0]
+    example["help"] = example["help"].replace("--context-length", "--ctx")
 
 
 def _forget_entry(facts: Facts) -> None:
@@ -154,7 +163,7 @@ def _fresh(code: str, pack: str | None) -> subprocess.CompletedProcess[str]:
 
 def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
-    assert pack.version == "4"
+    assert pack.version == "5"
     assert Counter(entry.kind for entry in pack.entries.values()) == {
         Kind.NAMES: 11,
         Kind.LOG_REGEX: 11,
@@ -267,7 +276,7 @@ _SHOW = textwrap.dedent(
 
 
 def test_a_session_reads_the_pack_its_input_names_and_a_changed_fact_needs_no_code_change(tmp_path: Path) -> None:
-    pack = _variant(tmp_path, lambda facts: facts["context_length_flags"]["names"].update(sglang="--ctx"), version="2")
+    pack = _variant(tmp_path, _rename_sglang_flag, version="2")
     done = _fresh(_SHOW, str(pack))
     assert done.returncode == 0, done.stderr[-2000:]
     shown = json.loads(done.stdout)
@@ -298,7 +307,7 @@ def test_a_session_whose_pack_cannot_be_used_stops_at_import_naming_the_entry(
 
 
 def test_the_recorded_identity_is_the_digest_of_the_bytes_read_and_is_stable(tmp_path: Path) -> None:
-    expected = {"version": "4", "digest": "sha256:" + hashlib.sha256(DEFAULT_PACK_PATH.read_bytes()).hexdigest()}
+    expected = {"version": "5", "digest": "sha256:" + hashlib.sha256(DEFAULT_PACK_PATH.read_bytes()).hexdigest()}
     assert rule_pack_identity() == expected
     assert rule_pack_identity() == rule_pack_identity()
     elsewhere = _fresh(_SHOW, None)
