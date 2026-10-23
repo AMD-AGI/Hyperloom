@@ -40,6 +40,7 @@ from kernelforge.orchestrator.contracts import (
     SpecialistOutcome,
     SpecialistRound,
 )
+from kernelforge.orchestrator.critic_fallback import render_critic_fallback
 from kernelforge.orchestrator.specialists import (
     SpecialistAgent,
     SpecialistPool,
@@ -1501,7 +1502,7 @@ class OrchestrationService:
             return [
                 replace(
                     drafts[0],
-                    text=self._render_critic_revision_fallback(
+                    text=render_critic_fallback(
                         draft_plan=drafts[0].text,
                         critic_review=critic_outcome.review,
                         critic_verdict=critic_outcome.verdict,
@@ -1523,34 +1524,6 @@ class OrchestrationService:
             "duration_sec": duration_sec,
             "message": "; ".join(failures),
         }
-
-    @staticmethod
-    def _render_critic_revision_fallback(
-        *,
-        draft_plan: str,
-        critic_review: str,
-        critic_verdict: str,
-    ) -> str:
-        """Preserve critic corrections when the model revision is unavailable."""
-        return "\n".join(
-            (
-                "# Optimization plan",
-                "",
-                (
-                    "The Orchestration revision was unavailable. Treat the "
-                    "Critic review below as mandatory planning guidance before "
-                    "editing; use the draft only as historical context."
-                ),
-                "",
-                f"## Critic verdict: {critic_verdict}",
-                "",
-                critic_review.strip(),
-                "",
-                "## Original draft",
-                "",
-                draft_plan.strip(),
-            )
-        ).strip()
 
     @staticmethod
     def _render_framework_plan(context: OrchestrationContext, specialists: SpecialistRound) -> str:

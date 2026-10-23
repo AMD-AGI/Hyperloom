@@ -59,6 +59,8 @@ from kernelforge.loop.lessons import (
 )
 from kernelforge.loop.archive import CandidateArchive, CandidateRecord
 from kernelforge.loop.handoffs import HandoffStore, IterationHandoff
+from kernelforge.loop.experiments_layout import LANE_PLAN_GLOB, ROUND_CONTEXT, ExperimentsLayout, lane_plan_name
+from kernelforge.loop.loop_log import LOOP_BANNER, iteration_header, kernel_line
 from kernelforge.loop.jit_rebuild import (
     force_jit_rebuild,
     tracked_source_changes,
@@ -83,6 +85,8 @@ from kernelforge.loop.round_budget import (
     estimate_measurement_sec,
 )
 from kernelforge.loop.run_state import (
+    ITERATION_RESULT,
+    ITERATION_STARTED,
     MAX_PINNED_ITERATIONS,
     ORCHESTRATION_CIRCUIT_OPEN,
     SESSION_COMPLETED,
@@ -159,7 +163,7 @@ from kernelforge.evaluation.benchmark.baseline import (
     check_baseline_against_reference,
 )
 from kernelforge.loop.device_hazard import DeviceHazard, DeviceHazardLog
-from kernelforge.loop.fanout import LanePlan, LaneResult, run_lanes
+from kernelforge.loop.fanout import LanePlan, LaneResult, lane_rationale, run_lanes
 from kernelforge.loop.merge_candidates import (
     MERGE_ATTEMPT_STALL_THRESHOLD,
     MERGE_PRECEDENCE_STREAK_LIMIT,
@@ -3819,7 +3823,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         """Build the canonical durable event for one completed iteration."""
         resolved_decision = decision_label or _decision_label(result)
         return make_event(
-            "iteration_result",
+            ITERATION_RESULT,
             result.iteration,
             decision=resolved_decision,
             plan=(plan or "").strip()[:120] or None,
@@ -4499,17 +4503,15 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         print(f"  [critic] resuming the {ruling.verdict} verdict an earlier process recorded")
 
     def _orchestration_root(self, iteration: int) -> Path:
-        return Path(self.ic.workspace_dir).resolve() / "forge_experiments" / "orchestration" / f"iter_{iteration:03d}"
+        return ExperimentsLayout.of(Path(self.ic.workspace_dir).resolve()).round(iteration)
 
     def _lane_plan_path(self, iteration: int, lane: int) -> Path:
-        """Where one lane's plan lives, lane 1 keeping the historical name."""
-        if lane <= 1:
-            return self._orchestration_root(iteration) / "optimization_plan.md"
-        return self._orchestration_root(iteration) / f"lane_{lane:03d}.md"
+        """Where one lane's plan lives."""
+        return self._orchestration_root(iteration) / lane_plan_name(lane)
 
     def _lane_queue_path(self) -> Path:
         """Where a round's unspent candidates wait for the iteration that measures them."""
-        return Path(self.ic.workspace_dir).resolve() / "forge_experiments" / "orchestration" / "lane_queue.json"
+        return ExperimentsLayout.of(Path(self.ic.workspace_dir).resolve()).lane_queue
 
     def _persist_lane_queue(self) -> None:
         """Publish what this round has bought and not yet measured."""
@@ -4568,7 +4570,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         manifest = self._lane_plan_manifest_path(iteration)
         manifest.unlink(missing_ok=True)
         keep = {self._lane_plan_path(iteration, lane) for lane in range(2, len(published) + 1)}
-        for stale in self._orchestration_root(iteration).glob("lane_[0-9][0-9][0-9].md"):
+        for stale in self._orchestration_root(iteration).glob(LANE_PLAN_GLOB):
             if stale not in keep:
                 stale.unlink()
         for lane, plan in enumerate(published, start=1):
@@ -4655,7 +4657,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
 
         root = self._orchestration_root(iteration)
         atomic_write_json(
-            root / "context.json",
+            root / ROUND_CONTEXT,
             context.to_prompt_dict(),
         )
         if result.dispatch_plan is not None:
@@ -5123,8 +5125,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             )
             print(self._supervisor_banner())
 
-        print("Starting autonomous iteration loop")
-        print(f"  Kernel: {self.ic.kernel_file}")
+        print(LOOP_BANNER)
+        print(kernel_line(self.ic.kernel_file))
         print(f"  Target: {self.ic.target_wall_ms} ms")
         print(
             f"  Budget: {self.ic.max_time_hours}h "
@@ -5642,7 +5644,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         elif queued_lane is not None:
             unmeasured_result = None
             commit_hash = ""
-            rationale = f"lane {queued_lane.lane_id} of a fan-out round"
+            rationale = lane_rationale(queued_lane.lane_id)
             attempt_source = self._read_kernel_source()
             attempt_diff = self._working_tree_diff()
             reusable_benchmark = None
@@ -6178,13 +6180,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
 
         self._update_search_policy(iteration)
 
-        print(
-            f"--- Iteration {iteration} "
-            f"(best mean case speedup: {self.best_mean_case_speedup:.6f}x, "
-            f"remaining: {self._time_remaining() / 60:.0f} min) ---"
-            if self.best_mean_case_speedup is not None
-            else f"--- Iteration {iteration} ---"
-        )
+        print(iteration_header(iteration, self.best_mean_case_speedup, self._time_remaining()))
         roofline_progress = self._render_roofline_progress()
         if roofline_progress:
             print(roofline_progress)
@@ -6199,7 +6195,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         self.run_state.iteration = iteration
         self.state_store.append_event(
             make_event(
-                "iteration_started",
+                ITERATION_STARTED,
                 iteration,
                 best_before_ms=self.best_wall_ms,
                 best_before_mean_case_speedup=self.best_mean_case_speedup,

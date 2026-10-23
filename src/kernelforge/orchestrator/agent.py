@@ -24,6 +24,7 @@ from kernelforge.agent_backends.session_resume import run_session_with_api_resum
 from kernelforge.config import Config, resolve_agent_model
 from kernelforge.workspace.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
+from kernelforge.orchestrator.gate_tag import gate_outcome_tag
 from kernelforge.loop.insession_gate import GateMeasurement, GateScope, InSessionGate
 from kernelforge.loop.lessons import SessionEnd
 from kernelforge.evaluation.scoring import (
@@ -344,18 +345,6 @@ def _session_end_reason(*, submitted: bool, gate, run_result, result_subtype: st
     if result_subtype and result_subtype != "success":
         return f"sdk_{result_subtype}"
     return "agent_stopped"
-
-
-def _gate_outcome_tag(gate, end_reason: str, num_turns: int | None) -> str:
-    """The gate outcome, so the outer loop's commit message records whether the session self-converged."""
-    tag = f"[gate edits={gate.edit_count} pass={gate.passed} end={end_reason}"
-    if num_turns is not None:
-        tag += f" turns={num_turns}"
-    if gate.last_mean_case_speedup is not None:
-        tag += f" mean_case_speedup={gate.last_mean_case_speedup:.6f}x"
-    if gate.last_wall_ms is not None:
-        tag += f" raw_mean={gate.last_wall_ms:.4f}ms"
-    return tag + "]"
 
 
 def _fill_session_sink(
@@ -896,7 +885,7 @@ Make your change(s) now.
 
         text = full or "no rationale provided"
         if gate is not None:
-            text = f"{_gate_outcome_tag(gate, end_reason, num_turns)} {text}"
+            text = f"{gate_outcome_tag(gate, end_reason, num_turns)} {text}"
 
         # Hand back structured session info so the runner can feed the ExperienceLedger with the gate's objective
         # findings, and (via ``summarize``) ask this exact session to record what it explored.

@@ -22,6 +22,14 @@ from typing import Any
 from hyperloom_kb.schema import TEXT_MAX_BYTES
 from kernelforge.knowledge.kb_store.identity.normalization import UNKNOWN_SEGMENT
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel, resolve_loop_identity
+from kernelforge.loop.experiments_layout import (
+    CANDIDATE_META,
+    LANE_PLAN_GLOB,
+    ROUND_CONTEXT,
+    ExperimentsLayout,
+    lane_plan_name,
+)
+from kernelforge.orchestrator.critic_fallback import original_draft
 from kernelforge.orchestrator.summary_line import read_summary
 from kernelforge.run_export.files import read_json, read_text
 from kernelforge.run_export.units import CandidateOrigin
@@ -29,10 +37,6 @@ from kernelforge.run_export.units import CandidateOrigin
 #: How many sentences of a plan without a Summary line, or of a single session's rationale when it wrote no lesson,
 #: an Experience keeps.
 _EXCERPT_SENTENCES = 3
-#: The sentence KernelForge opens a plan with when it could not revise the draft and put the critic's review in front
-#: of it instead (``_render_critic_revision_fallback`` in ``kernelforge/orchestrator/orchestration.py`` at 1c14e79e1).
-_FALLBACK_PREFACE = "The Orchestration revision was unavailable."
-_FALLBACK_DRAFT = "\n## Original draft\n"
 _HEADING = re.compile(r"^#{1,6} (\S.*)$")
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z`*\"'(\[])")
 _LIST_MARKER = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
@@ -63,15 +67,6 @@ def first_sentences(text: str, count: int = _EXCERPT_SENTENCES) -> str | None:
     return " ".join(sentences[:count]).strip() or None
 
 
-def _draft(plan: str) -> str:
-    """The plan as its planner wrote it: the original draft when KernelForge could not revise it and put the critic's
-    review in front of it instead."""
-
-    if _FALLBACK_PREFACE in plan and _FALLBACK_DRAFT in plan:
-        return plan.split(_FALLBACK_DRAFT, 1)[1]
-    return plan
-
-
 def _plan_body(plan: str) -> str:
     """The plan from its first heading on.
 
@@ -87,7 +82,7 @@ def plan_text(plan: str) -> str | None:
     """What an Experience keeps of a whole plan file: the whole Summary line its draft opens with, or the first
     sentences of the draft's body when it has none."""
 
-    draft = _draft(plan)
+    draft = original_draft(plan)
     return read_summary(draft) or first_sentences(_plan_body(draft))
 
 
@@ -120,7 +115,7 @@ def campaign_identity(config: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in identity.items() if value not in (None, "", UNKNOWN_SEGMENT)}
 
 
-def _lane_plan_file(experiments: Path, seq: int, plan: str) -> Path | None:
+def _lane_plan_file(layout: ExperimentsLayout, seq: int, plan: str) -> Path | None:
     """The file of the fan-out round that holds this lane's plan: optimization_plan.md for the round's first lane,
     lane_NNN.md for its others.
 
@@ -128,8 +123,8 @@ def _lane_plan_file(experiments: Path, seq: int, plan: str) -> Path | None:
     """
 
     for number in range(seq, 0, -1):
-        directory = experiments / "orchestration" / f"iter_{number:03d}"
-        for path in [directory / "optimization_plan.md", *sorted(directory.glob("lane_[0-9][0-9][0-9].md"))]:
+        directory = layout.round(number)
+        for path in [directory / lane_plan_name(1), *sorted(directory.glob(LANE_PLAN_GLOB))]:
             if path.is_file() and read_text(path).strip() == plan:
                 return path
     return None
@@ -137,31 +132,27 @@ def _lane_plan_file(experiments: Path, seq: int, plan: str) -> Path | None:
 
 @dataclass(frozen=True)
 class IterationArchive:
-    """What Kernel Forge archived for iteration ``seq`` under a run's ``forge_experiments`` directory."""
+    """What Kernel Forge archived for iteration ``seq`` of the run ``layout`` lays out."""
 
-    experiments: Path
+    layout: ExperimentsLayout
     seq: int
 
     @property
-    def tag(self) -> str:
-        return f"iter_{self.seq:03d}"
-
-    @property
     def candidate(self) -> Path:
-        return self.experiments / "candidates" / self.tag
+        return self.layout.candidate(self.seq)
 
     @property
     def handoff(self) -> Path:
-        return self.experiments / "handoffs" / f"{self.tag}.json"
+        return self.layout.handoff(self.seq)
 
     @property
     def lesson(self) -> Path:
-        return self.experiments / "lessons" / f"{self.tag}.md"
+        return self.layout.lesson(self.seq)
 
     def meta(self) -> dict[str, Any] | None:
         """The candidate's ``meta.json``, which Kernel Forge writes for every attempt that produced a diff."""
 
-        return read_json(self.candidate / "meta.json")
+        return read_json(self.candidate / CANDIDATE_META)
 
     def plan_file(self, origin: CandidateOrigin, plan: str) -> Path | None:
         """The plan the candidate was built from: its lane's plan, or the plan of the round a single session ran.
@@ -171,10 +162,10 @@ class IterationArchive:
 
         found: Path | None = None
         if origin is CandidateOrigin.LANE and plan:
-            found = _lane_plan_file(self.experiments, self.seq, plan)
+            found = _lane_plan_file(self.layout, self.seq, plan)
         elif origin is CandidateOrigin.SESSION:
             relative = str((read_json(self.handoff) or {}).get("optimization_plan_path") or "")
-            found = self.experiments.parent / relative if relative else None
+            found = self.layout.root.parent / relative if relative else None
         return found if found is not None and found.is_file() else None
 
     def fields(self, meta: dict[str, Any], plan_file: Path | None) -> dict[str, Any]:
@@ -190,14 +181,14 @@ class IterationArchive:
         if plan_file is not None:
             fields["plan_file"] = str(plan_file.resolve())
             fields["plan"] = plan_text(read_text(plan_file))
-        pristine = (read_json(self.experiments / "run_state.json") or {}).get("pristine_baseline_wall_ms")
+        pristine = (read_json(self.layout.run_state) or {}).get("pristine_baseline_wall_ms")
         fields["source_ms"] = pristine if pristine is not None else meta.get("baseline_wall_ms")
-        kernel = str((meta.get("files") or {}).get("kernel") or "")
+        files = meta.get("files") or {}
+        kernel, diff = str(files.get("kernel") or ""), str(files.get("diff") or "")
         if kernel and (self.candidate / kernel).is_file():
             fields["source_code"] = str((self.candidate / kernel).resolve())
-        diff = self.candidate / "change.diff"
-        if diff.is_file():
-            fields["change_diff_file"] = str(diff.resolve())
+        if diff and (self.candidate / diff).is_file():
+            fields["change_diff_file"] = str((self.candidate / diff).resolve())
         return fields
 
 
@@ -234,7 +225,7 @@ class AnalysisReport:
         return record
 
 
-def analysis_report(experiments: Path, plan_file: Path | None) -> AnalysisReport | None:
+def analysis_report(layout: ExperimentsLayout, plan_file: Path | None) -> AnalysisReport | None:
     """The report of the published Analysis generation the round that wrote ``plan_file`` planned on.
 
     The round's ``context.json``, beside its plans, names that generation as its first ``analysis_bundle`` evidence,
@@ -246,7 +237,7 @@ def analysis_report(experiments: Path, plan_file: Path | None) -> AnalysisReport
 
     if plan_file is None:
         return None
-    context = read_json(plan_file.parent / "context.json") or {}
+    context = read_json(plan_file.parent / ROUND_CONTEXT) or {}
     bundle = next(
         (
             str(ref.get("path") or "")
@@ -258,5 +249,5 @@ def analysis_report(experiments: Path, plan_file: Path | None) -> AnalysisReport
     tail = PurePosixPath(bundle).parts[-3:]
     if len(tail) < 3 or tail[0] != "analysis" or not _GENERATION.match(tail[2]):
         return None
-    report = experiments.joinpath(*tail, "report.md")
+    report = layout.root.joinpath(*tail, "report.md")
     return AnalysisReport("/".join(tail), read_text(report).strip()) if report.is_file() else None

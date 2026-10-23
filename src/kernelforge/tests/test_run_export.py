@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``kernelforge export-runs`` on plain forge-loop runs: the document a run's ``forge_experiments`` becomes."""
+"""``kernelforge export-runs`` on plain forge-loop runs: the document a run's ``forge_experiments`` becomes.
+
+The fixtures write a run through the layout, log lines, event types, gate tag and critic fallback Kernel Forge's own
+writers use, so a change at a writer reaches the exporter's tests; what a test expects the exporter to produce stays
+literal.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -17,11 +23,19 @@ from click.testing import CliRunner
 from hyperloom_kb.collect import collect
 from hyperloom_kb.schema import TEXT_MAX_BYTES
 from kernelforge.cli import main
+from kernelforge.loop.experiments_layout import CANDIDATE_META, ROUND_CONTEXT, ExperimentsLayout, lane_plan_name
+from kernelforge.loop.fanout import LANE_ROOT_PREFIX, lane_rationale
+from kernelforge.loop.loop_log import LOOP_BANNER, iteration_header, kb_write_line, kernel_line
+from kernelforge.loop.run_state import ITERATION_RESULT, ITERATION_STARTED
+from kernelforge.orchestrator.critic_fallback import render_critic_fallback
+from kernelforge.orchestrator.gate_tag import gate_outcome_tag
 from kernelforge.run_export.document import normalize
 
 CAMPAIGN = "5f1c0a9e2b7d4c38a6e0f1b2c3d4e5f6"
 WORKSPACE = "forge_loop_triton_softmax_1760500000"
-GATE_TAG = "[gate edits=2 pass=True end=agent_stopped turns=17 mean_case_speedup=1.180000x raw_mean=0.0410ms]"
+GATE_TAG = gate_outcome_tag(
+    SimpleNamespace(edit_count=2, passed=True, last_mean_case_speedup=1.18, last_wall_ms=0.041), "agent_stopped", 17
+)
 SESSION_RATIONALE = "Two passes over each row cost a second read. Fusing them halves the traffic."
 ROUND_PLAN = """I profiled the kernel first; here is the plan.
 
@@ -43,17 +57,15 @@ The body of the plan is not its summary.
 SUMMARY_LANE_PLAN = (
     "Summary: Loads are 32-bit. This lane widens them.\n\n# Lane two: vectorize loads\n\nUse 128-bit loads.\n"
 )
-CRITIC_FALLBACK_PLAN = """The Orchestration revision was unavailable. Treat the review below as binding.
-
-## Critic review
-Summary: The critic's own summary is not the plan's.
-
-## Original draft
-Summary: Small rows are bound by launch latency. This plan fuses the passes.
+CRITIC_FALLBACK_PLAN = render_critic_fallback(
+    draft_plan="""Summary: Small rows are bound by launch latency. This plan fuses the passes.
 
 # Fuse the row reduction
 Step one.
-"""
+""",
+    critic_review="Summary: The critic's own summary is not the plan's.",
+    critic_verdict="REVISE",
+)
 SESSION_LESSON = (
     "One sweep saved a global read. Small rows gained most. More.\n"
     "HELD-FIXED: the output layout.\n"
@@ -79,10 +91,10 @@ def _write_json(path: Path, value: Any) -> Path:
     return _write(path, json.dumps(value))
 
 
-def _candidate(experiments: Path, iteration: int, **meta: Any) -> Path:
+def _candidate(layout: ExperimentsLayout, iteration: int, **meta: Any) -> Path:
     """``candidates/iter_NNN`` as ``CandidateArchive.record`` writes it."""
 
-    directory = experiments / "candidates" / f"iter_{iteration:03d}"
+    directory = layout.candidate(iteration)
     _write(directory / "softmax_kernel.py", f"# candidate {iteration}\n")
     _write(directory / "change.diff", "--- a/softmax_kernel.py\n+++ b/softmax_kernel.py\n")
     record = {
@@ -98,7 +110,7 @@ def _candidate(experiments: Path, iteration: int, **meta: Any) -> Path:
         "files": {"kernel": "softmax_kernel.py", "diff": "change.diff", "profile": None, "validation": None},
         **meta,
     }
-    _write_json(directory / "meta.json", record)
+    _write_json(directory / CANDIDATE_META, record)
     return directory
 
 
@@ -109,10 +121,10 @@ def _plain_run(
     *,
     round_plan: str = ROUND_PLAN,
     lane_plan: str = LANE_PLAN,
-) -> Path:
+) -> ExperimentsLayout:
     """A workspace after a short forge-loop: a session that kept, a lane that reverted, and a merge."""
 
-    experiments = root / name / "forge_experiments"
+    layout = ExperimentsLayout.of(root / name)
     config = {
         "operator_name": "_softmax_kernel",
         "framework": "unknown",
@@ -120,25 +132,24 @@ def _plain_run(
         "gpu_type": "mi300x",
         "kernel_path": "softmax_kernel.py",
     }
-    _write_json(experiments / "campaign_config.json", config)
-    _write_json(experiments / "run_state.json", {"campaign_id": campaign_id, "iteration": 3})
+    _write_json(layout.campaign_config, config)
+    _write_json(layout.run_state, {"campaign_id": campaign_id, "iteration": 3})
     events = [
-        {"ts": "2026-10-15 09:58:00", "type": "iteration_started", "iter": 1},
-        {"ts": "2026-10-15 10:00:00", "type": "iteration_started", "iter": 1},
-        {"ts": "2026-10-15 10:04:30", "type": "iteration_result", "iter": 1, "decision": "KEEP"},
-        {"ts": "2026-10-15 10:05:00", "type": "iteration_started", "iter": 2},
+        {"ts": "2026-10-15 09:58:00", "type": ITERATION_STARTED, "iter": 1},
+        {"ts": "2026-10-15 10:00:00", "type": ITERATION_STARTED, "iter": 1},
+        {"ts": "2026-10-15 10:04:30", "type": ITERATION_RESULT, "iter": 1, "decision": "KEEP"},
+        {"ts": "2026-10-15 10:05:00", "type": ITERATION_STARTED, "iter": 2},
         {"ts": "2026-10-15 10:06:00", "type": "merge_attempt_staged", "iter": 2},
-        {"ts": "2026-10-15 10:09:00", "type": "iteration_result", "iter": 2, "decision": "REVERT_PERF"},
+        {"ts": "2026-10-15 10:09:00", "type": ITERATION_RESULT, "iter": 2, "decision": "REVERT_PERF"},
     ]
-    _write(experiments / "events.jsonl", "".join(json.dumps(event) + "\n" for event in events) + "{torn line\n")
-    _write(experiments / "orchestration" / "iter_001" / "optimization_plan.md", round_plan)
-    _write(experiments / "orchestration" / "iter_001" / "lane_002.md", lane_plan)
-    plan_path = "forge_experiments/orchestration/iter_001/optimization_plan.md"
-    _write_json(experiments / "handoffs" / "iter_001.json", {"optimization_plan_path": plan_path})
-    _write(experiments / "lessons" / "iter_001.md", SESSION_LESSON)
-    _write(experiments / "best" / "iter_001" / "softmax_kernel.py", "# best\n")
+    _write(layout.events, "".join(json.dumps(event) + "\n" for event in events) + "{torn line\n")
+    plan = _write(layout.round(1) / lane_plan_name(1), round_plan)
+    _write(layout.round(1) / lane_plan_name(2), lane_plan)
+    _write_json(layout.handoff(1), {"optimization_plan_path": str(plan.relative_to(layout.root.parent))})
+    _write(layout.lesson(1), SESSION_LESSON)
+    _write(layout.root / "best" / "iter_001" / "softmax_kernel.py", "# best\n")
     _candidate(
-        experiments,
+        layout,
         1,
         decision="KEEP",
         kept=True,
@@ -149,7 +160,7 @@ def _plain_run(
         rationale=f"{GATE_TAG} {SESSION_RATIONALE}",
     )
     _candidate(
-        experiments,
+        layout,
         2,
         decision="REVERT_PERF",
         wall_ms=0.051,
@@ -157,10 +168,10 @@ def _plain_run(
         best_wall_ms_before=0.044,
         best_mean_case_speedup_before=1.18,
         plan=lane_plan.strip(),
-        rationale="lane 2 of a fan-out round",
+        rationale=lane_rationale("2"),
     )
     _candidate(
-        experiments,
+        layout,
         3,
         decision="REVERT_PERF",
         wall_ms=0.047,
@@ -170,34 +181,35 @@ def _plain_run(
         plan=MERGE_PLAN,
         rationale="stacked iterations 1 and 2; no Implementer session",
     )
-    return experiments
+    return layout
 
 
 def _loop_log(path: Path, workspace: str, kb_record: str = KB_RECORD) -> Path:
     """A forge-loop stdout log of the fixture's three iterations; it names the kernel by the absolute path the run
     had, and the KB record written after the KEEP and rewritten after the loop."""
 
-    text = (
-        "  Agent profile: claude / Claude-Opus-5: available\n"
-        "Starting autonomous iteration loop\n"
-        f"  Kernel: /home/someone/kernelforge-runs/{workspace}/softmax_kernel.py\n"
-        "--- Iteration 1 (best mean case speedup: 1.000000x, remaining: 110 min) ---\n"
-        "  [KEEP] mean case speedup=1.180000x — NEW BEST (+18.0% vs previous best)\n"
-        f"  [kb] experience written: {kb_record} (speedup 1.180)\n"
-        "--- Iteration 2 (best mean case speedup: 1.180000x, remaining: 90 min) ---\n"
-        "--- Iteration 3 (best mean case speedup: 1.180000x, remaining: 70 min) ---\n"
-        "BUDGET EXHAUSTED after 3 iterations in this session\n"
-        f"  [kb] experience written: {kb_record} (speedup 1.180)\n"
+    written = kb_write_line({"written": True, "solution": kb_record, "speedup": 1.18})
+    lines = (
+        "  Agent profile: claude / Claude-Opus-5: available",
+        LOOP_BANNER,
+        kernel_line(f"/home/someone/kernelforge-runs/{workspace}/softmax_kernel.py"),
+        iteration_header(1, 1.0, 110 * 60),
+        "  [KEEP] mean case speedup=1.180000x — NEW BEST (+18.0% vs previous best)",
+        written,
+        iteration_header(2, 1.18, 90 * 60),
+        iteration_header(3, 1.18, 70 * 60),
+        "BUDGET EXHAUSTED after 3 iterations in this session",
+        written,
     )
-    return _write(path, text)
+    return _write(path, "".join(f"{line}\n" for line in lines))
 
 
 def _units(root: Path) -> dict[str, dict[str, Any]]:
     return {unit["unit_id"]: unit for unit in normalize([root])["runs"]}
 
 
-def _meta(experiments: Path, iteration: int) -> dict[str, Any]:
-    return json.loads((experiments / "candidates" / f"iter_{iteration:03d}" / "meta.json").read_text(encoding="utf-8"))
+def _meta(layout: ExperimentsLayout, iteration: int) -> dict[str, Any]:
+    return json.loads((layout.candidate(iteration) / CANDIDATE_META).read_text(encoding="utf-8"))
 
 
 def _ref(path: Path) -> dict[str, Any]:
@@ -205,39 +217,36 @@ def _ref(path: Path) -> dict[str, Any]:
     return {"name": path.name, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
 
 
-def _generation(experiments: Path, commit: str, report: str) -> Path:
+def _generation(layout: ExperimentsLayout, commit: str, report: str) -> Path:
     """A published Analysis generation for ``commit``, ``analysis/<commit>/generation-001``, with its report."""
 
-    directory = experiments / "analysis" / commit / "generation-001"
+    directory = layout.root / "analysis" / commit / "generation-001"
     _write(directory / "report.md", f"\n{report}\n")
-    _write_json(experiments / "analysis" / commit / "published.json", {"generation_root": directory.name})
+    _write_json(layout.root / "analysis" / commit / "published.json", {"generation_root": directory.name})
     return directory
 
 
 def _made_elsewhere(relative: str) -> str:
     """The absolute path ``forge_experiments/<relative>`` had where the fixture's run was made."""
 
-    return f"/home/someone/kernelforge-runs/{WORKSPACE}/forge_experiments/{relative}"
+    return str(ExperimentsLayout.of(f"/home/someone/kernelforge-runs/{WORKSPACE}").root / relative)
 
 
-def _planned_on(experiments: Path, iteration: int, bundle: str) -> None:
+def _planned_on(layout: ExperimentsLayout, iteration: int, bundle: str) -> None:
     """The context round ``iteration`` planned with, naming ``bundle`` as its Analysis bundle after the report it
     summarizes."""
 
     refs = [{"kind": "analysis_summary", "path": f"{bundle}/report.md"}, {"kind": "analysis_bundle", "path": bundle}]
-    _write_json(experiments / "orchestration" / f"iter_{iteration:03d}" / "context.json", {"evidence_refs": refs})
+    _write_json(layout.round(iteration) / ROUND_CONTEXT, {"evidence_refs": refs})
 
 
-def _round_after_the_keep(experiments: Path) -> None:
+def _round_after_the_keep(layout: ExperimentsLayout) -> None:
     """Round 4, planned after iteration 1's KEEP: a single session's plan, its handoff, and the candidate it built."""
 
-    _write(
-        experiments / "orchestration" / "iter_004" / "optimization_plan.md", "# Widen the loads\n\nUse 128-bit loads.\n"
-    )
-    plan_path = "forge_experiments/orchestration/iter_004/optimization_plan.md"
-    _write_json(experiments / "handoffs" / "iter_004.json", {"optimization_plan_path": plan_path})
+    plan = _write(layout.round(4) / lane_plan_name(1), "# Widen the loads\n\nUse 128-bit loads.\n")
+    _write_json(layout.handoff(4), {"optimization_plan_path": str(plan.relative_to(layout.root.parent))})
     _candidate(
-        experiments,
+        layout,
         4,
         decision="REVERT_PERF",
         wall_ms=0.046,
@@ -248,12 +257,11 @@ def _round_after_the_keep(experiments: Path) -> None:
 
 
 def test_a_single_session_candidate_becomes_a_complete_unit(tmp_path: Path) -> None:
-    experiments = _plain_run(tmp_path)
+    layout = _plain_run(tmp_path)
     _loop_log(tmp_path / "forge-loop.log", WORKSPACE)
     unit = _units(tmp_path)[f"{WORKSPACE}/iteration-1"]
 
-    candidate = experiments / "candidates" / "iter_001"
-    orchestration = experiments / "orchestration" / "iter_001"
+    candidate = layout.candidate(1)
     assert unit == {
         "unit_id": f"{WORKSPACE}/iteration-1",
         "run_id": CAMPAIGN,
@@ -262,14 +270,14 @@ def test_a_single_session_candidate_becomes_a_complete_unit(tmp_path: Path) -> N
         "provenance": {
             "kb_record": KB_RECORD,
             "candidate_origin": "session",
-            "meta": _meta(experiments, 1),
+            "meta": _meta(layout, 1),
         },
         "started_at": "2026-10-15T10:00:00",
         "completed_at": "2026-10-15T10:04:30",
         "best_wall_ms_before": 0.052,
         "decision": "KEEP",
         "candidate_wall_ms": 0.044,
-        "plan_file": str((orchestration / "optimization_plan.md").resolve()),
+        "plan_file": str((layout.round(1) / lane_plan_name(1)).resolve()),
         "plan": (
             "Small rows are bound by launch latency. This plan fuses the max and sum passes into one sweep. "
             "It keeps the output layout unchanged."
@@ -282,11 +290,11 @@ def test_a_single_session_candidate_becomes_a_complete_unit(tmp_path: Path) -> N
 
 
 def test_a_lane_candidate_takes_its_lane_plan_from_the_round_that_planned_it(tmp_path: Path) -> None:
-    experiments = _plain_run(tmp_path)
+    layout = _plain_run(tmp_path)
     unit = _units(tmp_path)[f"{WORKSPACE}/iteration-2"]
 
-    lane_plan = experiments / "orchestration" / "iter_001" / "lane_002.md"
-    assert unit["provenance"] == {"candidate_origin": "lane", "meta": _meta(experiments, 2)}
+    lane_plan = layout.round(1) / lane_plan_name(2)
+    assert unit["provenance"] == {"candidate_origin": "lane", "meta": _meta(layout, 2)}
     assert unit["plan_file"] == str(lane_plan.resolve())
     assert unit["plan"] == "Use 128-bit loads for the input rows. Keep the reduction as it is."
     assert (unit["started_at"], unit["completed_at"]) == ("2026-10-15T10:05:00", "2026-10-15T10:09:00")
@@ -295,10 +303,10 @@ def test_a_lane_candidate_takes_its_lane_plan_from_the_round_that_planned_it(tmp
 
 
 def test_a_merge_is_named_by_its_stacked_plans_and_dated_by_its_archive(tmp_path: Path) -> None:
-    experiments = _plain_run(tmp_path)
+    layout = _plain_run(tmp_path)
     unit = _units(tmp_path)[f"{WORKSPACE}/iteration-3"]
 
-    assert unit["provenance"] == {"candidate_origin": "merge", "meta": _meta(experiments, 3)}
+    assert unit["provenance"] == {"candidate_origin": "merge", "meta": _meta(layout, 3)}
     assert unit["plan"] == MERGE_PLAN
     assert (unit["best_wall_ms_before"], unit["candidate_wall_ms"]) == (0.044, 0.047)
     assert (unit["started_at"], unit["completed_at"]) == ("2026-10-15T10:12:00", "2026-10-15T10:12:00")
@@ -318,8 +326,8 @@ def test_source_ms_is_the_pristine_baseline_the_run_state_records(
     """A run given --baseline-json archives the time of the kernel its search started from in each meta.json; its
     run state keeps the original kernel's time."""
 
-    experiments = _plain_run(tmp_path)
-    _write_json(experiments / "run_state.json", {"campaign_id": CAMPAIGN, "iteration": 3, **state})
+    layout = _plain_run(tmp_path)
+    _write_json(layout.run_state, {"campaign_id": CAMPAIGN, "iteration": 3, **state})
 
     units = _units(tmp_path)
 
@@ -348,9 +356,9 @@ def test_identity_names_the_operator_and_the_kernel_kernelforge_files_its_record
     the run's target functions; neither the backend's version nor the inputs' dtype is recorded, so neither is
     named."""
 
-    experiments = _plain_run(tmp_path)
-    config = json.loads((experiments / "campaign_config.json").read_text(encoding="utf-8"))
-    _write_json(experiments / "campaign_config.json", {**config, **recorded})
+    layout = _plain_run(tmp_path)
+    config = json.loads(layout.campaign_config.read_text(encoding="utf-8"))
+    _write_json(layout.campaign_config, {**config, **recorded})
 
     identities = [unit["identity"] for unit in _units(tmp_path).values()]
 
@@ -358,12 +366,12 @@ def test_identity_names_the_operator_and_the_kernel_kernelforge_files_its_record
 
 
 def test_the_driver_hash_joins_identity_only_when_the_campaign_recorded_one(tmp_path: Path) -> None:
-    experiments = _plain_run(tmp_path)
+    layout = _plain_run(tmp_path)
     assert "driver_sha256" not in _units(tmp_path)[f"{WORKSPACE}/iteration-1"]["identity"]
 
     digest = "ab" * 32
-    config = json.loads((experiments / "campaign_config.json").read_text(encoding="utf-8"))
-    _write_json(experiments / "campaign_config.json", {**config, "driver_sha256": digest})
+    config = json.loads(layout.campaign_config.read_text(encoding="utf-8"))
+    _write_json(layout.campaign_config, {**config, "driver_sha256": digest})
 
     identities = [unit["identity"]["driver_sha256"] for unit in _units(tmp_path).values()]
 
@@ -371,8 +379,8 @@ def test_the_driver_hash_joins_identity_only_when_the_campaign_recorded_one(tmp_
 
 
 def test_a_candidate_without_an_archived_diff_links_no_diff_file(tmp_path: Path) -> None:
-    experiments = _plain_run(tmp_path)
-    (experiments / "candidates" / "iter_003" / "change.diff").unlink()
+    layout = _plain_run(tmp_path)
+    (layout.candidate(3) / "change.diff").unlink()
 
     units = _units(tmp_path)
 
@@ -418,14 +426,14 @@ def test_only_a_kept_candidate_carries_the_kb_record_its_iteration_wrote(tmp_pat
 
 
 def test_lane_copies_are_not_runs_and_unreadable_archives_say_why(tmp_path: Path) -> None:
-    experiments = _plain_run(tmp_path)
-    lane_copy = tmp_path / "forge-lanes-x1y2" / "2" / "forge_experiments"
-    _write_json(lane_copy / "campaign_config.json", {"operator_name": "softmax_kernel"})
-    _write_json(lane_copy / "run_state.json", {"campaign_id": CAMPAIGN})
-    _write(experiments / "candidates" / "iter_004" / "meta.json", "{not json")
-    unnamed = tmp_path / "unnamed" / "forge_experiments"
-    _write_json(unnamed / "campaign_config.json", {"operator_name": "softmax_kernel"})
-    _write_json(unnamed / "run_state.json", {"iteration": 0})
+    layout = _plain_run(tmp_path)
+    lane_copy = ExperimentsLayout.of(tmp_path / f"{LANE_ROOT_PREFIX}x1y2" / "2")
+    _write_json(lane_copy.campaign_config, {"operator_name": "softmax_kernel"})
+    _write_json(lane_copy.run_state, {"campaign_id": CAMPAIGN})
+    _write(layout.candidate(4) / CANDIDATE_META, "{not json")
+    unnamed = ExperimentsLayout.of(tmp_path / "unnamed")
+    _write_json(unnamed.campaign_config, {"operator_name": "softmax_kernel"})
+    _write_json(unnamed.run_state, {"iteration": 0})
 
     units = _units(tmp_path)
 
@@ -438,10 +446,10 @@ def test_lane_copies_are_not_runs_and_unreadable_archives_say_why(tmp_path: Path
 
 
 def test_summary_lines_give_the_plan_and_the_whole_lesson_is_the_reasoning(tmp_path: Path) -> None:
-    experiments = _plain_run(tmp_path, round_plan=SUMMARY_PLAN, lane_plan=SUMMARY_LANE_PLAN)
-    orchestration = experiments / "orchestration" / "iter_001"
-    _write(experiments / "lessons" / "iter_001.md", SESSION_LESSON)
-    _write(experiments / "lessons" / "iter_002.md", LANE_LESSON)
+    layout = _plain_run(tmp_path, round_plan=SUMMARY_PLAN, lane_plan=SUMMARY_LANE_PLAN)
+    orchestration = layout.round(1)
+    _write(layout.lesson(1), SESSION_LESSON)
+    _write(layout.lesson(2), LANE_LESSON)
     _write(orchestration / "optimization_plan.reasoning.md", "Summary: This log is not the reasoning.\n")
     _write(orchestration / "lane_002.reasoning.md", "Summary: Neither is this one.\n")
 
@@ -454,9 +462,9 @@ def test_summary_lines_give_the_plan_and_the_whole_lesson_is_the_reasoning(tmp_p
     )
     assert session["reasoning"] == SESSION_LESSON.strip()
     assert "lesson" not in session and "lesson_file" not in session
-    assert session["plan_file"] == str((orchestration / "optimization_plan.md").resolve())
+    assert session["plan_file"] == str((orchestration / lane_plan_name(1)).resolve())
     assert (lane["plan"], lane["reasoning"]) == ("Loads are 32-bit. This lane widens them.", LANE_LESSON.strip())
-    assert lane["plan_file"] == str((orchestration / "lane_002.md").resolve())
+    assert lane["plan_file"] == str((orchestration / lane_plan_name(2)).resolve())
     assert "reasoning" not in merge
 
 
@@ -464,13 +472,13 @@ def test_summary_lines_give_the_plan_and_the_whole_lesson_is_the_reasoning(tmp_p
 def test_a_plan_is_summarized_from_its_draft_and_a_session_without_a_lesson_falls_back(
     tmp_path: Path, lesson: str | None
 ) -> None:
-    experiments = _plain_run(tmp_path, round_plan=CRITIC_FALLBACK_PLAN)
-    lesson_path = experiments / "lessons" / "iter_001.md"
+    layout = _plain_run(tmp_path, round_plan=CRITIC_FALLBACK_PLAN)
+    lesson_path = layout.lesson(1)
     if lesson is None:
         lesson_path.unlink()
     else:
         _write(lesson_path, lesson)
-    _write(experiments / "orchestration" / "iter_001" / "optimization_plan.reasoning.md", "Summary: Ignored.\n")
+    _write(layout.round(1) / "optimization_plan.reasoning.md", "Summary: Ignored.\n")
 
     session = _units(tmp_path)[f"{WORKSPACE}/iteration-1"]
 
@@ -479,12 +487,12 @@ def test_a_plan_is_summarized_from_its_draft_and_a_session_without_a_lesson_fall
 
 
 def test_each_candidate_carries_the_report_of_the_analysis_its_round_planned_on(tmp_path: Path) -> None:
-    experiments = _plain_run(tmp_path)
-    _round_after_the_keep(experiments)
-    _generation(experiments, BASELINE_COMMIT, BASELINE_REPORT)
-    _generation(experiments, KEPT_COMMIT, KEPT_REPORT)
-    _planned_on(experiments, 1, _made_elsewhere(f"analysis/{BASELINE_COMMIT}/generation-001"))
-    _planned_on(experiments, 4, _made_elsewhere(f"analysis/{KEPT_COMMIT}/generation-001"))
+    layout = _plain_run(tmp_path)
+    _round_after_the_keep(layout)
+    _generation(layout, BASELINE_COMMIT, BASELINE_REPORT)
+    _generation(layout, KEPT_COMMIT, KEPT_REPORT)
+    _planned_on(layout, 1, _made_elsewhere(f"analysis/{BASELINE_COMMIT}/generation-001"))
+    _planned_on(layout, 4, _made_elsewhere(f"analysis/{KEPT_COMMIT}/generation-001"))
 
     units = _units(tmp_path)
 
@@ -514,9 +522,9 @@ def test_each_candidate_carries_the_report_of_the_analysis_its_round_planned_on(
 def test_a_report_a_text_field_cannot_hold_is_left_out_and_its_provenance_says_why(
     tmp_path: Path, report: str, omitted: str | None
 ) -> None:
-    experiments = _plain_run(tmp_path)
-    _generation(experiments, BASELINE_COMMIT, report)
-    _planned_on(experiments, 1, _made_elsewhere(f"analysis/{BASELINE_COMMIT}/generation-001"))
+    layout = _plain_run(tmp_path)
+    _generation(layout, BASELINE_COMMIT, report)
+    _planned_on(layout, 1, _made_elsewhere(f"analysis/{BASELINE_COMMIT}/generation-001"))
 
     session = _units(tmp_path)[f"{WORKSPACE}/iteration-1"]
 
@@ -534,10 +542,10 @@ def test_a_report_a_text_field_cannot_hold_is_left_out_and_its_provenance_says_w
     ],
 )
 def test_a_round_that_planned_on_no_published_generation_gives_no_report(tmp_path: Path, bundle: str | None) -> None:
-    experiments = _plain_run(tmp_path)
-    _generation(experiments, BASELINE_COMMIT, BASELINE_REPORT)
+    layout = _plain_run(tmp_path)
+    _generation(layout, BASELINE_COMMIT, BASELINE_REPORT)
     if bundle is not None:
-        _planned_on(experiments, 1, bundle)
+        _planned_on(layout, 1, bundle)
 
     session = _units(tmp_path)[f"{WORKSPACE}/iteration-1"]
 
@@ -547,10 +555,10 @@ def test_a_round_that_planned_on_no_published_generation_gives_no_report(tmp_pat
 
 def test_the_report_collects_as_text_and_no_analysis_file_is_linked(tmp_path: Path) -> None:
     logs = tmp_path / "logs"
-    experiments = _plain_run(logs)
-    generation = _generation(experiments, BASELINE_COMMIT, BASELINE_REPORT)
+    layout = _plain_run(logs)
+    generation = _generation(layout, BASELINE_COMMIT, BASELINE_REPORT)
     _write(generation / "cases" / "M1024_N256-2bb066cf" / "profile" / "pmc_perf.csv", "Dispatch_ID,SQ_WAVES\n0,64\n")
-    _planned_on(experiments, 1, _made_elsewhere(f"analysis/{BASELINE_COMMIT}/generation-001"))
+    _planned_on(layout, 1, _made_elsewhere(f"analysis/{BASELINE_COMMIT}/generation-001"))
     output = tmp_path / "runs.json"
     assert CliRunner().invoke(main, ["export-runs", str(logs), "-o", str(output)]).exit_code == 0
 
@@ -581,7 +589,7 @@ def test_export_runs_writes_the_document(tmp_path: Path) -> None:
 
 
 def test_the_exported_document_collects_through_the_packaged_mapping(tmp_path: Path) -> None:
-    _plain_run(tmp_path / "logs")
+    layout = _plain_run(tmp_path / "logs")
     _loop_log(tmp_path / "logs" / "forge-loop.log", WORKSPACE)
     output = tmp_path / "runs.json"
     assert CliRunner().invoke(main, ["export-runs", str(tmp_path / "logs"), "-o", str(output)]).exit_code == 0
@@ -603,7 +611,7 @@ def test_the_exported_document_collects_through_the_packaged_mapping(tmp_path: P
     assert "lesson" not in row.experience.reflection
     assert "llm_backend" not in row.experience.provenance.extra
     assert "llm_model" not in row.experience.provenance.extra
-    assert row.experience.provenance.extra["meta"] == _meta(tmp_path / "logs" / WORKSPACE / "forge_experiments", 1)
+    assert row.experience.provenance.extra["meta"] == _meta(layout, 1)
     assert row.experience.raw_logs == ()
     assert {row.unit_id: row.reason.split(":")[0] for row in report.skipped} == {
         f"{WORKSPACE}/iteration-2": "No reasoning, which every Experience requires",
@@ -613,9 +621,8 @@ def test_the_exported_document_collects_through_the_packaged_mapping(tmp_path: P
 
 def test_a_run_collects_its_lanes_with_each_lesson_as_their_reasoning(tmp_path: Path) -> None:
     logs = tmp_path / "logs"
-    experiments = _plain_run(logs, round_plan=SUMMARY_PLAN, lane_plan=SUMMARY_LANE_PLAN)
-    orchestration = experiments / "orchestration" / "iter_001"
-    _write(experiments / "lessons" / "iter_002.md", LANE_LESSON)
+    layout = _plain_run(logs, round_plan=SUMMARY_PLAN, lane_plan=SUMMARY_LANE_PLAN)
+    _write(layout.lesson(2), LANE_LESSON)
     output = tmp_path / "runs.json"
     assert CliRunner().invoke(main, ["export-runs", str(logs), "-o", str(output)]).exit_code == 0
 
@@ -629,7 +636,7 @@ def test_a_run_collects_its_lanes_with_each_lesson_as_their_reasoning(tmp_path: 
     assert lane["rationale"] == {
         "reasoning": LANE_LESSON.strip(),
         "plan": "Loads are 32-bit. This lane widens them.",
-        "plan_file": _ref(orchestration / "lane_002.md"),
+        "plan_file": _ref(layout.round(1) / lane_plan_name(2)),
     }
     assert lane["change"]["change_diff_file"]["name"] == "change.diff"
     assert (lane["baseline"], lane["outcome"]) == (
@@ -665,13 +672,13 @@ def test_export_runs_stops_naming_a_path_it_cannot_read(tmp_path: Path, unreadab
     if os.geteuid() == 0:
         pytest.skip("root reads every file whatever its mode")
     logs = tmp_path / "logs"
-    experiments = _plain_run(logs)
+    layout = _plain_run(logs)
     paths = {
-        "plan": experiments / "orchestration" / "iter_001" / "optimization_plan.md",
+        "plan": layout.round(1) / lane_plan_name(1),
         "log": _loop_log(logs / "forge-loop.log", WORKSPACE),
-        "candidate record": experiments / "candidates" / "iter_001" / "meta.json",
-        "events log": experiments / "events.jsonl",
-        "best bundle": experiments / "best" / "iter_001",
+        "candidate record": layout.candidate(1) / CANDIDATE_META,
+        "events log": layout.events,
+        "best bundle": layout.root / "best" / "iter_001",
     }
     path = paths[unreadable]
     mode = path.stat().st_mode
