@@ -110,6 +110,31 @@ def external_service_url() -> str:
     return _service_url(handoff_lookup())
 
 
+def _external_pods(ips: list[str], role: str, ssh_port: int) -> list[dict[str, Any]]:
+    """Build SSH targets for one role, mirroring the pods' own port math."""
+    base = ssh_port + ssh_role_port_offset(role)
+    return [
+        {
+            "podIP": ip,
+            "podId": f"external-{role}-{i}",
+            "role": role,
+            "lwsIndex": i,
+            "sshPort": base + i,
+        }
+        for i, ip in enumerate(ips)
+    ]
+
+
+def _record_pd_split(state: dict[str, Any], pd_mode: str, pn: int, dn: int) -> None:
+    """Record the prefill/decode node split of a disaggregated hand-off in ``state``."""
+    if pd_mode == "disaggregated" and (pn > 0 or dn > 0):
+        state["pd_prefill_nodes"] = pn
+        state["pd_decode_nodes"] = dn
+        state["last_restart_pd_prefill_nodes"] = pn
+        state["last_restart_pd_decode_nodes"] = dn
+        state["last_restart_pd_mode"] = "disaggregated"
+
+
 def build_external_state_from_env() -> dict[str, Any]:
     """Synthesize multi-node state from ``TOPOLOGY_HANDOFF_FILE`` or, without it, ``HYPERLOOM_MN_EXT_*`` env vars."""
     get = handoff_lookup()
@@ -132,20 +157,6 @@ def build_external_state_from_env() -> dict[str, Any]:
     gpn = _int_env("INFERENCE_OPTIMIZER_GPUS_PER_NODE", 8)
     # From the --pd-mode flag, mirrored into the env by `optimize`.
     pd_mode = (os.environ.get("PD_MODE", "") or "aggregated").strip().lower()
-
-    def _pods(ips: list[str], role: str) -> list[dict[str, Any]]:
-        """Build SSH targets for one role, mirroring the pods' own port math."""
-        base = ssh_port + ssh_role_port_offset(role)
-        return [
-            {
-                "podIP": ip,
-                "podId": f"external-{role}-{i}",
-                "role": role,
-                "lwsIndex": i,
-                "sshPort": base + i,
-            }
-            for i, ip in enumerate(ips)
-        ]
 
     prefill, decode, worker = (
         _ips("HYPERLOOM_MN_EXT_PREFILL_IPS"),
@@ -175,11 +186,11 @@ def build_external_state_from_env() -> dict[str, Any]:
         "pd_mode": pd_mode,
         "ssh_port": ssh_port,
         "prefill_pod_ips": prefill,
-        "prefill_pods": _pods(prefill, "prefill"),
+        "prefill_pods": _external_pods(prefill, "prefill", ssh_port),
         "decode_pod_ips": decode,
-        "decode_pods": _pods(decode, "decode"),
+        "decode_pods": _external_pods(decode, "decode", ssh_port),
         "worker_pod_ips": worker,
-        "worker_pods": _pods(worker, "worker"),
+        "worker_pods": _external_pods(worker, "worker", ssh_port),
     }
     if ssh_key:
         state["ssh_key_path"] = ssh_key
@@ -190,12 +201,7 @@ def build_external_state_from_env() -> dict[str, Any]:
         state["ray_address"] = ray_address
     if ray_dash_token:
         state["ray_dashboard_token"] = ray_dash_token
-    if pd_mode == "disaggregated" and (pn > 0 or dn > 0):
-        state["pd_prefill_nodes"] = pn
-        state["pd_decode_nodes"] = dn
-        state["last_restart_pd_prefill_nodes"] = pn
-        state["last_restart_pd_decode_nodes"] = dn
-        state["last_restart_pd_mode"] = "disaggregated"
+    _record_pd_split(state, pd_mode, pn, dn)
     return state
 
 

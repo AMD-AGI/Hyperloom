@@ -451,10 +451,11 @@ def test_outside_optimize_the_file_still_supplies_the_counts(monkeypatch, tmp_pa
 
 # ---- the CLI reaches the file through the package's own interface --------------------------------------------------
 def test_the_cli_uses_the_packages_exports_and_not_its_internal_module() -> None:
+    import importlib
     import inspect
 
-    import hyperloom.inference_optimizer.cli.multi_node as cli_mn
-    import hyperloom.inference_optimizer.multi_node as package
+    cli_mn = importlib.import_module("hyperloom.inference_optimizer.cli.multi_node")
+    package = importlib.import_module("hyperloom.inference_optimizer.multi_node")
 
     assert package.TopologyHandoffError is topo.TopologyHandoffError
     assert package.topology_file_overlay is topo.topology_file_overlay
