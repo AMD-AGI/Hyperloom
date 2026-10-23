@@ -253,13 +253,11 @@ def test_provision_external_infera_requires_ssh(
 
 def _adopt_rayjob(monkeypatch: pytest.MonkeyPatch) -> argparse.Namespace:
     """Neutralize the session-side setup so adoption reduces to its reporting."""
-    from hyperloom.inference_optimizer.cli import multi_node as mn
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
     monkeypatch.setattr(mncli, "cmd_bootstrap", lambda _ns: 0)
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: 0)
-    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: None)
     return argparse.Namespace(nodes=2, mn_backend="rayjob", mn_image=None, model="/models/test", no_kernel=True)
 
 
@@ -991,7 +989,6 @@ def test_a_genuine_benchmark_only_handoff_still_proceeds(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """No HEAD_IP and no SSH is the documented benchmark-only mode, not an error."""
-    from hyperloom.inference_optimizer.cli import multi_node as mn
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
     monkeypatch.delenv("HYPERLOOM_MN_EXT_HEAD_IP", raising=False)
@@ -1000,7 +997,6 @@ def test_a_genuine_benchmark_only_handoff_still_proceeds(
         monkeypatch.delenv(f"HYPERLOOM_MN_EXT_{role}_IPS", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: 0)
-    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: None)
 
     args = argparse.Namespace(nodes=2, mn_backend="rayjob", model="/models/test", no_kernel=True)
     _prepare_multi_node_state(args)
@@ -1014,7 +1010,6 @@ def test_benchmark_only_rayjob_handoff_skips_bootstrap_instead_of_aborting(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Benchmark-only must survive the adoption it was just promised."""
-    from hyperloom.inference_optimizer.cli import multi_node as mn
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
     monkeypatch.delenv("HYPERLOOM_MN_EXT_HEAD_IP", raising=False)
@@ -1024,12 +1019,11 @@ def test_benchmark_only_rayjob_handoff_skips_bootstrap_instead_of_aborting(
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
     calls: list[str] = []
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: calls.append("geak") or 0)
-    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: calls.append("replay"))
 
     args = argparse.Namespace(nodes=2, mn_backend="rayjob", model="/models/test", no_kernel=False)
     _prepare_multi_node_state(args)
 
-    assert calls == ["geak", "replay"]
+    assert calls == ["geak"]
     assert "skipping the head-pod bootstrap" in capsys.readouterr().err
 
 
@@ -1061,12 +1055,11 @@ def test_kill_inference_invalidates_the_launch_it_terminated(
     assert after["last_restart_framework"] == "sglang"
 
 
-def test_adopting_a_rayjob_bootstraps_and_replays_patches(
+def test_adopting_a_rayjob_bootstraps_and_installs_geak(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Adoption still owes the cluster its session-side setup."""
-    from hyperloom.inference_optimizer.cli import multi_node as mn
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
     monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
@@ -1074,12 +1067,11 @@ def test_adopting_a_rayjob_bootstraps_and_replays_patches(
     calls: list[str] = []
     monkeypatch.setattr(mncli, "cmd_bootstrap", lambda _ns: calls.append("bootstrap") or 0)
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: calls.append("geak") or 0)
-    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: calls.append("replay"))
 
     args = argparse.Namespace(nodes=2, mn_backend="rayjob", model="/models/test", no_kernel=False)
     _prepare_multi_node_state(args)
 
-    assert calls == ["bootstrap", "geak", "replay"]
+    assert calls == ["bootstrap", "geak"]
 
 
 def test_adopting_an_infera_cluster_skips_bootstrap_but_installs_geak(
@@ -1087,18 +1079,16 @@ def test_adopting_an_infera_cluster_skips_bootstrap_but_installs_geak(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Bootstrap is a Ray Dashboard call, so it is rayjob-only; GEAK is the infera half."""
-    from hyperloom.inference_optimizer.cli import multi_node as mn
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
     calls: list[str] = []
     monkeypatch.setattr(mncli, "cmd_bootstrap", lambda _ns: calls.append("bootstrap") or 0)
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: calls.append("geak") or 0)
-    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: calls.append("replay"))
 
     args = argparse.Namespace(nodes=2, mn_backend="infera", model="/models/test", no_kernel=False)
     _prepare_multi_node_state(args)
 
-    assert calls == ["geak", "replay"]
+    assert calls == ["geak"]
 
 
 def test_adopting_with_no_kernel_skips_the_geak_install(
@@ -1106,17 +1096,15 @@ def test_adopting_with_no_kernel_skips_the_geak_install(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``--no-kernel`` opts out of the kernel phase, so the pods need no GEAK."""
-    from hyperloom.inference_optimizer.cli import multi_node as mn
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
     calls: list[str] = []
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: calls.append("geak") or 0)
-    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: calls.append("replay"))
 
     args = argparse.Namespace(nodes=2, mn_backend="infera", model="/models/test", no_kernel=True)
     _prepare_multi_node_state(args)
 
-    assert calls == ["replay"]
+    assert calls == []
 
 
 def test_missing_handoff_exits_config_error_not_transient(

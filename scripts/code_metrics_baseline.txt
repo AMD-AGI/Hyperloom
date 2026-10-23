@@ -80,12 +80,12 @@ duplicated-lines src/hyperloom/inference_optimizer/tests/test_cli_bootstrap.py 3
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_cli_bootstrap_coverage_unit.py 380
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_close_phase_sequencer.py 42
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_column_kb.py 68
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_common_utils.py 863
+duplicated-lines src/hyperloom/inference_optimizer/tests/test_common_utils.py 785
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_conc_sweep.py 44
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_coordinator_async_methods_coverage_unit.py 18
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_coordinator_sync_helpers_coverage_unit.py 15
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_coverage_boost_unit.py 44
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_coverage_gap_units.py 660
+duplicated-lines src/hyperloom/inference_optimizer/tests/test_coverage_gap_units.py 581
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_coverage_margin3_unit.py 161
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_decision_framework.py 18
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_eval_result_dir_wiring.py 66
@@ -442,7 +442,7 @@ module-lines src/hyperloom/orchestrator/phases/framework.py 3038
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4102
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 1994
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2511
-module-lines src/hyperloom/orchestrator/policy/gate.py 1577
+module-lines src/hyperloom/orchestrator/policy/gate.py 1576
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2556
 module-lines src/hyperloom/orchestrator/specialists/runner.py 1453
