@@ -212,17 +212,14 @@ def geak_acceptance_specs(result: Any) -> list[dict[str, Any]]:
         if not isinstance(raw, dict) or not name:
             continue
         row = {**raw, "lane": lane, "alias_collapsed": False}
-        try:
-            delta = float(raw.get("e2e_delta_pct"))
-        except (TypeError, ValueError):
-            delta = None
         if geak_spec_is_env(raw):
             out.append({**row, "kind": "env"})
             continue
-        if delta is None:
+        try:
+            twin = (str(raw.get("op_kind") or ""), f"{float(raw.get('e2e_delta_pct')):.4f}")
+        except (TypeError, ValueError):
             out.append(row)
             continue
-        twin = (str(raw.get("op_kind") or ""), f"{delta:.4f}")
         pos = index.setdefault(twin, len(out))
         if pos == len(out):
             out.append(row)
