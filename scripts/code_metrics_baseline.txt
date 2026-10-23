@@ -300,7 +300,7 @@ function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_c
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_model_config_compat 71
 function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_prepare_multi_node_state 76
 function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_replay_kernel_patches_for_multi_node 73
-function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 929
+function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 913
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_emit_preflight_diagnostics 65
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_inferencex 51
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_lm_eval_dep 62
