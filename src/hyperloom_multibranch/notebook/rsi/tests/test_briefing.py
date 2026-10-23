@@ -56,6 +56,7 @@ from hyperloom_multibranch.notebook.rsi.briefing import ON_HEAD, CrossSessionBri
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, judgement, profile, request, result
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, SPLIT_KV, scripted_session
 from hyperloom_multibranch.notebook.tools import FOCUS_LINE
+from hyperloom_multibranch.repo.merge import KernelTables, stack_kernel_slot
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact, union_rows
 from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import (
     B01_HEAD,
@@ -68,6 +69,12 @@ from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import (
     csv_text,
     install,
 )
+
+
+def _tables(store: dict[str, bytes], keep=None, configs=None) -> TableStack:
+    tables = KernelTables(lambda artifact: store[artifact.sha256], keep, configs)
+    return TableStack(stack_slot=lambda wanted, current: stack_kernel_slot(wanted, current, tables))
+
 
 SAME = {
     "model": "deepseek-ai/DeepSeek-R1",
@@ -341,8 +348,9 @@ async def test_a_peer_replay_takes_the_wider_table_and_names_no_loss(tmp_path: P
     store = {narrow.sha256: csv_text(SHARED), wide.sha256: csv_text(SHARED, B09_NEW)}
     await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(wide,))))
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(narrow,))
-    tables = TableStack(lambda artifact: store[artifact.sha256])
-    briefing = CrossSessionBriefing(notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), tables=tables)
+    briefing = CrossSessionBriefing(
+        notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), tables=_tables(store)
+    )
 
     replayed = await briefing.peer_replay("r7")
 
@@ -359,8 +367,9 @@ async def test_a_peer_replay_drops_a_kernel_the_heads_wider_table_already_covers
     store = {narrow.sha256: csv_text(SHARED), wide.sha256: csv_text(SHARED, B09_NEW)}
     await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(narrow,))))
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(wide,))
-    tables = TableStack(lambda artifact: store[artifact.sha256])
-    briefing = CrossSessionBriefing(notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), tables=tables)
+    briefing = CrossSessionBriefing(
+        notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), tables=_tables(store)
+    )
 
     with pytest.raises(ValueError, match="already has the change"):
         await briefing.peer_replay("r7")
@@ -383,8 +392,9 @@ async def test_a_peer_replay_unites_two_tables_each_with_rows_the_other_lacks(tm
 
     await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(peer,))))
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(head_art,))
-    tables = TableStack(lambda artifact: store[artifact.sha256], keep, configs)
-    briefing = CrossSessionBriefing(notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), tables=tables)
+    briefing = CrossSessionBriefing(
+        notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), tables=_tables(store, keep, configs)
+    )
 
     replayed = await briefing.peer_replay("r7")
 
@@ -394,7 +404,7 @@ async def test_a_peer_replay_unites_two_tables_each_with_rows_the_other_lacks(tm
     assert (united.sha256, store[united.sha256]) == (hashlib.sha256(expected).hexdigest(), expected)
 
 
-async def test_a_peer_replay_keeps_naming_the_swap_when_the_tables_conflict(tmp_path: Path) -> None:
+async def test_a_peer_replay_unites_keeping_the_heads_row_when_shapes_differ(tmp_path: Path) -> None:
     root = tmp_path / "notebook"
     notebook = await scripted_session(root, FakeClock())
     toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
@@ -411,13 +421,41 @@ async def test_a_peer_replay_keeps_naming_the_swap_when_the_tables_conflict(tmp_
 
     await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(peer,))))
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(head_art,))
-    tables = TableStack(lambda artifact: store[artifact.sha256], keep, configs)
-    briefing = CrossSessionBriefing(notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), tables=tables)
+    briefing = CrossSessionBriefing(
+        notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), tables=_tables(store, keep, configs)
+    )
 
     replayed = await briefing.peer_replay("r7")
 
-    assert replayed.replaces == (head_art,)
-    assert replayed.delta.add_kernels == (peer,)
+    (united,) = replayed.delta.add_kernels
+    expected = union_rows(csv_text(B01_NEW), head_data, ENV, configs=configs)
+    assert replayed.replaces == ()
+    assert (united.sha256, store[united.sha256]) == (hashlib.sha256(expected).hexdigest(), expected)
+
+
+async def test_a_peer_replay_keeps_naming_the_swap_when_the_tables_cannot_unite(tmp_path: Path) -> None:
+    root = tmp_path / "notebook"
+    notebook = await scripted_session(root, FakeClock())
+    toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
+    own = KernelArtifact(KernelKind.GEMM, "moe", "kernel/gemm/head.csv", "b" * 64)
+    theirs = KernelArtifact(KernelKind.GEMM, "moe", "kernel/gemm/peer.csv", "d" * 64)
+    store = {
+        own.sha256: b"cu_num,M,N,K,gfx,us\n304,1,4096,4096,gfx950,23.1\n",
+        theirs.sha256: b"M,N,K,us\n1,4096,4096,19.8\n8,4096,4096,31.0\n",
+    }
+    await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(theirs,))))
+    head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(own,))
+    briefing = CrossSessionBriefing(
+        notebook,
+        branch="s3",
+        repo=_Repo({"s3": "c3"}, {"c3": head}),
+        tables=_tables(store, lambda data: hashlib.sha256(data).hexdigest()),
+    )
+
+    replayed = await briefing.peer_replay("r7")
+
+    assert replayed.replaces == (own,)
+    assert replayed.delta.add_kernels == (theirs,)
 
 
 async def test_a_peer_replay_gives_a_component_new_to_the_head_the_upstream_its_test_was_made_on(

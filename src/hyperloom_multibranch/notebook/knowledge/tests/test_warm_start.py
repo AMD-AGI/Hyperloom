@@ -313,6 +313,7 @@ def test_a_champion_on_this_image_replays_its_whole_recipe_on_any_head_its_files
 
 def test_a_replay_stacks_the_champions_table_over_the_heads_instead_of_replacing_it(tmp_path: Path) -> None:
     from hyperloom_multibranch.notebook.knowledge.replay_tables import TableStack
+    from hyperloom_multibranch.repo.merge import KernelTables, stack_kernel_slot
     from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
     from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import B09_NEW, ENV, SHARED, csv_text
 
@@ -322,8 +323,10 @@ def test_a_replay_stacks_the_champions_table_over_the_heads_instead_of_replacing
     head = replace(ROOT, kernels=(narrow,))
     champion = replace(CHAMPION, kernels=(wide,), components=ROOT.components)
     found = PreparedReplay(EXACT_ID, champion, champion.launch)
+    tables = KernelTables(lambda artifact: store[artifact.sha256])
+    stack = TableStack(stack_slot=lambda wanted, current: stack_kernel_slot(wanted, current, tables))
 
-    on_head = found.on(head, "c3", TableStack(lambda artifact: store[artifact.sha256]))
+    on_head = found.on(head, "c3", stack)
 
     assert on_head is not None
     assert on_head.delta.add_kernels == (wide,)

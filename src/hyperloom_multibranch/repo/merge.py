@@ -75,6 +75,16 @@ class Stored:
 
 
 @dataclass(frozen=True)
+class KernelTables:
+    """What stacking two kernel artifacts needs: the bytes behind each, a store for a united table, and the aiter
+    install a union reads a shape key from (the image's when ``None``)."""
+
+    kernel_table: TableBytes
+    store_table: TableStore | None = None
+    aiter_configs: Path | None = None
+
+
+@dataclass(frozen=True)
 class _Kernels:
     """The kernel artifacts a merge carries, and the slots among them it fills with a union of both sides' tables."""
 
@@ -213,11 +223,43 @@ def wider_table(wanted: KernelArtifact, current: KernelArtifact, table: TableByt
     return None
 
 
+def stack_kernel_slot(wanted: KernelArtifact, current: KernelArtifact, tables: KernelTables) -> KernelArtifact | None:
+    """The artifact that serves both tables in one slot: the wider of them, or their union, or ``None`` when neither
+    fits. A union needs ``tables.store_table``. Refusals from the union become ``None`` rather than raising, so a
+    replay can keep swapping the head's table out and name the loss.
+    """
+
+    try:
+        wider = wider_table(wanted, current, tables.kernel_table)
+    except (KeyError, OSError, ValueError):
+        return None
+    if wider is not None:
+        return wider
+    if tables.store_table is None:
+        return None
+    try:
+        return _unite_pair(wanted, current, tables.kernel_table, tables.store_table, tables.aiter_configs).table
+    except RecipeError:
+        return None
+
+
 def _united(theirs: KernelArtifact, ours: KernelArtifact, stored: Stored) -> UnitedTable:
     """The rows of both tables as one table of their slot, kept in the blob store. A shape both tuned to other rows
     keeps the head's row; rows put over the image's default table read the same over a whole table, so a rows-only set
     and a whole table make a whole table. Refused when the two do not load through one variable or are not one kind
     of table."""
+
+    return _unite_pair(theirs, ours, stored.kernel_table, stored.store_table, stored.aiter_configs)
+
+
+def _unite_pair(
+    theirs: KernelArtifact,
+    ours: KernelArtifact,
+    kernel_table: TableBytes,
+    store_table: TableStore,
+    aiter_configs: Path | None,
+) -> UnitedTable:
+    """:func:`_united` over the table bytes and store alone, so a replay can call it without a full :class:`Stored`."""
 
     try:
         env, other = kernel_load_env(theirs), kernel_load_env(ours)
@@ -226,12 +268,12 @@ def _united(theirs: KernelArtifact, ours: KernelArtifact, stored: Stored) -> Uni
         raise _both_moved(theirs.slot, str(error)) from error
     if env != other:
         raise _both_moved(theirs.slot, f"one table loads through {env}, the other through {other}")
-    tables = stored.kernel_table(theirs), stored.kernel_table(ours)
+    tables = kernel_table(theirs), kernel_table(ours)
     try:
-        data, kept = _union_keeping_ours(*tables, env, rows_only, stored.aiter_configs)
+        data, kept = _union_keeping_ours(*tables, env, rows_only, aiter_configs)
     except KernelRowsError as error:
         raise _both_moved(theirs.slot, str(error)) from error
-    stored.store_table(data)
+    store_table(data)
     return UnitedTable(
         theirs, ours, mint_kernel_artifact(theirs.kind, theirs.target, env, data, rows_only=rows_only), kept
     )
@@ -363,4 +405,14 @@ def _without(delta: RecipeDelta, settled: _Settled) -> RecipeDelta:
     return replace(delta, components=tuple(changes))
 
 
-__all__ = ["PatchStore", "StackFiles", "Stored", "TableBytes", "TableStore", "carry", "wider_table"]
+__all__ = [
+    "KernelTables",
+    "PatchStore",
+    "StackFiles",
+    "Stored",
+    "TableBytes",
+    "TableStore",
+    "carry",
+    "stack_kernel_slot",
+    "wider_table",
+]

@@ -54,6 +54,7 @@ from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
 from hyperloom_multibranch.notebook import BriefTriggers, LocalNotebook
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs, TableStack
+from hyperloom_multibranch.repo.merge import KernelTables, stack_kernel_slot
 from hyperloom_multibranch.notebook.rsi.lesson_recall import LessonRecall
 from hyperloom_multibranch.notebook.rsi.lessons import LessonPool
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
@@ -265,12 +266,13 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
 
     mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
     learnings = specialist_recall(layout.reports)
+    kernel_tables = KernelTables(lambda artifact: setup.blobs.get(artifact.sha256), setup.blobs.put)
     briefs = SessionBriefs(
         LocalNotebook(layout.notebook, Writer(Role.OBSERVER, BRIEFS_READER)),
         metric=workload.metric,
         learnings=learnings,
         repo=repo,
-        tables=TableStack(lambda artifact: setup.blobs.get(artifact.sha256), setup.blobs.put),
+        tables=TableStack(stack_slot=lambda wanted, current: stack_kernel_slot(wanted, current, kernel_tables)),
     )
     tool_options = SpecialistToolOptions(
         claim_ttl_seconds=CLAIM_TTL_SECONDS,
