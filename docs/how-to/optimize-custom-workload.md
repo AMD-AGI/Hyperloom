@@ -27,7 +27,6 @@ frameworks, see [Run a Hyperloom optimization](optimize.md) instead.
 ## Launch
 
 ```bash
-export HYPERLOOM_BENCHMARK_BACKEND=bypass
 python3 -m hyperloom optimize -v \
   --framework custom \
   --framework-path /path/to/my-checkout \
@@ -37,13 +36,11 @@ python3 -m hyperloom optimize -v \
   --extra-env MYFW_STEPS=50 --extra-env MYFW_CKPT=/path/to/ckpt
 ```
 
-```{important}
-`HYPERLOOM_BENCHMARK_BACKEND=bypass` is required. The backend defaults to
-Magpie, which cannot run an operator-supplied script, so launch refuses any
-other value with `--framework custom requires HYPERLOOM_BENCHMARK_BACKEND=bypass`.
-This is easy to lose when you move to a fresh shell, and it is the most common
-launch failure on this path.
-```
+`--framework custom` selects the `bypass` benchmark backend when
+`HYPERLOOM_BENCHMARK_BACKEND` is unset; it is the only backend that can run an
+operator-supplied script, so launch refuses any other explicit value. Set
+`HYPERLOOM_BENCHMARK_BACKEND=bypass` before running `install.sh` anyway: the
+installer does not know the framework and otherwise also installs Magpie.
 
 Neither `--framework-path` nor `--benchmark-scripts-dir` is optional here. With
 no shipped entrypoint to fall back on, a missing path fails at launch rather
@@ -546,7 +543,7 @@ custom launch script fails explicitly instead of launching a serving framework.
 
 | Symptom | Cause |
 |---------|-------|
-| `requires HYPERLOOM_BENCHMARK_BACKEND=bypass` at launch | The backend is unset or set to something else |
+| `requires HYPERLOOM_BENCHMARK_BACKEND=bypass` at launch | The backend is set to something other than `bypass` |
 | Missing-path error at launch | `--framework-path` or `--benchmark-scripts-dir` not given; `custom` has no shipped entrypoint to fall back on |
 | Entrypoint not resolved | The directory has no `custom_<runner_type>.sh` and does not contain exactly one `.sh` |
 | Run completes but keeps no optimization | The report carries no `quality_gate`, so accuracy scores 0.0 and every candidate is rejected |
