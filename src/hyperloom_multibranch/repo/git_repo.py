@@ -20,6 +20,7 @@ from pathlib import Path
 from hyperloom.contracts.recipe import (
     PATCH_ROOT,
     ComponentPatches,
+    KernelArtifact,
     PatchRef,
     Recipe,
     RecipeDelta,
@@ -36,7 +37,7 @@ from hyperloom.measure.compile import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, RepoMerge
-from hyperloom_multibranch.repo.merge import carry
+from hyperloom_multibranch.repo.merge import Stored, carry
 
 RECIPE_FILE = "recipe.json"
 _UPDATE_REF = "update-ref"
@@ -120,7 +121,8 @@ class GitExperimentRepo:
         if parent is None:
             raise ValueError(f"{candidate} is the root commit; it carries no change")
         recipes = [await self.read_recipe(commit) for commit in (parent, resolved, onto)]
-        return await asyncio.to_thread(carry, onto, *recipes, self._apply_to_package)
+        stored = Stored(self._apply_to_package, self._table_bytes)
+        return await asyncio.to_thread(carry, onto, *recipes, stored)
 
     async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: Sequence[str]) -> str:
         recipe = apply(await self.read_recipe(onto), delta)
@@ -150,6 +152,9 @@ class GitExperimentRepo:
         files = [(patch.path, patch.sha256) for component in recipe.components for patch in component.patches]
         files += [(kernel.ref, kernel.sha256) for kernel in recipe.kernels]
         await asyncio.to_thread(self._write_files, files, destination)
+
+    def _table_bytes(self, artifact: KernelArtifact) -> bytes:
+        return self._blobs.get(artifact.sha256)
 
     def _apply_to_package(self, component: ComponentPatches) -> None:
         layout = COMPONENT_LAYOUTS.get(component.component)
