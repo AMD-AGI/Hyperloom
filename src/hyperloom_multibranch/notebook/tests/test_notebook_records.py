@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.recipe import DIGEST_PREFIX, RecipeDelta
+from hyperloom.contracts.recipe import DIGEST_PREFIX, PatchRef, RecipeDelta
 from hyperloom_multibranch.contracts.notebook import (
     INTEGRATION_BRANCH,
     ClaimKey,
@@ -37,6 +37,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
     Verdict,
 )
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
+from hyperloom_multibranch.contracts.repo import ResolvedPatch
 from hyperloom_multibranch.contracts.notebook.records import (
     BaselineRecord,
     Learning,
@@ -687,6 +688,27 @@ async def test_merges_that_did_not_land_say_why_in_the_commit_query(open_as: Ope
         await integrator.record_merge_attempt(MergeAttempt(("c2",), "c0"))
     with pytest.raises(ValueError, match="integration"):
         await integrator.record_merge_attempt(MergeAttempt(("c2",), "c0", request_id="r2"))
+
+
+async def test_the_patches_a_model_wrote_for_a_tested_merge_reach_the_snapshot(open_as: Open) -> None:
+    """CLOSE names them in the Recipe KB's provenance, so the snapshot carries every one the merges recorded."""
+
+    scheduler, gate, integrator = open_as(Role.SCHEDULER), open_as(Role.GATE), open_as(Role.INTEGRATOR)
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    await _tested(open_as, "r1")
+    await gate.write_judgement("r1", judgement(3.0, ("r1",)), Conclusion.COMMITTED, "c1")
+    await _tested(open_as, "m1", branch=INTEGRATION_BRANCH)
+    written = ResolvedPatch(
+        "sglang", "patch/sglang/qwen3.patch", PatchRef("patch/sglang/m1.patch", "e" * 64), "m", "v1", 2
+    )
+
+    await integrator.record_merge_attempt(MergeAttempt(("c1",), "c0", request_id="m1", resolved_patches=(written,)))
+
+    assert (await integrator.snapshot()).resolved_patches == (written,)
+    with pytest.raises(ValueError, match="no model-written patch"):
+        await integrator.record_merge_attempt(
+            MergeAttempt(("c1",), "c0", skipped_reason="unresolved patch conflict", resolved_patches=(written,))
+        )
 
 
 async def test_a_merge_skipped_because_its_change_is_already_on_the_head_is_no_conflict(open_as: Open) -> None:
