@@ -357,6 +357,11 @@ _HOLDS = {
         "e2e_workflow/knowledge/learned and kernel_workflow/knowledge/learned: what earlier GEAK runs learned, by "
         "operator and model)"
     ),
+    "inferencex": (
+        " (configs/*-master.yaml: the reference entries per model, GPU, framework and precision, with their image, TP "
+        "and concurrency; benchmarks/single_node: the script each entry launches, with its server arguments and "
+        "environment)"
+    ),
 }
 
 

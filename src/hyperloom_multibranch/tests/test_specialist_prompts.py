@@ -561,6 +561,13 @@ def test_the_role_says_what_geak_s_reference_directories_hold(tmp_path):
     assert "perf_knowledge" not in role_prompt(WORKLOAD, references={"notes": tmp_path / "notes"})
 
 
+def test_the_role_says_what_an_inferencex_copy_holds(tmp_path):
+    prompt = role_prompt(WORKLOAD, references={"inferencex": tmp_path / "inferencex"})
+
+    assert "configs/*-master.yaml" in prompt
+    assert "benchmarks/single_node" in prompt
+
+
 def test_the_role_reads_a_table_s_hits_before_calling_it_flat():
     prompt = role_prompt(WORKLOAD)
 
