@@ -1453,6 +1453,18 @@ and keep the `ps` check for the optimizer PID recorded in the pidfile.
 Health checks only observe and reconcile launch metadata; they must not kill,
 restart, or automatically resume the optimizer.
 
+## Hosted Run (`hyperloom hosted run`)
+
+Not a launch you run by hand: a hosting platform starts it. `hyperloom hosted run` takes no arguments. It reads the host's inputs
+(`HYPERLOOM_INPUT_FILE` for the campaign spec `hyperloom.campaign-spec/v1`, plus `HYPERLOOM_RUN_ID`, `HYPERLOOM_RUN_CREATED_AT`,
+`HYPERLOOM_STATE_DIR` and the rest listed in `docs/reference/environment-variables.md`), removes the host-only ones from its
+environment, and runs `optimize` in the same process: `--resume-from <dir> --plug-profile <profile>` when the run's session
+directory already holds `manifest.json` and `state.json`, otherwise the spec mapped to `optimize` flags plus
+`--plug-profile <profile> --session-dir <dir>`. The directory is derived from the run, so a restart resumes the same session.
+It records the outcome in `$HYPERLOOM_STATE_DIR/exit.json`; the host restarts the run only when `final` is not true. A spec it
+refuses ends with `final: true` and return code 2. A spec with `flow: "multibranch"` is handed to `hyperloom-multibranch hosted
+run` with the environment unchanged.
+
 ## Resume Existing Session
 
 `--resume-from "$SESSION_DIR"` is the only way to resume; there is no

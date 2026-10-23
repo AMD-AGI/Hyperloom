@@ -30,6 +30,13 @@ _HOSTED = (
 )
 # Packages that exist only on the multibranch development branch; main must stay self-contained.
 _DEV_ONLY = ("hyperloom.measure", "hyperloom.sandbox", "hyperloom.hosted", "hyperloom_multibranch")
+# Modules of hyperloom.hosted that main itself carries; the rest of that package is dev-only.
+_HOSTED_ON_MAIN = (
+    "hyperloom.hosted.campaign",
+    "hyperloom.hosted.context",
+    "hyperloom.hosted.entry",
+    "hyperloom.hosted.host_info",
+)
 _E2B_OWNER = "hyperloom/sandbox/e2b.py"
 
 
@@ -115,7 +122,7 @@ def test_rule_2_main_imports_no_package_that_exists_only_on_the_dev_branch() -> 
     offenders = []
     for path in _main_modules():
         for line, module in _imports(ast.parse(path.read_text())):
-            if _under(module, _DEV_ONLY):
+            if _under(module, _DEV_ONLY) and not _under(module, _HOSTED_ON_MAIN):
                 offenders.append(f"{path.relative_to(_SRC)}:{line}: {module}")
     assert offenders == []
 
