@@ -6,7 +6,7 @@ notebook in step.
 
 Opening a branch records its ``OPEN`` lineage, cuts it in the experiment repository at its start commit, starts its
 specialist there and gives it its K; the session's briefs keep the focus a branch the scheduler opens in a batch was
-opened with. A user branch opens the same way at the root commit, on the direction the user wrote for it, which its
+opened with. A user branch opens the same way where EXPLORE starts, on the direction the user wrote for it, which its
 started decision records. A repair the fork desk admitted is opened the same way at the commit its blocked
 candidate was measured against, however far the branch that asked for it has committed past that commit meanwhile:
 the repair lands on its own branch, and the integrator carries a commit's own change onto the integration head. A

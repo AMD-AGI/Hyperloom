@@ -212,6 +212,15 @@ def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_dollars_used() -> N
     )
 
 
+def test_the_prompt_opens_the_first_branches_where_explore_started_and_not_at_the_root() -> None:
+    """EXPLORE opens on the Recipe KB champion when PRELUDE's replay of it improved on the root."""
+
+    prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
+    assert "the opening batch, which opens from the commit EXPLORE started on" in prompt
+    assert "the root commit, or the Recipe KB champion PRELUDE replayed onto it" in prompt
+    assert "such branches open from that same commit ahead of the opening batch" in prompt
+
+
 def test_a_branch_row_shows_what_is_known_of_its_specialist_and_a_gave_up_one_is_left_to_the_scheduler() -> None:
     gave_up = SpecialistStatus(running=False, crashes=4, lost=1, gave_up=True, judge_failed=False)
     judging_failed = SpecialistStatus(running=False, crashes=0, lost=6, gave_up=False, judge_failed=True)

@@ -71,7 +71,8 @@ Each branch has K, the number of tests it may run at once. Within the hard caps 
 how many branches to open, each branch's K (the integration branch included), which specialist branches to stop and
 why, and whether the whole session should stop early.
 You may open branches at any call. opening is true only for the call that sizes the opening batch, which opens from
-the root commit, at least one branch unless user branches opened already. A branch opened at a later call starts from
+the commit EXPLORE started on — the root commit, or the Recipe KB champion PRELUDE replayed onto it — at least one
+branch unless user branches opened already. A branch opened at a later call starts from
 the integration head, briefed on its focus: the op it should speed up. Name the focus of each, or leave it out and
 the branch is briefed on the largest op of the integration head's latest profile, or on none when that head was never
 profiled. The opening batch is given no focus. free_branch_slots counts the branches you may open at this call having
@@ -141,7 +142,7 @@ to be confirmed, and that one you cannot stop either. A branch whose judging fai
 its slot until you stop it: stop it, and open a branch in its place if one would still pay off.
 Each lost heartbeat costs minutes: weigh a specialist's lost count against its progress, and stop it when it keeps
 losing its heartbeat without gaining.
-A branch of origin user follows a direction the user wrote; such branches open from the root commit ahead of the
+A branch of origin user follows a direction the user wrote; such branches open from that same commit ahead of the
 opening batch, and the opening batch fills the slots they leave.
 A branch's held says why a stop or a lower K you give it is not applied, and is absent from a branch you may stop
 and narrow freely. grace: a specialist branch until {SETTLED_TESTS} of its explore tests ended with a result, a
