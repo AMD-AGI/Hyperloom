@@ -75,6 +75,10 @@ def _ref(branch: str) -> str:
     return f"refs/heads/{branch}"
 
 
+def _patch_paths(recipe: Recipe) -> set[str]:
+    return {patch.path for component in recipe.components for patch in component.patches}
+
+
 def _read(path: Path) -> bytes | None:
     return path.read_bytes() if path.is_file() else None
 
@@ -150,13 +154,31 @@ class GitExperimentRepo:
     async def commit(self, branch: str, parent: str, recipe: Recipe, message: str) -> str:
         return await self._land(branch, parent, recipe, (parent,), message)
 
-    async def merge(self, candidate: str, onto: str) -> RepoMerge:
+    async def merge(self, candidate: str, onto: str, protected: frozenset[str] = frozenset()) -> RepoMerge:
         resolved = await self._commit_of(candidate)
         parent = await self._resolve(f"{resolved}^1")
         if parent is None:
             raise ValueError(f"{candidate} is the root commit; it carries no change")
         recipes = [await self.read_recipe(commit) for commit in (parent, resolved, onto)]
-        return await asyncio.to_thread(carry, onto, *recipes, self._stored())
+        stored = replace(self._stored(), protected=await self._contributed(onto, protected))
+        return await asyncio.to_thread(carry, onto, *recipes, stored)
+
+    async def _contributed(self, onto: str, merged: frozenset[str]) -> frozenset[str]:
+        """The paths of the patches the merges of ``merged`` added to ``onto``'s first-parent chain: each merge commit's
+        later parents are the commits it merged, and the patches its recipe added over its first parent's are theirs.
+
+        The chain is read from the repository, but ``merged`` is the session's: a head carried into a later session
+        protects nothing until that set is derived from the merge log.
+        """
+        if not merged:
+            return frozenset()
+        chain = (await self._git("rev-list", "--first-parent", "--parents", await self._commit_of(onto))).splitlines()
+        paths: set[str] = set()
+        for commit, first, *others in (line.split() for line in chain if len(line.split()) > 2):
+            if not merged.isdisjoint(others):
+                before, after = await self.read_recipe(first), await self.read_recipe(commit)
+                paths |= _patch_paths(after) - _patch_paths(before)
+        return frozenset(paths)
 
     def stack_kernel_slot(self, wanted: KernelArtifact, current: KernelArtifact) -> KernelArtifact | None:
         """What a replay of ``wanted`` puts in the slot ``current`` fills, read and kept in the stores :meth:`merge`

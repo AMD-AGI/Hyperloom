@@ -33,7 +33,7 @@ from hyperloom.measure.compile import (
     kernel_rows_only,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.repo import RepoMerge, ResolvedPatch, UnitedTable
+from hyperloom_multibranch.contracts.repo import ReplacedPatch, RepoMerge, ResolvedPatch, UnitedTable
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot, wider_table
 from hyperloom_multibranch.repo.rebase import Files
@@ -494,7 +494,7 @@ async def test_the_repository_reports_what_does_not_apply_to_the_installed_packa
     head = await repo.commit_integration(root, (await repo.merge(first, root)).delta, (first,))
 
     clash = _git_patch("config.py", "max_num_seqs = 128", "max_num_seqs = 256")
-    clashing = await repo.merge(await _candidate(repo, "s2", root, clash), head)
+    clashing = await repo.merge(await _candidate(repo, "s2", root, clash), head, frozenset({first}))
     elsewhere = _git_patch("scheduler.py", "policy = 'fcfs'", "policy = 'lpm'")
     beside = await repo.merge(await _candidate(repo, "s3", root, elsewhere), head)
 
@@ -570,7 +570,9 @@ async def test_a_patch_whose_context_the_head_moved_is_rebased_onto_it(tmp_path)
 
 
 async def test_a_line_both_sides_changed_stays_a_conflict(tmp_path):
-    *_, merge = await _merged_onto(tmp_path, _edit(c="30"), _edit(c="31", e="50"))
+    """The head's patch also changes a line the candidate's leaves alone, so the candidate's does not replace it."""
+
+    *_, merge = await _merged_onto(tmp_path, _edit(c="30", h="80"), _edit(c="31", e="50"))
 
     (conflict,) = merge.patch_conflicts
     assert "does not apply" in conflict.detail and merge.rebased_patches == ()
@@ -582,6 +584,92 @@ async def test_a_change_the_head_already_holds_is_not_carried_twice(tmp_path):
 
     assert merge.clean and merge.rebased_patches == ()
     assert [change.add_patches for change in merge.delta.components] == [()]
+
+
+def _on(lines: list[str], before: list[str] | None = None) -> str:
+    """A patch of the installed ``config.py`` from ``before`` (the installed file) to ``lines``."""
+
+    body = difflib.unified_diff(before or _config(), lines, "a/vllm/config.py", "b/vllm/config.py")
+    return "diff --git a/vllm/config.py b/vllm/config.py\n" + "".join(body)
+
+
+async def _replaced_onto(tmp_path, head_patches: list[str], candidate_patch: str, *, protect: bool = False):
+    """The candidate's merge from the root onto a head that merged each of ``head_patches`` in turn, each branched off
+    the head before it; ``protect`` passes the first of those merges as a foundation fix."""
+
+    installed = _installed(tmp_path, config="".join(_config()))
+    repo = _repository(tmp_path, installed)
+    head = root = await repo.init_root(BASE)
+    merged = []
+    for number, text in enumerate(head_patches):
+        merged.append(await _candidate(repo, f"h{number}", head, text))
+        head = await repo.commit_integration(head, (await repo.merge(merged[-1], head)).delta, merged[-1:])
+    candidate = await _candidate(repo, "s2", root, candidate_patch)
+    merge = await repo.merge(candidate, head, frozenset(merged[:1]) if protect else frozenset())
+    return repo, installed, head, merge
+
+
+def _paths(repo: GitExperimentRepo, recipe: Recipe) -> list[str]:
+    stack = recipe.component("vllm")
+    return [] if stack is None else [patch.path for patch in stack.patches]
+
+
+async def test_a_head_patch_the_candidate_rewrote_in_full_is_replaced_by_the_candidate_s(tmp_path):
+    """b19 in miniature: the head merged X after the candidate branched off; P sets the same lines otherwise."""
+
+    repo, installed, head, merge = await _replaced_onto(tmp_path, [_edit(c="30", d="40")], _edit(c="31", d="41"))
+
+    (x,) = _paths(repo, await repo.read_recipe(head))
+    (replaced,) = merge.replaced_patches
+    assert merge.clean and (replaced.component, replaced.removed) == ("vllm", (x,))
+    (change,) = merge.delta.components
+    assert (change.remove_patches, change.add_patches) == ((x,), (replaced.by,))
+    stack = apply(await repo.read_recipe(head), merge.delta).component("vllm")
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    (entry,) = apply_patch_stack(stack, COMPONENT_LAYOUTS["vllm"], installed, blobs).entries
+    assert blobs.get(entry.blob).decode() == "".join(_config(c="31", d="41"))
+
+
+async def test_a_head_patch_with_a_hunk_the_candidate_leaves_alone_is_not_replaced(tmp_path):
+    *_, merge = await _replaced_onto(tmp_path, [_edit(a="10", g="70")], _edit(a="11"))
+
+    (conflict,) = merge.patch_conflicts
+    assert "does not apply" in conflict.detail and merge.replaced_patches == ()
+    assert [(change.add_patches, change.remove_patches) for change in merge.delta.components] == [((), ())]
+
+
+async def test_a_foundation_fix_on_the_head_is_never_replaced(tmp_path):
+    *_, merge = await _replaced_onto(tmp_path, [_edit(c="30", d="40")], _edit(c="31", d="41"), protect=True)
+
+    assert len(merge.patch_conflicts) == 1 and merge.replaced_patches == ()
+    assert [change.remove_patches for change in merge.delta.components] == [()]
+
+
+async def test_a_head_patch_that_only_applies_on_top_of_the_replaced_one_goes_with_it(tmp_path):
+    on_x = _on(_config(c="30", d="40"), _config(c="30"))
+    repo, _, head, merge = await _replaced_onto(tmp_path, [_edit(c="30"), on_x], _edit(c="31", d="41"))
+
+    x, dependent = _paths(repo, await repo.read_recipe(head))
+    (replaced,) = merge.replaced_patches
+    assert merge.clean and replaced.removed == (x, dependent)
+    assert _paths(repo, apply(await repo.read_recipe(head), merge.delta)) == [replaced.by.path]
+
+
+async def test_a_head_patch_beside_the_replaced_one_stays(tmp_path):
+    beside = _on(_config(c="30", h="80"), _config(c="30"))
+    repo, _, head, merge = await _replaced_onto(tmp_path, [_edit(c="30"), beside], _edit(c="31"))
+
+    x, kept = _paths(repo, await repo.read_recipe(head))
+    (replaced,) = merge.replaced_patches
+    assert merge.clean and replaced.removed == (x,)
+    assert _paths(repo, apply(await repo.read_recipe(head), merge.delta)) == [kept, replaced.by.path]
+
+
+def test_a_merge_replaces_no_head_patch_unless_the_tier_settles_one():
+    replaced = ReplacedPatch("vllm", ("patch/vllm/old.patch",), _patch("new"))
+
+    assert RepoMerge(PIN, RecipeDelta()).replaced_patches == ()
+    assert replace(RepoMerge(PIN, RecipeDelta()), replaced_patches=(replaced,)).replaced_patches == (replaced,)
 
 
 def _blob_names(tmp_path) -> set[str]:

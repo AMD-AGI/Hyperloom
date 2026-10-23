@@ -192,7 +192,7 @@ async def test_a_merge_that_left_its_patch_out_as_a_conflict_is_still_accepted_o
     """A line both sides changed: the patch is a conflict, the delta carries the change without it."""
 
     repo, box, root = await _rig(tmp_path)
-    head, _ = await _head_with_first(repo, root, _edit(c="30"))
+    head, _ = await _head_with_first(repo, root, _edit(c="30", h="80"))
     merge = await repo.merge(await _candidate(repo, "s2", root, _edit(c="31", e="50")), head)
     (conflict,) = merge.patch_conflicts
     assert conflict.component == "vllm" and merge.rebased_patches == ()

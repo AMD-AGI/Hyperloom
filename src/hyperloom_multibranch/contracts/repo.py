@@ -41,6 +41,17 @@ class RebasedPatch:
 
 
 @dataclass(frozen=True)
+class ReplacedPatch:
+    """Head patches of ``component`` taken out for ``by``, a candidate's patch that rewrites every line they change:
+    ``removed`` is the head patch the candidate's stack did not hold, then each later head patch that applied only on
+    top of it."""
+
+    component: str
+    removed: tuple[str, ...]
+    by: PatchRef
+
+
+@dataclass(frozen=True)
 class ResolvedPatch:
     """A patch a model wrote in place of one of ``component`` that conflicted; ``replaces`` is the conflicting patch's
     path, and ``attempts`` how many patches the model wrote until this one applied."""
@@ -79,6 +90,7 @@ class RepoMerge:
     filled that ``delta`` fills with a union of their tables in place of the candidate's, or leaves at ``onto``'s table
     where the union is its rows and a shape of the candidate's lost to the head's row. ``resolved_patches`` are the
     patches a model wrote in place of conflicting ones that ``delta`` carries; the repository never writes them.
+    ``replaced_patches`` are the head patches ``delta`` removes for a candidate's patch that supersedes them.
     """
 
     onto: str
@@ -88,6 +100,7 @@ class RepoMerge:
     rebased_patches: tuple[RebasedPatch, ...] = ()
     united_tables: tuple[UnitedTable, ...] = ()
     resolved_patches: tuple[ResolvedPatch, ...] = ()
+    replaced_patches: tuple[ReplacedPatch, ...] = ()
 
     @property
     def clean(self) -> bool:
@@ -117,8 +130,13 @@ class ExperimentRepo(Protocol):
 
     async def commit(self, branch: str, parent: str, recipe: Recipe, message: str) -> str: ...
 
-    async def merge(self, candidate: str, onto: str) -> RepoMerge:
-        """Carry ``candidate``'s change onto ``onto``, writing nothing; ``RecipeError`` when the two cannot combine."""
+    async def merge(self, candidate: str, onto: str, protected: frozenset[str] = frozenset()) -> RepoMerge:
+        """Carry ``candidate``'s change onto ``onto``, writing nothing; ``RecipeError`` when the two cannot combine.
+
+        ``protected`` are the commits merged into ``onto`` as foundation fixes: no head patch they contributed is
+        replaced. The set is the session's, so a head carried into a later session protects nothing until it is
+        derived from the merge log.
+        """
 
     async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: Sequence[str]) -> str:
         """``delta`` on ``onto`` as a merge of ``merged_from``, landing on ``INTEGRATION_BRANCH`` as ``commit`` does.
@@ -147,6 +165,7 @@ __all__ = [
     "ExperimentRepo",
     "PatchConflict",
     "RebasedPatch",
+    "ReplacedPatch",
     "RepoMerge",
     "ResolvedPatch",
     "UnitedTable",
