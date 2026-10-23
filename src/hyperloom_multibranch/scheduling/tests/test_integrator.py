@@ -34,6 +34,8 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import (
     ComponentChange,
     ConfigDelta,
+    KernelArtifact,
+    KernelKind,
     LaunchConfig,
     PatchRef,
     Recipe,
@@ -45,6 +47,7 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, MergeOutcome
+from hyperloom_multibranch.contracts.repo import RepoMerge, UnitedTable
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay
@@ -704,6 +707,47 @@ async def _committed_again(bench: Bench) -> str:
     """A commit of a new branch ``s2`` that makes ``c1``'s change again, committed on the root."""
 
     return await _committed_elsewhere(bench, RecipeDelta(config=bench.deltas["c1"].config), 5.0)
+
+
+#: The shapes the head's rows won in the united slot, as ``union_rows`` names them by their key columns.
+KEPT_SHAPES = ({"M": "1024", "N": "4096"},)
+UNITED = UnitedTable(
+    KernelArtifact(KernelKind.GEMM, "linear", "kernel/theirs.csv", "c" * 64),
+    KernelArtifact(KernelKind.GEMM, "linear", "kernel/ours.csv", "d" * 64),
+    KernelArtifact(KernelKind.GEMM, "linear", "kernel/united.csv", "e" * 64),
+    KEPT_SHAPES,
+)
+UNITED_ROW = {
+    "kind": KernelKind.GEMM.value,
+    "target": "linear",
+    "theirs": "c" * 64,
+    "ours": "d" * 64,
+    "table": "e" * 64,
+    "kept_head_shapes": [dict(shape) for shape in KEPT_SHAPES],
+}
+
+
+class UnitingRepo(GitExperimentRepo):
+    """Reports every merge as uniting one kernel slot; a test double for the union a merge makes where a table's
+    shapes can be keyed, which needs an aiter install this bench has none of."""
+
+    async def merge(self, candidate: str, onto: str) -> RepoMerge:
+        return replace(await super().merge(candidate, onto), united_tables=(UNITED,))
+
+
+async def test_a_merge_that_unites_two_kernel_tables_says_so_in_the_decision_log(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, repo_type=UnitingRepo)
+
+    merged = await _one(bench)
+    again = await _committed_again(bench)
+    reports = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
+
+    assert merged is not None and merged.outcome is MergeOutcome.MERGED
+    [skipped] = [report for report in reports if report.candidate == again]
+    assert skipped.outcome is MergeOutcome.ALREADY_ON_HEAD
+    rows = {entry["detail"]["candidate"]: entry["detail"]["united_tables"] for entry in bench.logged()}
+    assert rows[merged.candidate] == [UNITED_ROW]
+    assert rows[again] == [UNITED_ROW]
 
 
 async def test_a_merge_that_leaves_the_head_s_recipe_unchanged_is_skipped_untested(bench: Bench) -> None:

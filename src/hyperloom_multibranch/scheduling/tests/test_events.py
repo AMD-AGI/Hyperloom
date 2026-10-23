@@ -56,7 +56,7 @@ BAR = 2.0
 
 def _merged(gain_pct: float, outcome: MergeOutcome = MergeOutcome.MERGED) -> MergeReport:
     merged = "c-merged" if outcome is MergeOutcome.MERGED else None
-    return MergeReport("c1", "c-root", outcome, "", "r1", merged, (), gain_pct, BAR)
+    return MergeReport("c1", "c-root", outcome, "", "r1", merged, gain_pct=gain_pct, threshold_pct=BAR)
 
 
 @pytest.mark.parametrize(
@@ -342,7 +342,9 @@ BEFORE = {"attn": 60.0, "gemm": 30.0}
 
 
 def _moved_onto(head: str) -> MergeReport:
-    return MergeReport("c1", "c-root", MergeOutcome.MERGED, "", "r1", head, (), MB_BIG_GAIN_BARS * BAR, BAR)
+    return MergeReport(
+        "c1", "c-root", MergeOutcome.MERGED, "", "r1", head, gain_pct=MB_BIG_GAIN_BARS * BAR, threshold_pct=BAR
+    )
 
 
 async def _until(condition: Any) -> None:
