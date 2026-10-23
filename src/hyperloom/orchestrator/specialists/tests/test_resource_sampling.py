@@ -6,8 +6,12 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
+import pytest
+
+from hyperloom.orchestrator.specialists import resources
 from hyperloom.orchestrator.specialists.resources import (
     ProcessTreeSampler,
     ResourceLog,
@@ -122,6 +126,71 @@ def test_dir_usage_counts_files_and_reports_missing_as_null(tmp_path: Path) -> N
     used = dir_usage_bytes(tmp_path / "w")
     assert used is not None and used >= 20000
     assert dir_usage_bytes(tmp_path / "absent") is None
+
+
+BLOCK = 512
+
+
+@pytest.fixture
+def one_block_each(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Weigh every directory entry at one block, so a count says how many entries were visited, on any filesystem."""
+
+    def weigh(entry: os.DirEntry[str]) -> tuple[int, Path | None]:
+        return BLOCK, Path(entry.path) if entry.is_dir(follow_symlinks=False) else None
+
+    monkeypatch.setattr(resources, "_entry_blocks", weigh)
+
+
+def test_dir_usage_visits_every_entry_at_any_depth_and_does_not_follow_a_link_to_a_directory(
+    tmp_path: Path, one_block_each: None
+) -> None:
+    root = tmp_path / "w"
+    (root / "sub" / "deeper").mkdir(parents=True)
+    for name in ("a.bin", "sub/b.bin", "sub/deeper/c.bin"):
+        (root / name).write_bytes(b"x")
+    (root / "link").symlink_to(root / "sub", target_is_directory=True)
+
+    assert dir_usage_bytes(root) == 6 * BLOCK  # a.bin, sub, b.bin, deeper, c.bin, and the link as one entry
+
+
+class _ScanFailingAfter:
+    """What ``os.scandir`` returns for a directory that yields ``entries`` and then fails."""
+
+    def __init__(self, entries: list[os.DirEntry[str]]) -> None:
+        self.entries = entries
+
+    def __enter__(self) -> "_ScanFailingAfter":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def __iter__(self):
+        yield from self.entries
+        raise PermissionError("the scan failed")
+
+
+@pytest.mark.parametrize("read_before_failing", [0, 1])
+def test_dir_usage_counts_what_was_read_of_a_directory_that_fails_and_goes_on_with_the_rest(
+    tmp_path: Path, one_block_each: None, monkeypatch: pytest.MonkeyPatch, read_before_failing: int
+) -> None:
+    root = tmp_path / "w"
+    (root / "sub").mkdir(parents=True)
+    (root / "a.bin").write_bytes(b"x")
+    for name in ("b.bin", "c.bin"):
+        (root / "sub" / name).write_bytes(b"x")
+    real_scandir = os.scandir
+
+    def scandir(path: str | os.PathLike[str]):
+        if Path(path) != root / "sub":
+            return real_scandir(path)
+        return _ScanFailingAfter(sorted(real_scandir(path), key=lambda entry: entry.name)[:read_before_failing])
+
+    monkeypatch.setattr(os, "scandir", scandir)
+
+    assert (
+        dir_usage_bytes(root) == (2 + read_before_failing) * BLOCK
+    )  # a.bin and sub, then what sub gave before failing
 
 
 def test_resource_log_appends_one_json_object_per_line(tmp_path: Path) -> None:

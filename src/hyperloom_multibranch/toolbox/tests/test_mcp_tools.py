@@ -285,6 +285,29 @@ async def test_wait_test_returns_as_soon_as_the_result_lands(wait_rig: Rig, wait
     assert body["state"] == "measured" and body["result"]["request_id"] == "r9"
 
 
+PACED_POLL_SECONDS = 0.037
+
+
+@pytest.fixture
+def paced_rig(seeded: tuple[Path, FakeClock], waiting: Writers) -> Iterator[Rig]:
+    yield from _running(seeded, SpecialistToolOptions(claim_ttl_seconds=60.0, wait_poll_seconds=PACED_POLL_SECONDS))
+
+
+def test_wait_test_reads_the_record_again_after_the_poll_interval_the_options_name(
+    paced_rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slept: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def spy(delay: float, *args: Any, **kwargs: Any) -> Any:
+        slept.append(delay)
+        return await real_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "sleep", spy)
+    _wait(paced_rig, request_id="r9", wait_seconds=1)
+    assert PACED_POLL_SECONDS in slept
+
+
 def test_wait_test_reports_how_many_tests_are_queued_ahead_of_a_waiting_one(wait_rig: Rig) -> None:
     wait_rig.toolbox.progress_of["r9"] = TestProgress("queued", queued_ahead=2)
     started = time.monotonic()
