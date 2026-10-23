@@ -7,7 +7,8 @@ The agent's source is fetched once into the branch's directory. Each attempt the
 reads that checkout, for the manifest (:mod:`agent_manifest`), writes the agent's config from it, runs its install
 commands in the branch's sandbox and starts it. An attempt fails with one line that says which step failed and what
 the step printed last, and the next attempt's prompt carries every earlier line, so the model corrects the manifest
-instead of repeating it. After :data:`ATTEMPTS` failures the preflight raises
+instead of repeating it; it starts :data:`RETRY_SECONDS` after the failure, so a gateway that failed for a moment does
+not take every attempt with it. After :data:`ATTEMPTS` failures the preflight raises
 :class:`~hyperloom_multibranch.specialist.runtime.PreflightFailed` with every line.
 
 The agent runs commands, not containers: a ``docker`` on its ``PATH`` (:data:`DOCKER_SHIM`) runs ``docker exec`` and
@@ -31,6 +32,8 @@ from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, Manif
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
 
 ATTEMPTS = 3
+#: How long the next attempt waits after a failed one: about as long as the gateway's own outages last.
+RETRY_SECONDS = 60.0
 #: How long a started agent has to write its keep file or stay up before its start counts as made.
 START_SECONDS = 300.0
 INSTALL_SECONDS = 1800.0
@@ -187,6 +190,8 @@ async def make_ready(source: str, spec: AgentSpec, agent_dir: Path, setup: Onboa
             return await _attempt(source, spec, agent_dir, setup, tuple(failures))
         except (AttemptFailed, OSError) as error:
             failures.append(f"attempt {attempt}: {error}")
+        if attempt < setup.attempts:
+            await setup.sleep(RETRY_SECONDS)
     raise PreflightFailed(failures)
 
 
@@ -355,6 +360,7 @@ Earlier attempts that failed, to correct rather than repeat:
 
 __all__ = [
     "ATTEMPTS",
+    "RETRY_SECONDS",
     "ENCODING",
     "SOURCE_DIR",
     "DOCKER_SHIM",

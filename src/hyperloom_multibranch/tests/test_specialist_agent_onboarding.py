@@ -5,13 +5,16 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from hyperloom_multibranch.specialist.agent_onboard import cli_onboard
 from hyperloom_multibranch.specialist.agent_onboarding import (
+    RETRY_SECONDS,
     AgentSpec,
     CommandResult,
     OnboardingSetup,
@@ -19,6 +22,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     make_ready,
     split_source,
 )
+from hyperloom_multibranch.specialist.agent_session import AgentCommand
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
 
 SPEC = AgentSpec(
@@ -109,9 +113,10 @@ class Onboarder:
         return self.answers.pop(0)
 
 
-def _setup(sandbox: Sandbox, onboard: Onboarder) -> OnboardingSetup:
-    async def no_wait(_seconds: float) -> None:
-        return None
+def _setup(sandbox: Sandbox, onboard, waits: list[float] | None = None) -> OnboardingSetup:
+    async def no_wait(seconds: float) -> None:
+        if waits is not None:
+            waits.append(seconds)
 
     ticks = iter(range(1000))
     return OnboardingSetup(
@@ -148,6 +153,47 @@ async def test_each_failed_attempt_reaches_the_next_prompt_and_three_give_up(tmp
     assert reasons[1].startswith("attempt 2: install `pip install agent` exited 1") and "no matching" in reasons[1]
     assert reasons[2].startswith("attempt 3: `python3 -m agent run` exited 127") and "not found" in reasons[2]
     assert reasons[0] in onboard.prompts[1] and reasons[1] in onboard.prompts[2]
+
+
+# Stands in for the onboarding Claude CLI: its first run ends in a gateway error, every later one answers the manifest.
+FLAKY_CLI = """#!{python}
+import json, os, sys
+sys.stdin.read()
+runs = os.environ["FAKE_RUNS"]
+count = int(open(runs).read()) if os.path.exists(runs) else 0
+open(runs, "w").write(str(count + 1))
+usage = {{"input_tokens": 10, "output_tokens": 40}}
+message = {{"id": f"m{{count}}", "model": "claude-sonnet-5-5", "usage": usage, "content": []}}
+print(json.dumps({{"type": "assistant", "message": message, "session_id": f"s-{{count}}"}}))
+error = count == 0
+answer = "API Error: 503 upstream connect error" if error else {answer!r}
+print(json.dumps({{"type": "result", "is_error": error, "result": answer, "session_id": f"s-{{count}}"}}))
+"""
+
+
+class _Usage:
+    def __init__(self) -> None:
+        self.recorded: list = []
+
+    async def record_llm_usage(self, usage) -> None:
+        self.recorded.append(usage)
+
+
+async def test_the_onboarding_cli_failing_once_is_waited_out_and_the_next_attempt_onboards(tmp_path: Path) -> None:
+    cli = tmp_path / "claude"
+    cli.write_text(FLAKY_CLI.format(python=sys.executable, answer=_manifest()), encoding="utf-8")
+    cli.chmod(0o755)
+    env = {"PATH": os.environ.get("PATH", ""), "FAKE_RUNS": str(tmp_path / "runs")}
+    usage, waits, process = _Usage(), [], Process(None)
+    onboard = cli_onboard(AgentCommand("claude", str(cli), "claude-sonnet-5-5"), env, "b01", usage)
+
+    ready = await make_ready(
+        str(_agent_repo(tmp_path)), SPEC, tmp_path / "agent", _setup(Sandbox([process]), onboard, waits)
+    )
+
+    assert ready.process is process and ready.manifest.launch == "python3 -m agent run"
+    assert RETRY_SECONDS in waits
+    assert [used.launch for used in usage.recorded] == ["s-0", "s-1"]
 
 
 async def test_an_agent_started_by_a_preflight_that_is_cancelled_is_killed(tmp_path: Path) -> None:
