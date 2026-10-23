@@ -309,6 +309,80 @@ def _environment_document(environment: object, ctx: SpecContext) -> dict[str, An
 # -- the sheet -------------------------------------------------------------------------------------------------------
 
 
+def _call_attachments(call: TestCall, ctx: SpecContext) -> dict[str, dict[str, str]]:
+    """The attachments the sheet ships, by id: the environment's, then the request's; one id may not name both."""
+    attachments = {a["id"]: a for a in _environment_attachments(call.environment, ctx)}
+    shipped = _request_attachments(call, ctx)
+    if any(a["id"] in attachments for a in shipped):
+        raise SpecRefused("attachment_id_taken", "a request attachment has the id of an environment attachment")
+    attachments.update({a["id"]: a for a in shipped})
+    return attachments
+
+
+def _point_configs(
+    call: TestCall, ctx: SpecContext, attachments: dict[str, dict[str, str]]
+) -> tuple[list[str], dict[str, Any] | None]:
+    """Each point's YAML with its shared-storage paths replaced by placeholders, and the first point's document.
+
+    Every attachment a point's paths name joins ``attachments``.
+    """
+    configs: list[str] = []
+    first: dict[str, Any] | None = None
+    for point in call.points:
+        text, document = _load_yaml(point)
+        first = first or document
+        found = _scan_attachments(document, ctx)
+        attachments.update({a["id"]: a for a in found.values()})
+        configs.append(_replace_paths(text, found))
+    return configs, first
+
+
+def _refuse_unknown_placeholders(configs: list[str], attachments: Mapping[str, object]) -> None:
+    unknown = sorted({p for text in configs for p in _PLACEHOLDER.findall(text)} - set(attachments))
+    if unknown:
+        raise SpecRefused("placeholder_unknown", f"the YAML names attachments {unknown} that nothing provides")
+
+
+def _meta_section(call: TestCall) -> dict[str, Any]:
+    meta = call.meta
+    return {
+        "purpose": meta.purpose or "explore",
+        "priority": meta.priority,
+        "branch_id": meta.branch_id or "none",
+        "parent_commit": meta.parent_commit or "none",
+        "retest_of": meta.retest_of,
+    }
+
+
+def _hardware_section(ctx: SpecContext, gpus: int) -> dict[str, Any]:
+    return {
+        "gpu_type": ctx.gpu_type,
+        "gpu_count": gpus,
+        "power_cap_w": ctx.power_cap_w,
+        "partition_mode": ctx.partition_mode,
+    }
+
+
+def _tools_section(call: TestCall, ctx: SpecContext) -> dict[str, Any]:
+    facts = call.session_facts
+    return {
+        "magpie": {"commit": _commit((facts.magpie_commit if facts else None) or ctx.magpie_commit, "Magpie")},
+        "inferencex": {"commit": _commit(ctx.inferencex_commit, "InferenceX")},
+    }
+
+
+def _procedure_section(call: TestCall, ctx: SpecContext, deadline_unix: float) -> dict[str, Any]:
+    return {
+        "prep": call.prep,
+        "benchmark_backend": ctx.benchmark_backend,
+        "rounds": {"warmup": _warmup_rounds(call), "measure": int(call.rounds.measure_rounds)},
+        "accuracy": bool(call.accuracy),
+        "timeout_sec": float(call.timeout_sec),
+        "silence_timeout_sec": float(call.silence_timeout_sec or call.timeout_sec),
+        "deadline_unix": float(deadline_unix),
+    }
+
+
 def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_unix: float) -> MeasurementSpec:
     """The sheet for ``call`` (one YAML per point); any way it could differ from what was asked is a :class:`SpecRefused`.
 
@@ -319,63 +393,26 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
     """
     if not call.points:
         raise SpecRefused("no_points", "a test needs at least one measurement point")
-    environment = call.environment
-    attachments = {a["id"]: a for a in _environment_attachments(environment, ctx)}
-    shipped = _request_attachments(call, ctx)
-    if any(a["id"] in attachments for a in shipped):
-        raise SpecRefused("attachment_id_taken", "a request attachment has the id of an environment attachment")
-    attachments.update({a["id"]: a for a in shipped})
-    configs, first = [], None
-    for point in call.points:
-        text, document = _load_yaml(point)
-        first = first or document
-        found = _scan_attachments(document, ctx)
-        attachments.update({a["id"]: a for a in found.values()})
-        configs.append(_replace_paths(text, found))
-    unknown = sorted({p for text in configs for p in _PLACEHOLDER.findall(text)} - set(attachments))
-    if unknown:
-        raise SpecRefused("placeholder_unknown", f"the YAML names attachments {unknown} that nothing provides")
-    facts = call.session_facts
-    meta = call.meta
+    attachments = _call_attachments(call, ctx)
+    configs, first = _point_configs(call, ctx, attachments)
+    _refuse_unknown_placeholders(configs, attachments)
     gpus = gpu_count_of(first or {})
     sheet = {
         "schema": "hyperloom.measurement-spec/v1",
         "request_id": request_id,
         "kind": call.kind,
-        "meta": {
-            "purpose": meta.purpose or "explore",
-            "priority": meta.priority,
-            "branch_id": meta.branch_id or "none",
-            "parent_commit": meta.parent_commit or "none",
-            "retest_of": meta.retest_of,
-        },
-        "hardware": {
-            "gpu_type": ctx.gpu_type,
-            "gpu_count": gpus,
-            "power_cap_w": ctx.power_cap_w,
-            "partition_mode": ctx.partition_mode,
-        },
+        "meta": _meta_section(call),
+        "hardware": _hardware_section(ctx, gpus),
         "image": {"ref": ctx.image_ref, "digest": ctx.image_digest},
         "config": [{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()} for text in configs],
         "attachments": list(attachments.values()),
         "process_env": _process_env(call, ctx),
         "platform_env": _platform_env(ctx),
         "unset_envs": list(_unset_envs(call)),
-        "tools": {
-            "magpie": {"commit": _commit((facts.magpie_commit if facts else None) or ctx.magpie_commit, "Magpie")},
-            "inferencex": {"commit": _commit(ctx.inferencex_commit, "InferenceX")},
-        },
-        "environment": _environment_document(environment, ctx),
+        "tools": _tools_section(call, ctx),
+        "environment": _environment_document(call.environment, ctx),
         "model_hashes": dict(ctx.model_hashes),
-        "procedure": {
-            "prep": call.prep,
-            "benchmark_backend": ctx.benchmark_backend,
-            "rounds": {"warmup": _warmup_rounds(call), "measure": int(call.rounds.measure_rounds)},
-            "accuracy": bool(call.accuracy),
-            "timeout_sec": float(call.timeout_sec),
-            "silence_timeout_sec": float(call.silence_timeout_sec or call.timeout_sec),
-            "deadline_unix": float(deadline_unix),
-        },
+        "procedure": _procedure_section(call, ctx, deadline_unix),
         "outputs": {"result_dir": split_result_dir(call)[0], **_max_bytes(ctx)},
     }
     try:

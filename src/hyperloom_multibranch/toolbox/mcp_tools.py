@@ -714,8 +714,16 @@ def register_specialist_tools(
     if toolbox_loop is None:
         with contextlib.suppress(RuntimeError):
             toolbox_loop = asyncio.get_running_loop()
-    own = {"scopes": _SPECIALIST_SCOPES}
     server.attach_reply_annotator(reply_inbox(notebooks))
+    _register_submit_test(server, toolbox, toolbox_loop)
+    _register_put_kernel_artifact(server, toolbox, toolbox_loop)
+    _register_test_queries(server, toolbox, notebooks, toolbox_loop, options)
+    _register_start_analysis(server, options.analysis, toolbox_loop)
+    _register_poll_inbox(server, notebooks)
+    _register_notebook_tools(server, notebooks, options)
+
+
+def _register_submit_test(server: McpServer, toolbox: Toolbox, home: asyncio.AbstractEventLoop | None) -> None:
     server.register(
         "submit_test",
         description=(
@@ -724,16 +732,25 @@ def register_specialist_tools(
             "request: wait_test on it, or read the commit's op shares from the notebook."
         ),
         schema=_SUBMIT_TEST,
-        handler=_submit_test(toolbox, toolbox_loop),
-        **own,
+        handler=_submit_test(toolbox, home),
+        scopes=_SPECIALIST_SCOPES,
     )
-    _register_put_kernel_artifact(server, toolbox, toolbox_loop)
+
+
+def _register_test_queries(
+    server: McpServer,
+    toolbox: Toolbox,
+    notebooks: NotebookFor,
+    home: asyncio.AbstractEventLoop | None,
+    options: SpecialistToolOptions,
+) -> None:
+    """Register the tools that read, wait for, cancel or size up the tests: ``test_result`` to ``queue_state``."""
     server.register(
         "test_result",
         description=_TEST_RESULT_GUIDE,
         schema=_REQUEST_ID,
         handler=_test_result(notebooks),
-        **own,
+        scopes=_SPECIALIST_SCOPES,
     )
     server.register(
         "wait_test",
@@ -742,31 +759,39 @@ def register_specialist_tools(
             "lands, else after wait_seconds with the test's progress; call it again to keep waiting."
         ),
         schema=_WAIT_TEST,
-        handler=_wait_test(toolbox, notebooks, toolbox_loop, options.wait_poll_seconds),
-        **own,
+        handler=_wait_test(toolbox, notebooks, home, options.wait_poll_seconds),
+        scopes=_SPECIALIST_SCOPES,
     )
     server.register(
         "cancel_test",
         description="Take back a test of this branch that has not finished.",
         schema=_REQUEST_ID,
-        handler=_cancel_test(toolbox, notebooks, toolbox_loop),
-        **own,
+        handler=_cancel_test(toolbox, notebooks, home),
+        scopes=_SPECIALIST_SCOPES,
     )
     server.register(
         "queue_state",
         description="Queue lengths by priority, running tests by branch, and the sandbox cold start time.",
         schema=_NO_ARGUMENTS,
-        handler=_queue_state(toolbox, toolbox_loop),
-        **own,
+        handler=_queue_state(toolbox, home),
+        scopes=_SPECIALIST_SCOPES,
     )
-    served = options.analysis.analysis_tools if options.analysis is not None else ()
+
+
+def _register_start_analysis(
+    server: McpServer, analysis: AnalysisStarter | None, home: asyncio.AbstractEventLoop | None
+) -> None:
+    served = analysis.analysis_tools if analysis is not None else ()
     server.register(
         "start_analysis",
         description=_start_analysis_description(served),
         schema=_start_analysis_schema(served),
-        handler=_start_analysis(options.analysis, toolbox_loop),
-        **own,
+        handler=_start_analysis(analysis, home),
+        scopes=_SPECIALIST_SCOPES,
     )
+
+
+def _register_poll_inbox(server: McpServer, notebooks: NotebookFor) -> None:
     server.register(
         _POLL_INBOX_TOOL,
         description=(
@@ -776,9 +801,8 @@ def register_specialist_tools(
         ),
         schema=_POLL_INBOX,
         handler=_poll_inbox(notebooks),
-        **own,
+        scopes=_SPECIALIST_SCOPES,
     )
-    _register_notebook_tools(server, notebooks, options)
 
 
 def _register_notebook_tools(server: McpServer, notebooks: NotebookFor, options: SpecialistToolOptions) -> None:
