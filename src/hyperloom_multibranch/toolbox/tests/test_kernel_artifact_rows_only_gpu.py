@@ -20,10 +20,12 @@ from __future__ import annotations
 import csv
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, RecipeDelta
-from hyperloom.contracts.measurement import Validity
+from hyperloom.contracts.measurement import TABLE_EXERCISED, TABLE_NOT_EXERCISED, TestResult, Validity
 from hyperloom.measure.framework_base import DEFAULT_CONFIGS, tree_files
 from hyperloom.measure.framework_merge import PRIVATE
 from hyperloom_multibranch.toolbox.tests.integration_inputs import baseline_recipe
@@ -87,10 +89,44 @@ def image_rows_taken(rows: list[dict[str, str]]) -> dict[str, int]:
     return taken
 
 
+def _hits_of_put_rows(lookups: list[str]) -> list[str]:
+    """The hit lines of the rows put: ``torch`` rows whose kernel is named ``torch``. The image's own ``torch`` rows (the
+    W116 server logs six of them) name their kernel ``native``, so the libtype alone does not tell the two apart."""
+    named = f"libtype is {TORCH_ROW['libtype']}, kernel name is {TORCH_ROW['kernelName']}"
+    return [line for line in lookups if "is tuned on cu_num" in line and line.endswith(named)]
+
+
 def _tuned_as(lookups: list[str], row: dict[str, str]) -> list[str]:
     """The libtype of each lookup the server logged for the shape of ``row``."""
     wanted = f"shape is M:{row['M']}, N:{row['N']}, K:{row['K']} "
     return [m.group(1) for line in lookups if wanted in line and (m := re.search(r"libtype is (\w+)", line))]
+
+
+@dataclass
+class _Ran:
+    """A test that put rows with ``rows_only`` and ran: the artifact, its stored bytes, the result and what its server left."""
+
+    artifact: dict[str, Any]
+    stored: bytes
+    result: TestResult
+    facts: dict[str, Any]
+    logs: str
+
+
+async def _put_rows_and_run(root: Path, content: str) -> _Ran:
+    async with build_stack(root, _variant(root), baseline_recipe()) as stack:
+        s1 = Specialist(stack, "s1")
+        artifact = json.loads(
+            await s1.call(
+                "put_kernel_artifact", kind="gemm", target=TARGET, env=VARIABLE, content=content, rows_only=True
+            )
+        )
+        delta = RecipeDelta(config=ConfigDelta(envs=ENVS), add_kernels=(KernelArtifact.from_document(artifact),))
+        result = await _run(stack, s1, delta)
+        logs = "\n".join(
+            p.read_text(errors="replace") for p in sorted((root / "session" / "tests").rglob("server*.log"))
+        )
+        return _Ran(artifact, stack.blobs.get(artifact["sha256"]), result, _facts(stack, result), logs)
 
 
 async def test_rows_put_with_rows_only_are_read_over_the_image_tables_and_override_the_shape_they_share() -> None:
@@ -101,19 +137,8 @@ async def test_rows_put_with_rows_only_are_read_over_the_image_tables_and_overri
     header = list(rows[0])
     content = "".join(",".join(line) + "\n" for line in [header, *([row[c] for c in header] for row in rows)])
     expected = image_rows_taken(rows)
-    async with build_stack(root, _variant(root), baseline_recipe()) as stack:
-        s1 = Specialist(stack, "s1")
-        artifact = json.loads(
-            await s1.call(
-                "put_kernel_artifact", kind="gemm", target=TARGET, env=VARIABLE, content=content, rows_only=True
-            )
-        )
-        delta = RecipeDelta(config=ConfigDelta(envs=ENVS), add_kernels=(KernelArtifact.from_document(artifact),))
-        result = await _run(stack, s1, delta)
-        facts = _facts(stack, result)
-        logs = "\n".join(
-            p.read_text(errors="replace") for p in sorted((root / "session" / "tests").rglob("server*.log"))
-        )
+    ran = await _put_rows_and_run(root, content)
+    artifact, result, facts, logs = ran.artifact, ran.result, ran.facts, ran.logs
     base = facts["base"]
     _probe(
         "rows-only",
@@ -130,6 +155,9 @@ async def test_rows_put_with_rows_only_are_read_over_the_image_tables_and_overri
         merge={k: base[k] for k in ("merge_isolation", "merge_dir", "merge_patched_processes", "merge_files")},
         shapes_read_as={row["N"] + "x" + row["K"]: _tuned_as(facts["lookups"], row) for row in rows},
         rows_hit=len(_put_rows_hit(facts["lookups"])),
+        hit_lines_of_put_rows=len(_hits_of_put_rows(facts["lookups"])),
+        table_hits=[hit.to_document() for hit in result.table_hits],
+        runtime_findings=result.runtime_findings,
         lookup_tables=sorted(_named_tables(facts["lookups"])),
         duplicate_errors=len(DUPLICATES.findall(logs)),
         shared_tables_unchanged=tree_files(Path(DEFAULT_CONFIGS)) == tables_before,
@@ -137,7 +165,7 @@ async def test_rows_put_with_rows_only_are_read_over_the_image_tables_and_overri
     )
 
     assert artifact["metadata"]["load"] == {"via": "env_file", "env": VARIABLE, "rows_only": True}
-    assert stack.blobs.get(artifact["sha256"]) == content.encode() and len(content) < SHARED.stat().st_size / 10
+    assert ran.stored == content.encode() and len(content) < SHARED.stat().st_size / 10
     assert result.validity is Validity.SUCCEEDED, (result.failure_class, result.failure_reason)
     assert result.rounds[-1].metrics.get("output_throughput", 0) > 0
     assert not DUPLICATES.search(logs), "aiter met a shape in two of the tables it was given"
@@ -149,8 +177,46 @@ async def test_rows_put_with_rows_only_are_read_over_the_image_tables_and_overri
     for row in rows:
         assert set(_tuned_as(facts["lookups"], row)) == {"torch"}, f"{row['N']}x{row['K']}: not read from the rows put"
     assert _put_rows_hit(facts["lookups"]), "no shape of the model hit a row that was put"
+    (hits,) = result.table_hits
+    assert (hits.env, hits.status, hits.rows) == (VARIABLE, TABLE_EXERCISED, len(rows)), hits
+    assert hits.hit_lines == len(_hits_of_put_rows(facts["lookups"])), (
+        "the by-hand count of the hit lines of the rows put"
+    )
+    assert 1 <= hits.rows_hit <= len(rows) and len(result.runtime_findings) == 1
     assert Path(base["merge_dir"]) in {Path(name).parent for name in _named_tables(facts["lookups"])}
     assert base["merge_isolation"] == PRIVATE and base["isolation"] == "private_copies"
     assert base["framework_base_changed"] is False and base["matches_session"] is True
     assert tree_files(Path(DEFAULT_CONFIGS)) == tables_before, "the shared tables are as they were"
     assert tree_files(AITER_MERGE_DIR) == merged_before, "nothing reached /tmp/aiter_configs"
+
+
+async def test_rows_put_for_a_shape_the_model_never_asks_are_not_exercised_and_the_result_says_so() -> None:
+    """The result tells a table nothing read from one that was read and did not matter (#109 item 4)."""
+    assert len(CARDS) == 1, f"HL_W13_CARDS must name one card, it is {CARDS}"
+    root = _run_root("w116")
+    row = {**rows_to_put()[0], "N": "104", "K": "208"}
+    header = list(row)
+    content = ",".join(header) + "\n" + ",".join(row[column] for column in header) + "\n"
+    ran = await _put_rows_and_run(root, content)
+    result, facts = ran.result, ran.facts
+    _probe(
+        "not-exercised",
+        artifact=ran.artifact,
+        validity=result.validity.value,
+        table_hits=[hit.to_document() for hit in result.table_hits],
+        runtime_findings=result.runtime_findings,
+        lookup_lines=len(facts["lookups"]),
+        hit_lines=len([line for line in facts["lookups"] if "is tuned on cu_num" in line]),
+    )
+    assert result.validity is Validity.SUCCEEDED, (result.failure_class, result.failure_reason)
+    assert any("is tuned on cu_num" in line for line in facts["lookups"]), "the server logged hits of the image's rows"
+    assert not _hits_of_put_rows(facts["lookups"]), "no shape of the model is the row that was put"
+    (hits,) = result.table_hits
+    assert (hits.env, hits.status, hits.rows, hits.rows_hit, hits.hit_lines) == (
+        VARIABLE,
+        TABLE_NOT_EXERCISED,
+        1,
+        0,
+        0,
+    ), hits
+    assert "NOT EXERCISED" in result.runtime_findings[0]

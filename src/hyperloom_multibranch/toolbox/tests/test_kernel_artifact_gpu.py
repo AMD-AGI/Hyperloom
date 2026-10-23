@@ -31,7 +31,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.contracts.measurement import TestResult, Validity
+from hyperloom.contracts.measurement import TABLE_EXERCISED, TestResult, Validity
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, RecipeDelta
 from hyperloom.measure.framework_base import DEFAULT_CONFIGS, FRAMEWORK_BASE_FILE, load_snapshot, tree_files
 from hyperloom.measure.framework_merge import PRIVATE
@@ -225,6 +225,10 @@ async def test_a_put_table_is_the_table_the_server_of_the_test_reads() -> None:
         lookup_tables={name: sorted(_named_tables(fact["lookups"])) for name, fact in facts.items()},
         lookup_lines={name: [line[:300] for line in fact["lookups"][:3]] for name, fact in facts.items()},
         torch_rows_hit={name: len(_put_rows_hit(fact["lookups"])) for name, fact in facts.items()},
+        table_hits={
+            name: [hit.to_document() for hit in result.table_hits]
+            for name, result in (("table", with_table), ("default", without))
+        },
         shared_tables_unchanged=tree_files(Path(DEFAULT_CONFIGS)) == tables_before,
         aiter_merge_dir_unchanged=tree_files(AITER_MERGE_DIR) == merged_before,
     )
@@ -236,6 +240,7 @@ async def test_a_put_table_is_the_table_the_server_of_the_test_reads() -> None:
         assert result.validity is Validity.SUCCEEDED, (result.failure_class, result.failure_reason)
         assert result.rounds[-1].metrics.get("output_throughput", 0) > 0
     _assert_server_reads_the_table(facts, with_table, sha, merged_name)
+    _assert_table_hits(with_table, without, sha, facts["table"]["lookups"])
     _assert_isolated(facts, {"table": with_table, "default": without})
     assert tree_files(Path(DEFAULT_CONFIGS)) == tables_before, "the shared tables are as they were"
     assert tree_files(AITER_MERGE_DIR) == merged_before, "nothing reached /tmp/aiter_configs"
@@ -256,6 +261,16 @@ def _assert_server_reads_the_table(facts: dict[str, Any], result: TestResult, sh
     named = _named_tables(table["lookups"])
     assert named and all(Path(name).name.endswith(placed) for name in named), named
     assert not any(placed in name for name in _named_tables(default["lookups"])), "the default test never saw it"
+
+
+def _assert_table_hits(with_table: TestResult, without: TestResult, sha: str, lookups: list[str]) -> None:
+    """The result's count of the table's hits is the count of the log's hit lines that name the table, done by hand."""
+    (hits,) = with_table.table_hits
+    named = [line for line in lookups if f"k-{sha[:16]}" in line and "is tuned on cu_num" in line]
+    assert (hits.env, hits.target, hits.sha256, hits.status) == (VARIABLE, TARGET, sha, TABLE_EXERCISED), hits
+    assert hits.hit_lines == len(named) and 1 <= hits.rows_hit <= hits.rows, (hits, len(named))
+    assert with_table.runtime_findings and "exercised" in with_table.runtime_findings[0]
+    assert without.table_hits == () and without.runtime_findings == (), "a test that put no table has no finding"
 
 
 def _assert_isolated(facts: dict[str, Any], results: dict[str, TestResult]) -> None:
