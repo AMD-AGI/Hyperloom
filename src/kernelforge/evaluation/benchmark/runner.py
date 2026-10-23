@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import math
 import os
 import re
 import shutil
+import signal
 import statistics
 import sys
 import tempfile
@@ -318,6 +320,28 @@ def calculate_measurement_case_speedups(
     return scores
 
 
+# How long a hung driver gets to print its stacks between SIGUSR1 and SIGKILL.
+STACK_DUMP_GRACE_SEC = 3.0
+
+
+async def _stack_then_kill(proc: asyncio.subprocess.Process, communicate: asyncio.Future) -> str:
+    """Ask a hung driver for its stacks, kill it, and return what it printed.
+
+    A driver that registers ``faulthandler`` on SIGUSR1 prints every thread's stack, which is the only record of
+    where it hung; one that does not dies of the signal, a moment before the kill would have ended it anyway.
+    """
+    with contextlib.suppress(ProcessLookupError):
+        proc.send_signal(signal.SIGUSR1)
+    await asyncio.sleep(STACK_DUMP_GRACE_SEC)
+    await kill_process_group(proc)
+    try:
+        stdout, stderr = await asyncio.wait_for(communicate, timeout=10)
+    except asyncio.TimeoutError:
+        communicate.cancel()
+        return ""
+    return stdout.decode(errors="replace") + "\n" + stderr.decode(errors="replace")
+
+
 async def bench_wallclock(
     run: BenchRun,
     *,
@@ -334,13 +358,15 @@ async def bench_wallclock(
         start_new_session=True,
         cwd=run.cwd,
     )
+    communicate = asyncio.ensure_future(proc.communicate())
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+        stdout, stderr = await asyncio.wait_for(asyncio.shield(communicate), timeout=timeout_sec)
     except asyncio.TimeoutError:
-        await kill_process_group(proc)
-        return {"success": False, "message": f"TIMEOUT after {timeout_sec}s"}
+        output = await _stack_then_kill(proc, communicate)
+        return {"success": False, "message": f"TIMEOUT after {timeout_sec}s", "output": output[-4000:]}
     except asyncio.CancelledError:
         await kill_process_group(proc)
+        communicate.cancel()
         raise
 
     stdout_text = stdout.decode(errors="replace")

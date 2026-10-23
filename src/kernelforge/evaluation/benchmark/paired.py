@@ -18,17 +18,22 @@ from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock
 
 CANDIDATE, INCUMBENT = "candidate", "incumbent"
 _TAIL_LINES = 8
+# Further runs of an arm that failed, each its own process: the profiler under SIKL's timer fails a process now and
+# then (an empty Kineto trace, a hang) and keeps failing within it, while a fresh process measures.
+ARM_RETRIES = 2
 
 
 @dataclass(frozen=True)
 class PairRecord:
-    """One pair: which arm ran first, both arms' results, and the equal-weight mean of incumbent/candidate."""
+    """One pair: which arm ran first, both arms' results, the equal-weight mean of incumbent/candidate, and every
+    failed run of an arm that a fresh process then measured."""
 
     order: tuple[str, str]
     candidate: dict
     incumbent: dict
     case_ratios: dict[str, float]
     score: float
+    retries: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -42,6 +47,10 @@ class PairedMeasurement:
     def scores(self) -> list[float]:
         return [pair.score for pair in self.pairs]
 
+    @property
+    def retries(self) -> list[str]:
+        return [retry for pair in self.pairs for retry in pair.retries]
+
     def extended(self, other: PairedMeasurement) -> PairedMeasurement:
         return PairedMeasurement(self.pairs + other.pairs, other.failure)
 
@@ -52,6 +61,13 @@ class PairedMeasurement:
             "mean": statistics.fmean(self.scores) if self.pairs else None,
             "failure": self.failure,
         }
+
+
+def _arm_failure(arm: str, result: dict) -> str:
+    """What an arm's failed run says: its message, then the last lines of its output."""
+    detail = result.get("message") or "failed"
+    tail = "\n".join(str(result.get("output") or "").strip().splitlines()[-_TAIL_LINES:])
+    return f"{arm} arm: {detail}" + (f"\n{tail}" if tail else "")
 
 
 def _pair_ratios(candidate: dict, incumbent: dict, scored: frozenset[str] | None) -> dict[str, float] | str:
@@ -75,24 +91,39 @@ async def measure_pairs(
     rng: random.Random,
     timeout_sec: int,
     scored: frozenset[str] | None = None,
+    arm_retries: int = ARM_RETRIES,
 ) -> PairedMeasurement:
-    """Time ``pairs`` pairs; stop at the first arm that fails, and say which."""
+    """Time ``pairs`` pairs; an arm that fails runs again in a fresh process up to ``arm_retries`` times, and the
+    measurement stops at the first arm that never succeeds, saying which and why."""
     records: list[PairRecord] = []
     arms = {CANDIDATE: candidate, INCUMBENT: incumbent}
     for _ in range(pairs):
         order = (CANDIDATE, INCUMBENT) if rng.random() < 0.5 else (INCUMBENT, CANDIDATE)
-        results = {}
+        results: dict[str, dict] = {}
+        retries: list[str] = []
         for arm in order:
-            results[arm] = await bench_wallclock(arms[arm], timeout_sec=timeout_sec)
-            if not results[arm].get("success"):
-                detail = results[arm].get("message") or "failed"
-                # The run's last lines say why; the message alone only says that it failed.
-                tail = "\n".join(str(results[arm].get("output") or "").strip().splitlines()[-_TAIL_LINES:])
-                return PairedMeasurement(tuple(records), f"{arm} arm: {detail}" + (f"\n{tail}" if tail else ""))
+            for _attempt in range(1 + arm_retries):
+                results[arm] = await bench_wallclock(arms[arm], timeout_sec=timeout_sec)
+                if results[arm].get("success"):
+                    break
+                retries.append(_arm_failure(arm, results[arm]))
+            else:
+                runs = 1 + arm_retries
+                return PairedMeasurement(
+                    tuple(records),
+                    f"{retries[-1]}\n(failed in each of {runs} fresh processes)" if runs > 1 else retries[-1],
+                )
         ratios = _pair_ratios(results[CANDIDATE], results[INCUMBENT], scored)
         if isinstance(ratios, str):
             return PairedMeasurement(tuple(records), ratios)
         records.append(
-            PairRecord(order, results[CANDIDATE], results[INCUMBENT], ratios, statistics.fmean(ratios.values()))
+            PairRecord(
+                order,
+                results[CANDIDATE],
+                results[INCUMBENT],
+                ratios,
+                statistics.fmean(ratios.values()),
+                tuple(retries),
+            )
         )
     return PairedMeasurement(tuple(records))

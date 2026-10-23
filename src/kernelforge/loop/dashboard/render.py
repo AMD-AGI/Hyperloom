@@ -134,7 +134,11 @@ def _keep_bar(bar) -> str:
     if not isinstance(bar, dict):
         return ""
     if bar.get("mode") == "paired":
-        return f"paired ×{bar.get('pairs')}: lower {_fmt(bar.get('lower'))} vs {1 + float(bar.get('floor') or 0):.4f}"
+        retried = f", {bar['retries']} arm run(s) repeated" if bar.get("retries") else ""
+        return (
+            f"paired ×{bar.get('pairs')}: lower {_fmt(bar.get('lower'))} vs {1 + float(bar.get('floor') or 0):.4f}"
+            f"{retried}"
+        )
     return f"needs {_fmt(bar.get('required'))}"
 
 

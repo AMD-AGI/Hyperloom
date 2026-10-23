@@ -31,6 +31,10 @@ here = pathlib.Path(__file__).resolve().parent
 if (here / "crash").exists():
     print("HIP error: out of memory", file=sys.stderr)
     sys.exit(1)
+if (here / "crash_once").exists():
+    (here / "crash_once").unlink()
+    print("RuntimeError: Kineto recorded no kernels for a single call", file=sys.stderr)
+    sys.exit(1)
 speed = float((here / "speed.txt").read_text())
 cases = (here / "cases.txt").read_text().split() if (here / "cases.txt").exists() else ["m=8", "m=16"]
 if "--bench-mode" in sys.argv:
@@ -101,7 +105,17 @@ async def test_a_failing_arm_is_named(tmp_path: Path) -> None:
     (Path(incumbent.cwd) / "crash").write_text("")
     measured = await measure_pairs(candidate, incumbent, pairs=3, rng=random.Random(1), timeout_sec=60)
     assert measured.failure.startswith("incumbent arm: BENCH CRASHED")
-    assert measured.failure.endswith("HIP error: out of memory")
+    assert "HIP error: out of memory" in measured.failure
+    assert measured.failure.endswith("(failed in each of 3 fresh processes)")
+
+
+async def test_an_arm_the_profiler_failed_once_is_measured_again_in_a_fresh_process(tmp_path: Path) -> None:
+    candidate, incumbent = _arms(tmp_path)
+    (Path(candidate.cwd) / "crash_once").write_text("")
+    measured = await measure_pairs(candidate, incumbent, pairs=2, rng=random.Random(1), timeout_sec=60)
+    assert measured.failure == "" and measured.scores == pytest.approx([1.2, 1.2])
+    assert len(measured.retries) == 1 and "Kineto recorded no kernels" in measured.retries[0]
+    assert measured.to_dict()["pairs"][0]["retries"] == measured.pairs[0].retries
 
 
 def test_the_incumbent_tree_follows_head_and_undoes_edits(tmp_path: Path) -> None:
@@ -182,6 +196,23 @@ async def test_the_null_control_measures_the_incumbent_beside_itself_once(tmp_pa
     count = len(loop.events)
     await IterationLoop._refresh_noise_floor_if_due(loop, 2)
     assert len(loop.events) == count
+
+
+async def test_a_hung_driver_says_where_before_it_is_killed(tmp_path: Path, monkeypatch) -> None:
+    from kernelforge.evaluation.benchmark import runner as bench_runner
+    from kernelforge.evaluation.benchmark.runner import bench_wallclock
+
+    monkeypatch.setattr(bench_runner, "STACK_DUMP_GRACE_SEC", 1.0)
+    hung = tmp_path / "hung.py"
+    hung.write_text(
+        "import faulthandler, signal, time\n"
+        "faulthandler.register(signal.SIGUSR1, all_threads=True)\n"
+        "def wait_for_the_gpu():\n    time.sleep(600)\n"
+        "wait_for_the_gpu()\n"
+    )
+    result = await bench_wallclock(BenchRun(str(hung), driver_args=[], cwd=str(tmp_path)), timeout_sec=2)
+    assert result["message"] == "TIMEOUT after 2s" and not result["success"]
+    assert "wait_for_the_gpu" in result["output"]
 
 
 def test_the_driver_used_by_these_tests_runs(tmp_path: Path) -> None:

@@ -160,7 +160,10 @@ kept, so whatever drifted since (clocks, temperature, a neighbour on the node) l
 `--paired-keep` each candidate is timed beside the incumbent, in pairs whose order a seeded coin decides; the
 incumbent runs from a git worktree at HEAD next to the workspace (`<workspace>.forge-incumbent`), refreshed before
 every measurement and checked to hold the same driver. A candidate is kept when the one-sided 95% lower bound of
-the per-pair incumbent/candidate ratio clears 1 + the noise floor; an open verdict buys up to two more pairs. The
+the per-pair incumbent/candidate ratio clears 1 + the noise floor; an open verdict buys up to two more pairs. An
+arm whose run fails (a crash, an empty profiler trace, a hang) runs again in a fresh process up to twice, and each
+repeat is recorded with the pair; a run that outruns `--bench-timeout-sec` is sent SIGUSR1 a few seconds before it is
+killed, so a driver that registers `faulthandler` on that signal leaves its stacks in the failure. The
 noise floor comes from pairs of the incumbent beside itself, measured before the first paired KEEP and recorded in
 `forge_experiments/noise_floor.json`. The in-session measurement cannot decide a paired KEEP and is not reused.
 A task whose kernel only the workspace can run (an editable install, a driver outside the workspace or not committed

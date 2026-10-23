@@ -3425,6 +3425,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             "lower": round(lower, 6) if lower is not None else None,
             "floor": floor,
             "passes": passes_paired_keep(paired.scores, floor=floor),
+            "retries": len(paired.retries),
         }
 
     def _noise_floor_record(self) -> dict:
@@ -4553,6 +4554,10 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             improved = (
                 bool(bench_result.get("success")) and keep_bar["passes"] and self._beats_the_source_caller(bench_result)
             )
+            if paired.retries:
+                print(f"  [bench] {len(paired.retries)} arm run(s) failed and were measured again in a fresh process:")
+                for retry in paired.retries:
+                    print("    " + retry.splitlines()[0])
         bench_result["keep_bar"] = keep_bar
         if bench_error_output:
             # The scoring verdict has already overwritten ``message`` with "candidate emitted no per-case timings",
