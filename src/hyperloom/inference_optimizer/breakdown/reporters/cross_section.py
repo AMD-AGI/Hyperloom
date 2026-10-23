@@ -11,10 +11,10 @@ from typing import Any
 from hyperloom.common.coerce import to_float, to_int
 from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
 
+from ..recorder.event_fields import as_dict
 from ..variant_funnel import VARIANT_COUNTS, variants_from_timeline
 from .base import (
     RenderedSection,
-    as_dict,
     events_of,
     outcome_of,
     session_of,

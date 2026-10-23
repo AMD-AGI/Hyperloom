@@ -53,17 +53,15 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from .assembler import EVENT_SECTIONS, event_parts
+from hyperloom.common.coerce import text_or_none as _text, to_float as _float_or_none, to_int as _int_or_none
+from .assembler import event_parts
 from .event_fields import (
     analysis_detail as _analysis_detail,
     as_dict as _as_dict,
     as_list as _as_list,
     clip as _clip,
     failure_row as _failure_row,
-    float_or_none as _float_or_none,
-    int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
-    text_or_none as _text,
 )
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
@@ -81,6 +79,7 @@ from .kernel_records import (
 )
 from .baseline_event import assemble_baseline_actions
 from .roofline_event import assemble_roofline_action
+from .sections import EVENT_SECTIONS
 
 log = logging.getLogger(__name__)
 

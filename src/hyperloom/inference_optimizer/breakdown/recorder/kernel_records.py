@@ -8,11 +8,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .event_fields import (
-    as_list as _as_list,
-    float_or_none as _float_or_none,
-    text_or_none as _text,
-)
+from hyperloom.common.coerce import text_or_none as _text, to_float as _float_or_none
+
+from .event_fields import as_list as _as_list
 
 # The five candidate producers a KERNEL entry can adopt from.
 SOURCE_KERNEL_REWRITE = "kernel_rewrite"

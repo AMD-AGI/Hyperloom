@@ -20,9 +20,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.common.coerce import dict_rows
+from hyperloom.inference_optimizer.breakdown.recorder.event_fields import as_dict
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG
 
-from ..base import as_dict, dict_rows, events_of
+from ..base import events_of
 
 __all__ = ["FrameworkTally", "config_attempts", "config_tally", "specialist_tally"]
 

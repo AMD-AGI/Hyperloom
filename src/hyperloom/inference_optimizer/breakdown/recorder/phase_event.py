@@ -27,14 +27,17 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from hyperloom.common.coerce import (
+    text_or_none as _text_or_none,
+    to_float as _float_or_none,
+    to_int as _int_or_none,
+)
+
 from .event_fields import (
     as_dict as _as_dict,
     as_list as _as_list,
     clip as _clip,
-    float_or_none as _float_or_none,
-    int_or_none as _int_or_none,
     now_iso_seconds as _now,
-    text_or_none as _text_or_none,
 )
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows

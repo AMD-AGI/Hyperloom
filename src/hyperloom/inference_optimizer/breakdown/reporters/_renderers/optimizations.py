@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import Decision, RenderedSection, as_dict, fmt_pct, md_table, register_renderer, validation_of
+from hyperloom.inference_optimizer.breakdown.recorder.event_fields import as_dict
+
+from ..base import Decision, RenderedSection, fmt_pct, md_table, register_renderer, validation_of
 
 
 @register_renderer("optimizations")

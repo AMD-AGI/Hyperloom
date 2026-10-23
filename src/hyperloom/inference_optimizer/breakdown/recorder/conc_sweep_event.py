@@ -27,21 +27,25 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.coerce import (
+    text_or_none as _text_or_none,
+    to_float as _float_or_none,
+    to_int as _int_or_none,
+)
+
 from .event_fields import (
     as_dict as _as_dict,
     as_list as _as_list,
     bool_or_none as _bool_or_none,
     failure_row as _failure_row,
-    float_or_none as _float_or_none,
-    int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
     text as _text,
-    text_or_none as _text_or_none,
 )
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink
 from .event_timeline import EventHeader, finish_event, open_event
+from .sections import CONC_SWEEP_EVENT_SECTIONS
 
 log = logging.getLogger(__name__)
 
@@ -854,11 +858,13 @@ class ConcSweepEventRecorder:
                 "duration_sec": round(time.monotonic() - self._t0, 3),
             }
         )
-        from .assembler import conc_sweep_event_parts
+        from .assembler import event_parts
         from .recorder_warnings import RECORDING_ERRORS, note_failure
 
         try:
-            ext, derived = assemble_conc_sweep_ext(conc_sweep_event_parts(self.event_id), event=self.event_id)
+            ext, derived = assemble_conc_sweep_ext(
+                event_parts(CONC_SWEEP_EVENT_SECTIONS, event=self.event_id), event=self.event_id
+            )
             finish_event(
                 EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,

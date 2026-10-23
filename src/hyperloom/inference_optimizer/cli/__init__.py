@@ -120,7 +120,6 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     PromptCycle,
     SessionContext,
 )
-from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 
 from ..session.lock import SessionAlreadyRunning, SessionLock, SessionLockPathError
 from ..session.paths import (
@@ -1530,14 +1529,8 @@ def _exit_code_for_stop_reason(stop_reason: str | None, baseline_tput: float) ->
     return 0 if outcome_status(str(stop_reason or ""), baseline_tput) == "completed" else 1
 
 
-def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_reason: str | None) -> None:
-    """Write the session's terminal artifacts in their established order.
-
-    A watchdog restart ends a leg, not the session, so it produces none of them
-    -- including the close-out package, which speaks for a finished run.
-    """
-    if stop_reason == SUPERVISOR_RESTART_REASON:
-        return
+def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState) -> None:
+    """Write the session's terminal artifacts in their established order."""
     if not state.close_sequence_done:
         from ..breakdown.recorder.close_out import record_close_safety_net
 
@@ -2673,7 +2666,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     finally:
         state = coordinator.shared_state
-        effective_stop_reason = stop_reason or coordinator.stop_classification
         with timed_teardown_step(state, "coordinator_stop"):
             await coordinator.stop()
         # Drop the single-optimizer session lock once the
@@ -2681,7 +2673,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # exit anyway; this just frees it promptly for an intentional resume.
         with timed_teardown_step(state, "session_lock"):
             session_lock.release()
-        _write_cli_terminal_artifacts(session_dir, state, effective_stop_reason)
+        _write_cli_terminal_artifacts(session_dir, state)
         try:
             state.save(session_dir)
         except Exception:

@@ -307,7 +307,6 @@ class Coordinator:
             )
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
-        self._stop_classification = ""
         self._tasks_running: list[asyncio.Task] = []
 
         # Wall-clock stamp of the last maintenance pass (lease reaping + DB retention).
@@ -817,11 +816,6 @@ class Coordinator:
             return "signal"
         return pending or self.shared_state.stop_reason
 
-    @property
-    def stop_classification(self) -> str:
-        """Authoritative in-process stop classification."""
-        return self._stop_classification
-
     async def await_within_session_bound(
         self,
         factory: Callable[[], Awaitable[Any]],
@@ -878,13 +872,8 @@ class Coordinator:
     def _close_undecided_proposals(self, stop_reason: str) -> None:
         """Close the trajectory span of every proposal the session ends without a verdict on.
 
-        A supervisor restart ends a leg, not the session: the next leg's replay restores these proposals. A resumed
-        session may end again over proposals an earlier leg already closed, so those are skipped.
+        A resumed session may end again over proposals an earlier leg already closed, so those are skipped.
         """
-        from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
-
-        if stop_reason == SUPERVISOR_RESTART_REASON:
-            return
         # A decided proposal is popped from the registry, so everything still pending is undecided.
         undecided = list(self.state.pending_proposals.values())
         if not undecided:
@@ -958,7 +947,6 @@ class Coordinator:
             final_signals = self._signals.close()
             self._signals = None
         stop_reason = self._classify_stop(final_signals, pending=stop_reason)
-        self._stop_classification = stop_reason
         self.shared_state.closing_phase = False
         # Resuming a terminal session can break out before stop_reason is set.
         self.shared_state.set_stop_reason(

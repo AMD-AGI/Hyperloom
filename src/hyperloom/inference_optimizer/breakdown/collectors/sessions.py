@@ -76,8 +76,8 @@ def _close_phase_stop_reason(state: dict[str, Any], *, leg_start_ts: str) -> tup
             continue
         if str(row.get("to_phase") or "").strip().upper() != "CLOSE":
             continue
-        reason = str(row.get("reason") or row.get("stop_reason") or row.get("exit_reason") or "").strip()
-        ts = str(row.get("ts") or row.get("entered_ts") or "").strip()
+        reason = str(row.get("reason") or "").strip()
+        ts = str(row.get("ts") or "").strip()
         closed_at = to_unix(ts)
         if leg_start is not None and closed_at is not None and closed_at < leg_start:
             continue
@@ -131,11 +131,6 @@ def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> b
 
 
 # Session metadata
-def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
-    """Project SharedState's crash / interruption / resume signals."""
-    return recovery_block(state)
-
-
 def collect_session(
     session_dir: Path,
     state: dict[str, Any],
@@ -177,18 +172,14 @@ def collect_session(
         ),
         "tick_count": int(state.get("tick") or 0),
         # Crash / interruption / resume history.
-        "recovery": _collect_recovery(state),
+        "recovery": recovery_block(state),
     }
     section["elapsed_minutes"] = session_elapsed_minutes(section)
     return section
 
 
 # Workload
-def collect_workload(
-    state: dict[str, Any],
-    manifest: dict[str, Any],
-    warnings: list[str],
-) -> dict[str, Any]:
+def collect_workload(state: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
     """Collect the workload-description section."""
     wl = manifest.get("workload") or {}
     return {
@@ -209,10 +200,7 @@ def collect_workload(
 
 
 # Model basics
-def collect_model_info(
-    state: dict[str, Any],
-    warnings: list[str],
-) -> dict[str, Any]:
+def collect_model_info(state: dict[str, Any]) -> dict[str, Any]:
     """Collect the ``model_info`` section (state.model_info passthrough)."""
     info = state.get("model_info")
     return dict(info) if isinstance(info, dict) else {}

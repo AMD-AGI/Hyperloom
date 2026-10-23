@@ -20,7 +20,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import as_dict, dict_rows, events_of
+from hyperloom.common.coerce import dict_rows
+from hyperloom.inference_optimizer.breakdown.recorder.event_fields import as_dict
+
+from ..base import events_of
 
 __all__ = [
     "FORGE_SOURCES",

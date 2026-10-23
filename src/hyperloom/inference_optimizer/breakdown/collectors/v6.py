@@ -13,19 +13,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import dict_rows, to_unix
 from hyperloom.common.env_safety import redact_secret_env_values
 
 from ...session.sbd_v6 import read_timeline_events
 from ..recorder.baseline_event import anchoring_eval_from_timeline
+from ..recorder.event_fields import as_dict
 from ..session_facts import architecture_block, grading_block, workload_signature
 from ..stop_reasons import MODEL_GATE_STOP_REASONS, outcome_status as _outcome_status
 from ..variant_funnel import variants_from_timeline
 from ._common import (
-    _dict_rows,
     _first,
-    _mapping,
     _optional_bool,
-    _parse_iso_unix as _timestamp_number,
     _to_float as _optional_float,
     _to_int as _optional_int,
 )
@@ -72,7 +71,7 @@ class MetadataSources:
     recorded: dict[str, Any] | None = None
 
 
-def collect_v6_metadata(sources: MetadataSources, *, exported_at_utc: str, warnings: list[str]) -> dict[str, Any]:
+def collect_v6_metadata(sources: MetadataSources, *, exported_at_utc: str) -> dict[str, Any]:
     """Build the V6 ``metadata`` section, preferring recorded facts.
 
     Every field here is recorded at the moment it is decided (see
@@ -81,13 +80,12 @@ def collect_v6_metadata(sources: MetadataSources, *, exported_at_utc: str, warni
     overlaid leaf-by-leaf on top of it so a live-recorded run is never
     downgraded to a re-derived value.
 
-    ``exported_at_utc`` and ``warnings`` are facts about the export itself,
-    not the session, so they are never taken from a fragment.
+    ``exported_at_utc`` is a fact about the export itself, not the session, so
+    it is never taken from a fragment.
 
     Args:
         sources: What the section is projected from.
         exported_at_utc: When this export ran.
-        warnings: The V6 warnings accumulated by this export.
 
     Returns:
         The ``metadata`` section.
@@ -109,7 +107,7 @@ def collect_v6_metadata(sources: MetadataSources, *, exported_at_utc: str, warni
         "max_model_len": workload.get("max_model_len"),
         "objective": dict(workload.get("objective") or {}),
         "launch_env": dict(state.get("operator_extra_env") or {}),
-        "launch_server_args": str(state.get("operator_server_args") or state.get("server_args") or ""),
+        "launch_server_args": str(state.get("operator_server_args") or ""),
         "architecture": architecture_block(sources.model_info, model_class=workload.get("model_class")),
     }
     signature = workload_signature(task_config)
@@ -133,12 +131,12 @@ def collect_v6_metadata(sources: MetadataSources, *, exported_at_utc: str, warni
         projected["grading"] = grading
     metadata = _overlay_recorded(projected, sources.recorded)
     _mask_launch_env(metadata)
-    return {"exported_at_utc": exported_at_utc, **metadata, "warnings": list(warnings)}
+    return {"exported_at_utc": exported_at_utc, **metadata}
 
 
 def _session_block(session: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     """The ``metadata.session`` block, with ``state`` read for the minutes charged across every leg."""
-    recovery = _mapping(session.get("recovery"))
+    recovery = as_dict(session.get("recovery"))
     image = str(session.get("image") or "").strip()
     return {
         "session_id": str(session.get("session_id") or ""),
@@ -247,20 +245,6 @@ def _recorded_leaf(value: Any, *, key: str = "") -> bool:
     return True
 
 
-def _recorded_types(timeline: list[dict[str, Any]], event_type: str) -> bool:
-    """Whether the durable events already hold one of a type.
-
-    Args:
-        timeline (list[dict[str, Any]]): The durable events read back.
-        event_type (str): The type to look for.
-
-    Returns:
-        bool: True when at least one durable event has that type.
-    """
-    wanted = str(event_type)
-    return any(isinstance(event, dict) and str(event.get("type") or "") == wanted for event in timeline)
-
-
 def collect_v6_timeline(
     session_dir: Path,
     warnings: list[str],
@@ -285,8 +269,8 @@ def collect_v6_timeline(
     indexed = list(enumerate(timeline))
     indexed.sort(
         key=lambda row: (
-            _timestamp_number(_first(row[1].get("start_time"), row[1].get("end_time"))) is None,
-            _timestamp_number(_first(row[1].get("start_time"), row[1].get("end_time"))) or 0.0,
+            to_unix(_first(row[1].get("start_time"), row[1].get("end_time"))) is None,
+            to_unix(_first(row[1].get("start_time"), row[1].get("end_time"))) or 0.0,
             row[0],
         )
     )
@@ -326,7 +310,7 @@ def _stage_reached(
             if kind:
                 return kind
     if phase == "PRELUDE":
-        heuristic = _prelude_stage_from_state(state, timeline)
+        heuristic = _prelude_stage_from_state(state)
         if heuristic:
             if warnings is not None:
                 warnings.append(
@@ -336,7 +320,7 @@ def _stage_reached(
     return "install"
 
 
-def _prelude_stage_from_state(state: dict[str, Any], timeline: list[dict[str, Any]]) -> str:
+def _prelude_stage_from_state(state: dict[str, Any]) -> str:
     """PRELUDE stage from leftover state fields when the timeline is empty."""
     if state.get("roofline_snapshots") or state.get("last_roofline") or state.get("roofline_attempts"):
         return "roofline"
@@ -344,8 +328,6 @@ def _prelude_stage_from_state(state: dict[str, Any], timeline: list[dict[str, An
         return "profile"
     if state.get("warm_replay_attempted") or state.get("warm_replay_outcome") or state.get("warm_replay_pending"):
         return "warm_replay"
-    if _recorded_types(timeline, "enablement"):
-        return "enablement"
     baseline_tput = state.get("baseline_tput")
     if (
         isinstance(baseline_tput, (int, float))
@@ -397,7 +379,7 @@ def _graded_axes(recorded: Any) -> dict[str, Any]:
     """
     from hyperloom.common.perf_metric import GRADED_AXIS_KEYS
 
-    source = _mapping(recorded)
+    source = as_dict(recorded)
     return {key: _optional_float(source.get(key)) for key in GRADED_AXIS_KEYS}
 
 
@@ -425,8 +407,8 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str
     for event in timeline:
         if not isinstance(event, dict) or str(event.get("type") or "") != "baseline":
             continue
-        for action in _dict_rows(_mapping(event.get("ext")).get("actions")):
-            if not _optional_bool(_mapping(action.get("request")).get("establishes_quality_ref")):
+        for action in dict_rows(as_dict(event.get("ext")).get("actions")):
+            if not _optional_bool(as_dict(action.get("request")).get("establishes_quality_ref")):
                 continue
             if str(action.get("status") or "").strip().lower() not in _ANCHORING_BASELINE_STATUSES:
                 continue
@@ -447,7 +429,7 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str
     anchors.sort(key=lambda row: row[0])
     if anchors[-1][2]:
         source_ids.append(anchors[-1][2])
-    measurement = _mapping(anchors[-1][1].get("measurement"))
+    measurement = as_dict(anchors[-1][1].get("measurement"))
     submission_valid = measurement.get("submission_valid")
     return {
         **{field: _optional_float(measurement.get(field)) for field in _BASELINE_OUTCOME_FIELDS},
@@ -485,12 +467,12 @@ def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[s
     ledger: dict[str, Any] = {}
     for event in timeline:
         if isinstance(event, dict) and str(event.get("type") or "") == "stack":
-            ledger = _mapping(event.get("ext"))
+            ledger = as_dict(event.get("ext"))
             source_ids[:] = [str(event["id"])] if event.get("id") else []
     available = bool(ledger)
-    adoptions = _mapping(ledger.get("adoptions"))
-    validations = _mapping(ledger.get("validations"))
-    settled = _mapping(validations.get("settled"))
+    adoptions = as_dict(ledger.get("adoptions"))
+    validations = as_dict(ledger.get("validations"))
+    settled = as_dict(validations.get("settled"))
     return {
         # The axis every percentage below shares. The reconciliation has to be single-axis: an attributed figure on
         # one axis against an unattributed figure on another makes the gap meaningless. Read off the validation row
@@ -503,7 +485,7 @@ def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[s
         "perf": _graded_axes(settled.get("perf")),
         "attributed_gain_pct": _optional_float(ledger.get("attributed_gain_pct")),
         "attributed_gain_pct_excluding_fixes": _optional_float(ledger.get("attributed_gain_pct_excluding_fixes")),
-        "by_keep_reason": dict(_mapping(adoptions.get("by_keep_reason"))),
+        "by_keep_reason": dict(as_dict(adoptions.get("by_keep_reason"))),
         "unattributed_gain_pct": _optional_float(ledger.get("unattributed_gain_pct")),
         "reconciliation_gap_pct": _optional_float(ledger.get("reconciliation_gap_pct")),
         "validated_total_gain_pct": _optional_float(ledger.get("validated_total_gain_pct")),
@@ -527,8 +509,8 @@ def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[s
         # no ledger, which is not the same as a stack that outran its
         # validation, so the negation is only taken when the ledger exists.
         "stack_changed_after_validation": (not bool(validations.get("at_head")) if available else False),
-        "attribution": _attribution(_mapping(adoptions.get("by_source")), available),
-        "guards": dict(_mapping(ledger.get("guards"))),
+        "attribution": _attribution(as_dict(adoptions.get("by_source")), available),
+        "guards": dict(as_dict(ledger.get("guards"))),
         "notes": _validation_notes(ledger),
     }
 
@@ -537,7 +519,7 @@ def _attribution(buckets: dict[str, Any], available: bool) -> dict[str, Any]:
     """The ledger's adoptions by source, the kernel source by backend; ``available`` says the ledger exists."""
 
     def _bucket(*names: str) -> dict[str, Any]:
-        rows = [_mapping(buckets.get(name)) for name in names]
+        rows = [as_dict(buckets.get(name)) for name in names]
         return {
             "total_gain_pct": (
                 round(sum(_optional_float(row.get("total_gain_pct")) or 0.0 for row in rows), 6) if available else None
@@ -549,7 +531,7 @@ def _attribution(buckets: dict[str, Any], available: bool) -> dict[str, Any]:
             "unmeasured_keep_count": sum(_optional_int(row.get("unmeasured")) or 0 for row in rows),
         }
 
-    kernel_backends = _mapping(_mapping(buckets.get("kernel")).get("by_backend"))
+    kernel_backends = as_dict(as_dict(buckets.get("kernel")).get("by_backend"))
     return {
         "available": available,
         "by_source": {
@@ -579,7 +561,7 @@ def _bucket_of(backends: dict[str, Any], name: str, available: bool) -> dict[str
     Returns:
         dict[str, Any]: The backend's adoption count and summed contribution.
     """
-    row = _mapping(backends.get(name))
+    row = as_dict(backends.get(name))
     return {
         "total_gain_pct": _optional_float(row.get("total_gain_pct")) if available else None,
         "keep_count": _optional_int(row.get("count")) or 0,
@@ -608,7 +590,7 @@ def _validation_notes(ledger: dict[str, Any]) -> list[str]:
     if not ledger:
         return []
     notes: list[str] = []
-    guards = _mapping(ledger.get("guards"))
+    guards = as_dict(ledger.get("guards"))
     unmeasured = _optional_int(guards.get("unmeasured")) or 0
     if unmeasured:
         notes.append(f"{unmeasured} adoption(s) have no measurable contribution; attributed gain is a lower bound")
@@ -629,7 +611,7 @@ def _validation_notes(ledger: dict[str, Any]) -> list[str]:
         )
     # No note for an off-objective adoption: a comparison that cannot supply the configured axis pair fails instead
     # of settling for another axis, so every row in this sum is on the axis ``graded_on`` names by construction.
-    validations = _mapping(ledger.get("validations"))
+    validations = as_dict(ledger.get("validations"))
     if not _optional_int(validations.get("count")):
         notes.append("no whole-stack validation was measured, so the ledger has nothing to reconcile against")
     elif validations.get("at_head") is False:
@@ -685,8 +667,8 @@ def collect_v6_outcome(sources: OutcomeSources, warnings: list[str] | None = Non
         break
     validation_ids: list[str] = []
     validation = _validation_from_timeline(timeline, validation_ids)
-    recipe = _mapping(sources.close.get("final_recipe"))
-    stage_recorded = str(_mapping(sources.recorded).get("stage_reached_recorded") or "")
+    recipe = as_dict(sources.close.get("final_recipe"))
+    stage_recorded = str(as_dict(sources.recorded).get("stage_reached_recorded") or "")
     outcome = {
         "stop_reason": stop_reason,
         "status": outcome_status,
@@ -707,7 +689,7 @@ def collect_v6_outcome(sources: OutcomeSources, warnings: list[str] | None = Non
             "graded_on": validation.get("graded_on"),
             "perf": validation.get("perf"),
             "action_path": [str(step) for step in recipe.get("action_path") or []],
-            "extra_envs": dict(_mapping(recipe.get("extra_envs"))),
+            "extra_envs": dict(as_dict(recipe.get("extra_envs"))),
             "extra_server_args": str(recipe.get("extra_server_args") or ""),
             # Read off the validation row that measured the final stack: the
             # settled figure and the latency and launch beside it come from one

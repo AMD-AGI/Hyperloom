@@ -566,7 +566,6 @@ def package_session_artifacts(
     session_dir: Path | str,
     *,
     session_id: str = "",
-    dest_root: Path | str | None = None,
 ) -> Path | None:
     """Bundle curated artifacts of ``session_dir`` into one zip under the dest root (default ``/workspace/<PACKAGE_SUBDIR>/``)."""
     sd = Path(session_dir).resolve()
@@ -591,7 +590,7 @@ def package_session_artifacts(
         reserved_overflow=reserved_overflow,
     )
 
-    root = Path(dest_root).resolve() if dest_root else _dest_root()
+    root = _dest_root()
     out_dir = root / PACKAGE_SUBDIR
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / f"{sid}.zip"

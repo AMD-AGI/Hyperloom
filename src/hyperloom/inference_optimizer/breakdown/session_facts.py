@@ -102,19 +102,12 @@ def grading_block(state: Any) -> dict[str, Any]:
     object without a recorded axis still uses :func:`resolved_grading`.
     """
     from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT
-    from hyperloom.inference_optimizer.grading import resolved_grading
+    from hyperloom.inference_optimizer.grading import recorded_grading, resolved_grading
 
-    recorded = _field(state, "grading", None)
-    recorded = recorded if isinstance(recorded, dict) else {}
-    objective = str(recorded.get("objective") or "").strip()
-    if objective:
-        noise_pct = recorded.get("noise_pct")
-        on_intvty = objective == GRADED_INTVTY
-        noise = float(noise_pct) if isinstance(noise_pct, (int, float)) else None
-    elif isinstance(state, Mapping):
+    grading = recorded_grading(state.get("grading")) if isinstance(state, Mapping) else resolved_grading(state)
+    if grading is None:
         return {}
-    else:
-        on_intvty, noise = resolved_grading(state)
+    on_intvty, noise = grading
     return {
         "benchmark_mode": str(_field(state, "benchmark_mode", "") or "").strip() or "synthetic",
         "objective": GRADED_INTVTY if on_intvty else GRADED_OUTPUT,

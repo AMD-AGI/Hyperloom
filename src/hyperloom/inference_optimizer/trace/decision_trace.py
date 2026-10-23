@@ -17,10 +17,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_unix
 from hyperloom.common.timeutil import iso_z
 from hyperloom.inference_optimizer.breakdown.collectors._common import (
     _load_jsonl_safe,
-    _parse_iso_unix,
     _to_float,
     phase_at,
 )
@@ -194,7 +194,7 @@ def _build_phase_windows(
         to_phase = str(row.get("to_phase") or "").strip()
         ts_unix = row.get("ts_unix")
         if ts_unix is None:
-            ts_unix = _parse_iso_unix(row.get("ts"))
+            ts_unix = to_unix(row.get("ts"))
         if ts_unix is None:
             continue
         windows.append((float(ts_unix), to_phase))
@@ -204,7 +204,7 @@ def _build_phase_windows(
 
 def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
     """Return the phase active at ISO-or-numeric ``ts`` per ``windows``."""
-    unix = _parse_iso_unix(ts)
+    unix = to_unix(ts)
     if unix is None or not windows:
         return ""
     return phase_at(unix, windows)

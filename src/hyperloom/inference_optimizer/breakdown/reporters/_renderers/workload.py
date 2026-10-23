@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import RenderedSection, as_dict, md_kv_list, register_renderer, stop_target_text, task_config_of
+from hyperloom.inference_optimizer.breakdown.recorder.event_fields import as_dict
+
+from ..base import RenderedSection, md_kv_list, register_renderer, stop_target_text, task_config_of
 
 
 @register_renderer("workload")

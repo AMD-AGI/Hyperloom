@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
 from zipfile import ZipFile
 
@@ -13,7 +14,7 @@ import pytest
 from jsonschema import ValidationError, validate
 
 from hyperloom.inference_optimizer.breakdown.exporter import build, patch_breakdown_close, write_breakdown_json
-from hyperloom.inference_optimizer.breakdown.session_package import package_session_artifacts
+from hyperloom.inference_optimizer.breakdown.session_package import ENV_PACKAGE_DEST_ROOT, package_session_artifacts
 from hyperloom.inference_optimizer.breakdown.recorder import phase_event, record_stage_reached, stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
     CloseStep,
@@ -294,7 +295,8 @@ def test_v2_budget_and_stack_ids_come_from_writers(tmp_path):
         validate(instance=fixture, schema=workflow_schema())
 
 
-def test_final_close_refresh_matches_rebuilt_package(tmp_path):
+def test_final_close_refresh_matches_rebuilt_package(tmp_path, monkeypatch):
+    monkeypatch.setenv(ENV_PACKAGE_DEST_ROOT, str(tmp_path / "workspace"))
     write_manifest(tmp_path, session_id="v2-close")
     state = SharedState(session_id="v2-close", phase="CLOSE", baseline_tput=100.0)
     state.set_stop_reason("target_reached")
@@ -302,7 +304,7 @@ def test_final_close_refresh_matches_rebuilt_package(tmp_path):
     record_close_opened(tmp_path)
     record_close_step(tmp_path, CloseStep(step="session_breakdown", status="done", optional=False))
     sbd_path = write_breakdown_json(tmp_path)
-    package = package_session_artifacts(tmp_path, session_id="v2-close", dest_root=tmp_path / "workspace")
+    package = package_session_artifacts(tmp_path, session_id="v2-close")
     assert package is not None
     record_close_step(
         tmp_path, CloseStep(step="artifact_package", status="done", optional=False, artifact_path=str(package))
@@ -311,7 +313,7 @@ def test_final_close_refresh_matches_rebuilt_package(tmp_path):
     record_close_settled(tmp_path)
     record_stage_reached(tmp_path, "close")
     assert patch_breakdown_close(tmp_path)
-    rebuilt = package_session_artifacts(tmp_path, session_id="v2-close", dest_root=tmp_path / "workspace")
+    rebuilt = package_session_artifacts(tmp_path, session_id="v2-close")
     assert rebuilt == package
 
     on_disk = json.loads(sbd_path.read_text(encoding="utf-8"))
@@ -377,6 +379,18 @@ def test_schema_rejects_contract_drift(tmp_path, mutation: str):
 
     with pytest.raises(ValidationError):
         validate(instance=fixture, schema=workflow_schema())
+
+
+def test_contract_digest_canonicalization_is_byte_stable(monkeypatch):
+    # External verifiers recompute the digest with this exact serialization and compare it strictly.
+    from hyperloom.inference_optimizer.breakdown import workflow_contract as contract_module
+
+    monkeypatch.setattr(
+        contract_module, "_load_workflow_contract", lambda: {"b": [1, {"y": "\u00e9", "x": None}], "a": "\u00fc"}
+    )
+    canonical = b'{"a":"\xc3\xbc","b":[1,{"x":null,"y":"\xc3\xa9"}]}'
+    assert hashlib.sha256(canonical).hexdigest() == "7f96ea3a020e615b4302a3648283ecbbacc5c69be56d5c29187599e46b94effd"
+    assert contract_module.workflow_contract_digest() == hashlib.sha256(canonical).hexdigest()
 
 
 def test_unknown_contract_digest_fails_schema_validation(tmp_path):

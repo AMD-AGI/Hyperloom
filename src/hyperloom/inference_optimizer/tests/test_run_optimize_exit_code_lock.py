@@ -34,22 +34,10 @@ def _record_terminal_writes(monkeypatch) -> list[str]:
     return order
 
 
-def test_resumable_restart_writes_no_terminal_artifacts(tmp_path: Path, monkeypatch) -> None:
-    order = _record_terminal_writes(monkeypatch)
-
-    ocli._write_cli_terminal_artifacts(
-        tmp_path,
-        SharedState(session_id="s"),
-        "supervisor_restart_requested",
-    )
-
-    assert order == []
-
-
 def test_terminal_artifacts_keep_the_existing_write_order(tmp_path: Path, monkeypatch) -> None:
     order = _record_terminal_writes(monkeypatch)
 
-    ocli._write_cli_terminal_artifacts(tmp_path, SharedState(session_id="s"), "signal")
+    ocli._write_cli_terminal_artifacts(tmp_path, SharedState(session_id="s"))
 
     assert order == ["final_json", "breakdown", "final_md", "package"]
 
@@ -58,7 +46,7 @@ def test_terminal_safety_net_preserves_authored_stage(tmp_path: Path, monkeypatc
     _record_terminal_writes(monkeypatch)
     record_stage_reached(tmp_path, "enablement")
 
-    ocli._write_cli_terminal_artifacts(tmp_path, SharedState(session_id="s", phase="PRELUDE"), "signal")
+    ocli._write_cli_terminal_artifacts(tmp_path, SharedState(session_id="s", phase="PRELUDE"))
 
     assert assemble_parts(tmp_path)["outcome"]["stage_reached_recorded"] == "enablement"
 
@@ -66,7 +54,7 @@ def test_terminal_safety_net_preserves_authored_stage(tmp_path: Path, monkeypatc
 def test_terminal_safety_net_does_not_invent_a_stage(tmp_path: Path, monkeypatch) -> None:
     _record_terminal_writes(monkeypatch)
 
-    ocli._write_cli_terminal_artifacts(tmp_path, SharedState(session_id="s", phase="PRELUDE"), "signal")
+    ocli._write_cli_terminal_artifacts(tmp_path, SharedState(session_id="s", phase="PRELUDE"))
 
     assert "outcome" not in assemble_parts(tmp_path)
 
@@ -76,7 +64,7 @@ def test_completed_close_still_gets_its_close_out_package(tmp_path: Path, monkey
     order = _record_terminal_writes(monkeypatch)
 
     state = SharedState(session_id="s", close_sequence_done=True)
-    ocli._write_cli_terminal_artifacts(tmp_path, state, "signal")
+    ocli._write_cli_terminal_artifacts(tmp_path, state)
 
     assert order == ["final_json", "package"]
 
