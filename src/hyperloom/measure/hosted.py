@@ -41,6 +41,7 @@ from hyperloom.measure.bundle import (
     VerifiedBundle,
 )
 from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure
+from hyperloom.measure.hosted_live import LiveOutputs, finite_number
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, MeasurementJournal, Record
 from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
 from hyperloom.measure.manifest import ResultManifest
@@ -288,6 +289,7 @@ class HostedMeasurementBackend:
         )
         self._journal: MeasurementJournal | None = None
         self._stops = _Stops()
+        self._live = LiveOutputs(clock)
 
     # -- lifecycle ----------------------------------------------------------------------------------------------
 
@@ -318,6 +320,11 @@ class HostedMeasurementBackend:
             raise HostedStartError("the backend was not started")
         return self._journal
 
+    def live_output(self, request_id: str) -> tuple[float, str] | None:
+        """``(seconds since the newest live log was written, its last line)`` of a test that is running, as its runner
+        reported at the latest poll; ``None`` when the test is not running or its runner has reported no log yet."""
+        return self._live.get(request_id)
+
     # -- the entry point ----------------------------------------------------------------------------------------
 
     def run_test(self, call: TestCall) -> TestOutcome:
@@ -338,6 +345,7 @@ class HostedMeasurementBackend:
             return self._fresh(call, journal.next_attempt(call.task_id), stop)
         finally:
             self._stops.end(call.task_id)
+            self._live.forget(call.task_id)
 
     def withdraw(self, request_id: str) -> None:
         """Tell the test of ``request_id`` that nobody wants its result any more; it returns at once.
@@ -510,13 +518,13 @@ class HostedMeasurementBackend:
         deadline = call.session_deadline_sec
         return deadline is not None and time.monotonic() >= deadline
 
-    @staticmethod
-    def _report_progress(handle: Sandbox, call: TestCall, last_output: float) -> float:
+    def _report_progress(self, handle: Sandbox, call: TestCall, last_output: float) -> float:
         try:
             progress = _read_json(handle, PROGRESS_PATH)
         except (ValueError, KeyError):
             return last_output
-        latest = float((progress or {}).get("last_output_unix") or 0.0)
+        self._live.note(call.task_id, progress)
+        latest = finite_number((progress or {}).get("last_output_unix")) or 0.0
         if latest > last_output and call.on_output is not None:
             call.on_output()
         return max(latest, last_output)

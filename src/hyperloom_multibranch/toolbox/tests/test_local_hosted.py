@@ -22,6 +22,7 @@ from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
 from hyperloom.measure.archive import DirResultArchive
 from hyperloom.measure.framework_base import FRAMEWORK_BASE_FILE, load_snapshot
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, MeasurementJournal, Record
+from hyperloom.measure.live_log import last_output
 from hyperloom.measure.runner.tools import ToolError, ensure_inferencex
 from hyperloom.measure.tests.framework_fixtures import make_framework
 from hyperloom.measure.tests.hosted_fixtures import spec_context
@@ -35,7 +36,6 @@ from hyperloom_multibranch.toolbox.local_hosted import (
     LocalOptions,
     LocalSession,
     build_local_toolbox,
-    last_output,
     max_parallel_tests,
 )
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup

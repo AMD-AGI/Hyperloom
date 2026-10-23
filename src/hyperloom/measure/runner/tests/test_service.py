@@ -50,6 +50,30 @@ def test_progress_records_phase_and_last_output_and_refreshes_in_the_background(
     assert after["updated_unix"] > before["updated_unix"]
 
 
+def test_progress_reports_the_last_line_of_the_newest_live_log_below_the_files_directory(tmp_path):
+    files = tmp_path / "files"
+    log = files / "round" / "server.log"
+    log.parent.mkdir(parents=True)
+    out = tmp_path
+    with Progress(out, refresh_sec=3600, files_dir=files) as progress:
+        assert "last_line" not in json.loads((out / "progress.json").read_text()), "no log is written yet"
+        log.write_text("booting\n\x1b[32mdecode batch 8\x1b[0m\n")
+        progress.phase("running")
+        document = json.loads((out / "progress.json").read_text())
+    assert document["last_line"] == "decode batch 8"
+    assert 0.0 <= document["last_log_age_sec"] < 60.0
+    assert document["phase"] == "running" and document["updated_unix"] > 0
+
+
+def test_progress_without_a_files_directory_reports_no_line(tmp_path):
+    (tmp_path / "files").mkdir()
+    (tmp_path / "files" / "server.log").write_text("a line\n")
+    with Progress(tmp_path, refresh_sec=3600) as progress:
+        progress.phase("running")
+        document = json.loads((tmp_path / "progress.json").read_text())
+    assert "last_line" not in document and "last_log_age_sec" not in document
+
+
 def test_two_writers_of_one_file_never_share_a_scratch_file(tmp_path, monkeypatch):
     """A second write that happens between the first's write and its rename must not take the first's scratch away."""
     import os

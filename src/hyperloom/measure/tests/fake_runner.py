@@ -27,6 +27,8 @@ below the round's directory) with those lines.
 ``fake_eval_in_warmup: true`` lays the rounds out as a graded test with a warmup leaves them (one evaluation, in the
 warmup round): a warmup round and the accuracy round on one directory, the measured round on another, and the lm-eval
 results file of ``fake_accuracy`` below the warmup's.
+``fake_log_line: <text>`` writes a server log whose last line that is, so the runner's progress reports it as the last
+line of the live output.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ from hyperloom.measure import signing
 from hyperloom.measure.attachments import place_attachments, substitute
 from hyperloom.measure.repro import REPRO_DIR, find_case, run_case
 from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
+from hyperloom.measure.runner.service import Progress
 from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
 
 REPORT_PATH = "benchmark_fake_20261014_000000/benchmark_report.json"
@@ -258,23 +261,27 @@ def _publish(out: Path, spec: MeasurementSpec, raw: bytes, config: dict[str, Any
 def main() -> int:
     root = Path(os.environ["HYPERLOOM_SANDBOX_ROOT"])
     inbox, out = root / "in", root / "out"
-    _atomic(out / "progress.json", json.dumps({"phase": "waiting_spec", "last_output_unix": 0.0}).encode())
-    while not (inbox / "READY").exists():
-        time.sleep(0.02)
-    raw = (inbox / "spec.json").read_bytes()
-    spec = MeasurementSpec.from_bytes(raw)
-    config = yaml.safe_load(spec.config[0].yaml) or {}
-    mode = str(config.get("fake_mode", "ok"))
-    _atomic(out / "progress.json", json.dumps({"phase": "running", "last_output_unix": time.time()}).encode())
-    time.sleep(float(config.get("fake_delay", 0)))
-    if mode == "hang":
-        time.sleep(3600)
-    if mode in ("spec_rejected", "node_fault"):
-        state = {"state": "failed", "error_class": mode, "message": f"fake {mode}"}
-        _atomic(out / "files" / "server.log", b"partial log\n")
-        _atomic(out / "status.json", json.dumps(state).encode())
-        return 0
-    _publish(out, spec, raw, config, mode)
+    with Progress(out, files_dir=out / "files") as progress:
+        progress.phase("waiting_spec")
+        while not (inbox / "READY").exists():
+            time.sleep(0.02)
+        raw = (inbox / "spec.json").read_bytes()
+        spec = MeasurementSpec.from_bytes(raw)
+        config = yaml.safe_load(spec.config[0].yaml) or {}
+        mode = str(config.get("fake_mode", "ok"))
+        if "fake_log_line" in config:
+            _atomic(out / "files" / "server.log", f"boot\n{config['fake_log_line']}\n".encode())
+        progress.touch()
+        progress.phase("running")
+        time.sleep(float(config.get("fake_delay", 0)))
+        if mode == "hang":
+            time.sleep(3600)
+        if mode in ("spec_rejected", "node_fault"):
+            state = {"state": "failed", "error_class": mode, "message": f"fake {mode}"}
+            _atomic(out / "files" / "server.log", b"partial log\n")
+            _atomic(out / "status.json", json.dumps(state).encode())
+            return 0
+        _publish(out, spec, raw, config, mode)
     return 0
 
 

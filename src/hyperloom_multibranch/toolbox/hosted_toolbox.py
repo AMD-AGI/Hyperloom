@@ -5,9 +5,9 @@
 
 Every test runs in a fresh authoritative sandbox the service creates from the runner template of the session's card
 count, and is accepted only as a signed bundle that verified against the key the service reported for that sandbox
-(:mod:`hyperloom.measure.hosted`). A branch's agent works in a ``dev`` sandbox of the same grant
-(:mod:`hyperloom_multibranch.toolbox.hosted_leases`). The service, not the toolbox, owns the cards: the toolbox counts
-the grant's GPUs and gives the ones its leases hold back to nobody else.
+(:mod:`hyperloom.measure.hosted`). While it runs, its progress is the last log line its runner reports. A branch's agent
+works in a ``dev`` sandbox of the same grant (:mod:`hyperloom_multibranch.toolbox.hosted_leases`). The service, not the
+toolbox, owns the cards: the toolbox counts the grant's GPUs and gives the ones its leases hold back to nobody else.
 
 :class:`HostedToolboxInputs` holds plain values only, so the host entry (which reads the host's variables and may not
 import this package) can pass them as keyword arguments.
@@ -180,6 +180,15 @@ class HostedToolbox(LeasedToolbox):
     async def release_branch_sandbox(self, lease_id: str) -> None:
         if self.leases is not None:
             await self.leases.release(lease_id)
+
+    async def _last_output(self, request_id: str) -> tuple[float, str] | None:
+        """The live output the test's runner reported at the backend's latest poll of its sandbox.
+
+        Read in a thread like every other call into the backend: its readings are guarded by a lock the polling threads
+        take, which the event loop never waits for.
+        """
+
+        return await asyncio.to_thread(self.backend.live_output, request_id)
 
     async def close(self) -> None:
         """End the tests' bookkeeping, then the lease sandboxes and the measurement sandboxes of this run."""

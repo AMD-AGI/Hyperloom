@@ -14,6 +14,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from hyperloom.measure.live_log import last_output
+
 __all__ = ["EXIT_CODES", "Progress", "RunnerFailure", "wait_for_file", "write_json_atomic", "write_status"]
 
 #: Exit code by ``error_class``; anything not listed exits 1.
@@ -75,10 +77,16 @@ def wait_for_file(
 
 
 class Progress:
-    """``/out/progress.json``: the phase, and when the test last wrote output; refreshed in the background."""
+    """``/out/progress.json``: the phase, and when the test last wrote output; refreshed in the background.
 
-    def __init__(self, out_dir: Path, *, refresh_sec: float = _REFRESH_SEC) -> None:
+    With ``files_dir``, the directory the test's logs are written below, it also says how long ago the newest live log was
+    written (``last_log_age_sec``, as the runner's clock sees it) and that log's last line (``last_line``, cleaned and
+    shortened), so the application can show how a running test is doing.
+    """
+
+    def __init__(self, out_dir: Path, *, refresh_sec: float = _REFRESH_SEC, files_dir: Path | None = None) -> None:
         self._path = out_dir / "progress.json"
+        self._files_dir = files_dir
         self._refresh_sec = refresh_sec
         self._lock = threading.Lock()
         self._state: dict[str, Any] = {"phase": "starting", "last_output_unix": None}
@@ -98,7 +106,11 @@ class Progress:
     def flush(self) -> None:
         with self._lock:
             document = {**self._state, "updated_unix": time.time()}
-        write_json_atomic(self._path, document)
+        write_json_atomic(self._path, {**document, **self._live_log()})
+
+    def _live_log(self) -> dict[str, Any]:
+        found = None if self._files_dir is None else last_output(self._files_dir, time.time())
+        return {} if found is None else {"last_log_age_sec": found[0], "last_line": found[1]}
 
     def __enter__(self) -> Progress:
         def refresh() -> None:

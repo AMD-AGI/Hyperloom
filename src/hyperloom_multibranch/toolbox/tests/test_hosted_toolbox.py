@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import functools
+import json
 import os
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -51,7 +52,7 @@ from hyperloom.sandbox.tests.e2b_standin import (
     unavailable_reason,
 )
 from hyperloom_multibranch.contracts.notebook import Role as NotebookRole, Writer
-from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected, WorkloadKind
+from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected, TestProgress, WorkloadKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox import hosted_toolbox
 from hyperloom_multibranch.toolbox.hosted_leases import LEASE_PURPOSE, RUN_ID_KEY, LeaseTuning
@@ -480,6 +481,57 @@ async def test_a_runner_template_that_does_not_list_a_create_environment_name_re
         assert f"env_not_allowed: template '{_NARROW}' does not accept {SOURCE_SHA_ENV}" in result.failure_reason
         assert _SOURCE_SHA not in result.failure_reason, "the refusal names the variable, not its value"
         assert service.running("measurement") == [], "a refused create made no sandbox"
+    finally:
+        await toolbox.close()
+
+
+async def _progress_with_a_line(toolbox: HostedToolbox, request_id: str) -> TestProgress:
+    deadline = time.monotonic() + 30
+    while True:
+        progress = await toolbox.progress(request_id)
+        if progress is not None and progress.last_line:
+            return progress
+        assert time.monotonic() < deadline, f"timed out waiting for a live line, last progress {progress}"
+        await asyncio.sleep(0.02)
+
+
+async def test_a_running_tests_progress_is_the_last_line_its_runner_reports_from_the_sandbox(
+    service: Service, tmp_path: Path
+) -> None:
+    toolbox = _toolbox(service, tmp_path, planned={**_HANG, "fake_log_line": "decode batch 8"})
+    try:
+        await toolbox.start()
+        request_id = await toolbox.submit_test(req())
+        progress = await _progress_with_a_line(toolbox, request_id)
+        assert progress.state == "running" and progress.last_line == "decode batch 8"
+        assert progress.last_output_seconds_ago is not None and 0.0 <= progress.last_output_seconds_ago < 30.0
+        assert progress.running_seconds is not None and progress.queued_ahead is None
+    finally:
+        await toolbox.close()
+
+
+async def test_a_running_test_whose_runner_has_written_no_log_has_no_live_line(
+    service: Service, tmp_path: Path
+) -> None:
+    toolbox = _toolbox(service, tmp_path, planned=_HANG)
+    try:
+        await toolbox.start()
+        request_id = await toolbox.submit_test(req())
+        await _until(lambda: service.running("measurement", "run-1") != [], "the runner sandbox")
+        (sandbox_id,) = service.running("measurement", "run-1")
+        sandbox = service.observer().connect(sandbox_id, role="measurement")
+
+        def running() -> bool:
+            try:
+                return json.loads(sandbox.read_file("/out/progress.json")).get("phase") == "running"
+            except FileNotFoundError:
+                return False
+
+        await _until(running, "the runner's progress to say it runs")
+        await asyncio.sleep(0.5)  # ten polls of that file
+        progress = await toolbox.progress(request_id)
+        assert progress is not None and progress.state == "running" and progress.running_seconds is not None
+        assert (progress.last_line, progress.last_output_seconds_ago) == (None, None)
     finally:
         await toolbox.close()
 

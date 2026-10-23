@@ -445,7 +445,7 @@ def run(
     for sub in ("farm", "attach", "pids"):
         (work / sub).mkdir(parents=True, exist_ok=True)
     ctx = _Context(in_dir, out_dir, work, scratch / "cache", environ, time.time())
-    with Progress(out_dir) as progress:
+    with Progress(out_dir, files_dir=ctx.files) as progress:
         try:
             key = _load_key(environ)
             take_topology(environ)

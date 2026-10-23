@@ -9,6 +9,7 @@ import json
 import subprocess
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -108,6 +109,46 @@ def test_the_runner_reports_progress_and_on_output_is_called(rig, tmp_path) -> N
     call = make_call(tmp_path, point=point_yaml(tmp_path, fake_delay=0.3), on_output=lambda: heard.append(1))
     assert r.backend.run_test(call).returncode == 0
     assert heard, "the runner's progress file reached the silence detector"
+
+
+def test_a_running_tests_live_output_is_what_its_runner_reports_and_ends_with_the_test(rig, tmp_path) -> None:
+    r = rig()
+    call = make_call(tmp_path, point=point_yaml(tmp_path, fake_mode="hang", fake_log_line="decode batch 8"))
+    assert r.backend.live_output("req-1") is None, "a test that is not running has none"
+    result: list = []
+    worker = threading.Thread(target=lambda: result.append(r.backend.run_test(call)))
+    worker.start()
+    try:
+        deadline = time.monotonic() + 20
+        while r.backend.live_output("req-1") is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        reported = r.backend.live_output("req-1")
+        assert reported is not None and reported[1] == "decode batch 8" and 0.0 <= reported[0] < 30.0
+        assert r.backend.live_output("req-2") is None, "each test has its own"
+    finally:
+        r.backend.withdraw("req-1")
+        worker.join(30)
+    assert not worker.is_alive() and result[0].returncode == STOPPED_RETURNCODE
+    assert r.backend.live_output("req-1") is None, "what a test said is not kept after it ended"
+
+
+def test_a_runner_that_reports_no_log_leaves_the_live_output_empty(rig, tmp_path) -> None:
+    r = rig()
+    call = make_call(tmp_path, point=point_yaml(tmp_path, fake_mode="hang"))
+    heard: list[int] = []
+    call = replace(call, on_output=lambda: heard.append(1))
+    worker = threading.Thread(target=lambda: r.backend.run_test(call))
+    worker.start()
+    try:
+        deadline = time.monotonic() + 20
+        while not heard and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert heard, "the runner's progress was read"
+        time.sleep(0.3)  # several more polls of the same file
+        assert r.backend.live_output("req-1") is None
+    finally:
+        r.backend.withdraw("req-1")
+        worker.join(30)
 
 
 def test_events_announce_start_and_finish(rig, tmp_path) -> None:
