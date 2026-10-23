@@ -17,7 +17,7 @@ from typing import Awaitable, Callable
 from kernelforge.agent_backends import AgentRunSpec, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.config import Config, resolve_agent_model
-from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool, require_mcp_backend, wiki_servers, wiki_tool_names
+from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool, require_mcp_runtime, wiki_servers, wiki_tool_names
 from kernelforge.tools.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -214,7 +214,6 @@ def make_supervisor_fn(
     from kernelforge.agent_backends import AgentToolPolicy
     from kernelforge.agent_backends.registry import (
         create_registered_backend,
-        get_agent_provider,
         resolve_agent_runtime,
     )
 
@@ -234,8 +233,8 @@ def make_supervisor_fn(
         runtime = replace(runtime, model=supervisor_model)
     timeout_sec = int(runtime.options.get("supervisor_timeout_sec") or runtime.timeout_sec)
     knowledge_wiki = KnowledgeWikiTool.from_config(config)
-    # The backend is built on the first pass, so the provider's declared capabilities are what can refuse it now.
-    require_mcp_backend(knowledge_wiki, get_agent_provider(runtime.provider), "supervisor")
+    # The backend is built on the first pass, so what its providers declare is what can refuse it now.
+    require_mcp_runtime(knowledge_wiki, runtime, "supervisor")
     selected_backend = None
 
     async def supervisor_fn(
