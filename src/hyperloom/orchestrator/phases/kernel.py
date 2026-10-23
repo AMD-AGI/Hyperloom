@@ -342,11 +342,16 @@ _AITER_ENV_TO_TABLE: dict[str, str] = {
 }
 
 
+def _integrate_run_name(tuner_name: str) -> str:
+    """Name of the integrate run that serves a tuner's candidate."""
+    return f"integrate-gemm_tune_{tuner_name}"
+
+
 def _integrate_server_logs(session_dir: Path, tuner_name: str) -> list[Path]:
     """Server logs for a tuner's integrate run, retries included, oldest first."""
     from ..kernel.gemm_shape_coverage import integrate_server_logs
 
-    return integrate_server_logs(session_dir, f"integrate-gemm_tune_{tuner_name}")
+    return integrate_server_logs(session_dir, _integrate_run_name(tuner_name))
 
 
 def _candidate_tuned_file(env: Any, env_var: str) -> str:
@@ -2791,7 +2796,7 @@ class KernelPhase(CoordinatorCollaborator):
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths:
             return None
-        loaded = read_latest_integrate_server_log(self.session_dir)
+        loaded = read_latest_integrate_server_log(self.session_dir, _integrate_run_name("fmoe_ck"))
         if loaded is None:
             return None
         log_path, log_text = loaded
@@ -2924,7 +2929,7 @@ class KernelPhase(CoordinatorCollaborator):
             # Say so.
             log.warning(
                 "forge gemm E2E: no server.log under %s (retries included); apply verification cannot run for %s",
-                self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}",
+                self.session_dir / "runs" / "integrate" / _integrate_run_name(tuner_name),
                 tuner_name,
             )
             return None
@@ -2956,11 +2961,11 @@ class KernelPhase(CoordinatorCollaborator):
             tuned_fmoe_csv_rows,
         )
 
-        loaded = read_latest_integrate_server_log(self.session_dir)
+        loaded = read_latest_integrate_server_log(self.session_dir, _integrate_run_name("fmoe_ck"))
         if loaded is None:
             log.warning(
                 "forge gemm E2E: no server.log under %s; apply verification cannot run for fmoe_ck",
-                self.session_dir / "runs" / "integrate" / "integrate-gemm_tune_fmoe_ck",
+                self.session_dir / "runs" / "integrate" / _integrate_run_name("fmoe_ck"),
             )
             return None
         log_text = loaded[1]

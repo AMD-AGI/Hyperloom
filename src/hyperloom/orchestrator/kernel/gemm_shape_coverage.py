@@ -445,9 +445,6 @@ def resolve_fmoe_candidate_csv(path: str | Path) -> Path | None:
     return resolved
 
 
-FMOE_INTEGRATE_RUN = "integrate-gemm_tune_fmoe_ck"
-
-
 def log_has_fused_moe_activity(log_text: str) -> bool:
     """Return True when server.log shows fused-MoE activity we might parse."""
     text = log_text or ""
@@ -467,20 +464,14 @@ def _safe_mtime(path: Path) -> float:
         return 0.0
 
 
-def integrate_server_logs(
-    session_dir: Path,
-    integrate_name: str = FMOE_INTEGRATE_RUN,
-) -> list[Path]:
+def integrate_server_logs(session_dir: Path, integrate_name: str) -> list[Path]:
     """Server logs for one integrate run, retries included, oldest first."""
     parent = session_dir / "runs" / "integrate"
     run_dirs = [parent / integrate_name, *sorted(parent.glob(f"{integrate_name}-*"))]
     return sorted((log_path for run_dir in run_dirs for log_path in run_dir.rglob("server.log")), key=_safe_mtime)
 
 
-def read_latest_integrate_server_log(
-    session_dir: Path,
-    integrate_name: str = FMOE_INTEGRATE_RUN,
-) -> tuple[Path, str] | None:
+def read_latest_integrate_server_log(session_dir: Path, integrate_name: str) -> tuple[Path, str] | None:
     """Return the newest ``server.log`` under an integrate run, if readable."""
     logs = integrate_server_logs(session_dir, integrate_name)
     if not logs:
