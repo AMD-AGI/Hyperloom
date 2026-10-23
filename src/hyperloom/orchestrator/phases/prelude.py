@@ -53,7 +53,14 @@ from ..loop.time_budget import (
     measured_baseline_runtime_sec,
 )
 from ..collaborator import CoordinatorCollaborator
-from .warm_replay_stack import replayed_patch_refs as _replayed_patch_refs, warm_replay_source_layer
+from .warm_replay_stack import (
+    commit_warm_replay_overlays,
+    committing_overlays,
+    replayed_patch_refs as _replayed_patch_refs,
+    uncommit_promoted_overlays,
+    warm_patch_trees as _warm_patch_trees,
+    warm_replay_source_layer,
+)
 from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
 
 log = _logging.getLogger(__name__)
@@ -155,24 +162,6 @@ def _warm_recipe_history_rows(warm: Any, key: str) -> list[Any]:
         attrs = exact_history
     rows = attrs.get(key)
     return rows if isinstance(rows, list) else []
-
-
-def _warm_patch_trees(result: Mapping[str, Any], pending: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    trees = [
-        tree
-        for tree in result.get("warm_patch_trees") or pending.get("recipe_patch_trees") or []
-        if isinstance(tree, Mapping)
-    ]
-    # A round that predates the list reports only its primary tree.
-    return trees or [
-        {
-            "root": result.get("warm_patch_target") or pending.get("recipe_patch_target"),
-            "pre_sha": result.get("warm_patch_pre_sha") or pending.get("recipe_patch_pre_sha"),
-            "snapshot_manifest": (
-                result.get("warm_patch_snapshot_manifest") or pending.get("recipe_patch_snapshot_manifest")
-            ),
-        }
-    ]
 
 
 def _recorded_apply_roots(provenance: Any) -> dict[str, str]:
@@ -1494,6 +1483,11 @@ class PreludePhase(CoordinatorCollaborator):
                     "target_repo": str(target_path),
                 }
             promoted.append(str(target_path))
+        self.shared_state.warm_replay_pending = committing_overlays(self.shared_state.warm_replay_pending or {})
+        self.shared_state.save(self.session_dir)
+        if failed := commit_warm_replay_overlays(result):
+            failure = "the replayed overlays cannot be committed to the framework tree: " + "; ".join(failed)
+            return False, {"status": "failed", "failure": failure}
         return True, {"status": "promoted", "target_repo": promoted[0], "target_repos": promoted}
 
     def rollback_combined_warm(self, result: dict[str, Any], task: "Task | None") -> dict[str, Any]:
@@ -1504,6 +1498,7 @@ class PreludePhase(CoordinatorCollaborator):
             target = str(tree.get("root") or "")
             if not target:
                 continue
+            uncommit_promoted_overlays(pending, target, str(tree.get("pre_sha") or ""))
             recipe_manifest = tree.get("snapshot_manifest")
             backups = list(tree.get("nogit_backups") or [])
             if not bool(tree.get("mutated", True)):
