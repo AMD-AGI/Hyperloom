@@ -244,6 +244,8 @@ hyperloom = [
     "plugs/profiles/*.json",
     "orchestrator/prompts/*.md",
     "orchestrator/prompts/references/*.md",
+    # The reference rule pack a session reads when HYPERLOOM_RULE_PACK names no other; importing outside_facts fails without it.
+    "common/outside_facts/packs/*.yaml",
 ]
 "hyperloom.inference_optimizer" = [
     "SKILL.md",
