@@ -122,7 +122,7 @@ class RoundContext:
     session_dir: Path | None = None
 
     @classmethod
-    def of_round(cls, explore_round: Any) -> RoundContext:
+    def of_round(cls, explore_round: Any, session_dir: Path | None) -> RoundContext:
         """The context of an ``explore._ExploreRound`` once its schedule is open."""
         return cls(
             config_path=explore_round.config_path,
@@ -132,7 +132,7 @@ class RoundContext:
             inherited_args=explore_round.inherited_args,
             keep_threshold_pct=explore_round.keep_threshold_pct,
             decision_protocol="warm" if explore_round.use_warm_decision else "cold",
-            session_dir=explore_round.session_dir,
+            session_dir=session_dir,
         )
 
     @functools.cached_property

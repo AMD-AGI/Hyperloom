@@ -892,12 +892,13 @@ def _sanitized_overrides(params: dict[str, Any]) -> tuple[str | None, str | None
 class _ExploreRound:
     """One explore round: the stack it accumulates, the variants it measures, and the ledgers it writes."""
 
-    def __init__(self, ctx: Any, params: dict[str, Any], output_root: Path, session_dir: Path | None = None) -> None:
+    projection: dict[str, Any] | None = None
+
+    def __init__(self, ctx: Any, params: dict[str, Any], output_root: Path) -> None:
         extra = getattr(ctx, "extra", None) or {}
         self.ctx = ctx
         self.params = params
         self.output_root = output_root
-        self.session_dir = session_dir
         self.ss = extra.get("shared_state") or extra.get("state")
         self.phase_deadline = extra.get("phase_deadline")
         script, self.result_dir = _sanitized_overrides(params)
@@ -970,13 +971,12 @@ class _ExploreRound:
         self.run_stop_detail = ""
         self.untested = 0
         self.lease: Any = None
-        self.projection: dict[str, Any] | None = None
 
-    async def run(self) -> dict[str, Any]:
+    async def run(self, session_dir: Path | None = None) -> dict[str, Any]:
         self._resolve_grid()
         self._shape_runnable()
         self._open_schedule()
-        round_ctx = await self._prefilter()
+        round_ctx = await self._prefilter(session_dir)
         # One Ray serving lease (actor) spans the WHOLE round; every variant reuses it.
         self.lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(self.config_path)) if self.runnable else None
         try:
@@ -1009,9 +1009,9 @@ class _ExploreRound:
                 self.lease.close()
         return self._result()
 
-    async def _prefilter(self) -> RoundContext:
+    async def _prefilter(self, session_dir: Path | None) -> RoundContext:
         # Drop variants an opt-in pre-filter rules out before any of them is benchmarked.
-        round_ctx = RoundContext.of_round(self)
+        round_ctx = RoundContext.of_round(self, session_dir)
         stack = Stack.from_measured(self.measured_against())
         prefiltered = await prefilter_variants(self.runnable, round_ctx, stack, is_stack_revalidation(self.params))
         self.runnable, self.projection = prefiltered.runnable, prefiltered.projection
@@ -1812,7 +1812,7 @@ class ExploreExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
         try:
-            return await _ExploreRound(ctx, params, output_root, self.session_dir).run()
+            return await _ExploreRound(ctx, params, output_root).run(self.session_dir)
         except _RoundRefused as refusal:
             return refusal.result
 

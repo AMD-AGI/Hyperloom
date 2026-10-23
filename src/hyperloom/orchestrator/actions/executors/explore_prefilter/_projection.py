@@ -331,7 +331,7 @@ def _route_one(rnd: _Round, variant: GridVariant, idx: int) -> tuple[VariantProj
         return rec, None
     try:
         spec = rnd.spec_for(variant, f"v{idx:02d}")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - a variant that cannot be materialized is benchmarked
         rec.reason, rec.detail = "materialize_failed", str(exc)[-300:]
         return rec, None
     if _projection_key(spec, rnd.mode) == rnd.stack_key:
@@ -339,7 +339,7 @@ def _route_one(rnd: _Round, variant: GridVariant, idx: int) -> tuple[VariantProj
         return rec, None
     try:
         metrics = rnd.project(spec, mode=rnd.mode)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - a variant that fails to project is benchmarked
         rec.reason, rec.detail = "projection_failed", str(exc)[-300:]
         return rec, None
     if _estimator(metrics) != _estimator(rnd.stack):
