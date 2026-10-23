@@ -204,7 +204,7 @@ class PrMaterialization:
     #: Which source produced them: ``explicit`` / ``checkout_head`` /
     #: ``diff_url_fallback`` / ``diff_url``.
     mode: str = ""
-    #: A terminal result dict when nothing applyable could be produced. The
+    #: A terminal result dict when no patch to apply could be produced. The
     #: caller returns it as-is rather than benching an unpatched tree.
     failure: dict[str, Any] | None = None
 
@@ -292,7 +292,7 @@ def materialize_candidate_patches(
             timeout_sec=diff_fetch_timeout_sec * 4.0,
         )
         if not ok and diff_url:
-            # A worktree/fetch hiccup must not strand an applyable candidate.
+            # A worktree/fetch hiccup must not strand a candidate that would apply.
             log.warning("upstream_pr: checkout-head failed (%s); falling back to diff_url", err)
             mode = "diff_url_fallback"
             ok, err = _fetch_diff_to_path(diff_url, dest, timeout_sec=diff_fetch_timeout_sec)
