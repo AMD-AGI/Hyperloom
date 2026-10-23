@@ -419,7 +419,7 @@ module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.p
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2681
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2569
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1759
-module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2645
+module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2624
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1804
 module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1417
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2045
