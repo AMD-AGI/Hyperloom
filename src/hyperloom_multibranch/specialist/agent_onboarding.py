@@ -85,10 +85,10 @@ sys.exit(f"docker {' '.join(args[:1])}: this sandbox runs commands in place and 
 
 @dataclass(frozen=True)
 class AgentSpec:
-    """What MB asks of the agent, which its config must be derived from: the workload, the metric it is judged on,
-    the server arguments and environment it starts from (the root's), ``workspace``, the framework checkout it edits,
-    ``cards``, the GPUs it may use, ``seconds``, how long it may run (0: until MB stops it), and ``port``, the first
-    of the ports its servers may listen on."""
+    """What MB asks of the agent, which its config must be derived from: the workload, the metric it is judged on, the
+    server arguments and environment of the commit its branch starts on, ``workspace``, the framework checkout it edits,
+    ``cards``, the GPUs it may use, ``seconds``, how long it may run (0: until MB stops it), and ``port``, the first of
+    the ports its servers may listen on."""
 
     model: str
     framework: str
@@ -316,9 +316,9 @@ directory is the agent's checkout, {checkout}, a clone of {source} at {commit}. 
 points before you answer. Every file the agent writes (its config, the packs or scripts the install adds, its session
 and run directories) must be in that checkout or in "workspace", never in {source}: give absolute paths under them.
 
-It will optimize this workload, and every value its config needs must come from here, not be invented. "server_args"
-and "envs" are what the root adds to a server of "model" at "tp"; the agent's own model, host, port and TP flags come
-on top of them:
+It will optimize this workload, and every value its config needs must come from here, not be invented. "server_args" and
+"envs" are what the recipe the branch starts on adds to a server of "model" at "tp"; the agent's own model, host, port
+and TP flags come on top of them:
 {spec}
 
 The sandbox:

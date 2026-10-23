@@ -38,8 +38,8 @@ PORTS_PER_AGENT = 10
 
 @dataclass
 class AgentSessions:
-    """What a session's agents run on: ``spec``, the workload every agent is asked to optimize (the cards, the port,
-    the root's arguments and the workspace are each branch's own); the onboarding ``command`` and its ``env``; the
+    """What a session's agents run on: ``spec``, the workload every agent is asked to optimize (the cards, the port, the
+    start commit's arguments and the workspace are each branch's own); the onboarding ``command`` and its ``env``; the
     ``toolbox`` the sandboxes are leased from and imports go to, and the ``repo`` they are read against; and the
     ``processes`` registry every agent process joins."""
 

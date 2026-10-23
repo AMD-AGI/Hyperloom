@@ -4,16 +4,16 @@
 """A branch driven by a third-party agent that optimizes end to end by its own logic: an autonomous branch.
 
 The preflight leases the branch's sandbox, its own cards, from the toolbox, makes the agent ready in it
-(:mod:`agent_onboarding`) and keeps the lease and the manifest in the branch's session directory, so a run after a
-crash resumes the agent in the same sandbox without onboarding again; the lease goes back when the branch stops. A run then watches the agent's keep signal and
-reads each keep whole (:mod:`agent_import`) the moment it shows, since the agent goes on to its next candidate in the
-same workspace. Keeps are submitted as claimless explore tests against the branch head, one at a time: a keep that
-lands while an import is measured or judged waits, and a later keep replaces it, since each is cumulative. What the run
-knows of the keeps is kept beside the manifest, so a keep waiting at a crash is submitted by the run after it. The
-branch's judge judges the imports as it judges any branch's tests; nothing of its verdicts reaches the agent. An agent
-that exits 0 finishes the run once what it kept last settled; one that exits otherwise is a crash the runtime restarts
-it from. A session never ends idle: what the agent keeps, or does not, is its own business, bounded by the session's
-stops.
+(:mod:`agent_onboarding`) and keeps the lease and the manifest in the branch's session directory, so a run after a crash
+resumes the agent in the same sandbox without onboarding again; the lease goes back when the branch stops. A run then
+watches the agent's keep signal and reads each keep whole (:mod:`agent_import`) the moment it shows, since the agent
+goes on to its next candidate in the same workspace. Keeps are submitted as claimless explore tests against the branch
+head, one at a time: a keep that lands while an import is measured or judged waits, and a later keep replaces it, since
+each is cumulative. What the run knows of the keeps is kept beside the manifest, so a keep waiting at a crash is
+submitted by the run after it. The branch's judge judges the imports as it judges any branch's tests; nothing of its
+verdicts reaches the agent. An agent that exits 0 finishes the run once what it kept last settled; one that exits
+otherwise is a crash the runtime restarts it from. A session never ends idle: what the agent keeps, or does not, is its
+own business, bounded by the session's stops.
 """
 
 from __future__ import annotations
@@ -83,9 +83,9 @@ def installed_component_upstream(component: str) -> Upstream | None:
 
 @dataclass(frozen=True)
 class AutonomousSetup:
-    """What an autonomous branch runs on: how its agent is made ready in a sandbox, the sandbox a lease of the
-    toolbox's cards gives, the spec it is given (its cards, its root's server arguments and environment and its
-    workspace are filled in at the preflight), the toolbox the sandbox is leased from and imports are submitted to,
+    """What an autonomous branch runs on: how its agent is made ready in a sandbox, the sandbox a lease of the toolbox's
+    cards gives, the spec it is given (its cards, the server arguments and environment of the commit it starts on and
+    its workspace are filled in at the preflight), the toolbox the sandbox is leased from and imports are submitted to,
     the repository they are read against, and ``component``, the framework the agent edits."""
 
     onboarding: Callable[[AgentSandbox], OnboardingSetup]

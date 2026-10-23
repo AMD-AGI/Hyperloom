@@ -24,7 +24,7 @@ its guardrails, and ``default`` keeps the defaults; the manifest fingerprint and
 the label under ``frontier`` in ``policy_versions``. ``--frontier-scorer LABEL`` pins the scorer the session scores
 with instead: ``frontier-v1``, a variation's label, a scorer in code or an expression in the archive's scorer pool; a
 label none of these has, or one given beside ``--frontier-policy default``, is a usage error.
-Each ``--autonomous-agent SOURCE`` opens one branch at PRELUDE's root, after the user's directions and within
+Each ``--autonomous-agent SOURCE`` opens one branch where EXPLORE starts, after the user's directions and within
 ``--max-branches``, whose specialist runs that third-party agent end to end in a sandbox of its own; a source that
 carries credentials in its URL is a usage error. Each ``--specialist-prompt`` file holds a direction the user wrote
 for one specialist: its branch opens at PRELUDE's
@@ -254,7 +254,7 @@ def _add_specialist_input_options(run: argparse.ArgumentParser) -> None:
         metavar="SOURCE",
         help=(
             "A third-party agent to run end to end on one branch, a git URL (URL@ref for a ref) or a local path;"
-            " repeatable, each opens one branch at the root within --max-branches."
+            " repeatable, each opens one branch where EXPLORE starts, within --max-branches."
         ),
     )
     run.add_argument(

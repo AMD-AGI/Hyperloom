@@ -8,7 +8,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import replace, dataclass, field
 from pathlib import Path
 
 import pytest
@@ -108,7 +108,7 @@ class LocalSandbox:
     """Runs commands as local processes, each in a process group of its own."""
 
     def __init__(self, logs: Path) -> None:
-        self._logs, self.started, self.envs, self.leases = logs, [], [], []
+        self._logs, self.started, self.envs, self.leases, self.prompts = logs, [], [], [], []
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
         done = subprocess.run(command, shell=True, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True)
@@ -221,13 +221,20 @@ class Rig:
         return self.blobs.get(change.add_patches[0].sha256).decode()
 
 
-async def _rig(tmp_path: Path, agent: Agent = Agent(), *, poll: float = 0.05, clock=time.time) -> Rig:
+async def _rig(
+    tmp_path: Path, agent: Agent = Agent(), *, poll: float = 0.05, clock=time.time, start: Recipe | None = None
+) -> Rig:
+    """A session of the agent on :data:`BRANCH`, opened at the root, or at ``start`` committed onto it the way PRELUDE
+    replays a Recipe KB champion."""
+
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
+    start_commit = rig.root if start is None else await rig.repo.commit(BRANCH, rig.root, start, "champion")
     toolbox_notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
     worktree = rig.base.worktree(BRANCH, tmp_path / BRANCH / "agent-workspace")
     sandbox, toolbox = LocalSandbox(tmp_path / "logs"), Toolbox(toolbox_notebook)
 
     async def onboard(checkout: Path, prompt: str) -> str:
+        sandbox.prompts.append(prompt)
         return _manifest(str(worktree.path), agent)
 
     def onboarding(agent_sandbox) -> OnboardingSetup:
@@ -242,7 +249,7 @@ async def _rig(tmp_path: Path, agent: Agent = Agent(), *, poll: float = 0.05, cl
         onboarding, sandbox_for, spec, toolbox, rig.repo, "vllm", poll_seconds=poll, settle_seconds=0.3, clock=clock
     )
     place = BranchPlace(worktree, rig.notebook, tmp_path / BRANCH / "session")
-    start = SessionStart(BRANCH, rig.root, 1, BranchTask(agent=str(_agent_repo(tmp_path))))
+    start = SessionStart(BRANCH, start_commit, 1, BranchTask(agent=str(_agent_repo(tmp_path))))
 
     def restart() -> AutonomousSession:
         return AutonomousSession(start, setup, place)
@@ -400,6 +407,20 @@ async def test_an_agent_runs_on_a_lease_taken_once_for_its_branch_and_given_back
     assert rig.toolbox.leases == [(BRANCH, 1)]
     assert [lease.gpu_ids for lease in rig.sandbox.leases] == [(3,), (3,)]
     assert rig.toolbox.released == ["L1", "L1"]
+
+
+async def test_an_agent_opened_on_a_recipe_kb_champion_starts_from_its_launch(tmp_path: Path) -> None:
+    champion = replace(
+        ROOT, launch=LaunchConfig("--max-num-seqs 256 --kv-cache-dtype fp8_e4m3", {"SGLANG_USE_AITER": "1"})
+    )
+    rig = await _rig(tmp_path, start=champion)
+
+    await rig.session.preflight()
+    await rig.session.stop()
+
+    [prompt] = rig.sandbox.prompts
+    assert '"server_args": "--max-num-seqs 256 --kv-cache-dtype fp8_e4m3"' in prompt
+    assert '"SGLANG_USE_AITER": "1"' in prompt
 
 
 async def test_an_agent_whose_lease_would_leave_no_card_to_measure_fails_its_preflight(tmp_path: Path) -> None:
