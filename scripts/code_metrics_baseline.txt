@@ -257,7 +257,7 @@ function-lines src/hyperloom/inference_optimizer/cli/bootstrap.py::_seed_shared_
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_context_window 123
 function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_prepare_multi_node_state 90
 function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 961
-function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_preflight 203
+function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_preflight 194
 function-lines src/hyperloom/inference_optimizer/multi_node/cli.py::build_parser 266
 function-lines src/hyperloom/inference_optimizer/multi_node/scripts/apply_tracelens_patch_multinode.py::main 115
 function-lines src/hyperloom/inference_optimizer/multi_node/scripts/kernel_patch_multinode.py::_do_apply 98
@@ -419,7 +419,7 @@ module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.p
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2681
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2569
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1759
-module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2624
+module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2561
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1804
 module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1417
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2045
