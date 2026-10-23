@@ -212,6 +212,8 @@ class AutonomousSession:
     async def _lease(self, cards: int) -> BranchLease:
         """Lease ``cards`` for the branch's sandbox and keep the lease for :meth:`release` and a later run."""
 
+        # The lease is only given back through its file, so the file's directory must exist before the lease does.
+        self._place.workspace.mkdir(parents=True, exist_ok=True)
         try:
             lease = await self._setup.toolbox.lease_branch_sandbox(self._start.branch, cards)
         except RequestRejected as error:

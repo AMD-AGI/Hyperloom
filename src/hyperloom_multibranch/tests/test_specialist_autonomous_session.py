@@ -242,7 +242,6 @@ async def _rig(tmp_path: Path, agent: Agent = Agent(), *, poll: float = 0.05, cl
         onboarding, sandbox_for, spec, toolbox, rig.repo, "vllm", poll_seconds=poll, settle_seconds=0.3, clock=clock
     )
     place = BranchPlace(worktree, rig.notebook, tmp_path / BRANCH / "session")
-    place.workspace.mkdir(parents=True)
     start = SessionStart(BRANCH, rig.root, 1, BranchTask(agent=str(_agent_repo(tmp_path))))
 
     def restart() -> AutonomousSession:
