@@ -127,6 +127,39 @@ async def test_each_kept_file_is_sent_once_with_its_current_content(
 
 
 @pytest.mark.asyncio
+async def test_a_kept_file_a_later_keep_deleted_is_not_sent(
+    coord: Coordinator, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = (tmp_path / "repo").resolve()
+    kernel = _write(repo / "kernel.cpp", "int main() { return 0; }\n")
+    other = _write(repo / "other.cpp", "int other() { return 0; }\n")
+    _keep(
+        coord,
+        "k001",
+        patch_path=str(_write(tmp_path / "k001.cpp", "int other() { return 1; }\n")),
+        target_file=str(other),
+    )
+    snapshot = tmp_path / "snapshot"
+    _write(snapshot / "kernel.cpp", "int main() { return 2; }\n")
+    diff = _write(
+        tmp_path / "k002.patch",
+        "diff --git a/kernel.cpp b/kernel.cpp\n--- a/kernel.cpp\n+++ b/kernel.cpp\n@@ -1 +1 @@\n"
+        "-int main() { return 0; }\n+int main() { return 2; }\n"
+        "diff --git a/other.cpp b/other.cpp\ndeleted file mode 100644\n--- a/other.cpp\n+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n-int other() { return 1; }\n",
+    )
+    _keep(
+        coord, "k002", patch_path=str(diff), target_file=str(kernel), snapshot_dir=str(snapshot), kernel_repo=str(repo)
+    )
+    assert not other.exists()
+    sent = _record_sends(monkeypatch)
+
+    await coord.writeback._resume_consistency_pass()
+
+    assert sent == [(kernel, "int main() { return 2; }\n")]
+
+
+@pytest.mark.asyncio
 async def test_a_kept_file_the_pods_refuse_halts_the_resume(
     coord: Coordinator, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

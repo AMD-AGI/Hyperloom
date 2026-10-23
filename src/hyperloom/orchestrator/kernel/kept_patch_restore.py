@@ -9,7 +9,7 @@ import json
 import logging
 import subprocess
 from pathlib import Path
-from typing import Any, Iterable, NamedTuple
+from typing import Any, Iterable
 
 from hyperloom.inference_optimizer.multi_node import external_has_server_control
 
@@ -34,20 +34,16 @@ class KeptPatchRestoreError(RuntimeError):
     """A kept kernel patch could not be put back on the pods."""
 
 
-class _KeptManifest(NamedTuple):
-    path: Path
-    data: dict[str, Any]
-
-
 def restore_kept_patches_on_pods(backup_roots: Iterable[Path]) -> list[Path]:
     """Send every file a kept kernel patch changed to every pod, as this host holds it now.
 
     A pod created after a KEEP starts from the image's sources, and nothing else
     re-sends a finalized patch. This host's tree is the reference because every
     apply and revert lands here before it fans out, so a file kept more than once
-    needs no ordering. A run that is not multi-node has no pods, and a cluster
-    without server control (benchmark-only) is left as it is, since no restart
-    would load the files.
+    needs no ordering, and one a later KEEP deleted is not sent; the pods keep
+    their copy, as they do after that KEEP itself. A run that is not multi-node
+    has no pods, and a cluster without server control (benchmark-only) is left as
+    it is, since no restart would load the files.
 
     Args:
         backup_roots: Apply backup roots; each subdirectory holds one apply's manifest.
@@ -56,8 +52,8 @@ def restore_kept_patches_on_pods(backup_roots: Iterable[Path]) -> list[Path]:
         The files sent, each once.
 
     Raises:
-        KeptPatchRestoreError: A manifest is unreadable, a kept file is missing on
-            this host, or sending a file to the pods failed.
+        KeptPatchRestoreError: A manifest is unreadable, or sending a file to the
+            pods failed.
     """
     if not _is_multi_node():
         return []
@@ -86,8 +82,8 @@ def restore_kept_patches_on_pods(backup_roots: Iterable[Path]) -> list[Path]:
     return [send.target_file for send in sends]
 
 
-def _kept_manifests(backup_roots: Iterable[Path]) -> list[_KeptManifest]:
-    kept: list[_KeptManifest] = []
+def _kept_manifests(backup_roots: Iterable[Path]) -> list[dict[str, Any]]:
+    kept: list[dict[str, Any]] = []
     for manifest_file in sorted(path for root in backup_roots for path in Path(root).glob(f"*/{_MANIFEST_NAME}")):
         try:
             data = json.loads(manifest_file.read_text(encoding="utf-8"))
@@ -96,7 +92,7 @@ def _kept_manifests(backup_roots: Iterable[Path]) -> list[_KeptManifest]:
         if not isinstance(data, dict):
             raise KeptPatchRestoreError(f"kernel patch manifest is not a JSON object: {manifest_file}")
         if data.get("status") in _KEPT_STATUSES:
-            kept.append(_KeptManifest(manifest_file, data))
+            kept.append(data)
     return kept
 
 
@@ -120,16 +116,15 @@ def _jit_invalidation(manifest: dict[str, Any]) -> tuple[str, Path] | None:
     return (str(jit_build_dirs[0]), carrier) if carrier else None
 
 
-def _kept_file_sends(kept: list[_KeptManifest]) -> list[PodPatchApply]:
+def _kept_file_sends(kept: list[dict[str, Any]]) -> list[PodPatchApply]:
     kernel_ids: dict[Path, str] = {}
     jit_carriers: dict[str, Path] = {}
     for manifest in kept:
-        for path in _kept_paths(manifest.data):
-            if not path.is_file():
-                raise KeptPatchRestoreError(f"kept kernel file {path} from {manifest.path} is missing on this host")
-            kernel_ids.setdefault(path, str(manifest.data.get("kernel_id") or ""))
-        invalidation = _jit_invalidation(manifest.data)
-        if invalidation:
+        for path in _kept_paths(manifest):
+            if path.is_file():
+                kernel_ids.setdefault(path, str(manifest.get("kernel_id") or ""))
+        invalidation = _jit_invalidation(manifest)
+        if invalidation and invalidation[1] in kernel_ids:
             jit_carriers.setdefault(*invalidation)
     jit_build_dir_by_path = {path: jit_build_dir for jit_build_dir, path in jit_carriers.items()}
     return [
