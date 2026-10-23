@@ -12,6 +12,7 @@ how many it took out. The columns that make two rows one shape are ``framework_t
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 from collections import Counter
@@ -22,7 +23,7 @@ from typing import Any
 
 from hyperloom.measure.framework_tables import table_key
 
-__all__ = ["DEFAULT_TABLE_PLACEHOLDER", "RowsOnlyRefused", "RowsOver", "lay_rows_over"]
+__all__ = ["DEFAULT_TABLE_PLACEHOLDER", "RowsOnlyRefused", "RowsOver", "cell", "lay_rows_over"]
 
 #: Names, in the value of an ``AITER_CONFIG_*`` variable, the tables the image reads for it when it is unset.
 DEFAULT_TABLE_PLACEHOLDER = "${HL_IMAGE_DEFAULT_TABLE}"
@@ -72,11 +73,13 @@ def _read(path: Path) -> _Table:
         return _Table(header, [row for row in reader if row])
 
 
-def _cell(text: str) -> str:
+def cell(text: str) -> str:
     """One cell as pandas, which aiter reads the tables with, compares it: ``64`` is ``64.0``, ``False`` is ``false``."""
     value = text.strip()
     if value.lower() in ("true", "false"):
         return value.lower()
+    with contextlib.suppress(ValueError):
+        return str(int(value))
     try:
         number = float(value)
     except ValueError:
@@ -85,7 +88,7 @@ def _cell(text: str) -> str:
 
 
 def _project(row: list[str], indices: Sequence[int]) -> tuple[str, ...]:
-    return tuple(_cell(row[i]) if i < len(row) else "" for i in indices)
+    return tuple(cell(row[i]) if i < len(row) else "" for i in indices)
 
 
 def _indices(header: list[str], columns: Sequence[str]) -> list[int]:
