@@ -1,0 +1,231 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# Reference copy of the rule pack: the facts about projects outside this repository that our rules and log readers
+# depend on. A session reads the pack named by HYPERLOOM_RULE_PACK, and this copy when the variable is not set, so a fact
+# that changed upstream is changed by publishing a pack, not by changing code.
+#
+# Entry kinds, a closed list in hyperloom.common.rule_pack:
+#   names         closed set of names, each under the role the code reads it by
+#   log_regex     a pattern for a log line; every examples.match line must match it, every examples.no_match line must not
+#   env_default   an environment variable and the value a launch sets
+#   arg_value     reserved: no rule reads one yet, so a pack that holds one is refused
+#   kernel_table  reserved: no rule reads one yet, so a pack that holds one is refused
+# Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
+# lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
+version: "1"
+facts:
+  aiter_merged_view:
+    kind: names
+    project: aiter
+    reason: >-
+      AITER_CONFIG.update_config_files writes the merged view of a variable that lists several tuned tables to this
+      directory, a literal in aiter's function body that no variable and no TMPDIR moves; two local tests that share
+      /tmp overwrite each other's merged file there.
+    names:
+      dir: /tmp/aiter_configs
+    examples:
+      - "hyperloom.measure.aiter_merge_hook: the sandbox start-up hook redirects this directory (a standalone copy of the literal, pinned to this entry by a test)"
+
+  sglang_image_layout:
+    kind: names
+    project: SGLang serving image
+    reason: >-
+      The SGLang image keeps its source checkouts (aiter, sglang, vllm, flydsl) below one workspace directory, and
+      aiter's default tuned tables below the aiter checkout.
+    names:
+      workspace: /sgl-workspace
+      aiter_configs: aiter/aiter/configs
+    examples:
+      - "hyperloom.measure.compile: IMAGE_SOURCE_ROOTS lists the workspace as a place sources are read from"
+      - "hyperloom.measure.framework_base: DEFAULT_CONFIGS is the aiter tables directory, the workspace joined with aiter_configs"
+
+  context_length_flags:
+    kind: names
+    project: SGLang, vLLM
+    reason: >-
+      The server flag that sets the context length a server serves is named by the framework that takes it; a launch that
+      serves less than the evaluation needs fails the evaluation after the cluster time is spent.
+    names:
+      sglang: --context-length
+      vllm: --max-model-len
+    examples:
+      - "hyperloom.measure.eval_context: a launch's served context is read from whichever of the two flags it carries"
+
+  python_import_errors:
+    kind: names
+    project: Python
+    reason: A failed import raises one of these two exceptions, and the log line that reports it starts with its name.
+    names:
+      import_error: ImportError
+      module_not_found_error: ModuleNotFoundError
+    examples:
+      - "hyperloom.measure.log_causes: _IMPORT_FAILURE tells a raised import error from a server's 'Ignore import error' line"
+      - "hyperloom.common.failure_signature: the missing-module and import-failure signatures"
+
+  rocr_visible_devices:
+    kind: names
+    project: ROCm (ROCr runtime)
+    reason: >-
+      The device mask a sandbox's cards are leased through; it renumbers the visible devices 0..N-1, so every reader that
+      maps a card to an ordinal goes through it.
+    names:
+      env: ROCR_VISIBLE_DEVICES
+    examples:
+      - "hyperloom.common.visible_devices: ROCR_LEVEL_VARS lists it first among the variables that mask devices"
+      - "hyperloom.measure.runner.run: the runner reads the ordinals its sandbox's mask lists"
+
+  pytorch_tunableop_env:
+    kind: names
+    project: PyTorch
+    reason: >-
+      TunableOp tunes a GEMM shape the first time a server runs it when ENABLED is 1 and TUNING is not 0, which makes the
+      measured number depend on the tuning that ran inside the measurement; the results file is named by FILENAME.
+    names:
+      enabled: PYTORCH_TUNABLEOP_ENABLED
+      tuning: PYTORCH_TUNABLEOP_TUNING
+      table: PYTORCH_TUNABLEOP_FILENAME
+    examples:
+      - "hyperloom_multibranch.toolbox.acceptance: a launch with ENABLED=1 and TUNING not 0 is refused as online tuning"
+      - "hyperloom.measure.compile: PER_DEVICE_TABLE_ENVS lists FILENAME, the table that is placed once per device ordinal"
+
+  inferencex_benchmark_envs:
+    kind: names
+    project: InferenceX
+    reason: >-
+      The names of the workload, the request and the evaluation in benchmark.envs, as InferenceX's benchmark scripts read
+      them; a renamed variable is silently ignored by the script and the point measures another workload.
+    names:
+      isl: ISL
+      osl: OSL
+      random_range_ratio: RANDOM_RANGE_RATIO
+      conc: CONC
+      run_eval: RUN_EVAL
+      num_prompts: NUM_PROMPTS
+      num_warmups: NUM_WARMUPS
+      max_model_len: MAX_MODEL_LEN
+      tp: TP
+      ep: EP
+      magpie_eval_tasks: MAGPIE_EVAL_TASKS
+      magpie_eval_limit: MAGPIE_EVAL_LIMIT
+      magpie_eval_tokenized_requests: MAGPIE_EVAL_TOKENIZED_REQUESTS
+    examples:
+      - "hyperloom.measure.surface: SURFACE_ENV_KEYS, POINT_ENV_KEYS and REQUEST_ENV_KEYS group these names by who may set them"
+      - "hyperloom.common.env_safety: BLOCKED_EXTERNAL_ENV_NAMES refuses these names in an env export from an untrusted source"
+
+  hip_graph_packet_capture:
+    kind: env_default
+    project: ROCm (HIP runtime, CLR)
+    reason: >-
+      The HIP runtime replays a captured graph from its recorded packets by default, and the ROCm profiler then records a
+      replay's kernels only when a host sync follows it; replayed node by node (0) every replay is recorded.
+    env: DEBUG_CLR_GRAPH_PACKET_CAPTURE
+    value: "0"
+    examples:
+      - "hyperloom/inference_optimizer/assets/configs/profile_sglang.yaml, profile_vllm.yaml and profile_atom.yaml: the profile launch's env block"
+
+  hip_undefined_symbol:
+    kind: log_regex
+    project: glibc (the dynamic loader), as it reports PyTorch, aiter and SGLang extensions
+    reason: A compiled extension that references a symbol nothing defines does not load; the loader names it this way.
+    pattern: undefined symbol
+    examples:
+      match:
+        - "ImportError: /sgl-workspace/sglang/python/sgl_kernel/common_ops.abi3.so: undefined symbol: _ZN3c104cuda14ExchangeDeviceEa"
+      no_match:
+        - "undefined behavior sanitizer is not enabled"
+
+  hip_no_kernel_image:
+    kind: log_regex
+    project: ROCm (HIP runtime)
+    reason: A kernel built for another GPU architecture than the device's is reported this way when it is launched.
+    pattern: no kernel image is available
+    examples:
+      match:
+        - "RuntimeError: HIP error: no kernel image is available for execution on the device"
+      no_match:
+        - "RuntimeError: HIP error: out of memory"
+
+  hip_no_binary_for_gpu:
+    kind: log_regex
+    project: ROCm (HIP runtime)
+    reason: A code object that holds no binary for the device's architecture is refused with this error name.
+    pattern: hipErrorNoBinaryForGpu
+    examples:
+      match:
+        - "hipErrorNoBinaryForGpu: Unable to find code object for all current devices"
+      no_match:
+        - "hipErrorOutOfMemory: out of memory"
+
+  hsa_status_error:
+    kind: log_regex
+    project: ROCm (ROCr runtime)
+    reason: A failed HSA call is reported with a status name that starts with this prefix.
+    pattern: HSA_STATUS_ERROR
+    examples:
+      match:
+        - "HSA_STATUS_ERROR_EXCEPTION: An HSAIL operation resulted in a hardware exception."
+      no_match:
+        - "HSA runtime initialised with status success"
+
+  hip_error_prefix:
+    kind: log_regex
+    project: ROCm (HIP runtime)
+    reason: Every HIP call that fails names its error with this prefix (hipErrorIllegalAddress, hipErrorOutOfMemory, ...).
+    pattern: hipError
+    examples:
+      match:
+        - "Search for `hipErrorIllegalAddress' in the ROCm documentation"
+      no_match:
+        - "hipcc finished with no error"
+
+  argparse_unrecognized_arguments:
+    kind: log_regex
+    project: Python (argparse)
+    reason: >-
+      argparse refuses a command line that carries a flag its parser does not define with this message; the singular and
+      the plural both occur, so it is regular-expression source.
+    pattern: unrecognized arguments?
+    examples:
+      match:
+        - "launch_server.py: error: unrecognized arguments: --enable-profile-cuda-graph"
+        - "launch_server.py: error: unrecognized argument: --enable-profile-cuda-graph"
+      no_match:
+        - "launch_server.py: error: the following arguments are required: --model-path"
+
+  argparse_invalid_choice:
+    kind: log_regex
+    project: Python (argparse)
+    reason: argparse refuses a flag value that is not one of the choices its parser lists with this message.
+    pattern: invalid choice
+    examples:
+      match:
+        - "launch_server.py: error: argument --attention-backend: invalid choice: 'fa9' (choose from 'triton', 'aiter')"
+      no_match:
+        - "launch_server.py: error: argument --tp-size: invalid int value: 'many'"
+
+  transformers_unknown_architecture:
+    kind: log_regex
+    project: Transformers
+    reason: >-
+      Transformers raises this for a checkpoint whose model_type or architecture it does not know, which a newer release
+      or the model's remote code resolves and a retry does not.
+    pattern: does not recognize this architecture
+    examples:
+      match:
+        - "but Transformers does not recognize this architecture. This could be because of an issue with the checkpoint"
+      no_match:
+        - "Transformers loaded the architecture from the checkpoint's config"
+
+  transformers_does_not_recognize:
+    kind: log_regex
+    project: Transformers
+    reason: >-
+      The first half of the same message, which names the model type that was refused; it is read for the type, so it is
+      its own fact.
+    pattern: Transformers does not recognize
+    examples:
+      match:
+        - "The checkpoint you are trying to load has model type `qwen3_5` but Transformers does not recognize this architecture."
+      no_match:
+        - "The checkpoint you are trying to load has model type `qwen3` and Transformers loads it"

@@ -3,19 +3,21 @@
 
 """Facts about projects outside this repository that more than one of our readers depends on, each stated once.
 
-aiter, SGLang, vLLM, PyTorch, the HIP runtime, argparse, Transformers and InferenceX decide these; we only repeat them. A
-fact is one name here, and every reader in ``hyperloom.measure``, ``hyperloom.common``, ``hyperloom.sandbox`` and
-``hyperloom_multibranch.toolbox`` imports that name, so a change in the outside project is made in one place. The module
-lives in ``hyperloom.common`` because that is the one layer all of those readers may import (``common`` imports nothing
-else of the project).
+aiter, SGLang, vLLM, PyTorch, the HIP runtime, argparse, Transformers and InferenceX decide these; we only repeat them.
+Their values are not written here: they are read from the rule pack (``hyperloom.common.rule_pack``), where each fact
+carries the project that owns it, the reason it exists and its examples. This module binds each fact to the name the
+readers import, so a reader in ``hyperloom.measure``, ``hyperloom.common``, ``hyperloom.sandbox`` or
+``hyperloom_multibranch.toolbox`` never holds a copy. The pack is loaded when this module is first imported, because the
+readers build module-level patterns from these values; a pack that cannot be used stops that import, naming the entry.
+The module lives in ``hyperloom.common`` because that is the one layer all of those readers may import.
 
 Two kinds of copy cannot import it and are pinned to it by a test instead: a YAML data file (``profile_*.yaml``), and a
-file that is copied into a sandbox and runs there with the standard library only (``aiter_merge_hook``). The names are
-the entries a pack of outside facts (board #110) will later back; until then they are plain constants and this module
-loads nothing.
+file that is copied into a sandbox and runs there with the standard library only (``aiter_merge_hook``).
 """
 
 from __future__ import annotations
+
+from hyperloom.common.rule_pack import default_pack
 
 __all__ = [
     "AITER_MERGED_VIEW_DIR",
@@ -55,72 +57,72 @@ __all__ = [
     "spaced",
 ]
 
-# --- aiter ------------------------------------------------------------------------------------------------------------
-#: Where aiter's ``AITER_CONFIG.update_config_files`` writes the merged view of a variable that lists several tables: a
-#: literal in aiter's function body that no variable and no ``TMPDIR`` moves.
-AITER_MERGED_VIEW_DIR = "/tmp/aiter_configs"
+_PACK = default_pack()
 
-# --- the SGLang serving image's layout --------------------------------------------------------------------------------
-#: The directory the SGLang image keeps its source checkouts (aiter, sglang, vllm, flydsl) in.
-SGLANG_IMAGE_WORKSPACE = "/sgl-workspace"
-#: The directory of aiter's default tuned tables in that image.
-SGLANG_IMAGE_AITER_CONFIGS = f"{SGLANG_IMAGE_WORKSPACE}/aiter/aiter/configs"
+_aiter = _PACK.names("aiter_merged_view", "dir")
+AITER_MERGED_VIEW_DIR = _aiter["dir"]
 
-# --- serving flags ----------------------------------------------------------------------------------------------------
-#: The server flags that set the context length a server serves, by the framework that takes them
-#: (``--context-length`` on SGLang, ``--max-model-len`` on vLLM).
-CONTEXT_LENGTH_FLAGS = ("--context-length", "--max-model-len")
+_image = _PACK.names("sglang_image_layout", "workspace", "aiter_configs")
+SGLANG_IMAGE_WORKSPACE = _image["workspace"]
+SGLANG_IMAGE_AITER_CONFIGS = f"{SGLANG_IMAGE_WORKSPACE}/{_image['aiter_configs']}"
 
-# --- HIP runtime and ROCm log markers ---------------------------------------------------------------------------------
-#: What a missing compiled kernel prints: an extension that references a symbol nothing defines, a GPU binary built for
-#: another device, an HSA status.
-HIP_UNDEFINED_SYMBOL = "undefined symbol"
-HIP_NO_KERNEL_IMAGE = "no kernel image is available"
-HIP_NO_BINARY_FOR_GPU = "hipErrorNoBinaryForGpu"
-HSA_STATUS_ERROR = "HSA_STATUS_ERROR"
-#: Every HIP call that fails names its error with this prefix (``hipErrorIllegalAddress``, ...).
-HIP_ERROR_PREFIX = "hipError"
-#: The HIP runtime setting that replays a captured graph node by node (value ``0``) instead of from its recorded packets,
-#: so the ROCm profiler records every replay's kernels. Set by the profile configurations (``profile_*.yaml``).
-HIP_GRAPH_PACKET_CAPTURE_ENV = "DEBUG_CLR_GRAPH_PACKET_CAPTURE"
-HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE = "0"
-#: The ROCr device mask a sandbox's cards are leased through; it renumbers the visible devices ``0..N-1``.
-ROCR_VISIBLE_DEVICES_ENV = "ROCR_VISIBLE_DEVICES"
+_context = _PACK.names("context_length_flags", "sglang", "vllm")
+CONTEXT_LENGTH_FLAGS = (_context["sglang"], _context["vllm"])
 
-# --- Python, argparse and Transformers messages -----------------------------------------------------------------------
-#: The exceptions a failed import raises.
-PY_IMPORT_ERROR = "ImportError"
-PY_MODULE_NOT_FOUND_ERROR = "ModuleNotFoundError"
-#: What argparse prints when it refuses a command line (``argparse.py``). The first is regular-expression source (the
-#: singular and the plural both occur), the second a plain phrase.
-ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE = "unrecognized arguments?"
-ARGPARSE_INVALID_CHOICE = "invalid choice"
-#: What Transformers raises for a checkpoint whose ``model_type`` or architecture it does not know.
-TRANSFORMERS_UNKNOWN_ARCHITECTURE = "does not recognize this architecture"
-TRANSFORMERS_DOES_NOT_RECOGNIZE = "Transformers does not recognize"
+HIP_UNDEFINED_SYMBOL = _PACK.pattern("hip_undefined_symbol")
+HIP_NO_KERNEL_IMAGE = _PACK.pattern("hip_no_kernel_image")
+HIP_NO_BINARY_FOR_GPU = _PACK.pattern("hip_no_binary_for_gpu")
+HSA_STATUS_ERROR = _PACK.pattern("hsa_status_error")
+HIP_ERROR_PREFIX = _PACK.pattern("hip_error_prefix")
+ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE = _PACK.pattern("argparse_unrecognized_arguments")
+ARGPARSE_INVALID_CHOICE = _PACK.pattern("argparse_invalid_choice")
+TRANSFORMERS_UNKNOWN_ARCHITECTURE = _PACK.pattern("transformers_unknown_architecture")
+TRANSFORMERS_DOES_NOT_RECOGNIZE = _PACK.pattern("transformers_does_not_recognize")
 
-# --- PyTorch TunableOp ------------------------------------------------------------------------------------------------
-#: TunableOp tunes a GEMM shape the first time a server runs it when ``ENABLED`` is ``1`` and ``TUNING`` is not ``0``; the
-#: results file is named by ``FILENAME``.
-TUNABLEOP_ENABLED_ENV = "PYTORCH_TUNABLEOP_ENABLED"
-TUNABLEOP_TUNING_ENV = "PYTORCH_TUNABLEOP_TUNING"
-TUNABLEOP_TABLE_ENV = "PYTORCH_TUNABLEOP_FILENAME"
+_import_errors = _PACK.names("python_import_errors", "import_error", "module_not_found_error")
+PY_IMPORT_ERROR = _import_errors["import_error"]
+PY_MODULE_NOT_FOUND_ERROR = _import_errors["module_not_found_error"]
 
-# --- InferenceX / Magpie benchmark environment ------------------------------------------------------------------------
-#: The names of the workload, the request and the evaluation in ``benchmark.envs``, as InferenceX's scripts read them.
-ENV_ISL = "ISL"
-ENV_OSL = "OSL"
-ENV_RANDOM_RANGE_RATIO = "RANDOM_RANGE_RATIO"
-ENV_CONC = "CONC"
-ENV_RUN_EVAL = "RUN_EVAL"
-ENV_NUM_PROMPTS = "NUM_PROMPTS"
-ENV_NUM_WARMUPS = "NUM_WARMUPS"
-ENV_MAX_MODEL_LEN = "MAX_MODEL_LEN"
-ENV_TP = "TP"
-ENV_EP = "EP"
-ENV_MAGPIE_EVAL_TASKS = "MAGPIE_EVAL_TASKS"
-ENV_MAGPIE_EVAL_LIMIT = "MAGPIE_EVAL_LIMIT"
-ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS = "MAGPIE_EVAL_TOKENIZED_REQUESTS"
+_graph_replay = _PACK.env_default("hip_graph_packet_capture")
+HIP_GRAPH_PACKET_CAPTURE_ENV = _graph_replay.name
+HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE = _graph_replay.value
+
+ROCR_VISIBLE_DEVICES_ENV = _PACK.names("rocr_visible_devices", "env")["env"]
+
+_tunableop = _PACK.names("pytorch_tunableop_env", "enabled", "tuning", "table")
+TUNABLEOP_ENABLED_ENV = _tunableop["enabled"]
+TUNABLEOP_TUNING_ENV = _tunableop["tuning"]
+TUNABLEOP_TABLE_ENV = _tunableop["table"]
+
+_inferencex = _PACK.names(
+    "inferencex_benchmark_envs",
+    "isl",
+    "osl",
+    "random_range_ratio",
+    "conc",
+    "run_eval",
+    "num_prompts",
+    "num_warmups",
+    "max_model_len",
+    "tp",
+    "ep",
+    "magpie_eval_tasks",
+    "magpie_eval_limit",
+    "magpie_eval_tokenized_requests",
+)
+ENV_ISL = _inferencex["isl"]
+ENV_OSL = _inferencex["osl"]
+ENV_RANDOM_RANGE_RATIO = _inferencex["random_range_ratio"]
+ENV_CONC = _inferencex["conc"]
+ENV_RUN_EVAL = _inferencex["run_eval"]
+ENV_NUM_PROMPTS = _inferencex["num_prompts"]
+ENV_NUM_WARMUPS = _inferencex["num_warmups"]
+ENV_MAX_MODEL_LEN = _inferencex["max_model_len"]
+ENV_TP = _inferencex["tp"]
+ENV_EP = _inferencex["ep"]
+ENV_MAGPIE_EVAL_TASKS = _inferencex["magpie_eval_tasks"]
+ENV_MAGPIE_EVAL_LIMIT = _inferencex["magpie_eval_limit"]
+ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS = _inferencex["magpie_eval_tokenized_requests"]
 
 
 def spaced(phrase: str) -> str:
