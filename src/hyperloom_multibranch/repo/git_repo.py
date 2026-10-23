@@ -38,7 +38,7 @@ from hyperloom.measure.compile import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, RepoMerge
-from hyperloom_multibranch.repo.merge import Stored, carry
+from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot
 from hyperloom_multibranch.repo.rebase import Files
 
 RECIPE_FILE = "recipe.json"
@@ -135,8 +135,16 @@ class GitExperimentRepo:
         if parent is None:
             raise ValueError(f"{candidate} is the root commit; it carries no change")
         recipes = [await self.read_recipe(commit) for commit in (parent, resolved, onto)]
-        stored = Stored(self._stack_files, self._table_bytes, self._put_patch, self._blobs.put, self._aiter_configs)
-        return await asyncio.to_thread(carry, onto, *recipes, stored)
+        return await asyncio.to_thread(carry, onto, *recipes, self._stored())
+
+    def stack_kernel_slot(self, wanted: KernelArtifact, current: KernelArtifact) -> KernelArtifact | None:
+        """What a replay of ``wanted`` puts in the slot ``current`` fills, read and kept in the stores :meth:`merge`
+        uses (:func:`~hyperloom_multibranch.repo.merge.stack_kernel_slot`)."""
+
+        return stack_kernel_slot(wanted, current, self._stored())
+
+    def _stored(self) -> Stored:
+        return Stored(self._stack_files, self._table_bytes, self._put_patch, self._blobs.put, self._aiter_configs)
 
     async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: Sequence[str]) -> str:
         recipe = apply(await self.read_recipe(onto), delta)

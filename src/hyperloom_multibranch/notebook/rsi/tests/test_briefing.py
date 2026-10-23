@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import re
 from functools import partial
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 from hyperloom_kb import RemoteReadResult
@@ -52,25 +54,40 @@ from hyperloom_multibranch.notebook.knowledge.tests.fakes import (
 from hyperloom_multibranch.contracts.notebook.records import PeerReplay, WarmReplay
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay, ReplayRefusal, WarmLead
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
-from hyperloom_multibranch.notebook.rsi.briefing import ON_HEAD, CrossSessionBriefing, SessionBriefs, TableStack
+from hyperloom_multibranch.notebook.knowledge.replay_tables import StackSlot
+from hyperloom_multibranch.notebook.rsi.briefing import ON_HEAD, CrossSessionBriefing, SessionBriefs
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, judgement, profile, request, result
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, SPLIT_KV, scripted_session
 from hyperloom_multibranch.notebook.tools import FOCUS_LINE
-from hyperloom_multibranch.repo.merge import wider_table
-from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
+from hyperloom_multibranch.repo.merge import Stored, stack_kernel_slot
+from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact, union_rows
 from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import (
     B01_HEAD,
     B01_NEW,
     B01_SHARED,
+    B06_NEW,
     B09_NEW,
     ENV,
     SHARED,
     csv_text,
+    install,
 )
 
 
-def _wider(store: dict[str, bytes]) -> TableStack:
-    return TableStack(stack_slot=partial(wider_table, table=lambda artifact: store[artifact.sha256]))
+def _unused(*_: object) -> NoReturn:
+    raise AssertionError("stacking a kernel slot reads and keeps tables only")
+
+
+def _slot(store: dict[str, bytes], configs: Path | None = None) -> StackSlot:
+    """The merge's stack of two tables in one slot, reading from ``store`` and keeping a united table in it."""
+
+    def keep(data: bytes) -> str:
+        store[hashlib.sha256(data).hexdigest()] = data
+        return hashlib.sha256(data).hexdigest()
+
+    return partial(
+        stack_kernel_slot, stored=Stored(_unused, lambda artifact: store[artifact.sha256], _unused, keep, configs)
+    )
 
 
 SAME = {
@@ -367,7 +384,9 @@ async def test_a_peer_replay_takes_the_wider_table_and_names_no_loss(tmp_path: P
     store = {narrow.sha256: csv_text(SHARED), wide.sha256: csv_text(SHARED, B09_NEW)}
     await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(wide,))))
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(narrow,))
-    briefing = CrossSessionBriefing(notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), tables=_wider(store))
+    briefing = CrossSessionBriefing(
+        notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), stack_slot=_slot(store)
+    )
 
     replayed = await briefing.peer_replay("r7")
 
@@ -384,28 +403,74 @@ async def test_a_peer_replay_drops_a_kernel_the_heads_wider_table_already_covers
     store = {narrow.sha256: csv_text(SHARED), wide.sha256: csv_text(SHARED, B09_NEW)}
     await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(narrow,))))
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(wide,))
-    briefing = CrossSessionBriefing(notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), tables=_wider(store))
+    briefing = CrossSessionBriefing(
+        notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), stack_slot=_slot(store)
+    )
 
     with pytest.raises(ValueError, match="already has the change"):
         await briefing.peer_replay("r7")
 
 
-async def test_a_peer_replay_names_the_swap_when_neither_table_holds_the_other(tmp_path: Path) -> None:
+async def _replayed_over(tmp_path: Path, head_data: bytes, peer_data: bytes) -> tuple[PeerReplay, dict[str, bytes]]:
+    """Another branch's table replayed on a head that holds ``head_data`` in the same slot, as the merge stacks it."""
+
     root = tmp_path / "notebook"
     notebook = await scripted_session(root, FakeClock())
     toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
-    head_data, peer_data = csv_text(SHARED, B01_HEAD), csv_text(B01_SHARED, B01_NEW)
     head_art = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, head_data)
     peer = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, peer_data)
     store = {head_art.sha256: head_data, peer.sha256: peer_data}
     await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(peer,))))
     head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(head_art,))
-    briefing = CrossSessionBriefing(notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), tables=_wider(store))
+    stack_slot = _slot(store, install(tmp_path / "image"))
+    briefing = CrossSessionBriefing(
+        notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), stack_slot=stack_slot
+    )
+    return await briefing.peer_replay("r7"), store
+
+
+async def test_a_peer_replay_unites_two_tables_each_with_rows_the_other_lacks(tmp_path: Path) -> None:
+    head_data, peer_data = csv_text(SHARED, B01_NEW), csv_text(SHARED[:3], B06_NEW)
+
+    replayed, store = await _replayed_over(tmp_path, head_data, peer_data)
+
+    (united,) = replayed.delta.add_kernels
+    expected = union_rows(peer_data, head_data, ENV, configs=install(tmp_path / "expected"))
+    assert replayed.replaces == ()
+    assert (united.sha256, store[united.sha256]) == (hashlib.sha256(expected).hexdigest(), expected)
+
+
+async def test_a_peer_replay_keeps_the_heads_row_for_a_shape_both_tuned(tmp_path: Path) -> None:
+    head_data, peer_data = csv_text(SHARED, B01_HEAD), csv_text(B01_SHARED, B01_NEW)
+
+    replayed, store = await _replayed_over(tmp_path, head_data, peer_data)
+
+    (united,) = replayed.delta.add_kernels
+    expected = union_rows(csv_text(B01_NEW), head_data, ENV, configs=install(tmp_path / "expected"))
+    assert replayed.replaces == ()
+    assert store[united.sha256] == expected
+
+
+async def test_a_peer_replay_names_the_swap_when_the_merge_would_refuse_the_tables(tmp_path: Path) -> None:
+    root = tmp_path / "notebook"
+    notebook = await scripted_session(root, FakeClock())
+    toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
+    own = KernelArtifact(KernelKind.GEMM, "moe", "kernel/gemm/head.csv", "b" * 64)
+    theirs = KernelArtifact(KernelKind.GEMM, "moe", "kernel/gemm/peer.csv", "d" * 64)
+    store = {
+        own.sha256: b"cu_num,M,N,K,gfx,us\n304,1,4096,4096,gfx950,23.1\n",
+        theirs.sha256: b"M,N,K,us\n1,4096,4096,19.8\n8,4096,4096,31.0\n",
+    }
+    await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(theirs,))))
+    head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(own,))
+    briefing = CrossSessionBriefing(
+        notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), stack_slot=_slot(store)
+    )
 
     replayed = await briefing.peer_replay("r7")
 
-    assert replayed.replaces == (head_art,)
-    assert replayed.delta.add_kernels == (peer,)
+    assert replayed.replaces == (own,)
+    assert replayed.delta.add_kernels == (theirs,)
 
 
 async def test_a_peer_replay_gives_a_component_new_to_the_head_the_upstream_its_test_was_made_on(

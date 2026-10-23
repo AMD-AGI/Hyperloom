@@ -213,6 +213,20 @@ def wider_table(wanted: KernelArtifact, current: KernelArtifact, table: TableByt
     return None
 
 
+def stack_kernel_slot(wanted: KernelArtifact, current: KernelArtifact, stored: Stored) -> KernelArtifact | None:
+    """The artifact a replay of ``wanted`` puts in the slot ``current`` fills, decided as a merge decides it: the wider
+    of the two tables, else the union of their rows with the head's row kept for a shape both tuned; ``None`` where a
+    merge would refuse the pair, so the replay swaps ``current`` out and says so."""
+
+    wider = wider_table(wanted, current, stored.kernel_table)
+    if wider is not None:
+        return wider
+    try:
+        return _united(wanted, current, stored).table
+    except RecipeError:
+        return None
+
+
 def _united(theirs: KernelArtifact, ours: KernelArtifact, stored: Stored) -> UnitedTable:
     """The rows of both tables as one table of their slot, kept in the blob store. A shape both tuned to other rows
     keeps the head's row; rows put over the image's default table read the same over a whole table, so a rows-only set
@@ -363,4 +377,13 @@ def _without(delta: RecipeDelta, settled: _Settled) -> RecipeDelta:
     return replace(delta, components=tuple(changes))
 
 
-__all__ = ["PatchStore", "StackFiles", "Stored", "TableBytes", "TableStore", "carry", "wider_table"]
+__all__ = [
+    "PatchStore",
+    "StackFiles",
+    "Stored",
+    "TableBytes",
+    "TableStore",
+    "carry",
+    "stack_kernel_slot",
+    "wider_table",
+]

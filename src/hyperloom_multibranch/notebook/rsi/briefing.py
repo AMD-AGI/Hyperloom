@@ -18,9 +18,9 @@ Its brief has three parts:
 A champion the start commit is already, or builds on, is no lead: the lessons name it first, as :data:`ON_HEAD`, and
 ``notebook_replay`` refuses to replay it, since its change would undo what the head did since.
 
-A peer or warm replay that would swap the head's kernel table out stacks the two tables when ``tables`` is set: the
-wider of them, or a union of their rows, using the same primitives a merge uses (#109 item 7). When neither fits, the
-swap stays and the head's artifact is named in ``replaces``.
+A peer or warm replay that would swap the head's kernel table out stacks the two tables when ``stack_slot`` is set: the
+wider of them, or a union of their rows, decided as a merge decides it (#109 item 7). When neither fits, the swap stays
+and the head's artifact is named in ``replaces``.
 
 At the root before anything was tried, the brief is the first batch's: cross-session content only. Lessons and leads
 together stay under ``max_chars``, the most specific first. Where the brief sits in the prompt and how long it may be
@@ -52,7 +52,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     WarmReplay,
 )
 from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall, PastLearnings
-from hyperloom_multibranch.notebook.knowledge.replay_tables import TableStack, stack_added_kernels
+from hyperloom_multibranch.notebook.knowledge.replay_tables import StackSlot, stack_added_kernels
 from hyperloom_multibranch.notebook.knowledge.lessons import MAX_ITEMS, clipped, listed
 from hyperloom_multibranch.notebook.knowledge.recall import (
     ExperienceReader,
@@ -206,7 +206,7 @@ class CrossSessionBriefing(StartupBriefProvider):
     recalls: RecallCache | None = None
     repo: RecipeReads | None = None
     champions: dict[str, frozenset[str]] | None = None
-    tables: TableStack | None = None
+    stack_slot: StackSlot | None = None
 
     def __post_init__(self) -> None:
         if self.identities is None and self.experiences is not None:
@@ -229,7 +229,7 @@ class CrossSessionBriefing(StartupBriefProvider):
         if commit is not None:
             where = "is its recipe" if commit == head else f"builds on {commit}, which is its recipe"
             raise ValueError(f"{canonical_id} is on your head already: your head {head} {where}; build on it")
-        return prepared.on(await self.repo.read_recipe(head), head, self.tables)
+        return prepared.on(await self.repo.read_recipe(head), head, self.stack_slot)
 
     async def _on_line(self, snapshot: NotebookSnapshot, commit: str) -> dict[str, str]:
         """The champions PRELUDE prepared a replay of that ``commit`` is already or builds on, each with the first commit
@@ -268,7 +268,7 @@ class CrossSessionBriefing(StartupBriefProvider):
         changed nothing, was made on this head already, or this head has or cannot take it.
 
         A component the head does not have takes the upstream it had on the commit the test was made on, which the
-        test's change does not name when that commit had the component already. When ``tables`` is set, each kernel the
+        test's change does not name when that commit had the component already. With ``stack_slot``, each kernel the
         change adds in a slot the head already fills is stacked over the head's table instead of replacing it."""
 
         request = (await self.notebook.record(request_id)).request
@@ -283,7 +283,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             raise ValueError(f"{request_id} tested this change on your head {head}; there is nothing to replay")
         recipe = await self.repo.read_recipe(head)
         delta = await self._with_upstreams(self.repo, request.delta, recipe, request.parent_commit)
-        delta, replaces = stack_added_kernels(delta, recipe, self.tables)
+        delta, replaces = stack_added_kernels(delta, recipe, self.stack_slot)
         try:
             replayed = apply(recipe, delta)
         except RecipeError as exc:
@@ -404,7 +404,7 @@ class SessionBriefs:
     learnings: LearningRecall | None = None
     max_chars: int = DEFAULT_MAX_CHARS
     repo: RecipeReads | None = None
-    tables: TableStack | None = None
+    stack_slot: StackSlot | None = None
     _identities: IdentityIndex | None = field(init=False, default=None)
     _recalls: RecallCache = field(init=False, default_factory=RecallCache)
     _champions: dict[str, frozenset[str]] = field(init=False, default_factory=dict)
@@ -431,7 +431,7 @@ class SessionBriefs:
             recalls=self._recalls,
             repo=self.repo,
             champions=self._champions,
-            tables=self.tables,
+            stack_slot=self.stack_slot,
         )
 
     async def text(self, branch: str, commit: str, focus: str | None = None) -> str:
@@ -440,12 +440,4 @@ class SessionBriefs:
         return render_brief(await self.for_branch(branch, focus).startup_brief(commit))
 
 
-__all__ = [
-    "DEFAULT_MAX_CHARS",
-    "ON_HEAD",
-    "CrossSessionBriefing",
-    "RecallCache",
-    "RecipeReads",
-    "SessionBriefs",
-    "TableStack",
-]
+__all__ = ["DEFAULT_MAX_CHARS", "ON_HEAD", "CrossSessionBriefing", "RecallCache", "RecipeReads", "SessionBriefs"]
