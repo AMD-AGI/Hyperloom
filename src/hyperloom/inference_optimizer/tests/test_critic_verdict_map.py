@@ -2154,7 +2154,6 @@ class TestN38ActionVerdictClass:
             def _caller(call: RuntimeCall) -> None:
                 if call.phase == "prepare-review":
                     bundle = {
-                        "kind": "coordinator_inbox",
                         "session_id": "test",
                         "proposals": [{"msg_id": "abc", "action_name": "params"}],
                         "review_constraints": {

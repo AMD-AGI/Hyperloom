@@ -270,7 +270,7 @@ hyperloom = [
     "assets/slurm/*.sh.in",
     "references/*.md",
 ]
-# Critic LLM skill assets, mounted by the A2A / Codex chat server host.
+# Critic LLM skill assets, loaded into the Critic prompt preamble by CriticAgentBackend.
 "hyperloom.agents.critic" = [
     "SKILL.md",
     "README.md",
