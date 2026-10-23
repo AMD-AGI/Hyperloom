@@ -20,7 +20,7 @@ from kernelforge.agent_backends import AgentRunSpec, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.agent_backends.workspace_guard import WorkspaceSafetyError
 from kernelforge.config import Config
-from kernelforge.tools.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import publish_report
 from kernelforge.workspace.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS
 
 log = logging.getLogger(__name__)
@@ -159,7 +159,7 @@ def make_review_fn(config: Config, *, usage=None) -> Callable[..., Awaitable[str
             log.warning("delivery review failed: %s", error)
             failure = f"{type(error).__name__}: {error}"
         outcome = f"## Failed\n\n{failure}\n" if failure else f"## Reply\n\n{reply}\n"
-        atomic_write_text(record, f"# Delivery review, round {brief.round_number}\n\n## Task\n\n{prompt}\n\n{outcome}")
+        publish_report(record, f"# Delivery review, round {brief.round_number}\n\n## Task\n\n{prompt}\n\n{outcome}")
         return None if failure else reply
 
     return review_fn

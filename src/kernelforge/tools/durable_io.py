@@ -50,6 +50,13 @@ def atomic_write_text(path: str | Path, content: str) -> None:
     atomic_write_bytes(path, content.encode("utf-8"))
 
 
+def publish_report(path: str | Path, content: str) -> None:
+    """Publish a report for people to read, as ``atomic_write_text`` does, readable by every user: the host that
+    shows it is often not the one, nor the user, that wrote it."""
+    atomic_write_text(path, content)
+    os.chmod(path, 0o644)
+
+
 def _fsync_file(path: Path) -> None:
     descriptor = os.open(str(path), os.O_RDONLY)
     try:

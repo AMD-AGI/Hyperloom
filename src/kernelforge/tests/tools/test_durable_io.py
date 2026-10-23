@@ -17,6 +17,7 @@ from kernelforge.tools.durable_io import (
     atomic_write_text,
     fsync_tree,
     fsync_tree_directories,
+    publish_report,
 )
 
 
@@ -54,6 +55,11 @@ def test_atomic_write_replaces_prior_content_in_one_step(tmp_path):
 
     assert target.read_text() == '{"a": 2}'
     assert [p.name for p in target.parent.iterdir()] == ["result.json"]
+
+
+def test_a_report_is_published_readable_by_every_user(tmp_path):
+    publish_report(tmp_path / "report.md", "# report\n")
+    assert stat.S_IMODE((tmp_path / "report.md").stat().st_mode) == 0o644
 
 
 def test_fsync_tree_visits_every_file_and_directory(tmp_path):

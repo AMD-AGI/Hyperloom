@@ -33,7 +33,7 @@ from kernelforge.loop.ablation import ABLATION_JSON, verdict
 from kernelforge.loop.campaign_config import CampaignConfigStore
 from kernelforge.loop.run_state import LoopStateStore
 from kernelforge.loop.worktrees import DetachedWorktree, tree_copy_refusal
-from kernelforge.tools.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import publish_report
 
 FINALIZE_JSON, FINALIZE_MD = "finalize.json", "finalize.md"
 HISTORY_BRANCH = "forge-history"
@@ -176,8 +176,8 @@ class _Delivery:
             raise FinalizeError("the workspace has uncommitted changes")
 
     def _save(self) -> None:
-        atomic_write_text(self.root / FINALIZE_JSON, json.dumps(self.report, indent=2))
-        atomic_write_text(self.root / FINALIZE_MD, render_finalize_md(self.report))
+        publish_report(self.root / FINALIZE_JSON, json.dumps(self.report, indent=2))
+        publish_report(self.root / FINALIZE_MD, render_finalize_md(self.report))
 
     def _changed(self) -> list[str]:
         """The files the working tree changed against the best, tracked or new."""

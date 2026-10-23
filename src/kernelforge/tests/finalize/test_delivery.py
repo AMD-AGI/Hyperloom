@@ -171,7 +171,9 @@ async def test_findings_left_by_a_round_go_to_the_next_and_a_failed_review_deliv
     assert report["review"]["rounds"][0]["failed"] is True
     assert report["gates"] == {"kept": False, "reason": "the review changed nothing"}
     assert _git(workspace, "diff", best, "HEAD").strip() == ""
-    finalize = json.loads((workspace / "forge_experiments" / "finalize.json").read_text())
+    record = workspace / "forge_experiments" / "finalize.json"
+    assert record.stat().st_mode & 0o044 == 0o044
+    finalize = json.loads(record.read_text())
     assert finalize["final_commit"] == _git(workspace, "rev-parse", "HEAD").strip()
 
 

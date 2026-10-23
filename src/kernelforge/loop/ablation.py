@@ -32,7 +32,7 @@ from kernelforge.loop.campaign_config import CampaignConfigStore
 from kernelforge.loop.direction_ledger import keep_gains
 from kernelforge.loop.run_state import NOISE_FLOOR_FILE, LoopStateStore
 from kernelforge.loop.worktrees import DetachedWorktree, _git, sha256_of, tree_copy_refusal
-from kernelforge.tools.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import publish_report
 
 ABLATION_JSON, ABLATION_MD = "ablation.json", "ablation.md"
 ALL_OFF = "all_off"
@@ -255,8 +255,8 @@ class _Ablation:
             return {}
 
     def _save(self) -> None:
-        atomic_write_text(self.root / ABLATION_JSON, json.dumps(self.report, indent=2))
-        atomic_write_text(self.root / ABLATION_MD, render_ablation_md(self.report))
+        publish_report(self.root / ABLATION_JSON, json.dumps(self.report, indent=2))
+        publish_report(self.root / ABLATION_MD, render_ablation_md(self.report))
 
     def _bench(self, slot: _Slot, tree: DetachedWorktree) -> BenchRun:
         return BenchRun(

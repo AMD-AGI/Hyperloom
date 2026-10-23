@@ -23,7 +23,7 @@ from kernelforge.agent_backends import AgentRunSpec, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.agent_backends.workspace_guard import WorkspaceSafetyError
 from kernelforge.config import Config
-from kernelforge.tools.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import publish_report
 
 log = logging.getLogger(__name__)
 
@@ -188,8 +188,8 @@ async def distill_campaign(
     patch = _git(copy, "diff", "--cached", f"--src-prefix=a/{prefix}", f"--dst-prefix=b/{prefix}").stdout
     files = [path for path in _git(copy, "diff", "--cached", "--name-only").stdout.splitlines() if path]
     report = report_of(reply) if reply is not None else ""
-    atomic_write_text(out / PATCH_NAME, patch)
-    atomic_write_text(
+    publish_report(out / PATCH_NAME, patch)
+    publish_report(
         out / REPORT_NAME, f"# Proposed skill patch\n\nFor {skill_dir}; not applied.\n\n{report or '(no report)'}\n"
     )
     result = {
@@ -200,5 +200,5 @@ async def distill_campaign(
         "failed": reply is None,
         "apply_from": str(Path(_git(skill_dir, "rev-parse", "--show-toplevel").stdout.strip() or skill_dir)),
     }
-    atomic_write_text(out / RESULT_NAME, json.dumps(result, indent=2))
+    publish_report(out / RESULT_NAME, json.dumps(result, indent=2))
     return result
