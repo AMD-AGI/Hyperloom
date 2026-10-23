@@ -162,15 +162,15 @@ def test_the_role_defines_the_layers_an_intent_names():
     assert "or a kernel's tuned table, and source for any other code change" in prompt
 
 
-def test_the_role_sends_a_tuned_table_through_put_kernel_artifact_whole_and_one_per_variable():
+def test_the_role_sends_tuned_rows_through_put_kernel_artifact_one_table_per_variable():
     prompt = role_prompt(WORKLOAD)
 
-    assert "A tuned table goes into the recipe through put_kernel_artifact" in prompt
-    assert "put the whole table for its variable, one table per variable" in prompt
-    assert "add the artifact it returns to the delta's add_kernels" in prompt
+    assert "A tuned table goes into the recipe through put_kernel_artifact, one table per variable" in prompt
+    assert "the artifact it returns goes into the delta's add_kernels" in prompt
     assert "never point a variable at a file of yours or set it from code" in prompt
-    assert "replaces the image's default table for that variable" in prompt
-    assert "carry the default's rows for the other shapes as well as the tuned ones" in prompt
+    assert "put only the rows you tuned with rows_only=true" in prompt
+    assert "a row overrides the image's default row for the same shape" in prompt
+    assert "If your head's recipe already has a table for that variable, yours replaces it" in prompt
     assert any("put_kernel_artifact" in direction for direction in DIRECTIONS)
 
 

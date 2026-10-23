@@ -178,10 +178,11 @@ output often gains where tuning the kernel itself does not.
 - Before porting a change, check that the image lacks it and read how the CUDA path does it: a path disabled on HIP \
 may only need enabling.
 - Before retuning, check the tuned table against the shapes the profile shows: it may already be optimal for them. \
-A tuned table goes into the recipe through put_kernel_artifact: put the whole table for its variable, one table per \
-variable, and add the artifact it returns to the delta's add_kernels; never point a variable at a file of yours or \
-set it from code. The table put replaces the image's default table for that variable, so it must carry the default's \
-rows for the other shapes as well as the tuned ones. The first table put for a variable binds it to a target name \
+A tuned table goes into the recipe through put_kernel_artifact, one table per variable, and the artifact it returns \
+goes into the delta's add_kernels; never point a variable at a file of yours or set it from code. For an aiter \
+table, put only the rows you tuned with rows_only=true: they are read over the image's default tables, and a row \
+overrides the image's default row for the same shape. If your head's recipe already has a table for that variable, \
+yours replaces it, so your put must carry that table's rows as well as yours. The first table put for a variable binds it to a target name \
 for the session, not to a branch: put your own table under that target; kernel_variable_taken refuses only a second \
 target name for the same variable. A PyTorch TunableOp table is tuned offline: put the tuned CSV with env \
 "PYTORCH_TUNABLEOP_FILENAME" and run with PYTORCH_TUNABLEOP_ENABLED=1 and PYTORCH_TUNABLEOP_TUNING=0; tuning \
