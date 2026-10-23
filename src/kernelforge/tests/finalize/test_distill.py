@@ -51,6 +51,7 @@ async def test_the_patch_applies_to_the_skill_and_leaves_it_untouched(tmp_path: 
     brief = briefs[0]
     assert (brief.base, brief.delivered, brief.history) == (base, report["final_commit"], "forge-history")
     assert sorted(result["files"]) == ["gemm/reduction.md", "gemm/split_k.md"] and result["failed"] is False
+    assert result["added_lines"] == 3
     assert "fused reduction" not in (skill / "gemm" / "split_k.md").read_text()
     patch = (out / "knowledge_patch.diff").read_text()
     assert "b/.claude/skills/kernel-optimization/gemm/split_k.md" in patch
@@ -75,5 +76,5 @@ async def test_a_failed_curator_and_a_folder_without_a_skill(tmp_path: Path) -> 
 def test_the_curator_is_held_to_the_audit_rules() -> None:
     prompt = distill_prompt(DistillBrief("/copy", "/ws", "b0", "f1", "forge-history", ("/flydsl",)))
     assert "Edit nothing outside that directory" in prompt and "- /flydsl" in prompt
-    assert "not steps to run" in prompt
+    assert "not steps to run" in prompt and "one or two lines" in prompt
     assert '"(field)"' in prompt and "not knowledge" in prompt and REPORT_HEADING in prompt

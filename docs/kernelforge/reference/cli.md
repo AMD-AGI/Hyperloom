@@ -390,9 +390,13 @@ against the installed source, hardware claims against the ISA or compiled code;
 the campaign's own numbers marked "(field)" and given as an order of magnitude;
 no dates, campaign names or citations in the cards.
 
+The patch is kept small enough to review: one or two lines per claim, in a list
+or table the card already has, with the mechanism and the numbers in the report
+instead.
+
 It writes `knowledge_patch.diff` (applies with `git apply` from the skill's
-repository root), `distill.md` (each edit's evidence, and the candidates it
-rejected with the reason), `distill.json` and the edited copy under `skill/`.
+repository root), `distill.md` (one line per edit with its evidence, and one per
+candidate it rejected), `distill.json` and the edited copy under `skill/`.
 
 | Option | Default | Meaning |
 |:--|:--|:--|

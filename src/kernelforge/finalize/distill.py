@@ -84,9 +84,14 @@ rather than measured says so.
 6. A dead end counts when the reason it failed is general: what the campaign tried that sat within noise or hurt.
 7. Edit the card where the topic lives, in its style; create a card only when none fits, and route it from SKILL.md.
 
-End with a section headed `{REPORT_HEADING}`: for each edit, its kind (addition or correction), the card, the claim, \
-and its evidence (artifact paths and numbers; source file and line). Then each candidate you rejected, one line \
-with the reason. Few well-checked edits beat many."""
+Keep the patch small enough for a maintainer to review. Each edit states one claim in one or two lines, as a row or bullet in a list or table the card already has wherever one fits; \
+the mechanism, the numbers behind it and the caveats go in your report, not in the card. Where the skill says the \
+same wrong thing in several places, correct each place with the smallest change and add no explanation. Few \
+well-checked edits beat many.
+
+End with a section headed `{REPORT_HEADING}`: one line per edit (addition or correction; the card; the claim in under \
+twenty words; its evidence as artifact paths and numbers, or source file and line), then one line per candidate you \
+rejected, with the reason."""
 
 
 def report_of(reply: str) -> str:
@@ -163,8 +168,29 @@ def _campaign_refs(workspace: Path) -> tuple[str, str, str]:
     return base, delivered or head, history
 
 
+def _added_lines(copy: Path) -> int:
+    """Lines the edits in ``copy`` add, new files included."""
+    _git(copy, "add", "-A")
+    rows = _git(copy, "diff", "--cached", "--numstat").stdout.splitlines()
+    return sum(int(row.split("\t")[0]) for row in rows if row.split("\t")[0].isdigit())
+
+
+def _fresh_copy(skill_dir: Path, copy: Path) -> None:
+    if copy.exists():
+        shutil.rmtree(copy)
+    shutil.copytree(skill_dir, copy, ignore=shutil.ignore_patterns("__pycache__"))
+    _git(copy, "init", "-q")
+    _git(copy, "add", "-A")
+    _git(copy, "-c", "user.name=distill", "-c", "user.email=distill@local", "commit", "-qm", "skill")
+
+
 async def distill_campaign(
-    workspace: str | Path, *, skill_dir: str | Path, out: str | Path, distill_fn, references: tuple[str, ...] = ()
+    workspace: str | Path,
+    *,
+    skill_dir: str | Path,
+    out: str | Path,
+    distill_fn,
+    references: tuple[str, ...] = (),
 ) -> dict:
     """Propose a patch to ``skill_dir`` from the campaign in ``workspace``; write it, the report and the result
     under ``out``, and return the result."""
@@ -173,30 +199,32 @@ async def distill_campaign(
         raise DistillError(f"{skill_dir} holds no SKILL.md")
     base, delivered, history = _campaign_refs(workspace)
     copy = out / "skill"
-    if copy.exists():
-        shutil.rmtree(copy)
-    shutil.copytree(skill_dir, copy, ignore=shutil.ignore_patterns("__pycache__"))
-    _git(copy, "init", "-q")
-    _git(copy, "add", "-A")
-    _git(copy, "-c", "user.name=distill", "-c", "user.email=distill@local", "commit", "-qm", "skill")
+    _fresh_copy(skill_dir, copy)
     brief = DistillBrief(
-        str(copy), str(workspace), base, delivered, history, tuple(str(Path(r).resolve()) for r in references)
+        str(copy),
+        str(workspace),
+        base,
+        delivered,
+        history,
+        tuple(str(Path(r).resolve()) for r in references),
     )
     reply = await distill_fn(brief=brief)
-    _git(copy, "add", "-A")
+    added = _added_lines(copy)
     prefix = _skill_prefix(skill_dir)
     patch = _git(copy, "diff", "--cached", f"--src-prefix=a/{prefix}", f"--dst-prefix=b/{prefix}").stdout
     files = [path for path in _git(copy, "diff", "--cached", "--name-only").stdout.splitlines() if path]
     report = report_of(reply) if reply is not None else ""
     publish_report(out / PATCH_NAME, patch)
     publish_report(
-        out / REPORT_NAME, f"# Proposed skill patch\n\nFor {skill_dir}; not applied.\n\n{report or '(no report)'}\n"
+        out / REPORT_NAME,
+        f"# Proposed skill patch\n\nFor {skill_dir}; not applied. Adds {added} lines.\n\n{report or '(no report)'}\n",
     )
     result = {
         "skill_dir": str(skill_dir),
         "patch": str(out / PATCH_NAME),
         "report": str(out / REPORT_NAME),
         "files": files,
+        "added_lines": added,
         "failed": reply is None,
         "apply_from": str(Path(_git(skill_dir, "rev-parse", "--show-toplevel").stdout.strip() or skill_dir)),
     }

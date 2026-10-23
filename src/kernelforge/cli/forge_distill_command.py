@@ -40,7 +40,11 @@ from kernelforge.cli.options import AgentRuntimeOptions, _agent_runtime_options,
 )
 @_agent_runtime_options
 def forge_distill(
-    workspace: str, skill_dir: str, out: str | None, references: tuple[str, ...], agent: AgentRuntimeOptions
+    workspace: str,
+    skill_dir: str,
+    out: str | None,
+    references: tuple[str, ...],
+    agent: AgentRuntimeOptions,
 ) -> None:
     """Audit what the campaign learned against the skill and write the edits worth making as a patch to review.
 
@@ -68,5 +72,8 @@ def forge_distill(
         raise click.ClickException(str(error)) from error
     if result["failed"]:
         raise click.ClickException(f"the curator failed; nothing to review in {target}")
-    click.echo(f"proposed edits to {len(result['files'])} file(s), not applied: {result['patch']}")
+    click.echo(
+        f"proposed edits to {len(result['files'])} file(s), {result['added_lines']} added lines, "
+        f"not applied: {result['patch']}"
+    )
     click.echo(f"evidence and rejected candidates: {result['report']}")
