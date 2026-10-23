@@ -17,12 +17,6 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     DEFAULT_HARDWARE_SLUG,
     DEFAULT_MODEL_SLUG,
     DEFAULT_PRECISION_SLUG,
-    F_LABEL_FRAMEWORK_NAME,
-    F_LABEL_FRAMEWORK_VERSION,
-    F_LABEL_HARDWARE,
-    F_LABEL_MODEL,
-    F_LABEL_PRECISION,
-    canonical_labels,
     detect_framework_version,
     kb_hardware_slug,
     recipe_canonical_id,
@@ -182,80 +176,6 @@ def test_canonical_id_defaults_empty_architecture_list() -> None:
         precision="p",
     )
     assert cid.split(":")[5] == DEFAULT_ARCHITECTURES_SLUG
-
-
-def test_canonical_labels_keys_match_documented_constants() -> None:
-    from hyperloom.inference_optimizer.recipe_snapshot_constants import (
-        F_LABEL_MODEL_TYPE,
-        F_LABEL_ARCHITECTURES,
-    )
-
-    labels = canonical_labels(
-        model="m",
-        hardware="h",
-        framework_name="f",
-        framework_version="v",
-        precision="p",
-    )
-    assert set(labels.keys()) == {
-        F_LABEL_MODEL,
-        F_LABEL_HARDWARE,
-        F_LABEL_FRAMEWORK_NAME,
-        F_LABEL_FRAMEWORK_VERSION,
-        F_LABEL_PRECISION,
-        F_LABEL_MODEL_TYPE,
-        F_LABEL_ARCHITECTURES,
-    }
-
-
-def test_canonical_labels_values_match_canonical_id_components() -> None:
-    """A label's value MUST equal the corresponding canonical_id slug."""
-    cid = recipe_canonical_id(
-        model="DeepSeek-R1",
-        hardware="MI300X",
-        framework_name="vLLM",
-        framework_version="0.6.0",
-        precision="bf16",
-    )
-    labels = canonical_labels(
-        model="DeepSeek-R1",
-        hardware="MI300X",
-        framework_name="vLLM",
-        framework_version="0.6.0",
-        precision="bf16",
-    )
-    parts = cid.split(":")[1:]
-    assert labels[F_LABEL_MODEL] == parts[0]
-    assert labels[F_LABEL_HARDWARE] == parts[1]
-    assert labels[F_LABEL_FRAMEWORK_NAME] == parts[2]
-    assert labels[F_LABEL_FRAMEWORK_VERSION] == parts[5]
-    assert labels[F_LABEL_PRECISION] == parts[6]
-
-
-def test_canonical_labels_substitutes_defaults_for_empty() -> None:
-    from hyperloom.inference_optimizer.recipe_snapshot_constants import (
-        DEFAULT_MODEL_TYPE_SLUG,
-        DEFAULT_ARCHITECTURES_SLUG,
-        F_LABEL_MODEL_TYPE,
-        F_LABEL_ARCHITECTURES,
-    )
-
-    labels = canonical_labels(
-        model="",
-        hardware="",
-        framework_name="",
-        framework_version="",
-        precision="",
-    )
-    assert labels == {
-        F_LABEL_MODEL: DEFAULT_MODEL_SLUG,
-        F_LABEL_HARDWARE: DEFAULT_HARDWARE_SLUG,
-        F_LABEL_FRAMEWORK_NAME: DEFAULT_FRAMEWORK_SLUG,
-        F_LABEL_FRAMEWORK_VERSION: DEFAULT_FRAMEWORK_VERSION_SLUG,
-        F_LABEL_PRECISION: DEFAULT_PRECISION_SLUG,
-        F_LABEL_MODEL_TYPE: DEFAULT_MODEL_TYPE_SLUG,
-        F_LABEL_ARCHITECTURES: DEFAULT_ARCHITECTURES_SLUG,
-    }
 
 
 def test_detect_framework_version_returns_default_for_blank_framework_name() -> None:

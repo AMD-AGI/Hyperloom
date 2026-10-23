@@ -81,9 +81,12 @@ def _coerce_rebuild_command(rebuild_command: "list[str] | str | None") -> list[s
     return argv
 
 
-# Pod-local multi-node backup dir; overridable via $HYPERLOOM_MN_KERNEL_BACKUP_DIR.
-_MN_POD_BACKUP_DIR_DEFAULT = "/var/kernel_patch_backups"
 _MANIFEST_MULTINODE = "multinode"
+_MANIFEST_NAME = "manifest.json"
+
+
+def _pod_backup_dir() -> str:
+    return os.environ.get("HYPERLOOM_MN_KERNEL_BACKUP_DIR", "/var/kernel_patch_backups")
 
 
 def _is_multi_node() -> bool:
@@ -2345,7 +2348,7 @@ def _prepare_whole_file_apply(
     if request.producer_manifest:
         manifest["producer_manifest"] = str(Path(request.producer_manifest).resolve())
     backup_dir.mkdir(parents=True, exist_ok=True)
-    deployment = _PatchDeployment(target, backup_dir, backup_dir / "manifest.json", manifest)
+    deployment = _PatchDeployment(target, backup_dir, backup_dir / _MANIFEST_NAME, manifest)
     deployment.persist()
     return deployment
 
@@ -2356,10 +2359,7 @@ def _fan_whole_file_out_to_pods(
     patch: Path,
     strategy: dict[str, Any],
 ) -> dict[str, Any]:
-    pod_backup_dir = os.environ.get(
-        "HYPERLOOM_MN_KERNEL_BACKUP_DIR",
-        _MN_POD_BACKUP_DIR_DEFAULT,
-    )
+    pod_backup_dir = _pod_backup_dir()
     jit_build_dir = str(strategy.get("jit_build_dir") or "").strip()
     remote_jit_dir = jit_build_dir if (strategy["compiled"] and not request.skip_rebuild) else ""
     fanout = _PodFanout()
@@ -2556,7 +2556,7 @@ def _prepare_snapshot_apply(request: KernelPatchRequest, plan: _SnapshotPlan) ->
     }
     if request.producer_manifest:
         manifest["producer_manifest"] = str(Path(request.producer_manifest).resolve())
-    deployment = _PatchDeployment(plan.target, backup_dir, backup_dir / "manifest.json", manifest)
+    deployment = _PatchDeployment(plan.target, backup_dir, backup_dir / _MANIFEST_NAME, manifest)
     deployment.persist()
     return deployment
 
@@ -2619,7 +2619,7 @@ def _fan_snapshot_out_to_pods(
     deployment: _PatchDeployment,
     plan: _SnapshotPlan,
 ) -> dict[str, Any]:
-    pod_backup_dir = os.environ.get("HYPERLOOM_MN_KERNEL_BACKUP_DIR", _MN_POD_BACKUP_DIR_DEFAULT)
+    pod_backup_dir = _pod_backup_dir()
     snap = Path(request.snapshot_dir)
     jit_build_dir = _snapshot_jit_build_dir(plan)
     jit_dispatch_target = next((path for path in plan.write_paths if _target_uses_aiter_jit(path)), None)

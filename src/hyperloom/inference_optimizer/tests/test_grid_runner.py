@@ -1977,6 +1977,37 @@ class TestSessionKillAttribution:
         assert results[0].output_throughput is None
 
     @pytest.mark.asyncio
+    async def test_a_reaped_round_names_the_server_log_its_workspace_holds(self, tmp_path):
+        """The log of a round reaped before its server was ready sits in the round's ``benchmark_*`` directory."""
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        log_lines = "[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so\n"
+
+        def fake_run(cmd, *args, **kwargs):
+            if "--output-dir" in cmd:
+                workspace = Path(cmd[cmd.index("--output-dir") + 1]) / "benchmark_sglang_20261021_063727"
+                workspace.mkdir(parents=True)
+                (workspace / "server.log").write_text(log_lines, encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, ORCHESTRATOR_CANCELLED_RETURNCODE, "", "")
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=fake_run,
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_expected_sec=30.0,
+            )
+
+        assert [r.status for r in results] == ["skipped"]
+        assert results[0].server_log_path == str(
+            tmp_path / "out" / "variant_00_v0" / "benchmark_sglang_20261021_063727" / "server.log"
+        )
+
+    @pytest.mark.asyncio
     async def test_session_deadline_reaches_the_watchdog_without_becoming_its_timeout(self, tmp_path):
         """A short session deadline keeps its own stop attribution."""
         base = tmp_path / "base.yaml"
