@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import dataclass
 from operator import itemgetter
 from typing import TYPE_CHECKING, Any, Callable
 from ..bus.gpu_pool import gpus_by_task_sync
@@ -63,6 +64,30 @@ _QUESTIONS_PROMPT_CHARS = 6_000
 _INBOX_PROMPT_CHARS = 40_000
 # Task kinds that queue for the benchmark lane, in the order the backlog line lists them.
 _BENCH_LANE_KINDS = ("integrate_patch", "explore")
+# Longest a KERNEL_AGENT session goes without an Orchestration turn while kernel progress is unchanged.
+_KERNEL_ORCHESTRATION_HEARTBEAT_SEC = 900.0
+
+
+@dataclass(frozen=True)
+class ComposedPrompt:
+    """One agent's prompt: ``context`` holds what changes rarely, ``turn`` what changes every tick."""
+
+    context: str
+    turn: str
+
+    @property
+    def text(self) -> str:
+        """The whole prompt as one string."""
+        return f"{self.context}\n{self.turn}"
+
+
+@dataclass(frozen=True)
+class TurnPrompt:
+    """What one reactor turn hands its backend; ``context`` is the part of the prompt carried in ``system_prompt``."""
+
+    system_prompt: str
+    prompt: str
+    context: str
 
 
 def _fit_to_budget(lines: list[str], budget_chars: int) -> list[str]:
@@ -256,6 +281,9 @@ class ConversationCollaborator(CoordinatorCollaborator):
         self.kb_last_read: ExperienceKBEvidence | None = None
         # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
+        # The kernel progress fingerprint at Orchestration's last admitted KERNEL turn, and when it was admitted.
+        self._admitted_kernel_fingerprint = ""
+        self._admitted_at = 0.0
 
     async def _kb_prompt_block(self, untested_proposals: str) -> str:
         """Read shared Experience evidence once per FRAMEWORK_AGENT orchestration tick."""
@@ -470,8 +498,10 @@ class ConversationCollaborator(CoordinatorCollaborator):
         self,
         agent_name: str,
         result: BackendTurnResult,
+        *,
+        context: str = "",
     ) -> None:
-        """Append one ``conversations.jsonl`` row for a reactor turn."""
+        """Append one ``conversations.jsonl`` row for a reactor turn, with ``context`` ahead of the backend's prompt."""
         metadata = result.metadata or {}
         prompt = metadata.get("prompt")
         response = metadata.get("response")
@@ -487,7 +517,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             tick=int(self.shared_state.tick or 0),
             phase=(self.shared_state.phase or "") or None,
             model=metadata.get("model"),
-            prompt=prompt or "",
+            prompt=f"{context}\n{prompt}" if context else prompt or "",
             response=response or "",
         )
         append_conversation(session_dir=self.session_dir, record=record)
@@ -577,52 +607,75 @@ class ConversationCollaborator(CoordinatorCollaborator):
             )
         return sections
 
-    async def compose_prompt(self, agent_name: str) -> str:
-        """Compose the prompt for *agent_name*: session context + inbox tail (with canonical msg_id per inbox row)."""
-        # SESSION_DIR contract — literal path for every agent.
-        sections: list[str] = [f"SESSION_DIR={self.session_dir}"]
+    async def compose_prompt(self, agent_name: str) -> ComposedPrompt:
+        """Compose the prompt for *agent_name*: the session context, and the per-tick blocks ending with the inbox tail."""
+        context: list[str] = [f"SESSION_DIR={self.session_dir}"]
+        turn: list[str] = []
 
-        # Per-tick phase block for every agent, high in the prompt.
         phase_block = _phase_state.phase_status_summary(self.shared_state)
         if phase_block:
-            sections.append("=== Phase ===")
-            sections.append(phase_block)
+            turn.append("=== Phase ===")
+            turn.append(phase_block)
 
         if agent_name == "orchestration":
-            sections.append("=== Mission progress ===")
-            sections.append(self.shared_state.to_mission_summary())
+            turn.append("=== Mission progress ===")
+            turn.append(self.shared_state.to_mission_summary())
             deadline = self._coord.run_deadline
             started = self._coord.run_started_monotonic
             if deadline is not None and started is not None:
                 remaining_min = max(0.0, deadline.remaining() / 60.0)
-                sections.append("=== Time budget ===")
-                sections.append(
+                turn.append("=== Time budget ===")
+                turn.append(
                     f"elapsed={(time.monotonic() - started) / 60.0:.1f}min  remaining={remaining_min:.1f}min  "
                     f"budget={self.shared_state.max_minutes or 0}min  "
                     f"closing_phase={self.shared_state.closing_phase}"
                 )
                 if remaining_min <= 5.0 and not self.shared_state.closing_phase:
-                    sections.append(
+                    turn.append(
                         "WARNING: < 5 min remaining. Avoid new `explore` rounds "
                         "(which bench every variant on the stack) — they will "
                         "likely be cut by the deadline. The Coordinator will "
                         "auto-enqueue `report` when the session closes."
                     )
+        turn.append("=== Tick ===")
+        turn.append(self.shared_state.to_tick_summary())
 
-        sections.append("=== Shared session state ===")
-        sections.append(self.shared_state.to_prompt_summary())
-        sections.append(f"target_gap_pct={self._coord.target_gap_pct():.2f}")
+        context.append("=== Shared session state ===")
+        context.append(self.shared_state.to_prompt_summary())
+        context.append(f"target_gap_pct={self._coord.target_gap_pct():.2f}")
         # Not wrapped, unlike the advisory blocks below: a latency budget changes
         # what a KEEP means, so losing it silently would have the model route as
         # if the session were unconstrained. Pure string assembly, no I/O.
-        sections.extend(self.shared_state.to_constraint_sections())
-        sections.append("=== Resource pools ===")
-        sections.append(resource_pools_summary(self.shared_state))
+        context.extend(self.shared_state.to_constraint_sections())
+        context.append("=== Resource pools ===")
+        context.append(resource_pools_summary(self.shared_state))
         if agent_name == "orchestration":
-            sections.extend(await self._orchestration_sections())
+            context.extend(await self._orchestration_sections())
 
-        sections.extend(await self._render_inbox_sections(agent_name))
-        return "\n".join(sections)
+        turn.extend(await self._render_inbox_sections(agent_name))
+
+        return ComposedPrompt(context="\n".join(context), turn="\n".join(turn))
+
+    def admit_turn(self, agent_name: str, now_unix: float) -> bool:
+        """Whether ``agent_name`` takes a turn this tick; in KERNEL_AGENT, Orchestration waits for kernel progress or the heartbeat."""
+        state = self.shared_state
+        if agent_name != "orchestration" or (state.phase or "").upper() != _phase_state.PHASE_KERNEL_AGENT:
+            return True
+        fingerprint = state.kernel_progress_fingerprint
+        last_turn = state.agent_last_active.get("orchestration", 0.0)
+        handled = fingerprint == self._admitted_kernel_fingerprint and last_turn >= self._admitted_at
+        if handled and now_unix - last_turn < _KERNEL_ORCHESTRATION_HEARTBEAT_SEC:
+            return False
+        self._admitted_kernel_fingerprint, self._admitted_at = fingerprint, now_unix
+        return True
+
+    async def compose_turn(self, agent_name: str, backend: Any) -> TurnPrompt:
+        """The system prompt and prompt for one turn; a backend that caches its system prompt gets the session context in it."""
+        system_prompt = await self.load_system_prompt(agent_name)
+        composed = await self.compose_prompt(agent_name)
+        if getattr(backend, "system_prompt_cached", False):
+            return TurnPrompt(f"{system_prompt}\n\n{composed.context}", composed.turn, composed.context)
+        return TurnPrompt(system_prompt, composed.text, "")
 
     async def advance_rendered_cursor(self, agent_name: str) -> None:
         """Advance an agent's read cursor to the last message its prompt rendered."""

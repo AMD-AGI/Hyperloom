@@ -67,11 +67,11 @@ def test_a_failing_factory_is_recorded_like_a_failing_load(monkeypatch) -> None:
 
 def test_unreadable_metadata_yields_one_discovery_record(monkeypatch) -> None:
     _patch(monkeypatch, {}, fail=OSError("metadata unreadable"))
-    records = list(ep.iter_entry_point_objects("g", legacy_groups=("old",)))
+    records = list(ep.iter_entry_point_objects("g"))
     assert [(r.name, r.error) for r in records] == [(ep.DISCOVERY_FAILED, "OSError: metadata unreadable")]
 
 
-def test_legacy_groups_are_scanned_after_the_group_and_do_not_duplicate_a_name(monkeypatch) -> None:
-    _patch(monkeypatch, {"new": [_Entry("x", "new-x")], "old": [_Entry("x", "old-x"), _Entry("y", "old-y")]})
-    found = [(o.name, o.value, o.group) for o in ep.iter_entry_point_objects("new", legacy_groups=("old",))]
-    assert found == [("x", "new-x", "new"), ("y", "old-y", "old")]
+def test_two_distributions_declaring_one_name_are_both_yielded(monkeypatch) -> None:
+    """The caller's duplicate check has to see the second one to record the conflict."""
+    _patch(monkeypatch, {"g": [_Entry("x", "vendor-a"), _Entry("x", "vendor-b")]})
+    assert [(o.name, o.value) for o in ep.iter_entry_point_objects("g")] == [("x", "vendor-a"), ("x", "vendor-b")]

@@ -54,28 +54,21 @@ def _load(entry: object, name: str, group: str) -> EntryPointObject:
     return EntryPointObject(name=name, group=group, value=value, origin=origin)
 
 
-def iter_entry_point_objects(group: str, *, legacy_groups: tuple[str, ...] = ()) -> Iterator[EntryPointObject]:
-    """Yield every entry point of ``group``, then of each legacy group, loaded one by one.
+def iter_entry_point_objects(group: str) -> Iterator[EntryPointObject]:
+    """Yield every entry point of ``group``, loaded one by one.
 
     An entry point may resolve to the object itself or to a zero-argument factory for it. Validating what it
-    resolved to is the caller's: this function knows nothing of the registry's types. A name already yielded from
-    an earlier group is skipped in a later one, so renaming a group does not double-register a plugin that
-    declares itself under both.
+    resolved to is the caller's: this function knows nothing of the registry's types. Two distributions declaring
+    the same name are both yielded, so the caller's own duplicate check sees and records the conflict.
 
     When the package metadata cannot be read, one record named :data:`DISCOVERY_FAILED` carries the error and
     nothing else is yielded.
     """
-    seen: set[str] = set()
-    for current in (group, *legacy_groups):
-        try:
-            entries = list(metadata.entry_points().select(group=current))
-        except Exception as exc:  # noqa: BLE001 - plugin discovery is optional
-            log.warning("entry-point discovery of group %s failed: %s", current, exc)
-            yield EntryPointObject(name=DISCOVERY_FAILED, group=current, error=f"{type(exc).__name__}: {exc}")
-            return
-        for entry in entries:
-            name = str(getattr(entry, "name", ""))
-            if name in seen:
-                continue
-            seen.add(name)
-            yield _load(entry, name, current)
+    try:
+        entries = list(metadata.entry_points().select(group=group))
+    except Exception as exc:  # noqa: BLE001 - plugin discovery is optional
+        log.warning("entry-point discovery of group %s failed: %s", group, exc)
+        yield EntryPointObject(name=DISCOVERY_FAILED, group=group, error=f"{type(exc).__name__}: {exc}")
+        return
+    for entry in entries:
+        yield _load(entry, str(getattr(entry, "name", "")), group)

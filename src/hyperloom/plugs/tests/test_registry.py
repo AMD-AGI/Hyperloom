@@ -136,6 +136,26 @@ def test_a_plugin_cannot_replace_a_builtin_implementation(monkeypatch) -> None:
     assert "already registered" in registry.plugin_errors()["measurement/local"]
 
 
+def test_two_plugins_declaring_one_name_keep_the_first_and_record_the_second(monkeypatch) -> None:
+    class _OtherDist:
+        name = "other-pkg"
+        version = "1.0"
+
+    _patch(
+        monkeypatch,
+        {
+            "hyperloom.plugs.measurement": [
+                _Entry("dup", _impl(name="dup"), dist=_Dist()),
+                _Entry("dup", _impl(name="dup"), dist=_OtherDist()),
+            ]
+        },
+    )
+    registry = _registry()
+    registry.discover()
+    assert registry.implementation("measurement", "dup").origin == "vendor-pkg==2.0"
+    assert "already registered" in registry.plugin_errors()["measurement/dup"]
+
+
 def test_a_broken_plugin_does_not_stop_the_others(monkeypatch) -> None:
     group = "hyperloom.plugs.measurement"
     _patch(monkeypatch, {group: [_Entry("bad", error=RuntimeError("boom")), _Entry("good", _impl(name="good"))]})
