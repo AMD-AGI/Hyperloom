@@ -3,8 +3,11 @@
 
 name: Tests with Coverage
 
-# Runs on push and pull_request for all branches. Skips when every changed file
-# matches paths-ignore (documentation-only and repo-metadata edits).
+# Runs on push and pull_request for all branches, every time: the ``coverage``
+# checks are required on main, so they must report even for a documentation-only
+# change. The ``changes`` job (code-changes.yml) classifies the event; when every
+# changed file is documentation or repo metadata, the shards do not run and
+# ``coverage`` reports success without measuring.
 #
 # Pytest argv for CI lives in ``pyproject.toml`` -> ``[tool.hyperloom.tests_coverage]``.
 # This workflow reads that table with inline Python.
@@ -33,21 +36,7 @@ on:
   # PR does not double-trigger (one run per event class).
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "LICENSE*"
-      - "COPYRIGHT"
-      - "**/CODEOWNERS"
-      - ".gitattributes"
   pull_request:
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "LICENSE*"
-      - "COPYRIGHT"
-      - "**/CODEOWNERS"
-      - ".gitattributes"
 
 # Cancel superseded runs for the same ref (newest push/PR sync wins).
 concurrency:
@@ -59,8 +48,13 @@ permissions:
   checks: write
 
 jobs:
+  changes:
+    uses: ./.github/workflows/code-changes.yml
+
   prepare-durations:
     name: select test duration seed
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     outputs:
       key: ${{ steps.select.outputs.key }}
@@ -455,7 +449,7 @@ jobs:
   # ---------------------------------------------------------------------------
   coverage:
     name: coverage (Python ${{ matrix.python-version }})
-    needs: test
+    needs: [changes, test]
     if: always()
     runs-on: ubuntu-latest
     strategy:
@@ -463,20 +457,34 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11"]
     steps:
+      - name: Require the change classification
+        if: ${{ !cancelled() && needs.changes.result != 'success' }}
+        run: |
+          echo "::error title=change-classification::The changes job ended '${{ needs.changes.result }}', so this run cannot tell whether tests had to run."
+          exit 1
+
+      - name: Documentation-only change
+        if: needs.changes.outputs.code == 'false'
+        run: echo "Every changed file is documentation or repository metadata; the test shards did not run." >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.code == 'true'
         with:
           # The PR merge commit plus both parents: ``HEAD^1`` is the base the
           # diff-coverage step compares against.
           fetch-depth: 2
 
       - uses: actions/setup-python@v7
+        if: needs.changes.outputs.code == 'true'
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
+        if: needs.changes.outputs.code == 'true'
         run: python -m pip install "coverage[toml]>=7.0"
 
       - name: Download shard coverage data
+        if: needs.changes.outputs.code == 'true'
         uses: actions/download-artifact@v8
         with:
           # Same artifact family the ``test`` job uploads shard-status/*
@@ -509,6 +517,7 @@ jobs:
       # ``>>``), so failures show above the coverage table. Keep that order.
       - name: Aggregate shard results
         id: outcomes
+        if: needs.changes.outputs.code == 'true'
         run: |
           python3 <<'PY'
           import glob
@@ -619,7 +628,7 @@ jobs:
         # run). Only genuine INCOMPLETENESS (a missing shard) skips combine,
         # since combining a partial set would under-count. The "Enforce shard
         # results" gate still reds the job for the failed/incomplete case.
-        if: steps.outcomes.outputs.complete == 'true'
+        if: needs.changes.outputs.code == 'true' && steps.outcomes.outputs.complete == 'true'
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -637,7 +646,7 @@ jobs:
 
       - name: Coverage summary
         id: coverage_report
-        if: always()
+        if: always() && needs.changes.outputs.code == 'true'
         env:
           # Missing or failed shards make any available coverage misleading.
           PYTEST_OUTCOME: ${{ steps.outcomes.outputs.tests_ok == 'true' && steps.outcomes.outputs.complete == 'true' && 'success' || 'failure' }}
@@ -645,7 +654,7 @@ jobs:
 
       - name: Enforce coverage fail_under (strict mode)
         # Failed or incomplete suites are rejected by the shard-results gate.
-        if: always() && steps.outcomes.outputs.complete == 'true' && steps.outcomes.outputs.tests_ok == 'true'
+        if: always() && needs.changes.outputs.code == 'true' && steps.outcomes.outputs.complete == 'true' && steps.outcomes.outputs.tests_ok == 'true'
         env:
           COVERAGE_RELAX_FAIL_UNDER: ${{ vars.COVERAGE_RELAX_FAIL_UNDER }}
           REPORT_EXIT_CODE: ${{ steps.coverage_report.outputs.report_exit_code }}
@@ -660,7 +669,7 @@ jobs:
       # drivers, ...) are not in the XML, so diff-cover does not count their
       # lines: that omit list is this gate's exemption surface.
       - name: Diff coverage (changed lines >= 80%)
-        if: always() && github.event_name == 'pull_request' && matrix.python-version == '3.10' && steps.outcomes.outputs.complete == 'true' && steps.outcomes.outputs.tests_ok == 'true'
+        if: always() && needs.changes.outputs.code == 'true' && github.event_name == 'pull_request' && matrix.python-version == '3.10' && steps.outcomes.outputs.complete == 'true' && steps.outcomes.outputs.tests_ok == 'true'
         run: |
           set -euo pipefail
           if [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -ne 3 ]; then
@@ -690,7 +699,7 @@ jobs:
       # shards -- never the empty "Failed shard(s):" the old split gate produced
       # when the completeness check exited before outcomes were aggregated.
       - name: Enforce shard results
-        if: always() && (needs.test.result != 'success' || steps.outcomes.outputs.complete != 'true' || steps.outcomes.outputs.tests_ok != 'true')
+        if: always() && needs.changes.outputs.code == 'true' && (needs.test.result != 'success' || steps.outcomes.outputs.complete != 'true' || steps.outcomes.outputs.tests_ok != 'true')
         env:
           PYVER: ${{ matrix.python-version }}
           FAILED_SHARDS: ${{ steps.outcomes.outputs.failed_shards }}

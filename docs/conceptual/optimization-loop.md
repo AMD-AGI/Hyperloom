@@ -494,7 +494,10 @@ One phase, two levers worked in parallel:
   a specialist wrote, `upstream_pr` for a diff fetched from an upstream PR
   that a `candidate_discovery_specialist` found, ranked and judged. Both
   serialise on the `workspace_mutation` lane: one landing at a time,
-  independent of how fast proposals arrive.
+  independent of how fast proposals arrive. A candidate whose every patch
+  reverse-applies cleanly, and that changes nothing else, is not benchmarked:
+  it ends `already_present`, and a candidate with an upstream PR identity is
+  recorded so in the framework KB.
 
 `specialist` serves both levers — investigation, patch authoring, and
 candidate discovery are all dispatches of the one specialist action. An

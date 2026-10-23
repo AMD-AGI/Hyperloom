@@ -2417,7 +2417,7 @@ resolve_credentials() {
   log "Phase 4: credentials"
   local anthropic_key anthropic_token anthropic_url
   local oauth_token dv_oauth_token
-  local dv_anthropic_key dv_anthropic_token dv_anthropic_url
+  local dv_anthropic_key dv_anthropic_token dv_anthropic_url dv_codex_secret dv_codex_url
   local has_url=0 has_key=0 setup_env_authoritative=0 setup_llm_mode=""
 
   if [ ! -f "$DOTENV" ] && [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
@@ -2438,6 +2438,8 @@ resolve_credentials() {
   dv_anthropic_token="$(read_dotenv_var ANTHROPIC_AUTH_TOKEN || true)"
   dv_oauth_token="$(read_dotenv_var CLAUDE_CODE_OAUTH_TOKEN || true)"
   dv_anthropic_url="$(read_dotenv_var ANTHROPIC_BASE_URL || true)"
+  dv_codex_secret="$(read_dotenv_var OPENAI_API_KEY || true)"
+  dv_codex_url="$(read_dotenv_var OPENAI_BASE_URL || true)"
   setup_llm_mode="$(read_dotenv_var HYPERLOOM_LLM_MODE || true)"
   setup_llm_mode="$(echo "$setup_llm_mode" | tr '[:upper:]' '[:lower:]')"
   # ``deepseek`` was a mode of its own; it is now an Anthropic-side endpoint value.
@@ -2447,7 +2449,11 @@ resolve_credentials() {
   fi
   if [ "$setup_env_authoritative" -eq 1 ] && [ -z "$setup_llm_mode" ]; then
     if [ -n "$dv_anthropic_key" ] || [ -n "$dv_anthropic_token" ] || [ -n "$dv_oauth_token" ] || [ -n "$dv_anthropic_url" ]; then
-      setup_llm_mode="anthropic"
+      # A complete, distinct OpenAI route is intentional even when it lives on
+      # another host. Only infer Anthropic-only mode for a stale/absent route.
+      if [ -z "$dv_codex_url" ] || [ -z "$dv_codex_secret" ] || [ "$dv_codex_url" = "$dv_anthropic_url" ]; then
+        setup_llm_mode="anthropic"
+      fi
     fi
   fi
   if [ "$setup_env_authoritative" -eq 1 ] && [ -n "$setup_llm_mode" ]; then
@@ -2460,10 +2466,8 @@ resolve_credentials() {
   oauth_token="${CLAUDE_CODE_OAUTH_TOKEN:-$dv_oauth_token}"
   anthropic_url="${ANTHROPIC_BASE_URL:-$dv_anthropic_url}"
 
-  # A dual-protocol gateway serves both protocols from ONE host, so its OpenAI
-  # side belongs to the same credential and must survive the Anthropic-only
-  # cleanup below. Decide from the resolved endpoints rather than from whether
-  # a legacy migration ran, so a hand-written two-sided config counts too.
+  # A gateway with two routes can share a host, while two providers can use
+  # separate hosts. Either complete OpenAI route survives the write-back.
   local dual_url dual_secret
   if [ "$LEGACY_DEEPSEEK_MIGRATED" -eq 1 ] || [ "$setup_env_authoritative" -eq 0 ]; then
     dual_url="${OPENAI_BASE_URL:-$(read_dotenv_var OPENAI_BASE_URL || true)}"
@@ -2471,8 +2475,8 @@ resolve_credentials() {
   else
     # .env is the source of truth the operator just confirmed, so an ambient
     # shell value is not allowed to keep a stale OpenAI side alive.
-    dual_url="$(read_dotenv_var OPENAI_BASE_URL || true)"
-    dual_secret="$(read_dotenv_var OPENAI_API_KEY || true)"
+    dual_url="$dv_codex_url"
+    dual_secret="$dv_codex_secret"
   fi
   # Same host but a DIFFERENT path: two protocol routes of one gateway. An
   # identical URL on both sides is a stale copy, not a second protocol -- the
@@ -2486,9 +2490,8 @@ resolve_credentials() {
   fi
 
   # In the interactive setup flow, .env is the source of truth the user just
-  # confirmed. Clear unsupported credential families before downstream scripts
-  # source env with "env wins". A dual-protocol gateway keeps its OpenAI side:
-  # both sides are the same gateway, not a second provider.
+  # confirmed. Clear stale OpenAI credentials only for Anthropic-only mode;
+  # complete OpenAI routes on either the same or a different host must survive.
   if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
     unset LLM_GATEWAY_KEY
     if [ "$DUAL_PROTOCOL_GATEWAY" -eq 0 ]; then
@@ -2585,8 +2588,7 @@ resolve_credentials() {
     elif [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
       # Anthropic-only deployment: scrub the other provider's entries. The
       # custom header belongs to that side, so it leaves with its URL and key --
-      # a dual-protocol gateway takes the branch above and keeps all three,
-      # which is the only place a header-authenticated OpenAI route is stored.
+      # a complete second route takes the branch above and keeps all three.
       remove_dotenv_var OPENAI_API_KEY
       remove_dotenv_var OPENAI_BASE_URL
       remove_dotenv_var OPENAI_CUSTOM_HEADERS

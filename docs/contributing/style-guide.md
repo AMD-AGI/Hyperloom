@@ -288,7 +288,7 @@ Shell scripts live under `scripts/`, `src/hyperloom/**/assets/`, and agent tool 
 - **yamllint** uses the `relaxed` preset; line-length is disabled to avoid churn.
 - **actionlint** validates `.github/workflows/` — pin action versions (`@v7`), avoid `${{ }}` injection pitfalls.
 
-When adding a workflow that should skip on documentation-only changes, copy the **canonical `paths-ignore` list** from `CONTRIBUTING.md`.
+When adding a workflow that should skip on documentation-only changes, follow `CONTRIBUTING.md` (*CI and documentation-only changes*): a workflow whose check the `main` ruleset requires calls `code-changes.yml` and conditions its jobs; any other workflow may use the canonical `paths-ignore` list.
 
 ## Markdown and documentation
 
