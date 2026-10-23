@@ -153,8 +153,6 @@ def test_build_manifest_with_args(monkeypatch):
         target_tput=None,
         target_baseline_dir=None,
         max_hours=2,
-        research_lane_capacity=3,
-        gpu_specialist_capacity=2,
         kb_degraded_reason=None,
         pr_degraded_reason=None,
     )
@@ -165,7 +163,6 @@ def test_build_manifest_with_args(monkeypatch):
     assert m["workload"]["isl"] == 128
     assert m["objective"]["kind"] == "gain_pct"
     assert m["max_minutes"] == 120
-    assert m["research_lane_capacity"] == 3
 
 
 def test_build_manifest_shared_provenance_fields(monkeypatch):
