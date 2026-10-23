@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import pwd
 import stat
@@ -237,10 +238,9 @@ def restore_umask() -> Iterator[None]:
 
 def test_resolving_the_user_does_not_touch_the_umask(monkeypatch, restore_umask):
     monkeypatch.setenv(run_as_mod.SPECIALIST_USER_ENV, UNPRIVILEGED if _account_exists(UNPRIVILEGED) else "root")
-    try:
+    # Whether the account resolves (non-root runs may be the account) or is refused, the umask must not move.
+    with contextlib.suppress(RunAsError):
         specialist_run_as()
-    except RunAsError:
-        pass
     assert os.umask(0o022) == 0o022
 
 
