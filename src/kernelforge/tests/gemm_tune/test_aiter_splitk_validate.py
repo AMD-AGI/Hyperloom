@@ -213,3 +213,97 @@ class TestBpreshuffleTrial:
         calls = fake_aiter(monkeypatch, k=5120)
         assert make_support_fn(op="a8w8_blockscale")(64, 5120, 5120) == 6
         assert calls == [("ck", sk) for sk in range(7)]
+
+
+def _blockwise_reference(x, w, xs, ws):
+    """fp32 blockscale GEMM written block by block, independent of the module's vectorized reference."""
+    import torch
+
+    m, k = x.shape
+    out = torch.zeros(m, w.shape[0], dtype=torch.float32)
+    for kb in range(0, k, 128):
+        w_blk = w[:, kb : kb + 128].float() * ws[:, kb // 128].repeat_interleave(128)[: w.shape[0], None]
+        out += (x[:, kb : kb + 128].float() * xs[:, kb // 128 : kb // 128 + 1]) @ w_blk.t()
+    return out
+
+
+def numeric_aiter(monkeypatch, scale: float = 1.0) -> list[dict]:
+    """Install a CPU ``aiter`` whose asm op computes the blockscale GEMM times ``scale``, reading x_scale column-major."""
+    import torch
+
+    monkeypatch.setattr(mod, "_resolve_device", lambda gpu_ids="": "cpu")
+
+    calls: list[dict] = []
+    shuffled = []
+
+    def shuffle_weight(w, layout):
+        shuffled.append(layout)
+        return w.clone()
+
+    def asm(x, w, out, xs, ws, bias=None, splitK=None, kernelName=None):
+        m = x.shape[0]
+        xs_row_major = xs.reshape(-1).view(-1, m).t()
+        calls.append({"splitK": splitK, "kernelName": kernelName, "layout": shuffled[-1]})
+        out.copy_((_blockwise_reference(x, w, xs_row_major, ws) * scale).to(out.dtype))
+        return out
+
+    aiter = types.ModuleType("aiter")
+    aiter.dtypes = types.SimpleNamespace(
+        fp16=torch.float16, fp8=torch.float8_e4m3fn, fp32=torch.float32, bf16=torch.bfloat16
+    )
+    aiter.gemm_a8w8_blockscale_bpreshuffle_asm = asm
+    ops, shuffle = types.ModuleType("aiter.ops"), types.ModuleType("aiter.ops.shuffle")
+    shuffle.shuffle_weight = shuffle_weight
+    monkeypatch.setitem(sys.modules, "aiter", aiter)
+    monkeypatch.setitem(sys.modules, "aiter.ops", ops)
+    monkeypatch.setitem(sys.modules, "aiter.ops.shuffle", shuffle)
+    return calls
+
+
+class TestAsmRelNormErr:
+    """The relative-norm error of one asm split-K row, measured through the production asm op."""
+
+    SHAPE = (4, 256, 384)
+
+    def test_an_exact_kernel_measures_only_bf16_rounding(self, monkeypatch):
+        numeric_aiter(monkeypatch)
+        err = mod.make_rel_norm_fn(op="a8w8_blockscale_bpreshuffle")(*self.SHAPE, 6, "asm_knl")
+        assert 0 <= err < 0.004
+
+    def test_a_kernel_off_by_three_percent_measures_three_percent(self, monkeypatch):
+        numeric_aiter(monkeypatch, scale=1.03)
+        err = mod.make_rel_norm_fn(op="a8w8_blockscale_bpreshuffle")(*self.SHAPE, 6, "asm_knl")
+        assert err == pytest.approx(0.03, abs=0.004)
+
+    def test_dispatches_the_rows_kernel_and_splitk_on_preshuffled_operands(self, monkeypatch):
+        calls = numeric_aiter(monkeypatch)
+        mod.make_rel_norm_fn(op="a8w8_blockscale_bpreshuffle")(*self.SHAPE, 6, "asm_knl")
+        assert calls == [{"splitK": 6, "kernelName": "asm_knl", "layout": (16, 16)}]
+
+    def test_memoized_per_row(self, monkeypatch):
+        calls = numeric_aiter(monkeypatch)
+        fn = mod.make_rel_norm_fn(op="a8w8_blockscale_bpreshuffle")
+        fn(*self.SHAPE, 6, "asm_knl")
+        fn(*self.SHAPE, 6, "asm_knl")
+        fn(*self.SHAPE, 4, "asm_knl")
+        assert [c["splitK"] for c in calls] == [6, 4]
+
+    def test_a_failed_dispatch_measures_nothing(self, monkeypatch):
+        def rejected(*args, **kwargs):
+            raise RuntimeError("Kdim alignment check failed for splitK!")
+
+        monkeypatch.setitem(mod._REL_NORM_OPS, "a8w8_blockscale_bpreshuffle", rejected)
+        assert mod.make_rel_norm_fn(op="a8w8_blockscale_bpreshuffle")(64, 5120, 17408, 6, "k") is None
+
+    def test_a_defect_in_the_check_surfaces(self, monkeypatch):
+        def buggy(*args, **kwargs):
+            raise TypeError("signature drifted")
+
+        monkeypatch.setitem(mod._REL_NORM_OPS, "a8w8_blockscale_bpreshuffle", buggy)
+        with pytest.raises(TypeError, match="^signature drifted$"):
+            mod.make_rel_norm_fn(op="a8w8_blockscale_bpreshuffle")(64, 5120, 17408, 6, "k")
+
+    def test_an_op_without_a_check_measures_nothing(self, monkeypatch):
+        calls = numeric_aiter(monkeypatch)
+        assert mod.make_rel_norm_fn(op="a8w8_blockscale")(*self.SHAPE, 6, "k") is None
+        assert not calls
