@@ -34,9 +34,10 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Literal, Protocol
+from typing import Literal, NamedTuple, Protocol, TypeVar
 
-from hyperloom.common.outside_facts import SGLANG_IMAGE_WORKSPACE, TUNABLEOP_TABLE_ENV
+from hyperloom.common.outside_facts import SGLANG_IMAGE_WORKSPACE, TUNABLEOP_TABLE_ENV, component_layouts
+from hyperloom.common.outside_facts.component_layout import PACKAGE_BASE, ComponentLayoutSpec, LayoutSection
 from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.contracts.recipe import (
     DIGEST_PREFIX,
@@ -152,19 +153,33 @@ class LocalBlobStore:
 
 @dataclass(frozen=True)
 class ComponentLayout:
-    """How a component's upstream repository maps onto the package installed in the image."""
+    """How a component's upstream repository maps onto the package installed in the image.
+
+    ``sections`` are the layout's parts (an upstream prefix, the base it lies over and where in the base it starts); a
+    layout without any is the one package section at ``upstream_prefix``. ``refuse`` are the patterns of the file names
+    whose change this layout cannot measure, and ``generated`` the package directories the runtime writes builds into.
+    The rule pack owns all of it (``component_layout`` entries).
+    """
 
     import_name: str
     #: The package directory's path inside the upstream repository; patches are relative to the repository root.
     upstream_prefix: str
+    sections: tuple[LayoutSection, ...] = ()
+    refuse: tuple[str, ...] = ()
+    generated: tuple[str, ...] = ()
+
+    @classmethod
+    def from_spec(cls, spec: ComponentLayoutSpec) -> ComponentLayout:
+        return cls(spec.import_name, spec.sections[0].prefix, spec.sections, spec.refuse, spec.generated)
+
+    @property
+    def spec(self) -> ComponentLayoutSpec:
+        sections = self.sections or (LayoutSection(self.upstream_prefix),)
+        return ComponentLayoutSpec(self.import_name, sections, self.refuse, self.generated)
 
 
 COMPONENT_LAYOUTS: Mapping[str, ComponentLayout] = {
-    "sglang": ComponentLayout("sglang", "python/sglang"),
-    "vllm": ComponentLayout("vllm", "vllm"),
-    "aiter": ComponentLayout("aiter", "aiter"),
-    "atom": ComponentLayout("atom", "atom"),
-    "xdit": ComponentLayout("xfuser", "xfuser"),
+    name: ComponentLayout.from_spec(spec) for name, spec in component_layouts().items()
 }
 
 
@@ -323,10 +338,26 @@ def check_base_image(recipe: Recipe, active_image_digest: str) -> None:
 # --- patches ---------------------------------------------------------------------------------------------------------
 
 
-def _package_path(path: str, prefix: str, patch: str) -> str:
+class PlacedPath(NamedTuple):
+    """A path of a patch placed in the image: ``upstream`` in the component's repository, ``relative`` in the base ``base``."""
+
+    upstream: str
+    base: str
+    relative: str
+
+
+_Placed = TypeVar("_Placed")
+
+
+def _safe_parts(path: str, patch: str) -> tuple[str, ...]:
     parts = PurePosixPath(path).parts
     if path.startswith("/") or ".." in parts:
         raise PatchApplyError(f"{patch}: unsafe path {path!r}")
+    return parts
+
+
+def _package_path(path: str, prefix: str, patch: str) -> str:
+    parts = _safe_parts(path, patch)
     prefix_parts = PurePosixPath(prefix).parts
     if parts[: len(prefix_parts)] != prefix_parts or len(parts) == len(prefix_parts):
         raise PatchApplyError(
@@ -335,14 +366,30 @@ def _package_path(path: str, prefix: str, patch: str) -> str:
     return str(PurePosixPath(*parts[len(prefix_parts) :]))
 
 
-def patch_targets(text: str, prefix: str, patch: str) -> list[str]:
-    """The package-relative files a git patch reads or writes; refuses what cannot be applied faithfully."""
+def _place(path: str, layout: ComponentLayout, patch: str) -> PlacedPath:
+    _safe_parts(path, patch)
+    pattern = layout.spec.refused_by(path)
+    if pattern is not None:
+        raise PatchApplyError(
+            f"{patch}: {path!r} is a native or binary file ({pattern}) of {layout.import_name}; a patch changes its "
+            "Python only, so the compiled code in the image would stay as it is"
+        )
+    placed = layout.spec.place(path)
+    if placed is None:
+        prefixes = ", ".join(f"{section.prefix}/" for section in layout.spec.sections)
+        raise PatchApplyError(
+            f"{patch}: {path!r} is outside the installed package ({prefixes}); a runner cannot apply it to the image"
+        )
+    section, relative = placed
+    return PlacedPath(path, section.base, relative)
 
-    targets: list[str] = []
+
+def _scan_patch(text: str, patch: str, place: Callable[[str], _Placed]) -> list[_Placed]:
+    targets: list[_Placed] = []
     for line in text.splitlines():
         header = _DIFF_HEADER.match(line)
         if header:
-            targets += [_package_path(header["old"], prefix, patch), _package_path(header["new"], prefix, patch)]
+            targets += [place(header["old"]), place(header["new"])]
         elif line.startswith(("GIT binary patch", "Binary files ")):
             raise PatchApplyError(f"{patch}: binary patches are not supported")
         elif line.startswith("diff --git "):
@@ -352,6 +399,19 @@ def patch_targets(text: str, prefix: str, patch: str) -> list[str]:
     if not targets:
         raise PatchApplyError(f"{patch}: not a git patch (no 'diff --git' header)")
     return list(dict.fromkeys(targets))
+
+
+def patch_targets(text: str, prefix: str, patch: str) -> list[str]:
+    """The package-relative files a git patch reads or writes; refuses what cannot be applied faithfully."""
+
+    return _scan_patch(text, patch, lambda path: _package_path(path, prefix, patch))
+
+
+def layout_targets(text: str, layout: ComponentLayout, patch: str) -> list[PlacedPath]:
+    """The files a git patch reads or writes, each placed by ``layout``; refuses a file outside its sections and one it
+    cannot measure, by path."""
+
+    return _scan_patch(text, patch, lambda path: _place(path, layout, patch))
 
 
 def _git_apply(tree: Path, patch_file: Path, strip: int, patch: str) -> None:
@@ -367,36 +427,77 @@ def _git_apply(tree: Path, patch_file: Path, strip: int, patch: str) -> None:
         raise PatchApplyError(f"{patch} does not apply to the installed package: {done.stderr.strip()[:500]}")
 
 
-def _stage(base: Path, tree: Path, rel: str, staged: set[str]) -> None:
-    """Copy a file the next patch touches from the base into the working tree, the first time it is touched."""
+def _installed(bases: Mapping[str, PackageBase], placed: PlacedPath) -> Path:
+    base = bases.get(placed.base)
+    if base is None:
+        raise UnsupportedComponentError(
+            f"{placed.upstream} lies over the {placed.base} of the image, which this compile does not lay yet"
+        )
+    return base.path / placed.relative
 
-    if rel in staged:
+
+def _stage(
+    bases: Mapping[str, PackageBase], tree: Path, placed: PlacedPath, staged: dict[tuple[str, str], str]
+) -> None:
+    """Copy a file the next patch touches from the image into the working tree, at its upstream path, the first time."""
+
+    key = (placed.base, placed.relative)
+    if key in staged:
+        if staged[key] != placed.upstream:
+            raise PatchApplyError(
+                f"{placed.upstream} and {staged[key]} are one file of the image ({placed.relative}); "
+                "a patch stack may name it by one path only"
+            )
         return
-    staged.add(rel)
-    source = base / rel
+    staged[key] = placed.upstream
+    source = _installed(bases, placed)
     if source.is_symlink():
-        raise PatchApplyError(f"{rel} is a symbolic link in the installed package")
+        raise PatchApplyError(f"{placed.relative} is a symbolic link in the installed package")
     if source.is_file():
-        (tree / rel).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, tree / rel)
+        (tree / placed.upstream).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, tree / placed.upstream)
 
 
 def _mode(path: Path) -> str:
     return "0755" if path.stat().st_mode & stat.S_IXUSR else "0644"
 
 
-def _entries(base: Path, tree: Path, staged: set[str], blobs: BlobStore) -> tuple[EnvEntry, ...]:
-    entries = []
-    for rel in sorted(staged):
-        old, new = base / rel, tree / rel
+def _entries(
+    bases: Mapping[str, PackageBase], tree: Path, staged: dict[tuple[str, str], str], blobs: BlobStore
+) -> dict[str, tuple[EnvEntry, ...]]:
+    """What the patches made different from the image, by base."""
+
+    entries: dict[str, list[EnvEntry]] = {}
+    for (base, rel), upstream in sorted(staged.items()):
+        old, new = _installed(bases, PlacedPath(upstream, base, rel)), tree / upstream
+        found = entries.setdefault(base, [])
         if new.is_file():
             data = new.read_bytes()
             if old.is_file() and old.read_bytes() == data and _mode(old) == _mode(new):
                 continue
-            entries.append(EnvEntry(rel, "upsert", blobs.put(data), _mode(new)))
+            found.append(EnvEntry(rel, "upsert", blobs.put(data), _mode(new)))
         elif old.is_file():
-            entries.append(EnvEntry(rel, "delete"))
-    return tuple(entries)
+            found.append(EnvEntry(rel, "delete"))
+    return {base: tuple(found) for base, found in entries.items()}
+
+
+def _apply_stack(
+    component: ComponentPatches, layout: ComponentLayout, bases: Mapping[str, PackageBase], blobs: BlobStore
+) -> dict[str, tuple[EnvEntry, ...]]:
+    """Apply the component's patches, each to the upstream paths it names, over copies of the files they touch."""
+
+    with tempfile.TemporaryDirectory(prefix="hl-compile-") as scratch:
+        tree = Path(scratch) / "tree"
+        tree.mkdir()
+        staged: dict[tuple[str, str], str] = {}
+        for ref in component.patches:
+            data = blobs.get(ref.sha256)
+            for placed in layout_targets(_decode(data, ref.path), layout, ref.path):
+                _stage(bases, tree, placed, staged)
+            patch_file = Path(scratch) / "current.patch"
+            patch_file.write_bytes(data)
+            _git_apply(tree, patch_file, 1, ref.path)
+        return _entries(bases, tree, staged, blobs)
 
 
 def apply_patch_stack(
@@ -404,21 +505,8 @@ def apply_patch_stack(
 ) -> EnvRoot:
     """Lay the component's patches over a copy of the files they touch; the root is what ended up different."""
 
-    prefix_depth = 1 + len(PurePosixPath(layout.upstream_prefix).parts)
-    with tempfile.TemporaryDirectory(prefix="hl-compile-") as scratch:
-        tree = Path(scratch) / "tree"
-        tree.mkdir()
-        staged: set[str] = set()
-        for ref in component.patches:
-            data = blobs.get(ref.sha256)
-            text = _decode(data, ref.path)
-            for rel in patch_targets(text, layout.upstream_prefix, ref.path):
-                _stage(base.path, tree, rel, staged)
-            patch_file = Path(scratch) / "current.patch"
-            patch_file.write_bytes(data)
-            _git_apply(tree, patch_file, prefix_depth, ref.path)
-        entries = _entries(base.path, tree, staged, blobs)
-    return EnvRoot(component.component, base.import_name, base.dist_name, base.dist_version, entries)
+    entries = _apply_stack(component, layout, {PACKAGE_BASE: base}, blobs)
+    return EnvRoot(component.component, base.import_name, base.dist_name, base.dist_version, entries[PACKAGE_BASE])
 
 
 def _decode(data: bytes, name: str) -> str:

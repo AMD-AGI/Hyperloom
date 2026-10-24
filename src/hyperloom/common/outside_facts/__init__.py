@@ -17,6 +17,10 @@ file that is copied into a sandbox and runs there with the standard library only
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
+
+from hyperloom.common.outside_facts.component_layout import ComponentLayoutSpec
 from hyperloom.common.outside_facts.rule_pack import default_pack
 
 __all__ = [
@@ -100,10 +104,29 @@ __all__ = [
     "TUNED_LIBTYPE_COLUMN",
     "TUNED_SPLITK_COLUMN",
     "UPSTREAM_PR_REPOS",
+    "component_layouts",
     "spaced",
 ]
 
 _PACK = default_pack()
+
+
+def component_layouts() -> Mapping[str, ComponentLayoutSpec]:
+    """The layout of every component the pack describes, by the name a recipe calls the component."""
+    return MappingProxyType(
+        {
+            "sglang": _PACK.component_layout("component_layout_sglang"),
+            "vllm": _PACK.component_layout("component_layout_vllm"),
+            "aiter": _PACK.component_layout("component_layout_aiter"),
+            "atom": _PACK.component_layout("component_layout_atom"),
+            "xdit": _PACK.component_layout("component_layout_xdit"),
+            "triton": _PACK.component_layout("component_layout_triton"),
+            "torch": _PACK.component_layout("component_layout_torch"),
+            "sgl_kernel": _PACK.component_layout("component_layout_sgl_kernel"),
+            "flydsl": _PACK.component_layout("component_layout_flydsl"),
+        }
+    )
+
 
 _aiter = _PACK.names("aiter_merged_view", "dir")
 AITER_MERGED_VIEW_DIR = _aiter["dir"]

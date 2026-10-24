@@ -9,6 +9,9 @@
 #   names         closed set of names, each under the role the code reads it by
 #   log_regex     a pattern for a log line; every examples.match line must match it, every examples.no_match line must not
 #   env_default   an environment variable and the value a launch sets
+#   component_layout  where a component's upstream paths lie in the image (sections), the files its layout cannot measure
+#                 (refuse) and the package directories its runtime writes builds into (generated); every examples.place
+#                 line "<upstream path> -> <base>:<path in base>" must be placed so, every examples.refuse path refused
 #   arg_value     reserved: no rule reads one yet, so a pack that holds one is refused
 #   kernel_table  reserved: no rule reads one yet, so a pack that holds one is refused
 # An entry may also declare image_check: checks the environment a session runs in can answer about the fact
@@ -17,7 +20,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "12"
+version: "13"
 facts:
   aiter_merged_view:
     kind: names
@@ -816,3 +819,295 @@ facts:
       pytorch: pytorch/pytorch
     examples:
       - "hyperloom_multibranch.toolbox.tools.upstream_pr: a search names a repository by its GitHub URL, and is refused unless the owner/name of that URL is one of these"
+
+  component_layout_sglang:
+    kind: component_layout
+    project: sglang
+    reason: >-
+      SGLang's package is python/sglang in its repository and lies over the installed sglang.
+    import_name: sglang
+    sections:
+      - {prefix: python/sglang, base: package}
+    refuse: []
+    generated: []
+    examples:
+      place:
+        - "python/sglang/srt/server_args.py -> package:srt/server_args.py"
+      refuse:
+        - "python/sgl-kernel/setup.py"
+        - "docs/index.md"
+
+  component_layout_vllm:
+    kind: component_layout
+    project: vllm
+    reason: >-
+      vLLM's package is vllm at the top of its repository and lies over the installed vllm.
+    import_name: vllm
+    sections:
+      - {prefix: vllm, base: package}
+    refuse: []
+    generated: []
+    examples:
+      place:
+        - "vllm/envs.py -> package:envs.py"
+      refuse:
+        - "csrc/cache_kernels.cu"
+
+  component_layout_aiter:
+    kind: component_layout
+    project: aiter
+    reason: >-
+      aiter's Python package is aiter at the top of its repository and lies over the installed aiter. A compiled module or a
+      code object is a build product, which a text patch cannot make; the runtime writes its builds into the directories listed in
+      generated.
+    import_name: aiter
+    sections:
+      - {prefix: aiter, base: package}
+    refuse:
+      - "*.so"
+      - "*.so.*"
+      - "*.a"
+      - "*.o"
+      - "*.co"
+      - "*.hsaco"
+      - "*.cubin"
+    generated:
+      - jit/build
+      - jit/hyperloom_jit_backup
+      - jit/flydsl_cache
+    examples:
+      place:
+        - "aiter/ops/mha.py -> package:ops/mha.py"
+      refuse:
+        - "aiter/jit/module_activation.so"
+        - "csrc/kernels/activation_kernels.cu"
+
+  component_layout_atom:
+    kind: component_layout
+    project: atom
+    reason: >-
+      ATOM's package is atom at the top of its repository and lies over the installed atom.
+    import_name: atom
+    sections:
+      - {prefix: atom, base: package}
+    refuse: []
+    generated: []
+    examples:
+      place:
+        - "atom/config.py -> package:config.py"
+      refuse:
+        - "docs/readme.md"
+
+  component_layout_xdit:
+    kind: component_layout
+    project: xdit
+    reason: >-
+      xDiT installs its package as xfuser, which is xfuser at the top of its repository.
+    import_name: xfuser
+    sections:
+      - {prefix: xfuser, base: package}
+    refuse: []
+    generated: []
+    examples:
+      place:
+        - "xfuser/config/args.py -> package:config/args.py"
+      refuse:
+        - "examples/run.sh"
+
+  component_layout_triton:
+    kind: component_layout
+    project: triton
+    reason: >-
+      Triton is installed as a wheel: its Python is python/triton in the repository, and the AMD backend and the HIP language
+      extension, which the wheel moves into the package, are third_party/amd/backend and third_party/amd/language/hip. The wheel
+      carries its compiler as native files (libtriton.so, the bitcode libraries, the C launcher stub driver.c): a Python patch
+      cannot change them, so a patch that names one is refused with its path instead of being laid beside the old binary.
+    import_name: triton
+    sections:
+      - {prefix: python/triton, base: package}
+      - {prefix: third_party/amd/backend, base: package, into: backends/amd}
+      - {prefix: third_party/amd/language/hip, base: package, into: language/extra/hip}
+    refuse:
+      - "*.so"
+      - "*.so.*"
+      - "*.a"
+      - "*.o"
+      - "*.bc"
+      - "*.co"
+      - "*.hsaco"
+      - "*.cubin"
+      - "*.pyd"
+      - "*.aks2"
+      - "*.c"
+      - "*.cc"
+      - "*.cpp"
+      - "*.cxx"
+      - "*.h"
+      - "*.hh"
+      - "*.hpp"
+      - "*.cu"
+      - "*.cuh"
+      - "*.hip"
+      - "*.inc"
+      - "*.td"
+      - "CMakeLists.txt"
+      - "*.cmake"
+      - "setup.py"
+      - "pyproject.toml"
+      - "Makefile"
+      - "*.ld"
+    generated: []
+    examples:
+      place:
+        - "python/triton/language/core.py -> package:language/core.py"
+        - "third_party/amd/backend/compiler.py -> package:backends/amd/compiler.py"
+        - "third_party/amd/language/hip/libdevice.py -> package:language/extra/hip/libdevice.py"
+      refuse:
+        - "python/triton/_C/libtriton.so"
+        - "third_party/amd/backend/driver.c"
+        - "CMakeLists.txt"
+        - "lib/Dialect/Triton/IR/Ops.cpp"
+
+  component_layout_torch:
+    kind: component_layout
+    project: pytorch
+    reason: >-
+      PyTorch is installed as a wheel: its Python is torch/ in the repository and lies over the installed torch. Everything native in the
+      wheel (the libtorch libraries, the aotriton kernel images, headers) is a build product of C++ sources that a Python patch
+      cannot change, so a patch that names one of those files, or a native source, is refused with its path.
+    import_name: torch
+    sections:
+      - {prefix: torch, base: package}
+    refuse:
+      - "*.so"
+      - "*.so.*"
+      - "*.a"
+      - "*.o"
+      - "*.bc"
+      - "*.co"
+      - "*.hsaco"
+      - "*.cubin"
+      - "*.pyd"
+      - "*.aks2"
+      - "*.c"
+      - "*.cc"
+      - "*.cpp"
+      - "*.cxx"
+      - "*.h"
+      - "*.hh"
+      - "*.hpp"
+      - "*.cu"
+      - "*.cuh"
+      - "*.hip"
+      - "*.inc"
+      - "*.td"
+      - "CMakeLists.txt"
+      - "*.cmake"
+      - "setup.py"
+      - "pyproject.toml"
+      - "Makefile"
+      - "*.ld"
+    generated: []
+    examples:
+      place:
+        - "torch/_inductor/config.py -> package:_inductor/config.py"
+      refuse:
+        - "torch/lib/libtorch_hip.so"
+        - "torch/csrc/autograd/engine.cpp"
+        - "aten/src/ATen/native/native_functions.yaml"
+        - "CMakeLists.txt"
+
+  component_layout_sgl_kernel:
+    kind: component_layout
+    project: sglang
+    reason: >-
+      sgl_kernel is installed as the wheel sglang-kernel. In the SGLang repository of the measured image its Python is
+      python/sglang/kernels/aot/python/sgl_kernel (the directory sgl-kernel/python/sgl_kernel of older SGLang no longer exists
+      there). Its operators are one native extension, common_ops.*.so, built from the C++ beside it: a Python patch cannot change
+      it, so a patch that names a native file is refused with its path.
+    import_name: sgl_kernel
+    sections:
+      - {prefix: python/sglang/kernels/aot/python/sgl_kernel, base: package}
+    refuse:
+      - "*.so"
+      - "*.so.*"
+      - "*.a"
+      - "*.o"
+      - "*.bc"
+      - "*.co"
+      - "*.hsaco"
+      - "*.cubin"
+      - "*.pyd"
+      - "*.aks2"
+      - "*.c"
+      - "*.cc"
+      - "*.cpp"
+      - "*.cxx"
+      - "*.h"
+      - "*.hh"
+      - "*.hpp"
+      - "*.cu"
+      - "*.cuh"
+      - "*.hip"
+      - "*.inc"
+      - "*.td"
+      - "CMakeLists.txt"
+      - "*.cmake"
+      - "setup.py"
+      - "pyproject.toml"
+      - "Makefile"
+      - "*.ld"
+    generated: []
+    examples:
+      place:
+        - "python/sglang/kernels/aot/python/sgl_kernel/gemm.py -> package:gemm.py"
+      refuse:
+        - "python/sglang/kernels/aot/python/sgl_kernel/common_ops.cpython-310-x86_64-linux-gnu.so"
+        - "python/sglang/kernels/aot/csrc/gemm/fp8_gemm.cu"
+        - "python/sglang/kernels/aot/CMakeLists.txt"
+
+  component_layout_flydsl:
+    kind: component_layout
+    project: flydsl
+    reason: >-
+      FlyDSL is installed as a wheel: its Python is python/flydsl in its repository. Its MLIR bindings (_mlir/_mlir_libs/*.so) are
+      native, so a patch that names a native file is refused with its path.
+    import_name: flydsl
+    sections:
+      - {prefix: python/flydsl, base: package}
+    refuse:
+      - "*.so"
+      - "*.so.*"
+      - "*.a"
+      - "*.o"
+      - "*.bc"
+      - "*.co"
+      - "*.hsaco"
+      - "*.cubin"
+      - "*.pyd"
+      - "*.aks2"
+      - "*.c"
+      - "*.cc"
+      - "*.cpp"
+      - "*.cxx"
+      - "*.h"
+      - "*.hh"
+      - "*.hpp"
+      - "*.cu"
+      - "*.cuh"
+      - "*.hip"
+      - "*.inc"
+      - "*.td"
+      - "CMakeLists.txt"
+      - "*.cmake"
+      - "setup.py"
+      - "pyproject.toml"
+      - "Makefile"
+      - "*.ld"
+    generated: []
+    examples:
+      place:
+        - "python/flydsl/compiler/jit_function.py -> package:compiler/jit_function.py"
+      refuse:
+        - "python/flydsl/_mlir/_mlir_libs/_mlir.cpython-310-x86_64-linux-gnu.so"
+        - "lib/Conversion/pass.cpp"

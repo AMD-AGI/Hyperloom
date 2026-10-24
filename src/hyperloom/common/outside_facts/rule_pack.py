@@ -35,6 +35,8 @@ from typing import Any, NamedTuple, TypedDict
 
 import yaml
 
+from hyperloom.common.outside_facts import component_layout
+from hyperloom.common.outside_facts.component_layout import ComponentLayoutSpec, LayoutSpecError
 from hyperloom.common.outside_facts.image_check_eval import check_examples
 from hyperloom.common.outside_facts.image_check_spec import CheckSpec, ImageCheckSpecError, parse_checks
 
@@ -75,6 +77,7 @@ class Kind(Enum):
     NAMES = "names"
     LOG_REGEX = "log_regex"
     ENV_DEFAULT = "env_default"
+    COMPONENT_LAYOUT = "component_layout"
     ARG_VALUE = "arg_value"
     KERNEL_TABLE = "kernel_table"
 
@@ -97,6 +100,7 @@ class Entry:
 
 
 _COMMON_FIELDS = frozenset({"kind", "project", "reason", "examples"})
+_LAYOUT_FIELDS = ("import_name", "sections", "refuse", "generated")
 _IMAGE_CHECK_FIELD = "image_check"
 _NAMES_FIELD = "names"
 _PATTERN_FIELD = "pattern"
@@ -133,6 +137,12 @@ class RulePack:
         """The variable and value of an ``env_default`` entry."""
         body = self._entry(entry_id, Kind.ENV_DEFAULT).body
         return EnvDefault(body[_ENV_FIELD], body[_VALUE_FIELD])
+
+    def component_layout(self, entry_id: str) -> ComponentLayoutSpec:
+        """The layout a ``component_layout`` entry states."""
+        where = self._where(entry_id)
+        body = self._entry(entry_id, Kind.COMPONENT_LAYOUT).body
+        return component_layout.parse_layout(where, {name: body[name] for name in _LAYOUT_FIELDS})
 
     def _where(self, entry_id: str) -> str:
         return f"rule pack {self.path}: entry {entry_id!r}"
@@ -192,11 +202,20 @@ def _check_log_regex(where: str, body: Mapping[str, Any], examples: object) -> N
             raise RulePackError(f"{where}: the must-not-match example {line!r} matches pattern {source!r}")
 
 
+def _check_component_layout(where: str, body: Mapping[str, Any], examples: object) -> None:
+    try:
+        spec = component_layout.parse_layout(where, body)
+        component_layout.check_examples(where, spec, examples)
+    except LayoutSpecError as exc:
+        raise RulePackError(str(exc)) from exc
+
+
 #: The fields each readable kind holds beside the common ones, and the check of its fields and examples.
 _READABLE: dict[Kind, tuple[frozenset[str], Callable[[str, Mapping[str, Any], object], None]]] = {
     Kind.NAMES: (frozenset({_NAMES_FIELD}), _check_names),
     Kind.LOG_REGEX: (frozenset({_PATTERN_FIELD}), _check_log_regex),
     Kind.ENV_DEFAULT: (frozenset({_ENV_FIELD, _VALUE_FIELD}), _check_env_default),
+    Kind.COMPONENT_LAYOUT: (frozenset(_LAYOUT_FIELDS), _check_component_layout),
 }
 
 

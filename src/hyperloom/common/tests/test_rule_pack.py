@@ -220,11 +220,12 @@ def _fresh(code: str, pack: str | None) -> subprocess.CompletedProcess[str]:
 
 def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
-    assert pack.version == "12"
+    assert pack.version == "13"
     assert Counter(entry.kind for entry in pack.entries.values()) == {
         Kind.NAMES: 19,
         Kind.LOG_REGEX: 14,
         Kind.ENV_DEFAULT: 1,
+        Kind.COMPONENT_LAYOUT: 9,
     }
 
 
@@ -259,6 +260,40 @@ def test_every_entry_of_the_reference_pack_is_read_by_outside_facts() -> None:
         (_set("hip_graph_packet_capture", "value", 0), "hip_graph_packet_capture", "non-empty string"),
         (_drop("aiter_merged_view", "reason"), "aiter_merged_view", "holds exactly"),
         (_set("aiter_merged_view", "colour", "red"), "aiter_merged_view", "holds exactly"),
+        (
+            _set("component_layout_triton", "examples", {"place": ["torch/x.py -> package:x.py"], "refuse": ["a.so"]}),
+            "component_layout_triton",
+            "is not placed as it says",
+        ),
+        (
+            _set(
+                "component_layout_triton",
+                "examples",
+                {"place": ["python/triton/a.py -> package:a.py"], "refuse": ["python/triton/a.py"]},
+            ),
+            "component_layout_triton",
+            "must be refused",
+        ),
+        (
+            _set("component_layout_triton", "sections", [{"prefix": "python/triton", "base": "elsewhere"}]),
+            "component_layout_triton",
+            "is not one of",
+        ),
+        (
+            _set("component_layout_triton", "sections", [{"prefix": "../x", "base": "package"}]),
+            "component_layout_triton",
+            "plain relative path",
+        ),
+        (
+            _set(
+                "component_layout_triton",
+                "sections",
+                [{"prefix": "a", "base": "package"}, {"prefix": "a", "base": "package"}],
+            ),
+            "component_layout_triton",
+            "same prefix",
+        ),
+        (_drop("component_layout_torch", "refuse"), "component_layout_torch", "holds exactly"),
         (_set("aiter_merged_view", "kind", "arg_value"), "aiter_merged_view", "reserved"),
         (_set("aiter_merged_view", "kind", "predicate"), "aiter_merged_view", "is not one of"),
     ],
@@ -270,6 +305,12 @@ def test_every_entry_of_the_reference_pack_is_read_by_outside_facts() -> None:
         "unquoted-number",
         "lacks-reason",
         "unknown-field",
+        "layout-example-misplaced",
+        "layout-refuse-example-taken",
+        "layout-unknown-base",
+        "layout-escaping-prefix",
+        "layout-repeated-prefix",
+        "layout-lacks-a-field",
         "reserved-kind",
         "unknown-kind",
     ],
@@ -364,7 +405,7 @@ def test_a_session_whose_pack_cannot_be_used_stops_at_import_naming_the_entry(
 
 
 def test_the_recorded_identity_is_the_digest_of_the_bytes_read_and_is_stable(tmp_path: Path) -> None:
-    expected = {"version": "12", "digest": "sha256:" + hashlib.sha256(DEFAULT_PACK_PATH.read_bytes()).hexdigest()}
+    expected = {"version": "13", "digest": "sha256:" + hashlib.sha256(DEFAULT_PACK_PATH.read_bytes()).hexdigest()}
     assert rule_pack_identity() == expected
     assert rule_pack_identity() == rule_pack_identity()
     elsewhere = _fresh(_SHOW, None)
