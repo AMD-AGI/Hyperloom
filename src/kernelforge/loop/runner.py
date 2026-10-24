@@ -109,6 +109,7 @@ from kernelforge.loop.run_state import (
     should_resume,
     start_session,
 )
+from kernelforge.orchestrator.agent import RATIONALE_MAX_CHARS
 from kernelforge.orchestrator.orchestration import (
     OrchestrationInfrastructureError,
 )
@@ -234,6 +235,12 @@ CONFIG_COVERAGE_DISPERSION_MULTIPLE = 1.0
 # Distinguishes "the ceiling report has not been looked for yet" from "it was looked for and is not there", so a
 # missing or corrupt report is read from disk once per campaign rather than once per iteration.
 _CEILING_UNLOADED = object()
+
+
+def _lane_rationale(lane: LanePlan) -> str:
+    """The rationale of the iteration that measures a queued lane, with the lane Implementer's own when it gave one."""
+    head = f"lane {lane.lane_id} of a fan-out round"
+    return f"{head}: {lane.rationale}" if lane.rationale else head
 
 
 def _measurement_case_times(
@@ -535,6 +542,9 @@ class IterationConfig:
     # nothing left worth buying and stops. Zero disables the gate, which is the default: a ceiling is an estimate
     # with no framework-side check on its arithmetic, so stopping on one is something an operator opts into.
     roofline_target: float = 0.0
+    # Mean per-case speedup over the baseline (the KEEP objective) at which the campaign stops, however much budget
+    # remains. Zero disables the gate, which is the default.
+    target_mean_case_speedup: float = 0.0
 
     def __post_init__(self) -> None:
         # Validated here rather than at the CLI boundary alone, so a pattern can never reach the commit/delete sites
@@ -721,6 +731,18 @@ class IterationResult:
     agent_provider: str = ""
     agent_model: str = ""
     blockage_epoch: int = 0
+
+
+def _planning_failure(iteration: int, error: str) -> IterationResult:
+    """The iteration a failed planning round produces: no Implementer session ran, so nothing was measured."""
+    return IterationResult(
+        iteration=iteration,
+        duration_sec=0.0,
+        validation_passed=False,
+        validation_summary=f"ORCHESTRATION ERROR: {error}",
+        session_end_reason="orchestration_error",
+        agent_rationale=f"planning failed; no Implementer session: {error}",
+    )
 
 
 @dataclass(frozen=True)
@@ -1034,7 +1056,9 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         benchmark.setdefault("median_ms", result.wall_ms)
         publication_base = self.ic.campaign_base_commit or base_head
         publication_patch, publication_changed_files = self._candidate_changes(publication_base)
-        commit_message = f"iter-{result.iteration}: {rationale[:72]}"
+        # One line with no trailing space: git folds a multi-line first paragraph into one subject and trims it, and a
+        # resume compares the subject git recorded with the one stored here.
+        commit_message = f"iter-{result.iteration}: {' '.join(rationale.split())[:72]}".rstrip()
         return {
             "campaign_id": self.run_state.campaign_id,
             "session_index": self.run_state.session_index,
@@ -1076,7 +1100,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             "blockage_epoch": result.blockage_epoch,
             "search_control": self._search_control_snapshot(),
             "commit_message": commit_message,
-            "commit_subject": commit_message.splitlines()[0],
+            "commit_subject": commit_message,
             "task_fingerprint": self._task_fingerprint(),
             "git_branch": self.ic.git_branch,
         }
@@ -1949,9 +1973,10 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             lane: LanePlan,
             lane_dir: Path,
             serialized_driver: Path,
-        ) -> None:
+        ) -> str | None:
             # The session edits the lane's own copy, so it is handed that copy's kernel rather than the canonical one.
-            await agent_factory(str(lane_dir), str(serialized_driver))(
+            # Its return value is the Implementer's rationale, recorded with the iteration that measures the lane.
+            return await agent_factory(str(lane_dir), str(serialized_driver))(
                 str(lane_dir / kernel_relative),
                 _lane_prompt(lane.plan, serialized_driver=serialized_driver),
             )
@@ -3370,6 +3395,22 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             return False
         return standing.mean >= target
 
+    def _stop_at_speedup_target(self, iteration: int) -> bool:
+        """End the campaign once the incumbent's mean per-case speedup reaches the target the operator set.
+
+        Like the roofline target, this decides only whether to buy another round; KEEP stays a measurement against
+        the incumbent.
+        """
+        target = self.ic.target_mean_case_speedup
+        if target <= 0 or self.best_mean_case_speedup is None or self.best_mean_case_speedup < target:
+            return False
+        self.termination_reason = "speedup_target_met"
+        print(
+            f"\nSPEEDUP TARGET MET at iteration {iteration}: mean case speedup "
+            f"{self.best_mean_case_speedup:.6f}x, at or above the {target:.6f}x target"
+        )
+        return True
+
     def _render_roofline_progress(self) -> str:
         """One log line with the incumbent's mean attainment, or ``""`` when the campaign has no ceiling.
 
@@ -3812,6 +3853,10 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             "iteration_result",
             result.iteration,
             decision=resolved_decision,
+            # Why this candidate was tried and decided, for trajectory comparison. Every path that produces an
+            # iteration names one, a placeholder when no agent ran or it gave none; only a pending KEEP recorded before
+            # the field existed has none, and then the key is omitted.
+            rationale=(result.agent_rationale or "").replace("\n", " ").strip()[:RATIONALE_MAX_CHARS] or None,
             plan=(plan or "").strip()[:120] or None,
             # The mode this iteration actually ran under, which is the direction identity the empty-diff streak is
             # counted against.
@@ -4520,6 +4565,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                             "plan": lane.plan,
                             "diff": lane.diff,
                             "agent_profile_id": lane.agent_profile_id,
+                            "rationale": lane.rationale,
                         }
                         for lane in self._lane_queue
                     ]
@@ -4543,6 +4589,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     plan=str(entry["plan"]),
                     diff=str(entry["diff"]),
                     agent_profile_id=str(entry.get("agent_profile_id") or ""),
+                    # A queue written before rationales were kept has none.
+                    rationale=str(entry.get("rationale") or ""),
                 )
                 for entry in record["candidates"]
             ]
@@ -5221,6 +5269,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     f"({entry.t_current_ms:.6g} ms vs ceiling {entry.t_ideal_ms:.6g} ms)"
                 )
             return True, None
+        if self._stop_at_speedup_target(iteration):
+            return True, None
         if self.run_state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN:
             self.termination_reason = "orchestration_failed"
             print(
@@ -5652,7 +5702,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         elif queued_lane is not None:
             unmeasured_result = None
             commit_hash = ""
-            rationale = f"lane {queued_lane.lane_id} of a fan-out round"
+            rationale = _lane_rationale(queued_lane)
             attempt_source = self._read_kernel_source()
             attempt_diff = self._working_tree_diff()
             reusable_benchmark = None
@@ -5696,13 +5746,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     )
                 if plan_path is None:
                     await self._abandon_iteration(
-                        IterationResult(
-                            iteration=iteration,
-                            duration_sec=0.0,
-                            validation_passed=False,
-                            validation_summary=(f"ORCHESTRATION ERROR: {orchestration_error}"),
-                            session_end_reason="orchestration_error",
-                        ),
+                        _planning_failure(iteration, orchestration_error),
                         frame,
                         decision_label="ORCHESTRATION_ERROR",
                         on_iteration=on_iteration,

@@ -22,6 +22,7 @@ from kernelforge.agent_backends import (
 )
 from kernelforge.agent_backends.session_resume import run_session_with_api_resume
 from kernelforge.config import Config, resolve_agent_model
+from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool, require_mcp_backend, wiki_servers
 from kernelforge.workspace.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.loop.insession_gate import GateMeasurement, GateScope, InSessionGate
@@ -51,6 +52,16 @@ _REPO_TASK_TYPES = {"repository", "image_kernel"}
 # Wall-clock fallback for a session that never sized its own budget (every make_agent_fn caller except the forge-loop,
 # e.g. the PORT loop).
 _DEFAULT_SESSION_TIMEOUT_SEC = 90 * 60
+_IMPLEMENTER_ROLE = "implementer"
+# The most of an iteration's rationale any record keeps.
+RATIONALE_MAX_CHARS = 500
+# Both Implementer prompts ask for the one line agent_fn records as the iteration's rationale.
+_RATIONALE_REQUEST = (
+    "Just before your `PLAN:` line, output one line starting with `RATIONALE:` for the trajectory log: the direction "
+    "you chose and why, the change you made, and why you expect it to beat the current best — or, if you are stopping "
+    "without a win, why this direction is exhausted and what you would try next. Only that line is recorded with the "
+    "iteration's keep/revert decision, so make it specific enough to compare runs by."
+)
 
 # PR KB settings forwarded to the MCP child.
 _PR_KB_CHILD_ENV_VARS = (
@@ -229,8 +240,8 @@ async def _run_outer_gate_turns(gate, backend, run_spec: AgentRunSpec, run_resul
             "The canonical Forge gate rejected your current candidate. "
             "Continue the SAME optimization session: inspect the concrete "
             "failure below, edit only the allowed kernel source files, "
-            "re-run any useful checks, and finish with an updated PLAN: "
-            "line. Do not modify git state or measurement files."
+            "re-run any useful checks, and finish with updated RATIONALE: "
+            "and PLAN: lines. Do not modify git state or measurement files."
             "\n\n## Canonical gate feedback\n"
             f"{decision.get('reason', '')}"
         )
@@ -308,18 +319,6 @@ def _session_end_reason(*, submitted: bool, gate, run_result, result_subtype: st
     if result_subtype and result_subtype != "success":
         return f"sdk_{result_subtype}"
     return "agent_stopped"
-
-
-def _gate_outcome_tag(gate, end_reason: str, num_turns: int | None) -> str:
-    """The gate outcome, so the outer loop's commit message records whether the session self-converged."""
-    tag = f"[gate edits={gate.edit_count} pass={gate.passed} end={end_reason}"
-    if num_turns is not None:
-        tag += f" turns={num_turns}"
-    if gate.last_mean_case_speedup is not None:
-        tag += f" mean_case_speedup={gate.last_mean_case_speedup:.6f}x"
-    if gate.last_wall_ms is not None:
-        tag += f" raw_mean={gate.last_wall_ms:.4f}ms"
-    return tag + "]"
 
 
 def _fill_session_sink(
@@ -538,6 +537,8 @@ prints the tables). If this environment lacks rocprof-compute's deps the script 
             tool_timeout_sec=60,
             tools=tuple(f"mcp__pr_monitor__{name}" for name in PR_TOOL_NAMES),
         )
+    knowledge_wiki = KnowledgeWikiTool.from_config(config)
+    require_mcp_backend(knowledge_wiki, backend, _IMPLEMENTER_ROLE)
 
     base_system_prompt = f"""\
 You are a GPU kernel optimization agent in an autonomous iteration loop.
@@ -545,8 +546,8 @@ You are a GPU kernel optimization agent in an autonomous iteration loop.
 ## Your Task
 Each invocation: read the target kernel, review the recent iteration history,
 and modify it to improve performance. You MAY make multiple changes across
-several places this iteration — you are not limited to a single change. Then
-explain your rationale in one sentence.
+several places this iteration — you are not limited to a single change.
+{_RATIONALE_REQUEST}
 
 ## Program (what to optimize and how)
 {program_md}
@@ -683,6 +684,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
   say so. An assumption about what the harness does is not a reason.
 - {workspace_hygiene_rule}
 - {deliverable_hygiene_rule}
+- {_RATIONALE_REQUEST}
 - As your VERY LAST output, after all edits/fixes are done and the kernel is in
   its final state, output one line starting with `PLAN:` — a SHORT headline
   (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
@@ -787,7 +789,7 @@ Make your change(s) now.
         run_spec = AgentRunSpec(
             system_prompt=system_prompt,
             user_prompt=prompt,
-            role="implementer",
+            role=_IMPLEMENTER_ROLE,
             cwd=run_cwd,
             writable=True,
             timeout_sec=session_deadline_sec,
@@ -822,7 +824,7 @@ Make your change(s) now.
                 if gate is not None and backend.capabilities.stop_hooks
                 else None
             ),
-            mcp_servers=pr_mcp_servers,
+            mcp_servers={**pr_mcp_servers, **wiki_servers(knowledge_wiki, _IMPLEMENTER_ROLE)},
             progress_log=progress_log,
         )
 
@@ -892,9 +894,8 @@ Make your change(s) now.
             flush=True,
         )
 
-        text = full or "no rationale provided"
-        if gate is not None:
-            text = f"{_gate_outcome_tag(gate, end_reason, num_turns)} {text}"
+        # Only the line the agent declares: a backend's text can be the whole session, opening remarks first.
+        rationale = _parse_output_tag(full, "RATIONALE:", RATIONALE_MAX_CHARS, last=True) or "no rationale provided"
 
         # Hand back structured session info so the runner can feed the ExperienceLedger with the gate's objective
         # findings, and (via ``summarize``) ask this exact session to record what it explored.
@@ -912,7 +913,7 @@ Make your change(s) now.
                 ),
             )
 
-        return text[:200]
+        return rationale
 
     setattr(agent_fn, "backend_name", backend.name)
     setattr(agent_fn, "backend_model", backend_model)

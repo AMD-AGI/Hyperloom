@@ -31,6 +31,7 @@ from kernelforge.cli.options import (
     _validate_max_hours,
     _validate_optional_agent_provider,
     _validate_roofline_target,
+    _validate_speedup_target,
 )
 from kernelforge.option_groups import option_group
 from kernelforge.cli.pr_references import (
@@ -146,6 +147,15 @@ def _make_ceiling_estimator(
         )
 
     return estimate
+
+
+def _announce_knowledge_base(config) -> None:
+    """Say which knowledge base every forge role reads, when one is configured."""
+    from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool
+
+    knowledge_wiki = KnowledgeWikiTool.from_config(config)
+    if knowledge_wiki is not None:
+        print(f"  Knowledge base: {knowledge_wiki.root} (calls logged to {knowledge_wiki.log_path})")
 
 
 def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
@@ -1127,6 +1137,7 @@ class ForgeLoopRequest:
     loop_shape: LoopShape
     roofline_ceiling: CeilingSwitch
     roofline_target: float
+    target_mean_case_speedup: float
     prepare_task: bool
     identity: TaskIdentity
     knowledge: KnowledgeOptions
@@ -1347,6 +1358,16 @@ class ForgeLoopRequest:
         "Requires a ceiling. Zero (default) disables the gate: a ceiling is an "
         "estimate whose arithmetic nothing checks, so stopping on one is opt-in. "
         "It never affects KEEP, which stays a measurement.",
+    ),
+    click.option(
+        "--target-mean-case-speedup",
+        default=0.0,
+        type=float,
+        help="Stop the campaign once the incumbent's mean per-case speedup over the "
+        "baseline (the objective a KEEP is judged by) reaches this value, e.g. 3.15, "
+        "however much of the time budget remains. Zero (default) disables the gate; "
+        "any other value at or below 1.0, a negative one included, or one that is not "
+        "finite is refused. It never affects KEEP.",
     ),
     click.option(
         "--prepare-task/--no-prepare-task",
@@ -1715,6 +1736,7 @@ def forge_loop(request: ForgeLoopRequest):
         commit_new_paths=commit_new_paths,
         # The attainment of the per-shape ceiling that ends the run; the ceiling itself is estimated inside the loop.
         roofline_target=_validate_roofline_target(request.roofline_target, request.roofline_ceiling.enabled),
+        target_mean_case_speedup=_validate_speedup_target(request.target_mean_case_speedup),
     )
     baseline_json = request.baseline_json
     if baseline_json:
@@ -1920,6 +1942,7 @@ def forge_loop(request: ForgeLoopRequest):
     )
     analysis_mode = "profiled" if profiling_enabled else "static-only"
     print("  Analysis Agent: " + analysis_mode)
+    _announce_knowledge_base(config)
     print(f"  Orchestration: enabled with parallel specialists ({', '.join(sorted(specialist_definitions))})")
     print(
         "  Plan Critic: "

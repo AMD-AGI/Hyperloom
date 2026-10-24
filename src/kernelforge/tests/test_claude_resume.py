@@ -17,6 +17,8 @@ from kernelforge.agent_backends.claude import (
     ClaudeBackendError,
     _supports_adaptive_thinking,
 )
+from kernelforge.config import Config
+from kernelforge.orchestrator import agent as agent_module
 from kernelforge.tools.git import git
 from kernelforge.orchestrator.agent import _make_session_summarizer
 
@@ -484,3 +486,39 @@ def test_a_session_that_stays_in_its_target_reports_what_it_changed(tmp_path):
 
 def test_the_backend_declares_the_guard_it_now_runs():
     assert ClaudeBackend.capabilities.workspace_guard is True
+
+
+def test_an_implementer_on_claude_records_the_rationale_it_declares_not_its_opening(tmp_path, monkeypatch):
+    """Claude's text is every text block of the session, so the rationale is the declared line, not its start."""
+    root, kernel = _guarded_repo(tmp_path)
+    declared = (
+        "The loads are 32-bit and the kernel is bandwidth bound, so widening them to 128-bit "
+        "should beat best by cutting the load instructions fourfold."
+    )
+    captured: dict = {}
+    backend = _backend(
+        [
+            _message(subtype="init", session_id="sess-rationale"),
+            SimpleNamespace(content=[SimpleNamespace(text="I'll start by reading the kernel and the driver.")]),
+            SimpleNamespace(content=[SimpleNamespace(text="The profile shows 32-bit global loads.")]),
+            SimpleNamespace(content=[SimpleNamespace(text=f"Done.\nRATIONALE: {declared}\nPLAN: widen the loads")]),
+            _result_message(session_id="sess-rationale"),
+        ],
+        captured,
+    )
+    monkeypatch.setattr(agent_module, "create_registered_backend", lambda _runtime, **_kwargs: backend)
+    agent_fn = agent_module.make_agent_fn(
+        Config(workspace=str(root), agent_backend="claude", agent_model="fake-model", agent_precheck=False),
+        agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize VALUE."),
+            measurement=agent_module.GateMeasurement(driver_script=str(root / "forge_driver.py")),
+            session=agent_module.SessionOptions(agent_backend="claude", insession_gate=False),
+        ),
+    )
+    session: dict[str, object] = {}
+
+    rationale = asyncio.run(agent_fn(str(kernel), "", session_sink=session))
+
+    assert rationale == declared
+    assert session["plan"] == "widen the loads"
+    assert "one line starting with `RATIONALE:`" in captured["options"].kwargs["system_prompt"]

@@ -26,6 +26,7 @@ from kernelforge.orchestrator import specialists
 from kernelforge.orchestrator.orchestration import _specialist_probe_config
 from kernelforge.orchestrator.specialists import (
     SpecialistAgent,
+    SpecialistTools,
     SpecialistProbeConfig,
 )
 
@@ -149,7 +150,7 @@ async def test_probe_is_offered_without_reaching_the_canonical_tree(tmp_path, mo
         backend=backend,
         timeout_sec=1800,
         max_turns=4,
-        probe=_probe(tmp_path),
+        tools=SpecialistTools(probe=_probe(tmp_path)),
     )
 
     outcome = await agent.run(_assignment(), _context(workspace))
@@ -183,7 +184,7 @@ async def test_unused_probe_is_distinguished_from_an_unavailable_one(tmp_path, m
         backend=backend,
         timeout_sec=1800,
         max_turns=4,
-        probe=_probe(tmp_path),
+        tools=SpecialistTools(probe=_probe(tmp_path)),
     )
 
     outcome = await agent.run(_assignment(), _context(_workspace(tmp_path)))
@@ -215,7 +216,7 @@ async def test_an_earlier_rounds_probes_are_not_reported_as_this_rounds(tmp_path
         backend=_McpBackend(),
         timeout_sec=1800,
         max_turns=4,
-        probe=probe,
+        tools=SpecialistTools(probe=probe),
     )
 
     outcome = await agent.run(_assignment(), _context(_workspace(tmp_path)))
@@ -233,7 +234,7 @@ async def test_missing_measurement_primitive_is_reported_not_hidden(tmp_path, mo
         backend=backend,
         timeout_sec=1800,
         max_turns=4,
-        probe=_probe(tmp_path),
+        tools=SpecialistTools(probe=_probe(tmp_path)),
     )
 
     outcome = await agent.run(_assignment(), _context(_workspace(tmp_path)))
@@ -255,7 +256,7 @@ async def test_scratch_root_inside_the_canonical_tree_disables_the_probe(tmp_pat
         backend=backend,
         timeout_sec=1800,
         max_turns=4,
-        probe=SpecialistProbeConfig(scratch_root=str(workspace / "scratch")),
+        tools=SpecialistTools(probe=SpecialistProbeConfig(scratch_root=str(workspace / "scratch"))),
     )
 
     with caplog.at_level("WARNING"):
@@ -287,7 +288,7 @@ async def test_probe_record_survives_a_failed_specialist(tmp_path, monkeypatch) 
         backend=backend,
         timeout_sec=1800,
         max_turns=4,
-        probe=_probe(tmp_path),
+        tools=SpecialistTools(probe=_probe(tmp_path)),
     )
 
     outcome = await agent.run(_assignment(), _context(_workspace(tmp_path)))
@@ -328,7 +329,7 @@ async def test_a_primitive_the_probe_cannot_call_is_reported_not_offered(tmp_pat
         backend=backend,
         timeout_sec=1800,
         max_turns=4,
-        probe=_probe(tmp_path),
+        tools=SpecialistTools(probe=_probe(tmp_path)),
     )
 
     with caplog.at_level("WARNING"):
@@ -354,7 +355,7 @@ async def test_a_sandbox_the_server_would_refuse_is_never_offered(tmp_path, monk
         backend=backend,
         timeout_sec=1800,
         max_turns=4,
-        probe=_probe(tmp_path),
+        tools=SpecialistTools(probe=_probe(tmp_path)),
     )
 
     with caplog.at_level("WARNING"):
@@ -386,7 +387,7 @@ async def test_an_unreadable_probe_ledger_is_reported_as_partial(tmp_path, monke
         backend=backend,
         timeout_sec=1800,
         max_turns=4,
-        probe=_probe(tmp_path),
+        tools=SpecialistTools(probe=_probe(tmp_path)),
     )
 
     outcome = await agent.run(_assignment(), _context(_workspace(tmp_path)))
@@ -689,7 +690,7 @@ async def test_the_refusals_the_server_records_are_reported_as_refusals(tmp_path
         backend=backend,
         timeout_sec=1800,
         max_turns=4,
-        probe=_probe(tmp_path),
+        tools=SpecialistTools(probe=_probe(tmp_path)),
     )
 
     outcome = await agent.run(_assignment(), _context(_workspace(tmp_path)))
@@ -831,7 +832,7 @@ async def test_the_default_campaign_layout_still_gets_a_usable_probe(tmp_path, m
         backend=backend,
         timeout_sec=1800,
         max_turns=4,
-        probe=probe,
+        tools=SpecialistTools(probe=probe),
     )
     outcome = await agent.run(_assignment(), _context(workspace))
 
@@ -878,7 +879,7 @@ async def test_the_probe_child_is_given_the_environment_its_driver_needs(tmp_pat
         backend=backend,
         timeout_sec=1800,
         max_turns=4,
-        probe=_probe(tmp_path, max_probes=4),
+        tools=SpecialistTools(probe=_probe(tmp_path, max_probes=4)),
     )
 
     await agent.run(_assignment(), _context(_workspace(tmp_path)))
@@ -908,7 +909,7 @@ async def test_a_probe_locks_the_same_device_sentinel_the_fanout_lanes_do(tmp_pa
         backend=backend,
         timeout_sec=1800,
         max_turns=4,
-        probe=_probe(tmp_path),
+        tools=SpecialistTools(probe=_probe(tmp_path)),
     )
 
     await agent.run(_assignment(), _context(workspace))
@@ -933,7 +934,7 @@ async def test_specialist_setup_creates_the_campaign_sentinel(tmp_path, monkeypa
         backend=_McpBackend(),
         timeout_sec=1800,
         max_turns=4,
-        probe=_probe(tmp_path),
+        tools=SpecialistTools(probe=_probe(tmp_path)),
     )
     await agent.run(_assignment(), _context(workspace))
 
@@ -1060,7 +1061,7 @@ async def test_the_mcp_tool_timeout_is_not_the_raw_budget(tmp_path, monkeypatch)
         backend=backend,
         timeout_sec=300,
         max_turns=4,
-        probe=_probe(tmp_path, budget_sec=600.0),
+        tools=SpecialistTools(probe=_probe(tmp_path, budget_sec=600.0)),
     )
 
     await agent.run(_assignment(), _context(_workspace(tmp_path)))
@@ -1113,7 +1114,7 @@ async def test_a_rounds_scratch_tree_does_not_outlive_the_round(tmp_path, monkey
                 }
             ]
         ),
-        probe=probe,
+        tools=SpecialistTools(probe=probe),
         timeout_sec=1800,
         max_turns=4,
     )
@@ -1139,7 +1140,7 @@ async def test_a_rounds_scratch_tree_is_removed_when_the_round_fails(tmp_path, m
     agent = SpecialistAgent(
         definition=_definition(),
         backend=_Exploding(),
-        probe=probe,
+        tools=SpecialistTools(probe=probe),
         timeout_sec=1800,
         max_turns=4,
     )
@@ -1188,7 +1189,7 @@ async def _run_one_round(tmp_path, monkeypatch, *, probe=None):
                 }
             ]
         ),
-        probe=probe,
+        tools=SpecialistTools(probe=probe),
         timeout_sec=1800,
         max_turns=4,
     )
@@ -1247,7 +1248,7 @@ async def test_a_round_that_never_got_a_tree_is_not_reaped(tmp_path, monkeypatch
     agent = SpecialistAgent(
         definition=_definition(),
         backend=backend,
-        probe=probe,
+        tools=SpecialistTools(probe=probe),
         timeout_sec=1800,
         max_turns=4,
     )
@@ -1437,7 +1438,7 @@ async def test_the_probe_child_inherits_the_campaigns_aiter_cache_isolation(tmp_
         backend=backend,
         timeout_sec=1800,
         max_turns=4,
-        probe=_probe(tmp_path),
+        tools=SpecialistTools(probe=_probe(tmp_path)),
     )
 
     await agent.run(_assignment(), _context(_workspace(tmp_path)))
@@ -1492,7 +1493,7 @@ async def test_a_session_too_small_for_one_probe_is_never_offered_one(tmp_path, 
         backend=backend,
         timeout_sec=int(specialist_probe.ANALYSIS_RESERVE_SEC),
         max_turns=4,
-        probe=_probe(tmp_path),
+        tools=SpecialistTools(probe=_probe(tmp_path)),
     )
 
     with caplog.at_level("WARNING"):
@@ -1515,7 +1516,7 @@ async def test_the_prompt_states_the_ceiling_the_client_enforces(tmp_path, monke
         backend=backend,
         timeout_sec=1800,
         max_turns=4,
-        probe=_probe(tmp_path, budget_sec=600.0),
+        tools=SpecialistTools(probe=_probe(tmp_path, budget_sec=600.0)),
     )
 
     await agent.run(_assignment(), _context(_workspace(tmp_path)))
@@ -1765,7 +1766,7 @@ async def test_a_round_whose_tree_cannot_be_made_disables_the_probe(tmp_path, mo
         backend=backend,
         timeout_sec=1800,
         max_turns=4,
-        probe=probe,
+        tools=SpecialistTools(probe=probe),
     )
     pool = specialists.SpecialistPool({"memory": agent}, max_parallel=1)
 

@@ -289,6 +289,30 @@ def test_pending_keep_publication_patch_is_cumulative(tmp_path, monkeypatch):
     }
 
 
+def test_iteration_result_event_records_the_agent_rationale(tmp_path, monkeypatch):
+    loop, _workspace = _make_loop(tmp_path, monkeypatch)
+    loop.run_state = RunState(campaign_id="campaign", session_index=1)
+    result = IterationResult(
+        iteration=3,
+        duration_sec=0.1,
+        validation_passed=True,
+        validation_summary="passed",
+        wall_ms=0.8,
+        mean_case_speedup=1.25,
+        kept=True,
+    )
+    result.agent_rationale = "Chose register tiling\nover split-K because " + "x" * 600
+    event = loop._iteration_result_event(result, plan="register tiling")
+    assert event["decision"] == "KEEP"
+    # The rationale is flattened to one line, truncated, and carried on the keep/revert event.
+    assert "\n" not in event["rationale"]
+    assert event["rationale"].startswith("Chose register tiling over split-K because ")
+    assert len(event["rationale"]) == 500
+
+    result.agent_rationale = ""
+    assert "rationale" not in loop._iteration_result_event(result, plan="register tiling")
+
+
 @pytest.mark.parametrize("assembly_source", ["s_endpgm\n", "s_endpgm\n\n", "s_endpgm"])
 def test_pending_keep_includes_new_assembly_in_recovery_and_publication(tmp_path, monkeypatch, assembly_source):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
@@ -823,6 +847,53 @@ def _fan_out_iteration(tmp_path, monkeypatch, rounds, **plan_kwargs):
     ]
 
 
+def test_the_iteration_that_measures_a_lane_records_that_lanes_rationale(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.ic = replace(loop.ic, lanes=2)
+    monkeypatch.setattr(
+        loop, "_run_orchestration", _counting_plan(loop, workspace, [], plans=("widen the loads", "stage LDS"))
+    )
+
+    def factory(lane_dir, _serialized_driver):
+        async def agent(_kernel_file, _prompt):
+            lane = Path(lane_dir).name
+            path = Path(lane_dir) / "kernel.py"
+            path.write_text(path.read_text().replace("return 1", f"return 1{lane}"))
+            return f"lane {lane} expects this to beat best"
+
+        return agent
+
+    async def measured(iteration, plan=""):
+        return IterationResult(
+            iteration=iteration,
+            duration_sec=0.01,
+            validation_passed=True,
+            validation_summary="passed",
+            wall_ms=1.0,
+            mean_case_speedup=1.0,
+            kept=False,
+            bench_detail={"case_times": {"case": 1.0}},
+        )
+
+    monkeypatch.setattr(loop, "run_one_iteration", measured)
+
+    asyncio.run(
+        loop.run(
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=factory,
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
+        )
+    )
+
+    [event] = [e for e in LoopStateStore(str(workspace)).read_events() if e.get("type") == "iteration_result"]
+    assert event["rationale"] == "lane 1 of a fan-out round: lane 1 expects this to beat best"
+    # The sibling stays queued with its own rationale for the iteration that measures it.
+    assert [(item.lane_id, item.rationale) for item in loop._lane_queue] == [("2", "lane 2 expects this to beat best")]
+
+
 def test_a_planning_outage_is_not_paid_for_twice(tmp_path, monkeypatch):
     """Retrying an outage inside the iteration it stopped cannot clear it.
 
@@ -836,6 +907,10 @@ def test_a_planning_outage_is_not_paid_for_twice(tmp_path, monkeypatch):
 
     assert rounds == [2]
     assert decisions == ["ORCHESTRATION_ERROR"]
+    # An iteration no Implementer ran still says why it ended.
+    events = LoopStateStore(str(tmp_path / "workspace")).read_events()
+    [event] = [event for event in events if event.get("type") == "iteration_result"]
+    assert event["rationale"].startswith("planning failed; no Implementer session: ")
 
 
 def test_a_round_that_could_only_plan_one_lane_spends_that_plan(tmp_path, monkeypatch):
@@ -8378,3 +8453,49 @@ def test_a_keep_that_cannot_be_committed_is_reverted_as_a_crash(tmp_path, monkey
     assert result.validation_summary == f"COMMIT FAILED: {failure}"
     assert (workspace / "kernel.py").read_text() == "def kernel():\n    return 1\n"
     assert not (workspace / "forge_experiments" / "pending_keep.json").exists()
+
+
+def _resumed_at_best(tmp_path, monkeypatch, *, mean_case_speedup, target):
+    """A resumed campaign whose recorded best sits at HEAD, with one round of budget left."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch, resume=True)
+    loop.ic = replace(loop.ic, target_mean_case_speedup=target)
+    subprocess.run(["git", "checkout", "-b", "test-loop"], cwd=workspace, check=True, capture_output=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=workspace, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    LoopStateStore(str(workspace)).save(
+        RunState(
+            campaign_id="campaign",
+            baseline_case_times={"case": 1.0},
+            best_case_times={"case": 1.0 / mean_case_speedup},
+            head_commit=head,
+            best=BestRecord(iteration=3, wall_ms=0.31, mean_case_speedup=mean_case_speedup, commit_hash=head),
+        )
+    )
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    return loop, workspace
+
+
+def test_a_best_at_the_speedup_target_ends_the_campaign_before_another_round(tmp_path, monkeypatch):
+    loop, workspace = _resumed_at_best(tmp_path, monkeypatch, mean_case_speedup=3.2, target=3.15)
+
+    store = LoopStateStore(str(workspace))
+    ended = [event for event in store.read_events() if event.get("type") == "run_terminated"]
+    assert loop.results == []
+    assert loop.termination_reason == "speedup_target_met"
+    assert store.load().termination_reason == "speedup_target_met"
+    assert ended[-1]["reason"] == "speedup_target_met"
+
+
+def test_a_best_short_of_the_speedup_target_keeps_buying_rounds(tmp_path, monkeypatch):
+    loop, _ = _resumed_at_best(tmp_path, monkeypatch, mean_case_speedup=3.2, target=3.3)
+
+    assert len(loop.results) == 1
+    assert loop.termination_reason != "speedup_target_met"
+
+
+def test_without_a_speedup_target_any_best_keeps_buying_rounds(tmp_path, monkeypatch):
+    loop, _ = _resumed_at_best(tmp_path, monkeypatch, mean_case_speedup=50.0, target=0.0)
+
+    assert len(loop.results) == 1
+    assert loop.termination_reason != "speedup_target_met"

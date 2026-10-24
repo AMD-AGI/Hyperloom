@@ -303,6 +303,21 @@ fusion that already succeeded this session.
 
 ---
 
+## Forge knowledge base
+
+A KernelWiki-layout checkout, such as InstinctWiki, offered read-only to every forge role that has tools (the
+Implementer, Analysis, the dispatch and synthesis planners, the specialists, the plan critic and the supervisor)
+through the `mcp__knowledge_wiki__search`, `__page`, `__grep` and `__guide` tools. Off unless the root is set. Forge
+also sets `FORGE_KNOWLEDGE_WIKI_ROLE` in each session's server environment to name the calling role; it is internal,
+not an operator setting.
+
+| Variable | Default | Description |
+|---|---|---|
+| `FORGE_KNOWLEDGE_WIKI_ROOT` | Unset (off) | Absolute path of the checkout, which must hold `scripts/query.py`, `scripts/get_page.py` and `scripts/grep_wiki.py`; an optional `SKILL.md` is served as its usage guide. A relative path (including one starting with `~`) or a directory missing those scripts is refused when the campaign starts. A configured knowledge base on an agent backend without MCP support is refused too: when each role is built at startup, the supervisor, whose backend is built on its first pass, by what its provider and its fallback provider declare. The built-in `claude` and `codex` backends support MCP; `deepseek` does not, so it is refused while this is set. |
+| `FORGE_KNOWLEDGE_WIKI_LOG` | `knowledge_wiki_calls.jsonl` in the forge experiments directory | Absolute path of the call log: one JSON line per call with the calling role, the tool, the one-line reason every call must give, its arguments, exit code, duration and the pages it returned. A relative path is refused when the campaign starts. |
+
+---
+
 ## KERNEL lane behaviour
 
 No variable toggles the behaviours below; `KERNEL_OPT_BACKEND_ORDER` only decides

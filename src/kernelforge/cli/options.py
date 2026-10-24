@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 
 import click
@@ -114,6 +115,35 @@ def _validate_roofline_target(target: float, ceiling_enabled: bool) -> float:
         raise click.BadParameter(
             "--roofline-target needs a ceiling to measure against; pass --roofline-ceiling on",
             param_hint="--roofline-target",
+        )
+    return value
+
+
+_SPEEDUP_TARGET_OPTION = "--target-mean-case-speedup"
+
+
+def _validate_speedup_target(target: float) -> float:
+    """Check the speedup target is a finite speedup the baseline has not already met; zero turns it off.
+
+    The baseline's mean case speedup is one by definition, so any other target
+    at or below one, a negative one included, would end every campaign before
+    its first round, and a target that is not finite can never be reached.
+    Both are refused rather than run: a mistyped target must not leave a
+    campaign without the stop its operator believes it has.
+    """
+    value = float(target or 0.0)
+    if value == 0:
+        return 0.0
+    if not math.isfinite(value):
+        raise click.BadParameter(
+            f"{_SPEEDUP_TARGET_OPTION} {value} can never be reached; give a finite speedup above 1.0, or 0 for none",
+            param_hint=_SPEEDUP_TARGET_OPTION,
+        )
+    if value <= 1.0:
+        raise click.BadParameter(
+            f"{_SPEEDUP_TARGET_OPTION} {value} is at or below 1.0, which the baseline already meets; "
+            "give a speedup above 1.0, or 0 for none",
+            param_hint=_SPEEDUP_TARGET_OPTION,
         )
     return value
 
