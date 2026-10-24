@@ -98,6 +98,7 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "AITER_TUNED_HIT_MARKER": r"\btuned(?: on| at|,)|found (?:padded_M|lookup M):",
     "ARGPARSE_INVALID_CHOICE": "invalid choice",
     "ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE": "unrecognized arguments?",
+    "ASM_LIBTYPE": "asm",
     "CONTEXT_LENGTH_FLAGS": ["--context-length", "--max-model-len"],
     "ENV_CONC": "CONC",
     "ENV_EP": "EP",
@@ -112,6 +113,7 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "ENV_RANDOM_RANGE_RATIO": "RANDOM_RANGE_RATIO",
     "ENV_RUN_EVAL": "RUN_EVAL",
     "ENV_TP": "TP",
+    "FORGE_REL_NORM_ERR_COLUMN": "relNormErr",
     "HIP_ERROR_PREFIX": "hipError",
     "HIP_GRAPH_PACKET_CAPTURE_ENV": "DEBUG_CLR_GRAPH_PACKET_CAPTURE",
     "HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE": "0",
@@ -146,6 +148,8 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "TUNABLEOP_ENABLED_ENV": "PYTORCH_TUNABLEOP_ENABLED",
     "TUNABLEOP_TABLE_ENV": "PYTORCH_TUNABLEOP_FILENAME",
     "TUNABLEOP_TUNING_ENV": "PYTORCH_TUNABLEOP_TUNING",
+    "TUNED_LIBTYPE_COLUMN": "libtype",
+    "TUNED_SPLITK_COLUMN": "splitK",
 }
 
 Facts = dict[str, Any]
@@ -203,9 +207,9 @@ def _fresh(code: str, pack: str | None) -> subprocess.CompletedProcess[str]:
 
 def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
-    assert pack.version == "9"
+    assert pack.version == "10"
     assert Counter(entry.kind for entry in pack.entries.values()) == {
-        Kind.NAMES: 15,
+        Kind.NAMES: 17,
         Kind.LOG_REGEX: 13,
         Kind.ENV_DEFAULT: 1,
     }
@@ -347,7 +351,7 @@ def test_a_session_whose_pack_cannot_be_used_stops_at_import_naming_the_entry(
 
 
 def test_the_recorded_identity_is_the_digest_of_the_bytes_read_and_is_stable(tmp_path: Path) -> None:
-    expected = {"version": "9", "digest": "sha256:" + hashlib.sha256(DEFAULT_PACK_PATH.read_bytes()).hexdigest()}
+    expected = {"version": "10", "digest": "sha256:" + hashlib.sha256(DEFAULT_PACK_PATH.read_bytes()).hexdigest()}
     assert rule_pack_identity() == expected
     assert rule_pack_identity() == rule_pack_identity()
     elsewhere = _fresh(_SHOW, None)

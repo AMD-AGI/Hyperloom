@@ -17,7 +17,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "9"
+version: "10"
 facts:
   aiter_merged_view:
     kind: names
@@ -727,3 +727,32 @@ facts:
         - "patch sglang patch/sglang/0003-logging-tweak.patch"
         - "kernel gemm bf16_gemm_M16_N4096_K4096"
         - "ref transformers 0123456789abcdef0123456789abcdef01234567->89abcdef0123456789abcdef0123456789abcdef"
+
+  aiter_tuned_row_columns:
+    kind: names
+    project: aiter
+    reason: >-
+      A row of a table aiter's tuner writes says, in these columns, which library runs its kernel (libtype, "asm" for a
+      hand-written assembly kernel) and how many splits of the K dimension the kernel makes (splitK). The rows an accuracy
+      check must treat differently, the asm kernels at a splitK above 1, are told apart by them.
+    names:
+      libtype_column: libtype
+      splitk_column: splitK
+      asm_libtype: asm
+    examples:
+      - "hyperloom_multibranch.toolbox.tools.tune_rows: a row is one of the rows judged by its relative-norm error when its libtype column says asm and its splitK column a number above 1, and the profile of the tuner's candidates is searched by the same two columns"
+
+  forge_rel_norm_err:
+    kind: names
+    project: Forge (kernelforge gemm_tune)
+    reason: >-
+      aiter's tuner counts the elements of a candidate's output that lie outside the reference's tolerance (errRatio). An
+      asm kernel at a splitK above 1 accumulates its partial results in bf16 with atomics, which fails that count while the
+      output as a whole stays accurate, so Forge also measures such a row by the relative norm of its error,
+      ||out - ref|| / ||ref|| against the fp32 dequantized matmul, ships the row when that is within 0.01, and writes the
+      figure to this column of the tuned table. Only those rows carry a figure; the column is Forge's, not aiter's, and a
+      table without it comes from a Forge that does not make the check.
+    names:
+      column: relNormErr
+    examples:
+      - "hyperloom_multibranch.toolbox.tools.tune_rows: an asm row at a splitK above 1 whose mismatch ratio is above the limit is verified when this column holds a figure from 0 to 0.01, and the column is left out of the rows handed over"

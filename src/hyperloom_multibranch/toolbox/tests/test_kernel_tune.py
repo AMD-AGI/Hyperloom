@@ -31,6 +31,7 @@ from hyperloom_multibranch.toolbox.tests.kernel_tune_rig import (
     GRAPH_SIZES,
     HIT_LOG,
     HIT_SHAPES,
+    REL_NORM_HEADER,
     SECRET_ENV,
     SERVER_ARGS,
     SERVER_LOG,
@@ -667,3 +668,30 @@ async def test_explicit_shapes_are_tuned_as_named_with_no_graph_sizes_added(make
     (entry,) = rig.forge.demands[0]["demands"]
     assert [(k["M"], k["N"], k["K"]) for k in entry["keys"]] == [("64", "5120", "5120")]
     assert rig.result(job)["result"]["demand"]["cuda_graph_batch_sizes"] == []
+
+
+async def test_an_asm_splitk_row_above_the_ratio_limit_is_handed_over_when_forge_measured_its_relative_norm_error(
+    make: Make,
+) -> None:
+    rig = await ready(await make(cards=2))
+    asm = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM)
+    rig.forge.header = REL_NORM_HEADER
+    rig.forge.rows = [*(f"{line}," for line in tuned_rows()), f"{asm},0.0047"]
+    job = await rig.submit(test_request_id=TEST_ID)
+
+    assert await rig.finished(job) is JobStatus.SUCCEEDED
+    result = rig.result(job)["result"]
+    (table,) = result["tables"]
+    checked = {r["M"]: r for r in table["verified_rows"]}
+    assert (checked["64"]["verified"], checked["64"]["check"]) == (True, "rel_norm_err")
+    assert (checked["64"]["err_ratio"], checked["64"]["rel_norm_err"]) == (0.0125, 0.0047)
+    assert {r["check"] for m, r in checked.items() if m != "64"} == {"err_ratio"}
+    assert table["rows"] == 3 and table["rejected_rows"] == [] and table["status"] == "tuned"
+    rows = csv_rows(table["rows_csv"])
+    assert [r["M"] for r in rows] == ["16", "64", "20480"] and "relNormErr" not in table["rows_csv"]
+    assert [r["kernelName"] for r in rows if r["M"] == "64"] == [ASM]
+    assert "relative-norm error of at most 0.01" in result["verification"]
+    artifact = await rig.box.put_kernel_artifact(
+        KernelKind.GEMM, table["target"], table["env"], table["rows_csv"].encode(), rows_only=True
+    )
+    assert artifact.metadata["load"]["rows_only"] is True

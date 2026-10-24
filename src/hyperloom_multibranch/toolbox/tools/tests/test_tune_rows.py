@@ -16,11 +16,15 @@ import pytest
 from hyperloom.contracts.recipe import KernelKind
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
 from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import ENV, HEADER, SHARED, install
-from hyperloom_multibranch.toolbox.tests.kernel_tune_rig import forge_dropped, profile_row, table_text
+from hyperloom_multibranch.toolbox.tests.kernel_tune_rig import REL_NORM_HEADER, forge_dropped, profile_row, table_text
+from hyperloom.common.outside_facts import FORGE_REL_NORM_ERR_COLUMN
 from hyperloom_multibranch.toolbox.tools.tune_rows import (
+    CHECK_ERR_RATIO,
+    CHECK_REL_NORM_ERR,
     ERR_RATIO_LIMIT,
     MAX_ERR_RATIO_LIMIT,
     RELAXED_REASON,
+    REL_NORM_ERR_LIMIT,
     Relax,
     RowsRefused,
     dropped_by_forge,
@@ -383,3 +387,162 @@ def test_a_row_above_the_allowed_ratio_is_not_read_back_even_when_the_profile_ho
     )
 
     assert rows.relaxed == () and rows.refused == () and [r["M"] for r in beyond] == ["64"]
+
+
+# --- asm rows at a splitK above 1, verified by Forge's relative-norm error -----------------------------------------------------
+
+REL = "relNormErr"
+REL_COLUMNS = REL_NORM_HEADER.split(",")
+
+
+def sk_row(
+    m: int, n: int, k: int, *, lib: str = "asm", split_k: str | int = 6, err: str = "0.0125", rel: str = "0.0047"
+) -> str:
+    """A row of a table that carries Forge's ``relNormErr`` column, the asm kernel at splitK 6 of Arbor's down_proj by default."""
+    cells = dict.fromkeys(REL_COLUMNS, "0") | {
+        "gfx": "gfx950",
+        "cu_num": "256",
+        "M": str(m),
+        "N": str(n),
+        "K": str(k),
+        "libtype": lib,
+        "splitK": str(split_k),
+        "us": "24.4",
+        "kernelName": ASM,
+        "errRatio": err,
+        REL: rel,
+    }
+    return ",".join(cells[name] for name in REL_COLUMNS)
+
+
+def rel_table(tmp_path: Path, *rows: str) -> Path:
+    return table(tmp_path, *rows, header=REL_NORM_HEADER)
+
+
+def test_an_asm_splitk_row_above_the_ratio_limit_is_verified_by_its_relative_norm_error_and_carries_both_figures(
+    tmp_path: Path, configs: Path
+) -> None:
+    rows = from_artifact(rel_table(tmp_path, sk_row(*DOWN, err="0.013", rel="0.005")), ENV, configs)
+
+    (verified,) = rows.verified
+    assert (verified["M"], verified["verified"], verified["check"]) == ("64", True, CHECK_REL_NORM_ERR)
+    assert (verified["err_ratio"], verified["rel_norm_err"]) == (0.013, 0.005)
+    assert verified["err_ratio"] > ERR_RATIO_LIMIT >= verified["rel_norm_err"]
+    assert shapes(rows.csv) == [("64", "5120", "17408")] and rows.refused == ()
+
+
+@pytest.mark.parametrize("rel", ["0.0", "0.01"])
+def test_a_relative_norm_error_at_either_end_of_its_range_is_within_it(tmp_path: Path, configs: Path, rel: str) -> None:
+    rows = from_artifact(rel_table(tmp_path, sk_row(*DOWN, rel=rel)), ENV, configs)
+
+    assert [(r["check"], r["rel_norm_err"]) for r in rows.verified] == [(CHECK_REL_NORM_ERR, float(rel))]
+
+
+@pytest.mark.parametrize(
+    ("rel", "noted"),
+    [
+        pytest.param("0.02", True, id="above-the-limit"),
+        pytest.param("0.0100001", True, id="just-above-the-limit"),
+        pytest.param("-0.001", True, id="negative"),
+        pytest.param("nan", True, id="nan"),
+        pytest.param("inf", True, id="inf"),
+        pytest.param("not-a-number", True, id="text"),
+        pytest.param("", False, id="blank"),
+    ],
+)
+def test_an_asm_splitk_row_whose_relative_norm_error_cannot_vouch_for_it_falls_to_the_ratio_rule(
+    tmp_path: Path, configs: Path, rel: str, noted: bool
+) -> None:
+    rows = from_artifact(
+        rel_table(tmp_path, sk_row(16, 512, 7168, err="0.0", rel=""), sk_row(*DOWN, rel=rel)), ENV, configs
+    )
+
+    assert shapes(rows.csv) == [("16", "512", "7168")]
+    (refused,) = rows.refused
+    assert (refused["verified"], refused["M"], refused["err_ratio"]) == (False, "64", 0.0125)
+    assert "outside the reference's tolerance" in refused["reason"] and f"{ERR_RATIO_LIMIT:g}" in refused["reason"]
+    assert ("relative-norm error" in refused["reason"]) is noted
+
+
+@pytest.mark.parametrize(
+    ("lib", "split_k"),
+    [
+        pytest.param("ck", 6, id="ck-kernel-at-splitk-6"),
+        pytest.param("asm", 1, id="asm-kernel-at-splitk-1"),
+        pytest.param("asm", 0, id="asm-kernel-without-split"),
+        pytest.param("asm", "", id="no-splitk-cell"),
+        pytest.param("asm", "x", id="splitk-not-a-number"),
+        pytest.param("asm", "inf", id="splitk-infinite"),
+        pytest.param("triton", 6, id="another-library"),
+    ],
+)
+def test_every_other_row_is_judged_by_its_ratio_alone_whatever_its_relative_norm_error_says(
+    tmp_path: Path, configs: Path, lib: str, split_k: str | int
+) -> None:
+    rows = from_artifact(rel_table(tmp_path, sk_row(*DOWN, lib=lib, split_k=split_k, rel="0.001")), ENV, configs)
+
+    assert rows.verified == () and shapes(rows.csv) == []
+    (refused,) = rows.refused
+    assert refused["err_ratio"] == 0.0125 and "outside the reference's tolerance" in refused["reason"]
+    assert "relative-norm error" not in refused["reason"]
+
+
+def test_the_ratio_still_has_to_be_a_number_for_a_row_the_relative_norm_error_could_have_verified(
+    tmp_path: Path, configs: Path
+) -> None:
+    rows = from_artifact(rel_table(tmp_path, sk_row(*DOWN, err="", rel="0.001")), ENV, configs)
+
+    assert rows.verified == () and "is not a ratio from 0 up: the row was not checked" in rows.refused[0]["reason"]
+
+
+def test_a_table_without_the_relative_norm_column_is_judged_as_before(tmp_path: Path, configs: Path) -> None:
+    line = sk_row(*DOWN, err="0.013").rsplit(",", 1)[0]
+    rows = from_artifact(table(tmp_path, row(16, 512, 7168), line), ENV, configs)
+
+    assert shapes(rows.csv) == [("16", "512", "7168")] and [r["M"] for r in rows.refused] == ["64"]
+    assert "relative-norm error" not in rows.refused[0]["reason"]
+    assert [(r["check"], "rel_norm_err" in r) for r in rows.verified] == [(CHECK_ERR_RATIO, False)]
+
+
+def test_a_row_within_the_ratio_limit_is_verified_by_the_ratio_even_when_it_holds_a_relative_norm_error(
+    tmp_path: Path, configs: Path
+) -> None:
+    rows = from_artifact(rel_table(tmp_path, sk_row(*DOWN, err="0.004", rel="0.003")), ENV, configs)
+
+    (verified,) = rows.verified
+    assert (verified["check"], verified["err_ratio"], "rel_norm_err" in verified) == (CHECK_ERR_RATIO, 0.004, False)
+
+
+def test_the_relative_norm_column_is_left_out_of_the_rows_handed_over_so_the_same_rows_are_the_same_bytes(
+    tmp_path: Path, configs: Path
+) -> None:
+    """The image's own table has no such column and another branch's table may not: the CSV has the table's own columns."""
+    plain = from_artifact(table(tmp_path, row(16, 512, 7168, err="0.002")), ENV, configs)
+    ordinary = row(16, 512, 7168, err="0.002") + ","
+    with_column = from_artifact(rel_table(tmp_path, ordinary, sk_row(*DOWN, err="0.013", rel="0.005")), ENV, configs)
+
+    assert with_column.csv.splitlines()[:2] == plain.csv.splitlines() and REL not in with_column.csv
+    assert [r["M"] for r in with_column.verified] == ["16", "64"] and with_column.verified[1][REL] == "0.005"
+
+
+def test_the_rows_read_back_for_a_higher_ratio_are_not_refused_for_the_column_their_profile_does_not_have(
+    tmp_path: Path, configs: Path
+) -> None:
+    line = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM)
+    allowed = relax(tmp_path, [forge_dropped(*DOWN)], line)
+
+    rows = from_artifact(rel_table(tmp_path, sk_row(16, 512, 7168, err="0.0", rel="")), ENV, configs, allowed)
+
+    assert rows.refused == () and shapes(rows.relaxed_csv) == [("64", "5120", "17408")]
+    assert rows.relaxed_csv.splitlines()[0] == HEADER and rows.csv.splitlines()[0] == HEADER
+    (relaxed,) = rows.relaxed
+    assert (relaxed["verified"], relaxed["reason"]) == (False, RELAXED_REASON)
+
+
+def test_the_relative_norm_limit_is_forges_own_once_forge_has_one() -> None:
+    forge = pytest.importorskip("kernelforge.gemm_tune.tuners._aiter_dense_common")
+    if not hasattr(forge, "_MAX_REL_NORM_ERR"):
+        pytest.skip("this Forge has no relative-norm check yet")
+
+    assert REL_NORM_ERR_LIMIT == forge._MAX_REL_NORM_ERR, "Forge changed the bound: change REL_NORM_ERR_LIMIT"
+    assert forge.REL_NORM_COLUMN == FORGE_REL_NORM_ERR_COLUMN

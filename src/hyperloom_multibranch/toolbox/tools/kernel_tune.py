@@ -8,7 +8,8 @@ and did not find, or lists shapes itself (``shapes``); the test also says which 
 shapes are for. The tool runs the tuner Forge has for each table (``kernelforge gemm-tune run``, through
 ``hyperloom.orchestrator.kernel.forge_gemm_tuning.build_command``, the command the single-lineage flow runs) with those
 shapes as its demand, on one card, and answers with the tuned rows of each table as a rows-only CSV that
-``put_kernel_artifact(rows_only=true)`` takes (:mod:`.tune_rows`), each row checked against the reference GEMM.
+``put_kernel_artifact(rows_only=true)`` takes (:mod:`.tune_rows`), each row checked against the reference GEMM (an asm row
+at a splitK above 1, by its relative-norm error when its mismatch ratio is above the limit).
 
 The tuner is pinned to the aiter the tests' servers run: ``AITER_ROOT_DIR`` of its process is the root of the aiter install
 whose ``configs`` the tool reads the tables' shape keys from (``serving_aiter_root``), and the job's result says so
@@ -57,7 +58,7 @@ from hyperloom_multibranch.toolbox.tools.tune_inputs import (
     served_workload,
     write_demand_of,
 )
-from hyperloom_multibranch.toolbox.tools.tune_rows import ERR_RATIO_LIMIT, MAX_ERR_RATIO_LIMIT
+from hyperloom_multibranch.toolbox.tools.tune_rows import ERR_RATIO_LIMIT, MAX_ERR_RATIO_LIMIT, REL_NORM_ERR_LIMIT
 from hyperloom_multibranch.toolbox.tools.tune_tables import (
     TableStatus,
     TuneTable,
@@ -116,8 +117,11 @@ _ADVICE = (
 _VERIFICATION = (
     "Every row was compared by aiter's tuner with a reference GEMM of its shape, element by element within aiter's "
     "tolerance (rtol and atol of 1e-2 unless the tuner sets its own), and the mismatch fraction recorded; "
-    f"a row is handed over only with a finite mismatch ratio of at most {ERR_RATIO_LIMIT:g}. Rows that failed or could "
-    "not be checked are listed as rejected with verified=false and the reason, and are not in rows_csv."
+    f"a row is handed over only with a finite mismatch ratio of at most {ERR_RATIO_LIMIT:g}, or, for an asm kernel at "
+    "a splitK above 1 (whose bf16 accumulation moves that ratio while the output stays accurate), a relative-norm "
+    f"error of at most {REL_NORM_ERR_LIMIT:g} that Forge measured (verified_rows say which check decided each row: "
+    "check). Rows that failed or could not be checked are listed as rejected with verified=false and the reason, "
+    "and are not in rows_csv."
 )
 _RELAXED = (
     f" This call allowed a mismatch ratio up to {{limit:g}}: the rows above {ERR_RATIO_LIMIT:g} and within it that the "

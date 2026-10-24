@@ -87,6 +87,11 @@ LOG_SHAPES = {("496", "7168", "5120"), ("496", "5120", "5120"), ("496", "34816",
 SECRET_ENV = "HF_TOKEN"
 
 
+#: The header of a table a Forge that measures the relative-norm error of an asm splitK row writes: the image's columns and
+#: Forge's own, blank on a row it did not measure.
+REL_NORM_HEADER = f"{HEADER},relNormErr"
+
+
 def table_text(header: str, rows: Iterable[str]) -> str:
     """A table of ``rows`` under ``header``, as the tuner writes one."""
     return "".join(f"{line}\n" for line in (header, *rows))
@@ -313,6 +318,7 @@ __all__ = [
     "HIT_LOG",
     "HIT_SHAPES",
     "LOG_SHAPES",
+    "REL_NORM_HEADER",
     "SECRET_ENV",
     "SERVER_ARGS",
     "SERVER_LOG",

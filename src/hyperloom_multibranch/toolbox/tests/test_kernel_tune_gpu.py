@@ -7,8 +7,8 @@ The toolbox is the real local one; the test is landed output with the lines of a
 two dense blockscale GEMMs that missed their tuned table), the tool leases its card from the toolbox's pool, runs
 ``kernelforge gemm-tune run`` on it for the shapes' padded M and the decode band of the point's concurrency, and answers
 with the rows-only CSV. What must hold: the job succeeds and held exactly one leased card while it ran (``leased_cards``
-1 during, 0 after), on the card named; every row handed over has a finite ``errRatio`` of at most Forge's limit and
-``verified`` true; the CSV is accepted by ``put_kernel_artifact(rows_only=true)`` and lays over the image's own default
+1 during, 0 after), on the card named; every row handed over has a finite ``errRatio`` of at most Forge's limit (an asm row at a
+splitK above 1 may have its relative-norm error within the limit instead) and ``verified`` true; the CSV is accepted by ``put_kernel_artifact(rows_only=true)`` and lays over the image's own default
 table without a repeated shape. What was measured is printed (``PROBE``).
 
 Needs a GPU machine with the image's aiter at ``/sgl-workspace`` and ``kernelforge`` importable, ``HL_W117_MODEL`` (a
@@ -46,7 +46,7 @@ from hyperloom_multibranch.toolbox.tests.kernel_tune_rig import (
 from hyperloom_multibranch.toolbox.tests.test_card_placement import _PointPerBranch
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.tools import JobStatus
-from hyperloom_multibranch.toolbox.tools.tune_rows import ERR_RATIO_LIMIT
+from hyperloom_multibranch.toolbox.tools.tune_rows import CHECK_REL_NORM_ERR, ERR_RATIO_LIMIT
 
 MODEL = os.environ.get("HL_W117_MODEL", "")
 OUT = os.environ.get("HL_W117_OUT", "")
@@ -112,7 +112,8 @@ async def test_the_real_tuner_tunes_two_untuned_shapes_on_the_leased_card_and_th
         )
         assert result["cards"] == [CARD] and table["env"] == ENV and table["status"] == "tuned" and table["rows"] >= 1
         assert all(
-            row["verified"] is True and 0 <= row["err_ratio"] <= ERR_RATIO_LIMIT for row in table["verified_rows"]
+            row["verified"] is True and (0 <= row["err_ratio"] <= ERR_RATIO_LIMIT or row["check"] == CHECK_REL_NORM_ERR)
+            for row in table["verified_rows"]
         )
         assert {row["gfx"] for row in table["verified_rows"]} and csv_rows(table["rows_csv"])
         artifact = await box.put_kernel_artifact(

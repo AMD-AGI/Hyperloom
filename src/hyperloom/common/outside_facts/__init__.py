@@ -44,6 +44,7 @@ __all__ = [
     "AITER_TUNED_HIT_MARKER",
     "ARGPARSE_INVALID_CHOICE",
     "ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE",
+    "ASM_LIBTYPE",
     "CONTEXT_LENGTH_FLAGS",
     "ENV_CONC",
     "ENV_EP",
@@ -58,6 +59,7 @@ __all__ = [
     "ENV_RANDOM_RANGE_RATIO",
     "ENV_RUN_EVAL",
     "ENV_TP",
+    "FORGE_REL_NORM_ERR_COLUMN",
     "HIP_ERROR_PREFIX",
     "HIP_GRAPH_PACKET_CAPTURE_ENV",
     "HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE",
@@ -87,6 +89,8 @@ __all__ = [
     "TUNABLEOP_ENABLED_ENV",
     "TUNABLEOP_TABLE_ENV",
     "TUNABLEOP_TUNING_ENV",
+    "TUNED_LIBTYPE_COLUMN",
+    "TUNED_SPLITK_COLUMN",
     "spaced",
 ]
 
@@ -101,6 +105,13 @@ AITER_META_WHEEL_DIR = _meta["wheel_dir"]
 AITER_META_MARKER_DIR = _meta["marker_dir"]
 AITER_INSTALL_MODE_FILE = _meta["install_mode_file"]
 AITER_DEVELOP_MODE = _meta["develop_mode"]
+
+_tuned = _PACK.names("aiter_tuned_row_columns", "libtype_column", "splitk_column", "asm_libtype")
+TUNED_LIBTYPE_COLUMN = _tuned["libtype_column"]
+TUNED_SPLITK_COLUMN = _tuned["splitk_column"]
+ASM_LIBTYPE = _tuned["asm_libtype"]
+
+FORGE_REL_NORM_ERR_COLUMN = _PACK.names("forge_rel_norm_err", "column")["column"]
 
 AITER_LOG_TUNED_CONFIG_ENV = _PACK.names("aiter_log_tuned_config", "env")["env"]
 AITER_TUNED_HIT = _PACK.pattern("aiter_tuned_hit")

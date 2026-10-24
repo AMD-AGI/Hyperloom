@@ -142,7 +142,7 @@ _PROBE = textwrap.dedent(
     from hyperloom.measure.runner import run
     from hyperloom.sandbox import card_occupancy, templates
     from hyperloom_multibranch.toolbox import acceptance, hosted_executor, mcp_tools
-    from hyperloom_multibranch.toolbox.tools import kernel_tune, tracelens_report
+    from hyperloom_multibranch.toolbox.tools import kernel_tune, tracelens_report, tune_rows
 
     out = {
         "signature": [pattern.pattern for rule in failure_signature._RULES for pattern in rule.patterns],
@@ -182,6 +182,13 @@ _PROBE = textwrap.dedent(
             farm.AITER_DEVELOP_MODE,
         ],
         "tuner": kernel_tune.AITER_META_MARKER_DIR,
+        "relnorm": tune_rows._rel_norm(
+            {
+                "TUNED_LIBTYPE_COLUMN": "ASM_LIBTYPE",
+                "TUNED_SPLITK_COLUMN": "6",
+                "FORGE_REL_NORM_ERR_COLUMN": "0.005",
+            }
+        ),
     }
     print(json.dumps(out))
     """
@@ -308,6 +315,13 @@ def test_aiter_meta_directory_names_are_read_from_the_owner(probe: dict[str, Any
         "AITER_DEVELOP_MODE",
     ]
     assert probe["tuner"] == "AITER_META_MARKER_DIR"
+
+
+def test_the_columns_that_pick_out_the_rows_judged_by_their_relative_norm_error_are_read_from_the_owner(
+    probe: dict[str, Any],
+) -> None:
+    """A row is one of them by the libtype and splitK columns and the libtype the owner names, its figure is in the column it names."""
+    assert probe["relnorm"] == 0.005
 
 
 def test_standalone_hook_holds_the_owners_merge_directory() -> None:
