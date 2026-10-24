@@ -439,4 +439,9 @@ def test_a_replay_acceptance_refuses_is_named_with_its_code_in_place_of_the_repl
 
     assert described.startswith(f"{LEAD.summary()}; not replayable here: online_tuning_unsupported (TunableOp")
     assert REPLAY_TOOL not in described and described.endswith("...)")
+    assert (
+        replace(refusal, rule_pack="2026.10.2")
+        .describe()
+        .startswith("not replayable here under rule pack 2026.10.2: online_tuning_unsupported (TunableOp")
+    )
     assert unchecked == f"{LEAD.summary()}; {found.describe()}; not checked against acceptance: the time ran out"

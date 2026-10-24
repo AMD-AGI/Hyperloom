@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.jsonio import read_json_strict
+from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult
 from hyperloom.contracts.recipe import PatchRef, Recipe
 from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
@@ -378,7 +379,8 @@ class Prelude:
                 try:
                     await asyncio.wait_for(self._toolbox.check_test(request), max(0.0, deadline - self._clock.now()))
                 except RequestRejected as refused:
-                    lead = replace(lead, replay=None, refusal=ReplayRefusal(refused.code, refused.reason))
+                    refusal = ReplayRefusal(refused.code, refused.reason, rule_pack_identity()["version"])
+                    lead = replace(lead, replay=None, refusal=refusal)
                 except asyncio.TimeoutError:
                     lead = replace(lead, unchecked=PREFLIGHT_OUT_OF_TIME)
             checked.append(lead)
