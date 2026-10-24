@@ -13,8 +13,9 @@ A component travels only for the patches it gains or loses, with its upstream co
 those patches create a component the other side lacks: every component is built from the installed package of the
 session's fixed base image, so a recipe's upstream pin is provenance no merge can act on, and a component the
 candidate records without patching it changes nothing a test would build. The merged patch stacks are applied to the
-installed package as the toolbox applies them when it builds a test's environment, so a conflict shows before the
-merge test is paid for. A patch the candidate brings that does not apply there is rebased by a three-way merge of the
+installed sources (the package, and the source trees beside it such as aiter's csrc) as the toolbox applies them when
+it builds a test's environment, so a conflict shows before the merge test is paid for. A patch the candidate brings
+that does not apply there is rebased by a three-way merge of the
 files it touches. Where a line is changed by both sides, a head patch the candidate's stack does not hold is replaced
 by the candidate's patch when that patch rewrites every line the head patch changes (see ``_replacement``); otherwise
 the patch is a conflict.
@@ -55,8 +56,9 @@ from hyperloom_multibranch.toolbox.kernel_artifacts import (
     union_rows,
 )
 
-#: Applies a component's patch stack to the installed package, and returns every file a patch of it touches and each of
-#: the given paths as the stack leaves them; raises ``PatchApplyError`` when a patch does not apply.
+#: Applies a component's patch stack to its installed sources, and returns every file a patch of it touches and each of
+#: the given paths as the stack leaves them, by path in the upstream repository; raises ``PatchApplyError`` when a patch
+#: does not apply.
 StackFiles = Callable[[ComponentPatches, Collection[str]], Files]
 #: Reads a kernel table's bytes, for the two that fill one slot.
 TableBytes = Callable[[KernelArtifact], bytes]
@@ -412,7 +414,7 @@ def _rebased_text(stack: ComponentPatches, sides: _Sides) -> str | None:
     """The patch's change merged three ways into the files ``stack`` leaves, as a patch over ``stack``: empty when
     ``stack`` already makes the change, ``None`` when a line is changed by both."""
     merged = merge_files(sides.original, sides.current, sides.changed)
-    return None if merged is None else patch_between(stack.component, sides.current, merged)
+    return None if merged is None else patch_between(sides.current, merged)
 
 
 def _replacement(

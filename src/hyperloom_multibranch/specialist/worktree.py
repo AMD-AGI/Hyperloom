@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The code a specialist edits: the installed framework packages as a git repository, one worktree per branch.
+"""The code a specialist edits: the installed packages, with the source beside them they build from (aiter's csrc), as
+a git repository, one worktree per branch.
 
 The toolbox applies a recipe's patches to the packages installed in the image, so a specialist writes its change
 against those same files. The session's source base commits them laid out as their upstream repositories lay them out,
@@ -16,7 +17,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,9 +29,10 @@ from hyperloom.measure.compile import (
     UnsupportedComponentError,
     locate_installed_package,
 )
+from hyperloom_multibranch.contracts.sources import SOURCE_LAYOUTS, SourceLayout, meta_prefix, source_roots
 
 #: Built files a text patch can never change.
-SKIPPED = ("__pycache__", "*.pyc", "*.pyo", "*.so", "*.a", "*.o")
+SKIPPED = ("__pycache__", "*.pyc", "*.pyo", "*.so", "*.a", "*.o", "*.co", "*.hsaco")
 BASE_BRANCH = "installed"
 HEAD_SUBJECT = "head "
 GIT_TIMEOUT_S = 300.0
@@ -45,13 +47,6 @@ _FIXED_CONFIG = ("-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c",
 _STAGE = ("add", "--all", "--")
 _HEAD = "HEAD"
 _QUIET = "--quiet"
-
-
-def _unpatchable(prefix: str) -> tuple[str, ...]:
-    """Pathspecs that leave out the built files of :data:`SKIPPED` under ``prefix``, for a tree whose editor may have
-    written them; anchored at ``prefix``, as git 2.34 stages no new file under a nested prefix past an unanchored
-    exclude."""
-    return tuple(f":(glob,exclude){prefix}/**/{name}" + ("" if name.startswith("*") else "/**") for name in SKIPPED)
 
 
 class WorktreeError(RuntimeError):
@@ -72,7 +67,10 @@ class Upstream:
 
 def installed_upstream(package: PackageBase) -> Upstream | None:
     """Where ``package`` was built from: the commit its version names, resolved in the checkout it is installed from,
-    and that checkout's origin; ``None`` when the version names no commit or no checkout holds it."""
+    and that checkout's origin; ``None`` when the version names no commit or no checkout holds it.
+
+    A wheel has no checkout: its version names an abbreviated commit, which no full commit can be read from.
+    """
     named = _BUILT_FROM.search(package.dist_version or "")
     if named is None:
         return None
@@ -117,32 +115,72 @@ class SourceBase:
         *,
         locator: PackageLocator = locate_installed_package,
         layouts: Mapping[str, ComponentLayout] = COMPONENT_LAYOUTS,
+        sources: Mapping[str, SourceLayout] = SOURCE_LAYOUTS,
     ) -> None:
         self.path = path
         self._locator = locator
         self._layouts = layouts
+        self._sources = sources
 
     def build(self, components: Sequence[str]) -> None:
-        """Copy each component's installed package to its upstream path and commit it; a session builds one base."""
+        """Copy each component's installed package and meta trees to their upstream paths and commit them; a session
+        builds one base.
+
+        Built files stay out of the base and, through ``info/exclude``, out of every worktree's stage.
+
+        Raises:
+            UnsupportedComponentError: For a component with meta trees installed without a checkout that holds the
+                commit its version names (aiter from a wheel).
+        """
         self.path.mkdir(parents=True)
         _git(self.path, "init", f"--initial-branch={BASE_BRANCH}")
+        excluded = list(SKIPPED)
         for component in components:
             layout = self._layout(component)
-            package = self._locator(layout)
-            shutil.copytree(package.path, self.path / layout.upstream_prefix, ignore=shutil.ignore_patterns(*SKIPPED))
+            source = self._sources.get(component, SourceLayout())
+            package, *metas = source_roots(layout, _with_checkout(component, self._locator(layout), source), source)
+            shutil.copytree(package.path, self.path / package.prefix, ignore=_ignore(package.path, source.built))
+            excluded += [f"/{package.prefix}/{built}/" for built in source.built]
+            for meta in (meta for meta in metas if meta.path.is_dir()):
+                shutil.copytree(meta.path, self.path / meta.prefix, ignore=_ignore(meta.path, ()))
+        (self.path / ".git" / "info").mkdir(exist_ok=True)
+        (self.path / ".git" / "info" / "exclude").write_text("".join(f"{line}\n" for line in excluded))
         _commit_all(self.path, BASE_BRANCH)
 
     def worktree(self, branch: str, path: Path) -> BranchWorktree:
         """The worktree of ``branch`` at ``path``, added at the installed packages the first time."""
         if not path.exists():
             _git(self.path, "worktree", "add", "-b", f"mb/{branch}", str(path), BASE_BRANCH)
-        return BranchWorktree(path, self._layouts)
+        return BranchWorktree(path, self._layouts, self._sources)
 
     def _layout(self, component: str) -> ComponentLayout:
         layout = self._layouts.get(component)
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout; its source cannot be laid out")
         return layout
+
+
+def _ignore(root: Path, built: Sequence[str]) -> Callable[[str, list[str]], set[str]]:
+    """The copy filter that leaves out :data:`SKIPPED` and the directories ``built`` under ``root``."""
+    skipped = shutil.ignore_patterns(*SKIPPED)
+    built_dirs = {root / path for path in built}
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        return set(skipped(directory, names)) | {name for name in names if Path(directory, name) in built_dirs}
+
+    return ignore
+
+
+def _with_checkout(component: str, package: PackageBase, source: SourceLayout) -> Path:
+    """Where ``package`` is installed, refused for a component whose meta trees the base lays out when it is installed
+    without a checkout: a recipe pins a component to a full upstream commit, which only a checkout can resolve."""
+    if source.meta and installed_upstream(package) is None:
+        raise UnsupportedComponentError(
+            f"{component} at {package.path} is installed with no git checkout that holds the commit its version "
+            f"{package.dist_version!r} names (a wheel names only an abbreviated commit), so no recipe can pin where its "
+            f"sources came from; the source base lays {component} out only from a develop install"
+        )
+    return package.path
 
 
 @dataclass(frozen=True)
@@ -156,9 +194,15 @@ class Changes:
 class BranchWorktree:
     """One branch's checkout of the source base; the experiment commit its HEAD holds is named in HEAD's subject."""
 
-    def __init__(self, path: Path, layouts: Mapping[str, ComponentLayout] = COMPONENT_LAYOUTS) -> None:
+    def __init__(
+        self,
+        path: Path,
+        layouts: Mapping[str, ComponentLayout] = COMPONENT_LAYOUTS,
+        sources: Mapping[str, SourceLayout] = SOURCE_LAYOUTS,
+    ) -> None:
         self.path = path
         self._layouts = layouts
+        self._sources = sources
 
     def holds(self, component: str) -> bool:
         """Whether the source base laid out ``component``; a recipe's patches to any other component are not here."""
@@ -201,8 +245,7 @@ class BranchWorktree:
         It is read through an index of its own: whoever edits the worktree (a third-party agent) may be using the
         worktree's index, and a stage there would race its commits.
         """
-        prefix = self._prefix(component)
-        paths = (prefix, *_unpatchable(prefix))
+        paths = self._paths(component)
         with tempfile.TemporaryDirectory(prefix="mb-diff-") as scratch:
             index = Path(scratch) / "index"
             _git(self.path, "read-tree", commit, index=index)
@@ -215,11 +258,11 @@ class BranchWorktree:
 
         Both are built in indexes of their own, so the worktree's files and index are left as they are.
         """
-        prefix = self._prefix(component)
+        paths = self._paths(component)
         with tempfile.TemporaryDirectory(prefix="mb-between-") as scratch:
             start = self._tree(commit, before, Path(scratch) / "before")
             end = self._tree(commit, (after,), Path(scratch) / "after")
-            return _git(self.path, "diff", "--no-color", "--no-ext-diff", start, end, "--", prefix)
+            return _git(self.path, "diff", "--no-color", "--no-ext-diff", start, end, "--", *paths)
 
     def _tree(self, commit: str, patches: Sequence[str], scratch: Path) -> str:
         """The git tree of ``commit`` with ``patches`` applied in order, written through the index under ``scratch``."""
@@ -246,15 +289,19 @@ class BranchWorktree:
         _git(self.path, "clean", "-fdx", _QUIET)
 
     def _staged_diff(self, component: str, *options: str) -> str:
-        prefix = self._prefix(component)
-        _git(self.path, *_STAGE, prefix)
-        return _git(self.path, "diff", "--cached", *options, _HEAD, "--", prefix)
+        paths = self._paths(component)
+        _git(self.path, *_STAGE, *paths)
+        return _git(self.path, "diff", "--cached", *options, _HEAD, "--", *paths)
 
-    def _prefix(self, component: str) -> str:
+    def _paths(self, component: str) -> tuple[str, ...]:
+        """``component``'s package and the meta trees the source base laid out beside it."""
         layout = self._layouts.get(component)
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout")
-        return layout.upstream_prefix
+        metas = [meta_prefix(layout, meta) for meta in self._sources.get(component, SourceLayout()).meta]
+        # A pathspec that names nothing fails the stage, and an install may ship no meta tree.
+        held = _git(self.path, "ls-tree", "--name-only", BASE_BRANCH, "--", *metas).splitlines() if metas else []
+        return (layout.upstream_prefix, *held)
 
 
 __all__ = [

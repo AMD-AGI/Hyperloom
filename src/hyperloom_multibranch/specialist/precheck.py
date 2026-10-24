@@ -77,9 +77,10 @@ def _aiter_meta_dir(package: Path) -> Path:
 
 
 def _mirror(installed: Path, target: Path, worktree: Path, prefix: str, changes: Changes) -> None:
-    """Lay the installed package out at ``target`` with the change over it."""
-    deleted = {_inside(path, prefix) for path in changes.deleted}
-    written = {_inside(path, prefix): worktree / path for path in changes.written}
+    """Lay the installed package out at ``target`` with the change over it; the change's files beside the package (a
+    meta tree such as aiter's csrc) are not part of its import."""
+    deleted = {_inside(path, prefix) for path in changes.deleted if _within(path, prefix)}
+    written = {_inside(path, prefix): worktree / path for path in changes.written if _within(path, prefix)}
     for source in installed.rglob("*"):
         rel = source.relative_to(installed).as_posix()
         if source.is_dir() or "__pycache__" in source.parts or rel in deleted or rel in written:
@@ -92,6 +93,10 @@ def _mirror(installed: Path, target: Path, worktree: Path, prefix: str, changes:
 
 def _inside(path: str, prefix: str) -> str:
     return str(PurePosixPath(path).relative_to(prefix))
+
+
+def _within(path: str, prefix: str) -> bool:
+    return PurePosixPath(prefix) in PurePosixPath(path).parents
 
 
 def _link(source: Path, destination: Path) -> None:
