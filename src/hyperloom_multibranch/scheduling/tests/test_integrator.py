@@ -707,6 +707,36 @@ async def test_a_merge_test_the_candidate_failed_is_not_tried_again_on_a_head_it
     assert len(tried) == 1
 
 
+#: ``parent`` and ``child``, one after the other on ``s1``, and ``across``, on a branch of its own, which sets the
+#: variable ``parent`` sets and nothing ``child`` sets.
+PARENT = RecipeDelta(config=ConfigDelta(server_args=f"{TAG_FLAG}parent", envs={"HL_PARENT": "1"}))
+CHILD = RecipeDelta(config=ConfigDelta(server_args=f"{TAG_FLAG}child", envs={"HL_CHILD": "1"}))
+ACROSS = RecipeDelta(config=ConfigDelta(server_args=f"{TAG_FLAG}across", envs={"HL_PARENT": "2"}))
+
+
+async def test_a_not_stackable_commit_is_tried_again_once_a_merge_changed_what_a_parent_it_carries_names(
+    tmp_path: Path,
+) -> None:
+    curves: Curves = {
+        frozenset({"parent", "child"}): {MAIN_POINT: 1005.0},
+        frozenset({"across"}): {MAIN_POINT: 1030.0},
+        frozenset({"across", "parent", "child"}): {MAIN_POINT: 1060.0},
+    }
+    bench = await _bench(tmp_path, curves, tags=())
+    parent = await _committed_on(bench, "s1", bench.root, PARENT, 1.0, name="parent")
+    child = await _committed_on(bench, "s1", parent, CHILD, 5.0, name="child")
+    across = await _committed_elsewhere(bench, ACROSS, 0.5)
+
+    rounds = [await _one(bench) for _ in range(3)]
+
+    merged = {item.commit_id: item.merged_into for item in await bench.handle(Role.OBSERVER).committed()}
+    assert [(report.candidate, report.onto, report.outcome) for report in rounds if report is not None] == [
+        (child, bench.root, MergeOutcome.NOT_STACKABLE),
+        (across, bench.root, MergeOutcome.MERGED),
+        (child, merged[across], MergeOutcome.MERGED),
+    ]
+
+
 async def test_a_not_stackable_commit_is_not_tried_again_on_a_head_that_patched_the_component_elsewhere(
     bench: Bench,
 ) -> None:

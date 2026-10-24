@@ -7,9 +7,11 @@ A commit is offered once per head, until it is merged or found already on the he
 already has still holds. An answer holds when it is about the candidate's own change rather than about the head the
 change met: ``NOT_STACKABLE`` is the rule gate's measured one, and a merge test the candidate failed is another --
 the merged recipe did not run, and a head that changes nothing the change names builds the same recipe again. The
-integration head only grows, so such an answer stands until a later merge changes one of the things the candidate's
-own change names -- a server argument, an environment variable, a kernel artifact, a component's upstream pin or one
-of the files a component's patches touch -- and then the candidate is offered again. Two candidates that patch the
+change is the one a merge carries: from the candidate's merge base with the head, so it holds the change of every
+parent of the candidate that was never merged. The integration head only grows, so such an answer stands until a
+later merge changes one of the things that change names -- a server argument, an environment variable, a kernel
+artifact, a component's upstream pin or one of the files a component's patches touch -- and then the candidate is
+offered again. Two candidates that patch the
 same component in different files name nothing in common and do not release each other. A merge attempt that
 settled nothing comes back on the next head whatever it named: a
 test whose measurement failed, a regression set that did not run clean, a conflict, and a candidate another of the
@@ -97,6 +99,21 @@ def touched(before: Recipe, after: Recipe, patched: Mapping[str, frozenset[str]]
     return frozenset(names)
 
 
+def _merge_base(commit: CommittedCommit, unmerged: Mapping[str, CommittedCommit]) -> str:
+    """The commit a merge of ``commit`` carries its change from: its nearest ancestor that is merged or no specialist
+    commit, of ``unmerged`` the specialist commits not merged.
+
+    The notebook answers for the repository's merge base because the integrator records every commit a landed merge
+    carries as merged: one the notebook does not record as merged is on no integration head, and one it does is on
+    every head since its merge.
+    """
+
+    base = commit.parent_commit
+    while base in unmerged:
+        base = unmerged[base].parent_commit
+    return base
+
+
 class CandidateNotebook(CommitQuery, RecordSearch, Protocol):
     """What :class:`Candidates` reads: the committed commits, and how a candidate's last merge test ended."""
 
@@ -117,13 +134,15 @@ class Candidates:
     async def offered_on(self, head: str) -> tuple[CommittedCommit, ...]:
         """The committed commits to test on ``head``, in the order the notebook gives them."""
 
+        committed = await self._notebook.committed()
+        unmerged = {commit.commit_id: commit for commit in committed if commit.merged_into is None}
         offered = []
-        for commit in await self._notebook.committed():
-            if await self._offered(commit, head):
+        for commit in committed:
+            if await self._offered(commit, head, unmerged):
                 offered.append(commit)
         return tuple(offered)
 
-    async def _offered(self, commit: CommittedCommit, head: str) -> bool:
+    async def _offered(self, commit: CommittedCommit, head: str, unmerged: Mapping[str, CommittedCommit]) -> bool:
         last = commit.last_merge
         if commit.merged_into is not None:
             return False
@@ -133,7 +152,7 @@ class Candidates:
             return False
         if not await self._answered_the_change(last):
             return True
-        own = await self._touched_between(commit.parent_commit, commit.commit_id)
+        own = await self._touched_between(_merge_base(commit, unmerged), commit.commit_id)
         return bool(own & await self._touched_between(last.integration_head, head))
 
     async def _answered_the_change(self, last: MergeState) -> bool:
