@@ -320,7 +320,7 @@ class Integrator:
     async def _test(self, commit: CommittedCommit, head: str) -> _Tested:
         candidate = commit.commit_id
         try:
-            merge = await self._repo.merge(candidate, head)
+            merge = await self._repo.merge(candidate, head, await self._foundation_fixes())
             delta = await self._resolved(merge, candidate)
             onto = await self._repo.read_recipe(head)
             if apply(onto, delta).digest() == onto.digest():
@@ -337,6 +337,15 @@ class Integrator:
             )
         except _Skipped as exc:
             return await self._skip(commit, head, exc.reason, MergeOutcome.CONFLICT_SKIPPED)
+
+    async def _foundation_fixes(self) -> frozenset[str]:
+        """The foundation fixes merged onto the integration branch, as the notebook records them: no later merge may
+        replace a patch they brought, which other branches build on."""
+
+        committed = await self._notebook.committed()
+        return frozenset(
+            commit.commit_id for commit in committed if commit.foundation_fix and commit.merged_into is not None
+        )
 
     async def _judge(self, merge: RepoMerge, delta: RecipeDelta, commit: CommittedCommit, request_id: str) -> _Tested:
         candidate = commit.commit_id

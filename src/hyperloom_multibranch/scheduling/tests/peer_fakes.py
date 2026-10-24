@@ -217,9 +217,9 @@ class HeldGitRepo(GitExperimentRepo):
         async with self.time.held():
             return await super().commit(branch, parent, recipe, message)
 
-    async def merge(self, candidate: str, onto: str) -> RepoMerge:
+    async def merge(self, candidate: str, onto: str, protected: frozenset[str] = frozenset()) -> RepoMerge:
         async with self.time.held():
-            return await super().merge(candidate, onto)
+            return await super().merge(candidate, onto, protected)
 
     async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: Sequence[str]) -> str:
         async with self.time.held():

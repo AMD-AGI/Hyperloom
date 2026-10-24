@@ -691,8 +691,9 @@ async def test_a_commit_made_during_a_round_takes_the_slot_the_round_had_nothing
     assert {report.outcome for report in reports} == {MergeOutcome.MERGED, MergeOutcome.PENDING}
 
 
-async def _committed_elsewhere(bench: Bench, delta: RecipeDelta, gain: float) -> str:
-    """A commit of a new branch ``s2`` on the root, that the gate judged ``gain`` and committed."""
+async def _committed_elsewhere(bench: Bench, delta: RecipeDelta, gain: float, *, foundation: bool = False) -> str:
+    """A commit of a new branch ``s2`` on the root, that the gate judged ``gain``, a foundation fix with
+    ``foundation``, and committed."""
 
     scheduler, toolbox, gate = (bench.handle(role) for role in (Role.SCHEDULER, Role.TOOLBOX, Role.GATE))
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s2", from_commit=bench.root, reason="refill"))
@@ -701,7 +702,8 @@ async def _committed_elsewhere(bench: Bench, delta: RecipeDelta, gain: float) ->
     test = request("rd1", intent("s2", bench.root, mechanism="d1"), delta)
     await toolbox.write_request(test)
     await toolbox.write_result(result(test.request_id))
-    await gate.write_judgement(test.request_id, judgement(gain, (test.request_id,)), Conclusion.COMMITTED, commit)
+    judged = judgement(gain, (test.request_id,), foundation_fix=foundation)
+    await gate.write_judgement(test.request_id, judged, Conclusion.COMMITTED, commit)
     return commit
 
 
@@ -733,8 +735,8 @@ class UnitingRepo(GitExperimentRepo):
     """Reports every merge as uniting one kernel slot; a test double for the union a merge makes where a table's
     shapes can be keyed, which needs an aiter install this bench has none of."""
 
-    async def merge(self, candidate: str, onto: str) -> RepoMerge:
-        return replace(await super().merge(candidate, onto), united_tables=(UNITED,))
+    async def merge(self, candidate: str, onto: str, protected: frozenset[str] = frozenset()) -> RepoMerge:
+        return replace(await super().merge(candidate, onto, protected), united_tables=(UNITED,))
 
 
 async def test_a_merge_that_unites_two_kernel_tables_says_so_in_the_decision_log(tmp_path: Path) -> None:
@@ -845,6 +847,35 @@ async def test_an_unresolved_patch_conflict_is_skipped_and_recorded(
     assert bench.merge_tests() == {}
     following = await _one(bench)
     assert following is not None and following.candidate == bench.commits["c2"]
+
+
+#: A patch of the line ``c1``'s patch rewrites as well, so that ``c1``'s patch replaces it where it may.
+HEAD_TEXT = _patch_text("x.py", "old", "head")
+
+
+async def _committed_head_patch(bench: Bench, *, foundation: bool) -> str:
+    """Branch ``s2``'s commit of :data:`HEAD_TEXT` on the root, judged +9% and so merged before ``c1``."""
+
+    patch = await bench.repo.store_patch(COMPONENT, HEAD_TEXT)
+    pinned = ComponentChange(COMPONENT, UPSTREAM_REF, UPSTREAM_REPO, add_patches=(patch,))
+    delta = RecipeDelta(config=ConfigDelta(server_args=f"{TAG_FLAG}head"), components=(pinned,))
+    return await _committed_elsewhere(bench, delta, 9.0, foundation=foundation)
+
+
+async def test_a_patch_a_foundation_fix_brought_is_never_replaced_by_a_later_merge(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, {frozenset({"head"}): {MAIN_POINT: 1040.0}}, tags=("c1",))
+    fix = await _committed_head_patch(bench, foundation=True)
+
+    merged, conflicted = await _one(bench), await _one(bench)
+
+    assert merged is not None and (merged.candidate, merged.outcome) == (fix, MergeOutcome.MERGED)
+    assert conflicted is not None and conflicted.candidate == bench.commits["c1"]
+    assert conflicted.outcome is MergeOutcome.CONFLICT_SKIPPED and conflicted.reason.startswith(CONFLICT_UNRESOLVED)
+    [(_, prompt)] = bench.completion.calls
+    assert HEAD_TEXT in prompt
+    head = await bench.repo.read_recipe(await bench.repo.head(INTEGRATION_BRANCH))
+    [kept] = head.component(COMPONENT).patches
+    assert await bench.repo.patch_text(merged.merged_commit, kept.path) == HEAD_TEXT
 
 
 async def test_a_merge_the_recipe_contract_refuses_is_skipped_and_the_round_goes_on(tmp_path: Path) -> None:
