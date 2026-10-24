@@ -128,9 +128,28 @@ class TestServeSafeReplacement:
             ],
         )
 
-        ac._cap_splitk_to_serve_safe(art, prof, 2, forwarding_libtypes=frozenset({"asm"}), support_fn=lambda m, n, k: 6)
+        limit = ac._SplitKLimit(2, lambda m, n, k: 6, _Measured(0.0047))
+
+        ac._cap_splitk_to_serve_safe(art, prof, limit, forwarding_libtypes=frozenset({"asm"}))
 
         assert [r["kernelName"] for r in _read(art)] == ["asm_sk6"]
+
+    @pytest.mark.parametrize("measured", [None, _Measured(0.3), _Measured(None)])
+    def test_a_replacement_failing_both_gates_yields_to_the_next_accurate_candidate(self, tmp_path, measured):
+        art = _write(tmp_path / "a.csv", [_row("asm", 8, "0.0", us=10.0, name="asm_sk8")])
+        prof = _write(
+            tmp_path / "p.csv",
+            [
+                _row("asm", 8, "0.0", us=10.0, name="asm_sk8"),
+                _row("asm", 6, "0.5", us=11.0, name="asm_sk6"),
+                _row("asm", 4, "0.0", us=12.0, name="asm_sk4"),
+            ],
+        )
+        limit = ac._SplitKLimit(2, lambda m, n, k: 6, measured)
+
+        ac._cap_splitk_to_serve_safe(art, prof, limit, forwarding_libtypes=frozenset({"asm"}))
+
+        assert [r["kernelName"] for r in _read(art)] == ["asm_sk4"]
 
 
 def _ctx(tmp_path: Path) -> TuneContext:
@@ -153,14 +172,15 @@ def _ctx(tmp_path: Path) -> TuneContext:
     )
 
 
-def _tune(tmp_path: Path, monkeypatch, rel_norm_err: float):
-    """Run the bpreshuffle driver on a tuner run whose only pick is Arbor's asm splitK=6 down_proj row."""
+def _tune(tmp_path: Path, monkeypatch, rel_norm_err: float, *, trial_max: int = 8, profile=None):
+    """Run the bpreshuffle driver on a tuner run whose only pick is Arbor's asm splitK=6 down_proj row by default."""
     monkeypatch.delenv("FORGE_SPLITK_TRIAL", raising=False)
-    monkeypatch.setitem(validate._TRIAL_OPS, _OP, lambda m, n, k, sk, device="cuda": sk <= 8)
+    monkeypatch.setitem(validate._TRIAL_OPS, _OP, lambda m, n, k, sk, device="cuda": sk <= trial_max)
     monkeypatch.setitem(validate._REL_NORM_OPS, _OP, lambda m, n, k, sk, name, device="cuda": rel_norm_err)
     (tmp_path / "in.csv").write_text("M,N,K\n64,5120,17408\n")
-    _write(tmp_path / "tuned_bpre.csv", [_row("asm", 6, "0.0125")])
-    _write(tmp_path / "profile_bpre.csv", [_row("asm", 6, "0.0125")])
+    profile = profile or [_row("asm", 6, "0.0125")]
+    _write(tmp_path / "tuned_bpre.csv", [min(profile, key=lambda r: float(r[_HDR.index("us")]))])
+    _write(tmp_path / "profile_bpre.csv", profile)
     monkeypatch.setattr(ac, "find_tuner_script", lambda key: tmp_path / "script.py")
     monkeypatch.setattr(ac, "_resolve_input_csv", lambda ctx, wd, needs_q_dtype_w=False: tmp_path / "in.csv")
     monkeypatch.setattr(ac, "resolve_aiter_root", lambda: str(tmp_path))
@@ -185,3 +205,17 @@ def test_the_bpreshuffle_tuner_reports_the_norm_of_a_dropped_row(tmp_path, monke
     (dropped,) = result.dropped_inaccurate
     assert (dropped["err_ratio"], dropped["rel_norm_err"]) == (0.0125, 0.02)
     assert _read(Path(result.env_value)) == []
+
+
+def test_an_inaccurate_splitk_replacement_yields_to_the_next_accurate_candidate(tmp_path, monkeypatch):
+    # The deployed asm splitK=8 exceeds the trialled limit of 6; the faster sk6 fails both gates, so sk4 must ship.
+    profile = [
+        _row("asm", 8, "0.0", us=10.0, name="asm_sk8"),
+        _row("asm", 6, "0.5", us=11.0, name="asm_sk6"),
+        _row("asm", 4, "0.0", us=12.0, name="asm_sk4"),
+    ]
+
+    result = _tune(tmp_path, monkeypatch, 0.3, trial_max=6, profile=profile)
+
+    assert result.dropped_inaccurate == []
+    assert [r["kernelName"] for r in _read(Path(result.env_value))] == ["asm_sk4"]
