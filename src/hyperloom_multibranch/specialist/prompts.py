@@ -9,7 +9,8 @@ declares a correctness fix with its repro case, and which gains the toolbox refu
 catalog, so a new row reaches the role). The
 launch prompt opens with the repair a repair branch was opened for, the branch's direction (one the user wrote, or
 the session's) and the startup brief, right after the role, then
-the branch, its head, K and the branch's latest memory, so a new session goes on where the last one stopped. A
+the branch, its head, K and the branch's latest memory, so a new session goes on where the last one stopped; a branch
+log longer than the launch shows is first summed up, what was tried, its results and the latest plan. A
 session whose turn ended is woken by :func:`wake_message`, with what its inbox and the runtime's notices brought, or
 by :func:`nudge_message` when nothing came and it has nothing running. A CLI restarted on its crashed conversation
 is told by :func:`resume_message` why it stopped, where its worktree stands and what arrived while it was down; one
@@ -27,21 +28,29 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
+from hyperloom_multibranch.contracts.branch_log import BranchLogType
 from hyperloom_multibranch.contracts.fork import RepairRequest
 from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord, InboxItem
 from hyperloom_multibranch.rulegate.fix_case import CASE_SCRIPT
 from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name
 from hyperloom_multibranch.specialist.judging import NOTICE
-from hyperloom_multibranch.specialist.runtime import SessionStart
+from hyperloom_multibranch.specialist.runtime import SessionStart, restart_notice
 
 #: Branch-log entries a launch prompt shows; the specialist reads further back with notebook_branch_log.
 RECENT_ENTRIES = 20
 #: Characters of one shown entry; a longer one is cut, its id says where to read it whole.
 ENTRY_CHARS = 400
+#: Entries of each kind the summary of a longer branch log names, and characters of each: the summary opens every
+#: fresh launch, so it stays a few thousand characters however long the branch ran.
+SUMMARY_ENTRIES = 10
+SUMMARY_ENTRY_CHARS = 160
 #: Hex digits of a prompt's sha256 that name its version, as agreed for the manifest fingerprint.
 VERSION_HEX = 12
 
 _BRIEF = "Startup brief:\n{brief}"
+_SUMMARY = "Your branch so far, from its whole log of {count} entries:\n{sections}"
+_SUMMARY_KIND = "{title}, the latest {shown} of {total}:\n{entries}"
+_SUMMARY_NEXT = "Next, by your latest plan:\n{entry}"
 _DIRECTION = """\
 Your branch's direction, to work on first:
 {direction}"""
@@ -98,6 +107,9 @@ _INTEGRATION_STILL = "The integration head is still {now}."
 _IDLE_ARRIVED = "Since your last turn ended, this arrived for your branch:\n{items}"
 _IDLE_NOTHING = "Nothing arrived for your branch since your last turn ended."
 _LAUNCH = (
+    _SUMMARY,
+    _SUMMARY_KIND,
+    _SUMMARY_NEXT,
     _REPAIR,
     _DIRECTION,
     _BRIEF,
@@ -121,6 +133,8 @@ _LAUNCH = (
     _IDLE_NOTHING,
     str(RECENT_ENTRIES),
     str(ENTRY_CHARS),
+    str(SUMMARY_ENTRIES),
+    str(SUMMARY_ENTRY_CHARS),
     *DIRECTIONS,
 )
 
@@ -414,9 +428,14 @@ def _references(references: Mapping[str, Path]) -> str:
 def launch_prompt(
     start: SessionStart, *, head: str, worktree: str, recent: Sequence[BranchLogRecord], last_end: str = ""
 ) -> str:
-    """The first message of one session of the specialist ``start`` runs; ``last_end`` says how the previous one ended."""
+    """The first message of one session of the specialist ``start`` runs; ``last_end`` says how the previous one ended.
+
+    ``recent`` is the whole branch log; one longer than the launch shows is summed up first."""
     task = start.task
-    sections = [_repair(task.repair)] if task.repair is not None else []
+    summary = _summary(recent) if len(recent) > RECENT_ENTRIES else ""
+    sections = [summary] if summary else []
+    if task.repair is not None:
+        sections.append(_repair(task.repair))
     direction = task.direction.strip()
     if direction:
         sections.append(_DIRECTION.format(direction=direction))
@@ -434,6 +453,24 @@ def launch_prompt(
     if last_end:
         sections.append(_ENDED.format(last_end=last_end))
     return "\n\n".join(sections) + "\n"
+
+
+def _summary(log: Sequence[BranchLogRecord]) -> str:
+    """What the branch ``log`` tried, its results and its latest plan, past superseded entries and the runtime's
+    restart notices; ``""`` when it holds none of them."""
+    replaced = {record.entry.supersedes for record in log}
+    live = [r for r in log if r.entry_id not in replaced and not restart_notice(r.entry.content)]
+    sections = []
+    for title, kind in (("Tried", BranchLogType.ATTEMPT), ("Results", BranchLogType.RESULT)):
+        found = [record for record in live if record.entry.kind is kind]
+        shown = found[-SUMMARY_ENTRIES:]
+        if shown:
+            entries = "\n".join(_entry(record, SUMMARY_ENTRY_CHARS) for record in shown)
+            sections.append(_SUMMARY_KIND.format(title=title, shown=len(shown), total=len(found), entries=entries))
+    plans = [record for record in live if record.entry.kind is BranchLogType.PLAN]
+    if plans:
+        sections.append(_SUMMARY_NEXT.format(entry=_entry(plans[-1])))
+    return _SUMMARY.format(count=len(log), sections="\n".join(sections)) if sections else ""
 
 
 def wake_message(items: Sequence[InboxItem], notices: Sequence[BranchLogRecord]) -> str:
@@ -530,18 +567,20 @@ def _repair(request: RepairRequest) -> str:
     )
 
 
-def _entry(record: BranchLogRecord) -> str:
+def _entry(record: BranchLogRecord, chars: int = ENTRY_CHARS) -> str:
     entry = record.entry
     tests = f" ({', '.join(entry.request_ids)})" if entry.request_ids else ""
     content = " ".join(entry.content.split())
-    if len(content) > ENTRY_CHARS:
-        content = content[: ENTRY_CHARS - 3] + "..."
+    if len(content) > chars:
+        content = content[: chars - 3] + "..."
     return _ENTRY.format(entry_id=record.entry_id, kind=entry.kind.value, tests=tests, content=content)
 
 
 __all__ = [
     "ENTRY_CHARS",
     "RECENT_ENTRIES",
+    "SUMMARY_ENTRIES",
+    "SUMMARY_ENTRY_CHARS",
     "VERSION_HEX",
     "IntegrationHeads",
     "Resume",

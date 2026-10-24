@@ -21,11 +21,14 @@ from hyperloom_multibranch.specialist.exhausted import EXHAUSTED_PREFIX, Exhaust
 from hyperloom_multibranch.specialist.prompts import (
     ENTRY_CHARS,
     RECENT_ENTRIES,
+    SUMMARY_ENTRIES,
+    SUMMARY_ENTRY_CHARS,
     VERSION_HEX,
     launch_prompt,
     prompt_versions,
     role_prompt,
 )
+from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionStart
 from hyperloom_multibranch.notebook.rsi.briefing import ON_HEAD
 from hyperloom_multibranch.notebook.tools import FOCUS_LINE, UNFINISHED_TITLE
@@ -488,7 +491,7 @@ def test_a_launch_shows_the_latest_entries_cut_to_size_and_how_the_last_session_
 
     prompt = _launch(recent=entries, last_end="the agent CLI exited 1")
 
-    assert prompt.startswith("Your branch: s1,")
+    assert prompt.split("\n\n")[1].startswith("Your branch: s1,")
     assert "[e4] result: entry 4" not in prompt and "[e5] result: entry 5" in prompt
     assert f"[e99] result (s1-17): {'x' * (ENTRY_CHARS - 3)}...\n" in prompt
     assert "Your previous session ended: the agent CLI exited 1." in prompt
@@ -660,3 +663,45 @@ def test_the_role_checks_the_head_for_a_lead_s_change_before_replaying_it():
 
 def test_the_gemm_direction_checks_a_peer_s_report_that_a_kernel_family_is_missing():
     assert "A peer's report that a kernel family is missing from the image closes nothing" in DIRECTIONS[1]
+
+
+def _logged(entry_id: str, kind: BranchLogType, content: str, supersedes: str | None = None) -> BranchLogRecord:
+    return BranchLogRecord(entry_id, 0.0, BranchLogEntry("s1", kind, content, (f"r-{entry_id}",), supersedes))
+
+
+def test_a_launch_on_a_log_longer_than_it_shows_opens_with_a_summary_of_the_whole_log():
+    tried = [_logged(f"a{n}", BranchLogType.ATTEMPT, f"tried change {n}") for n in range(SUMMARY_ENTRIES + 5)]
+    replaced = _logged("a99", BranchLogType.ATTEMPT, "tried change 14 again, measured right", supersedes="a14")
+    results = [_logged(f"o{n}", BranchLogType.RESULT, f"change {n} flat") for n in range(SUMMARY_ENTRIES)]
+    gate = _logged("g1", BranchLogType.RESULT, f"{NOTICE} r-a3 measured +2.1%: kept")
+    restart = _logged(
+        "n1", BranchLogType.RESULT, f"{NOTICE} the specialist crashed (RuntimeError('x')) and is restarted"
+    )
+    long = _logged("o99", BranchLogType.RESULT, "y" * 1000)
+    plans = [_logged("p1", BranchLogType.PLAN, "profile the head"), _logged("p2", BranchLogType.PLAN, "fuse rmsnorm")]
+    log = [*tried, *plans, *results, gate, restart, replaced, long]
+
+    prompt = _launch(direction="fusions", recent=log)
+
+    summary, direction = prompt.split("\n\n")[:2]
+    assert summary.startswith(f"Your branch so far, from its whole log of {len(log)} entries:")
+    assert direction.startswith("Your branch's direction")
+    assert "Next, by your latest plan:\n- [p2] plan (r-p2): fuse rmsnorm" in summary and "[p1]" not in summary
+    assert f"Tried, the latest {SUMMARY_ENTRIES} of {SUMMARY_ENTRIES + 5}:" in summary
+    assert "[a99] attempt" in summary and "[a14]" not in summary and "[a4]" not in summary and "[a5]" in summary
+    assert f"Results, the latest {SUMMARY_ENTRIES} of {SUMMARY_ENTRIES + 2}:" in summary
+    assert "[g1] result" in summary and "[n1]" not in summary and "[o1]" not in summary
+    assert f"[o99] result (r-o99): {'y' * (SUMMARY_ENTRY_CHARS - 3)}...\n" in summary
+
+
+def test_the_summary_of_a_log_stays_bounded_however_long_its_entries_and_a_short_log_has_none():
+    kinds = (BranchLogType.ATTEMPT, BranchLogType.RESULT, BranchLogType.PLAN, BranchLogType.HYPOTHESIS)
+    log = [_logged(f"e{n}", kinds[n % 4], "z" * 5000) for n in range(400)]
+
+    summary = _launch(recent=log).split("\n\n")[0]
+    short = _launch(recent=[_record(n) for n in range(RECENT_ENTRIES)])
+
+    assert summary.startswith("Your branch so far")
+    bound = 2 * SUMMARY_ENTRIES * (SUMMARY_ENTRY_CHARS + 40) + ENTRY_CHARS + 200
+    assert len(summary) <= bound and "[e398] hypothesis" not in summary
+    assert "Your branch so far" not in short
