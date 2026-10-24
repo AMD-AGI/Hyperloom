@@ -3858,14 +3858,16 @@ class KernelPhase(CoordinatorCollaborator):
                 "skipped_count": 0,
             }
             return
-        from ..kernel.controller_patch_integration import integrate_controller_patches
+        from ..kernel.controller_patch_integration import KeepSession, integrate_controller_patches
 
         try:
             integration = await integrate_controller_patches(
                 patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
-                session_dir=self.session_dir,
-                shared_state=self.shared_state,
-                record_keep=self._coord.writeback.record_integrate_keep,
+                session=KeepSession(
+                    session_dir=self.session_dir,
+                    shared_state=self.shared_state,
+                    record_keep=self._coord.writeback.record_integrate_keep,
+                ),
                 admit_round=lambda rounds_run: controller_round_stop(self.shared_state, rounds_run),
             )
             result["integration"] = integration.to_dict()

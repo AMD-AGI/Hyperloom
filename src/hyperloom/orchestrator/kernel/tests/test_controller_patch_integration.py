@@ -20,6 +20,7 @@ from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.actions.executors._patch_snapshot import _git_commit_kept
 from hyperloom.orchestrator.kernel import controller_patch_integration as integration
 from hyperloom.orchestrator.kernel.controller_patch_integration import (
+    KeepSession,
     integrate_controller_patches,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -213,9 +214,11 @@ async def _integrate(
     coordinator.shared_state = shared_state
     return await integrate_controller_patches(
         patches_root=patches_root,
-        session_dir=session_dir,
-        shared_state=shared_state,
-        record_keep=coordinator.writeback.record_integrate_keep,
+        session=KeepSession(
+            session_dir=session_dir,
+            shared_state=shared_state,
+            record_keep=coordinator.writeback.record_integrate_keep,
+        ),
         validator=validator,
         **options,
     )
@@ -1245,7 +1248,7 @@ async def test_controller_entry_uses_session_writeback_for_every_mode(tmp_path, 
     callbacks = []
 
     async def capture_callback(**kwargs):
-        callbacks.append(kwargs["record_keep"])
+        callbacks.append(kwargs["session"].record_keep)
         return integration.ControllerIntegrationSummary("completed", (), 0, 0, 0, "")
 
     monkeypatch.setattr(integration, "integrate_controller_patches", capture_callback)
@@ -1322,9 +1325,11 @@ async def test_synthetic_controller_keep_updates_state_and_stack_ledger(tmp_path
 
         summary = await integrate_controller_patches(
             patches_root=patches,
-            session_dir=session_dir,
-            shared_state=state,
-            record_keep=coordinator.writeback.record_integrate_keep,
+            session=KeepSession(
+                session_dir=session_dir,
+                shared_state=state,
+                record_keep=coordinator.writeback.record_integrate_keep,
+            ),
             validator=_validate,
         )
         ledger, _status = stack_event.assemble_stack_ext(
