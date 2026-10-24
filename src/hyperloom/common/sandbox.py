@@ -181,6 +181,10 @@ def package_root() -> Path | None:
     process silently imports a *different* Hyperloom -- whichever one the venv
     happens to contain -- or none at all. Silently running other code than the
     caller's is worse than failing, so the importing tree travels with it.
+
+    For a checkout (``src/`` layout next to ``pyproject.toml``) that is the whole
+    checkout: ``install.sh`` clones TraceLens, GEAK, InferenceX and Magpie into
+    its ``.cache/`` and points the run at them.
     """
     import hyperloom
 
@@ -188,6 +192,8 @@ def package_root() -> Path | None:
     if not origin:
         return None
     root = Path(origin).resolve().parent.parent
+    if root.name == "src" and (root.parent / "pyproject.toml").is_file():
+        root = root.parent
     venv = Path(sys.prefix)
     if _is_within(root, venv) or any(_is_within(root, Path(r)) for r in _SYSTEM_ROOTS):
         return None

@@ -470,3 +470,20 @@ def test_reexec_binds_the_command_roots_and_publishes_them(monkeypatch, tmp_path
     assert out.is_dir(), "a missing output root is created so the bind and its verification succeed"
     assert writable_roots_from_env() == (out,)
     assert readonly_roots_from_env() == (tmp_path / "operator", model)
+
+
+def test_package_root_is_the_whole_checkout_for_a_src_layout(monkeypatch, tmp_path):
+    """install.sh clones the run's tools into <checkout>/.cache, so the checkout travels, not just src/."""
+    checkout = tmp_path / "Hyperloom"
+    pkg = checkout / "src" / "hyperloom"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (checkout / "pyproject.toml").write_text("")
+    monkeypatch.setattr("hyperloom.common.sandbox.sys.prefix", str(tmp_path / "venv"))
+
+    import hyperloom
+
+    monkeypatch.setattr(hyperloom, "__file__", str(pkg / "__init__.py"))
+    from hyperloom.common.sandbox import package_root
+
+    assert package_root() == checkout
