@@ -360,8 +360,11 @@ class KernelPhase(CoordinatorCollaborator):
         return identity(recorded) != identity(self.shared_state.profile_workload_context())
 
     async def _maybe_reprofile_for_kernel(self) -> None:
-        """Reprofile inline when projected tput diverges from the last measured trace, so the phase targets the live bottleneck."""
-        before = self._last_measured_roofline_tput()
+        """Reprofile inline when the validated stack moved since the last trace, so the phase targets the live bottleneck.
+
+        Compares the projection with the anchor the watermark keeps in it, never with a snapshot's measured tok/s:
+        under AgentX the validated gain is the latency objective's, and the two never meet."""
+        before = float(self.shared_state.last_roofline_tput or 0.0)
         cur = self.current_tput_from_validated_gain()
         profile_signature = self._current_profile_config_signature()
         config_changed = self._profile_config_changed(profile_signature)
@@ -434,14 +437,11 @@ class KernelPhase(CoordinatorCollaborator):
             )
             return
         # Advance the anchor only when a new snapshot actually landed.
-        after = self._last_measured_roofline_tput()
         snapshots_after = len(self.shared_state.roofline_snapshots or [])
         snapshot_id_after = int(self.shared_state.roofline_snapshot_id or 0)
-        snapshot_landed = (
-            after != before or snapshots_after != snapshots_before or snapshot_id_after != snapshot_id_before
-        )
-        if after > 0 and snapshot_landed:
-            self.shared_state.last_roofline_tput = after
+        snapshot_landed = snapshots_after != snapshots_before or snapshot_id_after != snapshot_id_before
+        if snapshot_landed:
+            self.shared_state.last_roofline_tput = cur
             # Record the workload (incl. serving_config) that this trace reflects; _profile_config_changed derives the
             # config signature from it, so last_profile_args stays the plain-args field it is everywhere else.
             self.shared_state.last_profile_workload = self.shared_state.profile_workload_context()
@@ -4138,20 +4138,6 @@ class KernelPhase(CoordinatorCollaborator):
         except (TypeError, ValueError):
             gain = 0.0
         return base * (1.0 + gain / 100.0)
-
-    def _last_measured_roofline_tput(self) -> float:
-        """Measured tok/s of the most recent roofline snapshot; 0.0 when none."""
-        snaps = self.shared_state.roofline_snapshots or []
-        for snap in reversed(snaps):
-            if not isinstance(snap, dict):
-                continue
-            try:
-                tput = float(snap.get("achieved_tok_per_sec") or 0.0)
-            except (TypeError, ValueError):
-                tput = 0.0
-            if tput > 0:
-                return tput
-        return 0.0
 
     def _needs_roofline_for_watermark(self) -> bool:
         """True iff projected tput crossed the watermark over ``last_roofline_tput`` (False until PRELUDE roofline ran, or while auto_roofline_pending_task_id is in-flight)."""
