@@ -569,6 +569,8 @@ def run(args: argparse.Namespace, outcome: Outcome) -> int:
         outcome.touched = checks.touched_files(root, since)
     compare(findings, outcome.baseline, outcome)
     if since:
+        # PER_FILE only, in all three directions: base_values measures files, and the path of a
+        # directory-entries finding is a directory.
         paths = {f.path for f in outcome.new if f.metric in PER_FILE}
         paths |= {f.path for f, _ in outcome.worsened if f.metric in PER_FILE}
         paths |= {key[1] for key, _was, _now in outcome.stale if key[0] in PER_FILE}
