@@ -43,6 +43,9 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_WARMUP,
     RUN_AFTER_MOE_RUNNER_FAILURE,
     RUN_INITIAL,
+    BaselineInvocation,
+    BaselineRequest,
+    BaselineRound,
     make_baseline_recorder,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
@@ -2311,12 +2314,14 @@ class BenchmarkRunExecutor:
         if recorder is not None:
             recorder.record_invocation(
                 run_index=run_index,
-                framework_args=server_args,
-                extra_envs=base_extra_envs,
-                config_path=config_path,
-                framework=fw,
-                model_path=resolved_model,
-                args_mode=str(params.get("args_mode") or "append"),
+                invocation=BaselineInvocation(
+                    framework_args=server_args,
+                    extra_envs=base_extra_envs,
+                    config_path=config_path,
+                    framework=fw,
+                    model_path=resolved_model,
+                    args_mode=str(params.get("args_mode") or "append"),
+                ),
             )
         return await self._run_attempt_rounds(
             {
@@ -2978,11 +2983,13 @@ class BenchmarkRunExecutor:
                 return
             recorder.record_round(
                 run_index=common["run_index"],
-                label=label,
-                started_at=started_at,
-                duration_sec=round(time.monotonic() - started_monotonic, 3),
-                timeout_sec=common.get("timeout_sec"),
-                result=result,
+                round_=BaselineRound(
+                    label=label,
+                    started_at=started_at,
+                    duration_sec=round(time.monotonic() - started_monotonic, 3),
+                    timeout_sec=common.get("timeout_sec"),
+                    result=result,
+                ),
             )
 
         benchmark_kwargs = {key: value for key, value in common.items() if key not in _ROUND_RECORDING_KEYS}
@@ -3957,14 +3964,16 @@ class BaselineExecutor(BenchmarkRunExecutor):
         streak, total = self._failure_counters(ctx)
         recorder = make_baseline_recorder(
             self._resolve_sink(ctx),
-            task_id=str(getattr(ctx.task, "task_id", "") or ""),
-            task_kind=str(getattr(ctx.task, "kind", "") or ""),
-            reason=str(params.get("reason") or ""),
-            framework=self._resolve_framework(ctx),
-            establishes_quality_ref=_should_establish_quality_ref(getattr(ctx.task, "kind", ""), params),
-            params=params,
-            failure_streak_before=streak,
-            total_failures_before=total,
+            BaselineRequest(
+                task_id=str(getattr(ctx.task, "task_id", "") or ""),
+                task_kind=str(getattr(ctx.task, "kind", "") or ""),
+                reason=str(params.get("reason") or ""),
+                framework=self._resolve_framework(ctx),
+                establishes_quality_ref=_should_establish_quality_ref(getattr(ctx.task, "kind", ""), params),
+                params=params,
+                failure_streak_before=streak,
+                total_failures_before=total,
+            ),
             owns_event=not str(params.get(INLINE_EVENT_PARAM) or ""),
         )
         try:

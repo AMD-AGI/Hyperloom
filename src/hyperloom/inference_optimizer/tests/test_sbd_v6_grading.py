@@ -31,6 +31,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, rec
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     PRODUCER as BASELINE_PRODUCER,
+    BaselineRequest,
     baseline_event_id,
     make_baseline_recorder,
 )
@@ -381,12 +382,14 @@ def _record_baseline(**axes: Any) -> None:
     """Record an anchoring baseline the way a dispatched measurement does."""
     recorder = make_baseline_recorder(
         make_sink(baseline_event_id("prelude", 0), producer=BASELINE_PRODUCER),
-        task_id="t-1",
-        task_kind="baseline",
-        reason="",
-        framework="sglang",
-        establishes_quality_ref=True,
-        params={"config_path": "/cfg.yaml", "output_dir": "/w", "timeout_sec": 7800},
+        BaselineRequest(
+            task_id="t-1",
+            task_kind="baseline",
+            reason="",
+            framework="sglang",
+            establishes_quality_ref=True,
+            params={"config_path": "/cfg.yaml", "output_dir": "/w", "timeout_sec": 7800},
+        ),
     )
     assert recorder is not None
     recorder.finish({"status": "succeeded", "output_throughput": 183.0, **axes})
