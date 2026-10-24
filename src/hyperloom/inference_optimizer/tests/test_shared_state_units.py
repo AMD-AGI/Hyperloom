@@ -332,40 +332,40 @@ class TestPolicyDenialAndPruned:
 
     def test_record_policy_denial_tracks_streak(self):
         s = SharedState()
+        s.tick = 1
         first = s.record_policy_denial(
             action_name="kernel_opt",
             rule="cooldown",
             hint="hint",
             intent_type="propose_action",
-            tick=1,
         )
+        s.tick = 2
         second = s.record_policy_denial(
             action_name="kernel_opt",
             rule="cooldown",
             hint="hint",
             intent_type="propose_action",
-            tick=2,
         )
         assert first == 1 and second == 2
         # Resetting drops the matching streak rows.
         s.reset_policy_denial_streak("kernel_opt")
+        s.tick = 3
         again = s.record_policy_denial(
             action_name="kernel_opt",
             rule="cooldown",
             hint="hint",
             intent_type="propose_action",
-            tick=3,
         )
         assert again == 1
 
     def test_record_policy_denial_keeps_intent_keys_when_present(self):
         s = SharedState()
+        s.tick = 1
         s.record_policy_denial(
             action_name="profile",
             rule="missing-prereq",
             hint="needs baseline",
             intent_type="propose_action",
-            tick=1,
             intent_payload={"action": "profile", "params": {}},
         )
         assert s.policy_denial_history[-1]["intent_payload_keys"] == ["action", "params"]
@@ -379,12 +379,12 @@ class TestPolicyDenialAndPruned:
     def test_policy_denial_history_caps_to_50(self):
         s = SharedState()
         for tick in range(60):
+            s.tick = tick
             s.record_policy_denial(
                 action_name="x",
                 rule="r",
                 hint="h",
                 intent_type="propose_action",
-                tick=tick,
             )
         assert len(s.policy_denial_history) == 50
 
@@ -394,12 +394,12 @@ class TestPolicyDenialAndPruned:
     def test_policy_denial_summary_includes_recent_rows(self):
         s = SharedState()
         for tick in range(4):
+            s.tick = tick
             s.record_policy_denial(
                 action_name=f"a{tick}",
                 rule="rule",
                 hint=f"hint-{tick}",
                 intent_type="propose_action",
-                tick=tick,
             )
         summary = s.to_policy_denial_summary(top_k=2)
         assert "a2" in summary

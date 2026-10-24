@@ -1321,10 +1321,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         rule: str,
         hint: str,
         intent_type: str,
-        tick: int,
         intent_payload: dict[str, Any] | None = None,
     ) -> int:
-        """Append a PolicyGate denial row and bump the per-(action, rule) streak.
+        """Append a PolicyGate denial row, stamped with the current tick, and bump the per-(action, rule) streak.
 
         Records a capped rolling history entry and increments the
         consecutive-denial counter keyed by ``"<action_name>:<rule>"``.
@@ -1335,7 +1334,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             rule (str): The PolicyGate rule id that fired.
             hint (str): Human-readable remediation hint surfaced to the LLM.
             intent_type (str): The denied intent's type.
-            tick (int): The Coordinator tick at which the denial occurred.
             intent_payload (dict[str, Any] | None): Optional intent payload;
                 when present, its sorted keys are recorded for context.
 
@@ -1347,7 +1345,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         streak = int(self.policy_denial_streak.get(key, 0)) + 1
         self.policy_denial_streak[key] = streak
         entry = {
-            "tick": int(tick),
+            "tick": int(self.tick or 0),
             "action_name": action_name or "",
             "rule": rule,
             "hint": hint or "",

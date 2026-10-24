@@ -1397,7 +1397,6 @@ class IntentRouter(CoordinatorCollaborator):
             rule=str(denied.rule or ""),
             hint=str(denied.hint or ""),
             intent_type=intent.type.value,
-            tick=int(self.shared_state.tick or 0),
             intent_payload=intent.payload,
         )
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event
