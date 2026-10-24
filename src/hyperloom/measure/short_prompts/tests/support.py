@@ -57,7 +57,28 @@ class _Http(ThreadingHTTPServer):
         return
 
 
-class FakeServer:
+class LocalServer:
+    """A threaded HTTP server on a free local port with ``handler`` as its request handler, started by ``with``."""
+
+    def __init__(self, handler: type[BaseHTTPRequestHandler], port: int = 0) -> None:
+        self._http = _Http(("127.0.0.1", port), handler)
+        self._thread = threading.Thread(target=self._http.serve_forever, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self._http.server_address[1]}"
+
+    def __enter__(self) -> LocalServer:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._http.shutdown()
+        self._http.server_close()
+        self._thread.join(timeout=5)
+
+
+class FakeServer(LocalServer):
     """A completions server on a free local port; ``answer`` decides what it says to a prompt."""
 
     def __init__(
@@ -96,21 +117,7 @@ class FakeServer:
                     choice["logprobs"] = {"tokens": tokens}
                 self._reply({"choices": [choice]})
 
-        self._http = _Http(("127.0.0.1", port), Handler)
-        self._thread = threading.Thread(target=self._http.serve_forever, daemon=True)
-
-    @property
-    def base_url(self) -> str:
-        return f"http://127.0.0.1:{self._http.server_address[1]}"
-
-    def __enter__(self) -> FakeServer:
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self._http.shutdown()
-        self._http.server_close()
-        self._thread.join(timeout=5)
+        super().__init__(Handler, port)
 
 
 def free_port() -> int:

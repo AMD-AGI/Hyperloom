@@ -11,7 +11,6 @@ not by a runner after a candidate's rounds.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 
 from hyperloom.measure.docs import DocumentError
@@ -19,17 +18,16 @@ from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.short_prompts.prompts import PromptSetError
 from hyperloom.measure.short_prompts.staging import (
     EVALSETS_DIR,
-    MANIFEST_NAME,
     StagedEntry,
     cache_root,
     load_prompt_set,
+    recorded_sha256,
 )
 
 __all__ = ["staged_entry", "verified_entry"]
 
 #: A well-formed hash that names nothing: it lets a key be checked as a name before the entry's own hash is read.
 _ANY_SHA256 = "0" * 64
-_UTF8 = "utf-8"
 
 
 def _plan(key: str, sha256: object) -> ShortPromptPlan:
@@ -63,11 +61,4 @@ def staged_entry(key: str, environ: Mapping[str, str]) -> StagedEntry:
         PromptSetError: As :func:`verified_entry`, and no readable manifest.
     """
     _plan(key, _ANY_SHA256)
-    entry = cache_root(environ) / EVALSETS_DIR / key
-    try:
-        recorded = json.loads((entry / MANIFEST_NAME).read_text(encoding=_UTF8))["prompts"]["sha256"]
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise PromptSetError(
-            f"the entry {entry} has no readable manifest ({type(exc).__name__}): not staged, or unfinished"
-        ) from exc
-    return verified_entry(key, recorded, environ)
+    return verified_entry(key, recorded_sha256(cache_root(environ) / EVALSETS_DIR / key), environ)

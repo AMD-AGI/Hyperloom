@@ -16,6 +16,9 @@ The short-prompt consistency check is off the same way: ``LocalOptions.short_pro
 ``HYPERLOOM_SHORT_PROMPTS`` in the host environment when the option is not given. The set is read in the runner cache of
 this host (``HYPERLOOM_RUNNER_CACHE``, where ``python -m hyperloom.measure.short_prompts.build`` staged it) before the
 toolbox is built, and the runners are told that directory; one that is not staged there refuses the build.
+
+The long-context check is off the same way: ``LocalOptions.long_context``, or the key named by ``HYPERLOOM_LONG_CONTEXT``
+(staged by ``python -m hyperloom.measure.long_context.build``). It runs for the requests that set ``long_context_check``.
 """
 
 from __future__ import annotations
@@ -59,9 +62,11 @@ from hyperloom_multibranch.toolbox.leased_toolbox import (
     session_stores,
     session_tools,
     started_backend,
+    with_long_context,
     with_short_prompts,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
+from hyperloom_multibranch.toolbox.long_context import LongContextSetup, staged_long_context
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, staged_short_prompts
 from hyperloom_multibranch.toolbox.tools import (
     AsyncTool,
@@ -242,6 +247,8 @@ class LocalOptions:
     check runs. It is read in this host's runner cache (``HYPERLOOM_RUNNER_CACHE``, ``/runner-cache`` when unset) and
     the build refuses one that is not staged there; the runners read the same directory (``HYPERLOOM_RUNNER_CACHE`` in
     their template, which therefore wins over the same name in ``runner_envs``), the branches' sandboxes are not told.
+    ``long_context`` is the staged prompt set of the long-context check, named and read the same way (``None`` takes the
+    key in ``HYPERLOOM_LONG_CONTEXT``); a request that sets ``long_context_check`` runs the check with it.
     """
 
     policy: QueuePolicy | None = None
@@ -257,6 +264,7 @@ class LocalOptions:
     card_guard: CardGuard | None = None
     card_holders: Callable[[Sequence[int]], CardReading] = read_holders
     short_prompts: ShortPromptSetup | None = None
+    long_context: LongContextSetup | None = None
 
 
 def card_guard_of(options: LocalOptions, environ: Mapping[str, str] | None = None) -> CardGuard:
@@ -287,14 +295,13 @@ def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTempl
     return replace(template, envs={**template.envs, **pack})
 
 
-def _shared_dirs(
-    jit_store: Path | None, short_prompts: ShortPromptSetup | None, environ: Mapping[str, str]
-) -> dict[str, str]:
+def _shared_dirs(jit_store: Path | None, eval_sets: bool, environ: Mapping[str, str]) -> dict[str, str]:
     """The host directories the runners are told, by the variable each reads, for the shared stores that are on: the
-    compiled-code cache, and the runner cache the short-prompt set is read from (made absolute: a runner starts elsewhere)."""
+    compiled-code cache, and the runner cache the check sets are read from when a check is on (made absolute: a runner
+    starts elsewhere)."""
     named = {
         JIT_CACHE_ENV: jit_store,
-        RUNNER_CACHE_ENV: None if short_prompts is None else cache_root(environ).expanduser().resolve(),
+        RUNNER_CACHE_ENV: cache_root(environ).expanduser().resolve() if eval_sets else None,
     }
     return {name: str(path) for name, path in named.items() if path is not None}
 
@@ -347,7 +354,12 @@ def _acceptance_with_prompts(
         ValueError: The options and the acceptance setup name different sets.
     """
     named = with_short_prompts(acceptance, options.short_prompts).short_prompts
-    return replace(acceptance, short_prompts=staged_short_prompts(named, environ))
+    long_named = with_long_context(acceptance, options.long_context).long_context
+    return replace(
+        acceptance,
+        short_prompts=staged_short_prompts(named, environ),
+        long_context=staged_long_context(long_named, environ),
+    )
 
 
 def build_local_toolbox(
@@ -373,7 +385,8 @@ def build_local_toolbox(
     Raises:
         ShortPromptsNotStaged: The short-prompt check is asked for (the option or ``HYPERLOOM_SHORT_PROMPTS``) and its
             set is not staged in this host's runner cache; nothing has been started.
-        ValueError: The options and the acceptance setup name different short-prompt sets.
+        LongContextNotStaged: The same for the long-context check (the option or ``HYPERLOOM_LONG_CONTEXT``).
+        ValueError: The options and the acceptance setup name different short-prompt or long-context sets.
     """
 
     directory, cards, tp = Path(session.session_dir), tuple(session.cards), session.tp
@@ -392,7 +405,8 @@ def build_local_toolbox(
         jit_store=None if jit_root is None else DirJitStore(jit_root),
     )
     template = _runner_template(session, options)
-    shared_dirs = _shared_dirs(jit_root, acceptance.short_prompts, os.environ)
+    eval_sets = acceptance.short_prompts is not None or acceptance.long_context is not None
+    shared_dirs = _shared_dirs(jit_root, eval_sets, os.environ)
     provider = _provider(session, cards, template, options, shared_dirs)
     backend = started_backend(provider, config)
     leases = BranchLeases(provider, directory / _BRANCH_SANDBOXES, tp, template.envs)

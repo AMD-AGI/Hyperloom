@@ -383,6 +383,8 @@ def _procedure_section(call: TestCall, ctx: SpecContext, deadline_unix: float) -
     }
     if call.short_prompts is not None:
         section["short_prompts"] = call.short_prompts.to_document()
+    if call.long_context is not None:
+        section["long_context"] = call.long_context.to_document()
     return section
 
 

@@ -326,3 +326,68 @@ def test_the_fingerprint_changes_with_the_short_prompt_plan_because_the_measurem
     base = _fp(spec_document())
 
     assert _fp(_edit(lambda d: d["procedure"].update(short_prompts=_short_prompts()))) != base
+
+
+def _long_context(**changes: Any) -> dict[str, Any]:
+    plan = {
+        "prompt_set": "long-context-0123456789abcdef",
+        "prompts_sha256": "a" * 64,
+        "length": 131072,
+        "max_new_tokens": 128,
+        "concurrency": 4,
+        "phase_cap_sec": 2400.0,
+        "trigger": ["request long_context_check"],
+    }
+    return {**plan, **changes}
+
+
+def test_a_sheet_that_asks_for_the_long_context_check_carries_the_plan_and_the_schema_allows_it() -> None:
+    document = _edit(lambda d: d["procedure"].update(long_context=_long_context()))
+
+    spec = MeasurementSpec.from_document(document)
+
+    assert spec.procedure.long_context is not None and spec.procedure.long_context.length == 131072
+    assert spec.procedure.short_prompts is None
+    assert list(VALIDATOR.iter_errors(document)) == []
+    assert MeasurementSpec.from_bytes(spec.to_bytes()) == spec
+
+
+def test_a_sheet_that_asks_for_no_long_context_check_has_no_such_key_so_its_bytes_and_hash_are_unchanged() -> None:
+    spec = MeasurementSpec.from_document(spec_document())
+
+    assert spec.procedure.long_context is None and "long_context" not in spec.to_document()["procedure"]
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"length": 10}, "must be at least 1024"),
+        ({"max_new_tokens": 0}, "must be at least 1"),
+        ({"concurrency": 0}, "must be at least 1"),
+        ({"prompts_sha256": "nope"}, "does not match"),
+        ({"prompt_set": "Bad Key"}, "does not match"),
+        ({"phase_cap_sec": "slow"}, "expected a number"),
+        ({"trigger": [""]}, "non-empty string"),
+        ({"extra": 1}, "unknown key 'extra'"),
+    ],
+)
+def test_a_long_context_plan_that_breaks_its_contract_is_refused_by_the_reader_and_the_schema(change, message) -> None:
+    document = _edit(lambda d: d["procedure"].update(long_context=_long_context(**change)))
+
+    with pytest.raises(DocumentError, match=message):
+        MeasurementSpec.from_document(document)
+    assert list(VALIDATOR.iter_errors(document)) != []
+
+
+def test_a_max_new_tokens_beyond_what_the_headroom_covers_is_refused_by_the_schema_too() -> None:
+    document = _edit(lambda d: d["procedure"].update(long_context=_long_context(max_new_tokens=129)))
+
+    assert list(VALIDATOR.iter_errors(document)) != []
+    with pytest.raises(DocumentError, match="max_new_tokens must be 1 to 128"):
+        MeasurementSpec.from_document(document)
+
+
+def test_the_fingerprint_changes_with_the_long_context_plan_because_the_measurement_then_is_another() -> None:
+    base = _fp(spec_document())
+
+    assert _fp(_edit(lambda d: d["procedure"].update(long_context=_long_context()))) != base

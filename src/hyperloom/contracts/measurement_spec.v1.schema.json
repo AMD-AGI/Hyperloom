@@ -558,6 +558,58 @@
               "pattern": "^sha256:[0-9a-f]{64}$"
             }
           }
+        },
+        "long_context": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The long-context check the runner runs after the test's rounds: a fresh server of the test's own launch answers a staged set of long synthetic prompts greedily. Absent when the test runs none.",
+          "required": [
+            "prompt_set",
+            "prompts_sha256",
+            "length",
+            "max_new_tokens",
+            "concurrency",
+            "phase_cap_sec",
+            "trigger"
+          ],
+          "properties": {
+            "prompt_set": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+            },
+            "prompts_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "length": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 2097152
+            },
+            "max_new_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 128
+            },
+            "concurrency": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64
+            },
+            "phase_cap_sec": {
+              "type": "number",
+              "minimum": 1
+            },
+            "trigger": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            }
+          }
         }
       }
     },

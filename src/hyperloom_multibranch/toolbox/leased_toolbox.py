@@ -23,6 +23,7 @@ from hyperloom.sandbox.socket import SandboxProvider
 from hyperloom_multibranch.contracts.toolbox import BranchLease, MeasurementCapacity
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
+from hyperloom_multibranch.toolbox.long_context import LongContextSetup
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
 from hyperloom_multibranch.toolbox.tools import AsyncTool, ToolJobs
@@ -36,6 +37,7 @@ __all__ = [
     "session_stores",
     "session_tools",
     "started_backend",
+    "with_long_context",
     "with_short_prompts",
 ]
 
@@ -124,6 +126,23 @@ def with_short_prompts(acceptance: AcceptanceSetup, setup: ShortPromptSetup | No
             f"{held.prompt_set}: name it once"
         )
     return replace(acceptance, short_prompts=setup)
+
+
+def with_long_context(acceptance: AcceptanceSetup, setup: LongContextSetup | None) -> AcceptanceSetup:
+    """``acceptance`` that runs the long-context check with ``setup``, a builder's option; unchanged when it names none.
+
+    Raises:
+        ValueError: ``acceptance`` already names another prompt set: the set is named once.
+    """
+    held = acceptance.long_context
+    if setup is None or setup == held:
+        return acceptance
+    if held is not None:
+        raise ValueError(
+            f"the options name the long-context set {setup.prompt_set} and the acceptance setup already names "
+            f"{held.prompt_set}: name it once"
+        )
+    return replace(acceptance, long_context=setup)
 
 
 def started_backend(provider: SandboxProvider, config: HostedConfig) -> HostedMeasurementBackend:

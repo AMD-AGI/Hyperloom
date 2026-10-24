@@ -78,6 +78,7 @@ from hyperloom_multibranch.toolbox.reverify import (
     first_value_difference,
     first_warning_difference,
 )
+from hyperloom_multibranch.toolbox import long_context
 from hyperloom_multibranch.toolbox.short_prompts import ReferenceStore, consistency_of, record_reference, rederive
 from hyperloom_multibranch.toolbox.table_hits import read_table_hits, runtime_findings
 
@@ -159,6 +160,7 @@ class HostedExecutor:
         result = self._result(request, accepted, call, outcome, _Span(started, self._clock()))
         result = await self._with_table_hits(result, accepted, call)
         result = await self._with_short_prompts(result, accepted, call)
+        result = await self._with_long_context(result, accepted, call)
         return await self._with_request_classes(result, request, outcome, call)
 
     def withdraw(self, request_id: str) -> None:
@@ -183,6 +185,7 @@ class HostedExecutor:
                 _unlike_bundle(result, derived, landed)
                 or _unlike_classes(result, derived, landed)
                 or _unlike_consistency(result, landed)
+                or _unlike_long_context(result, landed)
             )
 
     async def reverify(self, result: TestResult) -> None:
@@ -237,6 +240,7 @@ class HostedExecutor:
             avoid_nodes=tuple(job.avoid_nodes),
             attachments=request.attachments if request.kind is TestKind.REPRO else (),
             short_prompts=accepted.short_prompts,
+            long_context=accepted.long_context,
         )
 
     # -- the outcome -----------------------------------------------------------------------------------------------
@@ -313,6 +317,15 @@ class HostedExecutor:
             record_reference, plan, check, Path(call.output_dir), self._references, result.request_id
         )
         return replace(result, short_prompt_consistency=check)
+
+    async def _with_long_context(self, result: TestResult, accepted: AcceptedMeasurement, call: TestCall) -> TestResult:
+        """``result`` with the long-context check the test ran, read from its landed outputs; a test that asked for none, or
+        did not succeed, carries none."""
+        plan = accepted.long_context
+        if plan is None or result.validity is not Validity.SUCCEEDED:
+            return result
+        check = await asyncio.to_thread(long_context.long_context_of, plan, Path(call.output_dir))
+        return replace(result, long_context=check)
 
     async def _with_request_classes(
         self, result: TestResult, request: TestRequest, outcome: TestOutcome, call: TestCall
@@ -439,6 +452,17 @@ def _unlike_consistency(result: TestResult, landed: Path) -> str | None:
     """
     recorded = result.short_prompt_consistency
     return None if recorded is None else first_consistency_difference(result, rederive(recorded, landed))
+
+
+def _unlike_long_context(result: TestResult, landed: Path) -> str | None:
+    """The first field of the long-context check ``result`` records that the verified bundle's outputs do not support.
+
+    A record that holds none is not checked: it makes no claim.
+    """
+    recorded = result.long_context
+    return (
+        None if recorded is None else long_context.first_difference(recorded, long_context.rederive(recorded, landed))
+    )
 
 
 def _unlike_values(result: TestResult, derived: Reverified, landed: Path) -> str | None:

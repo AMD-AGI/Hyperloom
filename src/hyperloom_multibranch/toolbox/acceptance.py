@@ -31,6 +31,8 @@ from hyperloom.measure.fake_gain import (
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
+from hyperloom_multibranch.toolbox.long_context import LongContextSetup
+from hyperloom_multibranch.toolbox.long_context import decide as decide_long_context
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, decide
 
 
@@ -133,6 +135,8 @@ class AcceptanceSetup:
     acceptance as ``unsupported_kind``, and ``None`` accepts every kind. ``short_prompts`` is the staged prompt set of the
     short-prompt consistency check: with it, a test whose change touches attention, the KV cache or prefill (the rule
     pack says which), whose purpose the pack always checks, or whose request forces it, runs the check; ``None`` runs none.
+    ``long_context`` is the staged prompt set of the long-context check, which a request that sets ``long_context_check``
+    runs; ``None`` runs none.
     """
 
     repo: ExperimentRepo
@@ -141,6 +145,7 @@ class AcceptanceSetup:
     workload_kind: WorkloadKind = WorkloadKind.INFERENCEX
     supported_kinds: Collection[str] | None = None
     short_prompts: ShortPromptSetup | None = None
+    long_context: LongContextSetup | None = None
 
 
 @dataclass(frozen=True)
@@ -167,6 +172,7 @@ class Acceptance:
         self._live_profile = live_profile
         self._workload = setup.workload_kind
         self._short_prompts = setup.short_prompts
+        self._long_context = setup.long_context
 
     def with_required_accuracy(self, request: TestRequest) -> TestRequest:
         """The request an InferenceX campaign runs: ``baseline``, ``explore``, ``confirm``, ``integration`` and
@@ -199,13 +205,23 @@ class Acceptance:
         self._check_fake_gain(recipe, candidate)
         if not replay:
             _check_online_tuning(candidate)
-        return Prepared(self._with_short_prompts(self._plan(recipe, request), recipe, candidate, request))
+        accepted = self._with_short_prompts(self._plan(recipe, request), recipe, candidate, request)
+        return Prepared(self._with_long_context(accepted, request))
 
     def _with_short_prompts(self, accepted: object, parent: Recipe, candidate: Recipe, request: TestRequest) -> object:
         """``accepted`` with the consistency check this request runs, when it runs one and ``accepted`` can carry it."""
         plan = decide(request, parent, candidate, self._short_prompts)
         return (
             replace(accepted, short_prompts=plan)
+            if plan is not None and isinstance(accepted, AcceptedMeasurement)
+            else accepted
+        )
+
+    def _with_long_context(self, accepted: object, request: TestRequest) -> object:
+        """``accepted`` with the long-context check this request runs, when it runs one and ``accepted`` can carry it."""
+        plan = decide_long_context(request, self._long_context)
+        return (
+            replace(accepted, long_context=plan)
             if plan is not None and isinstance(accepted, AcceptedMeasurement)
             else accepted
         )

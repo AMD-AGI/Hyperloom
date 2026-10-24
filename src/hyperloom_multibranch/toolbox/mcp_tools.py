@@ -178,7 +178,12 @@ _TEST_RESULT_GUIDE = (
     "candidate's other processes; reference.counts does the same against the parent's own outputs, and reference.status "
     "absent means the parent has none, not that nothing differs. first_difference gives the process, prompt and token "
     "position of the first difference: a difference in the first tokens is corruption, one late in the output may be "
-    "rounding. The counts are findings, not a verdict."
+    "rounding. The counts are findings, not a verdict. long_context is null unless the test ran the long-context check: "
+    "long synthetic prompts (needle retrieval, multi-key retrieval, variable tracking, common-word extraction) at the "
+    "stated length, answered greedily by the candidate's own server and graded by substring match. score is the share "
+    "of all n prompts that passed (tasks and prompts give the per-task and per-prompt outcomes); status incomplete, "
+    "with a reason, means a prompt errored or never ran (for example a launch that serves too little context) and is "
+    "never a pass. The scores are findings, not a verdict."
 )
 _KERNEL_TUNE_PARAMS_NOTE = (
     " For kernel_tune, params.test_request_id is required: a call without it is refused (test_required)."

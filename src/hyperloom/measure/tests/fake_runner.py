@@ -29,6 +29,8 @@ the default. ``fake_legacy_decode: true`` lists the ``decode/outputs.jsonl`` tha
 bundle written then can be verified again.
 ``fake_short_prompts: [good, bad, ...]`` leaves the outputs of a short-prompt check whose processes behave so, when the
 sheet asks for the check (``bad``: wrong for short prompts, ``drift``: one long prompt differs late, ``fail``: did not come up).
+``fake_long_context: {broken: [family, ...], served: N}`` leaves the outputs of a long-context check whose server loses those
+task families (``niah``, ``tracking``, ``words``) and serves ``served`` tokens, when the sheet asks for the check.
 ``fake_export: [line, ...]`` lists the per-request export of an AgentX round (``aiperf_artifacts/profile_export.jsonl``
 below the round's directory) with those lines.
 ``fake_eval_in_warmup: true`` lays the rounds out as a graded test with a warmup leaves them (one evaluation, in the
@@ -61,6 +63,7 @@ from hyperloom.measure.jit_kinds import AITER_JIT
 from hyperloom.measure.jit.store import Snapshot, StoredFile
 from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
 from hyperloom.measure.runner.service import Progress
+from hyperloom.measure.long_context.tests.support import outputs_files as long_context_outputs
 from hyperloom.measure.short_prompts.tests.support import outputs_files
 from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
 
@@ -304,10 +307,23 @@ def _short_prompt_files(out: Path, spec: MeasurementSpec, config: dict[str, Any]
     return files
 
 
+def _long_context_files(out: Path, spec: MeasurementSpec, config: dict[str, Any]) -> dict[str, bytes]:
+    """The outputs of the long-context check the sheet asks for, as ``fake_long_context`` says its server behaved."""
+    plan = spec.procedure.long_context
+    if plan is None or "fake_long_context" not in config:
+        return {}
+    behaviour = config["fake_long_context"]
+    files = long_context_outputs(plan, behaviour.get("broken", ()), served=behaviour.get("served"))
+    for relative, data in files.items():
+        _atomic(out / "files" / relative, data)
+    return files
+
+
 def _publish(out: Path, spec: MeasurementSpec, raw: bytes, config: dict[str, Any], mode: str) -> None:
     key = signing.load_private_key(Path(os.environ["HYPERLOOM_SIGNING_KEY_FILE"]))
     files = _write_files(out, config, mode)
     files.update(_short_prompt_files(out, spec, config))
+    files.update(_long_context_files(out, spec, config))
     if config.get("fake_repro"):
         files.update(_repro_files(spec, Path(os.environ["HYPERLOOM_SANDBOX_ROOT"]), out))
     if config.get("fake_attached_env"):

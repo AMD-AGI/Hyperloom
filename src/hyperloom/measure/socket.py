@@ -21,6 +21,7 @@ from typing import Any, Literal, Protocol
 from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef, FailureClass, PhaseTiming, SandboxFacts
 from hyperloom.measure.jit.session import JitCacheSession
 from hyperloom.measure.phases import PhaseRecorder
+from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 
 __all__ = [
@@ -143,6 +144,9 @@ class TestCall:
     #: The short-prompt consistency check this test runs after its rounds, on fresh server processes of its own launch
     #: (``measure.short_prompts``); ``None`` runs no check. It never changes the test's rounds or its outcome.
     short_prompts: ShortPromptPlan | None = None
+    #: The long-context check this test runs after its rounds, on a fresh server of its own launch
+    #: (``measure.long_context``); ``None`` runs no check. It never changes the test's rounds or its outcome.
+    long_context: LongContextPlan | None = None
 
 
 @dataclass(frozen=True)

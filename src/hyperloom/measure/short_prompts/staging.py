@@ -32,6 +32,7 @@ from hyperloom.measure.short_prompts.prompts import GENERATOR, Prompt, PromptSet
 
 __all__ = [
     "CACHE_ENV",
+    "DATA_DIR",
     "DEFAULT_CACHE_DIR",
     "EVALSETS_DIR",
     "KEY_PREFIX",
@@ -40,8 +41,11 @@ __all__ = [
     "StagedEntry",
     "cache_root",
     "entry_key",
+    "entry_problem",
     "load_prompt_set",
+    "recorded_sha256",
     "stage_entry",
+    "stage_file",
 ]
 
 #: The directory of the runner cache, as ``hyperloom.measure.runner.cache_layout`` names it. The two are siblings, so this
@@ -72,20 +76,20 @@ def cache_root(environ: Mapping[str, str]) -> Path:
     return Path(environ.get(CACHE_ENV) or DEFAULT_CACHE_DIR)
 
 
-def entry_key(inputs: Mapping[str, Any]) -> str:
-    """The key of the entry the generator makes from ``inputs`` (the seed and the tokenizer's file hashes)."""
-    digest = hashlib.sha256(canonical_json({"generator": GENERATOR, "inputs": inputs}).encode(_UTF8)).hexdigest()
-    return f"{KEY_PREFIX}{digest[:_KEY_DIGITS]}"
+def entry_key(inputs: Mapping[str, Any], *, generator: str = GENERATOR, prefix: str = KEY_PREFIX) -> str:
+    """The key of the entry ``generator`` makes from ``inputs`` (the seed and the tokenizer's file hashes)."""
+    digest = hashlib.sha256(canonical_json({"generator": generator, "inputs": inputs}).encode(_UTF8)).hexdigest()
+    return f"{prefix}{digest[:_KEY_DIGITS]}"
 
 
-def _manifest(inputs: Mapping[str, Any], prompts: Sequence[Prompt], raw: bytes) -> bytes:
+def _manifest(inputs: Mapping[str, Any], count: int, raw: bytes, generator: str) -> bytes:
     document = {
         "schema": _SCHEMA,
-        "generator": GENERATOR,
+        "generator": generator,
         "inputs": inputs,
         "prompts": {
             "file": f"{DATA_DIR}/{PROMPTS_FILE}",
-            "count": len(prompts),
+            "count": count,
             "size": len(raw),
             "sha256": hashlib.sha256(raw).hexdigest(),
         },
@@ -94,7 +98,13 @@ def _manifest(inputs: Mapping[str, Any], prompts: Sequence[Prompt], raw: bytes) 
 
 
 def stage_entry(root: Path, prompts: Sequence[Prompt], inputs: Mapping[str, Any]) -> StagedEntry:
-    """Write the entry for ``prompts`` below ``root``; an entry already there that is the same one is left as it is.
+    """Write the entry for ``prompts`` below ``root`` (see :func:`stage_file`)."""
+    return stage_file(root, prompts_bytes(prompts), inputs, generator=GENERATOR, prefix=KEY_PREFIX)
+
+
+def stage_file(root: Path, raw: bytes, inputs: Mapping[str, Any], *, generator: str, prefix: str) -> StagedEntry:
+    """Write the entry whose prompts file is ``raw`` (one prompt on each line) below ``root``; an entry already there that is the
+    same one is left as it is.
 
     The data and then the manifest are written into a directory of their own, which becomes the entry in one rename, so
     a reader never sees half an entry.
@@ -102,9 +112,8 @@ def stage_entry(root: Path, prompts: Sequence[Prompt], inputs: Mapping[str, Any]
     Raises:
         PromptSetError: An entry with this key exists and differs from what would be written.
     """
-    raw = prompts_bytes(prompts)
-    manifest = _manifest(inputs, prompts, raw)
-    key = entry_key(inputs)
+    manifest = _manifest(inputs, raw.count(b"\n"), raw, generator)
+    key = entry_key(inputs, generator=generator, prefix=prefix)
     final = Path(root) / EVALSETS_DIR / key
     staged = StagedEntry(key, final, hashlib.sha256(raw).hexdigest())
     if final.exists():
@@ -126,7 +135,21 @@ def stage_entry(root: Path, prompts: Sequence[Prompt], inputs: Mapping[str, Any]
     return staged
 
 
-def _entry_problem(entry: Path, wanted_sha256: str) -> str:
+def recorded_sha256(entry: Path) -> str:
+    """The SHA-256 of the prompts file the manifest of ``entry`` records.
+
+    Raises:
+        PromptSetError: The manifest cannot be read, or records no hash.
+    """
+    try:
+        return json.loads((entry / MANIFEST_NAME).read_text(encoding=_UTF8))["prompts"]["sha256"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise PromptSetError(
+            f"the entry {entry} has no readable manifest ({type(exc).__name__}): not staged, or unfinished"
+        ) from exc
+
+
+def entry_problem(entry: Path, wanted_sha256: str) -> str:
     """What is wrong with the entry, or ``""``: no manifest, a manifest that says another file, a file that is not the
     one the manifest recorded."""
     try:
@@ -149,7 +172,7 @@ def load_prompt_set(plan: ShortPromptPlan, environ: Mapping[str, str]) -> tuple[
         PromptSetError: The entry is missing, unfinished, or not the one the plan names.
     """
     entry = cache_root(environ) / EVALSETS_DIR / plan.prompt_set
-    problem = _entry_problem(entry, plan.prompts_sha256)
+    problem = entry_problem(entry, plan.prompts_sha256)
     if problem:
         raise PromptSetError(problem)
     return load_prompts(entry / DATA_DIR / PROMPTS_FILE)

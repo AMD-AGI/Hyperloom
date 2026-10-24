@@ -23,7 +23,7 @@ from hyperloom.measure.short_prompts.outputs import FAILED, OK, ProcessEntry, co
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.short_prompts.prompts import Prompt
 
-__all__ = ["PassFailed", "PassHost", "Serving", "run_passes"]
+__all__ = ["PassFailed", "PassHost", "Serving", "model_of", "run_passes"]
 
 _PHASE_CAP_STOP = "the phase cap leaves no room for another process"
 _RUN_STOPPED = "the run was stopped"
@@ -73,7 +73,7 @@ class _Budget:
         return time.monotonic() + (self.deadline - self.clock())
 
 
-def _model_of(serving: Serving, deadline: float) -> str:
+def model_of(serving: Serving, deadline: float) -> str:
     try:
         return discover_model(serving.base_url, request_timeout(deadline))
     except CompletionError:
@@ -84,7 +84,7 @@ def _model_of(serving: Serving, deadline: float) -> str:
 
 async def _answer(plan: ShortPromptPlan, prompts: Sequence[Prompt], serving: Serving, budget: _Budget) -> dict:
     deadline = budget.monotonic_deadline()
-    model = await asyncio.to_thread(_model_of, serving, deadline)
+    model = await asyncio.to_thread(model_of, serving, deadline)
     return await asyncio.to_thread(
         run_prompts, serving.base_url, model, prompts, max_new_tokens=plan.max_new_tokens, deadline=deadline
     )

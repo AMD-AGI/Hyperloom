@@ -67,7 +67,9 @@ class _Servers:
 
 
 class _CheckGrid(_Grid):
-    """``run_grid`` that brings the check's server up when it is asked for a boot-only round called ``short<index>``."""
+    """``run_grid`` that brings the check's server up when it is asked for a boot-only round called ``<prefix><index>``."""
+
+    prefix = "short"
 
     def __init__(self, tmp_path: Path, servers: _Servers) -> None:
         super().__init__(tmp_path)
@@ -75,8 +77,8 @@ class _CheckGrid(_Grid):
 
     async def __call__(self, **kwargs: Any):
         name = kwargs["grid"][0].name
-        if kwargs.get("lifecycle_boot_only") and name.startswith("short") and name not in self.answers:
-            self.servers.start(int(name.removeprefix("short")))
+        if kwargs.get("lifecycle_boot_only") and name.startswith(self.prefix) and name not in self.answers:
+            self.servers.start(int(name.removeprefix(self.prefix)))
         return await super().__call__(**kwargs)
 
 

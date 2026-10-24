@@ -41,6 +41,7 @@ from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.compile import CompiledEnvironment, EnvironmentCompiler
 from hyperloom.measure.eval_context import check_eval_context
 from hyperloom.measure.magpie_launchers import install_launchers
+from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.surface import (
     SCRIPT_FIELD,
@@ -179,7 +180,7 @@ def _concurrencies(requested: Sequence[int], canonical: CanonicalMeasurement) ->
     return levels
 
 
-def _launch_carriers(config: Mapping[str, Any]) -> tuple[Mapping[str, Any], str | None]:
+def launch_carriers(config: Mapping[str, Any]) -> tuple[Mapping[str, Any], str | None]:
     """Where a rendered point carries the recipe's launch: the variables, and the text holding its server arguments.
 
     The text is ``None`` for a framework the registry does not know. An AgentX point carries both in
@@ -198,7 +199,7 @@ def _launch_carriers(config: Mapping[str, Any]) -> tuple[Mapping[str, Any], str 
 def _check_launch_present(config: Mapping[str, Any], launch: LaunchConfig, envs: Mapping[str, str]) -> None:
     """Every variable and argument the recipe launches with must be in the YAML, or the test would not use it."""
 
-    present, carried = _launch_carriers(config)
+    present, carried = launch_carriers(config)
     missing = sorted(name for name, value in {**launch.envs, **envs}.items() if str(present.get(name)) != value)
     if missing:
         raise PointError(f"the renderer dropped or changed launch variables {', '.join(missing)}")
@@ -248,7 +249,7 @@ def generate_points(
         check_point(config, concurrency=level, accuracy=accuracy, reference=point_values(reference))
         _check_launch_present(config, launch, environment.envs)
         if accuracy:
-            envs, carried = _launch_carriers(config)
+            envs, carried = launch_carriers(config)
             check_eval_context(envs, carried or "")
         points.append(out_dir / name)
     return tuple(points)
@@ -311,11 +312,12 @@ def generate_profile_point(
 @dataclass(frozen=True)
 class AcceptedMeasurement:
     """What acceptance produces for a test request: its environment and the points it runs, and the short-prompt
-    consistency check the toolbox decided the test runs (``None`` for none)."""
+    consistency check and the long-context check the toolbox decided the test runs (``None`` for none)."""
 
     environment: CompiledEnvironment
     points: tuple[Path, ...]
     short_prompts: ShortPromptPlan | None = None
+    long_context: LongContextPlan | None = None
 
 
 def accept_measurement(
@@ -348,4 +350,5 @@ __all__ = [
     "default_canonical",
     "generate_points",
     "generate_profile_point",
+    "launch_carriers",
 ]

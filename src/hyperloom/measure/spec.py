@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom.contracts.measurement import Purpose
+from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS
 from hyperloom.measure.docs import (
@@ -40,6 +41,7 @@ _UPSERT = "upsert"
 _RUNTIME = "runtime"
 _ACCURACY = "accuracy"
 _SHORT_PROMPTS = "short_prompts"
+_LONG_CONTEXT = "long_context"
 _RESULT_DIR = "result_dir"
 #: A key the sheet of a test that ran a greedy decode pass carried. The pass is gone and the key means nothing, but the
 #: journal keeps those sheets and a result is verified again from them, so the key is read and dropped.
@@ -354,6 +356,11 @@ def _short_prompts(value: Any, path: str) -> ShortPromptPlan | None:
     return None if value is None else ShortPromptPlan.parse(value, path)
 
 
+def _long_context(value: Any, path: str) -> LongContextPlan | None:
+    """The sheet's long-context check, absent from a sheet that asks for none."""
+    return None if value is None else LongContextPlan.parse(value, path)
+
+
 @dataclass(frozen=True)
 class Procedure:
     prep: str
@@ -365,6 +372,7 @@ class Procedure:
     silence_timeout_sec: float
     deadline_unix: float
     short_prompts: ShortPromptPlan | None = None
+    long_context: LongContextPlan | None = None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "Procedure":
@@ -382,6 +390,7 @@ class Procedure:
             silence_timeout_sec=r.number("silence_timeout_sec", minimum=1) or 1.0,
             deadline_unix=r.number("deadline_unix", minimum=0) or 0.0,
             short_prompts=_short_prompts(r.optional(_SHORT_PROMPTS), r.at(_SHORT_PROMPTS)),
+            long_context=_long_context(r.optional(_LONG_CONTEXT), r.at(_LONG_CONTEXT)),
         )
         r.optional(_REMOVED_DECODE_PASS)
         r.done()
@@ -399,6 +408,8 @@ class Procedure:
         }
         if self.short_prompts is not None:
             document[_SHORT_PROMPTS] = self.short_prompts.to_document()
+        if self.long_context is not None:
+            document[_LONG_CONTEXT] = self.long_context.to_document()
         return document
 
 

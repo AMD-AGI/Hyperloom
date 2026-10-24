@@ -19,6 +19,7 @@ import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol, TypeVar
 
 from hyperloom.measure.docs import DocumentError, canonical_json, parse_json_object
 from hyperloom.measure.short_prompts.compare import PromptInfo
@@ -31,6 +32,7 @@ __all__ = [
     "Prompt",
     "PromptSetError",
     "build_prompts",
+    "load_lines",
     "load_prompts",
     "prompts_bytes",
 ]
@@ -156,14 +158,27 @@ def _read_prompt(line: bytes, number: int) -> Prompt:
     return Prompt(document["id"], document["mode"], tuple(ids))
 
 
-def load_prompts(path: Path) -> tuple[Prompt, ...]:
-    """The prompts of a staged file; a file that is not a prompt set, or repeats an id, is refused."""
+class _Identified(Protocol):
+    @property
+    def id(self) -> str: ...
+
+
+_P = TypeVar("_P", bound=_Identified)
+
+
+def load_lines(path: Path, parse: Callable[[bytes, int], _P]) -> tuple[_P, ...]:
+    """The prompts of a staged file, one for each line ``parse`` reads; a file with no prompt, or an id twice, is refused."""
     try:
         raw = Path(path).read_bytes()
     except OSError as exc:
         raise PromptSetError(f"{path} cannot be read: {type(exc).__name__}") from None
-    prompts = tuple(_read_prompt(line, number) for number, line in enumerate(raw.splitlines(), 1))
+    prompts = tuple(parse(line, number) for number, line in enumerate(raw.splitlines(), 1))
     ids = [prompt.id for prompt in prompts]
     if not prompts or len(set(ids)) != len(ids):
         raise PromptSetError(f"{path} holds no prompt, or an id twice")
     return prompts
+
+
+def load_prompts(path: Path) -> tuple[Prompt, ...]:
+    """The prompts of a staged file; a file that is not a prompt set, or repeats an id, is refused."""
+    return load_lines(path, _read_prompt)

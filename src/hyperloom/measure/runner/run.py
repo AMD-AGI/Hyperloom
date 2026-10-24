@@ -320,6 +320,7 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         attachments=_case_attachments(spec),
         phases=ctx.phases,
         short_prompts=p.short_prompts,
+        long_context=p.long_context,
     )
 
 

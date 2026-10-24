@@ -25,6 +25,7 @@ from hyperloom.measure.points import default_canonical, generate_points
 from hyperloom.measure.runner import run as runner
 from hyperloom.measure.returncodes import SERVER_BOOT_TIMEOUT_RC
 from hyperloom.measure.runner.hardware import EccCounts, GpuFacts
+from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import MeasurementSpec
@@ -963,6 +964,58 @@ def test_a_prompt_set_the_sandbox_does_not_hold_is_spec_rejected_before_any_serv
 
     with pytest.raises(
         runner.RunnerFailure, match="short-prompt set short-prompts-0123456789abcdef cannot be used"
+    ) as info:
+        runner._execute(call)
+    assert info.value.error_class == "spec_rejected"
+
+
+LONG_CONTEXT = {
+    "prompt_set": "long-context-0123456789abcdef",
+    "prompts_sha256": "a" * 64,
+    "length": 131072,
+    "max_new_tokens": 128,
+    "concurrency": 4,
+    "phase_cap_sec": 2400.0,
+    "trigger": ["request long_context_check"],
+}
+
+
+def test_the_long_context_plan_of_the_sheet_is_the_one_the_call_carries(tmp_path, env, monkeypatch):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+    sheet = _sheet()
+    sheet["procedure"]["long_context"] = LONG_CONTEXT
+
+    assert _go(tmp_path, env, sheet) == 0
+
+    (call,) = backend.calls
+    assert call.long_context is not None and call.long_context.to_document() == LONG_CONTEXT
+    assert call.short_prompts is None
+
+
+def test_a_sheet_that_asks_for_no_long_context_check_gives_a_call_with_none(tmp_path, env, monkeypatch):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+
+    _go(tmp_path, env, _sheet())
+
+    assert backend.calls[0].long_context is None
+
+
+def test_a_long_context_set_the_sandbox_does_not_hold_is_spec_rejected_before_any_server_starts(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(tmp_path / "empty-cache"))
+    call = TestCall(
+        points=(tmp_path / "p.yaml",),
+        output_dir=tmp_path / "out",
+        timeout_sec=60,
+        cwd=str(tmp_path),
+        magpie_python="",
+        task_id="t",
+        long_context=LongContextPlan.parse(LONG_CONTEXT, "sheet"),
+    )
+
+    with pytest.raises(
+        runner.RunnerFailure, match="long-context set long-context-0123456789abcdef cannot be used"
     ) as info:
         runner._execute(call)
     assert info.value.error_class == "spec_rejected"

@@ -51,6 +51,18 @@ from hyperloom.contracts.consistency import (
     ShortPromptConsistency,
     ShortPromptReference,
 )
+from hyperloom.contracts.long_context import (
+    LONG_CONTEXT_COMPLETE,
+    LONG_CONTEXT_INCOMPLETE,
+    LONG_CONTEXT_STATUSES,
+    PROMPT_ERROR,
+    PROMPT_NOT_RUN,
+    PROMPT_OK,
+    PROMPT_STATUSES,
+    LongContextPrompt,
+    LongContextResult,
+    LongContextTask,
+)
 from hyperloom.contracts.recipe import RecipeDelta, RecipeError
 
 PRIORITY_HIGHEST = 0
@@ -198,6 +210,7 @@ class TestRequest:
     request_id: str | None = None
     diff_ref: str = ""
     consistency_check: bool | None = None
+    long_context_check: bool | None = None
 
     def __post_init__(self) -> None:
         _enum(TestKind, self.kind, "kind")
@@ -211,6 +224,8 @@ class TestRequest:
             raise MeasurementError(f"delta must be a RecipeDelta, got {self.delta!r}")
         if self.consistency_check is not None:
             _bool(self.consistency_check, "consistency_check")
+        if self.long_context_check is not None:
+            _bool(self.long_context_check, "long_context_check")
         self._check_priority()
         self._check_lists()
         self._check_combinations()
@@ -252,6 +267,13 @@ class TestRequest:
         return self.consistency_check is True
 
     @property
+    def forces_long_context_check(self) -> bool:
+        """Whether the caller asks for the long-context check: ``True`` forces it; ``None`` and ``False`` leave it to the
+        toolbox's rule, because a caller may add the check but never remove one the rule demands."""
+
+        return self.long_context_check is True
+
+    @property
     def branch(self) -> str:
         """The notebook's name for ``branch_id``."""
 
@@ -291,6 +313,8 @@ class TestRequest:
         }
         if self.consistency_check is not None:
             document["consistency_check"] = self.consistency_check
+        if self.long_context_check is not None:
+            document["long_context_check"] = self.long_context_check
         return document
 
     @classmethod
@@ -312,6 +336,7 @@ class TestRequest:
             request_id=f.get("request_id"),
             diff_ref=f.get("diff_ref", ""),
             consistency_check=_optional_bool(f.get("consistency_check"), "consistency_check"),
+            long_context_check=_optional_bool(f.get("long_context_check"), "long_context_check"),
         )
 
 
@@ -804,6 +829,9 @@ class TestResult:
     ``short_prompt_consistency`` is the check of a test the toolbox asked it for (``None`` for any other test): a frozen set
     of short prompts answered by fresh server processes, compared with each other and with the parent's, as counts and
     positions only.
+    ``long_context`` is the check of a test the toolbox asked it for (``None`` for any other test): a frozen set of long
+    synthetic prompts answered by the candidate's own server and graded by substring match, as per-task and total scores,
+    per-prompt outcomes and, when it did not answer every prompt, the reason it is ``incomplete``.
     A document written while the greedy decode pass existed may carry ``decode_outputs`` and ``decode_identity``; they
     mean nothing now and ``from_document`` leaves them out, so such a document still loads.
     """
@@ -837,6 +865,7 @@ class TestResult:
     phases: tuple[PhaseTiming, ...] = ()
     unaccounted_seconds: float | None = None
     short_prompt_consistency: ShortPromptConsistency | None = None
+    long_context: LongContextResult | None = None
 
     def __post_init__(self) -> None:
         _text(self.request_id, "request_id")
@@ -871,6 +900,8 @@ class TestResult:
         consistency = self.short_prompt_consistency
         if consistency is not None and not isinstance(consistency, ShortPromptConsistency):
             raise MeasurementError(f"short_prompt_consistency must be a ShortPromptConsistency, got {consistency!r}")
+        if self.long_context is not None and not isinstance(self.long_context, LongContextResult):
+            raise MeasurementError(f"long_context must be a LongContextResult, got {self.long_context!r}")
 
     def _check_repro_verdict(self) -> None:
         if self.repro_verdict not in ("", *REPRO_VERDICTS):
@@ -927,12 +958,15 @@ class TestResult:
         }
         if self.short_prompt_consistency is not None:
             document["short_prompt_consistency"] = self.short_prompt_consistency.to_document()
+        if self.long_context is not None:
+            document["long_context"] = self.long_context.to_document()
         return document
 
     @classmethod
     def from_document(cls, document: object) -> TestResult:
         f = _mapping(document, "a test result")
         sandbox, failure, consistency = f.get("sandbox"), f.get("failure_class"), f.get("short_prompt_consistency")
+        long_context = f.get("long_context")
         return cls(
             request_id=f.get("request_id"),
             validity=_enum(Validity, f.get("validity"), "validity"),
@@ -963,6 +997,7 @@ class TestResult:
             phases=tuple(map(PhaseTiming.from_document, _items(f.get("phases", ()), "phases"))),
             unaccounted_seconds=f.get("unaccounted_seconds"),
             short_prompt_consistency=None if consistency is None else ShortPromptConsistency.from_document(consistency),
+            long_context=None if long_context is None else LongContextResult.from_document(long_context),
         )
 
 
@@ -981,6 +1016,13 @@ __all__ = [
     "TABLE_NOT_OBSERVABLE",
     "TABLE_STATUSES",
     "COMPARED_BY",
+    "LONG_CONTEXT_COMPLETE",
+    "LONG_CONTEXT_INCOMPLETE",
+    "LONG_CONTEXT_STATUSES",
+    "PROMPT_ERROR",
+    "PROMPT_NOT_RUN",
+    "PROMPT_OK",
+    "PROMPT_STATUSES",
     "REFERENCE_ABSENT",
     "REFERENCE_COMPARED",
     "REFERENCE_STATUSES",
@@ -991,6 +1033,9 @@ __all__ = [
     "AttachmentRef",
     "Attempt",
     "FailureClass",
+    "LongContextPrompt",
+    "LongContextResult",
+    "LongContextTask",
     "MAX_PHASE_SECONDS",
     "MeasurementError",
     "OutputCounts",

@@ -21,6 +21,7 @@ __all__ = [
     "DEFAULT_MAX_NEW_TOKENS",
     "DEFAULT_PHASE_CAP_SEC",
     "DEFAULT_PROCESSES",
+    "KEY_RE",
     "MAX_PROCESSES",
     "OUTPUTS_FILE",
     "SHORT_PROMPTS_DIR",
@@ -39,7 +40,7 @@ MAX_PROCESSES = 16
 _MAX_NEW_TOKENS = 256
 _MAX_TRIGGER_LINES = 32
 _MAX_TRIGGER_CHARS = 200
-_KEY = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+KEY_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _RECIPE_FIELDS = ("recipe", "parent_recipe")
 #: The share of server processes a defect of the kind this check looks for shows in (the measured case: one in three).
@@ -75,7 +76,7 @@ class ShortPromptPlan:
     parent_recipe: str = ""
 
     def __post_init__(self) -> None:
-        if not _KEY.fullmatch(self.prompt_set):
+        if not KEY_RE.fullmatch(self.prompt_set):
             raise DocumentError(f"short prompts: {self.prompt_set!r} is not a prompt set key")
         if not SHA256_RE.fullmatch(self.prompts_sha256):
             raise DocumentError("short prompts: prompts_sha256 is not a sha256")
@@ -109,7 +110,7 @@ class ShortPromptPlan:
     def parse(cls, value: Any, path: str) -> ShortPromptPlan:
         r = Reader(value, path)
         plan = cls(
-            prompt_set=r.text("prompt_set", pattern=_KEY) or "",
+            prompt_set=r.text("prompt_set", pattern=KEY_RE) or "",
             prompts_sha256=r.text("prompts_sha256", pattern=SHA256_RE) or "",
             processes=r.integer("processes", minimum=1) or 1,
             max_new_tokens=r.integer("max_new_tokens", minimum=1) or 1,

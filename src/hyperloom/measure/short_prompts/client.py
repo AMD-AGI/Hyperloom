@@ -24,7 +24,7 @@ from typing import TypeVar
 
 from hyperloom.measure.short_prompts.prompts import BATCHED, SEQUENTIAL, Prompt
 
-__all__ = ["Completion", "CompletionError", "complete", "discover_model", "request_timeout", "run_prompts"]
+__all__ = ["Completion", "CompletionError", "complete", "discover_model", "post_json", "request_timeout", "run_prompts"]
 
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _JSON = {"Content-Type": "application/json"}
@@ -95,7 +95,7 @@ def _read_json(source: urllib.request.Request | str, timeout_sec: float) -> obje
         return json.loads(reply.read(_MAX_REPLY_BYTES).decode(_UTF8))
 
 
-def _post(url: str, body: dict[str, object], timeout_sec: float) -> dict[str, object]:
+def post_json(url: str, body: dict[str, object], timeout_sec: float) -> dict[str, object]:
     request = urllib.request.Request(url, data=json.dumps(body).encode(_UTF8), headers=_JSON, method="POST")
     try:
         document = _bounded(timeout_sec, lambda: _read_json(request, timeout_sec))
@@ -143,7 +143,7 @@ def complete(base_url: str, model: str, prompt: Prompt, *, max_new_tokens: int, 
         "logprobs": 1,
         "stream": False,
     }
-    return _completion(_post(f"{base_url}/v1/completions", body, timeout_sec))
+    return _completion(post_json(f"{base_url}/v1/completions", body, timeout_sec))
 
 
 def run_prompts(

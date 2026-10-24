@@ -18,7 +18,7 @@ from pathlib import Path
 from hyperloom.measure.short_prompts.prompts import PromptSetError, build_prompts
 from hyperloom.measure.short_prompts.staging import StagedEntry, stage_entry
 
-__all__ = ["build_entry", "main", "tokenizer_hashes"]
+__all__ = ["build_entry", "huggingface_encoder", "main", "tokenizer_hashes"]
 
 #: The files that make a tokenizer what it is, when the model directory has them.
 _TOKENIZER_FILES = (
@@ -56,6 +56,10 @@ def _huggingface_encoder(model_dir: Path) -> Callable[[str], Sequence[int]]:
         raise PromptSetError("the transformers library is needed to read the model's tokenizer") from exc
     tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True)
     return lambda text: tokenizer.encode(text, add_special_tokens=False)
+
+
+#: The encoder of a model directory's tokenizer, for the builders of other prompt sets.
+huggingface_encoder = _huggingface_encoder
 
 
 def build_entry(
