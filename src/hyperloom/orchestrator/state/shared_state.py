@@ -1643,6 +1643,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if not isinstance(entry, dict):
             return
         from hyperloom.inference_optimizer.breakdown.recorder import kernel_event
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import IntegrateVerdict
 
         last = (entry.get("attempts") or [{}])[-1]
         last = last if isinstance(last, dict) else {}
@@ -1651,26 +1652,28 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         integration_id = str(entry.get("integration_id") or "")
         kernel_event.record_integrate_verdict(
             macro_cycle=cycle,
-            integration_id=integration_id,
-            kernel_id=str(entry.get("kernel_id") or ""),
-            decision=str(entry.get("last_decision") or ""),
-            status=str(entry.get("last_status") or ""),
-            attempt_count=entry.get("attempt_count"),
-            fault_count=entry.get("fault_count"),
-            gain_pct=entry.get("best_gain_pct"),
-            accuracy_pass=last.get("accuracy_pass"),
-            validation_tier=str(last.get("validation_tier") or ""),
-            patch_path=str(entry.get("patch_path") or ""),
-            target_file=str(entry.get("target_file") or ""),
-            error_class=str(entry.get("last_error_class") or ""),
-            rejected_reason=str(rejected.get("reason") or "") if isinstance(rejected, dict) else "",
-            retryable=bool(entry.get("retryable")),
-            settled_at=str(entry.get("updated_at") or ""),
-            extra_server_args=str(entry.get("extra_server_args") or ""),
-            basis=str(entry.get("basis") or ""),
-            alignment_status=str(entry.get("alignment_status") or ""),
-            # Absent means attributable; a writer that cannot pin the gain on this kernel says so.
-            gain_attributed=bool(entry.get("validated", True)),
+            verdict=IntegrateVerdict(
+                integration_id=integration_id,
+                kernel_id=str(entry.get("kernel_id") or ""),
+                decision=str(entry.get("last_decision") or ""),
+                status=str(entry.get("last_status") or ""),
+                attempt_count=entry.get("attempt_count"),
+                fault_count=entry.get("fault_count"),
+                gain_pct=entry.get("best_gain_pct"),
+                accuracy_pass=last.get("accuracy_pass"),
+                validation_tier=str(last.get("validation_tier") or ""),
+                patch_path=str(entry.get("patch_path") or ""),
+                target_file=str(entry.get("target_file") or ""),
+                error_class=str(entry.get("last_error_class") or ""),
+                rejected_reason=str(rejected.get("reason") or "") if isinstance(rejected, dict) else "",
+                retryable=bool(entry.get("retryable")),
+                settled_at=str(entry.get("updated_at") or ""),
+                extra_server_args=str(entry.get("extra_server_args") or ""),
+                basis=str(entry.get("basis") or ""),
+                alignment_status=str(entry.get("alignment_status") or ""),
+                # Absent means attributable; a writer that cannot pin the gain on this kernel says so.
+                gain_attributed=bool(entry.get("validated", True)),
+            ),
         )
         kernel_event.record_integrate_axis(
             macro_cycle=cycle, integration_id=integration_id, graded_objective=str(last.get("graded_objective") or "")

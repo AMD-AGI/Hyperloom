@@ -43,6 +43,9 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     record_geak_attempts,
     reject_geak_attempts,
 )
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
+    IntegrateVerdict,
+)
 from ..actions.stop_attribution import stopped_by_the_run_class
 from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_GEMM_TUNING,
@@ -403,16 +406,18 @@ def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cyc
 
     record_integrate_verdict(
         macro_cycle=macro_cycle,
-        integration_id=f"geak-{kernel_id}",
-        kernel_id=kernel_id,
-        decision=str(entry.get("last_decision") or ""),
-        status=str(entry.get("last_status") or ""),
-        attempt_count=entry.get("attempt_count"),
-        gain_pct=entry.get("best_gain_pct"),
-        basis=str(entry.get("basis") or ""),
-        alignment_status=str(entry.get("alignment_status") or ""),
-        gain_attributed=bool(entry.get("validated", True)),
-        settled_at=str(entry.get("updated_at") or ""),
+        verdict=IntegrateVerdict(
+            integration_id=f"geak-{kernel_id}",
+            kernel_id=kernel_id,
+            decision=str(entry.get("last_decision") or ""),
+            status=str(entry.get("last_status") or ""),
+            attempt_count=entry.get("attempt_count"),
+            gain_pct=entry.get("best_gain_pct"),
+            basis=str(entry.get("basis") or ""),
+            alignment_status=str(entry.get("alignment_status") or ""),
+            gain_attributed=bool(entry.get("validated", True)),
+            settled_at=str(entry.get("updated_at") or ""),
+        ),
     )
 
 

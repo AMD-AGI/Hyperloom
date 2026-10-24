@@ -76,6 +76,7 @@ from .kernel_records import (
     SOURCE_GEAK_AUTHORED_KERNEL,
     SOURCE_GEMM_TUNING,
     SOURCE_KERNEL_REWRITE,
+    IntegrateVerdict,
     KernelRewriteRun,
     LaneRunFields,
 )
@@ -401,29 +402,7 @@ def reject_geak_attempts(
     _republish_closed_event(event)
 
 
-def record_integrate_verdict(
-    *,
-    macro_cycle: Any,
-    integration_id: str,
-    kernel_id: str,
-    decision: str = "",
-    status: str = "",
-    attempt_count: Any = None,
-    fault_count: Any = None,
-    gain_pct: Any = None,
-    accuracy_pass: Any = None,
-    validation_tier: str = "",
-    patch_path: str = "",
-    target_file: str = "",
-    error_class: str = "",
-    rejected_reason: str = "",
-    retryable: bool = False,
-    settled_at: str = "",
-    extra_server_args: str = "",
-    basis: str = "",
-    alignment_status: str = "",
-    gain_attributed: Any = None,
-) -> None:
+def record_integrate_verdict(*, macro_cycle: Any, verdict: IntegrateVerdict) -> None:
     """Record the end-to-end integrate gate's verdict on one patch.
 
     The gate runs outside the phase that produced the patch: the KERNEL visit
@@ -440,54 +419,22 @@ def record_integrate_verdict(
     own budget and can settle a cycle or more later. ``kernel_id`` is on the
     row so the two can be joined either way, and the row is only written when
     that event exists, so a verdict never mints an event of its own.
-
-    Args:
-        decision: The gate's verdict (``KEEP`` / ``REVERT``).
-        fault_count: How many attempts never measured the patch fairly.
-        rejected_reason: Why the patch was rejected outright, when it was -- an
-            exhausted budget rather than a verdict on the code.
-        basis: Throughput basis the gain was measured on (``hot`` / ``cold``);
-            a gain is meaningless without the baseline behind it.
-        gain_attributed: Whether the measured gain is this one kernel's. A
-            rebench carrying several kernels measured all of them together, so
-            the gain is real but unattributable.
     """
-    if not str(integration_id or ""):
+    if not str(verdict.integration_id or ""):
         return
     sink = make_sink(kernel_event_id(macro_cycle), producer=PRODUCER)
     if not sink.has_row(SECTION_EVENT):
         log.debug(
             "kernel timeline: no event %s to hold the integrate verdict for %s",
             sink.event_id,
-            integration_id,
+            verdict.integration_id,
         )
         return
     sink.record(
         SECTION_INTEGRATE,
-        {
-            "integration_id": str(integration_id),
-            "kernel_id": str(kernel_id or ""),
-            "decision": _text(decision),
-            "status": _text(status),
-            "attempt_count": _int_or_none(attempt_count),
-            "fault_count": _int_or_none(fault_count),
-            "gain_pct": _float_or_none(gain_pct),
-            "accuracy_pass": accuracy_pass if isinstance(accuracy_pass, bool) else None,
-            "validation_tier": _text(validation_tier),
-            "patch_path": _text(patch_path),
-            "target_file": _text(target_file),
-            "error_class": _text(error_class),
-            "rejected_reason": _text(rejected_reason),
-            "retryable": bool(retryable),
-            "settled_at": _text(settled_at),
-            "settled_in_macro_cycle": _int_or_none(macro_cycle),
-            "extra_server_args": _text(extra_server_args),
-            "basis": _text(basis),
-            "alignment_status": _text(alignment_status),
-            "gain_attributed": gain_attributed if isinstance(gain_attributed, bool) else None,
-        },
+        verdict.row(macro_cycle),
         row_type=ROW_INTEGRATE,
-        natural_ids=str(integration_id),
+        natural_ids=str(verdict.integration_id),
     )
     _republish_closed_event(sink.event_id)
 

@@ -30,7 +30,11 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     record_trace_analyze_request,
     reject_geak_attempts,
 )
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelRewriteRun, LaneRunFields
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
+    IntegrateVerdict,
+    KernelRewriteRun,
+    LaneRunFields,
+)
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.phases.kernel import KernelPhase
@@ -262,13 +266,15 @@ def test_an_adoption_states_the_basis_its_gain_was_measured_on(tmp_path):
     )
     record_integrate_verdict(
         macro_cycle=3,
-        integration_id="geak-k001",
-        kernel_id="k001",
-        decision="KEEP",
-        gain_pct=6.0,
-        basis="hot",
-        alignment_status="aligned",
-        gain_attributed=False,
+        verdict=IntegrateVerdict(
+            integration_id="geak-k001",
+            kernel_id="k001",
+            decision="KEEP",
+            gain_pct=6.0,
+            basis="hot",
+            alignment_status="aligned",
+            gain_attributed=False,
+        ),
     )
     recorder.finish(tput_after=1060.0)
 
@@ -286,7 +292,9 @@ def test_the_integrate_gate_is_what_settles_a_forge_candidate(tmp_path):
             kernel_id="k001",
         )
     )
-    record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="KEEP", gain_pct=6.0)
+    record_integrate_verdict(
+        macro_cycle=3, verdict=IntegrateVerdict(integration_id="int-1", kernel_id="k001", decision="KEEP", gain_pct=6.0)
+    )
     recorder.finish(tput_after=1060.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
@@ -334,7 +342,9 @@ def test_a_reverted_kernel_is_rejected_by_the_gate_not_left_pending(tmp_path):
             kernel_id="k001",
         )
     )
-    record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="REVERT")
+    record_integrate_verdict(
+        macro_cycle=3, verdict=IntegrateVerdict(integration_id="int-1", kernel_id="k001", decision="REVERT")
+    )
     recorder.finish(tput_after=1000.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
@@ -353,18 +363,15 @@ def test_a_kernel_gated_twice_is_settled_by_the_verdict_that_stands(tmp_path):
     )
     record_integrate_verdict(
         macro_cycle=3,
-        integration_id="int-1",
-        kernel_id="k001",
-        decision="REVERT",
-        settled_at="2026-09-02T00:01:00",
+        verdict=IntegrateVerdict(
+            integration_id="int-1", kernel_id="k001", decision="REVERT", settled_at="2026-09-02T00:01:00"
+        ),
     )
     record_integrate_verdict(
         macro_cycle=3,
-        integration_id="int-2",
-        kernel_id="k001",
-        decision="KEEP",
-        gain_pct=4.0,
-        settled_at="2026-09-02T00:09:00",
+        verdict=IntegrateVerdict(
+            integration_id="int-2", kernel_id="k001", decision="KEEP", gain_pct=4.0, settled_at="2026-09-02T00:09:00"
+        ),
     )
     recorder.finish(tput_after=1000.0)
 
@@ -384,11 +391,7 @@ def test_an_adopted_rewrite_states_the_backend_that_produced_it(tmp_path):
         )
     )
     record_integrate_verdict(
-        macro_cycle=3,
-        integration_id="int-1",
-        kernel_id="k001",
-        decision="KEEP",
-        gain_pct=6.0,
+        macro_cycle=3, verdict=IntegrateVerdict(integration_id="int-1", kernel_id="k001", decision="KEEP", gain_pct=6.0)
     )
     recorder.finish(tput_after=1060.0)
 
@@ -412,17 +415,19 @@ def test_an_integrate_verdict_lands_after_the_visit_has_closed(tmp_path):
 
     record_integrate_verdict(
         macro_cycle=3,
-        integration_id="int-1",
-        kernel_id="k001",
-        decision="KEEP",
-        status="succeeded",
-        attempt_count=2,
-        fault_count=1,
-        gain_pct=4.5,
-        accuracy_pass=True,
-        patch_path="patches/k001.diff",
-        target_file="vllm/attention.py",
-        settled_at="2026-09-02T00:20:00",
+        verdict=IntegrateVerdict(
+            integration_id="int-1",
+            kernel_id="k001",
+            decision="KEEP",
+            status="succeeded",
+            attempt_count=2,
+            fault_count=1,
+            gain_pct=4.5,
+            accuracy_pass=True,
+            patch_path="patches/k001.diff",
+            target_file="vllm/attention.py",
+            settled_at="2026-09-02T00:20:00",
+        ),
     )
 
     ext = _kernel_events(tmp_path)[0]["ext"]
@@ -473,20 +478,20 @@ def test_a_later_unrelated_integration_cannot_rewrite_an_exact_attempt(tmp_path)
 
     record_integrate_verdict(
         macro_cycle=3,
-        integration_id="int-1",
-        kernel_id="k001",
-        decision="KEEP",
-        gain_pct=6.0,
-        settled_at="2026-09-02T00:10:00",
+        verdict=IntegrateVerdict(
+            integration_id="int-1", kernel_id="k001", decision="KEEP", gain_pct=6.0, settled_at="2026-09-02T00:10:00"
+        ),
     )
     record_integrate_verdict(
         macro_cycle=3,
-        integration_id="int-2",
-        kernel_id="k001",
-        decision="REVERT",
-        gain_pct=None,
-        rejected_reason="fault_attempts_exhausted_2",
-        settled_at="2026-09-02T00:30:00",
+        verdict=IntegrateVerdict(
+            integration_id="int-2",
+            kernel_id="k001",
+            decision="REVERT",
+            gain_pct=None,
+            rejected_reason="fault_attempts_exhausted_2",
+            settled_at="2026-09-02T00:30:00",
+        ),
     )
 
     ext = _kernel_events(tmp_path)[0]["ext"]
@@ -514,7 +519,9 @@ def test_same_kernel_name_without_integration_ref_does_not_claim_a_gate(tmp_path
             lane=LaneRunFields(run_id="attempt-7", status="success", micro_decision="keep"), kernel_id="k001"
         )
     )
-    record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="REVERT")
+    record_integrate_verdict(
+        macro_cycle=3, verdict=IntegrateVerdict(integration_id="int-1", kernel_id="k001", decision="REVERT")
+    )
     recorder.finish(tput_after=1000.0)
 
     assert _kernel_events(tmp_path)[0]["ext"]["attempts"][0]["e2e"] is None
@@ -524,7 +531,9 @@ def test_a_verdict_with_no_event_to_belong_to_is_dropped(tmp_path):
     recorder = _forge_recorder()
     recorder.finish(tput_after=1000.0)
 
-    record_integrate_verdict(macro_cycle=9, integration_id="int-1", kernel_id="k001", decision="KEEP")
+    record_integrate_verdict(
+        macro_cycle=9, verdict=IntegrateVerdict(integration_id="int-1", kernel_id="k001", decision="KEEP")
+    )
 
     assert [event["id"] for event in _kernel_events(tmp_path)] == [kernel_event_id(3)]
 
@@ -542,10 +551,7 @@ def test_a_fusion_is_settled_by_the_integration_it_queued(tmp_path):
         integrate_ref="int-fusion-1",
     )
     record_integrate_verdict(
-        macro_cycle=3,
-        integration_id="int-fusion-1",
-        kernel_id="",
-        decision="REVERT",
+        macro_cycle=3, verdict=IntegrateVerdict(integration_id="int-fusion-1", kernel_id="", decision="REVERT")
     )
     recorder.finish(tput_after=1000.0)
 
@@ -747,10 +753,9 @@ def test_geak_opaque_ids_survive_acceptance_rebench_integration_and_late_rejecti
     _geak_rebench(recorder, "geak:rebench:0", REBENCH_VALIDATED)
     record_integrate_verdict(
         macro_cycle=0,
-        integration_id=f"geak:{kernel_id}",
-        kernel_id=kernel_id,
-        decision="KEEP",
-        gain_pct=4.0,
+        verdict=IntegrateVerdict(
+            integration_id=f"geak:{kernel_id}", kernel_id=kernel_id, decision="KEEP", gain_pct=4.0
+        ),
     )
     recorder.finish(tput_after=950.0)
 
@@ -1258,7 +1263,9 @@ def _forge_rewrite_with_gate(recorder, **verdict: Any) -> None:
             kernel_id="k001",
         )
     )
-    record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", **verdict)
+    record_integrate_verdict(
+        macro_cycle=3, verdict=IntegrateVerdict(integration_id="int-1", kernel_id="k001", **verdict)
+    )
 
 
 def test_a_gate_concluding_against_the_candidate_still_succeeds_the_entry(tmp_path):
@@ -1458,10 +1465,7 @@ def test_a_measurement_that_lands_after_the_visit_closed_is_still_published(tmp_
     guest.finish({"status": "succeeded", "output_throughput": 1100.0})
     record_integrate_verdict(
         macro_cycle=3,
-        integration_id="stack-k001+k004",
-        kernel_id="k001+k004",
-        decision="KEEP",
-        status="ok",
+        verdict=IntegrateVerdict(integration_id="stack-k001+k004", kernel_id="k001+k004", decision="KEEP", status="ok"),
     )
 
     event = _kernel_events(tmp_path)[0]
@@ -2019,7 +2023,9 @@ def _gated_rewrite(recorder, **verdict: Any) -> None:
         )
     )
     axis = verdict.pop("graded_objective", "")
-    record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="KEEP", **verdict)
+    record_integrate_verdict(
+        macro_cycle=3, verdict=IntegrateVerdict(integration_id="int-1", kernel_id="k001", decision="KEEP", **verdict)
+    )
     record_integrate_axis(macro_cycle=3, integration_id="int-1", graded_objective=axis)
 
 

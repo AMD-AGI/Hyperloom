@@ -18,7 +18,11 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     make_kernel_recorder,
     record_integrate_verdict,
 )
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelRewriteRun, LaneRunFields
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
+    IntegrateVerdict,
+    KernelRewriteRun,
+    LaneRunFields,
+)
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.kernel.attempt_summary import SCHEMA_VERSION, build_kernel_optimization_summary
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -117,7 +121,9 @@ def test_forge_candidates_carry_the_verdict_that_settled_them(tmp_path: Path) ->
     _rewrite(recorder, "a-keep", "k001", decision="KEEP", integrate_ref="int-1")
     _rewrite(recorder, "a-revert", "k002", decision="REVERT")
     _rewrite(recorder, "a-crash", "k003", decision="", status="failed", error_class="compile_failed")
-    record_integrate_verdict(macro_cycle=0, integration_id="int-1", kernel_id="k001", decision="KEEP", gain_pct=3.5)
+    record_integrate_verdict(
+        macro_cycle=0, verdict=IntegrateVerdict(integration_id="int-1", kernel_id="k001", decision="KEEP", gain_pct=3.5)
+    )
     recorder.finish(tput_after=1035.0)
 
     out = build_kernel_optimization_summary(_state(top15=[_top("k001", "fused_moe", 30.0)]), tmp_path)

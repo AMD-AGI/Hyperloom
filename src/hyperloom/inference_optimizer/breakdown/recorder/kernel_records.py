@@ -11,6 +11,7 @@ from typing import Any
 from .event_fields import (
     as_list as _as_list,
     float_or_none as _float_or_none,
+    int_or_none as _int_or_none,
     text_or_none as _text,
 )
 
@@ -36,6 +37,7 @@ __all__ = [
     "SOURCE_GEAK_AUTHORED_KERNEL",
     "SOURCE_GEMM_TUNING",
     "SOURCE_KERNEL_REWRITE",
+    "IntegrateVerdict",
     "KernelRewriteRun",
     "LaneRunFields",
 ]
@@ -125,4 +127,62 @@ class KernelRewriteRun:
             "correctness": self.correctness if isinstance(self.correctness, bool) else None,
             "artifact_path": _text(self.artifact_path),
             "trace_analyze_ref": _text(self.trace_analyze_ref),
+        }
+
+
+@dataclass(frozen=True)
+class IntegrateVerdict:
+    """The end-to-end integrate gate's verdict on one queued patch."""
+
+    integration_id: str
+    kernel_id: str
+    #: The gate's verdict (``KEEP`` / ``REVERT``).
+    decision: str = ""
+    status: str = ""
+    attempt_count: Any = None
+    #: How many attempts never measured the patch fairly.
+    fault_count: Any = None
+    gain_pct: Any = None
+    accuracy_pass: Any = None
+    validation_tier: str = ""
+    patch_path: str = ""
+    target_file: str = ""
+    error_class: str = ""
+    #: Why the patch was rejected outright, when it was -- an exhausted budget
+    #: rather than a verdict on the code.
+    rejected_reason: str = ""
+    retryable: bool = False
+    settled_at: str = ""
+    extra_server_args: str = ""
+    #: Throughput basis the gain was measured on (``hot`` / ``cold``); a gain
+    #: is meaningless without the baseline behind it.
+    basis: str = ""
+    alignment_status: str = ""
+    #: Whether the measured gain is this one kernel's; a rebench carrying
+    #: several kernels measured all of them together.
+    gain_attributed: Any = None
+
+    def row(self, macro_cycle: Any) -> dict[str, Any]:
+        """The integrate row this verdict persists as, settled in ``macro_cycle``."""
+        return {
+            "integration_id": str(self.integration_id),
+            "kernel_id": str(self.kernel_id or ""),
+            "decision": _text(self.decision),
+            "status": _text(self.status),
+            "attempt_count": _int_or_none(self.attempt_count),
+            "fault_count": _int_or_none(self.fault_count),
+            "gain_pct": _float_or_none(self.gain_pct),
+            "accuracy_pass": self.accuracy_pass if isinstance(self.accuracy_pass, bool) else None,
+            "validation_tier": _text(self.validation_tier),
+            "patch_path": _text(self.patch_path),
+            "target_file": _text(self.target_file),
+            "error_class": _text(self.error_class),
+            "rejected_reason": _text(self.rejected_reason),
+            "retryable": bool(self.retryable),
+            "settled_at": _text(self.settled_at),
+            "settled_in_macro_cycle": _int_or_none(macro_cycle),
+            "extra_server_args": _text(self.extra_server_args),
+            "basis": _text(self.basis),
+            "alignment_status": _text(self.alignment_status),
+            "gain_attributed": self.gain_attributed if isinstance(self.gain_attributed, bool) else None,
         }
