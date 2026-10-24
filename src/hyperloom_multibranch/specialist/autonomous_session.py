@@ -14,7 +14,8 @@ before EXPLORE ends, so that work is measured and judged in EXPLORE, and again w
 the keeps is kept beside the manifest, so a keep waiting at a crash is submitted by the run after it. The agent's own
 LLM spend is read from its Claude CLI's transcripts (:mod:`agent_spend`) every :data:`SPEND_SECONDS` and once more when
 the run ends, and recorded as the branch's. At each keep, the findings the agent wrote down in its ledger since the last
-one become the branch's learnings, a finding it revised superseding what it said before, so other branches read them.
+one become the branch's learnings, a finding it revised superseding what it said before, so other branches read them;
+what it wrote after its last keep is learnt when the branch stops.
 The branch's judge judges the imports as it judges any branch's tests;
 nothing of its verdicts reaches the agent. An agent that exits 0 finishes the run once what it kept last settled; one
 that exits otherwise is a crash the runtime restarts it from. A session never ends idle: what the agent keeps, or does
@@ -261,9 +262,16 @@ class AutonomousSession:
             await self._setup.toolbox.release_branch_sandbox(self._held().lease_id)
 
     async def stop(self) -> None:
+        """Stop the agent, then learn what its ledger gained since the last keep, which no later keep imports."""
+
         self._stopped.set()
         if self._process is not None:
             await self._process.kill()
+        watch_file = self._place.workspace / WATCH_FILE
+        if self._manifest is not None and watch_file.exists():
+            watch = KeepWatch.load(watch_file)
+            await self._learn(self._manifest.ledger, watch)
+            watch.save(watch_file)
 
     async def _running(self) -> tuple[AgentManifest, AgentProcess]:
         """The agent preflight started, or, in a run after a crash, the agent resumed by the stored manifest."""

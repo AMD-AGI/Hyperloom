@@ -727,3 +727,26 @@ async def test_the_agent_s_ledger_facts_and_dead_ends_become_the_branch_s_learni
     assert revised.learning.supersedes == learnt[0].entry_id
     assert long.learning.content.startswith("FACT long: xxx") and len(long.learning.content) == LEARNING_MAX_CHARS
     assert len(await rig.notebook.learnings(branch=BRANCH)) == 4
+
+
+KEPT = "the decode GEMMs miss the tuned CSV"
+AFTER = "the fused qk-norm kernel is slower at batch 8"
+
+
+async def test_ledger_findings_written_after_the_last_keep_are_learnt_when_the_branch_is_stopped(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(256,), tail=30.0, ledger=((_entry("a", "FACT", KEPT),),)))
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    ledger = tmp_path / BRANCH / "session" / AGENT_DIR / "src" / "run" / "ledger.jsonl"
+    with ledger.open("a", encoding="utf-8") as lines:
+        lines.write(json.dumps(_entry("b", "DEAD_END", AFTER)) + "\n")
+
+    running.cancel()
+    await asyncio.gather(running, return_exceptions=True)
+    await rig.session.stop()
+
+    learnt = [record.learning.content for record in await rig.notebook.learnings(branch=BRANCH)]
+    assert learnt == [f"FACT a: {KEPT}", f"DEAD_END b: {AFTER}"]
