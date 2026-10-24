@@ -534,6 +534,16 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if isinstance(variant, dict)
         }
 
+    def trajectory_digest(self) -> str:
+        """The deterministic trajectory digest, or "" when building it fails."""
+        from ..knowledge import trajectory_reviewer
+
+        try:
+            return trajectory_reviewer.build_trajectory_digest(self.session_dir, self.shared_state)
+        except Exception:
+            log.exception("Coordinator: trajectory review digest failed")
+            return ""
+
     async def _orchestration_sections(self) -> list[str]:
         """The denial summary, proposal queue and advisories only the orchestration agent reads."""
         from ..predictor.prompt import queue_block
@@ -562,16 +572,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             sections.append("=== Plateau advisory ===")
             sections.append(plateau_block)
             # Candidate directions are worth the digest's cost only once the session has stopped gaining.
-            try:
-                from ..knowledge import trajectory_reviewer as _trajectory_reviewer
-
-                trajectory_block = _trajectory_reviewer.build_trajectory_digest(
-                    self.session_dir,
-                    self.shared_state,
-                )
-            except Exception:
-                log.exception("Coordinator: trajectory review failed")
-                trajectory_block = ""
+            trajectory_block = self.trajectory_digest()
             if trajectory_block:
                 sections.append("=== Trajectory review (advisory) ===")
                 sections.append(trajectory_block)
