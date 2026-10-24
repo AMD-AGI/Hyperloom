@@ -24,11 +24,6 @@ class RetentionResult:
     events_deleted: int = 0
     tasks_deleted: int = 0
 
-    @property
-    def total(self) -> int:
-        """Total rows deleted across the events and tasks retention passes."""
-        return self.events_deleted + self.tasks_deleted
-
 
 async def prune_events(
     db: SqliteConnection,
@@ -86,22 +81,9 @@ async def prune_tasks(
         return int(cur.rowcount or 0)
 
 
-async def run_db_retention(
-    db: SqliteConnection,
-    *,
-    events_keep_recent: int = DEFAULT_EVENTS_KEEP_RECENT,
-    tasks_keep_done: int = DEFAULT_TASKS_KEEP_DONE,
-) -> RetentionResult:
+async def run_db_retention(db: SqliteConnection) -> RetentionResult:
     """Run all DB retention passes; safe to call periodically from the reaper."""
-    events_deleted = await prune_events(
-        db,
-        keep_recent=events_keep_recent,
-    )
-    tasks_deleted = await prune_tasks(db, keep_done=tasks_keep_done)
-    return RetentionResult(
-        events_deleted=events_deleted,
-        tasks_deleted=tasks_deleted,
-    )
+    return RetentionResult(events_deleted=await prune_events(db), tasks_deleted=await prune_tasks(db))
 
 
 __all__ = [

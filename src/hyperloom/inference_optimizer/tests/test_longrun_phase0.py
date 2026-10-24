@@ -164,16 +164,6 @@ async def test_prune_tasks_keeps_recent_done_and_spares_inflight(conn):
     assert int(rows[0]["c"]) == 10
 
 
-@pytest.mark.asyncio
-async def test_run_db_retention_aggregates(conn):
-    bus = MessageBus(conn)
-    for i in range(40):
-        await bus.append_and_seq(Message.new("orchestration", "*", "observation", {"i": i}))
-    res = await dbm.run_db_retention(conn, events_keep_recent=5)
-    assert res.events_deleted > 0
-    assert res.total == res.events_deleted + res.tasks_deleted
-
-
 # Retained GPU ownership
 @pytest.mark.asyncio
 async def test_gpu_pool_retains_old_leases(conn):
