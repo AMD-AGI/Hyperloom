@@ -22,10 +22,11 @@ from hyperloom_multibranch.contracts.notebook.records import (
     PendingCandidate,
     TestRecord,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis
+from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis, MergeOutcome
 from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
 from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, SETTLED_TESTS, FrontierPolicy
+from hyperloom_multibranch.notebook.rsi.stranded import StrandedCommit, StrandedLead
 from hyperloom_multibranch.notebook.tests.factories import intent, request, result
 from hyperloom_multibranch.scheduling.branches import REPAIR_PROTECTED_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -112,6 +113,7 @@ def _view(
     similar_to: dict[str, tuple[SimilarBranch, ...]] | None = None,
     events: tuple[SessionEvent, ...] = (),
     behind: dict[str, float] | None = None,
+    stranded: tuple[StrandedLead, ...] = (),
     profile_running: bool = False,
     explore_gpu_hours: float | None = None,
     max_llm_usd: float | None = None,
@@ -151,6 +153,7 @@ def _view(
         similar_to=similar_to or {},
         events=events,
         behind_integration_pct=behind or {},
+        stranded_leads=stranded,
         profile_running=profile_running,
         gpu_hours_used=1.23456,
         explore_gpu_hours=explore_gpu_hours,
@@ -288,6 +291,28 @@ def test_the_prompt_shows_and_explains_the_events_and_how_far_each_branch_lies_b
         assert field in prompt
     assert f"at least {MB_BIG_GAIN_BARS} times the bar threshold_pct" in prompt
     assert "or merged a foundation fix (foundation_fix true), which merges whatever its gain" in prompt
+
+
+def _lead(branch: str, lead_pct: float, commit: StrandedCommit) -> StrandedLead:
+    value = 100.0 * (1.0 + lead_pct / 100.0)
+    return StrandedLead(branch, True, f"c-{branch}", METRIC, value, 100.0, lead_pct, 1.6, (commit,))
+
+
+def test_the_prompt_shows_one_line_per_stranded_lead_the_largest_first_and_explains_them() -> None:
+    conflicted = StrandedCommit("aaaaaaaa1111", 5.0, MergeOutcome.CONFLICT_SKIPPED, "unresolved patch conflict", 3)
+    refused = StrandedCommit("bbbbbbbb2222", 8.0, MergeOutcome.NOT_STACKABLE, "-0.99% on the integration head", 1)
+    leads = (_lead("b02", 11.1, refused), _lead("b01", 7.8, conflicted))
+
+    assert _state(_view(stranded=leads))["stranded_leads"] == [
+        "b02 leads integration by +11.1% on output_throughput (111 against 100, over the 1.6% bar), and 1 of its "
+        "commits did not merge: bbbbbbbb (+8.0%): -0.99% on the integration head",
+        "b01 leads integration by +7.8% on output_throughput (108 against 100, over the 1.6% bar), and 1 of its "
+        "commits did not merge: aaaaaaaa (+5.0%): unresolved patch conflict, 3 tries",
+    ]
+    assert _state(_view())["stranded_leads"] == []
+    prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
+    assert "stranded_leads lists, the largest lead first, each branch whose head leads the integration head" in prompt
+    assert "skipped as a conflict, or tested and not stackable" in prompt
 
 
 @pytest.mark.parametrize("running", [True, False])

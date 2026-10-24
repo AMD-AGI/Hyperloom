@@ -19,9 +19,10 @@ changes what the branches are worth: a merge that moved the integration head by 
 profile taken of the integration head after such a merge moving, or a quarantined measurement node. A branch the
 judge opens after the opening batch starts from the integration head, briefed on a focus. The judge reads the
 frontier-scored progress, how similar archived sessions went, which running branches made much the same change, the
-events since its last call, how far each branch lies behind the integration head, whether a profile of the integration
-head runs, the GPU hours and the LLM dollars the specialists and the scheduler itself spent so far, and what is known of
-each running branch's specialist (given up, stopped because its judging failed, its heartbeat lost
+events since its last call, how far each branch lies behind the integration head, which branches lead it while their
+commits fail to merge, whether a profile of the integration head runs, the GPU hours and the LLM dollars the
+specialists and the scheduler itself spent so far, and what is known of each running branch's specialist (given up,
+stopped because its judging failed, its heartbeat lost
 again and again), and decides what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed,
 and a branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background
 task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the
@@ -48,6 +49,7 @@ from hyperloom_multibranch.contracts.notebook.records import BranchProgress, pri
 from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierScoring
 from hyperloom_multibranch.notebook.rsi.session import judge_history
+from hyperloom_multibranch.notebook.rsi.stranded import stranded_leads
 from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR
 from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, BatchStart, BranchControl
 from hyperloom_multibranch.scheduling.context import SchedulerContext
@@ -331,6 +333,7 @@ class Explorer:
             similar_to=await self._similarity.similar_to(),
             events=self._events.hand_over(),
             behind_integration_pct=behind_integration_pct(progress, integration_value, root.values, self._metric),
+            stranded_leads=stranded_leads(snapshot, self._metric),
             profile_running=self._events.profiling,
             gpu_hours_used=spent_gpu_seconds(progress) / MB_SECONDS_PER_HOUR,
             explore_gpu_hours=_hours_or_none(window.explore_gpu_seconds),

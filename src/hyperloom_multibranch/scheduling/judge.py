@@ -6,8 +6,9 @@
 The scheduler hands the judge a :class:`JudgeView` (the roster, each branch's frontier progress, the remaining budget,
 the integration branch's recorded value, how similar archived sessions went, whether a branch opened now would
 still pay off, which running branches made much the same change, the events since its last call, how far each
-branch lies behind the integration head, whether a profile of the integration head runs, the GPU hours and LLM
-tokens the session has used, and what is known of each running branch's specialist). The judge answers with one JSON
+branch lies behind the integration head, which branches lead it while their commits fail to merge, whether a profile
+of the integration head runs, the GPU hours and LLM tokens the session has used, and what is known of each running
+branch's specialist). The judge answers with one JSON
 object, which :func:`parse_decision` reads and :func:`cap_decision` cuts to the caps and to the branches that are
 still live. A failed call or an unreadable reply gives ``None``, and the scheduler keeps the status quo. The judge
 never calls a peer; the scheduler applies its decision. The judge may neither stop nor lower the K of a held branch
@@ -36,6 +37,7 @@ from hyperloom_multibranch.contracts.notebook.records import BranchProgress, Pen
 from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
 from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS
+from hyperloom_multibranch.notebook.rsi.stranded import StrandedLead
 from hyperloom_multibranch.scheduling.branches import REPAIR_BRANCH_SECONDS, REPAIR_PROTECTED_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, SessionEvent
@@ -103,6 +105,11 @@ whatever its gain because the other branches build on what it fixes. A branch's 
 head's recorded value lies below the integration head's, in percent of the root's value: a branch far behind gains
 little even once merged, so it is a candidate to stop, and a branch you open now starts from the new integration
 head.
+stranded_leads lists, the largest lead first, each branch whose head leads the integration head by more than the bar
+on the metric while commits of its own failed to merge: skipped as a conflict, or tested and not stackable. Each line
+names those commits with their gain, why their last merge failed and how many merges they took part in. While a lead
+stays stranded the integration branch, and every branch you open from it, goes on from the lower value: weigh that
+before stopping such a branch, whose head holds the gain the integration head lacks.
 bottleneck_moved: the profile of the integration head taken after it moved found its largest op changed, or that op's
 share fell by more than {MB_BOTTLENECK_SHIFT_PP} percentage points: branches still speeding up the previous largest op
 have less to gain, and a branch you open now is briefed on the new largest op unless you name its focus.
@@ -199,7 +206,8 @@ class JudgeView:
     opened now would still pay off. ``similar_to`` maps a branch to the running branches whose own change is much the
     same as its own; a branch similar to none is not in it. ``events`` are the events detected since the last call,
     and ``behind_integration_pct`` maps a running specialist branch to how far its head lies behind the integration
-    head, in percent of the root's value. ``profile_running`` is whether a profile of the integration head runs.
+    head, in percent of the root's value. ``stranded_leads`` are the branches whose head leads the integration head by
+    more than the bar while commits of theirs failed to merge, the largest lead first. ``profile_running`` is whether a profile of the integration head runs.
     ``gpu_hours_used`` are the GPU hours of the session's tests that have a result: the root's baseline is among them,
     a test withdrawn before its result and the PRELUDE child's own measurements are not. ``explore_gpu_hours`` is where
     EXPLORE ends under ``--max-gpu-hours``, ``None`` without a limit, ``prelude_gpu_hours_upper_bound`` the PRELUDE
@@ -230,6 +238,7 @@ class JudgeView:
     similar_to: Mapping[str, tuple[SimilarBranch, ...]]
     events: tuple[SessionEvent, ...]
     behind_integration_pct: Mapping[str, float]
+    stranded_leads: tuple[StrandedLead, ...]
     profile_running: bool
     gpu_hours_used: float
     explore_gpu_hours: float | None
@@ -443,6 +452,7 @@ def render_prompt(view: JudgeView) -> str:
             "scheduler_llm_usd": round(view.scheduler_llm_usd, _USD_DIGITS),
         },
         "events": [{"event": event.kind.value, "reason": event.reason, **event.detail} for event in view.events],
+        "stranded_leads": [lead.describe() for lead in view.stranded_leads],
         _KEY_BRANCHES: [_branch_row(entry, progress.get(entry.branch), view) for entry in view.roster],
     }
     history = f"How similar past sessions went:\n{view.history}\n\n" if view.history else ""
