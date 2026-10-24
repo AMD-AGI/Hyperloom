@@ -41,6 +41,9 @@ MB_LLM_READ_TIMEOUT_SECONDS = 120.0
 # A patch resolver's reply carries a whole unified diff, which takes longer to write than a judgement: the
 # ad4ab4d9 session lost two merge candidates to the 120 s read timeout rather than to a conflict it could not settle.
 MB_RESOLVER_READ_TIMEOUT_SECONDS = 300.0
+# And it is longer than a judgement: under the judge's 8192-token cap the 4aef3318 session lost every one of a branch's
+# six cumulative patches to replies cut off at the cap.
+MB_RESOLVER_MAX_TOKENS = 32768
 
 
 def default_model() -> str:
@@ -77,11 +80,17 @@ def recorded(completion: Completion, notebook: UsageSink, source: UsageSource) -
 
 
 def anthropic_completion(
-    model: str, *, component: str, operation: str, read_seconds: float = MB_LLM_READ_TIMEOUT_SECONDS
+    model: str,
+    *,
+    component: str,
+    operation: str,
+    read_seconds: float = MB_LLM_READ_TIMEOUT_SECONDS,
+    max_tokens: int = COMPLETION_MAX_TOKENS,
 ) -> Completion:
     """A :data:`Completion` over ``llm_config``'s Anthropic transport, tagged with ``component`` and ``operation``,
     each reply priced at ``model``'s rates; a model the price sheet does not list gives replies with no cost, which
-    no dollar cap counts, and says so once here. ``read_seconds`` bounds how long a reply may take to arrive."""
+    no dollar cap counts, and says so once here. ``read_seconds`` bounds how long a reply may take to arrive, and
+    ``max_tokens`` how long it may be."""
 
     price = price_of(model)
     if price is None:
@@ -93,7 +102,7 @@ def anthropic_completion(
         request = AnthropicCompletionRequest(
             model=model,
             messages=[{"role": "user", "content": user}],
-            max_tokens=COMPLETION_MAX_TOKENS,
+            max_tokens=max_tokens,
             system=system,
             timeout=timeout,
             timeout_s=read_seconds,
@@ -104,7 +113,9 @@ def anthropic_completion(
             raise CompletionFailed(f"{operation} call failed: {type(exc).__name__}: {exc}") from exc
         usage = result.usage if isinstance(result.usage, Mapping) else {}
         tokens = TokenCounts.from_anthropic_usage(usage)
-        return CompletionReply(result.text, tokens, None if price is None else price.cost_usd(tokens))
+        return CompletionReply(
+            result.text, tokens, None if price is None else price.cost_usd(tokens), result.stop_reason
+        )
 
     return complete
 
@@ -112,6 +123,7 @@ def anthropic_completion(
 __all__ = [
     "MB_LLM_CONNECT_TIMEOUT_SECONDS",
     "MB_LLM_READ_TIMEOUT_SECONDS",
+    "MB_RESOLVER_MAX_TOKENS",
     "MB_RESOLVER_READ_TIMEOUT_SECONDS",
     "anthropic_completion",
     "default_model",

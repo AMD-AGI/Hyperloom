@@ -66,7 +66,7 @@ from hyperloom_multibranch.rulegate.inferencex import GAIN_BELOW_THRESHOLD, GAIN
 from hyperloom_multibranch.scheduling.candidates import Candidates
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
-from hyperloom_multibranch.contracts.llm import Completion, CompletionFailed
+from hyperloom_multibranch.contracts.llm import STOPPED_AT_MAX_TOKENS, Completion, CompletionFailed, CompletionReply
 from hyperloom_multibranch.scheduling.requests import SessionChecks, integration_test_request
 
 SUPERSEDED = "superseded: another candidate of the round was merged onto this head first"
@@ -77,6 +77,8 @@ CONFLICT_UNRESOLVED = "unresolved patch conflict"
 #: The same conflict, lost before any answer: the resolver could not be reached. Counted apart from
 #: :data:`CONFLICT_UNRESOLVED`, because a timed-out call says nothing about whether the patches can be combined.
 RESOLVER_UNREACHED = "the patch resolver could not be asked"
+#: The same conflict, lost to an answer the output token cap cut off: a longer cap, not another model, would settle it.
+CONFLICT_TRUNCATED = "the patch resolver's answer was cut off at its output cap"
 #: The JSON key the resolver's reply carries the rewritten patch under; ``null`` means it cannot be combined.
 PATCH_KEY = "patch"
 #: The resolver's answers per conflicting patch: a rewrite that does not apply is asked for once more, with why.
@@ -138,11 +140,18 @@ class PatchUnresolved(Exception):
     """A conflicting patch the resolver got no rewrite of that applies; the message says why."""
 
 
-def _rewritten(conflict: PatchConflict, reply: str) -> str | None:
-    """The patch ``reply`` carries, ``None`` when it carries none; :class:`PatchUnresolved` when the model answered
-    that the patch cannot be combined, which another answer would not change."""
+class ReplyTruncated(Exception):
+    """The resolver's answer stopped at the output token cap; the message names the patch it was about."""
 
-    answer = extract_last_json_with_key(reply, PATCH_KEY)
+
+def _rewritten(conflict: PatchConflict, reply: CompletionReply) -> str | None:
+    """The patch ``reply`` carries, ``None`` when it carries none. Another answer would not change it when the model
+    answered that the patch cannot be combined (:class:`PatchUnresolved`) or ran out of output tokens
+    (:class:`ReplyTruncated`)."""
+
+    if reply.stop_reason == STOPPED_AT_MAX_TOKENS:
+        raise ReplyTruncated(f"the answer about {conflict.path} stopped after {reply.tokens.output} output tokens")
+    answer = extract_last_json_with_key(reply.text, PATCH_KEY)
     if answer is not None and answer[PATCH_KEY] is None:
         raise PatchUnresolved(f"the model answered that {conflict.path} cannot be combined with the patches before it")
     text = None if answer is None else answer[PATCH_KEY]
@@ -219,7 +228,7 @@ class LlmPatchResolver:
 
         asked, error = prompt, NO_PATCH
         for attempt in range(1, RESOLVER_ATTEMPTS + 1):
-            text = _rewritten(conflict, (await self._completion(RESOLVER_SYSTEM_PROMPT, asked)).text)
+            text = _rewritten(conflict, await self._completion(RESOLVER_SYSTEM_PROMPT, asked))
             error = NO_PATCH if text is None else await self._repo.apply_error(stack, text)
             if text is not None and error is None:
                 return _Rewrite(text, attempt)
@@ -463,6 +472,8 @@ class Integrator:
             return await self._resolver.resolve(merge, candidate)
         except CompletionFailed as exc:
             raise _Skipped(f"{RESOLVER_UNREACHED}: {conflicts}: {exc}", merge) from exc
+        except ReplyTruncated as exc:
+            raise _Skipped(f"{CONFLICT_TRUNCATED}: {conflicts}: {exc}", merge) from exc
         except (BlobError, PatchUnresolved) as exc:
             raise _Skipped(f"{CONFLICT_UNRESOLVED}: {conflicts}: {exc}", merge) from exc
 
@@ -619,6 +630,7 @@ def _decision(report: MergeReport) -> Decision:
 
 
 __all__ = [
+    "CONFLICT_TRUNCATED",
     "CONFLICT_UNRESOLVED",
     "FOUNDATION_FIX_VERDICTS",
     "GAIN_ONLY_REFUSALS",
@@ -631,6 +643,7 @@ __all__ = [
     "NO_PATCH",
     "PROMPT_VERSION",
     "PatchUnresolved",
+    "ReplyTruncated",
     "defects_beyond_gain",
     "not_stackable_reason",
 ]

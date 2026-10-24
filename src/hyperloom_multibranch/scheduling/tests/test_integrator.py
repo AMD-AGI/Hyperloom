@@ -58,6 +58,7 @@ from hyperloom_multibranch.scheduling.decisions import DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS
 from hyperloom_multibranch.scheduling.integrator import (
     ALREADY_ON_HEAD,
+    CONFLICT_TRUNCATED,
     CONFLICT_UNRESOLVED,
     FOUNDATION_FIX_VERDICTS,
     NO_PATCH,
@@ -72,7 +73,7 @@ from hyperloom_multibranch.scheduling.integrator import (
     MergeReport,
     not_stackable_reason,
 )
-from hyperloom_multibranch.contracts.llm import CompletionFailed
+from hyperloom_multibranch.contracts.llm import STOPPED_AT_MAX_TOKENS, CompletionFailed
 from hyperloom_multibranch.rulegate import agentx
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request
@@ -832,17 +833,23 @@ async def test_a_patch_that_does_not_apply_on_the_head_is_rewritten_before_the_m
             ScriptedCompletion(error=CompletionFailed("patch_resolve call failed: ReadTimeout: ")),
             RESOLVER_UNREACHED,
         ),
+        (
+            ScriptedCompletion(fallback='{"patch": "diff --git a/vllm/x.py', stop_reason=STOPPED_AT_MAX_TOKENS),
+            CONFLICT_TRUNCATED,
+        ),
     ],
-    ids=["model-declines", "call-fails"],
+    ids=["model-declines", "call-fails", "answer-cut-off"],
 )
 async def test_an_unresolved_patch_conflict_is_skipped_and_recorded(
     tmp_path: Path, scripted: ScriptedCompletion, named: str
 ) -> None:
-    """A conflict the model declined and one it was never asked about are both skipped, under reasons that tell them
-    apart: a timed-out call says nothing about whether the two patches can be combined."""
+    """A conflict the model declined, one it was never asked about and one whose answer the output cap cut off are
+    all skipped, under reasons that tell them apart: a timed-out call or a cut-off answer says nothing about whether
+    the two patches can be combined, and none of them is asked again."""
 
     bench = await _bench(tmp_path, conflicting=True)
     bench.completion.fallback, bench.completion.error = scripted.fallback, scripted.error
+    bench.completion.stop_reason = scripted.stop_reason
 
     report = await _one(bench)
 
