@@ -37,8 +37,6 @@ _DDL = [
         PRIMARY KEY (lane, holder_id)
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_leases_expires ON leases(expires_at)",
-    "CREATE INDEX IF NOT EXISTS idx_leases_lane ON leases(lane)",
     # lane_capacity — per-lane concurrency cap
     """
     CREATE TABLE IF NOT EXISTS lane_capacity (
@@ -86,7 +84,6 @@ _DDL = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state, updated_at)",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_idem ON tasks(idempotency_key)",
     # gpu_leases — specialist GPU pool (separate from serving lanes)
     """
     CREATE TABLE IF NOT EXISTS gpu_leases (
