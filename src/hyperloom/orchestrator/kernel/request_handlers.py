@@ -606,18 +606,17 @@ def _gemm_router_targets(
     """
     try:
         from kernelforge.gemm_tune.model_analyzer import analyze_model
-        from kernelforge.gemm_tune.router import select_tuners
+        from kernelforge.gemm_tune.router import RoutingEvidence, RoutingTarget, select_tuners
 
         specs = select_tuners(
             analyze_model(model_path),
-            framework=framework,
-            precision=precision,
-            quant_type=quant_type,
-            gpu_type=gpu_type,
-            kernel_signature_log=kernel_signature_log or None,
-            has_untuned_csv=has_untuned_csv,
-            has_shapes_json=has_shapes_json,
-            has_tunableop_input=has_tunableop_input,
+            RoutingTarget(framework, precision, quant_type, gpu_type),
+            RoutingEvidence(
+                kernel_signature_log=kernel_signature_log or None,
+                has_untuned_csv=has_untuned_csv,
+                has_shapes_json=has_shapes_json,
+                has_tunableop_input=has_tunableop_input,
+            ),
         )
     except Exception:
         log.debug("GEMM: could not consult the tuner router for lane cost estimates", exc_info=True)
