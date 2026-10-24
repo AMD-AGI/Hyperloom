@@ -115,7 +115,7 @@ _SOURCE_BY_ACTION: dict[str, str] = {
 
 #: The kernel backends the per-backend split reports. Anything else is folded
 #: into ``unattributed`` rather than minting a bucket per unrecognized string.
-BACKENDS: tuple[str, ...] = ("geak", "forge")
+BACKENDS: tuple[str, ...] = ("geak", "forge", "ave")
 
 STATUS_SUCCEEDED = "succeeded"
 STATUS_DEGRADED = "degraded"

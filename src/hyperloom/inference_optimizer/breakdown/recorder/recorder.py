@@ -50,6 +50,7 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "kernel_geak_acceptance": "item",
     "kernel_discovered": "item",
     "kernel_integrate": "item",
+    "kernel_ave_attempt": "item",
     # The same sections whether the roofline was dispatched or called inline by
     # a phase; only the rows' event id differs.
     "roofline_event": "item",

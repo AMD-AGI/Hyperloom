@@ -240,6 +240,7 @@ exclude = [
 ".cursor/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 
 [tool.setuptools.package-data]
+ave = ["knowledge/*.md"]
 hyperloom = [
     "plugs/profiles/*.json",
     "orchestrator/prompts/*.md",
@@ -345,6 +346,7 @@ relative_files = true
 source = [
     "src/hyperloom",
     "src/kernelforge",
+    "src/ave",
     "src/hyperloom_kb",
     "OOB",  # optional component; not always present in a clone
 ]

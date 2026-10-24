@@ -159,19 +159,21 @@ def test_a_repository_that_cannot_be_sealed_does_not_stop_the_others(tmp_path: P
     assert str(broken) not in pins
 
 
+@pytest.mark.parametrize("package_name", ["sglang", "avelang"])
 def test_the_framework_being_served_is_found_without_configuration(
     tmp_path: Path,
     monkeypatch,
+    package_name: str,
 ) -> None:
     """All three configured sources were empty in the GLM-5.2 session."""
-    repo = _repo(tmp_path, "sglang-checkout")
-    package = repo / "python" / "sglang"
+    repo = _repo(tmp_path, f"{package_name}-checkout")
+    package = repo / "python" / package_name
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
     monkeypatch.setattr(
         campaign_baseline,
         "_package_repository",
-        lambda name: repo.resolve() if name == "sglang" else None,
+        lambda name: repo.resolve() if name == package_name else None,
     )
 
     roots = campaign_repositories(SimpleNamespace(framework_repo_path=""))

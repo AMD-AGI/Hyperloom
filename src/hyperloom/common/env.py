@@ -153,6 +153,11 @@ def forge_explicitly_enabled() -> bool:
     return env_str("KERNEL_OPT_BACKEND_ORDER").lower() == "forge"
 
 
+def ave_explicitly_enabled() -> bool:
+    """Whether the Ave kernel optimizer is opted in."""
+    return env_str("KERNEL_OPT_BACKEND_ORDER").lower() == "ave"
+
+
 __all__ = [
     "EnvValueError",
     "is_truthy",
@@ -162,4 +167,5 @@ __all__ = [
     "env_float",
     "env_str",
     "forge_explicitly_enabled",
+    "ave_explicitly_enabled",
 ]

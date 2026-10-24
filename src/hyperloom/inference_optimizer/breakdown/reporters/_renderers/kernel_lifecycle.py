@@ -79,7 +79,7 @@ def _kernel_tables(detected: list[dict[str, Any]]) -> str:
     """The table of the kernels the pipeline acted on, then the residual long tail folded into ``<details>``."""
     util = {header: field for header, field in _UTIL_COLUMNS.items() if any(d.get(field) for d in detected)}
     headers = ["kernel_id", "name", "gpu%", "duration_us", "calls", *util]
-    headers += ["selected", "GEAK", "Forge", "adopted_by", "final"]
+    headers += ["selected", "GEAK", "Forge", "Ave", "adopted_by", "final"]
 
     def _row_for(d: dict[str, Any]) -> list[Any]:
         """Build one table row for a detected kernel record."""
@@ -93,6 +93,7 @@ def _kernel_tables(detected: list[dict[str, Any]]) -> str:
             "yes" if d.get("selected_for_optimization") else "no",
             _lane_summary(d.get("geak")),
             _lane_summary(d.get("forge")),
+            _lane_summary(d.get("ave")),
             d.get("adopted_by") or "—",
             d.get("final_decision"),
         ]
@@ -113,7 +114,7 @@ def _kernel_tables(detected: list[dict[str, Any]]) -> str:
     else:
         parts.append(
             "_No kernel was selected for optimization, and neither "
-            "GEAK nor Forge recorded an attempt. The kernel optimization "
+            "GEAK nor Forge nor Ave recorded an attempt. The kernel optimization "
             "pipeline did not run on this session._"
         )
     if residual:
@@ -172,19 +173,20 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     selected = sum(1 for d in detected if d.get("selected_for_optimization"))
     geak_touched = sum(1 for d in detected if d.get("geak"))
     forge_touched = sum(1 for d in detected if d.get("forge"))
+    ave_touched = sum(1 for d in detected if d.get("ave"))
     verdicts = Counter(d.get("final_decision") for d in detected)
     adopted = [d for d in detected if d.get("final_decision") == "kept"]
 
     facts = [
         f"{len(detected)} kernel(s) detected, {selected} selected for "
         f"optimization, GEAK touched {geak_touched}, Forge touched "
-        f"{forge_touched}, adopted={verdicts['kept']}, reverted={verdicts['reverted']}, "
+        f"{forge_touched}, Ave touched {ave_touched}, adopted={verdicts['kept']}, reverted={verdicts['reverted']}, "
         f"rejected={verdicts['rejected']}, attempted-no-decision={verdicts['attempted']}."
     ]
-    if selected and not (geak_touched or forge_touched):
+    if selected and not (geak_touched or forge_touched or ave_touched):
         facts.append(
             "Kernels were selected for optimization but neither GEAK nor "
-            "Forge recorded an attempt — kernel optimization pipeline "
+            "Forge nor Ave recorded an attempt — kernel optimization pipeline "
             "stalled before launch."
         )
     if adopted:
@@ -201,7 +203,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             Decision(
                 kind="not_attempted",
                 subject="kernel_lifecycle",
-                rationale=f"all {len(detected)} detected kernels left un-optimized (neither GEAK nor Forge attempted)",
+                rationale=f"all {len(detected)} detected kernels left un-optimized (neither GEAK nor Forge nor Ave attempted)",
             )
         )
 

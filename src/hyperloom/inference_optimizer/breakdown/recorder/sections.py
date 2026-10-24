@@ -65,6 +65,7 @@ KERNEL_EVENT_SECTIONS: tuple[str, ...] = (
     "kernel_geak_acceptance",
     "kernel_discovered",
     "kernel_integrate",
+    "kernel_ave_attempt",
 )
 
 #: The roofline substreams. Rows belong to whichever event tagged them: the

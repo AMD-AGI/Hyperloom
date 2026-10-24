@@ -19,3 +19,7 @@ The following table lists each component with its role, source repository, and d
 | [TraceLens](tracelens.md) | Agentic trace analysis and roofline targets | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) | [TraceLens Docs](https://rocm.docs.amd.com/projects/tracelens/en/latest/) |
 | [GEAK](geak.md) | GPU kernel generation and optimization (Triton, HIP, or FlyDSL) | [AMD-AGI/GEAK](https://github.com/AMD-AGI/GEAK) | [GEAK Docs](https://rocm.docs.amd.com/projects/geak/en/latest/) |
 | [AgentKernelArena](agentkernelarena.md) | Optional standardized evaluation arena for agent benchmarking | [AMD-AGI/AgentKernelArena](https://github.com/AMD-AGI/AgentKernelArena) | [AgentKernelArena Docs](https://rocm.docs.amd.com/projects/agent-kernel-arena/en/latest/) |
+
+[Ave](ave.md) runs ordered optimization prompts on an AveLang kernel within one node
+selected from the inference workload, alongside the
+[Forge kernel optimizer](../kernelforge/quickstart.md).
