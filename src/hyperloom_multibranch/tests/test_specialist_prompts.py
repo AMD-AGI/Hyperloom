@@ -216,11 +216,12 @@ def test_the_role_says_a_profile_refused_as_existing_is_waited_on():
     assert "wait_test on it rather than profiling again" in role_prompt(WORKLOAD)
 
 
-def test_the_role_keeps_working_while_tests_run_and_ends_the_turn_to_wait():
+def test_the_role_keeps_working_after_submit_test_and_ends_the_turn_only_with_k_tests_running():
     prompt = role_prompt(WORKLOAD)
 
-    assert "While your tests run, keep working" in prompt
-    assert "when nothing is left to do until one lands, end your turn and it wakes you" in prompt
+    assert "After submit_test, keep working; do not end your turn" in prompt
+    assert "While fewer than K of your tests run, prepare and submit the next candidate" in prompt
+    assert "End your turn only when nothing is left to read or prepare and every candidate the evidence" in prompt
     assert "within a minute with the test's progress" in prompt
     assert "Never wait with sleep, a background shell or by reading the test's files" in prompt
 
@@ -628,3 +629,26 @@ def test_the_gemm_attention_and_fusion_directions_carry_the_strongest_kernel_exa
     assert "copied into the framework tree and edited" in fusion
     assert "page size included" in attention and "pa_decode_gluon" in attention
     assert "scales from its epilogue" in attention
+
+
+def test_the_role_retests_a_lesson_or_a_peer_s_flat_result_on_the_current_head_before_closing_on_it():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "A lesson, a learning or another branch's flat result closes nothing on a different head" in prompt
+    assert "retest it on your current head before you call it closed" in prompt
+
+
+def test_the_role_says_a_blocked_or_missing_capability_exhausted_names_the_path_tried():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "for blocked_by_tool or needs_capability, the path you tried: the file, the call and the error" in prompt
+
+
+def test_the_role_checks_the_head_for_a_lead_s_change_before_replaying_it():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "Before you replay a lead, check whether your head already carries its change" in prompt
+
+
+def test_the_gemm_direction_checks_a_peer_s_report_that_a_kernel_family_is_missing():
+    assert "A peer's report that a kernel family is missing from the image closes nothing" in DIRECTIONS[1]
