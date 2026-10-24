@@ -216,9 +216,17 @@ def enable_profile(config_path: Path) -> None:
 
     An explicit ``num_steps``, ``num_profiles``, ``start_seconds``,
     ``interval_seconds``, or ``detailed_annotations`` already present in the
-    profile copy is left unchanged. A missing ``detailed_annotations`` becomes true.
+    profile copy is left unchanged. A missing ``detailed_annotations`` follows the patch
+    outcome, as the fixed-sequence request body does: Magpie probes the server whenever the
+    field is true and raises when the server lacks it, so claiming it on a runtime the patch
+    did not reach ends the round before the server starts.
     """
-    from ._profile_setup import apply_sglang_shape_tool, patch_for_profile, shape_discovery_enabled
+    from ._profile_setup import (
+        annotations_supported,
+        apply_sglang_shape_tool,
+        patch_for_profile,
+        shape_discovery_enabled,
+    )
 
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     bench = config["benchmark"]
@@ -245,7 +253,7 @@ def enable_profile(config_path: Path) -> None:
     torch_profiler.setdefault("num_profiles", 1)
     torch_profiler.setdefault("start_seconds", 300)
     torch_profiler.setdefault("interval_seconds", 900)
-    torch_profiler.setdefault("detailed_annotations", True)
+    torch_profiler.setdefault("detailed_annotations", annotations_supported(bench["envs"]))
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 

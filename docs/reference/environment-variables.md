@@ -966,7 +966,9 @@ fixed-sequence profiling. Configure capture steps, count, delay and interval thr
 `interval_seconds`). The diagnostic copy preserves those settings and explicit
 `detailed_annotations`. When profiling is enabled, a missing capture setting becomes
 one capture of 256 steps, starting 300 seconds after measurement, with a 900-second
-interval. A missing `detailed_annotations` becomes true.
+interval. A missing `detailed_annotations` becomes true, and false when the TraceLens
+runtime patch was attempted and did not apply: Magpie probes the server whenever the field
+is true and refuses to launch when the server lacks it.
 Hyperloom adds the shape-tool environment through `agentx.launch_overrides` while
 preserving the server's runtime paths. Magpie owns profiling flags, starts after replay
 reaches measurement, and manages capture/flush. Each window remains a separate TraceLens input.

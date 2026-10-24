@@ -407,6 +407,18 @@ def _apply_vllm_profile(
     return flags
 
 
+def annotations_supported(envs: Mapping[str, Any]) -> bool:
+    """Whether the server this round launches will accept TraceLens step annotations.
+
+    False only after a patch was attempted and failed: ``patch_for_profile`` writes the reason on
+    exactly that path, and an image that ships the patch (``HYPERLOOM_ENABLE_PATCH=0``) keeps them.
+    Both profile paths ask this one question -- the fixed-sequence request body because an unpatched
+    server rejects the field, and the native path because Magpie probes the server whenever
+    ``detailed_annotations`` is true and raises, rather than degrading, when the fields are absent.
+    """
+    return envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") != _TRACELENS_PATCH_UNAVAILABLE
+
+
 def _apply_sglang_profile(
     bench: dict[str, Any],
     envs: dict[str, Any],
@@ -427,7 +439,7 @@ def _apply_sglang_profile(
         extra_body.setdefault("detailed_annotations", True)
         envs["PROFILE_EXTRA_BODY"] = json.dumps(extra_body)
         return
-    degraded = envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE
+    degraded = not annotations_supported(envs)
     if degraded:
         shape_discovery = False
     extra_body["shape_discovery"] = shape_discovery

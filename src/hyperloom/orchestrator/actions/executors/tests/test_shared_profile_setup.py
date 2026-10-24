@@ -261,6 +261,26 @@ def test_fixed_shape_setup_preserves_request_options_and_capture_window(tmp_path
     assert "--enable-shape-discovery-for-cuda-graph-profile" not in envs.get("EXTRA_SGLANG_ARGS", "")
 
 
+@pytest.mark.parametrize("framework", ["sglang", "vllm"])
+def test_native_profile_drops_annotations_when_the_patch_did_not_apply(tmp_path, monkeypatch, framework):
+    """Magpie raises rather than degrading when the server lacks the fields, so an unreached patch means false."""
+    monkeypatch.setattr(_server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda: False)
+    path = _native_config(tmp_path, framework)
+    enable_profile(path)
+    native = load_benchmark(path)
+    assert native["envs"]["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
+    assert native["profiler"]["torch_profiler"]["detailed_annotations"] is False
+
+
+@pytest.mark.parametrize("framework", ["sglang", "vllm"])
+def test_native_profile_keeps_the_operator_annotation_choice_through_a_failed_patch(tmp_path, monkeypatch, framework):
+    monkeypatch.setattr(_server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda: False)
+    requested = {"enabled": False, "detailed_annotations": True}
+    path = _native_config(tmp_path, framework, profiler={"torch_profiler": deepcopy(requested)})
+    enable_profile(path)
+    assert load_benchmark(path)["profiler"]["torch_profiler"]["detailed_annotations"] is True
+
+
 @pytest.mark.parametrize("enable_patch,expected_status", [("1", "ok"), ("0", "not_attempted")])
 def test_native_patch_retry_clears_its_stale_failure(tmp_path, monkeypatch, enable_patch, expected_status):
     path = _native_config(tmp_path, "sglang")
