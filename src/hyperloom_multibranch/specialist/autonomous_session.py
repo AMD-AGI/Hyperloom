@@ -9,12 +9,14 @@ resumes the agent in the same sandbox without onboarding again; the lease goes b
 watches the agent's keep signal and reads each keep whole (:mod:`agent_import`) the moment it shows, since the agent
 goes on to its next candidate in the same workspace. Keeps are submitted as claimless explore tests against the branch
 head, one at a time: a keep that lands while an import is measured or judged waits, and a later keep replaces it, since
-each is cumulative. What the run knows of the keeps is kept beside the manifest, so a keep waiting at a crash is
-submitted by the run after it. The agent's own LLM spend is read from its Claude CLI's transcripts (:mod:`agent_spend`)
-at each poll and once more when the run ends, and recorded as the branch's. The branch's judge judges the imports as it
-judges any branch's tests; nothing of its verdicts reaches the agent. An agent that exits 0 finishes the run once what
-it kept last settled; one that exits otherwise is a crash the runtime restarts it from. A session never ends idle: what
-the agent keeps, or does not, is its own business, bounded by the session's stops.
+each is cumulative. An agent that signals no keep has its workspace taken as its keep once, :data:`CUTOFF_SECONDS`
+before EXPLORE ends, so that work is measured and judged in EXPLORE, and again when it exits 0. What the run knows of
+the keeps is kept beside the manifest, so a keep waiting at a crash is submitted by the run after it. The agent's own
+LLM spend is read from its Claude CLI's transcripts (:mod:`agent_spend`) at each poll and once more when the run ends,
+and recorded as the branch's. The branch's judge judges the imports as it judges any branch's tests; nothing of its
+verdicts reaches the agent. An agent that exits 0 finishes the run once what it kept last settled; one that exits
+otherwise is a crash the runtime restarts it from. A session never ends idle: what the agent keeps, or does not, is its
+own business, bounded by the session's stops.
 """
 
 from __future__ import annotations
@@ -70,6 +72,9 @@ log = logging.getLogger(__name__)
 
 MANIFEST_FILE = "agent-manifest.json"
 LEASE_FILE = "agent-lease.json"
+#: How long before the EXPLORE end an agent that signals no keep has its workspace collected: an import's test and its
+#: confirm, about ten minutes each on an InferenceX workload, after whatever test of the branch runs then.
+CUTOFF_SECONDS = 40 * 60.0
 SPEND_FILE = "agent-spend.json"
 #: What a run knows of the agent's keeps (:class:`KeepWatch`), so the run after a crash goes on from it.
 WATCH_FILE = "agent-watch.json"
@@ -104,6 +109,7 @@ class AutonomousSetup:
     component: str
     spend: Callable[[tuple[Path, ...], Path], AgentSpend]
     poll_seconds: float = 5.0
+    cutoff_seconds: float = CUTOFF_SECONDS
     upstream: Callable[[str], Upstream | None] = installed_component_upstream
     settle_seconds: float = SETTLE_SECONDS
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
@@ -112,10 +118,11 @@ class AutonomousSetup:
 
 @dataclass
 class KeepWatch:
-    """What a run knows of the agent's keeps: ``root``, the workspace's git commit every keep is read against (the
-    agent may commit on top of it); ``seq``, the keeps seen; ``mark``, what the keep file last said of them; ``base``,
-    the keeps seen before the agent last started its count over; ``pending``, the latest keep read and not submitted
-    yet; and what of the agent's launch the toolbox refused, which every later keep that still runs with it is imported
+    """What a run knows of the agent's keeps: ``root``, the workspace's git commit every keep is read against (the agent
+    may commit on top of it); ``seq``, the keeps seen; ``mark``, what the keep file last said of them; ``base``, the
+    keeps seen before the agent last started its count over; ``pending``, the latest keep read and not submitted yet;
+    ``collected``, whether the workspace of an agent that signals no keep was taken ahead of the EXPLORE end; and
+    what of the agent's launch the toolbox refused, which every later keep that still runs with it is imported
     without: ``refused_envs``, each variable with the value refused (``None``: the variable left unset), and
     ``refused_args``, server arguments refused as a whole."""
 
@@ -124,6 +131,7 @@ class KeepWatch:
     mark: int | str | None = None
     base: int = 0
     pending: KeptChange | None = None
+    collected: bool = False
     refused_envs: dict[str, str | None] = field(default_factory=dict)
     refused_args: str | None = None
 
@@ -141,6 +149,7 @@ class KeepWatch:
             "mark": self.mark,
             "base": self.base,
             "pending": pending,
+            "collected": self.collected,
             "refused_envs": self.refused_envs,
             "refused_args": self.refused_args,
         }
@@ -187,6 +196,7 @@ class AutonomousSession:
             while not self._stopped.is_set():
                 ended = process.returncode is not None
                 await self._observe(manifest, watch)
+                await self._collect_before_the_end(manifest, watch)
                 await self._record_spend(spend)
                 if ended:
                     await self._ended(manifest, process, watch)
@@ -194,6 +204,19 @@ class AutonomousSession:
                 await self._setup.sleep(self._setup.poll_seconds)
         finally:
             await self._record_spend(spend)
+
+    async def _collect_before_the_end(self, manifest: AgentManifest, watch: KeepWatch) -> None:
+        """Take, once, the workspace of an agent that signals no keep as its keep, :attr:`AutonomousSetup.cutoff_seconds`
+        before the EXPLORE end, so its work is measured and judged before EXPLORE ends."""
+
+        deadline = self._start.task.deadline
+        if manifest.keep is not None or watch.collected or not deadline:
+            return
+        if self._setup.clock() < deadline - self._setup.cutoff_seconds:
+            return
+        watch.collected = True
+        await self._note("EXPLORE ends soon: the agent's workspace is taken as its keep now")
+        await self._take(manifest, watch, watch.seq + 1)
 
     async def _record_spend(self, spend: AgentSpend) -> None:
         """Record the agent's new LLM spend; a read that fails is noted once and tried again at the next poll."""

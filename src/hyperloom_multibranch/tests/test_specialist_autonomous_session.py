@@ -248,7 +248,13 @@ class Rig:
 
 
 async def _rig(
-    tmp_path: Path, agent: Agent = Agent(), *, poll: float = 0.05, clock=time.time, start: Recipe | None = None
+    tmp_path: Path,
+    agent: Agent = Agent(),
+    *,
+    poll: float = 0.05,
+    clock=time.time,
+    start: Recipe | None = None,
+    deadline: float = 0.0,
 ) -> Rig:
     """A session of the agent on :data:`BRANCH`, opened at the root, or at ``start`` committed onto it the way PRELUDE
     replays a Recipe KB champion."""
@@ -285,10 +291,11 @@ async def _rig(
         spend,
         poll_seconds=poll,
         settle_seconds=0.3,
+        cutoff_seconds=0.5,
         clock=clock,
     )
     place = BranchPlace(worktree, rig.notebook, tmp_path / BRANCH / "session")
-    start = SessionStart(BRANCH, start_commit, 1, BranchTask(agent=str(_agent_repo(tmp_path))))
+    start = SessionStart(BRANCH, start_commit, 1, BranchTask(agent=str(_agent_repo(tmp_path)), deadline=deadline))
 
     def restart() -> AutonomousSession:
         return AutonomousSession(start, setup, place)
@@ -478,6 +485,23 @@ async def test_what_the_agent_s_own_cli_spends_is_recorded_as_the_branch_s(tmp_p
 
     [recorded] = rig.sandbox.usage.recorded
     assert (recorded.branch, recorded.launch, recorded.tokens) == (BRANCH, "s-1", TokenCounts(3, 50))
+
+
+async def test_an_agent_with_no_keep_signal_has_its_workspace_collected_once_before_the_explore_end(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, Agent(keep=None, tail=30.0), deadline=time.time() + 1.5)
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+
+    await _until(lambda: rig.toolbox.requests, "the cut-off collection")
+    await asyncio.sleep(1.5)
+    await rig.session.stop()
+    await asyncio.wait_for(running, 10)
+
+    [request] = rig.toolbox.requests
+    assert "+max_num_seqs = 512" in rig.patch(request)
+    assert any("EXPLORE ends" in note for note in await rig.notices())
 
 
 async def test_an_agent_whose_lease_would_leave_no_card_to_measure_fails_its_preflight(tmp_path: Path) -> None:
