@@ -625,6 +625,7 @@ def _parse_tuner_stdout(stdout: str, stderr: str) -> list[dict[str, Any]]:
                     "tuned_us": post,
                     "speedup": round(pre / post, 4) if post > 0 else 1.0,
                     "improved": action == "UPDATE" or in_would_update,
+                    "below_update_bar": action == "<",  # "< 3.0% improve"; not post-mismatch or post-error
                 }
             )
     return results
@@ -1044,15 +1045,14 @@ def _filter_unimproved_rows(
     artifact_csv: Path,
     shape_results: list[dict[str, Any]],
 ) -> tuple[int, int]:
-    """Drop deployed rows for shapes that did not beat the pre-run config serving falls back to without them."""
+    """Drop rows that lost to the pre-run config; unmeasured rows, and faster ones below aiter's update bar, stay."""
     losers: set[tuple[int, int, int]] = set()
     for r in shape_results:
         if r.get("improved"):
             continue
-        if r.get("is_new") or r.get("tuned_unverified") or (r.get("speedup") or 0.0) > 1.0:
+        if r.get("is_new") or r.get("tuned_unverified") or r.get("below_update_bar") and r["speedup"] > 1.0:
             continue
         if r.get("speedup") is None and r.get("default_us") is None:
-            # No baseline recorded at all -> not a loss, just unmeasured.
             continue
         try:
             losers.add((int(r["M"]), int(r["N"]), int(r["K"])))
