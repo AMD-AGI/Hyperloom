@@ -46,6 +46,7 @@ def check_change(worktree: BranchWorktree, component: str, layout: ComponentLayo
             done = subprocess.run(
                 [sys.executable, "-c", f"import {layout.import_name}"],
                 cwd=scratch,
+                env=_import_env(layout, package),
                 capture_output=True,
                 timeout=IMPORT_TIMEOUT_S,
             )
@@ -55,6 +56,24 @@ def check_change(worktree: BranchWorktree, component: str, layout: ComponentLayo
         output = (done.stdout + done.stderr).decode(errors="replace")[-OUTPUT_CHARS:]
         raise CheckFailed(f"import {layout.import_name} failed with the change:\n{output}")
     return len(written)
+
+
+def _import_env(layout: ComponentLayout, package: PackageBase) -> dict[str, str] | None:
+    if layout.import_name != "aiter" or os.environ.get("AITER_META_DIR"):
+        return None
+    # aiter imports csrc from its meta dir, which it derives from where the package sits; the mirror would make it the
+    # scratch dir, which has no csrc, so it is pinned to the image's.
+    return {**os.environ, "AITER_META_DIR": str(_aiter_meta_dir(package.path))}
+
+
+def _aiter_meta_dir(package: Path) -> Path:
+    """The image's aiter meta dir, resolved as aiter/jit/core.py does: the package's parent for a develop install,
+    its sibling ``aiter_meta`` for a wheel."""
+    try:
+        develop = (package / "install_mode").read_text().strip() == "develop"
+    except FileNotFoundError:
+        develop = True
+    return package.parent if develop else package.parent / "aiter_meta"
 
 
 def _mirror(installed: Path, target: Path, worktree: Path, prefix: str, changes: Changes) -> None:
