@@ -19,7 +19,7 @@ from hyperloom.orchestrator.lever import (
     patch_lever_kind,
 )
 
-from ..knowledge.agent_kb import PatchKB
+from ..knowledge.agent_kb import OverlayProvenance, PatchKB
 from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
 from ..state.task_registry import Task
 
@@ -272,7 +272,7 @@ class AgentKeepStagingMixin:
         # and can apply each overlay to the checkout it was taken from.
         if provenance and not patch_kb.stage_provenance(
             stack_index=stack_index,
-            **self._provenance_with_apply_roots(provenance, refs),
+            provenance=OverlayProvenance(**self._provenance_with_apply_roots(provenance, refs)),
         ):
             return False
         return True
