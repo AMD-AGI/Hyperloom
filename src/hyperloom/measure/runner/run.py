@@ -49,7 +49,7 @@ from hyperloom.measure.runner.inventory import OutputRejected, drop_agentx_runti
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
 from hyperloom.measure.runner.rewrite import Placement, rewrite_config
 from hyperloom.measure.runner.rounds import write_rounds
-from hyperloom.measure.runner.service import Progress, RunnerFailure, wait_for_file, write_status
+from hyperloom.measure.runner.service import Progress, RunnerFailure, join_notes, wait_for_file, write_status
 from hyperloom.measure.runner.snapshot import SnapshotError, check_snapshot
 from hyperloom.measure.runner.tools import ToolError, ensure_inferencex, ensure_magpie
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
@@ -532,5 +532,5 @@ def run(
         except Exception as exc:  # noqa: BLE001 - the application reads status.json, not a traceback
             write_status(out_dir, state=_FAILED, error_class="runner_error", message=f"{type(exc).__name__}: {exc}")
             return 1
-        write_status(out_dir, state="succeeded", message="; ".join(ctx.notes))
+        write_status(out_dir, state="succeeded", message=join_notes(ctx.notes))
     return 0

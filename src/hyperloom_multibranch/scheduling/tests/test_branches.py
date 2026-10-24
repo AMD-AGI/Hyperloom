@@ -253,6 +253,7 @@ async def test_agent_branches_open_at_the_root_at_k_one_after_the_user_branches_
 
     assert [(entry.branch, entry.origin, entry.k) for entry in opened] == [("b02", BranchOrigin.AGENT, 1)]
     assert bench.sessions.agents == {"b02": "https://github.com/acme/agent@v1"}
+    assert bench.sessions.deadlines["b02"] == OPEN_BY
     assert bench.sessions.started["b02"] == bench.root
     rows = [json.loads(line) for line in (tmp_path / "MB-decisions.jsonl").read_text().splitlines()]
     assert ("b02", "agent branch started") in [(row["branch"], row["reason"]) for row in rows if row["kind"] == "open"]

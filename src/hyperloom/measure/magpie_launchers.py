@@ -34,7 +34,7 @@ _MAGPIE_PATH_ENV = "MAGPIE_PATH"
 _INFERENCEX_PATH_ENV = "INFERENCEX_PATH"
 _LAUNCHERS = Path("scripts") / "benchmark"
 _BENCHMARKS = "benchmarks"
-_EXECUTABLE = 0o755
+_EXECUTABLE = 0o700
 _UTF8 = "utf-8"
 
 

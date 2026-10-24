@@ -17,6 +17,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import sys
 import tarfile
 from pathlib import Path
@@ -28,10 +29,20 @@ from hyperloom.measure import farm as farm_module
 from hyperloom.measure import local, signing
 from hyperloom.measure.jit.publish import STAGING_PATH, publish_contributions
 from hyperloom.measure.jit.store import DirJitStore
+from hyperloom.measure.jit.tests.triton_cache import find_kernel, get_group
 from hyperloom.measure.manifest import JitCacheFacts, ResultManifest
 from hyperloom.measure.runner import jit as runner_jit
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
-from hyperloom.measure.runner.tests.test_run import POINT, _blob, _go, _sheet, _snapshot, env, key  # noqa: F401 - fixtures
+from hyperloom.measure.runner.tests.test_run import (  # noqa: F401 - fixtures
+    POINT,
+    _blob,
+    _go,
+    _sheet,
+    _snapshot,
+    env,
+    key,
+    runner,
+)
 from hyperloom.measure.tests.test_local_backend import _Grid, _Server
 
 HASH_DIR = "0123456789abcdef0123456789abcdef"
@@ -42,25 +53,30 @@ BUILD_LOG = (
 )
 CORE = 'import os\nA = os.getenv("AITER_CONFIG_GEMM_A8W8", "x")\nB = os.environ.get("ENABLE_CK", "1")\n'
 TABLE_VARIABLE = "AITER_CONFIG_GEMM_A8W8"
+#: What aiter's cpp_itfs does with the home directory: the default of the root of its cache.
+HOME_READ = (
+    'import os\nHOME_PATH = os.environ.get("HOME") or os.environ.get("USERPROFILE")\nROOT = f"{HOME_PATH}/.aiter"\n'
+)
 STATES = ("aiter_jit", "aiter_cpp", "triton")
 
 
 class _CompilingGrid(_Grid):
     """A ``run_grid`` whose server compiles what it does not find: one aiter module, one cpp_itfs library, one Triton kernel."""
 
+    #: A compiler that does not trust what it was given and writes every Triton file again, to other bytes.
+    recompile_triton = False
+
     def __init__(self, tmp_path: Path, files: Path, *, fail: bool = False) -> None:
         super().__init__(tmp_path)
         self.files = files
         self.fail = fail
+        self.triton_found: list[bool] = []
+        self.triton_group: dict[str, str] | None = None
 
     async def __call__(self, **kwargs):
         log = self.files / "variant_0" / "server.log"
         log.parent.mkdir(parents=True, exist_ok=True)
-        compiled = {
-            "AITER_JIT_DIR": "module_gemm.so",
-            "AITER_ROOT_DIR": "build/pa_x/lib.so",
-            "TRITON_CACHE_DIR": f"{HASH_DIR}/kernel.hsaco",
-        }
+        compiled = {"AITER_JIT_DIR": "module_gemm.so", "AITER_ROOT_DIR": "build/pa_x/lib.so"}
         for variable, relative in compiled.items():
             target = Path(os.environ.get(variable) or self.tmp_path / "default" / variable) / relative
             if not target.exists():
@@ -69,6 +85,11 @@ class _CompilingGrid(_Grid):
                 if variable == "AITER_JIT_DIR":
                     with open(log, "a", encoding="utf-8") as out:
                         out.write(BUILD_LOG)
+        triton = Path(os.environ.get("TRITON_CACHE_DIR") or self.tmp_path / "default" / "TRITON_CACHE_DIR")
+        self.triton_found.append(find_kernel(triton, HASH_DIR))
+        self.triton_group = get_group(triton, HASH_DIR)
+        for path in triton.rglob("kernel.*") if self.recompile_triton else ():
+            path.write_bytes(b"compiled again, differently")
         with open(log, "a", encoding="utf-8") as out:
             out.write("Model loading took 28.5 GiB and 41.25 seconds\n")
         results = await super().__call__(**kwargs)
@@ -116,6 +137,7 @@ class Rig:
             "aiter/jit/core.py": CORE,
             "aiter/jit/optCompilerConfig.json": "{}",
             "aiter/ops/mha.py": 'import os\nX = os.environ.get("AITER_DISABLE_FMHA_OPUS")\n',
+            "csrc/cpp_itfs/utils.py": HOME_READ,
             "sglang/__init__.py": "",
             "sglang/srt/a.py": "x = 1\n",
         }
@@ -181,7 +203,8 @@ class Rig:
         environ = {**self.base_environ, "HYPERLOOM_SIGNING_KEY_FILE": str(key_file), **(extra_env or {})}
         if cache:
             environ[JIT_CACHE_ENV] = str(self.store.root)
-        self.monkeypatch.setattr(local, "run_grid", _CompilingGrid(run, run / "out" / "files", fail=fail))
+        self.grid = _CompilingGrid(run, run / "out" / "files", fail=fail)
+        self.monkeypatch.setattr(local, "run_grid", self.grid)
         assert _go(run, environ, make_sheet(run)) == 0
         manifest = ResultManifest.from_bytes((run / "out" / "manifest.json").read_bytes())
         return manifest, json.loads((run / "out" / "status.json").read_text()), run
@@ -224,9 +247,70 @@ def test_the_second_test_hits_the_cache_the_first_filled_and_builds_nothing(rig)
     assert (first.jit_cache.builds_seen, second.jit_cache.builds_seen) == (1, 0), "the hit counter"
     assert (first.timing.jit_compile_sec, second.timing.jit_compile_sec) == (12.5, 0.0), "the cold-start breakdown"
     assert first.jit_cache.kinds[0].contribution is not None and second.jit_cache.kinds[0].contribution is None
-    assert second.jit_cache.kinds[0].seed_files == 1 and status["message"] == ""
+    assert second.jit_cache.kinds[0].seed_files == 5, "Triton's kernel: four products and the group that lists them"
+    assert status["message"] == ""
     names = [phase.name for phase in second.timing.phases]
     assert "jit_cache" in names and names.index("jit_cache") < names.index("kernel_tables")
+
+
+def test_a_sandbox_with_a_home_and_a_scratch_directory_of_its_own_finds_the_cache_another_one_filled(rig) -> None:
+    """Every local sandbox has its own ``HOME`` and ``TMPDIR``, and aiter reads ``HOME``: they are where things are kept."""
+
+    def places(name: str) -> dict:
+        return {"HOME": str(rig.tmp_path / name / "home"), "TMPDIR": str(rig.tmp_path / name / "tmp")}
+
+    first, _, first_run = rig.run("first", _arm(rig), extra_env=places("first"))
+    rig.publish(first_run, first)
+    second, status, _ = rig.run("second", _arm(rig), extra_env=places("second"))
+
+    assert _keys(second) == _keys(first), "where the sandbox keeps its things is not an input of the build"
+    assert _states(second) == dict.fromkeys(STATES, "hit") and second.jit_cache.builds_seen == 0
+    assert status["message"] == ""
+    other, _, _ = rig.run("other", _arm(rig, envs={"ENABLE_CK": "0"}), extra_env=places("other"))
+    assert _keys(other)["aiter_jit"] != _keys(first)["aiter_jit"], (
+        "a variable that selects what is built still splits it"
+    )
+
+
+def test_a_kernel_triton_compiled_in_a_sandbox_that_is_gone_is_found_by_the_next_one_and_nothing_is_rewritten(
+    rig,
+) -> None:
+    first, _, first_run = rig.run("first", _arm(rig))
+    rig.publish(first_run, first)
+    shutil.rmtree(first_run / "scratch")  # the sandbox, and the directories the group was written with
+    second, status, _ = rig.run("second", _arm(rig))
+
+    assert rig.grid.triton_found == [True], "Triton found the kernel through the group: it compiled nothing"
+    group = rig.grid.triton_group
+    assert group and all(Path(target).is_file() and str(rig.tmp_path / "second") in target for target in group.values())
+    assert status["message"] == "" and _kind(second, "triton").contribution is None, "no file was rewritten"
+
+
+def test_the_status_message_says_what_failed_verification_before_the_files_a_compiler_changed(rig, monkeypatch) -> None:
+    base, _, base_run = rig.run("base", _arm(rig))
+    rig.publish(base_run, base)
+    digest = hashlib.sha256(MODULE).hexdigest()
+    blob = rig.store.root / "blobs" / digest[:2] / digest
+    blob.chmod(0o644)
+    blob.write_bytes(bytes(reversed(MODULE)))
+    monkeypatch.setattr(_CompilingGrid, "recompile_triton", True)
+
+    _, status, _ = rig.run("noisy", _arm(rig))
+
+    message = status["message"]
+    assert message.index("the bytes are not the 36 bytes whose hash is listed; ignored") < message.index(
+        "changed by the test"
+    )
+    assert "jit cache: triton: 4 files changed by the test; the stored bytes stay (" in message
+
+
+def test_a_succeeded_tests_status_message_is_made_of_its_notes_whole_from_the_first(rig, monkeypatch) -> None:
+    joined = []
+    monkeypatch.setattr(runner, "join_notes", lambda notes: joined.append(list(notes)) or "from join_notes")
+
+    _, status, _ = rig.run("only", _arm(rig))
+
+    assert status["message"] == "from join_notes" and len(joined) == 1
 
 
 def test_the_result_states_the_cold_start_parts_with_or_without_a_cache(rig) -> None:

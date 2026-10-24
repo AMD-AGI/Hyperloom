@@ -11,9 +11,13 @@
 #   env_default   an environment variable and the value a launch sets
 #   arg_value     reserved: no rule reads one yet, so a pack that holds one is refused
 #   kernel_table  reserved: no rule reads one yet, so a pack that holds one is refused
+# An entry may also declare image_check: checks the environment a session runs in can answer about the fact
+# (path_exists, csv_has_columns, cli_accepts_flag, source_contains, module_attr; hyperloom.common.outside_facts.
+# image_check_spec). Each carries examples.pass and examples.fail that the loader runs it against, and {ref: entry.role}
+# reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "4"
+version: "5"
 facts:
   aiter_merged_view:
     kind: names
@@ -26,6 +30,35 @@ facts:
       dir: /tmp/aiter_configs
     examples:
       - "hyperloom.measure.aiter_merge_hook: the sandbox start-up hook redirects this directory (a standalone copy of the literal, pinned to this entry by a test)"
+    image_check:
+      - check: source_contains
+        module: aiter.jit.core
+        text: {ref: aiter_merged_view.dir}
+        examples:
+          pass:
+            - source: |-
+                config_path = Path("/tmp/aiter_configs/")
+                if not config_path.exists():
+                    config_path.mkdir(parents=True, exist_ok=True)
+          fail:
+            - source: |-
+                config_path = Path(tempfile.gettempdir()) / "aiter_configs"
+                if not config_path.exists():
+                    config_path.mkdir(parents=True, exist_ok=True)
+      - check: module_attr
+        module: aiter.jit.core
+        attr: AITER_CONFIG.update_config_files
+        examples:
+          pass:
+            - source: |-
+                class AITER_CONFIG:
+                    def update_config_files(self, file_path: str, merge_name: str, env_name: str | None = None):
+                        return file_path
+          fail:
+            - source: |-
+                class AITER_CONFIG:
+                    def merge_config_files(self, file_path: str, merge_name: str):
+                        return file_path
 
   sglang_image_layout:
     kind: names
@@ -39,6 +72,16 @@ facts:
     examples:
       - "hyperloom.measure.compile: IMAGE_SOURCE_ROOTS lists the workspace as a place sources are read from"
       - "hyperloom.measure.framework.base: DEFAULT_CONFIGS is the aiter tables directory, the workspace joined with aiter_configs"
+    image_check:
+      - check: path_exists
+        installed: sglang
+        path: [{ref: sglang_image_layout.workspace}, {ref: sglang_image_layout.aiter_configs}]
+        type: dir
+        examples:
+          pass:
+            - tree: ["/sgl-workspace/aiter/aiter/configs/"]
+          fail:
+            - tree: ["/sgl-workspace/aiter/aiter/", "/sgl-workspace/aiter/aiter/jit/"]
 
   context_length_flags:
     kind: names
@@ -51,6 +94,51 @@ facts:
       vllm: --max-model-len
     examples:
       - "hyperloom.measure.eval_context: a launch's served context is read from whichever of the two flags it carries"
+    image_check:
+      - check: cli_accepts_flag
+        module: sglang.launch_server
+        flag: {ref: context_length_flags.sglang}
+        examples:
+          pass:
+            - help: |-
+                usage: launch_server.py [-h] --model-path MODEL_PATH
+                options:
+                  -h, --help            show this help message and exit
+                  --model-path MODEL_PATH, --model MODEL_PATH
+                                        The path of the model weights.
+                  --tokenizer-path TOKENIZER_PATH
+                                        The path of the tokenizer.
+                  --context-length CONTEXT_LENGTH
+                                        The model's maximum context length.
+          fail:
+            - help: |-
+                usage: launch_server.py [-h] --model-path MODEL_PATH
+                options:
+                  -h, --help            show this help message and exit
+                  --model-path MODEL_PATH, --model MODEL_PATH
+                                        The path of the model weights.
+                  --tokenizer-path TOKENIZER_PATH
+                                        The path of the tokenizer.
+                  --max-context-length MAX_CONTEXT_LENGTH
+                                        The model's maximum context length.
+      - check: cli_accepts_flag
+        module: vllm.entrypoints.openai.api_server
+        flag: {ref: context_length_flags.vllm}
+        examples:
+          pass:
+            - help: |-
+                usage: api_server.py [-h] [--host HOST] [--port PORT]
+                ModelConfig:
+                  --model MODEL         Name or path of the Hugging Face model to use.
+                  --max-model-len MAX_MODEL_LEN
+                                        Model context length (prompt and output).
+          fail:
+            - help: |-
+                usage: api_server.py [-h] [--host HOST] [--port PORT]
+                ModelConfig:
+                  --model MODEL         Name or path of the Hugging Face model to use.
+                  --max-model-length MAX_MODEL_LENGTH
+                                        Model context length (prompt and output).
 
   python_import_errors:
     kind: names
@@ -88,6 +176,24 @@ facts:
     examples:
       - "hyperloom_multibranch.toolbox.acceptance: a launch with ENABLED=1 and TUNING not 0 is refused as online tuning"
       - "hyperloom.measure.compile: PER_DEVICE_TABLE_ENVS lists FILENAME, the table that is placed once per device ordinal"
+    image_check:
+      - check: source_contains
+        module: torch.cuda.tunable
+        text:
+          - {ref: pytorch_tunableop_env.enabled}
+          - {ref: pytorch_tunableop_env.tuning}
+          - {ref: pytorch_tunableop_env.table}
+        examples:
+          pass:
+            - source: |-
+                export PYTORCH_TUNABLEOP_ENABLED=1
+                export PYTORCH_TUNABLEOP_TUNING=0
+                results_filename_env = os.getenv("PYTORCH_TUNABLEOP_FILENAME")
+          fail:
+            - source: |-
+                export PYTORCH_TUNABLEOP_ENABLED=1
+                export PYTORCH_TUNABLEOP_TUNING=0
+                results_filename_env = os.getenv("PYTORCH_TUNABLEOP_RESULTS")
 
   inferencex_benchmark_envs:
     kind: names
@@ -192,6 +298,15 @@ facts:
         - "launch_server.py: error: unrecognized argument: --enable-profile-cuda-graph"
       no_match:
         - "launch_server.py: error: the following arguments are required: --model-path"
+    image_check:
+      - check: source_contains
+        module: argparse
+        text: "unrecognized arguments"
+        examples:
+          pass:
+            - source: "msg = _('unrecognized arguments: %s')"
+          fail:
+            - source: "msg = _('unexpected arguments: %s')"
 
   argparse_invalid_choice:
     kind: log_regex
@@ -203,6 +318,15 @@ facts:
         - "launch_server.py: error: argument --attention-backend: invalid choice: 'fa9' (choose from 'triton', 'aiter')"
       no_match:
         - "launch_server.py: error: argument --tp-size: invalid int value: 'many'"
+    image_check:
+      - check: source_contains
+        module: argparse
+        text: "invalid choice"
+        examples:
+          pass:
+            - source: "msg = _('invalid choice: %(value)r (choose from %(choices)s)')"
+          fail:
+            - source: "msg = _('unknown choice: %(value)r (choose from %(choices)s)')"
 
   transformers_unknown_architecture:
     kind: log_regex
@@ -216,6 +340,15 @@ facts:
         - "but Transformers does not recognize this architecture. This could be because of an issue with the checkpoint"
       no_match:
         - "Transformers loaded the architecture from the checkpoint's config"
+    image_check:
+      - check: source_contains
+        module: transformers.models.auto.configuration_auto
+        text: does not recognize this architecture
+        examples:
+          pass:
+            - source: '"but Transformers does not recognize this architecture. This could be because of an "'
+          fail:
+            - source: '"but this model type is not supported by Transformers. This could be because of an "'
 
   transformers_does_not_recognize:
     kind: log_regex
@@ -229,6 +362,15 @@ facts:
         - "The checkpoint you are trying to load has model type `qwen3_5` but Transformers does not recognize this architecture."
       no_match:
         - "The checkpoint you are trying to load has model type `qwen3` and Transformers loads it"
+    image_check:
+      - check: source_contains
+        module: transformers.models.auto.configuration_auto
+        text: Transformers does not recognize
+        examples:
+          pass:
+            - source: '"but Transformers does not recognize this architecture. This could be because of an "'
+          fail:
+            - source: '"but this model type is not supported by Transformers. This could be because of an "'
 
   aiter_log_tuned_config:
     kind: names
@@ -242,6 +384,15 @@ facts:
     examples:
       - "hyperloom_multibranch.toolbox.table_hits: a table is called not exercised only when a server with this variable set logged no hit in its rows"
       - "hyperloom_multibranch.toolbox.planner: every point it plans launches its server with this variable at 1, a baseline's and a candidate's alike"
+    image_check:
+      - check: source_contains
+        module: aiter.jit.core
+        text: {ref: aiter_log_tuned_config.env}
+        examples:
+          pass:
+            - source: 'AITER_LOG_TUNED_CONFIG = int(os.getenv("AITER_LOG_TUNED_CONFIG", "0"))'
+          fail:
+            - source: 'AITER_LOG_TUNED = int(os.getenv("AITER_LOG_TUNED", "0"))'
 
   aiter_tuned_hit:
     kind: log_regex
@@ -274,6 +425,29 @@ facts:
       no_match:
         - "[aiter] shape is M:512, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False, not found tuned config in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, will use default config! using torch solution:0"
         - "[aiter] shape is M:8192, N:7168, K:5120, not found tuned config in /work/hl-framework-x/merged/a8w8_bpreshuffle_tuned_gemm.csv, will use default config!"
+    image_check:
+      - check: source_contains
+        module: aiter.tuned_gemm
+        text: ["found padded_M:", "is tuned on cu_num", "libtype is", "kernel name is"]
+        examples:
+          pass:
+            - source: |-
+                f"shape is M:{M}, N:{N}, K:{K} {dtype=} {otype=} {bias=}, {scaleAB=}, {bpreshuffle=} found padded_M: {padded_M}, N:{N}, K:{K} is tuned on cu_num = {cu_num} in {table}, libtype is {libtype}, kernel name is {kernelName}"
+          fail:
+            - source: |-
+                f"shape is M:{M}, N:{N}, K:{K} {dtype=} {otype=} {bias=}, {scaleAB=}, {bpreshuffle=} hit a tuned row for cu_num = {cu_num} in {table}, libtype is {libtype}, kernel name is {kernelName}"
+      - check: csv_has_columns
+        installed: sglang
+        path:
+          - {ref: sglang_image_layout.workspace}
+          - {ref: sglang_image_layout.aiter_configs}
+          - bf16_tuned_gemm.csv
+        columns: [M, N, K, bias, dtype, outdtype, scaleAB, bpreshuffle, cu_num, libtype, kernelName]
+        examples:
+          pass:
+            - header: "gfx,cu_num,M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,libtype,solidx,splitK,us,kernelName,err_ratio,tflops,bw"
+          fail:
+            - header: "gfx,cu_num,M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,libtype,solidx,splitK,us,kernel_name,err_ratio,tflops,bw"
 
   aiter_tuned_hit_marker:
     kind: log_regex
@@ -352,3 +526,20 @@ facts:
       output_length_file: src/aiperf/metrics/types/output_sequence_length_metric.py
     examples:
       - "hyperloom.measure.runner.aiperf_patch: the runner edits these two files of the submodule before an AgentX round, so the client keeps the output token count of a no-content failure and exports it as an error-only metric"
+    image_check:
+      - check: source_contains
+        path: [{env: INFERENCEX_PATH}, .gitmodules]
+        text: {ref: aiperf_source.submodule}
+        examples:
+          pass:
+            - env: {INFERENCEX_PATH: /checkout}
+              source: |-
+                [submodule "utils/aiperf"]
+                    path = utils/aiperf
+                    url = https://github.com/SemiAnalysisAI/aiperf.git
+          fail:
+            - env: {INFERENCEX_PATH: /checkout}
+              source: |-
+                [submodule "inferencex-e2e/utils/srt-slurm"]
+                    path = inferencex-e2e/utils/srt-slurm
+                    url = https://github.com/NVIDIA/srt-slurm.git

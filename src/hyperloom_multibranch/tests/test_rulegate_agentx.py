@@ -12,6 +12,7 @@ from hyperloom.common.perf_metric import (
 )
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD, compare, confirm
+from hyperloom_multibranch.rulegate.readings import GRADED_SHORT_REQUESTS, GRADED_UNSERVED_REQUESTS
 
 PARENT = {
     GRADED_INTVTY_P50: 100.0,
@@ -96,3 +97,35 @@ def test_a_run_without_a_p50_is_not_compared():
     candidate = {key: value for key, value in PARENT.items() if key != GRADED_INTVTY_P50}
     with pytest.raises(ValueError, match="cannot compare"):
         compare(candidate, PARENT, "r1")
+
+
+COUNTED = {**PARENT, GRADED_UNSERVED_REQUESTS: 1.0, GRADED_SHORT_REQUESTS: 0.0}
+
+
+def test_the_request_classes_are_recorded_on_the_judgement():
+    candidate = {**COUNTED, GRADED_INTVTY_P50: 104.0, GRADED_SHORT_REQUESTS: 2.0}
+    judgement = compare(candidate, COUNTED, "r1")
+    assert judgement.recorded_value[GRADED_SHORT_REQUESTS] == 2.0
+    assert judgement.recorded_value[GRADED_UNSERVED_REQUESTS] == 1.0
+
+
+def test_more_short_answers_alone_never_refuse_a_candidate():
+    candidate = {**COUNTED, GRADED_INTVTY_P50: 104.0, GRADED_ERROR_RATE: 5.0, GRADED_SHORT_REQUESTS: 30.0}
+    judgement = compare(candidate, COUNTED, "r1")
+    assert judgement.verdict is Verdict.IMPROVED
+    assert judgement.refused_by == ()
+
+
+@pytest.mark.parametrize(
+    ("candidate", "parent"),
+    [
+        ({**COUNTED, GRADED_UNSERVED_REQUESTS: 2.0}, COUNTED),
+        ({key: value for key, value in COUNTED.items() if key != GRADED_UNSERVED_REQUESTS}, COUNTED),
+        (COUNTED, PARENT),
+    ],
+    ids=["more-unserved", "candidate-uncounted", "parent-uncounted"],
+)
+def test_more_failed_requests_refuse_unless_the_unserved_count_shows_none_more(candidate, parent):
+    judgement = compare({**candidate, GRADED_INTVTY_P50: 104.0, GRADED_ERROR_RATE: 5.0}, parent, "r1")
+    assert judgement.verdict is Verdict.NEEDS_CONFIRM
+    assert judgement.refused_by == ("extra_failed_requests",)

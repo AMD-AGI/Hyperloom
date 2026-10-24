@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import threading
 from pathlib import Path
 
@@ -22,6 +24,7 @@ from hyperloom.measure.jit.builds import BuildLog, scan_builds
 from hyperloom.measure.jit_kinds import AITER_CPP, AITER_JIT, DISABLED, HIT, MISS, TRITON, VERIFY_FAILED
 from hyperloom.measure.jit.session import JitCacheSession, KindPlan
 from hyperloom.measure.jit.store import DirJitStore
+from hyperloom.measure.jit.tests.triton_cache import PRODUCTS, RELEASES, find_kernel, get_group, put_kernel
 
 KEY = "a" * 64
 TRITON_KEY = "b" * 64
@@ -206,7 +209,7 @@ def test_a_file_the_test_changed_under_a_name_the_snapshot_holds_is_not_contribu
     second.collect()
 
     report = second.report(NO_BUILDS)
-    assert any("module_a.so was changed by the test; the stored one stays" in note for note in report.notes)
+    assert report.notes == ("jit cache: aiter_jit: 1 file changed by the test; the stored bytes stay (module_a.so)",)
     staged = (tmp_path / "two" / "out" / "aiter_jit" / "manifest.json").read_text()
     assert (
         hashlib.sha256(b"original").hexdigest() in staged
@@ -347,3 +350,144 @@ def test_a_kind_the_key_does_not_cover_is_given_the_cache_and_stages_nothing(sto
     assert report.kinds[0].state == HIT and (_dirs(second)["AITER_JIT_DIR"] / "module_a.so").read_bytes() == b"a"
     assert report.kinds[0].contribution is None and not (tmp_path / "two" / "out").exists()
     assert f"jit cache: aiter_jit is read only in this test: {reason}" in report.notes
+
+
+def _compiled_by_the_first_test(store, tmp_path, *, name: str = "one", **kernel) -> JitCacheSession:
+    """A test that compiled one Triton kernel the way Triton does, in a directory of its own, and published it."""
+    first = _session(store, tmp_path, name, plans=[KindPlan(TRITON, TRITON_KEY)])
+    first.seed()
+    put_kernel(_dirs(first)["TRITON_CACHE_DIR"], HASH_DIR, **kernel)
+    first.collect()
+    _publish(store, first, tmp_path, name)
+    return first
+
+
+@pytest.mark.parametrize("release", RELEASES)
+def test_a_kernel_the_first_test_compiled_is_found_by_the_second_in_the_second_tests_own_directory(
+    store, tmp_path, release
+) -> None:
+    first = _compiled_by_the_first_test(store, tmp_path, release=release)
+    shutil.rmtree(tmp_path / "one" / "private")  # the sandbox the group was written in is gone
+    second = _session(store, tmp_path, "two", plans=[KindPlan(TRITON, TRITON_KEY)])
+
+    second.seed()
+
+    directory = _dirs(second)["TRITON_CACHE_DIR"]
+    group = get_group(directory, HASH_DIR, release=release)
+    assert group == {name: f"{directory}/{HASH_DIR}/{name}" for name in PRODUCTS}, "every file the group lists exists"
+    assert second.report(NO_BUILDS).kinds[0].state == HIT
+    assert find_kernel(directory, HASH_DIR, release=release), "so Triton finds the kernel and compiles nothing"
+    second.collect()
+    assert second.report(NO_BUILDS).notes == () and second.report(NO_BUILDS).kinds[0].contribution is None
+    assert first.report(NO_BUILDS).kinds[0].contribution is not None
+
+
+def test_two_tests_that_compile_a_kernel_in_directories_of_their_own_stage_the_same_group_bytes(
+    store, tmp_path
+) -> None:
+    _compiled_by_the_first_test(store, tmp_path, name="one")
+    _compiled_by_the_first_test(DirJitStore(tmp_path / "another store"), tmp_path, name="elsewhere")
+
+    def group_hash(name: str) -> str:
+        manifest = json.loads((tmp_path / name / "out" / "triton" / "manifest.json").read_text())
+        return manifest["files"][f"{HASH_DIR}/__grp__kernel.json"]["sha256"]
+
+    assert group_hash("one") == group_hash("elsewhere")
+    blob = tmp_path / "one" / "out" / "triton" / "blobs" / group_hash("one")
+    assert str(tmp_path) not in blob.read_text(), "the stored group holds no directory of the sandbox that wrote it"
+
+
+def test_a_compiler_that_writes_the_same_bytes_again_has_changed_nothing_and_a_different_byte_is_noted(
+    store, tmp_path
+) -> None:
+    """Triton, finding nothing it could use, rewrote every file it was given (a new time, the same bytes): that is not a
+    change, and a kernel compiled to other bytes under a stored name is."""
+    _compiled_by_the_first_test(store, tmp_path)
+    second = _session(store, tmp_path, "two", plans=[KindPlan(TRITON, TRITON_KEY)])
+    second.seed()
+    directory = _dirs(second)["TRITON_CACHE_DIR"]
+    for path in sorted((directory / HASH_DIR).iterdir()):
+        stat = path.stat()
+        path.write_bytes(path.read_bytes())
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+    put_kernel(directory, HASH_DIR)  # and writes the group again the way it always does
+
+    second.collect()
+
+    assert second.report(NO_BUILDS).notes == () and second.report(NO_BUILDS).kinds[0].contribution is None
+    (directory / HASH_DIR / "kernel.hsaco").write_bytes(b"compiled to other bytes")
+    third = _session(store, tmp_path, "three", plans=[KindPlan(TRITON, TRITON_KEY)])
+    third.seed()
+    (_dirs(third)["TRITON_CACHE_DIR"] / HASH_DIR / "kernel.hsaco").write_bytes(b"compiled to other bytes")
+
+    third.collect()
+
+    assert third.report(NO_BUILDS).notes == (
+        f"jit cache: triton: 1 file changed by the test; the stored bytes stay ({HASH_DIR}/kernel.hsaco)",
+    )
+
+
+def test_a_file_of_the_same_size_and_time_but_other_content_is_a_change(store, tmp_path) -> None:
+    first = _session(store, tmp_path, "one", plans=[KindPlan(AITER_JIT, KEY)])
+    first.seed()
+    _write(_dirs(first)["AITER_JIT_DIR"], "module_a.so", b"original")
+    first.collect()
+    _publish(store, first, tmp_path, "one")
+    second = _session(store, tmp_path, "two", plans=[KindPlan(AITER_JIT, KEY)])
+    second.seed()
+    path = _dirs(second)["AITER_JIT_DIR"] / "module_a.so"
+    stat = path.stat()
+    path.write_bytes(b"0riginal")
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    second.collect()
+
+    assert second.report(NO_BUILDS).notes == (
+        "jit cache: aiter_jit: 1 file changed by the test; the stored bytes stay (module_a.so)",
+    )
+
+
+def test_sixty_changed_files_are_one_note_and_the_note_that_the_cache_failed_verification_is_first(
+    store, tmp_path
+) -> None:
+    kernels = [f"{n:02d}{HASH_DIR[2:]}" for n in range(12)]
+    first = _session(store, tmp_path, "one", plans=[KindPlan(AITER_JIT, KEY), KindPlan(TRITON, TRITON_KEY)])
+    first.seed()
+    _write(_dirs(first)["AITER_JIT_DIR"], "module_a.so", MODULE)
+    for key in kernels:
+        put_kernel(_dirs(first)["TRITON_CACHE_DIR"], key, extra={"kernel.llir": b"llir"})
+    first.collect()
+    _publish(store, first, tmp_path, "one")
+    blob = store.root / "blobs" / hashlib.sha256(MODULE).hexdigest()[:2] / hashlib.sha256(MODULE).hexdigest()
+    blob.chmod(0o644)
+    blob.write_bytes(bytes(reversed(MODULE)))
+    second = _session(store, tmp_path, "two", plans=[KindPlan(AITER_JIT, KEY), KindPlan(TRITON, TRITON_KEY)])
+    second.seed()
+    for path in sorted(_dirs(second)["TRITON_CACHE_DIR"].rglob("kernel.*")):
+        path.write_bytes(b"compiled again, differently")
+
+    second.collect()
+
+    notes = second.report(NO_BUILDS).notes
+    assert len(notes) == 2, "60 changed files are one line, and they do not push the other note out"
+    assert "the bytes are not the 16 bytes whose hash is listed; ignored" in notes[0]
+    assert notes[1].startswith("jit cache: triton: 60 files changed by the test; the stored bytes stay (")
+    assert notes[1].endswith(", and 57 more)") and notes[1].count("/kernel.") == 3
+
+
+def test_a_group_that_names_a_file_outside_the_cache_is_not_contributed_and_the_kernel_files_are(
+    store, tmp_path
+) -> None:
+    session = _session(store, tmp_path, plans=[KindPlan(TRITON, TRITON_KEY)])
+    session.seed()
+    directory = _dirs(session)["TRITON_CACHE_DIR"]
+    put_kernel(directory, HASH_DIR)
+    group = directory / HASH_DIR / "__grp__kernel.json"
+    group.write_text(json.dumps({"child_paths": {"kernel.json": "/etc/hostname"}}))
+
+    session.collect()
+
+    assert _listed(tmp_path, "t", "triton") == sorted(f"{HASH_DIR}/{name}" for name in PRODUCTS)
+    assert session.report(NO_BUILDS).notes == (
+        f"jit cache: triton: 1 file not contributed: they name files the cache does not hold ({HASH_DIR}/__grp__kernel.json)",
+    )

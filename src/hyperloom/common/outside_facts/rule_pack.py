@@ -14,6 +14,11 @@ missing or is not one YAML document, a repeated key, a YAML alias or merge key, 
 its ``project``, ``reason`` and ``examples``, a pattern that does not compile or fails one of its own examples, and an
 entry the code reads that the pack lacks. The kinds are a closed list: a rule that needs one more is a change to this
 module with its own evaluator and tests, never a new pack.
+
+An entry may also declare ``image_check``: the checks the environment a session runs in can answer about the fact
+(``hyperloom.common.outside_facts.image_check_spec``). They are read with the entry, a reference to another entry's name
+is resolved here, and each check is pinned to its own examples, so a check that refuses what the real tool prints, or
+names a unit the pack does not hold, is refused with the entry.
 """
 
 from __future__ import annotations
@@ -23,12 +28,15 @@ import hashlib
 import os
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, NamedTuple, TypedDict
 
 import yaml
+
+from hyperloom.common.outside_facts.image_check_eval import check_examples
+from hyperloom.common.outside_facts.image_check_spec import CheckSpec, ImageCheckSpecError, parse_checks
 
 __all__ = [
     "DEFAULT_PACK_PATH",
@@ -84,9 +92,12 @@ class Entry:
 
     kind: Kind
     body: Mapping[str, Any]
+    project: str = ""
+    image_checks: tuple[CheckSpec, ...] = ()
 
 
 _COMMON_FIELDS = frozenset({"kind", "project", "reason", "examples"})
+_IMAGE_CHECK_FIELD = "image_check"
 _NAMES_FIELD = "names"
 _PATTERN_FIELD = "pattern"
 _ENV_FIELD = "env"
@@ -202,15 +213,16 @@ def _parse_entry(where: str, raw: object) -> Entry:
         raise RulePackError(f"{where}: kind {kind.value} is reserved; no rule reads one yet")
     own_fields, check = _READABLE[kind]
     expected = _COMMON_FIELDS | own_fields
-    if set(raw) != expected:
+    if set(raw) - {_IMAGE_CHECK_FIELD} != expected:
         raise RulePackError(
-            f"{where}: a {kind.value} entry holds exactly {sorted(expected)}; found {sorted(map(str, raw))}"
+            f"{where}: a {kind.value} entry holds exactly {sorted(expected)} "
+            f"(and may add {_IMAGE_CHECK_FIELD!r}); found {sorted(map(str, raw))}"
         )
     _text(where, "project", raw["project"])
     _text(where, "reason", raw["reason"])
     body = {name: raw[name] for name in own_fields}
     check(where, body, raw["examples"])
-    return Entry(kind, body)
+    return Entry(kind, body, raw["project"])
 
 
 def _refuse_ambiguous_mapping(path: Path, node: yaml.MappingNode, where: str) -> None:
@@ -250,6 +262,47 @@ def _refuse_ambiguous_yaml(path: Path, root: yaml.Node | None) -> None:
         pending.extend(_children(node, trail))
 
 
+def _name_lookup(entries: Mapping[str, Entry]) -> Callable[[str], str]:
+    """Reads ``<entry>.<role>`` as the name an entry of the pack holds: a role of a names entry, or the variable or the
+    value of an env_default entry."""
+
+    def lookup(reference: str) -> str:
+        entry_id, _, role = reference.partition(".")
+        entry = entries.get(entry_id)
+        if entry is None or entry.kind not in (Kind.NAMES, Kind.ENV_DEFAULT):
+            raise ImageCheckSpecError(f"{reference!r} names no names or env_default entry")
+        held = entry.body[_NAMES_FIELD] if entry.kind is Kind.NAMES else entry.body
+        if role not in held or not isinstance(held[role], str):
+            raise ImageCheckSpecError(f"{reference!r}: entry {entry_id!r} holds no name for {role!r}")
+        return held[role]
+
+    return lookup
+
+
+def _with_image_checks(path: Path, facts: Mapping[str, Any], entries: Mapping[str, Entry]) -> dict[str, Entry]:
+    lookup = _name_lookup(entries)
+    checked = {}
+    for entry_id, entry in entries.items():
+        if _IMAGE_CHECK_FIELD not in facts[entry_id]:
+            checked[entry_id] = entry
+            continue
+        try:
+            specs = parse_checks(facts[entry_id][_IMAGE_CHECK_FIELD], lookup)
+            for index, spec in enumerate(specs):
+                _pin_to_examples(index, spec)
+        except ImageCheckSpecError as exc:
+            raise RulePackError(f"rule pack {path}: entry {entry_id!r}: {exc}") from exc
+        checked[entry_id] = replace(entry, image_checks=specs)
+    return checked
+
+
+def _pin_to_examples(index: int, spec: CheckSpec) -> None:
+    try:
+        check_examples(spec)
+    except ImageCheckSpecError as exc:
+        raise ImageCheckSpecError(f"{_IMAGE_CHECK_FIELD}[{index}]: {exc}") from exc
+
+
 def load_pack(path: Path) -> RulePack:
     """Read, parse and check the pack at ``path``; raise ``RulePackError`` rather than return a pack that is partial."""
     try:
@@ -272,6 +325,7 @@ def load_pack(path: Path) -> RulePack:
         entries[_text(f"rule pack {path}", "an entry id", entry_id)] = _parse_entry(
             f"rule pack {path}: entry {entry_id!r}", raw_entry
         )
+    entries = _with_image_checks(path, facts, entries)
     return RulePack(path, version, "sha256:" + hashlib.sha256(raw).hexdigest(), entries)
 
 

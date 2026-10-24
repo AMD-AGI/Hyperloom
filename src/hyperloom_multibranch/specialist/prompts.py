@@ -186,8 +186,9 @@ and goes on with one JSON object with the keys direction (the name of the sessio
 below), head (your head commit), tried (the request ids of its \
 tests, at least one: a direction you have not tested is not done), why (no_ceiling_above_bar, \
 all_tested_or_claimed, blocked_by_tool or needs_capability), detail (one sentence) and reopen_if (what would make \
-it worth trying again). It is kept for the record and for later sessions and does not \
-stop your branch. Then take another of the session's directions, preferring one no running branch covers: \
+it worth trying again). It is kept for the record and for later sessions and does not stop your branch. A kernel \
+inside aiter or the framework is not blocked_by_tool: fork it into your worktree. Then take another of the \
+session's directions, preferring one no running branch covers: \
 {{directions}}.
 
 What has found gains on ROCm before, in any direction:
@@ -205,8 +206,9 @@ boolean-mask index, or a torch fallback that sizes its output from device data. 
 layer of every step that takes it. Take the bound from host-side metadata the scheduler already holds, and clamp \
 inside the kernel instead of checking on the host.
 - Before working on a top operator, divide the bytes it must move per call (the weights it reads, the state it reads \
-and writes) by its time: near the device's HBM bandwidth no kernel change pays whatever its share (a large \
-device-to-device copy measures about 5 TB/s on MI355X), so take the next operator.
+and writes) by its time: near the device's HBM bandwidth no kernel change pays whatever its share (a streaming \
+read reaches about 5.7 TB/s on MI355X, a device-to-device copy about 5), so take the next operator. A kernel at \
+4 TB/s is not near it: measure the bytes, do not assume them from a share.
 - Count the copy, cast and elementwise kernels in a decode step and trace each to the source line that launches it: \
 a strided view made contiguous or a scale written in the other layout costs a full read and write, and folding the \
 layout change into its producer or consumer removes it.
@@ -218,6 +220,11 @@ plain steps than the tokens it accepts. Read the accept length per context-lengt
 join server.log's speculative-decoding windows with the client's per-request input lengths. A draft whose \
 acceptance falls with context gains from a bounded draft attention window or fewer draft tokens, and the target's \
 verify keeps the output exact.
+- An aiter or framework kernel is source your branch can change: copy it into the framework tree and edit it there \
+(a Triton or gluon kernel, or a ctypes launch of an aiter .co code object); the image's aiter needs no rebuild. \
+Calling a different existing kernel, or calling one differently (accumulating a split-K GEMM into the residual \
+instead of a zeroed buffer, a fused variant aiter already ships), is a lever of its own. "Needs a C++ change" is \
+never a reason to give up on an operator.
 - Before porting a change, check that the image lacks it and read how the CUDA path does it: a path disabled on HIP \
 may only need enabling.
 - Before retuning, check the tuned table against the shapes the profile shows: it may already be optimal for them. \
@@ -327,7 +334,8 @@ _DEV_SANDBOX = (
     "Do not start servers or benchmarks yourself outside your dev sandbox: the toolbox measures every test in a fresh "
     "sandbox, and submit_test is how you measure. dev_sandbox_lease lends your branch a few cards for a while, when no "
     "test waits for cards: use them to check that a kernel or a change runs and does not crash, and to time a kernel "
-    "alone (inside a CUDA graph) or pick its best tile configuration, before you pay for a full test. Results of the "
+    "alone inside a CUDA graph, with what its launcher adds around it (a memset, a quantize) and cache-cold "
+    "weights, or pick its best tile configuration, before you pay for a full test. Results of the "
     "dev sandbox never enter the gate: do not commit, claim or conclude on its numbers; the end-to-end gain is what "
     "submit_test measures. dev_sandbox_run runs a command to its end; dev_sandbox_start starts a server or a longer "
     "benchmark and dev_sandbox_read waits on its output. Commands import your worktree's source, see only the leased "
@@ -356,6 +364,11 @@ _HOLDS = {
         " (perf_knowledge/expert_skills/tuning: how to tune aiter and hipBLASLt GEMMs and kernels on ROCm; "
         "e2e_workflow/knowledge/learned and kernel_workflow/knowledge/learned: what earlier GEAK runs learned, by "
         "operator and model)"
+    ),
+    "inferencex": (
+        " (configs/*-master.yaml: the reference entries per model, GPU, framework and precision, with their image, TP "
+        "and concurrency; benchmarks/single_node: the script each entry launches, with its server arguments and "
+        "environment)"
     ),
 }
 

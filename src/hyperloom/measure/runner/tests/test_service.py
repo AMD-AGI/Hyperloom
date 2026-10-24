@@ -6,7 +6,14 @@ from __future__ import annotations
 import json
 import time
 
-from hyperloom.measure.runner.service import EXIT_CODES, Progress, RunnerFailure, wait_for_file, write_status
+from hyperloom.measure.runner.service import (
+    EXIT_CODES,
+    Progress,
+    RunnerFailure,
+    join_notes,
+    wait_for_file,
+    write_status,
+)
 
 
 def test_status_is_written_atomically_with_its_fields(tmp_path):
@@ -18,6 +25,30 @@ def test_status_is_written_atomically_with_its_fields(tmp_path):
         "message": "m",
     }
     assert [p.name for p in tmp_path.iterdir()] == ["status.json"]
+
+
+def test_notes_that_fit_are_joined_as_they_are():
+    assert join_notes(["a", "b", "c"]) == "a; b; c" and join_notes([]) == ""
+
+
+def test_notes_that_do_not_fit_are_cut_at_their_end_so_the_first_and_most_important_are_kept(tmp_path):
+    notes = ["jit cache: the cache failed verification; ignored", *(f"note {n:03d} " + "x" * 100 for n in range(40))]
+
+    message = join_notes(notes)
+
+    assert len(message) <= 2000 and message.startswith(notes[0] + "; note 000 ")
+    kept = message.count("note 0")
+    assert 0 < kept < 40 and message.endswith(f"; {40 - kept} more notes left out")
+    write_status(tmp_path, state="succeeded", message=message)
+    assert json.loads((tmp_path / "status.json").read_text())["message"] == message, "and the status keeps all of it"
+
+
+def test_a_first_note_that_is_longer_than_the_message_may_be_keeps_its_head_so_status_does_not_cut_its_start(tmp_path):
+    message = join_notes(["z" * 2500, "second"])
+
+    assert len(message) <= 2000 and message.startswith("z" * 1900) and message.endswith("; 1 more notes left out")
+    write_status(tmp_path, state="succeeded", message=message)
+    assert json.loads((tmp_path / "status.json").read_text())["message"] == message
 
 
 def test_wait_for_file_returns_true_when_it_appears_and_false_on_timeout(tmp_path):
