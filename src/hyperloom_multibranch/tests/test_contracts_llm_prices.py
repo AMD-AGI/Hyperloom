@@ -20,6 +20,10 @@ def test_every_default_model_a_session_runs_has_a_price():
         assert price_of(model).input > 0
 
 
+def test_main_s_default_codex_model_is_priced_at_the_gateway_s_rates():
+    assert price_of("gpt-6-astra") == ModelPrice(6.8, 34, 0.34, 8.5)
+
+
 def test_a_model_the_sheet_does_not_list_has_no_price():
     assert price_of("glm-5-3") is None
 
