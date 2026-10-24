@@ -29,8 +29,11 @@ from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
+from hyperloom.contracts.recipe import PatchRef
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role
+from hyperloom_multibranch.contracts.notebook.records import MergeAttempt, NotebookSnapshot
+from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome
+from hyperloom_multibranch.contracts.repo import ReplacedPatch, ResolvedPatch
 from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import FinalRecipe
@@ -41,11 +44,12 @@ from hyperloom_multibranch.notebook.rsi.authoring import AUTHORING_SYSTEM_PROMPT
 from hyperloom_multibranch.notebook.rsi.lesson_curation import NO_LESSONS
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.notebook.rsi.session import DISABLED, WRITTEN
-from hyperloom_multibranch.notebook.tests.factories import FakeClock
-from hyperloom_multibranch.notebook.tests.sessions import METRIC, scripted_session
+from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, request, result
+from hyperloom_multibranch.notebook.tests.sessions import METRIC, Writers, scripted_session
 from hyperloom_multibranch.scheduling.close import CloseReport, Closer, ended_before_final, report_document
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
+from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.exports import (
     IMAGE_CHECK_FILE,
     ExportServices,
@@ -56,6 +60,14 @@ from hyperloom_multibranch.scheduling.exports import (
 )
 from hyperloom_multibranch.scheduling.tests.peer_fakes import ScriptedCompletion
 from hyperloom_multibranch.scheduling.final import FinalCandidate, FinalChoice
+from hyperloom_multibranch.scheduling.integrator import (
+    CONFLICT_TRUNCATED,
+    CONFLICT_UNRESOLVED,
+    RESOLVER_UNREACHED,
+    SUPERSEDED,
+    MergeReport,
+    _decision,
+)
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.manifest import CodeVersion, SessionManifest
 from hyperloom_multibranch.scheduling.roster import RosterCaps
@@ -316,7 +328,61 @@ async def test_without_a_kb_client_or_a_final_choice_the_write_back_is_recorded_
     )
     close = json.loads(skipped.exports.breakdown.read_text())["close"]
     assert close["final"] is None and close["selection"]["chosen"] is None
+    assert close["merges"] == NO_MERGES
     assert json.loads(layout.report.read_text())["error"] == "prelude failed"
+
+
+#: ``close.merges`` of a session that merged nothing: no merge log, and no patch a model wrote.
+NO_MERGES = {
+    "attempts": {"merged": 0, "not_stackable": 0, "conflict_skipped": 0, "already_on_head": 0, "pending": 0},
+    "conflicts": {
+        "replaced": 0,
+        "resolved_patches": 0,
+        "lost": {"unresolved": 0, "truncated": 0, "resolver_unreached": 0},
+    },
+}
+
+
+def _model_patch(replaces: str) -> ResolvedPatch:
+    return ResolvedPatch("vllm", replaces, PatchRef(f"{replaces}.resolved.patch", "e" * 64), "resolver", "p1", 1)
+
+
+async def test_close_counts_how_the_merges_went_from_the_merge_log_and_the_model_s_patches(
+    layout: SessionLayout, notebook: LocalNotebook, final: FinalRecipe, tmp_path: Path
+) -> None:
+    swap = ReplacedPatch("vllm", ("patch/vllm/0001-old.patch",), PatchRef("patch/vllm/0002-new.patch", "a" * 64))
+    merges = DecisionLog(layout.merges, CLOCK)
+    for report in (
+        MergeReport("c1", "c0", MergeOutcome.MERGED, "gain +4.1%", replaced_patches=(swap,)),
+        MergeReport(
+            "c2", "i1", MergeOutcome.CONFLICT_SKIPPED, f"{CONFLICT_UNRESOLVED}: patch/vllm/a.patch: no rewrite"
+        ),
+        MergeReport("c3", "i1", MergeOutcome.CONFLICT_SKIPPED, f"{CONFLICT_TRUNCATED}: patch/vllm/b.patch: cut off"),
+        MergeReport("c4", "i1", MergeOutcome.CONFLICT_SKIPPED, f"{RESOLVER_UNREACHED}: patch/vllm/c.patch: timeout"),
+        MergeReport("c5", "i1", MergeOutcome.CONFLICT_SKIPPED, "the merge does not combine: two kernels in one slot"),
+        MergeReport("c6", "i1", MergeOutcome.PENDING, SUPERSEDED),
+    ):
+        merges.record(_decision(report))
+    champion = {"champion": "kb-1", "onto": "c0", "request_id": "", "merged_commit": ""}
+    merges.record(Decision(DecisionKind.MERGE, "its change is already on the integration head", "", champion))
+    writers = Writers(tmp_path / "notebook", FakeClock())
+    await writers.as_role(Role.TOOLBOX).write_request(request("m2", intent(INTEGRATION_BRANCH, "i1", "merge", "c7")))
+    resolved = (_model_patch("patch/vllm/0003-x.patch"), _model_patch("patch/vllm/0004-y.patch"))
+    attempt = MergeAttempt(("c7",), "i1", request_id="m2", resolved_patches=resolved)
+    await writers.as_role(Role.INTEGRATOR).record_merge_attempt(attempt)
+    await writers.as_role(Role.TOOLBOX).write_result(result("m2"))
+
+    closed = await _closer(layout, notebook, _clean(), final, None).close(REASON, CHOICE, "", HARD_STOP)
+
+    assert closed.exports is not None
+    assert json.loads(closed.exports.breakdown.read_text())["close"]["merges"] == {
+        "attempts": {"merged": 1, "not_stackable": 0, "conflict_skipped": 4, "already_on_head": 0, "pending": 1},
+        "conflicts": {
+            "replaced": 1,
+            "resolved_patches": 2,
+            "lost": {"unresolved": 1, "truncated": 1, "resolver_unreached": 1},
+        },
+    }
 
 
 async def test_an_unreachable_kb_is_recorded_and_close_carries_on(
