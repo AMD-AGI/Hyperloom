@@ -606,10 +606,10 @@ class TestCustomAdapterMeasurement:
         )
 
         def _ok(cmd, *a, **k):
-            assert k["timeout"] == expected_timeout
-            assert k["silence_timeout_sec"] == 600
-            assert k["server_log_path"] is None
-            assert k["session_deadline_sec"] is None
+            assert k["watch"].timeout == expected_timeout
+            assert k["watch"].silence_timeout_sec == 600
+            assert k["watch"].server_log_path is None
+            assert k["watch"].session_deadline_sec is None
             slot = Path(cmd[cmd.index("--output-dir") + 1])
             ws = slot / "benchmark_custom_20260101_000000"
             ws.mkdir(parents=True, exist_ok=True)

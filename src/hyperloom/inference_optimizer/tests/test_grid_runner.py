@@ -1621,7 +1621,7 @@ def _capture_launches(recorded: list[dict]):
         if "--output-dir" not in cmd:
             return subprocess.CompletedProcess(cmd, 0, "ok", "")
         slot = Path(cmd[cmd.index("--output-dir") + 1])
-        recorded.append({"round_slot": slot.name, **kwargs})
+        recorded.append({"round_slot": slot.name, **kwargs, **vars(kwargs["watch"])})
         _fake_workspace(slot)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
@@ -2300,8 +2300,8 @@ class TestSessionBudgetWarmupRounds:
             if "--output-dir" not in cmd:
                 return subprocess.CompletedProcess(cmd, 0, "ok", "")
             slot = Path(cmd[cmd.index("--output-dir") + 1])
-            recorded.append({"round_slot": slot.name, **kwargs})
-            raise subprocess.TimeoutExpired(cmd, float(kwargs.get("timeout") or 0.0))
+            recorded.append({"round_slot": slot.name, **kwargs, **vars(kwargs["watch"])})
+            raise subprocess.TimeoutExpired(cmd, float(kwargs["watch"].timeout or 0.0))
 
         with (
             patch(

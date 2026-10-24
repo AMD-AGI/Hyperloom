@@ -82,6 +82,7 @@ from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     DETOKENIZER_STALL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
+    RoundWatch,
     clear_server_ready_stamp,
     post_ready_runtime_sec,
     resolve_benchmark_timeouts,
@@ -3070,12 +3071,14 @@ class BenchmarkRunExecutor:
                     warm_cmd,
                     env=warm_env,
                     cwd=str(warm_dir),
-                    timeout=timeout_sec,
-                    silence_timeout_sec=silence_timeout_sec,
-                    server_already_ready=True,
-                    server_log_path=_watchdog_server_log_path(warm_dir, framework),
+                    watch=RoundWatch(
+                        timeout=timeout_sec,
+                        silence_timeout_sec=silence_timeout_sec,
+                        server_already_ready=True,
+                        server_log_path=_watchdog_server_log_path(warm_dir, framework),
+                        session_deadline_sec=session_deadline_sec,
+                    ),
                     on_output=warm_activity.note,
-                    session_deadline_sec=session_deadline_sec,
                 )
             warm_rc = warm_proc.returncode
             log.info("baseline_executor: MN warmup pass done (discarded) rc=%s", warm_rc)
@@ -3484,12 +3487,14 @@ class BenchmarkRunExecutor:
                     round_.cmd,
                     env=round_.env,
                     cwd=str(round_.output_dir),
-                    timeout=round_.timeout_sec,
-                    silence_timeout_sec=round_.silence_timeout_sec,
-                    server_already_ready=server_ready,
-                    server_log_path=round_.watchdog_server_log,
+                    watch=RoundWatch(
+                        timeout=round_.timeout_sec,
+                        silence_timeout_sec=round_.silence_timeout_sec,
+                        server_already_ready=server_ready,
+                        server_log_path=round_.watchdog_server_log,
+                        session_deadline_sec=round_.session_deadline_sec,
+                    ),
                     on_output=activity.note,
-                    session_deadline_sec=round_.session_deadline_sec,
                 )
             returncode, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
         return _BenchProcess(

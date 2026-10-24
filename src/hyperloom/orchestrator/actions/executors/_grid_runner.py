@@ -47,6 +47,7 @@ from ._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    RoundWatch,
     resolve_benchmark_timeouts,
     run_with_session_kill,
     server_log_death_excerpt,
@@ -475,12 +476,14 @@ def _run_magpie(
         cmd,
         env=env,
         cwd=cwd,
-        timeout=timeout_sec,
-        silence_timeout_sec=silence_timeout_sec,
-        server_log_path=server_log_path,
-        server_already_ready=server_already_ready,
+        watch=RoundWatch(
+            timeout=timeout_sec,
+            silence_timeout_sec=silence_timeout_sec,
+            server_log_path=server_log_path,
+            server_already_ready=server_already_ready,
+            session_deadline_sec=session_deadline_sec,
+        ),
         on_output=on_output,
-        session_deadline_sec=session_deadline_sec,
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 

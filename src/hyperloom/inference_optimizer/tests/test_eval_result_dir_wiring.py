@@ -71,7 +71,7 @@ def test_run_magpie_exports_eval_result_dir_under_result_dir(tmp_path, monkeypat
     def fake_run(cmd, *args, **kwargs):
         captured["env"] = dict(kwargs.get("env") or {})
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert config["benchmark"]["timeout_seconds"] == kwargs["timeout"] == 5
+        assert config["benchmark"]["timeout_seconds"] == kwargs["watch"].timeout == 5
         assert config["benchmark"]["envs"]["PYTHONUNBUFFERED"] == "1"
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 

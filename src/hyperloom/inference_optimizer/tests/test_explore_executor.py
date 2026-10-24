@@ -2455,7 +2455,7 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
     received_deadlines: list[float | None] = []
 
     def _fake_kill(cmd, *args, **kwargs):
-        received_deadlines.append(kwargs.get("silence_timeout_sec"))
+        received_deadlines.append(kwargs["watch"].silence_timeout_sec)
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=820.0)  # +2.5% KEEP
@@ -2523,7 +2523,7 @@ async def test_explore_variant_cap_is_clamped_to_the_session_budget(
         # counting it would make this order-dependent.
         if "--output-dir" not in cmd:
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-        granted.append(int(kwargs["timeout"]))
+        granted.append(int(kwargs["watch"].timeout))
         slot = Path(cmd[cmd.index("--output-dir") + 1])
         _fake_workspace(slot, tput=840.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
@@ -2579,7 +2579,7 @@ async def test_explore_skips_a_variant_the_budget_cannot_fit(
     def _fake_run(cmd, *args, **kwargs):
         if "--output-dir" not in cmd:
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-        granted.append(int(kwargs["timeout"]))
+        granted.append(int(kwargs["watch"].timeout))
         slot = Path(cmd[cmd.index("--output-dir") + 1])
         _fake_workspace(slot, tput=840.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
@@ -2632,7 +2632,7 @@ async def _explore_under_phase_budget(sub_agent_runner, tmp_path, *, phase_left_
     def _fake_run(cmd, *args, **kwargs):
         if "--output-dir" not in cmd:
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-        started.append(int(kwargs["timeout"]))
+        started.append(int(kwargs["watch"].timeout))
         _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]), tput=840.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 

@@ -1410,7 +1410,7 @@ class KernelPhase(CoordinatorCollaborator):
         ``GEAK_FLUSH_GRACE_S``, inside the kill cap. The launch marks the run, so whatever it left running is
         reaped when it returns, however it detached.
         """
-        from ..actions.executors._subprocess_kill import REAP_MARK_ENV, run_with_session_kill
+        from ..actions.executors._subprocess_kill import REAP_MARK_ENV, RoundWatch, run_with_session_kill
 
         runner_timeout, kill_timeout, budget_known = timeouts
         cmd = [
@@ -1444,7 +1444,9 @@ class KernelPhase(CoordinatorCollaborator):
         from hyperloom.common.llm_attribution import inject_env
 
         inject_env(runner_env, component="geak", operation="optimize_kernel")
-        return await asyncio.to_thread(run_with_session_kill, cmd, env=runner_env, timeout=kill_timeout)
+        return await asyncio.to_thread(
+            run_with_session_kill, cmd, env=runner_env, watch=RoundWatch(timeout=kill_timeout)
+        )
 
     def _accepted_launch_spec(self, *, agentx: bool) -> tuple[dict[str, Any], Mapping[str, Any]]:
         state = self.shared_state
