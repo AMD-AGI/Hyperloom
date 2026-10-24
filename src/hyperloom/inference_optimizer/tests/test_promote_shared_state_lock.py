@@ -2325,8 +2325,8 @@ class TestWritebackRequiredAxes:
         assert state.validated_recipe_generation == state.working_recipe_generation == 1
         assert not state.optimization_stack_has_unvalidated_keeps()
         record.assert_called_once()
-        assert record.call_args.kwargs["baseline_tput"] == 100.0
-        assert record.call_args.kwargs["validated_tput"] == 150.0
+        assert record.call_args.args[0].graded.reference == 100.0
+        assert record.call_args.args[0].graded.candidate == 150.0
 
 
 def test_lift_does_not_double_append_same_fingerprint(session_dir):
