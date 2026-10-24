@@ -30,20 +30,18 @@ class CursorStore:
         row = await self.db.fetchone("SELECT last_processed_seq FROM cursors WHERE agent=?", (agent,))
         return CursorState(agent=agent, last_processed_seq=int(row["last_processed_seq"]) if row else 0)
 
-    async def advance(self, agent: str, *, seq: int) -> CursorState:
+    async def advance(self, agent: str, *, seq: int) -> None:
         """Advance an agent's cursor via UPSERT, never moving backwards."""
         async with self.db.transaction() as cur:
             cur.execute("SELECT last_processed_seq FROM cursors WHERE agent=?", (agent,))
             row = cur.fetchone()
-            current = int(row["last_processed_seq"]) if row else 0
-            if seq <= current:
-                return CursorState(agent=agent, last_processed_seq=current)
+            if seq <= (int(row["last_processed_seq"]) if row else 0):
+                return
             cur.execute(
                 "INSERT INTO cursors(agent, last_processed_seq) VALUES (?,?) "
                 "ON CONFLICT(agent) DO UPDATE SET last_processed_seq=excluded.last_processed_seq",
                 (agent, seq),
             )
-            return CursorState(agent=agent, last_processed_seq=seq)
 
 
 __all__ = ["CursorState", "CursorStore"]

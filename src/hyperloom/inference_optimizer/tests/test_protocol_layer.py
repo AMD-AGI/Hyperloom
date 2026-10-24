@@ -346,18 +346,15 @@ async def test_cursor_store_empty_default(db):
 @pytest.mark.asyncio
 async def test_cursor_store_advance_forward(db):
     cs = CursorStore(db)
-    s = await cs.advance("Critic", seq=5)
-    assert s.last_processed_seq == 5
-    s = await cs.advance("Critic", seq=10)
-    assert s.last_processed_seq == 10
+    await cs.advance("Critic", seq=5)
+    assert (await cs.load("Critic")).last_processed_seq == 5
+    await cs.advance("Critic", seq=10)
+    assert (await cs.load("Critic")).last_processed_seq == 10
 
 
 @pytest.mark.asyncio
 async def test_cursor_store_never_moves_backwards(db):
     cs = CursorStore(db)
     await cs.advance("Critic", seq=10)
-    s = await cs.advance("Critic", seq=3)
-    assert s.last_processed_seq == 10
-    current = await cs.load("Critic")
-    assert 3 <= current.last_processed_seq
-    assert 11 > current.last_processed_seq
+    await cs.advance("Critic", seq=3)
+    assert (await cs.load("Critic")).last_processed_seq == 10
