@@ -11,10 +11,10 @@ the Experiences and the specialists' learnings go nowhere while MB1 runs on no E
 outcomes next to the chosen commit's recipe and how FINAL chose it; once the search tree is archived, the scheduler's
 LLM writes a generation of frontier scorers into the pool beside the archive (:func:`author_scorers`) and curates the
 RSI lesson pool the knowledge steps published the session's learnings to (:func:`curate_lessons`), steps that never
-stop CLOSE; ``session_breakdown.json``, which also counts how the merges went from the integrator's merge log, the
-knowledge steps' receipts and :data:`IMAGE_CHECK_FILE`, the whole
-image check the session ran before its first phase, land in ``MB-reports/``, and the dashboard is rebuilt a last time
-with the queue the stop left.
+stop CLOSE; ``session_breakdown.json``, which also counts how the merges went and how each met a conflicting patch
+from the integrator's merge log, the knowledge steps' receipts and :data:`IMAGE_CHECK_FILE`, the whole image check the
+session ran before its first phase, land in ``MB-reports/``, and the dashboard is rebuilt a last time with the queue
+the stop left.
 """
 
 from __future__ import annotations
@@ -52,7 +52,12 @@ from hyperloom_multibranch.notebook.rsi.lesson_curation import curate_lessons
 from hyperloom_multibranch.notebook.rsi.session import CloseStep, KnowledgeClose
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.final import FinalChoice
-from hyperloom_multibranch.scheduling.integrator import CONFLICT_TRUNCATED, CONFLICT_UNRESOLVED, RESOLVER_UNREACHED
+from hyperloom_multibranch.scheduling.integrator import (
+    ADOPTING_LEAD,
+    CONFLICT_TRUNCATED,
+    CONFLICT_UNRESOLVED,
+    RESOLVER_UNREACHED,
+)
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.contracts.llm import Completion
 from hyperloom_multibranch.scheduling.manifest import read_manifest
@@ -63,6 +68,9 @@ KB_DISABLED = "disabled"
 KB_FAILED = "failed"
 #: The whole image check's report, under ``MB-reports/``.
 IMAGE_CHECK_FILE = "image_check.json"
+#: The merge-log fields that name the patches a merge recovered a conflict with, by their key in
+#: ``close.merges.conflicts``.
+_RECOVERED_CONFLICTS = {"rebased": "rebased_patches", "replaced": "replaced_patches", "resolved": "resolved_patches"}
 #: The merge log's reasons for a merge lost to a conflicting patch, by their key in ``close.merges.conflicts.lost``.
 _LOST_CONFLICTS = {
     "unresolved": CONFLICT_UNRESOLVED,
@@ -94,27 +102,41 @@ def step_lines(steps: Mapping[str, CloseStep]) -> list[str]:
     ]
 
 
-def _merge_statistics(merge_log: Sequence[Mapping[str, Any]], snapshot: NotebookSnapshot) -> dict[str, object]:
-    """How the session's merges went, for ``close.merges``, from the integrator's merge log and the notebook.
+def _recovered_by(row: Mapping[str, Any]) -> tuple[str, ...]:
+    """The keys of ``close.merges.conflicts`` the merge of merge-log ``row`` recovered a conflicting patch by."""
+
+    return tuple(key for key, field in _RECOVERED_CONFLICTS.items() if row["detail"][field])
+
+
+def _lost_to(row: Mapping[str, Any]) -> str | None:
+    """The key of ``close.merges.conflicts.lost`` the merge of merge-log ``row`` counts under; ``None`` for a merge
+    not lost to a conflicting patch. A lead adoption's reason names the branch first."""
+
+    adopts = row["detail"]["adopts"]
+    reason = row["reason"].removeprefix(f"{ADOPTING_LEAD.format(adopts)}: ") if adopts else row["reason"]
+    return next((key for key, lost in _LOST_CONFLICTS.items() if reason.startswith(lost)), None)
+
+
+def _merge_statistics(merge_log: Sequence[Mapping[str, Any]]) -> dict[str, object]:
+    """How the session's merges went, for ``close.merges``, from the integrator's merge log.
 
     ``attempts`` counts the merge attempts the log records by outcome; the replay of the Recipe KB's champion is no
-    merge attempt. ``conflicts`` counts the merges that took head patches out for a candidate's patch rewriting them
-    (``replaced``), the conflicting patches the model rewrote (``resolved_patches``: the notebook keeps them for the
-    session, not per merge, so they are patches, not merges) and the merges lost to a conflicting patch, by why
-    (``lost``). A conflict the three-way rebase settled is recorded nowhere, so none is counted.
+    merge attempt. ``conflicts`` counts merges: ``seen`` those that met a conflicting patch, then by how it was met --
+    a patch the three-way rebase settled (``rebased``), head patches taken out for a candidate's patch rewriting them
+    (``replaced``), a patch the model rewrote (``resolved``) -- and those lost to a conflicting patch, by why
+    (``lost``). One merge may recover in several ways, and a merge lost to the model may have rebased a patch first.
     """
 
     merges = [row for row in merge_log if "outcome" in row["detail"]]
     outcomes = Counter(MergeOutcome(row["detail"]["outcome"]) for row in merges)
-    lost = {
-        key: sum(1 for row in merges if row["reason"].startswith(reason)) for key, reason in _LOST_CONFLICTS.items()
-    }
+    recovered = [_recovered_by(row) for row in merges]
+    lost = [_lost_to(row) for row in merges]
     return {
         "attempts": {outcome.value: outcomes[outcome] for outcome in MergeOutcome},
         "conflicts": {
-            "replaced": sum(1 for row in merges if row["detail"]["replaced_patches"]),
-            "resolved_patches": len(snapshot.resolved_patches),
-            "lost": lost,
+            "seen": sum(1 for by, lost_to in zip(recovered, lost) if by or lost_to),
+            **{key: sum(key in by for by in recovered) for key in _RECOVERED_CONFLICTS},
+            "lost": {key: lost.count(key) for key in _LOST_CONFLICTS},
         },
     }
 
@@ -222,7 +244,7 @@ class SessionExports:
         curation = await self._curate(snapshot)
         selection = encode(final) if final is not None else None
         stepped = knowledge_document(knowledge, scorers, curation)
-        merges = _merge_statistics(read_jsonl(self._layout.merges), snapshot)
+        merges = _merge_statistics(read_jsonl(self._layout.merges))
         document = build_breakdown(
             snapshot,
             CloseOutcome(
