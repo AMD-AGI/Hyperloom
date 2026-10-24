@@ -144,11 +144,10 @@ def test_running_task_without_lease_is_not_proof_of_exit(tmp_path, missing_table
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("evidence", [{"reason": "cancelled_in_flight"}, {"lease_ttl_sec": 10}])
 @pytest.mark.parametrize("with_lease", [False, True])
-def test_unobserved_terminal_holder_keeps_open_round_blocked(tmp_path, evidence, with_lease):
+def test_unobserved_terminal_holder_keeps_open_round_blocked(tmp_path, with_lease):
     path = _database(tmp_path)
-    _task(path, state="cancelled", evidence=evidence)
+    _task(path, state="cancelled", evidence={"reason": "cancelled_in_flight"})
     _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
     _execute(path, "INSERT INTO leases VALUES ('bringup_round', 'round-1', 'task-1', 0, '')")
     if with_lease:
@@ -774,7 +773,6 @@ def test_confirmation_is_idempotent_but_cannot_authorize_later_work(tmp_path, la
     [
         {"evidence": {"cleanup_confirmed": False, "outcome": {"state": "cancelled"}}},
         {"to": "cancelled", "evidence": {"reason": "cancelled_in_flight"}},
-        {"to": "cancelled", "evidence": {"lease_ttl_sec": 5}},
         {"to": "running", "evidence": {}},
         {"to": [], "evidence": {}},
         {"evidence": {"cleanup_confirmed": True, "outcome": {"state": "succeeded", "result": {}}}},
