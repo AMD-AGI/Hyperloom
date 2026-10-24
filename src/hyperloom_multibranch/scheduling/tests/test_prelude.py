@@ -20,6 +20,7 @@ import pytest
 
 import hyperloom
 from hyperloom.common.io import atomic_write_json
+from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
@@ -423,11 +424,14 @@ async def test_a_replay_acceptance_refuses_on_the_root_stays_a_lead_named_not_re
     result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
 
     [lead] = result.warm_leads
+    version = rule_pack_identity()["version"]
     assert (lead.replay, lead.refusal) == (
         None,
-        ReplayRefusal("online_tuning_unsupported", "TunableOp tunes online"),
+        ReplayRefusal("online_tuning_unsupported", "TunableOp tunes online", version),
     )
-    assert lead.describe().endswith("; not replayable here: online_tuning_unsupported (TunableOp tunes online)")
+    assert lead.describe().endswith(
+        f"; not replayable here under rule pack {version}: online_tuning_unsupported (TunableOp tunes online)"
+    )
     assert _warm_start_decision(layout) == {"leads": [lead.describe()], "unread": ""}
 
 

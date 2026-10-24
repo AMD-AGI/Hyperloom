@@ -243,14 +243,17 @@ def _on_head_upstreams(wanted: Recipe, head: Recipe) -> Recipe:
 
 @dataclass(frozen=True)
 class ReplayRefusal:
-    """Why the toolbox's acceptance refuses a champion's replay on the session's root: its code, and its reason."""
+    """Why the toolbox's acceptance refuses a champion's replay on the session's root: its code, its reason, and the
+    version of the rule pack it was refused under, which a later pack may judge otherwise."""
 
     code: str
     reason: str
+    rule_pack: str = ""
 
     def describe(self) -> str:
         reason = self.reason if len(self.reason) <= REFUSAL_CHARS else self.reason[: REFUSAL_CHARS - 3] + "..."
-        return f"not replayable here: {self.code} ({reason})"
+        under = f" under rule pack {self.rule_pack}" if self.rule_pack else ""
+        return f"not replayable here{under}: {self.code} ({reason})"
 
 
 @dataclass(frozen=True)
