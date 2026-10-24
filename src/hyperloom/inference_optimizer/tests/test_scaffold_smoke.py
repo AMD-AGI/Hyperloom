@@ -82,9 +82,9 @@ def test_ensure_schema_is_idempotent(tmp_path):
     db = _new_db(tmp_path)
     conn = open_connection(db)
     try:
-        v1 = ensure_schema(conn)
-        v2 = ensure_schema(conn)
-        assert v1 == v2 == SCHEMA_VERSION
+        ensure_schema(conn)
+        ensure_schema(conn)
+        assert [row[0] for row in conn.execute("SELECT version FROM schema_version")] == [SCHEMA_VERSION]
     finally:
         conn.close()
 
