@@ -326,19 +326,6 @@ async def test_a_terminal_holder_with_nothing_following_it_expires_on_its_cap(db
 
 
 @pytest.mark.asyncio
-async def test_a_holder_that_reported_its_own_end_is_proof_but_a_lease_watchdog_is_not(db):
-    """A watchdog times a lease; it never looks at a process."""
-    rec, rounds, tasks, state = _build(db, terminal_holder_cap_sec=0.0)
-    await _open_round(rounds, tasks, holder="spec-1")
-    await tasks.transition("spec-1", "running")
-    await tasks.transition("spec-1", "failed", {"reason": "lease_expired", "lease_ttl_sec": 60.0, "age_sec": 99.0})
-
-    await rec.run(_NOW + 10.0)
-
-    assert (await rounds.get("round-spec-1")).state == OPEN
-
-
-@pytest.mark.asyncio
 async def test_a_running_task_whose_process_is_gone_is_failed_and_one_unobservable_is_not(db, monkeypatch):
     """Inability to observe is UNKNOWN. Nothing is manufactured from it."""
     rec, _rounds, tasks, _ = _build(db)

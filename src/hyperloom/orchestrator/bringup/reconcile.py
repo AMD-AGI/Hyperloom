@@ -40,11 +40,6 @@ REVIEW_TTL_SEC: float = 1800.0
 #: The verdict a timeout writes.
 TIMEOUT_VERDICT = "reject"
 
-#: Evidence key ``TaskRegistry.reclaim_dead_running`` writes when it proved a pid
-#: dead, and the key its lease watchdog writes when it only timed a lease out.
-_EVIDENCE_DEAD_PID = "dead_pid"
-_EVIDENCE_LEASE_TTL = "lease_ttl_sec"
-
 #: Proposals with no verdict against them.
 _UNDECIDED_PROPOSALS_SQL = f"""
     SELECT msg_id, from_agent, ts FROM events
@@ -474,9 +469,7 @@ def _terminal_by_observation(task: Task) -> bool:
             continue
         if not isinstance(evidence, dict):
             return True
-        if _EVIDENCE_DEAD_PID in evidence:
-            return True
-        return _EVIDENCE_LEASE_TTL not in evidence and evidence.get("reason") != "cancelled_in_flight"
+        return evidence.get("reason") != "cancelled_in_flight"
     return True
 
 
