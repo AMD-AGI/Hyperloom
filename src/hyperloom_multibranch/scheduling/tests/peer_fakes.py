@@ -33,7 +33,7 @@ import pytest
 
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import TestRequest, TestResult
-from hyperloom.contracts.recipe import ConfigDelta, PatchRef, Recipe, RecipeDelta, apply
+from hyperloom.contracts.recipe import ComponentPatches, ConfigDelta, PatchRef, Recipe, RecipeDelta, apply
 from hyperloom.measure.compile import BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RecipeScope
@@ -236,6 +236,10 @@ class HeldGitRepo(GitExperimentRepo):
     async def patch_text(self, commit: str, path: str) -> str:
         async with self.time.held():
             return await super().patch_text(commit, path)
+
+    async def apply_error(self, stack: ComponentPatches, text: str) -> str | None:
+        async with self.time.held():
+            return await super().apply_error(stack, text)
 
     async def checkout(self, commit: str, destination: Path) -> None:
         async with self.time.held():

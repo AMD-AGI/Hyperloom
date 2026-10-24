@@ -38,12 +38,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence, Set
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 
 from hyperloom.common.jsonio import extract_last_json_with_key
 from hyperloom.contracts.measurement import Purpose, TestKind
-from hyperloom.contracts.recipe import PatchRef, Recipe, RecipeDelta, RecipeError, ValueChange, apply
+from hyperloom.contracts.recipe import ComponentPatches, PatchRef, RecipeDelta, RecipeError, ValueChange, apply
 from hyperloom.measure.compile import BlobError
 from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
@@ -104,66 +104,89 @@ class MergeReport:
     foundation_fix: bool = False
 
 
+class PatchUnresolved(Exception):
+    """A conflicting patch the resolver got no rewrite of that applies; the message says why."""
+
+
+@dataclass(frozen=True)
+class _Sources:
+    """Where the text of a patch of the merge is read: a rewrite this resolution wrote, else the candidate's recipe,
+    else the integration head's."""
+
+    candidate: str
+    onto: str
+    written: dict[str, str] = field(default_factory=dict)
+
+
 class LlmPatchResolver:
     """Asks a model to rewrite every patch of a merge that does not apply where the merge puts it.
 
-    A rewritten patch is not applied here: the merge test builds the merged recipe, and the toolbox refuses it when a
-    patch still does not apply.
+    A rewrite is applied on top of the patches of its component it has to apply on before it is kept, so one that does
+    not apply costs no merge test; the toolbox still builds the merged recipe once the merge is tested.
     """
 
     def __init__(self, completion: Completion, repo: ExperimentRepo) -> None:
         self._completion = completion
         self._repo = repo
 
-    async def resolve(self, merge: RepoMerge, candidate: str) -> RecipeDelta | None:
-        """``merge``'s delta with every conflicting patch rewritten and added; ``None`` when one stays unresolved.
+    async def resolve(self, merge: RepoMerge, candidate: str) -> RecipeDelta:
+        """``merge``'s delta with every conflicting patch rewritten and added; :class:`PatchUnresolved` when one stays
+        unresolved. Each rewrite applies on top of the rewrites before it.
 
         A call that fails raises :class:`CompletionFailed`: a model that could not be asked is a different loss from
         a model that answered, and the merge log names them apart.
         """
 
         merged = apply(await self._repo.read_recipe(merge.onto), merge.delta)
+        stacks = {pinned.component: pinned for pinned in merged.components}
+        sources = _Sources(candidate, merge.onto)
         rewritten: dict[str, list[PatchRef]] = {}
         for conflict in merge.patch_conflicts:
-            text = await self._rewrite(conflict, merged, candidate, merge.onto)
-            if text is None:
-                return None
-            rewritten.setdefault(conflict.component, []).append(await self._repo.store_patch(conflict.component, text))
+            stack = stacks[conflict.component]
+            text = await self._rewrite(conflict, stack, await self._prompt(conflict, stack, sources))
+            patch = await self._repo.store_patch(conflict.component, text)
+            sources.written[patch.path] = text
+            stacks[conflict.component] = replace(stack, patches=(*stack.patches, patch))
+            rewritten.setdefault(conflict.component, []).append(patch)
         changes = tuple(
             replace(change, add_patches=(*change.add_patches, *rewritten.get(change.component, ())))
             for change in merge.delta.components
         )
         return replace(merge.delta, components=changes)
 
-    async def _rewrite(self, conflict: PatchConflict, merged: Recipe, candidate: str, onto: str) -> str | None:
-        prompt = await self._prompt(conflict, merged, candidate, onto)
+    async def _rewrite(self, conflict: PatchConflict, stack: ComponentPatches, prompt: str) -> str:
+        """The model's rewrite of ``conflict``, once it applies on top of ``stack``."""
+
         reply = (await self._completion(RESOLVER_SYSTEM_PROMPT, prompt)).text
         answer = extract_last_json_with_key(reply, PATCH_KEY)
-        rewritten = answer.get(PATCH_KEY) if answer is not None else None
-        return rewritten if isinstance(rewritten, str) and rewritten.strip() else None
+        text = answer.get(PATCH_KEY) if answer is not None else None
+        if not isinstance(text, str) or not text.strip():
+            raise PatchUnresolved(f"the model gave no rewrite of {conflict.path}")
+        error = await self._repo.apply_error(stack, text)
+        if error is not None:
+            raise PatchUnresolved(f"the rewrite of {conflict.path} does not apply: {error}")
+        return text
 
-    async def _prompt(self, conflict: PatchConflict, merged: Recipe, candidate: str, onto: str) -> str:
-        """``merged`` is the merge without the patches that conflict: what the rewritten patch has to apply on."""
+    async def _prompt(self, conflict: PatchConflict, stack: ComponentPatches, sources: _Sources) -> str:
+        """``stack`` is what the rewritten patch has to apply on: the merge without the patches that conflict."""
 
-        pinned = merged.component(conflict.component)
-        stack = pinned.patches if pinned is not None else ()
         sections = [
             f"Component: {conflict.component}",
             f"Patch {conflict.path} to rewrite:",
-            await self._text(conflict.path, candidate, onto),
+            await self._text(conflict.path, sources),
             f"Why it does not apply:\n{conflict.detail}",
             f"The patches of {conflict.component} it has to apply on top of, in order:",
-            *[f"--- {patch.path} ---\n{await self._text(patch.path, candidate, onto)}" for patch in stack],
+            *[f"--- {patch.path} ---\n{await self._text(patch.path, sources)}" for patch in stack.patches],
         ]
         return "\n\n".join(sections)
 
-    async def _text(self, path: str, candidate: str, onto: str) -> str:
-        """A patch of the merge comes from the candidate's recipe or from the integration head's."""
-
+    async def _text(self, path: str, sources: _Sources) -> str:
+        if path in sources.written:
+            return sources.written[path]
         try:
-            return await self._repo.patch_text(candidate, path)
+            return await self._repo.patch_text(sources.candidate, path)
         except KeyError:
-            return await self._repo.patch_text(onto, path)
+            return await self._repo.patch_text(sources.onto, path)
 
 
 #: The verdicts a foundation fix that passed the accuracy gate merges on: a settled measurement, whatever its gain.
@@ -374,14 +397,11 @@ class Integrator:
             return merge.delta
         conflicts = "; ".join(f"{conflict.path}: {conflict.detail}" for conflict in merge.patch_conflicts)
         try:
-            delta = await self._resolver.resolve(merge, candidate)
+            return await self._resolver.resolve(merge, candidate)
         except CompletionFailed as exc:
             raise _Skipped(f"{RESOLVER_UNREACHED}: {conflicts}: {exc}") from exc
-        except BlobError as exc:
+        except (BlobError, PatchUnresolved) as exc:
             raise _Skipped(f"{CONFLICT_UNRESOLVED}: {conflicts}: {exc}") from exc
-        if delta is None:
-            raise _Skipped(f"{CONFLICT_UNRESOLVED}: {conflicts}")
-        return delta
 
     async def _skip(
         self,
@@ -543,6 +563,7 @@ __all__ = [
     "LlmPatchResolver",
     "MergeRecords",
     "MergeReport",
+    "PatchUnresolved",
     "defects_beyond_gain",
     "not_stackable_reason",
 ]

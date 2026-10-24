@@ -878,6 +878,24 @@ async def test_a_patch_a_foundation_fix_brought_is_never_replaced_by_a_later_mer
     assert await bench.repo.patch_text(merged.merged_commit, kept.path) == HEAD_TEXT
 
 
+#: A rewrite of the conflicting patch against a line no stack of the bench holds, so it applies nowhere.
+STRAY_TEXT = _patch_text("x.py", "stray", "resolved")
+
+
+async def test_a_rewrite_that_does_not_apply_is_an_unresolved_conflict_and_spends_no_merge_test(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, conflicting=True)
+    bench.completion.fallback = json.dumps({"patch": STRAY_TEXT})
+
+    report = await _one(bench)
+
+    assert report is not None and report.outcome is MergeOutcome.CONFLICT_SKIPPED and report.request_id is None
+    conflicting = bench.deltas["c1"].components[0].add_patches[1]
+    assert report.reason.startswith(CONFLICT_UNRESOLVED)
+    assert f"the rewrite of {conflicting.path} does not apply: " in report.reason
+    assert bench.merge_tests() == {}
+    assert await bench.outcome("c1") is MergeOutcome.CONFLICT_SKIPPED
+
+
 async def test_a_merge_the_recipe_contract_refuses_is_skipped_and_the_round_goes_on(tmp_path: Path) -> None:
     bench = await _bench(tmp_path, invalid=True)
 
