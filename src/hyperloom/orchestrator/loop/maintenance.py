@@ -37,7 +37,7 @@ async def run_lease_and_db_reclaim(
     an operator starts; the remedy for each one is logged once by the diagnostic.
 
     Args:
-        host: Coordinator exposing ``reconciler`` and ``db``.
+        host: Coordinator exposing ``reconciler``, ``locks`` and ``db``.
         summary: Mutated in place with the per-step counts.
         reason: Log prefix identifying the maintenance caller.
     """
@@ -50,7 +50,7 @@ async def run_lease_and_db_reclaim(
         # docs/task-containment.md), and the one candidate left is
         # safety-critical, so this is the number that decides whether anyone
         # should build it.
-        unconfirmed, ended = await host.reconciler.cleanup_confirmation_rate()
+        unconfirmed, ended = await host.locks.cleanup_confirmation_rate()
         if ended:
             summary["cleanup_unconfirmed"] = f"{unconfirmed}/{ended}"
         summary["running_tasks_reclaimed"] = len(report.failed_tasks)
