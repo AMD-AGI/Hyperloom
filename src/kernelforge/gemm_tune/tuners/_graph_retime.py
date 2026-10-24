@@ -18,7 +18,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from ..aiter_graph_retime import Kernel, RetimeError, RetimeFn, Timing, make_retime_fn
+from ..aiter_graph_retime import Kernel, RetimeError, RetimeFn, RetimeTarget, Timing, make_retime_fn
 from ..dense_shapes import _SGLANG_CUDAGRAPH_BS
 from ._row_accuracy import REL_NORM_COLUMN, _judge_row, _read_dict_rows, _rewrite_rows
 from ._serve_safe import _SPLITK_FORWARDING_LIBTYPES, _Candidate, _serve_safe_candidates, _SplitKLimit
@@ -68,21 +68,15 @@ def _describe(kernel: Kernel, graph_us: float | None) -> dict[str, Any]:
     }
 
 
-def retime_table(
-    artifact: str,
-    profile_csv: Path,
-    limit: _SplitKLimit,
-    script_key: str,
-    gpu_ids: str,
-) -> list[dict[str, Any]]:
+def retime_table(artifact: str, profile_csv: Path, limit: _SplitKLimit, target: RetimeTarget) -> list[dict[str, Any]]:
     """Ship each decode row's fastest candidate in a graph; the rows it changed or could not time.
 
     It dispatches on the tuner's card like the split-K trial, so the same switch turns it off.
     """
     if os.environ.get("FORGE_SPLITK_TRIAL", "1") == "0":
         return []
-    time_fn = make_retime_fn(script_key, gpu_ids, profile_csv.parent / "graph_retime")
-    libtypes = _SPLITK_FORWARDING_LIBTYPES.get(script_key, frozenset())
+    time_fn = make_retime_fn(target, profile_csv.parent / "graph_retime")
+    libtypes = _SPLITK_FORWARDING_LIBTYPES.get(target.op, frozenset())
     return [r.to_dict() for r in retime_decode_rows(Path(artifact), profile_csv, limit, libtypes, time_fn)]
 
 

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import TuneContext, TuneResult, micro_metrics
+from ..aiter_graph_retime import RetimeTarget
 from ._graph_retime import retime_table
 from ._row_accuracy import RelNormFn, drop_inaccurate_rows, dropped_row_record
 from ._serve_safe import _SPLITK_FORWARDING_LIBTYPES, _fastest_serve_safe, _serve_safe_candidates, _SplitKLimit
@@ -907,6 +908,7 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
 
     aiter_root = resolve_aiter_root()
     run_start_time = time.time()
+    deadline = run_start_time + ctx.timeout_s
 
     rc, stdout, stderr, iso_candidate = _invoke_tuner(
         _tr.TunerInvocation(script, base_args, input_csv, tuned_csv, work_dir, aiter_root),
@@ -930,7 +932,6 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
             error_class="subprocess_error",
         )
 
-    # Find candidate CSV.
     candidate = iso_candidate if iso_candidate is not None else _find_latest_candidate(tuner_name, run_start_time)
     artifact = str(candidate) if candidate else str(tuned_csv)
 
@@ -989,7 +990,7 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
         candidate=force_candidate,
         shape_results=shape_results,
         dropped_inaccurate=[dropped_row_record(r) for r in accuracy.dropped],
-        graph_retime=retime_table(artifact, profile_csv, limit, script_key, _gpu_ids(ctx)),
+        graph_retime=retime_table(artifact, profile_csv, limit, RetimeTarget(script_key, _gpu_ids(ctx), deadline)),
     )
 
 
