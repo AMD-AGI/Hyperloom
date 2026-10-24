@@ -1201,8 +1201,9 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         committed_patch = self._git("diff", base_head, current_head, "--", ".")
         if hashlib.sha256(committed_patch.encode()).hexdigest() != expected_hash:
             raise ValueError("pending KEEP committed patch mismatch")
+        # git keeps a subject without its trailing whitespace; a subject cut at a space would never match.
         subject = self._git("show", "-s", "--format=%s", current_head)
-        if subject != pending["commit_subject"]:
+        if subject.rstrip() != str(pending["commit_subject"]).rstrip():
             raise ValueError("pending KEEP commit message mismatch")
         return "committed"
 
