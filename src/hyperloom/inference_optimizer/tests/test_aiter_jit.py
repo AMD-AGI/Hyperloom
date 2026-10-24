@@ -18,6 +18,7 @@ except ModuleNotFoundError:  # optional runtime dependency
 
 from hyperloom.orchestrator.actions.executors import _aiter_jit
 from hyperloom.orchestrator.actions.executors import baseline
+from hyperloom.orchestrator.kernel import _integrate_rebaseline as integrate_rebaseline
 
 
 # Only tests that drive psutil directly require it; sweep tests replace the liveness probe.
@@ -211,7 +212,6 @@ def test_sweep_unknown_liveness_preserves_all_locks(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_integrate_does_not_retry_when_compiler_probe_is_unknown(monkeypatch, tmp_path):
-    from hyperloom.orchestrator.kernel import request_handlers
 
     layout = _make_aiter_tree(tmp_path / "jit")
     monkeypatch.setattr(_aiter_jit, "_resolve_lock_sweep_dirs", lambda *_args: [tmp_path / "jit"])
@@ -227,7 +227,7 @@ async def test_integrate_does_not_retry_when_compiler_probe_is_unknown(monkeypat
         calls += 1
         return {"status": "failed", "error_class": "timeout"}
 
-    result = await request_handlers._run_integrate_rebaseline_with_lock_retry(
+    result = await integrate_rebaseline._run_integrate_rebaseline_with_lock_retry(
         executor, object(), workspace=tmp_path, reason="unknown compiler probe"
     )
 

@@ -140,7 +140,7 @@ def test_the_aiter_per_token_gate_is_every_gfx942_board():
 
 
 def test_the_fp8_dense_quant_type_reads_gfx950_from_the_table():
-    from hyperloom.orchestrator.kernel.request_handlers import _is_gfx950
+    from hyperloom.orchestrator.kernel._untuned_gemm_csv import _is_gfx950
 
     for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items():
         assert _is_gfx950(board) is (arch == "gfx950"), board
