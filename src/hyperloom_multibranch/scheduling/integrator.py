@@ -29,7 +29,9 @@ goes to :class:`LlmPatchResolver`, and a merge it cannot resolve is skipped and 
 from the integration head and judged by the rule gate, and a candidate about to be merged runs the regression set,
 before anything is written, so only a candidate that keeps the regression set passing reaches the integration branch
 and nothing on it is ever reverted. That candidate is an improvement, or a foundation fix the accuracy gate passed
-whatever its gain: a fix the other branches build on is worth merging even when it costs throughput.
+whatever its gain: a fix the other branches build on is worth merging even when it costs throughput. A foundation fix
+merges without a gain only when it carries nothing but itself; one that brings parents never merged is judged as any
+candidate is, so a fix cut from a regressed commit does not take that commit onto the integration branch unjudged.
 
 Before EXPLORE opens, :meth:`Integrator.replay_champion` carries the Recipe KB champion PRELUDE prepared onto the
 root the same way and by the same rule. It is nobody's candidate, so no merge attempt records it and the regression
@@ -108,7 +110,8 @@ class MergeReport:
     patches the merge took out for a candidate's patch that rewrites them, and the reason names them.
 
     A merged candidate carries the gain its merge test was judged to make and the bar it was judged against;
-    ``foundation_fix`` says the candidate is a foundation fix, which merges without a gain.
+    ``foundation_fix`` says the candidate is a foundation fix, which merges without a gain; a tested one is judged as
+    one only when its merge carries no other commit.
     """
 
     candidate: str
@@ -455,7 +458,7 @@ class Integrator:
             merge.config_conflicts,
             merge.united_tables,
             merge.replaced_patches,
-            foundation_fix=commit.foundation_fix,
+            foundation_fix=commit.foundation_fix and merge.carried == (commit.commit_id,),
         )
         try:
             judgement = await self._gate.compare(request_id)
