@@ -32,7 +32,8 @@ _CALL = re.compile(r"\b[A-Za-z_]\w*\(|\b[A-Za-z_]\w+(?:\.[A-Za-z_]\w+)+|\b[a-z]+
 _ERROR = re.compile(
     r"error|exception|traceback|fail|crash|abort|segfault|illegal|missing|not found|no such|no module|unsupported"
     r"|undefined|timed out|timeout|out of memory|\boom\b|\bima\b|exit (?:code|status)|\brc ?= ?-?\d"
-    r"|does not apply|did not apply|doesn't apply|refused|rejected",
+    r"|does not apply|did not apply|doesn't apply|refused|rejected|does not exist|doesn't exist|not supported"
+    r"|cannot (?:find|open|load|import)|can't (?:find|open|load|import)",
     re.IGNORECASE,
 )
 

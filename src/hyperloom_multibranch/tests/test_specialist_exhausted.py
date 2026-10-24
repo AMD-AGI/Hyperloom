@@ -87,6 +87,18 @@ def test_a_blocked_record_whose_detail_names_the_path_tried_and_its_error_stands
     assert exhausted_refusal(_blocked(detail, why)) == ""
 
 
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "aiter.ops.gemm_a8w8_bpreshuffle_splitk does not exist in the image's aiter",
+        "set_tuned_config(splitK=8) raised: splitK > 4 not supported for this tile",
+        "the loader cannot find aiter_configs/qwen3_tuned.csv",
+    ],
+)
+def test_a_tool_s_refusal_in_its_own_words_counts_as_the_error_it_gave(detail):
+    assert exhausted_refusal(_blocked(detail)) == ""
+
+
 @pytest.mark.parametrize("why", ["blocked_by_tool", "needs_capability"])
 @pytest.mark.parametrize(
     ("detail", "lacks"),
