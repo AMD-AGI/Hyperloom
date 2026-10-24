@@ -27,17 +27,7 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
 )
 
 
-TASK_STATES = (
-    "queued",
-    "running",
-    "succeeded",
-    "failed",
-    "cancelled",
-)
-
-# Re-exported: the state machine moved to ``task_states`` so ``bus`` can read it
-# without importing this module back. Existing callers keep their import site.
-_TRANSITIONS = TRANSITIONS
+TASK_STATES = tuple(TRANSITIONS)
 
 _TRAJECTORY_STATUS: dict[str, str] = {
     "queued": STATUS_QUEUED,
@@ -399,7 +389,7 @@ class TaskRegistry:
             if row is None:
                 raise TaskNotFound(task_id)
             current_state = row["state"]
-            allowed = _TRANSITIONS.get(current_state, frozenset())
+            allowed = TRANSITIONS.get(current_state, frozenset())
             if new_state not in allowed:
                 raise IllegalTransition(f"cannot transition {task_id!r} from {current_state!r} to {new_state!r}")
             now = now_iso()
