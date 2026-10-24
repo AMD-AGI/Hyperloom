@@ -36,11 +36,17 @@ class _Reconciler:
 
     An open bring-up round holds one of those leases and can only be settled in
     the reconciler, so a second sweep here would reap a lease a live round still
-    holds. ``raises`` stands in for a cleanup-rate read the database refused.
+    holds.
     """
 
-    def __init__(self, reaped=0, raises=False, unverifiable=0, rate=(0, 0)):
+    def __init__(self, reaped=0, unverifiable=0):
         self.last_report = SimpleNamespace(leases_reaped=reaped, leases_unverifiable=unverifiable, failed_tasks=["t1"])
+
+
+class _Locks:
+    """``raises`` stands in for a cleanup-rate read the database refused."""
+
+    def __init__(self, raises=False, rate=(0, 0)):
         self._rate = rate
         self._raises = raises
 
@@ -79,6 +85,7 @@ class _Tasks:
 def _host(**kw):
     return SimpleNamespace(
         reconciler=kw.get("reconciler", _Reconciler(reaped=2)),
+        locks=kw.get("locks", _Locks()),
         gpu_specialist_pool=kw.get("pool", _Pool()),
         tasks=kw.get("tasks", _Tasks()),
         db=kw.get("db", object()),
@@ -146,7 +153,7 @@ class TestNoSingleStepCanEndTheRun:
         _patch_retention(monkeypatch)
         summary: dict = {}
 
-        await run_lease_and_db_reclaim(_host(reconciler=_Reconciler(raises=True)), summary, reason="r")
+        await run_lease_and_db_reclaim(_host(locks=_Locks(raises=True)), summary, reason="r")
 
         assert "cleanup_unconfirmed" not in summary
         assert "running_tasks_reclaimed" not in summary
@@ -178,6 +185,7 @@ def _coordinator(session_dir: Path, **kw):
     return SimpleNamespace(
         session_dir=session_dir,
         reconciler=_Reconciler(),
+        locks=_Locks(),
         gpu_specialist_pool=_Pool(),
         tasks=_Tasks(),
         db=object(),
