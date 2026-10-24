@@ -117,23 +117,20 @@ def _tool_metadata(
     tool: str,
     *,
     root: str | None = None,
-    root_env: str | None = None,
     version: str | None = None,
 ) -> dict[str, Any]:
     """Resolve ``{tool, root_dir, commit, version}`` for an external tool.
 
-    Root resolution: explicit ``root`` > caller ``root_env`` > the tool's
-    registered ``root_env``. ``commit`` is a cached ``git rev-parse`` of the
-    root, and ``version`` is the caller's value, else a cached ``_TOOL_PROVENANCE``
-    probe. Best-effort: never raises into the optimizer.
+    Root resolution: explicit ``root`` > the tool's registered ``root_env``.
+    ``commit`` is a cached ``git rev-parse`` of the root, and ``version`` is
+    the caller's value, else a cached ``_TOOL_PROVENANCE`` probe. Best-effort:
+    never raises into the optimizer.
     """
     import os
 
     key = str(tool or "").lower()
     hint = _TOOL_PROVENANCE.get(key, {})
-    root_dir = str(
-        root or os.environ.get(root_env or "", "") or os.environ.get(str(hint.get("root_env") or ""), "")
-    ).strip()
+    root_dir = str(root or os.environ.get(str(hint.get("root_env") or ""), "")).strip()
     cache_key = f"{key}:{root_dir}"
     cached = _TOOL_META_CACHE.get(cache_key)
     if cached is None:
@@ -166,7 +163,6 @@ def record_tool_version(
     *,
     tool: str,
     root: str | None = None,
-    root_env: str | None = None,
     version: str | None = None,
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
@@ -180,7 +176,7 @@ def record_tool_version(
     if not session_dir or not name:
         trace_skip(reason="no session_dir" if not session_dir else "no tool", section=SECTION)
         return
-    meta = _tool_metadata(name, root=root, root_env=root_env, version=version)
+    meta = _tool_metadata(name, root=root, version=version)
     recorder_for(session_dir, producer=producer).record_item(SECTION, meta, key=name)
 
 
