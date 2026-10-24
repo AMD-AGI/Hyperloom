@@ -2768,7 +2768,7 @@ def test_a_failing_proposal_outcome_record_propagates(monkeypatch) -> None:
     from hyperloom.inference_optimizer.breakdown.recorder import phase_event
     from hyperloom.orchestrator.loop import proposals
 
-    def _boom(**_kwargs) -> None:
+    def _boom(_outcome) -> None:
         raise RuntimeError("proposal outcome bug")
 
     monkeypatch.setattr(phase_event, "record_proposal_outcome", _boom)

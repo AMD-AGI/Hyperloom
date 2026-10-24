@@ -235,11 +235,14 @@ def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
     if not proposal_msg_id or not task_id:
         return
     from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalOutcome
 
     phase_event.record_proposal_outcome(
-        proposal_msg_id=str(proposal_msg_id),
-        materialized=True,
-        task_id=str(task_id),
+        ProposalOutcome(
+            proposal_msg_id=str(proposal_msg_id),
+            materialized=True,
+            task_id=str(task_id),
+        )
     )
 
 

@@ -32,6 +32,7 @@ __all__ = [
     "PhaseExit",
     "PhaseMarker",
     "PhaseProposal",
+    "ProposalOutcome",
     "ProposalReview",
     "SpecialistRound",
 ]
@@ -306,6 +307,32 @@ class ProposalReview:
                 "alternative_action": _text_or_none(advice.get("alternative_action")),
                 "variants": [dict(row) for row in _as_list(self.variants) if isinstance(row, Mapping)],
                 "reviewed_at": _now(),
+            },
+        }
+
+
+@dataclass(frozen=True)
+class ProposalOutcome:
+    """What the loop did with one proposal; ``task_id`` names the dispatch it became."""
+
+    proposal_msg_id: str
+    materialized: bool = False
+    denied: bool = False
+    reauthored: bool = False
+    task_id: Any = None
+    patch_verdict_key: Any = None
+
+    def row(self) -> dict[str, Any]:
+        """The proposal row fields this outcome persists as."""
+        return {
+            "proposal_msg_id": str(self.proposal_msg_id),
+            "outcome": {
+                "materialized": bool(self.materialized),
+                "denied": bool(self.denied),
+                "reauthored": bool(self.reauthored),
+                "task_id": _text_or_none(self.task_id),
+                "patch_verdict_key": _text_or_none(self.patch_verdict_key),
+                "settled_at": _now(),
             },
         }
 

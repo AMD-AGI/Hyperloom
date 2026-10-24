@@ -199,11 +199,12 @@ def _record_phase_proposal_review(
     if not proposal_id:
         return
     try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event, phase_records
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalReview
 
         fields = payload or {}
         phase_event.record_proposal_review(
-            phase_records.ProposalReview(
+            ProposalReview(
                 proposal_msg_id=proposal_id,
                 verdict=authored or effective,
                 effective_verdict=effective,
@@ -301,13 +302,16 @@ def _record_phase_proposal_outcome(pending: Any, **outcome: Any) -> None:
         return
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalOutcome
 
         phase_event.record_proposal_outcome(
-            proposal_msg_id=proposal_id,
-            materialized=bool(outcome.get("materialized")),
-            denied=bool(outcome.get("denied")),
-            reauthored=bool(outcome.get("reauthored")),
-            patch_verdict_key=outcome.get("patch_verdict_key"),
+            ProposalOutcome(
+                proposal_msg_id=proposal_id,
+                materialized=bool(outcome.get("materialized")),
+                denied=bool(outcome.get("denied")),
+                reauthored=bool(outcome.get("reauthored")),
+                patch_verdict_key=outcome.get("patch_verdict_key"),
+            )
         )
     except Exception:
         log.debug("phase timeline: proposal outcome row failed for %s", proposal_id, exc_info=True)

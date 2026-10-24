@@ -32,7 +32,6 @@ from .event_fields import (
     float_or_none as _float_or_none,
     int_or_none as _int_or_none,
     now_iso_seconds as _now,
-    text_or_none as _text_or_none,
 )
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
@@ -47,6 +46,7 @@ from .phase_records import (
     PhaseExit,
     PhaseMarker,
     PhaseProposal,
+    ProposalOutcome,
     ProposalReview,
     SpecialistRound,
 )
@@ -311,44 +311,20 @@ def record_proposal_review(review: ProposalReview) -> None:
     sink.record(SECTION_PROPOSAL, review.row(), row_type="proposal", natural_ids=str(review.proposal_msg_id))
 
 
-def record_proposal_outcome(
-    *,
-    proposal_msg_id: str,
-    materialized: bool = False,
-    denied: bool = False,
-    reauthored: bool = False,
-    task_id: Any = None,
-    patch_verdict_key: Any = None,
-    settled_at: str = "",
-) -> None:
+def record_proposal_outcome(outcome: ProposalOutcome) -> None:
     """Record what the loop did with a proposal. Never raises.
 
     ``task_id`` joins the proposal to the dispatch row it became, beside it on
     this same event. Located and dropped the same way as the ruling."""
-    if not str(proposal_msg_id or ""):
+    if not str(outcome.proposal_msg_id or ""):
         return
-    event = _proposal_event(str(proposal_msg_id))
+    event = _proposal_event(str(outcome.proposal_msg_id))
     if event is None:
         return
     sink = _sink(event)
     if sink is None:
         return
-    sink.record(
-        SECTION_PROPOSAL,
-        {
-            "proposal_msg_id": str(proposal_msg_id),
-            "outcome": {
-                "materialized": bool(materialized),
-                "denied": bool(denied),
-                "reauthored": bool(reauthored),
-                "task_id": _text_or_none(task_id),
-                "patch_verdict_key": _text_or_none(patch_verdict_key),
-                "settled_at": str(settled_at or "") or _now(),
-            },
-        },
-        row_type="proposal",
-        natural_ids=str(proposal_msg_id),
-    )
+    sink.record(SECTION_PROPOSAL, outcome.row(), row_type="proposal", natural_ids=str(outcome.proposal_msg_id))
 
 
 def record_settle(settlement: ActionSettlement) -> None:

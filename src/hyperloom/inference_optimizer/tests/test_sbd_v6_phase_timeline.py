@@ -28,6 +28,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.phase_records import (
     PhaseExit,
     PhaseMarker,
     PhaseProposal,
+    ProposalOutcome,
     ProposalReview,
 )
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
@@ -458,7 +459,7 @@ def test_the_task_a_proposal_became_joins_it_to_its_dispatch(tmp_path):
     _enter("KERNEL_AGENT", sequence=1, at=10.0)
     _propose("m-1")
     phase_event.record_proposal_review(ProposalReview(proposal_msg_id="m-1", verdict="approve"))
-    phase_event.record_proposal_outcome(proposal_msg_id="m-1", materialized=True, task_id="t-9")
+    phase_event.record_proposal_outcome(ProposalOutcome(proposal_msg_id="m-1", materialized=True, task_id="t-9"))
     phase_event.record_dispatch(ActionDispatch(at=PhaseCycle("KERNEL_AGENT", 0), action="kernel_opt", task_id="t-9"))
 
     ext = _ext("KERNEL_AGENT")
