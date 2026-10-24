@@ -199,23 +199,21 @@ def _record_phase_proposal_review(
     if not proposal_id:
         return
     try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event, phase_records
 
         fields = payload or {}
-        advice = advisory or {}
         phase_event.record_proposal_review(
-            proposal_msg_id=proposal_id,
-            verdict=authored or effective,
-            effective_verdict=effective,
-            source=str(fields.get("source") or ""),
-            reasoning=reason,
-            confidence=fields.get("confidence"),
-            failure_reason_code=fields.get("failure_reason_code"),
-            required_evidence=advice.get("required_evidence"),
-            risks=advice.get("risks"),
-            advice_text=advice.get("advice_text"),
-            alternative_action=advice.get("alternative_action"),
-            variants=variants,
+            phase_records.ProposalReview(
+                proposal_msg_id=proposal_id,
+                verdict=authored or effective,
+                effective_verdict=effective,
+                source=str(fields.get("source") or ""),
+                reasoning=reason,
+                confidence=fields.get("confidence"),
+                failure_reason_code=fields.get("failure_reason_code"),
+                advisory=advisory,
+                variants=variants,
+            )
         )
     except Exception:
         log.debug("phase timeline: proposal review row failed for %s", proposal_id, exc_info=True)
@@ -1393,17 +1391,19 @@ class IntentRouter(CoordinatorCollaborator):
             intent_payload=intent.payload,
         )
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseDenial
 
         payload = intent.payload or {}
         proposal_msg_id = (
             payload.get("proposal_msg_id") or payload.get("target_proposal_msg_id") or payload.get("proposal_id")
         )
         phase_event.record_denial(
-            actor=source,
-            proposal_msg_id=str(proposal_msg_id) if proposal_msg_id else None,
-            action=resolved_action,
-            phase=str(self.shared_state.phase or ""),
-            macro_cycle=int(self.shared_state.macro_cycle or 0),
-            rule=str(denied.rule or ""),
-            hint=str(denied.hint or ""),
+            PhaseDenial(
+                at=PhaseCycle(str(self.shared_state.phase or ""), int(self.shared_state.macro_cycle or 0)),
+                actor=source,
+                proposal_msg_id=str(proposal_msg_id) if proposal_msg_id else None,
+                action=resolved_action,
+                rule=str(denied.rule or ""),
+                hint=str(denied.hint or ""),
+            )
         )

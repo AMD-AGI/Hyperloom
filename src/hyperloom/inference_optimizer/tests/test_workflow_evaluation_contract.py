@@ -28,6 +28,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.phase_records import (
     ActionDispatch,
     ActionSettlement,
     PhaseCycle,
+    PhaseDenial,
     PhaseEntry,
     PhaseExit,
 )
@@ -86,13 +87,14 @@ def _writer_fixture(tmp_path, *, denied: bool) -> dict:
         )
         if denied:
             phase_event.record_denial(
-                actor="framework-agent",
-                proposal_msg_id=None,
-                action="profile",
-                phase="PRELUDE",
-                macro_cycle=0,
-                rule="phase_action_not_allowed",
-                hint="use an allowed PRELUDE action",
+                PhaseDenial(
+                    at=PhaseCycle("PRELUDE", 0),
+                    actor="framework-agent",
+                    proposal_msg_id=None,
+                    action="profile",
+                    rule="phase_action_not_allowed",
+                    hint="use an allowed PRELUDE action",
+                ),
             )
         phase_event.record_exit(
             PhaseExit(
