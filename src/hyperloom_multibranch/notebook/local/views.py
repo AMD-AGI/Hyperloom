@@ -149,17 +149,18 @@ def _commit_node(
     )
 
 
-def merge_state(state: NotebookState, attempt: MergeAttempt) -> MergeState:
-    """Where a merge attempt stands, from the judgement of its merge test."""
+def merge_state(state: NotebookState, attempt: MergeAttempt, at: float = 0.0) -> MergeState:
+    """Where a merge attempt recorded ``at`` stands, from the judgement of its merge test."""
 
     if attempt.request_id is None:
-        return MergeState(attempt.skipped_outcome, attempt.integration_head)
+        return MergeState(attempt.skipped_outcome, attempt.integration_head, reason=attempt.skipped_reason, at=at)
     write = state.latest_judgement(attempt.request_id)
     if write is None:
-        return MergeState(MergeOutcome.PENDING, attempt.integration_head, attempt.request_id)
+        return MergeState(MergeOutcome.PENDING, attempt.integration_head, attempt.request_id, at=at)
     if write.conclusion is Conclusion.MERGED:
-        return MergeState(MergeOutcome.MERGED, attempt.integration_head, attempt.request_id, write.commit_id)
-    return MergeState(MergeOutcome.NOT_STACKABLE, attempt.integration_head, attempt.request_id)
+        return MergeState(MergeOutcome.MERGED, attempt.integration_head, attempt.request_id, write.commit_id, at=at)
+    reason = f"{write.judgement.gain_pct:+.2f}% on the integration head"
+    return MergeState(MergeOutcome.NOT_STACKABLE, attempt.integration_head, attempt.request_id, reason=reason, at=at)
 
 
 def committed(state: NotebookState, view: LineageView) -> tuple[CommittedCommit, ...]:
@@ -171,7 +172,11 @@ def committed(state: NotebookState, view: LineageView) -> tuple[CommittedCommit,
         if node.origin not in _SPECIALIST_ORIGINS:
             continue
         judgement = state.commit_writes[node.commit_id].judgement
-        attempts = [attempt for attempt in state.merge_attempts if node.commit_id in attempt.source_commits]
+        attempts = [
+            (attempt, at)
+            for attempt, at in zip(state.merge_attempts, state.merge_attempted_at)
+            if node.commit_id in attempt.source_commits
+        ]
         found.append(
             CommittedCommit(
                 commit_id=node.commit_id,
@@ -182,7 +187,8 @@ def committed(state: NotebookState, view: LineageView) -> tuple[CommittedCommit,
                 fixes_correctness=judgement.fixes_correctness,
                 foundation_fix=judgement.foundation_fix,
                 merged_into=next((merge.commit_id for merge in merges if node.commit_id in merge.merged_from), None),
-                last_merge=merge_state(state, attempts[-1]) if attempts else None,
+                last_merge=merge_state(state, *attempts[-1]) if attempts else None,
+                merge_attempts=len(attempts),
             )
         )
     return tuple(sorted(found, key=lambda commit: (not commit.foundation_fix, -commit.gain_pct)))

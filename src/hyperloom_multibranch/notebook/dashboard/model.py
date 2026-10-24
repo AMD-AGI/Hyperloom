@@ -5,6 +5,8 @@
 
 * ``branches``: each branch's progress, its head's gain over the baseline, and its frontier score when the progress
   rows carry one (pass :class:`FrontierScoring`'s rows to show them);
+* ``stranded``: the branches that lead integration by more than the merge bar while commits of theirs failed to merge,
+  with those commits (:func:`~hyperloom_multibranch.notebook.rsi.stranded.stranded_leads`);
 * ``spend``: the session's GPU hours and LLM dollars so far, its specialists', judge's and resolver's together, and the
   tokens of the LLM calls whose model the price sheet does not list, which the dollars leave out;
 * ``in_flight``: tests requested and neither measured nor withdrawn yet, and the claims held now;
@@ -37,6 +39,7 @@ from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.dashboard.page import render_html
 from hyperloom_multibranch.notebook.knowledge.breakdown import measurement_usage, session_spend
 from hyperloom_multibranch.notebook.rsi.analysis import direction_occupancy, hypothesis_ledger
+from hyperloom_multibranch.notebook.rsi.stranded import stranded_leads
 
 SCHEMA_VERSION = "multibranch-dashboard-1"
 DASHBOARD_JSON = "dashboard.json"
@@ -175,6 +178,7 @@ def build_dashboard(
         "session": encode(profile),
         "baseline": encode(baseline),
         "branches": _branches(snapshot, rows, metric),
+        "stranded": encode(stranded_leads(snapshot, metric)),
         "spend": session_spend(snapshot),
         "in_flight": _in_flight(snapshot),
         "directions": _directions(snapshot),

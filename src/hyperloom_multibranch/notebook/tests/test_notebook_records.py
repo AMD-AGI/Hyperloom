@@ -666,7 +666,7 @@ async def test_the_latest_baseline_is_in_force(open_as: Open) -> None:
         await open_as(Role.SCHEDULER).write_baseline(updated)
 
 
-async def test_merges_that_did_not_land_say_why_in_the_commit_query(open_as: Open) -> None:
+async def test_merges_that_did_not_land_say_why_in_the_commit_query(open_as: Open, clock: FakeClock) -> None:
     scheduler, gate, integrator = open_as(Role.SCHEDULER), open_as(Role.GATE), open_as(Role.INTEGRATOR)
     await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
     for request_id in ("r1", "r2"):
@@ -677,12 +677,24 @@ async def test_merges_that_did_not_land_say_why_in_the_commit_query(open_as: Ope
     await integrator.record_merge_attempt(MergeAttempt(("c1",), "c0", request_id="m1"))
     await integrator.write_judgement("m1", judgement(0.1, ("m1",), verdict=Verdict.FLAT), Conclusion.NOT_STACKABLE)
     await integrator.record_merge_attempt(MergeAttempt(("c2",), "c0", skipped_reason="patch conflict in fused_moe.py"))
+    clock.advance(600.0)
+    await integrator.record_merge_attempt(MergeAttempt(("c2",), "c0", skipped_reason="patch conflict in qwen3.py"))
 
     by_commit = {commit.commit_id: commit for commit in await integrator.committed()}
 
     assert [commit.commit_id for commit in await integrator.committed()] == ["c1", "c2"]
-    assert by_commit["c1"].last_merge.outcome is MergeOutcome.NOT_STACKABLE
-    assert by_commit["c2"].last_merge.outcome is MergeOutcome.CONFLICT_SKIPPED
+    c1, c2 = by_commit["c1"].last_merge, by_commit["c2"].last_merge
+    assert (c1.outcome, c1.reason, by_commit["c1"].merge_attempts) == (
+        MergeOutcome.NOT_STACKABLE,
+        "+0.10% on the integration head",
+        1,
+    )
+    assert (c2.outcome, c2.reason, by_commit["c2"].merge_attempts) == (
+        MergeOutcome.CONFLICT_SKIPPED,
+        "patch conflict in qwen3.py",
+        2,
+    )
+    assert c2.at - c1.at > 600.0
     assert by_commit["c1"].merged_into is None
     with pytest.raises(ValueError, match="says why"):
         await integrator.record_merge_attempt(MergeAttempt(("c2",), "c0"))

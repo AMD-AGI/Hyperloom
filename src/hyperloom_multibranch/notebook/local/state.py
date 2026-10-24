@@ -108,6 +108,7 @@ class NotebookState:
         self.judgements: dict[str, list[JudgementWrite]] = {}
         self.commit_writes: dict[str, JudgementWrite] = {}
         self.merge_attempts: list[MergeAttempt] = []
+        self.merge_attempted_at: list[float] = []
         self.lineage: list[LineageEvent] = []
         self.baselines: list[BaselineRecord] = []
         self.regressions: list[RegressionCase] = []
@@ -148,7 +149,7 @@ class NotebookState:
             EntryKind.JUDGEMENT: self._judgement,
             EntryKind.SESSION_PROFILE: lambda _entry, value: self.profiles.append(value),
             EntryKind.MANIFEST: lambda _entry, value: self.fingerprints.append(value),
-            EntryKind.MERGE_ATTEMPT: lambda _entry, value: self.merge_attempts.append(value),
+            EntryKind.MERGE_ATTEMPT: self._merge_attempt,
             EntryKind.LINEAGE: lambda _entry, value: self.lineage.append(value),
             EntryKind.BASELINE: lambda _entry, value: self.baselines.append(value),
             EntryKind.REGRESSION: lambda _entry, value: self.regressions.append(value),
@@ -165,6 +166,10 @@ class NotebookState:
     def _request(self, entry: Entry, request: TestRequest) -> None:
         self.requests[request.request_id] = request
         self.requested_at.setdefault(request.request_id, entry.at)
+
+    def _merge_attempt(self, entry: Entry, attempt: MergeAttempt) -> None:
+        self.merge_attempts.append(attempt)
+        self.merge_attempted_at.append(entry.at)
 
     def _result(self, entry: Entry, result: TestResult) -> None:
         self.results[result.request_id] = result

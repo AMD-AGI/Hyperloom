@@ -477,17 +477,21 @@ class LineageView:
 
 @dataclass(frozen=True)
 class MergeState:
-    """The latest merge attempt a commit took part in."""
+    """The latest merge attempt a commit took part in, recorded ``at``. ``reason`` says why one that did not merge did
+    not: the integrator's reason for a merge skipped untested, the merge test's gain for one not stackable."""
 
     outcome: MergeOutcome
     integration_head: str
     request_id: str | None = None
     merged_commit: str | None = None
+    reason: str = ""
+    at: float = 0.0
 
 
 @dataclass(frozen=True)
 class CommittedCommit:
-    """A specialist commit as the integrator sees it; ``gain_pct`` is its own gain over its parent commit."""
+    """A specialist commit as the integrator sees it; ``gain_pct`` is its own gain over its parent commit, and
+    ``merge_attempts`` how many merge attempts it took part in."""
 
     commit_id: str
     branch: str
@@ -498,6 +502,7 @@ class CommittedCommit:
     foundation_fix: bool
     merged_into: str | None = None
     last_merge: MergeState | None = None
+    merge_attempts: int = 0
 
 
 @dataclass(frozen=True)

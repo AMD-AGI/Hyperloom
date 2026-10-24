@@ -9,6 +9,8 @@ from collections.abc import Mapping, Sequence
 from html import escape
 from typing import Any
 
+from hyperloom_multibranch.notebook.rsi.stranded import short_reason
+
 _STYLE = """
 body { font: 14px/1.45 system-ui, sans-serif; margin: 24px; color: #1f2328; }
 h1 { font-size: 20px; margin-bottom: 4px; }
@@ -78,6 +80,30 @@ def _branches(rows: Sequence[Mapping[str, Any]]) -> str:
                 row["llm_usd"],
                 _pct(row["gain_pct"]),
                 frontier(row),
+            )
+            for row in rows
+        ],
+    )
+
+
+def _stranded(rows: Sequence[Mapping[str, Any]]) -> str:
+    def commits(row: Mapping[str, Any]) -> str:
+        return "; ".join(
+            f"{item['commit_id'][:8]}: {short_reason(item['reason']) or item['outcome']}" for item in row["commits"]
+        )
+
+    return _table(
+        "Ahead of integration, merges failing",
+        (_BRANCH, "state", "lead", "head", "integration", "bar", "commits not merged"),
+        [
+            (
+                row["branch"],
+                "running" if row["running"] else "stopped",
+                _pct(row["lead_pct"]),
+                row["head_value"],
+                row["integration_value"],
+                _pct(row["bar_pct"]),
+                commits(row),
             )
             for row in rows
         ],
@@ -216,6 +242,7 @@ def render_html(dashboard: Mapping[str, Any]) -> str:
             f"<h1>{escape(title)}</h1>",
             f'<p class="meta">{escape(task)}; {spent}; generated {escape(str(dashboard["generated_at_utc"]))}</p>',
             _branches(dashboard["branches"]),
+            _stranded(dashboard.get("stranded") or []),
             _in_flight(dashboard["in_flight"]),
             _exploration(dashboard),
             _lineage(dashboard),
