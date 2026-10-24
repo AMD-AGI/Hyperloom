@@ -352,7 +352,10 @@ Answer with one JSON object and nothing else, with exactly these fields:
   with, "server_args": the field of the arguments string, "envs": the field of the environment object}}, or null;
 - "summary_field": dotted path in the keep file to the agent's own words for its latest keep (an integer step indexes
   a list, -1 its last item), "" when none;
-- "needs": what it requires, from "anthropic", "openai", "network", "docker".
+- "needs": what it requires, from "anthropic", "openai", "network", "docker";
+- "ledger": where the agent writes down what it found, {{"path": JSON-lines file relative to the checkout, "id": the
+  field of an entry's id, "kind": the field of its kind, "text": the field of the finding, "kinds": {{each of the
+  agent's kinds that states a measured fact or a dead end: "insight" or "pitfall"}}}}, or null when it writes none.
 
 Earlier attempts that failed, to correct rather than repeat:
 {failures}

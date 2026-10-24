@@ -8,7 +8,8 @@ validates before anything runs: every command is a non-empty string, every path 
 agent's checkout, and a key the schema does not have is refused, so a misspelt field fails the attempt instead of
 silently meaning nothing. The manifest says how to install and launch the agent, the config it is launched with, how
 a kept change shows (:class:`KeepSignal`), where the agent keeps the server arguments and environment it runs with
-(:class:`ConfigSource`); an agent with no keep signal is read once, from its workspace.
+(:class:`ConfigSource`) and what it found (:class:`LedgerSource`); an agent with no keep signal is read once, from its
+workspace.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any
+
+from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
 
 
 class ManifestError(ValueError):
@@ -144,6 +147,42 @@ class ConfigSource:
         return {"path": self.path, "server_args": self.server_args, "envs": self.envs}
 
 
+@dataclass(frozen=True)
+class LedgerSource:
+    """Where the agent writes down what it found: the JSON-lines file ``path`` in its checkout, whose entries hold an
+    id under ``id``, a kind under ``kind`` and the finding under ``text``; ``kinds`` maps each of the agent's kinds
+    worth a learning to the learning it is, and an entry whose id comes again revises the earlier one."""
+
+    path: str
+    id: str
+    kind: str
+    text: str
+    kinds: Mapping[str, LearningKind]
+
+    @classmethod
+    def read(cls, document: object) -> LedgerSource:
+        fields = _fields(document, "ledger", {"path", "id", "kind", "text", "kinds"})
+        kinds = fields.get("kinds")
+        if not isinstance(kinds, Mapping) or not kinds:
+            raise ManifestError(f"ledger.kinds must be a non-empty object, got {kinds!r}")
+        try:
+            learning_kinds = {str(kind): LearningKind(learning) for kind, learning in kinds.items()}
+        except ValueError as error:
+            names = ", ".join(kind.value for kind in LearningKind)
+            raise ManifestError(f"ledger.kinds maps to {names} only: {error}") from error
+        return cls(
+            _relative(fields.get("path"), "ledger.path"),
+            _text(fields.get("id"), "ledger.id"),
+            _text(fields.get("kind"), "ledger.kind"),
+            _text(fields.get("text"), "ledger.text"),
+            learning_kinds,
+        )
+
+    def to_document(self) -> dict[str, object]:
+        kinds = {kind: learning.value for kind, learning in self.kinds.items()}
+        return {"path": self.path, "id": self.id, "kind": self.kind, "text": self.text, "kinds": kinds}
+
+
 _MANIFEST_FIELDS = {
     "source",
     "commit",
@@ -156,6 +195,7 @@ _MANIFEST_FIELDS = {
     "config_source",
     "summary_field",
     "needs",
+    "ledger",
 }
 
 
@@ -164,7 +204,7 @@ class AgentManifest:
     """How to run one agent: ``install`` once, write ``config`` to ``config_file``, run ``launch`` (``resume`` after a
     crash, ``launch`` again when empty); ``keep`` is ``None`` for an agent collected once, from its workspace;
     ``summary_field`` is where the keep file holds the agent's words for its latest keep; ``needs`` is what
-    the agent requires of its sandbox."""
+    the agent requires of its sandbox; ``ledger`` is ``None`` for an agent that writes down no findings."""
 
     source: str
     commit: str
@@ -177,6 +217,7 @@ class AgentManifest:
     config_source: ConfigSource | None = None
     summary_field: str = ""
     needs: tuple[str, ...] = ()
+    ledger: LedgerSource | None = None
 
     @classmethod
     def read(cls, document: object) -> AgentManifest:
@@ -186,7 +227,7 @@ class AgentManifest:
         config = fields.get("config")
         if not isinstance(config, Mapping):
             raise ManifestError(f"config must be an object, got {config!r}")
-        keep, source = fields.get("keep"), fields.get("config_source")
+        keep, source, ledger = fields.get("keep"), fields.get("config_source"), fields.get("ledger")
         return cls(
             source=_text(fields.get("source"), "source"),
             commit=_text(fields.get("commit"), "commit"),
@@ -199,6 +240,7 @@ class AgentManifest:
             config_source=None if source is None else ConfigSource.read(source),
             summary_field=_optional(fields.get("summary_field"), "summary_field"),
             needs=_commands(fields.get("needs", []), "needs"),
+            ledger=None if ledger is None else LedgerSource.read(ledger),
         )
 
     def to_document(self) -> dict[str, object]:
@@ -214,7 +256,8 @@ class AgentManifest:
             "config_source": None if self.config_source is None else self.config_source.to_document(),
             "summary_field": self.summary_field,
             "needs": list(self.needs),
+            "ledger": None if self.ledger is None else self.ledger.to_document(),
         }
 
 
-__all__ = ["AgentManifest", "ConfigSource", "KeepSignal", "ManifestError", "read_field"]
+__all__ = ["AgentManifest", "ConfigSource", "KeepSignal", "LedgerSource", "ManifestError", "read_field"]

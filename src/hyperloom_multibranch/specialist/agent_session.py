@@ -63,7 +63,7 @@ from hyperloom.orchestrator.specialists.agent_runner import (
 )
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
-from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, Inbox, UsageSink
+from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, Inbox, LearningStore, UsageSink
 from hyperloom_multibranch.contracts.notebook.records import (
     BranchLogRecord,
     InboxItem,
@@ -243,9 +243,10 @@ class AgentSetup:
     dev_leases: DevLeaseHolder | None = None
 
 
-class SessionNotebook(BranchLogStore, UsageSink, Inbox, Protocol):
+class SessionNotebook(BranchLogStore, UsageSink, Inbox, LearningStore, Protocol):
     """A branch's runtime handle as its sessions use it: the branch log, the spend of each turn, the inbox that wakes
-    a CLI whose turn ended, and the snapshot that says whether the branch has a test in flight."""
+    a CLI whose turn ended, the learnings an autonomous agent's findings become, and the snapshot that says whether
+    the branch has a test in flight."""
 
     async def snapshot(self) -> NotebookSnapshot: ...
 

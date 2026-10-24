@@ -10,8 +10,18 @@ from hyperloom_multibranch.specialist.agent_manifest import (
     AgentManifest,
     ConfigSource,
     KeepSignal,
+    LedgerSource,
     ManifestError,
 )
+from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
+
+LEDGER = {
+    "path": "sessions/b01/ledger.jsonl",
+    "id": "id",
+    "kind": "type",
+    "text": "claim",
+    "kinds": {"FACT": "insight", "DEAD_END": "pitfall"},
+}
 
 
 def _document(**overrides: Any) -> dict[str, Any]:
@@ -27,6 +37,7 @@ def _document(**overrides: Any) -> dict[str, Any]:
         "config_source": {"path": "agent/config.json", "server_args": "server_flags", "envs": "server_env"},
         "summary_field": "lessons.-1.done",
         "needs": ["anthropic"],
+        "ledger": LEDGER,
     }
     document.update(overrides)
     return document
@@ -37,7 +48,14 @@ def test_a_manifest_reads_back_what_it_writes() -> None:
 
     assert manifest.keep == KeepSignal("run/session.json", "lessons", {"decision": "KEEP"})
     assert manifest.config_source == ConfigSource("agent/config.json", "server_flags", "server_env")
+    kinds = {"FACT": LearningKind.INSIGHT, "DEAD_END": LearningKind.PITFALL}
+    assert manifest.ledger == LedgerSource("sessions/b01/ledger.jsonl", "id", "type", "claim", kinds)
     assert AgentManifest.read(json.loads(json.dumps(manifest.to_document()))) == manifest
+
+
+def test_an_agent_that_keeps_no_ledger_names_none() -> None:
+    assert AgentManifest.read({key: value for key, value in _document().items() if key != "ledger"}).ledger is None
+    assert AgentManifest.read(_document(ledger=None)).ledger is None
 
 
 def test_an_agent_with_no_keep_signal_is_read_as_collected_once() -> None:
@@ -56,6 +74,9 @@ def test_a_null_optional_field_is_empty_not_the_text_none() -> None:
     ("overrides", "names"),
     [
         ({"launch": ""}, "launch"),
+        ({"ledger": {**LEDGER, "kinds": {"FACT": "truth"}}}, "ledger.kinds"),
+        ({"ledger": {**LEDGER, "path": "../ledger.jsonl"}}, "ledger.path"),
+        ({"ledger": {**LEDGER, "text": ""}}, "ledger.text"),
         ({"install": "pip install ."}, "install"),
         ({"config_file": "/etc/agent.json"}, "config_file"),
         ({"keep": {"path": "../outside/session.json"}}, "keep.path"),

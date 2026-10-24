@@ -20,6 +20,7 @@ from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, RequestRejected
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.local.notebook import LEARNING_MAX_CHARS
 from hyperloom_multibranch.notebook.tests.factories import result
 from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec, CommandResult, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
@@ -47,6 +48,7 @@ ROOT = Recipe(
 #: An agent that, every ``gap`` seconds, writes each of ``keeps`` to its workspace's config.py and to the config it
 #: runs with, commits it when ``commits`` is set, as Arbor does, and records the keep; it ends with ``exit`` after
 #: ``tail`` more seconds. With ``table`` it also writes that kernel table, for the keep, to its workspace's tuned.csv.
+#: Before each keep it appends that keep's entries of ``ledger`` to its ledger, run/ledger.jsonl, as Arbor does.
 AGENT = """
 import json, pathlib, subprocess, sys, time
 config = json.loads(pathlib.Path("campaign.json").read_text())
@@ -62,11 +64,21 @@ for step, seqs in enumerate(config["keeps"], start=1):
         (workspace / "tuned.csv").write_text(config["table"].format(seqs=seqs))
     if config["commits"]:
         subprocess.run("git add -A && git -c user.name=a -c user.email=a@a commit -qm k", shell=True, cwd=workspace)
+    with pathlib.Path("run/ledger.jsonl").open("a") as ledger:
+        for entry in config["ledger"][step - 1] if step <= len(config["ledger"]) else []:
+            ledger.write(json.dumps(entry) + "\\n")
     state.write_text(json.dumps({"keeps": [{"decision": "KEEP"}] * step, "note": f"seqs {seqs}"}))
 time.sleep(config["tail"])
 sys.exit(config["exit"])
 """
 KEEPS = {"path": "run/state.json", "field": "keeps", "where": {"decision": "KEEP"}}
+LEDGER = {
+    "path": "run/ledger.jsonl",
+    "id": "id",
+    "kind": "type",
+    "text": "claim",
+    "kinds": {"FACT": "insight", "DEAD_END": "pitfall"},
+}
 CONFIG_SOURCE = {"path": "agent-config.json", "server_args": "args", "envs": "envs"}
 
 
@@ -83,6 +95,7 @@ class Agent:
     config_source: object = None
     resume: str = ""
     table: str = ""
+    ledger: tuple[tuple[dict[str, str], ...], ...] = ()
 
 
 async def _until(condition, what: str, seconds: float = 10.0) -> None:
@@ -208,6 +221,7 @@ def _manifest(workspace: str, agent: Agent) -> str:
                 "args": agent.args,
                 "envs": agent.envs,
                 "table": agent.table,
+                "ledger": [list(entries) for entries in agent.ledger],
                 **plan,
             },
             "launch": "python3 agent.py",
@@ -216,6 +230,7 @@ def _manifest(workspace: str, agent: Agent) -> str:
             "config_source": agent.config_source,
             "summary_field": "note",
             "needs": [],
+            "ledger": LEDGER if agent.ledger else None,
         }
     )
 
@@ -673,3 +688,42 @@ async def test_a_kernel_table_the_agent_keeps_in_its_workspace_is_imported_as_th
     assert artifact.target == (bound or env.lower())
     assert rig.toolbox.tables[artifact.sha256] == b"M,N,K\n256,5120,5120\n"
     assert env not in request.delta.config.envs
+
+
+def _entry(entry_id: str, kind: str, claim: str) -> dict[str, str]:
+    return {"id": entry_id, "type": kind, "claim": claim, "evidence": "eval/x.json"}
+
+
+async def test_the_agent_s_ledger_facts_and_dead_ends_become_the_branch_s_learnings_at_each_keep(
+    tmp_path: Path,
+) -> None:
+    first = (
+        _entry("gemm-untuned", "FACT", "dense fp8 GEMMs miss the tuned CSV and cost 64% of the decode step"),
+        _entry("triton-slower", "DEAD_END", "aiter triton blockscale GEMM is slower than default CK at M=64"),
+        _entry("guess", "ASSUMPTION", "the allreduce is not on the critical path at TP1"),
+    )
+    second = (
+        _entry("gemm-untuned", "FACT", "dense fp8 GEMMs miss the tuned CSV; the asm table cuts them to 4.35 ms"),
+        _entry("long", "FACT", "x" * 2000),
+    )
+    rig = await _rig(tmp_path, Agent(ledger=(first, second)))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    learnt = await rig.notebook.learnings(branch=BRANCH)
+    assert [(record.learning.kind.value, record.learning.content) for record in learnt] == [
+        ("insight", f"FACT gemm-untuned: {first[0]['claim']}"),
+        ("pitfall", f"DEAD_END triton-slower: {first[1]['claim']}"),
+    ]
+    await rig.toolbox_notebook.write_result(result("r1"))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the second import")
+    await rig.toolbox_notebook.write_result(result("r2"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    revised, long = (await rig.notebook.learnings(branch=BRANCH))[2:]
+    assert revised.learning.content == f"FACT gemm-untuned: {second[0]['claim']}"
+    assert revised.learning.supersedes == learnt[0].entry_id
+    assert long.learning.content.startswith("FACT long: xxx") and len(long.learning.content) == LEARNING_MAX_CHARS
+    assert len(await rig.notebook.learnings(branch=BRANCH)) == 4
