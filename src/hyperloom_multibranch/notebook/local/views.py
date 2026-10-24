@@ -39,7 +39,9 @@ from hyperloom_multibranch.contracts.notebook.records import (
     priced_usd,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
+    FAILED_MERGES,
     INTEGRATION_BRANCH,
+    BranchDriver,
     CommitOrigin,
     Conclusion,
     LineageKind,
@@ -64,6 +66,7 @@ class _BranchDraft:
     stop_reason: str | None = None
     stopped_at: float | None = None
     repairs: str = ""
+    driver: BranchDriver = BranchDriver.SPECIALIST
 
     def node(self) -> BranchNode:
         return BranchNode(
@@ -76,6 +79,7 @@ class _BranchDraft:
             opened_at=self.opened_at,
             stopped_at=self.stopped_at,
             repairs=self.repairs,
+            driver=self.driver,
         )
 
 
@@ -112,11 +116,17 @@ def _apply_event(
             draft.stop_reason, draft.stopped_at = event.reason, at
     elif draft is None:
         branches[event.branch] = _BranchDraft(
-            event.branch, event.kind, event.from_commit, at, event.from_branch, repairs=event.repairs
+            event.branch,
+            event.kind,
+            event.from_commit,
+            at,
+            event.from_branch,
+            repairs=event.repairs,
+            driver=event.driver,
         )
     else:
         draft.origin, draft.start_commit, draft.from_branch = event.kind, event.from_commit, event.from_branch
-        draft.repairs = event.repairs or draft.repairs
+        draft.repairs, draft.driver = event.repairs or draft.repairs, event.driver
         draft.opened_at = min(draft.opened_at, at)
 
 
@@ -149,17 +159,18 @@ def _commit_node(
     )
 
 
-def merge_state(state: NotebookState, attempt: MergeAttempt) -> MergeState:
-    """Where a merge attempt stands, from the judgement of its merge test."""
+def merge_state(state: NotebookState, attempt: MergeAttempt, at: float = 0.0) -> MergeState:
+    """Where a merge attempt recorded ``at`` stands, from the judgement of its merge test."""
 
     if attempt.request_id is None:
-        return MergeState(attempt.skipped_outcome, attempt.integration_head)
+        return MergeState(attempt.skipped_outcome, attempt.integration_head, reason=attempt.skipped_reason, at=at)
     write = state.latest_judgement(attempt.request_id)
     if write is None:
-        return MergeState(MergeOutcome.PENDING, attempt.integration_head, attempt.request_id)
+        return MergeState(MergeOutcome.PENDING, attempt.integration_head, attempt.request_id, at=at)
     if write.conclusion is Conclusion.MERGED:
-        return MergeState(MergeOutcome.MERGED, attempt.integration_head, attempt.request_id, write.commit_id)
-    return MergeState(MergeOutcome.NOT_STACKABLE, attempt.integration_head, attempt.request_id)
+        return MergeState(MergeOutcome.MERGED, attempt.integration_head, attempt.request_id, write.commit_id, at=at)
+    reason = f"{write.judgement.gain_pct:+.2f}% on the integration head"
+    return MergeState(MergeOutcome.NOT_STACKABLE, attempt.integration_head, attempt.request_id, reason=reason, at=at)
 
 
 def committed(state: NotebookState, view: LineageView) -> tuple[CommittedCommit, ...]:
@@ -171,7 +182,11 @@ def committed(state: NotebookState, view: LineageView) -> tuple[CommittedCommit,
         if node.origin not in _SPECIALIST_ORIGINS:
             continue
         judgement = state.commit_writes[node.commit_id].judgement
-        attempts = [attempt for attempt in state.merge_attempts if node.commit_id in attempt.source_commits]
+        attempts = [
+            merge_state(state, attempt, at)
+            for attempt, at in zip(state.merge_attempts, state.merge_attempted_at)
+            if node.commit_id in attempt.source_commits
+        ]
         found.append(
             CommittedCommit(
                 commit_id=node.commit_id,
@@ -182,7 +197,9 @@ def committed(state: NotebookState, view: LineageView) -> tuple[CommittedCommit,
                 fixes_correctness=judgement.fixes_correctness,
                 foundation_fix=judgement.foundation_fix,
                 merged_into=next((merge.commit_id for merge in merges if node.commit_id in merge.merged_from), None),
-                last_merge=merge_state(state, attempts[-1]) if attempts else None,
+                last_merge=attempts[-1] if attempts else None,
+                merge_attempts=len(attempts),
+                first_failed_at=next((item.at for item in attempts if item.outcome in FAILED_MERGES), None),
             )
         )
     return tuple(sorted(found, key=lambda commit: (not commit.foundation_fix, -commit.gain_pct)))

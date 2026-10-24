@@ -97,6 +97,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     INTEGRATION_BRANCH,
     INTEGRATION_CONCLUSIONS,
     LINEAGE_WRITERS,
+    BranchDriver,
     ClaimStatus,
     Conclusion,
     DedupStatus,
@@ -119,7 +120,7 @@ from hyperloom_multibranch.notebook.local.segments import (
     require_token,
 )
 from hyperloom_multibranch.notebook.local.state import ClaimDecision, JudgementWrite, NotebookState
-from hyperloom_multibranch.notebook.local.unfinished import unfinished_leads
+from hyperloom_multibranch.notebook.local.unfinished import refused_replays, unfinished_leads
 
 SEGMENTS_DIR = "segments"
 CLAIMS_DIR = "claims"
@@ -262,6 +263,8 @@ def _check_lineage(event: LineageEvent) -> None:
         raise ValueError(f"the root commit, and only it, starts the {INTEGRATION_BRANCH} branch")
     if event.recipe_digest is not None and event.kind is not LineageKind.ROOT:
         raise ValueError("only the root event names its commit's recipe digest; judgements name the others'")
+    if event.driver is not BranchDriver.SPECIALIST and event.kind is not LineageKind.OPEN:
+        raise ValueError(f"only an open event names who drives its branch, not a {event.kind.value} event")
 
 
 def _new_lineage(state: NotebookState, event: LineageEvent) -> bool:
@@ -857,8 +860,11 @@ class LocalNotebook(
         state = self._state()
         view = views.lineage_view(state)
         now = self._clock()
-        held = {claim.key.intent_fingerprint for claim in self._leases.all_current() if is_live(claim, now)}
-        return replace(views.startup_brief(state, view, start_commit), unfinished=unfinished_leads(state, view, held))
+        claims = self._leases.all_current()
+        held = {claim.key.intent_fingerprint for claim in claims if is_live(claim, now)}
+        refused = refused_replays(claims, view, start_commit)
+        unfinished = unfinished_leads(state, view, held, refused)
+        return replace(views.startup_brief(state, view, start_commit), unfinished=unfinished)
 
     async def search(self, query: str, *, limit: int = 20) -> tuple[SearchHit, ...]:
         return feeds.search(self._state(), query, limit)

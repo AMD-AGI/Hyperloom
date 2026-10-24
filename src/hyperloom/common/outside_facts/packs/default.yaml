@@ -17,7 +17,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "5"
+version: "10"
 facts:
   aiter_merged_view:
     kind: names
@@ -59,6 +59,64 @@ facts:
                 class AITER_CONFIG:
                     def merge_config_files(self, file_path: str, merge_name: str):
                         return file_path
+
+  aiter_meta_dir:
+    kind: names
+    project: aiter
+    reason: >-
+      aiter reads its device sources and code generators (csrc, hsa, 3rdparty) from one meta directory, which it also puts
+      first on sys.path so that "from csrc.cpp_itfs.pa.pa import ..." resolves while aiter.ops is imported. It works the
+      directory out from where aiter/jit/core.py sits: the install_mode file beside the package says develop (also when
+      the file is missing) for a source checkout, whose meta directory is the directory around the package, and anything
+      else for a wheel, whose meta directory is the aiter_meta package beside it. The variable overrides that, and aiter
+      ignores a value whose directory holds no csrc. An aiter package laid anywhere else, as the farm lays a patched one,
+      therefore finds none of it and "import aiter" stops at "No module named 'csrc'" unless the variable names the
+      image's own directory.
+    names:
+      variable: AITER_META_DIR
+      wheel_dir: aiter_meta
+      marker_dir: csrc
+      install_mode_file: install_mode
+      develop_mode: develop
+    examples:
+      - "hyperloom.measure.farm: a farm that lays a patched aiter sets the variable to the image's own meta directory, resolved as aiter resolves it, unless the server already inherits one"
+      - "hyperloom_multibranch.toolbox.tools.kernel_tune: the tuner is pinned to the directory around the aiter package or its aiter_meta, whichever holds csrc"
+    image_check:
+      - check: source_contains
+        module: aiter.jit.core
+        text:
+          - {ref: aiter_meta_dir.variable}
+          - {ref: aiter_meta_dir.wheel_dir}
+          - {ref: aiter_meta_dir.marker_dir}
+          - {ref: aiter_meta_dir.install_mode_file}
+          - {ref: aiter_meta_dir.develop_mode}
+        match: word
+        examples:
+          pass:
+            - source: |-
+                try:
+                    with open(f"{this_dir}/../install_mode", "r") as f:
+                        isDevelopMode = f.read().strip() == "develop"
+                except FileNotFoundError:
+                    isDevelopMode = True
+                AITER_META_DIR = AITER_ROOT_DIR if isDevelopMode else os.path.abspath(f"{AITER_ROOT_DIR}/aiter_meta/")
+                env_meta = os.environ.get("AITER_META_DIR")
+                if env_meta:
+                    AITER_META_DIR = os.path.abspath(env_meta)
+                if not os.path.exists(os.path.join(AITER_META_DIR, "csrc")):
+                    AITER_META_DIR = AITER_ROOT_DIR
+          fail:
+            - source: |-
+                AITER_META_DIR = os.path.abspath(f"{AITER_ROOT_DIR}/aiter_meta/")
+                env_meta = os.environ.get("AITER_META_DIR")
+                if env_meta:
+                    AITER_META_DIR = os.path.abspath(env_meta)
+                if not os.path.exists(os.path.join(AITER_META_DIR, "csrc")):
+                    AITER_META_DIR = AITER_ROOT_DIR
+            - source: |-
+                AITER_SOURCE_DIR = os.environ.get("AITER_SOURCE_DIR") or AITER_ROOT_DIR
+                if not os.path.exists(os.path.join(AITER_SOURCE_DIR, "csrc")):
+                    AITER_SOURCE_DIR = os.path.join(AITER_ROOT_DIR, "aiter_src")
 
   sglang_image_layout:
     kind: names
@@ -162,6 +220,42 @@ facts:
     examples:
       - "hyperloom.common.visible_devices: ROCR_LEVEL_VARS lists it first among the variables that mask devices"
       - "hyperloom.measure.runner.run: the runner reads the ordinals its sandbox's mask lists"
+
+  kfd_process_listing:
+    kind: names
+    project: amdkfd (the Linux amdgpu kernel driver's compute interface)
+    reason: >-
+      The kernel lists every process that has opened the GPU compute interface in one directory, a subdirectory per
+      process id (the id in the host's namespace). It holds a vram_<gpu id> file with the bytes the process has resident
+      on that GPU and a queues directory with one directory per compute queue, whose gpuid file names the GPU the queue
+      runs on. The topology below the same root numbers the GPUs: a node directory per device, whose gpu_id file is 0 for a
+      CPU and the kernel's id for a GPU, in the order the ROCm runtime counts devices for ROCR_VISIBLE_DEVICES. The ROCm
+      tools (rocm-smi --showpids, amd-smi process) read these same files, so a process that holds a card is found here with
+      no tool whose output format changes between ROCm releases and without root.
+    names:
+      root: /sys/class/kfd/kfd
+      processes: proc
+      nodes: topology/nodes
+      node_gpu_id: gpu_id
+      queues: queues
+      queue_gpu_id: gpuid
+      vram_prefix: vram_
+    examples:
+      - "hyperloom.sandbox.card_occupancy: read_holders maps a card ordinal to the gpu_id of the n-th GPU node and lists the processes that have a queue or resident memory on it"
+      - "kernel tree, as read on a GPU node: /sys/class/kfd/kfd/proc/4242/vram_61439 holds 8589934592 and /sys/class/kfd/kfd/proc/4242/queues/0/gpuid holds 61439"
+
+  linux_pid_namespace:
+    kind: names
+    project: Linux kernel
+    reason: >-
+      The kernel's process list of the GPUs names a process by its id in the host's (initial) pid namespace. A reader can
+      only match those ids to what it sees in /proc when it is in that namespace itself, which the link below says by
+      naming the namespace's inode, a fixed number the kernel gives the initial one.
+    names:
+      link: self/ns/pid
+      initial: "pid:[4026531836]"
+    examples:
+      - "hyperloom.sandbox.card_occupancy: the process list is read only by a reader whose /proc/self/ns/pid is the initial namespace, otherwise the probe says it cannot tell"
 
   pytorch_tunableop_env:
     kind: names
@@ -464,6 +558,30 @@ facts:
       no_match:
         - "[aiter] shape is M:512, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False, not found tuned config in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, will use default config! using torch solution:0"
 
+  sglang_cuda_graph_decode_bs:
+    kind: log_regex
+    project: SGLang
+    reason: >-
+      SGLang prints the arguments a server resolved at launch (server_args=...), and the batch sizes its decode CUDA
+      graphs are captured for are in that line: the decode entry of cuda_graph_config in the current layout, cuda_graph_bs
+      before it. A decode step of N running requests replays the graph of the smallest captured size that is at least N,
+      so these are the M of every dense GEMM of a graph-served decode step, whatever the server's flag or default list
+      was. The pattern's group "sizes" is the comma-separated list.
+    pattern: |-
+      (?x)
+      (?: 'cuda_graph_config': \s* \{ \s* 'decode': \s* \{ [^{}]*? 'bs'
+        | \bcuda_graph_bs\b'? )
+      \s* [:=] \s* \[ (?P<sizes>\d+ (?: \s*,\s* \d+ )* ) \]
+    examples:
+      match:
+        - "[2026-10-22 04:34:21] server_args={'model_path': '/models/m', 'cuda_graph_bs_decode': None, 'cuda_graph_config': {'decode': {'backend': 'full', 'max_bs': 512, 'bs': [1, 2, 4, 8, 12, 16, 24, 32, 40, 512], 'tc_compiler': 'eager', 'max_context_size': None}, 'prefill': {'backend': 'disabled', 'max_bs': 16384, 'bs': [4, 8, 12]}}, 'tp_size': 1}"
+        - "[2025-06-01 00:00:00] server_args=ServerArgs(model_path='/models/m', cuda_graph_max_bs=160, cuda_graph_bs=[1, 2, 4, 8, 16, 24, 32], disable_cuda_graph=False)"
+        - "[2025-06-01 00:00:00] server_args={'tp_size': 1, 'cuda_graph_bs': [1, 2, 4], 'disable_cuda_graph': False}"
+      no_match:
+        - "[2026-10-22 04:34:21] server_args={'cuda_graph_bs_decode': None, 'cuda_graph_bs_prefill': None, 'tp_size': 1}"
+        - "server_args={'cuda_graph_config': {'decode': {'backend': 'disabled', 'max_bs': 16, 'bs': None}, 'prefill': {'backend': 'disabled', 'max_bs': 16384, 'bs': [4, 8, 12]}}}"
+        - "Capturing batches (bs=512 avail_mem=54.88 GB):   2%|2         | 1/52 [00:03<03:10,  3.73s/it]"
+
   aiperf_request_export:
     kind: names
     project: aiperf (the replay client of an AgentX round, SemiAnalysisAI fork pinned by InferenceX)
@@ -543,3 +661,98 @@ facts:
                 [submodule "inferencex-e2e/utils/srt-slurm"]
                     path = inferencex-e2e/utils/srt-slurm
                     url = https://github.com/NVIDIA/srt-slurm.git
+
+  short_prompt_check:
+    kind: names
+    project: aiter (the prefill kernels the framework image serves with) and the framework that calls them
+    reason: >-
+      aiter's vectorized_5d mha_batch_prefill gave wrong output for short sequences in about one server process in three,
+      and a long, batched, averaged evaluation (GSM8K) did not see it. The check boots fresh server processes of a
+      candidate's own launch and asks each the same short prompts greedily; processes is how many (a defect in one launch
+      in three escapes six launches with probability (2/3)^6, 8.8 percent, and eight with 3.9 percent), max_new_tokens how
+      many tokens each prompt may generate, phase_cap_sec how long the whole check may take before it ends incomplete, and
+      always_purposes the test purposes that run it whatever their recipe change is (a baseline gives its descendants their
+      reference outputs, a final candidate is the one that ships). The values are read as numbers and words by the toolbox.
+    names:
+      processes: "6"
+      max_new_tokens: "32"
+      phase_cap_sec: "1200"
+      always_purposes: "baseline final"
+    examples:
+      - "hyperloom_multibranch.toolbox.short_prompts: the plan of a test that runs the check takes its process count, token budget and time cap from these names"
+      - "hyperloom_multibranch.toolbox.short_prompts: a test whose purpose is one of always_purposes runs the check, with the purpose as the reason"
+
+  short_prompt_touch:
+    kind: log_regex
+    project: aiter (the prefill kernels the framework image serves with) and the framework that calls them
+    reason: >-
+      A recipe change that can alter what an attention, KV-cache or prefill kernel computes needs the short-prompt check;
+      the toolbox renders the change from the parent recipe to the candidate as lines and the check runs when any line
+      matches. A line is "arg <flag> <value>" for a server argument that differs ("(unset)" where a side lacks it), "env
+      <name>=<value>" for a launch variable, "ref <component> <parent ref>-><candidate ref>" for a component moved to
+      another upstream commit, "patch <component> <path>" and "kernel <kind> <target>" for a patch or kernel artifact
+      added or removed, "image changed", and, because a change the toolbox cannot read must count as touching, "unexpressed
+      <entry>". Which flags, variables, components and paths touch attention is the project's
+      to say, so they are here and not in code.
+    pattern: |-
+      (?ix) ^ (?:
+          arg \s+ --(?: [a-z-]*attention-backend | kv-cache-dtype | page-size | block-size | chunked-prefill-size
+                       | max-prefill-tokens | max-num-batched-tokens | enable-prefix-caching | disable-radix-cache
+                       | enable-chunked-prefill | num-continuous-decode-steps ) \b
+        | env \s+ \S*? (?: ATTN | ATTENTION | AITER | FLASH | MHA | MLA | KV | PREFILL | RADIX ) \S*? =
+        | ref \s+ (?: aiter | sglang | vllm | flash-attention | flash_attn | triton ) \b
+        | patch \s+ aiter \b
+        | patch \s+ \S+ \s+ \S* (?: attn | attention | mha | mla | prefill | kv | flash | radix )
+        | kernel \s+ (?: fusion | rewrite ) \s+ \S* (?: attn | attention | mha | mla | prefill | kv | flash )
+        | image \s+ changed
+        | unexpressed \s
+      )
+    examples:
+      match:
+        - "arg --attention-backend aiter"
+        - "arg --prefill-attention-backend (unset)"
+        - "arg --kv-cache-dtype fp8_e4m3"
+        - "env SGLANG_USE_AITER_ATTN=1"
+        - "env AITER_ENABLE_PREFILL_VSKIP=(unset)"
+        - "ref aiter 0123456789abcdef0123456789abcdef01234567->89abcdef0123456789abcdef0123456789abcdef"
+        - "patch aiter patch/aiter/0001-tune-gemm.patch"
+        - "patch sglang patch/sglang/0002-radix-cache-eviction.patch"
+        - "kernel rewrite mha_batch_prefill_short"
+        - "image changed"
+        - "unexpressed launch envs set outside the recipe"
+      no_match:
+        - "arg --max-running-requests 128"
+        - "arg --tensor-parallel-size 8"
+        - "env HIP_FORCE_DEV_KERNARG=1"
+        - "patch sglang patch/sglang/0003-logging-tweak.patch"
+        - "kernel gemm bf16_gemm_M16_N4096_K4096"
+        - "ref transformers 0123456789abcdef0123456789abcdef01234567->89abcdef0123456789abcdef0123456789abcdef"
+
+  aiter_tuned_row_columns:
+    kind: names
+    project: aiter
+    reason: >-
+      A row of a table aiter's tuner writes says, in these columns, which library runs its kernel (libtype, "asm" for a
+      hand-written assembly kernel) and how many splits of the K dimension the kernel makes (splitK). The rows an accuracy
+      check must treat differently, the asm kernels at a splitK above 1, are told apart by them.
+    names:
+      libtype_column: libtype
+      splitk_column: splitK
+      asm_libtype: asm
+    examples:
+      - "hyperloom_multibranch.toolbox.tools.tune_rows: a row is one of the rows judged by its relative-norm error when its libtype column says asm and its splitK column a number above 1, and the profile of the tuner's candidates is searched by the same two columns"
+
+  forge_rel_norm_err:
+    kind: names
+    project: Forge (kernelforge gemm_tune)
+    reason: >-
+      aiter's tuner counts the elements of a candidate's output that lie outside the reference's tolerance (errRatio). An
+      asm kernel at a splitK above 1 accumulates its partial results in bf16 with atomics, which fails that count while the
+      output as a whole stays accurate, so Forge also measures such a row by the relative norm of its error,
+      ||out - ref|| / ||ref|| against the fp32 dequantized matmul, ships the row when that is within 0.01, and writes the
+      figure to this column of the tuned table. Only those rows carry a figure; the column is Forge's, not aiter's, and a
+      table without it comes from a Forge that does not make the check.
+    names:
+      column: relNormErr
+    examples:
+      - "hyperloom_multibranch.toolbox.tools.tune_rows: an asm row at a splitK above 1 whose mismatch ratio is above the limit is verified when this column holds a figure from 0 to 0.01, and the column is left out of the rows handed over"

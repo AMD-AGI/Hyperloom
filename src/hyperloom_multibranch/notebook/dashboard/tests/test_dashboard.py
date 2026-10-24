@@ -15,14 +15,23 @@ from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, ClaimKey, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import (
     BranchNode,
+    BranchProgress,
     Claim,
+    CommittedCommit,
     LlmUsage,
     LlmUsageRecord,
+    MergeState,
     NotebookSnapshot,
     QuarantineEvent,
     TestRecord,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind, QuarantineAction, UsageSource
+from hyperloom_multibranch.contracts.notebook.vocab import (
+    ClaimStatus,
+    LineageKind,
+    MergeOutcome,
+    QuarantineAction,
+    UsageSource,
+)
 from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import encode
@@ -89,6 +98,23 @@ def test_the_dashboard_holds_branches_in_flight_work_lineage_and_infrastructure(
         "cold_start_seconds": 812.0,
     }
     assert json.loads(json.dumps(dashboard)) == dashboard
+
+
+def test_a_branch_ahead_of_integration_whose_merges_fail_is_listed_with_why(snapshot: NotebookSnapshot) -> None:
+    rows = (
+        BranchProgress(INTEGRATION_BRANCH, True, "c0", "i1", 2, 1, 0.0, {METRIC: 1000.0}),
+        BranchProgress("b01", True, "c0", "c5", 6, 3, 900.0, {METRIC: 1100.0}),
+    )
+    last = MergeState(MergeOutcome.CONFLICT_SKIPPED, "i1", reason="unresolved patch conflict")
+    commit = CommittedCommit("c5", "b01", "c4", "r5", 4.0, False, False, last_merge=last, merge_attempts=2)
+    stuck = dataclasses.replace(snapshot, progress=rows, committed=(commit,))
+
+    dashboard = build_dashboard(stuck, metric=METRIC)
+
+    assert [(row["branch"], round(row["lead_pct"], 1)) for row in dashboard["stranded"]] == [("b01", 10.0)]
+    page = render_html(dashboard)
+    assert "<h2>Ahead of integration, merges failing</h2>" in page
+    assert "<td>c5: unresolved patch conflict</td>" in page
 
 
 def test_the_page_is_self_contained_and_escapes_every_value(busy: NotebookSnapshot) -> None:
@@ -171,4 +197,4 @@ async def test_an_empty_notebook_has_an_empty_page(tmp_path: Path) -> None:
     page = render_html(build_dashboard(empty))
 
     assert "<h1>Session without a profile</h1>" in page
-    assert page.count('<p class="empty">none</p>') == 10
+    assert page.count('<p class="empty">none</p>') == 11

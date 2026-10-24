@@ -14,12 +14,13 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import TestRequest
-from hyperloom.contracts.recipe import ComponentPatches, KernelArtifact, KernelKind, LaunchConfig, Recipe
+from hyperloom.contracts.recipe import ComponentPatches, KernelArtifact, KernelKind, LaunchConfig, Recipe, apply
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, RequestRejected
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.local.notebook import LEARNING_MAX_CHARS
 from hyperloom_multibranch.notebook.tests.factories import result
 from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec, CommandResult, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
@@ -47,6 +48,7 @@ ROOT = Recipe(
 #: An agent that, every ``gap`` seconds, writes each of ``keeps`` to its workspace's config.py and to the config it
 #: runs with, commits it when ``commits`` is set, as Arbor does, and records the keep; it ends with ``exit`` after
 #: ``tail`` more seconds. With ``table`` it also writes that kernel table, for the keep, to its workspace's tuned.csv.
+#: Before each keep it appends that keep's entries of ``ledger`` to its ledger, run/ledger.jsonl, as Arbor does.
 AGENT = """
 import json, pathlib, subprocess, sys, time
 config = json.loads(pathlib.Path("campaign.json").read_text())
@@ -62,11 +64,21 @@ for step, seqs in enumerate(config["keeps"], start=1):
         (workspace / "tuned.csv").write_text(config["table"].format(seqs=seqs))
     if config["commits"]:
         subprocess.run("git add -A && git -c user.name=a -c user.email=a@a commit -qm k", shell=True, cwd=workspace)
+    with pathlib.Path("run/ledger.jsonl").open("a") as ledger:
+        for entry in config["ledger"][step - 1] if step <= len(config["ledger"]) else []:
+            ledger.write(json.dumps(entry) + "\\n")
     state.write_text(json.dumps({"keeps": [{"decision": "KEEP"}] * step, "note": f"seqs {seqs}"}))
 time.sleep(config["tail"])
 sys.exit(config["exit"])
 """
 KEEPS = {"path": "run/state.json", "field": "keeps", "where": {"decision": "KEEP"}}
+LEDGER = {
+    "path": "run/ledger.jsonl",
+    "id": "id",
+    "kind": "type",
+    "text": "claim",
+    "kinds": {"FACT": "insight", "DEAD_END": "pitfall"},
+}
 CONFIG_SOURCE = {"path": "agent-config.json", "server_args": "args", "envs": "envs"}
 
 
@@ -83,6 +95,7 @@ class Agent:
     config_source: object = None
     resume: str = ""
     table: str = ""
+    ledger: tuple[tuple[dict[str, str], ...], ...] = ()
 
 
 async def _until(condition, what: str, seconds: float = 10.0) -> None:
@@ -116,6 +129,10 @@ class LocalSandbox:
     def __init__(self, logs: Path) -> None:
         self._logs, self.started, self.envs, self.leases, self.prompts = logs, [], [], [], []
         self.usage = _Usage()
+        self.watch_said: list[str] = []
+
+    def watched(self) -> str:
+        return self.watch_said.pop(0) if self.watch_said else ""
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
         done = subprocess.run(command, shell=True, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True)
@@ -208,6 +225,7 @@ def _manifest(workspace: str, agent: Agent) -> str:
                 "args": agent.args,
                 "envs": agent.envs,
                 "table": agent.table,
+                "ledger": [list(entries) for entries in agent.ledger],
                 **plan,
             },
             "launch": "python3 agent.py",
@@ -216,6 +234,7 @@ def _manifest(workspace: str, agent: Agent) -> str:
             "config_source": agent.config_source,
             "summary_field": "note",
             "needs": [],
+            "ledger": LEDGER if agent.ledger else None,
         }
     )
 
@@ -330,6 +349,29 @@ async def test_an_agent_s_keeps_are_imported_one_at_a_time_against_the_branch_he
     notices = await rig.notices()
     assert any(note.startswith(f"{NOTICE} keep 2") and "seqs 512" in note for note in notices)
     assert notices[-1] == f"{NOTICE} the agent finished its run"
+
+
+async def test_a_keep_after_one_the_branch_committed_imports_only_its_own_change_on_top(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path)
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    first = rig.toolbox.requests[0]
+    recipe = await rig.repo.read_recipe(first.parent_commit)
+    committed = await rig.repo.commit(BRANCH, first.parent_commit, apply(recipe, first.delta), "keep 1")
+    await rig.toolbox_notebook.write_result(result("r1"))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the second import")
+    await rig.toolbox_notebook.write_result(result("r2"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    last = rig.toolbox.requests[1]
+    assert last.parent_commit == committed
+    assert "-max_num_seqs = 256" in rig.patch(last) and "+max_num_seqs = 512" in rig.patch(last)
+    assert "max_num_seqs = 128" not in rig.patch(last)
+    [change] = last.delta.components
+    assert change.remove_patches == ()
 
 
 async def test_an_import_waits_while_the_last_one_is_measured_or_judged(tmp_path: Path) -> None:
@@ -650,3 +692,98 @@ async def test_a_kernel_table_the_agent_keeps_in_its_workspace_is_imported_as_th
     assert artifact.target == (bound or env.lower())
     assert rig.toolbox.tables[artifact.sha256] == b"M,N,K\n256,5120,5120\n"
     assert env not in request.delta.config.envs
+
+
+def _entry(entry_id: str, kind: str, claim: str) -> dict[str, str]:
+    return {"id": entry_id, "type": kind, "claim": claim, "evidence": "eval/x.json"}
+
+
+async def test_the_agent_s_ledger_facts_and_dead_ends_become_the_branch_s_learnings_at_each_keep(
+    tmp_path: Path,
+) -> None:
+    first = (
+        _entry("gemm-untuned", "FACT", "dense fp8 GEMMs miss the tuned CSV and cost 64% of the decode step"),
+        _entry("triton-slower", "DEAD_END", "aiter triton blockscale GEMM is slower than default CK at M=64"),
+        _entry("guess", "ASSUMPTION", "the allreduce is not on the critical path at TP1"),
+    )
+    second = (
+        _entry("gemm-untuned", "FACT", "dense fp8 GEMMs miss the tuned CSV; the asm table cuts them to 4.35 ms"),
+        _entry("long", "FACT", "x" * 2000),
+    )
+    rig = await _rig(tmp_path, Agent(ledger=(first, second)))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    learnt = await rig.notebook.learnings(branch=BRANCH)
+    assert [(record.learning.kind.value, record.learning.content) for record in learnt] == [
+        ("insight", f"FACT gemm-untuned: {first[0]['claim']}"),
+        ("pitfall", f"DEAD_END triton-slower: {first[1]['claim']}"),
+    ]
+    await rig.toolbox_notebook.write_result(result("r1"))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the second import")
+    await rig.toolbox_notebook.write_result(result("r2"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    revised, long = (await rig.notebook.learnings(branch=BRANCH))[2:]
+    assert revised.learning.content == f"FACT gemm-untuned: {second[0]['claim']}"
+    assert revised.learning.supersedes == learnt[0].entry_id
+    assert long.learning.content.startswith("FACT long: xxx") and len(long.learning.content) == LEARNING_MAX_CHARS
+    assert len(await rig.notebook.learnings(branch=BRANCH)) == 4
+
+
+KEPT = "the decode GEMMs miss the tuned CSV"
+AFTER = "the fused qk-norm kernel is slower at batch 8"
+
+
+async def test_ledger_findings_written_after_the_last_keep_are_learnt_when_the_branch_is_stopped(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(256,), tail=30.0, ledger=((_entry("a", "FACT", KEPT),),)))
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    ledger = tmp_path / BRANCH / "session" / AGENT_DIR / "src" / "run" / "ledger.jsonl"
+    with ledger.open("a", encoding="utf-8") as lines:
+        lines.write(json.dumps(_entry("b", "DEAD_END", AFTER)) + "\n")
+
+    running.cancel()
+    await asyncio.gather(running, return_exceptions=True)
+    await rig.session.stop()
+
+    learnt = [record.learning.content for record in await rig.notebook.learnings(branch=BRANCH)]
+    assert learnt == [f"FACT a: {KEPT}", f"DEAD_END b: {AFTER}"]
+
+
+async def test_a_sandbox_watch_started_again_is_noted_in_the_branch_log(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(), tail=30.0))
+    await rig.session.preflight()
+    rig.sandbox.watch_said.append("the sandbox's watch had ended (exit 1) and was started again")
+    running = asyncio.create_task(rig.session.run())
+
+    await _until(lambda: not rig.sandbox.watch_said, "the watch check")
+    await rig.session.stop()
+    await asyncio.wait_for(running, 10)
+
+    assert f"{NOTICE} the sandbox's watch had ended (exit 1) and was started again" in await rig.notices()
+
+
+async def test_a_finding_learnt_as_the_agent_finished_is_not_learnt_again_when_the_branch_is_stopped(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(256,), tail=1.0, ledger=((_entry("a", "FACT", KEPT),),)))
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    ledger = tmp_path / BRANCH / "session" / AGENT_DIR / "src" / "run" / "ledger.jsonl"
+    with ledger.open("a", encoding="utf-8") as lines:
+        lines.write(json.dumps(_entry("b", "DEAD_END", AFTER)) + "\n")
+    await rig.toolbox_notebook.write_result(result("r1"))
+
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+    await rig.session.stop()
+
+    learnt = [record.learning.content for record in await rig.notebook.learnings(branch=BRANCH)]
+    assert learnt == [f"FACT a: {KEPT}", f"DEAD_END b: {AFTER}"]

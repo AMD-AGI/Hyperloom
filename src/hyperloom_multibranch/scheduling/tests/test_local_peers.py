@@ -67,6 +67,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     machine_cards,
     machine_parallel_tests,
     measurement_host,
+    model_backed_sessions,
     require_framework_package,
     specialist_command,
     specialist_recall,
@@ -79,7 +80,11 @@ from hyperloom_multibranch.scheduling.prelude import prelude_argv
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
+from hyperloom_multibranch.specialist import model_sessions as model_sessions_module
+from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSetup
+from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions
+from hyperloom_multibranch.specialist.prompts import role_prompt
 from hyperloom_multibranch.specialist.runtime import SessionStart, SpecialistRuntime
 from hyperloom_multibranch.specialist.worktree import BranchWorktree
 from hyperloom_multibranch.toolbox import local_hosted
@@ -94,6 +99,7 @@ AGENTX = replace(WORKLOAD, inferencex=None)
 IMAGE = ActiveImage("registry.example/sglang:v1", "sha256:" + "2" * 64)
 HOST = MeasurementHost((0, 1, 2, 3), IMAGE, "a" * 40, InferenceXCheckout("b" * 40, "/opt/InferenceX"))
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
+DEV_SANDBOX_TOOLS = {f"dev_sandbox_{verb}" for verb in ("lease", "run", "start", "read", "release")}
 
 
 def _call_tool(grant: SpecialistGrant, name: str, arguments: dict[str, str] | None = None) -> dict[str, object]:
@@ -377,10 +383,15 @@ class _Built:
 
 @asynccontextmanager
 async def _peers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload: Workload, host: MeasurementHost = HOST
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workload: Workload,
+    host: MeasurementHost = HOST,
+    dev_leases: int = 0,
 ) -> AsyncIterator[_Built]:
-    """The real peers of a session of ``workload`` on ``host`` in ``tmp_path``, with the wiring their specialist
-    sessions were built on; every variable the build exports is restored afterwards."""
+    """The real peers of a session of ``workload`` on ``host`` in ``tmp_path`` lending ``dev_leases`` dev sandboxes,
+    with the wiring their specialist sessions were built on; a branch's worktree, holding no component, is served
+    only when the session lends dev sandboxes. Every variable the build exports is restored afterwards."""
 
     for name in (*workload_environment(workload), BENCHMARK_CONFIG_ENV):
         monkeypatch.setenv(name, "")
@@ -398,6 +409,7 @@ async def _peers(
         blobs,
         NoCritic(),
         {"geak": layout.reference / "geak"},
+        dev_leases,
     )
     wired: list[SessionWiring] = []
 
@@ -408,7 +420,9 @@ async def _peers(
             raise AssertionError("no specialist runs here")
 
         def worktrees(branch: str) -> BranchWorktree:
-            raise AssertionError("no worktree is used here")
+            if not dev_leases:
+                raise AssertionError("no worktree is used here")
+            return SimpleNamespace(path=tmp_path / branch, holds=lambda component: False)
 
         return ModelSessions(factory, worktrees)
 
@@ -555,6 +569,65 @@ async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -
     }
     assert served <= tools
     assert all(entry.name.startswith(SESSION_PREFIX) for entry in layout.root.iterdir())
+
+
+async def test_a_session_that_lends_no_dev_sandboxes_serves_no_dev_sandbox_tools(built: _Built) -> None:
+    grant = built.wiring.tokens.issue("b01", frozenset({SCOPE_SPECIALIST}))
+
+    tools = await asyncio.to_thread(_list_tools, grant)
+
+    assert built.wiring.dev_leases is None
+    assert not {name for name in tools if name.startswith("dev_sandbox_")}
+
+
+async def test_a_session_lending_dev_sandboxes_leases_the_toolbox_cards_to_a_specialist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    async with _peers(tmp_path, monkeypatch, WORKLOAD, dev_leases=2) as built:
+        leases = built.wiring.dev_leases
+        assert isinstance(leases, DevLeases) and leases.limits.cap == 2
+        await built.peers.toolbox.start()
+        grant = built.wiring.tokens.issue("b01", frozenset({SCOPE_SPECIALIST}))
+        assert DEV_SANDBOX_TOOLS <= await asyncio.to_thread(_list_tools, grant)
+
+        leased = await asyncio.to_thread(_call_tool, grant, "dev_sandbox_lease", {"cards": 1, "minutes": 5})
+        assert leased["result"]["isError"] is False, leased
+        assert json.loads(leased["result"]["content"][0]["text"])["cards"] == 1
+        await leases.reclaim("b01", "its branch stopped")
+        released = await asyncio.to_thread(_call_tool, grant, "dev_sandbox_release")
+
+    assert "no_lease" in released["result"]["content"][0]["text"]
+
+
+async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_session_lends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[AgentSetup] = []
+
+    def sessions(setup: AgentSetup, **_: object) -> ModelSessions:
+        built.append(setup)
+        return ModelSessions(lambda start: None, lambda branch: None)
+
+    monkeypatch.setattr(model_sessions_module, "model_sessions", sessions)
+    leases = SimpleNamespace(limits=SimpleNamespace(cap=1))
+    layout = SimpleNamespace(logs=tmp_path, source=tmp_path, branch_dir=lambda branch: tmp_path)
+    for held in (None, leases):
+        wiring = SimpleNamespace(
+            setup=SimpleNamespace(layout=layout, workload=WORKLOAD, references={}, processes=None),
+            tokens=None,
+            repo=None,
+            briefs=SimpleNamespace(text=None),
+            toolbox=None,
+            notebooks=None,
+            dev_leases=held,
+        )
+        model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
+
+    without, lending = built
+    assert (without.dev_leases, lending.dev_leases) == (None, leases)
+    assert without.role == role_prompt(_specialist_role(WORKLOAD), references={})
+    assert lending.role == role_prompt(_specialist_role(WORKLOAD), references={}, dev_leases=1) != without.role
 
 
 async def test_a_fix_case_a_specialist_declares_is_stored_in_the_session_blob_store(built: _Built) -> None:

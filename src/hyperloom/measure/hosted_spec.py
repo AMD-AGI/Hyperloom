@@ -372,7 +372,7 @@ def _tools_section(call: TestCall, ctx: SpecContext) -> dict[str, Any]:
 
 
 def _procedure_section(call: TestCall, ctx: SpecContext, deadline_unix: float) -> dict[str, Any]:
-    return {
+    section: dict[str, Any] = {
         "prep": call.prep,
         "benchmark_backend": ctx.benchmark_backend,
         "rounds": {"warmup": _warmup_rounds(call), "measure": int(call.rounds.measure_rounds)},
@@ -381,6 +381,9 @@ def _procedure_section(call: TestCall, ctx: SpecContext, deadline_unix: float) -
         "silence_timeout_sec": float(call.silence_timeout_sec or call.timeout_sec),
         "deadline_unix": float(deadline_unix),
     }
+    if call.short_prompts is not None:
+        section["short_prompts"] = call.short_prompts.to_document()
+    return section
 
 
 def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_unix: float) -> MeasurementSpec:

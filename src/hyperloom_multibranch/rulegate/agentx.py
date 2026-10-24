@@ -22,7 +22,11 @@ from hyperloom.common.perf_metric import (
 )
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok
-from hyperloom_multibranch.rulegate.readings import GRADED_SHORT_REQUESTS, GRADED_UNSERVED_REQUESTS
+from hyperloom_multibranch.rulegate.readings import (
+    GRADED_REQUESTS_TOTAL,
+    GRADED_SHORT_REQUESTS,
+    GRADED_UNSERVED_REQUESTS,
+)
 
 P50_BELOW_THRESHOLD = "p50_gain_below_threshold"
 # Failing more requests than the parent is a defect of the candidate a repair can look at; the other reasons
@@ -38,6 +42,7 @@ _RECORDED_AXES = (
     GRADED_ERROR_RATE,
     GRADED_UNSERVED_REQUESTS,
     GRADED_SHORT_REQUESTS,
+    GRADED_REQUESTS_TOTAL,
 )
 
 

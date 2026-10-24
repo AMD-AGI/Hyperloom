@@ -27,6 +27,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
     Verdict,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
+    BranchDriver,
     ClaimStatus,
     CommitOrigin,
     Conclusion,
@@ -184,7 +185,9 @@ class LineageEvent:
 
     ``ROOT`` records the baseline commit ``commit_id`` the integration branch starts from, and may name the digest of
     its recipe (``Recipe.digest()``); a judgement names the recipe digest of every other commit. The ``OPEN`` of a
-    repair branch names in ``repairs`` the test whose blocked gain it was opened to repair.
+    repair branch names in ``repairs`` the test whose blocked gain it was opened to repair. Only an ``OPEN`` names a
+    ``driver`` other than the specialist: an autonomous branch's, written before its agent starts, so a branch whose
+    start fails is known for one too.
     """
 
     kind: LineageKind
@@ -195,6 +198,7 @@ class LineageEvent:
     reason: str = ""
     recipe_digest: str | None = None
     repairs: str = ""
+    driver: BranchDriver = BranchDriver.SPECIALIST
 
 
 @dataclass(frozen=True)
@@ -447,6 +451,7 @@ class BranchNode:
     opened_at: float = 0.0
     stopped_at: float | None = None
     repairs: str = ""
+    driver: BranchDriver = BranchDriver.SPECIALIST
 
 
 @dataclass(frozen=True)
@@ -477,17 +482,22 @@ class LineageView:
 
 @dataclass(frozen=True)
 class MergeState:
-    """The latest merge attempt a commit took part in."""
+    """The latest merge attempt a commit took part in, recorded ``at``. ``reason`` says why one that did not merge did
+    not: the integrator's reason for a merge skipped untested, the merge test's gain for one not stackable."""
 
     outcome: MergeOutcome
     integration_head: str
     request_id: str | None = None
     merged_commit: str | None = None
+    reason: str = ""
+    at: float = 0.0
 
 
 @dataclass(frozen=True)
 class CommittedCommit:
-    """A specialist commit as the integrator sees it; ``gain_pct`` is its own gain over its parent commit."""
+    """A specialist commit as the integrator sees it; ``gain_pct`` is its own gain over its parent commit,
+    ``merge_attempts`` how many merge attempts it took part in, and ``first_failed_at`` when the first of them that did
+    not carry it onto integration was recorded, ``None`` while none failed."""
 
     commit_id: str
     branch: str
@@ -498,6 +508,8 @@ class CommittedCommit:
     foundation_fix: bool
     merged_into: str | None = None
     last_merge: MergeState | None = None
+    merge_attempts: int = 0
+    first_failed_at: float | None = None
 
 
 @dataclass(frozen=True)

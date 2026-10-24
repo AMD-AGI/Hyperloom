@@ -447,8 +447,8 @@ async def test_a_branch_whose_preflight_failed_gives_back_what_it_holds_when_it_
     assert runs.released == [BRANCH]
 
 
-def _idle(tested: bool = False) -> SessionIdle:
-    return SessionIdle("its model ended 3 turns in a row with nothing to test", tested=tested)
+def _idle(tested: bool = False, resumable: bool = False) -> SessionIdle:
+    return SessionIdle("its model ended 3 turns in a row with nothing to test", tested=tested, resumable=resumable)
 
 
 @pytest.mark.parametrize("kind", ["", "direction", "repair"])
@@ -535,6 +535,20 @@ async def test_an_exhausted_record_naming_no_session_direction_closes_nothing_an
 
     assert runs.started[-1].start.task.direction == DIRECTIONS[2]
     assert "names none of the session's directions" in caplog.text
+
+
+async def test_an_idle_session_whose_conversation_is_resumed_says_so_and_still_counts_as_idle(session):
+    runs = _Runs(errors=(_idle(resumable=True), _idle(resumable=True)))
+    runtime = session.runtime(runs)
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH))
+    await _until(lambda: _any_notice(session, "not restarted"), "the runtime to give up")
+    await runtime.stop(BRANCH)
+
+    assert len(runs.started) == 2
+    notices = await session.notices()
+    assert any("found nothing to test" in n and "resumes its conversation" in n for n in notices)
+    assert not any("starts a fresh session" in n for n in notices)
 
 
 async def test_an_idle_session_that_submitted_a_test_starts_the_count_again(session):

@@ -504,6 +504,60 @@
         "decode_pass": {
           "type": "boolean",
           "description": "Removed: read and ignored, so a sheet written while the greedy decode pass existed still parses."
+        },
+        "short_prompts": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The short-prompt consistency check the runner runs after the test's rounds: fresh server processes of the test's own launch answer a staged set of short prompts greedily. Absent when the test runs none.",
+          "required": [
+            "prompt_set",
+            "prompts_sha256",
+            "processes",
+            "max_new_tokens",
+            "phase_cap_sec",
+            "trigger"
+          ],
+          "properties": {
+            "prompt_set": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+            },
+            "prompts_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "processes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16
+            },
+            "max_new_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256
+            },
+            "phase_cap_sec": {
+              "type": "number",
+              "minimum": 1
+            },
+            "trigger": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "recipe": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "parent_recipe": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
         }
       }
     },

@@ -28,7 +28,9 @@ is xiaofei's call, so the cap is a parameter.
 
 :class:`SessionBriefs` is the session's one source of briefs, so a branch's brief can be rebuilt at every launch of its
 specialist, on its head then: the Experience KB is read once per focus and branch, and only the notebook's part is read
-again. It keeps the focus each branch was given.
+again. It keeps the focus each branch was given, and each head ``notebook_replay`` refused to replay an unfinished lead
+on, because its change no longer applies there or the head has it already: the lead leaves the briefs from that head
+and from every commit that builds on it, for the rest of the session.
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     NotebookSnapshot,
     PeerReplay,
     StartupBrief,
+    UnfinishedLead,
     WarmReplay,
 )
 from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall, PastLearnings
@@ -63,6 +66,7 @@ from hyperloom_multibranch.notebook.knowledge.recall import (
     RecallTier,
     recall_experiences,
 )
+from hyperloom_multibranch.notebook.knowledge.reference_leads import ReferenceLead
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay, WarmLead, delta_layer
 from hyperloom_multibranch.notebook.learning_search import (
     Retrieval,
@@ -185,17 +189,20 @@ class RecallCache:
 class CrossSessionBriefing(StartupBriefProvider):
     """A startup brief with this session's lessons and what other sessions left.
 
-    ``warm`` are the leads PRELUDE read; ``experiences`` the Experience KB, read for ``focus`` (the bottleneck the
-    specialist attacks) on ``branch``; ``metric`` the throughput metric whose baseline the read carries.
+    ``warm`` are the leads PRELUDE read; ``references`` the reference launches the run was given, listed after them and
+    never replayed; ``experiences`` the Experience KB, read for ``focus`` (the bottleneck the specialist attacks) on
+    ``branch``; ``metric`` the throughput metric whose baseline the read carries.
     ``identities`` looks up the conditions a read's summaries leave out; by default one is built on ``experiences``,
     and passing one index to every briefing of a session reads the export once. ``learnings`` is the session's one
     recall of the specialists' learnings; without it the brief holds this session's only. ``recalls`` keeps the
     completed reads, so a brief built again reads the Experience KB no more. ``champions`` keeps the champions each
-    commit read is, by commit, so each commit's recipe is read once a session.
+    commit read is, by commit, so each commit's recipe is read once a session. ``refused`` keeps, by test, the heads
+    :meth:`peer_replay` found its change no longer applies to or already in, which the briefs from them leave out.
     """
 
     notebook: Notebook
     warm: tuple[WarmLead, ...] = ()
+    references: tuple[ReferenceLead, ...] = ()
     experiences: ExperienceReader | None = None
     metric: str = ""
     focus: str = ""
@@ -207,6 +214,7 @@ class CrossSessionBriefing(StartupBriefProvider):
     repo: RecipeReads | None = None
     champions: dict[str, frozenset[str]] | None = None
     stack_slot: StackSlot | None = None
+    refused: dict[str, set[str]] | None = None
 
     def __post_init__(self) -> None:
         if self.identities is None and self.experiences is not None:
@@ -287,10 +295,26 @@ class CrossSessionBriefing(StartupBriefProvider):
         try:
             replayed = apply(recipe, delta)
         except RecipeError as exc:
+            self._refuse(request_id, head)
             raise ValueError(f"the change {request_id} tested no longer applies to your head {head}: {exc}") from exc
         if replayed == recipe:
+            self._refuse(request_id, head)
             raise ValueError(f"your head {head} already has the change {request_id} tested")
         return PeerReplay(request_id, request.branch, head, delta, delta_layer(delta), replaces)
+
+    def _refuse(self, request_id: str, head: str) -> None:
+        if self.refused is not None:
+            self.refused.setdefault(request_id, set()).add(head)
+
+    def _unrefused(
+        self, leads: Sequence[UnfinishedLead], snapshot: NotebookSnapshot, start_commit: str
+    ) -> tuple[UnfinishedLead, ...]:
+        """``leads`` less those :meth:`peer_replay` refused on ``start_commit`` or on a commit it builds on."""
+
+        if not self.refused:
+            return tuple(leads)
+        builds_on = {start_commit, *snapshot.lineage.ancestry(start_commit)}
+        return tuple(lead for lead in leads if not self.refused.get(lead.request_id, set()) & builds_on)
 
     @staticmethod
     async def _with_upstreams(repo: RecipeReads, delta: RecipeDelta, head: Recipe, tested_on: str) -> RecipeDelta:
@@ -371,6 +395,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             *(_Item(True, text) for text in listed(repeated)),
             *(_Item(True, f"learnt here: {render_session_learning(record, snapshot)[2:]}") for record in here),
             *(_recipe(lead) for lead in self.warm if lead.canonical_id not in on_head),
+            *(_Item(False, f"reference: {lead.describe()}") for lead in self.references),
             *_listed(recalled.leads),
             *(_Item(True, text) for text in listed([*recalled.lessons, *learnt_before, *kb_lessons])),
         ]
@@ -384,6 +409,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             tried,
             lessons=tuple(item.text for item in kept if item.lesson),
             leads=tuple(item.text for item in kept if not item.lesson),
+            unfinished=self._unrefused(tried.unfinished, snapshot, start_commit),
             focus=self.focus,
         )
 
@@ -399,6 +425,7 @@ class SessionBriefs:
 
     notebook: Notebook
     warm: tuple[WarmLead, ...] = ()
+    references: tuple[ReferenceLead, ...] = ()
     experiences: ExperienceReader | None = None
     metric: str = ""
     learnings: LearningRecall | None = None
@@ -409,6 +436,7 @@ class SessionBriefs:
     _recalls: RecallCache = field(init=False, default_factory=RecallCache)
     _champions: dict[str, frozenset[str]] = field(init=False, default_factory=dict)
     _focus: dict[str, str] = field(init=False, default_factory=dict)
+    _refused: dict[str, set[str]] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
         self._identities = IdentityIndex.of(self.experiences) if self.experiences is not None else None
@@ -421,6 +449,7 @@ class SessionBriefs:
         return CrossSessionBriefing(
             self.notebook,
             warm=self.warm,
+            references=self.references,
             experiences=self.experiences,
             metric=self.metric,
             focus=self._focus.get(branch, ""),
@@ -432,6 +461,7 @@ class SessionBriefs:
             repo=self.repo,
             champions=self._champions,
             stack_slot=self.stack_slot,
+            refused=self._refused,
         )
 
     async def text(self, branch: str, commit: str, focus: str | None = None) -> str:

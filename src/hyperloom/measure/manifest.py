@@ -15,7 +15,13 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.contracts.measurement import MAX_PHASE_SECONDS, MeasurementError, PhaseTiming
+from hyperloom.contracts.measurement import (
+    CARD_CLEAN,
+    CARD_OCCUPANCY_STATES,
+    MAX_PHASE_SECONDS,
+    MeasurementError,
+    PhaseTiming,
+)
 from hyperloom.measure.jit_kinds import STATES as JIT_STATES
 from hyperloom.measure.docs import (
     PREFIXED_SHA256_RE,
@@ -64,8 +70,30 @@ class RulePackFacts:
 
 
 @dataclass(frozen=True)
+class CardOccupancyFacts:
+    """What the runner says of who else used its cards: ``clean``, ``foreign`` with the process it saw (the guard only
+    observed it) or ``unknown`` with the reason it could not look, and how many looks read the list."""
+
+    state: str
+    reason: str | None
+    checks: int
+
+    @classmethod
+    def parse(cls, value: Any, path: str) -> "CardOccupancyFacts":
+        r = Reader(value, path)
+        state = r.choice("state", CARD_OCCUPANCY_STATES) or ""
+        reason = r.text("reason", optional=True)
+        facts = cls(state, reason, r.integer("checks", minimum=0) or 0)
+        r.done()
+        if (state != CARD_CLEAN) != (reason is not None):
+            raise DocumentError(f"{path}: a card occupancy that is not clean states why, and a clean one has no reason")
+        return facts
+
+
+@dataclass(frozen=True)
 class RunnerFacts:
-    """What the runner states about itself. ``rule_pack`` is absent from a manifest an older runner signed."""
+    """What the runner states about itself. ``rule_pack`` and ``card_occupancy`` are absent from a manifest an older runner
+    signed, and ``card_occupancy`` from one a runner without a card signed."""
 
     sandbox_id: str
     signing_key_fingerprint: str
@@ -80,12 +108,14 @@ class RunnerFacts:
     gpu_ids: tuple[int, ...]
     ecc_delta: EccDelta | None
     rule_pack: RulePackFacts | None = None
+    card_occupancy: CardOccupancyFacts | None = None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "RunnerFacts":
         r = Reader(value, path)
         ecc = r.optional("ecc_delta")
         pack = r.optional("rule_pack")
+        occupancy = r.optional("card_occupancy")
         facts = cls(
             sandbox_id=r.text("sandbox_id") or "",
             signing_key_fingerprint=r.text("signing_key_fingerprint", pattern=PREFIXED_SHA256_RE) or "",
@@ -100,6 +130,7 @@ class RunnerFacts:
             gpu_ids=r.sequence("gpu_ids", _gpu_id),
             ecc_delta=None if ecc is None else EccDelta.parse(ecc, r.at("ecc_delta")),
             rule_pack=None if pack is None else RulePackFacts.parse(pack, r.at("rule_pack")),
+            card_occupancy=None if occupancy is None else CardOccupancyFacts.parse(occupancy, r.at("card_occupancy")),
         )
         r.done()
         return facts

@@ -51,7 +51,10 @@ BUILD_LOG = (
     "[aiter] [pid=11 pname=MainProcess] start build [module_gemm] under /j/build/module_gemm\n"
     "\x1b[32mfinish build [module_gemm], cost 12.5s \x1b[0m\n"
 )
-CORE = 'import os\nA = os.getenv("AITER_CONFIG_GEMM_A8W8", "x")\nB = os.environ.get("ENABLE_CK", "1")\n'
+CORE = (
+    'import os\nA = os.getenv("AITER_CONFIG_GEMM_A8W8", "x")\nB = os.environ.get("ENABLE_CK", "1")\n'
+    'C = os.environ.get("AITER_META_DIR")\n'
+)
 TABLE_VARIABLE = "AITER_CONFIG_GEMM_A8W8"
 #: What aiter's cpp_itfs does with the home directory: the default of the root of its cache.
 HOME_READ = (
@@ -349,6 +352,54 @@ def test_an_aiter_patch_misses_the_aiter_caches_and_still_hits_the_one_triton_ke
         and _keys(candidate)["triton"] == _keys(base)["triton"]
     )
     assert candidate.jit_cache.builds_seen == 1, "it builds what the patch may have changed"
+
+
+def _aiter_patch(rig: Rig):
+    return lambda run: [rig.root(run, "aiter", "jit/optCompilerConfig.json", b'{"flags": ["-O0"]}')]
+
+
+def test_a_patched_aiter_finds_the_cache_another_sandbox_filled_though_the_farm_names_its_meta_directory(rig) -> None:
+    first, _, first_run = rig.run("first", _arm(rig, roots=_aiter_patch(rig)))
+    rig.publish(first_run, first)
+    second, _, _ = rig.run("second", _arm(rig, roots=_aiter_patch(rig)))
+
+    assert _keys(second)["aiter_jit"] == _keys(first)["aiter_jit"], "the image's meta directory is not the sandbox's"
+    assert _states(second)["aiter_jit"] == "hit"
+
+
+def test_a_meta_directory_the_sheet_names_instead_of_the_images_is_an_input_of_the_aiter_build(rig) -> None:
+    elsewhere = rig.tmp_path / "other-meta"
+    (elsewhere / "csrc").mkdir(parents=True)
+
+    image, _, _ = rig.run("image", _arm(rig, roots=_aiter_patch(rig)))
+    named, _, _ = rig.run("named", _arm(rig, roots=_aiter_patch(rig), envs={"AITER_META_DIR": str(elsewhere)}))
+
+    assert _keys(named)["aiter_jit"] != _keys(image)["aiter_jit"], "sources from another tree are another build"
+
+
+def _pinned_meta_directory(rig: Rig) -> str | None:
+    """The ``AITER_META_DIR`` the last run's server was given by its YAML."""
+    return rig.grid.configs[0]["benchmark"]["envs"].get("AITER_META_DIR")
+
+
+def test_a_patched_aiter_server_is_told_the_images_meta_directory_and_an_unpatched_one_nothing(rig) -> None:
+    rig.run("base", _arm(rig))
+    assert _pinned_meta_directory(rig) is None
+
+    rig.run("patched", _arm(rig, roots=_aiter_patch(rig)))
+
+    assert _pinned_meta_directory(rig) == str(rig.bases), "the directory around the image's aiter, where csrc is"
+
+
+def test_a_meta_directory_the_server_inherits_is_kept_and_one_the_test_unsets_is_not(rig) -> None:
+    inherited = {"AITER_META_DIR": "/inherited/meta"}
+
+    rig.run("environment", _arm(rig, roots=_aiter_patch(rig)), extra_env=inherited)
+    assert _pinned_meta_directory(rig) is None, "the runner's environment already names one"
+    rig.run("process", _arm(rig, roots=_aiter_patch(rig), process_env=inherited))
+    assert _pinned_meta_directory(rig) is None, "the test's own process variables name one"
+    rig.run("unset", _arm(rig, roots=_aiter_patch(rig), unset_envs=["AITER_META_DIR"]), extra_env=inherited)
+    assert _pinned_meta_directory(rig) == str(rig.bases), "the test removes it, so the server would find none"
 
 
 def test_a_runtime_snapshot_is_part_of_the_aiter_key_because_the_sources_outside_the_package_are_in_it(rig) -> None:

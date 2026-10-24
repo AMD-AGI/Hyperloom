@@ -22,22 +22,33 @@ from hyperloom.contracts.recipe import KernelKind
 from hyperloom.measure.framework.rows import lay_rows_over
 from hyperloom.measure.tests.hosted_fixtures import point_yaml
 from hyperloom.orchestrator.actions.executors import run_with_session_kill
+from hyperloom.sandbox.card_occupancy import CardGuard, Holder
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, MeasurementCapacity, RequestRejected
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.tests.helpers import req
 from hyperloom_multibranch.toolbox.tests.kernel_tune_rig import (
     ENV,
+    GRAPH_SIZES,
+    HIT_LOG,
+    HIT_SHAPES,
+    REL_NORM_HEADER,
     SECRET_ENV,
+    SERVER_ARGS,
+    SERVER_LOG,
     TEST_ID,
     Make,
     Rig,
     build_rig,
     csv_rows,
     flags,
+    forge_dropped,
+    profile_row,
     record_test,
     tuned_rows,
 )
 from hyperloom_multibranch.toolbox.tests.test_card_placement import HANG, _behaviour, _until
+from hyperloom_multibranch.toolbox.tests.card_list import INTRUDER, CardList
+from hyperloom_multibranch.toolbox import branch_leases
 from hyperloom_multibranch.toolbox.tools import JobStatus, kernel_tune
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL, MIN_TUNER_SEC
 
@@ -94,6 +105,23 @@ async def test_a_running_job_holds_its_card_as_a_lease_that_leased_cards_counts(
 
     rig.forge.release.set()
     assert await rig.finished(job) is JobStatus.SUCCEEDED
+    assert await rig.box.measurement_capacity() == MeasurementCapacity(2, 2) and pool(rig) == (0, 1)
+
+
+async def test_a_card_some_process_holds_is_not_leased_for_tuning_and_the_job_says_who_holds_it(
+    make: Make, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tuner measures on its card: a card an agent's command is using would give it numbers that are not the card's."""
+    holders = CardList()
+    holders.holders = (INTRUDER, Holder(card=1, pid=4243, command="python3 other.py"))
+    rig = await ready(await make(cards=2, card_holders=holders, card_guard=CardGuard.ENFORCE))
+    monkeypatch.setattr(branch_leases, "LEASE_WAIT_SECONDS", 0.3)
+
+    job = await rig.submit(test_request_id=TEST_ID)
+
+    assert await rig.finished(job) is JobStatus.FAILED
+    assert "card 0 by pid 4242 (python3 -c import torch)" in rig.result(job)["summary"]
+    assert rig.forge.calls == [], "the tuner never ran"
     assert await rig.box.measurement_capacity() == MeasurementCapacity(2, 2) and pool(rig) == (0, 1)
 
 
@@ -463,3 +491,207 @@ async def test_a_job_whose_every_table_failed_is_a_failed_job(make: Make) -> Non
     assert await rig.finished(job) is JobStatus.FAILED
     assert "declares no shape key for AITER_CONFIG_GEMM_BF16" in rig.result(job)["summary"]
     assert (await rig.box.measurement_capacity()).leased_cards == 0
+
+
+# --- a higher mismatch ratio the call allowed ---------------------------------------------------------------------------------
+
+ASM = "relaxed_asm_splitk6_kernel"
+DOWN = (64, 5120, 17408)
+
+
+def arbors_rows(rig: Rig) -> None:
+    """What Forge leaves when the asm row at splitK 6 wins a decode shape with a ratio just above the default: the table has
+    the CK row the default check lets through, and the report names the asm row it removed (and one of 0.4, and one of 0.0145)."""
+    ck = profile_row(*DOWN, lib="ck", kernel_id=17, split_k=0, us=38.9, err=0.0, name="ck_kernel")
+    asm = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM)
+    worse = profile_row(2048, 512, 7168, lib="asm", kernel_id=5, split_k=6, us=5.0, err=0.0145, name=ASM)
+    wrong = profile_row(4096, 512, 7168, lib="ck", kernel_id=6, split_k=0, us=1.0, err=0.4, name="ck_wrong")
+    rig.forge.rows = [*tuned_rows()]
+    rig.forge.profile = [ck, asm, worse, wrong]
+    rig.forge.dropped = [
+        forge_dropped(*DOWN),
+        forge_dropped(2048, 512, 7168, err=0.0145, us=5.0),
+        forge_dropped(4096, 512, 7168, lib="ck", split_k=0, us=1.0, err=0.4),
+    ]
+
+
+async def test_without_max_err_ratio_the_rows_above_the_default_are_rejected_and_the_answer_has_no_relaxed_rows(
+    make: Make,
+) -> None:
+    rig = await ready(await make(cards=2))
+    arbors_rows(rig)
+    job = await rig.submit(test_request_id=TEST_ID)
+
+    assert await rig.finished(job) is JobStatus.SUCCEEDED
+    result = rig.result(job)["result"]
+    (table,) = result["tables"]
+    assert sorted(r["M"] for r in table["rejected_rows"]) == ["2048", "4096", "64"]
+    assert not {"rows_csv_relaxed", "relaxed_rows", "rows_relaxed", "rows_file_relaxed"} & set(table)
+    assert result["max_err_ratio"] == 0.01 and "allowed a mismatch ratio" not in result["verification"]
+    assert "relaxed" not in rig.result(job)["summary"]
+
+
+async def test_max_err_ratio_returns_the_rows_within_it_in_a_csv_of_their_own_and_never_in_the_default_one(
+    make: Make,
+) -> None:
+    rig = await ready(await make(cards=2))
+    arbors_rows(rig)
+    job = await rig.submit(test_request_id=TEST_ID, max_err_ratio=0.02)
+
+    assert await rig.finished(job) is JobStatus.SUCCEEDED
+    result = rig.result(job)
+    table = result["result"]["tables"][0]
+    assert [r["M"] for r in csv_rows(table["rows_csv"])] == ["16", "20480"], "the default rows are what they were"
+    assert ASM not in table["rows_csv"] and ASM not in "".join(r["kernelName"] for r in table["verified_rows"])
+    assert [(r["M"], r["splitK"], r["kernelName"]) for r in csv_rows(table["rows_csv_relaxed"])] == [
+        ("64", "6", ASM),
+        ("2048", "6", ASM),
+    ]
+    assert table["rows_relaxed"] == 2 and Path(table["rows_file_relaxed"]).read_text() == table["rows_csv_relaxed"]
+    relaxed = {r["M"]: r for r in table["relaxed_rows"]}
+    assert {m: (r["verified"], r["err_ratio"], r["reason"]) for m, r in relaxed.items()} == {
+        "64": (False, 0.0125, "err_ratio_above_default"),
+        "2048": (False, 0.0145, "err_ratio_above_default"),
+    }
+    assert [r["M"] for r in table["rejected_rows"]] == ["4096"], "above the allowed ratio, it stays rejected"
+    assert (
+        table["status"] == "tuned"
+        and table["rows"] == 2
+        and "2 row(s) with a mismatch ratio above 0.01" in table["reason"]
+    )
+    assert result["result"]["max_err_ratio"] == 0.02
+    assert (
+        "explicit choice" in result["result"]["verification"]
+        and "end-to-end accuracy check" in result["result"]["verification"]
+    )
+    assert "2 relaxed row(s) not verified" in result["summary"]
+
+
+@pytest.mark.parametrize("name", ["profile_dense_bf16.csv", "profile_whatever_the_tuner_calls_it.csv"])
+async def test_the_profile_is_found_beside_the_table_whatever_the_tuner_names_it(make: Make, name: str) -> None:
+    """The bf16 tuner writes ``profile_dense_bf16.csv``, not ``profile_<tuner>.csv`` as an aiter dense one does."""
+    rig = await ready(await make(cards=2))
+    arbors_rows(rig)
+    rig.forge.profile_file = name
+    job = await rig.submit(test_request_id=TEST_ID, max_err_ratio=0.02)
+
+    await rig.finished(job)
+
+    (table,) = rig.result(job)["result"]["tables"]
+    assert [r["M"] for r in csv_rows(table["rows_csv_relaxed"])] == ["64", "2048"]
+
+
+async def test_a_tuner_that_left_no_profile_leaves_the_rows_within_the_ratio_rejected_with_the_reason(
+    make: Make,
+) -> None:
+    rig = await ready(await make(cards=2))
+    arbors_rows(rig)
+    rig.forge.profile = []
+    job = await rig.submit(test_request_id=TEST_ID, max_err_ratio=0.02)
+
+    await rig.finished(job)
+
+    (table,) = rig.result(job)["result"]["tables"]
+    assert table["rows_relaxed"] == 0 and table["rows_csv_relaxed"] == "" and table["rows_file_relaxed"] == ""
+    refused = {r["M"]: r["reason"] for r in table["rejected_rows"]}
+    assert set(refused) == {"64", "2048", "4096"}
+    assert all("the tuner's profile of its candidates is missing" in refused[m] for m in ("64", "2048"))
+
+
+async def test_the_ratio_allowed_is_the_most_a_relaxed_row_may_have(make: Make) -> None:
+    rig = await ready(await make(cards=2))
+    arbors_rows(rig)
+    job = await rig.submit(test_request_id=TEST_ID, max_err_ratio=0.0125)
+
+    await rig.finished(job)
+
+    (table,) = rig.result(job)["result"]["tables"]
+    assert [r["M"] for r in table["relaxed_rows"]] == ["64"] and sorted(r["M"] for r in table["rejected_rows"]) == [
+        "2048",
+        "4096",
+    ]
+
+
+async def test_a_table_with_only_relaxed_rows_is_not_tuned_and_has_no_default_csv(make: Make) -> None:
+    rig = await ready(await make(cards=2))
+    arbors_rows(rig)
+    rig.forge.rows = []
+    job = await rig.submit(test_request_id=TEST_ID, max_err_ratio=0.05)
+
+    await rig.finished(job)
+
+    (table,) = rig.result(job)["result"]["tables"]
+    assert (table["status"], table["rows"], table["rows_csv"], table["rows_file"]) == ("no_rows", 0, "", "")
+    assert table["rows_relaxed"] == 2 and "none of the 3 row(s) the tuner measured passed" in table["reason"]
+
+
+# --- the shapes the tables serve, and the decode CUDA-graph batch sizes ---------------------------------------------------------
+
+
+async def test_a_log_whose_tables_serve_every_lookup_fails_without_retune_and_tunes_the_served_rows_with_it(
+    make: Make,
+) -> None:
+    rig = await ready(await make(cards=2), log=HIT_LOG)
+    refused = await rig.submit(test_request_id=TEST_ID)
+    assert await rig.finished(refused) is JobStatus.FAILED
+    assert "set retune=true" in rig.result(refused)["summary"] and rig.forge.calls == []
+
+    job = await rig.submit(test_request_id=TEST_ID, retune=True)
+
+    assert await rig.finished(job) is JobStatus.SUCCEEDED
+    (entry,) = [e for e in rig.forge.demands[0]["demands"] if e["env_var"] == ENV]
+    assert {(k["M"], k["N"], k["K"]) for k in entry["keys"]} == HIT_SHAPES[ENV]
+    assert (
+        rig.result(job)["result"]["demand"]["retune"] is True
+        and rig.result(job)["result"]["demand"]["served_keys"] == 3
+    )
+
+
+async def test_the_decode_graph_batch_sizes_of_the_test_are_in_the_demand_the_tuner_is_given(make: Make) -> None:
+    rig = await ready(await make(cards=2), log=SERVER_ARGS + SERVER_LOG)
+    job = await rig.submit(test_request_id=TEST_ID)
+
+    assert await rig.finished(job) is JobStatus.SUCCEEDED
+
+    (entry,) = rig.forge.demands[0]["demands"]
+    sizes = tuple(size for size in GRAPH_SIZES if size <= 128)
+    assert {int(k["M"]) for k in entry["keys"]} == {*sizes, 496}, "the points ran at concurrency 32 and 128"
+    assert rig.result(job)["result"]["demand"]["cuda_graph_batch_sizes"] == list(sizes)
+
+
+async def test_explicit_shapes_are_tuned_as_named_with_no_graph_sizes_added(make: Make) -> None:
+    rig = await ready(await make(cards=2), log=SERVER_ARGS)
+    job = await rig.submit(test_request_id=TEST_ID, shapes=[{"env": ENV, "M": 64, "N": 5120, "K": 5120}])
+
+    assert await rig.finished(job) is JobStatus.SUCCEEDED
+
+    (entry,) = rig.forge.demands[0]["demands"]
+    assert [(k["M"], k["N"], k["K"]) for k in entry["keys"]] == [("64", "5120", "5120")]
+    assert rig.result(job)["result"]["demand"]["cuda_graph_batch_sizes"] == []
+
+
+async def test_an_asm_splitk_row_above_the_ratio_limit_is_handed_over_when_forge_measured_its_relative_norm_error(
+    make: Make,
+) -> None:
+    rig = await ready(await make(cards=2))
+    asm = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM)
+    rig.forge.header = REL_NORM_HEADER
+    rig.forge.rows = [*(f"{line}," for line in tuned_rows()), f"{asm},0.0047"]
+    job = await rig.submit(test_request_id=TEST_ID)
+
+    assert await rig.finished(job) is JobStatus.SUCCEEDED
+    result = rig.result(job)["result"]
+    (table,) = result["tables"]
+    checked = {r["M"]: r for r in table["verified_rows"]}
+    assert (checked["64"]["verified"], checked["64"]["check"]) == (True, "rel_norm_err")
+    assert (checked["64"]["err_ratio"], checked["64"]["rel_norm_err"]) == (0.0125, 0.0047)
+    assert {r["check"] for m, r in checked.items() if m != "64"} == {"err_ratio"}
+    assert table["rows"] == 3 and table["rejected_rows"] == [] and table["status"] == "tuned"
+    rows = csv_rows(table["rows_csv"])
+    assert [r["M"] for r in rows] == ["16", "64", "20480"] and "relNormErr" not in table["rows_csv"]
+    assert [r["kernelName"] for r in rows if r["M"] == "64"] == [ASM]
+    assert "relative-norm error of at most 0.01" in result["verification"]
+    artifact = await rig.box.put_kernel_artifact(
+        KernelKind.GEMM, table["target"], table["env"], table["rows_csv"].encode(), rows_only=True
+    )
+    assert artifact.metadata["load"]["rows_only"] is True

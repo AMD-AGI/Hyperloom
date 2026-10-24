@@ -6,7 +6,9 @@
 A table is ``tuned`` when it has verified rows (and then carries their rows-only CSV), ``no_rows`` when the tuner ran and
 none of its rows is handed over (nothing beat the default, or every row failed the reference check), ``failed`` when the run
 did not give a usable table and ``skipped`` when the time did not reach it. Whatever the status, every row the reference
-check refused is listed with ``verified`` false and its reason; none is in a CSV.
+check refused is listed with ``verified`` false and its reason; none is in a CSV. A call that allowed a higher mismatch
+ratio gets the rows within it, which the default check refuses, in a CSV and a list of their own (``relaxed``): they never
+make a table ``tuned`` and are never in ``rows_csv``.
 """
 
 from __future__ import annotations
@@ -19,13 +21,24 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from hyperloom_multibranch.toolbox.tools.tune_rows import RowsRefused, TunedRows, dropped_by_forge, from_artifact
+from hyperloom_multibranch.toolbox.tools.tune_rows import (
+    ERR_RATIO_LIMIT,
+    Relax,
+    RowsRefused,
+    TunedRows,
+    dropped_by_forge,
+    from_artifact,
+    split_dropped,
+)
 
-__all__ = ["ROWS_FILE", "TableStatus", "TuneTable", "failed", "read_run", "skipped"]
+__all__ = ["RELAXED_FILE", "ROWS_FILE", "TableStatus", "TuneTable", "failed", "read_run", "skipped"]
 
 #: The keyed rows-only CSV of a table, written beside the tuner's own output.
 ROWS_FILE = "rows_only.csv"
+#: The rows within a higher ratio the call allowed, in the same form.
+RELAXED_FILE = "rows_relaxed.csv"
 _RESULT = "result.json"
+_PROFILE_GLOB = "profile_*.csv"
 _TAIL_CHARS = 600
 
 
@@ -48,10 +61,15 @@ class TuneTable:
     rows_file: Path | None = None
     refused: tuple[Mapping[str, Any], ...] = ()
     forge: Mapping[str, Any] | None = None
+    relaxed_file: Path | None = None
 
     @property
     def verified(self) -> int:
         return 0 if self.rows is None else len(self.rows.verified)
+
+    @property
+    def relaxed(self) -> int:
+        return 0 if self.rows is None else len(self.rows.relaxed)
 
     def document(self) -> dict[str, Any]:
         """The table as the answer says it: what a specialist needs to put it, and to know what was left out."""
@@ -73,6 +91,13 @@ class TuneTable:
                 "rows_file": str(self.rows_file) if self.rows_file is not None else "",
                 "verified_rows": list(self.rows.verified),
             }
+            if self.rows.relax_limit > ERR_RATIO_LIMIT:
+                table |= {
+                    "rows_relaxed": self.relaxed,
+                    "rows_csv_relaxed": self.rows.relaxed_csv if self.relaxed else "",
+                    "rows_file_relaxed": str(self.relaxed_file) if self.relaxed_file is not None else "",
+                    "relaxed_rows": list(self.rows.relaxed),
+                }
         return table
 
 
@@ -92,25 +117,49 @@ def _skipped_or_failed(report: Mapping[str, Any]) -> str:
 
 
 def _row_reason(rows: TunedRows, rejected: int) -> str:
+    relaxed = (
+        f"; {len(rows.relaxed)} row(s) with a mismatch ratio above {ERR_RATIO_LIMIT:g} and within the allowed "
+        f"{rows.relax_limit:g} are in rows_csv_relaxed, not verified"
+        if rows.relaxed
+        else ""
+    )
     if rows.verified:
-        return f"{len(rows.verified)} row(s) checked against the reference" + (
-            f", {rejected} rejected" if rejected else ""
+        return (
+            f"{len(rows.verified)} row(s) checked against the reference"
+            + (f", {rejected} rejected" if rejected else "")
+            + relaxed
         )
-    if rejected:
-        return f"none of the {rejected} row(s) the tuner measured passed the reference check"
+    if rejected or rows.relaxed:
+        return (
+            f"none of the {rejected + len(rows.relaxed)} row(s) the tuner measured passed the reference check" + relaxed
+        )
     return "the tuner left no row"
 
 
-def _write_rows(out: Path, rows: TunedRows) -> Path:
-    path = out / ROWS_FILE
-    path.write_text(rows.csv, encoding="utf-8")
+def _write_csv(path: Path, text: str) -> Path:
+    path.write_text(text, encoding="utf-8")
     return path
 
 
-def read_run(demand: Mapping[str, Any], out: Path, done: subprocess.CompletedProcess[str], configs: Path) -> TuneTable:
+def _profiles(table: Path) -> tuple[Path, ...]:
+    """The profile of every candidate the tuner measured: ``profile_*.csv`` beside its table. The tuners name it as they
+    like (the bf16 tuner ``profile_dense_bf16.csv``, an aiter dense one ``profile_<tuner>.csv``); the directory is the one
+    tuner's own, and the isolated per-shape ones (``_iso_*``) are merged into it."""
+    return tuple(sorted(table.parent.glob(_PROFILE_GLOB)))
+
+
+def read_run(
+    demand: Mapping[str, Any],
+    out: Path,
+    done: subprocess.CompletedProcess[str],
+    configs: Path,
+    max_err_ratio: float = ERR_RATIO_LIMIT,
+) -> TuneTable:
     """The table a finished Forge run left in ``out``: its verified rows, the rows it rejected, or why there is none.
 
-    ``configs`` is the aiter install's ``configs`` directory the table's shape key is read from.
+    ``configs`` is the aiter install's ``configs`` directory the table's shape key is read from. ``max_err_ratio`` is the
+    mismatch ratio the call allows: above the default, the rows within it that Forge took out of the table are read back
+    from the tuner's profile and handed over as relaxed rows.
     """
     tuner = demand["tuner"]
     try:
@@ -121,11 +170,11 @@ def read_run(demand: Mapping[str, Any], out: Path, done: subprocess.CompletedPro
     run = next((r for r in report.get("tuners_run") or [] if r.get("tuner") == tuner), {})
     forge = {key: report.get(key) for key in ("status", "micro_decision", "total_elapsed_s", "error", "error_class")}
     forge["run"] = run
-    refused = dropped_by_forge(run)
+    dropped = dropped_by_forge(run)
     artifact = (report.get("artifacts") or {}).get(tuner)
 
     def without_rows(status: TableStatus, reason: str) -> TuneTable:
-        return TuneTable(demand["env_var"], tuner, status, reason, refused=refused, forge=forge)
+        return TuneTable(demand["env_var"], tuner, status, reason, refused=dropped, forge=forge)
 
     if not artifact:
         why = report.get("error") or _skipped_or_failed(report) or "no row beat the default of the shapes it tuned"
@@ -133,14 +182,18 @@ def read_run(demand: Mapping[str, Any], out: Path, done: subprocess.CompletedPro
     path = Path(artifact)
     if not path.is_relative_to(out):
         return without_rows(TableStatus.FAILED, f"the tuner names a table outside its output directory: {artifact}")
+    within, beyond = split_dropped(dropped, max_err_ratio)
+    relax = Relax(max_err_ratio, within, _profiles(path)) if max_err_ratio > ERR_RATIO_LIMIT else None
     try:
-        rows = from_artifact(path, demand["env_var"], configs)
+        rows = from_artifact(path, demand["env_var"], configs, relax)
     except RowsRefused as exc:
         return without_rows(TableStatus.FAILED, str(exc))
-    refused = (*refused, *rows.refused)
+    refused = (*(beyond if relax else dropped), *rows.refused)
     status = TableStatus.TUNED if rows.verified else TableStatus.NO_ROWS
-    rows_file = _write_rows(out, rows) if rows.verified else None
-    return TuneTable(demand["env_var"], tuner, status, _row_reason(rows, len(refused)), rows, rows_file, refused, forge)
+    rows_file = _write_csv(out / ROWS_FILE, rows.csv) if rows.verified else None
+    relaxed_file = _write_csv(out / RELAXED_FILE, rows.relaxed_csv) if rows.relaxed else None
+    reason = _row_reason(rows, len(refused))
+    return TuneTable(demand["env_var"], tuner, status, reason, rows, rows_file, refused, forge, relaxed_file)
 
 
 def tables_summary(tables: Sequence[TuneTable]) -> str:
@@ -149,9 +202,11 @@ def tables_summary(tables: Sequence[TuneTable]) -> str:
     if not tuned:
         return "; ".join(f"{table.env}: {table.status.value}: {table.reason}" for table in tables)
     rejected = sum(len(table.refused) for table in tables)
+    relaxed = sum(table.relaxed for table in tables)
     broken = sum(table.status is TableStatus.FAILED for table in tables)
     return (
         f"{sum(table.verified for table in tuned)} reference-checked row(s) for {', '.join(t.env for t in tuned)}"
         + (f"; {rejected} rejected" if rejected else "")
+        + (f"; {relaxed} relaxed row(s) not verified" if relaxed else "")
         + (f"; {broken} table(s) failed" if broken else "")
     )

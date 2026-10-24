@@ -28,6 +28,7 @@ Facts = dict[str, Any]
 
 _WITH_CHECKS = {
     "aiter_merged_view",
+    "aiter_meta_dir",
     "sglang_image_layout",
     "context_length_flags",
     "pytorch_tunableop_env",
@@ -245,6 +246,15 @@ def test_the_checks_of_the_reference_pack_hold_the_names_the_pack_holds_and_do_n
         (outside_facts.TUNABLEOP_ENABLED_ENV, outside_facts.TUNABLEOP_TUNING_ENV, outside_facts.TUNABLEOP_TABLE_ENV)
     ]
     assert text_of["aiter_log_tuned_config"] == [(outside_facts.AITER_LOG_TUNED_CONFIG_ENV,)]
+    assert text_of["aiter_meta_dir"] == [
+        (
+            outside_facts.AITER_META_DIR_ENV,
+            outside_facts.AITER_META_WHEEL_DIR,
+            outside_facts.AITER_META_MARKER_DIR,
+            outside_facts.AITER_INSTALL_MODE_FILE,
+            outside_facts.AITER_DEVELOP_MODE,
+        )
+    ]
     flags = [spec.flag for spec in pack.entries["context_length_flags"].image_checks]
     assert tuple(flags) == outside_facts.CONTEXT_LENGTH_FLAGS
     layout = pack.entries["sglang_image_layout"].image_checks[0]

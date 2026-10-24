@@ -47,7 +47,7 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, MergeOutcome
-from hyperloom_multibranch.contracts.repo import RepoMerge, UnitedTable
+from hyperloom_multibranch.contracts.repo import ReplacedPatch, RepoMerge, ResolvedPatch, UnitedTable
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay
@@ -58,8 +58,12 @@ from hyperloom_multibranch.scheduling.decisions import DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS
 from hyperloom_multibranch.scheduling.integrator import (
     ALREADY_ON_HEAD,
+    CONFLICT_TRUNCATED,
     CONFLICT_UNRESOLVED,
     FOUNDATION_FIX_VERDICTS,
+    NO_PATCH,
+    PROMPT_VERSION,
+    RESOLVER_ATTEMPTS,
     RESOLVER_SYSTEM_PROMPT,
     RESOLVER_UNREACHED,
     SUPERSEDED,
@@ -69,7 +73,7 @@ from hyperloom_multibranch.scheduling.integrator import (
     MergeReport,
     not_stackable_reason,
 )
-from hyperloom_multibranch.contracts.llm import CompletionFailed
+from hyperloom_multibranch.contracts.llm import STOPPED_AT_MAX_TOKENS, CompletionFailed
 from hyperloom_multibranch.rulegate import agentx
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request
@@ -102,6 +106,7 @@ CANDIDATE_TEXT = _patch_text("x.py", "old", "candidate")
 CONFLICTING_TEXT = _patch_text("x.py", "old", "second")
 RESOLVED_TEXT = _patch_text("x.py", "candidate", "resolved")
 REFUSAL = "the base image moved"
+RESOLVER_MODEL = "resolver-model"
 GAINS = {"c1": 4.0, "c2": 2.0}
 ARGS = {"c1": "--max-num-seqs 256", "c2": "--max-num-seqs 128"}
 #: ``c1`` merged onto the root gains 3%, ``c2`` 2%, and ``c2`` onto a head holding ``c1`` gains another 1.9%.
@@ -286,7 +291,7 @@ async def _bench(
     await gate.establish_baseline(root, [await tests.submit(baseline) for _ in range(BASELINE_TESTS)])
     completion = ScriptedCompletion()
     decisions = tmp_path / "MB-decisions.jsonl"
-    resolver = LlmPatchResolver(completion, repo)
+    resolver = LlmPatchResolver(completion, repo, RESOLVER_MODEL)
     records = MergeRecords(merger, DecisionLog(decisions, Clock(now=clock)))
     regression = FakeRegressionCheck()
     integrator = Integrator(records, repo, SessionChecks(tests, gate, regression), resolver, Clock(clock, _poll))
@@ -691,8 +696,9 @@ async def test_a_commit_made_during_a_round_takes_the_slot_the_round_had_nothing
     assert {report.outcome for report in reports} == {MergeOutcome.MERGED, MergeOutcome.PENDING}
 
 
-async def _committed_elsewhere(bench: Bench, delta: RecipeDelta, gain: float) -> str:
-    """A commit of a new branch ``s2`` on the root, that the gate judged ``gain`` and committed."""
+async def _committed_elsewhere(bench: Bench, delta: RecipeDelta, gain: float, *, foundation: bool = False) -> str:
+    """A commit of a new branch ``s2`` on the root, that the gate judged ``gain``, a foundation fix with
+    ``foundation``, and committed."""
 
     scheduler, toolbox, gate = (bench.handle(role) for role in (Role.SCHEDULER, Role.TOOLBOX, Role.GATE))
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s2", from_commit=bench.root, reason="refill"))
@@ -701,7 +707,8 @@ async def _committed_elsewhere(bench: Bench, delta: RecipeDelta, gain: float) ->
     test = request("rd1", intent("s2", bench.root, mechanism="d1"), delta)
     await toolbox.write_request(test)
     await toolbox.write_result(result(test.request_id))
-    await gate.write_judgement(test.request_id, judgement(gain, (test.request_id,)), Conclusion.COMMITTED, commit)
+    judged = judgement(gain, (test.request_id,), foundation_fix=foundation)
+    await gate.write_judgement(test.request_id, judged, Conclusion.COMMITTED, commit)
     return commit
 
 
@@ -733,8 +740,8 @@ class UnitingRepo(GitExperimentRepo):
     """Reports every merge as uniting one kernel slot; a test double for the union a merge makes where a table's
     shapes can be keyed, which needs an aiter install this bench has none of."""
 
-    async def merge(self, candidate: str, onto: str) -> RepoMerge:
-        return replace(await super().merge(candidate, onto), united_tables=(UNITED,))
+    async def merge(self, candidate: str, onto: str, protected: frozenset[str] = frozenset()) -> RepoMerge:
+        return replace(await super().merge(candidate, onto, protected), united_tables=(UNITED,))
 
 
 async def test_a_merge_that_unites_two_kernel_tables_says_so_in_the_decision_log(tmp_path: Path) -> None:
@@ -813,6 +820,9 @@ async def test_a_patch_that_does_not_apply_on_the_head_is_rewritten_before_the_m
     head = await bench.repo.head(INTEGRATION_BRANCH)
     assert await bench.repo.patch_text(head, rewritten.path) == RESOLVED_TEXT
     assert rewritten in (await bench.repo.read_recipe(head)).component(COMPONENT).patches
+    conflicting = bench.deltas["c1"].components[0].add_patches[1]
+    written = ResolvedPatch(COMPONENT, conflicting.path, rewritten, RESOLVER_MODEL, PROMPT_VERSION, 1)
+    assert (await bench.handle(Role.OBSERVER).snapshot()).resolved_patches == (written,)
 
 
 @pytest.mark.parametrize(
@@ -823,28 +833,126 @@ async def test_a_patch_that_does_not_apply_on_the_head_is_rewritten_before_the_m
             ScriptedCompletion(error=CompletionFailed("patch_resolve call failed: ReadTimeout: ")),
             RESOLVER_UNREACHED,
         ),
+        (
+            ScriptedCompletion(fallback='{"patch": "diff --git a/vllm/x.py', stop_reason=STOPPED_AT_MAX_TOKENS),
+            CONFLICT_TRUNCATED,
+        ),
     ],
-    ids=["model-declines", "call-fails"],
+    ids=["model-declines", "call-fails", "answer-cut-off"],
 )
 async def test_an_unresolved_patch_conflict_is_skipped_and_recorded(
     tmp_path: Path, scripted: ScriptedCompletion, named: str
 ) -> None:
-    """A conflict the model declined and one it was never asked about are both skipped, under reasons that tell them
-    apart: a timed-out call says nothing about whether the two patches can be combined."""
+    """A conflict the model declined, one it was never asked about and one whose answer the output cap cut off are
+    all skipped, under reasons that tell them apart: a timed-out call or a cut-off answer says nothing about whether
+    the two patches can be combined, and none of them is asked again."""
 
     bench = await _bench(tmp_path, conflicting=True)
     bench.completion.fallback, bench.completion.error = scripted.fallback, scripted.error
+    bench.completion.stop_reason = scripted.stop_reason
 
     report = await _one(bench)
 
     assert report is not None and report.outcome is MergeOutcome.CONFLICT_SKIPPED
     assert report.reason.startswith(named) and report.request_id is None
+    assert len(bench.completion.calls) == 1
     conflicting = bench.deltas["c1"].components[0].add_patches[1]
     assert conflicting.path in report.reason
     assert await bench.outcome("c1") is MergeOutcome.CONFLICT_SKIPPED
     assert bench.merge_tests() == {}
     following = await _one(bench)
     assert following is not None and following.candidate == bench.commits["c2"]
+
+
+#: A patch of the line ``c1``'s patch rewrites as well, so that ``c1``'s patch replaces it where it may.
+HEAD_TEXT = _patch_text("x.py", "old", "head")
+
+
+async def _committed_head_patch(bench: Bench, *, foundation: bool) -> str:
+    """Branch ``s2``'s commit of :data:`HEAD_TEXT` on the root, judged +9% and so merged before ``c1``."""
+
+    patch = await bench.repo.store_patch(COMPONENT, HEAD_TEXT)
+    pinned = ComponentChange(COMPONENT, UPSTREAM_REF, UPSTREAM_REPO, add_patches=(patch,))
+    delta = RecipeDelta(config=ConfigDelta(server_args=f"{TAG_FLAG}head"), components=(pinned,))
+    return await _committed_elsewhere(bench, delta, 9.0, foundation=foundation)
+
+
+async def test_a_patch_a_foundation_fix_brought_is_never_replaced_by_a_later_merge(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, {frozenset({"head"}): {MAIN_POINT: 1040.0}}, tags=("c1",))
+    fix = await _committed_head_patch(bench, foundation=True)
+
+    merged, conflicted = await _one(bench), await _one(bench)
+
+    assert merged is not None and (merged.candidate, merged.outcome) == (fix, MergeOutcome.MERGED)
+    assert conflicted is not None and conflicted.candidate == bench.commits["c1"]
+    assert conflicted.outcome is MergeOutcome.CONFLICT_SKIPPED and conflicted.reason.startswith(CONFLICT_UNRESOLVED)
+    assert HEAD_TEXT in bench.completion.calls[0][1]
+    head = await bench.repo.read_recipe(await bench.repo.head(INTEGRATION_BRANCH))
+    [kept] = head.component(COMPONENT).patches
+    assert await bench.repo.patch_text(merged.merged_commit, kept.path) == HEAD_TEXT
+
+
+async def test_a_merge_that_takes_a_head_patch_out_says_so_in_its_reason_and_the_merge_log(tmp_path: Path) -> None:
+    curves = {frozenset({"head"}): {MAIN_POINT: 1040.0}, frozenset({"head", "c1"}): {MAIN_POINT: 1070.0}}
+    bench = await _bench(tmp_path, curves, tags=("c1",))
+    await _committed_head_patch(bench, foundation=False)
+
+    first, replacing = await _one(bench), await _one(bench)
+
+    assert first is not None and replacing is not None and replacing.candidate == bench.commits["c1"]
+    [taken] = (await bench.repo.read_recipe(str(first.merged_commit))).component(COMPONENT).patches
+    [by] = bench.deltas["c1"].components[0].add_patches
+    assert replacing.outcome is MergeOutcome.MERGED
+    assert replacing.replaced_patches == (ReplacedPatch(COMPONENT, (taken.path,), by),)
+    swap = f"took out the head's {COMPONENT} patch {taken.path} for the candidate's {by.path}"
+    assert replacing.reason == f"improved +2.88% on the integration head; {swap}"
+    assert (await bench.repo.read_recipe(str(replacing.merged_commit))).component(COMPONENT).patches == (by,)
+    logged = bench.logged()[-1]
+    assert logged["reason"] == replacing.reason
+    assert logged["detail"]["replaced_patches"] == [{"component": COMPONENT, "removed": [taken.path], "by": by.path}]
+    assert bench.logged()[0]["detail"]["replaced_patches"] == []
+
+
+#: A rewrite of the conflicting patch against a line no stack of the bench holds, so it applies nowhere.
+STRAY_TEXT = _patch_text("x.py", "stray", "resolved")
+
+
+async def test_a_rewrite_that_does_not_apply_is_an_unresolved_conflict_and_spends_no_merge_test(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, conflicting=True)
+    bench.completion.fallback = json.dumps({"patch": STRAY_TEXT})
+
+    report = await _one(bench)
+
+    assert report is not None and report.outcome is MergeOutcome.CONFLICT_SKIPPED and report.request_id is None
+    conflicting = bench.deltas["c1"].components[0].add_patches[1]
+    assert report.reason.startswith(CONFLICT_UNRESOLVED)
+    assert f"no rewrite of {conflicting.path} applied in {RESOLVER_ATTEMPTS} attempts, the last: " in report.reason
+    assert "does not apply" in report.reason
+    assert len(bench.completion.calls) == RESOLVER_ATTEMPTS
+    assert bench.merge_tests() == {}
+    assert await bench.outcome("c1") is MergeOutcome.CONFLICT_SKIPPED
+
+
+@pytest.mark.parametrize(
+    ("first", "quoted"),
+    [(json.dumps({"patch": STRAY_TEXT}), "does not apply"), ("no rewrite today", NO_PATCH)],
+    ids=["does-not-apply", "no-patch"],
+)
+async def test_a_rewrite_that_does_not_apply_is_asked_for_again_with_why(
+    tmp_path: Path, first: str, quoted: str
+) -> None:
+    bench = await _bench(tmp_path, conflicting=True)
+    bench.completion.replies = [first, json.dumps({"patch": RESOLVED_TEXT})]
+
+    report = await _one(bench)
+
+    assert report is not None and report.outcome is MergeOutcome.MERGED
+    [written] = (await bench.handle(Role.OBSERVER).snapshot()).resolved_patches
+    assert written.attempts == RESOLVER_ATTEMPTS
+    (_, asked), (_, again) = bench.completion.calls
+    assert again.startswith(asked)
+    feedback = again.removeprefix(asked)
+    assert feedback.startswith("\n\nYour last rewrite failed to apply: ") and quoted in feedback
 
 
 async def test_a_merge_the_recipe_contract_refuses_is_skipped_and_the_round_goes_on(tmp_path: Path) -> None:

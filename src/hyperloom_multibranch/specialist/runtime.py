@@ -17,8 +17,9 @@ reason in a notice, and a restart does not repeat it. A session that crashes is 
 ``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``, and a lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no
 session working in between: a loss takes the heartbeat timeout, so losses alone never fill the window. Whether the
 restart resumes the crashed conversation is the session's to decide; the notice only says which. A session that
-ends idle, its model finding nothing to test, is no crash: the branch gets one fresh session, briefed again at its head,
-and ``MAX_IDLE_SESSIONS`` idle sessions in a row end it, a session that submitted a test starting the count again. Then
+ends idle, its model finding nothing to test, is no crash: the branch gets one more session, which goes on with the
+idle conversation or starts fresh as the session decides, and ``MAX_IDLE_SESSIONS`` idle sessions in a row end it, a
+session that submitted a test starting the count again. Then
 the specialist gives up and the scheduler stops the branch, freeing its slot for a fresh branch with its own direction.
 A session that finished, a third-party agent that ended its run and whose last keep settled, ends its specialist the
 same way. Past any of these the branch keeps its judge, which settles what was already measured, and the scheduler stops
@@ -73,11 +74,11 @@ class SessionCrashed(RuntimeError):
 
 class SessionIdle(RuntimeError):
     """A run of a branch's specialist ended because its model kept finding nothing to test; ``tested`` says whether
-    the run submitted a test before it did."""
+    the run submitted a test before it did, ``resumable`` whether the next run goes on with its conversation."""
 
-    def __init__(self, message: str, *, tested: bool = False) -> None:
+    def __init__(self, message: str, *, tested: bool = False, resumable: bool = False) -> None:
         super().__init__(message)
-        self.tested = tested
+        self.tested, self.resumable = tested, resumable
 
 
 class SessionFinished(RuntimeError):
@@ -293,9 +294,7 @@ class SpecialistRuntime:
                 logger.info("the specialist of %s found nothing to test: %s", state.name, error)
                 idle = 0 if error.tested else idle + 1
                 if idle < MAX_IDLE_SESSIONS:
-                    await _notice(
-                        state, f"the specialist found nothing to test ({error}); the branch starts a fresh session"
-                    )
+                    await _notice(state, _idle_restarted(error))
                     continue
                 state.session, state.gave_up = None, True
                 record = await self._close_direction(state)
@@ -409,6 +408,11 @@ def _restarted(error: Exception) -> str:
     resumed = isinstance(error, SessionCrashed) and error.resumable
     how = "resuming its conversation" if resumed else "with a fresh session"
     return f"the specialist crashed ({error!r}) and is restarted on this branch, {how}"
+
+
+def _idle_restarted(error: SessionIdle) -> str:
+    how = "resumes its conversation" if error.resumable else "starts a fresh session"
+    return f"the specialist found nothing to test ({error}); the branch {how}"
 
 
 def _log_failure(task: asyncio.Task[None]) -> None:

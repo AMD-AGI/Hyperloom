@@ -12,7 +12,9 @@ the session's) and the startup brief, right after the role, then
 the branch, its head, K and the branch's latest memory, so a new session goes on where the last one stopped. A
 session whose turn ended is woken by :func:`wake_message`, with what its inbox and the runtime's notices brought, or
 by :func:`nudge_message` when nothing came and it has nothing running. A CLI restarted on its crashed conversation
-is told by :func:`resume_message` why it stopped, where its worktree stands and what arrived while it was down.
+is told by :func:`resume_message` why it stopped, where its worktree stands and what arrived while it was down; one
+that goes on with an idle session's conversation is told by :func:`idle_resume_message` what changed since its last
+turn, the integration head included.
 :func:`prompt_versions` names the text of all of them for the session's manifest fingerprint.
 """
 
@@ -84,6 +86,17 @@ _RESET = (
 )
 _ARRIVED = "While you were down, this arrived for your branch:\n{items}"
 _NOTHING_ARRIVED = "Nothing arrived for your branch while you were down."
+_IDLE_RESUMED = """\
+Your last session ended idle ({reason}); your branch goes on in this same conversation, with no fresh briefing.
+{worktree}
+{integration}
+{arrived}
+Act on what changed. If nothing did, read notebook_brief for your head and test the next source change in your \
+direction, or take another of the session's directions: sessions that end with nothing to test stop your branch."""
+_INTEGRATION_MOVED = "The integration head moved from {seen} to {now}; read notebook_brief for what it took in."
+_INTEGRATION_STILL = "The integration head is still {now}."
+_IDLE_ARRIVED = "Since your last turn ended, this arrived for your branch:\n{items}"
+_IDLE_NOTHING = "Nothing arrived for your branch since your last turn ended."
 _LAUNCH = (
     _REPAIR,
     _DIRECTION,
@@ -101,6 +114,11 @@ _LAUNCH = (
     _RESET,
     _ARRIVED,
     _NOTHING_ARRIVED,
+    _IDLE_RESUMED,
+    _INTEGRATION_MOVED,
+    _INTEGRATION_STILL,
+    _IDLE_ARRIVED,
+    _IDLE_NOTHING,
     str(RECENT_ENTRIES),
     str(ENTRY_CHARS),
     *DIRECTIONS,
@@ -150,14 +168,18 @@ upstream commit already, and you set them only when its reply carries a note say
 upstream_repo on a component your head already has, which the toolbox refuses as upstream_label_unsupported. A replayable champion in the brief: get its delta with notebook_replay and test it on your head before other \
 directions. A champion the brief lists as "already on your head, nothing to replay" is in your head already: build on \
 it, do not test it again. A lead under "Unfinished in this session" in the brief is a change another branch measured \
-but left unfinished: finish one in your direction the same way before starting a new idea.
+but left unfinished: finish one in your direction the same way before starting a new idea. Before you replay a \
+lead, check whether your head already carries its change (its patch's lines in your synced worktree, its settings \
+or table in a commit your branch log or the brief names): one already on your head is done, build on it.
 4. Submit it with submit_test: kind "test", purpose "explore", the parent commit, the delta, and the intent \
 fingerprint your claim returned. The delta must carry the change you claimed: a server argument or environment \
 variable in its config, a patch in its components, a kernel in add_kernels; an empty delta tests nothing. Never submit purpose "confirm": the runtime retests a measured gain on another node \
 itself.
-5. While your tests run, keep working: read the analysis and the server logs of finished tests, look for the next \
-bottleneck, prepare the next candidate. Every result reaches you: when nothing is left to do until one lands, end \
-your turn and it wakes you. For a short wait, wait_test returns the result as soon as it lands (test_result reads \
+5. After submit_test, keep working; do not end your turn because a test runs. While fewer than K of your tests run, \
+prepare and submit the next candidate the evidence supports. With all K running, read the analysis and the server \
+logs of finished tests, read the code on the top operator's path or profile it, and prepare the candidate for the \
+next free slot. End your turn only when nothing is left to read or prepare and every candidate the evidence \
+supports is running, K or fewer: every result wakes you. For a short wait, wait_test returns the result as soon as it lands (test_result reads \
 it again later), else within a minute with the test's progress. Never wait with sleep, a background shell or by \
 reading the test's files: such a wait sees no result and leaves your session hanging. poll_inbox lists what else \
 arrived, judgements and briefs. A tool reply can end with a block headed "New for your branch since your last call:": \
@@ -176,7 +198,9 @@ Your launch prompt names your branch's direction: work on it first. When the bri
 that operator within your direction: the scheduler opened your branch on it. When the first idea fails, profile and dig \
 deeper in it rather than switching to settings. Settings are a small space the settings branch sweeps; the larger \
 ceilings are in source: a patch, a fused or tuned kernel, or a port of an aiter or framework PR, on the operators the \
-profile ranks highest. That every setting near your direction was tried never means your direction is done. Never \
+profile ranks highest. That every setting near your direction was tried never means your direction is done. A \
+lesson, a learning or another branch's flat result closes nothing on a different head: what was flat on another \
+parent can gain on yours, so retest it on your current head before you call it closed. Never \
 end a turn to wait for a brief: one comes only when the session moves, and a branch that keeps finding nothing to \
 test is stopped. That no candidate clears the bar is a missing measurement, not a stop: profile your head, add a \
 one-time log line on the top operator's dispatch path, or break a flat result down, and write the hypothesis it \
@@ -185,7 +209,8 @@ can be done within the hour), record that before you move on: one branch-log ent
 and goes on with one JSON object with the keys direction (the name of the session's direction exactly as listed \
 below), head (your head commit), tried (the request ids of its \
 tests, at least one: a direction you have not tested is not done), why (no_ceiling_above_bar, \
-all_tested_or_claimed, blocked_by_tool or needs_capability), detail (one sentence) and reopen_if (what would make \
+all_tested_or_claimed, blocked_by_tool or needs_capability), detail (one sentence; for blocked_by_tool or \
+needs_capability, the path you tried: the file, the call and the error it gave) and reopen_if (what would make \
 it worth trying again). It is kept for the record and for later sessions and does not stop your branch. A kernel \
 inside aiter or the framework is not blocked_by_tool: fork it into your worktree. Then take another of the \
 session's directions, preferring one no running branch covers: \
@@ -224,7 +249,9 @@ verify keeps the output exact.
 (a Triton or gluon kernel, or a ctypes launch of an aiter .co code object); the image's aiter needs no rebuild. \
 Calling a different existing kernel, or calling one differently (accumulating a split-K GEMM into the residual \
 instead of a zeroed buffer, a fused variant aiter already ships), is a lever of its own. "Needs a C++ change" is \
-never a reason to give up on an operator.
+never a reason to give up on an operator. SGLang's C++/HIP kernels under python/sglang/kernels/jit/csrc are \
+framework source too: the server's first load recompiles a kernel whose own file you edited, with hipcc; a change \
+to a shared header alone is not seen, so touch the kernel file that includes it as well.
 - Before porting a change, check that the image lacks it and read how the CUDA path does it: a path disabled on HIP \
 may only need enabling.
 - Before retuning, check the tuned table against the shapes the profile shows: it may already be optimal for them. \
@@ -416,8 +443,8 @@ def wake_message(items: Sequence[InboxItem], notices: Sequence[BranchLogRecord])
 
 @dataclass(frozen=True)
 class Resume:
-    """Where a crashed CLI's conversation goes on: why it stopped, and the head its worktree is at, ``kept`` as the
-    CLI left it or reset to that head."""
+    """Where a crashed or idle CLI's conversation goes on: why it stopped, and the head its worktree is at, ``kept``
+    as the CLI left it or reset to that head."""
 
     reason: str
     head: str
@@ -430,6 +457,30 @@ def resume_message(resume: Resume, items: Sequence[InboxItem], notices: Sequence
     worktree = (_KEPT if resume.kept else _RESET).format(worktree=resume.worktree, head=resume.head)
     arrived = _ARRIVED.format(items=_arrivals(items, notices)) if items or notices else _NOTHING_ARRIVED
     return _RESUMED.format(reason=resume.reason, worktree=worktree, arrived=arrived)
+
+
+@dataclass(frozen=True)
+class IntegrationHeads:
+    """The integration head a conversation's last finished turn saw, and the one it goes on at."""
+
+    seen: str
+    now: str
+
+
+def idle_resume_message(
+    resume: Resume, integration: IntegrationHeads, items: Sequence[InboxItem], notices: Sequence[BranchLogRecord]
+) -> str:
+    """The first message of a CLI that goes on with the conversation of a session that ended idle: what changed since
+    its last turn, in place of a launch prompt."""
+    worktree = (_KEPT if resume.kept else _RESET).format(worktree=resume.worktree, head=resume.head)
+    moved = _INTEGRATION_MOVED if integration.seen != integration.now else _INTEGRATION_STILL
+    arrived = _IDLE_ARRIVED.format(items=_arrivals(items, notices)) if items or notices else _IDLE_NOTHING
+    return _IDLE_RESUMED.format(
+        reason=resume.reason,
+        worktree=worktree,
+        integration=moved.format(seen=integration.seen, now=integration.now),
+        arrived=arrived,
+    )
 
 
 def _arrivals(items: Sequence[InboxItem], notices: Sequence[BranchLogRecord]) -> str:
@@ -492,7 +543,9 @@ __all__ = [
     "ENTRY_CHARS",
     "RECENT_ENTRIES",
     "VERSION_HEX",
+    "IntegrationHeads",
     "Resume",
+    "idle_resume_message",
     "launch_prompt",
     "nudge_message",
     "prompt_versions",

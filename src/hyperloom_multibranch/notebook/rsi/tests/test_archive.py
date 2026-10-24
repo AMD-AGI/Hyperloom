@@ -14,7 +14,7 @@ import pytest
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, TestRecord
-from hyperloom_multibranch.contracts.notebook.vocab import CommitOrigin, LineageKind
+from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver, CommitOrigin, LineageKind
 from hyperloom_multibranch.notebook.rsi.archive import (
     ARCHIVE_ENV,
     ARCHIVED,
@@ -146,6 +146,30 @@ def test_a_tree_written_before_stop_reasons_and_directions_still_reads(snapshot:
 
     assert all(branch.stop_reason == "" and branch.directions == () for branch in older.branches)
     assert [branch.commits for branch in older.branches] == [branch.commits for branch in searched.branches]
+
+
+def test_each_branch_keeps_who_drove_it_and_a_tree_written_before_reads_as_all_specialist(
+    snapshot: NotebookSnapshot,
+) -> None:
+    lineage = snapshot.lineage
+    nodes = tuple(
+        dataclasses.replace(node, driver=BranchDriver.AUTONOMOUS) if node.branch == "s2" else node
+        for node in lineage.branches
+    )
+    driven = dataclasses.replace(snapshot, lineage=dataclasses.replace(lineage, branches=nodes))
+    searched = tree_from_snapshot(driven, METRIC)
+    document = tree_document(searched)
+    for stored in document["tree"]["branches"]:  # type: ignore[index]
+        del stored["driver"]
+
+    drivers = {branch.name: (branch.driver, branch.steered) for branch in searched.branches}
+    assert drivers == {
+        INTEGRATION_BRANCH: (BranchDriver.SPECIALIST, False),
+        "s1": (BranchDriver.SPECIALIST, True),
+        "s2": (BranchDriver.AUTONOMOUS, False),
+    }
+    assert tree_from_document(tree_document(searched)) == searched
+    assert all(branch.driver is BranchDriver.SPECIALIST for branch in tree_from_document(document).branches)
 
 
 @pytest.mark.parametrize(("merge_node", "environment"), [("node-1", SINGLE_HOST), ("node-2", "hosted")])

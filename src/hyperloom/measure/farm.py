@@ -8,6 +8,10 @@ directory an entry touches is real, its untouched files are symlinks, an ``upser
 absent. The image is never written. Whether the rebuilt copy is what the server imports is then checked with the same
 interpreter and the same path the server gets: a farm that exists but is not the first import location would measure
 the image's framework and call it the candidate's.
+
+A rebuilt aiter also has to be told where the image keeps the sources it imports ``csrc`` from and builds from, because
+aiter looks for them around its own location, which is now the farm: unless the server already inherits one, the farm
+sets ``AITER_META_DIR`` to the image's own meta directory, resolved the way aiter resolves it.
 """
 
 from __future__ import annotations
@@ -23,6 +27,14 @@ from typing import Any
 import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.outside_facts import (
+    AITER_DEVELOP_MODE,
+    AITER_INSTALL_MODE_FILE,
+    AITER_META_DIR_ENV,
+    AITER_META_MARKER_DIR,
+    AITER_META_WHEEL_DIR,
+)
+from hyperloom.measure.jit.key import AITER_PACKAGE
 from hyperloom.measure.spec import EnvEntry, EnvRoot
 from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
 
@@ -30,6 +42,8 @@ __all__ = [
     "Farm",
     "FarmError",
     "build_farm",
+    "image_aiter_meta",
+    "inherited_environment",
     "locate_package",
     "place_farm",
     "prepend_pythonpath",
@@ -54,11 +68,13 @@ class FarmError(Exception):
 
 @dataclass(frozen=True)
 class Farm:
-    """The directory to put first on ``PYTHONPATH`` and the packages rebuilt in it."""
+    """The directory to put first on ``PYTHONPATH``, the packages rebuilt in it and, when aiter is one of them and the
+    server inherits no meta directory of its own, the image's, which the server is told to read aiter's sources from."""
 
     site: Path
     packages: tuple[str, ...]
     roots: tuple[EnvRoot, ...] = ()
+    aiter_meta: Path | None = None
 
 
 def locate_package(import_name: str, python: str, cwd: Path) -> Path:
@@ -77,6 +93,29 @@ def locate_package(import_name: str, python: str, cwd: Path) -> Path:
     if done.returncode != 0 or not locations:
         raise FarmError(f"{python} cannot import {import_name}: {done.stderr.strip()[-300:]}")
     return Path(locations[0])
+
+
+def image_aiter_meta(package: Path) -> Path:
+    """The meta directory the image's own aiter reads ``csrc`` from, resolved as ``aiter/jit/core.py`` resolves it.
+
+    ``package`` is the aiter package directory the image's interpreter finds. A develop install (what the
+    ``install_mode`` file beside the package says, and what a missing file means) keeps ``csrc`` in the directory around
+    the package; a wheel install keeps it in the ``aiter_meta`` package beside it.
+    """
+    try:
+        develop = (package / AITER_INSTALL_MODE_FILE).read_text(encoding=_UTF8).strip() == AITER_DEVELOP_MODE
+    except FileNotFoundError:
+        develop = True
+    return package.parent if develop else package.parent / AITER_META_WHEEL_DIR
+
+
+def inherited_environment(
+    environ: Mapping[str, str], process_env: Mapping[str, str], unset_envs: Iterable[str]
+) -> dict[str, str]:
+    """What a server's process inherits before its YAML's variables: the runner's environment with the test's own
+    process variables over it, minus the ones the test unsets."""
+    unset = set(unset_envs)
+    return {name: value for name, value in {**environ, **process_env}.items() if name not in unset}
 
 
 def _touched_directories(entries: Iterable[EnvEntry]) -> set[str]:
@@ -121,23 +160,45 @@ def _build_root(root: EnvRoot, base: Path, target: Path, read_blob: Callable[[st
 
 
 def build_farm(
-    roots: Iterable[EnvRoot], farm_dir: Path, *, python: str, read_blob: Callable[[str], bytes]
+    roots: Iterable[EnvRoot],
+    farm_dir: Path,
+    *,
+    python: str,
+    read_blob: Callable[[str], bytes],
+    inherited: Mapping[str, str] | None = None,
 ) -> Farm | None:
     """Build ``farm_dir/site/<import_name>`` for every root; ``None`` when the sheet changes no framework.
 
-    ``read_blob`` returns the bytes of a ``sha256:<hex>`` address and raises when it is not there.
+    ``read_blob`` returns the bytes of a ``sha256:<hex>`` address and raises when it is not there. ``inherited`` is what the
+    server's process inherits (:func:`inherited_environment`), this process's environment when not given: a rebuilt aiter
+    is told the image's meta directory only when it names none.
     """
     site = farm_dir / "site"
+    server_has = os.environ if inherited is None else inherited
     built = []
     rebuilt = []
+    meta = None
     for root in roots:
         if root.kind != "package":
             raise FarmError(f"{root.id}: a runtime root is not supported by this runner yet")
         base = locate_package(root.import_name, python, farm_dir.parent)
         _build_root(root, base, site / root.import_name, read_blob)
+        if root.import_name == AITER_PACKAGE and not server_has.get(AITER_META_DIR_ENV):
+            meta = _checked_aiter_meta(root, base)
         built.append(root.import_name)
         rebuilt.append(root)
-    return Farm(site, tuple(built), tuple(rebuilt)) if built else None
+    return Farm(site, tuple(built), tuple(rebuilt), meta) if built else None
+
+
+def _checked_aiter_meta(root: EnvRoot, base: Path) -> Path:
+    meta = image_aiter_meta(base)
+    if not (meta / AITER_META_MARKER_DIR).is_dir():
+        raise FarmError(
+            f"{root.id}: the installed {root.import_name} at {base} keeps no {AITER_META_MARKER_DIR} directory in {meta}, "
+            f"so a rebuilt copy of it could not be told where to read its sources from ({AITER_META_DIR_ENV}) and would "
+            f"not import"
+        )
+    return meta
 
 
 def prepend_pythonpath(envs: MutableMapping[str, Any], site: Path) -> None:
@@ -182,26 +243,47 @@ def server_python(config: Mapping[str, Any], *, default: str) -> str:
     return named_python(config) or (_AGENTX_DEFAULT_PYTHON if agentx else default)
 
 
+def _loaded(config_path: Path) -> dict[str, Any]:
+    return yaml.safe_load(config_path.read_text(encoding=_UTF8)) or {}
+
+
+def _launch_environment(config: dict[str, Any]) -> dict[str, Any]:
+    """The mapping the server of ``config`` takes its variables from, created when it has none: what :func:`server_environment`
+    reads, for a caller that writes."""
+    bench = config.setdefault("benchmark", {})
+    if is_magpie_agentx(bench):
+        return bench["agentx"].setdefault("launch_overrides", {}).setdefault("env", {})
+    return bench.setdefault("envs", {})
+
+
 def place_farm(config_path: Path, farm: Farm) -> Mapping[str, Any]:
     """Put the farm first on the import path of the server ``config_path`` launches; return the variables it gets.
 
     An AgentX server's variables and interpreter are the launch's, so the farm goes where the single-lineage flow puts
     an overlay: ``apply_native_runtime`` writes it into ``launch_overrides.env`` and binds the rebuilt files as source
     evidence, and an interpreter the YAML names becomes the launch executable.
+
+    A farm that pins the image's aiter meta directory sets ``AITER_META_DIR`` to it, unless the YAML already names one:
+    the rebuilt aiter sits in the farm, where it finds no ``csrc`` around it.
     """
-    config = yaml.safe_load(config_path.read_text(encoding=_UTF8)) or {}
-    if is_magpie_agentx(config.get("benchmark") or {}):
+    config = _loaded(config_path)
+    agentx = is_magpie_agentx(config.get("benchmark") or {})
+    if agentx:
         python = named_python(config)
         apply_native_runtime(config_path, {"runtime_python_exe": python} if python else {}, str(farm.site))
-        return server_environment(yaml.safe_load(config_path.read_text(encoding=_UTF8)))
-    envs = config.setdefault("benchmark", {}).setdefault("envs", {})
-    prepend_pythonpath(envs, farm.site)
+        config = _loaded(config_path)
+    envs = _launch_environment(config)
+    if not agentx:
+        prepend_pythonpath(envs, farm.site)
+    if farm.aiter_meta is not None:
+        envs.setdefault(AITER_META_DIR_ENV, str(farm.aiter_meta))
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
     return envs
 
 
 def verify_farm(farm: Farm, envs: Mapping[str, Any], *, python: str, cwd: Path) -> None:
-    """Check that ``python``, given this YAML's ``PYTHONPATH``, finds every rebuilt package in the farm first."""
+    """Check that ``python``, given this YAML's variables, finds every rebuilt package in the farm first, and that a
+    rebuilt aiter is told a meta directory that holds ``csrc``."""
     environment = {**os.environ, "PYTHONPATH": str(envs.get("PYTHONPATH") or "")}
     for name in farm.packages:
         done = subprocess.run(
@@ -216,3 +298,19 @@ def verify_farm(farm: Farm, envs: Mapping[str, Any], *, python: str, cwd: Path) 
         expected = str(farm.site / name)
         if done.returncode != 0 or not found or found[0] != expected:
             raise FarmError(f"{name} would be imported from {found[:1] or done.stderr.strip()[-200:]}, not {expected}")
+    if AITER_PACKAGE in farm.packages:
+        _verify_aiter_meta(farm, envs)
+
+
+def _verify_aiter_meta(farm: Farm, envs: Mapping[str, Any]) -> None:
+    """A meta directory the farm pins or the YAML names must hold ``csrc``: aiter ignores one that does not and falls back
+    to the directory around the farm, which has none. A value the server inherits is its own and is not looked at."""
+    named = envs.get(AITER_META_DIR_ENV)
+    if named is None and farm.aiter_meta is None:
+        return
+    value = str(named or "")
+    if not value or not (Path(value) / AITER_META_MARKER_DIR).is_dir():
+        raise FarmError(
+            f"the rebuilt aiter would be told {AITER_META_DIR_ENV}={value!r}, which holds no {AITER_META_MARKER_DIR}: "
+            f"it would not find its sources and would not import"
+        )

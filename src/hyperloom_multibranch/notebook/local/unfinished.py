@@ -16,20 +16,30 @@
 A lead drops out once its direction or its change is tested again on any branch, its own confirm aside, or a branch
 holds a claim on it, so two later branches do not chase the same one: a replay claims an intent of its own, but tests
 the lead's change, with its delta or, made with ``notebook_replay``, with one made for its own head and an intent
-naming the lead. A commit drops out once the integrator offers it again. The leads
+naming the lead. It drops out of the brief of a start commit too once a replay of it was claimed on that commit or one
+it builds on and released with no test (:func:`refused_replays`): the change could not be made for that head, the
+toolbox refusing it or the change no longer applying. In session 4aef3318 one lead was claimed and released that way
+23 times on 20 branches. A commit drops out once the integrator offers it again. The leads
 come in that order, unstackable commits and near misses by gain, unfinished repairs and withdrawn explores newest
 first, one for each direction and each change, at most :data:`MAX_UNFINISHED` of them.
 """
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.notebook.peers import Purpose, TestKind
-from hyperloom_multibranch.contracts.notebook.records import REPLAY_TARGET, LineageView, TestRecord, UnfinishedLead
+from hyperloom_multibranch.contracts.notebook.records import (
+    REPLAY_TARGET,
+    Claim,
+    LineageView,
+    TestRecord,
+    UnfinishedLead,
+)
 from hyperloom_multibranch.contracts.notebook.vocab import (
     INTEGRATION_BRANCH,
+    ClaimStatus,
     Conclusion,
     MergeOutcome,
     UnfinishedReason,
@@ -41,6 +51,8 @@ from hyperloom_multibranch.notebook.local.views import committed
 #: How far short of its bar a measured explore may fall and still be worth finishing, in points.
 NEAR_BAR_PCT = 0.5
 MAX_UNFINISHED = 8
+#: How soon after its branch stopped a claim's release is the stop's, not the answer of a replay that could not be made.
+STOP_RELEASE_SECONDS = 60.0
 _REPAIRING = frozenset({Conclusion.DIAGNOSIS_PENDING, Conclusion.REPAIR_REQUESTED})
 _NO_CHANGE = RecipeDelta().fingerprint()
 
@@ -166,13 +178,42 @@ def _by_gain(leads: Sequence[UnfinishedLead]) -> list[UnfinishedLead]:
     return sorted(leads, key=lambda lead: -(lead.gain_pct or 0.0))
 
 
-def unfinished_leads(state: NotebookState, view: LineageView, held: Collection[str] = ()) -> tuple[UnfinishedLead, ...]:
-    """The session's unfinished leads, in the module's order; ``held`` are the intent fingerprints branches claim."""
+def refused_replays(claims: Iterable[Claim], view: LineageView, start_commit: str) -> frozenset[str]:
+    """The leads whose replay was claimed on ``start_commit`` or a commit it builds on and released with no test, by
+    request id; a release its branch's stop made is left out, since it says nothing of the replay."""
+
+    builds_on = set(view.ancestry(start_commit))
+    stopped = {node.branch: node.stopped_at for node in view.branches if node.stopped_at is not None}
+    return frozenset(
+        claim.intent.mechanism
+        for claim in claims
+        if claim.intent.target == REPLAY_TARGET
+        and claim.status is ClaimStatus.RELEASED
+        and claim.request_id is None
+        and claim.key.parent_commit in builds_on
+        and not _released_by_its_stop(claim, stopped)
+    )
+
+
+def _released_by_its_stop(claim: Claim, stopped: Mapping[str, float]) -> bool:
+    at = stopped.get(claim.holder)
+    return at is not None and 0.0 <= claim.heartbeat_at - at <= STOP_RELEASE_SECONDS
+
+
+def unfinished_leads(
+    state: NotebookState, view: LineageView, held: Collection[str] = (), refused: Collection[str] = ()
+) -> tuple[UnfinishedLead, ...]:
+    """The session's unfinished leads, in the module's order; ``held`` are the intent fingerprints branches claim, and
+    ``refused`` the leads :func:`refused_replays` found for the brief's start commit."""
 
     records = state.records()
     replayed = _replayed(state, records)
     newest = sorted(records, key=lambda item: -item.requested_at)
-    untaken = {record.request_id for record in records if not _taken_up(record, records, held, replayed)}
+    untaken = {
+        record.request_id
+        for record in records
+        if record.request_id not in refused and not _taken_up(record, records, held, replayed)
+    }
     explores = [record for record in newest if _explore(record) and record.request_id in untaken]
     near = [
         _lead(state, record, UnfinishedReason.NEAR_BAR, f"bar {record.judgement.threshold_pct:.2f}%")
@@ -215,4 +256,4 @@ def _distinct(
     return kept
 
 
-__all__ = ["MAX_UNFINISHED", "NEAR_BAR_PCT", "unfinished_leads"]
+__all__ = ["MAX_UNFINISHED", "NEAR_BAR_PCT", "STOP_RELEASE_SECONDS", "refused_replays", "unfinished_leads"]

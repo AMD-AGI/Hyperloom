@@ -8,7 +8,8 @@ and did not find, or lists shapes itself (``shapes``); the test also says which 
 shapes are for. The tool runs the tuner Forge has for each table (``kernelforge gemm-tune run``, through
 ``hyperloom.orchestrator.kernel.forge_gemm_tuning.build_command``, the command the single-lineage flow runs) with those
 shapes as its demand, on one card, and answers with the tuned rows of each table as a rows-only CSV that
-``put_kernel_artifact(rows_only=true)`` takes (:mod:`.tune_rows`), each row checked against the reference GEMM.
+``put_kernel_artifact(rows_only=true)`` takes (:mod:`.tune_rows`), each row checked against the reference GEMM (an asm row
+at a splitK above 1, by its relative-norm error when its mismatch ratio is above the limit).
 
 The tuner is pinned to the aiter the tests' servers run: ``AITER_ROOT_DIR`` of its process is the root of the aiter install
 whose ``configs`` the tool reads the tables' shape keys from (``serving_aiter_root``), and the job's result says so
@@ -20,11 +21,19 @@ The card is a lease from the pool the measurements and the branches' sandboxes t
 would leave fewer cards than one test needs is refused (``lease_leaves_no_measurement``), so a tool job never starves
 measurement. The microseconds in the rows are the tuner's micro-benchmark: advice for the specialist, never an input of
 the gate. A test of the rows is what says whether they help.
+
+Three things a call may ask beyond the shapes. ``retune`` tunes the shapes the tables already serve (the server log's hit
+lines) when it reports no miss. The decode CUDA-graph batch sizes the test's servers captured are added to the demand as
+M, since a decode step replays a graph of exactly one of them (what Forge does with those M is its own: it rounds the M of
+a demand up to a power of two). ``max_err_ratio`` (up to 0.05, default 0.01) also returns the rows with a mismatch ratio
+above the default and within it, in a CSV of their own (``rows_csv_relaxed``), never in ``rows_csv``: whether they stand
+is the specialist's explicit choice, and only an end-to-end accuracy check decides it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -33,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import GPU_MASK_ENV_NAMES, is_secret_shaped_env_name, scrub_benchmark_process_env
-from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
+from hyperloom.common.outside_facts import AITER_META_MARKER_DIR, AITER_META_WHEEL_DIR, ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
 from hyperloom.orchestrator.actions.executors import COOPERATIVE_REAP_BUDGET_SEC, run_with_session_kill
 from hyperloom.orchestrator.kernel import forge_gemm_tuning
@@ -49,7 +58,7 @@ from hyperloom_multibranch.toolbox.tools.tune_inputs import (
     served_workload,
     write_demand_of,
 )
-from hyperloom_multibranch.toolbox.tools.tune_rows import ERR_RATIO_LIMIT
+from hyperloom_multibranch.toolbox.tools.tune_rows import ERR_RATIO_LIMIT, MAX_ERR_RATIO_LIMIT, REL_NORM_ERR_LIMIT
 from hyperloom_multibranch.toolbox.tools.tune_tables import (
     TableStatus,
     TuneTable,
@@ -64,7 +73,9 @@ __all__ = [
     "HOLDER_PREFIX",
     "KERNEL_TUNE_TOOL",
     "LANDED_PARAM",
+    "MAX_ERR_RATIO_PARAM",
     "MAX_TIMEOUT_SEC",
+    "RETUNE_PARAM",
     "SHAPES_PARAM",
     "TEST_PARAM",
     "TIMEOUT_PARAM",
@@ -79,6 +90,9 @@ KERNEL_TUNE_TOOL = "kernel_tune"
 TEST_PARAM = "test_request_id"
 SHAPES_PARAM = "shapes"
 TIMEOUT_PARAM = "timeout_sec"
+#: The mismatch ratio a call allows beyond the default, and whether it asks for the shapes the tables serve.
+MAX_ERR_RATIO_PARAM = "max_err_ratio"
+RETUNE_PARAM = "retune"
 #: What the server adds: the landed output directory of the test, resolved inside the session; never the caller's.
 LANDED_PARAM = "landed_dir"
 #: A lease of a tool job names its holder ``tool:<job id>``, which no branch id is.
@@ -91,9 +105,8 @@ MAX_SHAPES = 64
 #: What the subprocess is given beyond the budget Forge keeps itself to, to write its report.
 _GRACE_SEC = 300
 _CARDS = 1
-#: The variable Forge reads the aiter it tunes against from, and where an aiter install keeps its tuner scripts.
+#: The variable Forge reads the aiter it tunes against from.
 _AITER_ROOT_ENV = "AITER_ROOT_DIR"
-_AITER_SOURCE_DIR = "csrc"
 _CANCEL_REASON = "kernel_tune_cancelled"
 _SHAPE_NAMES = frozenset({"env", "M", "N", "K", "dtype", "otype", "bias", "scaleAB", "bpreshuffle"})
 _ADVICE = (
@@ -104,13 +117,25 @@ _ADVICE = (
 _VERIFICATION = (
     "Every row was compared by aiter's tuner with a reference GEMM of its shape, element by element within aiter's "
     "tolerance (rtol and atol of 1e-2 unless the tuner sets its own), and the mismatch fraction recorded; "
-    f"a row is handed over only with a finite mismatch ratio of at most {ERR_RATIO_LIMIT:g}. Rows that failed or could "
-    "not be checked are listed as rejected with verified=false and the reason, and are not in rows_csv."
+    f"a row is handed over only with a finite mismatch ratio of at most {ERR_RATIO_LIMIT:g}, or, for an asm kernel at "
+    "a splitK above 1 (whose bf16 accumulation moves that ratio while the output stays accurate), a relative-norm "
+    f"error of at most {REL_NORM_ERR_LIMIT:g} that Forge measured (verified_rows say which check decided each row: "
+    "check). Rows that failed or could not be checked are listed as rejected with verified=false and the reason, "
+    "and are not in rows_csv."
+)
+_RELAXED = (
+    f" This call allowed a mismatch ratio up to {{limit:g}}: the rows above {ERR_RATIO_LIMIT:g} and within it that the "
+    "default check removed are in each table's rows_csv_relaxed (listed in relaxed_rows, each verified=false with its "
+    "err_ratio and the reason err_ratio_above_default). They are not checked rows and are never in rows_csv. Putting "
+    "them is your explicit choice, and only an end-to-end accuracy check (GSM8K, and the long-context check for "
+    "attention or KV paths) says whether they stand."
 )
 
 
 def _unknown(params: Mapping[str, Any]) -> list[str]:
-    return sorted(set(params) - {TEST_PARAM, SHAPES_PARAM, TIMEOUT_PARAM, LANDED_PARAM})
+    return sorted(
+        set(params) - {TEST_PARAM, SHAPES_PARAM, TIMEOUT_PARAM, MAX_ERR_RATIO_PARAM, RETUNE_PARAM, LANDED_PARAM}
+    )
 
 
 def _shape_problem(shape: Any) -> str | None:
@@ -131,10 +156,14 @@ def check_params(params: Mapping[str, Any]) -> None:
     """Refuse the caller's parameters that no run can use; raises :class:`InvalidRequest`.
 
     ``shapes`` is a list of objects, each naming ``env`` (the variable of a dense aiter GEMM table), ``M``, ``N``, ``K``
-    and, for a table keyed on more, its dtype and flag columns.
+    and, for a table keyed on more, its dtype and flag columns. ``max_err_ratio`` is a mismatch ratio from the default
+    (0.01) to aiter's own filter (0.05), ``retune`` a boolean that does not go with ``shapes`` (those are tuned as named).
     """
     if unknown := _unknown(params):
-        raise InvalidRequest(f"kernel_tune takes {TEST_PARAM}, {SHAPES_PARAM} and {TIMEOUT_PARAM}, not {unknown}")
+        raise InvalidRequest(
+            f"kernel_tune takes {TEST_PARAM}, {SHAPES_PARAM}, {TIMEOUT_PARAM}, {MAX_ERR_RATIO_PARAM} and "
+            f"{RETUNE_PARAM}, not {unknown}"
+        )
     shapes = params.get(SHAPES_PARAM)
     if shapes is not None:
         if not isinstance(shapes, Sequence) or isinstance(shapes, str) or not 0 < len(shapes) <= MAX_SHAPES:
@@ -145,6 +174,23 @@ def check_params(params: Mapping[str, Any]) -> None:
     timeout = params.get(TIMEOUT_PARAM, DEFAULT_TIMEOUT_SEC)
     if not isinstance(timeout, int) or isinstance(timeout, bool) or not MIN_TUNER_SEC <= timeout <= MAX_TIMEOUT_SEC:
         raise InvalidRequest(f"{TIMEOUT_PARAM} is whole seconds from {MIN_TUNER_SEC} to {MAX_TIMEOUT_SEC}")
+    ratio = params.get(MAX_ERR_RATIO_PARAM, ERR_RATIO_LIMIT)
+    if not _is_ratio(ratio) or not ERR_RATIO_LIMIT <= ratio <= MAX_ERR_RATIO_LIMIT:
+        raise InvalidRequest(
+            f"{MAX_ERR_RATIO_PARAM} is a mismatch ratio from {ERR_RATIO_LIMIT:g} (the default) to {MAX_ERR_RATIO_LIMIT:g}"
+        )
+    retune = params.get(RETUNE_PARAM, False)
+    if not isinstance(retune, bool):
+        raise InvalidRequest(f"{RETUNE_PARAM} is true or false")
+    if retune and shapes is not None:
+        raise InvalidRequest(
+            f"{RETUNE_PARAM} tunes the shapes the test's tables served; the {SHAPES_PARAM} you name are tuned as named, "
+            "covered by a table or not, so give one or the other"
+        )
+
+
+def _is_ratio(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 @dataclass(frozen=True)
@@ -156,13 +202,25 @@ class _Plan:
     demands: tuple[Mapping[str, Any], ...]
     source: str
     aiter_root: Path
+    max_err_ratio: float
+    #: What was added to the demand beyond the shapes (``demand_notes``), and the mismatch ratio the call allowed.
+    notes: Mapping[str, Any]
 
 
-def _plan(landed: Path, shapes: Sequence[Mapping[str, Any]], configs: Path) -> _Plan:
+def _plan(landed: Path, params: Mapping[str, Any], configs: Path) -> _Plan:
+    shapes = params.get(SHAPES_PARAM) or ()
     aiter_root = serving_aiter_root(configs)
     workload = served_workload(landed)
-    demand = explicit_demand(shapes) if shapes else demand_from_logs(landed)
-    return _Plan(workload, tuple(demand["demands"]), "shapes" if shapes else "server_log", aiter_root)
+    retune = params.get(RETUNE_PARAM, False)
+    demand = explicit_demand(shapes) if shapes else demand_from_logs(landed, retune=retune, conc=workload.conc)
+    notes = {
+        "retune": retune,
+        "served_keys": demand.get("served_keys", 0),
+        "served_lines_unread": demand.get("served_lines_unread", 0),
+        "cuda_graph_batch_sizes": demand.get("cuda_graph_batch_sizes", []),
+    }
+    ratio = float(params.get(MAX_ERR_RATIO_PARAM, ERR_RATIO_LIMIT))
+    return _Plan(workload, tuple(demand["demands"]), "shapes" if shapes else "server_log", aiter_root, ratio, notes)
 
 
 def serving_aiter_root(configs: Path) -> Path:
@@ -177,12 +235,12 @@ def serving_aiter_root(configs: Path) -> Path:
     """
     package = Path(os.path.abspath(configs)).parent
     if configs.name == "configs" and configs.is_dir() and (package / "jit" / "core.py").is_file():
-        for root in (package.parent, package.parent / "aiter_meta"):
-            if (root / _AITER_SOURCE_DIR).is_dir():
+        for root in (package.parent, package.parent / AITER_META_WHEEL_DIR):
+            if (root / AITER_META_MARKER_DIR).is_dir():
                 return root
     raise ToolFailure(
         f"the aiter the tests' servers run cannot be found from {str(configs)!r}: it is not the aiter/configs of an "
-        f"install with aiter/jit/core.py beside it and {_AITER_SOURCE_DIR} around it, so the tuner cannot be pinned to "
+        f"install with aiter/jit/core.py beside it and {AITER_META_MARKER_DIR} around it, so the tuner cannot be pinned to "
         f"it ({_AITER_ROOT_ENV}) and is not run against whatever aiter it finds"
     )
 
@@ -242,7 +300,7 @@ class KernelTuneTool:
 
     async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
         params = request.params
-        plan = await asyncio.to_thread(_plan, Path(params[LANDED_PARAM]), params.get(SHAPES_PARAM) or (), self._configs)
+        plan = await asyncio.to_thread(_plan, Path(params[LANDED_PARAM]), params, self._configs)
         lease = await self._lease(workdir)
         try:
             tables = await self._tune_all(plan, lease, workdir, int(params.get(TIMEOUT_PARAM, DEFAULT_TIMEOUT_SEC)))
@@ -296,7 +354,7 @@ class KernelTuneTool:
             done = await _forge(cmd, _tuner_env(cards, plan.aiter_root), budget + _GRACE_SEC)
         except subprocess.TimeoutExpired:
             return failed(demand, f"the tuner did not end within {budget + _GRACE_SEC} s and was stopped")
-        return read_run(demand, out, done, self._configs)
+        return read_run(demand, out, done, self._configs, plan.max_err_ratio)
 
 
 def _output(plan: _Plan, lease: BranchLease, tables: list[TuneTable], test_request_id: str) -> ToolOutput:
@@ -312,8 +370,11 @@ def _output(plan: _Plan, lease: BranchLease, tables: list[TuneTable], test_reque
         },
         "cards": list(lease.gpu_ids),
         "aiter": {"pinned": True, "root_dir": str(plan.aiter_root)},
+        "demand": plan.notes,
+        "max_err_ratio": plan.max_err_ratio,
         "tables": [table.document() for table in tables],
-        "verification": _VERIFICATION,
+        "verification": _VERIFICATION
+        + (_RELAXED.format(limit=plan.max_err_ratio) if plan.max_err_ratio > ERR_RATIO_LIMIT else ""),
         "advice": _ADVICE,
     }
     ok = any(table.status in (TableStatus.TUNED, TableStatus.NO_ROWS) for table in tables)

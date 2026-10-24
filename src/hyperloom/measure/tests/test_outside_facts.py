@@ -35,6 +35,13 @@ from hyperloom.measure import aiter_merge_hook
 _NOT_SCANNED = frozenset(
     {
         "HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE",
+        "KFD_NODES",
+        "KFD_NODE_GPU_ID",
+        "KFD_PROCESSES",
+        "KFD_QUEUES",
+        "KFD_QUEUE_GPU_ID",
+        "KFD_VRAM_PREFIX",
+        "PID_NAMESPACE_LINK",
         "AIPERF_ERROR_CLASS_KEY",
         "AIPERF_ERROR_KEY",
         "AIPERF_METADATA_KEY",
@@ -130,12 +137,12 @@ _PROBE = textwrap.dedent(
 
     from hyperloom.common import env_safety, failure_signature, visible_devices
     from hyperloom.measure import compile as compiled
-    from hyperloom.measure import agentx_requests, eval_context, hosted_spec, local, log_causes, points, surface
+    from hyperloom.measure import agentx_requests, eval_context, farm, hosted_spec, local, log_causes, points, surface
     from hyperloom.measure.framework import base as framework_base
     from hyperloom.measure.runner import run
-    from hyperloom.sandbox import templates
+    from hyperloom.sandbox import card_occupancy, templates
     from hyperloom_multibranch.toolbox import acceptance, hosted_executor, mcp_tools
-    from hyperloom_multibranch.toolbox.tools import tracelens_report
+    from hyperloom_multibranch.toolbox.tools import kernel_tune, tracelens_report, tune_rows
 
     out = {
         "signature": [pattern.pattern for rule in failure_signature._RULES for pattern in rule.patterns],
@@ -156,6 +163,32 @@ _PROBE = textwrap.dedent(
         "concurrency": hosted_executor._concurrency_in("benchmark: {envs: {ENV_CONC: 7}}"),
         "visible": run._visible({"ROCR_VISIBLE_DEVICES_ENV": "0,2"}),
         "export": list(agentx_requests._EXPORT_PATTERNS),
+        "kfd": [
+            str(card_occupancy.KFD_PATH),
+            card_occupancy.KFD_PROCESSES,
+            card_occupancy.KFD_NODES,
+            card_occupancy.KFD_NODE_GPU_ID,
+            card_occupancy.KFD_QUEUES,
+            card_occupancy.KFD_QUEUE_GPU_ID,
+            card_occupancy.KFD_VRAM_PREFIX,
+            card_occupancy.PID_NAMESPACE_LINK,
+            card_occupancy.INITIAL_PID_NAMESPACE,
+        ],
+        "meta": [
+            farm.AITER_META_DIR_ENV,
+            farm.AITER_META_MARKER_DIR,
+            farm.AITER_META_WHEEL_DIR,
+            farm.AITER_INSTALL_MODE_FILE,
+            farm.AITER_DEVELOP_MODE,
+        ],
+        "tuner": kernel_tune.AITER_META_MARKER_DIR,
+        "relnorm": tune_rows._rel_norm(
+            {
+                "TUNED_LIBTYPE_COLUMN": "ASM_LIBTYPE",
+                "TUNED_SPLITK_COLUMN": "6",
+                "FORGE_REL_NORM_ERR_COLUMN": "0.005",
+            }
+        ),
     }
     print(json.dumps(out))
     """
@@ -249,12 +282,46 @@ def test_rocr_mask_name_is_read_from_the_owner(probe: dict[str, Any]) -> None:
     assert probe["visible"] == [0, 2]
 
 
+def test_the_kernels_process_list_is_read_where_the_owner_says_it_is(probe: dict[str, Any]) -> None:
+    """The card-occupancy probe finds the GPU processes by the owner's names and tells its namespace by the owner's link."""
+    assert probe["kfd"] == [
+        "KFD_ROOT",
+        "KFD_PROCESSES",
+        "KFD_NODES",
+        "KFD_NODE_GPU_ID",
+        "KFD_QUEUES",
+        "KFD_QUEUE_GPU_ID",
+        "KFD_VRAM_PREFIX",
+        "PID_NAMESPACE_LINK",
+        "INITIAL_PID_NAMESPACE",
+    ]
+
+
 def test_aiperf_export_names_are_read_from_the_owner(probe: dict[str, Any]) -> None:
     """The per-request export of an AgentX round is looked for where the owner says the replay client writes it."""
     assert probe["export"] == [
         "AIPERF_EXPORT_DIR/AIPERF_EXPORT_FILE",
         "*/AIPERF_EXPORT_DIR/AIPERF_EXPORT_FILE",
     ]
+
+
+def test_aiter_meta_directory_names_are_read_from_the_owner(probe: dict[str, Any]) -> None:
+    """The farm names the variable, the directories and the install mode it resolves, and the tuner's refusal the marker."""
+    assert probe["meta"] == [
+        "AITER_META_DIR_ENV",
+        "AITER_META_MARKER_DIR",
+        "AITER_META_WHEEL_DIR",
+        "AITER_INSTALL_MODE_FILE",
+        "AITER_DEVELOP_MODE",
+    ]
+    assert probe["tuner"] == "AITER_META_MARKER_DIR"
+
+
+def test_the_columns_that_pick_out_the_rows_judged_by_their_relative_norm_error_are_read_from_the_owner(
+    probe: dict[str, Any],
+) -> None:
+    """A row is one of them by the libtype and splitK columns and the libtype the owner names, its figure is in the column it names."""
+    assert probe["relnorm"] == 0.005
 
 
 def test_standalone_hook_holds_the_owners_merge_directory() -> None:

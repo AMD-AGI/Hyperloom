@@ -96,6 +96,7 @@ from hyperloom_multibranch.scheduling.lifecycle import (
     pinned_frontier_choice,
 )
 from hyperloom_multibranch.scheduling.llm import (
+    MB_RESOLVER_MAX_TOKENS,
     MB_RESOLVER_READ_TIMEOUT_SECONDS,
     anthropic_completion,
     default_model,
@@ -160,6 +161,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_run_options(run: argparse.ArgumentParser) -> None:
+    _add_workload_options(run)
+    _add_budget_options(run)
+    _add_specialist_input_options(run)
+    _add_concurrency_options(run)
+    run.add_argument(
+        "--reuse-prelude",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="An earlier session of this workload and image whose PRELUDE child to root on instead of starting one.",
+    )
+    _add_frontier_options(run)
+    run.add_argument("-v", "--verbose", action="store_true", help="Log at debug level.")
+
+
+def _add_workload_options(run: argparse.ArgumentParser) -> None:
+    """The fixed workload, spelled as ``hyperloom optimize`` spells it, and the kernel optimizer its recipes are scoped
+    to."""
+
     run.add_argument("--model", required=True, help="Model path or id.")
     run.add_argument("--framework", required=True, help="Inference framework, e.g. vllm or sglang.")
     run.add_argument("--gpu-type", required=True, choices=MAGPIE_RUNNER_GPU_TYPES, help="GPU type.")
@@ -175,6 +195,11 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
         default=KernelOptimizer.FORGE.value,
         help="Kernel optimizer the session's recipes are scoped to.",
     )
+
+
+def _add_budget_options(run: argparse.ArgumentParser) -> None:
+    """What the session may spend: wall-clock time, GPU hours, LLM dollars and live branches."""
+
     run.add_argument(
         "--max-hours", type=float, default=MB_DEFAULT_MAX_HOURS, help="Wall-clock budget, PRELUDE included; 0 = none."
     )
@@ -196,7 +221,11 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
     run.add_argument(
         "--max-branches", type=int, default=DEFAULT_MAX_BRANCHES, help="Specialist branches not stopped, at most."
     )
-    _add_specialist_input_options(run)
+
+
+def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
+    """How much runs at once and how often the judge looks: tests, a branch's K, dev sandboxes and judge calls."""
+
     run.add_argument(
         "--max-parallel-tests",
         type=int,
@@ -205,15 +234,20 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
     )
     run.add_argument("--max-k-per-branch", type=int, default=DEFAULT_MAX_K_PER_BRANCH, help="Highest K of a branch.")
     run.add_argument(
-        "--judge-interval-sec", type=float, default=DEFAULT_JUDGE_INTERVAL_SECONDS, help="Seconds between judge calls."
+        "--dev-leases",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Dev sandboxes lent to the specialists at once, from the cards tests are measured on; 0 = none.",
     )
     run.add_argument(
-        "--reuse-prelude",
-        type=Path,
-        default=None,
-        metavar="DIR",
-        help="An earlier session of this workload and image whose PRELUDE child to root on instead of starting one.",
+        "--judge-interval-sec", type=float, default=DEFAULT_JUDGE_INTERVAL_SECONDS, help="Seconds between judge calls."
     )
+
+
+def _add_frontier_options(run: argparse.ArgumentParser) -> None:
+    """Which frontier policy, or which pinned scorer, the session scores its branches with after PRELUDE."""
+
     run.add_argument(
         "--frontier-policy",
         choices=[mode.value for mode in FrontierPolicyMode],
@@ -229,7 +263,6 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
         metavar="LABEL",
         help="The frontier scorer the session scores with, instead of the one the calibration chooses.",
     )
-    run.add_argument("-v", "--verbose", action="store_true", help="Log at debug level.")
 
 
 def _add_specialist_input_options(run: argparse.ArgumentParser) -> None:
@@ -337,6 +370,8 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         errors.append("--max-gpu-hours must be 0 (no limit) or a positive number of hours")
     if not math.isfinite(args.max_llm_usd) or args.max_llm_usd < 0:
         errors.append("--max-llm-usd must be 0 (no limit) or a positive number of dollars")
+    if args.dev_leases < 0:
+        errors.append("--dev-leases must be 0 (none) or a positive number of sandboxes")
     if args.frontier_scorer and FrontierPolicyMode(args.frontier_policy) is FrontierPolicyMode.DEFAULT:
         errors.append("--frontier-scorer pins a scorer, which --frontier-policy default rules out")
     if errors:
@@ -371,6 +406,7 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         frontier_policy=FrontierPolicyMode(args.frontier_policy),
         frontier_scorer=args.frontier_scorer,
         references=_references(args.references or []),
+        dev_leases=args.dev_leases,
     )
 
 
@@ -444,11 +480,15 @@ def session_services(recipe_kb: RemoteRecipeClient | None) -> SessionServices:
     model = default_model()
     judge = anthropic_completion(model, component=PROG, operation="judge")
     resolver = anthropic_completion(
-        model, component=PROG, operation="patch_resolve", read_seconds=MB_RESOLVER_READ_TIMEOUT_SECONDS
+        model,
+        component=PROG,
+        operation="patch_resolve",
+        read_seconds=MB_RESOLVER_READ_TIMEOUT_SECONDS,
+        max_tokens=MB_RESOLVER_MAX_TOKENS,
     )
     critic = partial(LlmCritic, anthropic_critic(model, component=PROG))
     scorer = anthropic_completion(model, component=PROG, operation="author_scorers")
-    return SessionServices(judge, resolver, recipe_kb, critic, scorer, model)
+    return SessionServices(judge, resolver, recipe_kb, critic, scorer, model, model)
 
 
 def run_session(settings: RunSettings, peer_factory: PeerFactory, services: SessionServices) -> int:

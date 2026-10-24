@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom.contracts.measurement import Purpose
+from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS
 from hyperloom.measure.docs import (
     PREFIXED_SHA256_RE,
@@ -38,6 +39,7 @@ _KIND = "kind"
 _UPSERT = "upsert"
 _RUNTIME = "runtime"
 _ACCURACY = "accuracy"
+_SHORT_PROMPTS = "short_prompts"
 _RESULT_DIR = "result_dir"
 #: A key the sheet of a test that ran a greedy decode pass carried. The pass is gone and the key means nothing, but the
 #: journal keeps those sheets and a result is verified again from them, so the key is read and dropped.
@@ -347,6 +349,11 @@ class Environment:
         }
 
 
+def _short_prompts(value: Any, path: str) -> ShortPromptPlan | None:
+    """The sheet's short-prompt check, absent from a sheet that asks for none."""
+    return None if value is None else ShortPromptPlan.parse(value, path)
+
+
 @dataclass(frozen=True)
 class Procedure:
     prep: str
@@ -357,6 +364,7 @@ class Procedure:
     timeout_sec: float
     silence_timeout_sec: float
     deadline_unix: float
+    short_prompts: ShortPromptPlan | None = None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "Procedure":
@@ -373,13 +381,14 @@ class Procedure:
             timeout_sec=r.number("timeout_sec", minimum=1) or 1.0,
             silence_timeout_sec=r.number("silence_timeout_sec", minimum=1) or 1.0,
             deadline_unix=r.number("deadline_unix", minimum=0) or 0.0,
+            short_prompts=_short_prompts(r.optional(_SHORT_PROMPTS), r.at(_SHORT_PROMPTS)),
         )
         r.optional(_REMOVED_DECODE_PASS)
         r.done()
         return procedure
 
     def to_document(self) -> dict[str, Any]:
-        return {
+        document: dict[str, Any] = {
             "prep": self.prep,
             "benchmark_backend": self.benchmark_backend,
             "rounds": {"warmup": self.warmup_rounds, "measure": self.measure_rounds},
@@ -388,6 +397,9 @@ class Procedure:
             "silence_timeout_sec": self.silence_timeout_sec,
             "deadline_unix": self.deadline_unix,
         }
+        if self.short_prompts is not None:
+            document[_SHORT_PROMPTS] = self.short_prompts.to_document()
+        return document
 
 
 @dataclass(frozen=True)

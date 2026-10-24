@@ -41,9 +41,18 @@ from hyperloom.measure.phases import (
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.measure.jit.session import JitCacheSession
 from hyperloom.measure.runner import hardware
+from hyperloom.measure.runner.card_watch import BEFORE_TEST, CardWatch
 from hyperloom.measure.runner.aiperf_patch import ReplayClientPatchError, patch_replay_client
 from hyperloom.measure.attachments import AttachmentError, place_attachments
-from hyperloom.measure.farm import Farm, FarmError, build_farm, server_environment, server_python, verify_farm
+from hyperloom.measure.farm import (
+    Farm,
+    FarmError,
+    build_farm,
+    inherited_environment,
+    server_environment,
+    server_python,
+    verify_farm,
+)
 from hyperloom.measure.runner.jit import STAGING_DIR, ColdStart, Surroundings, build_session, cold_start
 from hyperloom.measure.runner.inventory import OutputRejected, drop_agentx_runtime, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
@@ -56,6 +65,7 @@ from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
 from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
 from hyperloom.measure.surface import extract_surface
 from hyperloom.orchestrator.actions.executors import harvest_leaked_artifacts
+from hyperloom.sandbox.card_occupancy import card_guard, own_sandbox_processes
 
 __all__ = ["run"]
 
@@ -79,6 +89,8 @@ class _Context:
     cache: Path
     environ: MutableMapping[str, str]
     started: float
+    #: Watches the visible cards for a process that is not this sandbox's; the signed result states what it saw.
+    cards: CardWatch
     #: Checks that could not be made on this machine; a successful run says so in ``status.json``.
     notes: list[str] = field(default_factory=list)
     #: The phases of this run on this machine's clock; the signed result states them.
@@ -155,6 +167,19 @@ def _check_runtime(spec: MeasurementSpec) -> None:
         raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
 
 
+def _check_cards_free(ctx: _Context, visible: list[int]) -> None:
+    """No process holds a visible card yet, and the card's memory is free (design 4.8.1 step 3).
+
+    The process list says who holds a card, so it goes first: a card that is held fails as ``foreign_process_on_card``,
+    naming the process, and only a card whose memory is taken by something it does not list fails as a start failure.
+    """
+    if not visible:
+        ctx.notes.append(f"{ROCR_VISIBLE_DEVICES_ENV} names no card; the cards were not checked for other processes")
+    ctx.cards.check(BEFORE_TEST)
+    ctx.cards.enforce_guard()
+    _check_vram_free(ctx, visible)
+
+
 def _check_vram_free(ctx: _Context, visible: list[int]) -> None:
     """A visible GPU that already holds memory is not free for the test (design 4.8.1 step 3)."""
     busy = hardware.busy_gpus(visible)
@@ -217,7 +242,13 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
     try:
         placed = place_attachments(spec.attachments, ctx.work / "attach", ctx.read_blob)
         python = server_python(yaml.safe_load(spec.config[0].yaml) or {}, default="python3")
-        farm = build_farm(spec.environment.roots, ctx.work / "farm", python=python, read_blob=ctx.read_blob)
+        farm = build_farm(
+            spec.environment.roots,
+            ctx.work / "farm",
+            python=python,
+            read_blob=ctx.read_blob,
+            inherited=inherited_environment(ctx.environ, spec.process_env, spec.unset_envs),
+        )
         placement = Placement(
             placed=placed,
             pid_dir=ctx.work / "pids",
@@ -288,6 +319,7 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         session_facts=SessionFacts((), str(inferencex), spec.tools.magpie),
         attachments=_case_attachments(spec),
         phases=ctx.phases,
+        short_prompts=p.short_prompts,
     )
 
 
@@ -376,6 +408,7 @@ def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Finding
     files, facts, changed, timing, visible = found.files, found.facts, found.changed, found.timing, found.visible
     pem = signing.public_key_pem(key)
     first = facts[0] if facts else None
+    statement = ctx.cards.statement()
     document: dict = {"outcome": outcome}
     document.update(
         {
@@ -397,6 +430,7 @@ def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Finding
                 "inferencex_commit": spec.tools.inferencex,
                 "gpu_ids": visible,
                 "rule_pack": rule_pack_identity(),
+                "card_occupancy": None if statement is None else statement.to_document(),
             },
             "platform_env_changed": list(changed),
             "timing": timing,
@@ -446,9 +480,16 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     surface = _surface_sha256(spec, points)
     session = _jit_session(ctx, spec, points, farm, facts)
     call = dataclasses.replace(_call(ctx, spec, points, inferencex, progress), jit=session)
+    ctx.cards.check(BEFORE_TEST)
+    ctx.cards.enforce_guard()
     progress.phase("running")
     started = time.time()
-    outcome, timed_out = _execute(call)
+    with ctx.cards.watching():
+        outcome, timed_out = _execute(call)
+    ctx.cards.enforce_guard()
+    observed = ctx.cards.observation()
+    if observed is not None:
+        ctx.notes.append(observed)
     ctx.phases.begin(RESULT_SIGNING)
     progress.phase("collecting")
     harvest_leaked_artifacts(ctx.files, subprocess_started_unix=started, leak_root=ctx.work)
@@ -514,13 +555,20 @@ def run(
     work = scratch / "test"
     for sub in ("farm", "attach", "pids"):
         (work / sub).mkdir(parents=True, exist_ok=True)
-    ctx = _Context(in_dir, out_dir, work, scratch / "cache", environ, time.time())
+    try:
+        guard = card_guard(environ)
+    except ValueError as exc:
+        failure = RunnerFailure(_START_FAILED, str(exc))
+        write_status(out_dir, state=_FAILED, error_class=failure.error_class, message=str(failure))
+        return failure.exit_code
+    watch = CardWatch(_visible(environ), own_sandbox_processes(environ), guard)
+    ctx = _Context(in_dir, out_dir, work, scratch / "cache", environ, time.time(), watch)
     _begin_phases(ctx)
     with Progress(out_dir, files_dir=ctx.files) as progress:
         try:
             key = _load_key(environ)
             take_topology(environ)
-            _check_vram_free(ctx, _visible(environ))
+            _check_cards_free(ctx, _visible(environ))
             progress.phase("waiting_spec")
             if not wait_for_file(in_dir / "READY", spec_wait_sec):
                 write_status(out_dir, state=_FAILED, error_class="no_spec", message="no instruction sheet arrived")

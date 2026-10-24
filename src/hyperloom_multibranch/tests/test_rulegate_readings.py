@@ -13,7 +13,11 @@ from hyperloom_multibranch.rulegate.readings import (
     dropped_requests,
     inferencex_reading,
 )
-from hyperloom_multibranch.rulegate.readings import GRADED_SHORT_REQUESTS, GRADED_UNSERVED_REQUESTS
+from hyperloom_multibranch.rulegate.readings import (
+    GRADED_REQUESTS_TOTAL,
+    GRADED_SHORT_REQUESTS,
+    GRADED_UNSERVED_REQUESTS,
+)
 
 STRICT, FLEXIBLE, _, ACC = ACCURACY_METRICS
 GSM8K = "gsm8k"
@@ -135,6 +139,7 @@ def test_agentx_sums_the_unserved_and_the_short_requests_over_the_measured_round
     reading = agentx_reading(_agentx_rounds(_classes(0, 1, 2, 3), _classes(1, 4, 0, 5)))
     assert reading[GRADED_UNSERVED_REQUESTS] == 7.0
     assert reading[GRADED_SHORT_REQUESTS] == 8.0
+    assert reading[GRADED_REQUESTS_TOTAL] == 200.0
 
 
 @pytest.mark.parametrize(
@@ -146,3 +151,23 @@ def test_agentx_leaves_the_request_classes_out_when_a_round_does_not_count_them(
     reading = agentx_reading(_agentx_rounds(*classes))
     assert GRADED_UNSERVED_REQUESTS not in reading
     assert GRADED_SHORT_REQUESTS not in reading
+
+
+def test_agentx_sums_the_requests_of_rounds_that_counted_them_but_did_not_classify_the_failures():
+    unsplit = RequestClasses(1, "", None, 100, 3, 1, 2, None, None, "the export carries no output token count")
+    reading = agentx_reading(_agentx_rounds(_classes(0, 1, 2, 3), unsplit))
+    assert GRADED_UNSERVED_REQUESTS not in reading
+    assert reading[GRADED_REQUESTS_TOTAL] == 200.0
+
+
+@pytest.mark.parametrize(
+    "classes",
+    [
+        (),
+        (_classes(0, 1, 2, 3),),
+        (_classes(0, 1, 2, 3), RequestClasses(1, "", None, reason="the round left no export")),
+    ],
+    ids=["no-classes", "a-round-without-classes", "an-uncounted-round"],
+)
+def test_agentx_leaves_the_requests_total_out_when_a_round_does_not_count_its_requests(classes):
+    assert GRADED_REQUESTS_TOTAL not in agentx_reading(_agentx_rounds(*classes))

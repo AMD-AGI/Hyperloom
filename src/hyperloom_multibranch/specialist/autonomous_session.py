@@ -13,7 +13,10 @@ each is cumulative. An agent that signals no keep has its workspace taken as its
 before EXPLORE ends, so that work is measured and judged in EXPLORE, and again when it exits 0. What the run knows of
 the keeps is kept beside the manifest, so a keep waiting at a crash is submitted by the run after it. The agent's own
 LLM spend is read from its Claude CLI's transcripts (:mod:`agent_spend`) every :data:`SPEND_SECONDS` and once more when
-the run ends, and recorded as the branch's. The branch's judge judges the imports as it judges any branch's tests;
+the run ends, and recorded as the branch's. At each keep, the findings the agent wrote down in its ledger since the last
+one become the branch's learnings, a finding it revised superseding what it said before, so other branches read them;
+what it wrote after its last keep is learnt when the branch stops.
+The branch's judge judges the imports as it judges any branch's tests;
 nothing of its verdicts reaches the agent. An agent that exits 0 finishes the run once what it kept last settled; one
 that exits otherwise is a crash the runtime restarts it from. A session never ends idle: what the agent keeps, or does
 not, is its own business, bounded by the session's stops.
@@ -22,20 +25,24 @@ not, is its own business, bounded by the session's stops.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
-from hyperloom.contracts.recipe import KernelArtifact, KernelKind, LaunchConfig, RecipeDelta, RecipeError
+from hyperloom.contracts.recipe import KernelArtifact, KernelKind, LaunchConfig, PatchRef, RecipeDelta, RecipeError
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, locate_installed_package
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
+from hyperloom_multibranch.contracts.notebook.records import Learning
 from hyperloom_multibranch.contracts.notebook.records import TestRecord
+from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, RequestRejected
 from hyperloom_multibranch.specialist.agent_import import (
@@ -47,7 +54,8 @@ from hyperloom_multibranch.specialist.agent_import import (
     with_tables,
     read_kept_change,
 )
-from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, read_field
+from hyperloom_multibranch.notebook.local.notebook import LEARNING_MAX_CHARS
+from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, LedgerSource, read_field
 from hyperloom_multibranch.specialist.agent_onboarding import (
     AgentProcess,
     AgentSandbox,
@@ -127,7 +135,8 @@ class KeepWatch:
     ``collected``, whether the workspace of an agent that signals no keep was taken ahead of the EXPLORE end; and
     what of the agent's launch the toolbox refused, which every later keep that still runs with it is imported
     without: ``refused_envs``, each variable with the value refused (``None``: the variable left unset), and
-    ``refused_args``, server arguments refused as a whole."""
+    ``refused_args``, server arguments refused as a whole; ``learnt``, for each finding of the agent's ledger the branch
+    learnt, the learning it became and a digest of what it said."""
 
     root: str
     seq: int = 0
@@ -137,6 +146,7 @@ class KeepWatch:
     collected: bool = False
     refused_envs: dict[str, str | None] = field(default_factory=dict)
     refused_args: str | None = None
+    learnt: dict[str, list[str]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> KeepWatch:
@@ -155,6 +165,7 @@ class KeepWatch:
             "collected": self.collected,
             "refused_envs": self.refused_envs,
             "refused_args": self.refused_args,
+            "learnt": self.learnt,
         }
         path.write_text(json.dumps(document), encoding=ENCODING)
 
@@ -169,7 +180,9 @@ class AutonomousSession:
         self._agent_dir = place.workspace / AGENT_DIR
         self._manifest: AgentManifest | None = None
         self._process: AgentProcess | None = None
+        self._sandbox: AgentSandbox | None = None
         self._root = LaunchConfig()
+        self._root_commit = ""
         self._unread = ""
         self._spend_unread = False
         self._spent_at = -math.inf
@@ -183,23 +196,26 @@ class AutonomousSession:
         spec = replace(self._setup.spec, server_args=launch.server_args, envs=dict(launch.envs), workspace=workspace)
         lease = await self._lease(spec.tp)
         spec = replace(spec, cards=lease.gpu_ids)
-        onboarding = self._setup.onboarding(self._setup.sandbox(lease))
-        ready = await make_ready(self._start.task.agent, spec, self._agent_dir, onboarding)
+        self._sandbox = self._setup.sandbox(lease)
+        ready = await make_ready(self._start.task.agent, spec, self._agent_dir, self._setup.onboarding(self._sandbox))
         self._manifest, self._process = ready.manifest, ready.process
         (self._place.workspace / MANIFEST_FILE).write_text(json.dumps(ready.manifest.to_document()), encoding=ENCODING)
         KeepWatch(root, mark=self._mark(ready.manifest)).save(self._place.workspace / WATCH_FILE)
         await self._note(f"the agent {ready.manifest.source} at {ready.manifest.commit} is running")
 
     async def run(self) -> None:
-        manifest, process = await self._running()
+        manifest, process, sandbox = await self._running()
         self._unread = ""
         self._root = (await self._setup.repo.read_recipe(self._start.start_commit)).launch
         watch = KeepWatch.load(self._place.workspace / WATCH_FILE)
+        self._root_commit = watch.root
         spend = self._setup.spend((self._place.workspace.parent, self._held().root), self._place.workspace / SPEND_FILE)
         try:
             while not self._stopped.is_set():
                 ended = process.returncode is not None
                 await self._observe(manifest, watch)
+                if said := sandbox.watched():
+                    await self._note(said)
                 await self._collect_before_the_end(manifest, watch)
                 await self._record_spend(spend, final=False)
                 if ended:
@@ -249,23 +265,31 @@ class AutonomousSession:
             await self._setup.toolbox.release_branch_sandbox(self._held().lease_id)
 
     async def stop(self) -> None:
+        """Stop the agent, then learn what its ledger gained since the last keep, which no later keep imports."""
+
         self._stopped.set()
         if self._process is not None:
             await self._process.kill()
+        watch_file = self._place.workspace / WATCH_FILE
+        if self._manifest is not None and watch_file.exists():
+            watch = KeepWatch.load(watch_file)
+            await self._learn(self._manifest.ledger, watch)
+            watch.save(watch_file)
 
-    async def _running(self) -> tuple[AgentManifest, AgentProcess]:
-        """The agent preflight started, or, in a run after a crash, the agent resumed by the stored manifest."""
+    async def _running(self) -> tuple[AgentManifest, AgentProcess, AgentSandbox]:
+        """The agent preflight started, or, in a run after a crash, the agent resumed by the stored manifest, and the
+        sandbox it runs in."""
 
-        if self._manifest is not None and self._process is not None:
-            return self._manifest, self._process
+        if self._manifest is not None and self._process is not None and self._sandbox is not None:
+            return self._manifest, self._process, self._sandbox
         document = json.loads((self._place.workspace / MANIFEST_FILE).read_text(encoding=ENCODING))
         manifest = AgentManifest.read(document)
         command = manifest.resume or manifest.launch
         sandbox = self._setup.sandbox(self._held())
         process = await sandbox.start(command, self._agent_dir / SOURCE_DIR, agent_env(self._agent_dir))
-        self._manifest, self._process = manifest, process
+        self._manifest, self._process, self._sandbox = manifest, process, sandbox
         await self._note(f"the agent resumed with `{command}`")
-        return manifest, process
+        return manifest, process, sandbox
 
     async def _lease(self, cards: int) -> BranchLease:
         """Lease ``cards`` for the branch's sandbox and keep the lease for :meth:`release` and a later run."""
@@ -298,6 +322,7 @@ class AutonomousSession:
             raise SessionCrashed(f"the agent exited {process.returncode}: {tail(await process.output())}")
         if manifest.keep is None:
             await self._take(manifest, watch, watch.seq + 1)
+        await self._learn(manifest.ledger, watch)
         while not self._stopped.is_set() and (watch.pending is not None or await self._busy()):
             await self._submit(manifest, watch)
             await self._setup.sleep(self._setup.poll_seconds)
@@ -328,7 +353,30 @@ class AutonomousSession:
             watch.pending = await asyncio.to_thread(self._read, manifest, watch.root, seq)
         except (KeptChangeError, WorktreeError) as error:
             await self._note(f"keep {seq} cannot be read and is skipped: {error}")
+        await self._learn(manifest.ledger, watch)
         watch.save(self._place.workspace / WATCH_FILE)
+
+    async def _learn(self, ledger: LedgerSource | None, watch: KeepWatch) -> None:
+        """Append each finding of the agent's ``ledger`` the branch has not learnt as it reads now as the branch's
+        learning, superseding the one an earlier version of it became; one the notebook refuses is noted once.
+
+        The watch is saved after each finding: :meth:`stop` reads it from its file, and a finding learnt by a run that
+        ended before saving it would be learnt again."""
+
+        if ledger is None:
+            return
+        for finding in await asyncio.to_thread(read_findings, self._agent_dir / SOURCE_DIR / ledger.path, ledger):
+            digest = hashlib.sha256(finding.content.encode()).hexdigest()[:16]
+            earlier, said = watch.learnt.get(finding.id, ["", ""])
+            if said == digest:
+                continue
+            learning = Learning(self._start.branch, finding.kind, finding.content, supersedes=earlier or None)
+            try:
+                earlier = (await self._place.notebook.append_learning(learning)).entry_id
+            except ValueError as error:
+                await self._note(f"the agent's finding {finding.id} is not learnt: {error}")
+            watch.learnt[finding.id] = [earlier, digest]
+            watch.save(self._place.workspace / WATCH_FILE)
 
     async def _submit(self, manifest: AgentManifest, watch: KeepWatch) -> None:
         """Submit the pending keep once nothing of the branch is measured or being judged, against the head then.
@@ -358,6 +406,8 @@ class AutonomousSession:
                 await self._submit_narrowed(narrowed, head)
         except RecipeError as error:
             await self._note(f"keep {kept.seq} is no recipe change and is skipped: {error}")
+        except WorktreeError as error:
+            await self._note(f"keep {kept.seq} cannot be read against the branch head and is skipped: {error}")
         watch.pending = None
         watch.save(self._place.workspace / WATCH_FILE)
 
@@ -401,7 +451,7 @@ class AutonomousSession:
         repo, component = self._setup.repo, self._setup.component
         recipe = await repo.read_recipe(head)
         root = await repo.read_recipe(self._start.start_commit)
-        stores = KeepStores(repo.store_patch, self._kernel_artifact)
+        stores = KeepStores(repo.store_patch, self._kernel_artifact, partial(self._increment, head))
         delta = await import_delta(kept, root=root, head=recipe, component=component, stores=stores)
         if delta is None or all(item.component != component for item in delta.components):
             return delta
@@ -409,6 +459,14 @@ class AutonomousSession:
             return delta
         upstream = await asyncio.to_thread(self._setup.upstream, component)
         return delta if upstream is None else added_at(delta, recipe, upstream)
+
+    async def _increment(self, head: str, imported: tuple[PatchRef, ...], cumulative: str) -> str:
+        """The patch from the state ``head``'s ``imported`` patches make to the one the keep's ``cumulative`` patch
+        makes, both over the workspace's root."""
+
+        texts = [await self._setup.repo.patch_text(head, ref.path) for ref in imported]
+        worktree, component = self._place.worktree, self._setup.component
+        return await asyncio.to_thread(worktree.diff_between, self._root_commit, texts, cumulative, component)
 
     async def _kernel_artifact(self, env: str, table: str) -> KernelArtifact:
         """The table ``env`` loads, kept in the session's blob store under the target the session bound ``env`` to, or
@@ -490,6 +548,40 @@ class AutonomousSession:
         await self._place.notebook.append_branch_log(entry)
 
 
+@dataclass(frozen=True)
+class Finding:
+    """One finding of an agent's ledger, as the learning it becomes: ``content`` names the agent's kind and id."""
+
+    id: str
+    kind: LearningKind
+    content: str
+
+
+def read_findings(path: Path, ledger: LedgerSource) -> list[Finding]:
+    """The findings of the kinds ``ledger`` maps that the ledger at ``path`` holds, each in its latest version, in the
+    order they first appear; a line the agent is still writing is left for the next read."""
+
+    try:
+        lines = path.read_text(encoding=ENCODING).splitlines()
+    except FileNotFoundError:
+        return []
+    latest: dict[str, Finding | None] = {}
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(entry, dict) or not isinstance(entry.get(ledger.id), str):
+            continue
+        kind, text = entry.get(ledger.kind), entry.get(ledger.text)
+        content = " ".join(f"{kind} {entry[ledger.id]}: {text}".split())
+        if len(content) > LEARNING_MAX_CHARS:
+            content = content[: LEARNING_MAX_CHARS - 1] + "\u2026"
+        fits = kind in ledger.kinds and isinstance(text, str)
+        latest[entry[ledger.id]] = Finding(entry[ledger.id], ledger.kinds[kind], content) if fits else None
+    return [finding for finding in latest.values() if finding is not None]
+
+
 def _without_refused(kept: KeptChange, launch: LaunchConfig, watch: KeepWatch) -> KeptChange:
     """``kept`` with each launch entry the toolbox refused before, and that it still runs with, set back to ``launch``'s."""
 
@@ -536,6 +628,8 @@ __all__ = [
     "WATCH_FILE",
     "AutonomousSession",
     "AutonomousSetup",
+    "Finding",
     "KeepWatch",
+    "read_findings",
     "without_file",
 ]

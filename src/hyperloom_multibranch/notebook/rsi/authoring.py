@@ -5,10 +5,13 @@
 
 :func:`survey` sets every pooled expression beside the champion (``frontier-v1`` until one earned the place) on the
 archived sessions like this one: prospectively, each on the sessions that started after it was written, which is what
-decides, and in hindsight, on all of them, for ideas. :func:`authoring_prompt` is what the LLM reads: the expression
-syntax and the features of :mod:`rsi.expression`, ``frontier-v1`` written as an expression, both tables, how this
-session's branches went, the pool's expressions with the parents each refined, the ones retired, and the parents to
-refine: the champion, and the challengers whose lead over it has the highest low end. It answers with one JSON object,
+decides, and in hindsight, on all of them, for ideas. :func:`feedback_for` looks back on the earlier generations:
+whether each refinement ranks better than the parent it refined, on the sessions that started after it, and the rounds
+where each parent to refine misranked worst, with the features that told its pick from the branch that gained the most.
+:func:`authoring_prompt` is what the LLM reads: the expression syntax and the features of :mod:`rsi.expression`,
+``frontier-v1`` written as an expression, both tables, how this session's branches went, the pool's expressions with
+the parents each refined, the ones retired, that feedback, and the parents to refine: the champion, and the challengers
+whose lead over it has the highest low end. It answers with one JSON object,
 ``{"candidates": [{"label": ..., "expression": ..., "rationale": ..., "parents": [...]}]}``, of at most
 :data:`~hyperloom_multibranch.notebook.rsi.scorers.MAX_PER_SESSION` candidates, at most one of them with no parents: a
 new idea. :func:`read_candidates` turns the answer into pool records and says why it refused any.
@@ -34,7 +37,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
@@ -45,16 +48,25 @@ from hyperloom_multibranch.notebook.rsi.calibration import (
     MIN_SESSIONS,
     VARIATIONS,
     CalibrationReport,
+    CalibrationSettings,
     Comparison,
     PolicyChoice,
     Registered,
+    Replayed,
     calibrate,
     calibrate_against,
     ranked_alike,
     rankings,
+    replayed,
     scorer_baseline,
 )
-from hyperloom_multibranch.notebook.rsi.expression import FEATURES, MAX_CHARS, ExpressionError, ExpressionScorer
+from hyperloom_multibranch.notebook.rsi.expression import (
+    FEATURES,
+    MAX_CHARS,
+    ExpressionError,
+    ExpressionScorer,
+    features,
+)
 from hyperloom_multibranch.notebook.rsi.frontier import (
     FRONTIER_V1,
     FRONTIER_V1_LABEL,
@@ -65,7 +77,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     FrontierPolicy,
     FrontierScorer,
 )
-from hyperloom_multibranch.notebook.rsi.report import number
+from hyperloom_multibranch.notebook.rsi.report import number, table
 from hyperloom_multibranch.notebook.rsi.scorers import (
     MAX_PER_SESSION,
     PoolRecord,
@@ -73,6 +85,7 @@ from hyperloom_multibranch.notebook.rsi.scorers import (
     ScorerPool,
     ScorerSource,
     current_champion,
+    scorer_named,
 )
 from hyperloom_multibranch.notebook.rsi.session import (
     FAILED,
@@ -97,6 +110,18 @@ MAX_PARENTS = 3
 DUPLICATE_SHARE = 1 - MIN_IMPROVEMENT / 2
 #: How many of the most recently retired expressions the prompt shows and a candidate is checked against.
 RECENT_RETIRED = 12
+#: How many rounds the prompt shows of each parent to refine, those it misranked worst, from as many sessions.
+MISRANKED_ROUNDS = 3
+REFINEMENT_HEADINGS = (
+    "refinement",
+    "parent",
+    "rank correlation",
+    "the parent's",
+    "lead interval",
+    "rounds",
+    "sessions",
+    "verdict",
+)
 #: ``frontier-v1`` under the default policy as an expression; the envelope's new-branch floor, which lifts an
 #: expression's score, never lifts one ``frontier-v1`` took from the prior.
 FRONTIER_V1_EXPRESSION = (
@@ -106,6 +131,7 @@ FRONTIER_V1_EXPRESSION = (
 NOT_ARCHIVED = "the session's search tree is not in the archive"
 NO_CANDIDATES = "the LLM wrote no candidate"
 _MINUTE = 60.0
+_SAME = 1e-9
 
 AUTHORING_SYSTEM_PROMPT = """You write frontier scorers for a multi-branch LLM inference optimization session.
 The session runs specialist branches in parallel. Every round its judge spends the budget where a branch's frontier
@@ -114,7 +140,9 @@ scored lowest. A scorer is one arithmetic expression over the features you are g
 scores rank the branches by the gain each made afterwards (the Spearman correlation, round by round), beside the
 champion, and only on sessions that start after you write it: a formula fitted to the sessions you read gains nothing.
 Each session's close is one generation. Refine the parents you are given, naming them in parents, and write at most one
-candidate with no parents, a new idea. Write formulas that rank by what foretells a branch's later gain in general,
+candidate with no parents, a new idea. You are shown whether each earlier refinement ranked better than its parent and
+where each parent misranked worst: fix what those show in general, not for those rounds, and build on the changes that
+helped rather than those that did not. Write formulas that rank by what foretells a branch's later gain in general,
 simple enough that their rationale says why. Answer with one JSON object and nothing else:
 {"candidates": [{"label": "...", "expression": "...", "rationale": "...", "parents": ["..."]}]}"""
 
@@ -206,6 +234,111 @@ def session_challenger(
     return named_frontier_choice(label, defaults, evidence, target)
 
 
+@dataclass(frozen=True)
+class Refinement:
+    """A pooled expression beside ``parent``, a scorer it refined: ``compared``, labelled with the expression, on the
+    same rounds of the sessions that started after it was written."""
+
+    parent: str
+    compared: Comparison
+
+
+@dataclass(frozen=True)
+class Misranked:
+    """A round a scorer misranked: ``picked``, the branch it scored highest, went on to gain less than ``best``, the
+    branch that gained the most; ``differed`` holds each feature that told the two apart, with its value for each."""
+
+    picked: Replayed
+    best: Replayed
+    differed: tuple[tuple[str, float, float], ...] = ()
+
+
+@dataclass(frozen=True)
+class Feedback:
+    """What the earlier generations show the next: each refinement beside its parent, and the rounds each parent to
+    refine misranked worst, by label, or why its rounds could not be replayed."""
+
+    refinements: tuple[Refinement, ...] = ()
+    misranked: Mapping[str, tuple[Misranked, ...]] = field(default_factory=dict)
+    failures: Mapping[str, str] = field(default_factory=dict)
+
+
+def _beside_parent(
+    similar: Sequence[SearchTree], parent: FrontierScorer, children: Sequence[Registered]
+) -> CalibrationReport:
+    """``children`` beside ``parent`` on ``similar``, each on the sessions that started after it was written."""
+
+    since = min((item.since for item in children if item.since is not None), default=None)
+    rows = (scorer_baseline(parent, since), *(scorer_baseline(item.scorer, item.since) for item in children))
+    return calibrate(similar, variations=(), baselines=rows, settings=CalibrationSettings(reference=parent.label))
+
+
+def _refinements(
+    similar: Sequence[SearchTree], pool: ScorerPool, pooled: Sequence[PoolRecord]
+) -> tuple[Refinement, ...]:
+    """Each of ``pooled`` that refines parents beside each of them, by parent: a parent that is no longer to be found,
+    or no longer reads, is left out."""
+
+    readable = _readable({record.label: record.expression for record in pooled if record.parents})
+    children: dict[str, list[Registered]] = {}
+    for record in pooled:
+        for parent in record.parents if record.label in readable else ():
+            children.setdefault(parent, []).append(Registered(readable[record.label], record.registered_at))
+    found: list[Refinement] = []
+    for label, registered in children.items():
+        try:
+            parent = scorer_named(label, pool)
+        except ExpressionError as exc:
+            log.warning("left out the refinements of %s: %s", label, exc)
+            continue
+        if parent is not None:
+            found += (Refinement(label, item) for item in _beside_parent(similar, parent, registered).comparisons)
+    return tuple(found)
+
+
+def _shortfall(picked: Replayed, best: Replayed) -> float:
+    return best.gain_after_pct - picked.gain_after_pct
+
+
+def _differed(picked: Replayed, best: Replayed) -> tuple[tuple[str, float, float], ...]:
+    mine = features(picked.branch, picked.t_s, picked.context, picked.readings)
+    theirs = features(best.branch, best.t_s, best.context, best.readings)
+    return tuple((name, mine[name], theirs[name]) for name in FEATURES if abs(mine[name] - theirs[name]) > _SAME)
+
+
+def _misranked(similar: Sequence[SearchTree], scorer: FrontierScorer) -> tuple[Misranked, ...]:
+    """The rounds of ``similar`` where the branch ``scorer`` scored highest fell furthest short of the branch that gained
+    the most, the worst of each session, :data:`MISRANKED_ROUNDS` at most, the worst first. Of branches it scored alike,
+    the one that gained the most is its pick."""
+
+    worst: dict[str, tuple[Replayed, Replayed]] = {}
+    for branches in replayed(similar, scorer):
+        top = max(item.score for item in branches)
+        picked = max((item for item in branches if item.score >= top - _SAME), key=lambda item: item.gain_after_pct)
+        best = max(branches, key=lambda item: item.gain_after_pct)
+        held = worst.get(picked.session_id)
+        if _shortfall(picked, best) > (_shortfall(*held) if held is not None else _SAME):
+            worst[picked.session_id] = (picked, best)
+    ranked = sorted(worst.values(), key=lambda pair: _shortfall(*pair), reverse=True)[:MISRANKED_ROUNDS]
+    return tuple(Misranked(picked, best, _differed(picked, best)) for picked, best in ranked)
+
+
+def feedback_for(similar: Sequence[SearchTree], pool: ScorerPool, found: Survey) -> Feedback:
+    """What the earlier generations of ``pool`` show on the archived sessions ``similar`` to this one: each pooled
+    refinement beside its parents, and the rounds each of :func:`parents` misranked worst."""
+
+    misranked: dict[str, tuple[Misranked, ...]] = {}
+    failures: dict[str, str] = {}
+    for label in parents(found):
+        try:
+            scorer = scorer_named(label, pool)
+            if scorer is not None:
+                misranked[label] = _misranked(similar, scorer)
+        except (ArithmeticError, ValueError) as exc:
+            failures[label] = f"{type(exc).__name__}: {exc}"
+    return Feedback(_refinements(similar, pool, found.pooled), misranked, failures)
+
+
 def _tree_lines(tree: SearchTree) -> list[str]:
     lines = [
         f"Session {tree.session_id}: a budget of {tree.budget_seconds / HOUR:.1f} h, the best gain "
@@ -229,9 +362,74 @@ def _pooled_line(record: PoolRecord) -> str:
     return f"- {record.label}: {record.expression} ({refines}; {record.rationale})"
 
 
-def authoring_prompt(tree: SearchTree, found: Survey) -> str:
+def _verdict(item: Comparison) -> str:
+    """Whether the refinement ``item`` ranks better than its parent, on the evidence the gate asks for."""
+
+    if item.sessions < MIN_SESSIONS or item.rounds < MIN_ROUNDS:
+        return "too little evidence"
+    if item.difference_low is not None and item.difference_low > 0:
+        return "better"
+    if item.difference_high is not None and item.difference_high < 0:
+        return "worse"
+    return "no clear difference"
+
+
+def _refinement_lines(found: Sequence[Refinement]) -> list[str]:
+    heading = (
+        "Whether each change helped: each refinement beside the parent it refined, on the same rounds of the sessions "
+        "that started after it was written."
+    )
+    shown = [item for item in found if item.compared.rounds]
+    rows = [
+        (
+            item.compared.label,
+            item.parent,
+            number(item.compared.rank_correlation),
+            number(item.compared.current_correlation),
+            f"{number(item.compared.difference_low)} to {number(item.compared.difference_high)}",
+            item.compared.rounds,
+            item.compared.sessions,
+            _verdict(item.compared),
+        )
+        for item in shown
+    ]
+    waiting = ", ".join(dict.fromkeys(item.compared.label for item in found if not item.compared.rounds))
+    return [
+        heading,
+        *(["", *table(REFINEMENT_HEADINGS, rows)] if rows else ["- none yet"]),
+        *(["", f"Too new to tell, no session like this one started after them: {waiting}."] if waiting else []),
+    ]
+
+
+def _misranked_line(label: str, item: Misranked) -> str:
+    picked, best = item.picked, item.best
+    differed = ", ".join(f"{name} {number(mine)} / {number(theirs)}" for name, mine, theirs in item.differed)
+    return (
+        f"- {label}, session {picked.session_id} at {picked.t_s / _MINUTE:.0f} min: it scored {picked.branch.name} "
+        f"highest ({number(picked.score)}), which gained {picked.gain_after_pct:+.2f}% after; {best.branch.name} "
+        f"gained {best.gain_after_pct:+.2f}% (scored {number(best.score)}). Where they differed, "
+        f"{picked.branch.name} / {best.branch.name}: {differed or 'nowhere'}."
+    )
+
+
+def _feedback_lines(feedback: Feedback) -> list[str]:
+    lines = [
+        *_refinement_lines(feedback.refinements),
+        "",
+        "Where each parent misranked worst on the archived sessions like this one, a round a session: the branch it "
+        "scored highest beside the branch that went on to gain the most, and the features where the two differed, "
+        "the first's value then the second's.",
+    ]
+    for label, found in feedback.misranked.items():
+        none = f"- {label}: nowhere, the branch it scored highest gained the most in every round"
+        lines += [_misranked_line(label, item) for item in found] or [none]
+    lines += [f"- {label}: its rounds could not be replayed: {why}" for label, why in feedback.failures.items()]
+    return [*lines, ""]
+
+
+def authoring_prompt(tree: SearchTree, found: Survey, feedback: Feedback | None = None) -> str:
     """What the LLM reads at the CLOSE of ``tree``'s session: the syntax, the features, ``frontier-v1``, where the pool
-    stands, the session, the pool's expressions and the ones retired, and the parents to refine."""
+    stands, the session, the pool's expressions and the ones retired, ``feedback`` when given, and the parents."""
 
     taken = ", ".join([*(record.label for record in found.pooled), *(item.label for item in found.retired)])
     retired = [f"- {item.label}: {item.expression} ({item.evidence})" for item in found.retired] or ["- none yet"]
@@ -272,6 +470,7 @@ def authoring_prompt(tree: SearchTree, found: Survey) -> str:
             "Retired, clearly worse than the champion; a candidate that ranks the branches like one is refused:",
             *retired,
             "",
+            *(_feedback_lines(feedback) if feedback is not None else ()),
             f"Parents to refine: {', '.join(parents(found))}. Write at most {MAX_PER_SESSION} candidates, each naming "
             "in parents the labels it refines, at most one of them a new idea with none; fewer, or none, when nothing "
             "is worth trying.",
@@ -424,11 +623,12 @@ async def author_scorers(
     similar = tuple(item.tree for item in similar_trees(history, own.task))
     try:
         found = await asyncio.to_thread(survey, similar, writable)
+        feedback = await asyncio.to_thread(feedback_for, similar, writable, found)
     except STEP_ERRORS as exc:
         log.warning("CLOSE could not calibrate the pool's frontier scorers: %s", exc)
         return CloseStep(FAILED, f"{type(exc).__name__}: {exc}")
     try:
-        answer = await complete(AUTHORING_SYSTEM_PROMPT, authoring_prompt(own, found))
+        answer = await complete(AUTHORING_SYSTEM_PROMPT, authoring_prompt(own, found, feedback))
     except Exception as exc:
         log.warning("CLOSE could not ask the LLM for frontier scorers: %s", exc, exc_info=True)
         return CloseStep(FAILED, f"{type(exc).__name__}: {exc}")
@@ -449,15 +649,21 @@ __all__ = [
     "FRONTIER_V1_EXPRESSION",
     "MAX_PARENTS",
     "MAX_RATIONALE_CHARS",
+    "MISRANKED_ROUNDS",
     "NOT_ARCHIVED",
     "NO_ARCHIVE",
     "NO_CANDIDATES",
     "RECENT_RETIRED",
+    "REFINEMENT_HEADINGS",
     "Authored",
     "Complete",
+    "Feedback",
+    "Misranked",
+    "Refinement",
     "Survey",
     "author_scorers",
     "authoring_prompt",
+    "feedback_for",
     "parents",
     "read_candidates",
     "session_challenger",

@@ -10,7 +10,6 @@ reads them when it builds a test's environment.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import re
@@ -35,14 +34,14 @@ from hyperloom.measure.compile import (
     PackageLocator,
     PatchApplyError,
     UnsupportedComponentError,
-    apply_patch_stack,
     locate_installed_package,
-    patch_targets,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, RepoMerge
+from hyperloom_multibranch.contracts.sources import SOURCE_LAYOUTS, SourceLayout, SourceRoot, source_roots
 from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot
 from hyperloom_multibranch.repo.rebase import Files
+from hyperloom_multibranch.repo.stack import ScratchBlobs, stack_files
 
 RECIPE_FILE = "recipe.json"
 _UPDATE_REF = "update-ref"
@@ -77,28 +76,6 @@ def _ref(branch: str) -> str:
 
 def _patch_paths(recipe: Recipe) -> set[str]:
     return {patch.path for component in recipe.components for patch in component.patches}
-
-
-def _read(path: Path) -> bytes | None:
-    return path.read_bytes() if path.is_file() else None
-
-
-class _ScratchBlobs:
-    """The session's blob store for reads, keeping what a trial application writes in memory instead."""
-
-    def __init__(self, blobs: BlobStore) -> None:
-        self.root = blobs.root
-        self._blobs = blobs
-        self._kept: dict[str, bytes] = {}
-
-    def put(self, data: bytes) -> str:
-        sha256 = hashlib.sha256(data).hexdigest()
-        self._kept[sha256] = data
-        return sha256
-
-    def get(self, sha256: str) -> bytes:
-        kept = self._kept.get(sha256)
-        return self._blobs.get(sha256) if kept is None else kept
 
 
 class GitExperimentRepo:
@@ -228,12 +205,11 @@ class GitExperimentRepo:
         return PatchRef(f"{PATCH_ROOT}/{component}/{sha256}.patch", sha256)
 
     def _apply_error(self, stack: ComponentPatches, text: str) -> str | None:
-        scratch = _ScratchBlobs(self._blobs)
+        scratch = ScratchBlobs(self._blobs)
         sha256 = scratch.put(text.encode())
         patch = PatchRef(f"{PATCH_ROOT}/{stack.component}/{sha256}.patch", sha256)
-        layout = self._layout(stack)
         try:
-            apply_patch_stack(replace(stack, patches=(*stack.patches, patch)), layout, self._locator(layout), scratch)
+            stack_files(replace(stack, patches=(*stack.patches, patch)), self._roots(stack), scratch, ())
         except PatchApplyError as error:
             return str(error)
         return None
@@ -246,19 +222,13 @@ class GitExperimentRepo:
         return layout
 
     def _stack_files(self, component: ComponentPatches, paths: Collection[str]) -> Files:
+        return stack_files(component, self._roots(component), self._blobs, paths)
+
+    def _roots(self, component: ComponentPatches) -> tuple[SourceRoot, ...]:
+        """The trees ``component``'s patches apply to: its installed package, and the meta trees the specialist's
+        source base lays out beside it."""
         layout = self._layout(component)
-        package = self._locator(layout)
-        root = apply_patch_stack(component, layout, package, self._blobs)
-        touched = [
-            target
-            for patch in component.patches
-            for target in patch_targets(self._blobs.get(patch.sha256).decode(), layout.upstream_prefix, patch.path)
-        ]
-        files = {path: _read(package.path / path) for path in (*paths, *touched)}
-        files.update(
-            {entry.path: None if entry.blob is None else self._blobs.get(entry.blob) for entry in root.entries}
-        )
-        return files
+        return source_roots(layout, self._locator(layout).path, SOURCE_LAYOUTS.get(component.component, SourceLayout()))
 
     def _write_files(self, files: Sequence[tuple[str, str]], destination: Path) -> None:
         for path, sha256 in files:

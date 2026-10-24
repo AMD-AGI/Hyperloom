@@ -50,6 +50,10 @@ LOG_TAIL_CHARS = 128 * 1024
 #: could stall a runner or the tool layer for minutes.
 LOG_LINE_CHARS = 2000
 
+#: A process outside the test held one of the test's cards, so nothing the test showed is the candidate's: retried on
+#: other cards like any infrastructure failure (``hyperloom.measure.runner.card_watch``).
+FOREIGN_PROCESS_ON_CARD = "foreign_process_on_card"
+
 #: ``error_class`` values a runner, the hosted backend or the platform reports that are not about the candidate.
 INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
     {
@@ -57,6 +61,7 @@ INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
         "runner_start_timeout",
         "runner_lost",
         "preflight_mismatch",
+        FOREIGN_PROCESS_ON_CARD,
         "node_fault",
         "no_spec",
         "sandbox_create_failed",

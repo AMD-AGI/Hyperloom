@@ -21,6 +21,7 @@ from typing import Any, Literal, Protocol
 from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef, FailureClass, PhaseTiming, SandboxFacts
 from hyperloom.measure.jit.session import JitCacheSession
 from hyperloom.measure.phases import PhaseRecorder
+from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 
 __all__ = [
     "EnvironmentRef",
@@ -139,6 +140,9 @@ class TestCall:
     #: The shared compiled-code cache this test uses (design 4.21): the backend seeds its directories before the server
     #: starts and stages what the compilers added once a test succeeds. ``None`` runs the test as it always did.
     jit: JitCacheSession | None = None
+    #: The short-prompt consistency check this test runs after its rounds, on fresh server processes of its own launch
+    #: (``measure.short_prompts``); ``None`` runs no check. It never changes the test's rounds or its outcome.
+    short_prompts: ShortPromptPlan | None = None
 
 
 @dataclass(frozen=True)

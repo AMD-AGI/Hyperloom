@@ -55,6 +55,7 @@ __all__ = [
     "SANDBOX_START",
     "SERVER_BOOT",
     "SHEET_WAIT",
+    "SHORT_PROMPTS",
     "TEARDOWN",
     "WARMUP",
     "Accounted",
@@ -95,6 +96,8 @@ MEASURED = "measured"
 ROUND_COLLECT = "round_collect"
 TEARDOWN = "teardown"
 REPRO_CASE = "repro_case"
+#: The short-prompt consistency check's questions to a server it has just booted (the boots are ``server_boot`` as always).
+SHORT_PROMPTS = "short_prompts"
 #: A round whose marks cannot say where its parts began, and time between stamped phases that nothing stamps.
 ROUND = "round"
 OTHER = "other"
@@ -116,6 +119,7 @@ PHASE_ORDER = (
     ACCURACY_EVAL,
     MEASURED,
     REPRO_CASE,
+    SHORT_PROMPTS,
     ROUND_COLLECT,
     TEARDOWN,
     ROUND,

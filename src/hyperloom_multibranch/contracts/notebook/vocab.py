@@ -90,6 +90,14 @@ LINEAGE_WRITERS: dict[LineageKind, Role] = {
 }
 
 
+class BranchDriver(str, Enum):
+    """Who drives a branch: its specialist, whom the judge steers, or a third-party agent the user named, which runs
+    the branch end to end by its own logic."""
+
+    SPECIALIST = "specialist"
+    AUTONOMOUS = "autonomous"
+
+
 class CommitOrigin(str, Enum):
     """How a commit came to exist."""
 
@@ -108,6 +116,11 @@ class MergeOutcome(str, Enum):
     CONFLICT_SKIPPED = "conflict_skipped"
     ALREADY_ON_HEAD = "already_on_head"
     PENDING = "pending"
+
+
+#: The merge outcomes that did not carry their commits onto integration: skipped untested because they conflicted, or
+#: tested and not stackable.
+FAILED_MERGES = frozenset({MergeOutcome.CONFLICT_SKIPPED, MergeOutcome.NOT_STACKABLE})
 
 
 class InboxKind(str, Enum):
@@ -185,6 +198,7 @@ class UnfinishedReason(str, Enum):
 
 __all__ = [
     "COMMITTING",
+    "FAILED_MERGES",
     "INTEGRATION_BRANCH",
     "INTEGRATION_CONCLUSIONS",
     "LINEAGE_WRITERS",

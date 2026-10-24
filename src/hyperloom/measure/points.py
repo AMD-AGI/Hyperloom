@@ -41,6 +41,7 @@ from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.compile import CompiledEnvironment, EnvironmentCompiler
 from hyperloom.measure.eval_context import check_eval_context
 from hyperloom.measure.magpie_launchers import install_launchers
+from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.surface import (
     SCRIPT_FIELD,
     MeasurementSurface,
@@ -309,10 +310,12 @@ def generate_profile_point(
 
 @dataclass(frozen=True)
 class AcceptedMeasurement:
-    """What acceptance produces for a test request: its environment and the points it runs."""
+    """What acceptance produces for a test request: its environment and the points it runs, and the short-prompt
+    consistency check the toolbox decided the test runs (``None`` for none)."""
 
     environment: CompiledEnvironment
     points: tuple[Path, ...]
+    short_prompts: ShortPromptPlan | None = None
 
 
 def accept_measurement(

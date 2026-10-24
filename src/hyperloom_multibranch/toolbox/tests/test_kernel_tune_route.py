@@ -116,6 +116,18 @@ async def test_the_advertisement_says_a_test_request_id_is_required_and_the_serv
     assert untouched(served.rig)
 
 
+async def test_the_advertisement_says_that_the_relaxed_rows_are_the_specialists_choice_and_an_accuracy_check_decides(
+    make: Any,
+) -> None:
+    description = (await make(cards=2)).stack.advertised()["description"]
+
+    assert "params.max_err_ratio (up to 0.05)" in description and "rows_csv_relaxed" in description
+    assert "relaxed_rows" in description and "err_ratio_above_default" in description
+    assert "never in rows_csv" in description and "your explicit choice" in description
+    assert "end-to-end accuracy check" in description and "a mismatch ratio of at most 0.01" in description
+    assert "params.retune=true" in description and "CUDA-graph batch sizes" in description
+
+
 async def test_a_specialist_starts_the_tuner_on_a_test_and_its_rows_reach_its_inbox(make: Any) -> None:
     served = await make(cards=2)
     reply = await served.stack.start(tool="kernel_tune", params={"test_request_id": TEST_ID})
@@ -170,6 +182,22 @@ async def test_a_job_that_would_starve_measurement_is_refused_to_the_specialist_
         ({"test_request_id": TEST_ID, "timeout_sec": MIN_TUNER_SEC - 1}, "invalid_request", "whole seconds from"),
         ({"test_request_id": TEST_ID, "timeout_sec": MAX_TIMEOUT_SEC + 1}, "invalid_request", "whole seconds from"),
         ({"test_request_id": TEST_ID, "timeout_sec": "long"}, "invalid_request", "whole seconds from"),
+        (
+            {"test_request_id": TEST_ID, "max_err_ratio": 0.0501},
+            "invalid_request",
+            "mismatch ratio from 0.01 (the default) to 0.05",
+        ),
+        (
+            {"test_request_id": TEST_ID, "max_err_ratio": 0.0099},
+            "invalid_request",
+            "mismatch ratio from 0.01 (the default) to 0.05",
+        ),
+        ({"test_request_id": TEST_ID, "max_err_ratio": "0.02"}, "invalid_request", "mismatch ratio from 0.01"),
+        ({"test_request_id": TEST_ID, "max_err_ratio": True}, "invalid_request", "mismatch ratio from 0.01"),
+        ({"test_request_id": TEST_ID, "max_err_ratio": float("nan")}, "invalid_request", "mismatch ratio from 0.01"),
+        ({"test_request_id": TEST_ID, "retune": "yes"}, "invalid_request", "retune is true or false"),
+        ({"test_request_id": TEST_ID, "retune": 1}, "invalid_request", "retune is true or false"),
+        ({"test_request_id": TEST_ID, "retune": True, "shapes": [SHAPE]}, "invalid_request", "give one or the other"),
     ],
 )
 async def test_a_request_no_run_can_use_is_refused_by_name_before_anything_starts(

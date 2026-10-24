@@ -47,11 +47,20 @@ from hyperloom.measure import log_causes
 from hyperloom.measure.boot_watch import BOOT_CANCEL_REASON, BootGuard, boot_limit_sec
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure, decides_test
-from hyperloom.measure.farm import FarmError, build_farm, place_farm, server_python, verify_farm
+from hyperloom.measure.farm import FarmError, build_farm, inherited_environment, place_farm, server_python, verify_farm
 from hyperloom.measure.framework.copies import PrivateFramework, private_framework
 from hyperloom.measure.framework.rows import RowsOnlyRefused
 from hyperloom.measure.magpie_launchers import install_launchers
-from hyperloom.measure.phases import JIT_CACHE, KERNEL_TABLES, OTHER, REPRO_CASE, ROUND_COLLECT, TEARDOWN, PhaseRecorder
+from hyperloom.measure.phases import (
+    JIT_CACHE,
+    KERNEL_TABLES,
+    OTHER,
+    REPRO_CASE,
+    ROUND_COLLECT,
+    SHORT_PROMPTS,
+    TEARDOWN,
+    PhaseRecorder,
+)
 from hyperloom.measure.ports import DEV_SANDBOX_PORTS, pick_port_outside_dev_sandboxes
 from hyperloom.measure.profile_client import ProfileClientError, patch_profile_client
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces
@@ -59,6 +68,9 @@ from hyperloom.measure.repro import ReproError, find_case, run_case
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC, SERVER_BOOT_TIMEOUT_RC
 from hyperloom.measure.round_marks import ROLE_BOOT, ROLE_MEASURE, ROLE_WARMUP, RoundShape, read_runs, round_boundaries
 from hyperloom.sandbox.node import node_name
+from hyperloom.measure.short_prompts.rounds import PassFailed, Serving, run_passes
+from hyperloom.measure.short_prompts.staging import load_prompt_set
+from hyperloom.measure.short_prompts.prompts import PromptSetError
 from hyperloom.measure.socket import MeasurementTimeout, RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import Attachment
 from hyperloom.measure.spec import EnvRoot as SpecEnvRoot
@@ -268,6 +280,7 @@ def _validate(call: TestCall) -> None:
         _validate_profile(call)
     if call.kind == _REPRO:
         _validate_repro(call)
+    _validate_short_prompts(call)
     _, dropped = filter_untrusted_env_mapping(call.env_overrides, allow_predicate=is_allowed_variant_env_key)
     if dropped:
         raise TestCallRefused(f"env_overrides may not set {sorted(dropped)}")
@@ -295,6 +308,20 @@ def _validate_profile(call: TestCall) -> None:
         raise TestCallRefused(
             f"{call.points[0]} does not turn the torch profiler on (torch_profiler, and PROFILE=1 unless AgentX)"
         )
+
+
+def _validate_short_prompts(call: TestCall) -> None:
+    """A short-prompt check needs a test that measures and a staged prompt set that is the one the call names; a test that
+    would only find out after its rounds is refused before any server starts."""
+    plan = call.short_prompts
+    if plan is None:
+        return
+    if call.kind in (_PROFILE, _REPRO):
+        raise TestCallRefused(f"a {call.kind} test does not run the short-prompt consistency check")
+    try:
+        load_prompt_set(plan, os.environ)
+    except PromptSetError as exc:
+        raise TestCallRefused(f"the short-prompt set {plan.prompt_set} cannot be used: {exc}") from exc
 
 
 def _validate_repro(call: TestCall) -> None:
@@ -379,7 +406,8 @@ def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path
         )
         python = server_python(_point_config(call.points[0]), default=sys.executable)
         roots = [SpecEnvRoot.parse(root.to_document(), "environment.roots") for root in environment.roots]
-        farm = build_farm(roots, work / "farm", python=python, read_blob=read_blob)
+        inherited = inherited_environment(os.environ, call.env_overrides, call.unset_envs)
+        farm = build_farm(roots, work / "farm", python=python, read_blob=read_blob, inherited=inherited)
         points = []
         for index, point in enumerate(call.points):
             config = yaml.safe_load(substitute(Path(point).read_text(encoding=_UTF8), placed)) or {}
@@ -616,7 +644,19 @@ async def _eval_then_measure(run: _Run, lifecycle: _Lifecycle) -> None:
 def _runner_of(call: TestCall) -> Callable[[_Run], Awaitable[None]]:
     if call.kind == _REPRO:
         return _repro
-    return _sweep if call.prep == "conc_sweep" else _single
+    rounds = _sweep if call.prep == "conc_sweep" else _single
+    return rounds if call.short_prompts is None else _then_short_prompts(rounds)
+
+
+def _then_short_prompts(rounds: Callable[[_Run], Awaitable[None]]) -> Callable[[_Run], Awaitable[None]]:
+    """``rounds``, then the short-prompt check when every round of the test ran clean."""
+
+    async def run_all(run: _Run) -> None:
+        await rounds(run)
+        if run.stopped_rc is None and run.results and not any(_is_failure(result) for _, result in run.results):
+            await _short_prompts(run)
+
+    return run_all
 
 
 def _is_failure(result: VariantResult) -> bool:
@@ -775,6 +815,55 @@ def _run_case(run: _Run, port: int) -> None:
         )
     except ReproError as exc:
         _fail_case(run, str(exc))
+
+
+class _PassServers:
+    """The servers of a short-prompt check: each is a boot-only round of the point's own launch, as a repro test's is,
+    run in a scratch directory of its own so that its logs and reports are not part of the test's output."""
+
+    def __init__(self, run: _Run) -> None:
+        self._run = run
+        self._lifecycle: _Lifecycle | None = None
+        self._model = str((_point_config(run.call.points[0]).get("benchmark") or {}).get("model") or "")
+
+    def should_stop(self) -> bool:
+        return self._run.stopped_rc is not None
+
+    async def start(self, index: int, deadline: float) -> Serving:
+        run = self._run
+        run.call = dataclasses.replace(run.call, session_deadline_sec=deadline)
+        lifecycle = _Lifecycle(run)
+        if not lifecycle.eligible:
+            raise PassFailed(f"the server cannot be held up for the check ({lifecycle.reason})")
+        self._lifecycle = lifecycle
+        boot = await _boot_server(run, lifecycle, 0, f"short{index}")
+        if _is_failure(boot):
+            run.add(0, boot)
+            raise PassFailed(f"the server did not come up ({boot.error_class or boot.status})")
+        run.phases.begin(SHORT_PROMPTS)
+        return Serving(f"http://127.0.0.1:{lifecycle.port}", self._model)
+
+    async def stop(self) -> None:
+        if self._lifecycle is not None:
+            self._lifecycle.teardown()
+            self._lifecycle = None
+
+
+async def _short_prompts(run: _Run) -> None:
+    """Ask fresh servers of the test's own launch the short prompts, after its rounds and apart from them: the check's
+    servers run on a copy of the call whose output is a scratch directory, so its rounds, logs and reports are not the
+    test's, and a failure of the check is the check's (``outputs.json`` says), never the test's."""
+    plan, call = run.call.short_prompts, run.call
+    if plan is None:
+        return
+    scratch = Path(tempfile.mkdtemp(prefix="hl-short-"))
+    try:
+        apart = dataclasses.replace(call, output_dir=scratch, result_dir=None)
+        servers = _PassServers(_Run(apart, run.unset_envs, phases=run.phases))
+        await run_passes(plan, load_prompt_set(plan, os.environ), servers, Path(call.output_dir))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+        run.phases.begin(OTHER)
 
 
 def _gather_traces(run: _Run) -> None:

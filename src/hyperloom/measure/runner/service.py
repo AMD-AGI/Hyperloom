@@ -14,6 +14,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from hyperloom.measure.failures import FOREIGN_PROCESS_ON_CARD
 from hyperloom.measure.live_log import last_output
 
 __all__ = [
@@ -33,6 +34,7 @@ EXIT_CODES = {
     "spec_rejected": 3,
     "preflight_mismatch": 4,
     "node_fault": 5,
+    FOREIGN_PROCESS_ON_CARD: 6,
 }
 _REFRESH_SEC = 20.0
 #: ``status.json`` keeps this many characters of its message.

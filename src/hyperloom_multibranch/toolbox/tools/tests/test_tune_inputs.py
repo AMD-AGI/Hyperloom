@@ -14,7 +14,11 @@ import yaml
 
 from hyperloom_multibranch.toolbox.tests.kernel_tune_rig import (
     ENV,
+    GRAPH_SIZES,
+    HIT_LOG,
+    HIT_SHAPES,
     LOG_SHAPES,
+    SERVER_ARGS,
     SERVER_LOG,
     TABLE,
     TUNER,
@@ -23,6 +27,7 @@ from hyperloom_multibranch.toolbox.tests.kernel_tune_rig import (
 from hyperloom_multibranch.toolbox.tools.base import ToolFailure
 from hyperloom_multibranch.toolbox.tools.tune_inputs import (
     DENSE_TABLES,
+    cuda_graph_batch_sizes,
     demand_from_logs,
     explicit_demand,
     served_workload,
@@ -149,3 +154,157 @@ def test_the_table_asked_for_most_comes_first_so_a_short_time_reaches_it_first()
     demand = explicit_demand(shapes)
 
     assert [entry["env_var"] for entry in demand["demands"]] == [BF16, ENV]
+
+
+# --- the decode CUDA-graph batch sizes of the servers ---------------------------------------------------------------------
+
+
+def test_the_graph_sizes_are_the_decode_list_of_the_servers_resolved_arguments_up_to_the_size_the_workload_replays() -> (
+    None
+):
+    """A step of ``conc`` requests replays the graph of the smallest captured size at least ``conc``: 128 here (it is in the
+    list), so the sizes above it are never replayed, and neither the prefill list nor an unset flag is read as the list."""
+    assert cuda_graph_batch_sizes(SERVER_ARGS, 128) == tuple(size for size in GRAPH_SIZES if size <= 128)
+    assert cuda_graph_batch_sizes(SERVER_ARGS, 100) == tuple(size for size in GRAPH_SIZES if size <= 104)
+    assert cuda_graph_batch_sizes(SERVER_ARGS, 1) == (1,)
+
+
+def test_a_workload_above_every_captured_size_replays_all_of_them() -> None:
+    assert cuda_graph_batch_sizes(SERVER_ARGS, 100_000) == GRAPH_SIZES
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "server_args=ServerArgs(model_path='/m', cuda_graph_max_bs=160, cuda_graph_bs=[1, 2, 4, 8, 16, 24], tp_size=1)",
+        "server_args={'tp_size': 1, 'cuda_graph_bs': [1, 2, 4, 8, 16, 24], 'disable_cuda_graph': False}",
+    ],
+)
+def test_the_list_of_an_older_layout_is_read_too(line: str) -> None:
+    assert cuda_graph_batch_sizes(line, 64) == (1, 2, 4, 8, 16, 24)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        SERVER_LOG,
+        "server_args={'cuda_graph_bs_decode': None, 'cuda_graph_bs_prefill': None}",
+        "server_args={'cuda_graph_config': {'decode': {'backend': 'disabled', 'bs': None}, 'prefill': {'bs': [4, 8]}}}",
+    ],
+)
+def test_a_log_that_does_not_say_what_the_decode_graphs_were_captured_for_has_no_sizes(text: str) -> None:
+    assert cuda_graph_batch_sizes(text, 64) == ()
+
+
+def test_the_sizes_of_every_server_log_of_the_test_are_taken_together() -> None:
+    other = SERVER_ARGS.replace("'bs': [1, 2, 4", "'bs': [3, 5, 4", 1)
+    assert cuda_graph_batch_sizes(SERVER_ARGS + other, 128) == tuple(
+        sorted({3, 5, *GRAPH_SIZES} - {136, 144, 256, 512})
+    )
+
+
+def test_every_graph_size_is_added_as_the_m_of_each_n_k_of_a_demand_and_counts_for_no_miss(tmp_path: Path) -> None:
+    landed = landed_test(tmp_path, tmp_path / "model", log=SERVER_ARGS + SERVER_LOG)
+
+    demand = demand_from_logs(landed, conc=128)
+
+    (entry,) = demand["demands"]
+    sizes = tuple(size for size in GRAPH_SIZES if size <= 128)
+    assert demand["cuda_graph_batch_sizes"] == list(sizes)
+    by_group: dict[tuple[str, str], dict[str, int]] = {}
+    for key in entry["keys"]:
+        by_group.setdefault((key["N"], key["K"]), {})[key["M"]] = key["requests"]
+    assert set(by_group) == {(n, k) for _, n, k in LOG_SHAPES}
+    for group in by_group.values():
+        assert {int(m) for m in group} == {*sizes, 496}, "every size, and the M the log asked for"
+        assert group["496"] == 1 and all(group[str(size)] == 0 for size in sizes)
+    assert entry["miss_count"] == len(LOG_SHAPES), "an added key is no miss"
+    assert entry["distinct_keys"] == len(LOG_SHAPES) * (len(sizes) + 1)
+
+
+def test_a_size_the_log_asked_for_keeps_its_count(tmp_path: Path) -> None:
+    log = SERVER_ARGS + SERVER_LOG.replace("M:496", "M:64")
+    demand = demand_from_logs(landed_test(tmp_path, tmp_path / "model", log=log), conc=128)
+
+    (entry,) = demand["demands"]
+    counts = {(key["M"], key["N"], key["K"]): key["requests"] for key in entry["keys"]}
+    assert counts[("64", "7168", "5120")] == 1 and counts[("32", "7168", "5120")] == 0
+    assert len([key for key in entry["keys"] if (key["M"], key["N"], key["K"]) == ("64", "7168", "5120")]) == 1
+
+
+def test_no_concurrency_given_means_no_sizes_are_added(tmp_path: Path) -> None:
+    demand = demand_from_logs(landed_test(tmp_path, tmp_path / "model", log=SERVER_ARGS + SERVER_LOG))
+
+    assert keys(demand) == LOG_SHAPES and demand["cuda_graph_batch_sizes"] == []
+
+
+def test_a_log_that_names_no_graph_sizes_leaves_the_demand_as_the_log_has_it(tmp_path: Path) -> None:
+    demand = demand_from_logs(landed_test(tmp_path, tmp_path / "model"), conc=128)
+
+    assert keys(demand) == LOG_SHAPES and demand["cuda_graph_batch_sizes"] == []
+
+
+# --- retune: the shapes the tables serve ------------------------------------------------------------------------------------
+
+
+def hit_keys(demand: dict) -> dict[str, set[tuple[str, str, str]]]:
+    return {entry["env_var"]: {(k["M"], k["N"], k["K"]) for k in entry["keys"]} for entry in demand["demands"]}
+
+
+def test_a_log_whose_tables_served_every_lookup_is_nothing_to_tune_and_the_failure_names_retune(tmp_path: Path) -> None:
+    landed = landed_test(tmp_path, tmp_path / "model", log=HIT_LOG)
+
+    with pytest.raises(ToolFailure, match=r"report no untuned dense GEMM shape.*set retune=true"):
+        demand_from_logs(landed)
+
+
+def test_retune_makes_the_rows_the_tables_served_the_demand_of_each_dense_table(tmp_path: Path) -> None:
+    demand = demand_from_logs(landed_test(tmp_path, tmp_path / "model", log=HIT_LOG), retune=True)
+
+    assert hit_keys(demand) == HIT_SHAPES
+    assert {entry["env_var"]: entry["miss_count"] for entry in demand["demands"]} == {
+        ENV: 0,
+        "AITER_CONFIG_GEMM_BF16": 0,
+    }
+    bf16 = next(entry for entry in demand["demands"] if entry["env_var"] == "AITER_CONFIG_GEMM_BF16")
+    assert bf16["keys"][0]["dtype"] == "torch.bfloat16" and bf16["keys"][0]["bpreshuffle"] == "False"
+    assert demand["served_keys"] == 3, "the per-token a8w8 line prints no q_dtype_w, which keys its table: no key"
+    assert demand["served_lines_unread"] == 1
+
+
+def test_a_served_row_and_a_missed_shape_are_one_demand(tmp_path: Path) -> None:
+    landed = landed_test(tmp_path, tmp_path / "model", log=SERVER_LOG + HIT_LOG)
+
+    demand = demand_from_logs(landed, retune=True)
+
+    served = hit_keys(demand)[ENV]
+    assert served == LOG_SHAPES | HIT_SHAPES[ENV]
+    (blockscale,) = [entry for entry in demand["demands"] if entry["env_var"] == ENV]
+    assert blockscale["miss_count"] == len(LOG_SHAPES), "a served row is no miss"
+
+
+def test_without_retune_a_log_with_misses_and_hits_asks_for_the_misses_only(tmp_path: Path) -> None:
+    demand = demand_from_logs(landed_test(tmp_path, tmp_path / "model", log=SERVER_LOG + HIT_LOG))
+
+    assert hit_keys(demand) == {ENV: LOG_SHAPES} and demand["served_keys"] == 0
+
+
+def test_retune_on_a_log_with_no_lookup_at_all_says_that_the_server_may_not_have_logged_its_hits(
+    tmp_path: Path,
+) -> None:
+    boot = "[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so\n"
+
+    with pytest.raises(ToolFailure, match=r"no dense GEMM lookup.*AITER_LOG_TUNED_CONFIG.*nothing to retune"):
+        demand_from_logs(landed_test(tmp_path, tmp_path / "model", log=boot), retune=True)
+
+
+def test_retune_on_a_log_whose_only_hits_are_of_a_table_it_cannot_key_says_so_and_points_to_shapes(
+    tmp_path: Path,
+) -> None:
+    a8w8 = "".join(line for line in HIT_LOG.splitlines(keepends=True) if "a8w8_bpreshuffle_tuned_gemm" in line)
+
+    with pytest.raises(
+        ToolFailure, match=r"1 hit line\(s\) name rows of tables this reader cannot key.*q_dtype_w.*params.shapes"
+    ):
+        demand_from_logs(landed_test(tmp_path, tmp_path / "model", log=a8w8), retune=True)

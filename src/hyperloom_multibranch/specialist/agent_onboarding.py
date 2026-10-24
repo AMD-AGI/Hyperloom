@@ -47,8 +47,8 @@ TAIL_LINES = 20
 DOCKER_SHIM = """#!/usr/bin/env python3
 # Runs `docker exec` and `docker cp` in place, for an agent written to drive a container; the sandbox has no daemon.
 # A device mask the agent passes names cards of its own container, numbered from 0: it is read as indices into the
-# sandbox's cards, which HIP_VISIBLE_DEVICES holds, and set there alone, since set as given it would reach any card of
-# the host, or, as ROCR_VISIBLE_DEVICES under HIP_VISIBLE_DEVICES, none.
+# sandbox's cards, which HIP_VISIBLE_DEVICES numbers from 0 under ROCR_VISIBLE_DEVICES, and set there alone, since a
+# ROCR_VISIBLE_DEVICES set as given would reach other cards of the host.
 import os, shutil, subprocess, sys
 
 MASKS = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
@@ -149,6 +149,10 @@ class AgentSandbox(Protocol):
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult: ...
 
     async def start(self, command: str, cwd: Path, env: Mapping[str, str]) -> AgentProcess: ...
+
+    def watched(self) -> str:
+        """Start the watch confining the sandbox's processes again when it ended; what to say of it, empty when it
+        runs."""
 
 
 #: Asks the onboarding model ``prompt`` with the agent's checkout as its working directory; its answer.
@@ -328,10 +332,11 @@ and TP flags come on top of them:
 
 The sandbox:
 - has the session's image and framework and no docker daemon. It sees only the GPUs in "cards", numbered from 0
-  (HIP_VISIBLE_DEVICES is set): a GPU id the agent's config gives is one of those, 0 the first; never set
-  ROCR_VISIBLE_DEVICES, HIP_VISIBLE_DEVICES or CUDA_VISIBLE_DEVICES in a command of your own. A `docker` on PATH runs
-  `docker exec [-w DIR] [-e K=V] CONTAINER CMD...` as CMD in DIR and `docker cp C:SRC DST` as a copy, so an agent
-  written to drive a container works when its config names any container;
+  (ROCR_VISIBLE_DEVICES holds them): a GPU id the agent's config gives is one of those, 0 the first; never set
+  ROCR_VISIBLE_DEVICES, HIP_VISIBLE_DEVICES or CUDA_VISIBLE_DEVICES in a command of your own: a command whose
+  ROCR_VISIBLE_DEVICES reaches other cards is killed. A `docker` on PATH runs `docker exec [-w DIR] [-e K=V]
+  CONTAINER CMD...` as CMD in DIR and `docker cp C:SRC DST` as a copy, so an agent written to drive a container works
+  when its config names any container;
 - shares the host with other servers: `pkill`, `pgrep` and `killall` reach only the agent's own processes, but turn
   off any other sweep that kills what holds GPU memory, and give the agent's servers a port no one else uses;
 - the agent edits the framework source in "workspace", in place, and launches its servers from it;
@@ -351,7 +356,10 @@ Answer with one JSON object and nothing else, with exactly these fields:
   with, "server_args": the field of the arguments string, "envs": the field of the environment object}}, or null;
 - "summary_field": dotted path in the keep file to the agent's own words for its latest keep (an integer step indexes
   a list, -1 its last item), "" when none;
-- "needs": what it requires, from "anthropic", "openai", "network", "docker".
+- "needs": what it requires, from "anthropic", "openai", "network", "docker";
+- "ledger": where the agent writes down what it found, {{"path": JSON-lines file relative to the checkout, "id": the
+  field of an entry's id, "kind": the field of its kind, "text": the field of the finding, "kinds": {{each of the
+  agent's kinds that states a measured fact or a dead end: "insight" or "pitfall"}}}}, or null when it writes none.
 
 Earlier attempts that failed, to correct rather than repeat:
 {failures}

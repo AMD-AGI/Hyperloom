@@ -14,11 +14,9 @@ import os
 import subprocess
 import tempfile
 from collections.abc import Mapping
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
-from hyperloom.measure.compile import COMPONENT_LAYOUTS
-
-#: A package-relative path's content, ``None`` where there is no file.
+#: A file's content by its path in the component's upstream repository, ``None`` where there is no file.
 Files = Mapping[str, bytes | None]
 # Both commands work on the few files one patch touches; this only bounds a wedged filesystem.
 _GIT_TIMEOUT_S = 60.0
@@ -76,25 +74,24 @@ def _merge_file(base: bytes | None, ours: bytes | None, theirs: bytes | None, th
     return done.stdout
 
 
-def patch_between(component: str, before: Files, after: Files) -> str:
-    """A git patch of ``component`` that turns ``before`` into ``after``, named ``a/<upstream prefix>/<path>`` as the
-    patches the toolbox applies are; empty when nothing differs.
+def patch_between(before: Files, after: Files) -> str:
+    """A git patch that turns ``before`` into ``after``, named ``a/<path>`` as the patches the toolbox applies are;
+    empty when nothing differs.
 
     ``after`` holds every path of ``before``.
     """
     if all(before.get(path) == content for path, content in after.items()):
         return ""
-    prefix = PurePosixPath(COMPONENT_LAYOUTS[component].upstream_prefix)
     with tempfile.TemporaryDirectory(prefix="hl-rebase-") as scratch:
         tree = Path(scratch)
         _git(tree, "init", "--quiet")
-        trees = [_write_tree(tree, prefix, files) for files in (before, after)]
+        trees = [_write_tree(tree, files) for files in (before, after)]
         return _git(tree, "diff", "--no-color", "--no-ext-diff", "--no-renames", *trees)
 
 
-def _write_tree(tree: Path, prefix: PurePosixPath, files: Files) -> str:
+def _write_tree(tree: Path, files: Files) -> str:
     for path, content in files.items():
-        target = tree / prefix / path
+        target = tree / path
         if content is None:
             target.unlink(missing_ok=True)
             continue

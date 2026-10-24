@@ -50,6 +50,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     Withdrawal,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
+    BranchDriver,
     ClaimStatus,
     Conclusion,
     DedupStatus,
@@ -198,11 +199,32 @@ async def test_each_lineage_event_has_one_writer(open_as: Open, role: Role, even
         LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH),
         LineageEvent(LineageKind.OPEN, "s1", from_commit="c0", recipe_digest=ROOT_RECIPE),
         LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0", recipe_digest="sha256:c0"),
+        LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0", driver=BranchDriver.AUTONOMOUS),
+        LineageEvent(LineageKind.STOP, "s1", driver=BranchDriver.AUTONOMOUS),
     ],
 )
 async def test_a_lineage_event_names_what_its_kind_needs(open_as: Open, event: LineageEvent) -> None:
     with pytest.raises(ValueError):
         await open_as(Role.SCHEDULER).record_lineage(event)
+
+
+async def test_a_branch_an_autonomous_agent_drives_is_known_from_its_open_even_when_it_stops_at_once(
+    open_as: Open,
+) -> None:
+    scheduler = open_as(Role.SCHEDULER)
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "b01", from_commit="c0"))
+    await scheduler.record_lineage(
+        LineageEvent(LineageKind.OPEN, "b02", from_commit="c0", driver=BranchDriver.AUTONOMOUS)
+    )
+    await scheduler.record_lineage(LineageEvent(LineageKind.STOP, "b02", reason="its agent did not start"))
+
+    drivers = {node.branch: node.driver for node in (await scheduler.lineage()).branches}
+    assert drivers == {
+        INTEGRATION_BRANCH: BranchDriver.SPECIALIST,
+        "b01": BranchDriver.SPECIALIST,
+        "b02": BranchDriver.AUTONOMOUS,
+    }
 
 
 async def test_a_commit_keeps_the_recipe_digest_it_was_recorded_with(open_as: Open) -> None:
@@ -666,7 +688,7 @@ async def test_the_latest_baseline_is_in_force(open_as: Open) -> None:
         await open_as(Role.SCHEDULER).write_baseline(updated)
 
 
-async def test_merges_that_did_not_land_say_why_in_the_commit_query(open_as: Open) -> None:
+async def test_merges_that_did_not_land_say_why_in_the_commit_query(open_as: Open, clock: FakeClock) -> None:
     scheduler, gate, integrator = open_as(Role.SCHEDULER), open_as(Role.GATE), open_as(Role.INTEGRATOR)
     await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
     for request_id in ("r1", "r2"):
@@ -677,12 +699,24 @@ async def test_merges_that_did_not_land_say_why_in_the_commit_query(open_as: Ope
     await integrator.record_merge_attempt(MergeAttempt(("c1",), "c0", request_id="m1"))
     await integrator.write_judgement("m1", judgement(0.1, ("m1",), verdict=Verdict.FLAT), Conclusion.NOT_STACKABLE)
     await integrator.record_merge_attempt(MergeAttempt(("c2",), "c0", skipped_reason="patch conflict in fused_moe.py"))
+    clock.advance(600.0)
+    await integrator.record_merge_attempt(MergeAttempt(("c2",), "c0", skipped_reason="patch conflict in qwen3.py"))
 
     by_commit = {commit.commit_id: commit for commit in await integrator.committed()}
 
     assert [commit.commit_id for commit in await integrator.committed()] == ["c1", "c2"]
-    assert by_commit["c1"].last_merge.outcome is MergeOutcome.NOT_STACKABLE
-    assert by_commit["c2"].last_merge.outcome is MergeOutcome.CONFLICT_SKIPPED
+    c1, c2 = by_commit["c1"].last_merge, by_commit["c2"].last_merge
+    assert (c1.outcome, c1.reason, by_commit["c1"].merge_attempts) == (
+        MergeOutcome.NOT_STACKABLE,
+        "+0.10% on the integration head",
+        1,
+    )
+    assert (c2.outcome, c2.reason, by_commit["c2"].merge_attempts) == (
+        MergeOutcome.CONFLICT_SKIPPED,
+        "patch conflict in qwen3.py",
+        2,
+    )
+    assert c2.at - c1.at > 600.0
     assert by_commit["c1"].merged_into is None
     with pytest.raises(ValueError, match="says why"):
         await integrator.record_merge_attempt(MergeAttempt(("c2",), "c0"))

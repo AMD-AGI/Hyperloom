@@ -18,7 +18,9 @@ import sys
 import tempfile
 from pathlib import Path, PurePosixPath
 
+from hyperloom.common.outside_facts import AITER_META_DIR_ENV
 from hyperloom.measure.compile import ComponentLayout, PackageBase
+from hyperloom.measure.farm import image_aiter_meta
 from hyperloom_multibranch.specialist.worktree import BranchWorktree, Changes
 
 #: Importing a framework loads torch and its kernels; more than this is a hang, not a slow import.
@@ -46,6 +48,7 @@ def check_change(worktree: BranchWorktree, component: str, layout: ComponentLayo
             done = subprocess.run(
                 [sys.executable, "-c", f"import {layout.import_name}"],
                 cwd=scratch,
+                env=_import_env(layout, package),
                 capture_output=True,
                 timeout=IMPORT_TIMEOUT_S,
             )
@@ -57,10 +60,19 @@ def check_change(worktree: BranchWorktree, component: str, layout: ComponentLayo
     return len(written)
 
 
+def _import_env(layout: ComponentLayout, package: PackageBase) -> dict[str, str] | None:
+    if layout.import_name != "aiter" or os.environ.get(AITER_META_DIR_ENV):
+        return None
+    # aiter imports csrc from its meta dir, which it derives from where the package sits; the mirror would make it the
+    # scratch dir, which has no csrc, so it is pinned to the image's.
+    return {**os.environ, AITER_META_DIR_ENV: str(image_aiter_meta(package.path))}
+
+
 def _mirror(installed: Path, target: Path, worktree: Path, prefix: str, changes: Changes) -> None:
-    """Lay the installed package out at ``target`` with the change over it."""
-    deleted = {_inside(path, prefix) for path in changes.deleted}
-    written = {_inside(path, prefix): worktree / path for path in changes.written}
+    """Lay the installed package out at ``target`` with the change over it; the change's files beside the package (a
+    meta tree such as aiter's csrc) are not part of its import."""
+    deleted = {_inside(path, prefix) for path in changes.deleted if _within(path, prefix)}
+    written = {_inside(path, prefix): worktree / path for path in changes.written if _within(path, prefix)}
     for source in installed.rglob("*"):
         rel = source.relative_to(installed).as_posix()
         if source.is_dir() or "__pycache__" in source.parts or rel in deleted or rel in written:
@@ -73,6 +85,10 @@ def _mirror(installed: Path, target: Path, worktree: Path, prefix: str, changes:
 
 def _inside(path: str, prefix: str) -> str:
     return str(PurePosixPath(path).relative_to(prefix))
+
+
+def _within(path: str, prefix: str) -> bool:
+    return PurePosixPath(prefix) in PurePosixPath(path).parents
 
 
 def _link(source: Path, destination: Path) -> None:

@@ -33,7 +33,7 @@ import pytest
 
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import TestRequest, TestResult
-from hyperloom.contracts.recipe import ConfigDelta, PatchRef, Recipe, RecipeDelta, apply
+from hyperloom.contracts.recipe import ComponentPatches, ConfigDelta, PatchRef, Recipe, RecipeDelta, apply
 from hyperloom.measure.compile import BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RecipeScope
@@ -217,9 +217,9 @@ class HeldGitRepo(GitExperimentRepo):
         async with self.time.held():
             return await super().commit(branch, parent, recipe, message)
 
-    async def merge(self, candidate: str, onto: str) -> RepoMerge:
+    async def merge(self, candidate: str, onto: str, protected: frozenset[str] = frozenset()) -> RepoMerge:
         async with self.time.held():
-            return await super().merge(candidate, onto)
+            return await super().merge(candidate, onto, protected)
 
     async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: Sequence[str]) -> str:
         async with self.time.held():
@@ -236,6 +236,10 @@ class HeldGitRepo(GitExperimentRepo):
     async def patch_text(self, commit: str, path: str) -> str:
         async with self.time.held():
             return await super().patch_text(commit, path)
+
+    async def apply_error(self, stack: ComponentPatches, text: str) -> str | None:
+        async with self.time.held():
+            return await super().apply_error(stack, text)
 
     async def checkout(self, commit: str, destination: Path) -> None:
         async with self.time.held():
@@ -707,7 +711,7 @@ def judged(verdict: Verdict, gain_pct: float, request_id: str, value: float) -> 
 @dataclass
 class ScriptedCompletion:
     """A model for the tests: raises ``error`` when it is set, else the scripted replies in order, then ``fallback``,
-    each reply using ``tokens`` that cost ``cost_usd``.
+    each reply using ``tokens`` that cost ``cost_usd`` and stopping for ``stop_reason``.
 
     Not a placeholder: a test never calls a real model.
     """
@@ -718,12 +722,14 @@ class ScriptedCompletion:
     calls: list[tuple[str, str]] = field(default_factory=list)
     tokens: TokenCounts = TokenCounts()
     cost_usd: float = 0.0
+    stop_reason: str | None = None
 
     async def __call__(self, system: str, user: str) -> CompletionReply:
         self.calls.append((system, user))
         if self.error is not None:
             raise self.error
-        return CompletionReply(self.replies.pop(0) if self.replies else self.fallback, self.tokens, self.cost_usd)
+        text = self.replies.pop(0) if self.replies else self.fallback
+        return CompletionReply(text, self.tokens, self.cost_usd, self.stop_reason)
 
 
 @dataclass

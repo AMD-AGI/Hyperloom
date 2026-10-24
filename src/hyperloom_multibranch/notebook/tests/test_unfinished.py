@@ -5,14 +5,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
+from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer, Purpose, Verdict
 from hyperloom_multibranch.contracts.notebook.records import REPLAY_TARGET, LineageEvent, MergeAttempt, Withdrawal
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, UnfinishedReason
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.local.unfinished import MAX_UNFINISHED
+from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.notebook.tests.factories import TTL, FakeClock, delta, intent, judgement, request, result
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, Writers, scripted_session
 from hyperloom_multibranch.notebook.tools import UNFINISHED_TITLE, render_brief
@@ -135,6 +141,68 @@ async def test_a_lead_replayed_with_a_change_made_for_another_head_drops_out(tmp
     brief = await observer.startup_brief("i1")
 
     assert [item.request_id for item in brief.unfinished] == ["n1", "d1", "x1"]
+
+
+async def test_a_lead_whose_replay_was_released_untested_drops_out_for_that_head_but_not_one_its_stop_released(
+    tmp_path: Path,
+) -> None:
+    root, clock = tmp_path / "notebook", FakeClock()
+    observer = await _leftovers(root, clock)
+    w = Writers(root, clock)
+    scheduler = w.as_role(Role.SCHEDULER)
+    for branch in ("s5", "s6"):
+        await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit="c4", reason="refill"))
+    refusing = w.as_role(Role.SPECIALIST_RUNTIME, "s5")
+    claim = await refusing.acquire(
+        intent("s5", "c4", REPLAY_TARGET, "n1"), delta("--n1").fingerprint(), ttl_seconds=TTL
+    )
+    await refusing.release(claim.key)
+    await w.as_role(Role.SPECIALIST_RUNTIME, "s6").acquire(
+        intent("s6", "c4", REPLAY_TARGET, "d1"), delta("--fp8-gemm").fingerprint(), ttl_seconds=TTL
+    )
+    await scheduler.record_lineage(LineageEvent(LineageKind.STOP, "s6", reason="judge: no progress"))
+    await scheduler.release_branch("s6")
+
+    on_c4, on_i1 = await observer.startup_brief("c4"), await observer.startup_brief("i1")
+
+    assert [item.request_id for item in on_c4.unfinished] == ["u1", "d1", "x1"]
+    assert [item.request_id for item in on_i1.unfinished] == ["u1", "n1", "d1", "x1"]
+
+
+@dataclass(frozen=True)
+class _Heads:
+    """Each branch's head and the recipe of each commit, as a replay reads them."""
+
+    heads: Mapping[str, str]
+    recipes: Mapping[str, Recipe]
+
+    async def head(self, branch: str) -> str:
+        return self.heads[branch]
+
+    async def read_recipe(self, commit: str) -> Recipe:
+        return self.recipes[commit]
+
+
+async def test_a_lead_notebook_replay_refused_on_a_head_leaves_the_briefs_from_it_and_what_builds_on_it(
+    tmp_path: Path,
+) -> None:
+    observer = await _leftovers(tmp_path / "notebook", FakeClock())
+    has_it = Recipe("sha256:" + "a" * 64, LaunchConfig("--n1"))
+    briefs = SessionBriefs(observer, repo=_Heads({"s5": "c3"}, {"c3": has_it}))
+
+    with pytest.raises(ValueError, match="your head c3 already has the change n1 tested"):
+        await briefs.for_branch("s5").peer_replay("n1")
+
+    offered = {
+        commit: [item.request_id for item in (await briefs.for_branch("s6").startup_brief(commit)).unfinished]
+        for commit in ("c3", "c4", "i1", "c1")
+    }
+    assert offered == {
+        "c3": ["u1", "d1", "x1"],
+        "c4": ["u1", "d1", "x1"],
+        "i1": ["u1", "n1", "d1", "x1"],
+        "c1": ["u1", "n1", "d1", "x1"],
+    }
 
 
 async def test_a_running_branchs_commits_and_the_merged_ones_are_not_unfinished(tmp_path: Path) -> None:

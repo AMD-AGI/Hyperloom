@@ -46,7 +46,7 @@ async def test_the_completion_returns_the_reply_text_its_tokens_and_their_cost(m
     reply = await llm.anthropic_completion(MODEL, component="c", operation="judge")("sys", "user")
 
     tokens = TokenCounts(input=40, output=25, cache_read=900, cache_write=60)
-    assert reply == CompletionReply("reply", tokens, price_of(MODEL).cost_usd(tokens))
+    assert reply == CompletionReply("reply", tokens, price_of(MODEL).cost_usd(tokens), "end_turn")
     assert reply.cost_usd == pytest.approx((40 * 2 + 25 * 10 + 900 * 0.1 + 60 * 2.5) / 1e6)
     (request,) = asked
     assert (request.model, request.system, list(request.messages)) == (
@@ -73,6 +73,20 @@ async def test_a_reply_may_take_as_long_as_the_caller_allows_it(monkeypatch: pyt
     assert judge.timeout.connect == resolver.timeout.connect == llm.MB_LLM_CONNECT_TIMEOUT_SECONDS
 
 
+async def test_a_reply_may_be_as_long_as_the_caller_allows_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The output cap is the caller's too: a resolved patch can be many times as long as a judgement."""
+
+    asked = _answering(monkeypatch, {})
+
+    await llm.anthropic_completion(MODEL, component="c", operation="judge")("sys", "user")
+    await llm.anthropic_completion(
+        MODEL, component="c", operation="patch_resolve", max_tokens=llm.MB_RESOLVER_MAX_TOKENS
+    )("sys", "user")
+
+    judge, resolver = asked
+    assert judge.max_tokens == llm.COMPLETION_MAX_TOKENS < resolver.max_tokens == llm.MB_RESOLVER_MAX_TOKENS
+
+
 async def test_cache_writes_split_by_lifetime_are_priced_at_their_own_rates(monkeypatch: pytest.MonkeyPatch) -> None:
     _answering(
         monkeypatch,
@@ -96,7 +110,7 @@ async def test_a_reply_without_usable_counts_used_no_tokens(monkeypatch: pytest.
 
     reply = await llm.anthropic_completion(MODEL, component="c", operation="judge")("sys", "user")
 
-    assert reply == CompletionReply("reply", TokenCounts(), 0.0)
+    assert reply == CompletionReply("reply", TokenCounts(), 0.0, "end_turn")
 
 
 async def test_a_model_the_price_sheet_does_not_list_replies_with_its_tokens_and_no_cost(
@@ -106,7 +120,7 @@ async def test_a_model_the_price_sheet_does_not_list_replies_with_its_tokens_and
 
     reply = await llm.anthropic_completion("glm-5-3", component="c", operation="judge")("sys", "user")
 
-    assert reply == CompletionReply("reply", TokenCounts(input=40, output=25, cache_read=900), None)
+    assert reply == CompletionReply("reply", TokenCounts(input=40, output=25, cache_read=900), None, "end_turn")
     assert "judge runs on glm-5-3, which the price sheet does not list" in caplog.text
 
 
