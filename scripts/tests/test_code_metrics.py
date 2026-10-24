@@ -1310,6 +1310,44 @@ def test_a_directory_is_judged_when_the_change_touches_a_file_under_it() -> None
     ]
 
 
+def test_a_worse_directory_is_not_measured_again_at_the_base_as_a_file(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[str] = []
+    monkeypatch.setattr(code_metrics, "base_values", lambda root, since, paths, config: asked.extend(paths) or {})
+    repo.write_baseline({key("src/a", collect.MODULE, collect.DIRECTORY_ENTRIES): 51})
+    base = repo.commit()
+    repo.touch("src/a/new.py")
+    repo.findings = [
+        collect.Finding(collect.DIRECTORY_ENTRIES, "src/a", collect.MODULE, 52, 1),
+        cc("src/a/new.py", "f", 25),
+    ]
+
+    code, report = repo.gate("--base-ref", base)
+
+    assert asked == ["src/a/new.py"]
+    assert code == 1 and "| Directory size (entries) | 51 | 52 |" in section(report, WORSE)
+
+
+def test_a_new_directory_is_not_measured_again_at_the_base_as_a_file(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[str] = []
+    monkeypatch.setattr(code_metrics, "base_values", lambda root, since, paths, config: asked.extend(paths) or {})
+    repo.write_baseline({})
+    base = repo.commit()
+    repo.touch("src/a/new.py")
+    repo.findings = [
+        collect.Finding(collect.DIRECTORY_ENTRIES, "src/a", collect.MODULE, 51, 1),
+        cc("src/a/new.py", "f", 25),
+    ]
+
+    code, report = repo.gate("--base-ref", base)
+
+    assert asked == ["src/a/new.py"]
+    assert code == 1 and "| Directory size (entries) | 51 |" in section(report, NEW)
+
+
 @pytest.mark.skipif(shutil.which("ruff") is None or shutil.which("complexipy") is None, reason="ruff/complexipy")
 def test_base_values_measures_the_files_as_they_were_at_the_base(tmp_path: Path) -> None:
     branches = "".join(f"    if x == {i}:\n        return {i}\n" for i in range(21))
