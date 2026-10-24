@@ -515,26 +515,46 @@ class IntentRouter(CoordinatorCollaborator):
             meta is not None and self.shared_state.is_pruned(meta.family)
         )
 
+    async def _note_pruned_advisory(self, source: str, action_name: str, kind: str) -> None:
+        """Tell the proposer the action sits in a pruned family; the action is still admitted."""
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": kind,
+                "from": source,
+                "action": action_name,
+                "hint": (
+                    f"{action_name!r} is in pruned_families; if the "
+                    "prune was speculative the LLM may pick this "
+                    "action again, otherwise prefer another "
+                    "phase-allowed action."
+                ),
+            },
+        )
+
+    async def _reject_missing_patch_owner(
+        self, source: str, action_name: str, params: dict[str, Any], kind: str
+    ) -> None:
+        """Record that an integrate_patch intent was rejected because no author phase owns its patch."""
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": kind,
+                "reason": "integrate_patch_owner_missing",
+                "from_agent": source,
+                "action_name": action_name,
+                "specialist_task_id": str(params.get("specialist_task_id") or ""),
+            },
+        )
+
     async def _handle_propose_action(self, source: str, intent: Intent) -> None:
         """Gate a proposed action and enqueue it for Critic Review."""
         action_name = intent.payload["action_name"]
         # Pruned families are advisory: proposal still queues with an advisory note.
         if self._is_pruned_action(action_name):
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "proposal_pruned_advisory",
-                    "from": source,
-                    "action": action_name,
-                    "hint": (
-                        f"{action_name!r} is in pruned_families; if the "
-                        "prune was speculative the LLM may pick this "
-                        "action again, otherwise prefer another "
-                        "phase-allowed action."
-                    ),
-                },
-            )
+            await self._note_pruned_advisory(source, action_name, "proposal_pruned_advisory")
         denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
         if denied is not None:
             await self.record_policy_denied(source, intent, denied)
@@ -544,17 +564,7 @@ class IntentRouter(CoordinatorCollaborator):
         if action_name == "integrate_patch":
             params = dict(payload.get("params") or {})
             if not await self._stamp_integrate_patch_owner(params):
-                await self.bus.record_observation(
-                    "coordinator",
-                    "observation",
-                    {
-                        "kind": "proposal_rejected",
-                        "reason": "integrate_patch_owner_missing",
-                        "from_agent": source,
-                        "action_name": action_name,
-                        "specialist_task_id": str(params.get("specialist_task_id") or ""),
-                    },
-                )
+                await self._reject_missing_patch_owner(source, action_name, params, "proposal_rejected")
                 return
             payload["params"] = params
         from .proposals import record_proposal
@@ -936,21 +946,7 @@ class IntentRouter(CoordinatorCollaborator):
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
         if self._is_pruned_action(action_name):
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "delegate_pruned_advisory",
-                    "from": source,
-                    "action": action_name,
-                    "hint": (
-                        f"{action_name!r} is in pruned_families; if the "
-                        "prune was speculative the LLM may pick this "
-                        "action again, otherwise prefer another "
-                        "phase-allowed action."
-                    ),
-                },
-            )
+            await self._note_pruned_advisory(source, action_name, "delegate_pruned_advisory")
         denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
         if denied is not None:
             await self.record_policy_denied(source, intent, denied, action_name=action_name)
@@ -962,17 +958,7 @@ class IntentRouter(CoordinatorCollaborator):
         request = DelegateRequest(source, intent, action_name, params)
         if action_name == "integrate_patch":
             if not await self._stamp_integrate_patch_owner(params):
-                await self.bus.record_observation(
-                    "coordinator",
-                    "observation",
-                    {
-                        "kind": "delegate_rejected",
-                        "reason": "integrate_patch_owner_missing",
-                        "from_agent": source,
-                        "action_name": action_name,
-                        "specialist_task_id": str(params.get("specialist_task_id") or ""),
-                    },
-                )
+                await self._reject_missing_patch_owner(source, action_name, params, "delegate_rejected")
                 return
             self._coord.proposals.floor_keep_threshold(params)
         if action_name == "specialist" and not await self._admit_specialist(source, intent, params):
