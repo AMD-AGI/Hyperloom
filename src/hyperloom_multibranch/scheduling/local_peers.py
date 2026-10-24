@@ -198,17 +198,22 @@ def workload_rule(workload: Workload, notebook: CommitQuery) -> Rule:
 
 def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost) -> CanonicalMeasurement:
     """The canonical measurement every point of the session is rendered from. The renderer takes the model and the
-    runner type only as arguments, so a point never falls back to the shipped YAML's model."""
+    runner type only as arguments, so a point never falls back to the shipped YAML's model. Raises
+    :class:`PeersUnavailable` when it cannot be rendered, a launcher the checkout lacks and Magpie cannot supply
+    included."""
 
-    from hyperloom.measure.points import default_canonical
+    from hyperloom.measure.points import PointError, default_canonical
 
-    return default_canonical(
-        out_dir,
-        primary_concurrency=workload.conc,
-        model_path=resolve_serving_model_path(workload.model),
-        gpu_type=workload.gpu_type,
-        inferencex_path=host.inferencex.path,
-    )
+    try:
+        return default_canonical(
+            out_dir,
+            primary_concurrency=workload.conc,
+            model_path=resolve_serving_model_path(workload.model),
+            gpu_type=workload.gpu_type,
+            inferencex_path=host.inferencex.path,
+        )
+    except PointError as exc:
+        raise PeersUnavailable(f"the canonical measurement cannot be taken: {exc}") from exc
 
 
 def specialist_recall(reports: Path) -> LessonRecall:
@@ -221,6 +226,7 @@ def specialist_recall(reports: Path) -> LessonRecall:
 
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
     """The session's peers on this machine; exports the workload into this process (:func:`_export_workload`).
+    Raises :class:`PeersUnavailable` when the session's canonical measurement cannot be taken.
 
     Called on the event loop the session runs on. The toolbox is built, not started: the session starts it, and its
     close releases the backend and the sandboxes. The MCP service is started; the session stop stops it.
