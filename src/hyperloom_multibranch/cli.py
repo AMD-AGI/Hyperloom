@@ -45,7 +45,9 @@ PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to is
 :data:`RSI_ARCHIVE_DEFAULT`, set in this process's environment for every reader of it, and must be a writable
 directory; the measurement pins must be readable, the image the session runs on named by both
 ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` included; the framework's package must be
-installed in the image; and the agent CLI the specialists run must be installed.
+installed in the image; and the agent CLI the specialists run must be installed. A canonical measurement that cannot
+be taken, one naming a launcher the InferenceX checkout lacks and Magpie cannot supply included, fails the command the
+same way once the session directory exists.
 A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
@@ -588,19 +590,19 @@ def main(argv: list[str] | None = None) -> int:
         require_rsi_archive(os.environ)
         peer_factory = load_peers(settings.workload)
         services = session_services(recipe_kb)
+        if settings.frontier_scorer:
+            try:
+                require_frontier_scorer(settings.frontier_scorer, settings.workload.metric)
+            except ValueError as exc:
+                parser.print_usage(sys.stderr)
+                print(f"{parser.prog}: error: {exc}", file=sys.stderr)
+                raise SystemExit(EXIT_USAGE) from exc
+        if persisted is not None:
+            return final_only(persisted, peer_factory, services)
+        return run_session(settings, peer_factory, services)
     except (EnvironmentIncomplete, PeersUnavailable) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
         return EXIT_FAILED
-    if settings.frontier_scorer:
-        try:
-            require_frontier_scorer(settings.frontier_scorer, settings.workload.metric)
-        except ValueError as exc:
-            parser.print_usage(sys.stderr)
-            print(f"{parser.prog}: error: {exc}", file=sys.stderr)
-            raise SystemExit(EXIT_USAGE) from exc
-    if persisted is not None:
-        return final_only(persisted, peer_factory, services)
-    return run_session(settings, peer_factory, services)
 
 
 __all__ = [
