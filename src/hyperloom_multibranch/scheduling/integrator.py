@@ -421,7 +421,7 @@ class Integrator:
         """
 
         head = await self._repo.head(INTEGRATION_BRANCH)
-        adoptions = self._claim_adoption(leads, head)
+        adoptions = await self._claim_adoption(leads, head)
         running = [asyncio.create_task(self._test(adoption)) for adoption in adoptions]
         started = {adoption.candidate for adoption in adoptions}
         reports: list[MergeReport] = []
@@ -446,10 +446,20 @@ class Integrator:
                 task.cancel()
             await asyncio.gather(*running, return_exceptions=True)
 
-    def _claim_adoption(self, leads: Sequence[StrandedLead], head: str) -> tuple[MergeReport, ...]:
-        """The adoption of the first of ``leads`` whose head was not adopted on ``head`` yet, marked as adopted now."""
+    async def _claim_adoption(self, leads: Sequence[StrandedLead], head: str) -> tuple[MergeReport, ...]:
+        """The adoption of the first of ``leads`` whose head was neither adopted on ``head`` yet nor already tried on it
+        as a candidate, marked as adopted now: a second test of the same merge on the same head differs only by noise,
+        and noise must not merge it."""
 
-        lead = next((lead for lead in leads if (lead.head_commit, head) not in self._adopted), None)
+        tried = {
+            commit.commit_id
+            for commit in await self._notebook.committed()
+            if commit.last_merge is not None and commit.last_merge.integration_head == head
+        }
+        lead = next(
+            (lead for lead in leads if (lead.head_commit, head) not in self._adopted and lead.head_commit not in tried),
+            None,
+        )
         if lead is None:
             return ()
         self._adopted.add((lead.head_commit, head))

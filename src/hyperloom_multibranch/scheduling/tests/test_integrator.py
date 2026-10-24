@@ -1249,6 +1249,20 @@ async def test_a_lead_is_adopted_once_per_integration_head_and_a_skipped_adoptio
     assert (following.candidate, following.adopts, following.outcome) == (c1, "", MergeOutcome.MERGED)
 
 
+async def test_a_lead_whose_head_was_already_tried_on_this_head_is_not_adopted(tmp_path: Path) -> None:
+    """Adopting it would test the same merge on the same head again, which differs only by noise."""
+
+    bench = await _bench(tmp_path, {**CURVES, frozenset({"c1"}): {MAIN_POINT: 1005.0}})
+    refused = await _one(bench)
+    c1 = bench.commits["c1"]
+
+    reports = await bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS, _leading("s1", c1))
+
+    assert refused is not None and (refused.candidate, refused.outcome) == (c1, MergeOutcome.NOT_STACKABLE)
+    assert all(not report.adopts and report.candidate != c1 for report in reports)
+    assert len(bench.merge_tests()) == 1 + len(reports)
+
+
 async def test_a_lead_adoption_is_never_judged_as_a_foundation_fix(tmp_path: Path) -> None:
     bench = await _bench(tmp_path, {frozenset({"c1"}): {MAIN_POINT: 950.0}}, foundation="c1", tags=("c1",))
 
