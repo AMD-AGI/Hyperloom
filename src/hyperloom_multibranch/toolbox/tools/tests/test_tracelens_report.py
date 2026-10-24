@@ -11,6 +11,7 @@ perf report here still writes.
 
 from __future__ import annotations
 
+import gzip
 import json
 import shutil
 import subprocess
@@ -31,6 +32,8 @@ from hyperloom_multibranch.toolbox.tools.tests.sinks import RecordingSink
 
 DATA = Path(__file__).parent / "data"
 SPLITTER = "TraceLens.TraceUtils.split_trace.main"
+#: One GPU kernel: what TraceLens' trace discovery needs to take a trace for one that ran on a card.
+KERNEL_EVENT = {"cat": "kernel", "ph": "X", "name": "gemm", "ts": 1, "dur": 2}
 CHUNK = "mixed_steady_state_prefill_1_prefilldecode_0_decode_31_bs11_conc3_t-TP-0.trace.json.gz"
 OPS_SUMMARY = (
     "name,parent_module,total_direct_kernel_time_ms,Percentage (%)\n"
@@ -139,19 +142,13 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Rig:
     profile = tmp_path / "profile"
     (profile / "torch_trace" / "graph_capture_profile").mkdir(parents=True)
     trace = profile / "torch_trace" / "1.-TP-0.trace.json.gz"
-    trace.write_bytes(b"trace")
+    trace.write_bytes(gzip.compress(json.dumps({"traceEvents": [KERNEL_EVENT]}).encode()))
     (tmp_path / "TraceLens").mkdir()
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "TraceLens"))
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     shell = Shell()
     monkeypatch.setattr(report, "run_with_session_kill", shell)
     monkeypatch.setattr(report, "resolve_arch_json_path", lambda platform: tmp_path / f"{platform}.json")
-    _module(
-        monkeypatch,
-        "hyperloom.orchestrator.trace_analysis.tracelens_analysis",
-        discover_trace_inputs=lambda path: ("capture_dir", [trace]),
-        count_gpu_kernel_events=lambda path: 15940,
-    )
     _module(monkeypatch, "TraceLens.Agent.Analysis.utils", check_graph_replay_coverage=lambda csv: Coverage(False, 0.0))
     agent_calls: list[dict] = []
 
@@ -658,3 +655,17 @@ async def test_a_step_that_fails_fails_the_job_with_its_reason(
     status, pointer, record = await _run(tmp_path, params, rig)
     assert status is JobStatus.FAILED and not pointer.op_shares and rig.agent_calls == []
     assert record["result"]["error_class"] == error_class and record["result"]["error"] in pointer.summary
+
+
+async def test_the_trace_is_found_by_the_orchestrators_own_discovery_not_by_a_stand_in(
+    rig: Rig, tmp_path: Path
+) -> None:
+    """Nothing here replaces ``discover_trace_inputs`` or ``count_gpu_kernel_events``: a directory is searched and a trace
+    is taken only when it holds a GPU kernel (a trace without one is refused by name, a missing input likewise)."""
+    status, _, record = await _run(tmp_path, HINTS, rig)
+    assert status is JobStatus.SUCCEEDED and record["result"]["analysed_trace"] == rig.trace.name
+    rig.trace.write_bytes(gzip.compress(json.dumps({"traceEvents": [{"cat": "cpu_op", "name": "aten::mm"}]}).encode()))
+    status, _, record = await _run(tmp_path / "again", HINTS, rig)
+    assert status is JobStatus.FAILED and record["result"]["error_class"] == "trace_without_gpu_kernels"
+    status, _, record = await _run(tmp_path / "gone", {"trace_input": str(tmp_path / "no-such-profile")}, rig)
+    assert status is JobStatus.FAILED and record["result"]["error_class"] == "trace_input_missing"

@@ -55,6 +55,7 @@ from typing import TYPE_CHECKING, Any
 from hyperloom.common.outside_facts import ENV_CONC, ENV_ISL, ENV_OSL, ENV_RANDOM_RANGE_RATIO
 from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.orchestrator.actions.executors import run_with_session_kill
+from hyperloom.orchestrator.trace_analysis import count_gpu_kernel_events, discover_trace_inputs
 from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import resolve_arch_json_path
 from hyperloom.orchestrator.trace_analysis.tracelens_skill_runner import discover_capture_folder
 from hyperloom_multibranch.toolbox.tools.kernel_launchers import Relabelled, read_launched_window
@@ -178,8 +179,6 @@ def _sh(run: _Run, step: str, cmd: list[str]) -> None:
 
 def _analysed_trace(trace_input: Path) -> Path:
     """The trace of the input that holds GPU kernels: the file itself, or the first trace of a directory that does."""
-    from hyperloom.orchestrator.trace_analysis.tracelens_analysis import count_gpu_kernel_events, discover_trace_inputs
-
     try:
         _, files = discover_trace_inputs(trace_input)
     except FileNotFoundError as exc:
