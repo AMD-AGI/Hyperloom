@@ -469,22 +469,34 @@ async def test_an_agent_opened_on_a_recipe_kb_champion_starts_from_its_launch(tm
     assert '"SGLANG_USE_AITER": "1"' in prompt
 
 
-async def test_what_the_agent_s_own_cli_spends_is_recorded_as_the_branch_s(tmp_path: Path) -> None:
+def _spent(transcript: Path, message_id: str, output: int) -> None:
+    usage = {"input_tokens": 3, "output_tokens": output}
+    message = {"id": message_id, "model": "claude-opus-5-5", "usage": usage, "content": []}
+    with transcript.open("a") as handle:
+        handle.write(json.dumps({"type": "assistant", "sessionId": "s-1", "message": message}) + "\n")
+
+
+async def test_what_the_agent_s_own_cli_spends_is_recorded_as_the_branch_s_once_a_minute_and_at_the_end(
+    tmp_path: Path,
+) -> None:
     rig = await _rig(tmp_path, Agent(tail=30.0))
     await rig.session.preflight()
     running = asyncio.create_task(rig.session.run())
     transcript = transcript_dir(tmp_path / "claude", tmp_path / BRANCH / "session" / "agent" / "src") / "s-1.jsonl"
     transcript.parent.mkdir(parents=True)
-    usage = {"input_tokens": 3, "output_tokens": 50}
-    message = {"id": "m1", "model": "claude-opus-5-5", "usage": usage, "content": []}
-    transcript.write_text(json.dumps({"type": "assistant", "sessionId": "s-1", "message": message}) + "\n")
 
+    _spent(transcript, "m1", 50)
     await _until(lambda: rig.sandbox.usage.recorded, "the agent's spend")
+    _spent(transcript, "m2", 7)
+    await asyncio.sleep(0.5)
+    assert len(rig.sandbox.usage.recorded) == 1
     await rig.session.stop()
     await asyncio.wait_for(running, 10)
 
-    [recorded] = rig.sandbox.usage.recorded
-    assert (recorded.branch, recorded.launch, recorded.tokens) == (BRANCH, "s-1", TokenCounts(3, 50))
+    assert [(used.branch, used.launch, used.tokens) for used in rig.sandbox.usage.recorded] == [
+        (BRANCH, "s-1", TokenCounts(3, 50)),
+        (BRANCH, "s-1", TokenCounts(3, 7)),
+    ]
 
 
 async def test_an_agent_with_no_keep_signal_has_its_workspace_collected_once_before_the_explore_end(
