@@ -308,3 +308,41 @@ async def test_a_failed_result_that_records_warnings_is_named(tmp_path: Path, ri
     assert await executor.reverify(failed) is None
     reason = await _reason(executor, replace(failed, nonfatal_warnings=("invented",)))
     assert reason == "nonfatal_warnings: recorded ['invented'], the bundle has []"
+
+
+FOREIGN_REASON = (
+    "1 held the test's cards: pid 900 on card 0, first seen 2026-10-24T04:05:06Z during the test: python3 x.py"
+)
+KEPT_BESIDE_A_PROCESS = {"state": "foreign", "reason": FOREIGN_REASON, "checks": 5}
+
+
+async def test_a_result_kept_beside_a_process_by_a_guard_that_observes_reverifies_with_its_warning(
+    tmp_path: Path, rig
+) -> None:
+    executor, result = await _accepted(tmp_path, rig, fake_card_occupancy=json.dumps(KEPT_BESIDE_A_PROCESS))
+
+    assert result.nonfatal_warnings == (
+        f"foreign_process_on_card, kept because the card guard only observes: {FOREIGN_REASON}",
+    )
+    assert executor.difference(result) is None
+
+
+async def test_a_result_that_dropped_the_warning_of_a_process_the_bundle_signed_is_named(tmp_path: Path, rig) -> None:
+    executor, result = await _accepted(tmp_path, rig, fake_card_occupancy=json.dumps(KEPT_BESIDE_A_PROCESS))
+
+    difference = executor.difference(replace(result, nonfatal_warnings=()))
+
+    assert difference is not None and difference.startswith("nonfatal_warnings")
+
+
+async def test_a_clean_result_that_claims_the_warning_of_a_process_is_named(tmp_path: Path, rig) -> None:
+    clean = {"state": "clean", "reason": None, "checks": 5}
+    executor, result = await _accepted(tmp_path, rig, fake_card_occupancy=json.dumps(clean))
+
+    forged = replace(
+        result,
+        nonfatal_warnings=(f"foreign_process_on_card, kept because the card guard only observes: {FOREIGN_REASON}",),
+    )
+
+    difference = executor.difference(forged)
+    assert difference is not None and difference.startswith("nonfatal_warnings")

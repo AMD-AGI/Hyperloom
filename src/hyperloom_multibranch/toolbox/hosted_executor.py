@@ -34,6 +34,7 @@ import yaml
 
 from hyperloom.common.outside_facts import ENV_CONC
 from hyperloom.contracts.measurement import (
+    CARD_FOREIGN,
     AccuracyValue,
     FailureClass,
     PhaseTiming,
@@ -263,7 +264,12 @@ class HostedExecutor:
             gpu_seconds=gpu_seconds,
             profile_location=location,
             repro_verdict=verdict,
-            nonfatal_warnings=_warnings_of(outcome.rounds) if failure is None else (),
+            nonfatal_warnings=(
+                *_warnings_of(outcome.rounds),
+                *_card_warnings(facts.card_occupancy, facts.card_occupancy_reason),
+            )
+            if failure is None
+            else (),
             cold_start_seconds=boot_seconds(call.output_dir),
             **_phase_fields(outcome.phases, span, finished, facts.gpu_count),
             **audit,
@@ -374,13 +380,16 @@ def _unlike_bundle(result: TestResult, derived: Reverified, landed: Path) -> str
     """The first field of ``result`` that the verified bundle does not support.
 
     The warnings are checked on every path: a result that did not succeed records none, any other lists those of the
-    bundle's rounds, whatever kind of test it was.
+    bundle's rounds and the one its signed card occupancy asks for, whatever kind of test it was.
     """
     difference = _unlike_values(result, derived, landed)
     if difference:
         return difference
-    expected = _warnings_of(derived.rounds) if result.validity is Validity.SUCCEEDED else ()
-    return first_warning_difference(result, expected)
+    if result.validity is not Validity.SUCCEEDED:
+        return first_warning_difference(result, ())
+    occupancy = derived.manifest.runner.card_occupancy
+    card = _card_warnings(occupancy.state, occupancy.reason) if occupancy else ()
+    return first_warning_difference(result, (*_warnings_of(derived.rounds), *card))
 
 
 def _unlike_classes(result: TestResult, derived: Reverified, landed: Path) -> str | None:
@@ -581,6 +590,15 @@ def _metrics_of(measurement: Mapping[str, Any]) -> dict[str, float]:
 def _warnings_of(rounds: tuple[RoundOutcome, ...]) -> tuple[str, ...]:
     """The warnings ``run_grid`` wrote for the rounds of this test, in round order, as written."""
     return tuple(warning for r in rounds for warning in r.nonfatal_warnings)
+
+
+def _card_warnings(state: str, reason: str | None) -> tuple[str, ...]:
+    """The warning of a result that was kept although a process outside the test held its cards, which only a runner whose
+    card guard observes signs: a runner that enforces refuses such a result. The same text is derived again from the
+    signed manifest when the result is verified again."""
+    if state != CARD_FOREIGN:
+        return ()
+    return (f"foreign_process_on_card, kept because the card guard only observes: {reason}",)
 
 
 def _scores_of(rounds: tuple[RoundOutcome, ...]) -> tuple[AccuracyValue, ...]:

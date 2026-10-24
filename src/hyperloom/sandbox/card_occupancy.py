@@ -23,6 +23,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from hyperloom.common.env_safety import redact_secret_values
@@ -40,13 +41,16 @@ from hyperloom.common.outside_facts import (
 from hyperloom.sandbox.launcher import LAUNCHER_SOURCE
 
 __all__ = [
+    "CARD_GUARD_ENV",
     "COMMAND_CHARS",
     "KFD_PATH",
     "PROC_PATH",
     "SANDBOX_TAG_ENV",
+    "CardGuard",
     "CardReading",
     "Holder",
     "OwnProcesses",
+    "card_guard",
     "own_sandbox_processes",
     "read_holders",
 ]
@@ -56,6 +60,8 @@ KFD_PATH = Path(KFD_ROOT)
 PROC_PATH = Path("/proc")
 #: The environment variable every process of a sandbox carries, whatever it did to its parentage since.
 SANDBOX_TAG_ENV = "E2B_SANDBOX_ID"
+#: Names what the guard does with what the probe finds: the toolbox sets it for itself and for the runners it starts.
+CARD_GUARD_ENV = "HYPERLOOM_CARD_GUARD"
 #: A command line is kept to this many characters: it names the process, it is not a record of its arguments.
 COMMAND_CHARS = 160
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
@@ -67,6 +73,33 @@ _ZOMBIE = "Z"
 _ROOT_ACCOUNT = 0
 _HIDDEN_OPTION = "hidepid="
 _NOT_HIDING = ("0", "off")
+
+
+class CardGuard(str, Enum):
+    """What is done about a process that holds a card.
+
+    ``OBSERVE`` looks and records, and refuses nothing: a result is kept and says what was seen, a card is handed out and
+    the log says who holds it. ``ENFORCE`` refuses a result that was measured beside such a process and does not hand
+    out a card some process holds.
+    """
+
+    OBSERVE = "observe"
+    ENFORCE = "enforce"
+
+
+def card_guard(environ: Mapping[str, str]) -> CardGuard:
+    """The guard ``environ`` names (:data:`CARD_GUARD_ENV`); ``OBSERVE`` when it names none.
+
+    Raises:
+        ValueError: When it names something that is not a guard: a misspelling must not read as either one.
+    """
+    named = environ.get(CARD_GUARD_ENV, "").strip()
+    if not named:
+        return CardGuard.OBSERVE
+    try:
+        return CardGuard(named)
+    except ValueError:
+        raise ValueError(f"{CARD_GUARD_ENV} is {named!r}, not one of {[guard.value for guard in CardGuard]}") from None
 
 
 class _Unreadable(Exception):

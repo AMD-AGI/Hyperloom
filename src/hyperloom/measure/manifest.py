@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from hyperloom.contracts.measurement import (
+    CARD_CLEAN,
     CARD_OCCUPANCY_STATES,
-    CARD_UNKNOWN,
     MAX_PHASE_SECONDS,
     MeasurementError,
     PhaseTiming,
@@ -71,8 +71,8 @@ class RulePackFacts:
 
 @dataclass(frozen=True)
 class CardOccupancyFacts:
-    """What the runner says of who else used its cards: ``clean`` or ``unknown`` with the reason it could not look, and
-    how many looks read the list."""
+    """What the runner says of who else used its cards: ``clean``, ``foreign`` with the process it saw (the guard only
+    observed it) or ``unknown`` with the reason it could not look, and how many looks read the list."""
 
     state: str
     reason: str | None
@@ -85,8 +85,8 @@ class CardOccupancyFacts:
         reason = r.text("reason", optional=True)
         facts = cls(state, reason, r.integer("checks", minimum=0) or 0)
         r.done()
-        if (state == CARD_UNKNOWN) != (reason is not None):
-            raise DocumentError(f"{path}: an unknown card occupancy states why, and any other state has no reason")
+        if (state != CARD_CLEAN) != (reason is not None):
+            raise DocumentError(f"{path}: a card occupancy that is not clean states why, and a clean one has no reason")
         return facts
 
 

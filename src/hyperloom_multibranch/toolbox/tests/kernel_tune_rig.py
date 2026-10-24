@@ -29,7 +29,7 @@ import yaml
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
 from hyperloom.measure.tests.hosted_fixtures import runner_template, spec_context
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
-from hyperloom.sandbox.card_occupancy import CardReading, read_holders
+from hyperloom.sandbox.card_occupancy import CardGuard, CardReading, read_holders
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.notebook import LocalNotebook
@@ -282,6 +282,7 @@ def build_rig(tmp_path: Path, monkeypatch: Any, made: list[LocalHostedToolbox], 
         tp: int = 1,
         points: Mapping[str, Path] | None = None,
         card_holders: Callable[[Sequence[int]], CardReading] = read_holders,
+        card_guard: CardGuard | None = None,
     ) -> Rig:
         session = tmp_path / f"session-{len(made)}"
         session.mkdir()
@@ -292,7 +293,12 @@ def build_rig(tmp_path: Path, monkeypatch: Any, made: list[LocalHostedToolbox], 
             notebook,
             AcceptanceSetup(FakeRepo(), _PointPerBranch(dict(points or {})), IMAGE, WorkloadKind.AGENTX),
             spec_context(session, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")),
-            options=LocalOptions(poll_interval_sec=0.05, framework_configs=str(configs), card_holders=card_holders),
+            options=LocalOptions(
+                poll_interval_sec=0.05,
+                framework_configs=str(configs),
+                card_holders=card_holders,
+                card_guard=card_guard,
+            ),
         )
         made.append(box)
         await box.start()

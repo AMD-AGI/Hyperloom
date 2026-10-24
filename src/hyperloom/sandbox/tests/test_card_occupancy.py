@@ -12,9 +12,11 @@ import pytest
 
 from hyperloom.sandbox.card_occupancy import (
     COMMAND_CHARS,
+    CardGuard,
     CardReading,
     Holder,
     OwnProcesses,
+    card_guard,
     own_sandbox_processes,
     read_holders,
 )
@@ -312,3 +314,28 @@ def test_a_launcher_is_told_by_the_source_it_runs_not_by_its_name(tree: KernelTr
     tree.process(31, parent=30)
 
     assert own_sandbox_processes({}, pid=31, procfs=tree.procfs).roots == frozenset({31})
+
+
+# --- the guard a process names ----------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("environ", "expected"),
+    [
+        ({}, CardGuard.OBSERVE),
+        ({"HYPERLOOM_CARD_GUARD": ""}, CardGuard.OBSERVE),
+        ({"HYPERLOOM_CARD_GUARD": "observe"}, CardGuard.OBSERVE),
+        ({"HYPERLOOM_CARD_GUARD": "enforce"}, CardGuard.ENFORCE),
+        ({"HYPERLOOM_CARD_GUARD": " enforce\n"}, CardGuard.ENFORCE),
+    ],
+)
+def test_a_process_observes_unless_its_environment_says_to_enforce(
+    environ: dict[str, str], expected: CardGuard
+) -> None:
+    assert card_guard(environ) is expected
+
+
+@pytest.mark.parametrize("named", ["enfroce", "ENFORCE", "on", "1"])
+def test_a_guard_that_is_not_one_is_refused_and_not_read_as_either(named: str) -> None:
+    with pytest.raises(ValueError, match=rf"HYPERLOOM_CARD_GUARD is {named!r}, not one of \['observe', 'enforce'\]"):
+        card_guard({"HYPERLOOM_CARD_GUARD": named})

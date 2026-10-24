@@ -13,7 +13,7 @@ import pytest
 
 from hyperloom.contracts.measurement import TestResult
 from hyperloom.measure.tests.hosted_fixtures import spec_context
-from hyperloom.sandbox.card_occupancy import Holder
+from hyperloom.sandbox.card_occupancy import CardGuard, Holder
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import QuarantineAction
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, WorkloadKind
@@ -247,7 +247,9 @@ async def test_restoring_lost_cards_works_while_a_process_holds_a_card_that_is_n
         await first.close()
     holders = CardList()
     holders.holders = (Holder(card=3, pid=4242, command="python3 intruder.py"), Holder(card=0, pid=4243, command="x"))
-    second = _local_toolbox(tmp_path / "two", notebook, options=LocalOptions(card_holders=holders))
+    second = _local_toolbox(
+        tmp_path / "two", notebook, options=LocalOptions(card_holders=holders, card_guard=CardGuard.ENFORCE)
+    )
     try:
         await second.start()
         assert await second.measurement_capacity() == MeasurementCapacity(8, 6)

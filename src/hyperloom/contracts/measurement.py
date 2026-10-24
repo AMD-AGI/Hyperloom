@@ -50,7 +50,8 @@ REPRO_VERDICTS = (REPRODUCED, NOT_REPRODUCED)
 #: table changed nothing the test ran, the second says nothing about it.
 CARD_CLEAN = "clean"
 CARD_UNKNOWN = "unknown"
-CARD_OCCUPANCY_STATES = (CARD_CLEAN, CARD_UNKNOWN)
+CARD_FOREIGN = "foreign"
+CARD_OCCUPANCY_STATES = (CARD_CLEAN, CARD_UNKNOWN, CARD_FOREIGN)
 TABLE_EXERCISED = "exercised"
 TABLE_NOT_EXERCISED = "not_exercised"
 TABLE_NOT_OBSERVABLE = "not_observable"
@@ -363,7 +364,8 @@ class SandboxFacts:
     """Where one attempt ran; ``backend`` tells local measurement on one host from hosted measurement.
 
     ``card_occupancy`` is what the runner's signed result says of who else used the attempt's cards: ``clean`` when every
-    look at them found no process outside the test, ``unknown`` (with ``card_occupancy_reason``) when it could not look, and
+    look at them found no process outside the test, ``foreign`` (with ``card_occupancy_reason`` naming the process, the card
+    and when) when one was seen and the card guard only observes, ``unknown`` (with its reason) when it could not look, and
     empty when the attempt did not say (an attempt that failed before a result, a sandbox with no card, a runner that
     predates it). It is never ``clean`` for a result nobody looked at.
     """
@@ -403,8 +405,8 @@ class SandboxFacts:
             )
         if not isinstance(self.card_occupancy_reason, str):
             raise MeasurementError(f"card_occupancy_reason must be a string, got {self.card_occupancy_reason!r}")
-        if (self.card_occupancy == CARD_UNKNOWN) != bool(self.card_occupancy_reason):
-            raise MeasurementError("card_occupancy 'unknown' needs its reason, and any other state has none")
+        if (self.card_occupancy in (CARD_UNKNOWN, CARD_FOREIGN)) != bool(self.card_occupancy_reason):
+            raise MeasurementError("card_occupancy 'unknown' or 'foreign' needs its reason, and 'clean' has none")
 
     @property
     def node(self) -> str | None:
@@ -990,6 +992,7 @@ class TestResult:
 
 __all__ = [
     "CARD_CLEAN",
+    "CARD_FOREIGN",
     "CARD_OCCUPANCY_STATES",
     "CARD_UNKNOWN",
     "NOT_REPRODUCED",

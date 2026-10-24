@@ -14,11 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import CARD_CLEAN, CARD_UNKNOWN
+from hyperloom.contracts.measurement import CARD_CLEAN, CARD_FOREIGN, CARD_UNKNOWN
 from hyperloom.measure.runner.card_watch import AFTER_TEST, BEFORE_TEST, DURING_TEST, CardStatement, CardWatch
 from hyperloom.measure.runner.service import RunnerFailure
 from hyperloom.sandbox import card_occupancy
-from hyperloom.sandbox.card_occupancy import CardReading, OwnProcesses
+from hyperloom.sandbox.card_occupancy import CardGuard, CardReading, OwnProcesses
 from hyperloom.sandbox.card_occupancy import read_holders as read_the_machine
 from hyperloom.sandbox.tests.kernel_tree import KernelTree
 
@@ -38,8 +38,10 @@ def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> KernelTree:
     return machine
 
 
-def _watch(tree: KernelTree, cards: Sequence[int] = (0, 1), **kwargs: object) -> CardWatch:
-    return CardWatch(cards, OwnProcesses(frozenset({RUNNER}), procfs=tree.procfs), **kwargs)  # type: ignore[arg-type]
+def _watch(
+    tree: KernelTree, cards: Sequence[int] = (0, 1), guard: CardGuard = CardGuard.ENFORCE, **kwargs: object
+) -> CardWatch:
+    return CardWatch(cards, OwnProcesses(frozenset({RUNNER}), procfs=tree.procfs), guard, **kwargs)  # type: ignore[arg-type]
 
 
 def _unix(text: str) -> float:
@@ -52,7 +54,7 @@ def test_cards_nobody_but_the_test_holds_are_clean_and_the_result_says_how_often
 
     watch.check(BEFORE_TEST)
     watch.check(BEFORE_TEST)
-    watch.refuse_if_foreign()
+    watch.enforce_guard()
 
     assert watch.statement() == CardStatement(CARD_CLEAN, None, 2)
     assert watch.statement().to_document() == {"state": "clean", "reason": None, "checks": 2}  # type: ignore[union-attr]
@@ -66,7 +68,7 @@ def test_a_process_outside_the_test_that_holds_a_card_before_it_starts_refuses_t
     watch.check(BEFORE_TEST)
 
     with pytest.raises(RunnerFailure) as refused:
-        watch.refuse_if_foreign()
+        watch.enforce_guard()
     assert refused.value.error_class == "foreign_process_on_card"
     assert str(refused.value) == (
         "1 held the test's cards: pid 900 on card 1, first seen 2026-10-24T04:05:06Z before the test: "
@@ -88,7 +90,7 @@ def test_a_process_that_arrives_while_the_test_runs_is_seen_by_the_poll_and_reme
         tree.exit(901)
 
     with pytest.raises(RunnerFailure, match=r"pid 901 on card 0, first seen \S+ during the test: python3 intruder.py"):
-        watch.refuse_if_foreign()
+        watch.enforce_guard()
 
 
 def test_a_process_that_is_still_there_when_the_test_ends_is_seen_by_the_last_look(tree: KernelTree) -> None:
@@ -99,7 +101,7 @@ def test_a_process_that_is_still_there_when_the_test_ends_is_seen_by_the_last_lo
         tree.holds(902, 1)
 
     with pytest.raises(RunnerFailure, match=rf"pid 902 on card 1, first seen \S+ {AFTER_TEST}"):
-        watch.refuse_if_foreign()
+        watch.enforce_guard()
 
 
 def test_the_time_a_process_was_first_seen_is_kept_and_it_is_one_process_per_card(tree: KernelTree) -> None:
@@ -115,7 +117,7 @@ def test_the_time_a_process_was_first_seen_is_kept_and_it_is_one_process_per_car
     with pytest.raises(
         RunnerFailure, match=r"^1 held the test's cards: pid 903 on card 0, first seen 2023-11-14T22:13:20Z before"
     ):
-        watch.refuse_if_foreign()
+        watch.enforce_guard()
 
 
 def test_the_failure_names_the_earliest_two_and_counts_the_rest_and_cuts_long_commands(tree: KernelTree) -> None:
@@ -131,7 +133,7 @@ def test_the_failure_names_the_earliest_two_and_counts_the_rest_and_cuts_long_co
     watch.check(DURING_TEST)
 
     with pytest.raises(RunnerFailure) as refused:
-        watch.refuse_if_foreign()
+        watch.enforce_guard()
 
     text = str(refused.value)
     assert text.startswith("3 held the test's cards: pid 910 on card 0")
@@ -151,7 +153,7 @@ def test_a_probe_that_cannot_say_once_leaves_the_result_unknown_with_its_reason_
     watch.check(BEFORE_TEST)
     watch.check(DURING_TEST)
     watch.check(AFTER_TEST)
-    watch.refuse_if_foreign()
+    watch.enforce_guard()
 
     assert watch.statement() == CardStatement(CARD_UNKNOWN, "no AMD GPU driver", 2)
 
@@ -161,7 +163,7 @@ def test_a_probe_that_fails_outright_is_unknown_not_clean(monkeypatch: pytest.Mo
         raise RuntimeError("the list went away")
 
     monkeypatch.setattr(card_occupancy, "read_holders", broken)
-    watch = CardWatch((0,), OwnProcesses(frozenset({1})))
+    watch = CardWatch((0,), OwnProcesses(frozenset({1})), CardGuard.ENFORCE)
 
     watch.check(BEFORE_TEST)
 
@@ -177,11 +179,11 @@ def test_a_test_with_no_card_has_nothing_to_watch_and_states_nothing(monkeypatch
         raise AssertionError("no card, no look")
 
     monkeypatch.setattr(card_occupancy, "read_holders", never)
-    watch = CardWatch((), OwnProcesses(frozenset({1})))
+    watch = CardWatch((), OwnProcesses(frozenset({1})), CardGuard.ENFORCE)
 
     with watch.watching():
         watch.check(BEFORE_TEST)
-    watch.refuse_if_foreign()
+    watch.enforce_guard()
 
     assert watch.statement() is None
 
@@ -193,3 +195,69 @@ def test_the_poll_thread_ends_with_the_block(tree: KernelTree) -> None:
         assert "hl-card-watch" in {t.name for t in threading.enumerate()}
 
     assert {t.name for t in threading.enumerate()} == before
+
+
+# --- a guard that only observes ---------------------------------------------------------------------------------------
+
+
+def _intruder_seen_by(watch: CardWatch, tree: KernelTree) -> None:
+    tree.process(950, command=("python3", "-c", "import torch"))
+    tree.holds(950, 1)
+    watch.check(BEFORE_TEST)
+    watch.check(DURING_TEST)
+
+
+def test_a_guard_that_observes_refuses_nothing_and_the_result_says_who_was_seen(tree: KernelTree) -> None:
+    watch = _watch(tree, guard=CardGuard.OBSERVE, clock=lambda: _unix("2026-10-24T04:05:06Z"))
+    _intruder_seen_by(watch, tree)
+
+    watch.enforce_guard()
+
+    statement = watch.statement()
+    assert statement == CardStatement(
+        CARD_FOREIGN,
+        "1 held the test's cards: pid 950 on card 1, first seen 2026-10-24T04:05:06Z before the test: "
+        "python3 -c import torch",
+        2,
+    )
+    assert statement.to_document()["state"] == "foreign"  # type: ignore[union-attr]
+
+
+def test_a_guard_that_observes_leaves_a_note_that_says_the_result_was_kept(tree: KernelTree) -> None:
+    watch = _watch(tree, guard=CardGuard.OBSERVE)
+    _intruder_seen_by(watch, tree)
+
+    note = watch.observation()
+
+    assert note is not None
+    assert note.startswith(
+        "CARD GUARD OBSERVES ONLY (HYPERLOOM_CARD_GUARD=observe): this result was kept although 1 held"
+    )
+    assert "pid 950 on card 1" in note
+
+
+def test_a_guard_that_observes_leaves_no_note_for_cards_nobody_but_the_test_held(tree: KernelTree) -> None:
+    watch = _watch(tree, guard=CardGuard.OBSERVE)
+    watch.check(BEFORE_TEST)
+
+    assert watch.observation() is None and watch.statement() == CardStatement(CARD_CLEAN, None, 1)
+
+
+def test_a_guard_that_enforces_refuses_and_leaves_no_note(tree: KernelTree) -> None:
+    watch = _watch(tree, guard=CardGuard.ENFORCE)
+    _intruder_seen_by(watch, tree)
+
+    assert watch.observation() is None
+    with pytest.raises(RunnerFailure, match="pid 950 on card 1"):
+        watch.enforce_guard()
+
+
+def test_a_process_seen_wins_over_a_look_that_could_not_say(tree: KernelTree, monkeypatch: pytest.MonkeyPatch) -> None:
+    watch = _watch(tree, guard=CardGuard.OBSERVE)
+    _intruder_seen_by(watch, tree)
+    monkeypatch.setattr(card_occupancy, "read_holders", lambda cards: CardReading(unavailable="no AMD GPU driver"))
+    watch.check(AFTER_TEST)
+
+    statement = watch.statement()
+
+    assert statement is not None and statement.state == CARD_FOREIGN and "pid 950" in (statement.reason or "")

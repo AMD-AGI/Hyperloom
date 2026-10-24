@@ -67,6 +67,10 @@ def test_a_manifest_states_the_rule_pack_its_runner_read_and_one_from_an_older_r
             {"state": "unknown", "reason": "no AMD GPU driver is loaded", "checks": 0},
             CardOccupancyFacts("unknown", "no AMD GPU driver is loaded", 0),
         ),
+        (
+            {"state": "foreign", "reason": "1 held the test's cards: pid 9 on card 0", "checks": 4},
+            CardOccupancyFacts("foreign", "1 held the test's cards: pid 9 on card 0", 4),
+        ),
     ],
 )
 def test_a_manifest_states_whether_its_cards_were_free_of_other_processes_and_why_not_when_it_could_not_say(
@@ -176,6 +180,9 @@ NEGATIVES: dict[str, Callable[[dict[str, Any]], None]] = {
         rule_pack={"version": "1", "digest": PACK_DIGEST, "path": "/x"}
     ),
     "card occupancy that is another state": lambda d: d["runner"].update(
+        card_occupancy={"state": "other", "reason": None, "checks": 1}
+    ),
+    "card occupancy foreign with no process named": lambda d: d["runner"].update(
         card_occupancy={"state": "foreign", "reason": None, "checks": 1}
     ),
     "card occupancy unknown with no reason": lambda d: d["runner"].update(
@@ -205,6 +212,7 @@ def test_a_manifest_that_breaks_the_contract_is_refused_by_the_reader_and_the_sc
         "file under a file",
         "duplicate file",
         "card occupancy unknown with no reason",
+        "card occupancy foreign with no process named",
         "card occupancy clean with a reason",
     }
     if name not in cross_field:

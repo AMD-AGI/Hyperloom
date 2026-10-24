@@ -6,11 +6,15 @@
 A throughput measured on a card another process was using is not the candidate's number, and nothing in the result would
 say so. The runner therefore reads who holds its cards (:mod:`hyperloom.sandbox.card_occupancy`) before the test starts,
 at a fixed interval while it runs, and once more when it has ended. A holder that is not a process of this sandbox is
-remembered with the time it was first seen, and the result is refused as ``foreign_process_on_card``: an infrastructure
-failure, whatever the test itself did, because a failure it showed may be the intruder's doing as much as a number may.
+remembered with the time it was first seen.
 
-Where the probe cannot say who holds the cards (no driver list, a pid namespace of its own), the test goes on and the signed
-result says ``unknown`` and why; it is never written as clean.
+What is done about it is the card guard's say. Enforcing, the result is refused as ``foreign_process_on_card``: an
+infrastructure failure, whatever the test itself did, because a failure it showed may be the intruder's doing as much as a
+number may. Observing, which is the default until the probe has been shown right on the machines that run tests, nothing is
+refused: the signed result says ``foreign`` with the process, the card and when, and the runner leaves a note.
+
+Where the probe cannot say who holds the cards (no driver list, a pid namespace of its own), the test goes on in both modes
+and the signed result says ``unknown`` and why; it is never written as clean.
 """
 
 from __future__ import annotations
@@ -22,11 +26,11 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from hyperloom.contracts.measurement import CARD_CLEAN, CARD_UNKNOWN
+from hyperloom.contracts.measurement import CARD_CLEAN, CARD_FOREIGN, CARD_UNKNOWN
 from hyperloom.measure.failures import FOREIGN_PROCESS_ON_CARD
 from hyperloom.measure.runner.service import RunnerFailure
 from hyperloom.sandbox import card_occupancy
-from hyperloom.sandbox.card_occupancy import CardReading, Holder, OwnProcesses
+from hyperloom.sandbox.card_occupancy import CARD_GUARD_ENV, CardGuard, CardReading, Holder, OwnProcesses
 
 __all__ = [
     "AFTER_TEST",
@@ -66,8 +70,8 @@ class Sighting:
 
 @dataclass(frozen=True)
 class CardStatement:
-    """What the signed result says of the test's cards: ``clean``, or ``unknown`` with the reason a look could not say.
-    ``checks`` is how many looks read the list."""
+    """What the signed result says of the test's cards: ``clean``, ``foreign`` with the process that was seen, or ``unknown``
+    with the reason a look could not say. ``checks`` is how many looks read the list."""
 
     state: str
     reason: str | None
@@ -78,7 +82,7 @@ class CardStatement:
 
 
 class CardWatch:
-    """Watches ``cards`` for processes that are not ``own``'s.
+    """Watches ``cards`` for processes that are not ``own``'s, and applies ``guard`` to what it sees.
 
     ``cards`` are numbered as ``ROCR_VISIBLE_DEVICES`` numbers them. With none (a test that has no card) there is nothing
     to watch and the result states nothing about its cards.
@@ -88,12 +92,14 @@ class CardWatch:
         self,
         cards: Sequence[int],
         own: OwnProcesses,
+        guard: CardGuard,
         *,
         poll_sec: float = CARD_POLL_SEC,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._cards = tuple(cards)
         self._own = own
+        self._guard = guard
         self._poll_sec = poll_sec
         self._clock = clock
         self._lock = threading.Lock()
@@ -138,24 +144,45 @@ class CardWatch:
             thread.join(timeout=_STOP_WAIT_SEC)
             self.check(AFTER_TEST)
 
-    def refuse_if_foreign(self) -> None:
-        """Raise the failure that refuses the result when a process outside the test held a card at any look."""
+    def enforce_guard(self) -> None:
+        """Raise the failure that refuses the result when the guard enforces and a process outside the test held a card
+        at any look; observing, do nothing (:meth:`observation` and :meth:`statement` carry what was seen)."""
+        found = self._seen()
+        if self._guard is CardGuard.ENFORCE and found:
+            raise RunnerFailure(FOREIGN_PROCESS_ON_CARD, _describe(found))
+
+    def observation(self) -> str | None:
+        """The note a runner that only observes leaves when a process outside the test held a card, else ``None``."""
+        found = self._seen()
+        if self._guard is CardGuard.OBSERVE and found:
+            return (
+                f"CARD GUARD OBSERVES ONLY ({CARD_GUARD_ENV}=observe): this result was kept although {_describe(found)}"
+            )
+        return None
+
+    def _seen(self) -> list[Sighting]:
         with self._lock:
-            found = sorted(self._sightings.values(), key=lambda s: (s.first_seen_unix, s.holder.card, s.holder.pid))
-        if not found:
-            return
-        named = "; ".join(sighting.describe() for sighting in found[:_NAMED])
-        more = f"; and {len(found) - _NAMED} more" if len(found) > _NAMED else ""
-        raise RunnerFailure(FOREIGN_PROCESS_ON_CARD, f"{len(found)} held the test's cards: {named}{more}")
+            return sorted(self._sightings.values(), key=lambda s: (s.first_seen_unix, s.holder.card, s.holder.pid))
 
     def statement(self) -> CardStatement | None:
-        """What the signed result says of its cards: ``clean`` for a test every look of which read the list and found no
-        process outside the test, ``unknown`` and why when any look could not read it; ``None`` for a test with no card."""
+        """What the signed result says of its cards: ``foreign`` and who when a process outside the test held one,
+        ``clean`` for a test every look of which read the list and found none, ``unknown`` and why when a look could not
+        read it; ``None`` for a test with no card."""
         if not self._cards:
             return None
+        found = self._seen()
         with self._lock:
-            if not self._checks:
-                return CardStatement(CARD_UNKNOWN, self._unavailable or _NEVER_LOOKED, 0)
-            if self._unavailable:
-                return CardStatement(CARD_UNKNOWN, self._unavailable, self._checks)
-            return CardStatement(CARD_CLEAN, None, self._checks)
+            checks, unavailable = self._checks, self._unavailable
+        if found:
+            return CardStatement(CARD_FOREIGN, _describe(found), checks)
+        if not checks:
+            return CardStatement(CARD_UNKNOWN, unavailable or _NEVER_LOOKED, 0)
+        if unavailable:
+            return CardStatement(CARD_UNKNOWN, unavailable, checks)
+        return CardStatement(CARD_CLEAN, None, checks)
+
+
+def _describe(found: Sequence[Sighting]) -> str:
+    named = "; ".join(sighting.describe() for sighting in found[:_NAMED])
+    more = f"; and {len(found) - _NAMED} more" if len(found) > _NAMED else ""
+    return f"{len(found)} held the test's cards: {named}{more}"

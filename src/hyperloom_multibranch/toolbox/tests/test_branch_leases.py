@@ -21,7 +21,7 @@ import pytest
 import pytest_asyncio
 
 from hyperloom.measure.tests.hosted_fixtures import point_yaml, runner_template, spec_context
-from hyperloom.sandbox.card_occupancy import Holder, read_holders
+from hyperloom.sandbox.card_occupancy import CardGuard, Holder, read_holders
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, MeasurementCapacity, RequestRejected, WorkloadKind
@@ -61,6 +61,7 @@ async def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         tp: int = 1,
         runner_envs: dict[str, str] | None = None,
         card_holders: Callable[..., Any] = read_holders,
+        card_guard: CardGuard | None = None,
         **branches: str,
     ) -> Any:
         session = tmp_path / f"session-{len(made)}"
@@ -74,7 +75,9 @@ async def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             LocalNotebook(session / "notebook", Writer(Role.TOOLBOX, "toolbox")),
             AcceptanceSetup(FakeRepo(), _PointPerBranch(points), IMAGE, WorkloadKind.AGENTX),
             spec_context(session, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")),
-            options=LocalOptions(poll_interval_sec=0.05, runner_envs=runner_envs, card_holders=card_holders),
+            options=LocalOptions(
+                poll_interval_sec=0.05, runner_envs=runner_envs, card_holders=card_holders, card_guard=card_guard
+            ),
         )
         made.append(toolbox)
         await toolbox.start()
@@ -387,9 +390,11 @@ def test_the_wait_a_lease_takes_is_the_default_for_none_and_the_given_number_oth
 # -- a card some process holds is not leased ---------------------------------------------------------------------------
 
 
-async def _watching_the_cards(local: Make, cards: int = 3) -> tuple[LocalHostedToolbox, CardList]:
+async def _watching_the_cards(
+    local: Make, cards: int = 3, guard: CardGuard = CardGuard.ENFORCE
+) -> tuple[LocalHostedToolbox, CardList]:
     holders = CardList()
-    return await local(cards=cards, card_holders=holders), holders
+    return await local(cards=cards, card_holders=holders, card_guard=guard), holders
 
 
 async def test_a_lease_skips_a_card_a_process_holds(local: Make) -> None:
@@ -436,3 +441,27 @@ async def test_a_lease_that_waits_gives_up_at_its_wait_and_says_who_held_the_car
 
     with pytest.raises(SandboxUnavailable, match=r"not freed within 0.4 s: .*card 0 by pid 4242; card 1 by pid 4243"):
         await asyncio.wait_for(box.lease_branch_sandbox("agent", 1, wait_sec=0.4), 20)
+
+
+async def test_a_lease_under_a_guard_that_only_observes_takes_a_card_a_process_holds_and_logs_it(
+    local: Make, caplog: pytest.LogCaptureFixture
+) -> None:
+    box, holders = await _watching_the_cards(local, guard=CardGuard.OBSERVE)
+    holders.holders = (INTRUDER,)
+
+    with caplog.at_level("WARNING", logger="hyperloom.sandbox.gated_pool"):
+        lease = await box.lease_branch_sandbox("agent", 1, wait_sec=0)
+
+    assert lease.gpu_ids == (0,), "the held card was handed out as a plain pool would"
+    assert [r.getMessage() for r in caplog.records] == [
+        "cards a process holds were handed out (the card guard observes only): "
+        "held card 0 by pid 4242 (python3 -c import torch)"
+    ]
+
+
+async def test_a_lease_with_no_guard_named_observes(local: Make) -> None:
+    holders = CardList()
+    holders.holders = tuple(Holder(card=card, pid=4242 + card, command="x") for card in range(3))
+    box = await local(cards=3, card_holders=holders)
+
+    assert (await box.lease_branch_sandbox("agent", 1, wait_sec=0)).gpu_ids == (0,)

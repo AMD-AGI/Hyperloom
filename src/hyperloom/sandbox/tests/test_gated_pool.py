@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.sandbox.card_occupancy import CardReading, Holder, read_holders
+from hyperloom.sandbox.card_occupancy import CardGuard, CardReading, Holder, read_holders
 from hyperloom.sandbox.gated_pool import CardsHeld, GatedPool
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom.sandbox.tests.kernel_tree import KernelTree
@@ -34,21 +34,21 @@ class _Probe:
 
 
 def test_cards_nobody_holds_are_handed_out_lowest_first_like_a_plain_pool() -> None:
-    pool = GatedPool(range(4), read=_Probe())
+    pool = GatedPool(range(4), CardGuard.ENFORCE, read=_Probe())
 
     assert pool.acquire(2, 0.0) == (0, 1)
     assert pool.free_cards() == (2, 3)
 
 
 def test_a_held_card_is_skipped_and_stays_in_the_pool() -> None:
-    pool = GatedPool(range(4), read=_Probe(CardReading((_INTRUDER,))))
+    pool = GatedPool(range(4), CardGuard.ENFORCE, read=_Probe(CardReading((_INTRUDER,))))
 
     assert pool.acquire(2, 0.0) == (0, 2)
     assert pool.free_cards() == (1, 3)
 
 
 def test_when_too_few_cards_are_unheld_the_refusal_names_who_holds_them() -> None:
-    pool = GatedPool(range(2), read=_Probe(CardReading((_INTRUDER,))))
+    pool = GatedPool(range(2), CardGuard.ENFORCE, read=_Probe(CardReading((_INTRUDER,))))
 
     with pytest.raises(CardsHeld) as refused:
         pool.acquire(2, 0.0)
@@ -60,7 +60,7 @@ def test_when_too_few_cards_are_unheld_the_refusal_names_who_holds_them() -> Non
 
 def test_a_refusal_names_at_most_three_holders_and_counts_the_rest() -> None:
     holders = tuple(Holder(card=card, pid=100 + card, command="") for card in range(5))
-    pool = GatedPool(range(5), read=_Probe(CardReading(holders)))
+    pool = GatedPool(range(5), CardGuard.ENFORCE, read=_Probe(CardReading(holders)))
 
     with pytest.raises(CardsHeld, match=r"card 0 by pid 100; card 1 by pid 101; card 2 by pid 102; and 2 more"):
         pool.acquire(1, 0.0)
@@ -68,7 +68,7 @@ def test_a_refusal_names_at_most_three_holders_and_counts_the_rest() -> None:
 
 def test_a_wait_ends_when_the_holder_lets_go() -> None:
     probe = _Probe(CardReading((Holder(0, 9, "x"),)))
-    pool = GatedPool(range(1), read=probe, poll_sec=0.01)
+    pool = GatedPool(range(1), CardGuard.ENFORCE, read=probe, poll_sec=0.01)
     timer = threading.Timer(0.1, lambda: setattr(probe, "reading", CardReading()))
     timer.start()
     try:
@@ -79,7 +79,7 @@ def test_a_wait_ends_when_the_holder_lets_go() -> None:
 
 
 def test_a_wait_that_runs_out_while_the_card_is_held_is_a_refusal_not_a_hand_out() -> None:
-    pool = GatedPool(range(1), read=_Probe(CardReading((Holder(0, 9, "x"),))), poll_sec=0.01)
+    pool = GatedPool(range(1), CardGuard.ENFORCE, read=_Probe(CardReading((Holder(0, 9, "x"),))), poll_sec=0.01)
 
     with pytest.raises(CardsHeld, match="within|no 1 free GPUs that no process holds"):
         pool.acquire(1, 0.05)
@@ -87,7 +87,7 @@ def test_a_wait_that_runs_out_while_the_card_is_held_is_a_refusal_not_a_hand_out
 
 def test_only_the_free_cards_are_looked_at_a_leased_card_may_be_in_use() -> None:
     probe = _Probe()
-    pool = GatedPool(range(4), read=probe)
+    pool = GatedPool(range(4), CardGuard.ENFORCE, read=probe)
     pool.acquire(2, 0.0)
     probe.asked.clear()
 
@@ -97,7 +97,7 @@ def test_only_the_free_cards_are_looked_at_a_leased_card_may_be_in_use() -> None
 
 
 def test_too_few_free_cards_is_the_plain_pools_refusal_not_a_held_one() -> None:
-    pool = GatedPool(range(2), read=_Probe())
+    pool = GatedPool(range(2), CardGuard.ENFORCE, read=_Probe())
     pool.acquire(2, 0.0)
 
     with pytest.raises(SandboxUnavailable, match=r"no 1 free GPUs within 0.0s \(0 free\)") as refused:
@@ -108,13 +108,13 @@ def test_too_few_free_cards_is_the_plain_pools_refusal_not_a_held_one() -> None:
 
 def test_a_pool_smaller_than_the_request_refuses_as_a_plain_pool_does() -> None:
     with pytest.raises(SandboxUnavailable, match="needs 3 GPUs but the pool owns 2"):
-        GatedPool(range(2), read=_Probe()).acquire(3, 0.0)
+        GatedPool(range(2), CardGuard.ENFORCE, read=_Probe()).acquire(3, 0.0)
 
 
 def test_a_card_released_while_a_process_still_holds_it_is_not_handed_out_again() -> None:
     """A lease that ends with its agent's process still on the card must not give that card to a test."""
     probe = _Probe()
-    pool = GatedPool(range(2), read=probe)
+    pool = GatedPool(range(2), CardGuard.ENFORCE, read=probe)
     leased = pool.acquire(1, 0.0)
     probe.reading = CardReading((Holder(leased[0], 77, "agent-tool"),))
     pool.release(leased)
@@ -127,7 +127,7 @@ def test_a_card_released_while_a_process_still_holds_it_is_not_handed_out_again(
 def test_where_the_probe_cannot_say_cards_are_handed_out_and_the_reason_is_logged_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    pool = GatedPool(range(4), read=_Probe(CardReading(unavailable="no AMD GPU driver is loaded")))
+    pool = GatedPool(range(4), CardGuard.ENFORCE, read=_Probe(CardReading(unavailable="no AMD GPU driver is loaded")))
 
     with caplog.at_level(logging.WARNING, logger="hyperloom.sandbox.gated_pool"):
         assert pool.acquire(1, 0.0) == (0,)
@@ -139,7 +139,7 @@ def test_where_the_probe_cannot_say_cards_are_handed_out_and_the_reason_is_logge
 
 
 def test_two_takers_never_get_the_same_card() -> None:
-    pool = GatedPool(range(8), read=_Probe(), poll_sec=0.01)
+    pool = GatedPool(range(8), CardGuard.ENFORCE, read=_Probe(), poll_sec=0.01)
     taken: list[tuple[int, ...]] = []
     lock = threading.Lock()
 
@@ -161,9 +161,52 @@ def test_the_default_probe_reads_the_kernels_list(tmp_path: Path) -> None:
     tree = KernelTree(tmp_path, gpus=4)
     tree.process(900, command=("python3", "intruder.py"))
     tree.holds(900, 0)
-    pool = GatedPool(range(4), read=lambda cards: read_holders(cards, kfd=tree.kfd, procfs=tree.procfs))
+    pool = GatedPool(
+        range(4), CardGuard.ENFORCE, read=lambda cards: read_holders(cards, kfd=tree.kfd, procfs=tree.procfs)
+    )
 
     assert pool.acquire(2, 0.0) == (1, 2)
     with pytest.raises(CardsHeld, match="card 0 by pid 900 .python3 intruder.py."):
         pool.acquire(2, 0.0)
     assert pool.acquire(1, 0.0) == (3,)
+
+
+# --- a guard that only observes ---------------------------------------------------------------------------------------
+
+
+def test_a_pool_that_observes_hands_out_a_held_card_and_the_log_says_who_holds_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pool = GatedPool(range(4), CardGuard.OBSERVE, read=_Probe(CardReading((_INTRUDER,))))
+
+    with caplog.at_level(logging.WARNING, logger="hyperloom.sandbox.gated_pool"):
+        assert pool.acquire(2, 0.0) == (0, 1)
+
+    assert [record.getMessage() for record in caplog.records] == [
+        "cards a process holds were handed out (the card guard observes only): "
+        "held card 1 by pid 4242 (python3 -c import torch)"
+    ]
+
+
+def test_a_pool_that_observes_never_waits_or_refuses_for_a_held_card() -> None:
+    holders = tuple(Holder(card=card, pid=100 + card, command="") for card in range(2))
+    pool = GatedPool(range(2), CardGuard.OBSERVE, read=_Probe(CardReading(holders)))
+
+    assert pool.acquire(2, 0.0) == (0, 1)
+
+
+def test_a_pool_that_observes_says_nothing_of_cards_it_did_not_hand_out(caplog: pytest.LogCaptureFixture) -> None:
+    pool = GatedPool(range(4), CardGuard.OBSERVE, read=_Probe(CardReading((_INTRUDER,))))
+
+    with caplog.at_level(logging.WARNING, logger="hyperloom.sandbox.gated_pool"):
+        pool.acquire(1, 0.0)  # card 0 is clean; the holder is on card 1, which this hand-out does not give
+
+    assert caplog.records == []
+
+
+def test_a_pool_that_observes_still_refuses_what_a_plain_pool_refuses() -> None:
+    pool = GatedPool(range(2), CardGuard.OBSERVE, read=_Probe())
+    pool.acquire(2, 0.0)
+
+    with pytest.raises(SandboxUnavailable, match=r"no 1 free GPUs within 0.0s \(0 free\)"):
+        pool.acquire(1, 0.0)

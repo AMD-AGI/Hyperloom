@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A card pool that does not hand out a card some process holds.
+"""A card pool that looks at what holds a card before it hands the card out, and under an enforcing guard does not hand it out.
 
 A card nobody leased is not necessarily a card nobody uses: an agent's command, a tool that outlived its lease or a server
 a teardown missed can hold it. Every hand-out of this pool, to a measurement sandbox or to a lease, looks at what holds
-the free cards first (:mod:`hyperloom.sandbox.card_occupancy`) and takes only cards nobody holds; a card that is held stays
-in the pool and is looked at again at the next try. Where the probe cannot say who holds the cards, they are handed out as a
-plain pool would and the reason is logged: the runner of a test states for itself, in the signed result, what it could check.
+the free cards first (:mod:`hyperloom.sandbox.card_occupancy`). Enforcing, it takes only cards nobody holds; a card that is
+held stays in the pool and is looked at again at the next try. Observing, which is the default until the probe has been shown
+right on the machines that run tests, it hands cards out as a plain pool does and the log says who holds the ones that are
+held. Where the probe cannot say who holds the cards they are handed out in both modes and the reason is logged: the runner
+of a test states for itself, in the signed result, what it could check.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import logging
 import time
 from collections.abc import Callable, Iterable, Sequence
 
-from hyperloom.sandbox.card_occupancy import CardReading, Holder, read_holders
+from hyperloom.sandbox.card_occupancy import CardGuard, CardReading, Holder, read_holders
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.socket import SandboxUnavailable
 
@@ -44,10 +46,11 @@ def _described(holders: Sequence[Holder]) -> str:
 
 
 class GatedPool(GpuPool):
-    """A :class:`GpuPool` that hands out only cards no process holds.
+    """A :class:`GpuPool` that, when it enforces, hands out only cards no process holds.
 
     Args:
         gpus: The card numbers, as for :class:`GpuPool`; they are numbered the way ``ROCR_VISIBLE_DEVICES`` numbers cards.
+        guard: What is done about a held card: refused under ``ENFORCE``, handed out and logged under ``OBSERVE``.
         read: Who holds some cards: :func:`hyperloom.sandbox.card_occupancy.read_holders` unless a test says otherwise.
         poll_sec: How often a wait looks again, since a card is let go without any call to this pool.
     """
@@ -55,11 +58,13 @@ class GatedPool(GpuPool):
     def __init__(
         self,
         gpus: Iterable[int],
+        guard: CardGuard,
         *,
         read: Callable[[Sequence[int]], CardReading] = read_holders,
         poll_sec: float = _POLL_SEC,
     ) -> None:
         super().__init__(gpus)
+        self._guard = guard
         self._read = read
         self._poll_sec = poll_sec
         self._unavailable = ""
@@ -68,7 +73,7 @@ class GatedPool(GpuPool):
         """Lease ``count`` cards nobody holds, waiting up to ``wait_sec`` for them to be free and let go.
 
         Raises:
-            CardsHeld: When enough cards are free but processes hold them, once the wait ran out.
+            CardsHeld: When the guard enforces, enough cards are free but processes hold them, once the wait ran out.
             SandboxUnavailable: When the pool is smaller than ``count`` or too few cards were free within the wait.
         """
         if count <= 0 or count > self.total:
@@ -91,10 +96,11 @@ class GatedPool(GpuPool):
                 self._cond.wait(min(remaining, self._poll_sec))
 
     def _take_unheld(self, count: int) -> tuple[int, ...] | None:
-        """Take ``count`` free cards no process holds; ``None`` when too few are free or another taker was first.
+        """Take ``count`` free cards, none that a process holds when enforcing; ``None`` when too few are free or another
+        taker was first.
 
         Raises:
-            CardsHeld: When enough cards are free but too few of them are unheld.
+            CardsHeld: When enforcing, enough cards are free but too few of them are unheld.
         """
         free = self.free_cards()
         if len(free) < count:
@@ -103,9 +109,16 @@ class GatedPool(GpuPool):
         if reading.unavailable is not None:
             self._say_unchecked(reading.unavailable)
             chosen = free[:count]
+        elif self._guard is CardGuard.OBSERVE:
+            chosen = free[:count]
+            held = [holder for holder in reading.holders if holder.card in chosen]
+            if held:
+                log.warning(
+                    "cards a process holds were handed out (the card guard observes only): %s", _described(held)
+                )
         else:
-            held = reading.held_cards()
-            chosen = tuple(card for card in free if card not in held)[:count]
+            held_cards = reading.held_cards()
+            chosen = tuple(card for card in free if card not in held_cards)[:count]
             if len(chosen) < count:
                 raise CardsHeld(
                     f"no {count} free GPUs that no process holds: {_described(reading.holders)}", reading.holders

@@ -65,7 +65,7 @@ from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
 from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
 from hyperloom.measure.surface import extract_surface
 from hyperloom.orchestrator.actions.executors import harvest_leaked_artifacts
-from hyperloom.sandbox.card_occupancy import own_sandbox_processes
+from hyperloom.sandbox.card_occupancy import card_guard, own_sandbox_processes
 
 __all__ = ["run"]
 
@@ -176,7 +176,7 @@ def _check_cards_free(ctx: _Context, visible: list[int]) -> None:
     if not visible:
         ctx.notes.append(f"{ROCR_VISIBLE_DEVICES_ENV} names no card; the cards were not checked for other processes")
     ctx.cards.check(BEFORE_TEST)
-    ctx.cards.refuse_if_foreign()
+    ctx.cards.enforce_guard()
     _check_vram_free(ctx, visible)
 
 
@@ -480,12 +480,15 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     session = _jit_session(ctx, spec, points, farm, facts)
     call = dataclasses.replace(_call(ctx, spec, points, inferencex, progress), jit=session)
     ctx.cards.check(BEFORE_TEST)
-    ctx.cards.refuse_if_foreign()
+    ctx.cards.enforce_guard()
     progress.phase("running")
     started = time.time()
     with ctx.cards.watching():
         outcome, timed_out = _execute(call)
-    ctx.cards.refuse_if_foreign()
+    ctx.cards.enforce_guard()
+    observed = ctx.cards.observation()
+    if observed is not None:
+        ctx.notes.append(observed)
     ctx.phases.begin(RESULT_SIGNING)
     progress.phase("collecting")
     harvest_leaked_artifacts(ctx.files, subprocess_started_unix=started, leak_root=ctx.work)
@@ -551,7 +554,13 @@ def run(
     work = scratch / "test"
     for sub in ("farm", "attach", "pids"):
         (work / sub).mkdir(parents=True, exist_ok=True)
-    watch = CardWatch(_visible(environ), own_sandbox_processes(environ))
+    try:
+        guard = card_guard(environ)
+    except ValueError as exc:
+        failure = RunnerFailure(_START_FAILED, str(exc))
+        write_status(out_dir, state=_FAILED, error_class=failure.error_class, message=str(failure))
+        return failure.exit_code
+    watch = CardWatch(_visible(environ), own_sandbox_processes(environ), guard)
     ctx = _Context(in_dir, out_dir, work, scratch / "cache", environ, time.time(), watch)
     _begin_phases(ctx)
     with Progress(out_dir, files_dir=ctx.files) as progress:

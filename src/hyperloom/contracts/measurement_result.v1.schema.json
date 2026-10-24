@@ -184,7 +184,8 @@
                 "state": {
                   "enum": [
                     "clean",
-                    "unknown"
+                    "unknown",
+                    "foreign"
                   ]
                 },
                 "reason": {

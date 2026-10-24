@@ -20,7 +20,7 @@ from hyperloom.measure.runner.card_watch import CardWatch
 from hyperloom.measure.runner.tests.test_run import _Backend, _go, _ok, _sheet, _status, env, key  # noqa: F401 - fixtures
 from hyperloom.measure.socket import TestCall, TestOutcome
 from hyperloom.sandbox import card_occupancy
-from hyperloom.sandbox.card_occupancy import CardReading, own_sandbox_processes
+from hyperloom.sandbox.card_occupancy import CARD_GUARD_ENV, CardReading, own_sandbox_processes
 from hyperloom.sandbox.card_occupancy import read_holders as read_the_machine
 from hyperloom.sandbox.tests.kernel_tree import KernelTree
 
@@ -31,6 +31,7 @@ EXIT_FOREIGN_PROCESS = 6
 @pytest.fixture
 def tree(tmp_path: Path, env, monkeypatch: pytest.MonkeyPatch) -> KernelTree:
     """The machine the runner runs on: it is the process ``RUNNER``, in a sandbox of its own, and card 0 is its card."""
+    env[CARD_GUARD_ENV] = "enforce"  # a test of the observing guard says so
     machine = KernelTree(tmp_path / "machine")
     machine.process(RUNNER, environ=("E2B_SANDBOX_ID=sbx-1",))
     monkeypatch.setattr(
@@ -161,6 +162,74 @@ def test_the_servers_own_processes_on_the_card_are_not_an_intruder_and_the_resul
     assert occupancy is not None and (occupancy.state, occupancy.reason) == ("clean", None)
     assert occupancy.checks >= 4, "before the start, before the launch, while it ran and after it"
     assert _status(tmp_path)["message"] == ""
+
+
+# --- the card guard: observing is the default, enforcing is the refusal above -----------------------------------------------
+
+
+def test_a_guard_that_observes_keeps_a_result_measured_beside_a_process_and_signs_who_was_seen(
+    tmp_path, env, tree, monkeypatch
+) -> None:
+    env[CARD_GUARD_ENV] = "observe"
+
+    def a_test_an_intruder_interrupts(call: TestCall) -> TestOutcome:
+        _intruder(tree)
+        time.sleep(0.3)  # the watch looks every 10 ms
+        tree.exit(900)
+        return _ok(call)
+
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(a_test_an_intruder_interrupts))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    occupancy = _manifest(tmp_path).runner.card_occupancy
+    assert occupancy is not None and occupancy.state == "foreign" and occupancy.checks >= 4
+    assert (
+        occupancy.reason is not None
+        and "pid 900 on card 0" in occupancy.reason
+        and "during the test" in occupancy.reason
+    )
+    status = _status(tmp_path)
+    assert status["state"] == "succeeded" and status["error_class"] is None
+    assert status["message"].startswith("CARD GUARD OBSERVES ONLY (HYPERLOOM_CARD_GUARD=observe): this result was kept")
+    assert "pid 900 on card 0" in status["message"]
+
+
+def test_a_guard_that_observes_runs_a_test_whose_card_a_process_held_when_the_runner_started(
+    tmp_path, env, tree, monkeypatch
+) -> None:
+    env[CARD_GUARD_ENV] = "observe"
+    _intruder(tree)
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    assert len(backend.calls) == 1
+    occupancy = _manifest(tmp_path).runner.card_occupancy
+    assert occupancy is not None and occupancy.state == "foreign" and "before the test" in (occupancy.reason or "")
+
+
+def test_a_guard_named_nothing_observes(tmp_path, env, tree, monkeypatch) -> None:
+    del env[CARD_GUARD_ENV]
+    _intruder(tree)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    assert _manifest(tmp_path).runner.card_occupancy.state == "foreign"  # type: ignore[union-attr]
+
+
+def test_a_guard_that_is_not_one_stops_the_runner_before_anything_runs(tmp_path, env, monkeypatch) -> None:
+    env[CARD_GUARD_ENV] = "enfroce"
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+
+    assert _go(tmp_path, env, _sheet()) == 2
+
+    status = _status(tmp_path)
+    assert status["error_class"] == "runner_start_failed" and "HYPERLOOM_CARD_GUARD is 'enfroce'" in status["message"]
+    assert backend.calls == []
 
 
 def test_a_list_nobody_could_read_leaves_the_result_unknown_with_the_reason_never_clean(
