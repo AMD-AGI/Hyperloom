@@ -438,7 +438,7 @@ def _run_magpie(
     # Ray-managed GPU execution (§12 T1): route the round through the serving lease's actor, which holds ``num_gpus``
     # across every round sharing this server.
     if serving_lease is not None:
-        from ._ray_backend import strip_visible_devices_from_config
+        from ._ray_backend import SessionKillRound, strip_visible_devices_from_config
 
         ray_config_path = strip_visible_devices_from_config(config_path)
         cmd = build_benchmark_command(
@@ -450,16 +450,18 @@ def _run_magpie(
         # (potentially on another node) and only its final ``(rc, stdout, stderr)`` comes back, so there is nothing
         # local to call per line.
         return serving_lease.run_session_kill(
-            cmd,
-            env=env,
-            cwd=cwd,
-            timeout=timeout_sec,
-            silence_timeout_sec=silence_timeout_sec,
-            server_log_path=server_log_path,
-            server_already_ready=server_already_ready,
-            # Converted here, at the last moment before the process boundary: the actor cannot read this process's
-            # monotonic clock.
-            session_remaining_sec=session_deadline_to_remaining_sec(session_deadline_sec),
+            SessionKillRound(
+                cmd,
+                env=env,
+                cwd=cwd,
+                timeout=timeout_sec,
+                silence_timeout_sec=silence_timeout_sec,
+                server_log_path=server_log_path,
+                server_already_ready=server_already_ready,
+                # Converted here, at the last moment before the process boundary: the actor cannot read this process's
+                # monotonic clock.
+                session_remaining_sec=session_deadline_to_remaining_sec(session_deadline_sec),
+            )
         )
 
     cmd = build_benchmark_command(

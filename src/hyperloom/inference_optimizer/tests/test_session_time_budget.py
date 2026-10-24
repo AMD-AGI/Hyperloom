@@ -24,6 +24,7 @@ from hyperloom.orchestrator.actions.cancel_channel import (
     stop_was_asked_for,
     use_cancel_scope,
 )
+from hyperloom.orchestrator.actions.executors._ray_backend import SessionKillRound
 from hyperloom.orchestrator.actions.executors._ray_serving import CANCEL_ROUND_GRACE_SEC
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     COOPERATIVE_REAP_BUDGET_SEC,
@@ -971,8 +972,10 @@ def _runs_a_round_in_a_lease(started: asyncio.Event, *, outcome: dict[str, Any],
         started.set()
         rc, _out, _err = await asyncio.to_thread(
             lease.run_session_kill,
-            [sys.executable, "-c", f"import time; time.sleep({_BLOCKING_SEC})"],
-            timeout=_BLOCKING_SEC * 4,
+            SessionKillRound(
+                [sys.executable, "-c", f"import time; time.sleep({_BLOCKING_SEC})"],
+                timeout=_BLOCKING_SEC * 4,
+            ),
         )
         outcome["returncode"] = rc
         return {"returncode": rc}

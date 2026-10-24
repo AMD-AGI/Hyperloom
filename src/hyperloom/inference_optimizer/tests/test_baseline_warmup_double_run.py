@@ -2324,9 +2324,10 @@ class _CapturingLease:
     def __init__(self) -> None:
         self._run, self.calls = _capturing_fake_run()
 
-    def run_session_kill(self, cmd, **kwargs) -> tuple[int | None, str, str]:
+    def run_session_kill(self, bench_round) -> tuple[int | None, str, str]:
         """Record the launch and answer as the actor does, with a bare triple."""
-        proc = self._run(cmd, **kwargs)
+        fields = dict(vars(bench_round))
+        proc = self._run(fields.pop("cmd"), **fields)
         return proc.returncode, proc.stdout, proc.stderr
 
     def close(self) -> None:

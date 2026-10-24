@@ -3455,25 +3455,27 @@ class BenchmarkRunExecutor:
         if round_.serving_lease is not None:
             # Ray-managed GPU execution (§12 T1): run inside the lease's actor (holds num_gpus across this run's
             # rounds).
-            from ._ray_backend import strip_visible_devices_from_config
+            from ._ray_backend import SessionKillRound, strip_visible_devices_from_config
 
             # No liveness callback is possible here: the round runs inside a Ray actor in another process
             # (potentially on another node) and only its final ``(rc, stdout, stderr)`` crosses back, so there is
             # nothing local to call per line of child output.
             returncode, stdout, stderr = await asyncio.to_thread(
                 round_.serving_lease.run_session_kill,
-                build_benchmark_command(
-                    python_exe=self.magpie_python,
-                    config_path=strip_visible_devices_from_config(round_.config_path),
-                    output_dir=round_.output_dir,
+                SessionKillRound(
+                    build_benchmark_command(
+                        python_exe=self.magpie_python,
+                        config_path=strip_visible_devices_from_config(round_.config_path),
+                        output_dir=round_.output_dir,
+                    ),
+                    env=round_.env,
+                    cwd=str(round_.output_dir),
+                    timeout=round_.timeout_sec,
+                    silence_timeout_sec=round_.silence_timeout_sec,
+                    server_already_ready=server_ready,
+                    server_log_path=round_.watchdog_server_log,
+                    session_remaining_sec=session_deadline_to_remaining_sec(round_.session_deadline_sec),
                 ),
-                env=round_.env,
-                cwd=str(round_.output_dir),
-                timeout=round_.timeout_sec,
-                silence_timeout_sec=round_.silence_timeout_sec,
-                server_already_ready=server_ready,
-                server_log_path=round_.watchdog_server_log,
-                session_remaining_sec=session_deadline_to_remaining_sec(round_.session_deadline_sec),
             )
         else:
             async with heartbeat_while_output_flows(unit="baseline_round", label="benchmark") as activity:
