@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import csv
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -14,7 +15,7 @@ import pytest
 import kernelforge.gemm_tune.aiter_graph_retime as retime
 import kernelforge.gemm_tune.aiter_splitk_validate as validate
 import kernelforge.gemm_tune.tuners._aiter_dense_common as ac
-from kernelforge.gemm_tune.aiter_graph_retime import Kernel, RetimeError, Timing, make_retime_fn
+from kernelforge.gemm_tune.aiter_graph_retime import Kernel, RetimeError, RetimeTarget, Timing, make_retime_fn
 from kernelforge.gemm_tune.tuners._graph_retime import retime_decode_rows
 from kernelforge.gemm_tune.tuners._serve_safe import _SplitKLimit
 from kernelforge.gemm_tune.tuners.base import TuneContext
@@ -157,7 +158,7 @@ def test_a_candidate_that_cannot_be_timed_is_skipped_and_reported(tmp_path):
 
 
 def test_an_op_without_a_registered_retime_keeps_the_tuners_picks(tmp_path):
-    assert make_retime_fn("a8w8_blockscale", "", tmp_path) is None
+    assert make_retime_fn(RetimeTarget("a8w8_blockscale", "", time.time() + 600), tmp_path) is None
     art = _write(tmp_path / "tuned.csv", [_CK])
     prof = _write(tmp_path / "profile.csv", [_CK, _ASM_SK4])
     before = art.read_text()
@@ -166,7 +167,8 @@ def test_an_op_without_a_registered_retime_keeps_the_tuners_picks(tmp_path):
     assert art.read_text() == before
 
 
-def test_an_unknown_libtype_cannot_be_timed():
+def test_an_unknown_libtype_cannot_be_timed(monkeypatch):
+    monkeypatch.setitem(sys.modules, "aiter", types.SimpleNamespace())  # CI has no aiter
     with pytest.raises(RuntimeError, match="opus"):
         retime._BpreshuffleGraphTimer._call(Kernel("opus", 3, "opus_k", 0))
 
@@ -207,7 +209,7 @@ def test_the_worker_records_a_kernel_that_cannot_dispatch_and_times_the_rest(mon
     ]
 
 
-def _worker(tmp_path, monkeypatch, *, rc: int = 0, results=None):
+def _worker(tmp_path, monkeypatch, *, rc: int = 0, results=None, seconds_left: float = 600.0):
     """A worker run under ``tmp_path`` whose subprocess exits ``rc`` after writing ``results``."""
     jit = tmp_path / "aiter_jit"
     (jit / "build").mkdir(parents=True)
@@ -218,13 +220,13 @@ def _worker(tmp_path, monkeypatch, *, rc: int = 0, results=None):
     seen = {}
 
     def run(command, env, **kwargs):
-        seen.update(command=command, env=env)
+        seen.update(command=command, env=env, timeout=kwargs.get("timeout"))
         if results is not None:
             Path(command[-1]).write_text(results)
         return types.SimpleNamespace(returncode=rc)
 
     monkeypatch.setattr(retime.subprocess, "run", run)
-    return make_retime_fn(_OP, "", tmp_path / "run"), seen
+    return make_retime_fn(RetimeTarget(_OP, "", time.time() + seconds_left), tmp_path / "run"), seen
 
 
 def test_the_worker_rebuilds_the_production_modules_from_the_candidates(tmp_path, monkeypatch):
@@ -237,6 +239,18 @@ def test_the_worker_rebuilds_the_production_modules_from_the_candidates(tmp_path
     with open(seen["env"]["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"], newline="") as fh:
         build = list(csv.DictReader(fh))
     assert [(r["M"], r["kernelName"]) for r in build] == [("1", "ck_pick"), ("2", "asm_sk4")]
+
+
+def test_the_worker_gets_what_is_left_of_the_tuners_budget_and_none_once_it_is_spent(tmp_path, monkeypatch):
+    rows = [dict(zip(_HDR, _row("ck_pick", "ck", 14.0)))]
+    time_fn, seen = _worker(tmp_path / "left", monkeypatch, results='[{"us": 13.5, "error": ""}]', seconds_left=600.0)
+    time_fn(rows)
+    assert 590 < seen["timeout"] <= 600
+
+    time_fn, seen = _worker(tmp_path / "spent", monkeypatch, results="[]", seconds_left=-1.0)
+    with pytest.raises(RetimeError, match="budget"):
+        time_fn(rows)
+    assert "command" not in seen
 
 
 def test_a_failed_worker_raises_with_its_log(tmp_path, monkeypatch):
@@ -287,7 +301,7 @@ def test_the_bpreshuffle_tuner_reports_the_retimed_row(tmp_path, monkeypatch):
     monkeypatch.delenv("FORGE_SPLITK_TRIAL", raising=False)
     monkeypatch.setitem(validate._TRIAL_OPS, _OP, lambda m, n, k, sk, device="cuda": True)
     timer = _GraphTimes({"ck_pick": 14.28, "asm_sk4": 13.54})
-    monkeypatch.setattr(retime, "_WorkerRetime", lambda op, device, production, run_dir: timer)
+    monkeypatch.setattr(retime, "_WorkerRetime", lambda target, production, run_dir: timer)
     (tmp_path / "in.csv").write_text("M,N,K\n64,7168,5120\n")
     _write(tmp_path / "tuned_bpre.csv", [_CK])
     _write(tmp_path / "profile_bpre.csv", [_CK, _ASM_SK4])

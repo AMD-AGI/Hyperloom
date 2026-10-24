@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,8 +37,6 @@ _CALLS_PER_COPY = 10
 _REPLAYS = 7
 # The weight layout sglang's blockscale bpreshuffle path serves.
 _SHUFFLE_LAYOUT = (16, 16)
-# Building the candidates' ck and cktile instances dominates the worker's run time.
-_WORKER_TIMEOUT_S = 3600
 _WORKER_LOG_TAIL = 2000
 
 
@@ -61,6 +60,16 @@ class Timing:
 
     us: float | None = None
     error: str = ""
+
+
+@dataclass(frozen=True)
+class RetimeTarget:
+    """Whose rows are timed and where: ``op``, the tuner's ``gpu_ids``, and the clock time (``time.time``) the tuner's
+    budget ends at, which the timing must finish by."""
+
+    op: str
+    gpu_ids: str
+    deadline: float
 
 
 class RetimeError(RuntimeError):
@@ -88,10 +97,18 @@ _BPRESHUFFLE_MODULES = _ProductionModules(
 class _WorkerRetime:
     """Times rows in a worker process on ``device``, with ``production``'s modules built from the rows themselves."""
 
-    def __init__(self, op: str, device: str, production: _ProductionModules, run_dir: Path):
-        self._op, self._device, self._production, self._run_dir = op, device, production, run_dir
+    def __init__(self, target: RetimeTarget, production: _ProductionModules, run_dir: Path):
+        self._target, self._device, self._production, self._run_dir = (
+            target,
+            _resolve_device(target.gpu_ids),
+            production,
+            run_dir,
+        )
 
     def __call__(self, rows: Sequence[dict[str, str]]) -> list[Timing]:
+        seconds_left = self._target.deadline - time.time()
+        if seconds_left <= 0:
+            raise RetimeError("the tuner's time budget is spent")
         jobs, build, results = (self._run_dir / name for name in ("jobs.csv", "build.csv", "timings.json"))
         jit_dir = self._private_jit_dir()
         _write_rows(jobs, rows)
@@ -99,12 +116,12 @@ class _WorkerRetime:
         _write_rows(build, [{**row, "M": str(i + 1)} for i, row in enumerate(rows)])
         results.unlink(missing_ok=True)
         env = {**os.environ, "AITER_JIT_DIR": str(jit_dir), self._production.config_env: str(build)}
-        command = [sys.executable, "-m", __name__, self._op, self._device, str(jobs), str(results)]
+        command = [sys.executable, "-m", __name__, self._target.op, self._device, str(jobs), str(results)]
         log_path = self._run_dir / "worker.log"
         try:
             with log_path.open("w") as log_file:
                 rc = subprocess.run(
-                    command, env=env, stdout=log_file, stderr=subprocess.STDOUT, timeout=_WORKER_TIMEOUT_S, check=False
+                    command, env=env, stdout=log_file, stderr=subprocess.STDOUT, timeout=seconds_left, check=False
                 ).returncode
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RetimeError(f"timing worker did not finish: {exc}") from exc
@@ -238,12 +255,12 @@ class _RetimeOp:
 _RETIME_OPS = {"a8w8_blockscale_bpreshuffle": _RetimeOp(_BpreshuffleGraphTimer, _BPRESHUFFLE_MODULES)}
 
 
-def make_retime_fn(op: str, gpu_ids: str, run_dir: Path) -> RetimeFn | None:
-    """The in-graph timer for ``op`` on the tuner's assigned card, working under ``run_dir``; None when unregistered."""
-    if op not in _RETIME_OPS:
+def make_retime_fn(target: RetimeTarget, run_dir: Path) -> RetimeFn | None:
+    """The in-graph timer for ``target``'s op on its card, working under ``run_dir``; None when unregistered."""
+    if target.op not in _RETIME_OPS:
         return None
     run_dir.mkdir(parents=True, exist_ok=True)
-    return _WorkerRetime(op, _resolve_device(gpu_ids), _RETIME_OPS[op].production, run_dir)
+    return _WorkerRetime(target, _RETIME_OPS[target.op].production, run_dir)
 
 
 def _time_rows(op: str, device: str, rows: Sequence[dict[str, str]]) -> list[Timing]:
