@@ -116,7 +116,6 @@ async def test_serving_lane_capacity_1_refuses_second_holder(locks):
         action="bench",
         ttl_sec=60,
     )
-    assert isinstance(a.acquired_at, str)
     assert (
         await locks.acquire_many(
             ["benchmark_lane"],
@@ -376,8 +375,7 @@ async def test_release_only_drops_own_holder_row(conn, locks):
         action="specialist",
         ttl_sec=60,
     )
-    n = await locks.release(a)
-    assert n == 1
+    await locks.release(a)
     holders = await locks.lane_holders()
     assert holders.get("research_lane") == 1
     await locks.release(b)

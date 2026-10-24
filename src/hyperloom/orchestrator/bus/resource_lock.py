@@ -10,7 +10,7 @@ import logging
 import os
 import sqlite3
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from hyperloom.common.owner_scope import local_owner_scope, same_environment
@@ -413,12 +413,7 @@ class Lease:
     """Lease handle returned by ``acquire_many``."""
 
     holder_id: str
-    task_id: str
-    action: str
     lanes: tuple[str, ...]
-    acquired_at: str
-    expires_at: str
-    pid: int = field(default_factory=os.getpid)
 
 
 class SqliteLeaseBackend:
@@ -501,14 +496,7 @@ class SqliteLeaseBackend:
                     ),
                 )
 
-        return Lease(
-            holder_id=holder_id,
-            task_id=task_id,
-            action=action,
-            lanes=tuple(expanded),
-            acquired_at=stamp,
-            expires_at=expires_iso,
-        )
+        return Lease(holder_id=holder_id, lanes=tuple(expanded))
 
     async def heartbeat_by_task(self, task_id: str, *, ttl_sec: int) -> list[str]:
         """Refresh every lane row a task holds, whoever the holder is."""
@@ -524,7 +512,7 @@ class SqliteLeaseBackend:
                 )
         return lanes
 
-    async def release(self, lease: Lease) -> int:
+    async def release(self, lease: Lease) -> None:
         """Drop every (lane, holder_id) row this lease owns."""
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(lease.lanes))
@@ -532,7 +520,6 @@ class SqliteLeaseBackend:
                 f"DELETE FROM leases WHERE lane IN ({placeholders}) AND holder_id=?",  # nosec B608 - generated placeholders only.
                 (*lease.lanes, lease.holder_id),
             )
-            return cur.rowcount
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
