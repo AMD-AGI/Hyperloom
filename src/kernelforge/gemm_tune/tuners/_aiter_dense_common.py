@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import TuneContext, TuneResult, micro_metrics
+from ._graph_retime import retime_table
 from ._row_accuracy import RelNormFn, drop_inaccurate_rows, dropped_row_record
 from ._serve_safe import _SPLITK_FORWARDING_LIBTYPES, _fastest_serve_safe, _serve_safe_candidates, _SplitKLimit
 from ..script_probe import filter_args, probe_script
@@ -750,7 +751,7 @@ def _splitk_rel_norm_fn(script_key: str, ctx: TuneContext) -> RelNormFn | None:
 
 
 def _serve_safe_limit(script_key: str, ctx: TuneContext) -> _SplitKLimit:
-    """The split-K each shape may ship and the accuracy check a replacement passes, for the cap and the filter."""
+    """The split-K each shape may ship and the accuracy check a replacement passes, for cap, filter and re-time."""
     support_fn, rel_norm = _splitk_support_fn(script_key, ctx), _splitk_rel_norm_fn(script_key, ctx)
     return _SplitKLimit(int(os.environ.get("FORGE_MAX_SPLITK", "2")), support_fn, rel_norm)
 
@@ -960,9 +961,8 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
             error=f"aiter's accuracy figures were not applied to {artifact}: {accuracy.reason}",
             error_class="accuracy_filter_incomplete",
         )
-    dropped_inaccurate = accuracy.dropped
-    if dropped_inaccurate:
-        shape_results = _forget_shapes_that_lost_their_row(shape_results, dropped_inaccurate)
+    if accuracy.dropped:
+        shape_results = _forget_shapes_that_lost_their_row(shape_results, accuracy.dropped)
 
     if any(r.get("is_new") or r.get("tuned_unverified") for r in shape_results):
         force_candidate = True
@@ -971,11 +971,7 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
     # deployed artifact.
     n_dropped, n_kept = _filter_unimproved_rows(Path(artifact), shape_results)
     if n_dropped:
-        log.info(
-            "deployed artifact: dropped %d row(s) that were compared and did not win, %d kept",
-            n_dropped,
-            n_kept,
-        )
+        log.info("deployed artifact: dropped %d row(s) that lost their comparison, %d kept", n_dropped, n_kept)
 
     summary = _summarize_shape_results(shape_results)
 
@@ -992,7 +988,8 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
         avg_micro_speedup=summary["avg"],
         candidate=force_candidate,
         shape_results=shape_results,
-        dropped_inaccurate=[dropped_row_record(r) for r in dropped_inaccurate],
+        dropped_inaccurate=[dropped_row_record(r) for r in accuracy.dropped],
+        graph_retime=retime_table(artifact, profile_csv, limit, script_key, _gpu_ids(ctx)),
     )
 
 
