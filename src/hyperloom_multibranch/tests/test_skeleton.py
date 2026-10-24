@@ -628,6 +628,8 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     breakdown = json.loads((stage.layout.reports / "session_breakdown.json").read_text())
     assert breakdown["close"]["final"]["commit_id"] == head
     assert breakdown["close"]["selection"]["chosen"]["commit"] == head
+    attempts = breakdown["close"]["merges"]["attempts"]
+    assert (attempts["merged"], attempts["not_stackable"], attempts["conflict_skipped"]) == (1, 3, 0)
 
     assert all(entry["status"] == BranchStatus.STOPPED.value for entry in roster["entries"])
     assert outcome.close is not None and outcome.close.stop.clean and outcome.close.exports is not None

@@ -11,7 +11,8 @@ the Experiences and the specialists' learnings go nowhere while MB1 runs on no E
 outcomes next to the chosen commit's recipe and how FINAL chose it; once the search tree is archived, the scheduler's
 LLM writes a generation of frontier scorers into the pool beside the archive (:func:`author_scorers`) and curates the
 RSI lesson pool the knowledge steps published the session's learnings to (:func:`curate_lessons`), steps that never
-stop CLOSE; ``session_breakdown.json``, the knowledge steps' receipts and :data:`IMAGE_CHECK_FILE`, the whole
+stop CLOSE; ``session_breakdown.json``, which also counts how the merges went from the integrator's merge log, the
+knowledge steps' receipts and :data:`IMAGE_CHECK_FILE`, the whole
 image check the session ran before its first phase, land in ``MB-reports/``, and the dashboard is rebuilt a last time
 with the queue the stop left.
 """
@@ -19,10 +20,13 @@ with the queue the stop left.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from hyperloom.common.jsonio import read_jsonl
 from hyperloom.common.outside_facts.image_check import ImageCheckReport
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom.measure.compile import BlobError, BlobStore
@@ -31,6 +35,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeCl
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteRecipeValidationError, RemoteWriteResult
 from hyperloom_multibranch.contracts.notebook.interfaces import Notebook
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
+from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.notebook.codec import encode
@@ -47,6 +52,7 @@ from hyperloom_multibranch.notebook.rsi.lesson_curation import curate_lessons
 from hyperloom_multibranch.notebook.rsi.session import CloseStep, KnowledgeClose
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.final import FinalChoice
+from hyperloom_multibranch.scheduling.integrator import CONFLICT_TRUNCATED, CONFLICT_UNRESOLVED, RESOLVER_UNREACHED
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.contracts.llm import Completion
 from hyperloom_multibranch.scheduling.manifest import read_manifest
@@ -57,6 +63,12 @@ KB_DISABLED = "disabled"
 KB_FAILED = "failed"
 #: The whole image check's report, under ``MB-reports/``.
 IMAGE_CHECK_FILE = "image_check.json"
+#: The merge log's reasons for a merge lost to a conflicting patch, by their key in ``close.merges.conflicts.lost``.
+_LOST_CONFLICTS = {
+    "unresolved": CONFLICT_UNRESOLVED,
+    "truncated": CONFLICT_TRUNCATED,
+    "resolver_unreached": RESOLVER_UNREACHED,
+}
 
 
 def knowledge_steps(knowledge: KnowledgeClose, scorers: CloseStep, curation: CloseStep) -> dict[str, CloseStep]:
@@ -80,6 +92,31 @@ def step_lines(steps: Mapping[str, CloseStep]) -> list[str]:
     return [
         f"{name.replace('_', ' ').capitalize()}: {step.status} {step.reason}".rstrip() for name, step in steps.items()
     ]
+
+
+def _merge_statistics(merge_log: Sequence[Mapping[str, Any]], snapshot: NotebookSnapshot) -> dict[str, object]:
+    """How the session's merges went, for ``close.merges``, from the integrator's merge log and the notebook.
+
+    ``attempts`` counts the merge attempts the log records by outcome; the replay of the Recipe KB's champion is no
+    merge attempt. ``conflicts`` counts the merges that took head patches out for a candidate's patch rewriting them
+    (``replaced``), the conflicting patches the model rewrote (``resolved_patches``: the notebook keeps them for the
+    session, not per merge, so they are patches, not merges) and the merges lost to a conflicting patch, by why
+    (``lost``). A conflict the three-way rebase settled is recorded nowhere, so none is counted.
+    """
+
+    merges = [row for row in merge_log if "outcome" in row["detail"]]
+    outcomes = Counter(MergeOutcome(row["detail"]["outcome"]) for row in merges)
+    lost = {
+        key: sum(1 for row in merges if row["reason"].startswith(reason)) for key, reason in _LOST_CONFLICTS.items()
+    }
+    return {
+        "attempts": {outcome.value: outcomes[outcome] for outcome in MergeOutcome},
+        "conflicts": {
+            "replaced": sum(1 for row in merges if row["detail"]["replaced_patches"]),
+            "resolved_patches": len(snapshot.resolved_patches),
+            "lost": lost,
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -185,10 +222,16 @@ class SessionExports:
         curation = await self._curate(snapshot)
         selection = encode(final) if final is not None else None
         stepped = knowledge_document(knowledge, scorers, curation)
+        merges = _merge_statistics(read_jsonl(self._layout.merges), snapshot)
         document = build_breakdown(
             snapshot,
             CloseOutcome(
-                final=chosen, selection=selection, kb_write_back=kb_write_back, knowledge=stepped, metric=self._metric
+                final=chosen,
+                selection=selection,
+                kb_write_back=kb_write_back,
+                knowledge=stepped,
+                merges=merges,
+                metric=self._metric,
             ),
             SessionPlace(
                 session_dir=self._layout.root,
