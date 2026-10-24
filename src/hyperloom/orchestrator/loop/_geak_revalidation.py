@@ -29,7 +29,7 @@ from ..kernel.geak_config import (
     geak_overlay_is_loadable,
     geak_spec_name,
 )
-from ..state.shared_state import resolve_graded_comparison, stack_base_params
+from ..state.shared_state import ActionAttempt, resolve_graded_comparison, stack_base_params
 from ..state.task_registry import Task
 
 log = _logging.getLogger(__name__)
@@ -376,11 +376,13 @@ class GeakRevalidation(CoordinatorCollaborator):
         )
         self.shared_state.record_action_attempt(
             action="explore",
-            task_id=task.task_id,
-            status=str(result.get("status") or "succeeded"),
-            decision="promoted" if promoted else "no_promote" if decision == "no_promote" else "discarded",
-            result=result,
-            extras={"revalidation_decision": decision, "output_throughput": rebench.measured},
+            attempt=ActionAttempt(
+                task_id=task.task_id,
+                status=str(result.get("status") or "succeeded"),
+                decision="promoted" if promoted else "no_promote" if decision == "no_promote" else "discarded",
+                result=result,
+                extras={"revalidation_decision": decision, "output_throughput": rebench.measured},
+            ),
         )
         return Verdict.ADOPTED if promoted else Verdict.REFUSED
 

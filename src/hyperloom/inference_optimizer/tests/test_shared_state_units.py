@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import pytest
 
 from hyperloom.orchestrator.state.shared_state import (
+    ActionAttempt,
     _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_LAST_FAILURES,
     SharedState,
@@ -491,11 +492,13 @@ def test_record_action_attempt_succeeded_populates_last_and_history(
     s = SharedState()
     entry = s.record_action_attempt(
         action=action,
-        task_id="t-1",
-        status="succeeded",
-        decision="promoted",
-        result={metric_key: 1234.5, "workspace": "/runs/" + action},
-        extras={"variant_name": "vA"},
+        attempt=ActionAttempt(
+            task_id="t-1",
+            status="succeeded",
+            decision="promoted",
+            result={metric_key: 1234.5, "workspace": "/runs/" + action},
+            extras={"variant_name": "vA"},
+        ),
     )
     assert entry is not None
     last = getattr(s, f"last_{action}")
@@ -515,15 +518,17 @@ def test_record_action_attempt_failed_truncates_error_excerpt():
     long_err = "boom! " * 400
     s.record_action_attempt(
         action="baseline",
-        task_id="t-2",
-        status="failed",
-        decision="no_promote",
-        result={
-            "error_class": "no_report",
-            "error": long_err,
-            "workspace": "/ws/baseline-2",
-            "reported_success": False,
-        },
+        attempt=ActionAttempt(
+            task_id="t-2",
+            status="failed",
+            decision="no_promote",
+            result={
+                "error_class": "no_report",
+                "error": long_err,
+                "workspace": "/ws/baseline-2",
+                "reported_success": False,
+            },
+        ),
     )
     last = s.last_baseline
     assert last["status"] == "failed"
@@ -547,15 +552,17 @@ def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
     big_err = "x" * 2000 + "torch.OutOfMemoryError: HIP out of memory"
     s.record_action_attempt(
         action="baseline",
-        task_id="t-oom",
-        status="failed",
-        decision="no_promote",
-        result={
-            "error_class": "subprocess_nonzero",
-            "error": big_err,
-            "reported_success": False,
-            "stderr_log_path": "/runs/baseline/t-oom/baseline_stderr.log",
-        },
+        attempt=ActionAttempt(
+            task_id="t-oom",
+            status="failed",
+            decision="no_promote",
+            result={
+                "error_class": "subprocess_nonzero",
+                "error": big_err,
+                "reported_success": False,
+                "stderr_log_path": "/runs/baseline/t-oom/baseline_stderr.log",
+            },
+        ),
     )
     attempt = s.baseline_attempts[-1]
     assert attempt["error_class"] == "subprocess_nonzero"
@@ -571,13 +578,15 @@ def test_record_action_attempt_redacts_secrets_from_persisted_errors():
     planted = "ak-sensitive-value"
     s.record_action_attempt(
         action="baseline",
-        task_id="t-secret",
-        status="failed",
-        decision="no_promote",
-        result={
-            "error_class": "subprocess_nonzero",
-            "error": f"OPENAI_API_KEY={planted} Authorization: Bearer {planted}",
-        },
+        attempt=ActionAttempt(
+            task_id="t-secret",
+            status="failed",
+            decision="no_promote",
+            result={
+                "error_class": "subprocess_nonzero",
+                "error": f"OPENAI_API_KEY={planted} Authorization: Bearer {planted}",
+            },
+        ),
     )
 
     attempt = s.baseline_attempts[-1]
@@ -592,10 +601,9 @@ def test_attempts_history_caps_at_default():
     for i in range(_DEFAULT_ATTEMPTS_HISTORY + 5):
         s.record_action_attempt(
             action="explore",
-            task_id=f"t-{i}",
-            status="succeeded",
-            decision="discarded",
-            result={"best_gain_pct": float(i)},
+            attempt=ActionAttempt(
+                task_id=f"t-{i}", status="succeeded", decision="discarded", result={"best_gain_pct": float(i)}
+            ),
         )
     history = s.explore_attempts
     assert len(history) == _DEFAULT_ATTEMPTS_HISTORY
@@ -607,10 +615,9 @@ def test_record_action_attempt_skips_non_audit_kinds():
     s = SharedState()
     out = s.record_action_attempt(
         action="kernel_opt",
-        task_id="t-99",
-        status="succeeded",
-        decision="promoted",
-        result={"output_throughput": 1.0},
+        attempt=ActionAttempt(
+            task_id="t-99", status="succeeded", decision="promoted", result={"output_throughput": 1.0}
+        ),
     )
     assert out is None
     assert not hasattr(s, "kernel_opt_attempts_list")
@@ -620,17 +627,21 @@ def test_to_prompt_summary_renders_attempt_lines():
     s = SharedState()
     s.record_action_attempt(
         action="baseline",
-        task_id="t-1",
-        status="succeeded",
-        decision="promoted",
-        result={"output_throughput": 1761.6, "workspace": "/ws"},
+        attempt=ActionAttempt(
+            task_id="t-1",
+            status="succeeded",
+            decision="promoted",
+            result={"output_throughput": 1761.6, "workspace": "/ws"},
+        ),
     )
     s.record_action_attempt(
         action="explore",
-        task_id="t-2",
-        status="failed",
-        decision="no_promote",
-        result={"error_class": "subprocess_nonzero", "error": "rc=1"},
+        attempt=ActionAttempt(
+            task_id="t-2",
+            status="failed",
+            decision="no_promote",
+            result={"error_class": "subprocess_nonzero", "error": "rc=1"},
+        ),
     )
     txt = s.to_prompt_summary()
     assert "last_baseline=" in txt
@@ -645,11 +656,13 @@ def test_save_load_round_trips_attempt_fields(tmp_path):
     s = SharedState()
     s.record_action_attempt(
         action="profile",
-        task_id="p-1",
-        status="succeeded",
-        decision="promoted",
-        result={"output_throughput": 100.0},
-        extras={"trace_path": "/tmp/trace.json"},
+        attempt=ActionAttempt(
+            task_id="p-1",
+            status="succeeded",
+            decision="promoted",
+            result={"output_throughput": 100.0},
+            extras={"trace_path": "/tmp/trace.json"},
+        ),
     )
     s.save(tmp_path)
     s2 = SharedState.load_or_init(tmp_path)
@@ -953,14 +966,16 @@ def test_record_action_attempt_kv_cache_oom_captures_stderr_tail():
     s = SharedState()
     s.record_action_attempt(
         action="baseline",
-        task_id="t-kvoom",
-        status="failed",
-        decision="no_promote",
-        result={
-            "error_class": "kv_cache_oom",
-            "error": "Loaded weights leave no GPU memory for the KV cache",
-            "reported_success": False,
-        },
+        attempt=ActionAttempt(
+            task_id="t-kvoom",
+            status="failed",
+            decision="no_promote",
+            result={
+                "error_class": "kv_cache_oom",
+                "error": "Loaded weights leave no GPU memory for the KV cache",
+                "reported_success": False,
+            },
+        ),
     )
     attempt = s.baseline_attempts[-1]
     assert attempt["error_class"] == "kv_cache_oom"

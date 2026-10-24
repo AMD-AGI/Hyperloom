@@ -91,14 +91,13 @@ def _task(kind: str, *, task_id: str = "t1", params: dict | None = None) -> Task
 
 
 def _count_record_attempt(coord: Coordinator, monkeypatch) -> list[dict]:
-    """Spy that records every record_action_attempt call's kwargs, forwarding to the real impl."""
+    """Spy that records every record_action_attempt call's arguments, forwarding to the real impl."""
     calls: list[dict] = []
     real = coord.shared_state.record_action_attempt
 
-    def spy(*args, **kwargs):
-        # record_action_attempt is called as (action=..., ...) keyword in prod code.
-        calls.append(dict(kwargs))
-        return real(*args, **kwargs)
+    def spy(action, attempt):
+        calls.append({"action": action, "attempt": attempt})
+        return real(action, attempt)
 
     monkeypatch.setattr(coord.shared_state, "record_action_attempt", spy)
     return calls

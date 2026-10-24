@@ -27,6 +27,7 @@ from ..bringup import ARGV_INVALID
 from ..bus.message_bus import Message
 from ..phases.machine_state import PHASE_ENABLEMENT
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
+from ..state.shared_state import ActionAttempt
 from ..state.round_store import ABANDONED, FAILED
 from ..state.task_registry import Task
 from ._baseline_promotion import _adopt_eval_trigger, _preserves_measured_eval_trigger
@@ -305,11 +306,13 @@ class BaselineFailureMixin:
                 audit_extras["fingerprint"] = self.baseline_params_fingerprint(task.params)
             self.shared_state.record_action_attempt(
                 action=task.kind,
-                task_id=task.task_id,
-                status="failed",
-                decision="no_promote",
-                result=result_payload,
-                extras=audit_extras,
+                attempt=ActionAttempt(
+                    task_id=task.task_id,
+                    status="failed",
+                    decision="no_promote",
+                    result=result_payload,
+                    extras=audit_extras,
+                ),
             )
         # Global rolling failure log (every kind, including kernel_agent-owned).
         self.shared_state.record_action_failure(

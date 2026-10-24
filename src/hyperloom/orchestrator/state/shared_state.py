@@ -358,6 +358,17 @@ class KbInjection:
     gap_canonical_id: str = ""
 
 
+@dataclass(frozen=True)
+class ActionAttempt:
+    """One settled attempt of an audited action, as ``record_action_attempt`` ledgers it."""
+
+    task_id: str
+    status: str
+    decision: str
+    result: dict[str, Any] | None
+    extras: dict[str, Any] | None = None
+
+
 # roofline_snapshots history cap (record_trace_analyze).
 _ROOFLINE_SNAPSHOTS_CAP = 50
 
@@ -1764,23 +1775,13 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             "failure_id": result.get("failure_id"),
         }
 
-    def record_action_attempt(
-        self,
-        action: str,
-        *,
-        task_id: str,
-        status: str,
-        decision: str,
-        result: dict[str, Any] | None,
-        extras: dict[str, Any] | None = None,
-        max_history: int = _DEFAULT_ATTEMPTS_HISTORY,
-    ) -> dict[str, Any] | None:
+    def record_action_attempt(self, action: str, attempt: ActionAttempt) -> dict[str, Any] | None:
         """Append one attempt to ``<action>_attempts`` and refresh ``last_<action>``. Entry schema {ts, task_id, status, decision, key_metric, key_metric_kind, workspace, error_class, error_excerpt, stderr_tail, stderr_log_path, raw_result_path, reported_success, variant_name, extras}. Returns the entry, or None when ``action`` not in the audit set (kernel_agent-owned actions use bespoke recorders). Does NOT call :meth:`save`."""
         if action not in _AUDIT_ACTIONS:
             return None
         attempts_attr = f"{action}_attempts"
         last_attr = f"last_{action}"
-        result = result or {}
+        result = attempt.result or {}
         metric_key, metric_kind = _KEY_METRIC_MAP.get(
             action,
             ("output_throughput", "output_throughput"),
@@ -1792,18 +1793,18 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             key_metric = None
         entry: dict[str, Any] = {
             "ts": now_iso(),
-            "task_id": str(task_id or ""),
-            "status": str(status or ""),
-            "decision": str(decision or ""),
+            "task_id": str(attempt.task_id or ""),
+            "status": str(attempt.status or ""),
+            "decision": str(attempt.decision or ""),
             "key_metric": key_metric,
             "key_metric_kind": metric_kind,
             **self._common_result_fields(result),
-            "extras": dict(extras or {}),
+            "extras": dict(attempt.extras or {}),
         }
         history: list[dict[str, Any]] = list(getattr(self, attempts_attr) or [])
         history.append(entry)
-        if len(history) > max_history:
-            history = history[-max_history:]
+        if len(history) > _DEFAULT_ATTEMPTS_HISTORY:
+            history = history[-_DEFAULT_ATTEMPTS_HISTORY:]
         setattr(self, attempts_attr, history)
         setattr(self, last_attr, dict(entry))
         if action == "baseline":
