@@ -255,6 +255,13 @@ def test_an_ssh_source_with_a_password_carries_credentials() -> None:
         _settings("--autonomous-agent", "ssh://git:secret@github.com/acme/agent.git")
 
 
+def test_dev_leases_lend_specialists_dev_sandboxes_and_default_to_none() -> None:
+    assert _settings().dev_leases == 0
+    assert _settings("--dev-leases", "2").dev_leases == 2
+    with pytest.raises(ValueError, match="--dev-leases"):
+        _settings("--dev-leases", "-1")
+
+
 def test_each_reference_is_a_named_directory_pinned_at_the_commit_it_was_taken_from(tmp_path: Path) -> None:
     commit = knowledge_checkout(tmp_path / "GEAK", "gemm.md")
 

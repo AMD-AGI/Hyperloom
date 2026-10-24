@@ -72,10 +72,13 @@ if TYPE_CHECKING:
     from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec
     from pathlib import Path
 
+    from hyperloom.hosted.mcp_server import McpServer
     from hyperloom.measure.pins import ActiveImage, ToolCommits
     from hyperloom.measure.points import CanonicalMeasurement
     from hyperloom_multibranch.specialist.agent_session import AgentCommand
+    from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
     from hyperloom_multibranch.specialist.model_sessions import ModelSessions
+    from hyperloom_multibranch.specialist.tools import WorktreeFor
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 logger = logging.getLogger(__name__)
@@ -98,7 +101,8 @@ AGENTX_ENV = "HYPERLOOM_AGENTX"
 class SessionWiring:
     """What a session's specialist sessions are built on: the peer setup, the repository the branches use, the
     tokens that grant a branch's specialist the MCP service's tools (a grant names the service's URL, so it is issued
-    when a specialist starts), each branch's log and the session's briefs."""
+    when a specialist starts), each branch's log, the session's briefs and its dev sandboxes, ``None`` when it lends
+    none."""
 
     setup: PeerSetup
     repo: ExperimentRepo
@@ -106,6 +110,7 @@ class SessionWiring:
     notebooks: Callable[[str], BranchLogStore]
     briefs: SessionBriefs
     toolbox: RealToolbox
+    dev_leases: DevLeases | None = None
 
 
 #: Builds the specialist runtime's session factory, and the worktree of each branch the worktree tools serve, on a
@@ -283,11 +288,11 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         analysis=toolbox,
     )
     register_specialist_tools(mcp, toolbox=toolbox, notebooks=runtime_notebook, options=tool_options)
-    built = sessions(SessionWiring(setup, repo, McpSpecialistTokens(mcp), runtime_notebook, briefs, toolbox))
+    leases = _lend_dev_sandboxes(mcp, setup, toolbox, runtime_notebook, lambda branch: built.worktrees(branch))
+    built = sessions(SessionWiring(setup, repo, McpSpecialistTokens(mcp), runtime_notebook, briefs, toolbox, leases))
     register_worktree_tools(mcp, repo=repo, worktrees=built.worktrees)
     gate = RuleGate(gate_notebook, repo, setup.desk, toolbox)
-    blocked = BlockedCandidates(gate_notebook, gate)
-    register_blocked_tools(mcp, blocked=blocked, home=tool_options.toolbox_loop)
+    register_blocked_tools(mcp, blocked=BlockedCandidates(gate_notebook, gate), home=tool_options.toolbox_loop)
     register_fix_tools(mcp, attachments=toolbox)
     runner = ReproRunner(toolbox, gate_notebook, toolbox)
     judging = Judging(gate, toolbox, rule, FixChecking(runner, setup.critic, setup.blobs, _specialist_role(workload)))
@@ -298,6 +303,32 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     gate_service = GateService(gate_notebook, toolbox, rule, toolbox)
     regression = RegressionSet(gate_notebook, runner, repo)
     return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, image.digest, gate, regression)
+
+
+def _lend_dev_sandboxes(
+    mcp: McpServer,
+    setup: PeerSetup,
+    toolbox: RealToolbox,
+    notebooks: Callable[[str], LocalNotebook],
+    worktrees: WorktreeFor,
+) -> DevLeases | None:
+    """The session's dev sandboxes on ``toolbox``'s cards, their tools registered on ``mcp`` for the session's loop;
+    ``None``, and no tools, when ``setup`` lends none. ``worktrees`` is read only when a lease is granted, after the
+    MCP service starts, so it may name sessions built after this call."""
+
+    from hyperloom_multibranch.specialist.dev_sandbox import (
+        DevLeases,
+        DevLimits,
+        local_dev_sandboxes,
+        register_dev_sandbox_tools,
+    )
+
+    if setup.dev_leases < 1:
+        return None
+    limits = DevLimits(cap=setup.dev_leases)
+    leases = DevLeases(toolbox, local_dev_sandboxes(worktrees, setup.processes, limits), notebooks, limits=limits)
+    register_dev_sandbox_tools(mcp, leases=leases, home=asyncio.get_running_loop())
+    return leases
 
 
 def machine_cards() -> tuple[int, ...]:
@@ -473,7 +504,9 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
         layout, workload = wiring.setup.layout, wiring.setup.workload
         agent = AgentSetup(
             command=command,
-            role=role_prompt(_specialist_role(workload), references=wiring.setup.references),
+            role=role_prompt(
+                _specialist_role(workload), references=wiring.setup.references, dev_leases=wiring.setup.dev_leases
+            ),
             env=build_specialist_env(),
             runner=LocalAgentRunner(
                 session_dir=layout.logs, liveness=Liveness(lost_after_seconds=SPECIALIST_LOST_AFTER_S)
@@ -482,6 +515,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             processes=wiring.setup.processes,
             repo=wiring.repo,
             briefs=wiring.briefs.text,
+            dev_leases=wiring.dev_leases,
         )
         sessions = model_sessions(
             agent,

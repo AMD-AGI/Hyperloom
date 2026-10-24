@@ -68,7 +68,8 @@ class PeerSetup:
     them by closing the toolbox. ``blobs`` holds the patch and kernel files the recipes name; the toolbox's
     environment compiler reads them from it. ``critic`` decides whether the defect a proven correctness fix removes is
     reachable under the workload. ``references`` names each directory of reference material the run was given, already
-    copied into the session, for the specialist role to send the specialists to.
+    copied into the session, for the specialist role to send the specialists to. ``dev_leases`` is how many dev
+    sandboxes the session lends its specialists at once, from the toolbox's cards; 0 lends none.
     """
 
     layout: SessionLayout
@@ -78,6 +79,7 @@ class PeerSetup:
     blobs: BlobStore
     critic: FixReviewer
     references: Mapping[str, Path]
+    dev_leases: int = 0
 
 
 PeerFactory = Callable[[PeerSetup], Peers]
