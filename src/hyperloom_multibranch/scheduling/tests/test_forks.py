@@ -34,9 +34,11 @@ FIX = ForkRequest("b01", "c1", "fp8 fix regresses")
 BLOCKED = Judgement(Verdict.BLOCKED, 6.0, 2.0, ("r1", "r2"), {"output_throughput": 1060.0}, accuracy_ok=False)
 
 
-def _repair(branch: str = "b01", mechanism: str = "fp8 kv cache") -> RepairRequest:
-    intent = Intent(branch, "c1", "attention", mechanism, IntentLayer.CONFIG)
-    return RepairRequest(intent, tagged("fp8-kv"), BLOCKED, "per-tensor KV scales; scale per head")
+def _repair(
+    branch: str = "b01", mechanism: str = "fp8 kv cache", *, parent: str = "c1", change: str = "fp8-kv"
+) -> RepairRequest:
+    intent = Intent(branch, parent, "attention", mechanism, IntentLayer.CONFIG)
+    return RepairRequest(intent, tagged(change), BLOCKED, "per-tensor KV scales; scale per head")
 
 
 def _desk(tmp_path: Path, max_branches: int) -> tuple[Roster, ForkDesk]:
@@ -88,16 +90,33 @@ async def test_an_intent_is_repaired_once_per_commit(tmp_path: Path) -> None:
     roster, desk = _desk(tmp_path, max_branches=4)
 
     first = await desk.admit_repair(_repair())
-    again = await desk.admit_repair(_repair())
-    other = await desk.admit_repair(_repair(mechanism="bf16 kv cache"))
+    again = await desk.admit_repair(_repair(change="fp8-kv-per-head"))
+    other = await desk.admit_repair(_repair(mechanism="bf16 kv cache", change="bf16-kv"))
 
     assert [first.status, again.status, other.status] == [
         AdmissionStatus.ACCEPTED,
         AdmissionStatus.REJECTED,
         AdmissionStatus.ACCEPTED,
     ]
-    assert "already open or queued" in again.reason
+    assert again.reason.startswith("b02 already repairs") and "replay what it lands" in again.reason
     assert [admitted.branch for admitted in desk.waiting()] == ["b02", "b03"]
+
+
+async def test_one_change_blocked_on_two_heads_is_repaired_once_and_distinct_changes_each_once(tmp_path: Path) -> None:
+    roster, desk = _desk(tmp_path, max_branches=4)
+    roster.open(roster.next_branch_id(), origin=BranchOrigin.FIRST_BATCH, start_commit="c0", k=1)
+
+    first = await desk.admit_repair(_repair("b01", parent="c1"))
+    replayed = await desk.admit_repair(_repair("b02", "replayed fp8 kv cache", parent="c2"))
+    distinct = await desk.admit_repair(_repair("b02", "bf16 kv cache", parent="c2", change="bf16-kv"))
+
+    assert [(first.status, first.branch), (replayed.status, replayed.branch), (distinct.status, distinct.branch)] == [
+        (AdmissionStatus.ACCEPTED, "b03"),
+        (AdmissionStatus.REJECTED, ""),
+        (AdmissionStatus.ACCEPTED, "b04"),
+    ]
+    assert replayed.reason.startswith("b03 already repairs this change")
+    assert [(admitted.branch, admitted.parent_commit) for admitted in desk.waiting()] == [("b03", "c1"), ("b04", "c2")]
 
 
 async def test_a_request_past_the_cap_waits_and_enters_the_first_freed_slot(tmp_path: Path) -> None:
@@ -177,7 +196,7 @@ async def test_a_queued_repair_of_an_intent_refuses_the_same_intent_until_it_is_
         (AdmissionStatus.REJECTED, ""),
         (AdmissionStatus.PENDING, "b03"),
     ]
-    assert "already open or queued" in again.reason
+    assert again.reason.startswith("b02 already repairs")
     assert [pending.branch for pending in desk.pending()] == ["b03"]
 
 

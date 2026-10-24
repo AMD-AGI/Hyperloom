@@ -33,7 +33,9 @@ prompt, and the judge neither stops it nor lowers its K for its first judged tes
 more files than ``--max-branches``, is a usage error.
 Each ``--reference NAME=DIR`` names a directory the specialists read as reference, such as GEAK's tuning and kernel
 knowledge: it is copied to ``MB-reference/NAME`` before PRELUDE and the commit its checkout is on is recorded in the
-manifest, so every branch reads one fixed copy and the session says which. A ``DIR`` that is no readable directory
+manifest, so every branch reads one fixed copy and the session says which. Only an InferenceX checkout named
+:data:`~hyperloom_multibranch.notebook.knowledge.reference_leads.INFERENCEX_REFERENCE` briefs the specialists on its
+reference launches for the workload. A ``DIR`` that is no readable directory
 in a git checkout, and a ``NAME`` given twice, are usage errors. A session never refreshes its copy; knowledge that
 lands after it starts is what the next session takes. A session whose toolbox has fewer
 usable cards left than one test needs ends EXPLORE with ``no_measurement_cards`` and skips FINAL. Exit codes: 0 when
@@ -45,7 +47,12 @@ PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to is
 :data:`RSI_ARCHIVE_DEFAULT`, set in this process's environment for every reader of it, and must be a writable
 directory; the measurement pins must be readable, the image the session runs on named by both
 ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` included; the framework's package must be
-installed in the image; and the agent CLI the specialists run must be installed.
+installed in the image; and the agent CLI the specialists run must be installed. A canonical measurement that cannot
+be taken, one naming a launcher the InferenceX checkout lacks and Magpie cannot supply included, fails the command the
+same way once the session directory exists. Before PRELUDE the session checks the rule pack's facts about outside
+projects against this environment as ``HYPERLOOM_IMAGE_CHECK`` says: ``warn`` (the default) logs a failing fact,
+``strict`` fails the command the same way before any phase runs, ``off`` checks nothing, and any other value is a usage
+error. The manifest records the check's summary and CLOSE writes the whole report to ``MB-reports/image_check.json``.
 A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
@@ -75,12 +82,14 @@ from pathlib import Path
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
 from hyperloom.common.env import EnvValueError
+from hyperloom.common.outside_facts.image_check import ImageCheckFailed, mode_from_environment
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
+from hyperloom_multibranch.notebook.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
@@ -297,7 +306,9 @@ def _add_specialist_input_options(run: argparse.ArgumentParser) -> None:
         default=None,
         metavar="NAME=DIR",
         help="A directory of reference material the specialists read; repeatable. It is copied to MB-reference/NAME"
-        " before PRELUDE, and the commit its checkout is on is recorded in the manifest.",
+        " before PRELUDE, and the commit its checkout is on is recorded in the manifest. The specialists are briefed on"
+        " leads from InferenceX's reference launches for the workload only when an InferenceX checkout is given as"
+        f" --reference {INFERENCEX_REFERENCE}=DIR; under any other name it is plain reference.",
     )
 
 
@@ -578,6 +589,7 @@ def main(argv: list[str] | None = None) -> int:
                 settings = replace(settings, reuse_prelude=reused)
         require_workload_switch(settings.workload, os.environ)
         require_priced_models(settings.max_llm_usd, os.environ)
+        mode_from_environment(os.environ)
     except ValueError as exc:
         parser.print_usage(sys.stderr)
         print(f"{parser.prog}: error: {exc}", file=sys.stderr)
@@ -588,19 +600,19 @@ def main(argv: list[str] | None = None) -> int:
         require_rsi_archive(os.environ)
         peer_factory = load_peers(settings.workload)
         services = session_services(recipe_kb)
-    except (EnvironmentIncomplete, PeersUnavailable) as exc:
+        if settings.frontier_scorer:
+            try:
+                require_frontier_scorer(settings.frontier_scorer, settings.workload.metric)
+            except ValueError as exc:
+                parser.print_usage(sys.stderr)
+                print(f"{parser.prog}: error: {exc}", file=sys.stderr)
+                raise SystemExit(EXIT_USAGE) from exc
+        if persisted is not None:
+            return final_only(persisted, peer_factory, services)
+        return run_session(settings, peer_factory, services)
+    except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
         return EXIT_FAILED
-    if settings.frontier_scorer:
-        try:
-            require_frontier_scorer(settings.frontier_scorer, settings.workload.metric)
-        except ValueError as exc:
-            parser.print_usage(sys.stderr)
-            print(f"{parser.prog}: error: {exc}", file=sys.stderr)
-            raise SystemExit(EXIT_USAGE) from exc
-    if persisted is not None:
-        return final_only(persisted, peer_factory, services)
-    return run_session(settings, peer_factory, services)
 
 
 __all__ = [

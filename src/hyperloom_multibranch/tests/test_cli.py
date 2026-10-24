@@ -31,14 +31,25 @@ from hyperloom.common.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
 )
+from hyperloom.common.outside_facts.image_check import (
+    MODE_ENV,
+    FactResult,
+    ImageCheckFailed,
+    ImageCheckMode,
+    ImageCheckReport,
+)
+from hyperloom.common.outside_facts.image_check_eval import Status
 from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure import compile as compile_module
+from hyperloom.measure import points
 from hyperloom.measure.compile import PackageBase
+from hyperloom.measure.points import PointError
 from hyperloom_multibranch import cli
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.notebook.codec import encode
+from hyperloom_multibranch.notebook.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
 from hyperloom_multibranch.scheduling.layout import SessionLayout
@@ -109,6 +120,17 @@ def test_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
         cli.main(["--help"])
     assert exc.value.code == 0
     assert cli.PROG in capsys.readouterr().out
+
+
+def test_reference_help_says_which_name_briefs_inferencex_reference_launches(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--help"])
+
+    words = " ".join(capsys.readouterr().out.split())
+    assert "leads from InferenceX's reference launches for the workload only when an InferenceX checkout" in words
+    assert f"is given as --reference {INFERENCEX_REFERENCE}=DIR;" in words
 
 
 def test_run_defaults() -> None:
@@ -427,9 +449,8 @@ def ready_environment(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.
 
 
 @pytest.fixture
-def agent_cli(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> list[RunSettings]:
-    """Stand-ins for both agent CLIs first on ``PATH``; returns the settings of every session the command would run,
-    which runs none."""
+def agent_binaries(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """Stand-ins for both agent CLIs first on ``PATH``."""
 
     bin_dir = tmp_path_factory.mktemp("bin")
     for backend in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
@@ -437,6 +458,12 @@ def agent_cli(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPath
         stand_in.write_text("#!/bin/sh\nexit 0\n")
         stand_in.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
+@pytest.fixture
+def agent_cli(agent_binaries: None, monkeypatch: pytest.MonkeyPatch) -> list[RunSettings]:
+    """The :func:`agent_binaries`; returns the settings of every session the command would run, which runs none."""
+
     runs: list[RunSettings] = []
 
     def run_session(settings: RunSettings, peer_factory: PeerFactory, services: object) -> int:
@@ -493,6 +520,62 @@ def test_run_without_the_agent_cli_fails_loudly_before_creating_anything(
     captured = capsys.readouterr()
     assert "CLI the specialists run is not on PATH" in captured.err
     assert captured.out == ""
+    assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_binaries")
+def test_a_canonical_measurement_that_cannot_be_taken_fails_like_the_other_start_up_refusals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    for name in (*local_peers.workload_environment(_settings().workload), BENCHMARK_CONFIG_ENV):
+        monkeypatch.setenv(name, "")
+    refusal = "the canonical measurement runs sglang_mi355x.sh from the InferenceX checkout, which has no such file"
+
+    def no_launcher(*args: object, **kwargs: object) -> object:
+        raise PointError(refusal)
+
+    monkeypatch.setattr(points, "default_canonical", no_launcher)
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
+
+    captured = capsys.readouterr()
+    assert captured.err == f"{cli.PROG}: cannot run a session, the canonical measurement cannot be taken: {refusal}\n"
+    session_dir = Path(captured.out.strip())
+    assert session_dir.is_dir() and tmp_path in session_dir.parents
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_a_strict_image_check_that_fails_is_refused_like_the_other_start_up_refusals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    failing = FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone")
+    report = ImageCheckReport(ImageCheckMode.STRICT, rule_pack_identity(), "", {}, (failing,))
+
+    def session_refused(settings: RunSettings, peer_factory: PeerFactory, services: object) -> int:
+        raise ImageCheckFailed(report)
+
+    monkeypatch.setattr(cli, "run_session", session_refused)
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
+
+    expected = f"image check failed under {MODE_ENV}=strict: sglang.renamed-flag"
+    assert capsys.readouterr().err == f"{cli.PROG}: cannot run a session, {expected}\n"
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_an_image_check_mode_that_is_no_mode_exits_two_before_creating_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv(MODE_ENV, "loud")
+
+    with pytest.raises(SystemExit) as exited:
+        cli.main(["run", *WORKLOAD_ARGS])
+
+    assert exited.value.code == cli.EXIT_USAGE
+    assert f"{MODE_ENV}='loud'" in capsys.readouterr().err
     assert not any(tmp_path.iterdir())
 
 
