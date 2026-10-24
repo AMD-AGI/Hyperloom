@@ -124,12 +124,12 @@ async def test_reauthor_guard_caps_and_suffixes(coord: Coordinator) -> None:
 
     created: list[dict[str, Any]] = []
 
-    async def _fake_create(**kwargs: Any) -> Any:
-        created.append(kwargs)
+    async def _fake_create(spec) -> Any:
+        created.append(vars(spec))
         return (
             SimpleNamespace(
                 task_id=f"spec-{len(created)}",
-                params=kwargs.get("params") or {},
+                params=spec.params or {},
                 state="queued",
             ),
             False,

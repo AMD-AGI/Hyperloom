@@ -29,7 +29,7 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 from hyperloom.orchestrator.loop._promote_outcome import IntegrateRecoveryIncomplete
-from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.actions.executors import _patch_artifacts as patch_artifacts
 from hyperloom.orchestrator.actions.executors import _patch_sources as patch_sources
@@ -68,9 +68,11 @@ async def test_resume_rolls_back_recipe_checkout_and_kernel(
         lambda result: kernel_restores.append(result) or {"status": "ok"},
     )
     task = await coord.tasks.create(
-        kind="replay_warm_recipe",
-        params={},
-        idempotency_key="resume-warm",
+        TaskSpec(
+            kind="replay_warm_recipe",
+            params={},
+            idempotency_key="resume-warm",
+        ),
     )
     coord.shared_state.warm_replay_pending = {
         "task_id": task.task_id,
@@ -776,7 +778,9 @@ def pending_candidate(coord: Coordinator, tmp_path: Path, monkeypatch):
             if two_artifacts:
                 params["artifacts"].append({"source": str(source), "target": str(root / "created.json")})
         coord.shared_state.record_specialist_patch_verdict("spec-restore", "approve")
-        task = await coord.tasks.create(kind="integrate_patch", params=params, idempotency_key="pending-restore")
+        task = await coord.tasks.create(
+            TaskSpec(kind="integrate_patch", params=params, idempotency_key="pending-restore")
+        )
         result = await ip.IntegratePatchExecutor(session_dir=coord.session_dir)(
             RunnerContext(task=task, lease=None, extra={"shared_state": coord.shared_state})
         )
@@ -956,15 +960,17 @@ async def test_reused_output_directory_never_reuses_prior_attempt_preimages(coor
         source.write_text(content)
         coord.shared_state.record_specialist_patch_verdict(sid, "approve")
         task = await coord.tasks.create(
-            kind="integrate_patch",
-            idempotency_key=sid,
-            params={
-                "specialist_task_id": sid,
-                "framework_source_root": str(root),
-                "output_dir": str(output),
-                "artifacts": [{"source": str(source), "target": str(target)}],
-                "apply_only": True,
-            },
+            TaskSpec(
+                kind="integrate_patch",
+                idempotency_key=sid,
+                params={
+                    "specialist_task_id": sid,
+                    "framework_source_root": str(root),
+                    "output_dir": str(output),
+                    "artifacts": [{"source": str(source), "target": str(target)}],
+                    "apply_only": True,
+                },
+            ),
         )
         result = await executor(RunnerContext(task=task, lease=None, extra={"shared_state": coord.shared_state}))
         assert result["status"] == "applied_no_bench", result
@@ -1320,7 +1326,9 @@ def ordinary_integrate_completion(coord: Coordinator, tmp_path: Path):
     anchor = deepcopy(coord.shared_state.current_best)
 
     async def prepare(*, phase="ready", status="kept", error_class="", recovery_errors=None, marker_task_id=None):
-        task = await coord.tasks.create(kind="integrate_patch", params={}, idempotency_key="ordinary-integrate")
+        task = await coord.tasks.create(
+            TaskSpec(kind="integrate_patch", params={}, idempotency_key="ordinary-integrate")
+        )
         pending = {
             "task_id": task.task_id if marker_task_id is None else marker_task_id,
             "workspace": str(backup.parent),
@@ -1566,7 +1574,7 @@ async def test_resume_consistency_replays_pending_integrate_keep(coord: Coordina
 @pytest.mark.asyncio
 async def test_resume_consistency_rolls_back_pending_integrate(coord: Coordinator, monkeypatch) -> None:
     coord.writeback._resumed_from["is_resume"] = True
-    await coord.tasks.create(kind="integrate_patch", params={}, idempotency_key="ti-roll", task_id="ti-roll")
+    await coord.tasks.create(TaskSpec(kind="integrate_patch", params={}, idempotency_key="ti-roll", task_id="ti-roll"))
     coord.shared_state.pending_integrate = {
         "task_id": "ti-roll",
         "framework_source_root": "/tmp/framework",
@@ -1613,7 +1621,9 @@ async def test_resume_settles_an_env_only_integrate_from_its_task_row(
     environment from the stack. A recorded revert still just clears.
     """
     coord.writeback._resumed_from["is_resume"] = True
-    task = await coord.tasks.create(kind="integrate_patch", params={}, idempotency_key="ti-env", task_id="ti-env")
+    task = await coord.tasks.create(
+        TaskSpec(kind="integrate_patch", params={}, idempotency_key="ti-env", task_id="ti-env")
+    )
     await coord.tasks.transition(task.task_id, "running")
     result = {
         "kind": "integrate_patch",
@@ -2104,9 +2114,11 @@ async def test_pump_dispatcher_noop_when_empty(coord: Coordinator) -> None:
 async def test_pump_dispatcher_explore_promotes(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
     task = await coord.tasks.create(
-        kind="explore",
-        params={},
-        idempotency_key="disp-explore",
+        TaskSpec(
+            kind="explore",
+            params={},
+            idempotency_key="disp-explore",
+        ),
     )
 
     async def fake_run(t, **kw):
@@ -2135,9 +2147,11 @@ async def test_pump_dispatcher_explore_promotes(coord: Coordinator, monkeypatch)
 async def test_pump_dispatcher_specialist_bookkeeping(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", "0")
     await coord.tasks.create(
-        kind="specialist",
-        params={"domain": "kernel_agent"},
-        idempotency_key="disp-spec",
+        TaskSpec(
+            kind="specialist",
+            params={"domain": "kernel_agent"},
+            idempotency_key="disp-spec",
+        ),
     )
 
     async def fake_run(t, **kw):
@@ -2160,9 +2174,11 @@ async def test_pump_dispatcher_specialist_bookkeeping(coord: Coordinator, monkey
 @pytest.mark.asyncio
 async def test_pump_dispatcher_absorbs_spawn_exception(coord: Coordinator, monkeypatch) -> None:
     await coord.tasks.create(
-        kind="explore",
-        params={},
-        idempotency_key="disp-boom",
+        TaskSpec(
+            kind="explore",
+            params={},
+            idempotency_key="disp-boom",
+        ),
     )
 
     async def fake_run(t, **kw):
@@ -2177,9 +2193,11 @@ async def test_pump_dispatcher_absorbs_spawn_exception(coord: Coordinator, monke
 async def test_compose_prompt_has_no_specialist_status_block(coord: Coordinator) -> None:
     """No periodic specialist block: it can never observe a live specialist."""
     spec = await coord.tasks.create(
-        kind="specialist",
-        params={"domain": "serving_specialist"},
-        idempotency_key="visible-spec",
+        TaskSpec(
+            kind="specialist",
+            params={"domain": "serving_specialist"},
+            idempotency_key="visible-spec",
+        ),
     )
     await coord.tasks.transition(spec.task_id, "running")
     out = (await coord.conversation.compose_prompt("orchestration")).text
@@ -2191,9 +2209,11 @@ async def test_compose_prompt_has_no_specialist_status_block(coord: Coordinator)
 async def test_running_tasks_reader_sees_live_specialist(coord: Coordinator) -> None:
     """``get_running_tasks`` is the on-demand path and is not turn-bound."""
     spec = await coord.tasks.create(
-        kind="specialist",
-        params={"domain": "serving_specialist", "gap_canonical_id": "gap.xyz"},
-        idempotency_key="queryable-spec",
+        TaskSpec(
+            kind="specialist",
+            params={"domain": "serving_specialist", "gap_canonical_id": "gap.xyz"},
+            idempotency_key="queryable-spec",
+        ),
     )
     await coord.tasks.transition(spec.task_id, "running")
     out = coord.conversation._context_running_tasks_reader()
@@ -2796,13 +2816,15 @@ async def test_direct_integrate_proposal_inherits_specialist_owner(
     monkeypatch,
 ) -> None:
     specialist = await coord.tasks.create(
-        kind="specialist",
-        params={
-            "source_phase": "FRAMEWORK_AGENT",
-            "domain": "serving_specialist",
-            "gap_layer": "framework",
-        },
-        idempotency_key="owner-source",
+        TaskSpec(
+            kind="specialist",
+            params={
+                "source_phase": "FRAMEWORK_AGENT",
+                "domain": "serving_specialist",
+                "gap_layer": "framework",
+            },
+            idempotency_key="owner-source",
+        ),
     )
     monkeypatch.setattr(
         coord.dispatcher,
@@ -3190,7 +3212,7 @@ async def test_pump_framework_agent_phase_done_noop(coord: Coordinator) -> None:
 @pytest.mark.asyncio
 async def test_pump_framework_agent_skips_when_task_inflight(coord: Coordinator) -> None:
     _enter_framework(coord)
-    await coord.tasks.create(kind="framework_agent", params={}, idempotency_key="fpr-inflight")
+    await coord.tasks.create(TaskSpec(kind="framework_agent", params={}, idempotency_key="fpr-inflight"))
     await coord.phase_framework._pump_framework_agent_phase()
 
 

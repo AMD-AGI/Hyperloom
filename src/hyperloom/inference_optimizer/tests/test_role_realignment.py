@@ -23,6 +23,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     SessionContext,
 )
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir, make_session_dir
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
 # fixtures
@@ -451,10 +452,12 @@ async def test_running_tasks_reader_reports_held_resources(coordinator_with_mock
     c = coordinator_with_mocks
     try:
         task = await c.tasks.create(
-            kind="specialist",
-            params={},
-            idempotency_key="k-resources",
-            lease_ttl_sec=1800,
+            TaskSpec(
+                kind="specialist",
+                params={},
+                idempotency_key="k-resources",
+                lease_ttl_sec=1800,
+            ),
         )
         await c.tasks.transition(task.task_id, "running")
         # Two lanes, deliberately out of sorted order and with different expiries: the renderer must sort the lanes
@@ -518,9 +521,11 @@ async def test_running_tasks_reader_reports_heartbeat_age(
     c = coordinator_with_mocks
     try:
         task = await c.tasks.create(
-            kind="specialist",
-            params={},
-            idempotency_key="k-heartbeat",
+            TaskSpec(
+                kind="specialist",
+                params={},
+                idempotency_key="k-heartbeat",
+            ),
         )
         await c.tasks.transition(task.task_id, "running")
         # No workspace yet: the field is omitted rather than reported as zero.
@@ -546,9 +551,11 @@ async def test_running_tasks_reader_skips_heartbeat_for_non_specialist(
     c = coordinator_with_mocks
     try:
         task = await c.tasks.create(
-            kind="explore",
-            params={},
-            idempotency_key="k-explore-hb",
+            TaskSpec(
+                kind="explore",
+                params={},
+                idempotency_key="k-explore-hb",
+            ),
         )
         await c.tasks.transition(task.task_id, "running")
         # Plant the liveness file the specialist path would have read.
@@ -571,10 +578,12 @@ async def test_running_tasks_reader_reports_in_flight_task(coordinator_with_mock
     try:
         assert "no tasks in flight" in c.conversation._context_running_tasks_reader()
         task = await c.tasks.create(
-            kind="specialist",
-            params={"domain": "serving_specialist", "gap_canonical_id": "gap.x"},
-            idempotency_key="k-running-1",
-            lease_ttl_sec=1800,
+            TaskSpec(
+                kind="specialist",
+                params={"domain": "serving_specialist", "gap_canonical_id": "gap.x"},
+                idempotency_key="k-running-1",
+                lease_ttl_sec=1800,
+            ),
         )
         await c.tasks.transition(task.task_id, "running")
         out = c.conversation._context_running_tasks_reader()
@@ -605,7 +614,7 @@ async def test_running_tasks_reader_states_the_backlog_dispatch_order(coordinato
     try:
         c.shared_state.phase = phase
         for i, kind in enumerate(kinds):
-            await c.tasks.create(kind=kind, params={}, idempotency_key=f"k-backlog-{i}")
+            await c.tasks.create(TaskSpec(kind=kind, params={}, idempotency_key=f"k-backlog-{i}"))
         out = c.conversation._context_running_tasks_reader()
         assert "queued backlog: " in out
         assert "dispatches before" in out if order_note else "dispatches before" not in out
@@ -623,11 +632,13 @@ async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
     c = coordinator_with_mocks
     try:
         task = await c.tasks.create(
-            kind="specialist",
-            params={},
-            idempotency_key="k-extend-1",
-            requires_lanes=["research_lane"],
-            lease_ttl_sec=1800,
+            TaskSpec(
+                kind="specialist",
+                params={},
+                idempotency_key="k-extend-1",
+                requires_lanes=["research_lane"],
+                lease_ttl_sec=1800,
+            ),
         )
         await c.tasks.transition(task.task_id, "running")
         lease = await c.locks.acquire_many(
@@ -673,11 +684,13 @@ async def test_extend_lease_does_not_regrant_elapsed_time(coordinator_with_mocks
     c = coordinator_with_mocks
     try:
         task = await c.tasks.create(
-            kind="specialist",
-            params={},
-            idempotency_key="k-extend-elapsed",
-            requires_lanes=["research_lane"],
-            lease_ttl_sec=1800,
+            TaskSpec(
+                kind="specialist",
+                params={},
+                idempotency_key="k-extend-elapsed",
+                requires_lanes=["research_lane"],
+                lease_ttl_sec=1800,
+            ),
         )
         await c.tasks.transition(task.task_id, "running")
         await c.locks.acquire_many(
@@ -716,11 +729,13 @@ async def test_extend_lease_late_grant_keeps_new_increment_for_lanes(coordinator
     c = coordinator_with_mocks
     try:
         task = await c.tasks.create(
-            kind="specialist",
-            params={},
-            idempotency_key="k-extend-late",
-            requires_lanes=["research_lane"],
-            lease_ttl_sec=1800,
+            TaskSpec(
+                kind="specialist",
+                params={},
+                idempotency_key="k-extend-late",
+                requires_lanes=["research_lane"],
+                lease_ttl_sec=1800,
+            ),
         )
         await c.tasks.transition(task.task_id, "running")
         await c.locks.acquire_many(
@@ -757,10 +772,12 @@ async def test_extend_lease_grants_live_subprocess_extension(coordinator_with_mo
     c = coordinator_with_mocks
     try:
         task = await c.tasks.create(
-            kind="specialist",
-            params={},
-            idempotency_key="k-extend-live",
-            lease_ttl_sec=1800,
+            TaskSpec(
+                kind="specialist",
+                params={},
+                idempotency_key="k-extend-live",
+                lease_ttl_sec=1800,
+            ),
         )
         await c.tasks.transition(task.task_id, "running")
         _sub.clear_wall_budget_extension(task.task_id)
@@ -797,10 +814,12 @@ async def test_extend_lease_survives_wall_budget_grant_failure(coordinator_with_
     c = coordinator_with_mocks
     try:
         task = await c.tasks.create(
-            kind="specialist",
-            params={},
-            idempotency_key="k-extend-grant-fail",
-            lease_ttl_sec=1800,
+            TaskSpec(
+                kind="specialist",
+                params={},
+                idempotency_key="k-extend-grant-fail",
+                lease_ttl_sec=1800,
+            ),
         )
         await c.tasks.transition(task.task_id, "running")
 
@@ -845,11 +864,13 @@ async def test_extend_lease_survives_unreadable_running_age(coordinator_with_moc
     c = coordinator_with_mocks
     try:
         task = await c.tasks.create(
-            kind="specialist",
-            params={},
-            idempotency_key="k-extend-age-fail",
-            requires_lanes=["research_lane"],
-            lease_ttl_sec=1800,
+            TaskSpec(
+                kind="specialist",
+                params={},
+                idempotency_key="k-extend-age-fail",
+                requires_lanes=["research_lane"],
+                lease_ttl_sec=1800,
+            ),
         )
         await c.tasks.transition(task.task_id, "running")
         await c.locks.acquire_many(
@@ -899,10 +920,12 @@ async def test_extend_lease_rejects_non_running_task(coordinator_with_mocks):
     c = coordinator_with_mocks
     try:
         task = await c.tasks.create(
-            kind="specialist",
-            params={},
-            idempotency_key="k-extend-2",
-            lease_ttl_sec=1800,
+            TaskSpec(
+                kind="specialist",
+                params={},
+                idempotency_key="k-extend-2",
+                lease_ttl_sec=1800,
+            ),
         )
         await c.router.handle_intent(
             "orchestration",
@@ -924,9 +947,11 @@ async def test_prune_branch_on_a_catalogue_family_cancels_every_member_action(co
     try:
         members = sorted(name for name, meta in ACTION_CATALOGUE.items() if meta.family == "prep")
         assert len(members) > 1
-        queued = [await c.tasks.create(kind=kind, params={}, idempotency_key=f"k-prune-{kind}") for kind in members]
-        bystander = await c.tasks.create(kind="explore", params={}, idempotency_key="k-prune-bystander")
-        running = await c.tasks.create(kind=members[0], params={}, idempotency_key="k-prune-running")
+        queued = [
+            await c.tasks.create(TaskSpec(kind=kind, params={}, idempotency_key=f"k-prune-{kind}")) for kind in members
+        ]
+        bystander = await c.tasks.create(TaskSpec(kind="explore", params={}, idempotency_key="k-prune-bystander"))
+        running = await c.tasks.create(TaskSpec(kind=members[0], params={}, idempotency_key="k-prune-running"))
         await c.tasks.transition(running.task_id, "running")
 
         await c.router.handle_intent(
@@ -957,8 +982,8 @@ async def test_prune_branch_queued_scope_on_an_action_name_drains_only_that_kind
     """A single action name still works, and ``scope='queued'`` leaves the family usable."""
     c = coordinator_with_mocks
     try:
-        target = await c.tasks.create(kind="profile", params={}, idempotency_key="k-drain-profile")
-        sibling = await c.tasks.create(kind="roofline", params={}, idempotency_key="k-drain-roofline")
+        target = await c.tasks.create(TaskSpec(kind="profile", params={}, idempotency_key="k-drain-profile"))
+        sibling = await c.tasks.create(TaskSpec(kind="roofline", params={}, idempotency_key="k-drain-roofline"))
 
         await c.router.handle_intent(
             "orchestration",

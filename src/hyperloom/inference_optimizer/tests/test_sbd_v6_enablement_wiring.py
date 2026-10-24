@@ -93,8 +93,8 @@ class _FakeTasks:
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
 
-    async def create_or_return_existing(self, **kwargs: Any):
-        self.created.append(kwargs)
+    async def create_or_return_existing(self, spec):
+        self.created.append(vars(spec))
         return types.SimpleNamespace(task_id=f"spec-{len(self.created)}", state="queued"), False
 
     async def get(self, task_id: str):

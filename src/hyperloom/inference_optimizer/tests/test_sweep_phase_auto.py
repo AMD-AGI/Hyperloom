@@ -60,37 +60,24 @@ class _StubTaskRegistry:
     def __init__(self):
         self._tasks: dict[str, Any] = {}
 
-    async def create_or_return_existing(
-        self,
-        *,
-        kind: str,
-        params: dict,
-        idempotency_key: str,
-        requires_lanes: list | None = None,
-        allowed_tools: list | None = None,
-        side_effects: list | None = None,
-        lease_ttl_sec: int = 0,
-        task_id: str | None = None,
-        dispatch_class: str | None = None,
-        dispatch_origin: dict | None = None,
-    ):
+    async def create_or_return_existing(self, spec):
         from hyperloom.orchestrator.state.task_registry import Task
 
-        self.last_lease_ttl_sec = lease_ttl_sec
-        existing = self._tasks.get(idempotency_key)
+        self.last_lease_ttl_sec = spec.lease_ttl_sec
+        existing = self._tasks.get(spec.idempotency_key)
         if existing is not None:
             return existing, True
         import uuid as _uuid
 
         task = Task(
-            task_id=task_id or _uuid.uuid4().hex,
-            kind=kind,
+            task_id=spec.task_id or _uuid.uuid4().hex,
+            kind=spec.kind,
             state="queued",
-            params=dict(params),
-            idempotency_key=idempotency_key,
-            requires_lanes=list(requires_lanes) if requires_lanes else [],
+            params=dict(spec.params),
+            idempotency_key=spec.idempotency_key,
+            requires_lanes=list(spec.requires_lanes) if spec.requires_lanes else [],
         )
-        self._tasks[idempotency_key] = task
+        self._tasks[spec.idempotency_key] = task
         return task, False
 
 

@@ -50,7 +50,7 @@ from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.policy.gate import PolicyDenied
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
-from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 from hyperloom.orchestrator.loop.dispatcher import HeldLeases
 
 
@@ -416,9 +416,11 @@ class TestThePhaseBudgetGate:
     async def test_a_queued_task_the_phase_outlived_is_dropped_before_dispatch(self, coord: Coordinator, monkeypatch):
         _set_budget(coord, minutes=600)
         task, _ = await coord.tasks.create_or_return_existing(
-            kind=_EXPENSIVE_ACTION,
-            params={},
-            idempotency_key="q-phase-drained",
+            TaskSpec(
+                kind=_EXPENSIVE_ACTION,
+                params={},
+                idempotency_key="q-phase-drained",
+            ),
         )
         _set_phase_budget(coord, monkeypatch, phase="FRAMEWORK_AGENT", minutes_left=20)
 
@@ -499,9 +501,11 @@ class TestPreDispatchBackstop:
     ):
         _set_budget(coord, minutes=600)
         task, _ = await coord.tasks.create_or_return_existing(
-            kind=_EXPENSIVE_ACTION,
-            params={},
-            idempotency_key="q-drained",
+            TaskSpec(
+                kind=_EXPENSIVE_ACTION,
+                params={},
+                idempotency_key="q-drained",
+            ),
         )
         # The budget drains while the task waits in the queue.
         _set_budget(coord, minutes=600, elapsed_min=590.0)
@@ -516,9 +520,11 @@ class TestPreDispatchBackstop:
         """A task that never ran is not evidence about the action."""
         _set_budget(coord, minutes=600)
         task, _ = await coord.tasks.create_or_return_existing(
-            kind=_EXPENSIVE_ACTION,
-            params={},
-            idempotency_key="q-no-failure",
+            TaskSpec(
+                kind=_EXPENSIVE_ACTION,
+                params={},
+                idempotency_key="q-no-failure",
+            ),
         )
         _set_budget(coord, minutes=600, elapsed_min=590.0)
 
@@ -532,9 +538,11 @@ class TestPreDispatchBackstop:
     async def test_a_queued_task_that_still_fits_is_left_alone(self, coord: Coordinator):
         _set_budget(coord, minutes=600)
         task, _ = await coord.tasks.create_or_return_existing(
-            kind=_EXPENSIVE_ACTION,
-            params={},
-            idempotency_key="q-fits",
+            TaskSpec(
+                kind=_EXPENSIVE_ACTION,
+                params={},
+                idempotency_key="q-fits",
+            ),
         )
         assert await coord.dispatcher._cancel_queued_task_over_budget(task) is False
         assert (await coord.tasks.get(task.task_id)).state == "queued"
@@ -547,11 +555,13 @@ class TestPreDispatchBackstop:
         """A self-settling kind is still subject to the budget gate."""
         _set_budget(coord, minutes=600)
         task, _ = await coord.tasks.create_or_return_existing(
-            kind="targeted_build",
-            params={},
-            idempotency_key="q-build",
-            requires_lanes=["build_lane"],
-            lease_ttl_sec=900,
+            TaskSpec(
+                kind="targeted_build",
+                params={},
+                idempotency_key="q-build",
+                requires_lanes=["build_lane"],
+                lease_ttl_sec=900,
+            ),
         )
         _set_budget(coord, minutes=600, elapsed_min=600.0)
 
@@ -569,11 +579,13 @@ class TestPreDispatchBackstop:
         """It is registered for cancellation like any other dispatched action."""
         _set_budget(coord, minutes=600)
         task, _ = await coord.tasks.create_or_return_existing(
-            kind="targeted_build",
-            params={},
-            idempotency_key="q-build-fits",
-            requires_lanes=["build_lane"],
-            lease_ttl_sec=900,
+            TaskSpec(
+                kind="targeted_build",
+                params={},
+                idempotency_key="q-build-fits",
+                requires_lanes=["build_lane"],
+                lease_ttl_sec=900,
+            ),
         )
 
         await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5.0)
@@ -589,9 +601,11 @@ class TestPreDispatchBackstop:
         """Cancelling conc_sweep at dispatch must stamp last_conc_sweep so SWEEP can close."""
         _set_budget(coord, minutes=180)
         task, _ = await coord.tasks.create_or_return_existing(
-            kind="conc_sweep",
-            params={},
-            idempotency_key="q-conc-sweep",
+            TaskSpec(
+                kind="conc_sweep",
+                params={},
+                idempotency_key="q-conc-sweep",
+            ),
         )
         _set_budget(coord, minutes=180, elapsed_min=166.0)
 
@@ -624,9 +638,11 @@ class TestPreDispatchBackstop:
             {"status": "succeeded", "was_skipped": False, "summary": {"successful_pairs": 3}}
         )
         task, _ = await coord.tasks.create_or_return_existing(
-            kind="conc_sweep",
-            params={},
-            idempotency_key="q-conc-sweep-prior",
+            TaskSpec(
+                kind="conc_sweep",
+                params={},
+                idempotency_key="q-conc-sweep-prior",
+            ),
         )
         _set_budget(coord, minutes=180, elapsed_min=166.0)
 
@@ -665,11 +681,13 @@ async def _queue_action(
     coord.sub.register_executor(kind, make_executor(started))
     lanes, ttl_sec = coord.dispatcher.registry_lanes_ttl(kind)
     task, _ = await coord.tasks.create_or_return_existing(
-        kind=kind,
-        params={},
-        idempotency_key=key,
-        requires_lanes=lanes,
-        lease_ttl_sec=ttl_sec,
+        TaskSpec(
+            kind=kind,
+            params={},
+            idempotency_key=key,
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl_sec,
+        ),
     )
     return task, started
 
@@ -754,9 +772,11 @@ class TestInflightHandles:
     async def test_an_action_that_finishes_normally_leaves_no_handle(self, coord: Coordinator):
         coord.sub.register_executor(_CHEAP_ACTION, lambda _ctx: _done({"ok": True}))
         task, _ = await coord.tasks.create_or_return_existing(
-            kind=_CHEAP_ACTION,
-            params={},
-            idempotency_key="h-quick",
+            TaskSpec(
+                kind=_CHEAP_ACTION,
+                params={},
+                idempotency_key="h-quick",
+            ),
         )
         await coord.dispatcher._spawn_fitting_queued()
         await _settle(coord.dispatcher._inflight_actions[task.task_id].atask)
@@ -1071,7 +1091,7 @@ async def test_cancelled_thread_keeps_capacity_until_execution_cleanup(coord, mo
 
     coord.sub.register_executor(_CHEAP_ACTION, execute)
     task = await coord.tasks.create(
-        kind=_CHEAP_ACTION, params={}, idempotency_key="retained-thread", requires_lanes=[_CHEAP_ACTION_LANE]
+        TaskSpec(kind=_CHEAP_ACTION, params={}, idempotency_key="retained-thread", requires_lanes=[_CHEAP_ACTION_LANE])
     )
     action = asyncio.create_task(coord.dispatcher.run_task_registered(task))
     await asyncio.to_thread(entered.wait, 2)
@@ -1125,7 +1145,7 @@ async def test_stop_defers_db_close_until_pending_worker_cleanup(coord, monkeypa
     monkeypatch.setattr(coord.dispatcher, "close_db_after_executions", drain)
     coord.sub.register_executor(_CHEAP_ACTION, execute)
     task = await coord.tasks.create(
-        kind=_CHEAP_ACTION, params={}, idempotency_key="deferred-db", requires_lanes=[_CHEAP_ACTION_LANE]
+        TaskSpec(kind=_CHEAP_ACTION, params={}, idempotency_key="deferred-db", requires_lanes=[_CHEAP_ACTION_LANE])
     )
     action = asyncio.create_task(coord.dispatcher.run_task_registered(task))
     assert await asyncio.to_thread(entered.wait, 2)
@@ -1158,7 +1178,7 @@ async def test_cancelled_result_bookkeeping_does_not_release_gpu_capacity(coord)
     from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 
     coord.gpu_specialist_pool = SpecialistGpuPool(coord.db, gpu_ids=[0])
-    task = await coord.tasks.create(kind="specialist", params={}, idempotency_key="pending-cleanup")
+    task = await coord.tasks.create(TaskSpec(kind="specialist", params={}, idempotency_key="pending-cleanup"))
     await coord.gpu_specialist_pool.try_acquire(count=1, holder_id=task.task_id, task_id=task.task_id)
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
@@ -1184,7 +1204,7 @@ async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed
 
     coord.sub.register_executor(_CHEAP_ACTION, lambda _ctx: _done({"ok": True}))
     task = await coord.tasks.create(
-        kind=_CHEAP_ACTION, params={}, idempotency_key="cleanup-order", requires_lanes=[_CHEAP_ACTION_LANE]
+        TaskSpec(kind=_CHEAP_ACTION, params={}, idempotency_key="cleanup-order", requires_lanes=[_CHEAP_ACTION_LANE])
     )
     gpu = await coord.gpu_specialist_pool.try_acquire(count=1, holder_id=task.task_id, task_id=task.task_id)
     assert gpu is not None
@@ -1300,7 +1320,7 @@ class TestThePumpStopsWorkItCannotWaitFor:
 
         coord.sub.register_executor(_CHEAP_ACTION, execute)
         task = await coord.tasks.create(
-            kind=_CHEAP_ACTION, params={}, idempotency_key="p-orphan", requires_lanes=[_CHEAP_ACTION_LANE]
+            TaskSpec(kind=_CHEAP_ACTION, params={}, idempotency_key="p-orphan", requires_lanes=[_CHEAP_ACTION_LANE])
         )
         try:
             await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5.0)

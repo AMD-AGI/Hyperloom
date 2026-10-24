@@ -33,7 +33,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client impo
 from hyperloom.orchestrator.knowledge.remote_recipe.values import has_new_keep
 from hyperloom.orchestrator.state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from hyperloom.inference_optimizer.session.paths import make_session_dir
-from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 
 
 @pytest.fixture
@@ -1916,14 +1916,16 @@ async def test_drain_cancels_queued_baselines_but_spares_revalidation(session_di
     coord = _coord(session_dir)
     coord.shared_state.baseline_tput = 2195.86
 
-    stale_a = await coord.tasks.create(kind="baseline", params={}, idempotency_key="bl-a")
-    stale_b = await coord.tasks.create(kind="baseline", params={"tag": "x"}, idempotency_key="bl-b")
+    stale_a = await coord.tasks.create(TaskSpec(kind="baseline", params={}, idempotency_key="bl-a"))
+    stale_b = await coord.tasks.create(TaskSpec(kind="baseline", params={"tag": "x"}, idempotency_key="bl-b"))
     reval = await coord.tasks.create(
-        kind="baseline",
-        params={"reason": ENABLEMENT_REVALIDATION_REASON},
-        idempotency_key="bl-reval",
+        TaskSpec(
+            kind="baseline",
+            params={"reason": ENABLEMENT_REVALIDATION_REASON},
+            idempotency_key="bl-reval",
+        ),
     )
-    other = await coord.tasks.create(kind="explore", params={}, idempotency_key="ex-a")
+    other = await coord.tasks.create(TaskSpec(kind="explore", params={}, idempotency_key="ex-a"))
 
     cancelled = await coord.writeback.drain_queued_baselines(reason="baseline_established")
 
@@ -1938,7 +1940,7 @@ async def test_drain_spares_the_tracked_revalidation_task_id(session_dir):
     """The tracked id is honoured even when params carry no revalidation reason."""
     coord = _coord(session_dir)
     coord.shared_state.baseline_tput = 1000.0
-    reval = await coord.tasks.create(kind="baseline", params={}, idempotency_key="bl-tracked")
+    reval = await coord.tasks.create(TaskSpec(kind="baseline", params={}, idempotency_key="bl-tracked"))
     coord.shared_state.enablement.revalidation_task_id = reval.task_id
 
     assert await coord.writeback.drain_queued_baselines(reason="baseline_established") == []
@@ -1949,7 +1951,7 @@ async def test_drain_spares_the_tracked_revalidation_task_id(session_dir):
 async def test_promote_baseline_drains_the_backlog(session_dir):
     """The drain is wired into promotion, not just available as a helper."""
     coord = _coord(session_dir)
-    stale = await coord.tasks.create(kind="baseline", params={}, idempotency_key="bl-stale")
+    stale = await coord.tasks.create(TaskSpec(kind="baseline", params={}, idempotency_key="bl-stale"))
 
     await coord.writeback.promote_to_shared_state(
         "baseline",
