@@ -227,24 +227,55 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     """
 
     from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
-    from hyperloom.measure.compile import EnvironmentCompiler
-    from hyperloom.measure.hosted_spec import SpecContext
-    from hyperloom_multibranch.toolbox.local_hosted import LocalSession, build_local_toolbox
-    from hyperloom_multibranch.toolbox.mcp_tools import (
-        McpSpecialistTokens,
-        SpecialistToolOptions,
-        register_specialist_tools,
-    )
+    from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens
     from hyperloom_multibranch.specialist.blocked import BlockedCandidates, register_blocked_tools
     from hyperloom_multibranch.specialist.tools import register_worktree_tools
-    from hyperloom_multibranch.toolbox.planner import HostedPlanner
-    from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
     layout, workload = setup.layout, setup.workload
     _export_workload(workload, layout.toolbox)
     repo = GitExperimentRepo(layout.repo, setup.blobs)
+    toolbox = _local_toolbox(host, setup, repo)
+    gate_notebook = LocalNotebook(layout.notebook, Writer(Role.GATE, GATE_WRITER))
+    rule = workload_rule(workload, gate_notebook)
+
+    @cache
+    def runtime_notebook(branch: str) -> LocalNotebook:
+        """The branch's one handle for the session: a handle is a writer of its own, and every inbox cursor holds one
+        sequence number per writer, so a handle per MCP call made ``poll_inbox`` answer 91,000 characters after 12 h."""
+        return LocalNotebook(layout.notebook, Writer(Role.SPECIALIST_RUNTIME, branch, branch), briefs=BriefTriggers())
+
+    mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
+    briefs = _specialist_briefs(setup, repo)
+    _serve_specialist_tools(mcp, toolbox, runtime_notebook, briefs)
+    leases = _lend_dev_sandboxes(mcp, setup, toolbox, runtime_notebook, lambda branch: built.worktrees(branch))
+    built = sessions(SessionWiring(setup, repo, McpSpecialistTokens(mcp), runtime_notebook, briefs, toolbox, leases))
+    register_worktree_tools(mcp, repo=repo, worktrees=built.worktrees)
+    gate = RuleGate(gate_notebook, repo, setup.desk, toolbox)
+    register_blocked_tools(mcp, blocked=BlockedCandidates(gate_notebook, gate), home=asyncio.get_running_loop())
+    register_fix_tools(mcp, attachments=toolbox)
+    runner = ReproRunner(toolbox, gate_notebook, toolbox)
+    judging = Judging(gate, toolbox, rule, FixChecking(runner, setup.critic, setup.blobs, _specialist_role(workload)))
+    runtime = SpecialistRuntime(
+        runtime_notebook, judging, built.factory, pacing=RuntimePacing(claim_ttl_seconds=CLAIM_TTL_SECONDS)
+    )
+    mcp.start()
+    gate_service = GateService(gate_notebook, toolbox, rule, toolbox)
+    regression = RegressionSet(gate_notebook, runner, repo)
+    return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, host.image.digest, gate, regression)
+
+
+def _local_toolbox(host: MeasurementHost, setup: PeerSetup, repo: ExperimentRepo) -> RealToolbox:
+    """The session's hosted toolbox on ``host``: its sandboxes, archive and submit log under ``MB-toolbox``, every
+    test's points rendered from the session's canonical measurement and compiled from the session's blob store."""
+
+    from hyperloom.measure.compile import EnvironmentCompiler
+    from hyperloom.measure.hosted_spec import SpecContext
+    from hyperloom_multibranch.toolbox.local_hosted import LocalSession, build_local_toolbox
+    from hyperloom_multibranch.toolbox.planner import HostedPlanner
+    from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
+
+    layout, workload, image = setup.layout, setup.workload, host.image
     canonical = _canonical(layout.toolbox / CANONICAL_DIR, workload, host)
-    image = host.image
     compiler = EnvironmentCompiler(setup.blobs, image.digest)
     spec = SpecContext(
         image_ref=image.ref,
@@ -256,53 +287,44 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         blob_root=str(setup.blobs.root),
     )
     planner = HostedPlanner(compiler, canonical, layout.toolbox / POINTS_DIR)
-    toolbox = build_local_toolbox(
+    return build_local_toolbox(
         LocalSession(layout.toolbox, layout.session_id, host.cards, workload.tp),
         LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, TOOLBOX_WRITER)),
         AcceptanceSetup(repo, planner, image.digest, workload_kind=workload.kind),
         spec,
     )
-    gate_notebook = LocalNotebook(layout.notebook, Writer(Role.GATE, GATE_WRITER))
-    rule = workload_rule(workload, gate_notebook)
 
-    @cache
-    def runtime_notebook(branch: str) -> LocalNotebook:
-        """The branch's one handle for the session: a handle is a writer of its own, and every inbox cursor holds one
-        sequence number per writer, so a handle per MCP call made ``poll_inbox`` answer 91,000 characters after 12 h."""
-        return LocalNotebook(layout.notebook, Writer(Role.SPECIALIST_RUNTIME, branch, branch), briefs=BriefTriggers())
 
-    mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
-    learnings = specialist_recall(layout.reports)
-    briefs = SessionBriefs(
-        LocalNotebook(layout.notebook, Writer(Role.OBSERVER, BRIEFS_READER)),
-        metric=workload.metric,
+def _specialist_briefs(setup: PeerSetup, repo: GitExperimentRepo) -> SessionBriefs:
+    """The briefs the session's specialists are given, read as an observer of the notebook, with their learnings
+    recall (:func:`specialist_recall`)."""
+
+    learnings = specialist_recall(setup.layout.reports)
+    return SessionBriefs(
+        LocalNotebook(setup.layout.notebook, Writer(Role.OBSERVER, BRIEFS_READER)),
+        metric=setup.workload.metric,
         learnings=learnings,
         repo=repo,
         stack_slot=repo.stack_kernel_slot,
     )
-    tool_options = SpecialistToolOptions(
+
+
+def _serve_specialist_tools(
+    mcp: McpServer, toolbox: RealToolbox, notebooks: Callable[[str], LocalNotebook], briefs: SessionBriefs
+) -> None:
+    """Register the specialists' toolbox and notebook tools on ``mcp``, calling the toolbox on the session's loop and
+    briefing each branch from ``briefs``."""
+
+    from hyperloom_multibranch.toolbox.mcp_tools import SpecialistToolOptions, register_specialist_tools
+
+    options = SpecialistToolOptions(
         claim_ttl_seconds=CLAIM_TTL_SECONDS,
         toolbox_loop=asyncio.get_running_loop(),
-        learnings=learnings,
+        learnings=briefs.learnings,
         briefing_for=briefs.for_branch,
         analysis=toolbox,
     )
-    register_specialist_tools(mcp, toolbox=toolbox, notebooks=runtime_notebook, options=tool_options)
-    leases = _lend_dev_sandboxes(mcp, setup, toolbox, runtime_notebook, lambda branch: built.worktrees(branch))
-    built = sessions(SessionWiring(setup, repo, McpSpecialistTokens(mcp), runtime_notebook, briefs, toolbox, leases))
-    register_worktree_tools(mcp, repo=repo, worktrees=built.worktrees)
-    gate = RuleGate(gate_notebook, repo, setup.desk, toolbox)
-    register_blocked_tools(mcp, blocked=BlockedCandidates(gate_notebook, gate), home=tool_options.toolbox_loop)
-    register_fix_tools(mcp, attachments=toolbox)
-    runner = ReproRunner(toolbox, gate_notebook, toolbox)
-    judging = Judging(gate, toolbox, rule, FixChecking(runner, setup.critic, setup.blobs, _specialist_role(workload)))
-    runtime = SpecialistRuntime(
-        runtime_notebook, judging, built.factory, pacing=RuntimePacing(claim_ttl_seconds=CLAIM_TTL_SECONDS)
-    )
-    mcp.start()
-    gate_service = GateService(gate_notebook, toolbox, rule, toolbox)
-    regression = RegressionSet(gate_notebook, runner, repo)
-    return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, image.digest, gate, regression)
+    register_specialist_tools(mcp, toolbox=toolbox, notebooks=notebooks, options=options)
 
 
 def _lend_dev_sandboxes(
