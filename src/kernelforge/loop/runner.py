@@ -10,7 +10,6 @@ import copy
 import contextlib
 import functools
 import hashlib
-import inspect
 import json
 import logging
 import math
@@ -31,11 +30,13 @@ from hyperloom.common.unified_diff import touched_paths
 
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
 from kernelforge.tools.process_reaping import processes_under
-from kernelforge.workspace.edit_policy import is_protected_path
+from kernelforge.workspace.edit_policy import hide_forge_loop_output, is_protected_path
 from kernelforge.tools.git import git, git_bytes
 from kernelforge.config import Config
 from kernelforge.evaluation.correctness.canonical import accept_candidate
 from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
+from kernelforge.loop.agent_extras import declared_extras
+from kernelforge.loop.decision_labels import DecisionLabel
 from kernelforge.loop.experience import ExperienceLedger
 from kernelforge.loop.lessons import (
     SUMMARY_MIN_SECONDS,
@@ -46,6 +47,7 @@ from kernelforge.loop.lessons import (
     PrReferenceNote,
     SessionEnd,
     SessionObservations,
+    SummaryOutcome,
     build_fallback_document,
     cases_named_in,
     format_outcome_line,
@@ -58,6 +60,8 @@ from kernelforge.loop.lessons import (
 )
 from kernelforge.loop.archive import CandidateArchive, CandidateRecord
 from kernelforge.loop.handoffs import HandoffStore, IterationHandoff
+from kernelforge.loop.experiments_layout import LANE_PLAN_GLOB, ROUND_CONTEXT, ExperimentsLayout, lane_plan_name
+from kernelforge.loop.loop_log import LOOP_BANNER, iteration_header, kernel_line
 from kernelforge.loop.jit_rebuild import (
     force_jit_rebuild,
     tracked_source_changes,
@@ -82,6 +86,8 @@ from kernelforge.loop.round_budget import (
     estimate_measurement_sec,
 )
 from kernelforge.loop.run_state import (
+    ITERATION_RESULT,
+    ITERATION_STARTED,
     MAX_PINNED_ITERATIONS,
     ORCHESTRATION_CIRCUIT_OPEN,
     SESSION_COMPLETED,
@@ -141,6 +147,7 @@ from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     SIGMA_REMEASURE_BATCH,
     SIGMA_REMEASURE_MAX_ROUNDS,
+    GateScoring,
     SigmaAttribution,
     attribute_sigma,
     beats_current_best,
@@ -157,7 +164,7 @@ from kernelforge.evaluation.benchmark.baseline import (
     check_baseline_against_reference,
 )
 from kernelforge.loop.device_hazard import DeviceHazard, DeviceHazardLog
-from kernelforge.loop.fanout import LanePlan, LaneResult, run_lanes
+from kernelforge.loop.fanout import LanePlan, LaneResult, lane_rationale, run_lanes
 from kernelforge.loop.merge_candidates import (
     MERGE_ATTEMPT_STALL_THRESHOLD,
     MERGE_PRECEDENCE_STREAK_LIMIT,
@@ -675,6 +682,7 @@ class _Attempt(NamedTuple):
     reusable_benchmark: object | None
     optimization_plan_path: str
     optimization_plan_executable: bool
+    lane_record: SummaryOutcome | None = None
 
 
 @dataclass
@@ -1734,7 +1742,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             CandidateRecord(
                 iteration=iteration,
                 commit_hash=commit_hash,
-                decision="KEEP",
+                decision=DecisionLabel.KEEP.value,
                 kept=True,
                 validation_passed=True,
                 wall_ms=pending.get("wall_ms"),
@@ -1949,12 +1957,20 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             lane: LanePlan,
             lane_dir: Path,
             serialized_driver: Path,
-        ) -> None:
+        ) -> SummaryOutcome:
             # The session edits the lane's own copy, so it is handed that copy's kernel rather than the canonical one.
-            await agent_factory(str(lane_dir), str(serialized_driver))(
+            # The record turn resumes that session now: the round deletes this copy as soon as it returns.
+            sink: dict = {}
+            call = agent_factory(str(lane_dir), str(serialized_driver))
+            await call(
                 str(lane_dir / kernel_relative),
                 _lane_prompt(lane.plan, serialized_driver=serialized_driver),
+                session_sink=sink,
             )
+            lesson = await self._request_lesson(iteration, sink.get("end_reason", ""), sink.get("summarize"))
+            if not lesson:
+                print(f"  [lane {lane.lane_id}] no lesson from its session ({lesson.reason})")
+            return lesson
 
         results = await run_lanes(
             workspace_dir=self.ic.workspace_dir,
@@ -2328,7 +2344,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 planned,
                 IterationVerdict(
                     iteration=result.iteration,
-                    decision="KEEP",
+                    decision=DecisionLabel.KEEP.value,
                     kept=True,
                     wall_ms=result.wall_ms,
                     commit_hash=result.commit_hash,
@@ -3809,7 +3825,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         """Build the canonical durable event for one completed iteration."""
         resolved_decision = decision_label or _decision_label(result)
         return make_event(
-            "iteration_result",
+            ITERATION_RESULT,
             result.iteration,
             decision=resolved_decision,
             plan=(plan or "").strip()[:120] or None,
@@ -3979,55 +3995,52 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             disproof=parse_disproof_marker(document),
         )
 
+    async def _request_lesson(self, iteration: int, end_reason: str, summarizer) -> SummaryOutcome:
+        """Ask the session for its record while the campaign still has time for the turn."""
+        if self._time_remaining() < SUMMARY_MIN_SECONDS:
+            # Time to produce the summary, not the loop's session-admission reserve: a campaign that can no
+            # longer admit an implementer session is resumed later, and that session reads this document.
+            return SummaryOutcome(reason="insufficient campaign time to run summarizer")
+        try:
+            return await summarize_iteration(
+                iteration=iteration,
+                end_reason=end_reason,
+                summarizer=summarizer,
+                references=PrReferenceNote(self.ic.pr_reference_labels, self.ic.pr_reference_context),
+            )
+        finally:
+            self._checkpoint_llm_usage()
+
     async def _record_lesson(
         self,
         *,
-        iteration: int,
         result: IterationResult,
         decision: str,
         session_sink: dict,
         diff_summary: str = "",
+        lane_record: SummaryOutcome | None = None,
     ) -> None:
         """Write this iteration's free-form factual session record."""
+        iteration = result.iteration
         store = getattr(self, "lessons", None)
         if store is None or session_sink.get("session_started") is not True:
             # No agent ran this iteration (e.g. the baseline measurement path): there is no exploration to record.
             return
 
-        has_narrative = False
+        # A lane's record was taken in its round. None means this iteration ran the session itself.
+        record = lane_record
+        if record is None:
+            record = await self._request_lesson(iteration, result.session_end_reason, session_sink.get("summarize"))
+        if record and store.write(iteration, record.text) is None:
+            record = SummaryOutcome(reason="failed to persist lesson document")
+        has_narrative = bool(record)
         # Narrated by the resumed session itself, as opposed to machine-written by the loop below.
-        agent_narrative = False
-        summary_failure = ""
-        if self._time_remaining() < SUMMARY_MIN_SECONDS:
-            # Gate on whether there is time to PRODUCE the summary, not on the loop's session-admission reserve: a
-            # campaign that runs out of room for another implementer session is resumed later, and that session reads
-            # this document.
-            print("  [lesson] too little time left — recording outcome only")
-            summary_failure = "insufficient campaign time to run summarizer"
+        agent_narrative = has_narrative
+        summary_failure = "" if has_narrative else record.reason
+        if has_narrative:
+            print(f"  [lesson] recorded iter {iteration}: {len(record.text)} chars")
         else:
-            try:
-                outcome = await summarize_iteration(
-                    store=store,
-                    iteration=iteration,
-                    end_reason=result.session_end_reason,
-                    summarizer=session_sink.get("summarize"),
-                    references=PrReferenceNote(self.ic.pr_reference_labels, self.ic.pr_reference_context),
-                )
-                has_narrative = bool(outcome)
-                agent_narrative = has_narrative
-                if has_narrative:
-                    print(f"  [lesson] recorded iter {iteration}: {len(outcome.text)} chars")
-                else:
-                    summary_failure = outcome.reason
-                    print(
-                        f"  [lesson] no summary ({outcome.reason}) — falling back to machine-observed session progress"
-                    )
-            except Exception as error:
-                summary_failure = f"{type(error).__name__}: {str(error)[:200]}"
-                log.debug("lessons: summarizer step failed", exc_info=True)
-                print(f"  [lesson] summarizer step failed ({type(error).__name__}: {error}) — falling back")
-            finally:
-                self._checkpoint_llm_usage()
+            print(f"  [lesson] no summary ({record.reason}) — falling back to machine-observed session progress")
 
         if not has_narrative:
             # No session could describe what was explored, but the gate's block reasons are a real record of what the
@@ -4489,17 +4502,15 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         print(f"  [critic] resuming the {ruling.verdict} verdict an earlier process recorded")
 
     def _orchestration_root(self, iteration: int) -> Path:
-        return Path(self.ic.workspace_dir).resolve() / "forge_experiments" / "orchestration" / f"iter_{iteration:03d}"
+        return ExperimentsLayout.of(Path(self.ic.workspace_dir).resolve()).round(iteration)
 
     def _lane_plan_path(self, iteration: int, lane: int) -> Path:
-        """Where one lane's plan lives, lane 1 keeping the historical name."""
-        if lane <= 1:
-            return self._orchestration_root(iteration) / "optimization_plan.md"
-        return self._orchestration_root(iteration) / f"lane_{lane:03d}.md"
+        """Where one lane's plan lives."""
+        return self._orchestration_root(iteration) / lane_plan_name(lane)
 
     def _lane_queue_path(self) -> Path:
         """Where a round's unspent candidates wait for the iteration that measures them."""
-        return Path(self.ic.workspace_dir).resolve() / "forge_experiments" / "orchestration" / "lane_queue.json"
+        return ExperimentsLayout.of(Path(self.ic.workspace_dir).resolve()).lane_queue
 
     def _persist_lane_queue(self) -> None:
         """Publish what this round has bought and not yet measured."""
@@ -4511,20 +4522,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 path.unlink(missing_ok=True)
                 return
             path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(
-                path,
-                {
-                    "candidates": [
-                        {
-                            "lane_id": lane.lane_id,
-                            "plan": lane.plan,
-                            "diff": lane.diff,
-                            "agent_profile_id": lane.agent_profile_id,
-                        }
-                        for lane in self._lane_queue
-                    ]
-                },
-            )
+            atomic_write_json(path, {"candidates": [lane.to_dict() for lane in self._lane_queue]})
         except OSError as error:
             print(
                 f"  [lanes] queue not durable ({error}); the "
@@ -4537,15 +4535,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         path = self._lane_queue_path()
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
-            queued = [
-                LaneResult(
-                    lane_id=str(entry["lane_id"]),
-                    plan=str(entry["plan"]),
-                    diff=str(entry["diff"]),
-                    agent_profile_id=str(entry.get("agent_profile_id") or ""),
-                )
-                for entry in record["candidates"]
-            ]
+            queued = [LaneResult.from_dict(entry) for entry in record["candidates"]]
         except (OSError, ValueError, KeyError, TypeError):
             log.debug("no readable lane queue at %s", path)
             return
@@ -4579,7 +4569,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         manifest = self._lane_plan_manifest_path(iteration)
         manifest.unlink(missing_ok=True)
         keep = {self._lane_plan_path(iteration, lane) for lane in range(2, len(published) + 1)}
-        for stale in self._orchestration_root(iteration).glob("lane_*.md"):
+        for stale in self._orchestration_root(iteration).glob(LANE_PLAN_GLOB):
             if stale not in keep:
                 stale.unlink()
         for lane, plan in enumerate(published, start=1):
@@ -4666,7 +4656,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
 
         root = self._orchestration_root(iteration)
         atomic_write_json(
-            root / "context.json",
+            root / ROUND_CONTEXT,
             context.to_prompt_dict(),
         )
         if result.dispatch_plan is not None:
@@ -4760,6 +4750,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         workspace_lock_held: bool = False,
     ) -> list[IterationResult]:
         """Run while exclusively owning this campaign workspace."""
+        hide_forge_loop_output(self.ic.workspace_dir)
         if workspace_lock_held:
             return await self._run_locked(agents, callbacks=callbacks, usage=usage)
         store = LoopStateStore(self.ic.workspace_dir)
@@ -5133,8 +5124,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             )
             print(self._supervisor_banner())
 
-        print("Starting autonomous iteration loop")
-        print(f"  Kernel: {self.ic.kernel_file}")
+        print(LOOP_BANNER)
+        print(kernel_line(self.ic.kernel_file))
         print(f"  Target: {self.ic.target_wall_ms} ms")
         print(
             f"  Budget: {self.ic.max_time_hours}h "
@@ -5544,8 +5535,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 plan=session_sink.get("plan", ""),
             )
 
-        # The verdict is now known, so ask the just-finished implementer session to record what it explored, then
-        # stamp the measured outcome onto the same document.
+        # The verdict is now known, so record what the session explored and stamp the measured outcome onto it.
         decision_label = _decision_label(result)
         if merge_diff and merge_pair is not None:
             print(
@@ -5568,11 +5558,11 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             self._diff_summary(commit_hash) if commit_hash else self._diff_summary_from_diff(attempt.attempt_diff)
         )
         await self._record_lesson(
-            iteration=iteration,
             result=result,
             decision=decision_label,
             session_sink=session_sink,
             diff_summary=iteration_diff_summary,
+            lane_record=attempt.lane_record,
         )
 
         # Record this iteration into the cross-iteration experience ledger.
@@ -5634,6 +5624,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             agents.orchestration_service,
             callbacks.on_iteration,
         )
+        lane_record = None
         # Only an orchestrated round synthesizes a plan; every other way of
         # sourcing an attempt leaves the iteration without one.
         optimization_plan_path = ""
@@ -5652,12 +5643,14 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         elif queued_lane is not None:
             unmeasured_result = None
             commit_hash = ""
-            rationale = f"lane {queued_lane.lane_id} of a fan-out round"
+            rationale = lane_rationale(queued_lane.lane_id)
             attempt_source = self._read_kernel_source()
             attempt_diff = self._working_tree_diff()
             reusable_benchmark = None
             session_sink["plan"] = queued_lane.plan
             self._bind_session_producer(session_sink, queued_lane.agent_profile_id)
+            session_sink["session_started"] = True
+            lane_record = queued_lane.lesson
             print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
         elif merge_diff and merge_pair is not None:
             unmeasured_result = None
@@ -5704,7 +5697,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                             session_end_reason="orchestration_error",
                         ),
                         frame,
-                        decision_label="ORCHESTRATION_ERROR",
+                        decision_label=DecisionLabel.ORCHESTRATION_ERROR.value,
                         on_iteration=on_iteration,
                     )
                     return None
@@ -5727,18 +5720,12 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             )
             # Pass extras only to agent_fns that declare them: the in-session gate uses the current best mean case
             # speedup and immutable pristine per-case timings; session_sink hands back findings and the
-            # resumed-session factual-record callback.
-            extra_kwargs = {}
-            try:
-                params = inspect.signature(agent_fn).parameters
-                if "baseline_case_times" in params:
-                    extra_kwargs["baseline_case_times"] = dict(self._baseline_case_times)
-                if "best_mean_case_speedup" in params:
-                    extra_kwargs["best_mean_case_speedup"] = self.best_mean_case_speedup
-                if "session_sink" in params:
-                    extra_kwargs["session_sink"] = session_sink
-            except (ValueError, TypeError):
-                log.debug("could not introspect agent_fn signature", exc_info=True)
+            # resumed-session factual-record callback. The lesson turn, not this session, writes the record.
+            extras = {
+                "gate_scoring": GateScoring(dict(self._baseline_case_times), self.best_mean_case_speedup),
+                "session_sink": session_sink,
+            }
+            extra_kwargs = declared_extras(agent_fn, extras)
             agent_error = None
             try:
                 rationale = await agent_fn(
@@ -5783,6 +5770,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             reusable_benchmark=reusable_benchmark,
             optimization_plan_path=optimization_plan_path,
             optimization_plan_executable=optimization_plan_executable,
+            lane_record=lane_record,
         )
 
     async def _collect_session_candidate(
@@ -5910,15 +5898,15 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 if new_files_only:
                     self._git_discard_worktree()
                 if agent_error:
-                    decision_label = "AGENT_ERROR"
+                    decision_label = DecisionLabel.AGENT_ERROR.value
                     summary = f"agent_fn error: {agent_error}"
                 elif api_failed:
-                    decision_label = "API_ERROR"
+                    decision_label = DecisionLabel.API_ERROR.value
                     summary = (
                         "LLM API never answered this Session; no candidate was attempted (not an optimization result)"
                     )
                 elif new_files_only:
-                    decision_label = "NO_CHANGES"
+                    decision_label = DecisionLabel.NO_CHANGES.value
                     summary = (
                         "NO TRACKED CHANGES: the whole candidate was in "
                         "new file(s) matching "
@@ -5929,7 +5917,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                         "rather than measured with the next candidate."
                     )
                 else:
-                    decision_label = "NO_CHANGES"
+                    decision_label = DecisionLabel.NO_CHANGES.value
                     summary = "NO TRACKED CHANGES: agent produced no candidate diff"
                 print("  [agent] No tracked source changes; skipping candidate")
                 result = IterationResult(
@@ -5998,7 +5986,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             decision_label=decision_label,
         )
         await self._record_lesson(
-            iteration=iteration,
             result=result,
             decision=decision_label,
             session_sink=session_sink,
@@ -6192,13 +6179,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
 
         self._update_search_policy(iteration)
 
-        print(
-            f"--- Iteration {iteration} "
-            f"(best mean case speedup: {self.best_mean_case_speedup:.6f}x, "
-            f"remaining: {self._time_remaining() / 60:.0f} min) ---"
-            if self.best_mean_case_speedup is not None
-            else f"--- Iteration {iteration} ---"
-        )
+        print(iteration_header(iteration, self.best_mean_case_speedup, self._time_remaining()))
         roofline_progress = self._render_roofline_progress()
         if roofline_progress:
             print(roofline_progress)
@@ -6213,7 +6194,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         self.run_state.iteration = iteration
         self.state_store.append_event(
             make_event(
-                "iteration_started",
+                ITERATION_STARTED,
                 iteration,
                 best_before_ms=self.best_wall_ms,
                 best_before_mean_case_speedup=self.best_mean_case_speedup,
@@ -6316,6 +6297,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             reusable_benchmark,
             _optimization_plan_path,
             optimization_plan_executable,
+            _lane_record,
         ) = attempt
         # Snapshot the best-so-far BEFORE this iteration is measured, so the archive can record the true delta vs
         # the standard it had to beat (run_one_iteration mutates self.best_wall_ms on an improvement).
@@ -6442,11 +6424,11 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
 # mean no candidate was ever measured.
 _LABELS_WITHOUT_A_MEASURED_NEGATIVE = frozenset(
     {
-        "KEEP",
-        "NO_CHANGES",
-        "API_ERROR",
-        "AGENT_ERROR",
-        "ORCHESTRATION_ERROR",
+        DecisionLabel.KEEP.value,
+        DecisionLabel.NO_CHANGES.value,
+        DecisionLabel.API_ERROR.value,
+        DecisionLabel.AGENT_ERROR.value,
+        DecisionLabel.ORCHESTRATION_ERROR.value,
     }
 )
 
@@ -6454,20 +6436,20 @@ _LABELS_WITHOUT_A_MEASURED_NEGATIVE = frozenset(
 def _decision_label(result: IterationResult) -> str:
     """The canonical keep/revert label for one finished attempt."""
     if result.integrity_violation:
-        return "REVERT_INTEGRITY"
+        return DecisionLabel.REVERT_INTEGRITY.value
     if result.workspace_contention:
-        return "REVERT_CONTENDED"
+        return DecisionLabel.REVERT_CONTENDED.value
     if result.crashed:
-        return "CRASH"
+        return DecisionLabel.CRASH.value
     if not result.validation_passed:
         if (result.validation_summary or "").startswith("BUILD FAILED"):
-            return "BUILD_FAILED"
+            return DecisionLabel.BUILD_FAILED.value
         if result.validation_outcome == "timeout":
-            return "REVERT_VALIDATION_TIMEOUT"
+            return DecisionLabel.REVERT_VALIDATION_TIMEOUT.value
         if result.validation_outcome in {"driver_error", "invalid_result"}:
-            return "REVERT_VALIDATION_ERROR"
-        return "REVERT_VALIDATION"
-    return "KEEP" if result.kept else "REVERT_PERF"
+            return DecisionLabel.REVERT_VALIDATION_ERROR.value
+        return DecisionLabel.REVERT_VALIDATION.value
+    return DecisionLabel.KEEP.value if result.kept else DecisionLabel.REVERT_PERF.value
 
 
 def _long_horizon_header(

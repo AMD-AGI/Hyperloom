@@ -40,10 +40,16 @@ from kernelforge.orchestrator.contracts import (
     SpecialistOutcome,
     SpecialistRound,
 )
+from kernelforge.orchestrator.critic_fallback import render_critic_fallback
 from kernelforge.orchestrator.specialists import (
     SpecialistAgent,
     SpecialistPool,
     SpecialistProbeConfig,
+)
+from kernelforge.orchestrator.plan_prompts import (
+    LANE_SYNTHESIS_SYSTEM_PROMPT,
+    REVISION_SYSTEM_PROMPT,
+    SYNTHESIS_SYSTEM_PROMPT,
 )
 from kernelforge.orchestrator.plan_critic import (
     PLAN_CRITIC_MAX_TURNS,
@@ -124,22 +130,6 @@ Use only the supplied evidence. Do not edit files, run shell commands, alter
 measurement inputs, or present an inference as a profiler fact. Return one JSON
 object containing the specialist assignments. Do not use Markdown fences or add
 text outside the JSON object.
-"""
-
-_SYNTHESIS_SYSTEM_PROMPT = """\
-You are the read-only lead planner for an autonomous GPU-kernel optimization
-search. Multiple specialists have independently analyzed the current kernel.
-
-Synthesize their work into one coherent, implementer-ready optimization plan. Judge
-the recommendations rather than copying them: compare expected value, evidence,
-feasibility, correctness risk, implementation cost, dependencies, and conflicts.
-Combine compatible ideas, reject weak or contradictory ideas, and choose a clear
-implementation sequence. The result must be an integrated plan, not a catalog of
-specialist suggestions.
-
-Use only supplied evidence. Do not edit files, run shell commands, alter
-measurement inputs, or present an inference as a profiler fact. Return ordinary
-Markdown with no fixed schema.
 """
 
 _PARTITION_SYSTEM_PROMPT = """\
@@ -231,55 +221,6 @@ The remaining lanes are divided as usual, over ground the challenger does not
 touch. A challenger is allowed to lose: it is measured under the unchanged
 correctness and KEEP gates like any other lane, and one lane is what the round
 is willing to spend to find out.
-"""
-
-_LANE_SYNTHESIS_SYSTEM_PROMPT = """\
-You are the read-only lead planner for one lane of an autonomous GPU-kernel
-optimization search. Several lanes are implemented concurrently this round from
-the same analysis, each by its own Implementer in its own workspace.
-
-Plan only the ground your lane owns. Every lane's patch is measured on its own
-and adopted on its own, so work that overlaps another lane's ground spends two
-Implementer sessions on one change and returns one answer for the price of two.
-
-Your ground and every other lane's are stated in the payload, in the terms an
-edit lands in. They are the boundary, not a hint: when your strongest idea needs
-code another lane owns, plan the strongest idea that fits inside your own ground
-and say plainly what you had to leave out.
-
-When the payload marks your lane `joint`, your ground deliberately spans more
-than one region -- a change and the launch configuration it invalidates, or a
-move no single region contains -- and its result cannot be attributed to either
-part alone. Plan it time-boxed: name what is measured first, name the point at
-which the joint step is abandoned, and sequence the lane's `fallback` behind
-that point, so the session lands a measured candidate either way.
-
-You are given the whole round's evidence, not a slice of it. Every analysis may
-have something to say about your ground; read all of them and use whatever bears
-on the code you own.
-
-Within your own ground, judge the recommendations rather than copying them:
-compare expected value, evidence, feasibility, correctness risk, cost and
-dependencies, and choose a clear implementation sequence.
-
-Use only supplied evidence. Do not edit files, run shell commands, alter
-measurement inputs, or present an inference as a profiler fact. Return ordinary
-Markdown with no fixed schema.
-"""
-
-_REVISION_SYSTEM_PROMPT = """\
-You are the read-only lead planner revising one GPU-kernel optimization plan
-after an independent critic review.
-
-Produce one final, implementer-ready Markdown plan. Address every substantive
-critic concern using the supplied evidence. For REVISE, correct evidence,
-scope, sequencing, feasibility, and risk gaps while preserving worthwhile
-parts. For REPLACE, discard the dominated implementation route and formulate a
-concrete validation plan for the critic's alternative.
-
-Do not dispatch specialists again, edit files, run shell commands, alter
-measurement inputs, or present inference as profiler fact. Return only the
-final ordinary Markdown plan.
 """
 
 
@@ -610,7 +551,7 @@ class OrchestrationAgent:
         result = await self._run_result(
             context,
             _Turn(
-                _SYNTHESIS_SYSTEM_PROMPT,
+                SYNTHESIS_SYSTEM_PROMPT,
                 json.dumps(payload, indent=2, sort_keys=True),
                 role="orchestration synthesis",
             ),
@@ -679,7 +620,7 @@ class OrchestrationAgent:
             result = await self._run_result(
                 context,
                 _Turn(
-                    _LANE_SYNTHESIS_SYSTEM_PROMPT,
+                    LANE_SYNTHESIS_SYSTEM_PROMPT,
                     json.dumps(payload, indent=2, sort_keys=True),
                     role=f"orchestration lane {index + 1} synthesis",
                 ),
@@ -1029,7 +970,7 @@ class OrchestrationAgent:
         # from.
         fresh_payload = {
             **resumed_payload,
-            "revision_instructions": _REVISION_SYSTEM_PROMPT.strip(),
+            "revision_instructions": REVISION_SYSTEM_PROMPT.strip(),
             "context": context.to_prompt_dict(),
             "dispatch_plan": specialists.dispatch_plan.to_dict(),
             "specialist_coverage": dict(specialists.coverage),
@@ -1042,7 +983,7 @@ class OrchestrationAgent:
             result = await self._resume_result(
                 context,
                 _Turn(
-                    _REVISION_SYSTEM_PROMPT,
+                    REVISION_SYSTEM_PROMPT,
                     "",
                     role="orchestration revision",
                     max_turns=PLAN_REVISION_MAX_TURNS,
@@ -1064,7 +1005,7 @@ class OrchestrationAgent:
             result = await self._run_result(
                 context,
                 _Turn(
-                    _REVISION_SYSTEM_PROMPT,
+                    REVISION_SYSTEM_PROMPT,
                     json.dumps(fresh_payload, indent=2, sort_keys=True),
                     role="orchestration revision",
                     max_turns=PLAN_REVISION_MAX_TURNS,
@@ -1561,7 +1502,7 @@ class OrchestrationService:
             return [
                 replace(
                     drafts[0],
-                    text=self._render_critic_revision_fallback(
+                    text=render_critic_fallback(
                         draft_plan=drafts[0].text,
                         critic_review=critic_outcome.review,
                         critic_verdict=critic_outcome.verdict,
@@ -1583,34 +1524,6 @@ class OrchestrationService:
             "duration_sec": duration_sec,
             "message": "; ".join(failures),
         }
-
-    @staticmethod
-    def _render_critic_revision_fallback(
-        *,
-        draft_plan: str,
-        critic_review: str,
-        critic_verdict: str,
-    ) -> str:
-        """Preserve critic corrections when the model revision is unavailable."""
-        return "\n".join(
-            (
-                "# Optimization plan",
-                "",
-                (
-                    "The Orchestration revision was unavailable. Treat the "
-                    "Critic review below as mandatory planning guidance before "
-                    "editing; use the draft only as historical context."
-                ),
-                "",
-                f"## Critic verdict: {critic_verdict}",
-                "",
-                critic_review.strip(),
-                "",
-                "## Original draft",
-                "",
-                draft_plan.strip(),
-            )
-        ).strip()
 
     @staticmethod
     def _render_framework_plan(context: OrchestrationContext, specialists: SpecialistRound) -> str:

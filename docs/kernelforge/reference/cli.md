@@ -35,6 +35,7 @@ kernelforge gemm-tune run --model-path <M> --framework sglang \
 kernelforge kernel-rewrite-controller --handoff-dir <H> \
     --budget-minutes <m> --output-dir <D>
 kernelforge roofline-ceiling --workspace <W> [options]
+kernelforge export-runs <LOG_ROOT>... --output <file>
 ```
 
 See {doc}`Experience store </kernelforge/reference/experience-store>` for the exact
@@ -506,3 +507,54 @@ profiler or a shell cannot outlive its budget and hold the device.
 
 The result dict (`ideal_ms` per case, `mean_ideal_ms`, `report_path`) is
 printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__` sentinels.
+
+## export-runs
+
+Writes the runs found under one or more directories as one JSON document,
+`{"runs": [...], "raw_logs": ["raw-logs-not-collected.log"]}`, for
+`hyperloom-kb-collect --mapping kernelforge-v1` (see
+{doc}`Experience collection </reference/experience-kb-collect>`), and an empty
+`raw-logs-not-collected.log` beside it. A run is a plain `forge-loop` run's
+`forge_experiments/` directory, which holds `campaign_config.json` and
+`run_state.json`. Each candidate the run archived
+(`candidates/iter_NNN/`) is one entry, so each lane of a fan-out round is an
+entry of its own; a run whose `campaign_config.json` or `run_state.json` is not
+the JSON KernelForge writes, or a candidate whose `meta.json` is missing or
+malformed, is one entry saying why, which collection skips with that reason.
+
+An entry names the candidate's plan, the kernel KernelForge measured, and, when
+the candidate archived one, the diff of every file the commit touched
+(`candidates/iter_NNN/change.diff`). Its reasoning is the whole lesson
+`lessons/iter_NNN.md` or, for a single session that wrote none, the first three
+sentences of the rationale its `meta.json` records. A lane or a merge with
+neither has no reasoning. It holds the text of the `report.md` of the Analysis
+generation the candidate's planning round read, which its
+`orchestration/iter_NNN/context.json` names, and names that generation in its
+metadata. It carries the candidate's whole
+`meta.json` as its metadata, and the run's operator, the kernel name
+KernelForge files its KB records under, its framework, backend, GPU, and the
+benchmark driver's SHA-256 from `campaign_config.json`. The run's
+`forge-loop.log` gives the record KernelForge's own experience KB filed a kept
+candidate under; the log is only read, and no entry names it or records its path.
+
+A log belongs to the run whose workspace path ends most like the kernel path
+it announces, which may differ in its leading directories, as for a run made in
+a container. The export stops with an error and writes nothing when it cannot
+list a directory under the log roots or read a file it needs, such as a JSON
+record, a plan, a lesson, or a log, naming that path, or when a log fits
+two runs equally well.
+
+The document names the empty file, relative to itself, as the raw log of every
+Experience collected from it, and no run log goes with an Experience: the
+global KB refuses a complete Experience without raw logs, and KernelForge's run
+logs are not collected yet. Keep the file beside the document: collection reads
+that name from the document's directory and skips every candidate when the file
+is missing. The export empties any file of that name already there. A document
+without a top-level `raw_logs`, such as one an earlier `export-runs` wrote,
+gives Experiences the global KB refuses: export its runs again before
+collecting them.
+
+| Argument / option | Default | Meaning |
+|:--|:--|:--|
+| `LOG_ROOT...` | required | One or more directories to read runs from, in the order given. |
+| `--output <file>` / `-o` | required | Where to write the JSON document. The empty `raw-logs-not-collected.log` is written beside it. |

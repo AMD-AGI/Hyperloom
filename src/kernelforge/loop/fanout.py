@@ -10,8 +10,9 @@ import logging
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from kernelforge.loop.lessons import SummaryOutcome
 from kernelforge.tools.git import git, git_async
 
 from kernelforge.tools.process_reaping import (
@@ -25,6 +26,19 @@ log = logging.getLogger(__name__)
 
 SERIALIZED_DRIVER_NAME = "forge_lane_driver.py"
 DEVICE_LOCK_SENTINEL = ".forge-device-bench.lock"
+LANE_ROOT_PREFIX = "forge-lanes-"
+_LANE_RATIONALE_PREFIX, _LANE_RATIONALE_SUFFIX = "lane ", " of a fan-out round"
+
+
+def lane_rationale(lane_id: str) -> str:
+    """The rationale a lane's candidate is archived with, which says only which lane of its round produced it."""
+    return f"{_LANE_RATIONALE_PREFIX}{lane_id}{_LANE_RATIONALE_SUFFIX}"
+
+
+def is_lane_rationale(text: str) -> bool:
+    """Whether ``text`` is a rationale ``lane_rationale`` wrote."""
+    lane_id = text.removeprefix(_LANE_RATIONALE_PREFIX).removesuffix(_LANE_RATIONALE_SUFFIX)
+    return lane_id.isdecimal() and text == lane_rationale(lane_id)
 
 
 def campaign_device_lock_path(workspace: str | Path) -> Path:
@@ -50,6 +64,10 @@ class LaneResult:
     diff: str = ""
     error: str = ""
     agent_profile_id: str = ""
+    # The session's record, or why it has none, taken while the lane copy still
+    # exists. The round deletes that copy on return, so the measuring iteration
+    # and a later process read it from the queue rather than resuming the session.
+    lesson: SummaryOutcome = field(default_factory=SummaryOutcome)
     # What this lane's teardown found, carried structured rather than folded
     # into ``error``. The two say different things to different readers: the
     # error is why THIS lane produced nothing, which costs the round one
@@ -67,6 +85,31 @@ class LaneResult:
     def contended(self) -> bool:
         """Whether this lane's teardown left the device unsafe to measure on."""
         return self.reaped is not None and self.reaped.contended
+
+    def to_dict(self) -> dict:
+        """The queue record: what a later process needs in order to measure this candidate."""
+        return {
+            "lane_id": self.lane_id,
+            "plan": self.plan,
+            "diff": self.diff,
+            "agent_profile_id": self.agent_profile_id,
+            "lesson": self.lesson.text,
+            "lesson_reason": self.lesson.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, entry: dict) -> "LaneResult":
+        """One queued candidate. An entry holding neither a lesson nor its reason restores with a reason saying so."""
+        text, reason = str(entry.get("lesson") or ""), str(entry.get("lesson_reason") or "")
+        if not text and not reason:
+            reason = "the lane queue held no record for this lane"
+        return cls(
+            lane_id=str(entry["lane_id"]),
+            plan=str(entry["plan"]),
+            diff=str(entry["diff"]),
+            agent_profile_id=str(entry.get("agent_profile_id") or ""),
+            lesson=SummaryOutcome(text=text, reason=reason),
+        )
 
 
 _SERIALIZED_DRIVER = '''\
@@ -273,7 +316,7 @@ async def run_lanes(
     *,
     workspace_dir: str,
     lanes: Sequence[LanePlan],
-    session: Callable[[LanePlan, Path, Path], Awaitable[None]],
+    session: Callable[[LanePlan, Path, Path], Awaitable[SummaryOutcome]],
     parent_dir: str,
     driver: str,
 ) -> list[LaneResult]:
@@ -287,7 +330,7 @@ async def run_lanes(
     parent = Path(parent_dir).resolve()
     driver_relative = _lane_driver(source=source, driver=driver)
     await _require_room(source=source, parent=parent, lane_count=len(lanes))
-    root = Path(tempfile.mkdtemp(prefix="forge-lanes-", dir=str(parent)))
+    root = Path(tempfile.mkdtemp(prefix=LANE_ROOT_PREFIX, dir=str(parent)))
     try:
         lane_dirs = [root / lane.lane_id for lane in lanes]
         for lane_dir in lane_dirs:
@@ -311,7 +354,7 @@ async def run_lanes(
             reaped: ReapReport | None = None
             try:
                 try:
-                    await session(lane, lane_dir, serialized_driver)
+                    lesson = await session(lane, lane_dir, serialized_driver)
                 finally:
                     reaped = await _reap_lane_processes(lane_dir)
                 # Outside the guard above on purpose: a lane whose session already failed has to report why it failed,
@@ -336,6 +379,7 @@ async def run_lanes(
                 lane_id=lane.lane_id,
                 plan=lane.plan,
                 diff=diff,
+                lesson=lesson,
                 reaped=reaped,
             )
 

@@ -447,7 +447,7 @@ def test_a_ceiling_with_no_usable_case_logs_that_instead_of_a_figure(tmp_path):
 
 def test_the_progress_is_logged_with_each_iteration_header():
     source = inspect.getsource(IterationLoop._open_iteration)
-    header_at = source.index('f"--- Iteration {iteration} "')
+    header_at = source.index("print(iteration_header(")
 
     assert header_at < source.index("self._render_roofline_progress()")
 
