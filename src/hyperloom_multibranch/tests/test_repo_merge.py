@@ -3,6 +3,7 @@
 
 import difflib
 import hashlib
+import subprocess
 from collections.abc import Collection
 from dataclasses import replace
 from pathlib import Path
@@ -503,8 +504,6 @@ async def test_the_repository_reports_what_does_not_apply_to_the_installed_packa
     assert [change.add_patches for change in clashing.delta.components] == [()]
     assert beside.clean and len(apply(await repo.read_recipe(head), beside.delta).component("vllm").patches) == 2
     assert (clashing.rebased_patches, beside.rebased_patches) == ((), ())
-    with pytest.raises(ValueError, match="root commit"):
-        await repo.merge(root, head)
     assert await repo.head(INTEGRATION_BRANCH) == head
 
 
@@ -723,3 +722,129 @@ def test_a_merge_carries_no_resolved_patch_until_the_integrator_adds_one():
     assert (resolved.component, resolved.replaces, resolved.patch) == ("vllm", "patch/vllm/old.patch", _patch("new"))
     assert (resolved.model, resolved.prompt_version, resolved.attempts) == ("claude-sonnet-5-5", "v1", 2)
     assert replace(RepoMerge(PIN, RecipeDelta()), resolved_patches=(resolved,)).resolved_patches == (resolved,)
+
+
+def _setting(**config: object) -> RecipeDelta:
+    return RecipeDelta(ConfigDelta(**config))
+
+
+async def _lineage(repo: GitExperimentRepo, branch: str, at: str, *deltas: RecipeDelta) -> list[str]:
+    """Commits of ``deltas`` in turn on a new ``branch`` from ``at``, each on the one before."""
+
+    await repo.create_branch(branch, at)
+    commits, parent = [], at
+    for number, delta in enumerate(deltas):
+        parent = await repo.commit(branch, parent, apply(await repo.read_recipe(parent), delta), f"{branch}.{number}")
+        commits.append(parent)
+    return commits
+
+
+async def _merged(repo: GitExperimentRepo, candidate: str) -> str:
+    head = await repo.head(INTEGRATION_BRANCH)
+    return await repo.commit_integration(head, (await repo.merge(candidate, head)).delta, (candidate,))
+
+
+@pytest.fixture
+async def rooted(tmp_path) -> tuple[GitExperimentRepo, str]:
+    repo = GitExperimentRepo(tmp_path / "experiments.git", LocalBlobStore(tmp_path / "blobs"))
+    return repo, await repo.init_root(BASE)
+
+
+async def test_an_unmerged_lineage_is_carried_from_the_merge_base(rooted):
+    repo, root = rooted
+    first, second = await _lineage(
+        repo, "s1", root, _setting(server_args="--max-num-seqs 256"), _setting(envs={"VLLM_ROCM_USE_AITER": "1"})
+    )
+    (other,) = await _lineage(repo, "s2", root, _setting(server_args="--enable-chunked-prefill"))
+    head = await _merged(repo, other)
+
+    merge = await repo.merge(second, head)
+
+    merged = apply(await repo.read_recipe(head), merge.delta)
+    assert merge.clean and merge.carried == (first, second)
+    assert "--max-num-seqs 256" in merged.launch.server_args and "--enable-chunked-prefill" in merged.launch.server_args
+    assert merged.launch.envs["VLLM_ROCM_USE_AITER"] == "1"
+
+
+async def test_a_lineage_whose_first_commit_was_merged_carries_only_the_second(rooted):
+    repo, root = rooted
+    first, second = await _lineage(
+        repo, "s1", root, _setting(server_args="--max-num-seqs 256"), _setting(envs={"VLLM_ROCM_USE_AITER": "1"})
+    )
+    head = await _merged(repo, first)
+
+    merge = await repo.merge(second, head)
+
+    assert merge.carried == (second,)
+    assert merge.delta == _setting(envs={"VLLM_ROCM_USE_AITER": "1"})
+
+
+async def test_a_child_of_a_parent_never_merged_carries_the_parent(tmp_path):
+    """b13's 65ee1103 in miniature: the child rewrites the line its parent changed, which the head never took."""
+
+    repo = _repository(tmp_path, _installed(tmp_path, config="".join(_config())))
+    root = await repo.init_root(BASE)
+    parent_patch = await repo.store_patch("vllm", _edit(c="30"))
+    child_patch = await repo.store_patch("vllm", _on(_config(c="31"), _config(c="30")))
+    parent, child = await _lineage(repo, "s1", root, _adding_patch(parent_patch), _adding_patch(child_patch))
+    (other,) = await _lineage(repo, "s2", root, _adding_patch(await repo.store_patch("vllm", _edit(h="80"))))
+    head = await _merged(repo, other)
+
+    merge = await repo.merge(child, head)
+
+    assert merge.clean and merge.carried == (parent, child)
+    stack = apply(await repo.read_recipe(head), merge.delta).component("vllm")
+    assert stack is not None and [patch.path for patch in stack.patches][-2:] == [parent_patch.path, child_patch.path]
+
+
+async def test_a_candidate_already_on_onto_carries_nothing(rooted):
+    repo, root = rooted
+    (first,) = await _lineage(repo, "s1", root, _setting(server_args="--max-num-seqs 256"))
+    head = await _merged(repo, first)
+
+    for candidate in (root, first, head):
+        merge = await repo.merge(candidate, head)
+        assert (merge.onto, merge.delta, merge.carried) == (head, RecipeDelta(), ())
+
+
+async def test_a_criss_cross_history_does_not_merge(tmp_path, rooted):
+    repo, root = rooted
+    (left,) = await _lineage(repo, "s1", root, _setting(server_args="--max-num-seqs 256"))
+    (right,) = await _lineage(repo, "s2", root, _setting(envs={"VLLM_ROCM_USE_AITER": "1"}))
+    head = await repo.commit_integration(root, RecipeDelta(), (left, right))
+    git = ["git", "--git-dir", str(tmp_path / "experiments.git")]
+    tree = subprocess.run([*git, "rev-parse", f"{head}^{{tree}}"], capture_output=True, text=True, check=True)
+    argv = [*git, "commit-tree", "-p", right, "-p", left, "-m", "crossed", tree.stdout.strip()]
+    crossed = subprocess.run(argv, capture_output=True, text=True, check=True).stdout.strip()
+
+    with pytest.raises(RecipeError, match="merge bases") as raised:
+        await repo.merge(crossed, head)
+    assert left in str(raised.value) and right in str(raised.value)
+
+
+async def test_a_reverse_merge_carries_every_merge_integration_took_since_the_branch_forked(rooted):
+    """zheng's case: integration's head carried onto a leading branch that forked before three merges."""
+
+    repo, root = rooted
+    (lead,) = await _lineage(repo, "lead", root, _setting(server_args="--max-num-seqs 256"))
+    taken = []
+    for branch, delta in (
+        ("s1", _setting(server_args="--enable-chunked-prefill")),
+        ("s2", _setting(envs={"VLLM_ROCM_USE_AITER": "1"})),
+        ("s3", _setting(remove_args=("--enforce-eager",))),
+    ):
+        (commit,) = await _lineage(repo, branch, await repo.head(INTEGRATION_BRANCH), delta)
+        taken.append((commit, await _merged(repo, commit)))
+    head = taken[-1][1]
+
+    merge = await repo.merge(head, lead)
+
+    merged = apply(await repo.read_recipe(lead), merge.delta)
+    assert merge.clean and set(merge.carried) == {commit for pair in taken for commit in pair}
+    assert merge.carried[-1] == head and lead not in merge.carried
+    assert merged.launch.server_args.split() == ["--max-num-seqs", "256", "--enable-chunked-prefill"]
+    assert merged.launch.envs == {"VLLM_USE_V1": "1", "VLLM_ROCM_USE_AITER": "1"}
+
+
+def _adding_patch(patch: PatchRef) -> RecipeDelta:
+    return RecipeDelta(components=(ComponentChange("vllm", add_patches=(patch,)),))
