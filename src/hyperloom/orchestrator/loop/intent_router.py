@@ -1481,8 +1481,20 @@ class IntentRouter(CoordinatorCollaborator):
 
         phase = str(self.shared_state.phase or "").strip().upper()
         if hint == ESCALATE_HINT_SKIP_TO_KERNEL and phase != PHASE_FRAMEWORK_AGENT:
-            # Only the FRAMEWORK_AGENT exit reads it; left pending, it would end that phase on arrival.
-            log.info("escalate_strategy_change: dropped %r emitted in phase %s", hint, phase or "<none>")
+            # Only the FRAMEWORK_AGENT exit reads it; left pending, it would end that phase on arrival. Refused in
+            # silence, an agent re-sends it every turn and then reaches for skip_to_close, which ends the run.
+            await self.record_policy_denied(
+                source,
+                intent,
+                PolicyDenied(
+                    f"next_action_hint={hint!r} advances FRAMEWORK_AGENT only; the session is in {phase or '<none>'}",
+                    rule="escalate_hint_phase",
+                    hint=(
+                        f"No hint advances {phase or 'this phase'}: the Coordinator exits it on the gate its phase "
+                        "goal names. skip_to_close does not advance a phase; it ends the run."
+                    ),
+                ),
+            )
             return
         # skip_to_kernel / skip_to_close are deferred; next compute_next_phase picks them up.
         self.shared_state.set_pending_escalate_hint(hint)

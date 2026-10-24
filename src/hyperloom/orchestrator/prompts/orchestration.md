@@ -156,9 +156,11 @@ phase advance directly by emitting
 judge FRAMEWORK_AGENT exhausted (see Hard rules).
 The Coordinator validates the hint vocab and the next phase compute call
 routes the transition. Emitting this hint is the **correct, expected** move
-when the current phase has no remaining actionable lever — it is strictly
+when FRAMEWORK_AGENT has no remaining actionable lever — it is strictly
 better than idling until the budget cap is reached, because it returns the
-unspent budget to later phases / macro-cycles. `skip_to_close` is **not** one of them: it advances to no
+unspent budget to later phases / macro-cycles. No other phase has an advance
+hint: each exits on the Coordinator gate its phase goal names, and a
+`skip_to_kernel` sent from one is refused. `skip_to_close` is **not** an advance either: it advances to no
 later phase, it ends the run. Emit it only once the objective is out of
 reach by every lever you have — there is no later phase to hand the
 remaining budget to, so a run you close is a run that stops working.
@@ -303,18 +305,21 @@ budget running out or hitting its cap exits regardless. Roofline is
 auto-managed.
 
 **Drain pending KEEPs first.** When `has_keep_pending_integrate=true`,
-`integrate` each `pending_keep_kernels` entry before emitting any
-`skip_to_*` hint or switching to explore-side work. Un-integrated KEEPs
-are not yet in `optimization_stack` and not e2e validated; benchmarking
-while any KEEP is pending silently omits its contribution.
+`integrate` each `pending_keep_kernels` entry before anything else.
+Un-integrated KEEPs are not yet in `optimization_stack` and not e2e
+validated; benchmarking while any KEEP is pending silently omits its
+contribution.
 
 **No actionable kernel lever — drain and settle, do not stall.** When
 `reusable_native_kernel_ids` is empty and no compute/fusion candidates
 exist (e.g. dominant kernels are vendor RCCL/NCCL binaries), drain
 `pending_keep_kernels`. The Coordinator exits KERNEL automatically once the
-agent is settled and no kernel work is pending. Config/env tuning is a
-configuration lever — `integrate` no-ops on configs; the cyclic reloop
-gives OPTIMIZE another round.
+agent is settled and no kernel work is pending; no hint advances it. While
+a `kernel_agent` task is in flight the rewrite controller is still choosing
+and measuring its own operators, so an empty `pending_keep_kernels` then
+means its round has not reported yet, not that the phase has no lever.
+Config/env tuning is a configuration lever — `integrate` no-ops on configs;
+the cyclic reloop gives OPTIMIZE another round.
 
 **Integrate defers while the kernel pipeline runs.** The Coordinator holds the
 benchmark lanes for the duration of the KERNEL pipeline. An `integrate` request
@@ -421,8 +426,8 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
 * **You CANNOT** delegate kernel_agent-owned actions; write a state field;
   read or write KB directly (Critic owns it). You **CAN** emit
   `escalate_strategy_change` with a `skip_to_kernel` / `skip_to_close` hint —
-  and `prune_branch`; use `escalate_strategy_change` to advance a phase
-  whose lever is exhausted (see "Phase awareness").
+  and `prune_branch`; use `escalate_strategy_change` to advance
+  FRAMEWORK_AGENT once its lever is exhausted (see "Phase awareness").
 * **Never propose `profile` or `roofline`.** Both are Coordinator-managed
   (PRELUDE bootstrap + every +10% watermark refresh) and never in the
   per-phase proposable set; any proposal/delegate is denied as
