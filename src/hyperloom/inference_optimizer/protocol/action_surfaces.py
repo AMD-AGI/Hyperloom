@@ -59,7 +59,7 @@ COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
 
 
 # Coordinator-managed actions that agents should not directly propose.
-INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
+COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = frozenset(
     {
         "conc_sweep",
         "roofline",
@@ -71,9 +71,6 @@ INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
         "kernel_agent",
     }
 )
-
-
-COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = INTERNAL_ONLY_ACTION_NAMES
 
 
 # Actions rendered in the Orchestration prompt for full kernel-enabled runs.
@@ -355,7 +352,6 @@ __all__ = [
     "ActionMetadata",
     "COORDINATOR_INTERNAL_ACTIONS",
     "FULL_ENABLED_ACTIONS",
-    "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_ACTION_REQUEST_KINDS",
     "COORDINATOR_OWNED_KERNEL_REQUEST_KINDS",
     "KERNEL_AGENT_OWNED_ACTIONS",
