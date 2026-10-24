@@ -817,7 +817,7 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
     if not env_flag(_KV_METRICS_ENV, default=True):
         return None
     try:
-        from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder
+        from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder, KvRound
 
         workspace = Path(server_log_path).parent
         return KvMetricsRecorder(
@@ -827,15 +827,17 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
             # Authoritative phase boundaries when this round is an AgentX one; a no-op otherwise, since no other client
             # publishes a progress address and the poller then never resolves a URL.
             progress=AiperfProgressPoller(workspace),
-            output_path=str(workspace / KV_ARTIFACT_NAME),
-            scope={
-                "server_log_path": str(server_log_path),
-                "workspace": workspace.name,
-                "run_path": _run_relative_path(workspace),
-                "session": os.path.basename(
-                    os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
-                ),
-            },
+            kv_round=KvRound(
+                output_path=str(workspace / KV_ARTIFACT_NAME),
+                scope={
+                    "server_log_path": str(server_log_path),
+                    "workspace": workspace.name,
+                    "run_path": _run_relative_path(workspace),
+                    "session": os.path.basename(
+                        os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
+                    ),
+                },
+            ),
         )
     except Exception:
         log.warning("kv_metrics: recorder could not be built; this round collects nothing", exc_info=True)

@@ -71,6 +71,7 @@ __all__ = [
     "AiperfProgressPoller",
     "KvMetricsPoller",
     "KvMetricsRecorder",
+    "KvRound",
     "KvSample",
     "canonical_label_key",
     "counter_delta",
@@ -1036,6 +1037,15 @@ def counter_delta(first: dict[str, dict[str, float]], last: dict[str, dict[str, 
     return aggregate_series(deltas) or 0.0
 
 
+@dataclass(frozen=True)
+class KvRound:
+    """The round a KV recorder collects for: where its artifact goes, its directory and the scope it records."""
+
+    output_path: str | None = None
+    workspace: Any = None
+    scope: dict[str, Any] | None = None
+
+
 class KvMetricsRecorder:
     """Collects phase-tagged KV samples for one benchmark round.
 
@@ -1051,19 +1061,21 @@ class KvMetricsRecorder:
         self,
         *,
         poller: KvMetricsPoller,
-        output_path: str | None = None,
-        scope: dict[str, Any] | None = None,
+        kv_round: KvRound = KvRound(),
         min_interval_sec: float | None = None,
         progress: AiperfProgressPoller | None = None,
-        workspace: Any = None,
     ) -> None:
         """Prepare a recorder without contacting anything."""
         self._poller = poller
-        self._output_path = output_path
+        self._output_path = kv_round.output_path
         # The round's own directory, which is where both aiperf's export and our artifacts live. Derived from the
         # output path when not given, so the two can never point at different rounds.
-        self._workspace = workspace if workspace is not None else (Path(output_path).parent if output_path else None)
-        self._scope = dict(scope or {})
+        self._workspace = (
+            kv_round.workspace
+            if kv_round.workspace is not None
+            else (Path(kv_round.output_path).parent if kv_round.output_path else None)
+        )
+        self._scope = dict(kv_round.scope or {})
         self._min_interval = resolve_scrape_interval_sec() if min_interval_sec is None else float(min_interval_sec)
         self._progress = progress
         self._phase_timeline: dict[str, dict[str, Any]] = {}
