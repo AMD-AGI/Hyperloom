@@ -78,6 +78,8 @@ __all__ = [
     "PY_MODULE_NOT_FOUND_ERROR",
     "ROCR_VISIBLE_DEVICES_ENV",
     "SGLANG_CUDA_GRAPH_DECODE_BS",
+    "SHORT_PROMPT_CHECK",
+    "SHORT_PROMPT_TOUCH",
     "SGLANG_IMAGE_AITER_CONFIGS",
     "SGLANG_IMAGE_WORKSPACE",
     "TRANSFORMERS_DOES_NOT_RECOGNIZE",
@@ -105,6 +107,11 @@ AITER_TUNED_HIT = _PACK.pattern("aiter_tuned_hit")
 AITER_TUNED_HIT_MARKER = _PACK.pattern("aiter_tuned_hit_marker")
 
 SGLANG_CUDA_GRAPH_DECODE_BS = _PACK.pattern("sglang_cuda_graph_decode_bs")
+
+SHORT_PROMPT_CHECK = _PACK.names(
+    "short_prompt_check", "processes", "max_new_tokens", "phase_cap_sec", "always_purposes"
+)
+SHORT_PROMPT_TOUCH = _PACK.pattern("short_prompt_touch")
 
 _image = _PACK.names("sglang_image_layout", "workspace", "aiter_configs")
 SGLANG_IMAGE_WORKSPACE = _image["workspace"]

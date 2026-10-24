@@ -25,6 +25,7 @@ from hyperloom.measure.points import default_canonical, generate_points
 from hyperloom.measure.runner import run as runner
 from hyperloom.measure.returncodes import SERVER_BOOT_TIMEOUT_RC
 from hyperloom.measure.runner.hardware import EccCounts, GpuFacts
+from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import MeasurementSpec
 from hyperloom.measure.runner.tests import aiperf_source
@@ -915,3 +916,53 @@ def test_an_agentx_test_whose_client_cannot_be_patched_still_runs_and_the_status
         "the replay client was not patched to export the output token count of a failed"
     )
     assert why in status["message"]
+
+
+SHORT_PROMPTS = {
+    "prompt_set": "short-prompts-0123456789abcdef",
+    "prompts_sha256": "a" * 64,
+    "processes": 6,
+    "max_new_tokens": 32,
+    "phase_cap_sec": 1200.0,
+    "trigger": ["purpose final"],
+}
+
+
+def test_the_short_prompt_plan_of_the_sheet_is_the_one_the_call_carries(tmp_path, env, monkeypatch):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+    sheet = _sheet()
+    sheet["procedure"]["short_prompts"] = SHORT_PROMPTS
+
+    assert _go(tmp_path, env, sheet) == 0
+
+    (call,) = backend.calls
+    assert call.short_prompts is not None and call.short_prompts.to_document() == SHORT_PROMPTS
+
+
+def test_a_sheet_that_asks_for_no_check_gives_a_call_with_none(tmp_path, env, monkeypatch):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+
+    _go(tmp_path, env, _sheet())
+
+    assert backend.calls[0].short_prompts is None
+
+
+def test_a_prompt_set_the_sandbox_does_not_hold_is_spec_rejected_before_any_server_starts(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(tmp_path / "empty-cache"))
+    call = TestCall(
+        points=(tmp_path / "p.yaml",),
+        output_dir=tmp_path / "out",
+        timeout_sec=60,
+        cwd=str(tmp_path),
+        magpie_python="",
+        task_id="t",
+        short_prompts=ShortPromptPlan.parse(SHORT_PROMPTS, "sheet"),
+    )
+
+    with pytest.raises(
+        runner.RunnerFailure, match="short-prompt set short-prompts-0123456789abcdef cannot be used"
+    ) as info:
+        runner._execute(call)
+    assert info.value.error_class == "spec_rejected"

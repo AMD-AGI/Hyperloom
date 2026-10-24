@@ -319,6 +319,7 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         session_facts=SessionFacts((), str(inferencex), spec.tools.magpie),
         attachments=_case_attachments(spec),
         phases=ctx.phases,
+        short_prompts=p.short_prompts,
     )
 
 

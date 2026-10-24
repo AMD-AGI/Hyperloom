@@ -164,7 +164,14 @@ _TEST_RESULT_GUIDE = (
     "(the sandbox starting, the environment rebuilt, the server booting, each round, the result signed and landed): "
     "each phase's name, seconds, gpu_seconds and, for a round's phase, the measurement point it ran for; "
     "server_boot.weights_load and its siblings are parts of server_boot. unaccounted_seconds is the part of the wall "
-    "time no phase covers, so the phases and it add up to it; both are empty or null on a result recorded without them."
+    "time no phase covers, so the phases and it add up to it; both are empty or null on a result recorded without them. "
+    "short_prompt_consistency is null unless the test ran the short-prompt check (a change touching attention, the KV "
+    "cache or prefill, a baseline, a final candidate): short prompts answered greedily by several fresh server processes "
+    "of the candidate's launch. self_consistency counts, for each process, the prompts it answers differently from the "
+    "candidate's other processes; reference.counts does the same against the parent's own outputs, and reference.status "
+    "absent means the parent has none, not that nothing differs. first_difference gives the process, prompt and token "
+    "position of the first difference: a difference in the first tokens is corruption, one late in the output may be "
+    "rounding. The counts are findings, not a verdict."
 )
 _KERNEL_TUNE_PARAMS_NOTE = (
     " For kernel_tune, params.test_request_id is required: a call without it is refused (test_required)."

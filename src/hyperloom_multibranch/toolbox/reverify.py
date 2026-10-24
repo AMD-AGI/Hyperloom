@@ -14,10 +14,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import fields
 
+from hyperloom.contracts.consistency import ShortPromptConsistency
 from hyperloom.contracts.measurement import AccuracyValue, RequestClasses, RoundValue, TestResult
 from hyperloom.measure.manifest import ResultManifest
 
 __all__ = [
+    "first_consistency_difference",
     "first_hash_difference",
     "first_request_classes_difference",
     "first_value_difference",
@@ -26,6 +28,8 @@ __all__ = [
 
 _ROUND_FIELDS = ("phase", "concurrency", "completed_requests", "failed_requests")
 _HASH_FIELDS = ("spec_fingerprint", "surface_sha256")
+#: What a short-prompt check's record states that the bundle alone does not: the parent's outputs, the plan's reasons.
+_CONSISTENCY_NOT_IN_BUNDLE = frozenset({"reference", "trigger"})
 
 
 def first_hash_difference(recorded: TestResult, manifest: ResultManifest) -> str | None:
@@ -68,6 +72,24 @@ def first_request_classes_difference(recorded: TestResult, derived: Sequence[Req
                     f"request_classes[{index}].{field.name}: recorded {getattr(have, field.name)!r}, "
                     f"the bundle has {getattr(want, field.name)!r}"
                 )
+    return None
+
+
+def first_consistency_difference(recorded: TestResult, derived: ShortPromptConsistency) -> str | None:
+    """The first field of the short-prompt check the record holds that differs from the one derived from the bundle's
+    outputs file; the reference and the reasons are not in the bundle and are not compared.
+
+    A record that holds no check is not compared: it claims nothing.
+    """
+    held = recorded.short_prompt_consistency
+    if held is None:
+        return None
+    for field in fields(ShortPromptConsistency):
+        if field.name not in _CONSISTENCY_NOT_IN_BUNDLE and getattr(held, field.name) != getattr(derived, field.name):
+            return (
+                f"short_prompt_consistency.{field.name}: recorded {getattr(held, field.name)!r}, "
+                f"the bundle has {getattr(derived, field.name)!r}"
+            )
     return None
 
 

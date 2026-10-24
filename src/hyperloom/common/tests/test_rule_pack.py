@@ -58,9 +58,22 @@ _SGLANG_CUDA_GRAPH_DECODE_BS = r"""(?x)
   | \bcuda_graph_bs\b'? )
 \s* [:=] \s* \[ (?P<sizes>\d+ (?: \s*,\s* \d+ )* ) \]"""
 
+_SHORT_PROMPT_TOUCH = r"""(?ix) ^ (?:
+    arg \s+ --(?: [a-z-]*attention-backend | kv-cache-dtype | page-size | block-size | chunked-prefill-size
+                 | max-prefill-tokens | max-num-batched-tokens | enable-prefix-caching | disable-radix-cache
+                 | enable-chunked-prefill | num-continuous-decode-steps ) \b
+  | env \s+ \S*? (?: ATTN | ATTENTION | AITER | FLASH | MHA | MLA | KV | PREFILL | RADIX ) \S*? =
+  | ref \s+ (?: aiter | sglang | vllm | flash-attention | flash_attn | triton ) \b
+  | patch \s+ aiter \b
+  | patch \s+ \S+ \s+ \S* (?: attn | attention | mha | mla | prefill | kv | flash | radix )
+  | kernel \s+ (?: fusion | rewrite ) \s+ \S* (?: attn | attention | mha | mla | prefill | kv | flash )
+  | image \s+ changed
+  | unexpressed \s
+)"""
+
 #: Every value ``outside_facts`` held as a literal before the pack existed. Written out, not derived from the pack or
 #: from ``outside_facts``, so that a value that moved with the pack would fail here.
-_LITERALS: dict[str, str | list[str]] = {
+_LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "AIPERF_ERROR_CLASS_KEY": "type",
     "AIPERF_ERROR_KEY": "error",
     "AIPERF_ERROR_OUTPUT_LENGTH_METRIC": "error_osl",
@@ -120,6 +133,13 @@ _LITERALS: dict[str, str | list[str]] = {
     "ROCR_VISIBLE_DEVICES_ENV": "ROCR_VISIBLE_DEVICES",
     "SGLANG_CUDA_GRAPH_DECODE_BS": _SGLANG_CUDA_GRAPH_DECODE_BS,
     "SGLANG_IMAGE_AITER_CONFIGS": "/sgl-workspace/aiter/aiter/configs",
+    "SHORT_PROMPT_CHECK": {
+        "processes": "6",
+        "max_new_tokens": "32",
+        "phase_cap_sec": "1200",
+        "always_purposes": "baseline final",
+    },
+    "SHORT_PROMPT_TOUCH": _SHORT_PROMPT_TOUCH,
     "SGLANG_IMAGE_WORKSPACE": "/sgl-workspace",
     "TRANSFORMERS_DOES_NOT_RECOGNIZE": "Transformers does not recognize",
     "TRANSFORMERS_UNKNOWN_ARCHITECTURE": "does not recognize this architecture",
@@ -183,10 +203,10 @@ def _fresh(code: str, pack: str | None) -> subprocess.CompletedProcess[str]:
 
 def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
-    assert pack.version == "8"
+    assert pack.version == "9"
     assert Counter(entry.kind for entry in pack.entries.values()) == {
-        Kind.NAMES: 14,
-        Kind.LOG_REGEX: 12,
+        Kind.NAMES: 15,
+        Kind.LOG_REGEX: 13,
         Kind.ENV_DEFAULT: 1,
     }
 
@@ -327,7 +347,7 @@ def test_a_session_whose_pack_cannot_be_used_stops_at_import_naming_the_entry(
 
 
 def test_the_recorded_identity_is_the_digest_of_the_bytes_read_and_is_stable(tmp_path: Path) -> None:
-    expected = {"version": "8", "digest": "sha256:" + hashlib.sha256(DEFAULT_PACK_PATH.read_bytes()).hexdigest()}
+    expected = {"version": "9", "digest": "sha256:" + hashlib.sha256(DEFAULT_PACK_PATH.read_bytes()).hexdigest()}
     assert rule_pack_identity() == expected
     assert rule_pack_identity() == rule_pack_identity()
     elsewhere = _fresh(_SHOW, None)

@@ -270,3 +270,59 @@ def test_a_sheet_written_while_the_decode_pass_existed_still_parses_and_the_flag
     assert "decode_pass" not in spec.to_document()["procedure"]
     assert spec.to_document() == MeasurementSpec.from_document(spec_document()).to_document()
     assert not hasattr(spec.procedure, "decode_pass")
+
+
+def _short_prompts(**changes: Any) -> dict[str, Any]:
+    plan = {
+        "prompt_set": "short-prompts-0123456789abcdef",
+        "prompts_sha256": "a" * 64,
+        "processes": 6,
+        "max_new_tokens": 32,
+        "phase_cap_sec": 1200.0,
+        "trigger": ["purpose final", "arg --attention-backend aiter"],
+        "recipe": "sha256:" + "1" * 64,
+        "parent_recipe": "sha256:" + "2" * 64,
+    }
+    return {**plan, **changes}
+
+
+def test_a_sheet_that_asks_for_the_short_prompt_check_carries_the_plan_and_the_schema_allows_it() -> None:
+    document = _edit(lambda d: d["procedure"].update(short_prompts=_short_prompts()))
+
+    spec = MeasurementSpec.from_document(document)
+
+    assert spec.procedure.short_prompts is not None and spec.procedure.short_prompts.processes == 6
+    assert list(VALIDATOR.iter_errors(document)) == []
+    assert MeasurementSpec.from_bytes(spec.to_bytes()) == spec
+
+
+def test_a_sheet_that_asks_for_none_has_no_such_key_so_its_bytes_and_hash_are_unchanged() -> None:
+    spec = MeasurementSpec.from_document(spec_document())
+
+    assert spec.procedure.short_prompts is None and "short_prompts" not in spec.to_document()["procedure"]
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"processes": 0}, "must be at least 1"),
+        ({"prompts_sha256": "nope"}, "does not match"),
+        ({"prompt_set": "Bad Key"}, "does not match"),
+        ({"phase_cap_sec": "slow"}, "expected a number"),
+        ({"trigger": [""]}, "non-empty string"),
+        ({"recipe": "abc"}, "does not match"),
+        ({"extra": 1}, "unknown key 'extra'"),
+    ],
+)
+def test_a_short_prompt_plan_that_breaks_its_contract_is_refused_by_the_reader_and_the_schema(change, message) -> None:
+    document = _edit(lambda d: d["procedure"].update(short_prompts=_short_prompts(**change)))
+
+    with pytest.raises(DocumentError, match=message):
+        MeasurementSpec.from_document(document)
+    assert list(VALIDATOR.iter_errors(document)) != []
+
+
+def test_the_fingerprint_changes_with_the_short_prompt_plan_because_the_measurement_then_is_another() -> None:
+    base = _fp(spec_document())
+
+    assert _fp(_edit(lambda d: d["procedure"].update(short_prompts=_short_prompts()))) != base

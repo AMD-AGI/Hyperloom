@@ -27,6 +27,8 @@ checks}`` signs what the runner says of its cards into the manifest.
 is the unix time the first begins, on this fake runner's own clock: 9000 by default); a runner that states none is
 the default. ``fake_legacy_decode: true`` lists the ``decode/outputs.jsonl`` that a runner of the removed decode pass left, so a
 bundle written then can be verified again.
+``fake_short_prompts: [good, bad, ...]`` leaves the outputs of a short-prompt check whose processes behave so, when the
+sheet asks for the check (``bad``: wrong for short prompts, ``drift``: one long prompt differs late, ``fail``: did not come up).
 ``fake_export: [line, ...]`` lists the per-request export of an AgentX round (``aiperf_artifacts/profile_export.jsonl``
 below the round's directory) with those lines.
 ``fake_eval_in_warmup: true`` lays the rounds out as a graded test with a warmup leaves them (one evaluation, in the
@@ -59,6 +61,7 @@ from hyperloom.measure.jit_kinds import AITER_JIT
 from hyperloom.measure.jit.store import Snapshot, StoredFile
 from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
 from hyperloom.measure.runner.service import Progress
+from hyperloom.measure.short_prompts.tests.support import outputs_files
 from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
 
 REPORT_PATH = "benchmark_fake_20261014_000000/benchmark_report.json"
@@ -289,9 +292,22 @@ def _manifest(
     return document
 
 
+def _short_prompt_files(out: Path, spec: MeasurementSpec, config: dict[str, Any]) -> dict[str, bytes]:
+    """The outputs of the short-prompt check the sheet asks for, as the processes named by ``fake_short_prompts`` (a list of
+    ``good``, ``bad``, ``drift`` or ``fail``) would leave them."""
+    plan = spec.procedure.short_prompts
+    if plan is None or "fake_short_prompts" not in config:
+        return {}
+    files = outputs_files(plan, config["fake_short_prompts"])
+    for relative, data in files.items():
+        _atomic(out / "files" / relative, data)
+    return files
+
+
 def _publish(out: Path, spec: MeasurementSpec, raw: bytes, config: dict[str, Any], mode: str) -> None:
     key = signing.load_private_key(Path(os.environ["HYPERLOOM_SIGNING_KEY_FILE"]))
     files = _write_files(out, config, mode)
+    files.update(_short_prompt_files(out, spec, config))
     if config.get("fake_repro"):
         files.update(_repro_files(spec, Path(os.environ["HYPERLOOM_SANDBOX_ROOT"]), out))
     if config.get("fake_attached_env"):

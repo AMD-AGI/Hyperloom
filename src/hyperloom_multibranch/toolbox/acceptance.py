@@ -21,6 +21,7 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError, apply
 from hyperloom.measure.compile import BaseImageMismatchError
 from hyperloom.measure.eval_context import EvalContextError
+from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.fake_gain import (
     CONTEXT_COPY_REFUSAL,
     SPECULATIVE_DECODING_PINNED,
@@ -30,6 +31,7 @@ from hyperloom.measure.fake_gain import (
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
+from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, decide
 
 
 #: PyTorch tunes a GEMM shape the first time a server runs it when TunableOp is switched on (the value ``1``, nothing else
@@ -128,7 +130,9 @@ class AcceptanceSetup:
     campaign every ``explore`` and ``confirm`` request is accepted with ``accuracy=True``; AgentX leaves requests as
     submitted. A recipe on an image other than ``active_image_digest`` is refused; ``None`` skips the check.
     ``supported_kinds`` are the kinds the backend runs (a sweep counts as ``test``); any other kind is refused at
-    acceptance as ``unsupported_kind``, and ``None`` accepts every kind.
+    acceptance as ``unsupported_kind``, and ``None`` accepts every kind. ``short_prompts`` is the staged prompt set of the
+    short-prompt consistency check: with it, a test whose change touches attention, the KV cache or prefill (the rule
+    pack says which), whose purpose the pack always checks, or whose request forces it, runs the check; ``None`` runs none.
     """
 
     repo: ExperimentRepo
@@ -136,6 +140,7 @@ class AcceptanceSetup:
     active_image_digest: str | None
     workload_kind: WorkloadKind = WorkloadKind.INFERENCEX
     supported_kinds: Collection[str] | None = None
+    short_prompts: ShortPromptSetup | None = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +166,7 @@ class Acceptance:
         self._is_accepted = is_accepted
         self._live_profile = live_profile
         self._workload = setup.workload_kind
+        self._short_prompts = setup.short_prompts
 
     def with_required_accuracy(self, request: TestRequest) -> TestRequest:
         """The request an InferenceX campaign runs: ``baseline``, ``explore``, ``confirm``, ``integration`` and
@@ -193,7 +199,16 @@ class Acceptance:
         self._check_fake_gain(recipe, candidate)
         if not replay:
             _check_online_tuning(candidate)
-        return Prepared(self._plan(recipe, request))
+        return Prepared(self._with_short_prompts(self._plan(recipe, request), recipe, candidate, request))
+
+    def _with_short_prompts(self, accepted: object, parent: Recipe, candidate: Recipe, request: TestRequest) -> object:
+        """``accepted`` with the consistency check this request runs, when it runs one and ``accepted`` can carry it."""
+        plan = decide(request, parent, candidate, self._short_prompts)
+        return (
+            replace(accepted, short_prompts=plan)
+            if plan is not None and isinstance(accepted, AcceptedMeasurement)
+            else accepted
+        )
 
     def _check_profile_exists(self, request: TestRequest) -> None:
         """Refuse a PROFILE of a commit and recipe that already has a live one, and name that one.

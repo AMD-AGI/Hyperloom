@@ -71,11 +71,13 @@ from hyperloom_multibranch.toolbox.attempts import (
     carries_request_classes,
 )
 from hyperloom_multibranch.toolbox.reverify import (
+    first_consistency_difference,
     first_hash_difference,
     first_request_classes_difference,
     first_value_difference,
     first_warning_difference,
 )
+from hyperloom_multibranch.toolbox.short_prompts import ReferenceStore, consistency_of, record_reference, rederive
 from hyperloom_multibranch.toolbox.table_hits import read_table_hits, runtime_findings
 
 __all__ = ["DEFAULT_TEST_TIMEOUT_SEC", "HostedExecutor", "OUTPUTS_DIR", "TEST_SILENCE_TIMEOUT_SEC"]
@@ -87,6 +89,8 @@ DEFAULT_TEST_TIMEOUT_SEC = 3600
 TEST_SILENCE_TIMEOUT_SEC = 600.0
 #: Where a test's landed files go, below the session directory: ``tests/<request_id>/attempt-<n>``.
 OUTPUTS_DIR = "tests"
+#: Where the outputs of finished short-prompt checks are kept, below the session directory.
+REFERENCES_DIR = "short_prompt_refs"
 _REPORT = "benchmark_report.json"
 _MANIFEST = "manifest.json"
 _UNFINISHED = (STATE_SUBMITTED, STATE_SENT)
@@ -135,6 +139,7 @@ class HostedExecutor:
         self._python = magpie_python
         self._clock: Callable[[], float] = time.time
         self._workload = workload_kind
+        self._references = ReferenceStore(self._session / REFERENCES_DIR)
 
     async def run(self, job: TestJob) -> TestResult:
         request = job.request
@@ -152,6 +157,7 @@ class HostedExecutor:
             return self._timed_out(request_id, started, expired)
         result = self._result(request, accepted, call, outcome, _Span(started, self._clock()))
         result = await self._with_table_hits(result, accepted, call)
+        result = await self._with_short_prompts(result, accepted, call)
         return await self._with_request_classes(result, request, outcome, call)
 
     def withdraw(self, request_id: str) -> None:
@@ -172,7 +178,11 @@ class HostedExecutor:
         with tempfile.TemporaryDirectory(prefix="reverify-") as scratch:
             landed = Path(scratch) / "bundle"
             derived = self._backend.reverify(result.request_id, recorded, landed)
-            return _unlike_bundle(result, derived, landed) or _unlike_classes(result, derived, landed)
+            return (
+                _unlike_bundle(result, derived, landed)
+                or _unlike_classes(result, derived, landed)
+                or _unlike_consistency(result, landed)
+            )
 
     async def reverify(self, result: TestResult) -> None:
         """Raise :class:`ResultUnverified` naming why ``result`` does not follow from its archived bundle, or why the
@@ -225,6 +235,7 @@ class HostedExecutor:
             ),
             avoid_nodes=tuple(job.avoid_nodes),
             attachments=request.attachments if request.kind is TestKind.REPRO else (),
+            short_prompts=accepted.short_prompts,
         )
 
     # -- the outcome -----------------------------------------------------------------------------------------------
@@ -284,6 +295,23 @@ class HostedExecutor:
             return result
         hits = await asyncio.to_thread(read_table_hits, accepted.environment, accepted.points, Path(call.output_dir))
         return replace(result, table_hits=hits, runtime_findings=runtime_findings(hits))
+
+    async def _with_short_prompts(
+        self, result: TestResult, accepted: AcceptedMeasurement, call: TestCall
+    ) -> TestResult:
+        """``result`` with the short-prompt consistency check the test ran, read from its landed outputs and compared with
+        the parent's; a test that asked for none, or did not succeed, carries none.
+
+        A check that completed is kept as the reference of the tests whose parent is this test's recipe.
+        """
+        plan = accepted.short_prompts
+        if plan is None or result.validity is not Validity.SUCCEEDED:
+            return result
+        check = await asyncio.to_thread(consistency_of, plan, Path(call.output_dir), self._references)
+        await asyncio.to_thread(
+            record_reference, plan, check, Path(call.output_dir), self._references, result.request_id
+        )
+        return replace(result, short_prompt_consistency=check)
 
     async def _with_request_classes(
         self, result: TestResult, request: TestRequest, outcome: TestOutcome, call: TestCall
@@ -401,6 +429,15 @@ def _unlike_classes(result: TestResult, derived: Reverified, landed: Path) -> st
         return None
     concurrencies = tuple(_concurrency_in(text) for text in derived.point_yaml)
     return first_request_classes_difference(result, read_round_classes(derived.rounds, landed, concurrencies))
+
+
+def _unlike_consistency(result: TestResult, landed: Path) -> str | None:
+    """The first field of the short-prompt check ``result`` records that the verified bundle's outputs do not support.
+
+    A record that holds none is not checked: it makes no claim.
+    """
+    recorded = result.short_prompt_consistency
+    return None if recorded is None else first_consistency_difference(result, rederive(recorded, landed))
 
 
 def _unlike_values(result: TestResult, derived: Reverified, landed: Path) -> str | None:

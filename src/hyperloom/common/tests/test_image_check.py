@@ -463,7 +463,7 @@ def test_the_reference_pack_over_an_image_that_holds_every_fact_it_can_confirm(t
         name for name, entry in pack.entries.items() if entry.image_checks
     ]
     assert all(held[name] is Status.UNVERIFIABLE for name, entry in pack.entries.items() if not entry.image_checks)
-    assert report.counts() == {"pass": 12, "fail": 0, "unverifiable": 15}
+    assert report.counts() == {"pass": 12, "fail": 0, "unverifiable": 17}
     assert report.pack == {"version": pack.version, "digest": pack.digest}
 
 
@@ -483,7 +483,7 @@ def test_an_aiter_that_no_longer_holds_the_merge_directory_literal_fails_that_fa
         "mode": "warn",
         "pack_digest": report.pack["digest"],
         "pass": 11,
-        "unverifiable": 15,
+        "unverifiable": 17,
         "fail": ["aiter_merged_view"],
     }
 
@@ -492,12 +492,12 @@ def test_the_report_is_json_for_close_and_lines_for_people_and_is_written_whole(
     report = build_report(load_pack(DEFAULT_PACK_PATH), _reference_image(tmp_path, _NEW_AITER))
 
     document = json.loads(json.dumps(report.to_json()))
-    assert document["counts"] == {"pass": 11, "fail": 1, "unverifiable": 15}
+    assert document["counts"] == {"pass": 11, "fail": 1, "unverifiable": 17}
     assert document["environment"]["python_version"].count(".") == 2
     assert document["environment"]["packages"]["vllm"] == {"installed": True, "version": None}
     assert {fact["fact"] for fact in document["facts"]} == set(load_pack(DEFAULT_PACK_PATH).entries)
     lines = report.markdown_lines()
-    assert lines[0].startswith("Image check (warn) of rule pack 8: 11 pass, 1 fail, 15 unverifiable")
+    assert lines[0].startswith("Image check (warn) of rule pack 9: 11 pass, 1 fail, 17 unverifiable")
     assert lines[1] == "- FAIL aiter_merged_view (aiter)"
     assert lines[-1].startswith("- Unverifiable here: python_import_errors, ")
     target = tmp_path / "attached" / "image_check.json"
@@ -575,7 +575,7 @@ def test_the_command_line_prints_the_report_and_exits_one_when_a_fact_fails(
 ) -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
     assert main([], pack=pack, image=_reference_image(tmp_path, _OLD_AITER)) == 0
-    assert capsys.readouterr().out.startswith("Image check (warn) of rule pack 8: 12 pass, 0 fail, 15 unverifiable")
+    assert capsys.readouterr().out.startswith("Image check (warn) of rule pack 9: 12 pass, 0 fail, 17 unverifiable")
 
     other = tmp_path / "other"
     other.mkdir()

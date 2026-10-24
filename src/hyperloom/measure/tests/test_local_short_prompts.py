@@ -1,0 +1,272 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The local backend's short-prompt check: fresh server processes after the test's own rounds, apart from them (#126).
+
+``run_grid`` and the server lifecycle are stubbed as the other local-backend tests stub them; the servers the check talks
+to are real HTTP servers on a free local port, one for each boot-only round the check asks for, defective in the launches
+a test names. Nothing about the test's rounds, its output directory or its outcome may depend on the check.
+"""
+
+from __future__ import annotations
+
+import threading
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from hyperloom.measure import local
+from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
+from hyperloom.measure.phases import SHORT_PROMPTS
+from hyperloom.measure.short_prompts.compare import compare_outputs
+from hyperloom.measure.short_prompts.outputs import FAILED, OK, read_outputs
+from hyperloom.measure.short_prompts.plan import SHORT_PROMPTS_DIR
+from hyperloom.measure.short_prompts.tests.support import (
+    FakeServer,
+    free_port,
+    good_answer,
+    prompt_set,
+    short_prompts_wrong,
+    staged_plan,
+)
+from hyperloom.measure.tests.test_local_backend import BOOT_ENVS, _call, _Grid, _point
+from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
+
+
+class _Servers:
+    """The servers of the check: one real HTTP server per boot-only round, defective in the launches in ``defective``."""
+
+    def __init__(self, monkeypatch, *, defective: frozenset[int] = frozenset(), eligible: bool = True) -> None:
+        self.port, self.defective = free_port(), defective
+        self.live: FakeServer | None = None
+        self.started: list[int] = []
+        self.teardowns = 0
+        self._lock = threading.Lock()
+        monkeypatch.setattr(
+            local,
+            "resolve_lifecycle_params",
+            lambda path: {"eligible": eligible, "port": self.port, "framework": "sglang", "reason": "not eligible"},
+        )
+        monkeypatch.setattr(local, "teardown_lifecycle_server", lambda **kw: self.stop())
+
+    def start(self, index: int) -> None:
+        answer = short_prompts_wrong if index in self.defective else good_answer
+        self.live = FakeServer(answer, port=self.port).__enter__()
+        self.started.append(index)
+
+    def stop(self) -> None:
+        with self._lock:
+            self.teardowns += 1
+            if self.live is not None:
+                self.live.__exit__(None, None, None)
+                self.live = None
+
+
+class _CheckGrid(_Grid):
+    """``run_grid`` that brings the check's server up when it is asked for a boot-only round called ``short<index>``."""
+
+    def __init__(self, tmp_path: Path, servers: _Servers) -> None:
+        super().__init__(tmp_path)
+        self.servers = servers
+
+    async def __call__(self, **kwargs: Any):
+        name = kwargs["grid"][0].name
+        if kwargs.get("lifecycle_boot_only") and name.startswith("short") and name not in self.answers:
+            self.servers.start(int(name.removeprefix("short")))
+        return await super().__call__(**kwargs)
+
+
+@pytest.fixture(autouse=True)
+def magpie_backend(monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
+
+
+@pytest.fixture
+def cache(monkeypatch, tmp_path: Path) -> Path:
+    root = tmp_path / "runner-cache"
+    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(root))
+    return root
+
+
+def _grid(monkeypatch, tmp_path: Path, **servers: Any) -> _CheckGrid:
+    grid = _CheckGrid(tmp_path, _Servers(monkeypatch, **servers))
+    monkeypatch.setattr(local, "run_grid", grid)
+    return grid
+
+
+def _run(tmp_path: Path, cache: Path, **plan: Any):
+    call = _call(tmp_path, short_prompts=staged_plan(cache, **plan), result_dir=str(tmp_path / "out" / "results"))
+    return LocalMeasurementBackend().run_test(call)
+
+
+def test_a_planned_test_runs_its_rounds_then_a_fresh_server_for_each_process_and_leaves_the_outputs(
+    monkeypatch, tmp_path, cache
+):
+    grid = _grid(monkeypatch, tmp_path)
+
+    outcome = _run(tmp_path, cache)
+
+    names = [kwargs["grid"][0].name for kwargs in grid.calls]
+    assert names == ["test", *(f"short{i}" for i in range(6))], (
+        "the test's own round first, one boot-only round for each process"
+    )
+    boots = grid.calls[1:]
+    assert all(c["lifecycle_boot_only"] is True and c["base_extra_envs"] == BOOT_ENVS for c in boots)
+    assert all(c["server_lifecycle"]["cleanup"] is False and c["warmup_before_measure"] is False for c in boots)
+    assert grid.servers.started == list(range(6)) and grid.servers.teardowns == 6, (
+        "each server is stopped before the next"
+    )
+    found = read_outputs(tmp_path / "out")
+    assert [e.status for e in found.processes] == [OK] * 6 and len(found.prompts) == 64
+    assert (outcome.returncode, outcome.failure_class) == (0, None)
+
+
+def test_the_check_is_apart_from_the_test_its_rounds_its_files_and_its_result_directory_are_the_tests_own(
+    monkeypatch, tmp_path, cache
+):
+    plain = _grid(monkeypatch, tmp_path / "plain")
+    (tmp_path / "plain").mkdir(exist_ok=True)
+    baseline = LocalMeasurementBackend().run_test(_call(tmp_path / "plain"))
+    grid = _grid(monkeypatch, tmp_path)
+
+    outcome = _run(tmp_path, cache)
+
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [(r.phase, r.returncode) for r in baseline.rounds]
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == [SHORT_PROMPTS_DIR], "only the outputs file is added"
+    out = (tmp_path / "out").resolve()
+    for kwargs in grid.calls[1:]:
+        assert kwargs["result_dir"] is None and out not in Path(kwargs["output_root"]).resolve().parents
+        assert kwargs["output_root"] != tmp_path / "out"
+    assert grid.calls[0]["output_root"] == tmp_path / "out"
+    assert grid.calls[0]["result_dir"] == str(tmp_path / "out" / "results"), (
+        "the test's own round keeps its result directory"
+    )
+    assert plain.calls and len(plain.calls) == 1
+
+
+def test_a_server_that_is_wrong_for_short_prompts_in_some_launches_shows_in_the_outputs_the_check_leaves(
+    monkeypatch, tmp_path, cache
+):
+    _grid(monkeypatch, tmp_path, defective=frozenset({1, 4}))
+
+    _run(tmp_path, cache)
+
+    found = read_outputs(tmp_path / "out")
+    own = compare_outputs(found.completed, None, prompt_set()).self_consistency
+    assert own is not None and [n > 0 for n in own.mismatches] == [False, True, False, False, True, False]
+
+
+def test_the_check_adds_a_phase_for_each_process_s_questions_and_the_phases_still_tile_the_test(
+    monkeypatch, tmp_path, cache
+):
+    _grid(monkeypatch, tmp_path)
+
+    outcome = _run(tmp_path, cache)
+
+    names = [p.name for p in outcome.phases]
+    assert names.count(SHORT_PROMPTS) == 6
+    assert names.index(SHORT_PROMPTS) > names.index("kernel_tables"), "after the test's own rounds"
+    for earlier, later in zip(outcome.phases, outcome.phases[1:]):
+        assert earlier.started_at + earlier.seconds == pytest.approx(later.started_at, abs=1e-6), "no time is lost"
+
+
+def test_a_test_whose_round_failed_runs_no_check(monkeypatch, tmp_path, cache):
+    grid = _grid(monkeypatch, tmp_path)
+    grid.answers["test"] = grid.result("test", status="failed", returncode=1, error="server died")
+
+    outcome = _run(tmp_path, cache)
+
+    assert len(grid.calls) == 1 and outcome.returncode == 1
+    assert not (tmp_path / "out" / SHORT_PROMPTS_DIR).exists()
+
+
+def test_a_process_whose_server_does_not_boot_is_recorded_and_the_test_still_succeeds(monkeypatch, tmp_path, cache):
+    grid = _grid(monkeypatch, tmp_path)
+    grid.answers["short2"] = grid.result("short2", status="failed", returncode=1, error="oom", error_class="oom")
+
+    outcome = _run(tmp_path, cache)
+
+    found = read_outputs(tmp_path / "out")
+    assert [e.status for e in found.processes] == [OK, OK, FAILED, OK, OK, OK]
+    assert "did not come up (oom)" in found.processes[2].reason
+    assert grid.servers.teardowns == 6, "the lifecycle is torn down after the failed boot too"
+    assert (outcome.returncode, outcome.failure_class) == (0, None), "a failed check is the check's, not the test's"
+
+
+def test_a_framework_that_cannot_hold_a_server_up_fails_every_process_with_that_reason_and_not_the_test(
+    monkeypatch, tmp_path, cache
+):
+    grid = _grid(monkeypatch, tmp_path, eligible=False)
+
+    outcome = _run(tmp_path, cache)
+
+    found = read_outputs(tmp_path / "out")
+    assert {e.status for e in found.processes} == {FAILED}
+    assert "cannot be held up for the check (not eligible)" in found.processes[0].reason
+    assert len(grid.calls) == 1 and outcome.returncode == 0
+
+
+def test_a_run_that_is_stopped_during_the_check_starts_no_further_server(monkeypatch, tmp_path, cache):
+    grid = _grid(monkeypatch, tmp_path)
+    grid.answers["short1"] = grid.result(
+        "short1", status="failed", returncode=None, error="", error_class=ORCHESTRATOR_CANCELLED_CLASS
+    )
+
+    _run(tmp_path, cache)
+
+    found = read_outputs(tmp_path / "out")
+    assert [e.index for e in found.processes] == [0, 1] and found.stopped == "the run was stopped"
+
+
+def test_a_sweep_runs_the_check_after_its_arm_on_its_first_point(monkeypatch, tmp_path, cache):
+    grid = _grid(monkeypatch, tmp_path)
+    points = (_point(tmp_path, "c4", conc=4), _point(tmp_path, "c2", conc=2))
+
+    LocalMeasurementBackend().run_test(
+        _call(tmp_path, *points, prep="conc_sweep", short_prompts=staged_plan(cache, processes=2))
+    )
+
+    names = [kwargs["grid"][0].name for kwargs in grid.calls]
+    assert names[-2:] == ["short0", "short1"] and "c4" in names and "c2" in names
+    assert len(read_outputs(tmp_path / "out").completed) == 2
+
+
+def test_a_call_naming_a_prompt_set_that_is_not_staged_is_refused_before_any_server_starts(
+    monkeypatch, tmp_path, cache
+):
+    grid = _grid(monkeypatch, tmp_path)
+    plan = staged_plan(tmp_path / "elsewhere")
+
+    with pytest.raises(TestCallRefused, match=f"short-prompt set {plan.prompt_set} cannot be used: .*not staged"):
+        LocalMeasurementBackend().run_test(_call(tmp_path, short_prompts=plan))
+    assert grid.calls == []
+
+
+def test_a_prompt_set_whose_file_differs_from_the_plans_hash_is_refused_naming_both_hashes(
+    monkeypatch, tmp_path, cache
+):
+    grid = _grid(monkeypatch, tmp_path)
+    plan = staged_plan(cache)
+
+    with pytest.raises(TestCallRefused, match="the sheet names " + "1" * 64):
+        LocalMeasurementBackend().run_test(_call(tmp_path, short_prompts=type(plan)(plan.prompt_set, "1" * 64)))
+    assert grid.calls == []
+
+
+@pytest.mark.parametrize("kind", ["profile", "repro"])
+def test_a_profile_or_repro_test_does_not_run_the_check(tmp_path, cache, kind):
+    call = _call(tmp_path, kind=kind, short_prompts=staged_plan(cache))
+
+    with pytest.raises(TestCallRefused, match=f"a {kind} test does not run the short-prompt consistency check"):
+        local._validate_short_prompts(call)
+
+
+def test_a_call_with_no_plan_is_run_exactly_as_before(monkeypatch, tmp_path):
+    grid = _grid(monkeypatch, tmp_path)
+
+    LocalMeasurementBackend().run_test(_call(tmp_path))
+
+    assert [kwargs["grid"][0].name for kwargs in grid.calls] == ["test"] and not (
+        tmp_path / "out" / SHORT_PROMPTS_DIR
+    ).exists()
