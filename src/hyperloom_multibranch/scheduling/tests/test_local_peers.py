@@ -12,7 +12,7 @@ import json
 import os
 import subprocess
 import urllib.request
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -56,11 +56,13 @@ from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
+from hyperloom_multibranch.scheduling.hosted_peers import HostedSandboxes
 from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, SessionLayout, create_session
 from hyperloom_multibranch.scheduling import local_peers as local_peers_module
 from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
     InferenceXCheckout,
+    LocalCards,
     MeasurementHost,
     SessionWiring,
     local_peers,
@@ -88,6 +90,10 @@ from hyperloom_multibranch.specialist.prompts import role_prompt
 from hyperloom_multibranch.specialist.runtime import SessionStart, SpecialistRuntime
 from hyperloom_multibranch.specialist.worktree import BranchWorktree
 from hyperloom_multibranch.toolbox import local_hosted
+from hyperloom.sandbox.e2b import E2BSandboxProvider
+from hyperloom.sandbox.socket import Role as SandboxRole, SandboxInfo
+from hyperloom_multibranch.toolbox import hosted_toolbox
+from hyperloom_multibranch.toolbox.hosted_toolbox import HostedToolbox, HostedToolboxInputs
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
@@ -97,7 +103,8 @@ WORKLOAD = Workload(
 )
 AGENTX = replace(WORKLOAD, inferencex=None)
 IMAGE = ActiveImage("registry.example/sglang:v1", "sha256:" + "2" * 64)
-HOST = MeasurementHost((0, 1, 2, 3), IMAGE, "a" * 40, InferenceXCheckout("b" * 40, "/opt/InferenceX"))
+LOCAL = LocalCards((0, 1, 2, 3))
+HOST = MeasurementHost(LOCAL, IMAGE, "a" * 40, InferenceXCheckout("b" * 40, "/opt/InferenceX"))
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
 DEV_SANDBOX_TOOLS = {f"dev_sandbox_{verb}" for verb in ("lease", "run", "start", "read", "release")}
 
@@ -237,16 +244,15 @@ def test_the_host_is_this_machines_cards_on_the_launchers_image_and_the_pinned_t
     checkout = _inferencex_checkout(tmp_path / "InferenceX")
     env = {IMAGE_VARS[0]: IMAGE.ref, IMAGE_VARS[1]: IMAGE.digest, "INFERENCEX_PATH": str(checkout)}
 
-    host = measurement_host(env, WORKLOAD)
+    host = measurement_host(env, WORKLOAD, LocalCards(machine_cards()))
 
     tools = pinned_tool_commits({})
     assert host == MeasurementHost(
-        (4, 5, 6, 7), IMAGE, tools.magpie, InferenceXCheckout(tools.inferencex, str(checkout))
+        LocalCards((4, 5, 6, 7)), IMAGE, tools.magpie, InferenceXCheckout(tools.inferencex, str(checkout))
     )
     assert machine_parallel_tests(2) == 2
 
 
-@pytest.mark.usefixtures("four_cards")
 def test_a_machine_without_an_inferencex_checkout_refuses_the_peers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -254,9 +260,9 @@ def test_a_machine_without_an_inferencex_checkout_refuses_the_peers(
     env = {IMAGE_VARS[0]: IMAGE.ref, IMAGE_VARS[1]: IMAGE.digest}
 
     with pytest.raises(PeersUnavailable, match="no InferenceX checkout"):
-        measurement_host(env, WORKLOAD)
+        measurement_host(env, WORKLOAD, LOCAL)
     with pytest.raises(PeersUnavailable, match=f"no InferenceX checkout .*{tmp_path.name}"):
-        measurement_host({**env, "INFERENCEX_PATH": str(tmp_path)}, WORKLOAD)
+        measurement_host({**env, "INFERENCEX_PATH": str(tmp_path)}, WORKLOAD, LOCAL)
 
 
 def _git_checkout(root: Path) -> str:
@@ -288,7 +294,6 @@ def _magpie(monkeypatch: pytest.MonkeyPatch, default_dir: Path, **pin: str) -> N
     monkeypatch.setattr(local_peers_module, "_magpie_inferencex", lambda: module)
 
 
-@pytest.mark.usefixtures("four_cards")
 def test_an_agentx_host_measures_on_the_checkout_at_the_commit_magpie_pins(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -298,15 +303,14 @@ def test_an_agentx_host_measures_on_the_checkout_at_the_commit_magpie_pins(
     tools = pinned_tool_commits({})
 
     _magpie(monkeypatch, default, INFERENCEX_DEFAULT_REF=default_commit)
-    assert measurement_host(env, AGENTX) == MeasurementHost(
-        (4, 5, 6, 7), IMAGE, tools.magpie, InferenceXCheckout(default_commit, str(default / "inferencex-e2e"))
+    assert measurement_host(env, AGENTX, LOCAL) == MeasurementHost(
+        LOCAL, IMAGE, tools.magpie, InferenceXCheckout(default_commit, str(default / "inferencex-e2e"))
     )
     _magpie(monkeypatch, default, INFERENCEX_DEFAULT_REF=named_commit)
-    host = measurement_host({**env, "MAGPIE_INFERENCEX_PATH": str(named)}, AGENTX)
+    host = measurement_host({**env, "MAGPIE_INFERENCEX_PATH": str(named)}, AGENTX, LOCAL)
     assert host.inferencex == InferenceXCheckout(named_commit, str(named / "inferencex-e2e"))
 
 
-@pytest.mark.usefixtures("four_cards")
 def test_an_agentx_host_refuses_a_checkout_off_the_magpie_pin_and_a_magpie_without_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -316,12 +320,12 @@ def test_an_agentx_host_refuses_a_checkout_off_the_magpie_pin_and_a_magpie_witho
 
     _magpie(monkeypatch, tmp_path / "InferenceX", INFERENCEX_DEFAULT_REF=pinned)
     with pytest.raises(PeersUnavailable, match=f"no InferenceX checkout at {pinned}.* at {tmp_path}/InferenceX"):
-        measurement_host(env, AGENTX)
+        measurement_host(env, AGENTX, LOCAL)
     with pytest.raises(PeersUnavailable, match=f"no InferenceX checkout at {pinned}.* at {tmp_path}/missing"):
-        measurement_host({**env, "MAGPIE_INFERENCEX_PATH": str(tmp_path / "missing")}, AGENTX)
+        measurement_host({**env, "MAGPIE_INFERENCEX_PATH": str(tmp_path / "missing")}, AGENTX, LOCAL)
     _magpie(monkeypatch, tmp_path / "InferenceX")
     with pytest.raises(PeersUnavailable, match=f"INFERENCEX_DEFAULT_REF.*MAGPIE_REF {pinned_tool_commits({}).magpie}"):
-        measurement_host(env, AGENTX)
+        measurement_host(env, AGENTX, LOCAL)
 
 
 @pytest.mark.parametrize("mask", ["ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"])
@@ -346,10 +350,9 @@ def test_a_framework_whose_source_cannot_be_laid_out_refuses_the_peers(
         require_framework_package(framework)
 
 
-@pytest.mark.usefixtures("four_cards")
 def test_a_session_nobody_names_the_image_of_refuses_the_peers() -> None:
     with pytest.raises(PeersUnavailable, match=f"{IMAGE_VARS[0]}, {IMAGE_VARS[1]} not set"):
-        measurement_host({}, WORKLOAD)
+        measurement_host({}, WORKLOAD, LOCAL)
 
 
 @pytest.mark.parametrize(
@@ -361,10 +364,9 @@ def test_a_session_nobody_names_the_image_of_refuses_the_peers() -> None:
     ],
     ids=["half-named-image", "zero-digest", "moving-tool-ref"],
 )
-@pytest.mark.usefixtures("four_cards")
 def test_pins_that_cannot_be_read_refuse_the_peers(env: dict[str, str], named: str) -> None:
     with pytest.raises(PeersUnavailable, match=named):
-        measurement_host(env, WORKLOAD)
+        measurement_host(env, WORKLOAD, LOCAL)
 
 
 def test_a_machine_that_shows_no_card_fits_no_test(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -598,6 +600,47 @@ async def test_a_session_lending_dev_sandboxes_leases_the_toolbox_cards_to_a_spe
         released = await asyncio.to_thread(_call_tool, grant, "dev_sandbox_release")
 
     assert "no_lease" in released["result"]["content"][0]["text"]
+
+
+class _IdleService(E2BSandboxProvider):
+    """The host's sandbox service with no sandbox running: what a session closes before it measured anything."""
+
+    def find(self, metadata: Mapping[str, str], *, role: SandboxRole) -> list[SandboxInfo]:
+        return []
+
+
+async def test_a_hosted_session_measures_in_the_services_sandboxes_under_its_toolbox_directory_on_no_local_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[tuple[Path, int]] = []
+
+    def inputs(session_dir: Path, tp: int) -> HostedToolboxInputs:
+        asked.append((session_dir, tp))
+        return HostedToolboxInputs(
+            run_id="run-1",
+            session_dir=session_dir,
+            api_url="http://service.invalid",
+            sandbox_url="http://sandboxes.invalid",
+            measurement_key="m-key",
+            sandbox_templates={"runner": "ar-runner-g2"},
+            source_sha="c" * 40,
+            tp=tp,
+        )
+
+    def no_cards() -> tuple[int, ...]:
+        raise AssertionError("a hosted session reads none of this machine's cards")
+
+    monkeypatch.setattr(local_peers_module, "machine_cards", no_cards)
+    monkeypatch.setattr(hosted_toolbox, "E2BSandboxProvider", _IdleService)
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    host = replace(HOST, backend=HostedSandboxes(inputs))
+    async with _peers(tmp_path, monkeypatch, WORKLOAD, host) as built:
+        toolbox, layout = built.peers.toolbox, built.layout
+        assert isinstance(toolbox, HostedToolbox)
+        assert asked == [(layout.toolbox, WORKLOAD.tp)]
+        assert toolbox.trace_root == layout.toolbox and toolbox.blobs is built.setup.blobs
+        assert built.peers.base_image_digest == IMAGE.digest
+        assert (layout.toolbox / "canonical" / "canonical.yaml").is_file()
 
 
 async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_session_lends(
