@@ -167,7 +167,7 @@ def set_lane_capacity(
         cur.close()
 
 
-def ensure_schema(conn: sqlite3.Connection) -> int:
+def ensure_schema(conn: sqlite3.Connection) -> None:
     """Idempotently create all tables, seed lane_capacity defaults, and record the schema version."""
     cur = conn.cursor()
     try:
@@ -180,10 +180,7 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
             "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, datetime('now'))",
             (SCHEMA_VERSION,),
         )
-        cur.execute("SELECT MAX(version) FROM schema_version")
-        (current,) = cur.fetchone()
         conn.commit()
-        return int(current or 0)
     except Exception:
         conn.rollback()
         raise
