@@ -45,6 +45,8 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     FusionRun,
+    GeakDelegation,
+    GeakProduct,
     GemmTuningRun,
     IntegrateVerdict,
     KernelExit,
@@ -2093,13 +2095,15 @@ class KernelPhase(CoordinatorCollaborator):
             return
         recorder.record_geak_claim(self.shared_state.geak_pending, specs=self._geak_acceptance_specs(result))
         recorder.record_geak_product(
-            accepted_flags=accepted_flags,
-            accepted_envs=dict(parsed_envs),
-            accepted_config=result.get("accepted_config"),
-            final_overlay=result.get("final_overlay") or "",
-            final_launch_script=result.get("final_launch_script") or "",
-            bench_script=result.get("bench_script") or "",
-            final_patch=result.get("final_patch") or "",
+            GeakProduct(
+                accepted_flags=accepted_flags,
+                accepted_envs=dict(parsed_envs),
+                accepted_config=result.get("accepted_config"),
+                final_overlay=result.get("final_overlay") or "",
+                final_launch_script=result.get("final_launch_script") or "",
+                bench_script=result.get("bench_script") or "",
+                final_patch=result.get("final_patch") or "",
+            )
         )
 
     def _record_geak_candidate(self, result: dict[str, Any]) -> bool:
@@ -2637,23 +2641,25 @@ class KernelPhase(CoordinatorCollaborator):
         versions = result.get("versions")
         versions = versions if isinstance(versions, dict) else {}
         recorder.record_geak_delegation(
-            runner_status=str(result.get("status") or "unknown"),
-            started_at=started_at or str(result.get("started_at") or ""),
-            ended_at=str(result.get("ended_at") or datetime.now(timezone.utc).isoformat()),
-            duration_sec=duration_sec if duration_sec is not None else result.get("duration_sec"),
-            error_class=str(result.get("error_class") or ""),
-            error=str(result.get("error") or ""),
-            returncode=result.get("returncode"),
-            runner_timeout_sec=(
-                runner_timeout_sec if runner_timeout_sec is not None else result.get("runner_timeout_s")
-            ),
-            kill_timeout_sec=kill_timeout_sec if kill_timeout_sec is not None else result.get("kill_timeout_s"),
-            exp_root=str(result.get("exp_root") or handoff.get("exp_root") or ""),
-            eval_dir=str(result.get("eval_dir") or handoff.get("eval_dir") or ""),
-            report_path=str(result.get("report_path") or ""),
-            versions=versions,
-            recovered_from_disk=recovered_from_disk,
-            stages_reached=result.get("stages_reached"),
+            GeakDelegation(
+                runner_status=str(result.get("status") or "unknown"),
+                started_at=started_at or str(result.get("started_at") or ""),
+                ended_at=str(result.get("ended_at") or datetime.now(timezone.utc).isoformat()),
+                duration_sec=duration_sec if duration_sec is not None else result.get("duration_sec"),
+                error_class=str(result.get("error_class") or ""),
+                error=str(result.get("error") or ""),
+                returncode=result.get("returncode"),
+                runner_timeout_sec=(
+                    runner_timeout_sec if runner_timeout_sec is not None else result.get("runner_timeout_s")
+                ),
+                kill_timeout_sec=kill_timeout_sec if kill_timeout_sec is not None else result.get("kill_timeout_s"),
+                exp_root=str(result.get("exp_root") or handoff.get("exp_root") or ""),
+                eval_dir=str(result.get("eval_dir") or handoff.get("eval_dir") or ""),
+                report_path=str(result.get("report_path") or ""),
+                versions=versions,
+                recovered_from_disk=recovered_from_disk,
+                stages_reached=result.get("stages_reached"),
+            )
         )
 
     def _record_geak_kernel_journey(self, result: dict[str, Any]) -> None:

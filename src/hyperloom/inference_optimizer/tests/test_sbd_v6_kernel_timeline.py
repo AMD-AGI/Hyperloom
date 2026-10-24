@@ -32,6 +32,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     FusionRun,
+    GeakProduct,
     IntegrateVerdict,
     KernelExit,
     KernelReprofile,
@@ -610,9 +611,11 @@ def test_geak_handoff_and_product_do_not_share_the_accepted_flags_name(tmp_path)
         }
     )
     recorder.record_geak_product(
-        accepted_flags=["--enable-torch-compile", "--attention-backend=aiter"],
-        accepted_envs={"A": "1", "B": "2"},
-        final_overlay="/s/geak/overlay",
+        GeakProduct(
+            accepted_flags=["--enable-torch-compile", "--attention-backend=aiter"],
+            accepted_envs={"A": "1", "B": "2"},
+            final_overlay="/s/geak/overlay",
+        )
     )
     recorder.finish(KernelExit(tput_after=900.0))
 

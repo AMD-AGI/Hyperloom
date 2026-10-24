@@ -12,6 +12,7 @@ from .event_fields import (
     analysis_detail as _analysis_detail,
     as_dict as _as_dict,
     as_list as _as_list,
+    clip as _clip,
     float_or_none as _float_or_none,
     int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
@@ -41,6 +42,8 @@ __all__ = [
     "SOURCE_GEMM_TUNING",
     "SOURCE_KERNEL_REWRITE",
     "FusionRun",
+    "GeakDelegation",
+    "GeakProduct",
     "GeakRebenchAttempt",
     "GemmTuningRun",
     "IntegrateVerdict",
@@ -184,6 +187,73 @@ class GemmTuningRun:
             "gain_pct": _float_or_none(self.gain_pct),
             "graded_objective": _text(self.graded_objective),
             "tuner": _text(self.tuner),
+        }
+
+
+@dataclass(frozen=True)
+class GeakDelegation:
+    """How the delegated GEAK runner itself ended."""
+
+    runner_status: str
+    started_at: str = ""
+    ended_at: str = ""
+    duration_sec: Any = None
+    error_class: str = ""
+    error: str = ""
+    returncode: Any = None
+    runner_timeout_sec: Any = None
+    kill_timeout_sec: Any = None
+    exp_root: str = ""
+    eval_dir: str = ""
+    report_path: str = ""
+    versions: dict[str, Any] | None = None
+    recovered_from_disk: bool = False
+    stages_reached: Any = None
+
+    def block(self) -> dict[str, Any]:
+        """The ``geak_delegation`` block this delegation persists as."""
+        return {
+            "runner_status": str(self.runner_status or ""),
+            "started_at": _text(self.started_at),
+            "ended_at": _text(self.ended_at),
+            "duration_sec": _float_or_none(self.duration_sec),
+            "error_class": _text(self.error_class),
+            "error": _clip(self.error) or None,
+            "returncode": _int_or_none(self.returncode),
+            "runner_timeout_sec": _int_or_none(self.runner_timeout_sec),
+            "kill_timeout_sec": _int_or_none(self.kill_timeout_sec),
+            "exp_root": _text(self.exp_root),
+            "eval_dir": _text(self.eval_dir),
+            "report_path": _text(self.report_path),
+            "versions": _as_dict(self.versions),
+            "recovered_from_disk": bool(self.recovered_from_disk),
+            "stages_reached": [str(item) for item in _as_list(self.stages_reached)],
+        }
+
+
+@dataclass(frozen=True)
+class GeakProduct:
+    """The reproducible configuration GEAK handed back."""
+
+    accepted_flags: Any = None
+    accepted_envs: dict[str, Any] | None = None
+    accepted_config: dict[str, Any] | None = None
+    final_overlay: str = ""
+    final_launch_script: str = ""
+    bench_script: str = ""
+    final_patch: str = ""
+
+    def block(self) -> dict[str, Any]:
+        """The ``geak_product`` block this product persists as."""
+        flags = self.accepted_flags
+        return {
+            "accepted_flags": [str(item) for item in _as_list(flags)] if not isinstance(flags, str) else _text(flags),
+            "accepted_envs": _as_dict(self.accepted_envs),
+            "accepted_config": _as_dict(self.accepted_config),
+            "final_overlay": _text(self.final_overlay),
+            "final_launch_script": _text(self.final_launch_script),
+            "bench_script": _text(self.bench_script),
+            "final_patch": _text(self.final_patch),
         }
 
 

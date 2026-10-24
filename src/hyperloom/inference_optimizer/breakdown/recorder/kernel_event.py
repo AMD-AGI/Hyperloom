@@ -76,6 +76,8 @@ from .kernel_records import (
     SOURCE_GEMM_TUNING,
     SOURCE_KERNEL_REWRITE,
     FusionRun,
+    GeakDelegation,
+    GeakProduct,
     GeakRebenchAttempt,
     GemmTuningRun,
     IntegrateVerdict,
@@ -1108,48 +1110,9 @@ class KernelEventRecorder:
             },
         )
 
-    def record_geak_delegation(
-        self,
-        *,
-        runner_status: str,
-        started_at: str = "",
-        ended_at: str = "",
-        duration_sec: Any = None,
-        error_class: str = "",
-        error: str = "",
-        returncode: Any = None,
-        runner_timeout_sec: Any = None,
-        kill_timeout_sec: Any = None,
-        exp_root: str = "",
-        eval_dir: str = "",
-        report_path: str = "",
-        versions: dict[str, Any] | None = None,
-        recovered_from_disk: bool = False,
-        stages_reached: Any = None,
-    ) -> None:
+    def record_geak_delegation(self, delegation: GeakDelegation) -> None:
         """Record how the delegated runner itself ended."""
-        self._sink.record(
-            SECTION_EVENT,
-            {
-                "geak_delegation": {
-                    "runner_status": str(runner_status or ""),
-                    "started_at": _text(started_at),
-                    "ended_at": _text(ended_at),
-                    "duration_sec": _float_or_none(duration_sec),
-                    "error_class": _text(error_class),
-                    "error": _clip(error) or None,
-                    "returncode": _int_or_none(returncode),
-                    "runner_timeout_sec": _int_or_none(runner_timeout_sec),
-                    "kill_timeout_sec": _int_or_none(kill_timeout_sec),
-                    "exp_root": _text(exp_root),
-                    "eval_dir": _text(eval_dir),
-                    "report_path": _text(report_path),
-                    "versions": _as_dict(versions),
-                    "recovered_from_disk": bool(recovered_from_disk),
-                    "stages_reached": [str(item) for item in _as_list(stages_reached)],
-                }
-            },
-        )
+        self._sink.record(SECTION_EVENT, {"geak_delegation": delegation.block()})
 
     def record_geak_attempts(self, journey: dict[str, Any] | None) -> None:
         """Replay what GEAK tried, from the journey it emits."""
@@ -1214,35 +1177,9 @@ class KernelEventRecorder:
             },
         )
 
-    def record_geak_product(
-        self,
-        *,
-        accepted_flags: Any = None,
-        accepted_envs: dict[str, Any] | None = None,
-        accepted_config: dict[str, Any] | None = None,
-        final_overlay: str = "",
-        final_launch_script: str = "",
-        bench_script: str = "",
-        final_patch: str = "",
-    ) -> None:
+    def record_geak_product(self, product: GeakProduct) -> None:
         """Record the reproducible configuration GEAK handed back."""
-        flags = accepted_flags
-        self._sink.record(
-            SECTION_EVENT,
-            {
-                "geak_product": {
-                    "accepted_flags": [str(item) for item in _as_list(flags)]
-                    if not isinstance(flags, str)
-                    else _text(flags),
-                    "accepted_envs": _as_dict(accepted_envs),
-                    "accepted_config": _as_dict(accepted_config),
-                    "final_overlay": _text(final_overlay),
-                    "final_launch_script": _text(final_launch_script),
-                    "bench_script": _text(bench_script),
-                    "final_patch": _text(final_patch),
-                }
-            },
-        )
+        self._sink.record(SECTION_EVENT, {"geak_product": product.block()})
 
     def record_geak_rebench_attempt(self, *, max_attempts: Any = None, **fields: Any) -> None:
         """Record one GEAK rebench attempt."""
