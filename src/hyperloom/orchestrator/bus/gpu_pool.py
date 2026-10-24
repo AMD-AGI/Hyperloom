@@ -7,11 +7,8 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
-from hyperloom.common.timeutil import now_iso
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS, parse_device_list
 
 from .storage.connection import SqliteConnection
@@ -19,8 +16,6 @@ from .storage.connection import SqliteConnection
 
 log = logging.getLogger(__name__)
 
-
-DEFAULT_GPU_LEASE_TTL_SEC = 1800
 
 # Reserved synthetic gpu_id base for single-node Ray pending-observation slots.
 _RAY_OBS_ID_BASE = 100000
@@ -101,8 +96,6 @@ class GpuLease:
     holder_id: str
     task_id: str
     gpu_ids: tuple[int, ...]
-    acquired_at: str
-    expires_at: str
 
 
 class SpecialistGpuPool:
@@ -129,25 +122,16 @@ class SpecialistGpuPool:
         count: int,
         holder_id: str,
         task_id: str,
-        ttl_sec: int = DEFAULT_GPU_LEASE_TTL_SEC,
     ) -> GpuLease | None:
         """Acquire ``count`` GPU ids or return ``None`` if the pool is full."""
         n = int(count or 0)
         if n <= 0 or n > self.capacity:
             return None
-        now_ts = time.time()
-        stamp = now_iso()
-        expires_ts = now_ts + max(1, int(ttl_sec or DEFAULT_GPU_LEASE_TTL_SEC))
-        expires_iso = datetime.fromtimestamp(
-            expires_ts,
-            tz=timezone.utc,
-        ).isoformat(timespec="microseconds")
-
         async with self.db.transaction() as cur:
             # Same-holder/task acquire is idempotent when the existing lease already satisfies the request: same count
             # and every id still in this pool.
             cur.execute(
-                "SELECT gpu_id, acquired_at FROM gpu_leases WHERE holder_id=? AND task_id=?",
+                "SELECT gpu_id FROM gpu_leases WHERE holder_id=? AND task_id=?",
                 (holder_id, task_id),
             )
             existing_rows = cur.fetchall()
@@ -155,18 +139,7 @@ class SpecialistGpuPool:
                 existing_ids = tuple(int(r["gpu_id"]) for r in existing_rows)
                 pool_set = set(self.gpu_ids)
                 if len(existing_ids) == n and set(existing_ids) <= pool_set:
-                    acquired_at = existing_rows[0]["acquired_at"]
-                    cur.execute(
-                        "UPDATE gpu_leases SET expires_at=?, heartbeat_at=? WHERE holder_id=? AND task_id=?",
-                        (expires_iso, stamp, holder_id, task_id),
-                    )
-                    return GpuLease(
-                        holder_id=holder_id,
-                        task_id=task_id,
-                        gpu_ids=existing_ids,
-                        acquired_at=acquired_at,
-                        expires_at=expires_iso,
-                    )
+                    return GpuLease(holder_id=holder_id, task_id=task_id, gpu_ids=existing_ids)
                 # Stale lease — release it and fall through to a fresh acquire.
                 cur.execute(
                     "DELETE FROM gpu_leases WHERE holder_id=? AND task_id=?",
@@ -184,21 +157,10 @@ class SpecialistGpuPool:
             selected = available[:n]
             for gpu_id in selected:
                 cur.execute(
-                    """
-                    INSERT INTO gpu_leases(
-                        gpu_id, holder_id, task_id,
-                        acquired_at, expires_at, heartbeat_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (gpu_id, holder_id, task_id, stamp, expires_iso, stamp),
+                    "INSERT INTO gpu_leases(gpu_id, holder_id, task_id) VALUES (?, ?, ?)",
+                    (gpu_id, holder_id, task_id),
                 )
-        return GpuLease(
-            holder_id=holder_id,
-            task_id=task_id,
-            gpu_ids=tuple(selected),
-            acquired_at=stamp,
-            expires_at=expires_iso,
-        )
+        return GpuLease(holder_id=holder_id, task_id=task_id, gpu_ids=tuple(selected))
 
     async def try_acquire_ray_observation(
         self,
@@ -206,18 +168,9 @@ class SpecialistGpuPool:
         holder_id: str,
         task_id: str,
         pending_limit: int,
-        ttl_sec: int = DEFAULT_GPU_LEASE_TTL_SEC,
     ) -> GpuLease | None:
         """Admit a GPU specialist under single-node Ray by COUNT, not physical id."""
         limit = max(1, int(pending_limit or 1))
-        now_ts = time.time()
-        stamp = now_iso()
-        expires_ts = now_ts + max(1, int(ttl_sec or DEFAULT_GPU_LEASE_TTL_SEC))
-        expires_iso = datetime.fromtimestamp(
-            expires_ts,
-            tz=timezone.utc,
-        ).isoformat(timespec="microseconds")
-
         async with self.db.transaction() as cur:
             cur.execute(
                 "SELECT gpu_id FROM gpu_leases WHERE gpu_id >= ?",
@@ -233,21 +186,10 @@ class SpecialistGpuPool:
             if slot is None:
                 return None
             cur.execute(
-                """
-                INSERT INTO gpu_leases(
-                    gpu_id, holder_id, task_id,
-                    acquired_at, expires_at, heartbeat_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (slot, holder_id, task_id, stamp, expires_iso, stamp),
+                "INSERT INTO gpu_leases(gpu_id, holder_id, task_id) VALUES (?, ?, ?)",
+                (slot, holder_id, task_id),
             )
-        return GpuLease(
-            holder_id=holder_id,
-            task_id=task_id,
-            gpu_ids=(slot,),
-            acquired_at=stamp,
-            expires_at=expires_iso,
-        )
+        return GpuLease(holder_id=holder_id, task_id=task_id, gpu_ids=(slot,))
 
     async def release(self, lease: GpuLease | None) -> None:
         """Release the GPUs held by a lease."""
@@ -263,7 +205,6 @@ class SpecialistGpuPool:
 
 
 __all__ = [
-    "DEFAULT_GPU_LEASE_TTL_SEC",
     "GPU_LEASE_TTL_GRACE",
     "GpuLease",
     "SpecialistGpuPool",

@@ -279,8 +279,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
         super().__init__(coordinator)
         # The Experience KB read rendered into the latest orchestration prompt; proposals emitted on that tick cite it.
         self.kb_last_read: ExperienceKBEvidence | None = None
-        # Per-agent (seq, msg_id) of the last message its prompt rendered.
-        self._rendered_cursor: dict[str, tuple[int, str]] = {}
+        # Per-agent seq of the last message its prompt rendered.
+        self._rendered_cursor: dict[str, int] = {}
         # The kernel progress fingerprint at Orchestration's last admitted KERNEL turn, and when it was admitted.
         self._admitted_kernel_fingerprint = ""
         self._admitted_at = 0.0
@@ -597,7 +597,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         last_seq = cursor.last_processed_seq
         if read:
             last_seq = int(read[-1].seq)
-            self._rendered_cursor[agent_name] = (last_seq, str(read[-1].msg_id))
+            self._rendered_cursor[agent_name] = last_seq
         if not inbox_lines:
             return [f"=== Inbox for {agent_name} ===", "(no new messages)"]
         sections = [f"=== Inbox for {agent_name} (newest last) ===", *inbox_lines]
@@ -679,11 +679,9 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
     async def advance_rendered_cursor(self, agent_name: str) -> None:
         """Advance an agent's read cursor to the last message its prompt rendered."""
-        entry = self._rendered_cursor.get(agent_name)
-        if entry is None:
-            return
-        seq, msg_id = entry
-        await self.cursors.advance(agent_name, seq=seq, msg_id=msg_id)
+        seq = self._rendered_cursor.get(agent_name)
+        if seq is not None:
+            await self.cursors.advance(agent_name, seq=seq)
 
     async def _augment_critic_inbox_with_pending(self, rendered: list["Message"]) -> list["Message"]:
         """Ensure every undecided proposal awaiting a Critic verdict is present."""

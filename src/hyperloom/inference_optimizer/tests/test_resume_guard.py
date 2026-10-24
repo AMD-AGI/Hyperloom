@@ -281,8 +281,8 @@ def test_current_schema_round_holder_without_unknown_execution_is_allowed(tmp_pa
             "VALUES ('round-1', 'open', 'task-1', 1, 1, 2)"
         )
         db.execute(
-            "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at, heartbeat_at) "
-            "VALUES ('bringup_round', 'round-1', 'task-1', 'bringup_round', 0, 'old', 'old', 'old')"
+            "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at) "
+            "VALUES ('bringup_round', 'round-1', 'task-1', 'bringup_round', 0, 'old', 'old')"
         )
     before = path.read_bytes()
     ensure_resume_safe(tmp_path, owner_scope="local")
@@ -485,7 +485,7 @@ def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkey
         err = capsys.readouterr().err
         if residual == "older_schema":
             assert (
-                "ERROR: --resume-from coordinator.db is at schema version 6, older than this build's 7: sessions "
+                "ERROR: --resume-from coordinator.db is at schema version 6, older than this build's 8: sessions "
                 "created before this release cannot be resumed. Finish the session under the build that started "
                 "it, or start a new session."
             ) in err.splitlines()

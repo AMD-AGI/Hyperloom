@@ -118,8 +118,8 @@ async def test_sqlite_connection_async_transaction_atomic(tmp_path):
                 ("m-tx", "Critic", "Orchestration", "review_verdict", "{}", "t"),
             )
             cur.execute(
-                "INSERT INTO cursors(agent, last_processed_seq, last_processed_msg_id, processed_at) VALUES (?,?,?,?)",
-                ("Orchestration", 0, "", "t"),
+                "INSERT INTO cursors(agent, last_processed_seq) VALUES (?,?)",
+                ("Orchestration", 0),
             )
         ev = await sc.fetchall("SELECT msg_id FROM events")
         cu = await sc.fetchall("SELECT agent FROM cursors")

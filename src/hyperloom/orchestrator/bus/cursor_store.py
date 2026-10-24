@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from hyperloom.common.timeutil import now_iso
-
 from .storage.connection import SqliteConnection
 
 
@@ -18,28 +16,6 @@ class CursorState:
 
     agent: str
     last_processed_seq: int
-    last_processed_msg_id: str
-    processed_at: str
-
-    @classmethod
-    def empty(cls, agent: str) -> "CursorState":
-        """Build a zeroed cursor for an agent with no prior state."""
-        return cls(
-            agent=agent,
-            last_processed_seq=0,
-            last_processed_msg_id="",
-            processed_at=now_iso(),
-        )
-
-    @classmethod
-    def from_row(cls, row) -> "CursorState":
-        """Build a cursor from a ``cursors`` table row."""
-        return cls(
-            agent=row["agent"],
-            last_processed_seq=row["last_processed_seq"],
-            last_processed_msg_id=row["last_processed_msg_id"],
-            processed_at=row["processed_at"],
-        )
 
 
 class CursorStore:
@@ -50,51 +26,24 @@ class CursorStore:
         self.db = db
 
     async def load(self, agent: str) -> CursorState:
-        """Load one agent's cursor, defaulting to empty when absent."""
-        row = await self.db.fetchone("SELECT * FROM cursors WHERE agent=?", (agent,))
-        if row is None:
-            return CursorState.empty(agent)
-        return CursorState.from_row(row)
+        """Load one agent's cursor, defaulting to zero when absent."""
+        row = await self.db.fetchone("SELECT last_processed_seq FROM cursors WHERE agent=?", (agent,))
+        return CursorState(agent=agent, last_processed_seq=int(row["last_processed_seq"]) if row else 0)
 
-    async def advance(
-        self,
-        agent: str,
-        *,
-        seq: int,
-        msg_id: str,
-    ) -> CursorState:
+    async def advance(self, agent: str, *, seq: int) -> CursorState:
         """Advance an agent's cursor via UPSERT, never moving backwards."""
         async with self.db.transaction() as cur:
-            cur.execute(
-                "SELECT last_processed_seq, last_processed_msg_id, processed_at FROM cursors WHERE agent=?",
-                (agent,),
-            )
+            cur.execute("SELECT last_processed_seq FROM cursors WHERE agent=?", (agent,))
             row = cur.fetchone()
             current = int(row["last_processed_seq"]) if row else 0
             if seq <= current:
-                return CursorState(
-                    agent=agent,
-                    last_processed_seq=current,
-                    last_processed_msg_id=row["last_processed_msg_id"] if row else "",
-                    processed_at=row["processed_at"] if row else now_iso(),
-                )
-            now = now_iso()
+                return CursorState(agent=agent, last_processed_seq=current)
             cur.execute(
-                "INSERT INTO cursors(agent, last_processed_seq, "
-                "                   last_processed_msg_id, processed_at) "
-                "VALUES (?,?,?,?) "
-                "ON CONFLICT(agent) DO UPDATE SET "
-                "  last_processed_seq=excluded.last_processed_seq, "
-                "  last_processed_msg_id=excluded.last_processed_msg_id, "
-                "  processed_at=excluded.processed_at",
-                (agent, seq, msg_id, now),
+                "INSERT INTO cursors(agent, last_processed_seq) VALUES (?,?) "
+                "ON CONFLICT(agent) DO UPDATE SET last_processed_seq=excluded.last_processed_seq",
+                (agent, seq),
             )
-            return CursorState(
-                agent=agent,
-                last_processed_seq=seq,
-                last_processed_msg_id=msg_id,
-                processed_at=now,
-            )
+            return CursorState(agent=agent, last_processed_seq=seq)
 
 
 __all__ = ["CursorState", "CursorStore"]

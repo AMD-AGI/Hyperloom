@@ -341,23 +341,22 @@ async def test_cursor_store_empty_default(db):
     cs = CursorStore(db)
     state = await cs.load("Orchestration")
     assert state.last_processed_seq == 0
-    assert state.last_processed_msg_id == ""
 
 
 @pytest.mark.asyncio
 async def test_cursor_store_advance_forward(db):
     cs = CursorStore(db)
-    s = await cs.advance("Critic", seq=5, msg_id="m5")
+    s = await cs.advance("Critic", seq=5)
     assert s.last_processed_seq == 5
-    s = await cs.advance("Critic", seq=10, msg_id="m10")
+    s = await cs.advance("Critic", seq=10)
     assert s.last_processed_seq == 10
 
 
 @pytest.mark.asyncio
 async def test_cursor_store_never_moves_backwards(db):
     cs = CursorStore(db)
-    await cs.advance("Critic", seq=10, msg_id="m10")
-    s = await cs.advance("Critic", seq=3, msg_id="m3")
+    await cs.advance("Critic", seq=10)
+    s = await cs.advance("Critic", seq=3)
     assert s.last_processed_seq == 10
     current = await cs.load("Critic")
     assert 3 <= current.last_processed_seq

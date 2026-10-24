@@ -34,7 +34,6 @@ _DDL = [
         owner_scope   TEXT    NOT NULL DEFAULT '',
         acquired_at   TEXT    NOT NULL,
         expires_at    TEXT    NOT NULL,
-        heartbeat_at  TEXT    NOT NULL,
         PRIMARY KEY (lane, holder_id)
     )
     """,
@@ -65,10 +64,8 @@ _DDL = [
     # cursors — idempotent message processing
     """
     CREATE TABLE IF NOT EXISTS cursors (
-        agent                 TEXT PRIMARY KEY,
-        last_processed_seq    INTEGER NOT NULL,
-        last_processed_msg_id TEXT    NOT NULL,
-        processed_at          TEXT    NOT NULL
+        agent              TEXT PRIMARY KEY,
+        last_processed_seq INTEGER NOT NULL
     )
     """,
     # tasks — DelegatedTask state machine
@@ -82,7 +79,6 @@ _DDL = [
         params           TEXT NOT NULL,
         idempotency_key  TEXT NOT NULL UNIQUE,
         requires_lanes   TEXT NOT NULL DEFAULT '[]',
-        side_effects     TEXT NOT NULL DEFAULT '[]',
         lease_ttl_sec    INTEGER NOT NULL DEFAULT 0,
         history          TEXT NOT NULL DEFAULT '[]',
         created_at       TEXT NOT NULL,
@@ -94,15 +90,11 @@ _DDL = [
     # gpu_leases — specialist GPU pool (separate from serving lanes)
     """
     CREATE TABLE IF NOT EXISTS gpu_leases (
-        gpu_id       INTEGER PRIMARY KEY,
-        holder_id    TEXT    NOT NULL,
-        task_id      TEXT    NOT NULL,
-        acquired_at  TEXT    NOT NULL,
-        expires_at   TEXT    NOT NULL,
-        heartbeat_at TEXT    NOT NULL
+        gpu_id    INTEGER PRIMARY KEY,
+        holder_id TEXT    NOT NULL,
+        task_id   TEXT    NOT NULL
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_gpu_leases_expires ON gpu_leases(expires_at)",
     # bringup_rounds — the durable mutex deciding whether another round may
     # start. Only explicit settlement ends exclusion; timestamps describe budgets.
     """

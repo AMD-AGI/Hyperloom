@@ -102,8 +102,8 @@ def hold_round_lane(
 
     Keyed on ``(BRINGUP_ROUND_LANE, round_id)`` and idempotent, so the one call
     serves the acquire, every renewal, and a handoff that moves the round to a
-    new holder. ``acquired_at`` survives a renewal; only the holder and the two
-    clock columns move.
+    new holder. ``acquired_at`` survives a renewal; only the holder and the
+    expiry move.
 
     Args:
         cur: Cursor of the transaction writing the round row, so the round and
@@ -116,11 +116,10 @@ def hold_round_lane(
     stamp = _lease_iso(now_unix)
     cur.execute(
         "INSERT INTO leases(lane, holder_id, task_id, action, pid,"
-        "  acquired_at, expires_at, heartbeat_at) VALUES (?,?,?,?,?,?,?,?)"
+        "  acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)"
         " ON CONFLICT(lane, holder_id) DO UPDATE SET"
         "  task_id = excluded.task_id,"
-        "  expires_at = excluded.expires_at,"
-        "  heartbeat_at = excluded.heartbeat_at",
+        "  expires_at = excluded.expires_at",
         (
             BRINGUP_ROUND_LANE,
             round_id,
@@ -129,7 +128,6 @@ def hold_round_lane(
             ROUND_LEASE_PID,
             stamp,
             _lease_iso(expires_unix),
-            stamp,
         ),
     )
 
@@ -479,8 +477,8 @@ class SqliteLeaseBackend:
                 cur.execute(
                     "INSERT OR REPLACE INTO leases(lane, holder_id, "
                     "task_id, action, pid, acquired_at, expires_at, "
-                    "heartbeat_at, owner_scope) "
-                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    "owner_scope) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
                     (
                         lane,
                         holder_id,
@@ -489,7 +487,6 @@ class SqliteLeaseBackend:
                         os.getpid(),
                         stamp,
                         expires_iso,
-                        stamp,
                         local_owner_scope(),
                     ),
                 )
@@ -499,14 +496,13 @@ class SqliteLeaseBackend:
     async def heartbeat_by_task(self, task_id: str, *, ttl_sec: int) -> list[str]:
         """Refresh every lane row a task holds, whoever the holder is."""
         new_expires_iso = _lease_iso(time.time() + ttl_sec)
-        stamp = now_iso()
         async with self.db.transaction() as cur:
             cur.execute("SELECT lane FROM leases WHERE task_id=?", (task_id,))
             lanes = sorted(str(r["lane"]) for r in cur.fetchall())
             if lanes:
                 cur.execute(
-                    "UPDATE leases SET expires_at=?, heartbeat_at=? WHERE task_id=?",
-                    (new_expires_iso, stamp, task_id),
+                    "UPDATE leases SET expires_at=? WHERE task_id=?",
+                    (new_expires_iso, task_id),
                 )
         return lanes
 
