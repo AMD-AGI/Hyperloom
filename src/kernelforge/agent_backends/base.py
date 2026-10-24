@@ -25,6 +25,11 @@ _session_environment: ContextVar[Mapping[str, str]] = ContextVar(
     default={},
 )
 
+#: Under every session's overlay. An import the agent runs rewrites the byte-code caches beside the modules it loads,
+#: including those under a protected ``benchmark/`` or ``test/`` directory, and the workspace guard -- rightly, since a
+#: planted ``.pyc`` replaces the source it shadows -- rejects the session for them.
+_SESSION_BASE_ENVIRONMENT: Mapping[str, str] = {"PYTHONDONTWRITEBYTECODE": "1"}
+
 
 @contextmanager
 def session_environment(overlay: Mapping[str, str]) -> Iterator[None]:
@@ -285,7 +290,7 @@ class AgentRunSpec:
                 runtime.reasoning_effort.strip() or self.reasoning_effort.strip(),
                 self.max_reasoning_effort,
             ),
-            env={**_session_environment.get(), **self.env},
+            env={**_SESSION_BASE_ENVIRONMENT, **_session_environment.get(), **self.env},
         )
 
 

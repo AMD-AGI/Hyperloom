@@ -223,7 +223,7 @@ async def test_a_lane_denied_its_own_cache_is_refused_rather_than_shared(tmp_pat
 
 
 async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path):
-    """Pin the single-lane path: an ordinary session carries no overlay at all."""
+    """Pin the single-lane path: an ordinary session carries no lane overlay, only what every session gets."""
     captured: dict = {}
     backend = ClaudeBackend.__new__(ClaudeBackend)
     backend.runtime = AgentRuntimeConfig(provider="claude", model="fake-model")
@@ -247,7 +247,7 @@ async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path):
         )
     )
 
-    assert "env" not in captured["options"].kwargs
+    assert captured["options"].kwargs["env"] == {"PYTHONDONTWRITEBYTECODE": "1"}
 
 
 async def test_claude_hands_the_session_environment_to_its_cli(tmp_path):
@@ -274,7 +274,7 @@ async def test_claude_hands_the_session_environment_to_its_cli(tmp_path):
         )
     )
 
-    assert captured["options"].kwargs["env"] == {"AITER_JIT_DIR": "/lane/1/jit"}
+    assert captured["options"].kwargs["env"] == {"PYTHONDONTWRITEBYTECODE": "1", "AITER_JIT_DIR": "/lane/1/jit"}
 
 
 def test_codex_hands_the_session_environment_to_its_app_server(tmp_path):
