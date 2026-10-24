@@ -42,7 +42,7 @@ from ..state.shared_state import (
 )
 from ..state.analysis_failures import remember_trace_failure
 from ..state.experience_citations import merge_citations, normalize_citations, shown_ids
-from ..state.task_registry import IllegalTransition, TaskNotFound
+from ..state.task_registry import IllegalTransition, TaskNotFound, TaskSpec
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_INTENT,
     EVENT_PROPOSAL,
@@ -898,12 +898,14 @@ class IntentRouter(CoordinatorCollaborator):
                 if requires_gpu(request.params):
                     ttl = self._coord.dispatcher.gpu_lease_ttl_sec(int(ttl or 0), params=request.params)
             task, was_existing = await self.tasks.create_or_return_existing(
-                kind=request.action_name,
-                params=request.params,
-                idempotency_key=idempotency_key,
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="llm",
+                TaskSpec(
+                    kind=request.action_name,
+                    params=request.params,
+                    idempotency_key=idempotency_key,
+                    requires_lanes=lanes,
+                    lease_ttl_sec=ttl,
+                    dispatch_class="llm",
+                )
             )
             if not was_existing:
                 return task

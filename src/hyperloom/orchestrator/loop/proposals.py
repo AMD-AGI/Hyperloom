@@ -18,7 +18,7 @@ from ..policy.gate import SPECIALIST_ACTION_NAME
 from ..policy.specialist_in_flight import specialist_in_flight_denial
 from ..specialists.domains import gap_backfilled_domain
 from ..state.shared_state import inject_stack_base_params
-from ..state.task_registry import TERMINAL_STATES
+from ..state.task_registry import TERMINAL_STATES, TaskSpec
 from ..collaborator import CoordinatorCollaborator
 
 if TYPE_CHECKING:
@@ -378,12 +378,14 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         for attempt in range(_MAX_IDEMPOTENCY_ATTEMPTS):
             idempotency_key = raw_key if attempt == 0 else f"{raw_key}-retry{attempt}"
             task, was_existing = await self.tasks.create_or_return_existing(
-                kind=pending.action_name,
-                params=params,
-                idempotency_key=idempotency_key,
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="llm",
+                TaskSpec(
+                    kind=pending.action_name,
+                    params=params,
+                    idempotency_key=idempotency_key,
+                    requires_lanes=lanes,
+                    lease_ttl_sec=ttl,
+                    dispatch_class="llm",
+                )
             )
             if not was_existing:
                 break
