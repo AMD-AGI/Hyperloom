@@ -2000,7 +2000,6 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
         task_id="t-atom-roofline",
         idempotency_key="t-atom-roofline",
         requires_lanes=[],
-        side_effects=[],
         lease_ttl_sec=0,
     )
     ctx = SimpleNamespace(task=task, lease=None, extra=None)

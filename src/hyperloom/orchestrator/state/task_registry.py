@@ -62,7 +62,6 @@ class TaskSpec:
     params: dict
     idempotency_key: str
     requires_lanes: list[str] | None = None
-    side_effects: list[str] | None = None
     lease_ttl_sec: int = 0
     task_id: str | None = None
     dispatch_class: str | None = None
@@ -79,7 +78,6 @@ class Task:
     params: dict
     idempotency_key: str
     requires_lanes: list[str] = field(default_factory=list)
-    side_effects: list[str] = field(default_factory=list)
     lease_ttl_sec: int = 0
     history: list[dict] = field(default_factory=list)
     created_at: str = field(default_factory=now_iso)
@@ -95,7 +93,6 @@ class Task:
             params=json.loads(row["params"]),
             idempotency_key=row["idempotency_key"],
             requires_lanes=json.loads(row["requires_lanes"]),
-            side_effects=json.loads(row["side_effects"]),
             lease_ttl_sec=row["lease_ttl_sec"],
             history=json.loads(row["history"]),
             created_at=row["created_at"],
@@ -239,7 +236,6 @@ def _insert_queued_task(cur: Any, spec: TaskSpec) -> Task:
         params=spec.params,
         idempotency_key=spec.idempotency_key,
         requires_lanes=[] if spec.requires_lanes is None else list(spec.requires_lanes),
-        side_effects=[] if spec.side_effects is None else list(spec.side_effects),
         lease_ttl_sec=spec.lease_ttl_sec,
         history=initial_history,
         created_at=now,
@@ -247,9 +243,9 @@ def _insert_queued_task(cur: Any, spec: TaskSpec) -> Task:
     )
     cur.execute(
         "INSERT INTO tasks(task_id, kind, state, params, idempotency_key, "
-        "requires_lanes, side_effects, lease_ttl_sec, "
+        "requires_lanes, lease_ttl_sec, "
         "history, created_at, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (
             task.task_id,
             task.kind,
@@ -257,7 +253,6 @@ def _insert_queued_task(cur: Any, spec: TaskSpec) -> Task:
             json.dumps(task.params),
             task.idempotency_key,
             json.dumps(task.requires_lanes),
-            json.dumps(task.side_effects),
             task.lease_ttl_sec,
             json.dumps(task.history),
             task.created_at,

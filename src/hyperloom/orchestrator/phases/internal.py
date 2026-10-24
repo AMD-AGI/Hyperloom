@@ -139,7 +139,6 @@ class InternalTasksPhase(CoordinatorCollaborator):
                 params=params,
                 idempotency_key=f"internal-research-scout-round{int(round_id)}",
                 requires_lanes=lanes,
-                side_effects=["writes_results"],
                 lease_ttl_sec=ttl,
                 dispatch_class="coordinator",
             )
@@ -238,7 +237,6 @@ class InternalTasksPhase(CoordinatorCollaborator):
                 params=params,
                 idempotency_key=idempotency_key,
                 requires_lanes=lanes,
-                side_effects=["writes_results"],
                 lease_ttl_sec=ttl,
                 dispatch_class="coordinator",
             )
@@ -334,7 +332,6 @@ class InternalTasksPhase(CoordinatorCollaborator):
                 params=params,
                 idempotency_key=f"internal-trajectory-review-cycle{cycle}",
                 requires_lanes=lanes,
-                side_effects=["writes_results"],
                 lease_ttl_sec=ttl,
                 dispatch_class="coordinator",
             )
