@@ -468,9 +468,9 @@ def test_the_human_report_reads_the_same_elapsed_time_as_the_machine_field(tmp_p
     assert 119.0 <= bd["metadata"]["session"]["elapsed_minutes"] <= 121.0
 
 
-def test_the_recorder_path_keeps_the_fields_only_the_collector_can_resolve(tmp_path, monkeypatch):
-    """The image comes from the manifest / environment, which the live state never sees."""
-    monkeypatch.setenv("HYPERLOOM_IMAGE", "registry.example/hyperloom:test")
+def test_the_recorder_path_keeps_the_fields_only_the_collector_can_resolve(tmp_path):
+    """The image is the one the manifest recorded, which the live state never sees."""
+    (tmp_path / "manifest.json").write_text(json.dumps({"image": "registry.example/hyperloom:test"}), encoding="utf-8")
     _stopped_session(tmp_path, ran_for=timedelta(minutes=5))
 
     bd = ex.build(tmp_path)

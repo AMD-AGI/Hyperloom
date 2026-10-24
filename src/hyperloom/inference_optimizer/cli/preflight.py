@@ -765,7 +765,7 @@ def _in_container() -> bool:
     # Injected into every pod; a host that merely talks to a cluster lacks it.
     if os.environ.get("KUBERNETES_SERVICE_HOST", "").strip():
         return True
-    # Empty env so only the on-disk markers (projected pod / baked image) count.
+    # Empty env so only on-disk evidence (image markers, PID 1's container id) counts.
     if provenance.detect_image({}, probe=True):
         return True
     try:

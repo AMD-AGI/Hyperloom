@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from kernelforge.gemm_tune.cli import _normalize_inline_shapes_json, _safe_is_file
+from kernelforge.gemm_tune.dense_shapes import next_pow2, padded_m_gl0, padded_m_gl1
 from kernelforge.gemm_tune.tuners import _aiter_dense_common as ac
 from kernelforge.gemm_tune.tuners._aiter_dense_common import (
     _conform_csv_columns,
@@ -365,13 +366,13 @@ _PADDED_M_GL1_OBSERVED: tuple[tuple[int, int, int], ...] = (
 @pytest.mark.parametrize(("m", "gl0", "pow2"), _PADDED_M_OBSERVED)
 def test_padded_m_mirror_matches_recorded_aiter_behaviour(m, gl0, pow2):
     """Runs everywhere, including the lane that has no aiter installed."""
-    assert ac._padded_m_gl0(m) == gl0
-    assert ac._next_pow2(m) == pow2
+    assert padded_m_gl0(m) == gl0
+    assert next_pow2(m) == pow2
 
 
 @pytest.mark.parametrize(("m", "n", "gl1"), _PADDED_M_GL1_OBSERVED)
 def test_padded_m_gl1_mirror_matches_recorded_aiter_behaviour(m, n, gl1):
-    assert ac._padded_m_gl1(m, n) == gl1
+    assert padded_m_gl1(m, n) == gl1
 
 
 def test_the_recorded_buckets_capture_the_granularity_change():
@@ -394,9 +395,9 @@ def test_padded_m_mirror_matches_installed_aiter():
     get_padded_m = gemm_op_common.get_padded_m
     n, k = 8704, 3072
     for m, _gl0, _pow2 in _PADDED_M_OBSERVED:
-        assert ac._padded_m_gl0(m) == get_padded_m(m, n, k, 0), f"gl=0 mismatch at M={m}"
+        assert padded_m_gl0(m) == get_padded_m(m, n, k, 0), f"gl=0 mismatch at M={m}"
     for m, n_i, _gl1 in _PADDED_M_GL1_OBSERVED:
-        assert ac._padded_m_gl1(m, n_i) == get_padded_m(m, n_i, k, 1), f"gl=1 mismatch at M={m} N={n_i}"
+        assert padded_m_gl1(m, n_i) == get_padded_m(m, n_i, k, 1), f"gl=1 mismatch at M={m} N={n_i}"
 
 
 def test_aiter_dtype_str_rejects_a_dtype_outside_aiters_table(monkeypatch):

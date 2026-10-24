@@ -70,7 +70,13 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
                 "status": "ok",
                 "decision": "KEEP",
                 "best_speedup": 1.2,
-                "tuned_file": "/tmp/a8w8_blockscale_tuned_gemm.csv",
+                "backend": "forge",
+                "candidates": [
+                    {
+                        "tuner": "a8w8_blockscale_tuned_gemm",
+                        "env": {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tmp/a8w8_blockscale_tuned_gemm.csv"},
+                    }
+                ],
             }
         )
 
@@ -159,7 +165,14 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
                 "status": "complete",
                 "decision": "KEEP",
                 "best_speedup": 1.28,
-                "tuned_file": str(tuned),
+                "backend": "forge",
+                "candidates": [
+                    {
+                        "tuner": "a8w8_blockscale_tuned_gemm",
+                        "env": {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": str(tuned)},
+                        "best_micro_speedup": 1.28,
+                    }
+                ],
             }
 
         async def fake_integrate(payload, *, session_dir):

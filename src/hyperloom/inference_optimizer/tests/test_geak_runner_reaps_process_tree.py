@@ -71,7 +71,15 @@ def _launch(tmp_path: Path, runner: Path, *, timeout: float) -> subprocess.Compl
     handoff.write_text(json.dumps({"schema_version": 1, "model_path": "/m", "exp_root": "/tmp/x"}), encoding="utf-8")
     env = dict(os.environ, GEAK_E2E_RUNNER=str(runner), GEAK_FLUSH_GRACE_S="1")
     env[REAP_MARK_ENV] = uuid.uuid4().hex
-    cmd = [sys.executable, "-m", "hyperloom.orchestrator.kernel.geak_runner", str(handoff), str(tmp_path / "out")]
+    cmd = [
+        sys.executable,
+        "-m",
+        "hyperloom.orchestrator.kernel.geak_runner",
+        str(handoff),
+        str(tmp_path / "out"),
+        "--timeout-s",
+        "600",
+    ]
     return run_with_session_kill(cmd, env=env, timeout=timeout)
 
 
