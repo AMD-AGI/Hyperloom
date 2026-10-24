@@ -137,6 +137,32 @@ async def test_a_lead_replayed_with_a_change_made_for_another_head_drops_out(tmp
     assert [item.request_id for item in brief.unfinished] == ["n1", "d1", "x1"]
 
 
+async def test_a_lead_whose_replay_was_released_untested_drops_out_for_that_head_but_not_one_its_stop_released(
+    tmp_path: Path,
+) -> None:
+    root, clock = tmp_path / "notebook", FakeClock()
+    observer = await _leftovers(root, clock)
+    w = Writers(root, clock)
+    scheduler = w.as_role(Role.SCHEDULER)
+    for branch in ("s5", "s6"):
+        await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit="c4", reason="refill"))
+    refusing = w.as_role(Role.SPECIALIST_RUNTIME, "s5")
+    claim = await refusing.acquire(
+        intent("s5", "c4", REPLAY_TARGET, "n1"), delta("--n1").fingerprint(), ttl_seconds=TTL
+    )
+    await refusing.release(claim.key)
+    await w.as_role(Role.SPECIALIST_RUNTIME, "s6").acquire(
+        intent("s6", "c4", REPLAY_TARGET, "d1"), delta("--fp8-gemm").fingerprint(), ttl_seconds=TTL
+    )
+    await scheduler.record_lineage(LineageEvent(LineageKind.STOP, "s6", reason="judge: no progress"))
+    await scheduler.release_branch("s6")
+
+    on_c4, on_i1 = await observer.startup_brief("c4"), await observer.startup_brief("i1")
+
+    assert [item.request_id for item in on_c4.unfinished] == ["u1", "d1", "x1"]
+    assert [item.request_id for item in on_i1.unfinished] == ["u1", "n1", "d1", "x1"]
+
+
 async def test_a_running_branchs_commits_and_the_merged_ones_are_not_unfinished(tmp_path: Path) -> None:
     observer = await scripted_session(tmp_path / "notebook", FakeClock())
 

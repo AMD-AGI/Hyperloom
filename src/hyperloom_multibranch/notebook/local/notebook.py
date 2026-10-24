@@ -119,7 +119,7 @@ from hyperloom_multibranch.notebook.local.segments import (
     require_token,
 )
 from hyperloom_multibranch.notebook.local.state import ClaimDecision, JudgementWrite, NotebookState
-from hyperloom_multibranch.notebook.local.unfinished import unfinished_leads
+from hyperloom_multibranch.notebook.local.unfinished import refused_replays, unfinished_leads
 
 SEGMENTS_DIR = "segments"
 CLAIMS_DIR = "claims"
@@ -857,8 +857,11 @@ class LocalNotebook(
         state = self._state()
         view = views.lineage_view(state)
         now = self._clock()
-        held = {claim.key.intent_fingerprint for claim in self._leases.all_current() if is_live(claim, now)}
-        return replace(views.startup_brief(state, view, start_commit), unfinished=unfinished_leads(state, view, held))
+        claims = self._leases.all_current()
+        held = {claim.key.intent_fingerprint for claim in claims if is_live(claim, now)}
+        refused = refused_replays(claims, view, start_commit)
+        unfinished = unfinished_leads(state, view, held, refused)
+        return replace(views.startup_brief(state, view, start_commit), unfinished=unfinished)
 
     async def search(self, query: str, *, limit: int = 20) -> tuple[SearchHit, ...]:
         return feeds.search(self._state(), query, limit)
