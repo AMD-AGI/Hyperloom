@@ -859,16 +859,15 @@ class IntentRouter(CoordinatorCollaborator):
             await self._coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, advisory)
 
     def _seed_grid_params(self, request: DelegateRequest) -> None:
-        """Seed a grid-style delegate with the params an approved proposal would have carried."""
-        if request.action_name not in ("sweep", "explore"):
+        """Seed an explore delegate with the params an approved proposal would have carried."""
+        if request.action_name != "explore":
             return
         # Baseline's materialized YAML, which the delegator may override.
         if self.shared_state.baseline_config_path:
             request.params.setdefault("config_path", self.shared_state.baseline_config_path)
         inject_stack_base_params(request.params, self.shared_state, anchor=True)
-        if request.action_name == "explore":
-            self._coord.proposals.inject_explore_runtime_params(request.params)
-            self._coord.proposals.credit_predictor_proposals(request.params)
+        self._coord.proposals.inject_explore_runtime_params(request.params)
+        self._coord.proposals.credit_predictor_proposals(request.params)
 
     async def _prepare_specialist_dispatch(self, request: DelegateRequest, nested_idempotency_key: Any) -> bool:
         """Warm a specialist delegate's params through the KnowledgePlane.
