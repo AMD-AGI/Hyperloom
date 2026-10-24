@@ -391,7 +391,9 @@ async def test_the_stall_cap_closes_the_lane_on_a_real_coordinator(_bound_sessio
     coord = make_coordinator(_bound_session)
     coord.shared_state.enablement.launch_log = _MISSING_ARCH_LOG
     await _seed_stalled(coord.rounds, ENABLEMENT_MAX_ATTEMPTS)
-    enablement_event.record_trigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="missing_model_arch")
+    enablement_event.record_trigger(
+        enablement_event.LaneTrigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="missing_model_arch")
+    )
     lane = coord.enablement_lane
     lane._environment_verdict = lambda: None
 
@@ -499,7 +501,9 @@ async def test_a_round_still_open_leaves_one_unruled_row(_bound_session):
 @pytest.mark.asyncio
 async def test_an_unclassifiable_failure_is_recorded_without_a_round(_bound_session):
     lane = _lane(_bound_session)
-    enablement_event.record_trigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="unknown")
+    enablement_event.record_trigger(
+        enablement_event.LaneTrigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="unknown")
+    )
 
     await lane._maybe_record_enablement_human_review("Segmentation fault (core dumped)")
 
@@ -647,7 +651,9 @@ def test_the_build_executor_records_the_build_it_ran(_bound_session):
             "attempt_root": "/s/enablement/builds/build-7",
         },
     )
-    enablement_event.record_trigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="compiled_miss")
+    enablement_event.record_trigger(
+        enablement_event.LaneTrigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="compiled_miss")
+    )
 
     TargetedBuildExecutor._record_result(result, None, task_id="build-7")
 
@@ -688,9 +694,11 @@ def test_an_exception_the_lane_did_not_raise_is_not_named_on_it(_bound_session):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     enablement_event.record_trigger(
-        origin=enablement_event.ORIGIN_EVAL,
-        mode="all",
-        kind="accuracy_below_floor",
+        enablement_event.LaneTrigger(
+            origin=enablement_event.ORIGIN_EVAL,
+            mode="all",
+            kind="accuracy_below_floor",
+        ),
     )
     coordinator = types.SimpleNamespace(
         phase_kernel=types.SimpleNamespace(timeline=lambda: None),
@@ -718,10 +726,12 @@ async def test_a_raising_pump_is_named_on_the_event(_bound_session):
     handler, which no longer speaks for it -- see the test above.
     """
     enablement_event.record_trigger(
-        origin=enablement_event.ORIGIN_BOOT,
-        mode="all",
-        kind="import_error",
-        evidence="ImportError: cannot import name 'fused_moe'",
+        enablement_event.LaneTrigger(
+            origin=enablement_event.ORIGIN_BOOT,
+            mode="all",
+            kind="import_error",
+            evidence="ImportError: cannot import name 'fused_moe'",
+        ),
     )
 
     async def _boom() -> None:
