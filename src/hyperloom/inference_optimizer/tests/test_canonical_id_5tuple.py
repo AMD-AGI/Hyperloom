@@ -17,6 +17,7 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     DEFAULT_HARDWARE_SLUG,
     DEFAULT_MODEL_SLUG,
     DEFAULT_PRECISION_SLUG,
+    RecipeIdentity,
     detect_framework_version,
     kb_hardware_slug,
     recipe_canonical_id,
@@ -26,11 +27,13 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import (
 def test_canonical_id_shape_is_mhfvp_with_inference_prefix() -> None:
     """``inference:{model}:{hw}:{fw}:{fwver}:{precision}:{model_type}:{arch}`` — eight segments."""
     cid = recipe_canonical_id(
-        model="Qwen3-30B-A3B",
-        hardware="MI355X",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
+        RecipeIdentity(
+            model="Qwen3-30B-A3B",
+            hardware="MI355X",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+        )
     )
     assert cid == "inference:qwen3-30b-a3b:mi355x:sglang:unknown_model_type:unknown_arch:0.4.5:fp8"
     assert cid.split(":") == [
@@ -47,11 +50,13 @@ def test_canonical_id_shape_is_mhfvp_with_inference_prefix() -> None:
 
 def test_canonical_id_lowercases_every_component() -> None:
     cid = recipe_canonical_id(
-        model="DEEPSEEK-R1",
-        hardware="MI300X",
-        framework_name="VLLM",
-        framework_version="0.6.0+ROCM",
-        precision="BF16",
+        RecipeIdentity(
+            model="DEEPSEEK-R1",
+            hardware="MI300X",
+            framework_name="VLLM",
+            framework_version="0.6.0+ROCM",
+            precision="BF16",
+        )
     )
     assert cid.startswith("inference:")
     parts = cid.split(":")[1:]
@@ -62,18 +67,22 @@ def test_canonical_id_lowercases_every_component() -> None:
 def test_canonical_id_basenames_path_style_model() -> None:
     """A path-style ``--model`` must converge on the same canonical_id as the bare name."""
     cid_path = recipe_canonical_id(
-        model="/path/models/Qwen3-30B-A3B",
-        hardware="mi355x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
+        RecipeIdentity(
+            model="/path/models/Qwen3-30B-A3B",
+            hardware="mi355x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+        )
     )
     cid_bare = recipe_canonical_id(
-        model="Qwen3-30B-A3B",
-        hardware="mi355x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
+        RecipeIdentity(
+            model="Qwen3-30B-A3B",
+            hardware="mi355x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+        )
     )
     assert cid_path == cid_bare
 
@@ -83,17 +92,19 @@ def test_canonical_id_is_keyword_only() -> None:
     # Splat a runtime-built arg list to keep the positional drift a runtime check.
     bad_positional_args = ["m", "h", "f", "v", "p"]
     with pytest.raises(TypeError):
-        recipe_canonical_id(*bad_positional_args)  # type: ignore[misc]
+        RecipeIdentity(*bad_positional_args)  # type: ignore[misc]
 
 
 def test_canonical_id_normalises_whitespace_and_slashes() -> None:
     """Whitespace and embedded ``/`` inside any slug become ``_``."""
     cid = recipe_canonical_id(
-        model="A B",
-        hardware="mi 355x",
-        framework_name="sg lang",
-        framework_version="0.4 5",
-        precision="fp 8",
+        RecipeIdentity(
+            model="A B",
+            hardware="mi 355x",
+            framework_name="sg lang",
+            framework_version="0.4 5",
+            precision="fp 8",
+        )
     )
     assert cid == "inference:a_b:mi_355x:sg_lang:unknown_model_type:unknown_arch:0.4_5:fp_8"
 
@@ -105,11 +116,13 @@ def test_canonical_id_substitutes_defaults_for_each_empty_component() -> None:
     )
 
     cid = recipe_canonical_id(
-        model="",
-        hardware="",
-        framework_name="",
-        framework_version="",
-        precision="",
+        RecipeIdentity(
+            model="",
+            hardware="",
+            framework_name="",
+            framework_version="",
+            precision="",
+        )
     )
     assert cid == (
         f"inference:"
@@ -126,11 +139,13 @@ def test_canonical_id_substitutes_defaults_for_each_empty_component() -> None:
 def test_canonical_id_treats_whitespace_only_as_empty() -> None:
     """Whitespace-only is logically empty — must fall back to the default slug."""
     cid = recipe_canonical_id(
-        model="   ",
-        hardware="\t",
-        framework_name="",
-        framework_version="\n",
-        precision="",
+        RecipeIdentity(
+            model="   ",
+            hardware="\t",
+            framework_name="",
+            framework_version="\n",
+            precision="",
+        )
     )
     assert DEFAULT_MODEL_SLUG in cid
     assert DEFAULT_HARDWARE_SLUG in cid
@@ -145,11 +160,13 @@ def test_canonical_id_partial_defaults_keep_explicit_components() -> None:
     )
 
     cid = recipe_canonical_id(
-        model="m",
-        hardware="",
-        framework_name="sglang",
-        framework_version="",
-        precision="fp8",
+        RecipeIdentity(
+            model="m",
+            hardware="",
+            framework_name="sglang",
+            framework_version="",
+            precision="fp8",
+        )
     )
     parts = cid.split(":")
     assert parts == [
@@ -168,12 +185,14 @@ def test_canonical_id_defaults_empty_architecture_list() -> None:
     from hyperloom.inference_optimizer.recipe_snapshot_constants import DEFAULT_ARCHITECTURES_SLUG
 
     cid = recipe_canonical_id(
-        model="m",
-        hardware="h",
-        framework_name="sglang",
-        architectures=[],
-        framework_version="v",
-        precision="p",
+        RecipeIdentity(
+            model="m",
+            hardware="h",
+            framework_name="sglang",
+            architectures=[],
+            framework_version="v",
+            precision="p",
+        )
     )
     assert cid.split(":")[5] == DEFAULT_ARCHITECTURES_SLUG
 

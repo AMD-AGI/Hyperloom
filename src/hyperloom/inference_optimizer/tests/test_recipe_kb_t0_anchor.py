@@ -19,6 +19,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _warm_recipe_source,
     run_t0_anchor,
 )
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
     RecipeKB,
@@ -92,11 +93,13 @@ def kb(tmp_path: Path) -> RecipeKB:
 
 def _expected_cid(state: _FakeSharedState, workload: str, hw: str) -> str:
     return recipe_canonical_id(
-        model=workload,
-        hardware=hw,
-        framework_name=state.framework_name,
-        framework_version=state.framework_version,
-        precision=state.precision,
+        RecipeIdentity(
+            model=workload,
+            hardware=hw,
+            framework_name=state.framework_name,
+            framework_version=state.framework_version,
+            precision=state.precision,
+        )
     )
 
 
@@ -117,11 +120,13 @@ def test_t0_anchor_accepts_legacy_framework_extra_attr(
     )
 
     cid = recipe_canonical_id(
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.5.11",
-        precision="fp8",
+        RecipeIdentity(
+            model="m",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.5.11",
+            precision="fp8",
+        )
     )
     assert kb.local.get_recipe(canonical_id=cid) is not None
     assert "unknown_framework" not in state.warm_start_recipe.get("workload", "")

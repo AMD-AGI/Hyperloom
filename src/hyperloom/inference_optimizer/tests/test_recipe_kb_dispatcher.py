@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
     Recipe,
@@ -19,11 +20,13 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
 
 def _cid() -> str:
     return recipe_canonical_id(
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
+        RecipeIdentity(
+            model="m",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+        )
     )
 
 

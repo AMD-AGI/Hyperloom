@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from typing import Final
 
 from hyperloom.common.provenance import framework_distribution_version
@@ -46,29 +47,32 @@ def _architectures_slug(value: "str | list[str]") -> str:
     return _slug(str(value), DEFAULT_ARCHITECTURES_SLUG)
 
 
-def recipe_canonical_id(
-    *,
-    model: str,
-    hardware: str,
-    framework_name: str,
-    model_type: str = "",
-    architectures: "str | list[str]" = "",
-    framework_version: str,
-    precision: str,
-    scheme: str = "inference",
-) -> str:
+@dataclass(frozen=True, kw_only=True)
+class RecipeIdentity:
+    """The seven serving dimensions a recipe is keyed by."""
+
+    model: str
+    hardware: str
+    framework_name: str
+    model_type: str = ""
+    architectures: "str | list[str]" = ""
+    framework_version: str
+    precision: str
+
+
+def recipe_canonical_id(identity: RecipeIdentity, scheme: str = "inference") -> str:
     """Build a recipe id as ``{scheme}:{seven serving dimensions}``."""
     if scheme not in {"inference", "agentx"}:
         raise ValueError(f"unsupported recipe identity scheme: {scheme!r}")
     return (
         f"{scheme}:"
-        f"{_slug(model, DEFAULT_MODEL_SLUG)}:"
-        f"{_slug(hardware, DEFAULT_HARDWARE_SLUG)}:"
-        f"{_slug(framework_name, DEFAULT_FRAMEWORK_SLUG)}:"
-        f"{_slug(model_type, DEFAULT_MODEL_TYPE_SLUG)}:"
-        f"{_architectures_slug(architectures)}:"
-        f"{_slug(framework_version, DEFAULT_FRAMEWORK_VERSION_SLUG)}:"
-        f"{_slug(precision, DEFAULT_PRECISION_SLUG)}"
+        f"{_slug(identity.model, DEFAULT_MODEL_SLUG)}:"
+        f"{_slug(identity.hardware, DEFAULT_HARDWARE_SLUG)}:"
+        f"{_slug(identity.framework_name, DEFAULT_FRAMEWORK_SLUG)}:"
+        f"{_slug(identity.model_type, DEFAULT_MODEL_TYPE_SLUG)}:"
+        f"{_architectures_slug(identity.architectures)}:"
+        f"{_slug(identity.framework_version, DEFAULT_FRAMEWORK_VERSION_SLUG)}:"
+        f"{_slug(identity.precision, DEFAULT_PRECISION_SLUG)}"
     )
 
 
@@ -204,6 +208,7 @@ __all__ = [
     "DEFAULT_FRAMEWORK_SLUG",
     "DEFAULT_FRAMEWORK_VERSION_SLUG",
     "DEFAULT_PRECISION_SLUG",
+    "RecipeIdentity",
     "recipe_canonical_id",
     "kb_hardware_slug",
     "detect_framework_version",

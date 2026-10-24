@@ -14,6 +14,7 @@ import pytest
 
 from hyperloom.inference_optimizer.cli.model_gate import _load_model_config_tags
 from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
     RecipeKB,
@@ -129,13 +130,15 @@ def kb(tmp_path: Path) -> RecipeKB:
 
 def _cid(state: _FakeSharedState, workload: str, hw: str) -> str:
     return recipe_canonical_id(
-        model=workload,
-        hardware=hw,
-        framework_name=state.framework,
-        framework_version=state.framework_version,
-        precision=state.precision,
-        model_type=str(getattr(state, "model_type", "") or ""),
-        architectures=getattr(state, "model_architectures", None) or [],
+        RecipeIdentity(
+            model=workload,
+            hardware=hw,
+            framework_name=state.framework,
+            framework_version=state.framework_version,
+            precision=state.precision,
+            model_type=str(getattr(state, "model_type", "") or ""),
+            architectures=getattr(state, "model_architectures", None) or [],
+        )
     )
 
 

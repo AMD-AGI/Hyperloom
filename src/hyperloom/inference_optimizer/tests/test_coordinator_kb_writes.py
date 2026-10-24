@@ -18,6 +18,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
     LocalRecipeStoreError,
@@ -65,11 +66,13 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
 
 def _expected_cid() -> str:
     return recipe_canonical_id(
-        model=_MODEL,
-        hardware=_HW,
-        framework_name=_FW,
-        framework_version=_FWV,
-        precision=_PREC,
+        RecipeIdentity(
+            model=_MODEL,
+            hardware=_HW,
+            framework_name=_FW,
+            framework_version=_FWV,
+            precision=_PREC,
+        )
     )
 
 

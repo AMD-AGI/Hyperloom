@@ -18,7 +18,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     ARM_CONFIG,
 )
-from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, detect_framework_version
 from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_REVERT,
@@ -1135,7 +1135,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         identity = _framework_identity(state)
         from hyperloom.common.perf_metric import agentx_active
 
-        return recipe_canonical_id(
+        rid = RecipeIdentity(
             model=state.model_name or "unknown_model",
             hardware=self._kb_hardware_slug(),
             framework_name=identity.name,
@@ -1143,8 +1143,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             precision=identity.precision,
             model_type=str(state.model_type or ""),
             architectures=state.model_architectures or [],
-            scheme=("agentx" if agentx_active(benchmark_mode=state.benchmark_mode) else "inference"),
         )
+        return recipe_canonical_id(rid, "agentx" if agentx_active(benchmark_mode=state.benchmark_mode) else "inference")
 
     def read_local_recipe_row(self) -> dict[str, Any]:
         """Load the selected store's exact authority row for writes."""

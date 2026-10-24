@@ -183,6 +183,7 @@ def _t0_warm_started(tmp_path, **put_kwargs) -> SharedState:
     Driving ``run_t0_anchor`` means the context under assertion is the one a
     session actually builds, for whichever shape the KB and T0 agree on.
     """
+    from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
     from hyperloom.orchestrator.knowledge.recipe_kb import (
         LocalRecipeStore,
         RecipeKB,
@@ -198,11 +199,13 @@ def _t0_warm_started(tmp_path, **put_kwargs) -> SharedState:
     if put_kwargs:
         kb.put_recipe(
             canonical_id=recipe_canonical_id(
-                model="kimi-k3",
-                hardware="mi355x",
-                framework_name=state.framework_name,
-                framework_version=state.framework_version,
-                precision=state.precision,
+                RecipeIdentity(
+                    model="kimi-k3",
+                    hardware="mi355x",
+                    framework_name=state.framework_name,
+                    framework_version=state.framework_version,
+                    precision=state.precision,
+                )
             ),
             model="kimi-k3",
             hardware="mi355x",

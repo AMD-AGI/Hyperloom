@@ -25,7 +25,11 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
 )
 from hyperloom.orchestrator.knowledge.workload_tags import WORKLOAD_SHAPE_FIELDS, workload_shape_tags
 from hyperloom.inference_optimizer.breakdown.recorder import warm_start_event as _warm_start_event
-from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version, kb_hardware_slug
+from hyperloom.inference_optimizer.recipe_snapshot_constants import (
+    RecipeIdentity,
+    detect_framework_version,
+    kb_hardware_slug,
+)
 from hyperloom.inference_optimizer.session.session_paths import (
     recipe_kb_lessons_json,
     recipe_kb_pitfalls_json,
@@ -785,13 +789,15 @@ def _resolve_t0_identity(
         "precision": _text(getattr(shared_state, "precision", "")),
     }
     identity["canonical_id"] = recipe_canonical_id(
-        model=model,
-        hardware=hardware,
-        framework_name=framework,
-        framework_version=version,
-        precision=identity["precision"],
-        model_type=identity["model_type"],
-        architectures=architectures,
+        RecipeIdentity(
+            model=model,
+            hardware=hardware,
+            framework_name=framework,
+            framework_version=version,
+            precision=identity["precision"],
+            model_type=identity["model_type"],
+            architectures=architectures,
+        ),
         scheme=("agentx" if agentx_active(benchmark_mode=getattr(shared_state, "benchmark_mode", "")) else "inference"),
     )
     return identity

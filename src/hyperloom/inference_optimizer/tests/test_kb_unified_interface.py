@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
     RecipeKB,
@@ -42,11 +43,13 @@ def test_local_search_prefer_reorders_without_dropping(
     ]
     for hardware, tp in rows:
         cid = recipe_canonical_id(
-            model="qwen3-32b",
-            hardware=hardware,
-            framework_name="sglang",
-            framework_version="0.5.11",
-            precision="fp8",
+            RecipeIdentity(
+                model="qwen3-32b",
+                hardware=hardware,
+                framework_name="sglang",
+                framework_version="0.5.11",
+                precision="fp8",
+            )
         )
         kb.put_recipe(
             canonical_id=cid,

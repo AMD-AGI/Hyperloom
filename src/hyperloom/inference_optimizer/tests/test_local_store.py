@@ -9,17 +9,19 @@ import threading
 
 import pytest
 
-from hyperloom.inference_optimizer.recipe_snapshot_constants import recipe_canonical_id
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, recipe_canonical_id
 from hyperloom.orchestrator.knowledge.recipe_kb import local_store as ls
 
 
 def _cid(model="m", hardware="mi300", framework_name="sglang", framework_version="v1", precision="fp8") -> str:
     return recipe_canonical_id(
-        model=model,
-        hardware=hardware,
-        framework_name=framework_name,
-        framework_version=framework_version,
-        precision=precision,
+        RecipeIdentity(
+            model=model,
+            hardware=hardware,
+            framework_name=framework_name,
+            framework_version=framework_version,
+            precision=precision,
+        )
     )
 
 

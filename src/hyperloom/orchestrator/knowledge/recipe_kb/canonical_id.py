@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from hyperloom.inference_optimizer.recipe_snapshot_constants import recipe_canonical_id
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, recipe_canonical_id
 
 # One canonical-id segment: a path component safe to join onto a store root.
 SLUG_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
@@ -86,13 +86,15 @@ def canonical_id_for_path(*, root: Path, recipe_dir: Path) -> str:
         )
     model, hardware, framework_name, model_type, architectures, framework_version, precision = parts
     return recipe_canonical_id(
-        model=model,
-        hardware=hardware,
-        framework_name=framework_name,
-        model_type=model_type,
-        architectures=architectures,
-        framework_version=framework_version,
-        precision=precision,
+        RecipeIdentity(
+            model=model,
+            hardware=hardware,
+            framework_name=framework_name,
+            model_type=model_type,
+            architectures=architectures,
+            framework_version=framework_version,
+            precision=precision,
+        )
     )
 
 

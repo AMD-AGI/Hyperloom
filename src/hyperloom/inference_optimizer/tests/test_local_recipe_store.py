@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     HISTORY_DIRNAME,
     InvalidCanonicalIdError,
@@ -63,11 +64,13 @@ def _cid(
     precision: str = "fp8",
 ) -> str:
     return recipe_canonical_id(
-        model=model,
-        hardware=hardware,
-        framework_name=framework_name,
-        framework_version=framework_version,
-        precision=precision,
+        RecipeIdentity(
+            model=model,
+            hardware=hardware,
+            framework_name=framework_name,
+            framework_version=framework_version,
+            precision=precision,
+        )
     )
 
 
@@ -424,25 +427,31 @@ def test_get_recipe_with_unknown_version_returns_none(tmp_path: Path) -> None:
 def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
     """Create three recipes spanning different identity/metrics, keyed by alias."""
     cid_a = recipe_canonical_id(
-        model="m-a",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
+        RecipeIdentity(
+            model="m-a",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+        )
     )
     cid_b = recipe_canonical_id(
-        model="m-b",
-        hardware="mi300x",
-        framework_name="vllm",
-        framework_version="0.6.0",
-        precision="bf16",
+        RecipeIdentity(
+            model="m-b",
+            hardware="mi300x",
+            framework_name="vllm",
+            framework_version="0.6.0",
+            precision="bf16",
+        )
     )
     cid_c = recipe_canonical_id(
-        model="m-c",
-        hardware="mi355x",
-        framework_name="sglang",
-        framework_version="0.5.0",
-        precision="fp8",
+        RecipeIdentity(
+            model="m-c",
+            hardware="mi355x",
+            framework_name="sglang",
+            framework_version="0.5.0",
+            precision="fp8",
+        )
     )
     import time
 

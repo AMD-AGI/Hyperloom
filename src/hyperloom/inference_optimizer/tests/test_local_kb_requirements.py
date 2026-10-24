@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.cli.kb import _build_recipe_kb_dispatcher
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
     cid_to_path_components,
@@ -47,11 +48,13 @@ def _ns(**overrides: Any) -> argparse.Namespace:
 
 def test_item1_canonical_id_is_5tuple_with_inference_prefix() -> None:
     cid = recipe_canonical_id(
-        model="DeepSeek-R1",
-        hardware="MI300X",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
+        RecipeIdentity(
+            model="DeepSeek-R1",
+            hardware="MI300X",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+        )
     )
     assert cid == "inference:deepseek-r1:mi300x:sglang:unknown_model_type:unknown_arch:0.4.5:fp8"
     assert len(cid.split(":")) == 8  # prefix + 7 dimensions
@@ -62,7 +65,7 @@ def test_item1_canonical_id_keyword_only_no_positional_drift() -> None:
     # Splat a runtime-built arg list so the positional drift stays a runtime check.
     bad_positional_args = ["m", "h", "fw", "v", "p"]
     with pytest.raises(TypeError):
-        recipe_canonical_id(*bad_positional_args)  # type: ignore[misc]
+        RecipeIdentity(*bad_positional_args)  # type: ignore[misc]
 
 
 def test_item2_default_local_kb_root_is_user_data_path_knowledge(
@@ -99,11 +102,13 @@ def test_item3_no_central_url_reads_and_writes_go_local(
     assert kb.mode == "local"
 
     cid = recipe_canonical_id(
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
+        RecipeIdentity(
+            model="m",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+        )
     )
     out = kb.put_recipe(
         canonical_id=cid,
@@ -127,11 +132,13 @@ def test_item4_local_mode_ignores_central_credentials(
 ) -> None:
     """Local mode keeps both reads and writes local despite ambient credentials."""
     cid = recipe_canonical_id(
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
+        RecipeIdentity(
+            model="m",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+        )
     )
 
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "local")
@@ -163,18 +170,22 @@ def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
     """Two recipes differing in any single dimension land in distinct on-disk locations."""
     store = LocalRecipeStore(root=tmp_path)
     cid_v1 = recipe_canonical_id(
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
+        RecipeIdentity(
+            model="m",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+        )
     )
     cid_v2 = recipe_canonical_id(
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.5.0",
-        precision="fp8",
+        RecipeIdentity(
+            model="m",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.5.0",
+            precision="fp8",
+        )
     )
     store.put_recipe(
         canonical_id=cid_v1,
@@ -210,11 +221,13 @@ def test_item6_path_levels_match_5_dimensions(tmp_path: Path) -> None:
     """The on-disk path is exactly 7 levels below the store root, one per identity dimension."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
-        model="m",
-        hardware="hw",
-        framework_name="fw",
-        framework_version="ver",
-        precision="prec",
+        RecipeIdentity(
+            model="m",
+            hardware="hw",
+            framework_name="fw",
+            framework_version="ver",
+            precision="prec",
+        )
     )
     store.put_recipe(
         canonical_id=cid,
@@ -232,11 +245,13 @@ def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
     """A model arg like ``/hyperloom/models/Qwen-...`` must NOT split into path segments (slug basenames it first)."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
-        model="/hyperloom/models/Qwen-Qwen3-30B-A3B-Base",
-        hardware="mi355x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="bf16",
+        RecipeIdentity(
+            model="/hyperloom/models/Qwen-Qwen3-30B-A3B-Base",
+            hardware="mi355x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="bf16",
+        )
     )
     assert cid == ("inference:qwen-qwen3-30b-a3b-base:mi355x:sglang:unknown_model_type:unknown_arch:0.4.5:bf16")
     store.put_recipe(
@@ -267,11 +282,13 @@ def test_item7_model_with_double_slash_normalises(tmp_path: Path) -> None:
     """Edge case: a trailing slash on the model arg shouldn't split into an empty segment."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
-        model="/some/path/MyModel/",
-        hardware="hw",
-        framework_name="fw",
-        framework_version="v",
-        precision="p",
+        RecipeIdentity(
+            model="/some/path/MyModel/",
+            hardware="hw",
+            framework_name="fw",
+            framework_version="v",
+            precision="p",
+        )
     )
     assert ":mymodel:" in cid
     store.put_recipe(
@@ -292,11 +309,13 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
     """A second put_recipe without ``what_worked`` must preserve the previously written value."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
-        model="m",
-        hardware="hw",
-        framework_name="fw",
-        framework_version="v",
-        precision="p",
+        RecipeIdentity(
+            model="m",
+            hardware="hw",
+            framework_name="fw",
+            framework_version="v",
+            precision="p",
+        )
     )
     store.put_recipe(
         canonical_id=cid,
@@ -351,11 +370,13 @@ def test_item8_history_archives_prior_version(tmp_path: Path) -> None:
     """Every put_recipe bumps version and snapshots the prior row to ``history/v{N}.json`` for rollback."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
-        model="m",
-        hardware="hw",
-        framework_name="fw",
-        framework_version="v",
-        precision="p",
+        RecipeIdentity(
+            model="m",
+            hardware="hw",
+            framework_name="fw",
+            framework_version="v",
+            precision="p",
+        )
     )
     store.put_recipe(
         canonical_id=cid,
@@ -385,11 +406,13 @@ def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
     """The persisted ``recipe.json`` uses arbor field names, NOT the v2 wire spec's findings/failures/gaps/body/metrics."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
-        model="m",
-        hardware="hw",
-        framework_name="fw",
-        framework_version="v",
-        precision="p",
+        RecipeIdentity(
+            model="m",
+            hardware="hw",
+            framework_name="fw",
+            framework_version="v",
+            precision="p",
+        )
     )
     store.put_recipe(
         canonical_id=cid,
