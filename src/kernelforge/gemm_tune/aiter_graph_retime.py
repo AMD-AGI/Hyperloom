@@ -17,9 +17,7 @@ from __future__ import annotations
 
 import csv
 import json
-import os
 import shutil
-import subprocess
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -29,6 +27,7 @@ from pathlib import Path
 from hyperloom.common.aiter_jit_cache import resolve_jit_build_dir, resolve_package_root
 
 from .aiter_splitk_validate import _operands, _resolve_device
+from .utils import run_subprocess
 
 # Weight copies rotated per call so each call reads weights evicted by the others: above MI355X's 256 MiB MALL.
 _ROTATE_BYTES = 2 << 30
@@ -115,16 +114,13 @@ class _WorkerRetime:
         # The build keys instances by (gfx, cu_num, M, N, K); a distinct M per row keeps every candidate's instance.
         _write_rows(build, [{**row, "M": str(i + 1)} for i, row in enumerate(rows)])
         results.unlink(missing_ok=True)
-        env = {**os.environ, "AITER_JIT_DIR": str(jit_dir), self._production.config_env: str(build)}
+        env = {"AITER_JIT_DIR": str(jit_dir), self._production.config_env: str(build)}
         command = [sys.executable, "-m", __name__, self._target.op, self._device, str(jobs), str(results)]
         log_path = self._run_dir / "worker.log"
         try:
-            with log_path.open("w") as log_file:
-                rc = subprocess.run(
-                    command, env=env, stdout=log_file, stderr=subprocess.STDOUT, timeout=seconds_left, check=False
-                ).returncode
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise RetimeError(f"timing worker did not finish: {exc}") from exc
+            rc, _, _ = run_subprocess(command, timeout_s=int(seconds_left), log_file=log_path, env_override=env)
+        except OSError as exc:
+            raise RetimeError(f"timing worker did not start: {exc}") from exc
         if rc != 0 or not results.is_file():
             raise RetimeError(f"timing worker exited {rc}; {log_path} ends: {_tail(log_path)}")
         return [Timing(**timing) for timing in json.loads(results.read_text())]

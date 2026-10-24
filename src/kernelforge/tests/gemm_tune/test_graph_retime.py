@@ -219,13 +219,14 @@ def _worker(tmp_path, monkeypatch, *, rc: int = 0, results=None, seconds_left: f
     monkeypatch.setattr(retime, "resolve_jit_build_dir", lambda root: jit / "build")
     seen = {}
 
-    def run(command, env, **kwargs):
-        seen.update(command=command, env=env, timeout=kwargs.get("timeout"))
+    def run(command, *, timeout_s, log_file, env_override):
+        # The shared runner caps the aiter build's jobs to the container and kills its whole group on timeout.
+        seen.update(command=command, env=env_override, timeout=timeout_s)
         if results is not None:
             Path(command[-1]).write_text(results)
-        return types.SimpleNamespace(returncode=rc)
+        return rc, "", ""
 
-    monkeypatch.setattr(retime.subprocess, "run", run)
+    monkeypatch.setattr(retime, "run_subprocess", run)
     return make_retime_fn(RetimeTarget(_OP, "", time.time() + seconds_left), tmp_path / "run"), seen
 
 
