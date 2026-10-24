@@ -88,7 +88,7 @@ def test_worker_uses_invoking_policy_and_reanchors_session(monkeypatch):
     monkeypatch.setattr(sk.time, "monotonic", lambda: 5000.0)
 
     def run(cmd, **kwargs):
-        captured.update(kwargs)
+        captured.update(vars(kwargs["watch"]))
         return subprocess.CompletedProcess(cmd, 0, "out", "err")
 
     monkeypatch.setattr(sk, "run_with_session_kill", run)

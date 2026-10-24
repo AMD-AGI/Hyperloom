@@ -30,6 +30,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     COOPERATIVE_REAP_BUDGET_SEC,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     STOP_GATE_POLL_SECONDS,
+    RoundWatch,
     run_with_session_kill,
 )
 from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
@@ -819,7 +820,7 @@ def _blocks_in_a_thread(started: asyncio.Event, *, outcome: dict[str, Any]):
         proc = await asyncio.to_thread(
             run_with_session_kill,
             ["sleep", str(_BLOCKING_SEC)],
-            timeout=_BLOCKING_SEC * 4,
+            watch=RoundWatch(timeout=_BLOCKING_SEC * 4),
         )
         outcome["returncode"] = proc.returncode
         return {"returncode": proc.returncode}
