@@ -12,7 +12,9 @@ the session's) and the startup brief, right after the role, then
 the branch, its head, K and the branch's latest memory, so a new session goes on where the last one stopped. A
 session whose turn ended is woken by :func:`wake_message`, with what its inbox and the runtime's notices brought, or
 by :func:`nudge_message` when nothing came and it has nothing running. A CLI restarted on its crashed conversation
-is told by :func:`resume_message` why it stopped, where its worktree stands and what arrived while it was down.
+is told by :func:`resume_message` why it stopped, where its worktree stands and what arrived while it was down; one
+that goes on with an idle session's conversation is told by :func:`idle_resume_message` what changed since its last
+turn, the integration head included.
 :func:`prompt_versions` names the text of all of them for the session's manifest fingerprint.
 """
 
@@ -84,6 +86,17 @@ _RESET = (
 )
 _ARRIVED = "While you were down, this arrived for your branch:\n{items}"
 _NOTHING_ARRIVED = "Nothing arrived for your branch while you were down."
+_IDLE_RESUMED = """\
+Your last session ended idle ({reason}); your branch goes on in this same conversation, with no fresh briefing.
+{worktree}
+{integration}
+{arrived}
+Act on what changed. If nothing did, read notebook_brief for your head and test the next source change in your \
+direction, or take another of the session's directions: sessions that end with nothing to test stop your branch."""
+_INTEGRATION_MOVED = "The integration head moved from {seen} to {now}; read notebook_brief for what it took in."
+_INTEGRATION_STILL = "The integration head is still {now}."
+_IDLE_ARRIVED = "Since your last turn ended, this arrived for your branch:\n{items}"
+_IDLE_NOTHING = "Nothing arrived for your branch since your last turn ended."
 _LAUNCH = (
     _REPAIR,
     _DIRECTION,
@@ -101,6 +114,11 @@ _LAUNCH = (
     _RESET,
     _ARRIVED,
     _NOTHING_ARRIVED,
+    _IDLE_RESUMED,
+    _INTEGRATION_MOVED,
+    _INTEGRATION_STILL,
+    _IDLE_ARRIVED,
+    _IDLE_NOTHING,
     str(RECENT_ENTRIES),
     str(ENTRY_CHARS),
     *DIRECTIONS,
@@ -423,8 +441,8 @@ def wake_message(items: Sequence[InboxItem], notices: Sequence[BranchLogRecord])
 
 @dataclass(frozen=True)
 class Resume:
-    """Where a crashed CLI's conversation goes on: why it stopped, and the head its worktree is at, ``kept`` as the
-    CLI left it or reset to that head."""
+    """Where a crashed or idle CLI's conversation goes on: why it stopped, and the head its worktree is at, ``kept``
+    as the CLI left it or reset to that head."""
 
     reason: str
     head: str
@@ -437,6 +455,30 @@ def resume_message(resume: Resume, items: Sequence[InboxItem], notices: Sequence
     worktree = (_KEPT if resume.kept else _RESET).format(worktree=resume.worktree, head=resume.head)
     arrived = _ARRIVED.format(items=_arrivals(items, notices)) if items or notices else _NOTHING_ARRIVED
     return _RESUMED.format(reason=resume.reason, worktree=worktree, arrived=arrived)
+
+
+@dataclass(frozen=True)
+class IntegrationHeads:
+    """The integration head a conversation's last finished turn saw, and the one it goes on at."""
+
+    seen: str
+    now: str
+
+
+def idle_resume_message(
+    resume: Resume, integration: IntegrationHeads, items: Sequence[InboxItem], notices: Sequence[BranchLogRecord]
+) -> str:
+    """The first message of a CLI that goes on with the conversation of a session that ended idle: what changed since
+    its last turn, in place of a launch prompt."""
+    worktree = (_KEPT if resume.kept else _RESET).format(worktree=resume.worktree, head=resume.head)
+    moved = _INTEGRATION_MOVED if integration.seen != integration.now else _INTEGRATION_STILL
+    arrived = _IDLE_ARRIVED.format(items=_arrivals(items, notices)) if items or notices else _IDLE_NOTHING
+    return _IDLE_RESUMED.format(
+        reason=resume.reason,
+        worktree=worktree,
+        integration=moved.format(seen=integration.seen, now=integration.now),
+        arrived=arrived,
+    )
 
 
 def _arrivals(items: Sequence[InboxItem], notices: Sequence[BranchLogRecord]) -> str:
@@ -499,7 +541,9 @@ __all__ = [
     "ENTRY_CHARS",
     "RECENT_ENTRIES",
     "VERSION_HEX",
+    "IntegrationHeads",
     "Resume",
+    "idle_resume_message",
     "launch_prompt",
     "nudge_message",
     "prompt_versions",

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.contracts.measurement import Purpose, TestKind
-from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe, RecipeDelta
+from hyperloom.contracts.recipe import ComponentPatches, ConfigDelta, LaunchConfig, Recipe, RecipeDelta, apply
 from hyperloom.orchestrator.specialists.agent_runner import AgentEnded, AgentHandle, AgentStatus, LocalAgentRunner
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
@@ -148,6 +148,7 @@ async def rig(tmp_path):
     clock = _Clock()
     rig = SimpleNamespace(
         root=root,
+        repo=repo,
         clock=clock,
         runner=_Runner(clock),
         tokens=_Tokens(),
@@ -701,24 +702,95 @@ async def test_a_resume_after_the_branch_head_moved_resets_the_worktree_and_says
     assert f"reset to your branch head {rig.root}" in rig.runner.prompts[1]
 
 
-async def test_an_idle_end_is_followed_by_a_fresh_conversation(rig):
+_TOO_LONG = {"type": "result", "subtype": "success", "is_error": True, "result": "Prompt is too long"}
+
+
+_SUCCESS = {"type": "result", "subtype": "success"}
+
+
+async def _idle_after_turns(rig, *last) -> SessionIdle:
+    """Run a session whose first launch ends its turns with nothing to test, the last one logging ``last``."""
     session = rig.session(nudge_waits_s=NO_WAITS)
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the launch")
     for nudged in range(1, IDLE_TURNS):
-        _end_turn(rig, _INIT)
+        _end_turn(rig, _INIT, _call(50_000))
         await _until(lambda n=nudged: len(rig.runner.sent) == n, f"nudge {nudged}")
-    _end_turn(rig)
-    with pytest.raises(SessionIdle):
+    with (rig.workspace / "process.log").open("a") as log:
+        log.writelines(json.dumps(row) + "\n" for row in last)
+    with pytest.raises(SessionIdle) as idle:
         await asyncio.wait_for(running, 1)
+    return idle.value
+
+
+async def _move_integration(rig) -> str:
+    """Merge another branch's commit onto the integration head; the new head."""
+    chunking = RecipeDelta(config=ConfigDelta(server_args="--enable-chunked-prefill"))
+    await rig.repo.create_branch("s0", rig.root)
+    tip = await rig.repo.commit("s0", rig.root, apply(ROOT, chunking), "enable chunked prefill")
+    return await rig.repo.commit_integration(rig.root, chunking, (tip,))
+
+
+async def test_an_idle_end_under_the_context_cap_is_resumed_with_what_changed_since(rig):
+    idle = await _idle_after_turns(rig, _call(50_000), _SUCCESS)
+    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    await rig.toolbox_notebook.write_result(result("r1"))
+    moved = await _move_integration(rig)
 
     session, running = await _next_launch(rig, 2)
     await session.stop()
     await asyncio.wait_for(running, 1)
 
+    assert idle.resumable
+    first, resumed = rig.runner.specs
+    assert _flag(resumed.argv, "--resume") == _flag(first.argv, "--session-id")
+    assert "--session-id" not in resumed.argv
+    message = rig.runner.prompts[1]
+    assert "Startup brief" not in message and "result r1" in message
+    assert "nothing to test" in message and "as you left it" in message
+    assert f"integration head moved from {rig.root} to {moved}" in message
+
+
+async def test_an_idle_resume_with_nothing_new_says_so_and_names_the_unmoved_integration_head(rig):
+    await _idle_after_turns(rig, _call(50_000), _SUCCESS)
+
+    session, running = await _next_launch(rig, 2)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    message = rig.runner.prompts[1]
+    assert "--resume" in rig.runner.specs[1].argv
+    assert "Nothing arrived for your branch" in message and f"integration head is still {rig.root}" in message
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [(_call(RESUME_CONTEXT_MAX), _SUCCESS), (_TOO_LONG,)],
+    ids=["past-the-context-cap", "prompt-too-long"],
+)
+async def test_an_idle_end_with_a_full_context_is_followed_by_a_fresh_conversation(rig, rows):
+    idle = await _idle_after_turns(rig, *rows)
+
+    session, running = await _next_launch(rig, 2)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert not idle.resumable
     first, second = (spec.argv for spec in rig.runner.specs)
     assert "--resume" not in second and _flag(second, "--session-id") != _flag(first, "--session-id")
     assert rig.runner.prompts[1].startswith("Startup brief")
+
+
+async def test_a_crash_after_an_idle_resume_is_resumed_as_a_crash(rig):
+    await _idle_after_turns(rig, _call(50_000), _SUCCESS)
+    await _crash_after_a_turn(rig, rig.session(), 2)
+
+    session, running = await _next_launch(rig, 3)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert "--resume" in rig.runner.specs[2].argv
+    assert "exited 1" in rig.runner.prompts[2] and "nothing to test" not in rig.runner.prompts[2]
 
 
 async def test_a_session_that_ended_well_is_followed_by_a_fresh_conversation(rig):
@@ -732,9 +804,6 @@ async def test_a_session_that_ended_well_is_followed_by_a_fresh_conversation(rig
 
     first, second = (spec.argv for spec in rig.runner.specs)
     assert "--resume" not in second and _flag(second, "--session-id") != _flag(first, "--session-id")
-
-
-_TOO_LONG = {"type": "result", "subtype": "success", "is_error": True, "result": "Prompt is too long"}
 
 
 @pytest.mark.parametrize(

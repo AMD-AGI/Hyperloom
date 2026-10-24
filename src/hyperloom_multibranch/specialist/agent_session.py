@@ -26,10 +26,11 @@ A Claude session runs under a conversation id it is given at launch, written wit
 ``cli_session.json`` in the workspace before the CLI starts and updated at each turn's end. A Claude CLI that exits with
 an error or is lost after its conversation finished a turn is resumed by the next run: ``--resume`` on that
 conversation, told what arrived since and whether its worktree was kept, which it is while the branch head did not move.
-An idle or a clean end, a conversation past ``RESUME_CONTEXT_MAX`` or one the model refused as too long, and a resumed
-CLI that crashes again before finishing a turn are followed by a fresh session. A resume the CLI refuses at once is
-followed by a fresh session in the same run, with a notice and no crash. A conversation record that cannot be read
-means a fresh session and a warning.
+A session that ends idle is resumed the same way, told what changed since its last turn, the integration head included,
+as a fresh briefing would bring little the conversation lacks. A clean end, a conversation past ``RESUME_CONTEXT_MAX``
+or one the model refused as too long, and a resumed CLI that crashes again before finishing a turn are followed by a
+fresh session. A resume the CLI refuses at once is followed by a fresh session in the same run, with a notice and no
+crash. A conversation record that cannot be read means a fresh session and a warning.
 """
 
 from __future__ import annotations
@@ -70,12 +71,20 @@ from hyperloom_multibranch.contracts.notebook.records import (
     NotebookSnapshot,
     TestRecord,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import InboxKind, UsageSource
+from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, InboxKind, UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.llm_usage import launch_cost, launch_usage
-from hyperloom_multibranch.specialist.prompts import Resume, launch_prompt, nudge_message, resume_message, wake_message
+from hyperloom_multibranch.specialist.prompts import (
+    IntegrationHeads,
+    Resume,
+    idle_resume_message,
+    launch_prompt,
+    nudge_message,
+    resume_message,
+    wake_message,
+)
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart
 from hyperloom_multibranch.specialist.tools import sync_to_head
 from hyperloom_multibranch.specialist.worktree import BranchWorktree
@@ -320,11 +329,15 @@ class AgentSession:
         seen = _Seen((await self._place.notebook.poll(branch)).cursor, len(recent))
         if not self._setup.command.interactive:
             return _Launch(prompt, seen)
-        cli = _CliState(str(uuid.uuid4()), head=head, seen_cursor=seen.cursor, logged=seen.logged)
+        integration = await self._setup.repo.head(INTEGRATION_BRANCH)
+        cli = _CliState(
+            str(uuid.uuid4()), head=head, integration=integration, seen_cursor=seen.cursor, logged=seen.logged
+        )
         return _Launch(prompt, seen, cli)
 
     async def _resumed(self) -> _Launch | None:
-        """The launch that goes on with the conversation the last run's CLI crashed in; ``None`` when there is none.
+        """The launch that goes on with the conversation the last run's CLI crashed or idled in; ``None`` when there
+        is none.
 
         The worktree is kept as the CLI left it while the branch head did not move, so its uncommitted edits survive;
         the CLI is shown what arrived from where the conversation's last finished turn had seen up to."""
@@ -340,12 +353,19 @@ class AgentSession:
             head = await sync_to_head(self._setup.repo, branch, worktree)
         seen = _Seen(cli.seen_cursor, cli.logged)
         items, notices = await self._arrived(seen)
-        prompt = resume_message(Resume(cli.reason, head, str(worktree.path), kept=kept), items, notices)
+        resume = Resume(cli.reason, head, str(worktree.path), kept=kept)
+        integration = IntegrationHeads(cli.integration, await self._setup.repo.head(INTEGRATION_BRANCH))
+        if cli.idle:
+            prompt = idle_resume_message(resume, integration, items, notices)
+        else:
+            prompt = resume_message(resume, items, notices)
         cli = replace(
             cli,
             resumable=False,
+            idle=False,
             resumes_in_row=cli.resumes_in_row + 1,
             head=head,
+            integration=integration.now,
             seen_cursor=seen.cursor,
             logged=seen.logged,
         )
@@ -386,9 +406,9 @@ class AgentSession:
             raise SessionCrashed(reason, lost=lost, worked=bool(last_end), resumable=resumable)
         return "it reached its deadline" if status.timed_out else "its model finished its turn"
 
-    async def _keep_for_resume(self, launch: _Launch, reason: str) -> bool:
-        """Mark the crashed launch's conversation for the next run to resume, when it is worth going on with: it
-        finished a turn since its last resume, and its context has room left."""
+    async def _keep_for_resume(self, launch: _Launch, reason: str, *, idle: bool = False) -> bool:
+        """Mark the crashed or ``idle`` launch's conversation for the next run to resume, when it is worth going on
+        with: it finished a turn since its last resume, and its context has room left."""
         cli, turns = launch.cli, launch.turns
         if cli is None or turns is None:
             return False
@@ -398,7 +418,7 @@ class AgentSession:
             and cli.context_tokens < RESUME_CONTEXT_MAX
             and not turns.context_exceeded
         )
-        launch.cli = replace(cli, resumable=resumable, reason=reason)
+        launch.cli = replace(cli, resumable=resumable, idle=idle and resumable, reason=reason)
         await asyncio.to_thread(self._write_cli, launch.cli)
         return resumable
 
@@ -456,6 +476,7 @@ class AgentSession:
             resumes_in_row=0,
             context_tokens=turns.context,
             head=await self._setup.repo.head(self._start.branch),
+            integration=await self._setup.repo.head(INTEGRATION_BRANCH),
             seen_cursor=launch.seen.cursor,
             logged=launch.seen.logged,
         )
@@ -481,15 +502,22 @@ class AgentSession:
             strain = 0 if message else strain + (_WORKED if turns is not None and turns.worked() else _SILENT)
             quiet = 0 if message else quiet + 1
             if strain >= _SILENT * len(waits):
-                self._handle = None
-                await self._finish(handle, cancel=True)
-                tested = await self._branch_requests() != self._requested
-                raise SessionIdle(f"its model ended {quiet} turns in a row with nothing to test", tested=tested)
+                raise await self._idle_end(handle, launch, quiet)
             try:
                 await self._setup.runner.send(handle, self._setup.command.message(message or nudge_message()).encode())
             except AgentEnded:
                 return await self._setup.runner.poll(handle)
             sent += 1
+
+    async def _idle_end(self, handle: AgentHandle, launch: _Launch, quiet: int) -> SessionIdle:
+        """End the CLI whose model ended ``quiet`` turns in a row with nothing to test, keeping its conversation for
+        the next run when it has room left; what the run raises."""
+        self._handle = None
+        await self._finish(handle, cancel=True)
+        tested = await self._branch_requests() != self._requested
+        reason = f"its model ended {quiet} turns in a row with nothing to test"
+        resumable = await self._keep_for_resume(launch, reason, idle=True)
+        return SessionIdle(reason, tested=tested, resumable=resumable)
 
     async def _wake(self, handle: AgentHandle, seen: _Seen, patience: float) -> str | None:
         """Wait, beating the heartbeat, until something arrives for the branch, and move ``seen`` past it. An empty
@@ -675,18 +703,21 @@ class _Seen:
 @dataclass(frozen=True)
 class _CliState:
     """A Claude CLI's conversation as ``cli_session.json`` keeps it: its id; the turns it finished without an error,
-    and the tokens its last call read; the resumes since it last finished one; the branch head and the inbox cursor
-    and branch-log entries it had seen at its last finished turn; and whether the next run resumes it, with why it
-    crashed. ``resumable`` is set only when a launch crashed, so an idle or a clean end leaves it unset."""
+    and the tokens its last call read; the resumes since it last finished one; the branch and integration heads and
+    the inbox cursor and branch-log entries it had seen at its last finished turn; and whether the next run resumes
+    it, with why it stopped and whether that was an idle end. ``resumable`` is set only when a launch crashed or ended
+    idle, so a clean end leaves it unset."""
 
     session_id: str
     turns_done: int = 0
     context_tokens: int = 0
     resumes_in_row: int = 0
     head: str = ""
+    integration: str = ""
     seen_cursor: str = ""
     logged: int = 0
     resumable: bool = False
+    idle: bool = False
     reason: str = ""
 
     @classmethod
