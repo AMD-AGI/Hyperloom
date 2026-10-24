@@ -109,6 +109,7 @@ from hyperloom_multibranch.scheduling.exports import IMAGE_CHECK_FILE
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL, PRIMARY_POINT_ONLY
 from hyperloom_multibranch.scheduling import judge
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, HoldReason
+from hyperloom_multibranch.scheduling.integrator import ADOPTING_LEAD
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.notebook.rsi.bandit import BANDIT_LABEL
@@ -629,7 +630,11 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert breakdown["close"]["final"]["commit_id"] == head
     assert breakdown["close"]["selection"]["chosen"]["commit"] == head
     attempts = breakdown["close"]["merges"]["attempts"]
-    assert (attempts["merged"], attempts["not_stackable"], attempts["conflict_skipped"]) == (1, 3, 0)
+    assert (attempts["merged"], attempts["not_stackable"], attempts["conflict_skipped"]) == (1, 4, 0)
+    merge_log = [json.loads(line) for line in stage.layout.merges.read_text().splitlines()]
+    [adoption] = [row for row in merge_log if row["detail"].get("adopts")]
+    assert (adoption["detail"]["adopts"], adoption["detail"]["candidate"]) == ("b02", c2)
+    assert adoption["reason"].startswith(f"{ADOPTING_LEAD.format('b02')}: regressed ")
 
     assert all(entry["status"] == BranchStatus.STOPPED.value for entry in roster["entries"])
     assert outcome.close is not None and outcome.close.stop.clean and outcome.close.exports is not None
