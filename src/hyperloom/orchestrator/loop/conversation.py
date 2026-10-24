@@ -711,8 +711,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
         if override is not None:
             return override
         role = self.role_registry[agent_name]
-        if not role.prompt_driven:
-            return ""
         try:
             return role.load_system_prompt()
         except FileNotFoundError:
