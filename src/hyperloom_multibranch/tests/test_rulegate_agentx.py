@@ -12,7 +12,11 @@ from hyperloom.common.perf_metric import (
 )
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD, compare, confirm
-from hyperloom_multibranch.rulegate.readings import GRADED_SHORT_REQUESTS, GRADED_UNSERVED_REQUESTS
+from hyperloom_multibranch.rulegate.readings import (
+    GRADED_REQUESTS_TOTAL,
+    GRADED_SHORT_REQUESTS,
+    GRADED_UNSERVED_REQUESTS,
+)
 
 PARENT = {
     GRADED_INTVTY_P50: 100.0,
@@ -99,7 +103,7 @@ def test_a_run_without_a_p50_is_not_compared():
         compare(candidate, PARENT, "r1")
 
 
-COUNTED = {**PARENT, GRADED_UNSERVED_REQUESTS: 1.0, GRADED_SHORT_REQUESTS: 0.0}
+COUNTED = {**PARENT, GRADED_UNSERVED_REQUESTS: 1.0, GRADED_SHORT_REQUESTS: 0.0, GRADED_REQUESTS_TOTAL: 200.0}
 
 
 def test_the_request_classes_are_recorded_on_the_judgement():
@@ -107,6 +111,7 @@ def test_the_request_classes_are_recorded_on_the_judgement():
     judgement = compare(candidate, COUNTED, "r1")
     assert judgement.recorded_value[GRADED_SHORT_REQUESTS] == 2.0
     assert judgement.recorded_value[GRADED_UNSERVED_REQUESTS] == 1.0
+    assert judgement.recorded_value[GRADED_REQUESTS_TOTAL] == 200.0
 
 
 def test_more_short_answers_alone_never_refuse_a_candidate():

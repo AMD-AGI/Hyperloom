@@ -17,6 +17,8 @@ _MEASURE = "measure"
 GRADED_UNSERVED_REQUESTS = "graded_unserved_requests"
 #: Requests answered with output tokens the client still counted failed, summed over the measured rounds.
 GRADED_SHORT_REQUESTS = "graded_short_requests"
+#: Requests profiled, summed over the measured rounds: the denominator of the two counts above.
+GRADED_REQUESTS_TOTAL = "graded_requests_total"
 
 
 class UnreadableResult(ValueError):
@@ -79,13 +81,16 @@ def agentx_reading(result: TestResult) -> dict[str, float]:
 
 
 def _request_classes(classes: tuple[RequestClasses, ...], measured: int) -> dict[str, float]:
-    """Empty unless every measured round counted its empty and short failures: an uncounted round is no "none"."""
-    if len(classes) != measured or any(c.failed_empty is None or c.failed_transport is None for c in classes):
+    """Each count only when every measured round counted it: an uncounted round is no "none"."""
+    if len(classes) != measured:
         return {}
-    return {
-        GRADED_UNSERVED_REQUESTS: float(sum(c.failed_transport + c.failed_empty for c in classes)),
-        GRADED_SHORT_REQUESTS: float(sum(c.failed_short for c in classes)),
-    }
+    counts: dict[str, float] = {}
+    if all(c.requests_total is not None for c in classes):
+        counts[GRADED_REQUESTS_TOTAL] = float(sum(c.requests_total for c in classes))
+    if all(c.failed_empty is not None and c.failed_transport is not None for c in classes):
+        counts[GRADED_UNSERVED_REQUESTS] = float(sum(c.failed_transport + c.failed_empty for c in classes))
+        counts[GRADED_SHORT_REQUESTS] = float(sum(c.failed_short for c in classes))
+    return counts
 
 
 def _measured(result: TestResult) -> list[RoundValue]:
@@ -106,6 +111,7 @@ def _require_measurement(result: TestResult) -> None:
 
 
 __all__ = [
+    "GRADED_REQUESTS_TOTAL",
     "GRADED_SHORT_REQUESTS",
     "GRADED_UNSERVED_REQUESTS",
     "UnreadableResult",
