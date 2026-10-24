@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
+from types import SimpleNamespace
 import json
 import os
 import signal
@@ -29,6 +30,7 @@ from hyperloom_multibranch.specialist.autonomous_session import (
     AGENT_DIR,
     AutonomousSession,
     AutonomousSetup,
+    collection_margin,
     without_file,
 )
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
@@ -787,3 +789,18 @@ async def test_a_finding_learnt_as_the_agent_finished_is_not_learnt_again_when_t
 
     learnt = [record.learning.content for record in await rig.notebook.learnings(branch=BRANCH)]
     assert learnt == [f"FACT a: {KEPT}", f"DEAD_END b: {AFTER}"]
+
+
+def _record(*, measured: tuple[float, float] | None = None) -> SimpleNamespace:
+    attempts = () if measured is None else (SimpleNamespace(started_at=measured[0], finished_at=measured[1]),)
+    result = None if measured is None else SimpleNamespace(attempts=attempts)
+    return SimpleNamespace(result=result, in_flight=measured is None)
+
+
+def test_the_collection_margin_covers_the_tests_queued_and_the_import_s_test_and_confirm_at_the_longest_test() -> None:
+    measured = [_record(measured=(0.0, 500.0)), _record(measured=(1000.0, 1540.0))]
+
+    assert collection_margin([], 2400.0) == 2400.0
+    assert collection_margin(measured, 600.0) == 2 * 540.0
+    assert collection_margin([*measured, _record(), _record(), _record()], 600.0) == 5 * 540.0
+    assert collection_margin([*measured, _record()], 2400.0) == 2400.0

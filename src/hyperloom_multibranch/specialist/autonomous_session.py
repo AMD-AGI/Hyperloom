@@ -9,17 +9,17 @@ resumes the agent in the same sandbox without onboarding again; the lease goes b
 watches the agent's keep signal and reads each keep whole (:mod:`agent_import`) the moment it shows, since the agent
 goes on to its next candidate in the same workspace. Keeps are submitted as claimless explore tests against the branch
 head, one at a time: a keep that lands while an import is measured or judged waits, and a later keep replaces it, since
-each is cumulative. An agent that signals no keep has its workspace taken as its keep once, :data:`CUTOFF_SECONDS`
-before EXPLORE ends, so that work is measured and judged in EXPLORE, and again when it exits 0. What the run knows of
-the keeps is kept beside the manifest, so a keep waiting at a crash is submitted by the run after it. The agent's own
-LLM spend is read from its Claude CLI's transcripts (:mod:`agent_spend`) every :data:`SPEND_SECONDS` and once more when
-the run ends, and recorded as the branch's. At each keep, the findings the agent wrote down in its ledger since the last
-one become the branch's learnings, a finding it revised superseding what it said before, so other branches read them;
-what it wrote after its last keep is learnt when the branch stops.
-The branch's judge judges the imports as it judges any branch's tests;
-nothing of its verdicts reaches the agent. An agent that exits 0 finishes the run once what it kept last settled; one
-that exits otherwise is a crash the runtime restarts it from. A session never ends idle: what the agent keeps, or does
-not, is its own business, bounded by the session's stops.
+each is cumulative. An agent that signals no keep has its workspace taken as its keep once, early enough before EXPLORE
+ends for the session's queued tests and then its own to be measured and judged in EXPLORE (:func:`collection_margin`),
+and again when it exits 0. What the run knows of the keeps is kept beside the manifest, so a keep waiting at a crash is
+submitted by the run after it. The agent's own LLM spend is read from its Claude CLI's transcripts (:mod:`agent_spend`)
+every :data:`SPEND_SECONDS` and once more when the run ends, and recorded as the branch's. At each keep, the findings
+the agent wrote down in its ledger since the last one become the branch's learnings, a finding it revised superseding
+what it said before, so other branches read them; what it wrote after its last keep is learnt when the branch stops. The
+branch's judge judges the imports as it judges any branch's tests; nothing of its verdicts reaches the agent. An agent
+that exits 0 finishes the run once what it kept last settled; one that exits otherwise is a crash the runtime restarts
+it from. A session never ends idle: what the agent keeps, or does not, is its own business, bounded by the session's
+stops.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ import json
 import logging
 import math
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -83,8 +83,9 @@ MANIFEST_FILE = "agent-manifest.json"
 LEASE_FILE = "agent-lease.json"
 #: How often the agent's LLM spend is read and recorded while it runs: one record per CLI session a minute, not a poll.
 SPEND_SECONDS = 60.0
-#: How long before the EXPLORE end an agent that signals no keep has its workspace collected: an import's test and its
-#: confirm, about ten minutes each on an InferenceX workload, after whatever test of the branch runs then.
+#: The least time before the EXPLORE end an agent that signals no keep has its workspace collected, for a session that
+#: has measured nothing yet to time a test by: an import's test and its confirm, about ten minutes each on an InferenceX
+#: workload, after whatever test runs then (see :func:`collection_margin`).
 CUTOFF_SECONDS = 40 * 60.0
 SPEND_FILE = "agent-spend.json"
 #: What a run knows of the agent's keeps (:class:`KeepWatch`), so the run after a crash goes on from it.
@@ -226,13 +227,14 @@ class AutonomousSession:
             await self._record_spend(spend, final=True)
 
     async def _collect_before_the_end(self, manifest: AgentManifest, watch: KeepWatch) -> None:
-        """Take, once, the workspace of an agent that signals no keep as its keep, :attr:`AutonomousSetup.cutoff_seconds`
-        before the EXPLORE end, so its work is measured and judged before EXPLORE ends."""
+        """Take, once, the workspace of an agent that signals no keep as its keep, :func:`collection_margin` before the
+        EXPLORE end, so its work is measured and judged before EXPLORE ends."""
 
         deadline = self._start.task.deadline
         if manifest.keep is not None or watch.collected or not deadline:
             return
-        if self._setup.clock() < deadline - self._setup.cutoff_seconds:
+        records = (await self._place.notebook.snapshot()).records
+        if self._setup.clock() < deadline - collection_margin(records, self._setup.cutoff_seconds):
             return
         watch.collected = True
         await self._note("EXPLORE ends soon: the agent's workspace is taken as its keep now")
@@ -597,6 +599,25 @@ def _reverted(kept: KeptChange, launch: LaunchConfig, names: tuple[str, ...], ar
     return replace(kept, server_args=launch.server_args if args else kept.server_args, envs=envs)
 
 
+def collection_margin(records: Iterable[TestRecord], floor: float) -> float:
+    """How long before the EXPLORE end an import must go to be measured and judged in EXPLORE: the session's tests in
+    flight, then the import's test and its confirm, one after another at the longest test measured so far, as on one
+    card; at least ``floor``, which is all there is to go by before any test was measured."""
+
+    records = list(records)
+    durations = [
+        attempt.finished_at - attempt.started_at
+        for record in records
+        if record.result is not None
+        for attempt in record.result.attempts
+        if attempt.started_at is not None and attempt.finished_at is not None
+    ]
+    if not durations:
+        return floor
+    queued = sum(record.in_flight for record in records)
+    return max(floor, (queued + 2) * max(durations))
+
+
 def _being_judged(record: TestRecord, settled_before: float) -> bool:
     measured_at = record.measured_at if record.measured_at is not None else record.requested_at
     return record.result is not None and record.judgement is None and measured_at > settled_before
@@ -623,6 +644,7 @@ def _json(path: Path) -> object:
 __all__ = [
     "AGENT_DIR",
     "LEASE_FILE",
+    "collection_margin",
     "MANIFEST_FILE",
     "SETTLE_SECONDS",
     "WATCH_FILE",
