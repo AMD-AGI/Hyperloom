@@ -339,8 +339,6 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
             # two different messages: with no local scope nothing here can be
             # judged at all, whereas a mismatching scope means the recorded id
             # names a process on a machine this one cannot see.
-            if evidence.get(CLEANUP_CONFIRMED_KEY) is True:
-                continue
             row["reason"] = UNVERIFIABLE_NO_LOCAL_SCOPE if not scope else UNVERIFIABLE_FOREIGN_SCOPE
             stuck.append(row)
             continue
@@ -524,14 +522,10 @@ class SqliteLeaseBackend:
     @staticmethod
     def _pid_alive(pid: int) -> bool:
         """Best-effort liveness probe for a lease-holder PID."""
-        if pid <= 0:
-            return True
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
             return False
-        except PermissionError:
-            return True
         except OSError:
             return True
         return True
