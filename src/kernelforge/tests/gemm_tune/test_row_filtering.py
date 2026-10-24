@@ -73,6 +73,20 @@ class TestDropsLosers:
         assert _rows_of(csv) == [("64", "5120", "5120")]
 
 
+def _below_aiters_bar(m, n, k):
+    """aiter's compare skips a shape improved by less than 3%: (64, 34816, 5120) at 49.69 -> 48.38 us."""
+    return {"M": m, "N": n, "K": k, "default_us": 49.69, "tuned_us": 48.38, "speedup": 1.0271, "improved": False}
+
+
+class TestKeepsAFasterRow:
+    def test_a_row_faster_than_what_serving_runs_without_it_ships_below_aiters_update_bar(self, tmp_path):
+        # Dropping it hands the shape back to the slower pre-run config: on gate_up M=64 that is 6% in a graph.
+        csv = _csv(tmp_path, [_row(64, 34816, 5120), _row(48, 34816, 5120)])
+        dropped, kept = _filter_unimproved_rows(csv, [_below_aiters_bar(64, 34816, 5120), _lost(48, 34816, 5120)])
+        assert (dropped, kept) == (1, 1)
+        assert _rows_of(csv) == [("64", "34816", "5120")]
+
+
 class TestKeepsUnmeasured:
     def test_new_shape_survives(self, tmp_path):
         # improved=False here means "no prior baseline", not "lost".

@@ -1044,12 +1044,12 @@ def _filter_unimproved_rows(
     artifact_csv: Path,
     shape_results: list[dict[str, Any]],
 ) -> tuple[int, int]:
-    """Drop deployed rows for shapes that were compared and lost."""
+    """Drop deployed rows for shapes that did not beat the pre-run config serving falls back to without them."""
     losers: set[tuple[int, int, int]] = set()
     for r in shape_results:
         if r.get("improved"):
             continue
-        if r.get("is_new") or r.get("tuned_unverified"):
+        if r.get("is_new") or r.get("tuned_unverified") or (r.get("speedup") or 0.0) > 1.0:
             continue
         if r.get("speedup") is None and r.get("default_us") is None:
             # No baseline recorded at all -> not a loss, just unmeasured.
