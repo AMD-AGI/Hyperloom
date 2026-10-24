@@ -9,9 +9,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from .event_fields import (
+    analysis_detail as _analysis_detail,
+    as_dict as _as_dict,
     as_list as _as_list,
     float_or_none as _float_or_none,
     int_or_none as _int_or_none,
+    now_iso_seconds as _now_iso,
     text_or_none as _text,
 )
 
@@ -40,6 +43,7 @@ __all__ = [
     "IntegrateVerdict",
     "KernelRewriteRun",
     "LaneRunFields",
+    "TraceAnalyzeRun",
 ]
 
 
@@ -185,4 +189,41 @@ class IntegrateVerdict:
             "basis": _text(self.basis),
             "alignment_status": _text(self.alignment_status),
             "gain_attributed": self.gain_attributed if isinstance(self.gain_attributed, bool) else None,
+        }
+
+
+@dataclass(frozen=True)
+class TraceAnalyzeRun:
+    """One trace analysis, the result it returned and the cache it left."""
+
+    run_id: str
+    status: str
+    result: Any
+    requested_by: str = ""
+    request_msg_id: str = ""
+    trace_input: str = ""
+    top_k: Any = None
+    #: A ``last_trace_analyze``-shaped cache.
+    snapshot: dict[str, Any] | None = None
+    cache_hit: bool = False
+
+    def row(self, trigger: str) -> dict[str, Any]:
+        """The analysis row this run persists as, for a run asked for by ``trigger``."""
+        produced = _as_dict(self.snapshot)
+        return {
+            "run_id": str(self.run_id or ""),
+            "trigger": _text(trigger),
+            "requested_by": _text(self.requested_by),
+            "request_msg_id": _text(self.request_msg_id),
+            "ts": _now_iso(),
+            "status": str(self.status or ""),
+            "cache_hit": bool(self.cache_hit),
+            "trace_input": _text(self.trace_input),
+            "top_k": _int_or_none(self.top_k),
+            "roofline_snapshot_id": _int_or_none(produced.get("roofline_snapshot_id")),
+            "roofline_baseline_gain_at_snapshot": _float_or_none(produced.get("roofline_baseline_gain_at_snapshot")),
+            "steady_state_trace": _text(produced.get("steady_state_trace")),
+            "analysis_md_path": _text(produced.get("analysis_md_path")),
+            "reusable_native_kernel_ids": [str(item) for item in _as_list(produced.get("reusable_native_kernel_ids"))],
+            **_analysis_detail(self.result),
         }

@@ -1087,18 +1087,21 @@ class IntentRouter(CoordinatorCollaborator):
         timeline to account for it.
         """
         from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_trace_analyze_request
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import TraceAnalyzeRun
 
         record_trace_analyze_request(
             macro_cycle=int(self.shared_state.macro_cycle or 0),
-            run_id=str(getattr(request_msg, "msg_id", "") or ""),
-            status=str(result.get("status") or ""),
-            result=result,
-            requested_by=source,
-            request_msg_id=str(getattr(request_msg, "msg_id", "") or ""),
-            trace_input=str(payload.get("trace_path") or payload.get("trace_input") or ""),
-            top_k=payload.get("top_k"),
-            snapshot=self.shared_state.last_trace_analyze,
-            cache_hit=cache_hit,
+            run=TraceAnalyzeRun(
+                run_id=str(getattr(request_msg, "msg_id", "") or ""),
+                status=str(result.get("status") or ""),
+                result=result,
+                requested_by=source,
+                request_msg_id=str(getattr(request_msg, "msg_id", "") or ""),
+                trace_input=str(payload.get("trace_path") or payload.get("trace_input") or ""),
+                top_k=payload.get("top_k"),
+                snapshot=self.shared_state.last_trace_analyze,
+                cache_hit=cache_hit,
+            ),
         )
 
     async def _reply(self, request_msg: Message, result: dict[str, Any], *, source: str) -> None:

@@ -55,7 +55,6 @@ from typing import Any
 
 from .assembler import EVENT_SECTIONS, event_parts
 from .event_fields import (
-    analysis_detail as _analysis_detail,
     as_dict as _as_dict,
     as_list as _as_list,
     clip as _clip,
@@ -79,6 +78,7 @@ from .kernel_records import (
     IntegrateVerdict,
     KernelRewriteRun,
     LaneRunFields,
+    TraceAnalyzeRun,
 )
 from .baseline_event import assemble_baseline_actions
 from .roofline_event import assemble_roofline_action
@@ -496,64 +496,20 @@ def _write_discovered_kernels(
         )
 
 
-def _write_trace_analyze_run(
-    sink: Any,
-    *,
-    run_id: str,
-    trigger: str,
-    status: str,
-    result: Any,
-    requested_by: str = "",
-    request_msg_id: str = "",
-    trace_input: str = "",
-    top_k: Any = None,
-    snapshot: dict[str, Any] | None = None,
-    cache_hit: bool = False,
-) -> None:
-    """Write one analysis row and the kernel table it produced.
-
-    ``status`` is ``ok`` or ``failed``.
-    """
-    produced = _as_dict(snapshot)
+def _write_trace_analyze_run(sink: Any, run: TraceAnalyzeRun, *, trigger: str) -> None:
+    """Write one analysis row and the kernel table it produced."""
     sink.record(
         SECTION_TRACE_ANALYZE,
-        {
-            "run_id": str(run_id or ""),
-            "trigger": _text(trigger),
-            "requested_by": _text(requested_by),
-            "request_msg_id": _text(request_msg_id),
-            "ts": _now_iso(),
-            "status": str(status or ""),
-            "cache_hit": bool(cache_hit),
-            "trace_input": _text(trace_input),
-            "top_k": _int_or_none(top_k),
-            "roofline_snapshot_id": _int_or_none(produced.get("roofline_snapshot_id")),
-            "roofline_baseline_gain_at_snapshot": _float_or_none(produced.get("roofline_baseline_gain_at_snapshot")),
-            "steady_state_trace": _text(produced.get("steady_state_trace")),
-            "analysis_md_path": _text(produced.get("analysis_md_path")),
-            "reusable_native_kernel_ids": [str(item) for item in _as_list(produced.get("reusable_native_kernel_ids"))],
-            **_analysis_detail(result),
-        },
+        run.row(trigger),
         row_type=ROW_TRACE_ANALYZE,
-        natural_ids=str(run_id or ""),
+        natural_ids=str(run.run_id or ""),
     )
+    produced = _as_dict(run.snapshot)
     if produced:
         _write_discovered_kernels(sink, produced, provenance="trace_analyze_run")
 
 
-def record_trace_analyze_request(
-    *,
-    macro_cycle: Any,
-    run_id: str,
-    status: str,
-    result: Any,
-    requested_by: str = "",
-    request_msg_id: str = "",
-    trace_input: str = "",
-    top_k: Any = None,
-    snapshot: dict[str, Any] | None = None,
-    cache_hit: bool = False,
-) -> None:
+def record_trace_analyze_request(*, macro_cycle: Any, run: TraceAnalyzeRun) -> None:
     """Record an analysis an agent requested through the bus, not a phase.
 
     A ``trace_analyze`` dispatched this way advances the roofline snapshot
@@ -567,29 +523,17 @@ def record_trace_analyze_request(
 
     ``status`` is ``ok`` or ``failed``.
     """
-    if not str(run_id or ""):
+    if not str(run.run_id or ""):
         return
     sink = make_sink(kernel_event_id(macro_cycle), producer=PRODUCER)
     if not sink.has_row(SECTION_EVENT):
         log.debug(
             "kernel timeline: no event %s to hold the trace_analyze request %s",
             sink.event_id,
-            run_id,
+            run.run_id,
         )
         return
-    _write_trace_analyze_run(
-        sink,
-        run_id=run_id,
-        trigger=TRACE_ANALYZE_TRIGGER_BUS_REQUEST,
-        status=status,
-        result=result,
-        requested_by=requested_by,
-        request_msg_id=request_msg_id,
-        trace_input=trace_input,
-        top_k=top_k,
-        snapshot=snapshot,
-        cache_hit=cache_hit,
-    )
+    _write_trace_analyze_run(sink, run, trigger=TRACE_ANALYZE_TRIGGER_BUS_REQUEST)
     _republish_closed_event(sink.event_id)
 
 

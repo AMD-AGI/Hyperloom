@@ -34,6 +34,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     IntegrateVerdict,
     KernelRewriteRun,
     LaneRunFields,
+    TraceAnalyzeRun,
 )
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -189,14 +190,16 @@ def test_a_bus_requested_analysis_accounts_for_the_snapshot_it_advanced(tmp_path
     )
     record_trace_analyze_request(
         macro_cycle=3,
-        run_id="msg-42",
-        status="ok",
-        result={"hot_kernels": [{"name": "fused_moe", "gpu_pct": 31.5}]},
-        requested_by="kernel_agent",
-        request_msg_id="msg-42",
-        trace_input="traces/rank0.pt.trace.json",
-        top_k=15,
-        snapshot={"roofline_snapshot_id": 4, "analysis_md_path": "reports/analysis.md"},
+        run=TraceAnalyzeRun(
+            run_id="msg-42",
+            status="ok",
+            result={"hot_kernels": [{"name": "fused_moe", "gpu_pct": 31.5}]},
+            requested_by="kernel_agent",
+            request_msg_id="msg-42",
+            trace_input="traces/rank0.pt.trace.json",
+            top_k=15,
+            snapshot={"roofline_snapshot_id": 4, "analysis_md_path": "reports/analysis.md"},
+        ),
     )
     recorder.finish(tput_after=1000.0)
 
@@ -215,10 +218,7 @@ def test_a_bus_requested_analysis_after_the_visit_closed_still_lands(tmp_path):
 
     record_trace_analyze_request(
         macro_cycle=3,
-        run_id="msg-42",
-        status="ok",
-        result={},
-        snapshot={"roofline_snapshot_id": 4},
+        run=TraceAnalyzeRun(run_id="msg-42", status="ok", result={}, snapshot={"roofline_snapshot_id": 4}),
     )
 
     runs = _kernel_events(tmp_path)[0]["ext"]["forge"]["trace_analyze_runs"]
@@ -228,10 +228,7 @@ def test_a_bus_requested_analysis_after_the_visit_closed_still_lands(tmp_path):
 def test_a_bus_request_with_no_visit_running_mints_no_event(tmp_path):
     record_trace_analyze_request(
         macro_cycle=3,
-        run_id="msg-42",
-        status="ok",
-        result={},
-        snapshot={"roofline_snapshot_id": 4},
+        run=TraceAnalyzeRun(run_id="msg-42", status="ok", result={}, snapshot={"roofline_snapshot_id": 4}),
     )
 
     assert _kernel_events(tmp_path) == []
@@ -241,14 +238,16 @@ def test_a_bus_requested_analysis_carries_the_kernel_table_it_produced(tmp_path)
     recorder = _forge_recorder()
     record_trace_analyze_request(
         macro_cycle=3,
-        run_id="msg-42",
-        status="ok",
-        result={},
-        snapshot={
-            "roofline_snapshot_id": 4,
-            "reusable_native_kernel_ids": ["k001"],
-            "hot_kernels_top15": [{"kernel_id": "k001", "name": "fused_moe", "gpu_pct": 31.5}],
-        },
+        run=TraceAnalyzeRun(
+            run_id="msg-42",
+            status="ok",
+            result={},
+            snapshot={
+                "roofline_snapshot_id": 4,
+                "reusable_native_kernel_ids": ["k001"],
+                "hot_kernels_top15": [{"kernel_id": "k001", "name": "fused_moe", "gpu_pct": 31.5}],
+            },
+        ),
     )
     recorder.finish(tput_after=1000.0)
 
@@ -1111,17 +1110,19 @@ def test_the_trace_analyze_run_records_the_only_legal_kernel_id_source(tmp_path)
     recorder = _forge_recorder()
     record_trace_analyze_request(
         macro_cycle=3,
-        run_id="ta-1",
-        status="ok",
-        requested_by="orchestration",
-        trace_input="/s/traces",
-        top_k=10,
-        result={
-            "analysis_meta": {"route": "agent", "tool": "tracelens"},
-            "hot_kernels_top15": [{"name": "aten::mm", "gpu_pct": 10.0}],
-            "candidates_path": "/s/candidates.json",
-        },
-        snapshot={"roofline_snapshot_id": 5, "reusable_native_kernel_ids": ["k001", "k002"]},
+        run=TraceAnalyzeRun(
+            run_id="ta-1",
+            status="ok",
+            requested_by="orchestration",
+            trace_input="/s/traces",
+            top_k=10,
+            result={
+                "analysis_meta": {"route": "agent", "tool": "tracelens"},
+                "hot_kernels_top15": [{"name": "aten::mm", "gpu_pct": 10.0}],
+                "candidates_path": "/s/candidates.json",
+            },
+            snapshot={"roofline_snapshot_id": 5, "reusable_native_kernel_ids": ["k001", "k002"]},
+        ),
     )
     recorder.finish(tput_after=1000.0)
 
@@ -1526,23 +1527,25 @@ def test_trace_analyze_run_also_records_discovered_kernels(tmp_path):
     recorder = _forge_recorder()
     record_trace_analyze_request(
         macro_cycle=3,
-        run_id="ta-2",
-        status="ok",
-        result={"analysis_meta": {"route": "agent", "tool": "tracelens"}},
-        snapshot={
-            "roofline_snapshot_id": 6,
-            "hot_kernels_top15": [
-                {
-                    "kernel_id": "k001",
-                    "name": "aten::mm",
-                    "gpu_pct": 10.0,
-                    "duration_us": 50.0,
-                    "call_count": 8,
-                    "bound_type": "memory",
-                }
-            ],
-            "reusable_native_kernel_ids": ["k001"],
-        },
+        run=TraceAnalyzeRun(
+            run_id="ta-2",
+            status="ok",
+            result={"analysis_meta": {"route": "agent", "tool": "tracelens"}},
+            snapshot={
+                "roofline_snapshot_id": 6,
+                "hot_kernels_top15": [
+                    {
+                        "kernel_id": "k001",
+                        "name": "aten::mm",
+                        "gpu_pct": 10.0,
+                        "duration_us": 50.0,
+                        "call_count": 8,
+                        "bound_type": "memory",
+                    }
+                ],
+                "reusable_native_kernel_ids": ["k001"],
+            },
+        ),
     )
     recorder.finish(tput_after=1000.0)
 
