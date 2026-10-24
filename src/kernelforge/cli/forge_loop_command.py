@@ -190,15 +190,14 @@ def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
 
 def _directions_summary(loop_runner) -> dict:
     """How many ledger directions sit in each status, when the run kept a ledger."""
-    ledger_of = getattr(loop_runner, "_ledger", None)
-    ledger = ledger_of() if callable(ledger_of) else None
-    if ledger is None:
+    standing_of = getattr(loop_runner, "_early_stop_standing", None)
+    standing = standing_of() if callable(standing_of) else None
+    if standing is None:
         return {}
-    standings, _ = loop_runner._direction_standings(ledger)
     counts: dict[str, int] = {}
-    for standing in standings:
-        counts[standing.status] = counts.get(standing.status, 0) + 1
-    return {"total": len(standings), "by_status": counts}
+    for direction in standing.standings:
+        counts[direction.status] = counts.get(direction.status, 0) + 1
+    return {"total": len(standing.standings), "by_status": counts}
 
 
 def _load_anchor_presentation(path: str) -> tuple[str, float | None]:
