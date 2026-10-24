@@ -56,6 +56,14 @@ def test_the_breakdown_lays_out_the_session_tree_tests_and_measurement(snapshot:
     assert build_breakdown(snapshot)["close"] == {"final": None, "selection": {}, "kb_write_back": None}
 
 
+def test_the_close_section_holds_the_merge_statistics_the_scheduler_passes(snapshot: NotebookSnapshot) -> None:
+    merges = {"conflicts": 3, "rebased": 1, "resolved": 1, "lost": {"unresolved patch conflict": 1}}
+
+    close = build_breakdown(snapshot, CloseOutcome(merges=merges))["close"]
+
+    assert close["merges"] == merges and "merges" not in build_breakdown(snapshot)["close"]
+
+
 def test_a_hosted_run_adds_the_session_block_and_its_records_under_the_names_the_legacy_flow_uses(
     snapshot: NotebookSnapshot, tmp_path: Path
 ) -> None:

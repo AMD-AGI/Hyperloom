@@ -22,7 +22,8 @@ export has its own schema version and its own sections:
   results.
 * ``close``: the commit final selection chose and its recipe, how the scheduler chose it, and the Recipe KB
   write-back, as the single-lineage export reports it; when the scheduler passes them, what CLOSE's knowledge steps
-  did (``knowledge``: the Experiences, the learnings and the archived search tree).
+  did (``knowledge``: the Experiences, the learnings and the archived search tree) and how the session's merges went
+  (``merges``: the integrator's conflict statistics).
 """
 
 from __future__ import annotations
@@ -188,13 +189,15 @@ class CloseOutcome:
 
     ``final`` is the commit final selection chose; ``selection`` is how the scheduler chose it, such as its candidates
     and their measurements, as JSON-ready data. ``knowledge`` is what CLOSE's knowledge steps did, as the
-    ``rsi.session`` close reports them (``KnowledgeClose.document()``); ``close`` has it only when given.
+    ``rsi.session`` close reports them (``KnowledgeClose.document()``), and ``merges`` how the session's merges went,
+    as the integrator counts them, JSON-ready; ``close`` has each only when given.
     """
 
     final: FinalRecipe | None = None
     selection: Mapping[str, object] | None = None
     kb_write_back: RemoteWriteResult | None = None
     knowledge: Mapping[str, object] | None = None
+    merges: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -227,6 +230,8 @@ def build_breakdown(
     }
     if outcome.knowledge is not None:
         close["knowledge"] = dict(outcome.knowledge)
+    if outcome.merges is not None:
+        close["merges"] = dict(outcome.merges)
     return {
         "schema_version": SCHEMA_VERSION,
         "exporter_version": EXPORTER_VERSION,
