@@ -19,12 +19,12 @@ from hyperloom.orchestrator.enablement.lane import EnablementLane
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 
-def _lane(session: Path, verdict, *, observation_path: str = ""):
+def _lane(session: Path, verdict):
     """Build the collaborator surface the terminal is decided on."""
     state = types.SimpleNamespace(
         framework="vllm",
         model_path="/weights/absent",
-        enablement=EnablementRound(launch_observation_path=observation_path),
+        enablement=EnablementRound(),
         stop_reason="",
         save=lambda *a, **k: None,
     )

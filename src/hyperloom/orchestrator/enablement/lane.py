@@ -21,7 +21,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.inference_optimizer.framework_paths import point_session_framework_root
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.reference_script import ServingTarget
-from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, is_env_fault, load_boot_observation, observation_summary
+from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, load_boot_observation, observation_summary
 from ..collaborator import CoordinatorCollaborator
 from hyperloom.inference_optimizer.breakdown.round_archive import ROLE_LAUNCH_CONFIG, RoundArchive
 from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
@@ -218,18 +218,8 @@ class EnablementLane(CoordinatorCollaborator):
             routes to CLOSE on the next tick through ``_global_terminal``.
         """
         state = self.shared_state
-        loaded = load_boot_observation(state.enablement.launch_observation_path)
-        observation = loaded.observation
-        fault, detail = "", ""
-        if observation is not None and is_env_fault(observation):
-            excerpt = observation.excerpt
-            fault = str(observation.env_fault)
-            detail = (excerpt.text if excerpt is not None else "").replace("\n", " | ")
-        else:
-            verdict = self._environment_verdict()
-            if verdict is not None and verdict.terminal:
-                fault, detail = verdict.fault, verdict.detail
-        if not fault:
+        verdict = self._environment_verdict()
+        if verdict is None or not verdict.terminal:
             return False
         if not state.stop_reason:
             state.set_stop_reason(ENV_FAULT)
@@ -237,8 +227,8 @@ class EnablementLane(CoordinatorCollaborator):
             log.error(
                 "ENABLEMENT: this host cannot run the combo (%s); stopping the run rather than "
                 "authoring a framework patch for it -- %s",
-                fault,
-                detail,
+                verdict.fault,
+                verdict.detail,
             )
         return True
 
