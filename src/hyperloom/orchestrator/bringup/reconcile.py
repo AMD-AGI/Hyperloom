@@ -15,6 +15,7 @@ from typing import Any
 
 from hyperloom.common.timeutil import now_iso
 
+from ..bus.db_maintenance import DECIDED_PROPOSAL_IDS_SQL
 from ..bus.resource_lock import BRINGUP_ROUND_LANE, SqliteLeaseBackend
 from ..state.round_store import (
     EXPIRED_REAPED,
@@ -44,21 +45,13 @@ TIMEOUT_VERDICT = "reject"
 _EVIDENCE_DEAD_PID = "dead_pid"
 _EVIDENCE_LEASE_TTL = "lease_ttl_sec"
 
-#: Proposals with no verdict against them. The inner SELECT must exclude NULL and
-#: empty targets: ``msg_id NOT IN (.., NULL)`` is NULL for every row, so one
-#: malformed verdict would make every proposal look decided.
-_UNDECIDED_PROPOSALS_SQL = """
+#: Proposals with no verdict against them.
+_UNDECIDED_PROPOSALS_SQL = f"""
     SELECT msg_id, from_agent, ts FROM events
     WHERE topic = 'proposal'
-      AND msg_id NOT IN (
-        SELECT json_extract(payload, '$.target_proposal_msg_id')
-        FROM events
-        WHERE topic = 'review_verdict'
-          AND json_extract(payload, '$.target_proposal_msg_id') IS NOT NULL
-          AND json_extract(payload, '$.target_proposal_msg_id') != ''
-      )
+      AND msg_id NOT IN ({DECIDED_PROPOSAL_IDS_SQL})
     ORDER BY seq ASC
-"""
+"""  # nosec B608 - interpolates a constant SQL fragment only.
 
 #: The timeout deny, written only if no verdict targets the proposal at the
 #: instant of the write. The guard is in the statement rather than in a read
