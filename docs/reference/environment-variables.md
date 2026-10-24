@@ -960,11 +960,18 @@ With `HYPERLOOM_AGENTX=1`, Hyperloom generates and archives the native Magpie YA
 from its ordinary workload flags. `--docker-image` supplies an explicit serving
 image identity, required for custom models.
 
-Native AgentX profiling is configured in the Magpie YAML's
-`benchmark.profiler.torch_profiler` mapping: `num_steps`, `num_profiles`,
-`interval_seconds` (default 200), `start_seconds`, and `detailed_annotations`.
-Magpie starts after the replay reaches measurement and owns the capture/flush
-lifecycle. Each time window remains a separate trace input to TraceLens.
+Native AgentX profiling shares TraceLens patch and kernel-shape-tool preparation with
+fixed-sequence profiling. Configure capture steps, count, delay and interval through
+`benchmark.profiler.torch_profiler` (`num_steps`, `num_profiles`, `start_seconds`,
+`interval_seconds`). The diagnostic copy preserves those settings and explicit
+`detailed_annotations`. When profiling is enabled, a missing capture setting becomes
+one capture of 256 steps, starting 300 seconds after measurement, with a 900-second
+interval. A missing `detailed_annotations` becomes true, and false when the TraceLens
+runtime patch was attempted and did not apply: Magpie probes the server whenever the field
+is true and refuses to launch when the server lacks it.
+Hyperloom adds the shape-tool environment through `agentx.launch_overrides` while
+preserving the server's runtime paths. Magpie owns profiling flags, starts after replay
+reaches measurement, and manages capture/flush. Each window remains a separate TraceLens input.
 Profile reports are diagnostic only and cannot supply KEEP evidence.
 See [Optimize an AgentX workload](../how-to/optimize.md#optimize-an-agentx-workload).
 

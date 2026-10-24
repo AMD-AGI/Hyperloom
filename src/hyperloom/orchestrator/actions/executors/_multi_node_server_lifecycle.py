@@ -282,7 +282,7 @@ def _restart_env_scope(extra_env: dict[str, str] | None, unset_env, torch_profil
 # Multi-node TraceLens SGLang patch fan-out (fail-soft). The patch set (roofline vs sglang_gc_patch) follows
 # this controller's shape mode; sglang_gc_patch only matters while capturing, so it waits for a profiling round.
 async def _apply_tracelens_patch_fanout(patch_set: str, torch_profiler_dir: str, poll_timeout_s: int) -> None:
-    from ._workload_envs import _tracelens_patch_enabled
+    from ._profile_setup import _tracelens_patch_enabled
 
     if patch_set == "graph-capture" and not torch_profiler_dir:
         log.info("restart_server_for_round: not a profiling round; skipping sglang_gc_patch fan-out")

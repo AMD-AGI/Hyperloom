@@ -1018,8 +1018,8 @@ def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
 
 
 def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
-    """Replace the two patcher symbols on `_workload_envs` with stubs that record invocation counts for per-framework dispatch asserts."""
-    from hyperloom.orchestrator.actions.executors import _workload_envs
+    """Replace the two patchers with stubs that record which framework a profile tried to patch."""
+    from hyperloom.orchestrator.actions.executors import _server_patcher
 
     counts = {"vllm": 0, "sglang": 0}
 
@@ -1031,16 +1031,8 @@ def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
         counts["sglang"] += 1
         return sglang
 
-    monkeypatch.setattr(
-        _workload_envs,
-        "ensure_vllm_patched_for_tracelens",
-        _vllm_stub,
-    )
-    monkeypatch.setattr(
-        _workload_envs,
-        "ensure_sglang_patched_for_tracelens",
-        _sglang_stub,
-    )
+    monkeypatch.setattr(_server_patcher, "ensure_vllm_patched_for_tracelens", _vllm_stub)
+    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", _sglang_stub)
     return counts
 
 
@@ -1107,8 +1099,8 @@ def test_tracelens_patch_status_separates_fine_from_never_tried(tmp_path, monkey
     assert _status(sglang=True, enable_patch="0") == "not_attempted"
 
 
-def test_sitecustomize_profile_applies_gc_patch_without_touching_patch_status(tmp_path, monkeypatch):
-    """sglang_gc_patch is applied on a profile round, and the roofline patch status stays ``not_attempted``."""
+def test_sitecustomize_profile_records_successful_gc_patch(tmp_path, monkeypatch):
+    """Record the graph patch outcome without adding legacy shape-discovery flags."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1119,7 +1111,8 @@ def test_sitecustomize_profile_applies_gc_patch_without_touching_patch_status(tm
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
 
     assert counts == {"vllm": 0, "sglang": 1}, counts
-    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "not_attempted"
+    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "ok"
+    assert "--enable-shape-discovery-for-cuda-graph-profile" not in envs.get("EXTRA_SGLANG_ARGS", "")
 
 
 def test_sitecustomize_profile_proceeds_when_gc_patch_is_unavailable(tmp_path, monkeypatch, caplog):
@@ -1135,8 +1128,9 @@ def test_sitecustomize_profile_proceeds_when_gc_patch_is_unavailable(tmp_path, m
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
 
     assert counts == {"vllm": 0, "sglang": 1}, counts
-    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "not_attempted"
+    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
     assert "HYPERLOOM_PROFILE_DEGRADED_REASON" not in envs
+    assert "--enable-shape-discovery-for-cuda-graph-profile" not in envs.get("EXTRA_SGLANG_ARGS", "")
     assert "profiling continues" in caplog.text
 
 
