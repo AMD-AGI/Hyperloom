@@ -27,8 +27,9 @@ A Claude session runs under a conversation id it is given at launch, written wit
 an error or is lost after its conversation finished a turn is resumed by the next run: ``--resume`` on that
 conversation, told what arrived since and whether its worktree was kept, which it is while the branch head did not move.
 A session that ends idle is resumed the same way, told what changed since its last turn, the integration head included,
-as a fresh briefing would bring little the conversation lacks. Neither resume lists the runtime's notice of the restart
-among what arrived. A clean end, a conversation past ``RESUME_CONTEXT_MAX`` or one the model
+as a fresh briefing would bring little the conversation lacks; it first waits, at most ``IDLE_RESUME_WAIT_S``, for
+something to arrive or the integration head to move, so it has something to act on. Neither resume lists the runtime's
+notice of the restart among what arrived. A clean end, a conversation past ``RESUME_CONTEXT_MAX`` or one the model
 refused as too long, and a resumed CLI that crashes again before finishing a turn are followed by a fresh session. A
 resume the CLI refuses at once is followed by a fresh session in the same run, with a notice and no crash. A
 conversation record that cannot be read means a fresh session and a warning.
@@ -116,6 +117,9 @@ WAITED_END = "its model ended its turn to wait for a test, which has its result 
 #: sessions' Claude model, past the 73k to 231k the branches of a 12-hour session peaked at, so a resume never
 #: starts close to the window and rewriting the whole conversation to the cache stays cheaper than a fresh briefing.
 RESUME_CONTEXT_MAX = 600_000
+#: How long the resume of an idle session waits for something to arrive first: about one test's time, so a result or
+#: a merge usually lands within it, while a branch that nothing reaches still goes on before its slot sits idle long.
+IDLE_RESUME_WAIT_S = 600.0
 PROMPT_FILE, ROLE_FILE, DONE_FILE, HEARTBEAT_FILE, CLI_SESSION_FILE = (
     "prompt.md",
     "system_prompt.md",
@@ -224,7 +228,8 @@ class AgentSetup:
     ``env`` is the environment the CLI runs with, the branch's MCP token added; the session decides nothing about it.
     ``briefs(branch, head)`` rebuilds a branch's brief at the head a launch starts at; without it, every launch shows
     the brief the branch was started with. ``nudge_waits_s`` are the patiences of idle turns in a row; there are as
-    many idle turns as patiences. ``dev_leases`` are the session's dev sandboxes, ``None`` when it lends none: a
+    many idle turns as patiences. ``idle_resume_wait_s`` bounds how long the resume of an idle session waits for
+    something to arrive. ``dev_leases`` are the session's dev sandboxes, ``None`` when it lends none: a
     branch's lease is given back when its run ends, however it ended, and when it is stopped.
     """
 
@@ -240,6 +245,7 @@ class AgentSetup:
     min_session_seconds: float = MIN_SESSION_S
     poll_seconds: float = 5.0
     nudge_waits_s: tuple[float, ...] = NUDGE_WAITS_S
+    idle_resume_wait_s: float = IDLE_RESUME_WAIT_S
     clock: Callable[[], float] = time.time
     dev_leases: DevLeaseHolder | None = None
 
@@ -311,6 +317,8 @@ class AgentSession:
 
         ``last_end`` is how the previous session of this run ended, empty until one ended well."""
         launch = await self._resumed()
+        if self._stopped.is_set():
+            return last_end
         if launch is not None:
             ended = await self._run_launch(grant, launch)
             if ended is None:
@@ -338,8 +346,8 @@ class AgentSession:
         return _Launch(prompt, seen, cli)
 
     async def _resumed(self) -> _Launch | None:
-        """The launch that goes on with the conversation the last run's CLI crashed or idled in; ``None`` when there
-        is none.
+        """The launch that goes on with the conversation the last run's CLI crashed or idled in, an idle one once
+        something arrived or its wait is over; ``None`` when there is none.
 
         The worktree is kept as the CLI left it while the branch head did not move, so its uncommitted edits survive;
         the CLI is shown what arrived from where the conversation's last finished turn had seen up to."""
@@ -348,6 +356,8 @@ class AgentSession:
         cli = await asyncio.to_thread(self._read_cli)
         if cli is None or not cli.resumable:
             return None
+        if cli.idle:
+            await self._until_news(cli)
         branch, worktree = self._start.branch, self._place.worktree
         head = await self._setup.repo.head(branch)
         kept = await asyncio.to_thread(worktree.head) == head
@@ -372,6 +382,20 @@ class AgentSession:
             logged=seen.logged,
         )
         return _Launch(prompt, seen, cli, resumed=True)
+
+    async def _until_news(self, cli: _CliState) -> None:
+        """Wait, with no CLI running, until something arrives past what the idle conversation ``cli`` saw or the
+        integration head moves from where it saw it, at most ``idle_resume_wait_s`` and while the session runs: a model
+        resumed with nothing new to act on idles again, and its branch's last idle session goes with it."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._setup.idle_resume_wait_s
+        while not self._stopped.is_set() and loop.time() < deadline:
+            if any(await self._arrived(_Seen(cli.seen_cursor, cli.logged))):
+                return
+            if await self._setup.repo.head(INTEGRATION_BRANCH) != cli.integration:
+                return
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._stopped.wait(), min(self._setup.poll_seconds, deadline - loop.time()))
 
     async def _run_launch(self, grant: SpecialistGrant, launch: _Launch) -> _Ended | None:
         """Run ``launch``'s CLI to its end; ``None`` when the session was stopped meanwhile."""
@@ -839,6 +863,7 @@ def _describe(status: AgentStatus, seconds: float) -> str:
 
 __all__ = [
     "CLI_SESSION_FILE",
+    "IDLE_RESUME_WAIT_S",
     "IDLE_TURNS",
     "RESUME_CONTEXT_MAX",
     "NUDGE_WAITS_S",

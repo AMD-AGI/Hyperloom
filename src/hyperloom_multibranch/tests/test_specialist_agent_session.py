@@ -651,8 +651,8 @@ async def _crash_after_a_turn(rig, session, n: int, status=CRASHED, *rows) -> Se
     return raised.value
 
 
-async def _next_launch(rig, n: int) -> tuple[AgentSession, asyncio.Task]:
-    session = rig.session()
+async def _next_launch(rig, n: int, **overrides) -> tuple[AgentSession, asyncio.Task]:
+    session = rig.session(**overrides)
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == n, f"launch {n}")
     return session, running
@@ -754,7 +754,7 @@ async def test_an_idle_end_under_the_context_cap_is_resumed_with_what_changed_si
 async def test_an_idle_resume_with_nothing_new_says_so_and_names_the_unmoved_integration_head(rig):
     await _idle_after_turns(rig, _call(50_000), _SUCCESS)
 
-    session, running = await _next_launch(rig, 2)
+    session, running = await _next_launch(rig, 2, idle_resume_wait_s=0.0)
     await session.stop()
     await asyncio.wait_for(running, 1)
 
@@ -783,7 +783,7 @@ async def test_an_idle_end_with_a_full_context_is_followed_by_a_fresh_conversati
 
 async def test_a_crash_after_an_idle_resume_is_resumed_as_a_crash(rig):
     await _idle_after_turns(rig, _call(50_000), _SUCCESS)
-    await _crash_after_a_turn(rig, rig.session(), 2)
+    await _crash_after_a_turn(rig, rig.session(idle_resume_wait_s=0.0), 2)
 
     session, running = await _next_launch(rig, 3)
     await session.stop()
@@ -935,7 +935,7 @@ async def test_an_idle_resume_leaves_the_runtime_s_notice_of_the_restart_out_of_
     await _idle_after_turns(rig, _call(50_000), _SUCCESS)
     await _log(rig, _IDLE_RESTART)
 
-    session, running = await _next_launch(rig, 2)
+    session, running = await _next_launch(rig, 2, idle_resume_wait_s=0.0)
     await session.stop()
     await asyncio.wait_for(running, 1)
 
@@ -948,10 +948,61 @@ async def test_a_crash_resume_shows_the_notices_that_arrived_but_not_the_one_of_
     await _crash_after_a_turn(rig, rig.session(), 1)
     await _log(rig, _MORE_ROOM, _CRASH_RESTART)
 
-    session, running = await _next_launch(rig, 2)
+    session, running = await _next_launch(rig, 2, idle_resume_wait_s=60.0)
     await session.stop()
     await asyncio.wait_for(running, 1)
 
     message = rig.runner.prompts[1]
     assert restart_notice(_CRASH_RESTART) and "--resume" in rig.runner.specs[1].argv
     assert "3 tests running at once" in message and "is restarted on this branch" not in message
+
+
+@pytest.mark.parametrize("arrival", ["result", "notice", "integration"])
+async def test_an_idle_resume_waits_until_something_arrives_for_its_branch(rig, arrival):
+    await _idle_after_turns(rig, _call(50_000), _SUCCESS)
+    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    await _log(rig, _IDLE_RESTART)
+    session = rig.session(idle_resume_wait_s=60.0)
+    running = asyncio.create_task(session.run())
+
+    await asyncio.sleep(0.3)
+    assert len(rig.runner.specs) == 1
+    if arrival == "result":
+        await rig.toolbox_notebook.write_result(result("r1"))
+        said = "result r1"
+    elif arrival == "notice":
+        await _log(rig, _MORE_ROOM)
+        said = "3 tests running at once"
+    else:
+        said = f"integration head moved from {rig.root} to {await _move_integration(rig)}"
+    await _until(lambda: len(rig.runner.specs) == 2, "the resume")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert "--resume" in rig.runner.specs[1].argv and said in rig.runner.prompts[1]
+
+
+async def test_an_idle_resume_nothing_reaches_starts_once_its_wait_is_over(rig):
+    await _idle_after_turns(rig, _call(50_000), _SUCCESS)
+    session = rig.session(idle_resume_wait_s=0.6)
+    running = asyncio.create_task(session.run())
+
+    await asyncio.sleep(0.2)
+    assert len(rig.runner.specs) == 1
+    await _until(lambda: len(rig.runner.specs) == 2, "the resume once the wait is over")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert "--resume" in rig.runner.specs[1].argv and "Nothing arrived" in rig.runner.prompts[1]
+
+
+async def test_a_branch_stopped_while_its_idle_resume_waits_launches_nothing(rig):
+    await _idle_after_turns(rig, _call(50_000), _SUCCESS)
+    session = rig.session(idle_resume_wait_s=60.0)
+    running = asyncio.create_task(session.run())
+
+    await asyncio.sleep(0.1)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert len(rig.runner.specs) == 1
