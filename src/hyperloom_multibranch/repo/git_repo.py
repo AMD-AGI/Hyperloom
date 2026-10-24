@@ -39,7 +39,7 @@ from hyperloom.measure.compile import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, RepoMerge
-from hyperloom_multibranch.contracts.sources import SOURCE_LAYOUTS, SourceLayout, SourceRoot, source_roots
+from hyperloom_multibranch.contracts.sources import SourceRoot, source_roots
 from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot
 from hyperloom_multibranch.repo.rebase import Files
 from hyperloom_multibranch.repo.stack import ScratchBlobs, stack_files
@@ -240,7 +240,7 @@ class GitExperimentRepo:
         """The trees ``component``'s patches apply to: its installed package, and the meta trees the specialist's
         source base lays out beside it."""
         layout = self._layout(component)
-        return source_roots(layout, self._locator(layout).path, SOURCE_LAYOUTS.get(component.component, SourceLayout()))
+        return source_roots(layout, self._locator(layout).path)
 
     def _write_files(self, files: Sequence[tuple[str, str]], destination: Path) -> None:
         for path, sha256 in files:

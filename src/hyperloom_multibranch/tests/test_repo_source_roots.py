@@ -100,7 +100,7 @@ async def test_a_file_outside_the_package_and_its_source_trees_is_an_apply_error
     repo = _repository(tmp_path)
     stack = ComponentPatches("aiter", AITER, PIN)
 
-    error = await repo.apply_error(stack, _diff("hsa/gfx950/codegen.py", _lines(), _lines(c="30")))
+    error = await repo.apply_error(stack, _diff("3rdparty/composable_kernel/include/ck.hpp", _lines(), _lines(c="30")))
 
     assert error is not None and "outside" in error
 

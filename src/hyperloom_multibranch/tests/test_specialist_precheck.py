@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common.outside_facts.component_layout import META_BASE, LayoutSection
 from hyperloom.measure.compile import ComponentLayout, PackageBase
-from hyperloom_multibranch.contracts.sources import SourceLayout
 from hyperloom_multibranch.specialist.precheck import CheckFailed, check_change
 from hyperloom_multibranch.specialist.worktree import SourceBase
 
@@ -101,7 +101,7 @@ def test_a_patched_aiter_imports_its_csrc_from_the_image(tmp_path, monkeypatch, 
     (meta / "csrc" / "pa.py").write_bytes(b"KERNEL = 'pa'\n")
     layouts = {"aiter": ComponentLayout("aiter", "aiter")}
     installed = PackageBase("aiter", package, None, None)
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed, layouts=layouts, sources={})
+    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed, layouts=layouts)
     base.build(["aiter"])
     worktree = base.worktree("s1", tmp_path / "s1")
     worktree.sync("c0", [])
@@ -127,16 +127,13 @@ def test_a_change_to_the_source_beside_the_package_does_not_stop_the_check(tmp_p
     _git(checkout, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "--no-gpg-sign", "-m", "demo")
     version = f"1.0.dev1+g{_git(checkout, 'rev-parse', '--short=9', 'HEAD')}"
     installed = PackageBase("demo_pkg", package, "demo-pkg", version)
-    base = SourceBase(
-        tmp_path / "source",
-        locator=lambda _layout: installed,
-        layouts=LAYOUTS,
-        sources={"demo": SourceLayout(meta=("csrc",))},
-    )
+    sections = (LayoutSection("src/demo_pkg"), LayoutSection("src/csrc", META_BASE, "csrc"))
+    layouts = {"demo": ComponentLayout("demo_pkg", "src/demo_pkg", sections)}
+    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed, layouts=layouts)
     base.build(["demo"])
     worktree = base.worktree("s1", tmp_path / "s1")
     (worktree.path / "src" / "csrc" / "kernel.cu").write_bytes(b"__global__ void k() { return; }\n")
     (worktree.path / "src" / "demo_pkg" / "__init__.py").write_bytes(b"VALUE = 2\n")
 
     assert worktree.changed("demo").written == ("src/csrc/kernel.cu", "src/demo_pkg/__init__.py")
-    assert check_change(worktree, "demo", LAYOUTS["demo"], installed) == 1
+    assert check_change(worktree, "demo", layouts["demo"], installed) == 1

@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Where a component's editable sources lie: its installed package, and the source trees beside it that its runtime
-compiles (aiter's csrc).
+"""Where a component's editable sources lie: its installed package, and the meta trees beside it that its runtime
+compiles (aiter's ``csrc`` and ``hsa``), as the rule pack's component layout names them.
 
 A patch names each file by its path in the component's upstream repository. The specialist's source base lays the
 sources out at those paths, and the experiment repository applies a patch to the tree each path falls in.
@@ -10,28 +10,11 @@ sources out at those paths, and the experiment repository applies a patch to the
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
+from hyperloom.common.outside_facts.component_layout import META_BASE, LayoutSection
 from hyperloom.measure.compile import ComponentLayout
-
-
-@dataclass(frozen=True)
-class SourceLayout:
-    """What of a component lies beyond its installed package's text files."""
-
-    #: Directories inside the package, relative to it, that its runtime writes builds into.
-    built: tuple[str, ...] = ()
-    #: Source trees in the package's parent directory, by name: beside the package in the checkout it is installed
-    #: from, and beside the package's upstream prefix in its repository.
-    meta: tuple[str, ...] = ()
-
-
-SOURCE_LAYOUTS: Mapping[str, SourceLayout] = {
-    # A develop install compiles csrc from its checkout (aiter/jit/core.py).
-    "aiter": SourceLayout(built=("jit/build", "jit/hyperloom_jit_backup", "jit/flydsl_cache"), meta=("csrc",)),
-}
 
 
 @dataclass(frozen=True)
@@ -43,15 +26,16 @@ class SourceRoot:
     path: Path
 
 
-def meta_prefix(layout: ComponentLayout, meta: str) -> str:
-    """The path of the meta tree ``meta`` in the upstream repository: beside the package's upstream prefix."""
-    return (PurePosixPath(layout.upstream_prefix).parent / meta).as_posix()
+def meta_sections(layout: ComponentLayout) -> tuple[LayoutSection, ...]:
+    """The layout's sections that lie over the meta trees beside the package, not over the package itself."""
+    return tuple(section for section in layout.spec.sections if section.base == META_BASE)
 
 
-def source_roots(layout: ComponentLayout, package: Path, source: SourceLayout) -> tuple[SourceRoot, ...]:
-    """The package installed at ``package`` first, then each of ``source``'s meta trees beside it."""
-    metas = (SourceRoot(meta_prefix(layout, meta), package.parent / meta) for meta in source.meta)
+def source_roots(layout: ComponentLayout, package: Path) -> tuple[SourceRoot, ...]:
+    """The package installed at ``package`` first, then each meta tree beside it, in the checkout it is installed
+    from."""
+    metas = (SourceRoot(section.prefix, package.parent / section.into) for section in meta_sections(layout))
     return (SourceRoot(layout.upstream_prefix, package), *metas)
 
 
-__all__ = ["SOURCE_LAYOUTS", "SourceLayout", "SourceRoot", "meta_prefix", "source_roots"]
+__all__ = ["SourceRoot", "meta_sections", "source_roots"]

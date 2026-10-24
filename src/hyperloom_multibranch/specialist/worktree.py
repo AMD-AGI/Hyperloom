@@ -29,7 +29,7 @@ from hyperloom.measure.compile import (
     UnsupportedComponentError,
     locate_installed_package,
 )
-from hyperloom_multibranch.contracts.sources import SOURCE_LAYOUTS, SourceLayout, meta_prefix, source_roots
+from hyperloom_multibranch.contracts.sources import meta_sections, source_roots
 
 #: Built files a text patch can never change.
 SKIPPED = ("__pycache__", "*.pyc", "*.pyo", "*.so", "*.a", "*.o", "*.co", "*.hsaco")
@@ -119,12 +119,10 @@ class SourceBase:
         *,
         locator: PackageLocator = locate_installed_package,
         layouts: Mapping[str, ComponentLayout] = COMPONENT_LAYOUTS,
-        sources: Mapping[str, SourceLayout] = SOURCE_LAYOUTS,
     ) -> None:
         self.path = path
         self._locator = locator
         self._layouts = layouts
-        self._sources = sources
 
     def build(self, components: Sequence[str]) -> None:
         """Copy each component's installed package and meta trees to their upstream paths and commit them; a session
@@ -141,10 +139,9 @@ class SourceBase:
         excluded = list(SKIPPED)
         for component in components:
             layout = self._layout(component)
-            source = self._sources.get(component, SourceLayout())
-            package, *metas = source_roots(layout, _with_checkout(component, self._locator(layout), source), source)
-            shutil.copytree(package.path, self.path / package.prefix, ignore=_ignore(package.path, source.built))
-            excluded += [f"/{package.prefix}/{built}/" for built in source.built]
+            package, *metas = source_roots(layout, _with_checkout(component, self._locator(layout), layout))
+            shutil.copytree(package.path, self.path / package.prefix, ignore=_ignore(package.path, layout.generated))
+            excluded += [f"/{package.prefix}/{built}/" for built in layout.generated]
             for meta in (meta for meta in metas if meta.path.is_dir()):
                 shutil.copytree(meta.path, self.path / meta.prefix, ignore=_ignore(meta.path, ()))
         (self.path / ".git" / "info").mkdir(exist_ok=True)
@@ -155,7 +152,7 @@ class SourceBase:
         """The worktree of ``branch`` at ``path``, added at the installed packages the first time."""
         if not path.exists():
             _git(self.path, "worktree", "add", "-b", f"mb/{branch}", str(path), BASE_BRANCH)
-        return BranchWorktree(path, self._layouts, self._sources)
+        return BranchWorktree(path, self._layouts)
 
     def _layout(self, component: str) -> ComponentLayout:
         layout = self._layouts.get(component)
@@ -175,10 +172,10 @@ def _ignore(root: Path, built: Sequence[str]) -> Callable[[str, list[str]], set[
     return ignore
 
 
-def _with_checkout(component: str, package: PackageBase, source: SourceLayout) -> Path:
+def _with_checkout(component: str, package: PackageBase, layout: ComponentLayout) -> Path:
     """Where ``package`` is installed, refused for a component whose meta trees the base lays out when it is installed
     without a checkout: a recipe pins a component to a full upstream commit, which only a checkout can resolve."""
-    if source.meta and installed_upstream(package) is None:
+    if meta_sections(layout) and installed_upstream(package) is None:
         raise UnsupportedComponentError(
             f"{component} at {package.path} is installed with no git checkout that holds the commit its version "
             f"{package.dist_version!r} names (a wheel names only an abbreviated commit), so no recipe can pin where its "
@@ -202,11 +199,9 @@ class BranchWorktree:
         self,
         path: Path,
         layouts: Mapping[str, ComponentLayout] = COMPONENT_LAYOUTS,
-        sources: Mapping[str, SourceLayout] = SOURCE_LAYOUTS,
     ) -> None:
         self.path = path
         self._layouts = layouts
-        self._sources = sources
 
     def holds(self, component: str) -> bool:
         """Whether the source base laid out ``component``; a recipe's patches to any other component are not here."""
@@ -302,7 +297,7 @@ class BranchWorktree:
         layout = self._layouts.get(component)
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout")
-        metas = [meta_prefix(layout, meta) for meta in self._sources.get(component, SourceLayout()).meta]
+        metas = [section.prefix for section in meta_sections(layout)]
         # A pathspec that names nothing fails the stage, and an install may ship no meta tree.
         held = _git(self.path, "ls-tree", "--name-only", BASE_BRANCH, "--", *metas).splitlines() if metas else []
         return (layout.upstream_prefix, *held)

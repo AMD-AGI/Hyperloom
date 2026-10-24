@@ -32,6 +32,7 @@ def _aiter_install(root, meta, version=None):
     _write(meta / "csrc" / "cpp_itfs" / "__pycache__" / "utils.cpython-310.pyc", b"\x00compiled")
     _write(meta / "csrc" / "opus_gemm" / "gen_co" / "gfx950" / "opus_gemm_256x128.co", b"\x7fELF")
     _write(meta / "hsa" / "gfx950" / "gemm.co", b"\x7fELF")
+    _write(meta / "hsa" / "codegen.py", b"ARCHS = ('gfx950',)\n")
     return PackageBase("aiter", package, "amd-aiter", version)
 
 
@@ -70,7 +71,7 @@ def worktree(tmp_path, editable):
     return worktree
 
 
-EXPECTED = ["aiter/__init__.py", "aiter/jit/core.py", "csrc/include/gemm.h", "csrc/kernels/gemm.cu"]
+EXPECTED = ["aiter/__init__.py", "aiter/jit/core.py", "csrc/include/gemm.h", "csrc/kernels/gemm.cu", "hsa/codegen.py"]
 
 
 def test_the_base_lays_out_aiter_s_package_and_its_csrc_without_build_outputs(tmp_path, editable):
@@ -103,10 +104,11 @@ def test_a_develop_install_s_upstream_is_its_checkout_s_commit(tmp_path):
     assert installed_upstream(installed) == Upstream(AITER, commit)
 
 
-def test_an_aiter_without_csrc_lays_out_its_package_alone(tmp_path):
+def test_an_aiter_without_meta_trees_lays_out_its_package_alone(tmp_path):
     checkout = tmp_path / "aiter-checkout"
     installed, _ = _develop_install(checkout)
     shutil.rmtree(checkout / "csrc")
+    shutil.rmtree(checkout / "hsa")
     base = SourceBase(tmp_path / "source", locator=lambda _layout: installed)
     base.build(["aiter"])
     worktree = base.worktree("s1", tmp_path / "s1")
