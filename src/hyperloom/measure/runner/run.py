@@ -505,7 +505,19 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     report = None if session is None else session.report(cold.builds)
     if report is not None:
         ctx.notes.extend(report.notes)
-    timing = {
+    timing = _timing(ctx, received, cold)
+    _write_bundle(
+        ctx,
+        _Signed(spec, raw, key),
+        _outcome_document(outcome, timed_out),
+        _Findings(files, facts, changed, timing, visible, surface, None if report is None else report.document()),
+    )
+
+
+def _timing(ctx: _Context, received: float, cold: ColdStart) -> dict[str, object]:
+    """The result's timing: when the run started, received its spec and finished, its phases, which end now, and the
+    two parts of its cold start."""
+    return {
         "runner_started_unix": ctx.started,
         "spec_received_unix": received,
         "server_ready_unix": None,
@@ -513,12 +525,6 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
         "phases": manifest_document(ctx.phases.finish()),
         **_cold_start_timing(cold),
     }
-    _write_bundle(
-        ctx,
-        _Signed(spec, raw, key),
-        _outcome_document(outcome, timed_out),
-        _Findings(files, facts, changed, timing, visible, surface, None if report is None else report.document()),
-    )
 
 
 def _unix_time(ctx: _Context, name: str) -> float | None:
