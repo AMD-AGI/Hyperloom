@@ -140,6 +140,32 @@ class TestAClosedSessionIsReopenedOnResume:
         finally:
             await coordinator.stop()
 
+    @pytest.mark.asyncio
+    async def test_the_reopened_pass_is_a_new_macro_cycle_whose_kernel_round_is_still_to_run(self, session_dir):
+        """The rewrite controller runs once per macro-cycle, so the closed cycle's verdict must not stand for this one.
+
+        A Forge round the CLOSE transition killed is recorded as ``failed`` for its cycle. Reopened in that same cycle,
+        the next KERNEL entry read it as its own round's end and left on the first tick.
+        """
+        from hyperloom.orchestrator.phases.machine_state import kernel_controller_settled
+
+        SharedState(
+            session_id="closed",
+            phase="CLOSE",
+            macro_cycle=1,
+            kernel_optimizer="forge",
+            kernel_rewrite_controller_result={"macro_cycle": 1, "status": "failed"},
+        ).save(session_dir)
+
+        coordinator = Coordinator(session_dir, backends=_backends_full())
+        try:
+            state = coordinator.shared_state
+            assert state.macro_cycle == 2
+            assert state.phase_history[-1]["cycle"] == 2
+            assert not kernel_controller_settled(state)
+        finally:
+            await coordinator.stop()
+
 
 @pytest.mark.asyncio
 async def test_existing_events_triggers_resume(session_dir):

@@ -120,12 +120,21 @@ class MachinePhase(CoordinatorCollaborator):
             log.exception("Coordinator: save after phase init failed")
 
     def _reopen_a_session_that_was_left_closed(self) -> None:
-        """Put a session persisted in CLOSE back at the phase machine's entrance."""
+        """Put a session persisted in CLOSE back at the phase machine's entrance, as the next macro-cycle.
+
+        The closed cycle's records -- the Forge controller's terminal result above all -- describe a pass through the
+        phases that has ended. Kept as the reopened pass's own, they end its KERNEL on the first tick.
+        """
         state = self.shared_state
+        prior_cycle = int(state.macro_cycle or 0)
+        state.open_macro_cycle()
+        self._coord.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
         log.info(
             "Coordinator: session resumed in CLOSE, a phase with no way out; "
-            "reopening at PRELUDE so the new budget can be spent on the work "
-            "the earlier leg stopped short of."
+            "reopening at PRELUDE as macro-cycle %d -> %d so the new budget can be spent on the work "
+            "the earlier leg stopped short of.",
+            prior_cycle,
+            state.macro_cycle,
         )
         _phase_state.record_phase_transition(
             state,
