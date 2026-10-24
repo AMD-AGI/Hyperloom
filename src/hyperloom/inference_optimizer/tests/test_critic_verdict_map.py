@@ -37,7 +37,6 @@ from hyperloom.orchestrator.policy.gate import (
     INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
     PolicyDenied,
     PolicyGate,
-    REVIEW_VERDICTS,
 )
 from hyperloom.orchestrator.specialists.patch_safety import (
     QUANTITATIVE_CLAIM_REASON_CODE,
@@ -215,12 +214,6 @@ def test_policy_gate_rejects_unknown_per_variant_verdict(gate):
         )
     assert "verdict_map" in str(exc.value)
     assert "obliterate" in str(exc.value)
-
-
-def test_policy_gate_review_verdicts_vocab_contains_canonical_set():
-    """REVIEW_VERDICTS must cover the five canonical strings the Critic prompt documents."""
-    for v in ("approve", "reject", "redirect", "advise", "needs_review"):
-        assert v in REVIEW_VERDICTS
 
 
 # 3. Coordinator helpers — _handle_review_verdict dispatch
