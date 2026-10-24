@@ -44,6 +44,7 @@ from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
 from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint, SessionProfile
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
+from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.knowledge.reference_leads import (
@@ -203,41 +204,75 @@ class Session:
     def __init__(
         self, settings: RunSettings, peer_factory: PeerFactory, host: SessionHost, services: SessionServices
     ) -> None:
-        layout, processes, clock = host.layout, host.processes, host.clock
         self._settings = settings
-        self._layout = layout
-        self._processes = processes
-        self._clock = clock
-        self._notebook = LocalNotebook(layout.notebook, Writer(Role.SCHEDULER, SCHEDULER_WRITER), clock=clock.now)
-        merger = LocalNotebook(layout.notebook, Writer(Role.INTEGRATOR, INTEGRATOR_WRITER), clock=clock.now)
-        self._roster = Roster(settings.caps, layout.roster, clock)
-        self._decisions = DecisionLog(layout.decisions, clock)
-        desk = ForkDesk(self._roster, self._decisions, clock)
-        blobs = LocalBlobStore(layout.blobs)
-        peers = peer_factory(
-            PeerSetup(
-                layout,
-                settings.workload,
-                desk,
-                processes,
-                blobs,
-                services.critic(self._notebook),
-                self._reference_dirs(),
-                settings.dev_leases,
-            )
-        )
+        self._layout, self._processes, self._clock = host.layout, host.processes, host.clock
+        self._open_records()
+        desk = ForkDesk(self._roster, self._decisions, self._clock)
+        peers = peer_factory(self._peer_setup(desk, services))
         context = SchedulerContext(
-            layout, self._roster, self._notebook, self._decisions, processes, clock, desk, peers.reserved
+            self._layout,
+            self._roster,
+            self._notebook,
+            self._decisions,
+            self._processes,
+            self._clock,
+            desk,
+            peers.reserved,
         )
         self._toolbox = peers.toolbox
         self._briefs = peers.briefs
         self._base_image_digest = peers.base_image_digest
-        tests = SessionTests(peers.toolbox, clock)
+        tests = SessionTests(peers.toolbox, self._clock)
         checks = SessionChecks(tests, peers.gate, peers.regression)
         self._metric = settings.workload.metric
         self._budget_seconds = budget_seconds(settings.max_hours)
+        self._score_with_defaults()
+        self._context = context
+        self._repo = peers.repo
+        self._recipe_kb = services.recipe_kb
+        self._lifecycle = peers.lifecycle
+        self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo, peers.briefs)
+        self._stopper = SessionStopper(context, self._branches, peers.toolbox, peers.mcp)
+        warm_start = None if services.recipe_kb is None else WarmStartSource(services.recipe_kb, self._blobs)
+        self._prelude = Prelude(
+            context, PreludeServices(peers.repo, peers.gate, tests, peers.toolbox), warm_start=warm_start
+        )
+        self._integrator = self._build_integrator(peers.repo, checks, services)
+        self._open_llm_roles(services)
+        self._similarity = BranchSimilarity(peers.repo, self._roster)
+        profiler = IntegrationProfiler(peers.toolbox, tests, self._notebook, self._clock)
+        self._events = SessionEvents(self._notebook, self._decisions, profiler, peers.toolbox, settings.workload.tp)
+        self._selector = FinalSelector(checks, settings.workload)
+        self._signals = StopSignals()
+        self._in_final = False
+
+    def _open_records(self) -> None:
+        """The scheduler's notebook handle, the roster, the decision log and the blob store, on the session's layout."""
+
+        layout, clock = self._layout, self._clock
+        self._notebook = LocalNotebook(layout.notebook, Writer(Role.SCHEDULER, SCHEDULER_WRITER), clock=clock.now)
+        self._roster = Roster(self._settings.caps, layout.roster, clock)
+        self._decisions = DecisionLog(layout.decisions, clock)
+        self._blobs = LocalBlobStore(layout.blobs)
+
+    def _peer_setup(self, desk: ForkDesk, services: SessionServices) -> PeerSetup:
+        layout, settings = self._layout, self._settings
+        return PeerSetup(
+            layout,
+            settings.workload,
+            desk,
+            self._processes,
+            self._blobs,
+            services.critic(self._notebook),
+            self._reference_dirs(),
+            settings.dev_leases,
+        )
+
+    def _score_with_defaults(self) -> None:
+        """Score with the defaults for the session's budget until PRELUDE's choice replaces them, against the trees
+        archived by every other session."""
+
         self._challenger = False
-        # The defaults until PRELUDE's choice replaces it; EXPLORE and CLOSE build their scoring from it.
         self._choose(
             PolicyChoice(
                 FrontierPolicy.for_budget(self._metric, self._budget_seconds), DEFAULT_POLICY, UNCHOSEN_EVIDENCE
@@ -245,37 +280,28 @@ class Session:
         )
         # A session is not evidence about itself: a run over a directory whose CLOSE already archived its tree would
         # otherwise calibrate and score against that tree.
-        self._history = tuple(tree for tree in archived_history() if tree.session_id != layout.session_id)
-        self._context = context
-        self._repo = peers.repo
-        self._blobs = blobs
-        self._recipe_kb = services.recipe_kb
-        self._lifecycle = peers.lifecycle
-        self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo, peers.briefs)
-        self._stopper = SessionStopper(context, self._branches, peers.toolbox, peers.mcp)
+        self._history = tuple(tree for tree in archived_history() if tree.session_id != self._layout.session_id)
+
+    def _build_integrator(self, repo: ExperimentRepo, checks: SessionChecks, services: SessionServices) -> Integrator:
+        """The integrator, writing as itself to the notebook and the merge log, with the LLM patch resolver whose
+        spend the scheduler records."""
+
+        merger = LocalNotebook(self._layout.notebook, Writer(Role.INTEGRATOR, INTEGRATOR_WRITER), clock=self._clock.now)
         resolver = LlmPatchResolver(
-            recorded(services.resolver_completion, self._notebook, UsageSource.RESOLVER),
-            peers.repo,
-            services.resolver_model,
+            recorded(services.resolver_completion, self._notebook, UsageSource.RESOLVER), repo, services.resolver_model
         )
-        warm_start = None if services.recipe_kb is None else WarmStartSource(services.recipe_kb, blobs)
-        self._prelude = Prelude(
-            context, PreludeServices(peers.repo, peers.gate, tests, peers.toolbox), warm_start=warm_start
-        )
-        self._integrator = Integrator(
-            MergeRecords(merger, DecisionLog(layout.merges, clock)), peers.repo, checks, resolver, clock
-        )
-        self._judge = Judge(recorded(services.judge_completion, self._notebook, UsageSource.JUDGE), layout.judge, clock)
+        records = MergeRecords(merger, DecisionLog(self._layout.merges, self._clock))
+        return Integrator(records, repo, checks, resolver, self._clock)
+
+    def _open_llm_roles(self, services: SessionServices) -> None:
+        """The judge, and the scorer author and curator CLOSE asks, each recording its spend on the notebook."""
+
+        judge = recorded(services.judge_completion, self._notebook, UsageSource.JUDGE)
+        self._judge = Judge(judge, self._layout.judge, self._clock)
         scorer = recorded(services.scorer_completion, self._notebook, UsageSource.SCORER)
         self._scorers = ScorerAuthoring(scorer, services.scorer_model)
         curator = recorded(services.scorer_completion, self._notebook, UsageSource.CURATOR)
         self._curator = ScorerAuthoring(curator, services.scorer_model)
-        self._similarity = BranchSimilarity(peers.repo, self._roster)
-        profiler = IntegrationProfiler(peers.toolbox, tests, self._notebook, clock)
-        self._events = SessionEvents(self._notebook, self._decisions, profiler, peers.toolbox, settings.workload.tp)
-        self._selector = FinalSelector(checks, settings.workload)
-        self._signals = StopSignals()
-        self._in_final = False
 
     async def run(self) -> SessionOutcome:
         """Run every phase and CLOSE; an unhandled error propagates once CLOSE has run.
