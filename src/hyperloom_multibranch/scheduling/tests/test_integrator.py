@@ -60,6 +60,8 @@ from hyperloom_multibranch.scheduling.integrator import (
     ALREADY_ON_HEAD,
     CONFLICT_UNRESOLVED,
     FOUNDATION_FIX_VERDICTS,
+    NO_PATCH,
+    RESOLVER_ATTEMPTS,
     RESOLVER_SYSTEM_PROMPT,
     RESOLVER_UNREACHED,
     SUPERSEDED,
@@ -841,6 +843,7 @@ async def test_an_unresolved_patch_conflict_is_skipped_and_recorded(
 
     assert report is not None and report.outcome is MergeOutcome.CONFLICT_SKIPPED
     assert report.reason.startswith(named) and report.request_id is None
+    assert len(bench.completion.calls) == 1
     conflicting = bench.deltas["c1"].components[0].add_patches[1]
     assert conflicting.path in report.reason
     assert await bench.outcome("c1") is MergeOutcome.CONFLICT_SKIPPED
@@ -871,8 +874,7 @@ async def test_a_patch_a_foundation_fix_brought_is_never_replaced_by_a_later_mer
     assert merged is not None and (merged.candidate, merged.outcome) == (fix, MergeOutcome.MERGED)
     assert conflicted is not None and conflicted.candidate == bench.commits["c1"]
     assert conflicted.outcome is MergeOutcome.CONFLICT_SKIPPED and conflicted.reason.startswith(CONFLICT_UNRESOLVED)
-    [(_, prompt)] = bench.completion.calls
-    assert HEAD_TEXT in prompt
+    assert HEAD_TEXT in bench.completion.calls[0][1]
     head = await bench.repo.read_recipe(await bench.repo.head(INTEGRATION_BRANCH))
     [kept] = head.component(COMPONENT).patches
     assert await bench.repo.patch_text(merged.merged_commit, kept.path) == HEAD_TEXT
@@ -891,9 +893,31 @@ async def test_a_rewrite_that_does_not_apply_is_an_unresolved_conflict_and_spend
     assert report is not None and report.outcome is MergeOutcome.CONFLICT_SKIPPED and report.request_id is None
     conflicting = bench.deltas["c1"].components[0].add_patches[1]
     assert report.reason.startswith(CONFLICT_UNRESOLVED)
-    assert f"the rewrite of {conflicting.path} does not apply: " in report.reason
+    assert f"no rewrite of {conflicting.path} applied in {RESOLVER_ATTEMPTS} attempts, the last: " in report.reason
+    assert "does not apply" in report.reason
+    assert len(bench.completion.calls) == RESOLVER_ATTEMPTS
     assert bench.merge_tests() == {}
     assert await bench.outcome("c1") is MergeOutcome.CONFLICT_SKIPPED
+
+
+@pytest.mark.parametrize(
+    ("first", "quoted"),
+    [(json.dumps({"patch": STRAY_TEXT}), "does not apply"), ("no rewrite today", NO_PATCH)],
+    ids=["does-not-apply", "no-patch"],
+)
+async def test_a_rewrite_that_does_not_apply_is_asked_for_again_with_why(
+    tmp_path: Path, first: str, quoted: str
+) -> None:
+    bench = await _bench(tmp_path, conflicting=True)
+    bench.completion.replies = [first, json.dumps({"patch": RESOLVED_TEXT})]
+
+    report = await _one(bench)
+
+    assert report is not None and report.outcome is MergeOutcome.MERGED
+    (_, asked), (_, again) = bench.completion.calls
+    assert again.startswith(asked)
+    feedback = again.removeprefix(asked)
+    assert feedback.startswith("\n\nYour last rewrite failed to apply: ") and quoted in feedback
 
 
 async def test_a_merge_the_recipe_contract_refuses_is_skipped_and_the_round_goes_on(tmp_path: Path) -> None:

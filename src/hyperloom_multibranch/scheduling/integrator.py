@@ -71,6 +71,9 @@ CONFLICT_UNRESOLVED = "unresolved patch conflict"
 RESOLVER_UNREACHED = "the patch resolver could not be asked"
 #: The JSON key the resolver's reply carries the rewritten patch under; ``null`` means it cannot be combined.
 PATCH_KEY = "patch"
+#: The resolver's answers per conflicting patch: a rewrite that does not apply is asked for once more, with why.
+RESOLVER_ATTEMPTS = 2
+NO_PATCH = "the answer carried no patch"
 RESOLVER_SYSTEM_PROMPT = (
     "You resolve patch conflicts while merging two optimizations of an LLM inference server. "
     "A patch of a component did not apply on top of the other patches of that component. Rewrite it so it applies "
@@ -106,6 +109,17 @@ class MergeReport:
 
 class PatchUnresolved(Exception):
     """A conflicting patch the resolver got no rewrite of that applies; the message says why."""
+
+
+def _rewritten(conflict: PatchConflict, reply: str) -> str | None:
+    """The patch ``reply`` carries, ``None`` when it carries none; :class:`PatchUnresolved` when the model answered
+    that the patch cannot be combined, which another answer would not change."""
+
+    answer = extract_last_json_with_key(reply, PATCH_KEY)
+    if answer is not None and answer[PATCH_KEY] is None:
+        raise PatchUnresolved(f"the model answered that {conflict.path} cannot be combined with the patches before it")
+    text = None if answer is None else answer[PATCH_KEY]
+    return text if isinstance(text, str) and text.strip() else None
 
 
 @dataclass(frozen=True)
@@ -155,17 +169,19 @@ class LlmPatchResolver:
         return replace(merge.delta, components=changes)
 
     async def _rewrite(self, conflict: PatchConflict, stack: ComponentPatches, prompt: str) -> str:
-        """The model's rewrite of ``conflict``, once it applies on top of ``stack``."""
+        """The model's rewrite of ``conflict`` that applies on top of ``stack``; an answer that gave none is asked again
+        with why, up to :data:`RESOLVER_ATTEMPTS` answers in all."""
 
-        reply = (await self._completion(RESOLVER_SYSTEM_PROMPT, prompt)).text
-        answer = extract_last_json_with_key(reply, PATCH_KEY)
-        text = answer.get(PATCH_KEY) if answer is not None else None
-        if not isinstance(text, str) or not text.strip():
-            raise PatchUnresolved(f"the model gave no rewrite of {conflict.path}")
-        error = await self._repo.apply_error(stack, text)
-        if error is not None:
-            raise PatchUnresolved(f"the rewrite of {conflict.path} does not apply: {error}")
-        return text
+        asked, error = prompt, NO_PATCH
+        for _ in range(RESOLVER_ATTEMPTS):
+            text = _rewritten(conflict, (await self._completion(RESOLVER_SYSTEM_PROMPT, asked)).text)
+            error = NO_PATCH if text is None else await self._repo.apply_error(stack, text)
+            if text is not None and error is None:
+                return text
+            asked = f"{prompt}\n\nYour last rewrite failed to apply: {error}"
+        raise PatchUnresolved(
+            f"no rewrite of {conflict.path} applied in {RESOLVER_ATTEMPTS} attempts, the last: {error}"
+        )
 
     async def _prompt(self, conflict: PatchConflict, stack: ComponentPatches, sources: _Sources) -> str:
         """``stack`` is what the rewritten patch has to apply on: the merge without the patches that conflict."""
@@ -558,11 +574,13 @@ __all__ = [
     "CONFLICT_UNRESOLVED",
     "FOUNDATION_FIX_VERDICTS",
     "GAIN_ONLY_REFUSALS",
+    "RESOLVER_ATTEMPTS",
     "RESOLVER_UNREACHED",
     "Integrator",
     "LlmPatchResolver",
     "MergeRecords",
     "MergeReport",
+    "NO_PATCH",
     "PatchUnresolved",
     "defects_beyond_gain",
     "not_stackable_reason",
