@@ -313,11 +313,12 @@ async def test_a_keep_the_head_already_is_imports_nothing(tmp_path: Path) -> Non
     assert await import_delta(again, root=BARE, head=head, component="vllm", stores=source.stores(first)) is None
 
 
-async def test_a_keep_merges_onto_integration_beside_another_branch_s_patch_that_clashes_with_an_earlier_keep(
+async def test_a_keep_carries_an_earlier_unmerged_keep_that_clashes_with_integration_as_its_one_conflict(
     tmp_path: Path,
 ) -> None:
-    """Run 4aef3318's b01: integration holds b04's patch over the lines of b01's first keep, so that keep never merged;
-    b01's second keep edits another hunk of the file and must merge on its own."""
+    """Run 4aef3318's b01: integration holds b04's patch over the lines of b01's first keep, so that keep never merged.
+    A merge carries b01's lineage from the merge base, so the first keep's patch is the conflict and the second keep's
+    hunk lands beside b04's."""
 
     source = await _source(tmp_path)
     b04_text = source.keep(line_2="2000", line_10="1000")
@@ -331,6 +332,8 @@ async def test_a_keep_merges_onto_integration_beside_another_branch_s_patch_that
 
     merge = await source.repo.merge(second, integration)
 
-    assert merge.clean and merge.replaced_patches == ()
+    first_patch = (await source.repo.read_recipe(first)).components[0].patches[0].path
+    assert [conflict.path for conflict in merge.patch_conflicts] == [first_patch]
+    assert merge.carried == (first, second) and merge.replaced_patches == ()
     merged = apply(await source.repo.read_recipe(integration), merge.delta)
     assert source.config(merged) == _expected(line_2="2000", line_10="1000", line_25="250")

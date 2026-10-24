@@ -80,7 +80,11 @@ class UnitedTable:
 
 @dataclass(frozen=True)
 class RepoMerge:
-    """A candidate commit's own change, relative to its parent, carried onto ``onto``.
+    """A candidate commit's change, relative to the merge base of the candidate and ``onto``, carried onto ``onto``.
+
+    ``carried`` are the commits of the candidate's lineage not on ``onto``, oldest first and the candidate last, so a
+    candidate whose parents were never merged brings their change too; it is empty, as is ``delta``, when the
+    candidate is already on ``onto``.
 
     ``delta`` turns ``onto``'s recipe into the merged one. Where both changed a server argument or an environment
     variable, the candidate's value is taken and the setting listed in ``config_conflicts`` as ``onto``'s value
@@ -101,6 +105,7 @@ class RepoMerge:
     united_tables: tuple[UnitedTable, ...] = ()
     resolved_patches: tuple[ResolvedPatch, ...] = ()
     replaced_patches: tuple[ReplacedPatch, ...] = ()
+    carried: tuple[str, ...] = ()
 
     @property
     def clean(self) -> bool:
@@ -131,7 +136,9 @@ class ExperimentRepo(Protocol):
     async def commit(self, branch: str, parent: str, recipe: Recipe, message: str) -> str: ...
 
     async def merge(self, candidate: str, onto: str, protected: frozenset[str] = frozenset()) -> RepoMerge:
-        """Carry ``candidate``'s change onto ``onto``, writing nothing; ``RecipeError`` when the two cannot combine.
+        """Carry ``candidate``'s change from its merge base with ``onto`` onto ``onto``, writing nothing.
+
+        ``RecipeError`` when the two cannot combine or have several merge bases.
 
         ``protected`` are the commits merged into ``onto`` as foundation fixes: no head patch they contributed is
         replaced. The set is the session's, so a head carried into a later session protects nothing until it is

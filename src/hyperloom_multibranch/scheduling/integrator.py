@@ -18,8 +18,10 @@ like an unresolved conflict. One that leaves the head's recipe as it is is skipp
 another branch's commit already brought the same change, and the head keeps it, so it is not tried again, as a merged
 commit is not.
 
-The experiment repository carries the candidate's own change onto the integration head and reports what conflicts:
-where the two set a server argument or environment variable differently the candidate's value wins, and the
+The experiment repository carries the candidate's change from its merge base with the integration head, so a
+candidate whose parents were never merged brings their change with its own, and it names every commit it carries; a
+tested merge records them all as its source commits, so each one the merge lands is merged with the candidate. It
+reports what conflicts: where the two set a server argument or environment variable differently the candidate's value wins, and the
 integrator records every overridden value in the decision log; where both tuned one kernel slot the merge unites the
 two tables, and that is recorded there too, since the merged recipe then loads a table neither branch measured and
 the merge test's gain is measured on it; a patch that does not apply where the merge puts it
@@ -441,11 +443,10 @@ class Integrator:
         )
 
     async def _judge(self, merge: RepoMerge, commit: CommittedCommit, request_id: str) -> _Tested:
-        candidate = commit.commit_id
-        attempt = MergeAttempt((candidate,), merge.onto, request_id, resolved_patches=merge.resolved_patches)
+        attempt = MergeAttempt(merge.carried, merge.onto, request_id, resolved_patches=merge.resolved_patches)
         await self._notebook.record_merge_attempt(attempt)
         tested = MergeReport(
-            candidate,
+            commit.commit_id,
             merge.onto,
             MergeOutcome.PENDING,
             "",

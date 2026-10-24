@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A candidate commit's own change carried onto another commit's recipe, for the integrator's merge.
+"""A candidate commit's change carried onto another commit's recipe, for the integrator's merge.
 
-The change is what the candidate's recipe changed from its parent's. A server argument or environment variable both
-sides changed takes the candidate's value and is listed; a kernel slot both sides filled is decided by the two tables
+The change is what the candidate's recipe changed from the merge base's: the nearest commit both histories hold, so a
+candidate whose parents were never merged brings their change with its own. A server argument or environment variable
+both sides changed takes the candidate's value and is listed; a kernel slot both sides filled is decided by the two tables
 when one holds every row of the other, since a target loads one table and the wider one serves every shape the
 narrower did, and otherwise takes a new table of both tables' rows. A shape both set to other rows takes the row of the
 side that moved it from the base's table, the head's where both did; a union of only the head's rows keeps the head's
@@ -114,7 +115,8 @@ class _Sides:
 
 
 def carry(onto: str, base: Recipe, candidate: Recipe, ours: Recipe, stored: Stored) -> RepoMerge:
-    """``candidate``'s change from ``base``, its parent's recipe, carried onto ``ours``, the recipe of ``onto``."""
+    """``candidate``'s change from ``base``, the recipe of its merge base with ``onto``, carried onto ``ours``, the
+    recipe of ``onto``."""
     change = diff(base, candidate)
     if change.base_image_changed:
         raise RecipeError("the candidate changes the base image, which a session keeps")
@@ -256,7 +258,7 @@ def _united(
 ) -> UnitedTable:
     """The rows of both tables as one table of their slot, kept in the blob store; ``ours`` itself when the union is
     its rows, since a reordered copy would change the recipe and cost a merge test for no change. A shape both set to
-    other rows is decided against ``base``, the table the candidate's parent had in the slot (``_union_three_way``).
+    other rows is decided against ``base``, the table the merge base had in the slot (``_union_three_way``).
     Rows put over the image's default table read the same over a whole table, so a rows-only set and a whole table
     make a whole table. Refused when the two do not load through one variable or are not one kind of table."""
 
