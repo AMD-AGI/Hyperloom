@@ -63,6 +63,7 @@ __all__ = [
     "PY_IMPORT_ERROR",
     "PY_MODULE_NOT_FOUND_ERROR",
     "ROCR_VISIBLE_DEVICES_ENV",
+    "SGLANG_CUDA_GRAPH_DECODE_BS",
     "SGLANG_IMAGE_AITER_CONFIGS",
     "SGLANG_IMAGE_WORKSPACE",
     "TRANSFORMERS_DOES_NOT_RECOGNIZE",
@@ -81,6 +82,8 @@ AITER_MERGED_VIEW_DIR = _aiter["dir"]
 AITER_LOG_TUNED_CONFIG_ENV = _PACK.names("aiter_log_tuned_config", "env")["env"]
 AITER_TUNED_HIT = _PACK.pattern("aiter_tuned_hit")
 AITER_TUNED_HIT_MARKER = _PACK.pattern("aiter_tuned_hit_marker")
+
+SGLANG_CUDA_GRAPH_DECODE_BS = _PACK.pattern("sglang_cuda_graph_decode_bs")
 
 _image = _PACK.names("sglang_image_layout", "workspace", "aiter_configs")
 SGLANG_IMAGE_WORKSPACE = _image["workspace"]

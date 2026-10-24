@@ -17,7 +17,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "5"
+version: "6"
 facts:
   aiter_merged_view:
     kind: names
@@ -463,6 +463,30 @@ facts:
         - "[aiter] shape is M:192, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 192, N:4096, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is torch, kernel name is native"
       no_match:
         - "[aiter] shape is M:512, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False, not found tuned config in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, will use default config! using torch solution:0"
+
+  sglang_cuda_graph_decode_bs:
+    kind: log_regex
+    project: SGLang
+    reason: >-
+      SGLang prints the arguments a server resolved at launch (server_args=...), and the batch sizes its decode CUDA
+      graphs are captured for are in that line: the decode entry of cuda_graph_config in the current layout, cuda_graph_bs
+      before it. A decode step of N running requests replays the graph of the smallest captured size that is at least N,
+      so these are the M of every dense GEMM of a graph-served decode step, whatever the server's flag or default list
+      was. The pattern's group "sizes" is the comma-separated list.
+    pattern: |-
+      (?x)
+      (?: 'cuda_graph_config': \s* \{ \s* 'decode': \s* \{ [^{}]*? 'bs'
+        | \bcuda_graph_bs\b'? )
+      \s* [:=] \s* \[ (?P<sizes>\d+ (?: \s*,\s* \d+ )* ) \]
+    examples:
+      match:
+        - "[2026-10-22 04:34:21] server_args={'model_path': '/models/m', 'cuda_graph_bs_decode': None, 'cuda_graph_config': {'decode': {'backend': 'full', 'max_bs': 512, 'bs': [1, 2, 4, 8, 12, 16, 24, 32, 40, 512], 'tc_compiler': 'eager', 'max_context_size': None}, 'prefill': {'backend': 'disabled', 'max_bs': 16384, 'bs': [4, 8, 12]}}, 'tp_size': 1}"
+        - "[2025-06-01 00:00:00] server_args=ServerArgs(model_path='/models/m', cuda_graph_max_bs=160, cuda_graph_bs=[1, 2, 4, 8, 16, 24, 32], disable_cuda_graph=False)"
+        - "[2025-06-01 00:00:00] server_args={'tp_size': 1, 'cuda_graph_bs': [1, 2, 4], 'disable_cuda_graph': False}"
+      no_match:
+        - "[2026-10-22 04:34:21] server_args={'cuda_graph_bs_decode': None, 'cuda_graph_bs_prefill': None, 'tp_size': 1}"
+        - "server_args={'cuda_graph_config': {'decode': {'backend': 'disabled', 'max_bs': 16, 'bs': None}, 'prefill': {'backend': 'disabled', 'max_bs': 16384, 'bs': [4, 8, 12]}}}"
+        - "Capturing batches (bs=512 avail_mem=54.88 GB):   2%|2         | 1/52 [00:03<03:10,  3.73s/it]"
 
   aiperf_request_export:
     kind: names

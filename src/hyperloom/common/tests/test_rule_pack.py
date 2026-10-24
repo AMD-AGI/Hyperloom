@@ -53,6 +53,11 @@ shape (?:\s+is)? \s+ M:\d+, \s+ N:\d+, \s+ K:\d+ ,?
 (?: \s* , \s+ libtype \s+ is \s+ (?P<libtype>\w+) )?
 (?: \s* , \s+ kernel \s+ name \s+ is \s+ (?P<kernelName>[^\s!]*) )?"""
 
+_SGLANG_CUDA_GRAPH_DECODE_BS = r"""(?x)
+(?: 'cuda_graph_config': \s* \{ \s* 'decode': \s* \{ [^{}]*? 'bs'
+  | \bcuda_graph_bs\b'? )
+\s* [:=] \s* \[ (?P<sizes>\d+ (?: \s*,\s* \d+ )* ) \]"""
+
 #: Every value ``outside_facts`` held as a literal before the pack existed. Written out, not derived from the pack or
 #: from ``outside_facts``, so that a value that moved with the pack would fail here.
 _LITERALS: dict[str, str | list[str]] = {
@@ -99,6 +104,7 @@ _LITERALS: dict[str, str | list[str]] = {
     "PY_IMPORT_ERROR": "ImportError",
     "PY_MODULE_NOT_FOUND_ERROR": "ModuleNotFoundError",
     "ROCR_VISIBLE_DEVICES_ENV": "ROCR_VISIBLE_DEVICES",
+    "SGLANG_CUDA_GRAPH_DECODE_BS": _SGLANG_CUDA_GRAPH_DECODE_BS,
     "SGLANG_IMAGE_AITER_CONFIGS": "/sgl-workspace/aiter/aiter/configs",
     "SGLANG_IMAGE_WORKSPACE": "/sgl-workspace",
     "TRANSFORMERS_DOES_NOT_RECOGNIZE": "Transformers does not recognize",
@@ -163,10 +169,10 @@ def _fresh(code: str, pack: str | None) -> subprocess.CompletedProcess[str]:
 
 def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
-    assert pack.version == "5"
+    assert pack.version == "6"
     assert Counter(entry.kind for entry in pack.entries.values()) == {
         Kind.NAMES: 11,
-        Kind.LOG_REGEX: 11,
+        Kind.LOG_REGEX: 12,
         Kind.ENV_DEFAULT: 1,
     }
 
@@ -307,7 +313,7 @@ def test_a_session_whose_pack_cannot_be_used_stops_at_import_naming_the_entry(
 
 
 def test_the_recorded_identity_is_the_digest_of_the_bytes_read_and_is_stable(tmp_path: Path) -> None:
-    expected = {"version": "5", "digest": "sha256:" + hashlib.sha256(DEFAULT_PACK_PATH.read_bytes()).hexdigest()}
+    expected = {"version": "6", "digest": "sha256:" + hashlib.sha256(DEFAULT_PACK_PATH.read_bytes()).hexdigest()}
     assert rule_pack_identity() == expected
     assert rule_pack_identity() == rule_pack_identity()
     elsewhere = _fresh(_SHOW, None)
