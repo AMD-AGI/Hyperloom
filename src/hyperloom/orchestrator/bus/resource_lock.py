@@ -421,24 +421,6 @@ class Lease:
     pid: int = field(default_factory=os.getpid)
 
 
-class LaneBusy(RuntimeError):
-    """Raised by ``acquire_many`` on a cross-lane conflict (Inv-7.1); kept distinct from capacity."""
-
-    def __init__(self, busy_lanes: list[str]):
-        """Initialise with the lanes that triggered the cross-lane conflict."""
-        super().__init__(f"lanes busy: {busy_lanes!r}")
-        self.busy_lanes = busy_lanes
-
-
-class LaneFull(RuntimeError):
-    """Raised by ``acquire_many`` when a lane hits its ``capacity`` cap (pure capacity decision, distinct from :class:`LaneBusy`)."""
-
-    def __init__(self, full_lanes: list[str]):
-        """Initialise with the lanes that were at capacity."""
-        super().__init__(f"lanes full: {full_lanes!r}")
-        self.full_lanes = full_lanes
-
-
 class SqliteLeaseBackend:
     """Lane lease store; ``BEGIN IMMEDIATE`` + PK uniqueness gives atomic acquire-many."""
 
@@ -454,8 +436,12 @@ class SqliteLeaseBackend:
         task_id: str,
         action: str,
         ttl_sec: int,
-    ) -> Lease:
-        """Acquire ``lanes`` + transitive conflicts as one atomic batch."""
+    ) -> Lease | None:
+        """Acquire ``lanes`` + transitive conflicts as one atomic batch.
+
+        Returns:
+            Lease | None: The lease, or ``None`` when any lane is held at capacity.
+        """
         if not lanes:
             raise ValueError("acquire_many called with no lanes")
         expanded = _expand_lanes(lanes)
@@ -488,30 +474,12 @@ class SqliteLeaseBackend:
             for row in cur.fetchall():
                 holders_per_lane[row["lane"]].add(row["holder_id"])
 
-            # Distinguish capacity (LaneFull) from cross-lane mutex (LaneBusy).
-            full: list[str] = []
-            busy: list[str] = []
-            for lane in expanded:
-                live = holders_per_lane.get(lane, set())
-                # Same-holder attempt is idempotent (acts as TTL refresh).
-                if holder_id in live:
-                    continue
-                cap = capacity_by_lane.get(lane, 1)
-                if cap <= 0:
-                    # capacity=0 → lane disabled; LaneFull so dispatcher drops.
-                    full.append(lane)
-                    continue
-                if len(live) >= cap:
-                    # cap>1 full → LaneFull; cap==1 full → LaneBusy.
-                    if cap > 1:
-                        full.append(lane)
-                    else:
-                        busy.append(lane)
-
-            if busy:
-                raise LaneBusy(busy)
-            if full:
-                raise LaneFull(full)
+            # A holder already on a lane refreshes it; a lane at capacity (0 disables it) refuses the batch.
+            if any(
+                holder_id not in holders_per_lane[lane] and len(holders_per_lane[lane]) >= capacity_by_lane[lane]
+                for lane in expanded
+            ):
+                return None
 
             for lane in expanded:
                 # INSERT OR REPLACE lets the same holder refresh its row.
@@ -541,13 +509,6 @@ class SqliteLeaseBackend:
             acquired_at=stamp,
             expires_at=expires_iso,
         )
-
-    async def try_acquire_many(self, lanes: list[str], **kwargs) -> Lease | None:
-        """Non-blocking variant of :meth:`acquire_many`."""
-        try:
-            return await self.acquire_many(lanes, **kwargs)
-        except (LaneBusy, LaneFull):
-            return None
 
     async def heartbeat_by_task(self, task_id: str, *, ttl_sec: int) -> list[str]:
         """Refresh every lane row a task holds, whoever the holder is."""
@@ -689,8 +650,6 @@ __all__ = [
     "UNVERIFIABLE_FOREIGN_SCOPE",
     "UNVERIFIABLE_CONFIRMED_BUT_HELD",
     "UNVERIFIABLE_CLEANUP_UNCONFIRMED",
-    "LaneBusy",
-    "LaneFull",
     "Lease",
     "SqliteLeaseBackend",
     "drop_round_lane",

@@ -21,7 +21,6 @@ from hyperloom.orchestrator.bus.message_bus import (
 from hyperloom.orchestrator.bus.resource_lock import (
     KNOWN_LANES,
     LANE_CONFLICTS,
-    LaneBusy,
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.state.task_registry import (
@@ -208,7 +207,7 @@ async def test_resource_lock_lane_busy_rolls_back(db):
         action="bench_runner",
         ttl_sec=60,
     )
-    with pytest.raises(LaneBusy) as exc:
+    assert (
         await locks.acquire_many(
             ["benchmark_lane"],
             holder_id="hb",
@@ -216,7 +215,8 @@ async def test_resource_lock_lane_busy_rolls_back(db):
             action="bench_runner",
             ttl_sec=60,
         )
-    assert "benchmark_lane" in exc.value.busy_lanes
+        is None
+    )
     # Original lease should still be intact (atomic rollback)
     assert (await locks.lane_holders()).get("benchmark_lane") == 1
     await locks.release(a)
@@ -233,7 +233,7 @@ async def test_resource_lock_cross_lane_conflict_blocks_profile_during_bench(db)
         action="bench_runner",
         ttl_sec=60,
     )
-    with pytest.raises(LaneBusy):
+    assert (
         await locks.acquire_many(
             ["profile_lane"],
             holder_id="hp",
@@ -241,6 +241,8 @@ async def test_resource_lock_cross_lane_conflict_blocks_profile_during_bench(db)
             action="profile_runner",
             ttl_sec=60,
         )
+        is None
+    )
     await locks.release(bench)
 
 

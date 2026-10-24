@@ -570,7 +570,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         if not self._lanes_fit(expanded, holders, capacities):
             return None
         # ``None`` here is a race: another holder grabbed the lane; leave queued.
-        lease = await self.locks.try_acquire_many(
+        lease = await self.locks.acquire_many(
             lanes_needed,
             holder_id=task.task_id,
             task_id=task.task_id,
@@ -773,7 +773,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         """
         lease = held.prebound_lease
         if lease is None and task.requires_lanes:
-            lease = await self.locks.try_acquire_many(
+            lease = await self.locks.acquire_many(
                 list(task.requires_lanes),
                 holder_id=task.task_id,
                 task_id=task.task_id,
@@ -1193,7 +1193,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         holders: dict[str, int],
         capacities: dict[str, int],
     ) -> bool:
-        """Local-view headroom hint for the concurrent dispatcher (authoritative gate is try_acquire_many).
+        """Local-view headroom hint for the concurrent dispatcher (authoritative gate is acquire_many).
 
         Args:
             expanded_lanes: The fully-expanded lanes the task requires.

@@ -516,7 +516,7 @@ async def test_a_covered_step_runs_inside_the_lanes_its_caller_holds(coord):
     """A reprofile under the kernel_agent lease needs no profile_lane and leaves no row for the pump."""
     c = coord
     agent = await _create_kernel_agent(c)
-    lease = await c.locks.try_acquire_many(
+    lease = await c.locks.acquire_many(
         list(_KERNEL_AGENT_LANES),
         holder_id=agent.task_id,
         task_id=agent.task_id,
