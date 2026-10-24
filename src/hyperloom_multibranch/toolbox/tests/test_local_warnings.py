@@ -34,6 +34,11 @@ from hyperloom_multibranch.toolbox.tests.test_local_hosted import _require_tool_
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
 
+def _run_grid_warnings(result: TestResult) -> tuple[str, ...]:
+    """The warnings ``run_grid`` wrote: a machine with no GPU driver also warns that its cards could not be looked at."""
+    return tuple(w for w in result.nonfatal_warnings if not w.startswith("card_occupancy_unknown"))
+
+
 def _runner_python(tmp_path: Path) -> str:
     script = tmp_path / "warn-python"
     script.write_text(f"#!/bin/sh\nexec {sys.executable} -m hyperloom.measure.tests.warnings_runner_entry\n")
@@ -72,9 +77,9 @@ async def test_the_warnings_run_grid_wrote_are_on_the_stored_result_and_an_edite
         assert entry is not None and entry.outcome is not None and "result" in entry.outcome, entry
         result = TestResult.from_document(entry.outcome["result"])
         assert result.validity is Validity.SUCCEEDED, result.failure_reason
-        assert result.nonfatal_warnings == tuple(WARNINGS)
+        assert _run_grid_warnings(result) == tuple(WARNINGS)
         stored = (await notebook.record(request_id)).result
-        assert stored is not None and stored.nonfatal_warnings == tuple(WARNINGS)
+        assert stored is not None and _run_grid_warnings(stored) == tuple(WARNINGS)
         executor = toolbox._executor
         await executor.reverify(result)  # type: ignore[attr-defined]
         with pytest.raises(ResultUnverified, match="nonfatal_warnings: recorded"):
