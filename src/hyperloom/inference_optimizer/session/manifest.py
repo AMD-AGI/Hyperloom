@@ -199,11 +199,11 @@ def build_manifest(
         "workload": workload,
         "objective": _objective_summary(args) if args is not None else {"kind": "time_only", "value": None},
         "max_minutes": int((getattr(args, "max_hours", 0) or 0) * 60),
-        "code_revision": _prov.get("code_revision") or "",
+        "code_revision": _prov["code_revision"],
         "dependencies": _build_dependencies(),
         "pid": os.getpid(),
         "host": platform.node() or socket.gethostname() or "",
-        "image": _prov.get("image"),
+        "image": _prov["image"],
         # Snapshotted so resume-after-redeploy can detect drift.
         "stack_fingerprint": _prov.get("stack_fingerprint") or {},
         # Workflow identity is stamped only on a fresh manifest. Resumed
