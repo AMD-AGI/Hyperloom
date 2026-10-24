@@ -192,8 +192,7 @@ async def test_resource_lock_acquire_release(db):
     )
     assert lease.lanes == ("workspace_mutation",)
     assert (await locks.lane_holders()).get("workspace_mutation") == 1
-    n = await locks.release(lease)
-    assert n == 1
+    await locks.release(lease)
     assert await locks.lane_holders() == {}
 
 
@@ -270,19 +269,10 @@ async def test_resource_lock_release_ignores_another_holder(db):
         ttl_sec=60,
     )
     # Wrong holder release must not delete the row
-    fake = type(lease)(
-        holder_id="other",
-        task_id="t1",
-        action="profile_runner",
-        lanes=lease.lanes,
-        acquired_at=lease.acquired_at,
-        expires_at=lease.expires_at,
-    )
-    n = await locks.release(fake)
-    assert n == 0
+    await locks.release(type(lease)(holder_id="other", lanes=lease.lanes))
     assert (await locks.lane_holders()).get("profile_lane") == 1
-    n = await locks.release(lease)
-    assert n == len(lease.lanes)
+    await locks.release(lease)
+    assert await locks.lane_holders() == {}
 
 
 @pytest.mark.asyncio

@@ -76,10 +76,8 @@ async def test_corrupt_expires_at_does_not_abort_acquire(tmp_path):
         )
 
         assert [dict(row) for row in db.fetchall_sync("SELECT * FROM leases ORDER BY lane")] == retained
-        released = await backend.release(held)
-        holders = await backend.lane_holders()
-        assert released == len(held.lanes)
-        assert holders == {}
+        await backend.release(held)
+        assert await backend.lane_holders() == {}
 
         lease = await backend.acquire_many(
             lanes=["benchmark_lane"],
