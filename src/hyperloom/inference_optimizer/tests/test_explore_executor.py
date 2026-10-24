@@ -33,6 +33,7 @@ from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
 )
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
 from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
@@ -3320,10 +3321,7 @@ async def test_explore_rejects_unsafe_aiter_unified_attn_before_benchmark(
     )
     kept, dropped = apply_compatibility_filter(
         [other_variant],
-        framework="sglang",
-        model_path=str(model),
-        gpu_type="mi355x",
-        stack_fingerprint=other_stack,
+        serving=ServingStack("sglang", str(model), gpu_type="mi355x", stack_fingerprint=other_stack),
         base_server_args="--page-size 1 --kv-cache-dtype auto",
     )
     assert ([variant.name for variant in kept], dropped) == (["other_stack_unified"], [])
@@ -3351,15 +3349,17 @@ def test_unified_attn_filter_matches_aiter_dist_version_short_sha(tmp_path):
     )
     kept, dropped = apply_compatibility_filter(
         [GridVariant("unified", extra_envs={"SGLANG_USE_AITER_UNIFIED_ATTN": "1"})],
-        framework="sglang",
-        model_path=str(model),
-        gpu_type="mi355x",
-        stack_fingerprint={
-            "sglang": "0.5.20.dev20260920+gc610c40399",
-            # The dist version install_baremetal.sh falls back to; embeds the short sha of the pinned commit.
-            "aiter": "0.1.21.dev48+g4ad998328.d20260920",
-            "rocm": "10.0.0",
-        },
+        serving=ServingStack(
+            "sglang",
+            str(model),
+            gpu_type="mi355x",
+            stack_fingerprint={
+                "sglang": "0.5.20.dev20260920+gc610c40399",
+                # The dist version install_baremetal.sh falls back to; embeds the short sha of the pinned commit.
+                "aiter": "0.1.21.dev48+g4ad998328.d20260920",
+                "rocm": "10.0.0",
+            },
+        ),
         base_server_args="--page-size 1 --kv-cache-dtype auto",
     )
     assert ([variant.name for variant in kept], dropped) == (
@@ -3377,7 +3377,7 @@ def test_unified_attn_filter_matches_aiter_dist_version_short_sha(tmp_path):
 def test_atom_default_grid_survives_compatibility_filter():
     """``apply_compatibility_filter`` drops no atom seed variant."""
     grid = _atom_default_grid(model_class="moe_mla", conc=64)
-    kept, dropped = apply_compatibility_filter(grid, framework="atom", model_path="")
+    kept, dropped = apply_compatibility_filter(grid, serving=ServingStack("atom", ""))
     assert kept == grid, f"compatibility filter dropped seed variants; dropped={dropped}"
 
 

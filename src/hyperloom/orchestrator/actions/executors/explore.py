@@ -64,6 +64,7 @@ from . import _framework_switch_manifest as _switch_manifest
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import BaseControls, effective_fingerprint, normalize_proposal
 from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
+from ._grid_variant_filter import ServingStack
 from ._grid_base import (
     TS_FAILED,
     TS_KILLED_OVERTIME,
@@ -1123,10 +1124,12 @@ class _ExploreRound:
         # xDiT do-not-set list, plus flags the model class does not support.
         runnable, incompatible = apply_compatibility_filter(
             runnable,
-            framework=self.framework,
-            model_path=self.build["model_path"],
-            gpu_type=self.build["gpu_type"] or str(getattr(self.ss, "gpu_type", "") or ""),
-            stack_fingerprint=getattr(self.ss, "stack_fingerprint_meta", None),
+            serving=ServingStack(
+                framework=self.framework,
+                model_path=self.build["model_path"],
+                gpu_type=self.build["gpu_type"] or str(getattr(self.ss, "gpu_type", "") or ""),
+                stack_fingerprint=getattr(self.ss, "stack_fingerprint_meta", None),
+            ),
             base_server_args=compose_server_args(
                 inherited_args=self.inherited_args,
                 base_extra_args=self.base_args,
