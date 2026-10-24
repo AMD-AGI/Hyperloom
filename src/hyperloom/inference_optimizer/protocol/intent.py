@@ -71,12 +71,7 @@ class NoIntentEmitted(RuntimeError):
 
 
 class IntentValidationError(RuntimeError):
-    """Envelope present but schema invalid (raw + reason captured)."""
-
-    def __init__(self, reason: str, raw: str | None = None):
-        """Initialise the validation error."""
-        super().__init__(reason)
-        self.raw = raw
+    """Envelope present but schema invalid."""
 
 
 def _without_unset_fields(payload: dict[str, Any]) -> dict[str, Any]:
