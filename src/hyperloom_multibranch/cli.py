@@ -205,6 +205,13 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
     )
     run.add_argument("--max-k-per-branch", type=int, default=DEFAULT_MAX_K_PER_BRANCH, help="Highest K of a branch.")
     run.add_argument(
+        "--dev-leases",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Dev sandboxes lent to the specialists at once, from the cards tests are measured on; 0 = none.",
+    )
+    run.add_argument(
         "--judge-interval-sec", type=float, default=DEFAULT_JUDGE_INTERVAL_SECONDS, help="Seconds between judge calls."
     )
     run.add_argument(
@@ -337,6 +344,8 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         errors.append("--max-gpu-hours must be 0 (no limit) or a positive number of hours")
     if not math.isfinite(args.max_llm_usd) or args.max_llm_usd < 0:
         errors.append("--max-llm-usd must be 0 (no limit) or a positive number of dollars")
+    if args.dev_leases < 0:
+        errors.append("--dev-leases must be 0 (none) or a positive number of sandboxes")
     if args.frontier_scorer and FrontierPolicyMode(args.frontier_policy) is FrontierPolicyMode.DEFAULT:
         errors.append("--frontier-scorer pins a scorer, which --frontier-policy default rules out")
     if errors:
@@ -371,6 +380,7 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         frontier_policy=FrontierPolicyMode(args.frontier_policy),
         frontier_scorer=args.frontier_scorer,
         references=_references(args.references or []),
+        dev_leases=args.dev_leases,
     )
 
 

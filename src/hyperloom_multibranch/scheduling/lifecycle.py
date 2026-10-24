@@ -216,6 +216,7 @@ class Session:
                 blobs,
                 services.critic(self._notebook),
                 {source.name: layout.reference / source.name for source in settings.references},
+                settings.dev_leases,
             )
         )
         context = SchedulerContext(

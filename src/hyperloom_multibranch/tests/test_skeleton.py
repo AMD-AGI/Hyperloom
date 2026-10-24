@@ -855,6 +855,15 @@ async def test_a_session_copies_the_reference_material_it_was_given_and_its_mani
     assert stage.setup.references == {"geak-tuning": stage.layout.reference / "geak-tuning"}
 
 
+async def test_the_dev_leases_of_the_run_reach_the_peers(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=None)
+    stage.settings = replace(stage.settings, dev_leases=2)
+
+    stage._session()
+
+    assert stage.setup.dev_leases == 2
+
+
 async def test_a_pinned_scorer_is_never_a_challenger_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(lifecycle, "challenger_session", lambda session_id: True)
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))

@@ -110,7 +110,8 @@ class RunSettings:
     the third-party agents the user named, each opening one autonomous branch the same way.
     ``frontier_policy`` says how the frontier policy is chosen, and ``frontier_scorer`` names the scorer the session
     scores with instead of choosing one, ``""`` when it chooses. ``references`` are the directories of reference
-    material the run copies in before its first phase, each with the commit it was taken at."""
+    material the run copies in before its first phase, each with the commit it was taken at. ``dev_leases`` is how many
+    dev sandboxes the session lends its specialists at once; 0 lends none."""
 
     workload: Workload
     max_hours: float
@@ -124,6 +125,7 @@ class RunSettings:
     frontier_policy: FrontierPolicyMode = FrontierPolicyMode.AUTO
     frontier_scorer: str = ""
     references: tuple[ReferenceSource, ...] = ()
+    dev_leases: int = 0
 
 
 __all__ = [
