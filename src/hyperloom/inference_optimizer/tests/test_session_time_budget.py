@@ -405,6 +405,29 @@ class TestThePhaseBudgetGate:
         assert denied.rule == "phase_time_budget"
         assert f"{_catalogue_cost_min(action):.0f} min" in str(denied)
 
+    def test_the_absolute_cap_bounds_the_phase_however_much_the_entry_budget_has_left(
+        self, coord: Coordinator, monkeypatch
+    ):
+        """The phase exits when its time over every entry reaches the cap, so admission prices against that too.
+
+        A GLM-5.3 FRAMEWORK_AGENT re-entry read 245 minutes of entry budget, admitted six patch rounds, and reached
+        its cap 43 minutes later; all six were cancelled unmeasured.
+        """
+        phase = "FRAMEWORK_AGENT"
+        action = max(machine_state.allowed_actions_for(phase), key=_catalogue_cost_min)
+        _set_budget(coord, minutes=600)
+        _set_phase_budget(coord, monkeypatch, phase=phase, minutes_left=600)
+        state = coord.shared_state
+        state.phase_budget_pct = {**state.phase_budget_pct, phase: 0.5}
+        state.phase_started_unix = time.time()
+        state.phase_elapsed_totals = {phase: machine_state.phase_cap_seconds(state) - 5 * 60.0}
+
+        denied = asyncio.run(coord.dispatcher.admission_denial_for_action(action))
+
+        assert isinstance(denied, PolicyDenied)
+        assert denied.rule == "phase_time_budget"
+        assert "only 5 min" in str(denied)
+
     def test_a_phase_without_a_search_budget_answers_only_to_the_session(self, coord: Coordinator, monkeypatch):
         _set_budget(coord, minutes=600)
         _set_phase_budget(coord, monkeypatch, phase="PRELUDE", minutes_left=1)

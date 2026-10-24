@@ -467,6 +467,21 @@ def phase_cap_seconds(state: Any) -> float | None:
     return float(min(proportional, abs_cap))
 
 
+def phase_seconds_left(state: Any, *, now_unix: float | None = None) -> float | None:
+    """Seconds before a budget exit ends the current phase (``None`` when neither clock bounds it).
+
+    The phase exits on whichever runs out first: this entry's budget (:func:`phase_budget_remaining_seconds`) or the
+    absolute cap on its time over every entry (:func:`phase_cap_seconds`). Work sized against the entry budget alone
+    is admitted for hours in a phase the cap ends within the hour.
+    """
+    entry_left = phase_budget_remaining_seconds(state, now_unix=now_unix)
+    cap = phase_cap_seconds(state)
+    if cap is None:
+        return entry_left
+    cap_left = max(0.0, cap - phase_cumulative_seconds(state, now_unix=now_unix))
+    return cap_left if entry_left is None else min(entry_left, cap_left)
+
+
 def session_remaining_seconds(
     state: Any,
     *,
@@ -518,10 +533,9 @@ def phase_status_summary(
     """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable."""
     phase = (state.phase or "").strip().upper() or "UNSET"
     elapsed = int(phase_elapsed_seconds(state, now_unix=now_unix))
-    # ``remaining`` paces this entry; the absolute cap reads ``cumulative``.
     cumulative = int(phase_cumulative_seconds(state, now_unix=now_unix))
     budget_pct_for_phase = state.phase_budget_pct.get(phase, 0.0)
-    remaining = phase_budget_remaining_seconds(state, now_unix=now_unix)
+    remaining = phase_seconds_left(state, now_unix=now_unix)
     budget_line: str
     if remaining is None:
         budget_line = f"budget    : pct={budget_pct_for_phase:.2f} (unlimited run; no per-phase cap)"
@@ -2030,6 +2044,7 @@ __all__ = [
     "phase_cumulative_seconds",
     "phase_elapsed_seconds",
     "phase_index",
+    "phase_seconds_left",
     "phase_status_summary",
     "session_remaining_seconds",
     "warm_replay_in_flight",

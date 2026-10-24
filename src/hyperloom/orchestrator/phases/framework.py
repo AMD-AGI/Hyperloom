@@ -384,15 +384,8 @@ def predictor_budget(state: SessionView) -> PhaseBudget:
     """The FRAMEWORK clock a predictor request is conditioned on, read when the request goes out."""
     from ..predictor.payload import PhaseBudget
 
-    limits: list[float] = []
-    remaining = _phase_state.phase_budget_remaining_seconds(state)
-    if remaining is not None:
-        limits.append(float(remaining))
-    cap = _phase_state.phase_cap_seconds(state)
-    if cap is not None:
-        limits.append(float(cap) - float(_phase_state.phase_cumulative_seconds(state)))
     return PhaseBudget(
-        headroom_sec=min(limits) if limits else None,
+        headroom_sec=_phase_state.phase_seconds_left(state),
         elapsed_sec=_phase_state.phase_elapsed_seconds(state),
         keep_threshold_pct=_phase_state.resolve_keep_threshold(state),
     )

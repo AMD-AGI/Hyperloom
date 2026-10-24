@@ -275,7 +275,7 @@ def test_dispatch_pause_budget_spent(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(
         coord_mod._phase_state,
-        "phase_budget_remaining_seconds",
+        "phase_seconds_left",
         lambda _s: 0.0,
     )
     assert coord.dispatcher.dispatch_paused_for_phase_budget() is True
@@ -285,7 +285,7 @@ def test_dispatch_pause_budget_remaining(coord: Coordinator, monkeypatch) -> Non
     coord.shared_state.phase = "KERNEL_AGENT"
     monkeypatch.setattr(
         coord_mod._phase_state,
-        "phase_budget_remaining_seconds",
+        "phase_seconds_left",
         lambda _s: 123.0,
     )
     assert coord.dispatcher.dispatch_paused_for_phase_budget() is False

@@ -102,7 +102,7 @@ def gated_phase_remaining_sec(shared_state: SharedState) -> float | None:
     """Seconds left in the current phase's budget when that budget bounds the phase's search, else ``None``."""
     if str(shared_state.phase or "").upper() not in PHASE_BUDGET_GATED_PHASES:
         return None
-    return _phase_state.phase_budget_remaining_seconds(shared_state)
+    return _phase_state.phase_seconds_left(shared_state)
 
 
 def phase_deadline(shared_state: SharedState) -> Deadline | None:

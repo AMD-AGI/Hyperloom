@@ -615,13 +615,13 @@ def _lane_remaining_minutes(state: Any) -> float | None:
         The binding remaining minutes, or ``None`` when the session is unbounded
         and there is no finite budget to divide.
     """
-    from ..phases.machine_state import phase_budget_remaining_seconds
+    from ..phases.machine_state import phase_seconds_left
 
     remaining_fn = getattr(state, "remaining_minutes", None)
     session = remaining_fn() if callable(remaining_fn) else None
     if session is None:
         return None
-    phase_sec = phase_budget_remaining_seconds(state)
+    phase_sec = phase_seconds_left(state)
     if phase_sec is None:
         return float(session)
     return min(float(session), float(phase_sec) / 60.0)

@@ -767,7 +767,7 @@ class KernelPhase(CoordinatorCollaborator):
         )
         lanes, lease_ttl = self._coord.dispatcher.registry_lanes_ttl("kernel_agent")
         # Leases do not expire on their TTL, so it only records how long the holder expects to keep the lanes.
-        remaining = _phase_state.phase_budget_remaining_seconds(state)
+        remaining = _phase_state.phase_seconds_left(state)
         ttl = int(remaining) if remaining is not None and remaining > 0 else lease_ttl
         # A resumed session re-enters the phase whose earlier task already settled, so only a live row is reused.
         base_key = f"kernel_agent_c{int(state.macro_cycle or 0)}"
@@ -1138,7 +1138,7 @@ class KernelPhase(CoordinatorCollaborator):
         # Reserve the closing window: kill the subprocess with at least ``grace`` left.
         kill_budget = remaining - grace
         # Also honour the KERNEL_AGENT phase's own wall-clock budget: cap by min(session, kernel_phase).
-        phase_rem = _phase_state.phase_budget_remaining_seconds(self.shared_state)
+        phase_rem = _phase_state.phase_seconds_left(self.shared_state)
         if phase_rem is not None:
             kill_budget = min(kill_budget, float(phase_rem))
         # A GEAK result reaches the headline only through this session's own re-measurement of it, which runs in this
@@ -1157,12 +1157,9 @@ class KernelPhase(CoordinatorCollaborator):
         session_remaining = _phase_state.session_remaining_seconds(self.shared_state)
         if session_remaining is not None:
             candidates.append(max(0.0, float(session_remaining) - self.shared_state.closing_reserve_sec()))
-        phase_remaining = _phase_state.phase_budget_remaining_seconds(self.shared_state)
+        phase_remaining = _phase_state.phase_seconds_left(self.shared_state)
         if phase_remaining is not None:
-            candidates.append(max(0.0, float(phase_remaining)))
-        phase_cap = _phase_state.phase_cap_seconds(self.shared_state)
-        if phase_cap is not None:
-            candidates.append(max(0.0, float(phase_cap) - _phase_state.phase_cumulative_seconds(self.shared_state)))
+            candidates.append(phase_remaining)
         # The phase still measures the Controller's patches E2E after the Controller exits.
         hard_timeout = int(min(candidates) - measurement_round_sec(self.shared_state)) if candidates else 90 * 60
         return max(0, hard_timeout - 30), max(0, hard_timeout)
