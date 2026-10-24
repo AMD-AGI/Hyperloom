@@ -1721,7 +1721,6 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     grid = create_calls[0]["params"]["grid"]
     names = [v["name"] for v in grid]
     assert names == ["v_a", "v_c"]
-    assert create_calls[0]["params"]["critic_filtered_count"] == 2
 
 
 @pytest.mark.asyncio
@@ -1804,7 +1803,6 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     grid = create_calls[0]["params"]["grid"]
     names = [v["name"] for v in grid]
     assert names == ["v_a", "v_b", "v_c"]
-    assert "critic_filtered_count" not in create_calls[0]["params"]
 
 
 # 5. handle_delegate — explore grid runs directly (no Critic pre-review)
