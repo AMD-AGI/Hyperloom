@@ -846,33 +846,25 @@ class ConversationCollaborator(CoordinatorCollaborator):
             lines.extend(f"  {name}: prior gain {g:+.2f}% < {keep:.2f}%" for name, g in below_bar[:5])
         return "\n".join(lines)
 
-    def target_gap_advisory_block(self) -> str:
-        """Build the advisory \"External target gap\" prompt block (current-best vs competitor target; never gates)."""
-        state = self.shared_state
-        if not bool(state.target_advisory_enabled):
-            return ""
+    def _current_target_gap(self) -> dict[str, Any] | None:
+        """Current-best vs the competitor target; None when the advisory is off or no target is set."""
+        if not self.shared_state.target_advisory_enabled:
+            return None
         from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
         target = _research_hints.load_competitor_target(self.session_dir)
-        if not target:
-            return ""
-        gap = _research_hints.gap_for_state(target, state)
-        return _research_hints.full_gap_summary(gap)
+        return _research_hints.gap_for_state(target, self.shared_state) if target else None
+
+    def target_gap_advisory_block(self) -> str:
+        """Build the advisory \"External target gap\" prompt block (current-best vs competitor target; never gates)."""
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
+
+        return _research_hints.full_gap_summary(self._current_target_gap())
 
     def _current_primary_gap(self) -> str | None:
         """Resolve latency/throughput; None when advisory is off or no competitor target is set."""
-        state = self.shared_state
-        if not bool(state.target_advisory_enabled):
-            return None
-        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
-
-        target = _research_hints.load_competitor_target(self.session_dir)
-        if not target:
-            return None
-        gap = _research_hints.gap_for_state(target, state)
-        if not isinstance(gap, dict):
-            return None
-        return str(gap.get("primary_gap") or "").strip() or None
+        gap = self._current_target_gap()
+        return str((gap or {}).get("primary_gap") or "").strip() or None
 
     def _recent_proposed_variants(
         self,
