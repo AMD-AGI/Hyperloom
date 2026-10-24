@@ -449,7 +449,7 @@ def test_executor_cleanup_unconfirmed_keeps_result_and_ownership(tmp_path):
         dispatcher.sub.register_executor(
             "shutdown_test", AsyncMock(side_effect=ExecutionCleanupUnconfirmed("worker alive", result=result))
         )
-        lease = await dispatcher.locks.try_acquire_many(
+        lease = await dispatcher.locks.acquire_many(
             ["research_lane"], holder_id=task.task_id, task_id=task.task_id, action=task.kind, ttl_sec=60
         )
         with pytest.raises(ExecutionCleanupUnconfirmed) as caught:
@@ -496,7 +496,7 @@ def test_an_unconfirmed_cleanup_records_the_group_for_the_operator(tmp_path, nam
                 )
             ),
         )
-        lease = await dispatcher.locks.try_acquire_many(
+        lease = await dispatcher.locks.acquire_many(
             ["research_lane"], holder_id=task.task_id, task_id=task.task_id, action=task.kind, ttl_sec=60
         )
         with pytest.raises(ExecutionCleanupUnconfirmed):

@@ -20,8 +20,6 @@ from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 from hyperloom.orchestrator.bus.resource_lock import (
     KNOWN_LANES,
     LANE_CONFLICTS,
-    LaneBusy,
-    LaneFull,
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.bus.storage import SqliteConnection
@@ -110,7 +108,7 @@ def test_v2_ensure_schema_is_idempotent(conn):
 
 
 @pytest.mark.asyncio
-async def test_serving_lane_capacity_1_raises_LaneBusy(locks):
+async def test_serving_lane_capacity_1_refuses_second_holder(locks):
     a = await locks.acquire_many(
         ["benchmark_lane"],
         holder_id="ha",
@@ -119,7 +117,7 @@ async def test_serving_lane_capacity_1_raises_LaneBusy(locks):
         ttl_sec=60,
     )
     assert isinstance(a.acquired_at, str)
-    with pytest.raises(LaneBusy) as exc:
+    assert (
         await locks.acquire_many(
             ["benchmark_lane"],
             holder_id="hb",
@@ -127,7 +125,8 @@ async def test_serving_lane_capacity_1_raises_LaneBusy(locks):
             action="bench",
             ttl_sec=60,
         )
-    assert "benchmark_lane" in exc.value.busy_lanes
+        is None
+    )
     await locks.release(a)
 
 
@@ -151,7 +150,7 @@ async def test_research_lane_capacity_admits_multiple_holders(conn, locks):
 
 
 @pytest.mark.asyncio
-async def test_research_lane_overflow_raises_LaneFull(conn, locks):
+async def test_research_lane_overflow_is_refused(conn, locks):
     set_lane_capacity(conn.raw, "research_lane", 2)
     leases = [
         await locks.acquire_many(
@@ -163,7 +162,7 @@ async def test_research_lane_overflow_raises_LaneFull(conn, locks):
         )
         for i in range(2)
     ]
-    with pytest.raises(LaneFull) as exc:
+    assert (
         await locks.acquire_many(
             ["research_lane"],
             holder_id="s2",
@@ -171,7 +170,8 @@ async def test_research_lane_overflow_raises_LaneFull(conn, locks):
             action="specialist",
             ttl_sec=60,
         )
-    assert "research_lane" in exc.value.full_lanes
+        is None
+    )
     for l in leases:
         await locks.release(l)
 
@@ -260,7 +260,7 @@ async def test_specialist_gpu_pool_rejects_oversized_request(conn):
 async def test_capacity_zero_means_lane_disabled(conn, locks):
     """``--research-lane-capacity 0`` disables the research lane."""
     set_lane_capacity(conn.raw, "research_lane", 0)
-    with pytest.raises(LaneFull):
+    assert (
         await locks.acquire_many(
             ["research_lane"],
             holder_id="s0",
@@ -268,6 +268,8 @@ async def test_capacity_zero_means_lane_disabled(conn, locks):
             action="specialist",
             ttl_sec=60,
         )
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -324,8 +326,8 @@ def test_lane_conflicts_research_lane_isolated():
 
 
 @pytest.mark.asyncio
-async def test_try_acquire_many_returns_lease_on_success(locks):
-    lease = await locks.try_acquire_many(
+async def test_acquire_many_returns_lease_on_success(locks):
+    lease = await locks.acquire_many(
         ["benchmark_lane"],
         holder_id="hb",
         task_id="tb",
@@ -338,7 +340,7 @@ async def test_try_acquire_many_returns_lease_on_success(locks):
 
 
 @pytest.mark.asyncio
-async def test_try_acquire_many_returns_none_on_conflict(conn, locks):
+async def test_acquire_many_returns_none_on_conflict(conn, locks):
     bench = await locks.acquire_many(
         ["benchmark_lane"],
         holder_id="hb",
@@ -346,7 +348,7 @@ async def test_try_acquire_many_returns_none_on_conflict(conn, locks):
         action="bench",
         ttl_sec=60,
     )
-    result = await locks.try_acquire_many(
+    result = await locks.acquire_many(
         ["profile_lane"],
         holder_id="hp",
         task_id="tp",
@@ -355,32 +357,6 @@ async def test_try_acquire_many_returns_none_on_conflict(conn, locks):
     )
     assert result is None
     await locks.release(bench)
-
-
-@pytest.mark.asyncio
-async def test_try_acquire_many_returns_none_on_full(conn, locks):
-    """A multi-holder lane at capacity → ``try_acquire_many`` returns None (LaneFull swallowed)."""
-    set_lane_capacity(conn.raw, "research_lane", 2)
-    leases = [
-        await locks.acquire_many(
-            ["research_lane"],
-            holder_id=f"s{i}",
-            task_id=f"t{i}",
-            action="specialist",
-            ttl_sec=60,
-        )
-        for i in range(2)
-    ]
-    result = await locks.try_acquire_many(
-        ["research_lane"],
-        holder_id="s2",
-        task_id="t2",
-        action="specialist",
-        ttl_sec=60,
-    )
-    assert result is None
-    for l in leases:
-        await locks.release(l)
 
 
 @pytest.mark.asyncio
@@ -446,9 +422,7 @@ async def test_old_rows_still_count_toward_lane_capacity(conn, locks):
     holders = await locks.lane_holders()
     assert holders.get("research_lane") == 2
     assert (
-        await locks.try_acquire_many(
-            ["research_lane"], holder_id="next", task_id="next", action="specialist", ttl_sec=60
-        )
+        await locks.acquire_many(["research_lane"], holder_id="next", task_id="next", action="specialist", ttl_sec=60)
         is None
     )
     assert not hasattr(locks, "reap_expired")
@@ -791,52 +765,6 @@ async def test_reap_dead_holders_skips_null_pid(conn, locks):
 
 
 @pytest.mark.asyncio
-async def test_manager_counters_track_acquire_busy_full(conn, locks):
-    set_lane_capacity(conn.raw, "research_lane", 2)
-    a = await locks.acquire_many(
-        ["research_lane"],
-        holder_id="s0",
-        task_id="t0",
-        action="specialist",
-        ttl_sec=60,
-    )
-    a2 = await locks.acquire_many(
-        ["research_lane"],
-        holder_id="s1",
-        task_id="t1",
-        action="specialist",
-        ttl_sec=60,
-    )
-    with pytest.raises(LaneFull):
-        await locks.acquire_many(
-            ["research_lane"],
-            holder_id="s2",
-            task_id="t2",
-            action="specialist",
-            ttl_sec=60,
-        )
-    # capacity-1 lanes still raise LaneBusy (not LaneFull).
-    b = await locks.acquire_many(
-        ["benchmark_lane"],
-        holder_id="hb",
-        task_id="tb",
-        action="bench",
-        ttl_sec=60,
-    )
-    with pytest.raises(LaneBusy):
-        await locks.acquire_many(
-            ["profile_lane"],
-            holder_id="hp",
-            task_id="tp",
-            action="profile",
-            ttl_sec=60,
-        )
-    await locks.release(a)
-    await locks.release(a2)
-    await locks.release(b)
-
-
-@pytest.mark.asyncio
 async def test_lane_holders_distinct(conn, locks):
     set_lane_capacity(conn.raw, "research_lane", 3)
     leases = [
@@ -877,16 +805,13 @@ async def test_concurrent_acquires_respect_capacity(conn, locks):
     set_lane_capacity(conn.raw, "research_lane", 2)
 
     async def grab(holder: str):
-        try:
-            return await locks.acquire_many(
-                ["research_lane"],
-                holder_id=holder,
-                task_id=f"t-{holder}",
-                action="specialist",
-                ttl_sec=60,
-            )
-        except LaneFull:
-            return None
+        return await locks.acquire_many(
+            ["research_lane"],
+            holder_id=holder,
+            task_id=f"t-{holder}",
+            action="specialist",
+            ttl_sec=60,
+        )
 
     results = await asyncio.gather(
         grab("a"),
@@ -919,7 +844,7 @@ async def test_gpu_research_lane_blocks_serving(locks):
         ttl_sec=60,
     )
     for serving in ("server_lifecycle", "benchmark_lane", "profile_lane"):
-        with pytest.raises(LaneBusy) as exc:
+        assert (
             await locks.acquire_many(
                 [serving],
                 holder_id=f"h-{serving}",
@@ -927,7 +852,8 @@ async def test_gpu_research_lane_blocks_serving(locks):
                 action="serve",
                 ttl_sec=60,
             )
-        assert "gpu_research_lane" in exc.value.busy_lanes
+            is None
+        )
     await locks.release(gpu)
 
 
@@ -941,7 +867,7 @@ async def test_serving_blocks_gpu_research_lane(locks):
         action="bench",
         ttl_sec=60,
     )
-    with pytest.raises(LaneBusy) as exc:
+    assert (
         await locks.acquire_many(
             ["gpu_research_lane"],
             holder_id="g0",
@@ -949,7 +875,8 @@ async def test_serving_blocks_gpu_research_lane(locks):
             action="specialist",
             ttl_sec=60,
         )
-    assert "benchmark_lane" in exc.value.busy_lanes
+        is None
+    )
     await locks.release(bench)
 
 
@@ -963,7 +890,7 @@ async def test_gpu_research_lane_is_strictly_serial(locks):
         action="specialist",
         ttl_sec=60,
     )
-    with pytest.raises(LaneBusy):
+    assert (
         await locks.acquire_many(
             ["gpu_research_lane"],
             holder_id="g1",
@@ -971,6 +898,8 @@ async def test_gpu_research_lane_is_strictly_serial(locks):
             action="specialist",
             ttl_sec=60,
         )
+        is None
+    )
     await locks.release(first)
 
 
@@ -981,17 +910,13 @@ async def test_live_old_owner_keeps_conflicting_lanes_until_release(conn, locks)
     )
     assert await locks.reap_dead_holders() == []
     assert (
-        await locks.try_acquire_many(
-            ["benchmark_lane"], holder_id="next", task_id="next", action="baseline", ttl_sec=60
-        )
+        await locks.acquire_many(["benchmark_lane"], holder_id="next", task_id="next", action="baseline", ttl_sec=60)
         is None
     )
     assert (await locks.lane_holders())["gpu_research_lane"] == 1
     await locks.release(lease)
     assert (
-        await locks.try_acquire_many(
-            ["benchmark_lane"], holder_id="next", task_id="next", action="baseline", ttl_sec=60
-        )
+        await locks.acquire_many(["benchmark_lane"], holder_id="next", task_id="next", action="baseline", ttl_sec=60)
         is not None
     )
 

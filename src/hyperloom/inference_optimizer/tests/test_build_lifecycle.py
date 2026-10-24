@@ -68,7 +68,7 @@ async def _enqueue_and_run(build_coord, executor, *, action, session_dir) -> tup
         session_dir=Path(session_dir),
         links=RunnerLinks(shared_state=build_coord.shared_state),
     )
-    lease = await build_coord.locks.try_acquire_many(
+    lease = await build_coord.locks.acquire_many(
         ["build_lane"],
         holder_id=tid,
         task_id=tid,
@@ -104,7 +104,7 @@ async def test_build_lane_serializes_two_builds(build_coord):
     )
     assert a1 != a2
     t1 = await build_coord.tasks.get(a1)
-    lease = await build_coord.locks.try_acquire_many(
+    lease = await build_coord.locks.acquire_many(
         ["build_lane"],
         holder_id=a1,
         task_id=a1,
@@ -127,7 +127,7 @@ async def test_build_lane_does_not_conflict_with_serving(build_coord):
         _action([sys.executable, "-c", "import time; time.sleep(2)"])
     )
     t = await build_coord.tasks.get(tid)
-    build_lease = await build_coord.locks.try_acquire_many(
+    build_lease = await build_coord.locks.acquire_many(
         ["build_lane"],
         holder_id=tid,
         task_id=tid,
@@ -135,7 +135,7 @@ async def test_build_lane_does_not_conflict_with_serving(build_coord):
         ttl_sec=t.lease_ttl_sec or 60,
     )
     assert build_lease is not None
-    bench_lease = await build_coord.locks.try_acquire_many(
+    bench_lease = await build_coord.locks.acquire_many(
         ["benchmark_lane"], holder_id="bench", task_id="bench", action="bench", ttl_sec=60
     )
     assert bench_lease is not None
@@ -577,7 +577,7 @@ async def test_spawn_failure_marks_row_failed(build_coord, tmp_path):
         session_dir=tmp_path,
         links=RunnerLinks(shared_state=build_coord.shared_state),
     )
-    lease = await build_coord.locks.try_acquire_many(
+    lease = await build_coord.locks.acquire_many(
         ["build_lane"],
         holder_id=tid,
         task_id=tid,
