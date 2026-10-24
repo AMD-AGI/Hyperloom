@@ -42,7 +42,7 @@ from hyperloom.measure.versions import socket_versions
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
-from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint
+from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint, SessionProfile
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import encode
@@ -222,7 +222,7 @@ class Session:
                 processes,
                 blobs,
                 services.critic(self._notebook),
-                {source.name: layout.reference / source.name for source in settings.references},
+                self._reference_dirs(),
                 settings.dev_leases,
             )
         )
@@ -552,18 +552,23 @@ class Session:
         else:
             prelude = await self._prelude.reuse(reused, workload, self._base_image_digest)
         self._briefs.warm = prelude.warm_leads
-        self._briefs.references = await asyncio.to_thread(self._reference_leads, prelude)
+        self._briefs.references = await asyncio.to_thread(self._reference_leads, prelude.profile)
         self._roster.add_integration(prelude.root_commit, k=1)
         await self._branches.push_quota()
         return prelude
 
-    def _reference_leads(self, prelude: PreludeResult) -> tuple[ReferenceLead, ...]:
-        """InferenceX's reference launches for the session's profile, when the run was given its checkout. Blocks."""
+    def _reference_dirs(self) -> dict[str, Path]:
+        """Where the session keeps each reference the run was given, by name."""
+
+        return {source.name: self._layout.reference / source.name for source in self._settings.references}
+
+    def _reference_leads(self, profile: SessionProfile) -> tuple[ReferenceLead, ...]:
+        """InferenceX's reference launches for ``profile``, when the run was given its checkout. Blocks."""
 
         source = next((item for item in self._settings.references if item.name == INFERENCEX_REFERENCE), None)
         if source is None:
             return ()
-        return reference_leads(self._layout.reference / source.name, prelude.profile, source.revision)
+        return reference_leads(self._reference_dirs()[source.name], profile, source.revision)
 
     async def _final_candidates(self) -> FinalCandidates:
         progress = await self._notebook.progress()

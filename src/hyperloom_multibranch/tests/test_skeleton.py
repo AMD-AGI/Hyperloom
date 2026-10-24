@@ -71,6 +71,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
 from hyperloom_multibranch.contracts.toolbox import CancelOutcome, MeasurementCapacity
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
+from hyperloom_multibranch.notebook.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, SKIPPED
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
@@ -189,6 +190,20 @@ SETTINGS = RunSettings(
     caps=RosterCaps(3, 2, 8),
     judge_interval_seconds=600.0,
 )
+#: An InferenceX matrix with one single-node entry for the workload's model.
+LLAMA_MATRIX = """\
+llama3-bf16-mi355x-sglang:
+  image: lmsysorg/sglang:v0.5.12-rocm700-mi35x
+  model: meta-llama/Llama-3-8B
+  model-prefix: llama3
+  runner: mi355x
+  precision: bf16
+  framework: sglang
+  multinode: false
+  scenarios:
+    fixed-seq-len:
+    - { isl: 1024, osl: 1024, search-space: [{ tp: 1, conc-start: 4, conc-end: 64 }] }
+"""
 #: Where the hosted toolbox keeps its submit log inside the session's toolbox directory.
 SUBMISSIONS = "submissions.jsonl"
 STEP_SECONDS = 30.0
@@ -860,6 +875,26 @@ async def test_a_session_copies_the_reference_material_it_was_given_and_its_mani
         {"name": "geak-tuning", "path": str(knowledge), "revision": "c" * 40}
     ]
     assert stage.setup.references == {"geak-tuning": stage.layout.reference / "geak-tuning"}
+
+
+async def test_a_run_given_the_inferencex_checkout_briefs_its_launches_for_the_session_model_and_one_without_none(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "InferenceX"
+    (checkout / "configs").mkdir(parents=True)
+    (checkout / "configs" / "amd-master.yaml").write_text(LLAMA_MATRIX, encoding="utf-8")
+    given = ReferenceSource(INFERENCEX_REFERENCE, str(checkout), "d" * 40)
+    briefed = {}
+    for name, references in (("given", (given,)), ("without", ())):
+        (tmp_path / name).mkdir()
+        stage = _stage(tmp_path / name, child=child_with_patch(tmp_path / name))
+        stage.settings = replace(stage.settings, references=references)
+        await stage.run()
+        briefed[name] = stage.briefs.references
+
+    [lead] = briefed["given"]
+    assert (lead.config, lead.model, lead.revision) == ("llama3-bf16-mi355x-sglang", "meta-llama/Llama-3-8B", "d" * 40)
+    assert briefed["without"] == ()
 
 
 async def test_the_dev_leases_of_the_run_reach_the_peers(tmp_path: Path) -> None:
