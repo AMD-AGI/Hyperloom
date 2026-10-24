@@ -31,7 +31,7 @@ from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.tests.helpers import FakePlanner, Rig as ToolboxRig, ScriptedExecutor, build, req
 
 POLICY = QueuePolicy(per_branch_k=2, global_concurrency=2)
-SLOW, HANG, FAST = "slow", "hang", "fast"
+SLOW, HANG, FAST, FOREIGN = "slow", "hang", "fast", "foreign"
 
 
 class _PointPerBranch(FakePlanner):
@@ -77,7 +77,15 @@ async def two_cards(tmp_path: Path):
 
 
 def _behaviour(name: str) -> dict[str, object]:
-    return {SLOW: {"fake_delay": 1.5}, HANG: {"fake_mode": "hang"}, FAST: {"fake_delay": 0.2}}[name]
+    return {
+        SLOW: {"fake_delay": 1.5},
+        HANG: {"fake_mode": "hang"},
+        FAST: {"fake_delay": 0.2},
+        FOREIGN: {
+            "fake_foreign_cards": [0],
+            "fake_delay": 0.1,
+        },  # refused when the sandbox has card 0, as the runner does
+    }[name]
 
 
 async def _until(condition: Callable[[], bool], what: str, seconds: float = 20.0) -> None:

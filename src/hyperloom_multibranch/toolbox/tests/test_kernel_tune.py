@@ -22,6 +22,7 @@ from hyperloom.contracts.recipe import KernelKind
 from hyperloom.measure.framework.rows import lay_rows_over
 from hyperloom.measure.tests.hosted_fixtures import point_yaml
 from hyperloom.orchestrator.actions.executors import run_with_session_kill
+from hyperloom.sandbox.card_occupancy import Holder
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, MeasurementCapacity, RequestRejected
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.tests.helpers import req
@@ -45,6 +46,8 @@ from hyperloom_multibranch.toolbox.tests.kernel_tune_rig import (
     tuned_rows,
 )
 from hyperloom_multibranch.toolbox.tests.test_card_placement import HANG, _behaviour, _until
+from hyperloom_multibranch.toolbox.tests.card_list import INTRUDER, CardList
+from hyperloom_multibranch.toolbox import branch_leases
 from hyperloom_multibranch.toolbox.tools import JobStatus, kernel_tune
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL, MIN_TUNER_SEC
 
@@ -101,6 +104,23 @@ async def test_a_running_job_holds_its_card_as_a_lease_that_leased_cards_counts(
 
     rig.forge.release.set()
     assert await rig.finished(job) is JobStatus.SUCCEEDED
+    assert await rig.box.measurement_capacity() == MeasurementCapacity(2, 2) and pool(rig) == (0, 1)
+
+
+async def test_a_card_some_process_holds_is_not_leased_for_tuning_and_the_job_says_who_holds_it(
+    make: Make, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tuner measures on its card: a card an agent's command is using would give it numbers that are not the card's."""
+    holders = CardList()
+    holders.holders = (INTRUDER, Holder(card=1, pid=4243, command="python3 other.py"))
+    rig = await ready(await make(cards=2, card_holders=holders))
+    monkeypatch.setattr(branch_leases, "LEASE_WAIT_SECONDS", 0.3)
+
+    job = await rig.submit(test_request_id=TEST_ID)
+
+    assert await rig.finished(job) is JobStatus.FAILED
+    assert "card 0 by pid 4242 (python3 -c import torch)" in rig.result(job)["summary"]
+    assert rig.forge.calls == [], "the tuner never ran"
     assert await rig.box.measurement_capacity() == MeasurementCapacity(2, 2) and pool(rig) == (0, 1)
 
 

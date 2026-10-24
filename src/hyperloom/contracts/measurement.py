@@ -48,6 +48,9 @@ REPRO_VERDICTS = (REPRODUCED, NOT_REPRODUCED)
 #: What a test's server did with one kernel table the test loaded: some of its rows were hit, none was although hits
 #: were logged, or the logs cannot say. "Not exercised" and "not observable" are different findings: the first says the
 #: table changed nothing the test ran, the second says nothing about it.
+CARD_CLEAN = "clean"
+CARD_UNKNOWN = "unknown"
+CARD_OCCUPANCY_STATES = (CARD_CLEAN, CARD_UNKNOWN)
 TABLE_EXERCISED = "exercised"
 TABLE_NOT_EXERCISED = "not_exercised"
 TABLE_NOT_OBSERVABLE = "not_observable"
@@ -357,7 +360,13 @@ def _bool(value: object, what: str) -> bool:
 
 @dataclass(frozen=True)
 class SandboxFacts:
-    """Where one attempt ran; ``backend`` tells local measurement on one host from hosted measurement."""
+    """Where one attempt ran; ``backend`` tells local measurement on one host from hosted measurement.
+
+    ``card_occupancy`` is what the runner's signed result says of who else used the attempt's cards: ``clean`` when every
+    look at them found no process outside the test, ``unknown`` (with ``card_occupancy_reason``) when it could not look, and
+    empty when the attempt did not say (an attempt that failed before a result, a sandbox with no card, a runner that
+    predates it). It is never ``clean`` for a result nobody looked at.
+    """
 
     sandbox_id: str
     node_name: str | None = None
@@ -369,6 +378,8 @@ class SandboxFacts:
     same_node: bool = False
     gpu_ids: tuple[int, ...] = ()
     backend: str = ""
+    card_occupancy: str = ""
+    card_occupancy_reason: str = ""
 
     def __post_init__(self) -> None:
         _text(self.sandbox_id, "a sandbox id")
@@ -383,6 +394,17 @@ class SandboxFacts:
             _int(gpu, "a gpu id", minimum=0)
         if not isinstance(self.backend, str):
             raise MeasurementError(f"backend must be a string, got {self.backend!r}")
+        self._check_card_occupancy()
+
+    def _check_card_occupancy(self) -> None:
+        if self.card_occupancy not in ("", *CARD_OCCUPANCY_STATES):
+            raise MeasurementError(
+                f"card_occupancy must be '' or one of {CARD_OCCUPANCY_STATES}, got {self.card_occupancy!r}"
+            )
+        if not isinstance(self.card_occupancy_reason, str):
+            raise MeasurementError(f"card_occupancy_reason must be a string, got {self.card_occupancy_reason!r}")
+        if (self.card_occupancy == CARD_UNKNOWN) != bool(self.card_occupancy_reason):
+            raise MeasurementError("card_occupancy 'unknown' needs its reason, and any other state has none")
 
     @property
     def node(self) -> str | None:
@@ -408,6 +430,8 @@ class SandboxFacts:
             "same_node": self.same_node,
             "gpu_ids": list(self.gpu_ids),
             "backend": self.backend,
+            "card_occupancy": self.card_occupancy,
+            "card_occupancy_reason": self.card_occupancy_reason,
         }
 
     @classmethod
@@ -424,6 +448,8 @@ class SandboxFacts:
             same_node=f.get("same_node", False),
             gpu_ids=tuple(_items(f.get("gpu_ids", ()), "gpu_ids")),
             backend=f.get("backend", ""),
+            card_occupancy=f.get("card_occupancy", ""),
+            card_occupancy_reason=f.get("card_occupancy_reason", ""),
         )
 
 
@@ -963,6 +989,9 @@ class TestResult:
 
 
 __all__ = [
+    "CARD_CLEAN",
+    "CARD_OCCUPANCY_STATES",
+    "CARD_UNKNOWN",
     "NOT_REPRODUCED",
     "PRIORITY_HIGHEST",
     "PRIORITY_LOWEST",

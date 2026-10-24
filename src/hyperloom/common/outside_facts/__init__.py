@@ -60,6 +60,15 @@ __all__ = [
     "HIP_NO_KERNEL_IMAGE",
     "HIP_UNDEFINED_SYMBOL",
     "HSA_STATUS_ERROR",
+    "INITIAL_PID_NAMESPACE",
+    "KFD_NODES",
+    "KFD_NODE_GPU_ID",
+    "KFD_PROCESSES",
+    "KFD_QUEUES",
+    "KFD_QUEUE_GPU_ID",
+    "KFD_ROOT",
+    "KFD_VRAM_PREFIX",
+    "PID_NAMESPACE_LINK",
     "PY_IMPORT_ERROR",
     "PY_MODULE_NOT_FOUND_ERROR",
     "ROCR_VISIBLE_DEVICES_ENV",
@@ -111,6 +120,21 @@ HIP_GRAPH_PACKET_CAPTURE_ENV = _graph_replay.name
 HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE = _graph_replay.value
 
 ROCR_VISIBLE_DEVICES_ENV = _PACK.names("rocr_visible_devices", "env")["env"]
+
+_kfd = _PACK.names(
+    "kfd_process_listing", "root", "processes", "nodes", "node_gpu_id", "queues", "queue_gpu_id", "vram_prefix"
+)
+KFD_ROOT = _kfd["root"]
+KFD_PROCESSES = _kfd["processes"]
+KFD_NODES = _kfd["nodes"]
+KFD_NODE_GPU_ID = _kfd["node_gpu_id"]
+KFD_QUEUES = _kfd["queues"]
+KFD_QUEUE_GPU_ID = _kfd["queue_gpu_id"]
+KFD_VRAM_PREFIX = _kfd["vram_prefix"]
+
+_pid_namespace = _PACK.names("linux_pid_namespace", "link", "initial")
+PID_NAMESPACE_LINK = _pid_namespace["link"]
+INITIAL_PID_NAMESPACE = _pid_namespace["initial"]
 
 _tunableop = _PACK.names("pytorch_tunableop_env", "enabled", "tuning", "table")
 TUNABLEOP_ENABLED_ENV = _tunableop["enabled"]

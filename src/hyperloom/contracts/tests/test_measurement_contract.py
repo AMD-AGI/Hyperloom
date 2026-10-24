@@ -52,6 +52,33 @@ def _sandbox(**overrides: object) -> SandboxFacts:
     return SandboxFacts(**{**fields, **overrides})
 
 
+def test_sandbox_facts_state_whether_the_cards_were_free_of_other_processes_and_round_trip() -> None:
+    clean = _roundtrip(_sandbox(card_occupancy="clean"))
+    unknown = _roundtrip(_sandbox(card_occupancy="unknown", card_occupancy_reason="no AMD GPU driver is loaded"))
+    older = SandboxFacts.from_document({"sandbox_id": "sb-1"})
+
+    assert (clean.card_occupancy, clean.card_occupancy_reason) == ("clean", "")
+    assert (unknown.card_occupancy, unknown.card_occupancy_reason) == ("unknown", "no AMD GPU driver is loaded")
+    assert (older.card_occupancy, older.card_occupancy_reason) == ("", ""), "an attempt that did not say, says nothing"
+
+
+@pytest.mark.parametrize(
+    ("fields", "why"),
+    [
+        ({"card_occupancy": "foreign"}, "card_occupancy must be"),
+        ({"card_occupancy": "unknown"}, "needs its reason"),
+        ({"card_occupancy": "clean", "card_occupancy_reason": "why?"}, "needs its reason"),
+        ({"card_occupancy_reason": "a reason with no state"}, "needs its reason"),
+        ({"card_occupancy": "unknown", "card_occupancy_reason": 7}, "must be a string"),
+    ],
+)
+def test_sandbox_facts_refuse_a_card_occupancy_that_is_not_one_of_the_states_or_lacks_its_reason(
+    fields: dict[str, object], why: str
+) -> None:
+    with pytest.raises(MeasurementError, match=why):
+        _sandbox(**fields)
+
+
 def _result(**overrides: object) -> TestResult:
     fields: dict[str, object] = {
         "request_id": "r1",

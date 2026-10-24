@@ -20,7 +20,7 @@ import logging
 import os
 import sys
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -36,6 +36,9 @@ from hyperloom.measure.framework.base import DEFAULT_CONFIGS, framework_envs
 from hyperloom.measure.local_templates import local_runner_template
 from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
+from hyperloom.sandbox.card_occupancy import CardReading, read_holders
+from hyperloom.sandbox.gated_pool import GatedPool
+from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom.sandbox.templates import LocalTemplate
 from hyperloom_multibranch.notebook import LocalNotebook
@@ -121,7 +124,7 @@ class LocalHostedToolbox(LeasedToolbox):
         lost = frozenset(recorded & set(pool.free_cards()))
         if not lost:
             return
-        leased = pool.acquire(len(pool.free_cards()), 0.0)
+        leased = GpuPool.acquire(pool, len(pool.free_cards()), 0.0)  # the pool's own: a leak is kept whoever holds it
         pool.release([card for card in leased if card not in lost])
         self.provider.quarantined.update(lost)
         self._reported_cards |= lost
@@ -212,7 +215,8 @@ class LocalOptions:
     runners read it (``HYPERLOOM_JIT_CACHE`` in their template, which therefore wins over the same name in
     ``runner_envs``) and this host publishes into it; ``None`` takes ``HYPERLOOM_JIT_STORE`` of the host environment,
     and without either this host publishes nothing (a ``HYPERLOOM_JIT_CACHE`` in ``runner_envs`` alone is a cache the
-    runners only read).
+    runners only read). ``card_holders`` says who holds some cards, which the pool asks before it hands a card out: the
+    kernel's list of the machine unless a test of this module says otherwise.
     """
 
     policy: QueuePolicy | None = None
@@ -225,6 +229,7 @@ class LocalOptions:
     tools: Sequence[AsyncTool] | None = None
     framework_configs: str | None = None
     jit_store: Path | None = None
+    card_holders: Callable[[Sequence[int]], CardReading] = read_holders
 
 
 def jit_store_root(options: LocalOptions, environ: Mapping[str, str] | None = None) -> Path | None:
@@ -254,13 +259,16 @@ def _provider(
     jit_store: Path | None,
 ) -> LocalSandboxProvider:
     """The provider whose runner template also carries the session's framework tables and, when on, the cache's
-    directory: neither is part of the environment the branches' own sandboxes get."""
+    directory: neither is part of the environment the branches' own sandboxes get. Its cards are handed out only when no
+    process holds them, to a test's sandbox and to a lease alike."""
     framework = framework_envs(Path(session.session_dir) / _FRAMEWORK, options.framework_configs)
     cache = {} if jit_store is None else {JIT_CACHE_ENV: str(jit_store)}
     template = replace(template, envs={**template.envs, **framework, **cache})
-    return LocalSandboxProvider(
+    provider = LocalSandboxProvider(
         [template], gpus=cards, base_dir=Path(session.session_dir) / _SANDBOXES, hostname=session.hostname
     )
+    provider.pool = GatedPool(cards, read=options.card_holders)
+    return provider
 
 
 def _local_tools(leases: BranchLeases, options: LocalOptions) -> Sequence[AsyncTool]:

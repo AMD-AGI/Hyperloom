@@ -167,6 +167,44 @@
               }
             }
           ]
+        },
+        "card_occupancy": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "state",
+                "checks"
+              ],
+              "properties": {
+                "state": {
+                  "enum": [
+                    "clean",
+                    "unknown"
+                  ]
+                },
+                "reason": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  ]
+                },
+                "checks": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
         }
       }
     },

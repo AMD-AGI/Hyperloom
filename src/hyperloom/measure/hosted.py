@@ -894,6 +894,7 @@ def _meta_of(call: TestCall) -> dict[str, object]:
 
 def _facts_of(runner: RunnerSandbox, result: ResultManifest | None) -> SandboxFacts:
     facts = result.runner if result is not None else None
+    occupancy = facts.card_occupancy if facts else None
     return SandboxFacts(
         sandbox_id=runner.sandbox_id,
         node_name=(facts.node_name if facts else None) or runner.node_name,
@@ -905,6 +906,8 @@ def _facts_of(runner: RunnerSandbox, result: ResultManifest | None) -> SandboxFa
         same_node=runner.same_node,
         gpu_ids=tuple(facts.gpu_ids) if facts else (),
         backend=BACKEND_NAME,
+        card_occupancy=occupancy.state if occupancy else "",
+        card_occupancy_reason=(occupancy.reason or "") if occupancy else "",
     )
 
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ import pytest
 
 from hyperloom.contracts.measurement import TestResult
 from hyperloom.measure.tests.hosted_fixtures import spec_context
+from hyperloom.sandbox.card_occupancy import Holder
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import QuarantineAction
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, WorkloadKind
@@ -21,10 +23,12 @@ from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig
 from hyperloom_multibranch.toolbox.local_hosted import (
     LEAKED_CARDS_REASON,
     LocalHostedToolbox,
+    LocalOptions,
     LocalSession,
     build_local_toolbox,
 )
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
+from hyperloom_multibranch.toolbox.tests.card_list import CardList
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, build, req
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
 from hyperloom.measure.tests.test_hosted_real_runner import _point
@@ -56,13 +60,16 @@ async def test_a_real_toolbox_without_a_card_pool_reports_unknown(tmp_path: Path
     assert await build(tmp_path).toolbox.measurement_capacity() == MeasurementCapacity.unknown()
 
 
-def _local_toolbox(tmp_path: Path, notebook: LocalNotebook, cards: range = range(8)) -> LocalHostedToolbox:
+def _local_toolbox(
+    tmp_path: Path, notebook: LocalNotebook, cards: range = range(8), options: LocalOptions = LocalOptions()
+) -> LocalHostedToolbox:
     session = tmp_path / "session"
     return build_local_toolbox(
         LocalSession(session, "run-1", cards, hostname=NODE),
         notebook,
         AcceptanceSetup(FakeRepo(), PointPlanner(_point(tmp_path)), IMAGE, WorkloadKind.AGENTX),
         spec_context(tmp_path, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")),
+        options=options,
     )
 
 
@@ -222,6 +229,30 @@ async def test_cards_an_earlier_run_lost_stay_lost_after_a_restart(tmp_path: Pat
         assert second.provider.pool.free_cards() == (1, 2, 3, 4, 5, 7), "a lost card is never leased again"
         await second.tick()
         assert [e.gpu_ids for e in await _gpu_events(notebook)] == [(0, 6)], "restoring writes nothing new"
+    finally:
+        await second.close()
+
+
+async def test_restoring_lost_cards_works_while_a_process_holds_a_card_that_is_not_lost(tmp_path: Path) -> None:
+    """A leak is kept whoever holds the cards: a held card must not stop the toolbox from starting, and stays in the pool."""
+    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    for name in ("one", "two"):
+        (tmp_path / name).mkdir()
+    first = _local_toolbox(tmp_path / "one", notebook)
+    try:
+        await first.start()
+        first.provider.quarantined.update({0, 6})
+        await first.tick()
+    finally:
+        await first.close()
+    holders = CardList()
+    holders.holders = (Holder(card=3, pid=4242, command="python3 intruder.py"), Holder(card=0, pid=4243, command="x"))
+    second = _local_toolbox(tmp_path / "two", notebook, options=LocalOptions(card_holders=holders))
+    try:
+        await second.start()
+        assert await second.measurement_capacity() == MeasurementCapacity(8, 6)
+        assert second.provider.pool.free_cards() == (1, 2, 3, 4, 5, 7), "the held card is still the pool's"
+        assert await asyncio.to_thread(second.provider.pool.acquire, 5, 0.0) == (1, 2, 4, 5, 7), "but is not handed out"
     finally:
         await second.close()
 

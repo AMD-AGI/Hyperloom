@@ -17,7 +17,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "6"
+version: "7"
 facts:
   aiter_merged_view:
     kind: names
@@ -162,6 +162,42 @@ facts:
     examples:
       - "hyperloom.common.visible_devices: ROCR_LEVEL_VARS lists it first among the variables that mask devices"
       - "hyperloom.measure.runner.run: the runner reads the ordinals its sandbox's mask lists"
+
+  kfd_process_listing:
+    kind: names
+    project: amdkfd (the Linux amdgpu kernel driver's compute interface)
+    reason: >-
+      The kernel lists every process that has opened the GPU compute interface in one directory, a subdirectory per
+      process id (the id in the host's namespace). It holds a vram_<gpu id> file with the bytes the process has resident
+      on that GPU and a queues directory with one directory per compute queue, whose gpuid file names the GPU the queue
+      runs on. The topology below the same root numbers the GPUs: a node directory per device, whose gpu_id file is 0 for a
+      CPU and the kernel's id for a GPU, in the order the ROCm runtime counts devices for ROCR_VISIBLE_DEVICES. The ROCm
+      tools (rocm-smi --showpids, amd-smi process) read these same files, so a process that holds a card is found here with
+      no tool whose output format changes between ROCm releases and without root.
+    names:
+      root: /sys/class/kfd/kfd
+      processes: proc
+      nodes: topology/nodes
+      node_gpu_id: gpu_id
+      queues: queues
+      queue_gpu_id: gpuid
+      vram_prefix: vram_
+    examples:
+      - "hyperloom.sandbox.card_occupancy: read_holders maps a card ordinal to the gpu_id of the n-th GPU node and lists the processes that have a queue or resident memory on it"
+      - "kernel tree, as read on a GPU node: /sys/class/kfd/kfd/proc/4242/vram_61439 holds 8589934592 and /sys/class/kfd/kfd/proc/4242/queues/0/gpuid holds 61439"
+
+  linux_pid_namespace:
+    kind: names
+    project: Linux kernel
+    reason: >-
+      The kernel's process list of the GPUs names a process by its id in the host's (initial) pid namespace. A reader can
+      only match those ids to what it sees in /proc when it is in that namespace itself, which the link below says by
+      naming the namespace's inode, a fixed number the kernel gives the initial one.
+    names:
+      link: self/ns/pid
+      initial: "pid:[4026531836]"
+    examples:
+      - "hyperloom.sandbox.card_occupancy: the process list is read only by a reader whose /proc/self/ns/pid is the initial namespace, otherwise the probe says it cannot tell"
 
   pytorch_tunableop_env:
     kind: names

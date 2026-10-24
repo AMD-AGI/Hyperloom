@@ -35,6 +35,13 @@ from hyperloom.measure import aiter_merge_hook
 _NOT_SCANNED = frozenset(
     {
         "HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE",
+        "KFD_NODES",
+        "KFD_NODE_GPU_ID",
+        "KFD_PROCESSES",
+        "KFD_QUEUES",
+        "KFD_QUEUE_GPU_ID",
+        "KFD_VRAM_PREFIX",
+        "PID_NAMESPACE_LINK",
         "AIPERF_ERROR_CLASS_KEY",
         "AIPERF_ERROR_KEY",
         "AIPERF_METADATA_KEY",
@@ -133,7 +140,7 @@ _PROBE = textwrap.dedent(
     from hyperloom.measure import agentx_requests, eval_context, hosted_spec, local, log_causes, points, surface
     from hyperloom.measure.framework import base as framework_base
     from hyperloom.measure.runner import run
-    from hyperloom.sandbox import templates
+    from hyperloom.sandbox import card_occupancy, templates
     from hyperloom_multibranch.toolbox import acceptance, hosted_executor, mcp_tools
     from hyperloom_multibranch.toolbox.tools import tracelens_report
 
@@ -156,6 +163,17 @@ _PROBE = textwrap.dedent(
         "concurrency": hosted_executor._concurrency_in("benchmark: {envs: {ENV_CONC: 7}}"),
         "visible": run._visible({"ROCR_VISIBLE_DEVICES_ENV": "0,2"}),
         "export": list(agentx_requests._EXPORT_PATTERNS),
+        "kfd": [
+            str(card_occupancy.KFD_PATH),
+            card_occupancy.KFD_PROCESSES,
+            card_occupancy.KFD_NODES,
+            card_occupancy.KFD_NODE_GPU_ID,
+            card_occupancy.KFD_QUEUES,
+            card_occupancy.KFD_QUEUE_GPU_ID,
+            card_occupancy.KFD_VRAM_PREFIX,
+            card_occupancy.PID_NAMESPACE_LINK,
+            card_occupancy.INITIAL_PID_NAMESPACE,
+        ],
     }
     print(json.dumps(out))
     """
@@ -247,6 +265,21 @@ def test_rocr_mask_name_is_read_from_the_owner(probe: dict[str, Any]) -> None:
     assert "ROCR_VISIBLE_DEVICES_ENV" in probe["reserved"]
     assert probe["rocr"] == "ROCR_VISIBLE_DEVICES_ENV"
     assert probe["visible"] == [0, 2]
+
+
+def test_the_kernels_process_list_is_read_where_the_owner_says_it_is(probe: dict[str, Any]) -> None:
+    """The card-occupancy probe finds the GPU processes by the owner's names and tells its namespace by the owner's link."""
+    assert probe["kfd"] == [
+        "KFD_ROOT",
+        "KFD_PROCESSES",
+        "KFD_NODES",
+        "KFD_NODE_GPU_ID",
+        "KFD_QUEUES",
+        "KFD_QUEUE_GPU_ID",
+        "KFD_VRAM_PREFIX",
+        "PID_NAMESPACE_LINK",
+        "INITIAL_PID_NAMESPACE",
+    ]
 
 
 def test_aiperf_export_names_are_read_from_the_owner(probe: dict[str, Any]) -> None:

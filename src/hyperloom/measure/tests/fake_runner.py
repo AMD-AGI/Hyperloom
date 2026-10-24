@@ -20,6 +20,9 @@ attachment placement and ``run_case``) against no server, and lists the verdict 
 ``fake_attached_env: [NAME, ...]`` places the sheet's attachments as the runner does and lists, in
 ``attached_env.json``, the path each variable holds in the served YAML, the sha256 of the file there, and the sha256 of
 every file in the directory it is in (``directory``; a directory attachment beside it is left out).
+``fake_foreign_cards: [card, ...]`` fails as the runner does when a process outside the test holds one of those cards, if the
+sandbox was given any of them (``status.json`` says ``foreign_process_on_card``); ``fake_card_occupancy: {state, reason,
+checks}`` signs what the runner says of its cards into the manifest.
 ``fake_phases: [[name, seconds], ...]`` states those phases, back to back, in the manifest's timing (``fake_phases_at``
 is the unix time the first begins, on this fake runner's own clock: 9000 by default); a runner that states none is
 the default. ``fake_legacy_decode: true`` lists the ``decode/outputs.jsonl`` that a runner of the removed decode pass left, so a
@@ -77,6 +80,10 @@ def _atomic(path: Path, data: bytes) -> None:
     os.replace(scratch, path)
 
 
+def _visible_cards() -> list[int]:
+    return [int(i) for i in os.environ.get("ROCR_VISIBLE_DEVICES", "").split(",") if i.strip().isdigit()]
+
+
 def _runner_facts(key: Any, sandbox_id: str, mode: str) -> dict[str, Any]:
     public_pem = signing.public_key_pem(key)
     return {
@@ -90,7 +97,7 @@ def _runner_facts(key: Any, sandbox_id: str, mode: str) -> dict[str, Any]:
         "hyperloom_version": _version(),
         "magpie_commit": "e" * 40,
         "inferencex_commit": "f" * 40,
-        "gpu_ids": [int(i) for i in os.environ.get("ROCR_VISIBLE_DEVICES", "").split(",") if i.strip().isdigit()],
+        "gpu_ids": _visible_cards(),
         "ecc_delta": {"correctable": 0, "uncorrectable": 0},
         "rule_pack": rule_pack_identity(),
     }
@@ -277,6 +284,8 @@ def _manifest(
     if mode == "fail_test":
         document["outcome"]["failure_class"] = "candidate"
         document["outcome"]["failure_reason"] = "import_error"
+    if "fake_card_occupancy" in config:
+        document["runner"]["card_occupancy"] = config["fake_card_occupancy"]
     return document
 
 
@@ -326,7 +335,9 @@ def main() -> int:
         time.sleep(float(config.get("fake_delay", 0)))
         if mode == "hang":
             time.sleep(3600)
-        if mode in ("spec_rejected", "node_fault"):
+        if set(config.get("fake_foreign_cards") or ()) & set(_visible_cards()):
+            mode = "foreign_process_on_card"
+        if mode in ("spec_rejected", "node_fault", "foreign_process_on_card"):
             state = {"state": "failed", "error_class": mode, "message": f"fake {mode}"}
             _atomic(out / "files" / "server.log", b"partial log\n")
             _atomic(out / "status.json", json.dumps(state).encode())

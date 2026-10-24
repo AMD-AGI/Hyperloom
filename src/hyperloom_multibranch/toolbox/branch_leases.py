@@ -24,6 +24,7 @@ from types import MappingProxyType
 
 from hyperloom.common.env_safety import GPU_MASK_ENV_NAMES, is_secret_shaped_env_name, scrub_benchmark_process_env
 from hyperloom.measure.sandboxes import DEFAULT_RUNNER_START_TIMEOUT_SEC
+from hyperloom.sandbox.gated_pool import CardsHeld
 from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.toolbox import BranchLease, MeasurementCapacity, RequestRejected
@@ -154,19 +155,22 @@ class BranchLeases:
             self._promised[holder] = cards
 
     async def _take(self, cards: int, wait: float) -> tuple[int, ...]:
-        """The cards, taken as soon as they are free; the pool is asked at least once, whatever ``wait`` is."""
+        """The cards, taken as soon as they are free and no process holds them; the pool is asked at least once, whatever
+        ``wait`` is."""
 
         pool = self._provider.pool
         until = time.monotonic() + wait
+        held = ""
         while not self._closed:
             try:
                 return pool.acquire(cards, 0.0)
-            except SandboxUnavailable:
+            except SandboxUnavailable as refusal:
+                held = f": {refusal}" if isinstance(refusal, CardsHeld) else ""
                 left = until - time.monotonic()
                 if left <= 0:
                     break
                 await asyncio.sleep(min(_POLL_SECONDS, left))
-        reason = "the toolbox is closing" if self._closed else f"not freed within {wait:g} s"
+        reason = "the toolbox is closing" if self._closed else f"not freed within {wait:g} s{held}"
         raise SandboxUnavailable(f"no {cards} cards for the branch sandbox lease: {reason}")
 
     def _grant(self, holder: str, gpu_ids: tuple[int, ...], root: Path | None) -> BranchLease:
