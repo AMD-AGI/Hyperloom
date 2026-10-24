@@ -62,7 +62,7 @@ class _Measured:
 
 class TestDropInaccurateRows:
     def test_an_asm_splitk_row_within_the_norm_bound_ships_with_its_figure(self, tmp_path):
-        # Arbor's down_proj row: errRatio 0.0125 from bf16 atomic accumulation, relative-norm error 0.0047.
+        # A hand-tuned down_proj row: errRatio 0.0125 from bf16 atomic accumulation, relative-norm error 0.0047.
         art = _write(tmp_path / "a.csv", [_row("asm", 6, "0.0125", name="asm_sk6")])
         measured = _Measured(0.0047)
 
@@ -174,7 +174,7 @@ def _ctx(tmp_path: Path) -> TuneContext:
 
 
 def _tune(tmp_path: Path, monkeypatch, rel_norm_err: float, *, trial_max: int = 8, profile=None):
-    """Run the bpreshuffle driver on a tuner run whose only pick is Arbor's asm splitK=6 down_proj row by default."""
+    """Run the bpreshuffle driver on a tuner run whose only pick is a hand-tuned asm splitK=6 down_proj row by default."""
     monkeypatch.delenv("FORGE_SPLITK_TRIAL", raising=False)
     monkeypatch.setitem(validate._TRIAL_OPS, _OP, lambda m, n, k, sk, device="cuda": sk <= trial_max)
     monkeypatch.setitem(validate._REL_NORM_OPS, _OP, lambda mnk, sk, name, device="cuda": rel_norm_err)

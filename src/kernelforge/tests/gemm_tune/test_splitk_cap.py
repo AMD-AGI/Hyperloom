@@ -400,7 +400,7 @@ def _asm_row(sk, us, name):
 
 @pytest.mark.parametrize("asm_splitk", [3, 6])
 def test_bpreshuffle_asm_cap_uses_the_per_shape_trial(tmp_path, monkeypatch, asm_splitk):
-    # Arbor's down_proj rows were asm splitK 3-6; the static FORGE_MAX_SPLITK=2 would rewrite them to splitK<=2.
+    # Hand-tuned down_proj rows were asm splitK 3-6; the static FORGE_MAX_SPLITK=2 would rewrite them to splitK<=2.
     monkeypatch.delenv("FORGE_SPLITK_TRIAL", raising=False)
     monkeypatch.delenv("FORGE_MAX_SPLITK", raising=False)
     fake_aiter(monkeypatch, k=17408)
