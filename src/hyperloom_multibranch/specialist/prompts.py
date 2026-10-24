@@ -249,7 +249,9 @@ verify keeps the output exact.
 (a Triton or gluon kernel, or a ctypes launch of an aiter .co code object); the image's aiter needs no rebuild. \
 Calling a different existing kernel, or calling one differently (accumulating a split-K GEMM into the residual \
 instead of a zeroed buffer, a fused variant aiter already ships), is a lever of its own. "Needs a C++ change" is \
-never a reason to give up on an operator.
+never a reason to give up on an operator. SGLang's C++/HIP kernels under python/sglang/kernels/jit/csrc are \
+framework source too: the server's first load recompiles a kernel whose own file you edited, with hipcc; a change \
+to a shared header alone is not seen, so touch the kernel file that includes it as well.
 - Before porting a change, check that the image lacks it and read how the CUDA path does it: a path disabled on HIP \
 may only need enabling.
 - Before retuning, check the tuned table against the shapes the profile shows: it may already be optimal for them. \

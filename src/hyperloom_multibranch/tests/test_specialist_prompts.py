@@ -611,6 +611,14 @@ def test_the_role_says_an_aiter_or_framework_kernel_is_source_a_branch_can_fork_
     assert "a streaming read reaches about 5.7 TB/s on MI355X" in prompt
 
 
+def test_the_role_says_sglang_jit_kernels_are_framework_source_the_test_rebuilds():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "python/sglang/kernels/jit/csrc" in prompt
+    assert "the server's first load recompiles a kernel whose own file you edited" in prompt
+    assert "a change to a shared header alone is not seen" in prompt
+
+
 def test_the_dev_sandbox_times_a_kernel_with_what_its_launcher_adds():
     prompt = role_prompt(WORKLOAD, dev_leases=1)
 
