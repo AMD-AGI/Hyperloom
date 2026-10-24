@@ -47,8 +47,8 @@ TAIL_LINES = 20
 DOCKER_SHIM = """#!/usr/bin/env python3
 # Runs `docker exec` and `docker cp` in place, for an agent written to drive a container; the sandbox has no daemon.
 # A device mask the agent passes names cards of its own container, numbered from 0: it is read as indices into the
-# sandbox's cards, which HIP_VISIBLE_DEVICES holds, and set there alone, since set as given it would reach any card of
-# the host, or, as ROCR_VISIBLE_DEVICES under HIP_VISIBLE_DEVICES, none.
+# sandbox's cards, which HIP_VISIBLE_DEVICES numbers from 0 under ROCR_VISIBLE_DEVICES, and set there alone, since a
+# ROCR_VISIBLE_DEVICES set as given would reach other cards of the host.
 import os, shutil, subprocess, sys
 
 MASKS = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
@@ -328,7 +328,7 @@ and TP flags come on top of them:
 
 The sandbox:
 - has the session's image and framework and no docker daemon. It sees only the GPUs in "cards", numbered from 0
-  (HIP_VISIBLE_DEVICES is set): a GPU id the agent's config gives is one of those, 0 the first; never set
+  (ROCR_VISIBLE_DEVICES holds them): a GPU id the agent's config gives is one of those, 0 the first; never set
   ROCR_VISIBLE_DEVICES, HIP_VISIBLE_DEVICES or CUDA_VISIBLE_DEVICES in a command of your own. A `docker` on PATH runs
   `docker exec [-w DIR] [-e K=V] CONTAINER CMD...` as CMD in DIR and `docker cp C:SRC DST` as a copy, so an agent
   written to drive a container works when its config names any container;

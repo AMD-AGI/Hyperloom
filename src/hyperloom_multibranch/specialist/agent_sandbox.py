@@ -15,6 +15,9 @@ command line. ``killall NAME`` is ``pkill -x`` on the name's first 15 characters
 takes no option but a signal and ``-q``: its others select by user, age or regex, which an agent confined to its own
 processes has no use for.
 
+``ROCR_VISIBLE_DEVICES`` holds the cards and ``HIP_VISIBLE_DEVICES`` numbers them from 0, so a HIP-level mask a command
+sets indexes into the cards and reaches no other card of the host.
+
 Output goes to a numbered log file under the sandbox's root, not to a pipe, which an agent running for hours would
 fill.
 """
@@ -36,6 +39,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult
 from hyperloom_multibranch.specialist.agent_session import Processes
@@ -274,7 +278,8 @@ class LocalAgentSandbox:
         merged["TMPDIR"] = str(self.tmp)
         merged.update(env)
         merged = {name: value for name, value in merged.items() if name not in GPU_MASK_ENV_NAMES}
-        merged["HIP_VISIBLE_DEVICES"] = ",".join(map(str, self.cards))
+        merged[ROCR_VISIBLE_DEVICES_ENV] = ",".join(map(str, self.cards))
+        merged["HIP_VISIBLE_DEVICES"] = ",".join(map(str, range(len(self.cards))))
         merged[MARKER] = str(self.root)
         merged["PATH"] = os.pathsep.join(filter(None, [str(self.root / BIN_DIR), merged.get("PATH")]))
         return merged

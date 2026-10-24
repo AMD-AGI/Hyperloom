@@ -77,7 +77,8 @@ def test_env_drops_masks_and_pins_cards_paths_and_tmpdir(tmp_path: Path) -> None
     env = sandbox.env({"PATH": shim_path, "FOO": "bar", "HIP_VISIBLE_DEVICES": "7"})
 
     assert not {"CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL", "HSA_VISIBLE_DEVICES"} & set(env)
-    assert env["HIP_VISIBLE_DEVICES"] == "4,5" and "ROCR_VISIBLE_DEVICES" not in env
+    # ROCr exposes the cards alone, so a HIP-level mask a command sets indexes into them and reaches no other card.
+    assert env["ROCR_VISIBLE_DEVICES"] == "4,5" and env["HIP_VISIBLE_DEVICES"] == "0,1"
     # HIP unbundles its code objects in TMPDIR, which fails on a network file system such as the branch's directory.
     assert Path(env["TMPDIR"]).parent == Path(tempfile.gettempdir()) and Path(env["TMPDIR"]).is_dir()
     other = LocalAgentSandbox(cards=(6,), python_path=(), root=tmp_path / "other", base_env=BASE)
@@ -92,13 +93,16 @@ def test_env_drops_masks_and_pins_cards_paths_and_tmpdir(tmp_path: Path) -> None
 def test_run_sees_the_env_in_its_own_session(tmp_path: Path) -> None:
     done = asyncio.run(
         _sandbox(tmp_path).run(
-            'echo "$HIP_VISIBLE_DEVICES $(command -v pkill)"; ps -o sess= -p $$; echo $$', tmp_path, {}, 5
+            'echo "$ROCR_VISIBLE_DEVICES/$HIP_VISIBLE_DEVICES $(command -v pkill)"; ps -o sess= -p $$; echo $$',
+            tmp_path,
+            {},
+            5,
         )
     )
 
     devices, sid, pid = done.output.split("\n")[:3]
     assert done.returncode == 0
-    assert devices == f"4,5 {tmp_path / 'sandbox' / 'bin' / 'pkill'}"
+    assert devices == f"4,5/0,1 {tmp_path / 'sandbox' / 'bin' / 'pkill'}"
     assert sid.strip() == pid
 
 
