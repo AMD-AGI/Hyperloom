@@ -56,4 +56,31 @@ experience:
   raw_logs: $doc.raw_logs
   provenance:
     source_ref: {text: $run.unit_id}
-    extra: $run.provenance
+    extra:
+      compact:
+        object:
+          candidate_origin: $run.provenance.candidate_origin
+          kb_record: $run.provenance.kb_record
+          analysis_generation: $run.provenance.analysis_generation
+          analysis_report_omitted: $run.provenance.analysis_report_omitted
+          meta:
+            compact:
+              object:
+                commit_hash: $run.provenance.meta.commit_hash
+                decision: $run.provenance.meta.decision
+                kept: $run.provenance.meta.kept
+                validation_passed: $run.provenance.meta.validation_passed
+                wall_ms: $run.provenance.meta.wall_ms
+                mean_case_speedup: $run.provenance.meta.mean_case_speedup
+                snr_db: $run.provenance.meta.snr_db
+                vgpr: $run.provenance.meta.vgpr
+                baseline_wall_ms: $run.provenance.meta.baseline_wall_ms
+                best_wall_ms_before: $run.provenance.meta.best_wall_ms_before
+                best_mean_case_speedup_before: $run.provenance.meta.best_mean_case_speedup_before
+                delta_vs_best_pct: $run.provenance.meta.delta_vs_best_pct
+                session_end_reason: $run.provenance.meta.session_end_reason
+                turns: $run.provenance.meta.turns
+                agent_profile_id: $run.provenance.meta.agent_profile_id
+                agent_provider: $run.provenance.meta.agent_provider
+                agent_model: $run.provenance.meta.agent_model
+                blockage_epoch: $run.provenance.meta.blockage_epoch

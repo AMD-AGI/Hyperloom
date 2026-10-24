@@ -7,13 +7,14 @@
 # rationale its meta.json records. A lane or a merge with neither has none. A lesson longer than the 32 KB a text
 # field holds makes collect skip the candidate. Reasoning is required: a candidate whose logs hold none, such as a
 # merge of two earlier candidates, which no agent made, becomes no Experience.
-# provenance.extra holds the candidate's metadata, which never reaches a prompt: meta, the whole meta.json
-# KernelForge archived for the candidate, verbatim, among it the commit it kept the candidate as, the mean case
-# speedup it decided on, the per-case times, every benchmark measurement, and a single session's turns and end reason;
-# kb_record, the record KernelForge's own experience KB filed a kept candidate under; candidate_origin, session or
-# lane; analysis_generation, the Analysis generation reflection.analysis_report comes from, as
-# analysis/<commit>/generation-NNN under forge_experiments; and analysis_report_omitted, why a report too long for a
-# text field is not held.
+# provenance.extra holds the candidate's metadata, which never reaches a prompt: meta, the scalar measurement and
+# decision fields of the candidate's meta.json (commit_hash, decision, kept, validation_passed, wall_ms,
+# mean_case_speedup, snr_db, vgpr, baseline_wall_ms, best_wall_ms_before, best_mean_case_speedup_before,
+# delta_vs_best_pct, session_end_reason, turns, agent_profile_id, agent_provider, agent_model, blockage_epoch), not
+# its plan, rationale, bench, profile, pmc_diagnosis, or shape; kb_record, the record KernelForge's own experience KB
+# filed a kept candidate under; candidate_origin, session or lane; analysis_generation, the Analysis generation
+# reflection.analysis_report comes from, as analysis/<commit>/generation-NNN under forge_experiments; and
+# analysis_report_omitted, why a report too long for a text field is not held.
 # Every Experience has a raw_logs field, and it is intentionally empty for now: it links one 0-byte file,
 # raw-logs-not-collected.log, which kernelforge export-runs writes beside its document. The global KB refuses a
 # complete Experience without raw logs, and KernelForge's run logs are not collected yet. raw_logs is a top-level

@@ -17,6 +17,7 @@ from hyperloom_kb.schema import CATEGORIES, TEXT_MAX_BYTES, FieldKind, FieldRole
 
 MAPPING = "kernelforge-v1"
 CAMPAIGN = "5f1c0a9e2b7d4c38a6e0f1b2c3d4e5f6"
+TOKEN_PLAN = "Summary: per token: one scale."
 REASONING = "Summary: Two passes over each row cost a second read.\n\n## Evidence\nFusing them halves the traffic."
 ANALYSIS_REPORT = "# Analysis report\n\nEach row is read twice; both passes are bound by memory bandwidth."
 GENERATION = "analysis/ce146831869e122424b2a67038ae466565882a3d/generation-001"
@@ -145,7 +146,11 @@ def test_a_session_unit_projects_a_complete_experience(files: dict[str, Path]) -
     assert experience["outcome"] == {"decision": "KEEP", "candidate_wall_ms": 0.044}
     assert experience["reflection"] == {"analysis_report": ANALYSIS_REPORT}
     assert experience["provenance"]["source_ref"] == "forge_loop_triton_softmax/iteration-1"
-    assert experience["provenance"]["extra"] == unit["provenance"]
+    assert experience["provenance"]["extra"] == {
+        "candidate_origin": "session",
+        "analysis_generation": GENERATION,
+        "meta": {"commit_hash": "abc1234", "wall_ms": 0.044, "mean_case_speedup": 1.18},
+    }
     assert (
         experience["raw_logs"]
         == [_ref(files["raw_log"])]
@@ -189,6 +194,40 @@ def test_reasoning_longer_than_a_text_field_holds_skips_the_candidate(files: dic
 
     assert report["collected"] == []
     assert report["skipped"][0]["reason"].startswith("schema validation failed: rationale.reasoning holds")
+
+
+def test_a_per_token_plan_and_its_file_are_collected(files: dict[str, Path]) -> None:
+    files["plan"].write_text(f"{TOKEN_PLAN}\n", encoding="utf-8")
+    unit = _session_unit(files, plan=TOKEN_PLAN)
+
+    report = collect(MAPPING, {"runs": [unit], "raw_logs": [str(files["raw_log"])]}, dry_run=True).to_dict()
+
+    assert report["skipped"] == [] and report["counts"]["collected"] == 1
+    assert report["collected"][0]["experience"]["rationale"]["plan"] == TOKEN_PLAN
+
+
+def test_a_token_named_case_and_plan_prose_in_meta_are_not_published(files: dict[str, Path]) -> None:
+    unit = _session_unit(files)
+    unit["provenance"]["meta"].update(
+        {
+            "bench": {"case_times": {"tokens_128_e8": 1.2}},
+            "plan": TOKEN_PLAN,
+            "rationale": '{"max_tokens": 4}',
+            "kept": False,
+            "blockage_epoch": 0,
+            "commit_hash": "",
+        }
+    )
+
+    report = collect(MAPPING, {"runs": [unit], "raw_logs": [str(files["raw_log"])]}, dry_run=True).to_dict()
+
+    assert report["skipped"] == [] and report["counts"]["collected"] == 1
+    meta = report["collected"][0]["experience"]["provenance"]["extra"]["meta"]
+    assert meta["mean_case_speedup"] == 1.18
+    assert meta["kept"] is False and meta["blockage_epoch"] == 0
+    assert "commit_hash" not in meta
+    for name in ("plan", "rationale", "bench"):
+        assert name not in meta
 
 
 def test_different_driver_hashes_do_not_share_a_repeat_group(files: dict[str, Path]) -> None:

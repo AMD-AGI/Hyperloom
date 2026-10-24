@@ -163,10 +163,11 @@ A mapping cannot turn these off:
   tokens, JWTs, presigned URLs, and -- outside prose fields -- credential
   assignments, credential CLI flags, and credential-shaped keys (a name containing
   `TOKEN`, `SECRET`, `PASSWORD`, `API_KEY`, or `CREDENTIAL`, with `TOKENIZER`
-  exempt). The prose fields, `rationale.reasoning`, `rationale.alternatives`,
-  every `reflection` field, `notes`, `raw_logs`, and the change field
-  with the `summary` role, get only the token formats, so prose and raw logs are
-  not mistaken for an assignment;
+  exempt). The prose fields, `rationale.plan`, `rationale.plan_file`,
+  `rationale.reasoning`, `rationale.alternatives`, every `reflection` field,
+  `notes`, `raw_logs`, and the change field with the `summary` role, get only
+  the token formats, so prose, plan files, and raw logs are not mistaken for an
+  assignment;
   `rationale.preconditions` is checked in full, since it may restate the
   configuration measured against. Every text file a record names is screened
   line by line the same way; a binary file is not.
@@ -286,9 +287,13 @@ It reads:
   where a wrapper or config edit shows up. `source_code` is only the anchor
   kernel file. The diff is linked when the candidate archived one;
 - `provenance.extra` from the logs, which never reaches a prompt: `meta`, the
-  candidate's whole `meta.json` verbatim, among it the commit KernelForge kept
-  the candidate as, the mean case speedup it decided on, the per-case times,
-  and every benchmark measurement; `kb_record`, the record KernelForge's own
+  scalar measurement and decision fields of the candidate's `meta.json`
+  (`commit_hash`, `decision`, `kept`, `validation_passed`, `wall_ms`,
+  `mean_case_speedup`, `snr_db`, `vgpr`, `baseline_wall_ms`,
+  `best_wall_ms_before`, `best_mean_case_speedup_before`, `delta_vs_best_pct`,
+  `session_end_reason`, `turns`, `agent_profile_id`, `agent_provider`,
+  `agent_model`, `blockage_epoch`), and not its plan, rationale, bench,
+  profile, pmc diagnosis, or shape; `kb_record`, the record KernelForge's own
   experience KB filed a kept candidate under;
   `candidate_origin`, `session` or `lane`; and `analysis_generation`, the
   `analysis/<commit>/generation-NNN` the Analysis report comes from.
@@ -308,7 +313,8 @@ global KB refuses: export its runs again before collecting them.
 Of the run's own files, an Experience links only the plan, the measured
 kernel, and the archived diff above, so they are the only ones that go with it
 to a KB. No `forge-loop.log`, `events.jsonl`, or other archive file does;
-`meta.json` goes only as the metadata in `provenance.extra.meta`, and of the
+the scalar fields of `meta.json` go as `provenance.extra.meta`, and its plan,
+rationale, per-case times, and other benchmark measurements do not, and of the
 Analysis directory only the report's text goes. A `forge-loop.log` is only
 read, by the run whose workspace path ends most like the kernel path it
 announces; one that fits two runs equally well stops the export.

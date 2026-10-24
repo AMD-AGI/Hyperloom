@@ -57,6 +57,7 @@ The body of the plan is not its summary.
 SUMMARY_LANE_PLAN = (
     "Summary: Loads are 32-bit. This lane widens them.\n\n# Lane two: vectorize loads\n\nUse 128-bit loads.\n"
 )
+TOKEN_PLAN = "Summary: per token: one scale."
 CRITIC_FALLBACK_PLAN = render_critic_fallback(
     draft_plan="""Summary: Small rows are bound by launch latency. This plan fuses the passes.
 
@@ -215,6 +216,32 @@ def _units(root: Path) -> dict[str, dict[str, Any]]:
 
 def _meta(layout: ExperimentsLayout, iteration: int) -> dict[str, Any]:
     return json.loads((layout.candidate(iteration) / CANDIDATE_META).read_text(encoding="utf-8"))
+
+
+_PUBLISHED_META = (
+    "commit_hash",
+    "decision",
+    "kept",
+    "validation_passed",
+    "wall_ms",
+    "mean_case_speedup",
+    "snr_db",
+    "vgpr",
+    "baseline_wall_ms",
+    "best_wall_ms_before",
+    "best_mean_case_speedup_before",
+    "delta_vs_best_pct",
+    "session_end_reason",
+    "turns",
+    "agent_profile_id",
+    "agent_provider",
+    "agent_model",
+    "blockage_epoch",
+)
+
+
+def _published_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    return {key: meta[key] for key in _PUBLISHED_META if key in meta and meta[key] is not None and meta[key] != ""}
 
 
 def _ref(path: Path) -> dict[str, Any]:
@@ -626,12 +653,38 @@ def test_the_exported_document_collects_through_the_packaged_mapping(tmp_path: P
     assert "lesson" not in row.experience.reflection
     assert "llm_backend" not in row.experience.provenance.extra
     assert "llm_model" not in row.experience.provenance.extra
-    assert row.experience.provenance.extra["meta"] == _meta(layout, 1)
+    assert row.experience.provenance.extra["meta"] == _published_meta(_meta(layout, 1))
     assert [ref.to_dict() for ref in row.experience.raw_logs] == [EMPTY_RAW_LOG]
     assert {row.unit_id: row.reason.split(":")[0] for row in report.skipped} == {
         f"{WORKSPACE}/iteration-2": "No reasoning, which every Experience requires",
         f"{WORKSPACE}/iteration-3": "No reasoning, which every Experience requires",
     }
+
+
+def test_a_token_named_case_and_a_per_token_plan_still_collect(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    layout = _plain_run(logs)
+    record = _meta(layout, 1)
+    record["bench"] = {"case_times": {"tokens_128_e8": 1.2}}
+    record["plan"] = TOKEN_PLAN
+    record["rationale"] = '{"max_tokens": 4}'
+    _write_json(layout.candidate(1) / CANDIDATE_META, record)
+    _write(layout.round(1) / lane_plan_name(1), f"{TOKEN_PLAN}\n")
+    output = tmp_path / "runs.json"
+    assert CliRunner().invoke(main, ["export-runs", str(logs), "-o", str(output)]).exit_code == 0
+
+    exported = next(run for run in json.loads(output.read_text(encoding="utf-8"))["runs"] if run["seq"] == 1)
+    assert exported["provenance"]["meta"]["bench"]["case_times"]["tokens_128_e8"] == 1.2
+    assert exported["provenance"]["meta"]["plan"] == TOKEN_PLAN
+
+    report = collect("kernelforge-v1", output, dry_run=True)
+    row = next(item for item in report.collected if item.unit_id == f"{WORKSPACE}/iteration-1")
+    assert row.experience.rationale["plan"] == "per token: one scale."
+    meta = row.experience.provenance.extra["meta"]
+    assert meta == _published_meta(record)
+    assert meta["mean_case_speedup"] == 1.18
+    for name in ("plan", "rationale", "bench"):
+        assert name not in meta
 
 
 def test_a_run_collects_its_lanes_with_each_lesson_as_their_reasoning(tmp_path: Path) -> None:
