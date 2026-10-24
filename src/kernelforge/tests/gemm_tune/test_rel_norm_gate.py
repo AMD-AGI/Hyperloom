@@ -176,7 +176,7 @@ def _tune(tmp_path: Path, monkeypatch, rel_norm_err: float, *, trial_max: int = 
     """Run the bpreshuffle driver on a tuner run whose only pick is Arbor's asm splitK=6 down_proj row by default."""
     monkeypatch.delenv("FORGE_SPLITK_TRIAL", raising=False)
     monkeypatch.setitem(validate._TRIAL_OPS, _OP, lambda m, n, k, sk, device="cuda": sk <= trial_max)
-    monkeypatch.setitem(validate._REL_NORM_OPS, _OP, lambda m, n, k, sk, name, device="cuda": rel_norm_err)
+    monkeypatch.setitem(validate._REL_NORM_OPS, _OP, lambda mnk, sk, name, device="cuda": rel_norm_err)
     (tmp_path / "in.csv").write_text("M,N,K\n64,5120,17408\n")
     profile = profile or [_row("asm", 6, "0.0125")]
     _write(tmp_path / "tuned_bpre.csv", [min(profile, key=lambda r: float(r[_HDR.index("us")]))])

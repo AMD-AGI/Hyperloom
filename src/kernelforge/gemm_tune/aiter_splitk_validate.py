@@ -171,7 +171,7 @@ def _dequantized_matmul(x, w, x_scale, w_scale):
 
 
 def _bpreshuffle_asm_rel_norm_err(
-    m: int, n: int, k: int, split_k: int, kernel_name: str, device: str = "cuda"
+    mnk: tuple[int, int, int], split_k: int, kernel_name: str, device: str = "cuda"
 ) -> float:
     """``||out - ref|| / ||ref||`` of the production asm call for one tuned row, ``ref`` the fp32 dequantized matmul.
 
@@ -182,6 +182,7 @@ def _bpreshuffle_asm_rel_norm_err(
     import aiter
     from aiter.ops.shuffle import shuffle_weight
 
+    m, n, k = mnk
     x, w, xs, ws, out = _operands(m, n, k, device)
     xs_col_major = xs.t().contiguous().view(m, -1)
     aiter.gemm_a8w8_blockscale_bpreshuffle_asm(
@@ -209,7 +210,7 @@ def make_rel_norm_fn(gpu_ids: str = "", op: str = "a8w8_blockscale_bpreshuffle")
     @functools.cache
     def _fn(m: int, n: int, k: int, split_k: int, kernel_name: str) -> float | None:
         try:
-            return measure(m, n, k, split_k, kernel_name, device=device)
+            return measure((m, n, k), split_k, kernel_name, device=device)
         except (ImportError, OSError, RuntimeError) as exc:
             log.warning("relative-norm check of %s M=%d N=%d K=%d splitK=%d failed: %s", op, m, n, k, split_k, exc)
             return None

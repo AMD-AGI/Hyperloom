@@ -238,15 +238,7 @@ def drop_inaccurate_rows(tuned_csv: Path, rel_norm: RelNormFn | None = None) -> 
             reason=f"{tuned_csv} carries no accuracy column (aiter schema drift?)",
         )
 
-    keep: list[dict[str, str]] = []
-    dropped: list[dict[str, str]] = []
-    unmeasured = 0
-    for row in rows:
-        verdict = _judge_row(row, rel_norm)
-        unmeasured += verdict is None
-        if verdict is not None and verdict.rel_norm_err is not None:
-            row[REL_NORM_COLUMN] = f"{verdict.rel_norm_err:.6g}"
-        (keep if verdict is None or verdict.accurate else dropped).append(row)
+    keep, dropped, unmeasured = _judge_rows(rows, rel_norm)
     if unmeasured:
         return AccuracyFilter(
             completed=False,
@@ -267,6 +259,25 @@ def drop_inaccurate_rows(tuned_csv: Path, rel_norm: RelNormFn | None = None) -> 
         )
     _log_dropped(dropped, tuned_csv.name)
     return AccuracyFilter(completed=True, dropped=dropped)
+
+
+def _judge_rows(
+    rows: list[dict[str, str]], rel_norm: RelNormFn | None
+) -> tuple[list[dict[str, str]], list[dict[str, str]], int]:
+    """Split ``rows`` into kept and dropped, recording each measured relative-norm error on its row.
+
+    A row with no readable accuracy figure is kept and counted in the third element.
+    """
+    keep: list[dict[str, str]] = []
+    dropped: list[dict[str, str]] = []
+    unmeasured = 0
+    for row in rows:
+        verdict = _judge_row(row, rel_norm)
+        unmeasured += verdict is None
+        if verdict is not None and verdict.rel_norm_err is not None:
+            row[REL_NORM_COLUMN] = f"{verdict.rel_norm_err:.6g}"
+        (keep if verdict is None or verdict.accurate else dropped).append(row)
+    return keep, dropped, unmeasured
 
 
 def _row_rel_norm_err(row: dict[str, str]) -> float | None:
