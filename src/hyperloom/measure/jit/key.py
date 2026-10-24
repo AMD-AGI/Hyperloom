@@ -48,7 +48,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hyperloom.common.outside_facts import AITER_LOG_TUNED_CONFIG_ENV
+from hyperloom.common.outside_facts import AITER_LOG_TUNED_CONFIG_ENV, AITER_META_MARKER_DIR
 from hyperloom.measure.docs import canonical_json
 
 __all__ = [
@@ -99,6 +99,8 @@ _ENV_READ = re.compile(
 )
 #: Where, below the aiter package and the checkout around it, the code that builds and generates code is.
 _BUILD_PATH = ("jit", "../csrc", "../hsa", "../aiter_meta")
+#: The same, below a meta directory itself (the farm's copy, which holds the patched ``csrc`` and ``hsa``).
+_META_BUILD_PATH = (AITER_META_MARKER_DIR, "hsa")
 _MAX_SCANNED_BYTES = 2 * 1024**2
 #: Text of a patch that can change what aiter builds from inside the server process, other than by naming a variable.
 _BUILD_SURFACE_WORDS = ("AITER_", "aiter.jit", "build_module", "compile_ops", "putenv", "unsetenv")
@@ -180,18 +182,20 @@ def tree_identity(
     )
 
 
-def scan_env_names(package_dirs: Iterable[Path]) -> frozenset[str]:
+def scan_env_names(package_dirs: Iterable[Path], meta_dirs: Iterable[Path] = ()) -> frozenset[str]:
     """The environment variables the aiter build path reads, found in the source a test will run.
 
     Reads the Python files of the build path below each aiter package directory: the package's ``jit`` directory, the
     ``csrc`` code generators, ``hsa/codegen.py`` and the ``aiter_meta`` copy of a wheel install. A variable is named when
     the code reads it with ``os.getenv``, ``os.environ.get``, ``os.environ[...]`` or ``in os.environ``; a name found there that
-    the build never reads only makes the key finer.
+    the build never reads only makes the key finer. ``meta_dirs`` are meta directories to read the same ``csrc`` and ``hsa``
+    code of, for a test that carries patches to them.
     """
     names: set[str] = set()
-    for package in package_dirs:
-        for relative in _BUILD_PATH:
-            for path in _python_files((Path(package) / relative).resolve()):
+    places = [(package, _BUILD_PATH) for package in package_dirs] + [(meta, _META_BUILD_PATH) for meta in meta_dirs]
+    for directory, relatives in places:
+        for relative in relatives:
+            for path in _python_files((Path(directory) / relative).resolve()):
                 names.update(_names_in(path))
     return frozenset(names)
 

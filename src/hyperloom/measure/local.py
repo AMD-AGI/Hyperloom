@@ -48,7 +48,15 @@ from hyperloom.measure.boot_watch import BOOT_CANCEL_REASON, BootGuard, boot_lim
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.eval_context import eval_context, served_context
 from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure, decides_test
-from hyperloom.measure.farm import FarmError, build_farm, inherited_environment, place_farm, server_python, verify_farm
+from hyperloom.measure.farm import (
+    FarmError,
+    build_farm,
+    inherited_environment,
+    patches_aiter_sources,
+    place_farm,
+    server_python,
+    verify_farm,
+)
 from hyperloom.measure.framework.copies import PrivateFramework, private_framework
 from hyperloom.measure.framework.rows import RowsOnlyRefused
 from hyperloom.measure.long_context import staging as long_context_staging
@@ -416,6 +424,12 @@ def _rebuilt_environment(call: TestCall) -> Iterator[TestCall]:
 
 
 def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path) -> tuple[Path, ...]:
+    if call.jit is None and patches_aiter_sources(environment.roots):
+        raise TestCallRefused(
+            "the patch changes aiter's csrc or hsa, which is measured only by building the modules it touches in the "
+            "test's own JIT directory (a runner's JIT session), and this call has none: the image's prebuilt modules "
+            "would run instead"
+        )
     store = LocalBlobStore(environment.blob_root)
 
     def read_blob(address: str) -> bytes:

@@ -11,7 +11,9 @@ the image's framework and call it the candidate's.
 
 A rebuilt aiter also has to be told where the image keeps the sources it imports ``csrc`` from and builds from, because
 aiter looks for them around its own location, which is now the farm: unless the server already inherits one, the farm
-sets ``AITER_META_DIR`` to the image's own meta directory, resolved the way aiter resolves it.
+sets ``AITER_META_DIR`` to the image's own meta directory, resolved the way aiter resolves it. A patch to ``csrc`` or
+``hsa`` is a root of its own (``aiter_meta``): the farm mirrors the image's meta directory with the patched files laid
+over it, and ``AITER_META_DIR`` names that copy, which aiter builds its modules from and imports ``csrc`` from.
 """
 
 from __future__ import annotations
@@ -27,14 +29,9 @@ from typing import Any
 import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
-from hyperloom.common.outside_facts import (
-    AITER_DEVELOP_MODE,
-    AITER_INSTALL_MODE_FILE,
-    AITER_META_DIR_ENV,
-    AITER_META_MARKER_DIR,
-    AITER_META_WHEEL_DIR,
-)
+from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_MARKER_DIR, AITER_META_WHEEL_DIR
 from hyperloom.measure.jit.key import AITER_PACKAGE
+from hyperloom.measure.jit.modules import image_aiter_meta
 from hyperloom.measure.spec import EnvEntry, EnvRoot
 from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
 
@@ -45,6 +42,7 @@ __all__ = [
     "image_aiter_meta",
     "inherited_environment",
     "locate_package",
+    "patches_aiter_sources",
     "place_farm",
     "prepend_pythonpath",
     "server_environment",
@@ -69,12 +67,16 @@ class FarmError(Exception):
 @dataclass(frozen=True)
 class Farm:
     """The directory to put first on ``PYTHONPATH``, the packages rebuilt in it and, when aiter is one of them and the
-    server inherits no meta directory of its own, the image's, which the server is told to read aiter's sources from."""
+    server inherits no meta directory of its own, the image's, which the server is told to read aiter's sources from.
+
+    When the sheet patches aiter's ``csrc`` or ``hsa`` (``meta_patched``), ``aiter_meta`` is the farm's own copy of the
+    meta directory instead, and the server must read that one."""
 
     site: Path
     packages: tuple[str, ...]
     roots: tuple[EnvRoot, ...] = ()
     aiter_meta: Path | None = None
+    meta_patched: bool = False
 
 
 def locate_package(import_name: str, python: str, cwd: Path) -> Path:
@@ -95,18 +97,9 @@ def locate_package(import_name: str, python: str, cwd: Path) -> Path:
     return Path(locations[0])
 
 
-def image_aiter_meta(package: Path) -> Path:
-    """The meta directory the image's own aiter reads ``csrc`` from, resolved as ``aiter/jit/core.py`` resolves it.
-
-    ``package`` is the aiter package directory the image's interpreter finds. A develop install (what the
-    ``install_mode`` file beside the package says, and what a missing file means) keeps ``csrc`` in the directory around
-    the package; a wheel install keeps it in the ``aiter_meta`` package beside it.
-    """
-    try:
-        develop = (package / AITER_INSTALL_MODE_FILE).read_text(encoding=_UTF8).strip() == AITER_DEVELOP_MODE
-    except FileNotFoundError:
-        develop = True
-    return package.parent if develop else package.parent / AITER_META_WHEEL_DIR
+def patches_aiter_sources(roots: Iterable[Any]) -> bool:
+    """Whether ``roots`` change aiter's ``csrc`` or ``hsa`` (the root of its meta directory has an entry)."""
+    return any(root.import_name == AITER_META_WHEEL_DIR and root.entries for root in roots)
 
 
 def inherited_environment(
@@ -147,13 +140,20 @@ def _write_upsert(entry: EnvEntry, destination: Path, read_blob: Callable[[str],
     destination.chmod(int(entry.mode or "0644", 8))
 
 
-def _build_root(root: EnvRoot, base: Path, target: Path, read_blob: Callable[[str], bytes]) -> None:
+def _build_root(
+    root: EnvRoot,
+    base: Path,
+    target: Path,
+    read_blob: Callable[[str], bytes],
+    *,
+    left_out: frozenset[str] = frozenset(),
+) -> None:
     deletes = {entry.path for entry in root.entries if entry.op == "delete"}
     for path in deletes:
         if not (base / path).is_file():
             raise FarmError(f"{root.id}: {path} is to be deleted but the installed {root.import_name} has no such file")
     touched = _touched_directories(root.entries)
-    _mirror(base, target, "", touched, deletes | {e.path for e in root.entries if e.op == "upsert"})
+    _mirror(base, target, "", touched, deletes | {e.path for e in root.entries if e.op == "upsert"} | left_out)
     for entry in root.entries:
         if entry.op == "upsert":
             _write_upsert(entry, target / entry.path, read_blob)
@@ -178,16 +178,49 @@ def build_farm(
     built = []
     rebuilt = []
     meta = None
+    meta_root = None
     for root in roots:
         if root.kind != "package":
             raise FarmError(f"{root.id}: a runtime root is not supported by this runner yet")
+        if root.import_name == AITER_META_WHEEL_DIR:
+            meta_root = root
+            continue
         base = locate_package(root.import_name, python, farm_dir.parent)
         _build_root(root, base, site / root.import_name, read_blob)
         if root.import_name == AITER_PACKAGE and not server_has.get(AITER_META_DIR_ENV):
             meta = _checked_aiter_meta(root, base)
         built.append(root.import_name)
         rebuilt.append(root)
-    return Farm(site, tuple(built), tuple(rebuilt), meta) if built else None
+    if meta_root is not None:
+        aiter = locate_package(AITER_PACKAGE, python, farm_dir.parent)
+        meta = _build_meta_root(meta_root, aiter, site, server_has, read_blob)
+        rebuilt.append(meta_root)
+    if not rebuilt:
+        return None
+    return Farm(site, tuple(built), tuple(rebuilt), meta, meta_patched=meta_root is not None)
+
+
+def _build_meta_root(
+    root: EnvRoot, aiter: Path, site: Path, server_has: Mapping[str, str], read_blob: Callable[[str], bytes]
+) -> Path:
+    """Mirror the image's meta directory into ``site`` with the patched ``csrc`` and ``hsa`` laid over it.
+
+    The server must read this copy, so a server that inherits a meta directory of its own is refused: it would build the
+    image's sources and call them the candidate's. The image's own ``aiter`` directory is left out, since aiter puts the
+    meta directory first on its import path, where a second ``aiter`` would shadow the package of the farm.
+    """
+    inherited = server_has.get(AITER_META_DIR_ENV)
+    if inherited:
+        raise FarmError(
+            f"{root.id}: the server inherits {AITER_META_DIR_ENV}={inherited!r}, which it would read instead of the "
+            "patched csrc and hsa; the test cannot be measured with it set"
+        )
+    shadowing = next((entry.path for entry in root.entries if entry.path.split("/")[0] == AITER_PACKAGE), None)
+    if shadowing is not None:
+        raise FarmError(f"{root.id}: {shadowing} would put a second {AITER_PACKAGE} package ahead of the farm's")
+    target = site / root.import_name
+    _build_root(root, _checked_aiter_meta(root, aiter), target, read_blob, left_out=frozenset({AITER_PACKAGE}))
+    return target
 
 
 def _checked_aiter_meta(root: EnvRoot, base: Path) -> Path:
@@ -298,7 +331,7 @@ def verify_farm(farm: Farm, envs: Mapping[str, Any], *, python: str, cwd: Path) 
         expected = str(farm.site / name)
         if done.returncode != 0 or not found or found[0] != expected:
             raise FarmError(f"{name} would be imported from {found[:1] or done.stderr.strip()[-200:]}, not {expected}")
-    if AITER_PACKAGE in farm.packages:
+    if AITER_PACKAGE in farm.packages or farm.meta_patched:
         _verify_aiter_meta(farm, envs)
 
 
@@ -309,6 +342,11 @@ def _verify_aiter_meta(farm: Farm, envs: Mapping[str, Any]) -> None:
     if named is None and farm.aiter_meta is None:
         return
     value = str(named or "")
+    if farm.meta_patched and value != str(farm.aiter_meta):
+        raise FarmError(
+            f"the patched csrc and hsa are in the farm's meta directory {farm.aiter_meta}, but the server would be told "
+            f"{AITER_META_DIR_ENV}={value!r} and would build the image's sources"
+        )
     if not value or not (Path(value) / AITER_META_MARKER_DIR).is_dir():
         raise FarmError(
             f"the rebuilt aiter would be told {AITER_META_DIR_ENV}={value!r}, which holds no {AITER_META_MARKER_DIR}: "

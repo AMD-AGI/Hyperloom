@@ -22,7 +22,16 @@ from pathlib import Path
 import yaml
 
 from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
-from hyperloom.measure.farm import Farm, FarmError, locate_package, server_environment, server_python
+from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_WHEEL_DIR
+from hyperloom.measure.farm import (
+    Farm,
+    FarmError,
+    image_aiter_meta,
+    locate_package,
+    patches_aiter_sources,
+    server_environment,
+    server_python,
+)
 from hyperloom.measure.jit.builds import BuildLog, scan_builds, server_logs
 from hyperloom.measure.jit.key import (
     AITER_PACKAGE,
@@ -36,10 +45,20 @@ from hyperloom.measure.jit.key import (
     triton_key,
 )
 from hyperloom.measure.jit_kinds import AITER_CPP, AITER_JIT, TRITON, CacheKind
+from hyperloom.measure.jit.modules import (
+    CONFIG_FILE,
+    SourceTree,
+    Touched,
+    config_path,
+    prebuilt_names,
+    read_config,
+    touched_modules,
+)
 from hyperloom.measure.jit.session import JitCacheSession, KindPlan
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.round_marks import boot_parts
 from hyperloom.measure.runner.hardware import GpuFacts
+from hyperloom.measure.runner.service import RunnerFailure
 from hyperloom.measure.spec import EnvRoot, MeasurementSpec
 
 __all__ = ["JIT_CACHE_ENV", "ColdStart", "Surroundings", "build_session", "cold_start"]
@@ -50,6 +69,11 @@ _TABLE_PREFIX = "AITER_CONFIG_"
 _PYTHONPATH, _FRAMEWORK_PYTHON = "PYTHONPATH", "HYPERLOOM_FRAMEWORK_PYTHON"
 _DIGEST_CHUNK = 1 << 20
 _DIRECTORY = "dir"
+_PREFLIGHT_MISMATCH = "preflight_mismatch"
+_NEEDS_JIT_DIR = (
+    "the patch changes aiter's csrc or hsa, which is measured only by building the modules it touches in the test's own "
+    "aiter JIT directory, and this runner cannot give one: {why}"
+)
 
 
 @dataclass(frozen=True)
@@ -80,13 +104,20 @@ class _Inputs:
 def build_session(
     spec: MeasurementSpec, points: list[Path], farm: Farm | None, gpu: GpuFacts | None, around: Surroundings
 ) -> JitCacheSession | None:
-    """The session of this test, or ``None`` when no cache is configured or none of its kinds can be used."""
+    """The session of this test, or ``None`` when no cache is configured or none of its kinds can be used.
+
+    A test that patches aiter's ``csrc`` or ``hsa`` cannot run without the aiter kind: the image's prebuilt modules would
+    be what runs. It is refused (``preflight_mismatch``) when this runner cannot give the test its own JIT directory.
+    """
+    needs_jit_dir = patches_aiter_sources(spec.environment.roots)
     root = around.environ.get(JIT_CACHE_ENV, "").strip()
-    if not root:
-        return None
     arch = (gpu.gfx_arch if gpu else None) or gfx_arch_for_gpu_type(spec.hardware.gpu_type)
-    if arch is None:
-        around.notes.append("jit cache: the GPU architecture is not known, so the compiled-code cache is not used")
+    if not root or arch is None:
+        why = f"{JIT_CACHE_ENV} is not set" if not root else "the GPU architecture is not known"
+        if needs_jit_dir:
+            raise RunnerFailure(_PREFLIGHT_MISMATCH, _NEEDS_JIT_DIR.format(why=why))
+        if root:
+            around.notes.append("jit cache: the GPU architecture is not known, so the compiled-code cache is not used")
         return None
     config = yaml.safe_load(points[0].read_text(encoding="utf-8")) or {}
     declared = {str(name): str(value) for name, value in server_environment(config).items()}
@@ -96,11 +127,20 @@ def build_session(
     machine = Machine(spec.image.digest, arch, spec.hardware.gpu_type, spec.hardware.partition_mode)
     inputs = _Inputs(spec, machine, environment, sheet, farm, server_python(config, default="python3"), around)
     plans, disabled = _plans(inputs)
+    if needs_jit_dir:
+        _require_jit_dir(plans, disabled, environment)
     if not plans and not disabled:
         return None
     return JitCacheSession(
         DirJitStore(Path(root)), plans, private_root=around.private_root, staging=around.staging, disabled=disabled
     )
+
+
+def _require_jit_dir(plans: list[KindPlan], disabled: Mapping[str, str], environment: Mapping[str, str]) -> None:
+    """Refuse unless the aiter kind has a plan, or the test rebuilds every module itself (``AITER_REBUILD``)."""
+    if any(plan.kind is AITER_JIT for plan in plans) or build_surface((), environment, {}).rebuild:
+        return
+    raise RunnerFailure(_PREFLIGHT_MISMATCH, _NEEDS_JIT_DIR.format(why=disabled.get(AITER_JIT.name, "it has no plan")))
 
 
 def _plans(inputs: _Inputs) -> tuple[list[KindPlan], dict[str, str]]:
@@ -143,7 +183,8 @@ def _aiter_plans(inputs: _Inputs, kinds: list[CacheKind]) -> list[KindPlan] | st
         return "aiter cannot be imported by the server's interpreter"
     farm = inputs.farm
     effective = farm.site / AITER_PACKAGE if farm is not None and AITER_PACKAGE in farm.packages else base
-    names = scan_env_names([effective, base])
+    meta_dirs = [farm.aiter_meta] if farm is not None and farm.meta_patched and farm.aiter_meta else []
+    names = scan_env_names([effective, base], meta_dirs)
     if not names:
         return "no aiter build path was found in the package"
     environment = _build_environment(inputs.environment, farm)
@@ -154,16 +195,52 @@ def _aiter_plans(inputs: _Inputs, kinds: list[CacheKind]) -> list[KindPlan] | st
     key = aiter_key(inputs.machine, tree.identity, surface)
     uncovered = tree.uncovered or _directory_attachments(inputs.spec)
     read_only = "the test carries patched code that the key of aiter's caches does not cover" if uncovered else None
-    return [KindPlan(kind, key, effective / "jit" if kind is AITER_JIT else None, read_only) for kind in kinds]
+    touched = _touched(inputs, base, effective)
+    if isinstance(touched, str):
+        return touched
+    return [
+        KindPlan(
+            kind,
+            key,
+            effective / "jit" if kind is AITER_JIT else None,
+            read_only,
+            touched.names if kind is AITER_JIT else frozenset(),
+        )
+        for kind in kinds
+    ]
+
+
+def _touched(inputs: _Inputs, base: Path, effective: Path) -> Touched | str:
+    """The prebuilt modules the sheet's patch to aiter's sources makes stale, or why that cannot be told."""
+    roots = inputs.spec.environment.roots
+    patched = [entry.path for root in roots if root.import_name == AITER_META_WHEEL_DIR for entry in root.entries]
+    config_patched = any(
+        entry.path == f"jit/{CONFIG_FILE}"
+        for root in roots
+        if root.import_name == AITER_PACKAGE
+        for entry in root.entries
+    )
+    if not patched and not config_patched:
+        return Touched()
+    farm = inputs.farm
+    meta = farm.aiter_meta if farm is not None and farm.aiter_meta else image_aiter_meta(base)
+    try:
+        before, after = read_config(config_path(base)), read_config(config_path(effective))
+    except (OSError, ValueError) as exc:
+        return f"the module config of aiter cannot be read ({type(exc).__name__}), so which modules the patch touches is not known"
+    return touched_modules(before, after, SourceTree(meta), patched, prebuilt_names(base))
 
 
 def _build_environment(environment: Mapping[str, str], farm: Farm | None) -> dict[str, str]:
-    """The server's environment with the farm's own place on ``PYTHONPATH`` left out: a path of this test's own is no input."""
+    """The server's environment with the places of the test's own farm left out, its place on ``PYTHONPATH`` and its copy
+    of the meta directory: a path of this test's own is no input (the patched tree is, and the key holds that)."""
     result = dict(environment)
     if farm is not None and _PYTHONPATH in result:
         parts = [part for part in result.pop(_PYTHONPATH).split(os.pathsep) if part and part != str(farm.site)]
         if parts:
             result[_PYTHONPATH] = os.pathsep.join(parts)
+    if farm is not None and farm.meta_patched and result.get(AITER_META_DIR_ENV) == str(farm.aiter_meta):
+        del result[AITER_META_DIR_ENV]
     return result
 
 
@@ -198,9 +275,11 @@ class _Tree:
 def _tree(inputs: _Inputs, names: frozenset[str]) -> _Tree:
     environment = inputs.spec.environment
     aiter_roots = [root for root in environment.roots if root.import_name == AITER_PACKAGE]
+    meta_roots = [root for root in environment.roots if root.import_name == AITER_META_WHEEL_DIR]
     overlay = [(e.path, e.op, e.blob or "", e.mode or "") for root in aiter_roots for e in root.entries]
+    overlay += [(root.id, e.path, e.op, e.blob or "", e.mode or "") for root in meta_roots for e in root.entries]
     runtime = environment.runtime.manifest_sha256 if environment.runtime is not None else None
-    others = [root for root in environment.roots if root.import_name != AITER_PACKAGE]
+    others = [root for root in environment.roots if root.import_name not in (AITER_PACKAGE, AITER_META_WHEEL_DIR)]
     touching, uncovered = _framework_patches(others, names, inputs.around.read_blob)
     return _Tree(tree_identity(overlay, runtime, touching), uncovered)
 

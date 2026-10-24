@@ -141,6 +141,7 @@ _PROBE = textwrap.dedent(
     from hyperloom.common import env_safety, failure_signature, visible_devices
     from hyperloom.measure import compile as compiled
     from hyperloom.measure import agentx_requests, eval_context, farm, hosted_spec, local, log_causes, points, surface
+    from hyperloom.measure.jit import modules as jit_modules
     from hyperloom.measure.framework import base as framework_base
     from hyperloom.measure.runner import run
     from hyperloom.sandbox import card_occupancy, templates
@@ -181,8 +182,8 @@ _PROBE = textwrap.dedent(
             farm.AITER_META_DIR_ENV,
             farm.AITER_META_MARKER_DIR,
             farm.AITER_META_WHEEL_DIR,
-            farm.AITER_INSTALL_MODE_FILE,
-            farm.AITER_DEVELOP_MODE,
+            jit_modules.AITER_INSTALL_MODE_FILE,
+            jit_modules.AITER_DEVELOP_MODE,
         ],
         "tuner": kernel_tune.AITER_META_MARKER_DIR,
         "relnorm": tune_rows._rel_norm(
@@ -309,7 +310,7 @@ def test_aiperf_export_names_are_read_from_the_owner(probe: dict[str, Any]) -> N
 
 
 def test_aiter_meta_directory_names_are_read_from_the_owner(probe: dict[str, Any]) -> None:
-    """The farm names the variable, the directories and the install mode it resolves, and the tuner's refusal the marker."""
+    """The farm names the variable and the directories, the module reader the install mode it resolves, and the tuner's refusal the marker."""
     assert probe["meta"] == [
         "AITER_META_DIR_ENV",
         "AITER_META_MARKER_DIR",

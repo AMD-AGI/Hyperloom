@@ -36,8 +36,13 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal, NamedTuple, Protocol, TypeVar
 
-from hyperloom.common.outside_facts import SGLANG_IMAGE_WORKSPACE, TUNABLEOP_TABLE_ENV, component_layouts
-from hyperloom.common.outside_facts.component_layout import PACKAGE_BASE, ComponentLayoutSpec, LayoutSection
+from hyperloom.common.outside_facts import (
+    AITER_META_WHEEL_DIR,
+    SGLANG_IMAGE_WORKSPACE,
+    TUNABLEOP_TABLE_ENV,
+    component_layouts,
+)
+from hyperloom.common.outside_facts.component_layout import META_BASE, PACKAGE_BASE, ComponentLayoutSpec, LayoutSection
 from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.contracts.recipe import (
     DIGEST_PREFIX,
@@ -50,6 +55,17 @@ from hyperloom.contracts.recipe import (
     apply,
 )
 from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
+from hyperloom.measure.jit.modules import (
+    CONFIG_FILE,
+    ESTIMATED_MODULE_SECONDS,
+    MAX_REBUILD_SECONDS,
+    SourceTree,
+    config_path,
+    image_aiter_meta,
+    prebuilt_names,
+    read_config,
+    touched_modules,
+)
 from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
 
 ATTACH_PLACEHOLDER = "${HL_ATTACH:%s}"
@@ -79,6 +95,7 @@ _MODE_LINE = re.compile(r"^(?:(?:new file|deleted file|old|new) mode|index [0-9a
 _SYMLINK_MODE = "120000"
 _PACKAGE_DIST_DIRS = ("site-packages", "dist-packages")
 _GIT_APPLY_TIMEOUT_SEC = 120
+_UPSERT = "upsert"
 
 
 class CompileError(RecipeError):
@@ -95,6 +112,10 @@ class BaseImageMismatchError(CompileError):
 
 class UnsupportedComponentError(CompileError):
     """A component has no package in the image that a runner could take as the base of its patches."""
+
+
+class TooManyModulesError(CompileError):
+    """A patch stack touches so many of aiter's modules that its first test would spend most of its time compiling."""
 
 
 class BlobError(CompileError):
@@ -253,7 +274,7 @@ class EnvEntry:
 
     def to_document(self) -> dict[str, object]:
         document: dict[str, object] = {"path": self.path, "op": self.op}
-        if self.op == "upsert":
+        if self.op == _UPSERT:
             document.update(blob=f"{DIGEST_PREFIX}{self.blob}", mode=self.mode)
         return document
 
@@ -475,7 +496,7 @@ def _entries(
             data = new.read_bytes()
             if old.is_file() and old.read_bytes() == data and _mode(old) == _mode(new):
                 continue
-            found.append(EnvEntry(rel, "upsert", blobs.put(data), _mode(new)))
+            found.append(EnvEntry(rel, _UPSERT, blobs.put(data), _mode(new)))
         elif old.is_file():
             found.append(EnvEntry(rel, "delete"))
     return {base: tuple(found) for base, found in entries.items()}
@@ -500,13 +521,76 @@ def _apply_stack(
         return _entries(bases, tree, staged, blobs)
 
 
+#: The id suffix of a root over a base other than the package: ``aiter.meta`` is the root of aiter's meta directory.
+_ROOT_SUFFIX = {META_BASE: ".meta"}
+
+
+def apply_component_stack(
+    component: ComponentPatches, layout: ComponentLayout, bases: Mapping[str, PackageBase], blobs: BlobStore
+) -> tuple[EnvRoot, ...]:
+    """Lay the component's patches over copies of the files they touch; each root is what ended up different in one base.
+
+    The package root comes first and is always there; a root over another base is there when a patch changed it.
+    """
+
+    entries = _apply_stack(component, layout, bases, blobs)
+    package = bases[PACKAGE_BASE]
+    package_entries = entries.get(PACKAGE_BASE, ())
+    roots = [
+        EnvRoot(component.component, package.import_name, package.dist_name, package.dist_version, package_entries)
+    ]
+    for base, changed in entries.items():
+        if base != PACKAGE_BASE and changed:
+            other = bases[base]
+            root_id = f"{component.component}{_ROOT_SUFFIX[base]}"
+            roots.append(EnvRoot(root_id, other.import_name, other.dist_name, other.dist_version, changed))
+    return tuple(roots)
+
+
+def _patched_config(entries: tuple[EnvEntry, ...], blobs: BlobStore) -> dict | None:
+    """The module config the stack leaves, when it changes it; ``ValueError`` when it deletes or breaks it."""
+    for entry in entries:
+        if entry.path == f"jit/{CONFIG_FILE}":
+            if entry.op != _UPSERT:
+                raise ValueError("the patch deletes the module config")
+            return read_config(blobs.get(entry.blob or ""))
+    return None
+
+
+def refuse_costly_rebuild(roots: tuple[EnvRoot, ...], bases: Mapping[str, PackageBase], blobs: BlobStore) -> None:
+    """Refuse a stack that touches so many of aiter's modules that their first build would not fit the time given to it.
+
+    The modules are the prebuilt ones the patch leaves stale (:func:`~hyperloom.measure.jit.modules.touched_modules`); the
+    first test of the stack builds them on its card, when its server calls them.
+    """
+    package, meta = bases[PACKAGE_BASE], bases[META_BASE]
+    by_id = {root.import_name: root for root in roots}
+    meta_entries = by_id[meta.import_name].entries if meta.import_name in by_id else ()
+    try:
+        before = read_config(config_path(package.path))
+        after = _patched_config(by_id[package.import_name].entries, blobs) or before
+    except (OSError, ValueError) as exc:
+        raise PatchApplyError(f"cannot tell which of aiter's modules the patch touches: {exc}") from exc
+    if not meta_entries and after == before:
+        return
+    overlay = {entry.path: blobs.get(entry.blob or "") if entry.op == _UPSERT else None for entry in meta_entries}
+    found = touched_modules(before, after, SourceTree(meta.path, overlay), overlay, prebuilt_names(package.path))
+    seconds = len(found.rebuilt) * ESTIMATED_MODULE_SECONDS
+    if seconds > MAX_REBUILD_SECONDS:
+        examples = ", ".join(sorted(found.rebuilt)[:5])
+        raise TooManyModulesError(
+            f"the patch touches {len(found.rebuilt)} of aiter's prebuilt modules (for example {examples}), which take about "
+            f"{seconds} s to build again on the first test's card; more than {MAX_REBUILD_SECONDS} s is refused. "
+            "Change fewer modules at a time: a header that many modules include touches all of them"
+        )
+
+
 def apply_patch_stack(
     component: ComponentPatches, layout: ComponentLayout, base: PackageBase, blobs: BlobStore
 ) -> EnvRoot:
     """Lay the component's patches over a copy of the files they touch; the root is what ended up different."""
 
-    entries = _apply_stack(component, layout, {PACKAGE_BASE: base}, blobs)
-    return EnvRoot(component.component, base.import_name, base.dist_name, base.dist_version, entries[PACKAGE_BASE])
+    return apply_component_stack(component, layout, {PACKAGE_BASE: base}, blobs)[0]
 
 
 def _decode(data: bytes, name: str) -> str:
@@ -614,7 +698,7 @@ class EnvironmentCompiler:
     def _compile(self, recipe: Recipe, action: RecipeDelta) -> CompiledEnvironment:
         check_base_image(recipe, self.active_image_digest)
         target = apply(recipe, action)
-        roots = tuple(self._root(component) for component in target.components if component.patches)
+        roots = tuple(root for component in target.components if component.patches for root in self._roots(component))
         attachments, envs = kernel_attachments(target.kernels, target.launch.envs, self.blobs)
         return CompiledEnvironment(
             recipe=target,
@@ -625,13 +709,22 @@ class EnvironmentCompiler:
             blob_root=self.blobs.root,
         )
 
-    def _root(self, component: ComponentPatches) -> EnvRoot:
+    def _roots(self, component: ComponentPatches) -> tuple[EnvRoot, ...]:
         layout = self.layouts.get(component.component)
         if layout is None:
             raise UnsupportedComponentError(
                 f"{component.component} has no package layout; its patches cannot be applied"
             )
-        return apply_patch_stack(component, layout, self.locator(layout), self.blobs)
+        package = self.locator(layout)
+        bases = {PACKAGE_BASE: package}
+        if any(section.base == META_BASE for section in layout.spec.sections):
+            bases[META_BASE] = PackageBase(
+                AITER_META_WHEEL_DIR, image_aiter_meta(package.path), package.dist_name, package.dist_version
+            )
+        roots = apply_component_stack(component, layout, bases, self.blobs)
+        if META_BASE in bases:
+            refuse_costly_rebuild(roots, bases, self.blobs)
+        return roots
 
 
 def compile_environment(
@@ -663,7 +756,9 @@ __all__ = [
     "LocalBlobStore",
     "PackageBase",
     "PatchApplyError",
+    "TooManyModulesError",
     "UnsupportedComponentError",
+    "apply_component_stack",
     "apply_patch_stack",
     "attachment_placeholder",
     "check_base_image",

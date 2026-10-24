@@ -953,6 +953,21 @@ def test_an_environment_that_cannot_be_rebuilt_is_refused_with_the_reason(grid, 
     assert grid.calls == []
 
 
+def test_a_patch_to_aiters_csrc_is_refused_where_no_jit_session_keeps_the_images_modules_out(
+    grid, tmp_path, installed_framework
+):
+    from hyperloom.measure.tests.test_compile_aiter_meta import aiter_image, compile_aiter_environment
+
+    compiled = compile_aiter_environment(
+        tmp_path, aiter_image(tmp_path / "aiter-image"), {"csrc/kernels/m0.cu": "// x\n"}
+    )
+    point = _point_with_python(tmp_path, installed_framework[0])
+
+    with pytest.raises(TestCallRefused, match="changes aiter's csrc or hsa"):
+        _run(_call(tmp_path, point, environment=compiled))
+    assert grid.calls == []
+
+
 # --- profile test -------------------------------------------------------------------------------------------------
 
 

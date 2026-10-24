@@ -74,6 +74,22 @@ def test_a_variable_a_patch_adds_to_the_build_path_is_found_in_the_patched_tree_
     assert "AITER_NEW_BUILD_SWITCH" in scan_env_names([patched, checkout])
 
 
+def test_a_variable_a_patch_adds_to_csrc_or_hsa_is_found_in_the_farms_meta_directory_and_nowhere_else(
+    checkout, tmp_path
+) -> None:
+    """A farm with no rebuilt package keeps its meta directory elsewhere: it is read where it is named."""
+    package = tmp_path / "farm" / "aiter"
+    meta = tmp_path / "meta_copy"
+    _write(package, "jit/core.py", "")
+    _write(meta, "csrc/cpp_itfs/pa/pa.py", 'import os\nX = os.getenv("AITER_PATCHED_CSRC_SWITCH")\n')
+    _write(meta, "hsa/codegen.py", 'import os\nY = os.environ.get("AITER_PATCHED_HSA_SWITCH")\n')
+    _write(meta, "op_tests/test_x.py", 'import os\nZ = os.getenv("AITER_NOT_A_BUILD_INPUT")\n')
+
+    assert scan_env_names([package, checkout], [meta]) >= {"AITER_PATCHED_CSRC_SWITCH", "AITER_PATCHED_HSA_SWITCH"}
+    assert "AITER_PATCHED_CSRC_SWITCH" not in scan_env_names([package, checkout])
+    assert "AITER_NOT_A_BUILD_INPUT" not in scan_env_names([package], [meta])
+
+
 def test_no_build_path_is_no_names(tmp_path) -> None:
     assert scan_env_names([tmp_path / "missing"]) == frozenset()
 

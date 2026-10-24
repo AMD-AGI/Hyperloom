@@ -497,7 +497,7 @@ def test_the_report_is_json_for_close_and_lines_for_people_and_is_written_whole(
     assert document["environment"]["packages"]["vllm"] == {"installed": True, "version": None}
     assert {fact["fact"] for fact in document["facts"]} == set(load_pack(DEFAULT_PACK_PATH).entries)
     lines = report.markdown_lines()
-    assert lines[0].startswith("Image check (warn) of rule pack 13: 11 pass, 1 fail, 31 unverifiable")
+    assert lines[0].startswith("Image check (warn) of rule pack 14: 11 pass, 1 fail, 31 unverifiable")
     assert lines[1] == "- FAIL aiter_merged_view (aiter)"
     assert lines[-1].startswith("- Unverifiable here: python_import_errors, ")
     target = tmp_path / "attached" / "image_check.json"
@@ -575,7 +575,7 @@ def test_the_command_line_prints_the_report_and_exits_one_when_a_fact_fails(
 ) -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
     assert main([], pack=pack, image=_reference_image(tmp_path, _OLD_AITER)) == 0
-    assert capsys.readouterr().out.startswith("Image check (warn) of rule pack 13: 12 pass, 0 fail, 31 unverifiable")
+    assert capsys.readouterr().out.startswith("Image check (warn) of rule pack 14: 12 pass, 0 fail, 31 unverifiable")
 
     other = tmp_path / "other"
     other.mkdir()

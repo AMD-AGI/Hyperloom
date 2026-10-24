@@ -197,8 +197,8 @@ class Rig:
             archive.addfile(member, io.BytesIO(data))
         return {"id": "ext", "kind": "dir", "blob": _blob(run, buffer.getvalue()), "manifest_sha256": "1" * 64}
 
-    def run(self, name: str, make_sheet, *, cache: bool = True, fail: bool = False, extra_env: dict | None = None):
-        """Run one whole test in ``tmp_path/name``; give its manifest, its status and the directory."""
+    def _start(self, name: str, *, cache: bool, fail: bool, extra_env: dict | None) -> tuple[Path, dict]:
+        """The directory of a run and its environment, with the fake grid in place."""
         run = self.tmp_path / name
         run.mkdir()
         key_file = run / "key.pem"
@@ -208,9 +208,21 @@ class Rig:
             environ[JIT_CACHE_ENV] = str(self.store.root)
         self.grid = _CompilingGrid(run, run / "out" / "files", fail=fail)
         self.monkeypatch.setattr(local, "run_grid", self.grid)
+        return run, environ
+
+    def run(self, name: str, make_sheet, *, cache: bool = True, fail: bool = False, extra_env: dict | None = None):
+        """Run one whole test in ``tmp_path/name``; give its manifest, its status and the directory."""
+        run, environ = self._start(name, cache=cache, fail=fail, extra_env=extra_env)
         assert _go(run, environ, make_sheet(run)) == 0
         manifest = ResultManifest.from_bytes((run / "out" / "manifest.json").read_bytes())
         return manifest, json.loads((run / "out" / "status.json").read_text()), run
+
+    def refused(self, name: str, make_sheet, *, cache: bool = True) -> dict:
+        """Run one whole test that the runner refuses before it starts a server; give its status."""
+        run, environ = self._start(name, cache=cache, fail=False, extra_env=None)
+        assert _go(run, environ, make_sheet(run)) != 0
+        assert not (run / "out" / "manifest.json").exists()
+        return json.loads((run / "out" / "status.json").read_text())
 
     def publish(self, run: Path, manifest: ResultManifest) -> int:
         """What the host does after it verified the signed result."""

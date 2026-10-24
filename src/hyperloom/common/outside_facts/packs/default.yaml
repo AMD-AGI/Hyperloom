@@ -20,7 +20,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "13"
+version: "14"
 facts:
   aiter_merged_view:
     kind: names
@@ -859,10 +859,14 @@ facts:
     reason: >-
       aiter's Python package is aiter at the top of its repository and lies over the installed aiter. A compiled module or a
       code object is a build product, which a text patch cannot make; the runtime writes its builds into the directories listed in
-      generated.
+      generated. csrc and hsa lie over aiter's meta directory (AITER_META_DIR), where aiter builds its modules from and reads
+      its code generators and tables: a text change there is measured by building the modules it touches again, while the
+      code objects under hsa (*.co) stay as they are.
     import_name: aiter
     sections:
       - {prefix: aiter, base: package}
+      - {prefix: csrc, base: meta, into: csrc}
+      - {prefix: hsa, base: meta, into: hsa}
     refuse:
       - "*.so"
       - "*.so.*"
@@ -878,9 +882,12 @@ facts:
     examples:
       place:
         - "aiter/ops/mha.py -> package:ops/mha.py"
+        - "csrc/kernels/activation_kernels.cu -> meta:csrc/kernels/activation_kernels.cu"
+        - "hsa/gfx942/pa/pa_bf16.csv -> meta:hsa/gfx942/pa/pa_bf16.csv"
       refuse:
         - "aiter/jit/module_activation.so"
-        - "csrc/kernels/activation_kernels.cu"
+        - "hsa/gfx942/pa/pa_bf16.co"
+        - "3rdparty/composable_kernel/include/ck/ck.hpp"
 
   component_layout_atom:
     kind: component_layout
