@@ -37,6 +37,7 @@ class BranchTask:
     repair: RepairRequest | None = None
     direction: str = ""
     agent: str = ""
+    deadline: float = 0.0
 
 
 class SpecialistLifecycle(Protocol):
@@ -49,7 +50,8 @@ class SpecialistLifecycle(Protocol):
     branch's task, whatever brief a launch is rebuilt with. Its ``direction`` is the text a user wrote for the branch;
     every launch and restart prompt shows it as the branch's task, the way ``repair`` is shown. Its ``agent`` names the
     third-party agent an autonomous branch runs, a git URL (``URL@ref`` for a ref) or a local path, and is empty for a
-    specialist branch. A started branch may
+    specialist branch. Its ``deadline`` is the clock time (``time.time``) EXPLORE ends at, 0 when the branch has none:
+    an agent that signals no keep has its workspace collected ahead of it. A started branch may
     have one test running until ``set_k`` says otherwise, and shrinking a branch to nothing is ``stop``, not
     ``set_k(branch, 0)``. Every process the runtime starts goes through the session's process registry, so the session
     stop kills it even when ``stop`` hangs.

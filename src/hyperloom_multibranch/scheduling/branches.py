@@ -219,7 +219,7 @@ class BranchControl:
         it has one, and a user branch's direction."""
 
         seconds = min(SPECIALIST_START_SECONDS, deadline - self._clock.now())
-        started = await settled(self._clock.wait_for(self._launch(entry, start_commit, launch), seconds))
+        started = await settled(self._clock.wait_for(self._launch(entry, start_commit, deadline, launch), seconds))
         if isinstance(started, BaseException):
             logger.error("the specialist of %s did not start", entry.branch, exc_info=started)
             await self._fail_start(entry, failure_text(started))
@@ -341,7 +341,7 @@ class BranchControl:
     async def push_quota(self) -> None:
         await self._toolbox.set_policy(self._roster.quota_policy())
 
-    async def _launch(self, entry: BranchEntry, start_commit: str, launch: Launch) -> None:
+    async def _launch(self, entry: BranchEntry, start_commit: str, deadline: float, launch: Launch) -> None:
         """Start the specialist unbriefed, as the runtime briefs each launch itself; a ``launch.focus`` is the one the
         session's briefs keep for the branch."""
 
@@ -356,7 +356,7 @@ class BranchControl:
             await self._repo.create_branch(entry.branch, start_commit)
         await self.push_quota()
         self._specialists.add(entry.branch)
-        task = BranchTask(repair=launch.repair, direction=launch.direction, agent=launch.agent)
+        task = BranchTask(repair=launch.repair, direction=launch.direction, agent=launch.agent, deadline=deadline)
         started = await settled(self._lifecycle.start(entry.branch, start_commit, task))
         if isinstance(started, BaseException):
             self._specialists.discard(entry.branch)

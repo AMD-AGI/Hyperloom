@@ -409,6 +409,7 @@ class RecordedSessions:
         self.repairs: dict[str, RepairRequest] = {}
         self.directions: dict[str, list[str]] = {}
         self.agents: dict[str, str] = {}
+        self.deadlines: dict[str, float] = {}
         self.k: dict[str, int] = {}
         self.quota_at_start: dict[str, int | None] = {}
         self.running: set[str] = set()
@@ -426,6 +427,7 @@ class RecordedSessions:
         self.directions.setdefault(branch, []).append(start.task.direction)
         if start.task.agent:
             self.agents.setdefault(branch, start.task.agent)
+            self.deadlines.setdefault(branch, start.task.deadline)
         self.k[branch] = start.k
         self.running.add(branch)
         script = tuple(self._scripts.get(branch, ()))
