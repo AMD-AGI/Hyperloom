@@ -28,11 +28,12 @@ import math
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
-from hyperloom.contracts.recipe import KernelArtifact, KernelKind, LaunchConfig, RecipeDelta, RecipeError
+from hyperloom.contracts.recipe import KernelArtifact, KernelKind, LaunchConfig, PatchRef, RecipeDelta, RecipeError
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, locate_installed_package
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.notebook.records import TestRecord
@@ -170,6 +171,7 @@ class AutonomousSession:
         self._manifest: AgentManifest | None = None
         self._process: AgentProcess | None = None
         self._root = LaunchConfig()
+        self._root_commit = ""
         self._unread = ""
         self._spend_unread = False
         self._spent_at = -math.inf
@@ -195,6 +197,7 @@ class AutonomousSession:
         self._unread = ""
         self._root = (await self._setup.repo.read_recipe(self._start.start_commit)).launch
         watch = KeepWatch.load(self._place.workspace / WATCH_FILE)
+        self._root_commit = watch.root
         spend = self._setup.spend((self._place.workspace.parent, self._held().root), self._place.workspace / SPEND_FILE)
         try:
             while not self._stopped.is_set():
@@ -358,6 +361,8 @@ class AutonomousSession:
                 await self._submit_narrowed(narrowed, head)
         except RecipeError as error:
             await self._note(f"keep {kept.seq} is no recipe change and is skipped: {error}")
+        except WorktreeError as error:
+            await self._note(f"keep {kept.seq} cannot be read against the branch head and is skipped: {error}")
         watch.pending = None
         watch.save(self._place.workspace / WATCH_FILE)
 
@@ -401,7 +406,7 @@ class AutonomousSession:
         repo, component = self._setup.repo, self._setup.component
         recipe = await repo.read_recipe(head)
         root = await repo.read_recipe(self._start.start_commit)
-        stores = KeepStores(repo.store_patch, self._kernel_artifact)
+        stores = KeepStores(repo.store_patch, self._kernel_artifact, partial(self._increment, head))
         delta = await import_delta(kept, root=root, head=recipe, component=component, stores=stores)
         if delta is None or all(item.component != component for item in delta.components):
             return delta
@@ -409,6 +414,14 @@ class AutonomousSession:
             return delta
         upstream = await asyncio.to_thread(self._setup.upstream, component)
         return delta if upstream is None else added_at(delta, recipe, upstream)
+
+    async def _increment(self, head: str, imported: tuple[PatchRef, ...], cumulative: str) -> str:
+        """The patch from the state ``head``'s ``imported`` patches make to the one the keep's ``cumulative`` patch
+        makes, both over the workspace's root."""
+
+        texts = [await self._setup.repo.patch_text(head, ref.path) for ref in imported]
+        worktree, component = self._place.worktree, self._setup.component
+        return await asyncio.to_thread(worktree.diff_between, self._root_commit, texts, cumulative, component)
 
     async def _kernel_artifact(self, env: str, table: str) -> KernelArtifact:
         """The table ``env`` loads, kept in the session's blob store under the target the session bound ``env`` to, or

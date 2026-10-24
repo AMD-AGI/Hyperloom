@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import TestRequest
-from hyperloom.contracts.recipe import ComponentPatches, KernelArtifact, KernelKind, LaunchConfig, Recipe
+from hyperloom.contracts.recipe import ComponentPatches, KernelArtifact, KernelKind, LaunchConfig, Recipe, apply
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, RequestRejected
@@ -330,6 +330,29 @@ async def test_an_agent_s_keeps_are_imported_one_at_a_time_against_the_branch_he
     notices = await rig.notices()
     assert any(note.startswith(f"{NOTICE} keep 2") and "seqs 512" in note for note in notices)
     assert notices[-1] == f"{NOTICE} the agent finished its run"
+
+
+async def test_a_keep_after_one_the_branch_committed_imports_only_its_own_change_on_top(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path)
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    first = rig.toolbox.requests[0]
+    recipe = await rig.repo.read_recipe(first.parent_commit)
+    committed = await rig.repo.commit(BRANCH, first.parent_commit, apply(recipe, first.delta), "keep 1")
+    await rig.toolbox_notebook.write_result(result("r1"))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the second import")
+    await rig.toolbox_notebook.write_result(result("r2"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    last = rig.toolbox.requests[1]
+    assert last.parent_commit == committed
+    assert "-max_num_seqs = 256" in rig.patch(last) and "+max_num_seqs = 512" in rig.patch(last)
+    assert "max_num_seqs = 128" not in rig.patch(last)
+    [change] = last.delta.components
+    assert change.remove_patches == ()
 
 
 async def test_an_import_waits_while_the_last_one_is_measured_or_judged(tmp_path: Path) -> None:

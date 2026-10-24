@@ -6,9 +6,10 @@
 The agent edits a workspace of its own, a checkout of the session's source base at the root, and keeps the server
 arguments and environment it runs with in a file the manifest names. A keep is read as a :class:`KeptChange`: the
 workspace's patch against the root and the agent's whole config, both cumulative. :func:`import_delta` turns it into
-the delta against the branch head, which holds only what MB committed: the head's own import is replaced by the new
-cumulative patch, so a keep the gate rejected is not on the head and comes back inside the next one. A kernel table the
-agent loads from a file of its workspace goes in as a kernel artifact, the text the file held at the keep.
+the delta against the branch head, which holds only what MB committed. Its source goes in as one more patch on the
+head's, the increment from the state the head's imports make to the keep's, so a commit carries only its own change to
+a merge; a keep the gate rejected is not on the head and comes back inside the next increment. A kernel table the agent
+loads from a file of its workspace goes in as a kernel artifact, the text the file held at the keep.
 """
 
 from __future__ import annotations
@@ -35,14 +36,19 @@ from hyperloom_multibranch.specialist.worktree import Upstream
 PatchStore = Callable[[str, str], Awaitable[PatchRef]]
 #: Keeps the kernel table text a variable loads and returns its artifact.
 TableStore = Callable[[str, str], Awaitable[KernelArtifact]]
+#: The patch from the state the head's imported patches make, in order, to the state a keep's cumulative patch makes,
+#: both over the root; empty when they are the same.
+SourceIncrement = Callable[[tuple[PatchRef, ...], str], Awaitable[str]]
 
 
 @dataclass(frozen=True)
 class KeepStores:
-    """Where an import keeps what a keep carries: its patches and its kernel tables."""
+    """Where an import keeps what a keep carries, its patches and its kernel tables, and how it reads the keep's
+    source as an increment over the head's imports."""
 
     patch: PatchStore
     table: TableStore
+    increment: SourceIncrement
 
 
 class KeptChangeError(ValueError):
@@ -106,9 +112,8 @@ async def import_delta(
     artifacts = {
         name: await stores.table(name, kept.tables[value]) for name, value in kept.envs.items() if value in kept.tables
     }
-    change = await _source_change(
-        kept.source_patch, _patches(root, component), _patches(head, component), component, stores.patch
-    )
+    imported = tuple(ref for ref in _patches(head, component) if ref not in _patches(root, component))
+    change = await _source_change(await stores.increment(imported, kept.source_patch), component, stores.patch)
     envs = {name: value for name, value in kept.envs.items() if name not in artifacts}
     config = _config_change(head.launch, replace(kept, envs=envs))
     add, remove = _kernel_change(root.kernels, head.kernels, tuple(artifacts.values()))
@@ -137,18 +142,10 @@ def _patches(recipe: Recipe, component: str) -> tuple[PatchRef, ...]:
     return next((item.patches for item in recipe.components if item.component == component), ())
 
 
-async def _source_change(
-    text: str, root: tuple[PatchRef, ...], head: tuple[PatchRef, ...], component: str, store: PatchStore
-) -> ComponentChange | None:
-    imported = tuple(ref for ref in head if ref not in root)
-    wanted = await store(component, text) if text else None
-    if (wanted,) == imported or (wanted is None and not imported):
+async def _source_change(increment: str, component: str, store: PatchStore) -> ComponentChange | None:
+    if not increment:
         return None
-    return ComponentChange(
-        component,
-        remove_patches=tuple(ref.path for ref in imported),
-        add_patches=() if wanted is None else (wanted,),
-    )
+    return ComponentChange(component, add_patches=(await store(component, increment),))
 
 
 def _kernel_change(
@@ -185,6 +182,7 @@ __all__ = [
     "KeptChange",
     "KeptChangeError",
     "PatchStore",
+    "SourceIncrement",
     "TableStore",
     "added_at",
     "import_delta",

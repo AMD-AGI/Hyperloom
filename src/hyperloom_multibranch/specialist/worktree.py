@@ -201,15 +201,36 @@ class BranchWorktree:
         It is read through an index of its own: whoever edits the worktree (a third-party agent) may be using the
         worktree's index, and a stage there would race its commits.
         """
-        layout = self._layouts.get(component)
-        if layout is None:
-            raise UnsupportedComponentError(f"{component} has no package layout")
-        paths = (layout.upstream_prefix, *_unpatchable(layout.upstream_prefix))
+        prefix = self._prefix(component)
+        paths = (prefix, *_unpatchable(prefix))
         with tempfile.TemporaryDirectory(prefix="mb-diff-") as scratch:
             index = Path(scratch) / "index"
             _git(self.path, "read-tree", commit, index=index)
             _git(self.path, *_STAGE, *paths, index=index)
             return _git(self.path, "diff", "--cached", "--no-color", "--no-ext-diff", commit, "--", *paths, index=index)
+
+    def diff_between(self, commit: str, before: Sequence[str], after: str, component: str) -> str:
+        """The patch that takes ``component``'s files from ``commit`` with the patches ``before`` applied in order to
+        ``commit`` with the patch ``after`` applied, as the patch the toolbox applies; empty when both are the same.
+
+        Both are built in indexes of their own, so the worktree's files and index are left as they are.
+        """
+        prefix = self._prefix(component)
+        with tempfile.TemporaryDirectory(prefix="mb-between-") as scratch:
+            start = self._tree(commit, before, Path(scratch) / "before")
+            end = self._tree(commit, (after,), Path(scratch) / "after")
+            return _git(self.path, "diff", "--no-color", "--no-ext-diff", start, end, "--", prefix)
+
+    def _tree(self, commit: str, patches: Sequence[str], scratch: Path) -> str:
+        """The git tree of ``commit`` with ``patches`` applied in order, written through the index under ``scratch``."""
+        scratch.mkdir()
+        index = scratch / "index"
+        _git(self.path, "read-tree", commit, index=index)
+        for number, patch in enumerate(text for text in patches if text):
+            patch_file = scratch / f"{number:04d}.patch"
+            patch_file.write_text(patch, encoding="utf-8")
+            _git(self.path, "apply", "--cached", "--whitespace=nowarn", str(patch_file), index=index)
+        return _git(self.path, "write-tree", index=index).strip()
 
     def changed(self, component: str) -> Changes:
         """The files the worktree's change to ``component`` writes and deletes against its head."""
@@ -225,11 +246,15 @@ class BranchWorktree:
         _git(self.path, "clean", "-fdx", _QUIET)
 
     def _staged_diff(self, component: str, *options: str) -> str:
+        prefix = self._prefix(component)
+        _git(self.path, *_STAGE, prefix)
+        return _git(self.path, "diff", "--cached", *options, _HEAD, "--", prefix)
+
+    def _prefix(self, component: str) -> str:
         layout = self._layouts.get(component)
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout")
-        _git(self.path, *_STAGE, layout.upstream_prefix)
-        return _git(self.path, "diff", "--cached", *options, _HEAD, "--", layout.upstream_prefix)
+        return layout.upstream_prefix
 
 
 __all__ = [
