@@ -23,9 +23,10 @@ from hyperloom.sandbox.socket import SandboxProvider
 from hyperloom_multibranch.contracts.toolbox import BranchLease, MeasurementCapacity
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
+from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
 from hyperloom_multibranch.toolbox.tools import AsyncTool, ToolJobs
-from hyperloom_multibranch.toolbox.toolbox import RealToolbox, ToolboxStores
+from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox, ToolboxStores
 
 __all__ = [
     "LeaseBook",
@@ -35,6 +36,7 @@ __all__ = [
     "session_stores",
     "session_tools",
     "started_backend",
+    "with_short_prompts",
 ]
 
 #: Where a session's verified bundles, submit log and tool results are, below its directory; every toolbox uses the same.
@@ -105,6 +107,23 @@ def capped_policy(policy: QueuePolicy | None, parallel: int) -> QueuePolicy:
     """``policy`` with its global concurrency lowered to what the cards can run in parallel."""
     base = policy or QueuePolicy()
     return replace(base, global_concurrency=min(base.global_concurrency, parallel))
+
+
+def with_short_prompts(acceptance: AcceptanceSetup, setup: ShortPromptSetup | None) -> AcceptanceSetup:
+    """``acceptance`` that runs the short-prompt check with ``setup``, a builder's option; unchanged when it names none.
+
+    Raises:
+        ValueError: ``acceptance`` already names another prompt set: the set is named once.
+    """
+    held = acceptance.short_prompts
+    if setup is None or setup == held:
+        return acceptance
+    if held is not None:
+        raise ValueError(
+            f"the options name the short-prompt set {setup.prompt_set} and the acceptance setup already names "
+            f"{held.prompt_set}: name it once"
+        )
+    return replace(acceptance, short_prompts=setup)
 
 
 def started_backend(provider: SandboxProvider, config: HostedConfig) -> HostedMeasurementBackend:

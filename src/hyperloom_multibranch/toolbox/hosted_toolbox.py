@@ -16,6 +16,7 @@ import this package) can pass them as keyword arguments.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -46,8 +47,10 @@ from hyperloom_multibranch.toolbox.leased_toolbox import (
     session_stores,
     session_tools,
     started_backend,
+    with_short_prompts,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
+from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, environment_short_prompts
 from hyperloom_multibranch.toolbox.tools import AsyncTool, tracelens_tool
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, ToolboxTuning
 
@@ -178,7 +181,13 @@ class HostedOptions:
     ``tools`` are the asynchronous tools ``start_analysis`` may reach; ``None`` is the hosted set, TraceLens: it reads the
     traces a profile test lands below ``session_dir``. ``kernel_tune`` leases a card of a local pool and the roofline
     profiles on host cards, and the hosted toolbox has neither. ``retry`` is how the service client repeats a control-plane
-    call, ``lease_tuning`` the lifetime and waits of a branch's ``dev`` sandbox.
+    call, ``lease_tuning`` the lifetime and waits of a branch's ``dev`` sandbox. ``short_prompts`` is the staged prompt set
+    of the short-prompt consistency check (``acceptance.short_prompts`` of a builder that names it there says the same and
+    must not differ). The set is staged in the runner cache the runner template mounts, which a host may not read: the
+    option is carried as given (a key or hash that is not well formed is refused) and a runner that does not find that set
+    refuses the test, saying so, before it starts a server. ``None`` takes the key in ``HYPERLOOM_SHORT_PROMPTS`` of the
+    host environment, whose hash is read from the manifest of the entry in this host's own view of the runner cache
+    (``HYPERLOOM_RUNNER_CACHE``) and which refuses the build when it is not staged there; without either no check runs.
     """
 
     policy: QueuePolicy | None = None
@@ -189,6 +198,7 @@ class HostedOptions:
     tools: Sequence[AsyncTool] | None = None
     retry: RetryPolicy = RetryPolicy()
     lease_tuning: LeaseTuning = LeaseTuning()
+    short_prompts: ShortPromptSetup | None = None
 
 
 class HostedToolbox(LeasedToolbox):
@@ -276,6 +286,22 @@ def _parallel_tests(grant: GrantLimits | None, tp: int) -> int:
     return max(1, min(grant.max_gpus // tp, grant.max_sandboxes))
 
 
+def _acceptance_with_prompts(
+    acceptance: AcceptanceSetup, options: HostedOptions, environ: Mapping[str, str]
+) -> AcceptanceSetup:
+    """``acceptance`` with the short-prompt set the options (else the acceptance setup, else ``HYPERLOOM_SHORT_PROMPTS``)
+    name.
+
+    Raises:
+        ShortPromptsNotStaged: The environment names a key that is not staged in this host's view of the runner cache.
+        ValueError: The options and the acceptance setup name different sets.
+    """
+    named = with_short_prompts(acceptance, options.short_prompts)
+    if named.short_prompts is not None:
+        return named
+    return with_short_prompts(named, environment_short_prompts(environ))
+
+
 def build_hosted_toolbox(
     inputs: HostedToolboxInputs,
     notebook: LocalNotebook,
@@ -307,11 +333,14 @@ def build_hosted_toolbox(
         options: Everything else, see :class:`HostedOptions`.
 
     Raises:
-        ValueError: When the templates have no runner template for ``tp`` (or no ``dev`` one, when leases are offered)
-            or the grant cannot run one test.
+        ShortPromptsNotStaged: ``HYPERLOOM_SHORT_PROMPTS`` names a set that is not staged in this host's runner cache; nothing
+            has been started.
+        ValueError: When the templates have no runner template for ``tp`` (or no ``dev`` one, when leases are offered),
+            the grant cannot run one test, or the options and the acceptance setup name different short-prompt sets.
     """
 
     directory = Path(inputs.session_dir)
+    acceptance = _acceptance_with_prompts(acceptance, options, os.environ)
     grant = inputs.grant()
     parallel = _parallel_tests(grant, inputs.tp)
     config = HostedConfig(

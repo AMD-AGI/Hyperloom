@@ -166,7 +166,7 @@ async def test_a_result_kept_beside_a_process_says_so_in_its_facts_and_carries_a
 
 def _runner_envs(tmp_path: Path, options: LocalOptions) -> dict[str, str]:
     session = LocalSession(tmp_path, "run-guard", range(2))
-    provider = local_hosted._provider(session, (0, 1), local_hosted._runner_template(session, options), options, None)
+    provider = local_hosted._provider(session, (0, 1), local_hosted._runner_template(session, options), options, {})
     try:
         return dict(provider._templates["runner-1"].envs)
     finally:
@@ -208,7 +208,7 @@ def test_the_pool_of_the_local_provider_follows_the_guard(tmp_path: Path, guard:
     holders.holders = (INTRUDER,)
     options = LocalOptions(card_guard=guard, card_holders=holders)
     session = LocalSession(tmp_path, "run-pool", range(1))
-    provider = local_hosted._provider(session, (0,), local_hosted._runner_template(session, options), options, None)
+    provider = local_hosted._provider(session, (0,), local_hosted._runner_template(session, options), options, {})
     try:
         if refused:
             with pytest.raises(CardsHeld, match="card 0 by pid 4242"):

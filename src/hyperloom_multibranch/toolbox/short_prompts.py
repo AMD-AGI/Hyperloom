@@ -9,6 +9,11 @@ its purpose is one of the pack's ``always_purposes`` (a baseline, which gives it
 final candidate) or when the request sets ``consistency_check`` (scheduling does on a reverse merge). A caller can add the
 check, never remove one the rule demands. A toolbox given no :class:`ShortPromptSetup` runs no check and refuses nothing.
 
+*Switched on.* A builder gives the toolbox the setup: from its options, or from the host environment's
+``HYPERLOOM_SHORT_PROMPTS`` (the key of the staged entry; :func:`environment_short_prompts`) when it names none. A builder
+whose runners read this host's runner cache reads what it is given there first (:func:`staged_short_prompts`); a set that
+is asked for and not staged is refused, never run without.
+
 *What against.* The outputs of the test's own fresh server processes are compared with each other and with the parent's
 outputs from the parent's own run, which :class:`ReferenceStore` keeps by recipe digest. A parent with no stored outputs is
 a reference that is ``absent`` and counts nothing, never a clean one.
@@ -24,7 +29,7 @@ import json
 import os
 import re
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -56,19 +61,29 @@ from hyperloom.measure.short_prompts.plan import (
     ShortPromptPlan,
     miss_probability,
 )
+from hyperloom.measure.short_prompts.prompts import PromptSetError
+from hyperloom.measure.short_prompts.resolve import staged_entry, verified_entry
+from hyperloom.measure.short_prompts.staging import StagedEntry
 
 __all__ = [
+    "SHORT_PROMPTS_ENV",
     "ReferenceAbsent",
     "ReferenceStore",
     "ShortPromptRules",
     "ShortPromptSetup",
+    "ShortPromptsNotStaged",
     "consistency_of",
     "decide",
+    "environment_short_prompts",
     "record_reference",
     "rederive",
     "short_prompt_rules",
+    "staged_short_prompts",
     "touch_lines",
 ]
+
+#: The host environment variable that names the staged prompt set (its key) when a builder is given no setup.
+SHORT_PROMPTS_ENV = "HYPERLOOM_SHORT_PROMPTS"
 
 _UNSET = "(unset)"
 _MAX_LINE_CHARS = 200
@@ -83,10 +98,64 @@ _SHA_DIGITS = 16
 @dataclass(frozen=True)
 class ShortPromptSetup:
     """The staged prompt set a deployment's checks use (``measure.short_prompts.build`` makes it): its key and the SHA-256
-    of its prompts file. A toolbox that is given none does not run the check."""
+    of its prompts file. A toolbox that is given none does not run the check.
+
+    Raises:
+        ValueError: The key is not a plain name or the hash is not a SHA-256; a setup that no sheet could carry is refused
+            here, not at the first test that would have run the check.
+    """
 
     prompt_set: str
     prompts_sha256: str
+
+    def __post_init__(self) -> None:
+        ShortPromptPlan(self.prompt_set, self.prompts_sha256)
+
+
+class ShortPromptsNotStaged(ValueError):
+    """The check was asked for with a prompt set that is not staged where the runners read it; the message says why."""
+
+
+def _setup_of(asked: str, read: Callable[[], StagedEntry]) -> ShortPromptSetup:
+    """The setup of the entry ``read`` finds; a refusal says what was asked for and why it cannot be used."""
+    try:
+        entry = read()
+    except PromptSetError as exc:
+        raise ShortPromptsNotStaged(
+            f"the short-prompt consistency check is asked for with {asked}, which is not staged in the runner cache: {exc}"
+        ) from exc
+    return ShortPromptSetup(entry.key, entry.prompts_sha256)
+
+
+def environment_short_prompts(environ: Mapping[str, str]) -> ShortPromptSetup | None:
+    """The setup ``HYPERLOOM_SHORT_PROMPTS`` names in ``environ``, or ``None`` when it names none (a blank value names none).
+
+    The variable is the key of an entry in the runner cache ``environ`` names; the entry's own manifest says its hash, and
+    the entry is read as a runner reads it before it is accepted.
+
+    Raises:
+        ShortPromptsNotStaged: A key is named and its entry is not staged there, is unfinished or is not what its manifest
+            recorded.
+    """
+    key = environ.get(SHORT_PROMPTS_ENV, "").strip()
+    return _setup_of(f"{SHORT_PROMPTS_ENV}={key}", lambda: staged_entry(key, environ)) if key else None
+
+
+def staged_short_prompts(named: ShortPromptSetup | None, environ: Mapping[str, str]) -> ShortPromptSetup | None:
+    """The setup a toolbox whose runners read the runner cache ``environ`` names runs the check with, or ``None`` for none.
+
+    ``named`` is the setup the builder was given, read in that cache as a runner reads it before it is accepted; without
+    one, the environment's (:func:`environment_short_prompts`). Asking for the check never ends as a toolbox that quietly
+    runs none.
+
+    Raises:
+        ShortPromptsNotStaged: The set is asked for and is not staged there, is unfinished or is not the one named.
+    """
+    if named is None:
+        return environment_short_prompts(environ)
+    return _setup_of(
+        f"prompt set {named.prompt_set}", lambda: verified_entry(named.prompt_set, named.prompts_sha256, environ)
+    )
 
 
 @dataclass(frozen=True)

@@ -11,6 +11,11 @@ The shared compiled-code cache (design 4.21) is off unless a directory is named:
 ``HYPERLOOM_JIT_STORE`` environment variable of the host process when the option is not given (a command line that
 builds the toolbox with the default options is switched on by exporting it). Tests then read the directory's verified snapshots before their
 server starts, and what an accepted test compiled is published to it by this host.
+
+The short-prompt consistency check is off the same way: ``LocalOptions.short_prompts``, or the key named by
+``HYPERLOOM_SHORT_PROMPTS`` in the host environment when the option is not given. The set is read in the runner cache of
+this host (``HYPERLOOM_RUNNER_CACHE``, where ``python -m hyperloom.measure.short_prompts.build`` staged it) before the
+toolbox is built, and the runners are told that directory; one that is not staged there refuses the build.
 """
 
 from __future__ import annotations
@@ -36,6 +41,8 @@ from hyperloom.measure.framework.base import DEFAULT_CONFIGS, framework_envs
 from hyperloom.measure.local_templates import local_runner_template
 from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
+from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
+from hyperloom.measure.short_prompts.staging import cache_root
 from hyperloom.sandbox.card_occupancy import CARD_GUARD_ENV, CardGuard, CardReading, card_guard, read_holders
 from hyperloom.sandbox.gated_pool import GatedPool
 from hyperloom.sandbox.gpu_pool import GpuPool
@@ -52,8 +59,10 @@ from hyperloom_multibranch.toolbox.leased_toolbox import (
     session_stores,
     session_tools,
     started_backend,
+    with_short_prompts,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
+from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, staged_short_prompts
 from hyperloom_multibranch.toolbox.tools import AsyncTool, kernel_tune_tool, tracelens_tool
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, ToolboxTuning
 
@@ -219,7 +228,12 @@ class LocalOptions:
     (kept and recorded) or enforced (the test refused and retried, the card not handed out); ``None`` takes
     ``HYPERLOOM_CARD_GUARD`` of the host environment, and without it the guard only observes. The runners get the same
     setting. ``card_holders`` says who holds some cards, which the pool asks before it hands a card out: the kernel's list
-    of the machine unless a test of this module says otherwise.
+    of the machine unless a test of this module says otherwise. ``short_prompts`` is the staged prompt set of the
+    short-prompt consistency check (``acceptance.short_prompts`` of a builder that names it there says the same and must
+    not differ); ``None`` takes the key in ``HYPERLOOM_SHORT_PROMPTS`` of the host environment, and without either no
+    check runs. It is read in this host's runner cache (``HYPERLOOM_RUNNER_CACHE``, ``/runner-cache`` when unset) and
+    the build refuses one that is not staged there; the runners read the same directory (``HYPERLOOM_RUNNER_CACHE`` in
+    their template, which therefore wins over the same name in ``runner_envs``), the branches' sandboxes are not told.
     """
 
     policy: QueuePolicy | None = None
@@ -234,6 +248,7 @@ class LocalOptions:
     jit_store: Path | None = None
     card_guard: CardGuard | None = None
     card_holders: Callable[[Sequence[int]], CardReading] = read_holders
+    short_prompts: ShortPromptSetup | None = None
 
 
 def card_guard_of(options: LocalOptions, environ: Mapping[str, str] | None = None) -> CardGuard:
@@ -264,20 +279,31 @@ def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTempl
     return replace(template, envs={**template.envs, **pack})
 
 
+def _shared_dirs(
+    jit_store: Path | None, short_prompts: ShortPromptSetup | None, environ: Mapping[str, str]
+) -> dict[str, str]:
+    """The host directories the runners are told, by the variable each reads, for the shared stores that are on: the
+    compiled-code cache, and the runner cache the short-prompt set is read from (made absolute: a runner starts elsewhere)."""
+    named = {
+        JIT_CACHE_ENV: jit_store,
+        RUNNER_CACHE_ENV: None if short_prompts is None else cache_root(environ).expanduser().resolve(),
+    }
+    return {name: str(path) for name, path in named.items() if path is not None}
+
+
 def _provider(
     session: LocalSession,
     cards: tuple[int, ...],
     template: LocalTemplate,
     options: LocalOptions,
-    jit_store: Path | None,
+    shared_dirs: Mapping[str, str],
 ) -> LocalSandboxProvider:
-    """The provider whose runner template also carries the session's framework tables, the card guard and, when on, the
-    cache's directory: none is part of the environment the branches' own sandboxes get. Its cards are handed out, to a
-    test's sandbox and to a lease alike, under the same guard."""
+    """The provider whose runner template also carries the session's framework tables, the card guard and the directories
+    of the shared stores that are on: none is part of the environment the branches' own sandboxes get. Its cards are
+    handed out, to a test's sandbox and to a lease alike, under the same guard."""
     framework = framework_envs(Path(session.session_dir) / _FRAMEWORK, options.framework_configs)
-    cache = {} if jit_store is None else {JIT_CACHE_ENV: str(jit_store)}
     guard = {CARD_GUARD_ENV: card_guard_of(options).value}
-    template = replace(template, envs={**template.envs, **framework, **cache, **guard})
+    template = replace(template, envs={**template.envs, **framework, **shared_dirs, **guard})
     provider = LocalSandboxProvider(
         [template], gpus=cards, base_dir=Path(session.session_dir) / _SANDBOXES, hostname=session.hostname
     )
@@ -301,6 +327,20 @@ def _accepting_local_kinds(acceptance: AcceptanceSetup) -> AcceptanceSetup:
     return replace(acceptance, supported_kinds=SUPPORTED_KINDS)
 
 
+def _acceptance_with_prompts(
+    acceptance: AcceptanceSetup, options: LocalOptions, environ: Mapping[str, str]
+) -> AcceptanceSetup:
+    """``acceptance`` with the short-prompt set the options (else the acceptance setup, else ``HYPERLOOM_SHORT_PROMPTS``)
+    name, read in this host's runner cache: the runners read the same files.
+
+    Raises:
+        ShortPromptsNotStaged: A set is asked for and is not staged there.
+        ValueError: The options and the acceptance setup name different sets.
+    """
+    named = with_short_prompts(acceptance, options.short_prompts).short_prompts
+    return replace(acceptance, short_prompts=staged_short_prompts(named, environ))
+
+
 def build_local_toolbox(
     session: LocalSession,
     notebook: LocalNotebook,
@@ -320,11 +360,17 @@ def build_local_toolbox(
             and the campaign's workload, see :class:`~hyperloom_multibranch.toolbox.toolbox.AcceptanceSetup`.
         spec: What the instruction sheet needs besides the call: image, GPU type, commits, blob store.
         options: Everything else, see :class:`LocalOptions`.
+
+    Raises:
+        ShortPromptsNotStaged: The short-prompt check is asked for (the option or ``HYPERLOOM_SHORT_PROMPTS``) and its
+            set is not staged in this host's runner cache; nothing has been started.
+        ValueError: The options and the acceptance setup name different short-prompt sets.
     """
 
     directory, cards, tp = Path(session.session_dir), tuple(session.cards), session.tp
     parallel = max_parallel_tests(len(cards), tp)
     jit_root = jit_store_root(options)
+    acceptance = _acceptance_with_prompts(acceptance, options, os.environ)
     config = HostedConfig(
         session_dir=directory,
         run_id=session.run_id,
@@ -337,7 +383,8 @@ def build_local_toolbox(
         jit_store=None if jit_root is None else DirJitStore(jit_root),
     )
     template = _runner_template(session, options)
-    provider = _provider(session, cards, template, options, jit_root)
+    shared_dirs = _shared_dirs(jit_root, acceptance.short_prompts, os.environ)
+    provider = _provider(session, cards, template, options, shared_dirs)
     backend = started_backend(provider, config)
     leases = BranchLeases(provider, directory / _BRANCH_SANDBOXES, tp, template.envs)
     executor = HostedExecutor(
