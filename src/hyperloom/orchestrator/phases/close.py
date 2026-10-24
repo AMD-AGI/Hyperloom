@@ -24,7 +24,7 @@ from . import machine_state as _phase_state
 from .machine import Transition
 from ..bus.message_bus import Message
 from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
-from ..state.task_registry import IllegalTransition, Task, TaskNotFound
+from ..state.task_registry import IllegalTransition, Task, TaskNotFound, TaskSpec
 from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
@@ -594,13 +594,15 @@ class ClosePhase(CoordinatorCollaborator):
         task: Task | None = None
         for key in (idempotency_key, f"{idempotency_key}-{_RETRY_KEY_SUFFIX}"):
             task, was_existing = await self.tasks.create_or_return_existing(
-                kind=kind,
-                params=params,
-                idempotency_key=key,
-                requires_lanes=[],
-                side_effects=["writes_results"],
-                lease_ttl_sec=120,
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind=kind,
+                    params=params,
+                    idempotency_key=key,
+                    requires_lanes=[],
+                    side_effects=["writes_results"],
+                    lease_ttl_sec=120,
+                    dispatch_class="coordinator",
+                )
             )
             if not was_existing:
                 return task
@@ -926,16 +928,18 @@ class ClosePhase(CoordinatorCollaborator):
         idempotency_key = f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
         task_id = ""
         task, _existing = await self.tasks.create_or_return_existing(
-            kind="report",
-            params={
-                "session_dir": str(self.session_dir),
-                "max_highlights": 50,
-            },
-            idempotency_key=idempotency_key,
-            requires_lanes=[],
-            side_effects=["writes_results"],
-            lease_ttl_sec=120,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="report",
+                params={
+                    "session_dir": str(self.session_dir),
+                    "max_highlights": 50,
+                },
+                idempotency_key=idempotency_key,
+                requires_lanes=[],
+                side_effects=["writes_results"],
+                lease_ttl_sec=120,
+                dispatch_class="coordinator",
+            )
         )
         task_id = task.task_id
         self.shared_state.closing_report_task_id = task_id

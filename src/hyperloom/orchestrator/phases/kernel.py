@@ -62,7 +62,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
 )
 from ..state.analysis_failures import analysis_skip_reason, remembered_trace_failure
 from ..state.shared_state import resolve_graded_comparison
-from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound
+from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound, TaskSpec
 from ..bus.message_bus import Message
 from ..kernel.geak_config import (
     _geak_accepted_kernel_specs,
@@ -986,12 +986,14 @@ class KernelPhase(CoordinatorCollaborator):
         attempt = 0
         while True:
             task, was_existing = await self.tasks.create_or_return_existing(
-                kind="kernel_agent",
-                params={"from_phase": str(tr.from_phase or "")},
-                idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind="kernel_agent",
+                    params={"from_phase": str(tr.from_phase or "")},
+                    idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
+                    requires_lanes=lanes,
+                    lease_ttl_sec=ttl,
+                    dispatch_class="coordinator",
+                )
             )
             if not (was_existing and task.state in TERMINAL_STATES):
                 break

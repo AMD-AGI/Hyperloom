@@ -50,7 +50,7 @@ from ..actions.executors._launch_restatement import config_launch_restated_by
 from ..actions.executors.baseline import _revert_warm_patch_state, revert_warm_kernel_patches
 from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
 from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
-from ..state.task_registry import Task
+from ..state.task_registry import Task, TaskSpec
 from ..loop.time_budget import (
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,
@@ -1383,12 +1383,14 @@ class PreludePhase(CoordinatorCollaborator):
         try:
             lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("replay_warm_recipe")
             task, was_existing = await self.tasks.create_or_return_existing(
-                kind="replay_warm_recipe",
-                params=params,
-                idempotency_key="warm-replay-prelude",
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind="replay_warm_recipe",
+                    params=params,
+                    idempotency_key="warm-replay-prelude",
+                    requires_lanes=lanes,
+                    lease_ttl_sec=ttl,
+                    dispatch_class="coordinator",
+                )
             )
         except Exception as exc:
             rollback = self._unwind_warm_kernel_half(overlay)
@@ -2448,15 +2450,17 @@ class PreludePhase(CoordinatorCollaborator):
         kind = self.internal_analysis_kind()
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(kind)
         task, was_existing = await self.tasks.create_or_return_existing(
-            kind=kind,
-            params=params,
-            idempotency_key=(
-                f"internal-analysis-{reason}{idem_scope}"
-                f"{self._coord.dispatcher.cycle_idem_suffix()}{self._analysis_attempt_suffix(kind)}"
-            ),
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind=kind,
+                params=params,
+                idempotency_key=(
+                    f"internal-analysis-{reason}{idem_scope}"
+                    f"{self._coord.dispatcher.cycle_idem_suffix()}{self._analysis_attempt_suffix(kind)}"
+                ),
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
+            )
         )
         if was_existing:
             log.info(
