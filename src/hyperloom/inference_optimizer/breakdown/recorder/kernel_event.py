@@ -77,6 +77,7 @@ from .kernel_records import (
     SOURCE_KERNEL_REWRITE,
     GeakRebenchAttempt,
     IntegrateVerdict,
+    KernelExit,
     KernelReprofile,
     KernelRewriteRun,
     LaneRunFields,
@@ -1350,17 +1351,7 @@ class KernelEventRecorder:
 
     # ---- conclusion ------------------------------------------------------
 
-    def finish(
-        self,
-        *,
-        exit_reason: str = "",
-        failed: bool = False,
-        tput_after: Any = None,
-        cumulative_gain_validated_out: Any = None,
-        stack_depth_out: Any = None,
-        stack_added: Any = None,
-        stack_removed: Any = None,
-    ) -> None:
+    def finish(self, exit_facts: KernelExit = KernelExit(), *, failed: bool = False) -> None:
         """Record the exit facts, assemble the event and close it.
 
         The phase states what it measured on the way out, not how the visit
@@ -1383,16 +1374,7 @@ class KernelEventRecorder:
                 "end_time": end_time,
                 "duration_sec": round(time.monotonic() - self._t0, 3),
                 "closed_status": STATUS_FAILED if failed else "",
-                "outcome": {
-                    "exit_reason": _text(exit_reason),
-                    "tput_after": _float_or_none(tput_after),
-                    "cumulative_gain_validated_out": _float_or_none(cumulative_gain_validated_out),
-                    "stack_depth_out": _int_or_none(stack_depth_out),
-                    "stack_delta": {
-                        "added": [_as_dict(row) for row in _as_list(stack_added)],
-                        "removed": [_as_dict(row) for row in _as_list(stack_removed)],
-                    },
-                },
+                "outcome": exit_facts.outcome(),
             },
         )
         # Both families of sections: an inline roofline recorded its rows into this event, and assembly needs them to
@@ -1469,7 +1451,7 @@ class KernelEventRecorder:
                 )
             },
         )
-        self.finish(exit_reason=str(stage or ""), failed=True)
+        self.finish(KernelExit(exit_reason=str(stage or "")), failed=True)
 
     def finish_crashed(self, exc: BaseException) -> None:
         """Close an event whose phase raised instead of returning."""

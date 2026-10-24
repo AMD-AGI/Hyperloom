@@ -42,6 +42,7 @@ __all__ = [
     "SOURCE_KERNEL_REWRITE",
     "GeakRebenchAttempt",
     "IntegrateVerdict",
+    "KernelExit",
     "KernelReprofile",
     "KernelRewriteRun",
     "LaneRunFields",
@@ -162,6 +163,31 @@ class KernelReprofile:
             "snapshot_landed": bool(self.snapshot_landed),
             "snapshot_id_before": _int_or_none(self.snapshot_id_before),
             "snapshot_id_after": _int_or_none(self.snapshot_id_after),
+        }
+
+
+@dataclass(frozen=True)
+class KernelExit:
+    """What a KERNEL visit measured on its way out."""
+
+    exit_reason: str = ""
+    tput_after: Any = None
+    cumulative_gain_validated_out: Any = None
+    stack_depth_out: Any = None
+    stack_added: Any = None
+    stack_removed: Any = None
+
+    def outcome(self) -> dict[str, Any]:
+        """The ``outcome`` block these exit facts persist as."""
+        return {
+            "exit_reason": _text(self.exit_reason),
+            "tput_after": _float_or_none(self.tput_after),
+            "cumulative_gain_validated_out": _float_or_none(self.cumulative_gain_validated_out),
+            "stack_depth_out": _int_or_none(self.stack_depth_out),
+            "stack_delta": {
+                "added": [_as_dict(row) for row in _as_list(self.stack_added)],
+                "removed": [_as_dict(row) for row in _as_list(self.stack_removed)],
+            },
         }
 
 

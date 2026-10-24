@@ -20,6 +20,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     IntegrateVerdict,
+    KernelExit,
     KernelRewriteRun,
     LaneRunFields,
 )
@@ -82,7 +83,7 @@ def _geak_visit(*, rebench: str | None, specs: list[dict[str, Any]]):
             decision=rebench,
             status="settled",
         )
-    recorder.finish(tput_after=950.0)
+    recorder.finish(KernelExit(tput_after=950.0))
 
 
 def test_a_session_with_no_kernel_visit_skips_every_lane(tmp_path: Path) -> None:
@@ -124,7 +125,7 @@ def test_forge_candidates_carry_the_verdict_that_settled_them(tmp_path: Path) ->
     record_integrate_verdict(
         macro_cycle=0, verdict=IntegrateVerdict(integration_id="int-1", kernel_id="k001", decision="KEEP", gain_pct=3.5)
     )
-    recorder.finish(tput_after=1035.0)
+    recorder.finish(KernelExit(tput_after=1035.0))
 
     out = build_kernel_optimization_summary(_state(top15=[_top("k001", "fused_moe", 30.0)]), tmp_path)
 
@@ -189,7 +190,7 @@ def test_an_acceptance_no_rebench_ruled_on_is_unvalidated(tmp_path: Path) -> Non
 def test_gemm_tuning_counts_in_its_own_lane(tmp_path: Path) -> None:
     recorder = _forge_visit()
     recorder.record_gemm_tuning_run(run_id="gemm-c0", status="ok", micro_decision="REVERT", tuner="hipblaslt")
-    recorder.finish(tput_after=1000.0)
+    recorder.finish(KernelExit(tput_after=1000.0))
 
     out = build_kernel_optimization_summary(_state(), tmp_path)
 
@@ -202,7 +203,7 @@ def test_candidates_from_every_visit_are_counted(tmp_path: Path) -> None:
     for cycle in (0, 1):
         recorder = _forge_visit(cycle)
         _rewrite(recorder, f"a-{cycle}", f"k00{cycle}", decision="REVERT")
-        recorder.finish(tput_after=1000.0)
+        recorder.finish(KernelExit(tput_after=1000.0))
 
     out = build_kernel_optimization_summary(_state(), tmp_path)
 
@@ -219,7 +220,7 @@ def test_a_visit_still_in_flight_contributes_no_candidates(tmp_path: Path) -> No
 def test_a_recipe_id_joins_the_trace_row_by_operator_name(tmp_path: Path) -> None:
     recorder = _forge_visit()
     _rewrite(recorder, "a-1", "kernel:forge-loop:fused_moe:sglang:0.5.17:triton:mi355x", decision="KEEP")
-    recorder.finish(tput_after=1000.0)
+    recorder.finish(KernelExit(tput_after=1000.0))
 
     out = build_kernel_optimization_summary(_state(top15=[_top("k004", "FusedMoeKernel", 22.0)]), tmp_path)
 
@@ -230,7 +231,7 @@ def test_a_recipe_id_joins_the_trace_row_by_operator_name(tmp_path: Path) -> Non
 def test_the_hottest_kernel_nothing_was_adopted_for_is_the_missed_opportunity(tmp_path: Path) -> None:
     recorder = _forge_visit()
     _rewrite(recorder, "a-1", "k001", decision="KEEP")
-    recorder.finish(tput_after=1000.0)
+    recorder.finish(KernelExit(tput_after=1000.0))
     top15 = [_top("k001", "fused_moe", 40.0), _top("k002", "rms_norm", 12.0, efficiency=8.0)]
 
     out = build_kernel_optimization_summary(_state(top15=top15), tmp_path)

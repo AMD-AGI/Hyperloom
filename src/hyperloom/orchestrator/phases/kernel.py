@@ -45,6 +45,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     IntegrateVerdict,
+    KernelExit,
     KernelReprofile,
 )
 from ..actions.stop_attribution import stopped_by_the_run_class
@@ -936,12 +937,14 @@ class KernelPhase(CoordinatorCollaborator):
             stack_added = [item for item in stack_after if item not in stack_before]
             stack_removed = [item for item in stack_before if item not in stack_after]
         recorder.finish(
-            exit_reason=exit_reason,
-            tput_after=state.current_best.get("tput"),
-            cumulative_gain_validated_out=state.cumulative_gain_validated or None,
-            stack_depth_out=state.cumulative_gain_validated_stack_len or None,
-            stack_added=stack_added,
-            stack_removed=stack_removed,
+            KernelExit(
+                exit_reason=exit_reason,
+                tput_after=state.current_best.get("tput"),
+                cumulative_gain_validated_out=state.cumulative_gain_validated or None,
+                stack_depth_out=state.cumulative_gain_validated_stack_len or None,
+                stack_added=stack_added,
+                stack_removed=stack_removed,
+            )
         )
 
     async def on_enter_kernel(self, tr: "Transition") -> None:
