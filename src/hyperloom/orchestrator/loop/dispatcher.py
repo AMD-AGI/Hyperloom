@@ -41,6 +41,7 @@ from ..policy.gate import (
     PolicyDenied,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
+from ..policy.projection import serving_tp_for_policy
 from ..policy.specialist_in_flight import specialist_in_flight_denial
 from ..bus.gpu_pool import (
     GPU_LEASE_TTL_GRACE,
@@ -601,7 +602,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         if ray_serving_priority_enabled() and serving_slot_busy():
             # Serving is active — keep the task queued rather than piling onto the contended GPU.
             return None
-        serving_tp = self.resolve_serving_tp()
+        serving_tp = serving_tp_for_policy(self.shared_state)
         gpu_pool = self.framework_gpu_pool
         if not uses_whole_machine_gpu_lane(params):
             gpu_pool = self.gpu_specialist_pool
@@ -968,19 +969,6 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             limit_wall_budget_extension(task.task_id, None if ceiling is None else ceiling.at - stop.at)
             context.update(specialist_deadline=stop, specialist_progress_cb=self._specialist_progress_publisher(task))
         return context
-
-    def resolve_serving_tp(self) -> int:
-        """Resolve the live serving process's TP size (cards it holds).
-
-        Used for the serving-disjoint specialist pool (B1) and as the default
-        ``gpu_count`` for TP-coupled GPU specialists (B2). Reads the
-        resume-safe ``shared_state.tp``. Returns ``0`` when unset (the
-        legacy whole-pool / single-card behaviour).
-
-        Returns:
-            int: The serving TP size, or ``0`` when unknown.
-        """
-        return int(self.shared_state.tp or 0)
 
     def gpu_lease_ttl_sec(
         self,

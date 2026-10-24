@@ -50,6 +50,7 @@ from ..bus.message_bus import MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
 from ..policy.custom_specialist import skips_reactor_turn
 from ..policy.gate import PolicyGate
+from ..policy.projection import serving_tp_for_policy
 from ..state.round_store import RoundStore
 from ..bus.gpu_pool import (
     SpecialistGpuPool,
@@ -260,7 +261,7 @@ class Coordinator:
             self.db,
             gpu_ids=resolve_gpu_specialist_devices(
                 int(self.shared_state.gpu_specialist_capacity or 0),
-                serving_tp=self.dispatcher.resolve_serving_tp(),
+                serving_tp=serving_tp_for_policy(self.shared_state),
             ),
         )
         # Whole-node pool for enablement and bench specialists.

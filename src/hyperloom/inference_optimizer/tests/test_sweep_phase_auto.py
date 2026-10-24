@@ -1264,6 +1264,7 @@ class _SweepPhaseState:
 
     def __init__(self, phase_history=None):
         self.phase_history = list(phase_history or [])
+        self.tp = 0
 
 
 def _sweep_phase_row(*, auto_sweep_task_id: str = "") -> dict:
