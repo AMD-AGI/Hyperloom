@@ -615,15 +615,14 @@ def _parse_tuner_stdout(stdout: str, stderr: str) -> list[dict[str, Any]]:
                     }
                 )
                 continue
-            pre = float(pre_tok)
             results.append(
                 {
                     "M": int(t.group(1)),
                     "N": int(t.group(2)),
                     "K": int(t.group(3)),
-                    "default_us": pre,
+                    "default_us": float(pre_tok),
                     "tuned_us": post,
-                    "speedup": round(pre / post, 4) if post > 0 else 1.0,
+                    "speedup": round(float(pre_tok) / post, 4) if post > 0 else 1.0,
                     "improved": action == "UPDATE" or in_would_update,
                     "below_update_bar": action == "<",  # "< 3.0% improve"; not post-mismatch or post-error
                 }
