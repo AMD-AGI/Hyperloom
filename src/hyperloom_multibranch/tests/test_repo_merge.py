@@ -3,6 +3,7 @@
 
 import difflib
 import hashlib
+import os
 import subprocess
 from collections.abc import Collection
 from dataclasses import replace
@@ -54,6 +55,8 @@ from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import (
 )
 
 IMAGE = "rocm/vllm@sha256:" + "c" * 64
+#: A commit made outside the repository's own code, which sets its identity itself, on a host with no git identity.
+IDENTITY = {"NAME": "test", "EMAIL": "test@hyperloom.invalid"}
 VLLM = "https://github.com/vllm-project/vllm"
 TRITON = "https://github.com/triton-lang/triton"
 PIN, MOVED, ELSEWHERE = "1" * 40, "2" * 40, "3" * 40
@@ -815,7 +818,8 @@ async def test_a_criss_cross_history_does_not_merge(tmp_path, rooted):
     git = ["git", "--git-dir", str(tmp_path / "experiments.git")]
     tree = subprocess.run([*git, "rev-parse", f"{head}^{{tree}}"], capture_output=True, text=True, check=True)
     argv = [*git, "commit-tree", "-p", right, "-p", left, "-m", "crossed", tree.stdout.strip()]
-    crossed = subprocess.run(argv, capture_output=True, text=True, check=True).stdout.strip()
+    who = {f"GIT_{role}_{field}": value for role in ("AUTHOR", "COMMITTER") for field, value in IDENTITY.items()}
+    crossed = subprocess.run(argv, capture_output=True, text=True, check=True, env={**os.environ, **who}).stdout.strip()
 
     with pytest.raises(RecipeError, match="merge bases") as raised:
         await repo.merge(crossed, head)
