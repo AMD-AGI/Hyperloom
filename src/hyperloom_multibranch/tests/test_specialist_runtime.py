@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
+import logging
 import itertools
 import json
 
@@ -22,6 +23,7 @@ from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.exhausted import EXHAUSTED_PREFIX
 from hyperloom_multibranch.specialist.judging import NOTICE, Judging
+import hyperloom_multibranch.specialist.runtime as runtime_module
 from hyperloom_multibranch.specialist.runtime import (
     MAX_LOSS_RESTARTS,
     MAX_RESTARTS,
@@ -435,6 +437,22 @@ async def test_a_stop_its_caller_gave_up_waiting_for_is_confirmed_by_the_next_st
     await runtime.stop(BRANCH)
 
     assert runs.started[0].stopped.is_set() and runs.released == [BRANCH]
+
+
+async def test_a_slow_stop_is_logged_with_the_time_each_of_its_steps_took(session, monkeypatch, caplog):
+    monkeypatch.setattr(runtime_module, "SLOW_STOP_SECONDS", 0.05)
+    runs = _Runs()
+    runs.stops_after = asyncio.Event()
+    runtime = session.runtime(runs)
+    await runtime.start(BRANCH, await session.repo.head(BRANCH), BranchTask(agent="https://example.com/agent.git"))
+    await _until(lambda: _true(len(runs.started) == 1), "the run")
+
+    asyncio.get_running_loop().call_later(0.2, runs.stops_after.set)
+    with caplog.at_level(logging.WARNING, logger=runtime_module.__name__):
+        await runtime.stop(BRANCH)
+
+    [slow] = [record.getMessage() for record in caplog.records if "stop of s1 took" in record.getMessage()]
+    assert "session stop" in slow and "supervisor" in slow and "release" in slow
 
 
 async def test_a_branch_whose_preflight_failed_gives_back_what_it_holds_when_it_stops(session):

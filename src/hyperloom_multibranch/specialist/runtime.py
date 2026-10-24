@@ -51,6 +51,9 @@ from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, JudgeN
 logger = logging.getLogger(__name__)
 
 MAX_RESTARTS = 3
+#: A stop that takes this long is logged step by step: half of what the scheduler waits for one before it counts it
+#: as failed (``SPECIALIST_CALL_SECONDS``).
+SLOW_STOP_SECONDS = 30.0
 RESTART_WINDOW_S = 600.0
 MAX_LOSS_RESTARTS = 2
 MAX_IDLE_SESSIONS = 2
@@ -137,6 +140,26 @@ class RuntimePacing:
     claim_ttl_seconds: float = 600.0
     clock: Callable[[], float] = time.monotonic
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+
+
+class _StepTimes:
+    """How long each step of a stop took, logged when the whole stop took :data:`SLOW_STOP_SECONDS` or more."""
+
+    def __init__(self) -> None:
+        self._seconds: dict[str, float] = {}
+
+    async def __call__(self, step: str, awaitable: Awaitable[object]) -> None:
+        started = time.monotonic()
+        try:
+            await awaitable
+        finally:
+            self._seconds[step] = time.monotonic() - started
+
+    def report_if_slow(self, branch: str) -> None:
+        total = sum(self._seconds.values())
+        if total >= SLOW_STOP_SECONDS:
+            steps = ", ".join(f"{step} {seconds:.1f} s" for step, seconds in self._seconds.items())
+            logger.warning("the stop of %s took %.1f s: %s", branch, total, steps)
 
 
 @dataclass
@@ -259,17 +282,19 @@ class SpecialistRuntime:
         self._branches.pop(state.name, None)
 
     async def _stop_steps(self, state: _Branch) -> None:
+        timed = _StepTimes()
         supervisor, *others = state.tasks
         supervisor.cancel()
-        await asyncio.gather(supervisor, return_exceptions=True)
+        await timed("supervisor", asyncio.gather(supervisor, return_exceptions=True))
         if state.session is not None:
-            await state.session.stop()
+            await timed("session stop", state.session.stop())
         for task in others:
             task.cancel()
-        await asyncio.gather(*others, return_exceptions=True)
+        await timed("judge and claims", asyncio.gather(*others, return_exceptions=True))
         if state.last is not None:
-            await state.last.release()
-        await self._learn_exhausted(state)
+            await timed("release", state.last.release())
+        await timed("learn", self._learn_exhausted(state))
+        timed.report_if_slow(state.name)
 
     async def _supervise(self, state: _Branch) -> None:
         restarts = _Restarts()
