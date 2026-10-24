@@ -151,6 +151,8 @@ _WARMUP = "warmup"
 _MEASURED_ENVS = {ENV_RUN_EVAL: "false"}
 #: What ``run_grid`` writes on a point whose warmup round it discarded, with the throughput of that round.
 _WARMUP_DISCARDED = "run_grid_warmup_discarded_first"
+#: What a test that failed records in place of the short-prompt check it would have run.
+_CHECK_SKIPPED = "short_prompt_check skipped: test failed"
 _WARMUP_TPUT = "warmup_round_tput"
 
 
@@ -649,14 +651,25 @@ def _runner_of(call: TestCall) -> Callable[[_Run], Awaitable[None]]:
 
 
 def _then_short_prompts(rounds: Callable[[_Run], Awaitable[None]]) -> Callable[[_Run], Awaitable[None]]:
-    """``rounds``, then the short-prompt check when every round of the test ran clean."""
+    """``rounds``, then the short-prompt check when the test ran clean; a test that failed spends no time on it."""
 
     async def run_all(run: _Run) -> None:
         await rounds(run)
-        if run.stopped_rc is None and run.results and not any(_is_failure(result) for _, result in run.results):
+        if run.stopped_rc is None and run.results and not _test_failed(run):
             await _short_prompts(run)
+        else:
+            run.notes.append(_CHECK_SKIPPED)
 
     return run_all
+
+
+def _test_failed(run: _Run) -> bool:
+    """Whether a round of the test failed: by its status, or by the return code of a part of it (a benchmark that served
+    its whole protocol keeps its status when its evaluation fails, so the evaluation's return code says it)."""
+    return any(
+        _is_failure(result) or any(r.returncode != 0 for r in _rounds(run, point, result))
+        for point, result in run.results
+    )
 
 
 def _is_failure(result: VariantResult) -> bool:

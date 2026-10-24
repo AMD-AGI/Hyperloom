@@ -34,6 +34,9 @@ from hyperloom.measure.tests.test_local_backend import BOOT_ENVS, _call, _Grid, 
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
 
 
+SKIPPED = "short_prompt_check skipped: test failed"
+
+
 class _Servers:
     """The servers of the check: one real HTTP server per boot-only round, defective in the launches in ``defective``."""
 
@@ -179,6 +182,39 @@ def test_a_test_whose_round_failed_runs_no_check(monkeypatch, tmp_path, cache):
 
     assert len(grid.calls) == 1 and outcome.returncode == 1
     assert not (tmp_path / "out" / SHORT_PROMPTS_DIR).exists()
+    assert SKIPPED in outcome.stderr, "the test says why the check did not run"
+
+
+def test_a_test_whose_evaluation_failed_runs_no_check_although_its_round_kept_its_status(monkeypatch, tmp_path, cache):
+    """A benchmark that served its whole protocol is ``succeeded`` when only its accuracy evaluation fails: the evaluation's
+    return code is what says the test failed, and a test that failed spends no time on six more servers."""
+    grid = _grid(monkeypatch, tmp_path)
+    result = grid.result("test", returncode=0)
+    (Path(result.workspace) / "eval_returncode").write_text("3\n", encoding="utf-8")
+    grid.answers["test"] = result
+    call = _call(
+        tmp_path,
+        _point(tmp_path, "acc", run_eval="true"),
+        accuracy=True,
+        kind="accuracy",
+        short_prompts=staged_plan(cache),
+        result_dir=str(tmp_path / "out" / "results"),
+    )
+
+    outcome = LocalMeasurementBackend().run_test(call)
+
+    assert [kwargs["grid"][0].name for kwargs in grid.calls] == ["test"], "no server of the check was started"
+    assert outcome.returncode == 3 and SKIPPED in outcome.stderr
+    assert not (tmp_path / "out" / SHORT_PROMPTS_DIR).exists()
+    assert grid.servers.started == []
+
+
+def test_a_test_that_ran_clean_records_no_skip(monkeypatch, tmp_path, cache):
+    _grid(monkeypatch, tmp_path)
+
+    outcome = _run(tmp_path, cache)
+
+    assert SKIPPED not in outcome.stderr
 
 
 def test_a_process_whose_server_does_not_boot_is_recorded_and_the_test_still_succeeds(monkeypatch, tmp_path, cache):
