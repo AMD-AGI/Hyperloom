@@ -8,7 +8,7 @@ import logging as _logging
 import time
 from ..actions.executors._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS
 from ..actions.executors.benchmark_result import is_valid_measurement
-from ..phases.machine_state import record_lifecycle_event
+from ..phases.machine_state import LifecycleMark, record_lifecycle_event
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from ..state.task_registry import Task
 from ._baseline_failures import BaselineFailureMixin
@@ -81,11 +81,13 @@ class WritebackCollaborator(
         """
         record_lifecycle_event(
             self.shared_state,
-            step=step,
-            status=status,
-            artifacts=artifacts,
-            detail=detail,
-            duration_s=duration_s,
+            LifecycleMark(
+                step=step,
+                status=status,
+                artifacts=artifacts,
+                detail=detail,
+                duration_s=duration_s,
+            ),
         )
         terminal = status in ("END", "ERROR")
         now = time.monotonic()

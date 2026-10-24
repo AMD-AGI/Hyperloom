@@ -879,7 +879,10 @@ class ClosePhase(CoordinatorCollaborator):
         )
         machine.fire_phase_exit(Transition(from_phase=prior, to_phase=target, reason=reason, evidence=evidence))
         _phase_state.record_lifecycle_event(
-            state, step=target, status=_phase_state.LIFECYCLE_STATUS_ENTER, phase=target, detail=f"reason={reason}"
+            state,
+            _phase_state.LifecycleMark(
+                step=target, status=_phase_state.LIFECYCLE_STATUS_ENTER, phase=target, detail=f"reason={reason}"
+            ),
         )
         state.save(self.session_dir)
         return prior

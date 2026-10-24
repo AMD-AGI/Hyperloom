@@ -340,10 +340,12 @@ class MachinePhase(CoordinatorCollaborator):
         # marker, not a START/END interval).
         _phase_state.record_lifecycle_event(
             state,
-            step=move.to_phase,
-            status=_phase_state.LIFECYCLE_STATUS_ENTER,
-            phase=move.to_phase,
-            detail=f"reason={move.reason}" if move.reason else "",
+            _phase_state.LifecycleMark(
+                step=move.to_phase,
+                status=_phase_state.LIFECYCLE_STATUS_ENTER,
+                phase=move.to_phase,
+                detail=f"reason={move.reason}" if move.reason else "",
+            ),
         )
         # The in-memory phase has already moved, so a failed save is raised only after the entry has run.
         save_error: OSError | None = None
