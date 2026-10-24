@@ -33,7 +33,7 @@ from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
 )
-from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
     _default_grid_for_framework,
@@ -321,7 +321,7 @@ def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
         f"{ {'mem_fraction_static': 0.9, 'max_running_requests': 512, 'dp_size': 8}!r}\n",
         encoding="utf-8",
     )
-    evidence = build_launch_evidence(config_path=config, actual_server_log=str(log), framework="sglang", slot=tmp_path)
+    evidence = build_launch_evidence(RequestedLaunch(config, "sglang"), actual_server_log=str(log), slot=tmp_path)
     assert evidence["observed_server_launch_flags"] == ""
     assert evidence["observed_server_config"]["max_running_requests"] == 512
     # The env is stamped from the recipe; the argv key holds the launch command, not an env value.
@@ -367,7 +367,7 @@ def test_a_setting_the_engine_rewrote_is_not_already_in_effect(tmp_path):
         f"[2026-09-18 19:11:50] server_args={record!r}\n",
         encoding="utf-8",
     )
-    evidence = build_launch_evidence(config_path=config, actual_server_log=str(log), framework="sglang", slot=tmp_path)
+    evidence = build_launch_evidence(RequestedLaunch(config, "sglang"), actual_server_log=str(log), slot=tmp_path)
     assert evidence["engine_adjusted_settings"] == {"chunked_prefill_size": {"requested": "65536", "resolved": "8192"}}
 
     for engine_report in (evidence["engine_adjusted_settings"], {}):

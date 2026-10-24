@@ -65,7 +65,7 @@ from ..stop_attribution import (
 )
 from . import _server_lifecycle as _lifecycle
 from ._aiter_jit import is_aiter_jit_registry_mismatch
-from ._launch_evidence import build_launch_evidence, persist_launch_evidence
+from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_launch_evidence
 
 # The grid module is the namespace the helpers both benching arms share ended up in: how a sentinel returncode reads
 # back, how a round's cap is clamped to the budget, how the two session bounds are resolved, and the hygiene every
@@ -532,10 +532,7 @@ def _attach_baseline_launch_evidence(
         result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
         return
     evidence = build_launch_evidence(
-        config_path=config_path,
-        actual_server_log=actual_log,
-        framework=framework,
-        slot=output_dir,
+        RequestedLaunch(config_path, framework), actual_server_log=actual_log, slot=output_dir
     )
     result["launch_evidence"] = evidence
     result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)

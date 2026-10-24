@@ -38,7 +38,7 @@ from ._gpu_power import (
     read_measured_gpu_power_by_gpu,
 )
 from ._subprocess_kill import _LogCursor
-from ._launch_evidence import build_launch_evidence, persist_launch_evidence
+from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_launch_evidence
 from ._workload_envs import GEAK_METRIC_OUTPUT
 
 log = logging.getLogger(__name__)
@@ -260,15 +260,14 @@ def _sweep_point_env(plan: _ReplayPlan, out_dir: Path, *, conc: int, isl: int, o
 
 def _launch_evidence_fields(plan: _ReplayPlan, out_dir: Path) -> dict[str, Any]:
     actual_log = _geak_replay_server_log(out_dir)
-    evidence = build_launch_evidence(
-        config_path=plan.script,
-        actual_server_log=actual_log,
-        framework=plan.serving_env["BACKEND"],
-        slot=out_dir,
-        requested_server_args=plan.flags,
-        requested_server_env=plan.accepted_env,
+    requested = RequestedLaunch(
+        plan.script,
+        plan.serving_env["BACKEND"],
+        server_args=plan.flags,
+        server_env=plan.accepted_env,
         model_path=plan.serving_env["MODEL"],
     )
+    evidence = build_launch_evidence(requested, actual_server_log=actual_log, slot=out_dir)
     return {
         "server_log_path": actual_log or "",
         "launch_evidence": evidence,

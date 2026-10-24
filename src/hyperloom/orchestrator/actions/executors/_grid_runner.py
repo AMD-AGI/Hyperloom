@@ -64,7 +64,7 @@ from .benchmark_result import (
 from ._gpu_metrics import write_gpu_metrics_from_report
 from .benchmark_backend import build_benchmark_command
 from .benchmark_config import prepare_benchmark_runtime
-from ._launch_evidence import build_launch_evidence, persist_launch_evidence
+from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_launch_evidence
 from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, refuse_unpinned_speculative_change
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
@@ -1766,9 +1766,8 @@ def _attach_grid_launch_evidence(
             evidence = native_launch_evidence(measurement, config_path, actual_server_log=actual_log)
         else:
             evidence = build_launch_evidence(
-                config_path=config_path,
+                RequestedLaunch(config_path, os.environ.get("FRAMEWORK", "")),
                 actual_server_log=actual_log,
-                framework=os.environ.get("FRAMEWORK", ""),
                 slot=slot,
                 caller_reused_ready_server=caller_reused_ready_server,
             )
