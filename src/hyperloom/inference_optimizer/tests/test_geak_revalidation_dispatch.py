@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant
-from hyperloom.orchestrator.actions.executors._proposal_identity import effective_fingerprint
+from hyperloom.orchestrator.actions.executors._proposal_identity import BaseControls, effective_fingerprint
 from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
 from hyperloom.orchestrator.actions.executors._subprocess_kill import REAP_MARK_ENV, run_with_session_kill
 from hyperloom.orchestrator.phases import machine_state as ps
@@ -423,9 +423,11 @@ async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
     assert task.params["expected_cfg_hash"] == effective_fingerprint(
         ran.extra_server_args,
         ran.extra_envs,
-        base_remove_args=controls.get("remove_args"),
-        base_unset_envs=controls.get("unset_envs"),
-        base_args_mode=controls.get("args_mode"),
+        base=BaseControls(
+            remove_args=controls.get("remove_args"),
+            unset_envs=controls.get("unset_envs"),
+            args_mode=controls.get("args_mode"),
+        ),
     )
 
 

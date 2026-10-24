@@ -62,7 +62,7 @@ from ._accuracy_gate import (
 )
 from . import _framework_switch_manifest as _switch_manifest
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
-from ._proposal_identity import effective_fingerprint, normalize_proposal
+from ._proposal_identity import BaseControls, effective_fingerprint, normalize_proposal
 from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import (
     TS_FAILED,
@@ -1111,9 +1111,7 @@ class _ExploreRound:
                 gv.extra_server_args,
                 gv.extra_envs,
                 controls=_variant_control_fields(gv),
-                base_remove_args=self.base_remove_args,
-                base_unset_envs=self.base_unset_envs,
-                base_args_mode=self.args_mode,
+                base=BaseControls(self.base_remove_args, self.base_unset_envs, self.args_mode),
             )
         self.grid = grid
 

@@ -235,7 +235,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         *,
         reason: str,
     ) -> dict[str, Any]:
-        from ..actions.executors._proposal_identity import effective_fingerprint
+        from ..actions.executors._proposal_identity import BaseControls, effective_fingerprint
 
         overlay = product.overlay
         if overlay and not geak_overlay_is_loadable(overlay):
@@ -261,9 +261,7 @@ class GeakRevalidation(CoordinatorCollaborator):
                 product.flags,
                 product.envs,
                 controls=product.controls,
-                base_remove_args=base_params.get("base_remove_args"),
-                base_unset_envs=base_params.get("base_unset_envs"),
-                base_args_mode=base_params.get("base_args_mode"),
+                base=BaseControls.of_params(base_params),
             ),
             "expected_overlay": overlay,
             "expected_overlay_digest": _geak_overlay_digest(overlay),
