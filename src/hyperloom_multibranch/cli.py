@@ -161,6 +161,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_run_options(run: argparse.ArgumentParser) -> None:
+    _add_workload_options(run)
+    _add_budget_options(run)
+    _add_specialist_input_options(run)
+    _add_concurrency_options(run)
+    run.add_argument(
+        "--reuse-prelude",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="An earlier session of this workload and image whose PRELUDE child to root on instead of starting one.",
+    )
+    _add_frontier_options(run)
+    run.add_argument("-v", "--verbose", action="store_true", help="Log at debug level.")
+
+
+def _add_workload_options(run: argparse.ArgumentParser) -> None:
+    """The fixed workload, spelled as ``hyperloom optimize`` spells it, and the kernel optimizer its recipes are scoped
+    to."""
+
     run.add_argument("--model", required=True, help="Model path or id.")
     run.add_argument("--framework", required=True, help="Inference framework, e.g. vllm or sglang.")
     run.add_argument("--gpu-type", required=True, choices=MAGPIE_RUNNER_GPU_TYPES, help="GPU type.")
@@ -176,6 +195,11 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
         default=KernelOptimizer.FORGE.value,
         help="Kernel optimizer the session's recipes are scoped to.",
     )
+
+
+def _add_budget_options(run: argparse.ArgumentParser) -> None:
+    """What the session may spend: wall-clock time, GPU hours, LLM dollars and live branches."""
+
     run.add_argument(
         "--max-hours", type=float, default=MB_DEFAULT_MAX_HOURS, help="Wall-clock budget, PRELUDE included; 0 = none."
     )
@@ -197,7 +221,11 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
     run.add_argument(
         "--max-branches", type=int, default=DEFAULT_MAX_BRANCHES, help="Specialist branches not stopped, at most."
     )
-    _add_specialist_input_options(run)
+
+
+def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
+    """How much runs at once and how often the judge looks: tests, a branch's K, dev sandboxes and judge calls."""
+
     run.add_argument(
         "--max-parallel-tests",
         type=int,
@@ -215,13 +243,11 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
     run.add_argument(
         "--judge-interval-sec", type=float, default=DEFAULT_JUDGE_INTERVAL_SECONDS, help="Seconds between judge calls."
     )
-    run.add_argument(
-        "--reuse-prelude",
-        type=Path,
-        default=None,
-        metavar="DIR",
-        help="An earlier session of this workload and image whose PRELUDE child to root on instead of starting one.",
-    )
+
+
+def _add_frontier_options(run: argparse.ArgumentParser) -> None:
+    """Which frontier policy, or which pinned scorer, the session scores its branches with after PRELUDE."""
+
     run.add_argument(
         "--frontier-policy",
         choices=[mode.value for mode in FrontierPolicyMode],
@@ -237,7 +263,6 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
         metavar="LABEL",
         help="The frontier scorer the session scores with, instead of the one the calibration chooses.",
     )
-    run.add_argument("-v", "--verbose", action="store_true", help="Log at debug level.")
 
 
 def _add_specialist_input_options(run: argparse.ArgumentParser) -> None:
