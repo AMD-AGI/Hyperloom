@@ -246,25 +246,20 @@ class EnablementLane(CoordinatorCollaborator):
         """Ask the host, structurally, whether it can run this combo.
 
         Returns:
-            EnvVerdict | None: The host's verdict, or ``None`` when the checks
-            could not be made -- they stat a checkout on a network mount and
-            open a socket, and neither failing is evidence about the host.
+            EnvVerdict | None: The host's verdict, or ``None`` when the check
+            could not be made -- it stats a checkout on a network mount, and
+            that failing is no evidence about the host.
         """
         from hyperloom.common.env_safety import build_benchmark_env
 
         from ..bringup import check_environment
 
-        state = self.shared_state
         try:
-            launch_env = build_benchmark_env()
+            # The session's own resolved checkpoint. The launch env is a
+            # scrubbed environ that only the CLI exports MODEL_PATH into,
+            # so reading it alone turns this check off everywhere else.
             return check_environment(
-                framework=state.framework or os.environ.get("FRAMEWORK", ""),
-                # The session's own resolved checkpoint. The launch env is a
-                # scrubbed environ that only the CLI exports MODEL_PATH into,
-                # so reading it alone turns this check off everywhere else.
-                model=state.model_path or launch_env.get("MODEL_PATH", ""),
-                port=int(launch_env.get("PORT") or 0),
-                launch_env=launch_env,
+                model=self.shared_state.model_path or build_benchmark_env().get("MODEL_PATH", ""),
             )
         except OSError:
             log.debug("enablement: environment preflight could not be made", exc_info=True)
