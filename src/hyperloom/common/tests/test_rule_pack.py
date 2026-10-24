@@ -53,6 +53,10 @@ shape (?:\s+is)? \s+ M:\d+, \s+ N:\d+, \s+ K:\d+ ,?
 (?: \s* , \s+ libtype \s+ is \s+ (?P<libtype>\w+) )?
 (?: \s* , \s+ kernel \s+ name \s+ is \s+ (?P<kernelName>[^\s!]*) )?"""
 
+_SGLANG_CUDA_GRAPH_CAPTURE_END = r"""(?ix)
+Capture \s+ (?: [a-z]+ \s+ )*? cuda \s+ graph \s+ end \. \s+ (?: Time \s+ )? elapsed (?: : \s* | = \s*)
+(\d+(?:\.\d+)?) \s* s\b"""
+
 _SGLANG_CUDA_GRAPH_DECODE_BS = r"""(?x)
 (?: 'cuda_graph_config': \s* \{ \s* 'decode': \s* \{ [^{}]*? 'bs'
   | \bcuda_graph_bs\b'? )
@@ -115,6 +119,11 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "ENV_TP": "TP",
     "FORGE_REL_NORM_ERR_COLUMN": "relNormErr",
     "HIP_ERROR_PREFIX": "hipError",
+    "DRM_CLIENT_ID_KEY": "drm-client-id",
+    "DRM_FD_DIR": "fd",
+    "DRM_FDINFO_DIR": "fdinfo",
+    "DRM_RENDER_NODE_PREFIX": "renderD",
+    "DRM_VRAM_KEY": "drm-memory-vram",
     "HIP_GRAPH_PACKET_CAPTURE_ENV": "DEBUG_CLR_GRAPH_PACKET_CAPTURE",
     "HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE": "0",
     "HIP_NO_BINARY_FOR_GPU": "hipErrorNoBinaryForGpu",
@@ -124,15 +133,18 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "INITIAL_PID_NAMESPACE": "pid:[4026531836]",
     "KFD_NODES": "topology/nodes",
     "KFD_NODE_GPU_ID": "gpu_id",
+    "KFD_NODE_PROPERTIES": "properties",
     "KFD_PROCESSES": "proc",
     "KFD_QUEUES": "queues",
     "KFD_QUEUE_GPU_ID": "gpuid",
+    "KFD_RENDER_MINOR_KEY": "drm_render_minor",
     "KFD_ROOT": "/sys/class/kfd/kfd",
     "KFD_VRAM_PREFIX": "vram_",
     "PID_NAMESPACE_LINK": "self/ns/pid",
     "PY_IMPORT_ERROR": "ImportError",
     "PY_MODULE_NOT_FOUND_ERROR": "ModuleNotFoundError",
     "ROCR_VISIBLE_DEVICES_ENV": "ROCR_VISIBLE_DEVICES",
+    "SGLANG_CUDA_GRAPH_CAPTURE_END": _SGLANG_CUDA_GRAPH_CAPTURE_END,
     "SGLANG_CUDA_GRAPH_DECODE_BS": _SGLANG_CUDA_GRAPH_DECODE_BS,
     "SGLANG_IMAGE_AITER_CONFIGS": "/sgl-workspace/aiter/aiter/configs",
     "SHORT_PROMPT_CHECK": {
@@ -207,10 +219,10 @@ def _fresh(code: str, pack: str | None) -> subprocess.CompletedProcess[str]:
 
 def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
-    assert pack.version == "10"
+    assert pack.version == "11"
     assert Counter(entry.kind for entry in pack.entries.values()) == {
-        Kind.NAMES: 17,
-        Kind.LOG_REGEX: 13,
+        Kind.NAMES: 18,
+        Kind.LOG_REGEX: 14,
         Kind.ENV_DEFAULT: 1,
     }
 
@@ -351,7 +363,7 @@ def test_a_session_whose_pack_cannot_be_used_stops_at_import_naming_the_entry(
 
 
 def test_the_recorded_identity_is_the_digest_of_the_bytes_read_and_is_stable(tmp_path: Path) -> None:
-    expected = {"version": "10", "digest": "sha256:" + hashlib.sha256(DEFAULT_PACK_PATH.read_bytes()).hexdigest()}
+    expected = {"version": "11", "digest": "sha256:" + hashlib.sha256(DEFAULT_PACK_PATH.read_bytes()).hexdigest()}
     assert rule_pack_identity() == expected
     assert rule_pack_identity() == rule_pack_identity()
     elsewhere = _fresh(_SHOW, None)

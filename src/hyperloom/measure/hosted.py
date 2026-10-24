@@ -908,6 +908,7 @@ def _facts_of(runner: RunnerSandbox, result: ResultManifest | None) -> SandboxFa
         backend=BACKEND_NAME,
         card_occupancy=occupancy.state if occupancy else "",
         card_occupancy_reason=(occupancy.reason or "") if occupancy else "",
+        card_occupancy_method=(occupancy.method or "") if occupancy else "",
     )
 
 

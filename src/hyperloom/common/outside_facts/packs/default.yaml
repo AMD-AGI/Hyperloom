@@ -17,7 +17,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "10"
+version: "11"
 facts:
   aiter_merged_view:
     kind: names
@@ -240,8 +240,11 @@ facts:
       queues: queues
       queue_gpu_id: gpuid
       vram_prefix: vram_
+      node_properties: properties
+      render_minor_key: drm_render_minor
     examples:
       - "hyperloom.sandbox.card_occupancy: read_holders maps a card ordinal to the gpu_id of the n-th GPU node and lists the processes that have a queue or resident memory on it"
+      - "hyperloom.sandbox.card_occupancy: the render node of a card is the drm_render_minor line of its node's properties file, which reads 'drm_render_minor 128' for the first GPU of a machine"
       - "kernel tree, as read on a GPU node: /sys/class/kfd/kfd/proc/4242/vram_61439 holds 8589934592 and /sys/class/kfd/kfd/proc/4242/queues/0/gpuid holds 61439"
 
   linux_pid_namespace:
@@ -250,12 +253,31 @@ facts:
     reason: >-
       The kernel's process list of the GPUs names a process by its id in the host's (initial) pid namespace. A reader can
       only match those ids to what it sees in /proc when it is in that namespace itself, which the link below says by
-      naming the namespace's inode, a fixed number the kernel gives the initial one.
+      naming the namespace's inode, a fixed number the kernel gives the initial one. A reader in a namespace of its own
+      cannot match them and counts holders per card instead.
     names:
       link: self/ns/pid
       initial: "pid:[4026531836]"
     examples:
-      - "hyperloom.sandbox.card_occupancy: the process list is read only by a reader whose /proc/self/ns/pid is the initial namespace, otherwise the probe says it cannot tell"
+      - "hyperloom.sandbox.card_occupancy: the process ids of the list are matched to /proc only by a reader whose /proc/self/ns/pid is the initial namespace, otherwise the probe counts the holders of each card without naming whose they are"
+
+  drm_fdinfo:
+    kind: names
+    project: Linux kernel (DRM, the amdgpu driver)
+    reason: >-
+      A process that has a GPU's render node open says what memory it holds on it in the fdinfo file of that descriptor:
+      a drm-client-id line (one per open DRM file, shared by every descriptor that duplicates it) and a drm-memory-vram line
+      with a number and a unit (KiB, MiB, or no unit for 0). The descriptor's link names the render node, /dev/dri/renderD
+      and the node's minor, which the GPU's node of the kernel's topology states. This is how a reader in a pid namespace of
+      its own learns what the processes it can see hold, to set against the kernel's list of the whole machine.
+    names:
+      fd_dir: fd
+      fdinfo_dir: fdinfo
+      render_node_prefix: renderD
+      client_id_key: drm-client-id
+      vram_key: drm-memory-vram
+    examples:
+      - "hyperloom.sandbox.drm_fdinfo: /proc/4242/fdinfo/7 of a descriptor that links to /dev/dri/renderD152 reads 'drm-client-id: 17' and 'drm-memory-vram: 249506392 KiB'"
 
   pytorch_tunableop_env:
     kind: names
@@ -557,6 +579,28 @@ facts:
         - "[aiter] shape is M:192, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 192, N:4096, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is torch, kernel name is native"
       no_match:
         - "[aiter] shape is M:512, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False, not found tuned config in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, will use default config! using torch solution:0"
+
+  sglang_cuda_graph_capture_end:
+    kind: log_regex
+    project: SGLang
+    reason: >-
+      The line SGLang prints when it has captured its decode CUDA graphs, with how long it took, which is the graph part of a
+      server's boot. Releases word it differently: "Capture cuda graph end. Time elapsed: 11.34 s." before, and "Capture
+      target decode CUDA graph end. elapsed=11.34 s" (with a word naming what was captured) now; both are read. The
+      pattern's first group is the seconds.
+    pattern: |-
+      (?ix)
+      Capture \s+ (?: [a-z]+ \s+ )*? cuda \s+ graph \s+ end \. \s+ (?: Time \s+ )? elapsed (?: : \s* | = \s*)
+      (\d+(?:\.\d+)?) \s* s\b
+    examples:
+      match:
+        - "[2026-10-24 06:38:19 TP0] Capture cuda graph end. Time elapsed: 11.34 s. mem usage=1.52 GB. avail mem=51.20 GB."
+        - "[2026-10-24 06:38:19 TP0] Capture target decode CUDA graph end. elapsed=11.34 s, mem usage=1.52 GB, avail mem=51.20 GB."
+        - "Capture target decode CUDA graph end. elapsed=11.34 s"
+      no_match:
+        - "[2026-10-24 06:38:08 TP0] Capture cuda graph begin. This can take up to several minutes. avail mem=52.72 GB"
+        - "Exception: Capture cuda graph failed: HIP error: an illegal memory access was encountered"
+        - "Capture target decode CUDA graph begin. elapsed=11.34 s"
 
   sglang_cuda_graph_decode_bs:
     kind: log_regex

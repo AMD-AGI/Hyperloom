@@ -326,7 +326,8 @@ class SandboxFacts:
     look at them found no process outside the test, ``foreign`` (with ``card_occupancy_reason`` naming the process, the card
     and when) when one was seen and the card guard only observes, ``unknown`` (with its reason) when it could not look, and
     empty when the attempt did not say (an attempt that failed before a result, a sandbox with no card, a runner that
-    predates it). It is never ``clean`` for a result nobody looked at.
+    predates it). It is never ``clean`` for a result nobody looked at. ``card_occupancy_method`` says how the runner told a
+    process outside the test from the test's own (empty when it did not say).
     """
 
     sandbox_id: str
@@ -341,6 +342,7 @@ class SandboxFacts:
     backend: str = ""
     card_occupancy: str = ""
     card_occupancy_reason: str = ""
+    card_occupancy_method: str = ""
 
     def __post_init__(self) -> None:
         _text(self.sandbox_id, "a sandbox id")
@@ -364,6 +366,8 @@ class SandboxFacts:
             )
         if not isinstance(self.card_occupancy_reason, str):
             raise MeasurementError(f"card_occupancy_reason must be a string, got {self.card_occupancy_reason!r}")
+        if not isinstance(self.card_occupancy_method, str):
+            raise MeasurementError(f"card_occupancy_method must be a string, got {self.card_occupancy_method!r}")
         if (self.card_occupancy in (CARD_UNKNOWN, CARD_FOREIGN)) != bool(self.card_occupancy_reason):
             raise MeasurementError("card_occupancy 'unknown' or 'foreign' needs its reason, and 'clean' has none")
 
@@ -393,6 +397,7 @@ class SandboxFacts:
             "backend": self.backend,
             "card_occupancy": self.card_occupancy,
             "card_occupancy_reason": self.card_occupancy_reason,
+            "card_occupancy_method": self.card_occupancy_method,
         }
 
     @classmethod
@@ -411,6 +416,7 @@ class SandboxFacts:
             backend=f.get("backend", ""),
             card_occupancy=f.get("card_occupancy", ""),
             card_occupancy_reason=f.get("card_occupancy_reason", ""),
+            card_occupancy_method=f.get("card_occupancy_method", ""),
         )
 
 

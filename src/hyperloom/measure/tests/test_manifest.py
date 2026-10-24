@@ -71,6 +71,14 @@ def test_a_manifest_states_the_rule_pack_its_runner_read_and_one_from_an_older_r
             {"state": "foreign", "reason": "1 held the test's cards: pid 9 on card 0", "checks": 4},
             CardOccupancyFacts("foreign", "1 held the test's cards: pid 9 on card 0", 4),
         ),
+        (
+            {"state": "clean", "reason": None, "checks": 9, "method": "census+fdinfo"},
+            CardOccupancyFacts("clean", None, 9, "census+fdinfo"),
+        ),
+        (
+            {"state": "unknown", "reason": "no driver", "checks": 0, "method": None},
+            CardOccupancyFacts("unknown", "no driver", 0),
+        ),
     ],
 )
 def test_a_manifest_states_whether_its_cards_were_free_of_other_processes_and_why_not_when_it_could_not_say(

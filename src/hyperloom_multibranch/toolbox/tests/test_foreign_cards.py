@@ -140,6 +140,12 @@ async def test_the_signed_result_says_the_cards_were_clean_or_that_nobody_could_
     assert facts["silent"] is not None and facts["silent"].card_occupancy == "", (
         "a runner that said nothing says nothing"
     )
+    warned = {name: _result(tb, request_id).nonfatal_warnings for name, request_id in ids.items()}
+    assert warned["blind"] == (
+        "card_occupancy_unknown, the test's cards were not shown to be free of other processes: "
+        "no AMD GPU driver is loaded",
+    ), "a result nobody could look at the cards of says so in its warnings, in either guard mode"
+    assert warned["clean"] == () and warned["silent"] == ()
 
 
 async def test_a_result_kept_beside_a_process_says_so_in_its_facts_and_carries_a_warning(make: Make) -> None:

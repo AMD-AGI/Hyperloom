@@ -18,7 +18,7 @@ from hyperloom.contracts.measurement import CARD_CLEAN, CARD_FOREIGN, CARD_UNKNO
 from hyperloom.measure.runner.card_watch import AFTER_TEST, BEFORE_TEST, DURING_TEST, CardStatement, CardWatch
 from hyperloom.measure.runner.service import RunnerFailure
 from hyperloom.sandbox import card_occupancy
-from hyperloom.sandbox.card_occupancy import CardGuard, CardReading, OwnProcesses
+from hyperloom.sandbox.card_occupancy import METHOD_PID_MATCH, CardGuard, CardReading, OwnProcesses
 from hyperloom.sandbox.card_occupancy import read_holders as read_the_machine
 from hyperloom.sandbox.tests.kernel_tree import KernelTree
 
@@ -56,8 +56,13 @@ def test_cards_nobody_but_the_test_holds_are_clean_and_the_result_says_how_often
     watch.check(BEFORE_TEST)
     watch.enforce_guard()
 
-    assert watch.statement() == CardStatement(CARD_CLEAN, None, 2)
-    assert watch.statement().to_document() == {"state": "clean", "reason": None, "checks": 2}  # type: ignore[union-attr]
+    assert watch.statement() == CardStatement(CARD_CLEAN, None, 2, METHOD_PID_MATCH)
+    assert watch.statement().to_document() == {
+        "state": "clean",
+        "reason": None,
+        "checks": 2,
+        "method": "pid-match",
+    }  # type: ignore[union-attr]
 
 
 def test_a_process_outside_the_test_that_holds_a_card_before_it_starts_refuses_the_result(tree: KernelTree) -> None:
@@ -155,7 +160,7 @@ def test_a_probe_that_cannot_say_once_leaves_the_result_unknown_with_its_reason_
     watch.check(AFTER_TEST)
     watch.enforce_guard()
 
-    assert watch.statement() == CardStatement(CARD_UNKNOWN, "no AMD GPU driver", 2)
+    assert watch.statement() == CardStatement(CARD_UNKNOWN, "no AMD GPU driver", 2, METHOD_PID_MATCH)
 
 
 def test_a_probe_that_fails_outright_is_unknown_not_clean(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -219,6 +224,7 @@ def test_a_guard_that_observes_refuses_nothing_and_the_result_says_who_was_seen(
         "1 held the test's cards: pid 950 on card 1, first seen 2026-10-24T04:05:06Z before the test: "
         "python3 -c import torch",
         2,
+        METHOD_PID_MATCH,
     )
     assert statement.to_document()["state"] == "foreign"  # type: ignore[union-attr]
 
@@ -240,7 +246,7 @@ def test_a_guard_that_observes_leaves_no_note_for_cards_nobody_but_the_test_held
     watch = _watch(tree, guard=CardGuard.OBSERVE)
     watch.check(BEFORE_TEST)
 
-    assert watch.observation() is None and watch.statement() == CardStatement(CARD_CLEAN, None, 1)
+    assert watch.observation() is None and watch.statement() == CardStatement(CARD_CLEAN, None, 1, METHOD_PID_MATCH)
 
 
 def test_a_guard_that_enforces_refuses_and_leaves_no_note(tree: KernelTree) -> None:

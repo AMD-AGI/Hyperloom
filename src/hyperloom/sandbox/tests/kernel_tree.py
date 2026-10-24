@@ -39,10 +39,17 @@ class KernelTree:
             directory = self.kfd / "topology" / "nodes" / str(node)
             directory.mkdir(parents=True)
             (directory / "gpu_id").write_text(f"{0 if node < cpus else self.gpu_id(node - cpus)}\n")
+            minor = 0 if node < cpus else self.render_minor(node - cpus)
+            (directory / "properties").write_text(f"cpu_cores_count 0\ndrm_render_minor {minor}\nlocation_id 8\n")
         (self.kfd / "proc").mkdir()
         (self.procfs / "self" / "ns").mkdir(parents=True)
         os.symlink(pid_namespace, self.procfs / "self" / "ns" / "pid")
         (self.procfs / "self" / "mountinfo").write_text(_MOUNT_LINE.format(options=proc_options))
+
+    @staticmethod
+    def render_minor(card: int) -> int:
+        """The minor of the ``card``-th GPU's render node, as on a real machine (128, 136, ...)."""
+        return 128 + 8 * card
 
     @staticmethod
     def gpu_id(card: int) -> int:
@@ -75,6 +82,16 @@ class KernelTree:
         for number in range(existing, existing + queues):
             (directory / "queues" / str(number)).mkdir()
             (directory / "queues" / str(number) / "gpuid").write_text(f"{self.gpu_id(card)}\n")
+
+    def renders(self, pid: int, card: int, *, kib: int, client: str | None = None, descriptor: int = 3) -> None:
+        """A process of this container has ``card``'s render node open and its fdinfo says ``kib`` KiB of video memory;
+        ``client`` names the open DRM file (descriptors that share it say the same), by default one of its own."""
+        directory = self.procfs / str(pid)
+        (directory / "fd").mkdir(exist_ok=True)
+        (directory / "fdinfo").mkdir(exist_ok=True)
+        os.symlink(f"/dev/dri/renderD{self.render_minor(card)}", directory / "fd" / str(descriptor))
+        text = f"pos:\t0\ndrm-driver:\tamdgpu\ndrm-client-id:\t{client or f'{pid}-{descriptor}'}\ndrm-memory-vram:\t{kib} KiB\n"
+        (directory / "fdinfo" / str(descriptor)).write_text(text)
 
     def opened_only(self, pid: int) -> None:
         """``pid`` opened the interface on every GPU (as a monitor does): an entry with no memory and no queue."""

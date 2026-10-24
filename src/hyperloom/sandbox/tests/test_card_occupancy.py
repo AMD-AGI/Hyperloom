@@ -12,6 +12,7 @@ import pytest
 
 from hyperloom.sandbox.card_occupancy import (
     COMMAND_CHARS,
+    METHOD_CENSUS_FDINFO,
     CardGuard,
     CardReading,
     Holder,
@@ -46,7 +47,7 @@ def test_a_process_with_a_queue_and_memory_on_a_card_holds_it_and_is_named(tree:
     reading = _read(tree, [2, 3])
 
     assert reading.unavailable is None
-    assert reading.holders == (Holder(card=3, pid=4242, command="python3 -c import torch"),)
+    assert reading.holders == (Holder(card=3, pid=4242, command="python3 -c import torch", vram=1 << 30, queues=1),)
     assert reading.held_cards() == frozenset({3})
 
 
@@ -56,7 +57,7 @@ def test_a_card_is_the_nth_gpu_node_not_the_nth_node_of_the_topology(tmp_path: P
     tree.process(7)
     tree.holds(7, 0)
 
-    assert _read(tree, [0]).holders == (Holder(0, 7, "python3 work.py"),)
+    assert _read(tree, [0]).holders == (Holder(0, 7, "python3 work.py", 1 << 30, 1),)
     assert _read(tree, [1, 2, 3]).holders == ()
 
 
@@ -145,15 +146,16 @@ def test_without_the_kernels_list_the_probe_cannot_say_and_lists_nobody(tmp_path
     assert reading.unavailable is not None and "no AMD GPU driver" in reading.unavailable
 
 
-def test_in_a_pid_namespace_of_its_own_the_probe_cannot_match_ids_and_says_so(tmp_path: Path) -> None:
+def test_in_a_pid_namespace_of_its_own_the_probe_counts_the_holders_and_does_not_name_them(tmp_path: Path) -> None:
     tree = KernelTree(tmp_path, pid_namespace="pid:[4026532550]")
-    tree.process(50)
-    tree.holds(50, 0)
+    tree.process(50, command=("python3", "pod_process.py"))  # an unrelated process of the pod that has the host's id 50
+    tree.holds(4242, 0)
 
     reading = _read(tree, [0])
 
-    assert reading.holders == ()
-    assert reading.unavailable is not None and "pid namespace of its own" in reading.unavailable
+    assert reading.unavailable is None
+    assert reading.method == METHOD_CENSUS_FDINFO
+    assert reading.holders == (Holder(0, 4242, "", 1 << 30, 1),), "the host's id is kept, and no command is read for it"
 
 
 def test_where_proc_hides_other_accounts_the_probe_cannot_say(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

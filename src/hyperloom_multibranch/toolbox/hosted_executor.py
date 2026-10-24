@@ -35,6 +35,7 @@ import yaml
 from hyperloom.common.outside_facts import ENV_CONC
 from hyperloom.contracts.measurement import (
     CARD_FOREIGN,
+    CARD_UNKNOWN,
     AccuracyValue,
     FailureClass,
     PhaseTiming,
@@ -630,12 +631,15 @@ def _warnings_of(rounds: tuple[RoundOutcome, ...]) -> tuple[str, ...]:
 
 
 def _card_warnings(state: str, reason: str | None) -> tuple[str, ...]:
-    """The warning of a result that was kept although a process outside the test held its cards, which only a runner whose
-    card guard observes signs: a runner that enforces refuses such a result. The same text is derived again from the
-    signed manifest when the result is verified again."""
-    if state != CARD_FOREIGN:
-        return ()
-    return (f"foreign_process_on_card, kept because the card guard only observes: {reason}",)
+    """The warning of a result whose cards were not shown to be the test's alone: ``foreign`` is a result that was kept
+    although a process outside the test held its cards, which only a runner whose card guard observes signs (one that
+    enforces refuses it), and ``unknown`` is one nobody could look at the cards of, in either mode. The same text is derived
+    again from the signed manifest when the result is verified again."""
+    if state == CARD_FOREIGN:
+        return (f"foreign_process_on_card, kept because the card guard only observes: {reason}",)
+    if state == CARD_UNKNOWN:
+        return (f"card_occupancy_unknown, the test's cards were not shown to be free of other processes: {reason}",)
+    return ()
 
 
 def _scores_of(rounds: tuple[RoundOutcome, ...]) -> tuple[AccuracyValue, ...]:

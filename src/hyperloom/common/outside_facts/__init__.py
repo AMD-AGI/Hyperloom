@@ -46,6 +46,11 @@ __all__ = [
     "ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE",
     "ASM_LIBTYPE",
     "CONTEXT_LENGTH_FLAGS",
+    "DRM_CLIENT_ID_KEY",
+    "DRM_FDINFO_DIR",
+    "DRM_FD_DIR",
+    "DRM_RENDER_NODE_PREFIX",
+    "DRM_VRAM_KEY",
     "ENV_CONC",
     "ENV_EP",
     "ENV_ISL",
@@ -70,20 +75,23 @@ __all__ = [
     "INITIAL_PID_NAMESPACE",
     "KFD_NODES",
     "KFD_NODE_GPU_ID",
+    "KFD_NODE_PROPERTIES",
     "KFD_PROCESSES",
     "KFD_QUEUES",
     "KFD_QUEUE_GPU_ID",
+    "KFD_RENDER_MINOR_KEY",
     "KFD_ROOT",
     "KFD_VRAM_PREFIX",
     "PID_NAMESPACE_LINK",
     "PY_IMPORT_ERROR",
     "PY_MODULE_NOT_FOUND_ERROR",
     "ROCR_VISIBLE_DEVICES_ENV",
+    "SGLANG_CUDA_GRAPH_CAPTURE_END",
     "SGLANG_CUDA_GRAPH_DECODE_BS",
-    "SHORT_PROMPT_CHECK",
-    "SHORT_PROMPT_TOUCH",
     "SGLANG_IMAGE_AITER_CONFIGS",
     "SGLANG_IMAGE_WORKSPACE",
+    "SHORT_PROMPT_CHECK",
+    "SHORT_PROMPT_TOUCH",
     "TRANSFORMERS_DOES_NOT_RECOGNIZE",
     "TRANSFORMERS_UNKNOWN_ARCHITECTURE",
     "TUNABLEOP_ENABLED_ENV",
@@ -117,6 +125,7 @@ AITER_LOG_TUNED_CONFIG_ENV = _PACK.names("aiter_log_tuned_config", "env")["env"]
 AITER_TUNED_HIT = _PACK.pattern("aiter_tuned_hit")
 AITER_TUNED_HIT_MARKER = _PACK.pattern("aiter_tuned_hit_marker")
 
+SGLANG_CUDA_GRAPH_CAPTURE_END = _PACK.pattern("sglang_cuda_graph_capture_end")
 SGLANG_CUDA_GRAPH_DECODE_BS = _PACK.pattern("sglang_cuda_graph_decode_bs")
 
 SHORT_PROMPT_CHECK = _PACK.names(
@@ -152,7 +161,16 @@ HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE = _graph_replay.value
 ROCR_VISIBLE_DEVICES_ENV = _PACK.names("rocr_visible_devices", "env")["env"]
 
 _kfd = _PACK.names(
-    "kfd_process_listing", "root", "processes", "nodes", "node_gpu_id", "queues", "queue_gpu_id", "vram_prefix"
+    "kfd_process_listing",
+    "root",
+    "processes",
+    "nodes",
+    "node_gpu_id",
+    "queues",
+    "queue_gpu_id",
+    "vram_prefix",
+    "node_properties",
+    "render_minor_key",
 )
 KFD_ROOT = _kfd["root"]
 KFD_PROCESSES = _kfd["processes"]
@@ -161,6 +179,15 @@ KFD_NODE_GPU_ID = _kfd["node_gpu_id"]
 KFD_QUEUES = _kfd["queues"]
 KFD_QUEUE_GPU_ID = _kfd["queue_gpu_id"]
 KFD_VRAM_PREFIX = _kfd["vram_prefix"]
+KFD_NODE_PROPERTIES = _kfd["node_properties"]
+KFD_RENDER_MINOR_KEY = _kfd["render_minor_key"]
+
+_drm = _PACK.names("drm_fdinfo", "fd_dir", "fdinfo_dir", "render_node_prefix", "client_id_key", "vram_key")
+DRM_FD_DIR = _drm["fd_dir"]
+DRM_FDINFO_DIR = _drm["fdinfo_dir"]
+DRM_RENDER_NODE_PREFIX = _drm["render_node_prefix"]
+DRM_CLIENT_ID_KEY = _drm["client_id_key"]
+DRM_VRAM_KEY = _drm["vram_key"]
 
 _pid_namespace = _PACK.names("linux_pid_namespace", "link", "initial")
 PID_NAMESPACE_LINK = _pid_namespace["link"]

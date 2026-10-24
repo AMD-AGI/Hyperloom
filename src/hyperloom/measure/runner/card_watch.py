@@ -13,8 +13,10 @@ infrastructure failure, whatever the test itself did, because a failure it showe
 number may. Observing, which is the default until the probe has been shown right on the machines that run tests, nothing is
 refused: the signed result says ``foreign`` with the process, the card and when, and the runner leaves a note.
 
-Where the probe cannot say who holds the cards (no driver list, a pid namespace of its own), the test goes on in both modes
-and the signed result says ``unknown`` and why; it is never written as clean.
+Where the probe cannot say who holds the cards (no driver list, ``/proc`` hiding other accounts' processes), the test goes
+on in both modes and the signed result says ``unknown`` and why; it is never written as clean. In a pid namespace of its
+own the probe counts instead of naming (before the test nothing may hold a card, during it one process may hold memory on
+each, and no memory may be held that no process of this container accounts for): the result says so in its ``method``.
 """
 
 from __future__ import annotations
@@ -30,7 +32,16 @@ from hyperloom.contracts.measurement import CARD_CLEAN, CARD_FOREIGN, CARD_UNKNO
 from hyperloom.measure.failures import FOREIGN_PROCESS_ON_CARD
 from hyperloom.measure.runner.service import RunnerFailure
 from hyperloom.sandbox import card_occupancy
-from hyperloom.sandbox.card_occupancy import CARD_GUARD_ENV, CardGuard, CardReading, Holder, OwnProcesses
+from hyperloom.sandbox.card_occupancy import (
+    CARD_GUARD_ENV,
+    METHOD_CENSUS,
+    METHOD_CENSUS_FDINFO,
+    METHOD_PID_MATCH,
+    CardGuard,
+    CardReading,
+    Intrusion,
+    OwnProcesses,
+)
 
 __all__ = [
     "AFTER_TEST",
@@ -54,31 +65,37 @@ _STOP_WAIT_SEC = 10.0
 _NEVER_LOOKED = "the cards were not looked at"
 
 
+#: The methods of a reading from the one that says least to the one that says most; a result states the least any look used.
+_METHOD_RANK = {METHOD_CENSUS: 0, METHOD_CENSUS_FDINFO: 1, METHOD_PID_MATCH: 2}
+
+
 @dataclass(frozen=True)
 class Sighting:
-    """An intruder: a process outside the test that held one of its cards, with when it was first seen there."""
+    """An intruder: something outside the test on one of its cards, with when it was first seen there."""
 
-    holder: Holder
+    intrusion: Intrusion
     first_seen_unix: float
     when: str
 
     def describe(self) -> str:
         seen = datetime.fromtimestamp(self.first_seen_unix, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        command = f": {self.holder.command[:_COMMAND_CHARS]}" if self.holder.command else ""
-        return f"pid {self.holder.pid} on card {self.holder.card}, first seen {seen} {self.when}{command}"
+        command = f": {self.intrusion.command[:_COMMAND_CHARS]}" if self.intrusion.command else ""
+        return f"{self.intrusion.what}, first seen {seen} {self.when}{command}"
 
 
 @dataclass(frozen=True)
 class CardStatement:
-    """What the signed result says of the test's cards: ``clean``, ``foreign`` with the process that was seen, or ``unknown``
-    with the reason a look could not say. ``checks`` is how many looks read the list."""
+    """What the signed result says of the test's cards: ``clean``, ``foreign`` with what was seen, or ``unknown`` with the
+    reason a look could not say. ``checks`` is how many looks read the list, and ``method`` how they told a holder from the
+    test's own (the least one a look used; ``None`` when none read the list)."""
 
     state: str
     reason: str | None
     checks: int
+    method: str | None = None
 
     def to_document(self) -> dict[str, object]:
-        return {"state": self.state, "reason": self.reason, "checks": self.checks}
+        return {"state": self.state, "reason": self.reason, "checks": self.checks, "method": self.method}
 
 
 class CardWatch:
@@ -103,19 +120,20 @@ class CardWatch:
         self._poll_sec = poll_sec
         self._clock = clock
         self._lock = threading.Lock()
-        self._sightings: dict[tuple[int, int], Sighting] = {}
+        self._sightings: dict[tuple[str | int, ...], Sighting] = {}
         self._unavailable = ""
         self._checks = 0
+        self._method: str | None = None
 
     def check(self, when: str) -> None:
         """Look at who holds the cards now; ``when`` says which stage of the test this is, for the record."""
         if not self._cards:
             return
-        found: tuple[Holder, ...] = ()
+        found: tuple[Intrusion, ...] = ()
         try:
             reading = card_occupancy.read_holders(self._cards)
             if reading.unavailable is None:
-                found = reading.foreign(self._own)
+                found = reading.intrusions(self._own, before_test=when == BEFORE_TEST)
         except Exception as exc:  # noqa: BLE001 - a look that failed must leave the result unknown, never clean
             reading = CardReading(unavailable=f"a look at the cards failed ({type(exc).__name__})")
         with self._lock:
@@ -123,8 +141,9 @@ class CardWatch:
                 self._unavailable = self._unavailable or reading.unavailable
                 return
             self._checks += 1
-            for holder in found:
-                self._sightings.setdefault((holder.pid, holder.card), Sighting(holder, self._clock(), when))
+            self._method = _weaker(self._method, reading.method)
+            for intrusion in found:
+                self._sightings.setdefault(intrusion.key, Sighting(intrusion, self._clock(), when))
 
     @contextlib.contextmanager
     def watching(self) -> Iterator[None]:
@@ -162,7 +181,7 @@ class CardWatch:
 
     def _seen(self) -> list[Sighting]:
         with self._lock:
-            return sorted(self._sightings.values(), key=lambda s: (s.first_seen_unix, s.holder.card, s.holder.pid))
+            return sorted(self._sightings.values(), key=lambda s: (s.first_seen_unix, str(s.intrusion.key)))
 
     def statement(self) -> CardStatement | None:
         """What the signed result says of its cards: ``foreign`` and who when a process outside the test held one,
@@ -172,14 +191,18 @@ class CardWatch:
             return None
         found = self._seen()
         with self._lock:
-            checks, unavailable = self._checks, self._unavailable
+            checks, unavailable, method = self._checks, self._unavailable, self._method
         if found:
-            return CardStatement(CARD_FOREIGN, _describe(found), checks)
+            return CardStatement(CARD_FOREIGN, _describe(found), checks, method)
         if not checks:
             return CardStatement(CARD_UNKNOWN, unavailable or _NEVER_LOOKED, 0)
         if unavailable:
-            return CardStatement(CARD_UNKNOWN, unavailable, checks)
-        return CardStatement(CARD_CLEAN, None, checks)
+            return CardStatement(CARD_UNKNOWN, unavailable, checks, method)
+        return CardStatement(CARD_CLEAN, None, checks, method)
+
+
+def _weaker(known: str | None, method: str) -> str:
+    return method if known is None or _METHOD_RANK.get(method, 0) < _METHOD_RANK.get(known, 0) else known
 
 
 def _describe(found: Sequence[Sighting]) -> str:

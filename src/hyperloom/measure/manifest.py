@@ -72,18 +72,20 @@ class RulePackFacts:
 @dataclass(frozen=True)
 class CardOccupancyFacts:
     """What the runner says of who else used its cards: ``clean``, ``foreign`` with the process it saw (the guard only
-    observed it) or ``unknown`` with the reason it could not look, and how many looks read the list."""
+    observed it) or ``unknown`` with the reason it could not look, how many looks read the list, and ``method``, how a
+    look told a holder from the test's own (absent from a manifest an older runner signed)."""
 
     state: str
     reason: str | None
     checks: int
+    method: str | None = None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "CardOccupancyFacts":
         r = Reader(value, path)
         state = r.choice("state", CARD_OCCUPANCY_STATES) or ""
         reason = r.text("reason", optional=True)
-        facts = cls(state, reason, r.integer("checks", minimum=0) or 0)
+        facts = cls(state, reason, r.integer("checks", minimum=0) or 0, r.text("method", optional=True))
         r.done()
         if (state != CARD_CLEAN) != (reason is not None):
             raise DocumentError(f"{path}: a card occupancy that is not clean states why, and a clean one has no reason")
