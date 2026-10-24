@@ -169,6 +169,33 @@ def test_the_watch_logs_a_registry_entry_it_cannot_read_and_keeps_confining_the_
         _kill(marked_pids(str(tmp_path / "sandbox")))
 
 
+def test_a_watch_that_died_is_said_and_started_again_over_the_sandboxes_it_watched(tmp_path: Path) -> None:
+    pids = tmp_path / "pids"
+    sandbox = LocalAgentSandbox(cards=(4,), python_path=(), root=tmp_path / "sandbox", base_env=dict(os.environ))
+    command = f"sleep 2; (ROCR_VISIBLE_DEVICES=1 sleep 100 & echo $! >> {pids}); sleep 100"
+
+    async def scenario() -> tuple[str, str]:
+        process = await sandbox.start(command, tmp_path, {})
+        try:
+            for watch in _watches_of(os.getpid()):
+                os.kill(watch, signal.SIGKILL)
+            _until(lambda: not _watches_of(os.getpid()))
+            said, again = sandbox.watched(), sandbox.watched()
+            _until(lambda: _pids(pids) and not _alive(_pids(pids)[0]))
+            return said, again
+        finally:
+            await process.kill()
+
+    said, again = asyncio.run(scenario())
+
+    assert "the sandbox's watch had ended (exit -9) and was started again" in said
+    assert again == ""
+
+
+def _watches_of(owner: int) -> list[int]:
+    return [pid for pid in _children(owner) if b"agent_watch" in Path(f"/proc/{pid}/cmdline").read_bytes()]
+
+
 def _kill(pids: list[int]) -> None:
     for pid in pids:
         try:

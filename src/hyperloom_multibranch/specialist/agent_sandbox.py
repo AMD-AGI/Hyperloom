@@ -50,6 +50,7 @@ from hyperloom_multibranch.specialist.agent_watch import (
     POLL_SECONDS,
     kill_marked,
     marked_pids,
+    revive,
     watch,
 )
 
@@ -311,13 +312,22 @@ class LocalAgentSandbox:
         """Whether any process of the sandbox is left."""
         return bool(marked_pids(str(self.root)))
 
+    def watched(self) -> str:
+        """Start the session's watch again when it ended, which left the sandbox unconfined since; what to say of it,
+        empty when it runs."""
+
+        ended = revive()
+        return "" if ended is None else _restarted(ended)
+
     async def stop(self) -> None:
         """Kill every process of the sandbox, as :meth:`LocalProcess.kill` does."""
         await kill_marked(str(self.root), self.grace_seconds, self.poll_seconds)
 
     def _spawn(self, kind: str, command: str, cwd: Path, env: Mapping[str, str]) -> LocalProcess:
         log = self.root / LOG_DIR / f"{next(self._numbers):04d}-{kind}.log"
-        watch(self.root, self.cards)
+        ended = watch(self.root, self.cards)
+        if ended is not None:
+            logger.warning("%s", _restarted(ended))
         argv = ["bash", "-c", command]
         if self.niceness:
             argv = ["nice", "-n", str(self.niceness), *argv]
@@ -340,6 +350,11 @@ class LocalAgentSandbox:
 
     def _base(self) -> Mapping[str, str]:
         return os.environ if self.base_env is None else self.base_env
+
+
+def _restarted(ended: tuple[int, Path]) -> str:
+    status, err = ended
+    return f"the sandbox's watch had ended (exit {status}) and was started again; its stderr is in {err}"
 
 
 def read_tail(log: Path, size: int = TAIL_BYTES) -> str:

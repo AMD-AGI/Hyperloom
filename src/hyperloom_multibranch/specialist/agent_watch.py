@@ -8,7 +8,9 @@ A sandbox's processes carry :data:`MARKER`, set to the sandbox's root, whichever
 to, so the marker is what the watch and every kill select by. The session's process registers each sandbox's root and
 cards in a directory of its own (:func:`watch`) and starts the watch with the first; the watch outlives a SIGKILL of
 the session, which is how an agent kept running for an hour after its session died. The session's own kill terminates
-the watch with its other children and SIGKILLs it seconds later, so a terminated watch ends the sandboxes at once.
+the watch with its other children and SIGKILLs it seconds later, so a terminated watch ends the sandboxes at once. A
+look that fails is logged and the next one tries again; a watch that ended all the same is started again by
+:func:`revive`.
 
 The pod allows no device cgroup and no mount or user namespace, so the cards are confined by the environment:
 ``ROCR_VISIBLE_DEVICES`` names them and every HIP-level mask indexes into what ROCr exposes, so only a ROCr-level mask
@@ -48,26 +50,48 @@ WATCH_SECONDS = 1.0
 #: The file of a sandbox's root the watch says what it killed in.
 WATCH_LOG = "watch.log"
 REGISTRY_PREFIX = "hyperloom-agent-watch-"
+#: The file of the registry the watch's stderr goes to.
+WATCH_ERR = "watch.err"
 
 _watches: dict[int, tuple[subprocess.Popen[bytes], Path]] = {}
+#: Every sandbox a process registered, by the process, so a watch started again watches them all.
+_sandboxes: dict[int, dict[str, tuple[int, ...]]] = {}
 
 
-def watch(root: Path, cards: tuple[int, ...]) -> None:
+def watch(root: Path, cards: tuple[int, ...]) -> tuple[int, Path] | None:
     """Have this process's watch confine the processes of the sandbox at ``root`` to ``cards`` and end them once this
-    process is gone, starting the watch when none runs for this process."""
+    process is gone, starting the watch when none runs for this process; what :func:`revive` returns."""
+
+    _sandboxes.setdefault(os.getpid(), {})[str(root)] = cards
+    ended = revive()
+    _register(_watches[os.getpid()][1], str(root), cards)
+    return ended
+
+
+def revive() -> tuple[int, Path] | None:
+    """Start this process's watch again over every sandbox it registered when the watch is not running; the exit
+    status of the watch that ended and the file its stderr is in, ``None`` when it runs or none was started."""
 
     owner = os.getpid()
     running = _watches.get(owner)
-    if running is None or running[0].poll() is not None:
-        registry = Path(tempfile.gettempdir()) / f"{REGISTRY_PREFIX}{owner}"
-        registry.mkdir(parents=True, exist_ok=True)
-        argv = [sys.executable, "-m", __name__, str(owner), str(registry)]
-        with (registry / "watch.err").open("ab") as err:
-            process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=err, stderr=err, start_new_session=True)
-        running = _watches[owner] = (process, registry)
-    entry = running[1] / f"{hashlib.sha256(str(root).encode()).hexdigest()[:16]}.json"
+    ended = None if running is None else running[0].poll()
+    if running is not None and ended is None or not _sandboxes.get(owner):
+        return None
+    registry = Path(tempfile.gettempdir()) / f"{REGISTRY_PREFIX}{owner}"
+    registry.mkdir(parents=True, exist_ok=True)
+    argv = [sys.executable, "-m", __name__, str(owner), str(registry)]
+    with (registry / WATCH_ERR).open("ab") as err:
+        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=err, stderr=err, start_new_session=True)
+    _watches[owner] = (process, registry)
+    for root, cards in _sandboxes[owner].items():
+        _register(registry, root, cards)
+    return None if ended is None else (ended, registry / WATCH_ERR)
+
+
+def _register(registry: Path, root: str, cards: tuple[int, ...]) -> None:
+    entry = registry / f"{hashlib.sha256(root.encode()).hexdigest()[:16]}.json"
     written = entry.with_suffix(".tmp")
-    written.write_text(json.dumps({"root": str(root), "cards": list(cards)}), encoding="utf-8")
+    written.write_text(json.dumps({"root": root, "cards": list(cards)}), encoding="utf-8")
     written.replace(entry)
 
 
@@ -202,16 +226,15 @@ async def _end(roots: Iterable[str], grace_seconds: float) -> None:
 
 def main(argv: Sequence[str]) -> int:
     """Watch the sandboxes ``argv``'s registry holds while ``argv``'s owner, this process's parent, runs or until a
-    SIGTERM, then end them all and remove the registry."""
+    SIGTERM, then end them all and remove the registry; a watch that fails keeps it, for the traceback in
+    :data:`WATCH_ERR` and for :func:`revive`."""
 
     owner, registry = int(argv[0]), Path(argv[1])
     signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
     log = _Log()
-    try:
-        grace = STOP_GRACE_SECONDS if _watch(owner, registry, log) else GRACE_SECONDS
-        asyncio.run(_end(_registered(registry, log.say), grace))
-    finally:
-        shutil.rmtree(registry)
+    grace = STOP_GRACE_SECONDS if _watch(owner, registry, log) else GRACE_SECONDS
+    asyncio.run(_end(_registered(registry, log.say), grace))
+    shutil.rmtree(registry)
     return 0
 
 
@@ -259,10 +282,12 @@ __all__ = [
     "POLL_SECONDS",
     "REGISTRY_PREFIX",
     "STOP_GRACE_SECONDS",
+    "WATCH_ERR",
     "WATCH_LOG",
     "WATCH_SECONDS",
     "beyond",
     "kill_marked",
     "marked_pids",
+    "revive",
     "watch",
 ]
