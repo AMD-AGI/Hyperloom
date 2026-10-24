@@ -65,6 +65,13 @@ def test_numbers_come_back_as_the_type_their_field_declares() -> None:
     assert all(isinstance(value, float) for value in (decoded.ttl_seconds, decoded.acquired_at, decoded.expires_at))
 
 
+def test_a_field_of_any_json_comes_back_as_it_was_written() -> None:
+    manifest = {"source": "https://github.com/org/agent.git", "config": {"tp": 8, "flags": ["--a", 1.5, None]}}
+    record = records.AgentManifestRecord("a1", manifest, at=3.0)
+
+    assert codec.decode(records.AgentManifestRecord, json.loads(json.dumps(codec.encode(record)))) == record
+
+
 def test_a_field_an_older_row_lacks_takes_its_default() -> None:
     stored = codec.encode(records.LineageEvent(LineageKind.OPEN, "s1", from_commit="c0"))
     del stored["reason"]

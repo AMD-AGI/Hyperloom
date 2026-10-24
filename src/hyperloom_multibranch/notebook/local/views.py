@@ -438,6 +438,7 @@ def snapshot(state: NotebookState, claims: tuple[Claim, ...], taken_at: float) -
         op_shares=dict(state.op_shares),
         llm_usage=tuple(state.llm_usage),
         resolved_patches=tuple(patch for attempt in state.merge_attempts for patch in attempt.resolved_patches),
+        agent_manifests=dict(state.agent_manifests),
     )
 
 

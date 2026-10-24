@@ -341,6 +341,16 @@ class LearningRecord:
 
 
 @dataclass(frozen=True)
+class AgentManifestRecord:
+    """The manifest of the third-party agent that drives the autonomous ``branch``, as its runtime recorded it once
+    the agent's preflight passed, ``at``; the notebook drops every credential from it before it keeps it."""
+
+    branch: str
+    manifest: Mapping[str, object]
+    at: float = 0.0
+
+
+@dataclass(frozen=True)
 class LlmUsage:
     """What one LLM launch or call used: ``branch`` is the branch whose specialist spent it, empty for the scheduler's
     own judge, resolver or fix critic; ``tokens`` are its tokens by how they are billed; ``cost_usd`` is what they
@@ -719,6 +729,7 @@ class NotebookSnapshot:
     op_shares: Mapping[str, OpShares] = field(default_factory=dict)
     llm_usage: tuple[LlmUsageRecord, ...] = ()
     resolved_patches: tuple[ResolvedPatch, ...] = ()
+    agent_manifests: Mapping[str, AgentManifestRecord] = field(default_factory=dict)
 
     @property
     def baseline(self) -> BaselineRecord | None:
@@ -769,6 +780,7 @@ __all__ = [
     "ENVIRONMENT_FIELDS",
     "LESSON_ID",
     "MAX_OP_SHARES",
+    "AgentManifestRecord",
     "BaselineRecord",
     "BranchLogRecord",
     "BranchNode",

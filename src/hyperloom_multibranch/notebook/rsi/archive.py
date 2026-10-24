@@ -77,7 +77,8 @@ class TreeBranch:
     frontier calibration reads the observation period off. ``measured_times`` and ``judged_times`` are when its tests
     were measured and judged, and ``ended_times`` when its explore tests got a result of any validity, as the judge's
     grace counts them; each ``None`` in a tree archived before it was kept. ``driver`` is who drove the branch; a tree
-    archived before it was kept reads as all specialist.
+    archived before it was kept reads as all specialist. ``agent`` is the manifest of the third-party agent that drove
+    an autonomous branch, as the notebook kept it, credentials dropped; ``None`` when none was recorded.
     """
 
     name: str
@@ -96,6 +97,7 @@ class TreeBranch:
     judged_times: tuple[float, ...] | None = None
     ended_times: tuple[float, ...] | None = None
     driver: BranchDriver = BranchDriver.SPECIALIST
+    agent: Mapping[str, object] | None = None
 
     @property
     def steered(self) -> bool:
@@ -370,7 +372,12 @@ class _TreeReading:
             judged_times=_judged_times(tests, start),
             ended_times=_ended_times(tests, start),
             driver=node.driver,
+            agent=self.agent(node.branch),
         )
+
+    def agent(self, branch: str) -> Mapping[str, object] | None:
+        record = self.snapshot.agent_manifests.get(branch)
+        return None if record is None else record.manifest
 
 
 def tree_from_snapshot(

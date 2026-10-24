@@ -20,6 +20,7 @@ export has its own schema version and its own sections:
 * ``measurement_nodes``: per node, GPU model, backend and image, the tests run there, their GPU time and failed
   attempts; ``environment_changes``: where a node's image, GPU model, power cap or partition mode moved between its
   results.
+* ``agent_manifests``: by autonomous branch, the manifest of the third-party agent that drove it, credentials dropped.
 * ``close``: the commit final selection chose and its recipe, how the scheduler chose it, and the Recipe KB
   write-back, as the single-lineage export reports it; when the scheduler passes them, what CLOSE's knowledge steps
   did (``knowledge``: the Experiences, the learnings and the archived search tree) and how the session's merges went
@@ -259,6 +260,7 @@ def build_breakdown(
         "tests": encode(snapshot.records),
         "measurement_nodes": encode(measurement_usage(snapshot.records)),
         "environment_changes": encode(snapshot.environment_changes),
+        "agent_manifests": encode(snapshot.agent_manifests),
         "close": close,
     }
 
