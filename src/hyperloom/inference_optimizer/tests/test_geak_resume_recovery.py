@@ -31,7 +31,6 @@ class _TaskRegistry:
         idempotency_key: str,
         requires_lanes: list | None = None,
         allowed_tools: list | None = None,
-        side_effects: list | None = None,
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
     ) -> tuple[Task, bool]:

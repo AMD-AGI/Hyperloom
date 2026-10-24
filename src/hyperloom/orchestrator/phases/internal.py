@@ -138,7 +138,6 @@ class InternalTasksPhase(CoordinatorCollaborator):
             params=params,
             idempotency_key=f"internal-research-scout-round{int(round_id)}",
             requires_lanes=lanes,
-            side_effects=["writes_results"],
             lease_ttl_sec=ttl,
             dispatch_class="coordinator",
         )
@@ -235,7 +234,6 @@ class InternalTasksPhase(CoordinatorCollaborator):
             params=params,
             idempotency_key=idempotency_key,
             requires_lanes=lanes,
-            side_effects=["writes_results"],
             lease_ttl_sec=ttl,
             dispatch_class="coordinator",
         )
@@ -290,16 +288,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
         if not plateau_active:
             return
         cycle = int(state.macro_cycle or 0)
-        try:
-            from ..knowledge import trajectory_reviewer as _trajectory_reviewer
-
-            digest = _trajectory_reviewer.build_trajectory_digest(
-                self.session_dir,
-                state,
-            )
-        except Exception:
-            log.exception("Coordinator: trajectory review digest failed")
-            digest = ""
+        digest = self._coord.conversation.trajectory_digest()
         direction, _pct = self._coord.conversation.dominant_roofline_direction()
         from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
 
@@ -329,7 +318,6 @@ class InternalTasksPhase(CoordinatorCollaborator):
             params=params,
             idempotency_key=f"internal-trajectory-review-cycle{cycle}",
             requires_lanes=lanes,
-            side_effects=["writes_results"],
             lease_ttl_sec=ttl,
             dispatch_class="coordinator",
         )

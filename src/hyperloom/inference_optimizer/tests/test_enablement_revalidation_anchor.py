@@ -153,7 +153,7 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
 
     if script_source == "queued_without_override":
         # A persisted task created by an older producer may still lack the override.
-        task = await coordinator.tasks.create(
+        task, _ = await coordinator.tasks.create_or_return_existing(
             kind="baseline",
             params={"reason": ENABLEMENT_REVALIDATION_REASON, "config_path": str(config)},
             idempotency_key="old-producer-revalidation",

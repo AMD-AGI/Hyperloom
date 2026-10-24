@@ -144,11 +144,10 @@ def test_running_task_without_lease_is_not_proof_of_exit(tmp_path, missing_table
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("evidence", [{"reason": "cancelled_in_flight"}, {"lease_ttl_sec": 10}])
 @pytest.mark.parametrize("with_lease", [False, True])
-def test_unobserved_terminal_holder_keeps_open_round_blocked(tmp_path, evidence, with_lease):
+def test_unobserved_terminal_holder_keeps_open_round_blocked(tmp_path, with_lease):
     path = _database(tmp_path)
-    _task(path, state="cancelled", evidence=evidence)
+    _task(path, state="cancelled", evidence={"reason": "cancelled_in_flight"})
     _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
     _execute(path, "INSERT INTO leases VALUES ('bringup_round', 'round-1', 'task-1', 0, '')")
     if with_lease:
@@ -281,8 +280,8 @@ def test_current_schema_round_holder_without_unknown_execution_is_allowed(tmp_pa
             "VALUES ('round-1', 'open', 'task-1', 1, 1, 2)"
         )
         db.execute(
-            "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at, heartbeat_at) "
-            "VALUES ('bringup_round', 'round-1', 'task-1', 'bringup_round', 0, 'old', 'old', 'old')"
+            "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at) "
+            "VALUES ('bringup_round', 'round-1', 'task-1', 'bringup_round', 0, 'old', 'old')"
         )
     before = path.read_bytes()
     ensure_resume_safe(tmp_path, owner_scope="local")
@@ -302,7 +301,7 @@ async def test_matching_scope_dead_holder_reaches_existing_reaper(tmp_path, monk
         ensure_schema(db.raw)
         tasks = TaskRegistry(db)
         leases = resource_lock.SqliteLeaseBackend(db)
-        await tasks.create(kind="baseline", params={}, idempotency_key="task-1", task_id="task-1")
+        await tasks.create_or_return_existing(kind="baseline", params={}, idempotency_key="task-1", task_id="task-1")
         await tasks.transition("task-1", "running")
         await leases.acquire_many(
             ["benchmark_lane"], holder_id="holder-1", task_id="task-1", action="baseline", ttl_sec=1
@@ -335,7 +334,7 @@ async def test_current_handoff_to_unstarted_holder_remains_resumable(tmp_path):
         tasks = TaskRegistry(db)
         rounds = RoundStore(db)
         for task_id in ("first", "next"):
-            await tasks.create(kind="baseline", params={}, idempotency_key=task_id, task_id=task_id)
+            await tasks.create_or_return_existing(kind="baseline", params={}, idempotency_key=task_id, task_id=task_id)
         opened = await rounds.open(
             "round-1", RoundRequest(now_unix=1, request_id="open"), holder_task_id="first", lease_sec=1
         )
@@ -485,7 +484,7 @@ def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkey
         err = capsys.readouterr().err
         if residual == "older_schema":
             assert (
-                "ERROR: --resume-from coordinator.db is at schema version 6, older than this build's 7: sessions "
+                "ERROR: --resume-from coordinator.db is at schema version 6, older than this build's 8: sessions "
                 "created before this release cannot be resumed. Finish the session under the build that started "
                 "it, or start a new session."
             ) in err.splitlines()
@@ -774,7 +773,6 @@ def test_confirmation_is_idempotent_but_cannot_authorize_later_work(tmp_path, la
     [
         {"evidence": {"cleanup_confirmed": False, "outcome": {"state": "cancelled"}}},
         {"to": "cancelled", "evidence": {"reason": "cancelled_in_flight"}},
-        {"to": "cancelled", "evidence": {"lease_ttl_sec": 5}},
         {"to": "running", "evidence": {}},
         {"to": [], "evidence": {}},
         {"evidence": {"cleanup_confirmed": True, "outcome": {"state": "succeeded", "result": {}}}},
@@ -917,19 +915,23 @@ def test_confirmation_cli_reports_confirmation_failure_without_reports(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_confirmation_leaves_round_fence_and_events_for_existing_reconciler(tmp_path):
-    from hyperloom.orchestrator.bringup.reconcile import ReconcileLimits, Reconciler, ReconcileStores
-    from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+async def test_confirmation_leaves_round_fence_and_events_for_existing_reconciler(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.bringup import reconcile
+    from hyperloom.orchestrator.bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
+    from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
     from hyperloom.orchestrator.state.round_store import EXPIRED_REAPED, RoundRequest, RoundStore
+    from hyperloom.orchestrator.policy.projection import ResourceFacts
+    from hyperloom.orchestrator.state.shared_state import SharedState
     from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
+    monkeypatch.setattr(reconcile, "TERMINAL_HOLDER_CAP_SEC", 0.0)
     path = db_path_for(tmp_path)
     db = SqliteConnection(path)
     try:
         tasks = TaskRegistry(db)
         rounds = RoundStore(db)
-        await tasks.create(kind="baseline", params={}, idempotency_key="task-1", task_id="task-1")
+        await tasks.create_or_return_existing(kind="baseline", params={}, idempotency_key="task-1", task_id="task-1")
         await tasks.transition("task-1", "running")
         await tasks.transition("task-1", "cancelled", evidence={"reason": "cancelled_in_flight"})
         opened = await rounds.open(
@@ -937,9 +939,15 @@ async def test_confirmation_leaves_round_fence_and_events_for_existing_reconcile
         )
         assert opened.ok
         reconciler = Reconciler(
-            ReconcileStores(rounds=rounds, tasks=tasks, locks=ResourceLockManager(SqliteLeaseBackend(db))),
-            None,
-            limits=ReconcileLimits(terminal_holder_cap_sec=0),
+            ReconcileStores(rounds=rounds, tasks=tasks, locks=SqliteLeaseBackend(db)),
+            SharedState(),
+            links=ReconcileLinks(
+                resources=ResourceFacts(),
+                proposals=dict,
+                drop_proposal=lambda _pending, _reason: None,
+                session_dir=tmp_path,
+                result_pending=lambda _task_id: False,
+            ),
         )
         report = await reconciler.run(2_000_000_000)
         assert not report.settled and not report.failures

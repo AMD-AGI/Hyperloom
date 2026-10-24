@@ -110,17 +110,6 @@ def _stub(tmp_path: Path, *, local_explore: bool = True) -> Coordinator:
 
 
 # --------------------------------------------------------------------------- # 3.
-def test_arm_disabled_dispatch_is_noop(tmp_path: Path):
-    """When the arm flag is off the local-explore dispatch returns empty."""
-    disabled_arm = _stub(tmp_path, local_explore=False)
-    assert disabled_arm.phase_framework._framework_local_explore_arm_enabled() is False
-
-
-def test_arm_enabled_when_flag_on(tmp_path: Path):
-    stub = _stub(tmp_path, local_explore=True)
-    assert stub.phase_framework._framework_local_explore_arm_enabled() is True
-
-
 def test_gap_compose_includes_framework_and_gpu(tmp_path: Path):
     """_compose_framework_local_explore_gap returns a gap string and keywords."""
     stub = _stub(tmp_path, local_explore=True)

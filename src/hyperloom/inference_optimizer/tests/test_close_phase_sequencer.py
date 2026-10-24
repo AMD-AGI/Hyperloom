@@ -83,7 +83,6 @@ class _StubTaskRegistry:
         idempotency_key: str,
         requires_lanes: list | None = None,
         allowed_tools: list | None = None,
-        side_effects: list | None = None,
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
         dispatch_class: str | None = None,
@@ -428,14 +427,14 @@ async def test_a_running_task_that_never_lands_is_reported_not_waited_on_forever
 @pytest.mark.asyncio
 async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
     """The close-step timeout cancels its waiter, not the execution's ownership."""
-    from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+    from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
     from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
     db = SqliteConnection(coord.session_dir / "close-task.db")
     coord.tasks = TaskRegistry(db)
-    coord.locks = ResourceLockManager(SqliteLeaseBackend(db))
+    coord.locks = SqliteLeaseBackend(db)
     coord.sub = SubAgentRunner(coord.locks, coord.tasks)
     coord.shared_state.max_minutes = 60
     coord.phase_close._close_step_wait_sec = lambda _task: 0.05  # type: ignore[method-assign]
@@ -448,7 +447,9 @@ async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
         return {"status": "ok"}
 
     coord.sub.register_executor("report", execute)
-    queued = await coord.tasks.create(kind="report", params={}, idempotency_key="internal-report-close_phase_entry")
+    queued, _ = await coord.tasks.create_or_return_existing(
+        kind="report", params={}, idempotency_key="internal-report-close_phase_entry"
+    )
     try:
         started = time.monotonic()
         state = await coord.phase_close._run_close_task(queued, step="1 (report)")

@@ -99,7 +99,9 @@ async def test_the_integrate_route_accepts_the_specialist_it_owned(session_dir: 
     try:
         params = dict(_FREEFORM_PATCH)
         coord.router._stamp_specialist_owner(params)
-        task = await coord.tasks.create(kind="specialist", params=params, idempotency_key="spec-1")
+        task, _ = await coord.tasks.create_or_return_existing(
+            kind="specialist", params=params, idempotency_key="spec-1"
+        )
 
         integrate_params = {"specialist_task_id": task.task_id}
         assert await coord.router._stamp_integrate_patch_owner(integrate_params) == "FRAMEWORK_AGENT"

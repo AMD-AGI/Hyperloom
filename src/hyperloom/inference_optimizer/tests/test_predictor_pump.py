@@ -518,7 +518,7 @@ async def test_entry_asks_at_its_own_decision_point_after_filing_an_earlier_answ
     state = _state()
     service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 1})
     phase = _entering_phase(monkeypatch, state)
-    await phase._pump_predictor()
+    await phase._predictor_pump().step(phase.shared_state)
     # Answered while FRAMEWORK was away, so nothing filed it.
     await phase._predictor._inflight
     state.macro_cycle = 1
@@ -563,7 +563,7 @@ async def test_a_slow_answer_does_not_hold_framework_entry_past_its_bound(servic
 
     service.gate.set()
     await phase._predictor._inflight
-    await phase._pump_predictor()
+    await phase._predictor_pump().step(phase.shared_state)
     assert len(_predictor_rounds(state)) == 1
 
 

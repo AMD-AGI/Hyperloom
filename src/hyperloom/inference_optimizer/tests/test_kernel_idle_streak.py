@@ -113,7 +113,7 @@ async def test_running_kernel_task_never_winds_down(kernel_coordinator):
     _arm_kernel_phase(st)
     _owe_hot_kernels(st)
 
-    build = await c.tasks.create(
+    build, _ = await c.tasks.create_or_return_existing(
         kind="kernel_agent",
         params={"from_phase": ps.PHASE_FRAMEWORK_AGENT},
         idempotency_key="long-running-build",
@@ -179,7 +179,7 @@ async def test_queued_kernel_task_never_winds_down(kernel_coordinator):
     _arm_kernel_phase(st)
     _owe_hot_kernels(st)
 
-    await c.tasks.create(
+    await c.tasks.create_or_return_existing(
         kind="integrate",
         params={"kernel_id": "k001"},
         idempotency_key="queued-integrate",
@@ -271,7 +271,7 @@ def test_fingerprint_tracks_inflight_task_ids():
 async def test_exit_facts_report_a_queued_kernel_agent_only_inside_kernel(kernel_coordinator):
     c = kernel_coordinator
     st = c.shared_state
-    await c.tasks.create(kind="kernel_agent", params={}, idempotency_key="kernel-agent-queued")
+    await c.tasks.create_or_return_existing(kind="kernel_agent", params={}, idempotency_key="kernel-agent-queued")
 
     st.phase = ps.PHASE_FRAMEWORK_AGENT
     assert (await c.phase_kernel.exit_facts()).agent_in_flight is False

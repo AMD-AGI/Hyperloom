@@ -20,7 +20,6 @@ import pytest
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
-    LLM_REQUESTABLE_KERNEL_REQUEST_KINDS,
 )
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
@@ -71,7 +70,7 @@ def test_a_coordinator_owned_request_kind_is_refused(kind: str) -> None:
     assert excinfo.value.rule == "request_kind"
 
 
-@pytest.mark.parametrize("kind", sorted(LLM_REQUESTABLE_KERNEL_REQUEST_KINDS))
+@pytest.mark.parametrize("kind", sorted(set(KERNEL_REQUEST_HANDLERS) - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS))
 def test_the_llm_requestable_kinds_still_pass(kind: str) -> None:
     """The narrowing refuses the owned lanes and nothing beside them."""
     _emit(_llm_gate(), IntentType.REQUEST, {"target_agent": "kernel_agent", "kind": kind})
@@ -80,14 +79,6 @@ def test_the_llm_requestable_kinds_still_pass(kind: str) -> None:
 def test_an_unregistered_kind_reaches_the_auto_reject() -> None:
     """The handler lookup answers a typo with the valid-kind vocabulary."""
     _emit(_llm_gate(), IntentType.REQUEST, {"target_agent": "kernel_agent", "kind": "no_such_kind"})
-
-
-def test_every_registered_kernel_lane_is_requestable_or_owned() -> None:
-    """A new handler is refused by default until it is declared LLM-requestable."""
-    unclassified = (
-        set(KERNEL_REQUEST_HANDLERS) - LLM_REQUESTABLE_KERNEL_REQUEST_KINDS - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
-    )
-    assert not unclassified, f"kernel request kinds neither requestable nor Coordinator-owned: {sorted(unclassified)}"
 
 
 # -- Coordinator-managed actions ------------------------------------------

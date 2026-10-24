@@ -977,7 +977,7 @@ async def test_only_mode_tick_runs_the_custom_work_alone(monkeypatch, only, expe
     monkeypatch.setattr(FrameworkPhase, "_pump_framework_agent_phase", _rec("framework"))
     monkeypatch.setattr(FrameworkPhase, "_maybe_bench_untested_proposals", _rec("bench"))
     monkeypatch.setattr(FrameworkPhase, "_maybe_finish_custom_only_cycle", _rec("finish"))
-    monkeypatch.setattr(FrameworkPhase, "_pump_predictor", _rec("predictor"))
+    monkeypatch.setattr(FrameworkPhase, "_predictor_pump", lambda self: SimpleNamespace(step=_rec("predictor")))
     monkeypatch.setattr(FrameworkPhase, "_record_advisory_plateau", lambda self: None)
     state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_only=only)
     coord = SimpleNamespace(

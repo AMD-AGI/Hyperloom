@@ -59,11 +59,10 @@ async def _running_task_with_dead_lease(
     params: dict[str, Any] | None = None,
 ):
     """Create a running task holding a lease from a provably dead process."""
-    task = await coord.tasks.create(kind=kind, params=params or {}, idempotency_key=key)
+    task, _ = await coord.tasks.create_or_return_existing(kind=kind, params=params or {}, idempotency_key=key)
     await coord.tasks.transition(task.task_id, "running")
     coord.db.raw.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
-        "acquired_at, expires_at, heartbeat_at) VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
         (
             "benchmark_lane",
             task.task_id,
@@ -72,7 +71,6 @@ async def _running_task_with_dead_lease(
             _DEAD_PID,
             "2026-01-01T00:00:00+00:00",
             "2099-12-31T23:59:59+00:00",
-            "2026-01-01T00:00:00+00:00",
         ),
     )
     coord.db.raw.execute("UPDATE leases SET owner_scope='test-node' WHERE task_id=?", (task.task_id,))

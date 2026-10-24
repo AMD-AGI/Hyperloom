@@ -31,7 +31,6 @@ from hyperloom.orchestrator.loop.sub_agent_runner import (
     SubAgentRunner,
 )
 from hyperloom.orchestrator.bus.resource_lock import (
-    ResourceLockManager,
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
@@ -2471,12 +2470,12 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
         await c.stop()
 
     db = SqliteConnection(tmp_path_helper(session_dir))
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
     sub.register_executor("report", ReportExecutor())
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="report",
         params={"session_dir": str(session_dir)},
         idempotency_key="rep-1",
@@ -2518,11 +2517,11 @@ async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path, mo
     """An unresolvable session_dir yields a structured failure, not a crash."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "noses"))
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
     sub.register_executor("report", ReportExecutor())
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="report",
         params={},
         idempotency_key="rep-fail-1",
