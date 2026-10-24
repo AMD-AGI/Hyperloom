@@ -250,7 +250,10 @@ async def test_any_other_tool_is_refused_with_its_reason(stack: Stack, tool: str
     assert "must be one of ['tracelens', 'roofline']" in await stack.refused(tool=tool)
     with pytest.raises(RequestRejected) as raised:  # the toolbox's own refusal, for a caller outside the MCP schema
         await stack.rig.toolbox.submit_analysis("b1", tool, {})
-    assert raised.value.code == "tool_not_allowed" and "tracelens, roofline and kernel_tune" in raised.value.reason
+    assert (
+        raised.value.code == "tool_not_allowed"
+        and "tracelens, roofline, kernel_tune and upstream_pr_search" in raised.value.reason
+    )
     assert stack.tools["profile"].requests == []
 
 

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a specialist may start from the MCP service: ``tracelens`` and ``roofline`` on its own branch's commit, and
-``kernel_tune`` on the landed output of a test, those of them the toolbox's tool registry serves
-(:attr:`AnalysisStarter.analysis_tools`).
+"""What a specialist may start from the MCP service: ``tracelens`` and ``roofline`` on its own branch's commit,
+``kernel_tune`` on the landed output of a test, and ``upstream_pr_search`` on an upstream repository, those of them the
+toolbox's tool registry serves (:attr:`AnalysisStarter.analysis_tools`).
 
 The caller names the tool and its own parameters. The commit the analysis is about is never the caller's: it is the
 head of the caller's branch in the experiment repository, read here. ``profile_request_id`` is kept only when the
@@ -13,6 +13,8 @@ the trace splitter's workload hints are that profile test's own: the caller name
 for the trace the PRELUDE child profiled, is built here too (:func:`root_profile_request`), its hints read from the
 child's point config by the same rule. A ``kernel_tune`` request names a test (``test_request_id``) and gets the
 directory its output landed in, resolved inside the session, from the notebook's record of it, never from the caller.
+An ``upstream_pr_search`` request is about no commit and no test: it names a repository (one the rule pack lists) and what to
+look for, and the service the search asks is the host's, never the caller's.
 """
 
 from __future__ import annotations
@@ -33,9 +35,10 @@ from hyperloom_multibranch.toolbox.tools.op_shares import COMMIT_PARAM, PROFILE_
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
 from hyperloom_multibranch.toolbox.tools.tracelens_report import REPORT_ROUTE, WORKLOAD_HINTS, split_hint
 from hyperloom_multibranch.toolbox.tools.tune_inputs import POINT_CONFIG_GLOB, read_benchmark
+from hyperloom_multibranch.toolbox.tools.upstream_pr import UPSTREAM_PR_TOOL, build_search
 
 #: The ceiling of what a specialist may start; the toolbox serves those of them its registry holds, never more.
-ANALYSIS_TOOLS = (TRACELENS_TOOL, ROOFLINE_TOOL, KERNEL_TUNE_TOOL)
+ANALYSIS_TOOLS = (TRACELENS_TOOL, ROOFLINE_TOOL, KERNEL_TUNE_TOOL, UPSTREAM_PR_TOOL)
 CODE_TOOL_NOT_ALLOWED = "tool_not_allowed"
 CODE_SERVER_OWNED_PARAM = "server_owned_param"
 CODE_COMMIT_UNKNOWN = "commit_unknown"
@@ -52,6 +55,8 @@ ANALYSIS_ROUTE_PARAM = "analysis_route"
 ROOT_PROFILE_JOB_PREFIX = "prelude:"
 TRACE_GLOB = "*.trace.json*"
 SPLIT_HINT_PARAMS = tuple(key for _, key, _ in WORKLOAD_HINTS)
+#: The monitor service an upstream PR search may also read: only the host names one.
+PR_MONITOR_PARAM = "pr_monitor_url"
 
 
 class AnalysisStarter(Protocol):
@@ -199,9 +204,11 @@ async def analysis_request(
         )
     if ask.tool == KERNEL_TUNE_TOOL:
         return await _tune_request(records, ask, trace_root)
-    if ask.tool == TRACELENS_TOOL and not ask.profile_request_id:
+    if ask.tool == UPSTREAM_PR_TOOL:
+        return _pr_search_request(ask)
+    if not ask.profile_request_id:
         raise RequestRejected(
-            f"{TRACELENS_TOOL} reads the trace of a profile test: name the profile test with profile_request_id",
+            f"{ask.tool} reads the trace of a profile test: name the profile test with profile_request_id",
             CODE_PROFILE_REQUIRED,
         )
     commit = await _head(repo, ask.branch)
@@ -212,6 +219,22 @@ async def analysis_request(
         if ask.tool == TRACELENS_TOOL:
             params.update(_split_hints(record, trace_root))
     return ToolRequest(ask.tool, ask.branch, params)
+
+
+def _pr_search_request(ask: AnalysisAsk) -> ToolRequest:
+    """The ``upstream_pr_search`` request: the caller's search, checked now so a search that can never run is refused."""
+    if ask.profile_request_id:
+        raise RequestRejected(f"{UPSTREAM_PR_TOOL} reads no profile test: leave profile_request_id out")
+    if PR_MONITOR_PARAM in ask.params:
+        raise RequestRejected(
+            f"{PR_MONITOR_PARAM} in params is not the caller's to name: the host does not ask a service a caller names",
+            CODE_SERVER_OWNED_PARAM,
+        )
+    try:
+        build_search(ask.params)
+    except InvalidRequest as exc:
+        raise RequestRejected(str(exc)) from None
+    return ToolRequest(ask.tool, ask.branch, dict(ask.params))
 
 
 async def _tune_request(records: RecordSearch | None, ask: AnalysisAsk, root: Path | None) -> ToolRequest:

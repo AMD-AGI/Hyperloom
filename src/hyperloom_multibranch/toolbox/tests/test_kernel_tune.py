@@ -258,7 +258,8 @@ async def test_a_job_that_would_leave_less_than_one_test_needs_is_refused_by_nam
 async def test_a_pool_that_cannot_spare_a_card_does_not_serve_the_tool_at_all(make: Make, cards: int, tp: int) -> None:
     rig = await ready(await make(cards=cards, tp=tp))
 
-    assert rig.box.analysis_tools == ("tracelens",) and KERNEL_TUNE_TOOL not in rig.box._tools.tool_names  # type: ignore[union-attr]
+    assert rig.box.analysis_tools == ("tracelens", "roofline", "upstream_pr_search")
+    assert KERNEL_TUNE_TOOL not in rig.box._tools.tool_names  # type: ignore[union-attr]
     with pytest.raises(RequestRejected) as refused:
         await rig.submit(test_request_id=TEST_ID)
     assert refused.value.code == "tool_unavailable_on_backend"

@@ -17,7 +17,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "11"
+version: "12"
 facts:
   aiter_merged_view:
     kind: names
@@ -800,3 +800,19 @@ facts:
       column: relNormErr
     examples:
       - "hyperloom_multibranch.toolbox.tools.tune_rows: an asm row at a splitK above 1 whose mismatch ratio is above the limit is verified when this column holds a figure from 0 to 0.01, and the column is left out of the rows handed over"
+
+  upstream_pr_repos:
+    kind: names
+    project: SGLang, vLLM, aiter, PyTorch
+    reason: >-
+      The GitHub repositories whose pull requests a specialist may search for a change that looks relevant to the
+      measurement in hand (the upstream_pr_search analysis tool). The search runs in the toolbox host process and, when
+      the host holds a GitHub token, with it, so the tool answers only for these repositories and never for one a caller
+      names; a repository that moved or was renamed upstream is changed here, by publishing a pack.
+    names:
+      sglang: sgl-project/sglang
+      vllm: vllm-project/vllm
+      aiter: ROCm/aiter
+      pytorch: pytorch/pytorch
+    examples:
+      - "hyperloom_multibranch.toolbox.tools.upstream_pr: a search names a repository by its GitHub URL, and is refused unless the owner/name of that URL is one of these"

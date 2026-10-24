@@ -560,34 +560,6 @@ async def test_an_agent_analysis_whose_window_cannot_be_read_carries_no_shares_n
     assert DEGRADED_NOTICE in pointer.summary and "window.json.gz cannot be read" in pointer.summary
 
 
-async def test_the_roofline_pointer_carries_the_kernel_shares_of_the_window_its_analysis_ran_on(
-    rig: Rig, tmp_path: Path
-) -> None:
-    window, report = _analysed_window(rig, tmp_path)
-    result = {
-        "status": "succeeded",
-        "analysis_md_path": str(report),
-        "steady_state_trace": str(window),
-        "last_profile_trace": str(rig.trace_input),
-    }
-
-    class Executor:
-        async def __call__(self, ctx: Any) -> dict:
-            return dict(result)
-
-    tool = roofline.roofline_tool()
-    tool._factory = lambda workdir: Executor()
-    sink = RecordingSink()
-    jobs = ToolJobs([tool], sink, tmp_path / "jobs", push_delay_seconds=0)
-    assert (
-        await jobs.wait(jobs.submit(ToolRequest("roofline", "b1", {"commit_id": "c9"}), job_id="r1"))
-        is JobStatus.SUCCEEDED
-    )
-    shares = sink.pointers[0].op_shares
-    gemms = [name for name in shares if name.startswith("kernel_gemm_0 [")]
-    assert len(gemms) == 4 and "aten::mm" not in shares and (tmp_path / "jobs" / "r1" / "kernel_shares.csv").is_file()
-
-
 async def test_excluded_events_of_a_kernel_the_trace_never_ran_clean_degrade_the_window_it_does_not_rank_a_guess(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

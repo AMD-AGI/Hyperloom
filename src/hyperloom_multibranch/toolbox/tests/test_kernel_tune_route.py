@@ -83,15 +83,20 @@ async def test_the_local_toolbox_advertises_the_tuner_where_it_can_spare_a_card_
 ) -> None:
     served = await make(cards=2)
     entry = served.stack.advertised()
-    assert entry["inputSchema"]["properties"]["tool"]["enum"] == ["tracelens", "kernel_tune"]
+    assert entry["inputSchema"]["properties"]["tool"]["enum"] == [
+        "tracelens",
+        "roofline",
+        "kernel_tune",
+        "upstream_pr_search",
+    ]
     assert "kernel_tune" in entry["description"] and "lease_leaves_no_measurement" in entry["description"]
     assert "verified=false" in entry["description"] and "rows_only=true" in entry["description"]
 
     one = await make(cards=1)
     bare = one.stack.advertised()
-    assert bare["inputSchema"]["properties"]["tool"]["enum"] == ["tracelens"]
+    assert bare["inputSchema"]["properties"]["tool"]["enum"] == ["tracelens", "roofline", "upstream_pr_search"]
     assert "kernel_tune" not in bare["description"] and "kernel_tune" not in json.dumps(bare["inputSchema"])
-    assert "must be one of ['tracelens']" in await one.stack.refused(
+    assert "must be one of ['tracelens', 'roofline', 'upstream_pr_search']" in await one.stack.refused(
         tool="kernel_tune", params={"test_request_id": TEST_ID}
     )
 

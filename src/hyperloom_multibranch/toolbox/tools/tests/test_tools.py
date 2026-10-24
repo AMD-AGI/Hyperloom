@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-from hyperloom.orchestrator.actions.executors.roofline import RooflineExecutor
 from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
 from hyperloom.orchestrator.kernel.request_handlers import run_fusion_handler
 from hyperloom_multibranch.toolbox.tools import (
@@ -23,7 +22,7 @@ from hyperloom_multibranch.toolbox.tools import (
     roofline_tool,
     tracelens_tool,
 )
-from hyperloom_multibranch.toolbox.tools.roofline import tracelens_handler
+from hyperloom_multibranch.toolbox.tools.roofline import roofline_handler, tracelens_handler
 from hyperloom_multibranch.toolbox.tools.tests.sinks import RecordingSink
 
 
@@ -41,7 +40,7 @@ def test_the_tool_names_are_unique_and_complete() -> None:
 
 
 def test_each_tool_is_bound_to_the_existing_implementation(tmp_path: Path) -> None:
-    assert isinstance(roofline_tool()._factory(tmp_path), RooflineExecutor)
+    assert roofline_tool()._handler is roofline_handler
     assert isinstance(build_tool()._factory(tmp_path), TargetedBuildExecutor)
     accuracy = accuracy_tool()._factory(tmp_path)
     assert isinstance(accuracy, BaselineExecutor)

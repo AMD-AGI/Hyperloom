@@ -162,6 +162,7 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "TUNABLEOP_TUNING_ENV": "PYTORCH_TUNABLEOP_TUNING",
     "TUNED_LIBTYPE_COLUMN": "libtype",
     "TUNED_SPLITK_COLUMN": "splitK",
+    "UPSTREAM_PR_REPOS": ["sgl-project/sglang", "vllm-project/vllm", "ROCm/aiter", "pytorch/pytorch"],
 }
 
 Facts = dict[str, Any]
@@ -219,9 +220,9 @@ def _fresh(code: str, pack: str | None) -> subprocess.CompletedProcess[str]:
 
 def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
-    assert pack.version == "11"
+    assert pack.version == "12"
     assert Counter(entry.kind for entry in pack.entries.values()) == {
-        Kind.NAMES: 18,
+        Kind.NAMES: 19,
         Kind.LOG_REGEX: 14,
         Kind.ENV_DEFAULT: 1,
     }
@@ -363,7 +364,7 @@ def test_a_session_whose_pack_cannot_be_used_stops_at_import_naming_the_entry(
 
 
 def test_the_recorded_identity_is_the_digest_of_the_bytes_read_and_is_stable(tmp_path: Path) -> None:
-    expected = {"version": "11", "digest": "sha256:" + hashlib.sha256(DEFAULT_PACK_PATH.read_bytes()).hexdigest()}
+    expected = {"version": "12", "digest": "sha256:" + hashlib.sha256(DEFAULT_PACK_PATH.read_bytes()).hexdigest()}
     assert rule_pack_identity() == expected
     assert rule_pack_identity() == rule_pack_identity()
     elsewhere = _fresh(_SHOW, None)

@@ -40,7 +40,12 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
-from hyperloom.common.outside_facts import TUNABLEOP_ENABLED_ENV, TUNABLEOP_TABLE_ENV, TUNABLEOP_TUNING_ENV
+from hyperloom.common.outside_facts import (
+    TUNABLEOP_ENABLED_ENV,
+    TUNABLEOP_TABLE_ENV,
+    TUNABLEOP_TUNING_ENV,
+    UPSTREAM_PR_REPOS,
+)
 from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, Purpose, TestKind
 from hyperloom.contracts.measurement import TestRequest as MeasuredRequest
 from hyperloom.contracts.recipe import KernelKind
@@ -70,6 +75,7 @@ from hyperloom_multibranch.notebook.tools import ERROR, notebook_tools
 from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, AnalysisStarter
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
+from hyperloom_multibranch.toolbox.tools.upstream_pr import DEFAULT_LIMIT, MAX_LIMIT, UPSTREAM_PR_TOOL
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.notebook.learning_search import LearningFinder
@@ -150,8 +156,9 @@ _SUBMIT_TEST: dict[str, Any] = {
 }
 _ANALYSIS_BLURBS = {
     TRACELENS_TOOL: "analyse a trace",
-    ROOFLINE_TOOL: "profile, then analyse",
+    ROOFLINE_TOOL: "the kernel roofline of a trace",
     KERNEL_TUNE_TOOL: "tune GEMM shapes on one card",
+    UPSTREAM_PR_TOOL: "search upstream pull requests",
 }
 _TEST_RESULT_GUIDE = (
     "The state and result of one test this branch submitted, or of any branch's profile test. An AgentX test's "
@@ -200,15 +207,24 @@ _KERNEL_TUNE_GUIDE = (
 )
 
 
+_UPSTREAM_PR_GUIDE = (
+    " upstream_pr_search: reads no commit and no profile test (leave profile_request_id out); params.repo_url is "
+    f"required, the GitHub URL of one of {', '.join(UPSTREAM_PR_REPOS)}; params.keywords (words to look for), "
+    f"params.limit (default {DEFAULT_LIMIT}, at most {MAX_LIMIT}) and params.states (open by default; merged, closed or all "
+    "search pull requests of every state) are optional. The search runs in the toolbox's host process, and its result arrives in poll_inbox: the "
+    "candidate pull requests with ref, title, url and score. A host that cannot reach GitHub fails the job and says why; "
+    "that is not an empty answer."
+)
+
+
 def _start_analysis_schema(served: Sequence[str]) -> dict[str, Any]:
     """The ``start_analysis`` schema: ``tool`` is one of ``served``, the tools the toolbox serves, and nothing else.
 
     The commit is the branch head, read by the server; a request that names a commit or a branch is refused by the
     schema. With nothing served ``tool`` has no ``enum``, so a call reaches the toolbox's own refusal by name.
     """
-    profile_note = (
-        "required for tracelens, checked by the server" if TRACELENS_TOOL in served else "checked by the server"
-    )
+    needing = " and ".join(tool for tool in (TRACELENS_TOOL, ROOFLINE_TOOL) if tool in served)
+    profile_note = f"required for {needing}, checked by the server" if needing else "checked by the server"
     tool: dict[str, Any] = {"type": _STRING, "description": f"One of: {', '.join(served) or 'none served here'}."}
     if served:
         tool["enum"] = list(served)
@@ -239,7 +255,9 @@ def _start_analysis_description(served: Sequence[str]) -> str:
     return (
         f"Start {named} for this branch; returns the job id at once and the result arrives in poll_inbox. The commit "
         "analysed is this branch's head, set by the server; with a profile_request_id of any branch's profile test of "
-        "it the pointer carries its op shares." + (_KERNEL_TUNE_GUIDE if KERNEL_TUNE_TOOL in served else "")
+        "it the pointer carries its op shares."
+        + (_KERNEL_TUNE_GUIDE if KERNEL_TUNE_TOOL in served else "")
+        + (_UPSTREAM_PR_GUIDE if UPSTREAM_PR_TOOL in served else "")
     )
 
 

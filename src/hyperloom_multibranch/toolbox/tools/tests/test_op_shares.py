@@ -15,7 +15,6 @@ from hyperloom_multibranch.toolbox.tools import (
     ToolJobs,
     ToolRequest,
     build_tool,
-    roofline_tool,
     tracelens_tool,
 )
 from hyperloom_multibranch.toolbox.tools.op_shares import OPS_SUMMARY
@@ -84,23 +83,6 @@ async def test_a_trace_that_did_not_come_from_a_profile_test_has_no_request_id(t
     result = {"status": "completed", "trace_report_path": str(report)}
     pointer = await _tracelens_pointer(tmp_path, result, {"commit_id": "c9"})
     assert pointer.op_shares == {"silu": 5.0} and pointer.profile_request_id == ""
-
-
-async def test_roofline_pointer_reads_the_table_beside_its_analysis_report(tmp_path: Path) -> None:
-    report = _report(tmp_path, {"aiter::gemm": 40.0})
-
-    class Executor:
-        async def __call__(self, ctx: Any) -> dict:
-            return {"status": "succeeded", "analysis_md_path": str(report)}
-
-    tool = roofline_tool()
-    tool._factory = lambda workdir: Executor()
-    sink = RecordingSink()
-    jobs = ToolJobs([tool], sink, tmp_path / "jobs", push_delay_seconds=0)
-    job = jobs.submit(ToolRequest("roofline", "b1", {"commit_id": "c9"}), job_id="r1")
-    assert await jobs.wait(job) is JobStatus.SUCCEEDED
-    assert dict(sink.pointers[0].op_shares) == {"aiter::gemm": 40.0}
-    assert (sink.pointers[0].commit_id, sink.pointers[0].profile_request_id) == ("c9", "")
 
 
 async def test_another_tool_keeps_the_pointer_defaults_even_beside_a_table(tmp_path: Path) -> None:

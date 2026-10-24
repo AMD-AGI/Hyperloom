@@ -63,7 +63,13 @@ from hyperloom_multibranch.toolbox.leased_toolbox import (
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, staged_short_prompts
-from hyperloom_multibranch.toolbox.tools import AsyncTool, kernel_tune_tool, tracelens_tool
+from hyperloom_multibranch.toolbox.tools import (
+    AsyncTool,
+    UpstreamPrSearch,
+    kernel_tune_tool,
+    roofline_tool,
+    tracelens_tool,
+)
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, ToolboxTuning
 
 __all__ = [
@@ -216,9 +222,11 @@ class LocalOptions:
     runner and the measurement run with. ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the
     infrastructure retries per test before it ends as ``measurement_failed`` and ``poll_interval_sec`` how often the
     backend polls a runner for its result. ``tools`` are the asynchronous tools ``start_analysis`` may reach; ``None``
-    is the local set: TraceLens, and ``kernel_tune`` when the pool can spare a card for it without leaving fewer than one
-    test needs (it leases the card from the pool the branches' sandboxes lease from). Roofline profiles in the host
-    process on host cards outside the card leases, so it is not offered here. ``framework_configs`` is the directory of aiter's tuned tables that every test reads private
+    is the local set: TraceLens, the roofline of a profile test's trace (``bypass`` analysis, no card and no model), the
+    upstream PR search (GitHub is asked from this process, never from a sandbox) and ``kernel_tune`` when the pool can spare a
+    card for it without leaving fewer than one test needs (it leases the card from the pool the branches' sandboxes lease
+    from). The orchestrator's own roofline profiles on a host card outside the card leases, so it is not offered.
+    ``framework_configs`` is the directory of aiter's tuned tables that every test reads private
     copies of, snapshotted below ``session_dir/framework`` as the toolbox is built: the image's when omitted, ``""`` for
     none (the tests then share the tables). ``jit_store`` is the directory of the shared compiled-code cache: the
     runners read it (``HYPERLOOM_JIT_CACHE`` in their template, which therefore wins over the same name in
@@ -312,14 +320,15 @@ def _provider(
 
 
 def _local_tools(leases: BranchLeases, options: LocalOptions) -> Sequence[AsyncTool]:
-    """What ``options`` serves: its own tools, or TraceLens and the tuner, which is served only where a card can be
-    spared for it."""
+    """What ``options`` serves: its own tools, or TraceLens, the roofline, the upstream PR search and the tuner, which is
+    served only where a card can be spared for it. The first three need no card: they read a trace that is already there, or
+    ask GitHub from this process."""
     if options.tools is not None:
         return options.tools
     tuner = (
         (kernel_tune_tool(leases, Path(options.framework_configs or DEFAULT_CONFIGS)),) if leases.can_lease(1) else ()
     )
-    return (tracelens_tool(), *tuner)
+    return (tracelens_tool(), roofline_tool(), UpstreamPrSearch(), *tuner)
 
 
 def _accepting_local_kinds(acceptance: AcceptanceSetup) -> AcceptanceSetup:

@@ -99,6 +99,7 @@ __all__ = [
     "TUNABLEOP_TUNING_ENV",
     "TUNED_LIBTYPE_COLUMN",
     "TUNED_SPLITK_COLUMN",
+    "UPSTREAM_PR_REPOS",
     "spaced",
 ]
 
@@ -118,6 +119,8 @@ _tuned = _PACK.names("aiter_tuned_row_columns", "libtype_column", "splitk_column
 TUNED_LIBTYPE_COLUMN = _tuned["libtype_column"]
 TUNED_SPLITK_COLUMN = _tuned["splitk_column"]
 ASM_LIBTYPE = _tuned["asm_libtype"]
+
+UPSTREAM_PR_REPOS = tuple(_PACK.names("upstream_pr_repos", "sglang", "vllm", "aiter", "pytorch").values())
 
 FORGE_REL_NORM_ERR_COLUMN = _PACK.names("forge_rel_norm_err", "column")["column"]
 

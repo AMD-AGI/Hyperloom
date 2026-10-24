@@ -127,10 +127,10 @@ async def test_the_local_backend_advertises_only_the_analysis_tool_it_serves(loc
     assert "roofline" not in entry["description"] and "roofline" not in json.dumps(entry["inputSchema"])
 
 
-async def test_roofline_is_refused_on_the_local_backend(local: Local) -> None:
+async def test_a_tool_the_options_leave_out_is_refused_on_the_local_backend(local: Local) -> None:
     assert "must be one of ['tracelens']" in await local.stack.refused(tool="roofline")
     with pytest.raises(RequestRejected) as stale:  # the toolbox's own guard, for a client with an older tool list
-        await local.toolbox.submit_analysis("b1", "roofline", {})
+        await local.toolbox.submit_analysis("b1", "roofline", {}, "p1")
     assert stale.value.code == "tool_unavailable_on_backend"
 
 
@@ -184,12 +184,13 @@ async def test_a_profile_test_without_a_trace_location_is_refused_by_name(local:
     assert "profile_without_trace" in text and local.tracelens.requests == []
 
 
-async def test_the_default_options_serve_tracelens_and_the_tuner_not_roofline(tmp_path: Path) -> None:
+async def test_the_default_options_serve_every_analysis_tool(tmp_path: Path) -> None:
     notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
     toolbox = _toolbox(tmp_path, notebook, FakeRepo())
     try:
-        assert toolbox._tools is not None and toolbox._tools.tool_names == ("kernel_tune", "tracelens")
-        assert toolbox.analysis_tools == ("tracelens", "kernel_tune")
+        assert toolbox._tools is not None
+        assert toolbox._tools.tool_names == ("kernel_tune", "roofline", "tracelens", "upstream_pr_search")
+        assert toolbox.analysis_tools == ("tracelens", "roofline", "kernel_tune", "upstream_pr_search")
     finally:
         await toolbox.close()
 

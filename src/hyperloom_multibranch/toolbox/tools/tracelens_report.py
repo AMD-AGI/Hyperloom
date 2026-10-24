@@ -191,6 +191,19 @@ def _analysed_trace(trace_input: Path) -> Path:
     )
 
 
+def unusable_trace(trace_input: str) -> dict[str, str] | None:
+    """The failed result of an analysis whose ``trace_input`` cannot be analysed (it does not exist, or none of its first
+    traces has a GPU kernel), or ``None`` when it can.
+
+    The orchestrator's own analysis answers ``ok`` with no kernel for either, which reads as a trace with nothing in it.
+    """
+    try:
+        _analysed_trace(Path(trace_input).expanduser().resolve())
+    except _Refused as exc:
+        return {"status": "failed", "error_class": exc.error_class, "error": str(exc)}
+    return None
+
+
 def split_hint(flag: str, raw: object) -> str | None:
     """``raw`` as the text the splitter's ``flag`` takes, or ``None`` when it is not a value that flag accepts."""
     try:
@@ -442,5 +455,6 @@ __all__ = [
     "WORKLOAD_HINTS",
     "report_handler",
     "split_hint",
+    "unusable_trace",
     "with_window_shares",
 ]

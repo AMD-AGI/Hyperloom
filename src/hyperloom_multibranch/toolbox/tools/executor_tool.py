@@ -3,7 +3,7 @@
 
 """An existing action executor of the single-flow orchestrator, run as one asynchronous tool.
 
-The executors (profile, roofline, build, ...) take a runner context and return a result dict. This adapter builds that
+The executors (profile, build, accuracy, ...) take a runner context and return a result dict. This adapter builds that
 context from a tool request, so the executor's own implementation is the one that runs; nothing of it is copied.
 """
 
@@ -90,14 +90,10 @@ class ExecutorTool(_Reporting):
         extra = {"workspace": str(workdir), "session_dir": str(workdir)}
         return RunnerContext(task=task, lease=None, extra=extra)
 
-    async def settled(self, result: dict, workdir: Path) -> dict:
-        """The executor's ``result`` as the tool reports it; a tool adds what it computes from the files the run left."""
-        return result
-
     async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
         executor = self._factory(workdir)
         result = await executor(self.context(request, workdir))
-        return self.output(await self.settled(result, workdir), request)
+        return self.output(result, request)
 
 
 Handler = Callable[..., Awaitable[dict]]
