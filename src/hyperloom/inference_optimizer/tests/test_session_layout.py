@@ -422,7 +422,7 @@ async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
 
     sub = SubAgentRunner(locks, tasks, session_dir=sd)
     sub.register_executor("baseline", runner)
-    task = await tasks.create(
+    task, _ = await tasks.create_or_return_existing(
         TaskSpec(
             kind="baseline",
             params={},
@@ -454,7 +454,7 @@ async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
 
     sub = SubAgentRunner(locks, tasks, session_dir=sd)
     sub.register_executor("target_analysis", runner)
-    task = await tasks.create(
+    task, _ = await tasks.create_or_return_existing(
         TaskSpec(
             kind="target_analysis",
             params={},

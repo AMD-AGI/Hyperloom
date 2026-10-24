@@ -346,16 +346,15 @@ class TaskRegistry:
             _validate_dispatch_reuse(task, spec.dispatch_class)
             return task, True
 
-        if spec.dispatch_class is not None and spec.dispatch_origin is None and self._dispatch_origin_provider is not None:
+        if (
+            spec.dispatch_class is not None
+            and spec.dispatch_origin is None
+            and self._dispatch_origin_provider is not None
+        ):
             spec = replace(spec, dispatch_origin=self._dispatch_origin_provider())
         async with self.db.transaction() as cur:
             task = _insert_queued_task(cur, spec)
         return task, False
-
-    async def create(self, spec: TaskSpec) -> Task:
-        """Thin wrapper around :meth:`create_or_return_existing` for callers that don't need ``was_existing``."""
-        task, _was_existing = await self.create_or_return_existing(spec)
-        return task
 
     async def get(self, task_id: str) -> Task:
         """Fetch a single task by id."""

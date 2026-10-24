@@ -303,7 +303,9 @@ async def test_matching_scope_dead_holder_reaches_existing_reaper(tmp_path, monk
         ensure_schema(db.raw)
         tasks = TaskRegistry(db)
         leases = resource_lock.SqliteLeaseBackend(db)
-        await tasks.create(TaskSpec(kind="baseline", params={}, idempotency_key="task-1", task_id="task-1"))
+        await tasks.create_or_return_existing(
+            TaskSpec(kind="baseline", params={}, idempotency_key="task-1", task_id="task-1")
+        )
         await tasks.transition("task-1", "running")
         await leases.acquire_many(
             ["benchmark_lane"], holder_id="holder-1", task_id="task-1", action="baseline", ttl_sec=1
@@ -336,7 +338,9 @@ async def test_current_handoff_to_unstarted_holder_remains_resumable(tmp_path):
         tasks = TaskRegistry(db)
         rounds = RoundStore(db)
         for task_id in ("first", "next"):
-            await tasks.create(TaskSpec(kind="baseline", params={}, idempotency_key=task_id, task_id=task_id))
+            await tasks.create_or_return_existing(
+                TaskSpec(kind="baseline", params={}, idempotency_key=task_id, task_id=task_id)
+            )
         opened = await rounds.open(
             "round-1", RoundRequest(now_unix=1, request_id="open"), holder_task_id="first", lease_sec=1
         )
@@ -930,7 +934,9 @@ async def test_confirmation_leaves_round_fence_and_events_for_existing_reconcile
     try:
         tasks = TaskRegistry(db)
         rounds = RoundStore(db)
-        await tasks.create(TaskSpec(kind="baseline", params={}, idempotency_key="task-1", task_id="task-1"))
+        await tasks.create_or_return_existing(
+            TaskSpec(kind="baseline", params={}, idempotency_key="task-1", task_id="task-1")
+        )
         await tasks.transition("task-1", "running")
         await tasks.transition("task-1", "cancelled", evidence={"reason": "cancelled_in_flight"})
         opened = await rounds.open(

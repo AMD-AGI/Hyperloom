@@ -236,7 +236,7 @@ async def _explore(sub_agent_runner, tmp_path, names: list[str], *, entry: dict 
         _write_round(slot, 7648.85)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         TaskSpec(
             kind="explore",
             params={

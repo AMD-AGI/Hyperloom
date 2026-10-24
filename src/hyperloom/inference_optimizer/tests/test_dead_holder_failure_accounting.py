@@ -60,7 +60,7 @@ async def _running_task_with_dead_lease(
     params: dict[str, Any] | None = None,
 ):
     """Create a running task holding a lease from a provably dead process."""
-    task = await coord.tasks.create(TaskSpec(kind=kind, params=params or {}, idempotency_key=key))
+    task, _ = await coord.tasks.create_or_return_existing(TaskSpec(kind=kind, params=params or {}, idempotency_key=key))
     await coord.tasks.transition(task.task_id, "running")
     coord.db.raw.execute(
         "INSERT INTO leases(lane, holder_id, task_id, action, pid, "

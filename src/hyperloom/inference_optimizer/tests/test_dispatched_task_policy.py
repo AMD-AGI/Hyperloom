@@ -125,7 +125,7 @@ async def test_dispatched_integrate_patch_without_critic_verdict_is_cancelled(tm
         return {"status": "ok"}
 
     sub.register_executor("integrate_patch", _stub)
-    task = await sub.tasks.create(
+    task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(
             kind="integrate_patch",
             params={
@@ -161,7 +161,9 @@ async def test_dispatch_denied_baseline_is_not_charged_to_baseline_failures(sess
 
     monkeypatch.setattr(coord.policy, "validate_dispatched_task", _deny)
     for i in range(3):
-        task = await coord.tasks.create(TaskSpec(kind="baseline", params={}, idempotency_key=f"denied-baseline-{i}"))
+        task, _ = await coord.tasks.create_or_return_existing(
+            TaskSpec(kind="baseline", params={}, idempotency_key=f"denied-baseline-{i}")
+        )
         result = await coord.sub.run_task(task)
         await coord.dispatcher.reap_dispatched_task(task, result)
         assert result.state == "cancelled"
@@ -186,7 +188,7 @@ async def test_dispatched_internal_roofline_passes_delegate_gates(tmp_path, monk
         return {"status": "ok"}
 
     sub.register_executor("roofline", _stub)
-    task = await sub.tasks.create(
+    task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(
             kind="roofline",
             params={"reason": "prelude_bootstrap"},
@@ -218,7 +220,7 @@ async def test_dispatched_internal_conc_sweep_passes_auto_enqueue_singleton(tmp_
         return {"status": "ok"}
 
     sub.register_executor("conc_sweep", _stub)
-    task = await sub.tasks.create(
+    task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(
             kind="conc_sweep",
             params={"reason": "phase_entry"},
@@ -241,7 +243,7 @@ async def test_dispatched_recover_executes_when_queued(tmp_path, monkeypatch):
         return {"status": "ok"}
 
     sub.register_executor("recover", _stub)
-    task = await sub.tasks.create(
+    task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(
             kind="recover",
             params={"reason": "gpu_memory_leaked", "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]}},
@@ -474,7 +476,7 @@ async def test_dispatched_revalidation_holding_its_own_round_runs(tmp_path, monk
         return {"status": "ok"}
 
     sub.register_executor("baseline", _stub)
-    task = await sub.tasks.create(
+    task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(
             kind="baseline",
             params={"reason": "enablement_eval_revalidation"},
@@ -502,7 +504,7 @@ async def test_dispatched_integrate_patch_with_verdict_passes(tmp_path, monkeypa
         return {"status": "ok"}
 
     sub.register_executor("integrate_patch", _stub)
-    task = await sub.tasks.create(
+    task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(
             kind="integrate_patch",
             params={"specialist_task_id": "spec-ok", "apply_only": True},
@@ -527,7 +529,7 @@ async def test_dispatched_integrate_patch_resume_with_persisted_verdict_passes(t
 
     db = SqliteConnection(db_path)
     tasks = TaskRegistry(db)
-    task = await tasks.create(
+    task, _ = await tasks.create_or_return_existing(
         TaskSpec(
             kind="integrate_patch",
             params={"specialist_task_id": "spec-resume", "apply_only": True},
@@ -576,7 +578,7 @@ def _reconcile_dispatcher(*, sub: SubAgentRunner, tasks: TaskRegistry, shared_st
 async def test_reconcile_cancelled_integrate_patch_when_verdict_restored(tmp_path, monkeypatch):
     """Dispatch-time policy cancel is re-queued once Critic verdicts are restored."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
-    task = await sub.tasks.create(
+    task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(
             kind="integrate_patch",
             params={"specialist_task_id": "spec-reconcile", "apply_only": True},
@@ -607,7 +609,7 @@ async def test_reconcile_cancelled_integrate_patch_when_verdict_restored(tmp_pat
 async def test_reconcile_does_not_spawn_second_child_after_first_succeeds(tmp_path, monkeypatch):
     """A succeeded reconcile child must not trigger reconcile2 on later pump passes."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
-    task = await sub.tasks.create(
+    task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(
             kind="integrate_patch",
             params={"specialist_task_id": "spec-once", "apply_only": True},
@@ -643,7 +645,7 @@ async def test_reconcile_does_not_spawn_second_child_after_first_succeeds(tmp_pa
 async def test_reconcile_does_not_spawn_second_child_while_first_is_live(tmp_path, monkeypatch, child_state):
     """A queued or running reconcile child must not trigger reconcile2 on the next pump pass."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
-    task = await sub.tasks.create(
+    task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(
             kind="integrate_patch",
             params={"specialist_task_id": "spec-live", "apply_only": True},
@@ -670,7 +672,7 @@ async def test_reconcile_does_not_spawn_second_child_while_first_is_live(tmp_pat
 @pytest.mark.asyncio
 async def test_reconcile_skips_when_verdict_still_missing(tmp_path, monkeypatch):
     sub = _runner_with_policy(tmp_path, monkeypatch)
-    task = await sub.tasks.create(
+    task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(
             kind="integrate_patch",
             params={"specialist_task_id": "spec-no-verdict", "apply_only": True},
@@ -693,7 +695,7 @@ async def test_reconcile_skips_non_critic_policy_denials(tmp_path, monkeypatch):
     state = sub.shared_state
     assert isinstance(state, SharedState)
     state.record_specialist_patch_verdict("spec-root", "approve")
-    task = await sub.tasks.create(
+    task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(
             kind="integrate_patch",
             params={
@@ -719,7 +721,7 @@ async def test_dispatched_internal_framework_agent_passes(tmp_path, monkeypatch)
         return {"status": "ok"}
 
     sub.register_executor("framework_agent", _stub)
-    task = await sub.tasks.create(
+    task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(
             kind="framework_agent",
             params={"candidate": {"repo": "x/y", "pr_number": 1}},
@@ -747,7 +749,7 @@ async def test_runner_without_policy_skips_dispatch_validation(tmp_path, monkeyp
         return {"status": "ok"}
 
     sub.register_executor("integrate_patch", _stub)
-    task = await sub.tasks.create(
+    task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(
             kind="integrate_patch",
             params={"specialist_task_id": "no-gate", "apply_only": True},
@@ -763,7 +765,7 @@ async def test_runner_without_policy_skips_dispatch_validation(tmp_path, monkeyp
 async def test_killed_running_task_keeps_its_result(tmp_path, monkeypatch):
     """A task cancelled mid-flight still returns its executor result."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
-    task = await sub.tasks.create(
+    task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(
             kind="report",
             params={},

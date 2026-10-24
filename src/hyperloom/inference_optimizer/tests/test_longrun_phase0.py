@@ -151,12 +151,12 @@ async def test_prune_events_protects_pending_proposal(conn):
 async def test_prune_tasks_keeps_recent_done_and_spares_inflight(conn):
     reg = TaskRegistry(conn)
     # In-flight tasks that must never be pruned.
-    q = await reg.create(TaskSpec(kind="explore", params={}, idempotency_key="q1"))
-    r = await reg.create(TaskSpec(kind="explore", params={}, idempotency_key="r1"))
+    q, _ = await reg.create_or_return_existing(TaskSpec(kind="explore", params={}, idempotency_key="q1"))
+    r, _ = await reg.create_or_return_existing(TaskSpec(kind="explore", params={}, idempotency_key="r1"))
     await reg.transition(r.task_id, "running")
     done_ids = []
     for i in range(30):
-        t = await reg.create(TaskSpec(kind="explore", params={}, idempotency_key=f"d{i}"))
+        t, _ = await reg.create_or_return_existing(TaskSpec(kind="explore", params={}, idempotency_key=f"d{i}"))
         await reg.transition(t.task_id, "running")
         await reg.transition(t.task_id, "succeeded")
         done_ids.append(t.task_id)

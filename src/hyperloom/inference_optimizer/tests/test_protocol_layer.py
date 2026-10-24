@@ -310,15 +310,15 @@ def test_task_states_and_terminals():
 @pytest.mark.asyncio
 async def test_task_registry_create_idempotent(db):
     tr = TaskRegistry(db)
-    t1 = await tr.create(TaskSpec(kind="bench_runner", params={"x": 1}, idempotency_key="k1"))
-    t2 = await tr.create(TaskSpec(kind="bench_runner", params={"x": 1}, idempotency_key="k1"))
+    t1, _ = await tr.create_or_return_existing(TaskSpec(kind="bench_runner", params={"x": 1}, idempotency_key="k1"))
+    t2, _ = await tr.create_or_return_existing(TaskSpec(kind="bench_runner", params={"x": 1}, idempotency_key="k1"))
     assert t1.task_id == t2.task_id
 
 
 @pytest.mark.asyncio
 async def test_task_registry_legal_transitions(db):
     tr = TaskRegistry(db)
-    t = await tr.create(TaskSpec(kind="bench_runner", params={}, idempotency_key="kT1"))
+    t, _ = await tr.create_or_return_existing(TaskSpec(kind="bench_runner", params={}, idempotency_key="kT1"))
     t2 = await tr.transition(t.task_id, "running")
     assert t2.state == "running"
     t3 = await tr.transition(t.task_id, "succeeded", evidence={"tput": 1840})
@@ -328,7 +328,7 @@ async def test_task_registry_legal_transitions(db):
 @pytest.mark.asyncio
 async def test_task_registry_illegal_transition_rejected(db):
     tr = TaskRegistry(db)
-    t = await tr.create(TaskSpec(kind="bench_runner", params={}, idempotency_key="kT2"))
+    t, _ = await tr.create_or_return_existing(TaskSpec(kind="bench_runner", params={}, idempotency_key="kT2"))
     with pytest.raises(IllegalTransition):
         await tr.transition(t.task_id, "succeeded")  # queued -> succeeded illegal
 
@@ -336,9 +336,9 @@ async def test_task_registry_illegal_transition_rejected(db):
 @pytest.mark.asyncio
 async def test_task_registry_cancel_family_bulk(db):
     tr = TaskRegistry(db)
-    a = await tr.create(TaskSpec(kind="kernel_opt", params={}, idempotency_key="ka"))
-    b = await tr.create(TaskSpec(kind="kernel_opt", params={}, idempotency_key="kb"))
-    c = await tr.create(TaskSpec(kind="bench_runner", params={}, idempotency_key="kc"))
+    a, _ = await tr.create_or_return_existing(TaskSpec(kind="kernel_opt", params={}, idempotency_key="ka"))
+    b, _ = await tr.create_or_return_existing(TaskSpec(kind="kernel_opt", params={}, idempotency_key="kb"))
+    c, _ = await tr.create_or_return_existing(TaskSpec(kind="bench_runner", params={}, idempotency_key="kc"))
     cancelled = await tr.cancel_family(["kernel_opt"])
     assert set(cancelled) == {a.task_id, b.task_id}
     bench_after = await tr.get(c.task_id)
