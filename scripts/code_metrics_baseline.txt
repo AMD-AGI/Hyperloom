@@ -574,7 +574,7 @@ function-lines src/kernelforge/gemm_tune/tune_robustness.py::run_isolated 59
 function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_cap_splitk_to_serve_safe 64
 function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_ensure_decode_m_coverage 64
 function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_parse_tuner_stdout 52
-function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::run_aiter_dense_tuner 123
+function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::run_aiter_dense_tuner 122
 function-lines src/kernelforge/gemm_tune/tuners/fmoe_ck.py::FmoeCKTuner._untuned_csv_from_demand 53
 function-lines src/kernelforge/gemm_tune/tuners/fmoe_ck.py::FmoeCKTuner.run 108
 function-lines src/kernelforge/gemm_tune/tuners/sglang_dense_bf16.py::SglangDenseBf16Tuner._build_result 55
@@ -744,7 +744,7 @@ module-lines src/kernelforge/fusion/author.py 1263
 module-lines src/kernelforge/fusion/command.py 1584
 module-lines src/kernelforge/fusion/discover.py 1421
 module-lines src/kernelforge/fusion/validate.py 1513
-module-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py 1369
+module-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py 1251
 module-lines src/kernelforge/loop/insession_gate.py 1218
 module-lines src/kernelforge/loop/knowledge_integration.py 1457
 module-lines src/kernelforge/loop/runner.py 6051
