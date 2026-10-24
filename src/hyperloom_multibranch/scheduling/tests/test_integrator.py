@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -45,12 +46,13 @@ from hyperloom.contracts.recipe import (
 from hyperloom.measure.compile import LocalBlobStore, PackageBase
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent
+from hyperloom_multibranch.contracts.notebook.records import LineageEvent, MergeAttempt
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, MergeOutcome
 from hyperloom_multibranch.contracts.repo import ReplacedPatch, RepoMerge, ResolvedPatch, UnitedTable
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay
+from hyperloom_multibranch.notebook.rsi.stranded import StrandedLead
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, judgement, request, result
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -66,6 +68,7 @@ from hyperloom_multibranch.scheduling.integrator import (
     RESOLVER_ATTEMPTS,
     RESOLVER_SYSTEM_PROMPT,
     RESOLVER_UNREACHED,
+    REVERSE_MERGE,
     SUPERSEDED,
     Integrator,
     LlmPatchResolver,
@@ -222,7 +225,7 @@ class Bench:
 async def _one(bench: Bench) -> MergeReport | None:
     """A round one merge wide: the report of the one candidate tried, or ``None`` when none was."""
 
-    reports = await bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS)
+    reports = await bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS, ())
     assert len(reports) <= 1
     return reports[0] if reports else None
 
@@ -237,29 +240,39 @@ def _change(tag: str, patches: tuple[PatchRef, ...] = ()) -> RecipeDelta:
     return RecipeDelta(config=config, components=components)
 
 
+async def _open(bench: Bench, branch: str) -> None:
+    scheduler = bench.handle(Role.SCHEDULER)
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit=bench.root, reason="first batch"))
+    await bench.repo.create_branch(branch, bench.root)
+
+
+async def _commit_tag(bench: Bench, branch: str, parent: str, tag: str, *, invalid: bool, foundation: bool) -> str:
+    """``branch`` commits ``tag`` on ``parent``; with ``invalid`` it also moves the base image, which no merge
+    carries, and with ``foundation`` the gate judged it a foundation fix."""
+
+    toolbox, gate = bench.handle(Role.TOOLBOX), bench.handle(Role.GATE)
+    recipe = apply(await bench.repo.read_recipe(parent), bench.deltas[tag])
+    if invalid:
+        recipe = replace(recipe, base_image_digest="sha256:" + "1" * 64)
+    commit = await bench.repo.commit(branch, parent, recipe, tag)
+    test = request(f"r{tag}", intent(branch, parent, mechanism=tag), bench.deltas[tag])
+    await toolbox.write_request(test)
+    await toolbox.write_result(result(test.request_id))
+    verdict = judgement(GAINS[tag], (test.request_id,), foundation_fix=foundation)
+    await gate.write_judgement(test.request_id, verdict, Conclusion.COMMITTED, commit)
+    bench.commits[tag] = commit
+    return commit
+
+
 async def _commit_specialist_work(bench: Bench, invalid: bool, foundation: bool, tags: tuple[str, ...]) -> None:
     """``s1`` commits ``tags`` in turn; with ``invalid``, ``c1`` also moves the base image, which no merge carries,
     and with ``foundation`` the gate judged ``c1`` a foundation fix."""
 
-    scheduler, toolbox, gate = (bench.handle(role) for role in (Role.SCHEDULER, Role.TOOLBOX, Role.GATE))
-    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s1", from_commit=bench.root, reason="first batch"))
-    await bench.repo.create_branch("s1", bench.root)
+    await _open(bench, "s1")
     parent = bench.root
     for tag in tags:
-        recipe = apply(await bench.repo.read_recipe(parent), bench.deltas[tag])
-        if invalid and tag == "c1":
-            recipe = replace(recipe, base_image_digest="sha256:" + "1" * 64)
-        commit = await bench.repo.commit("s1", parent, recipe, tag)
-        test = request(f"r{tag}", intent("s1", parent, mechanism=tag), bench.deltas[tag])
-        await toolbox.write_request(test)
-        await toolbox.write_result(result(test.request_id))
-        await gate.write_judgement(
-            test.request_id,
-            judgement(GAINS[tag], (test.request_id,), foundation_fix=foundation and tag == "c1"),
-            Conclusion.COMMITTED,
-            commit,
-        )
-        bench.commits[tag], parent = commit, commit
+        first = tag == "c1"
+        parent = await _commit_tag(bench, "s1", parent, tag, invalid=invalid and first, foundation=foundation and first)
 
 
 async def _bench(
@@ -659,9 +672,9 @@ async def test_a_not_stackable_commit_is_not_tried_again_on_a_head_that_patched_
 
 
 async def test_a_round_tests_k_candidates_at_once_and_merges_the_first_improvement(bench: Bench) -> None:
-    first = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
+    first = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS, ())
     merged = await bench.repo.head(INTEGRATION_BRANCH)
-    second = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
+    second = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS, ())
 
     c1, c2 = bench.commits["c1"], bench.commits["c2"]
     assert [(r.candidate, r.onto, r.outcome, r.reason) for r in first] == [
@@ -674,13 +687,13 @@ async def test_a_round_tests_k_candidates_at_once_and_merges_the_first_improveme
     assert [(r.candidate, r.onto, r.outcome) for r in second] == [(c2, merged, MergeOutcome.MERGED)]
     head = await bench.repo.read_recipe(await bench.repo.head(INTEGRATION_BRANCH))
     assert TAG_FLAG + "c1" in head.launch.server_args and TAG_FLAG + "c2" in head.launch.server_args
-    assert await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS) == ()
+    assert await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS, ()) == ()
 
 
 async def test_a_commit_made_during_a_round_takes_the_slot_the_round_had_nothing_to_fill(tmp_path: Path) -> None:
     bench = await _bench(tmp_path, tags=("c1",))
     bench.toolbox.executor.gate.clear()
-    merging = asyncio.ensure_future(bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS))
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS, ()))
     await _until(lambda: len(bench.merge_tests()) == 1)
 
     arrived = await _committed_elsewhere(bench, _change("c2"), 2.0)
@@ -749,7 +762,7 @@ async def test_a_merge_that_unites_two_kernel_tables_says_so_in_the_decision_log
 
     merged = await _one(bench)
     again = await _committed_again(bench)
-    reports = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
+    reports = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS, ())
 
     assert merged is not None and merged.outcome is MergeOutcome.MERGED
     [skipped] = [report for report in reports if report.candidate == again]
@@ -764,7 +777,7 @@ async def test_a_merge_that_leaves_the_head_s_recipe_unchanged_is_skipped_untest
     head = await bench.repo.head(INTEGRATION_BRANCH)
     again = await _committed_again(bench)
 
-    reports = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
+    reports = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS, ())
 
     [skipped] = [report for report in reports if report.candidate == again]
     assert (skipped.onto, skipped.outcome, skipped.reason) == (head, MergeOutcome.ALREADY_ON_HEAD, ALREADY_ON_HEAD)
@@ -780,15 +793,15 @@ async def test_a_merge_that_leaves_the_head_s_recipe_unchanged_is_skipped_untest
 async def test_a_commit_already_on_the_head_is_not_tried_again_when_the_head_moves(bench: Bench) -> None:
     await _one(bench)
     again = await _committed_again(bench)
-    [skipped] = await bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS)
+    [skipped] = await bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS, ())
     head = await bench.repo.head(INTEGRATION_BRANCH)
 
-    moved = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
+    moved = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS, ())
 
     assert (skipped.candidate, skipped.outcome) == (again, MergeOutcome.ALREADY_ON_HEAD)
     assert await bench.repo.head(INTEGRATION_BRANCH) != head
     assert again not in {report.candidate for report in moved}
-    assert await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS) == ()
+    assert await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS, ()) == ()
 
 
 async def test_commits_of_a_stopped_branch_stay_eligible(bench: Bench) -> None:
@@ -958,7 +971,7 @@ async def test_a_rewrite_that_does_not_apply_is_asked_for_again_with_why(
 async def test_a_merge_the_recipe_contract_refuses_is_skipped_and_the_round_goes_on(tmp_path: Path) -> None:
     bench = await _bench(tmp_path, invalid=True)
 
-    reports = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
+    reports = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS, ())
 
     assert [(r.candidate, r.outcome) for r in reports] == [
         (bench.commits["c1"], MergeOutcome.CONFLICT_SKIPPED),
@@ -1014,7 +1027,7 @@ async def test_a_candidate_naming_another_upstream_commit_is_merged_and_the_head
 async def test_a_merge_test_the_toolbox_refuses_is_skipped_and_the_round_goes_on(bench: Bench) -> None:
     bench.refuse("c1")
 
-    reports = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
+    reports = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS, ())
 
     assert [(r.candidate, r.outcome) for r in reports] == [
         (bench.commits["c1"], MergeOutcome.CONFLICT_SKIPPED),
@@ -1052,7 +1065,7 @@ async def _cancel(task: asyncio.Task[object]) -> None:
 
 async def test_a_merge_cancelled_during_its_test_is_abandoned_and_its_test_withdrawn(bench: Bench) -> None:
     bench.toolbox.executor.gate.clear()
-    merging = asyncio.ensure_future(bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS))
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS, ()))
     await _until(lambda: bool(bench.merge_tests()))
 
     await _cancel(merging)
@@ -1068,7 +1081,7 @@ async def test_a_merge_cancelled_while_it_is_retested_is_abandoned_and_its_retes
     bench = await _bench(tmp_path, toolbox_type=HeldRetests)
     held = bench.toolbox
     assert isinstance(held, HeldRetests)
-    merging = asyncio.ensure_future(bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS))
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS, ()))
     await held.confirming.wait()
 
     await _cancel(merging)
@@ -1084,7 +1097,7 @@ async def test_a_merge_cancelled_while_committing_is_still_recorded(tmp_path: Pa
     repo = bench.repo
     assert isinstance(repo, HeldRepo)
     repo.committing, repo.released = asyncio.Event(), asyncio.Event()
-    merging = asyncio.ensure_future(bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS))
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS, ()))
     await repo.committing.wait()
 
     await _cancel(merging)
@@ -1096,3 +1109,85 @@ async def test_a_merge_cancelled_while_committing_is_still_recorded(tmp_path: Pa
     record = await bench.handle(Role.OBSERVER).record(request_id)
     assert (record.conclusion, record.commit_id) == (Conclusion.MERGED, await repo.head(INTEGRATION_BRANCH))
     assert bench.toolbox.withdrawn == {}
+
+
+async def _stranded(bench: Bench) -> tuple[str, StrandedLead]:
+    """``s2``'s ``c2`` merged onto the root, then ``s1`` commits ``c1`` on the root, whose merge onto that head
+    conflicted: the integration head and the stranded lead ``s1``, whose head ``c1`` is."""
+
+    await _open(bench, "s2")
+    await _commit_tag(bench, "s2", bench.root, "c2", invalid=False, foundation=False)
+    merged = await _one(bench)
+    assert merged is not None and merged.outcome is MergeOutcome.MERGED
+    head = await bench.repo.head(INTEGRATION_BRANCH)
+    c1 = await _commit_tag(bench, "s1", bench.root, "c1", invalid=False, foundation=False)
+    skipped = MergeAttempt((c1,), head, skipped_reason=CONFLICT_UNRESOLVED)
+    await bench.handle(Role.INTEGRATOR).record_merge_attempt(skipped)
+    lead = StrandedLead("s1", True, c1, "output_throughput", 1030.0, 1020.0, 1.0, 0.5, ())
+    return head, lead
+
+
+def _parents(bench: Bench, commit: str, *options: str) -> list[str]:
+    git = ["git", f"--git-dir={bench.root_dir.parent / 'repo'}", "rev-list", *options, commit]
+    return subprocess.run(git, check=True, capture_output=True, text=True).stdout.split()
+
+
+async def test_a_stranded_lead_takes_the_integration_head_onto_its_head_and_lands_it_after_the_integration_head(
+    tmp_path: Path,
+) -> None:
+    bench = await _bench(tmp_path, tags=())
+    head, lead = await _stranded(bench)
+    c1 = lead.head_commit
+
+    [report] = await bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS, (lead,))
+
+    landed = await bench.repo.head(INTEGRATION_BRANCH)
+    assert (report.outcome, report.candidate, report.onto, report.merged_commit) == (
+        MergeOutcome.MERGED,
+        c1,
+        head,
+        landed,
+    )
+    assert report.reverse_of == "s1" and report.reason.startswith(f"{REVERSE_MERGE.format('s1')}: improved")
+    [test] = [test for test in bench.merge_tests().values() if test.parent_commit == head]
+    recipe = await bench.repo.read_recipe(landed)
+    assert recipe == apply(await bench.repo.read_recipe(head), test.delta)
+    assert recipe.component(COMPONENT) == (await bench.repo.read_recipe(c1)).component(COMPONENT)
+    assert f"{TAG_FLAG}c1" in recipe.launch.server_args and f"{TAG_FLAG}c2" in recipe.launch.server_args
+    assert [(change.before, change.after) for change in report.config_conflicts] == [("256", "128")]
+    assert _parents(bench, landed, "--parents", "-n", "1") == [landed, head, c1]
+    assert _parents(bench, landed, "--first-parent") == [landed, head, bench.root]
+    observer = bench.handle(Role.OBSERVER)
+    assert next(commit for commit in await observer.committed() if commit.commit_id == c1).merged_into == landed
+    node = (await observer.lineage()).commit(landed)
+    assert node is not None and (node.parent_commit, node.merged_from) == (head, (c1,))
+    logged = bench.logged()[-1]
+    assert (logged["reason"], logged["detail"]["reverse_of"]) == (report.reason, "s1")
+
+
+async def test_a_reverse_merge_is_tried_once_per_pair_of_heads_and_judged_as_any_merge(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, {**CURVES, frozenset({"c1", "c2"}): {MAIN_POINT: 1020.0}}, tags=())
+    head, lead = await _stranded(bench)
+    tested = len(bench.merge_tests())
+
+    [report] = await bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS, (lead,))
+
+    assert report.outcome is MergeOutcome.NOT_STACKABLE and report.reverse_of == "s1"
+    assert report.reason.startswith(f"{REVERSE_MERGE.format('s1')}: flat")
+    assert len(bench.merge_tests()) == tested + 1 and await bench.repo.head(INTEGRATION_BRANCH) == head
+    assert await bench.outcome("c1") is MergeOutcome.NOT_STACKABLE
+    assert await bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS, (lead,)) == ()
+    assert len(bench.merge_tests()) == tested + 1
+
+
+async def test_a_skipped_reverse_merge_says_so_in_the_notebook_too(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, tags=())
+    _, lead = await _stranded(bench)
+    bench.refuse("c1")
+
+    [report] = await bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS, (lead,))
+
+    assert report.outcome is MergeOutcome.CONFLICT_SKIPPED
+    assert report.reason.startswith(f"{REVERSE_MERGE.format('s1')}: the toolbox refused the merge test")
+    [c1] = [commit for commit in await bench.handle(Role.OBSERVER).committed() if commit.commit_id == lead.head_commit]
+    assert c1.last_merge is not None and c1.last_merge.reason == report.reason

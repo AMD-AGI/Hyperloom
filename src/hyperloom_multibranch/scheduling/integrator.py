@@ -29,6 +29,14 @@ before anything is written, so only a candidate that keeps the regression set pa
 and nothing on it is ever reverted. That candidate is an improvement, or a foundation fix the accuracy gate passed
 whatever its gain: a fix the other branches build on is worth merging even when it costs throughput.
 
+A round also tries a stranded lead (:mod:`hyperloom_multibranch.notebook.rsi.stranded`), a branch whose head leads
+the integration head by more than the bar while commits of its own failed to merge, the largest lead first: a reverse
+merge carries the integration head's change onto that branch's head, and the result is tested from the integration
+head in one of the round's slots and judged and checked like any other merge. One that may be merged lands on the
+integration branch with the integration head as its first parent and the branch's head as its second, so the
+first-parent chain a foundation fix's patches are protected along stays the integration branch's own. A reverse merge
+is tried once per pair of branch head and integration head, and its report and merge-log entry say it is one.
+
 Before EXPLORE opens, :meth:`Integrator.replay_champion` carries the Recipe KB champion PRELUDE prepared onto the
 root the same way and by the same rule. It is nobody's candidate, so no merge attempt records it and the regression
 set it would run is still empty; what it leaves the integration branch at is the commit EXPLORE opens on.
@@ -38,13 +46,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Sequence, Set
+from collections.abc import Awaitable, Sequence, Set
 from dataclasses import dataclass, field, replace
 from functools import partial
 
 from hyperloom.common.jsonio import extract_last_json_with_key
 from hyperloom.contracts.measurement import Purpose, TestKind
-from hyperloom.contracts.recipe import ComponentPatches, RecipeDelta, RecipeError, ValueChange, apply
+from hyperloom.contracts.recipe import ComponentPatches, RecipeDelta, RecipeError, ValueChange, apply, delta_between
 from hyperloom.measure.compile import BlobError
 from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
@@ -61,6 +69,7 @@ from hyperloom_multibranch.contracts.repo import (
 )
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay
+from hyperloom_multibranch.notebook.rsi.stranded import StrandedLead
 from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD
 from hyperloom_multibranch.rulegate.inferencex import GAIN_BELOW_THRESHOLD, GAIN_NOT_CONFIRMED
 from hyperloom_multibranch.scheduling.candidates import Candidates
@@ -72,6 +81,8 @@ from hyperloom_multibranch.scheduling.requests import SessionChecks, integration
 SUPERSEDED = "superseded: another candidate of the round was merged onto this head first"
 EXPLORATION_ENDED = "exploration ended"
 ALREADY_ON_HEAD = "its change is already on the integration head"
+#: How a reverse merge's reason begins, naming the branch whose head the integration head was merged onto.
+REVERSE_MERGE = "reverse merge of the integration head onto the head of {}"
 #: A patch the three-way rebase could not settle and the resolver's answer did not resolve either.
 CONFLICT_UNRESOLVED = "unresolved patch conflict"
 #: The same conflict, lost before any answer: the resolver could not be reached. Counted apart from
@@ -106,7 +117,9 @@ class MergeReport:
     patches the merge took out for a candidate's patch that rewrites them, and the reason names them.
 
     A merged candidate carries the gain its merge test was judged to make and the bar it was judged against;
-    ``foundation_fix`` says the candidate is a foundation fix, which merges without a gain.
+    ``foundation_fix`` says the candidate is a foundation fix, which merges without a gain. ``reverse_of`` names the
+    branch of a reverse merge, whose head ``candidate`` is and which took the integration head's change; it is empty
+    for a candidate carried onto the integration head.
     """
 
     candidate: str
@@ -121,6 +134,15 @@ class MergeReport:
     gain_pct: float | None = None
     threshold_pct: float | None = None
     foundation_fix: bool = False
+    reverse_of: str = ""
+
+
+def _naming_reverse(report: MergeReport) -> MergeReport:
+    """``report`` with its reason saying it is a reverse merge, when it is one."""
+
+    if not report.reverse_of:
+        return report
+    return replace(report, reason=f"{REVERSE_MERGE.format(report.reverse_of)}: {report.reason}")
 
 
 def _naming_replaced(report: MergeReport) -> MergeReport:
@@ -352,9 +374,14 @@ class Integrator:
         self._resolver = resolver
         self._decisions = records.merges
         self._recording: asyncio.Future[str] | None = None
+        self._reversed: set[tuple[str, str]] = set()
 
-    async def integrate_next(self, width: int, tick: float) -> tuple[MergeReport, ...]:
+    async def integrate_next(self, width: int, tick: float, leads: Sequence[StrandedLead]) -> tuple[MergeReport, ...]:
         """Test the commits offered on the current head, ``width`` of them at once; ``()`` when none is offered.
+
+        The first of ``leads``, the stranded leads largest first, not yet reverse merged onto this head takes the
+        round's first slot, so a reverse merge that may be merged is the one the round merges. Its branch head is not
+        also offered as a commit in the same round.
 
         A slot the round has nothing to fill takes a commit committed while it runs, looked for every ``tick`` clock
         seconds, instead of standing idle until the round ends. The head stays where the round found it, so that
@@ -366,8 +393,9 @@ class Integrator:
         """
 
         head = await self._repo.head(INTEGRATION_BRANCH)
-        running: list[asyncio.Task[_Tested]] = []
-        started: set[str] = set()
+        reverse = self._claim_reverse(leads, head)
+        running = [asyncio.create_task(self._test_reverse(lead, head)) for lead in reverse]
+        started = {lead.head_commit for lead in reverse}
         reports: list[MergeReport] = []
         merged = False
         try:
@@ -378,7 +406,7 @@ class Integrator:
                 while running and running[0].done():
                     item = running.pop(0).result()
                     report = item if isinstance(item, MergeReport) else await self._conclude(item, merged)
-                    report = _naming_replaced(report)
+                    report = _naming_replaced(_naming_reverse(report))
                     merged = merged or report.outcome is MergeOutcome.MERGED
                     self._decisions.record(_decision(report))
                     reports.append(report)
@@ -389,6 +417,15 @@ class Integrator:
             for task in running:
                 task.cancel()
             await asyncio.gather(*running, return_exceptions=True)
+
+    def _claim_reverse(self, leads: Sequence[StrandedLead], head: str) -> tuple[StrandedLead, ...]:
+        """The first of ``leads`` whose head was not reverse merged onto ``head`` yet, marked as reverse merged now."""
+
+        lead = next((lead for lead in leads if (lead.head_commit, head) not in self._reversed), None)
+        if lead is None:
+            return ()
+        self._reversed.add((lead.head_commit, head))
+        return (lead,)
 
     async def _until_one_ends(self, running: Sequence[asyncio.Task[_Tested]], tick: float) -> None:
         """Wait until one of ``running`` has ended, or ``tick`` clock seconds have passed, whichever comes first."""
@@ -413,23 +450,50 @@ class Integrator:
         return tuple(commit for commit in offered if commit.commit_id not in started)[:free]
 
     async def _test(self, commit: CommittedCommit, head: str) -> _Tested:
-        candidate = commit.commit_id
+        pending = MergeReport(commit.commit_id, head, MergeOutcome.PENDING, "", foundation_fix=commit.foundation_fix)
+        return await self._tried(pending, self._carried(commit.commit_id, head))
+
+    async def _test_reverse(self, lead: StrandedLead, head: str) -> _Tested:
+        pending = MergeReport(lead.head_commit, head, MergeOutcome.PENDING, "", reverse_of=lead.branch)
+        return await self._tried(pending, self._reverse_carried(lead.head_commit, head))
+
+    async def _tried(self, pending: MergeReport, carrying: Awaitable[RepoMerge]) -> _Tested:
+        """Test the merge ``carrying`` gives of ``pending``'s candidate on ``pending``'s integration head, or skip it."""
+
         try:
-            carried = await self._repo.merge(candidate, head, await self._foundation_fixes())
-            merge = await self._resolved(carried, candidate)
-            onto = await self._repo.read_recipe(head)
+            merge = await carrying
+            onto = await self._repo.read_recipe(pending.onto)
             if apply(onto, merge.delta).digest() == onto.digest():
-                return await self._skip(commit, head, ALREADY_ON_HEAD, MergeOutcome.ALREADY_ON_HEAD, merge)
-            request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, head, merge.delta)
-            return await self._tests.judged(request, partial(self._judge, merge, commit))
+                return await self._skip(pending, ALREADY_ON_HEAD, MergeOutcome.ALREADY_ON_HEAD, merge)
+            request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, pending.onto, merge.delta)
+            return await self._tests.judged(request, partial(self._judge, merge, pending))
         except RecipeError as exc:
-            return await self._skip(commit, head, f"the merge does not combine: {exc}", MergeOutcome.CONFLICT_SKIPPED)
+            return await self._skip(pending, f"the merge does not combine: {exc}", MergeOutcome.CONFLICT_SKIPPED)
         except RequestRejected as exc:
             return await self._skip(
-                commit, head, f"the toolbox refused the merge test: {exc}", MergeOutcome.CONFLICT_SKIPPED
+                pending, f"the toolbox refused the merge test: {exc}", MergeOutcome.CONFLICT_SKIPPED
             )
         except _Skipped as exc:
-            return await self._skip(commit, head, exc.reason, MergeOutcome.CONFLICT_SKIPPED, exc.merge)
+            return await self._skip(pending, exc.reason, MergeOutcome.CONFLICT_SKIPPED, exc.merge)
+
+    async def _carried(self, candidate: str, head: str) -> RepoMerge:
+        """``candidate``'s change carried onto ``head``, its conflicts resolved."""
+
+        carried = await self._repo.merge(candidate, head, await self._foundation_fixes())
+        return await self._resolved(carried, candidate)
+
+    async def _reverse_carried(self, branch_head: str, head: str) -> RepoMerge:
+        """``head``'s change carried onto ``branch_head``, its conflicts resolved, as the change it makes to ``head``.
+
+        ``head``'s change is what it holds that ``branch_head`` does not, from the commits' merge base. The repository
+        protects the foundation fixes' patches along ``branch_head``'s first-parent chain, which holds those merged
+        before the branch opened; those merged since are in ``head``'s change, which adds them.
+        """
+
+        carried = await self._repo.merge(head, branch_head, await self._foundation_fixes())
+        merge = await self._resolved(carried, head)
+        merged = apply(await self._repo.read_recipe(branch_head), merge.delta)
+        return replace(merge, onto=head, delta=delta_between(await self._repo.read_recipe(head), merged))
 
     async def _foundation_fixes(self) -> frozenset[str]:
         """The foundation fixes merged onto the integration branch, as the notebook records them: no later merge may
@@ -440,21 +504,15 @@ class Integrator:
             commit.commit_id for commit in committed if commit.foundation_fix and commit.merged_into is not None
         )
 
-    async def _judge(self, merge: RepoMerge, commit: CommittedCommit, request_id: str) -> _Tested:
-        candidate = commit.commit_id
-        attempt = MergeAttempt((candidate,), merge.onto, request_id, resolved_patches=merge.resolved_patches)
+    async def _judge(self, merge: RepoMerge, pending: MergeReport, request_id: str) -> _Tested:
+        attempt = MergeAttempt((pending.candidate,), merge.onto, request_id, resolved_patches=merge.resolved_patches)
         await self._notebook.record_merge_attempt(attempt)
-        tested = MergeReport(
-            candidate,
-            merge.onto,
-            MergeOutcome.PENDING,
-            "",
-            request_id,
-            None,
-            merge.config_conflicts,
-            merge.united_tables,
-            merge.replaced_patches,
-            foundation_fix=commit.foundation_fix,
+        tested = replace(
+            pending,
+            request_id=request_id,
+            config_conflicts=merge.config_conflicts,
+            united_tables=merge.united_tables,
+            replaced_patches=merge.replaced_patches,
         )
         try:
             judgement = await self._gate.compare(request_id)
@@ -478,16 +536,17 @@ class Integrator:
             raise _Skipped(f"{CONFLICT_UNRESOLVED}: {conflicts}: {exc}", merge) from exc
 
     async def _skip(
-        self, commit: CommittedCommit, head: str, reason: str, outcome: MergeOutcome, merge: RepoMerge | None = None
+        self, pending: MergeReport, reason: str, outcome: MergeOutcome, merge: RepoMerge | None = None
     ) -> MergeReport:
         """A skipped candidate's report. ``merge`` is what the repository carried before the skip, if it got that far.
         What it united and replaced is recorded even where nothing was tested: a candidate whose every tuned row the
         head already had reads as already on the head, which is true of the slot and says nothing about the rows it
-        cost."""
+        cost. The notebook's record of a skipped reverse merge says it is one."""
 
-        attempt = MergeAttempt((commit.commit_id,), head, skipped_reason=reason, skipped_outcome=outcome)
+        report = replace(pending, outcome=outcome, reason=reason)
+        skipped = _naming_reverse(report).reason
+        attempt = MergeAttempt((pending.candidate,), pending.onto, skipped_reason=skipped, skipped_outcome=outcome)
         await self._notebook.record_merge_attempt(attempt)
-        report = MergeReport(commit.commit_id, head, outcome, reason, foundation_fix=commit.foundation_fix)
         if merge is None:
             return report
         return replace(report, united_tables=merge.united_tables, replaced_patches=merge.replaced_patches)
@@ -605,6 +664,7 @@ def _decision(report: MergeReport) -> Decision:
         "request_id": report.request_id,
         "merged_commit": report.merged_commit,
         "foundation_fix": report.foundation_fix,
+        "reverse_of": report.reverse_of,
         "gain_pct": report.gain_pct,
         "threshold_pct": report.threshold_pct,
         "config_conflicts": [
@@ -636,6 +696,7 @@ __all__ = [
     "GAIN_ONLY_REFUSALS",
     "RESOLVER_ATTEMPTS",
     "RESOLVER_UNREACHED",
+    "REVERSE_MERGE",
     "Integrator",
     "LlmPatchResolver",
     "MergeRecords",
