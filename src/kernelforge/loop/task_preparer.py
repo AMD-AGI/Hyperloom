@@ -1497,22 +1497,26 @@ def _commit_prepared_task(layout: _PreparationLayout, *, pf, attempt_count: int)
             ),
             audit_dir=audit_dir_str,
         )
-    # The agent path that names an identity runs only when the backend needs
-    # a git cwd, and a commit with none to auto-detect cannot land.
-    ensure_commit_identity(workspace)
-    _, commit_out = _git(workspace, "commit", "-m", "forge prepass: prepared measurement driver")
-    if _git_head(workspace) == guard.base_sha:
-        guard.rollback()
-        return PrepareResult(
-            ok=False,
-            attempts=attempt_count,
-            wrote_files=[],
-            created_files=[],
-            rolled_back=True,
-            final_preflight=pf,
-            message=(f"prepared a conforming driver but the git commit did not land: {commit_out.strip()[-200:]}"),
-            audit_dir=audit_dir_str,
-        )
+    # Nothing staged means preparation touched only paths git ignores -- the rewrite controller's driver sits in a
+    # directory that ignores itself -- so pristine is the base commit, and each iteration's restore, which removes
+    # only paths git lists, leaves the prepared driver in place.
+    if _git(workspace, "diff-index", "--cached", "--quiet", "HEAD")[0] != 0:
+        # The agent path that names an identity runs only when the backend needs
+        # a git cwd, and a commit with none to auto-detect cannot land.
+        ensure_commit_identity(workspace)
+        _, commit_out = _git(workspace, "commit", "-m", "forge prepass: prepared measurement driver")
+        if _git_head(workspace) == guard.base_sha:
+            guard.rollback()
+            return PrepareResult(
+                ok=False,
+                attempts=attempt_count,
+                wrote_files=[],
+                created_files=[],
+                rolled_back=True,
+                final_preflight=pf,
+                message=(f"prepared a conforming driver but the git commit did not land: {commit_out.strip()[-200:]}"),
+                audit_dir=audit_dir_str,
+            )
     return PrepareResult(
         ok=True,
         attempts=attempt_count,
