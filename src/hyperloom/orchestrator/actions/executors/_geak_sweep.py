@@ -385,27 +385,34 @@ def _sweep_outcome(entries: list[dict[str, Any]], plan: _ReplayPlan, output_root
     }
 
 
+@dataclass(frozen=True)
+class GeakSweepSpec:
+    """The CONC × (ISL, OSL) points a GEAK replay sweep measures, and how each point is measured."""
+
+    conc_values: list[int]
+    isl_osl_configs: list[str]
+    variant_timeout_sec: int
+    repeats: int = 3
+    pin_num_prompts: bool = False
+    metric_axis: tuple[str, str] = GEAK_METRIC_OUTPUT
+
+
 async def sweep_via_geak(
     *,
     result: dict[str, Any],
-    conc_values: list[int],
-    isl_osl_configs: list[str],
+    spec: GeakSweepSpec,
     output_root: Path,
-    variant_timeout_sec: int,
-    repeats: int = 3,
-    pin_num_prompts: bool = False,
     handoff: Mapping[str, Any] | None = None,
     env_spec: Mapping[str, Any] | None = None,
-    metric_axis: tuple[str, str] = GEAK_METRIC_OUTPUT,
 ) -> dict[str, Any]:
     """Run a CONC × (ISL, OSL) sweep on the GEAK-optimized server.
 
-    ``metric_axis`` is the ``(E2E_METRIC, metric_basis)`` pair from ``geak_metric_axis``. Every point is measured
+    ``spec.metric_axis`` is the ``(E2E_METRIC, metric_basis)`` pair from ``geak_metric_axis``. Every point is measured
     on it, and a point whose summary records another basis fails: a GEAK that cannot measure the requested axis
     and falls back to another would otherwise have that number rank the points.
     """
     handoff = handoff or {}
-    e2e_metric, requested_basis = metric_axis
+    e2e_metric, requested_basis = spec.metric_axis
     bench_script = result.get("bench_script") or result.get("geak_bench_script")
     final_launch_script = first_text(result.get("final_launch_script"))
     final_launch = _executable_final_launcher(final_launch_script)
@@ -445,15 +452,15 @@ async def sweep_via_geak(
         e2e_metric=e2e_metric,
         requested_basis=requested_basis,
         overlay=result.get("final_overlay") or "",
-        repeats=repeats,
-        timeout_sec=variant_timeout_sec,
-        protocol_env=_replay_protocol_env(result, flags, pin_num_prompts=pin_num_prompts),
+        repeats=spec.repeats,
+        timeout_sec=spec.variant_timeout_sec,
+        protocol_env=_replay_protocol_env(result, flags, pin_num_prompts=spec.pin_num_prompts),
     )
 
     output_root.mkdir(parents=True, exist_ok=True)
     entries: list[dict[str, Any]] = []
-    for index, (conc, spec) in enumerate((c, s) for c in conc_values for s in isl_osl_configs):
-        isl, osl = _parse_isl_osl(spec)
+    for index, (conc, shape) in enumerate((c, s) for c in spec.conc_values for s in spec.isl_osl_configs):
+        isl, osl = _parse_isl_osl(shape)
         # Name matches the sweep collector's scanner regex (``variant_<idx>_conc<c>_isl<i>_osl<o>``) so it is
         # discovered.
         out_dir = output_root / f"variant_{index}_conc{conc}_isl{isl}_osl{osl}"
