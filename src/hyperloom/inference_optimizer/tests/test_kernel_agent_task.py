@@ -237,6 +237,40 @@ async def test_a_leg_resumed_mid_forge_round_requeues_the_kernel_agent_and_stays
 
 
 @pytest.mark.asyncio
+async def test_a_leg_resumed_while_its_kernel_agent_ran_replaces_the_dead_legs_task(coord, monkeypatch):
+    """The stopped leg's kernel_agent row still reads running when the next leg starts; it is not a live round.
+
+    Reused as live, it was failed by the first tick's reconcile pass and the GLM-5.3 session left KERNEL as
+    ``kernel_settled`` the second it resumed, its Forge round never having started.
+    """
+    from hyperloom.orchestrator.bus import resource_lock
+
+    _arm_kernel_phase(coord.shared_state)
+    coord.shared_state.kernel_optimizer = "forge"
+    dead_legs = await _create_kernel_agent(coord, key=f"kernel_agent_c{int(coord.shared_state.macro_cycle or 0)}")
+    await coord.tasks.transition(dead_legs.task_id, "running")
+    await coord.locks.acquire_many(
+        list(_KERNEL_AGENT_LANES),
+        holder_id=dead_legs.task_id,
+        task_id=dead_legs.task_id,
+        action="kernel_agent",
+        ttl_sec=3600,
+    )
+    leg = await _next_leg(coord)
+    monkeypatch.setattr(resource_lock.SqliteLeaseBackend, "_pid_alive", staticmethod(lambda _pid: False))
+    try:
+        await leg.writeback.replay_resume_if_needed()
+
+        assert (await leg.tasks.get(dead_legs.task_id)).state == "failed"
+        replacement = [t for t in await leg.tasks.queued() if t.kind == "kernel_agent"]
+        assert len(replacement) == 1 and replacement[0].task_id != dead_legs.task_id
+        await leg.phase_machine.advance_phase_if_needed()
+        assert leg.shared_state.phase == ps.PHASE_KERNEL_AGENT
+    finally:
+        await leg.stop()
+
+
+@pytest.mark.asyncio
 async def test_a_leg_resumed_after_the_forge_round_settled_queues_no_new_round(coord):
     _arm_kernel_phase(coord.shared_state)
     _arm_terminal_controller(coord.shared_state)
