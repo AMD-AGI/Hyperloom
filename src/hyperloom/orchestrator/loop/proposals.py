@@ -205,8 +205,6 @@ def apply_critic_grid_filter(
     params["grid"] = stamped_grid
     if approved_variant_names is None:
         return True
-    original_grid_len = len([v for v in original_grid if isinstance(v, dict)])
-    params["critic_filtered_count"] = max(0, original_grid_len - len(stamped_grid))
     return bool(stamped_grid)
 
 
