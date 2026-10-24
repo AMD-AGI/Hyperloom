@@ -151,4 +151,4 @@ def test_the_breakdown_is_written_as_sorted_indented_json(snapshot: NotebookSnap
 
     assert path == tmp_path / "export" / FILENAME
     assert json.loads(path.read_text(encoding="utf-8")) == breakdown
-    assert path.read_text(encoding="utf-8").startswith('{\n  "baseline"')
+    assert path.read_text(encoding="utf-8").startswith('{\n  "agent_manifests"')

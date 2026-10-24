@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
@@ -61,6 +61,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
 from hyperloom_multibranch.contracts.notebook.records import (
     LESSON_ID,
     REPLAY_TARGET,
+    AgentManifestRecord,
     BaselineRecord,
     BranchLogRecord,
     BranchProgress,
@@ -108,6 +109,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
 )
 from hyperloom_multibranch.notebook import codec
 from hyperloom_multibranch.notebook.local import feeds, views
+from hyperloom_multibranch.notebook.local.agent_manifest import SOURCE_FIELD, sanitized_manifest
 from hyperloom_multibranch.notebook.local.feeds import BriefTriggers
 from hyperloom_multibranch.notebook.local.claims import LeaseStore, LeaseTaken, effective, is_live
 from hyperloom_multibranch.notebook.local.segments import (
@@ -802,6 +804,13 @@ class LocalNotebook(
 
     async def learnings(self, *, branch: str = "") -> tuple[LearningRecord, ...]:
         return tuple(record for record in self._state().learnings if not branch or record.learning.branch == branch)
+
+    async def record_agent_manifest(self, branch: str, document: Mapping[str, object]) -> None:
+        self._require(Role.SPECIALIST_RUNTIME)
+        self._own_branch(branch)
+        record = AgentManifestRecord(branch, sanitized_manifest(document))
+        summary = f"agent manifest: {record.manifest.get(SOURCE_FIELD, '')}"
+        self._append(EntryKind.AGENT_MANIFEST, record, branch=branch, parent="", summary=summary)
 
     async def poll(self, branch: str, cursor: str = "") -> InboxPage:
         if self._briefs is None:

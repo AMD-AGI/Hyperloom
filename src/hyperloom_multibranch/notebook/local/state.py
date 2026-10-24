@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from hyperloom_multibranch.contracts.notebook.interfaces import UnknownRequest
 from hyperloom_multibranch.contracts.notebook.peers import (
@@ -18,6 +18,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
     TestResult,
 )
 from hyperloom_multibranch.contracts.notebook.records import (
+    AgentManifestRecord,
     BaselineRecord,
     BranchLogRecord,
     Learning,
@@ -93,6 +94,7 @@ PAYLOADS: dict[EntryKind, type] = {
     EntryKind.SESSION_PROFILE: SessionProfile,
     EntryKind.MANIFEST: ManifestFingerprint,
     EntryKind.LLM_USAGE: LlmUsage,
+    EntryKind.AGENT_MANIFEST: AgentManifestRecord,
 }
 
 
@@ -116,6 +118,7 @@ class NotebookState:
         self.branch_logs: dict[str, list[BranchLogRecord]] = {}
         self.learnings: list[LearningRecord] = []
         self.llm_usage: list[LlmUsageRecord] = []
+        self.agent_manifests: dict[str, AgentManifestRecord] = {}
         self.intents: dict[str, Intent] = {}
         self.op_shares: dict[str, OpShares] = {}
         self.profiles: list[SessionProfile] = []
@@ -161,6 +164,7 @@ class NotebookState:
             EntryKind.LLM_USAGE: lambda entry, value: self.llm_usage.append(
                 LlmUsageRecord(entry.entry_id, entry.at, value)
             ),
+            EntryKind.AGENT_MANIFEST: self._agent_manifest,
         }
 
     def _request(self, entry: Entry, request: TestRequest) -> None:
@@ -190,6 +194,9 @@ class NotebookState:
 
     def _learning(self, entry: Entry, learning: Learning) -> None:
         self.learnings.append(LearningRecord(entry.entry_id, entry.at, learning))
+
+    def _agent_manifest(self, entry: Entry, record: AgentManifestRecord) -> None:
+        self.agent_manifests[record.branch] = replace(record, at=entry.at)
 
     def _claim(self, _entry: Entry, decision: ClaimDecision) -> None:
         self.intents.setdefault(decision.intent.fingerprint, decision.intent)

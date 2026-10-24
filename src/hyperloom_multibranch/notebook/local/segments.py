@@ -54,6 +54,7 @@ class EntryKind(str, Enum):
     SESSION_PROFILE = "session_profile"
     MANIFEST = "manifest"
     LLM_USAGE = "llm_usage"
+    AGENT_MANIFEST = "agent_manifest"
 
 
 def require_token(value: str, name: str) -> str:

@@ -73,10 +73,10 @@ def _decode(hint: object, data: object) -> object:
     if origin in _MAPPINGS:
         value_hint = typing.get_args(hint)[1]
         return {str(key): _decode(value_hint, item) for key, item in _object(data).items()}
-    if isinstance(hint, type):
-        return _decode_class(hint, data)
     if hint is object:
         return data
+    if isinstance(hint, type):
+        return _decode_class(hint, data)
     raise TypeError(f"the notebook cannot decode {hint!r}")
 
 

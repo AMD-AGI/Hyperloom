@@ -13,6 +13,7 @@ A write checks the role of the caller's :class:`~hyperloom_multibranch.contracts
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Protocol
 
 from hyperloom_multibranch.contracts.notebook.peers import (
@@ -231,6 +232,14 @@ class LearningStore(Protocol):
         """The learnings of ``branch``, every branch's when empty, oldest first, the superseded ones included."""
 
 
+class AgentRecords(Protocol):
+    """What an autonomous branch's runtime records of the third-party agent that drives it."""
+
+    async def record_agent_manifest(self, branch: str, document: Mapping[str, object]) -> None:
+        """Keep the manifest ``document`` of the agent driving ``branch``, once its preflight passed; only the branch's
+        own runtime records it, and the notebook drops every credential from it first."""
+
+
 class UsageSink(Protocol):
     """What the LLMs cost: a branch's specialist runtime records each launch's spend, the scheduler its own."""
 
@@ -314,6 +323,7 @@ class Notebook(
     ClaimService,
     BranchLogStore,
     LearningStore,
+    AgentRecords,
     UsageSink,
     Inbox,
     ProgressQuery,
@@ -328,6 +338,7 @@ class Notebook(
 
 
 __all__ = [
+    "AgentRecords",
     "AlreadyTested",
     "BranchLogStore",
     "CeilingTooLow",
