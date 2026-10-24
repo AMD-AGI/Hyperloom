@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import time
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -27,6 +29,9 @@ _RAY_OBS_ID_BASE = 100000
 
 # Lease TTL grace over how long the holder is expected to run: a GPU agent's wall budget, or an action's expected cost.
 GPU_LEASE_TTL_GRACE = 0.1
+
+# Resolution of the ISO timestamps written to and compared against gpu_leases.
+_LEASE_TIMESPEC = "microseconds"
 
 
 def _parse_gpu_list(raw: str) -> list[int]:
@@ -113,15 +118,58 @@ class SpecialistGpuPool:
         db: SqliteConnection,
         *,
         gpu_ids: list[int] | tuple[int, ...],
+        terminal_states: Collection[str] = (),
     ):
-        """Initialize the pool over a fixed set of GPU ids."""
+        """Initialize the pool over a fixed set of GPU ids.
+
+        ``terminal_states`` is the caller's vocabulary of task states that no
+        worker can come back from; the pool only reclaims a lapsed GPU lease
+        when its holder sits in one of them. Left empty, every row keeps its
+        slot until the holder releases it.
+        """
         self.db = db
         self.gpu_ids = tuple(dict.fromkeys(int(g) for g in gpu_ids if int(g) >= 0))
+        self.terminal_states = tuple(sorted({str(s) for s in terminal_states}))
 
     @property
     def capacity(self) -> int:
         """Return the number of GPUs the pool manages."""
         return len(self.gpu_ids)
+
+    def _blocking_gpu_rows(self, cur, *, min_gpu_id: int | None = None) -> dict[int, dict]:
+        """gpu_leases rows still entitled to their slot, keyed by gpu_id.
+
+        A row stops blocking when its holder task is terminal (one of the
+        states the caller passed in, which no worker will come back from) AND
+        its ``expires_at`` lapsed. Rows whose holder is live, or whose TTL has
+        not lapsed, keep the slot however old -- nothing heartbeats a GPU
+        worker mid-run, so raw expiry would steal slots from live holders.
+        """
+        terminal_tasks: set[str] = set()
+        if self.terminal_states:
+            try:
+                cur.execute(
+                    f"SELECT task_id FROM tasks WHERE state IN ({','.join('?' * len(self.terminal_states))})",
+                    self.terminal_states,
+                )
+                terminal_tasks = {str(row["task_id"]) for row in cur.fetchall()}
+            except sqlite3.OperationalError as exc:
+                # Legacy DB without the tasks table: nothing terminal to judge.
+                log.debug("_blocking_gpu_rows: tasks table unavailable: %s", exc)
+        now_iso = datetime.now(timezone.utc).isoformat(timespec=_LEASE_TIMESPEC)
+        if min_gpu_id is None:
+            cur.execute("SELECT gpu_id, task_id, expires_at FROM gpu_leases")
+        else:
+            cur.execute(
+                "SELECT gpu_id, task_id, expires_at FROM gpu_leases WHERE gpu_id >= ?",
+                (min_gpu_id,),
+            )
+        blocking: dict[int, dict] = {}
+        for row in cur.fetchall():
+            if str(row["task_id"]) in terminal_tasks and str(row["expires_at"] or "") <= now_iso:
+                continue  # Terminal holder, TTL lapsed: the slot is really free.
+            blocking[int(row["gpu_id"])] = dict(row)
+        return blocking
 
     async def try_acquire(
         self,
@@ -141,7 +189,7 @@ class SpecialistGpuPool:
         expires_iso = datetime.fromtimestamp(
             expires_ts,
             tz=timezone.utc,
-        ).isoformat(timespec="microseconds")
+        ).isoformat(timespec=_LEASE_TIMESPEC)
 
         async with self.db.transaction() as cur:
             # Same-holder/task acquire is idempotent when the existing lease already satisfies the request: same count
@@ -172,16 +220,19 @@ class SpecialistGpuPool:
                     "DELETE FROM gpu_leases WHERE holder_id=? AND task_id=?",
                     (holder_id, task_id),
                 )
-            placeholders = ",".join("?" * len(self.gpu_ids))
-            cur.execute(  # nosec B608 - placeholders string is generated from configured GPU id count.
-                f"SELECT gpu_id FROM gpu_leases WHERE gpu_id IN ({placeholders})",  # nosec B608 - generated placeholders only.
-                list(self.gpu_ids),
-            )
-            leased = {int(r["gpu_id"]) for r in cur.fetchall()}
+            blocking = self._blocking_gpu_rows(cur)
+            leased = set(blocking)
             available = [g for g in self.gpu_ids if g not in leased]
             if len(available) < n:
                 return None
             selected = available[:n]
+            for gpu_id in selected:
+                # gpu_id is the PK, so a terminal holder's lapsed row must go
+                # before this slot can be re-inserted for the new holder.
+                cur.execute(
+                    "DELETE FROM gpu_leases WHERE gpu_id=?",
+                    (gpu_id,),
+                )
             for gpu_id in selected:
                 cur.execute(
                     """
@@ -216,14 +267,11 @@ class SpecialistGpuPool:
         expires_iso = datetime.fromtimestamp(
             expires_ts,
             tz=timezone.utc,
-        ).isoformat(timespec="microseconds")
+        ).isoformat(timespec=_LEASE_TIMESPEC)
 
         async with self.db.transaction() as cur:
-            cur.execute(
-                "SELECT gpu_id FROM gpu_leases WHERE gpu_id >= ?",
-                (_RAY_OBS_ID_BASE,),
-            )
-            used = {int(r["gpu_id"]) for r in cur.fetchall()}
+            blocking = self._blocking_gpu_rows(cur, min_gpu_id=_RAY_OBS_ID_BASE)
+            used = set(blocking)
             slot: int | None = None
             for i in range(limit):
                 cand = _RAY_OBS_ID_BASE + i
@@ -232,6 +280,12 @@ class SpecialistGpuPool:
                     break
             if slot is None:
                 return None
+            # The synthetic id is the PK: a terminal holder's lapsed row must
+            # go before this slot can be re-inserted for the new holder.
+            cur.execute(
+                "DELETE FROM gpu_leases WHERE gpu_id=?",
+                (slot,),
+            )
             cur.execute(
                 """
                 INSERT INTO gpu_leases(

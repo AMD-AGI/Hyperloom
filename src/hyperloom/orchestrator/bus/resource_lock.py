@@ -593,25 +593,64 @@ class SqliteLeaseBackend:
         return pid > 0 and not cls._pid_alive(pid)
 
     async def reap_dead_holders(self) -> list[dict]:
-        """Release leases whose local holder process is confirmed absent."""
+        """Release leases whose holder is confirmed gone, or ended terminally.
+
+        Two questions can settle a row, in order of certainty:
+
+        - The holder's local process is confirmed absent (``holder_is_dead``).
+          This needs no clock: a dead pid is dead at any TTL.
+        - The holder's task is terminal (succeeded/failed/cancelled -- a state
+          it can never leave, so nothing will resume to claim the lane) AND the
+          lease's ``expires_at`` has lapsed. Task state is a database fact, not
+          a process-identity guess, so it is not one of the refuted proofs;
+          the TTL keeps the release from racing a task that just ended. The
+          ``gpu_leases`` exemption does not apply here: the 2026-09-21 wedge
+          was exactly a terminal holder that kept both its lanes and a
+          ``gpu_leases`` row because release failed mid-teardown.
+        """
         reaped: list[dict] = []
         async with self.db.transaction() as cur:
             cur.execute("SELECT * FROM leases")
             live_rows = [dict(r) for r in cur.fetchall()]
             cur.execute("SELECT DISTINCT task_id FROM gpu_leases")
             gpu_tasks = {row["task_id"] for row in cur.fetchall()}
+            terminal_tasks: set[str] = set()
+            try:
+                cur.execute(
+                    "SELECT task_id FROM tasks WHERE state IN (?,?,?)",
+                    tuple(sorted(TERMINAL_STATES)),
+                )
+                terminal_tasks = {str(row["task_id"]) for row in cur.fetchall()}
+            except sqlite3.OperationalError as exc:
+                # Legacy DB without the tasks table: nothing terminal to judge.
+                log.debug("reap_dead_holders: tasks table unavailable: %s", exc)
+            now_iso = _lease_iso(time.time())
             for row in live_rows:
                 # A lane records its coordinator, not the specialist's GPU worker.
-                if row["task_id"] in gpu_tasks or not self.holder_is_dead(row):
+                # A dead coordinator does not prove the worker ended, so the
+                # dead-pid path still respects the gpu_leases exemption.
+                if self.holder_is_dead(row) and row["task_id"] not in gpu_tasks:
+                    cur.execute(
+                        "DELETE FROM leases WHERE lane=? AND holder_id=?",
+                        (row["lane"], row["holder_id"]),
+                    )
+                    reaped.append(row)
                     continue
-                cur.execute(
-                    "DELETE FROM leases WHERE lane=? AND holder_id=?",
-                    (row["lane"], row["holder_id"]),
-                )
-                reaped.append(row)
+                # Terminal holder + lapsed TTL: a task state with no outgoing
+                # transition is a database fact, no process probe needed. This
+                # path is not gpu-exempt -- it is the shape that wedged
+                # 2026-09-21, a terminal holder that never released.
+                if row["lane"] == BRINGUP_ROUND_LANE:
+                    continue  # Round settlement is this lane's designed release.
+                if row["task_id"] in terminal_tasks and str(row["expires_at"] or "") <= now_iso:
+                    cur.execute(
+                        "DELETE FROM leases WHERE lane=? AND holder_id=?",
+                        (row["lane"], row["holder_id"]),
+                    )
+                    reaped.append(row)
         if reaped:
             log.warning(
-                "resource_lock: reaped %d lease(s) from dead holders: %s",
+                "resource_lock: reaped %d lease(s) from dead or terminal holders: %s",
                 len(reaped),
                 ", ".join(f"{r['lane']}<-{r['holder_id'][:12]}(pid={r.get('pid')})" for r in reaped),
             )
