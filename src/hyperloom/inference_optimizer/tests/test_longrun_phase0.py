@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -30,10 +29,6 @@ def conn(tmp_path):
     ensure_schema(db.raw)
     yield db
     db.close()
-
-
-def _iso(dt: datetime) -> str:
-    return dt.isoformat(timespec="microseconds")
 
 
 # SharedState ledger caps
@@ -183,18 +178,10 @@ async def test_run_db_retention_aggregates(conn):
 @pytest.mark.asyncio
 async def test_gpu_pool_retains_old_leases(conn):
     pool = SpecialistGpuPool(conn, gpu_ids=[0, 1, 2, 3])
-    now = datetime.now(timezone.utc)
-    # Insert one live + two expired leases directly.
-    rows = [
-        (0, "h0", "t0", _iso(now), _iso(now + timedelta(hours=1)), _iso(now)),
-        (1, "h1", "t1", _iso(now - timedelta(hours=2)), _iso(now - timedelta(hours=1)), _iso(now)),
-        (2, "h2", "t2", _iso(now - timedelta(hours=2)), _iso(now - timedelta(minutes=1)), _iso(now)),
-    ]
-    for row in rows:
+    for gpu_id in (0, 1, 2):
         await conn.execute(
-            "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, "
-            "expires_at, heartbeat_at) VALUES (?,?,?,?,?,?)",
-            row,
+            "INSERT INTO gpu_leases(gpu_id, holder_id, task_id) VALUES (?,?,?)",
+            (gpu_id, f"h{gpu_id}", f"t{gpu_id}"),
         )
     lease = await pool.try_acquire(count=1, holder_id="new", task_id="new")
     assert lease is not None and lease.gpu_ids == (3,)
@@ -285,13 +272,8 @@ async def test_coordinator_maintenance_reaps_leases_and_prunes(tmp_path, monkeyp
     }
     c = Coordinator(sd, backends=backends)
     try:
-        # Seed an expired GPU lease + some events with an advanced cursor.
-        now = datetime.now(timezone.utc)
-        await c.db.execute(
-            "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, "
-            "expires_at, heartbeat_at) VALUES (?,?,?,?,?,?)",
-            (0, "h", "t", _iso(now - timedelta(hours=2)), _iso(now - timedelta(hours=1)), _iso(now)),
-        )
+        # Seed a GPU lease + some events with an advanced cursor.
+        await c.db.execute("INSERT INTO gpu_leases(gpu_id, holder_id, task_id) VALUES (?,?,?)", (0, "h", "t"))
         c.gpu_specialist_pool = SpecialistGpuPool(c.db, gpu_ids=[0, 1])
         for i in range(30):
             await c.bus.append_and_seq(Message.new("orchestration", "*", "observation", {"i": i}))

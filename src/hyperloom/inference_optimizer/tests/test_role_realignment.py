@@ -466,7 +466,7 @@ async def test_running_tasks_reader_reports_held_resources(coordinator_with_mock
         ):
             c.bus.db.raw.execute(
                 "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
-                "acquired_at, expires_at, heartbeat_at) VALUES (?,?,?,?,?,?,?,?)",
+                "acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
                 (
                     lane,
                     holder,
@@ -475,21 +475,12 @@ async def test_running_tasks_reader_reports_held_resources(coordinator_with_mock
                     1,
                     "2026-05-19T18:00:00+00:00",
                     expires,
-                    "2026-05-19T18:00:00+00:00",
                 ),
             )
         for gpu_id in (3, 1):
             c.bus.db.raw.execute(
-                "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, "
-                "expires_at, heartbeat_at) VALUES (?,?,?,?,?,?)",
-                (
-                    gpu_id,
-                    f"h-gpu{gpu_id}",
-                    task.task_id,
-                    "2026-05-19T18:00:00+00:00",
-                    "2099-12-31T23:59:59+00:00",
-                    "2026-05-19T18:00:00+00:00",
-                ),
+                "INSERT INTO gpu_leases(gpu_id, holder_id, task_id) VALUES (?,?,?)",
+                (gpu_id, f"h-gpu{gpu_id}", task.task_id),
             )
         c.bus.db.raw.commit()
 

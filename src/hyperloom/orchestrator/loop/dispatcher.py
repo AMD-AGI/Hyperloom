@@ -623,11 +623,6 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 serving_tp,
             )
             gpu_count = serving_tp
-        # Timed from the same deadline carried down to the reaper.
-        gpu_ttl_sec = self.gpu_lease_ttl_sec(
-            task.lease_ttl_sec,
-            deadline=extra_context["specialist_deadline"],
-        )
         # Under single-node Ray the physical GPU mutex is Ray's ``num_gpus``, not this SQLite pool, so
         # admission there is a count-based pending limit and several specialists may share one GPU.
         if ray_gpu_specialist_exec_enabled():
@@ -635,14 +630,12 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 holder_id=task.task_id,
                 task_id=task.task_id,
                 pending_limit=ray_gpu_pending_limit(),
-                ttl_sec=gpu_ttl_sec,
             )
         else:
             gpu_lease = await gpu_pool.try_acquire(
                 count=gpu_count,
                 holder_id=task.task_id,
                 task_id=task.task_id,
-                ttl_sec=gpu_ttl_sec,
             )
         if gpu_lease is None:
             return None
@@ -656,7 +649,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         )
         if gpu_specialist_lease is not None:
             # Ray assigns and masks the physical cards, so the specialist sees a logical 0..N-1
-            # view and the SQLite ids are capacity/TTL accounting only. ``None`` off the Ray path
+            # view and the SQLite ids are capacity accounting only. ``None`` off the Ray path
             # (multi-node / RAY_EXEC off / tests) keeps the SQLite-gpu-id device path.
             extra_context["gpu_ids"] = list(range(gpu_count))
             extra_context["gpu_specialist_lease"] = gpu_specialist_lease

@@ -50,7 +50,7 @@ def locks(conn):
 
 
 def test_schema_version_records_owner_provenance():
-    assert SCHEMA_VERSION == 7
+    assert SCHEMA_VERSION == 8
 
 
 def test_fresh_db_has_composite_pk(conn):
@@ -71,7 +71,7 @@ def test_fresh_db_seeds_default_lane_capacity(conn):
 def test_fresh_db_has_gpu_leases_table(conn):
     cur = conn.raw.execute("PRAGMA table_info(gpu_leases)")
     cols = {row["name"] for row in cur.fetchall()}
-    assert {"gpu_id", "holder_id", "task_id", "expires_at"} <= cols
+    assert {"gpu_id", "holder_id", "task_id"} <= cols
 
 
 def test_set_lane_capacity_upserts(conn):
@@ -87,9 +87,7 @@ def test_set_lane_capacity_upserts(conn):
 def test_v2_ensure_schema_is_idempotent(conn):
     """Calling ensure_schema twice on the same DB doesn't lose data."""
     conn.raw.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
-        "acquired_at, expires_at, heartbeat_at) "
-        "VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
         (
             "research_lane",
             "h1",
@@ -98,7 +96,6 @@ def test_v2_ensure_schema_is_idempotent(conn):
             1,
             "2026-05-19T18:00:00+00:00",
             "2099-12-31T23:59:59+00:00",
-            "2026-05-19T18:00:00+00:00",
         ),
     )
     conn.raw.commit()
@@ -182,7 +179,6 @@ async def test_specialist_gpu_pool_allocates_and_releases(conn):
         count=1,
         holder_id="gpu-a",
         task_id="task-a",
-        ttl_sec=60,
     )
     assert lease is not None
     assert list(lease.gpu_ids) == [0]
@@ -190,7 +186,6 @@ async def test_specialist_gpu_pool_allocates_and_releases(conn):
         count=1,
         holder_id="gpu-b",
         task_id="task-b",
-        ttl_sec=60,
     )
     assert second is not None
     assert list(second.gpu_ids) == [1]
@@ -198,7 +193,6 @@ async def test_specialist_gpu_pool_allocates_and_releases(conn):
         count=1,
         holder_id="gpu-c",
         task_id="task-c",
-        ttl_sec=60,
     )
     assert full is None
     await pool.release(lease)
@@ -206,7 +200,6 @@ async def test_specialist_gpu_pool_allocates_and_releases(conn):
         count=1,
         holder_id="gpu-c",
         task_id="task-c",
-        ttl_sec=60,
     )
     assert reacquired is not None
     assert list(reacquired.gpu_ids) == [0]
@@ -221,20 +214,20 @@ async def test_ray_observation_admits_up_to_pending_limit(conn):
     """
     # A single physical GPU: the legacy try_acquire caps at 1 concurrent...
     pool = SpecialistGpuPool(conn, gpu_ids=[0])
-    a = await pool.try_acquire_ray_observation(holder_id="h-a", task_id="t-a", pending_limit=3, ttl_sec=60)
-    b = await pool.try_acquire_ray_observation(holder_id="h-b", task_id="t-b", pending_limit=3, ttl_sec=60)
-    c = await pool.try_acquire_ray_observation(holder_id="h-c", task_id="t-c", pending_limit=3, ttl_sec=60)
+    a = await pool.try_acquire_ray_observation(holder_id="h-a", task_id="t-a", pending_limit=3)
+    b = await pool.try_acquire_ray_observation(holder_id="h-b", task_id="t-b", pending_limit=3)
+    c = await pool.try_acquire_ray_observation(holder_id="h-c", task_id="t-c", pending_limit=3)
     # ...but the Ray observation ledger admits up to pending_limit (3) at once, each on a distinct synthetic slot id
     # above the real device id space.
     assert a is not None and b is not None and c is not None
     slots = sorted(list(a.gpu_ids) + list(b.gpu_ids) + list(c.gpu_ids))
     assert slots == [100000, 100001, 100002]
     # Over the limit -> backpressure (None; caller keeps the task queued).
-    d = await pool.try_acquire_ray_observation(holder_id="h-d", task_id="t-d", pending_limit=3, ttl_sec=60)
+    d = await pool.try_acquire_ray_observation(holder_id="h-d", task_id="t-d", pending_limit=3)
     assert d is None
     # Releasing frees a slot for the next admission (reuses the low slot).
     await pool.release(a)
-    e = await pool.try_acquire_ray_observation(holder_id="h-e", task_id="t-e", pending_limit=3, ttl_sec=60)
+    e = await pool.try_acquire_ray_observation(holder_id="h-e", task_id="t-e", pending_limit=3)
     assert e is not None and list(e.gpu_ids) == [100000]
     await pool.release(b)
     await pool.release(c)
@@ -249,7 +242,6 @@ async def test_specialist_gpu_pool_rejects_oversized_request(conn):
             count=2,
             holder_id="gpu-a",
             task_id="task-a",
-            ttl_sec=60,
         )
         is None
     )
@@ -387,9 +379,7 @@ async def test_old_rows_still_count_toward_lane_capacity(conn, locks):
     set_lane_capacity(conn.raw, "research_lane", 2)
     # Insert one expired and one live holder directly to bypass acquire_many's reap pass.
     conn.raw.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
-        "acquired_at, expires_at, heartbeat_at) "
-        "VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
         (
             "research_lane",
             "dead",
@@ -398,13 +388,10 @@ async def test_old_rows_still_count_toward_lane_capacity(conn, locks):
             1,
             "2026-01-01T00:00:00+00:00",
             "2026-01-01T00:00:01+00:00",
-            "2026-01-01T00:00:00+00:00",
         ),
     )
     conn.raw.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
-        "acquired_at, expires_at, heartbeat_at) "
-        "VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
         (
             "research_lane",
             "live",
@@ -413,7 +400,6 @@ async def test_old_rows_still_count_toward_lane_capacity(conn, locks):
             1,
             "2026-01-01T00:00:00+00:00",
             "2099-12-31T23:59:59+00:00",
-            "2026-01-01T00:00:00+00:00",
         ),
     )
     conn.raw.commit()
@@ -615,9 +601,8 @@ async def test_a_gpu_exempt_holder_is_retained_but_still_reported(conn, locks, c
     await locks.acquire_many(["build_lane"], holder_id="gpuheld", task_id="tgpuheld", action="specialist", ttl_sec=3600)
     _seed_task(conn, "tgpuheld", "succeeded", evidence={resource_lock.CLEANUP_CONFIRMED_KEY: False})
     conn.raw.execute(
-        "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, expires_at, heartbeat_at) "
-        "VALUES (?,?,?,?,?,?)",
-        (0, "gpuheld", "tgpuheld", _T0, _T0, _T0),
+        "INSERT INTO gpu_leases(gpu_id, holder_id, task_id) VALUES (?,?,?)",
+        (0, "gpuheld", "tgpuheld"),
     )
     conn.raw.commit()
 
@@ -697,9 +682,7 @@ async def test_reap_dead_holders_releases_crashed_pid(conn, locks, monkeypatch, 
     set_lane_capacity(conn.raw, "benchmark_lane", 1)
     # Long-lived (not expired) lease held by a dead PID.
     conn.raw.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
-        "acquired_at, expires_at, heartbeat_at) "
-        "VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
         (
             "benchmark_lane",
             "zombie",
@@ -708,14 +691,11 @@ async def test_reap_dead_holders_releases_crashed_pid(conn, locks, monkeypatch, 
             dead_pid,
             "2026-01-01T00:00:00+00:00",
             expires,
-            "2026-01-01T00:00:00+00:00",
         ),
     )
     # A second lane held by a live PID (this process) must survive.
     conn.raw.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
-        "acquired_at, expires_at, heartbeat_at) "
-        "VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
         (
             "profile_lane",
             "alive",
@@ -724,7 +704,6 @@ async def test_reap_dead_holders_releases_crashed_pid(conn, locks, monkeypatch, 
             os.getpid(),
             "2026-01-01T00:00:00+00:00",
             "2099-12-31T23:59:59+00:00",
-            "2026-01-01T00:00:00+00:00",
         ),
     )
     conn.raw.execute("UPDATE leases SET owner_scope='test-node'")
@@ -741,9 +720,7 @@ async def test_reap_dead_holders_releases_crashed_pid(conn, locks, monkeypatch, 
 async def test_reap_dead_holders_skips_null_pid(conn, locks):
     """A lease with a null/zero pid is never reaped (cannot prove dead)."""
     conn.raw.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
-        "acquired_at, expires_at, heartbeat_at) "
-        "VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
         (
             "benchmark_lane",
             "nopid",
@@ -752,7 +729,6 @@ async def test_reap_dead_holders_skips_null_pid(conn, locks):
             0,
             "2026-01-01T00:00:00+00:00",
             "2099-12-31T23:59:59+00:00",
-            "2026-01-01T00:00:00+00:00",
         ),
     )
     conn.raw.commit()
@@ -921,7 +897,7 @@ async def test_live_old_owner_keeps_conflicting_lanes_until_release(conn, locks)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ray", [False, True])
-async def test_old_gpu_owner_keeps_capacity_until_release(conn, ray):
+async def test_gpu_owner_keeps_capacity_until_release(conn, ray):
     pool = SpecialistGpuPool(conn, gpu_ids=[0])
 
     async def acquire(holder):
@@ -930,7 +906,6 @@ async def test_old_gpu_owner_keeps_capacity_until_release(conn, ray):
         return await pool.try_acquire(count=1, holder_id=holder, task_id=holder)
 
     lease = await acquire("old")
-    await conn.execute("UPDATE gpu_leases SET expires_at='2020-01-01T00:00:00+00:00'")
     assert await acquire("next") is None
     assert not hasattr(pool, "reap_expired")
     await pool.release(lease)

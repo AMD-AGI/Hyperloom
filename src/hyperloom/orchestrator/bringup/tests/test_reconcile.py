@@ -178,8 +178,8 @@ async def test_an_old_round_does_not_kill_its_live_recorded_process(db):
         await _open_round(rounds, tasks, holder="spec-1", lease=1.0)
         async with db.transaction() as cur:
             cur.execute(
-                "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at, heartbeat_at)"
-                " VALUES ('server_lifecycle', 'h1', 'spec-1', 'bench', ?, '', '', '')",
+                "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at)"
+                " VALUES ('server_lifecycle', 'h1', 'spec-1', 'bench', ?, '', '')",
                 (child.pid,),
             )
 
@@ -352,8 +352,8 @@ async def test_a_running_task_whose_process_is_gone_is_failed_and_one_unobservab
     monkeypatch.setattr(SqliteLeaseBackend, "_pid_alive", staticmethod(lambda pid: pid != gone.pid))
     async with db.transaction() as cur:
         cur.execute(
-            "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at, heartbeat_at)"
-            " VALUES ('server_lifecycle', 'h1', ?, 'bench', ?, '', '', '')",
+            "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at)"
+            " VALUES ('server_lifecycle', 'h1', ?, 'bench', ?, '', '')",
             (dead.task_id, gone.pid),
         )
         cur.execute("UPDATE leases SET owner_scope='test-node'")
@@ -535,8 +535,8 @@ async def test_the_pass_sweeps_the_leases_and_reports_what_it_swept(db):
     await _open_round(rounds, tasks, holder="spec-1", lease=_LEASE)
     async with db.transaction() as cur:
         cur.execute(
-            "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at, heartbeat_at)"
-            " VALUES ('server_lifecycle', 'h1', 'other', 'bench', 0, '', '', '')",
+            "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at)"
+            " VALUES ('server_lifecycle', 'h1', 'other', 'bench', 0, '', '')",
         )
 
     report = await rec.run(_NOW + 1.0)
