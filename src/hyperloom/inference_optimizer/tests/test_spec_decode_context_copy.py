@@ -24,7 +24,7 @@ from hyperloom.orchestrator.actions.executors._spec_decode_context_copy import (
     context_copy_method,
     context_copy_refusal,
 )
-from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -145,7 +145,7 @@ def test_a_speculative_env_change_on_a_copying_base_is_a_change():
 @pytest.fixture
 def sub_agent_runner(tmp_path):
     db = SqliteConnection(tmp_path / "db.db")
-    runner = SubAgentRunner(ResourceLockManager(SqliteLeaseBackend(db)), TaskRegistry(db))
+    runner = SubAgentRunner(SqliteLeaseBackend(db), TaskRegistry(db))
     yield runner, TaskRegistry(db)
     db.close()
 

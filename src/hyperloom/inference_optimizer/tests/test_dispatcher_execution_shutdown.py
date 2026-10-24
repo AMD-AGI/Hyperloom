@@ -23,7 +23,7 @@ import pytest
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
 from hyperloom.orchestrator.actions.executors import _ray_serving as ray_serving
 from hyperloom.orchestrator.bus.message_bus import MessageBus
-from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop import dispatcher as dispatcher_module
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator, HeldLeases
@@ -37,7 +37,7 @@ from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn
 
 def _dispatcher(tmp_path):
     db = SqliteConnection(tmp_path / "shutdown.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tasks = TaskRegistry(db)
     state = SimpleNamespace(phase="PRELUDE", macro_cycle=0, tick=0, session_budget_usable_sec=lambda: None)
     writeback_ns = SimpleNamespace(

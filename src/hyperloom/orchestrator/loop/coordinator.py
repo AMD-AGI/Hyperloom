@@ -56,10 +56,7 @@ from ..bus.gpu_pool import (
     resolve_gpu_specialist_devices,
     resolve_whole_machine_devices,
 )
-from ..bus.resource_lock import (
-    ResourceLockManager,
-    SqliteLeaseBackend,
-)
+from ..bus.resource_lock import SqliteLeaseBackend
 from ..state.shared_state import SharedState, effective_closing_grace_sec, timed_teardown_step
 from .signals import SignalDrain
 from .intent_router import IntentRouter
@@ -241,7 +238,7 @@ class Coordinator:
         self.db = SqliteConnection(db_path, journal_mode=resolve_journal_mode())
 
         self.bus = MessageBus(self.db)
-        self.locks = ResourceLockManager(SqliteLeaseBackend(self.db))
+        self.locks = SqliteLeaseBackend(self.db)
         self.tasks = TaskRegistry(
             self.db,
             dispatch_origin_provider=lambda: task_dispatch_origin(self.shared_state),

@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.session import paths
-from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.sub_agent_runner import (
     PROGRESS_OWNER_AGENT,
@@ -39,7 +39,7 @@ def _runner(tmp_path: Path, monkeypatch) -> SubAgentRunner:
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "coord.db")
-    return SubAgentRunner(ResourceLockManager(SqliteLeaseBackend(db)), TaskRegistry(db), session_dir=sd)
+    return SubAgentRunner(SqliteLeaseBackend(db), TaskRegistry(db), session_dir=sd)
 
 
 def _progress_notes(task) -> list[dict]:

@@ -12,7 +12,7 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session import paths
-from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
@@ -101,7 +101,7 @@ def _runner_with_policy(tmp_path: Path, monkeypatch, *, shared_state: object | N
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "coord.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tasks = TaskRegistry(db, dispatch_origin_provider=lambda: _ORIGIN)
     state = shared_state if shared_state is not None else SharedState.load_or_init(sd)
     gate = PolicyGate(
@@ -543,7 +543,7 @@ async def test_dispatched_integrate_patch_resume_with_persisted_verdict_passes(t
     assert resumed_state.get_specialist_patch_verdict("spec-resume") == "approve"
 
     db2 = SqliteConnection(db_path)
-    locks2 = ResourceLockManager(SqliteLeaseBackend(db2))
+    locks2 = SqliteLeaseBackend(db2)
     tasks2 = TaskRegistry(db2)
     gate = PolicyGate(
         role_registry=default_role_registry(),
@@ -739,7 +739,7 @@ async def test_runner_without_policy_skips_dispatch_validation(tmp_path, monkeyp
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "coord.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tasks = TaskRegistry(db)
     sub = SubAgentRunner(locks, tasks, session_dir=sd, links=RunnerLinks(policy=None))
     executed = {"ran": False}

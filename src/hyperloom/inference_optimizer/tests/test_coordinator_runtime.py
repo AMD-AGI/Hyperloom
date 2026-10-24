@@ -42,7 +42,6 @@ from hyperloom.orchestrator.state.task_registry import (
     TaskSpec,
 )
 from hyperloom.orchestrator.bus.resource_lock import (
-    ResourceLockManager,
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
@@ -240,7 +239,7 @@ async def test_mock_backend_records_calls():
 @pytest.mark.asyncio
 async def test_sub_agent_runner_succeeds(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
     sub.register_executor("baseline", lambda ctx: _async_return({"tput": 1840}))
@@ -260,7 +259,7 @@ async def _async_return(value):
 @pytest.mark.asyncio
 async def test_sub_agent_runner_no_executor_fails(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
     task, _ = await tr.create_or_return_existing(TaskSpec(kind="never_registered", params={}, idempotency_key="k-x"))
@@ -275,7 +274,7 @@ async def test_sub_agent_runner_no_executor_fails(tmp_path):
 async def test_sub_agent_runner_executor_exception_sets_error_class(tmp_path):
     """A raised executor exception must not collapse into the generic unknown_error gap bucket -- error_class carries the exception's own class name."""
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
 
@@ -294,7 +293,7 @@ async def test_sub_agent_runner_executor_exception_sets_error_class(tmp_path):
 async def test_sub_agent_runner_hands_its_lease_to_the_executor_and_gives_it_back(tmp_path):
     """Lanes are won by the caller and handed over; the runner returns them."""
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
     seen_lease = {}
@@ -333,7 +332,7 @@ async def test_sub_agent_runner_hands_its_lease_to_the_executor_and_gives_it_bac
 async def test_sub_agent_runner_refuses_a_lane_holding_task_with_no_lease(tmp_path):
     """Running it anyway would run it unserialised, which is the bug the lanes exist to prevent."""
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
     ran = {"called": False}
@@ -2404,7 +2403,7 @@ async def test_sub_agent_runner_hands_back_lanes_when_the_claim_is_rejected(
 ):
     """A row cancelled between dispatch and the claim must not keep its lanes."""
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
     sub.register_executor("explore", lambda _ctx: _immediately({}))
@@ -2440,7 +2439,7 @@ async def test_a_registered_run_leaves_a_row_queued_when_its_lanes_are_busy(
 ):
     """Losing the race for a lane is a retry, not a task that started."""
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
 
@@ -2480,7 +2479,7 @@ async def test_a_registered_run_leaves_a_row_queued_when_its_lanes_are_busy(
 async def test_a_registered_run_is_reachable_by_the_wall_clock_defences(tmp_path):
     """The handle is the whole point: without it a cancel cannot find the action."""
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
     disp = DispatcherCollaborator(SimpleNamespace(locks=locks, sub=sub))
@@ -2507,7 +2506,7 @@ async def test_a_registered_run_labels_its_llm_calls_with_the_action(tmp_path):
     from hyperloom.common.llm_attribution import current_action
 
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
     disp = DispatcherCollaborator(SimpleNamespace(locks=locks, sub=sub))
@@ -2533,7 +2532,7 @@ async def test_sub_agent_runner_fails_a_row_whose_workspace_cannot_be_made(
 ):
     """An ENOSPC while preparing the workspace is a failed task, not a live one."""
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
     sub.register_executor("explore", lambda _ctx: _immediately({}))
@@ -2556,7 +2555,7 @@ async def test_sub_agent_runner_normal_path_still_records_transitions(
     tmp_path,
 ):
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
     sub.register_executor("baseline", lambda ctx: _async_return({"tput": 1.0}))
