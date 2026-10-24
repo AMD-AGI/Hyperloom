@@ -1181,6 +1181,11 @@ class RooflineExecutor:
         self.shared_state.last_profile_trace = trace_path
         self.shared_state.last_profile_launch_evidence_path = str(profile.result.get("launch_evidence_path") or "")
         self.shared_state.last_profile_status = status
+        _trace_validate = (profile.result or {}).get("trace_validate") or {}
+        self.shared_state.last_profile_phase_coverage = {
+            "partial": bool(_trace_validate.get("phase_coverage_partial")),
+            "missing": str(_trace_validate.get("phase_coverage_missing") or ""),
+        }
         self.shared_state.record_profile_workload(profile.params, arm=analysis.payload["roofline_arm"])
         self.shared_state.record_trace_analyze(analysis.payload, analysis.result)
         cached = self.shared_state.last_trace_analyze or {}

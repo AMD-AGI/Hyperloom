@@ -122,6 +122,7 @@ CHECK_STEP_ANNOTATIONS = "step_annotations"
 CHECK_SPLIT_CHUNK_ANNOTATIONS = "split_chunk_annotations"
 CHECK_SGLANG_SHAPE_PROFILER = "sglang_shape_profiler"
 CHECK_STEADY_STATE_SPLIT_NAMING = "steady_state_split_naming"
+CHECK_PHASE_COVERAGE = "phase_coverage"
 CHECK_TRACE_HAS_OPS = "trace_has_ops"
 CHECK_GRAPH_LAUNCH_COVERAGE = "graph_launch_coverage"
 CHECK_RANK_SHAPE = "rank_shape"
@@ -264,6 +265,46 @@ class _TraceProbe:
     error: str = ""
 
 
+_PHASE_PREFILL = "prefill"
+_PHASE_DECODE = "decode"
+_TRACE_SPLIT_DIR = "trace_split"
+
+
+def _phase_coverage_check(trace_dir: Path, framework: str) -> dict[str, Any]:
+    """Report which serving phases (prefill/decode) the trace split captured.
+
+    A partial capture (one phase only) means the missing phase's component shares drop out of the Amdahl denominator,
+    so the gap refresh can steer instrumentation to it instead of treating it as free. A single-phase split can be
+    legitimate (a steady-state decode-only capture), so the row is advisory, not a hard trace failure. The returned
+    row's ``detail`` carries ``prefill``/``decode`` presence and, on a partial split, the ``missing`` phase name.
+    """
+    from hyperloom.inference_optimizer import framework_registry as _fw_reg
+
+    framework = str(framework or os.environ.get("FRAMEWORK", "") or "")
+    split = trace_dir / _TRACE_SPLIT_DIR
+    if _fw_reg.is_scriptable(framework) or not split.is_dir():
+        return _check_row(CHECK_PHASE_COVERAGE, status="skipped", skip_reason="scriptable framework or no trace_split/")
+    names = [p.name for p in split.iterdir() if p.is_file()]
+    prefill = any("_extend_" in n or "extend_only_" in n for n in names)
+    decode = any("_decode_" in n or "decode_only_" in n for n in names)
+    if not (prefill or decode):
+        return _check_row(
+            CHECK_PHASE_COVERAGE,
+            status="skipped",
+            skip_reason="trace_split/ carries no phase-labelled chunks",
+            prefill=prefill,
+            decode=decode,
+        )
+    partial = prefill != decode
+    return _check_row(
+        CHECK_PHASE_COVERAGE,
+        status="failed" if partial else "passed",
+        prefill=prefill,
+        decode=decode,
+        missing=((_PHASE_PREFILL if decode else _PHASE_DECODE) if partial else ""),
+    )
+
+
 def _build_trace_validate(
     health: dict[str, Any],
     probe: _TraceProbe,
@@ -278,6 +319,8 @@ def _build_trace_validate(
     checks = [row for row in (health.get("checks") or []) if isinstance(row, dict)]
     if isinstance(preflight, dict):
         checks = [preflight] + checks
+    phase_coverage = _phase_coverage_check(probe.trace_dir, probe.framework)
+    checks = checks + [phase_coverage]
     certificate = probe.certificate or {}
     if certificate:
         checks = checks + _probe_check_rows(certificate)
@@ -293,6 +336,10 @@ def _build_trace_validate(
         "trace_dir": str(probe.trace_dir),
         "framework": str(probe.framework or ""),
         "verdict": certificate.get("verdict") or {},
+        # Which serving phases the split captured; a partial capture drops the missing phase out of the Amdahl
+        # denominator, so the gap refresh reads these to steer instrumentation rather than let the phase go unseen.
+        "phase_coverage_partial": phase_coverage["status"] == "failed",
+        "phase_coverage_missing": str((phase_coverage.get("detail") or {}).get("missing") or ""),
         "trace_dir_level": certificate.get("trace_dir_level") or {},
         "rank_level": certificate.get("rank_level") or [],
         "chunk_level": [],
@@ -915,7 +962,7 @@ def _is_split_chunk(path: Path, root: Path) -> bool:
         relative = path.relative_to(root)
     except ValueError:
         relative = path
-    return any(part == "trace_split" for part in relative.parts)
+    return any(part == _TRACE_SPLIT_DIR for part in relative.parts)
 
 
 def _trace_files_for_dir(trace_dir: Path) -> list[Path]:

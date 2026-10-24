@@ -1158,6 +1158,7 @@ def test_instrumentation_preflight_names_the_checks_it_dooms(tmp_path, monkeypat
 
     from hyperloom.orchestrator.actions.executors.profile import (
         CHECK_INSTRUMENTATION_PREFLIGHT,
+        CHECK_PHASE_COVERAGE,
         CHECK_SGLANG_SHAPE_PROFILER,
         CHECK_STEP_ANNOTATIONS,
         _TraceProbe,
@@ -1181,11 +1182,16 @@ def test_instrumentation_preflight_names_the_checks_it_dooms(tmp_path, monkeypat
     assert row["detail"]["shape_discovery_flag_present"] is False
     assert row["detail"]["predicts_failure_of"] == [CHECK_STEP_ANNOTATIONS, CHECK_SGLANG_SHAPE_PROFILER]
 
-    # It has to lead the list: everything after it is a consequence, not an independent finding.
+    # It has to lead the list: everything after it is a consequence, not an independent finding. The phase-coverage
+    # check is appended last (skipped here — no trace_split dir).
     validate = _build_trace_validate(
         {"checks": [{"check_id": "later"}]}, _TraceProbe(tmp_path, "sglang"), preflight=row
     )
-    assert [c["check_id"] for c in validate["checks"]] == [CHECK_INSTRUMENTATION_PREFLIGHT, "later"]
+    assert [c["check_id"] for c in validate["checks"]] == [
+        CHECK_INSTRUMENTATION_PREFLIGHT,
+        "later",
+        CHECK_PHASE_COVERAGE,
+    ]
 
 
 def test_instrumentation_preflight_passes_on_a_healthy_patch(tmp_path, monkeypatch):
@@ -2404,6 +2410,69 @@ def test_upstream_sglang_capture_directory_passes_health_check(tmp_path):
     assert row["detail"]["capture_dir"] == str(capture)
     assert health["capture_traces_present"] is True
     assert not any("subdirectory missing" in issue for issue in health["issues"])
+
+
+def _split_trace_dir(root, *, phases):
+    """Write a ``trace_split/`` with one steady-state chunk per requested phase (``"extend"`` / ``"decode"``)."""
+    import gzip
+    import json as _json
+
+    split = root / "trace_split"
+    split.mkdir(parents=True, exist_ok=True)
+    for phase in phases:
+        with gzip.open(split / f"steady_state_{phase}_0.json.gz", "wt", encoding="utf-8") as fh:
+            fh.write(_json.dumps({"traceEvents": [{"name": "execute_context_0(0)_generation_R(74)"}]}))
+    return split
+
+
+def test_both_phases_present_passes_phase_coverage(tmp_path):
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    _split_trace_dir(tmp_path, phases=["extend", "decode"])
+    row = pf._phase_coverage_check(tmp_path, "vllm")
+
+    assert row["status"] == "passed"
+    assert row["detail"]["prefill"] is True
+    assert row["detail"]["decode"] is True
+    assert row["detail"]["missing"] == ""
+
+
+def test_decode_only_split_flags_missing_prefill(tmp_path):
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    _split_trace_dir(tmp_path, phases=["decode"])
+    row = pf._phase_coverage_check(tmp_path, "vllm")
+
+    assert row["status"] == "failed"
+    assert row["detail"] == {"prefill": False, "decode": True, "missing": "prefill"}
+
+
+def test_prefill_only_split_flags_missing_decode(tmp_path):
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    _split_trace_dir(tmp_path, phases=["extend"])
+    row = pf._phase_coverage_check(tmp_path, "vllm")
+
+    assert row["status"] == "failed"
+    assert row["detail"] == {"prefill": True, "decode": False, "missing": "decode"}
+
+
+def test_phase_coverage_skips_without_a_split_dir(tmp_path):
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    assert pf._phase_coverage_check(tmp_path, "vllm")["status"] == "skipped"
+
+
+def test_build_trace_validate_hoists_phase_coverage(tmp_path):
+    """A decode-only split surfaces as phase_coverage_partial + missing on the trace_validate block the roofline reads."""
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    _split_trace_dir(tmp_path, phases=["decode"])
+    block = pf._build_trace_validate({"checks": []}, pf._TraceProbe(tmp_path, "vllm"))
+
+    assert block["phase_coverage_partial"] is True
+    assert block["phase_coverage_missing"] == "prefill"
+    assert any(c["check_id"] == pf.CHECK_PHASE_COVERAGE for c in block["checks"])
 
 
 # kernel_request_handlers — direct unit
