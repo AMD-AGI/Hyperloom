@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from hyperloom.common.fs_utils import read_bytes_nofollow
 from hyperloom.common.env_safety import ungrounded_env_file_reason
 from hyperloom.common.unified_diff import strip_diff_path, strip_path_components
 
@@ -980,7 +981,7 @@ def vet_patches(
     readable: list[tuple[str, str]] = []
     for path in patch_paths:
         try:
-            text = Path(path).read_text(encoding="utf-8", errors="replace")
+            text = read_bytes_nofollow(path).decode("utf-8", errors="replace")
         except OSError as exc:
             ungrounded.append({"path": path, "verdict": "unreadable", "detail": repr(exc)})
             continue
