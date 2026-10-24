@@ -1411,7 +1411,7 @@ def _pin_accuracy_eval_envs(envs: dict[str, Any]) -> None:
         try:
             from ._multi_node_env import resolve_kb_topology
 
-            if str(resolve_kb_topology().get("pd_mode") or "").lower() == "disaggregated":
+            if str(resolve_kb_topology().pd_mode or "").lower() == "disaggregated":
                 _eval_tok_env = "false"
         except Exception as exc:  # noqa: BLE001 - best-effort; never block config materialization
             # Don't degrade silently: if this IS a PD run, failing to resolve the

@@ -14,6 +14,7 @@ import yaml
 
 from hyperloom.common.env_safety import OPERATOR_EXTRA_ENV_VAR
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from hyperloom.inference_optimizer.recipe_snapshot_constants import KbTopology
 from hyperloom.orchestrator.actions.executors import _profile_setup as profile_setup
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
@@ -149,7 +150,7 @@ def test_materialize_pd_forces_string_prompts_for_lm_eval(tmp_path, monkeypatch)
     monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
-    monkeypatch.setattr(mne, "resolve_kb_topology", lambda: {"pd_mode": "disaggregated"})
+    monkeypatch.setattr(mne, "resolve_kb_topology", lambda: KbTopology(pd_mode="disaggregated"))
     src = tmp_path / "base.yaml"
     _write(src)
     bench = _materialize(src, tmp_path / "out")
@@ -163,7 +164,7 @@ def test_materialize_aggregated_leaves_lm_eval_default(tmp_path, monkeypatch):
     monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
-    monkeypatch.setattr(mne, "resolve_kb_topology", lambda: {"pd_mode": "aggregated"})
+    monkeypatch.setattr(mne, "resolve_kb_topology", lambda: KbTopology(pd_mode="aggregated"))
     src = tmp_path / "base.yaml"
     _write(src)
     bench = _materialize(src, tmp_path / "out")

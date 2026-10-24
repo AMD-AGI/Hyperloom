@@ -17,6 +17,7 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     DEFAULT_HARDWARE_SLUG,
     DEFAULT_MODEL_SLUG,
     DEFAULT_PRECISION_SLUG,
+    KbTopology,
     RecipeIdentity,
     detect_framework_version,
     kb_hardware_slug,
@@ -278,20 +279,22 @@ def test_detect_framework_version_strips_dunder_version_whitespace(
 def test_kb_hardware_slug_single_node_unchanged() -> None:
     """Single-node KB keys must stay byte-for-byte identical to pre-infera runs."""
     gpu = "MI300X"
-    assert kb_hardware_slug(gpu, nodes=1) == gpu
+    assert kb_hardware_slug(gpu, KbTopology(nodes=1)) == gpu
     # Cluster kwargs are all ignored when nodes < 2, and the default shape (dense, whole card) adds nothing.
     assert (
         kb_hardware_slug(
             gpu,
-            nodes=1,
-            gpus_per_node=8,
-            pd_mode="disaggregated",
-            pd_prefill_nodes=2,
-            pd_decode_nodes=1,
-            tp=8,
-            ep=1,
-            partition_mode="SPX",
-            backend="rayjob",
+            KbTopology(
+                nodes=1,
+                gpus_per_node=8,
+                pd_mode="disaggregated",
+                pd_prefill_nodes=2,
+                pd_decode_nodes=1,
+                tp=8,
+                ep=1,
+                partition_mode="SPX",
+                backend="rayjob",
+            ),
         )
         == gpu
     )
@@ -299,12 +302,14 @@ def test_kb_hardware_slug_single_node_unchanged() -> None:
 
 def test_kb_hardware_slug_separates_a_divided_card_from_a_whole_one() -> None:
     """SPX and CPX share a GPU type but are different machines; the key has to say so."""
-    assert kb_hardware_slug("MI300X", nodes=1, tp=8, partition_mode="CPX") == "MI300X_cpx"
-    assert kb_hardware_slug("MI300X", nodes=1, tp=8, partition_mode="DPX") == "MI300X_dpx"
-    assert kb_hardware_slug("MI300X", nodes=1, tp=8, partition_mode="QPX") == "MI300X_qpx"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, tp=8, partition_mode="CPX")) == "MI300X_cpx"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, tp=8, partition_mode="DPX")) == "MI300X_dpx"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, tp=8, partition_mode="QPX")) == "MI300X_qpx"
     # The mode also suffixes inside a cluster key, after the formation and before the backend.
     assert (
-        kb_hardware_slug("MI300X", nodes=2, gpus_per_node=8, tp=8, ep=8, partition_mode="CPX", backend="rayjob")
+        kb_hardware_slug(
+            "MI300X", KbTopology(nodes=2, gpus_per_node=8, tp=8, ep=8, partition_mode="CPX", backend="rayjob")
+        )
         == "MI300X_ws16_tp8_ep8_cpx_rayjob"
     )
 
@@ -312,34 +317,36 @@ def test_kb_hardware_slug_separates_a_divided_card_from_a_whole_one() -> None:
 def test_kb_hardware_slug_treats_the_default_shape_as_no_shape() -> None:
     """Anything that would re-key a historical row has to be omitted, not encoded."""
     # One partition IS the whole card, so SPX must be indistinguishable from a mode nobody published.
-    assert kb_hardware_slug("MI300X", nodes=1, partition_mode="SPX") == "MI300X"
-    assert kb_hardware_slug("MI300X", nodes=1, partition_mode="") == "MI300X"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, partition_mode="SPX")) == "MI300X"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, partition_mode="")) == "MI300X"
     # A mode this build does not know is not a licence to invent a key for it.
-    assert kb_hardware_slug("MI300X", nodes=1, partition_mode="TPX") == "MI300X"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, partition_mode="TPX")) == "MI300X"
     # tp is deliberately NOT encoded single-node: almost every run sets it, so it would move the whole corpus.
-    assert kb_hardware_slug("MI300X", nodes=1, tp=8) == "MI300X"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, tp=8)) == "MI300X"
 
 
 def test_kb_hardware_slug_encodes_single_node_expert_parallelism() -> None:
     """``ep`` is fixed at launch and invalidates a config across splits, whatever the node count."""
-    assert kb_hardware_slug("MI300X", nodes=1, tp=8, ep=8) == "MI300X_ep8"
-    assert kb_hardware_slug("MI300X", nodes=1, tp=8, ep=8, partition_mode="CPX") == "MI300X_ep8_cpx"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, tp=8, ep=8)) == "MI300X_ep8"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, tp=8, ep=8, partition_mode="CPX")) == "MI300X_ep8_cpx"
     # Dense is the default, so ep<=1 stays silent and keeps the historical key.
-    assert kb_hardware_slug("MI300X", nodes=1, tp=8, ep=1) == "MI300X"
-    assert kb_hardware_slug("MI300X", nodes=1, tp=8, ep=0) == "MI300X"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, tp=8, ep=1)) == "MI300X"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, tp=8, ep=0)) == "MI300X"
 
 
 def test_kb_hardware_slug_multi_node_adds_topology_suffix() -> None:
     """Contrast: multi-node encodes world_size (and PD split when disaggregated)."""
-    assert kb_hardware_slug("MI300X", nodes=2, gpus_per_node=8) == "MI300X_ws16"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=2, gpus_per_node=8)) == "MI300X_ws16"
     assert (
         kb_hardware_slug(
             "MI300X",
-            nodes=2,
-            gpus_per_node=8,
-            pd_mode="disaggregated",
-            pd_prefill_nodes=1,
-            pd_decode_nodes=1,
+            KbTopology(
+                nodes=2,
+                gpus_per_node=8,
+                pd_mode="disaggregated",
+                pd_prefill_nodes=1,
+                pd_decode_nodes=1,
+            ),
         )
         == "MI300X_ws16_pd1p1d"
     )
@@ -351,11 +358,13 @@ def test_kb_hardware_slug_encodes_formation_and_backend() -> None:
     assert (
         kb_hardware_slug(
             "MI325X",
-            nodes=2,
-            gpus_per_node=2,
-            tp=4,
-            ep=4,
-            backend="rayjob",
+            KbTopology(
+                nodes=2,
+                gpus_per_node=2,
+                tp=4,
+                ep=4,
+                backend="rayjob",
+            ),
         )
         == "MI325X_ws4_tp4_ep4_rayjob"
     )
@@ -363,18 +372,21 @@ def test_kb_hardware_slug_encodes_formation_and_backend() -> None:
     assert (
         kb_hardware_slug(
             "MI300X",
-            nodes=2,
-            gpus_per_node=8,
-            pd_mode="disaggregated",
-            pd_prefill_nodes=1,
-            pd_decode_nodes=1,
-            tp=8,
-            ep=8,
-            backend="infera",
+            KbTopology(
+                nodes=2,
+                gpus_per_node=8,
+                pd_mode="disaggregated",
+                pd_prefill_nodes=1,
+                pd_decode_nodes=1,
+                tp=8,
+                ep=8,
+                backend="infera",
+            ),
         )
         == "MI300X_ws16_pd1p1d_tp8_ep8_infera"
     )
     # ep==1 (no expert parallelism) is omitted; tp still encoded.
     assert (
-        kb_hardware_slug("MI300X", nodes=2, gpus_per_node=8, tp=8, ep=1, backend="rayjob") == "MI300X_ws16_tp8_rayjob"
+        kb_hardware_slug("MI300X", KbTopology(nodes=2, gpus_per_node=8, tp=8, ep=1, backend="rayjob"))
+        == "MI300X_ws16_tp8_rayjob"
     )

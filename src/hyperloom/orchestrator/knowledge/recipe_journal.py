@@ -1127,7 +1127,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
 
         ss = self.shared_state
-        return kb_hardware_slug(ss.gpu_type or "unknown_gpu", **resolve_kb_topology())
+        return kb_hardware_slug(ss.gpu_type or "unknown_gpu", resolve_kb_topology())
 
     def workload_canonical_id(self) -> str:
         """Return the workload's canonical seven-dimension Recipe identity."""

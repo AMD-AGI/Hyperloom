@@ -763,7 +763,7 @@ def _resolve_t0_identity(
     model = _text(workload) or "unknown_model"
     # Topology-aware hardware slug (multi-node appends ``_ws{world_size}``), resolved once so the cid, the stored
     # ``hardware`` field, and every warm-start tier share an identical, isolated key.
-    hardware = kb_hardware_slug(_text(hw) or "unknown_gpu", **resolve_kb_topology())
+    hardware = kb_hardware_slug(_text(hw) or "unknown_gpu", resolve_kb_topology())
     framework = _text(
         extra.get("framework_name")
         or extra.get("framework")
