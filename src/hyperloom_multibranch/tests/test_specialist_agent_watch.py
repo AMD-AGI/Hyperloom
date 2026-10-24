@@ -177,9 +177,11 @@ def test_a_watch_that_died_is_said_and_started_again_over_the_sandboxes_it_watch
     async def scenario() -> tuple[str, str]:
         process = await sandbox.start(command, tmp_path, {})
         try:
-            for watch in _watches_of(os.getpid()):
+            killed = _watches_of(os.getpid())
+            for watch in killed:
                 os.kill(watch, signal.SIGKILL)
-            _until(lambda: not _watches_of(os.getpid()))
+            # A dying watch's cmdline reads empty before it is a zombie its parent can reap, so wait on its state.
+            _until(lambda: not any(_alive(pid) for pid in killed))
             said, again = sandbox.watched(), sandbox.watched()
             _until(lambda: _pids(pids) and not _alive(_pids(pids)[0]))
             return said, again
@@ -205,11 +207,13 @@ def _kill(pids: list[int]) -> None:
 
 
 def _takes_sigterm(pid: int) -> bool:
-    """Whether ``pid`` handles SIGTERM or holds it to wait for, rather than dying of it."""
+    """Whether ``pid`` handles SIGTERM or holds it to wait for, rather than dying of it. While a process sleeps in
+    ``sigtimedwait`` the kernel unblocks what it waits for, so its status shows SIGTERM blocked only between waits."""
 
     status = Path(f"/proc/{pid}/status").read_text().splitlines()
     masks = [int(line.split()[1], 16) for line in status if line.startswith(("SigCgt", "SigBlk"))]
-    return any(mask & (1 << (signal.SIGTERM - 1)) for mask in masks)
+    waiting = "sigtimedwait" in Path(f"/proc/{pid}/wchan").read_text()
+    return waiting or any(mask & (1 << (signal.SIGTERM - 1)) for mask in masks)
 
 
 def _children(pid: int) -> list[int]:
