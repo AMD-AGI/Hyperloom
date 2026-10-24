@@ -24,6 +24,7 @@ from hyperloom.contracts.recipe import (
     PatchRef,
     Recipe,
     RecipeDelta,
+    RecipeError,
     apply,
     with_unexpressed,
 )
@@ -132,13 +133,24 @@ class GitExperimentRepo:
         return await self._land(branch, parent, recipe, (parent,), message)
 
     async def merge(self, candidate: str, onto: str, protected: frozenset[str] = frozenset()) -> RepoMerge:
-        resolved = await self._commit_of(candidate)
-        parent = await self._resolve(f"{resolved}^1")
-        if parent is None:
-            raise ValueError(f"{candidate} is the root commit; it carries no change")
-        recipes = [await self.read_recipe(commit) for commit in (parent, resolved, onto)]
-        stored = replace(self._stored(), protected=await self._contributed(onto, protected))
-        return await asyncio.to_thread(carry, onto, *recipes, stored)
+        resolved, target = await self._commit_of(candidate), await self._commit_of(onto)
+        base = await self._merge_base(resolved, target)
+        if base == resolved:
+            return RepoMerge(onto, RecipeDelta())
+        recipes = [await self.read_recipe(commit) for commit in (base, resolved, target)]
+        stored = replace(self._stored(), protected=await self._contributed(target, protected))
+        merge = await asyncio.to_thread(carry, onto, *recipes, stored)
+        carried = await self._git("rev-list", "--topo-order", "--reverse", resolved, f"^{target}")
+        return replace(merge, carried=tuple(carried.split()))
+
+    async def _merge_base(self, candidate: str, onto: str) -> str:
+        """The one nearest common ancestor of ``candidate`` and ``onto``; ``RecipeError`` when there are several, since
+        the change carried from each differs."""
+
+        bases = (await self._git("merge-base", "--all", candidate, onto)).split()
+        if len(bases) > 1:
+            raise RecipeError(f"{candidate} and {onto} have several merge bases: {', '.join(bases)}")
+        return bases[0]
 
     async def _contributed(self, onto: str, merged: frozenset[str]) -> frozenset[str]:
         """The paths of the patches the merges of ``merged`` added to ``onto``'s first-parent chain: each merge commit's

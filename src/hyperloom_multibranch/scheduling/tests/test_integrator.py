@@ -429,8 +429,12 @@ async def test_a_merge_that_does_not_improve_is_not_stackable(
 
 
 async def test_an_improving_merge_the_regression_set_fails_stays_pending_and_is_tried_on_the_next_head(
-    bench: Bench,
+    tmp_path: Path,
 ) -> None:
+    """``c2``'s change is made on a branch of its own, so that the merge onto the next head does not carry ``c1``."""
+
+    bench = await _bench(tmp_path, tags=("c1",))
+    c2 = await _committed_elsewhere(bench, bench.deltas["c2"], GAINS["c2"])
     bench.regression.failures = {bench.root: "case kv-overflow reproduced"}
 
     report = await _one(bench)
@@ -448,7 +452,7 @@ async def test_an_improving_merge_the_regression_set_fails_stays_pending_and_is_
     bench.regression.failures = {}
     merged, retried = await _one(bench), await _one(bench)
 
-    assert merged is not None and (merged.candidate, merged.outcome) == (bench.commits["c2"], MergeOutcome.MERGED)
+    assert merged is not None and (merged.candidate, merged.outcome) == (c2, MergeOutcome.MERGED)
     assert retried is not None and (retried.candidate, retried.onto) == (bench.commits["c1"], merged.merged_commit)
     assert retried.outcome is MergeOutcome.MERGED
 
@@ -558,7 +562,10 @@ async def test_a_merge_measuring_no_throughput_stays_pending_and_merging_goes_on
 async def test_a_merge_that_could_not_be_measured_is_tried_again_on_the_next_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    bench = await _bench(tmp_path)
+    """``c2``'s change is made on a branch of its own, so that the merge onto the next head does not carry ``c1``."""
+
+    bench = await _bench(tmp_path, tags=("c1",))
+    c2 = await _committed_elsewhere(bench, bench.deltas["c2"], GAINS["c2"])
     measure_no_throughput(monkeypatch)
     unmeasured = await _one(bench)
     monkeypatch.undo()
@@ -566,7 +573,7 @@ async def test_a_merge_that_could_not_be_measured_is_tried_again_on_the_next_hea
     merged = await _one(bench)
     retried = await _one(bench)
 
-    c1, c2 = bench.commits["c1"], bench.commits["c2"]
+    c1 = bench.commits["c1"]
     assert unmeasured is not None and (unmeasured.candidate, unmeasured.onto) == (c1, bench.root)
     assert unmeasured.outcome is MergeOutcome.PENDING and unmeasured.reason.startswith("the merge test failed")
     assert (await bench.handle(Role.OBSERVER).record(str(unmeasured.request_id))).conclusion is None
@@ -578,23 +585,49 @@ async def test_a_merge_that_could_not_be_measured_is_tried_again_on_the_next_hea
 async def test_a_not_stackable_commit_is_tried_again_once_a_merge_changed_what_its_change_names(
     tmp_path: Path,
 ) -> None:
+    """``c2``'s change is made on a branch of its own, so that its merge does not carry ``c1``."""
+
     curves = {frozenset({"c1"}): {MAIN_POINT: 1005.0}, frozenset({"c2"}): {MAIN_POINT: 1020.0}}
-    bench = await _bench(tmp_path, {**curves, frozenset({"c1", "c2"}): {MAIN_POINT: 1025.0}})
+    bench = await _bench(tmp_path, {**curves, frozenset({"c1", "c2"}): {MAIN_POINT: 1025.0}}, tags=("c1",))
+    c2 = await _committed_elsewhere(bench, bench.deltas["c2"], GAINS["c2"])
 
     tried = [await _one(bench) for _ in range(4)]
 
     head = await bench.repo.head(INTEGRATION_BRANCH)
-    c1, c2 = bench.commits["c1"], bench.commits["c2"]
+    c1 = bench.commits["c1"]
     assert [(report.candidate, report.onto, report.outcome) for report in tried if report is not None] == [
         (c1, bench.root, MergeOutcome.NOT_STACKABLE),
         (c2, bench.root, MergeOutcome.MERGED),
         (c1, head, MergeOutcome.NOT_STACKABLE),
     ]
     assert tried[3] is None
-    merged_c2 = [row for row in bench.logged() if row["detail"]["outcome"] == MergeOutcome.MERGED.value]
-    assert [row["detail"]["config_conflicts"] for row in merged_c2] == [
-        [{"name": "--max-num-seqs", "before": "64", "after": "128"}]
+    assert [row["detail"]["config_conflicts"] for row in bench.logged()] == [
+        [],
+        [],
+        [{"name": "--max-num-seqs", "before": "128", "after": "256"}],
     ]
+
+
+async def test_a_merge_carries_the_commits_its_candidate_builds_on_that_were_never_merged(tmp_path: Path) -> None:
+    """``c1`` alone is not stackable; ``c2`` built on it brings its change, and the merge lands both, so ``c1`` is
+    merged rather than left behind its branch's lead."""
+
+    bench = await _bench(tmp_path, {**CURVES, frozenset({"c1"}): {MAIN_POINT: 1005.0}})
+
+    refused, carrying = await _one(bench), await _one(bench)
+
+    c1, c2 = bench.commits["c1"], bench.commits["c2"]
+    assert refused is not None and (refused.candidate, refused.outcome) == (c1, MergeOutcome.NOT_STACKABLE)
+    assert carrying is not None and (carrying.candidate, carrying.onto) == (c2, bench.root)
+    assert carrying.outcome is MergeOutcome.MERGED and carrying.gain_pct == pytest.approx(5.0)
+    assert await bench.repo.read_recipe(str(carrying.merged_commit)) == await bench.repo.read_recipe(c2)
+    observer = bench.handle(Role.OBSERVER)
+    assert {item.commit_id: item.merged_into for item in await observer.committed()} == {
+        c1: carrying.merged_commit,
+        c2: carrying.merged_commit,
+    }
+    assert (await observer.lineage()).commit(str(carrying.merged_commit)).merged_from == (c1, c2)
+    assert await _one(bench) is None
 
 
 #: A change that names nothing ``c1`` or ``c2`` name: an environment variable and a tag flag of its own.
@@ -700,11 +733,28 @@ async def _committed_elsewhere(bench: Bench, delta: RecipeDelta, gain: float, *,
     """A commit of a new branch ``s2`` on the root, that the gate judged ``gain``, a foundation fix with
     ``foundation``, and committed."""
 
-    scheduler, toolbox, gate = (bench.handle(role) for role in (Role.SCHEDULER, Role.TOOLBOX, Role.GATE))
+    scheduler = bench.handle(Role.SCHEDULER)
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s2", from_commit=bench.root, reason="refill"))
     await bench.repo.create_branch("s2", bench.root)
-    commit = await bench.repo.commit("s2", bench.root, apply(await bench.repo.read_recipe(bench.root), delta), "d1")
-    test = request("rd1", intent("s2", bench.root, mechanism="d1"), delta)
+    return await _committed_on(bench, "s2", bench.root, delta, gain, foundation=foundation)
+
+
+async def _committed_on(
+    bench: Bench,
+    branch: str,
+    parent: str,
+    delta: RecipeDelta,
+    gain: float,
+    *,
+    foundation: bool = False,
+    name: str = "d1",
+) -> str:
+    """Commit ``name``, ``delta`` on ``parent`` of the open ``branch``, that the gate judged ``gain``, a foundation fix
+    with ``foundation``, and committed."""
+
+    toolbox, gate = bench.handle(Role.TOOLBOX), bench.handle(Role.GATE)
+    commit = await bench.repo.commit(branch, parent, apply(await bench.repo.read_recipe(parent), delta), name)
+    test = request(f"r{name}", intent(branch, parent, mechanism=name), delta)
     await toolbox.write_request(test)
     await toolbox.write_result(result(test.request_id))
     judged = judgement(gain, (test.request_id,), foundation_fix=foundation)
@@ -956,15 +1006,20 @@ async def test_a_rewrite_that_does_not_apply_is_asked_for_again_with_why(
 
 
 async def test_a_merge_the_recipe_contract_refuses_is_skipped_and_the_round_goes_on(tmp_path: Path) -> None:
-    bench = await _bench(tmp_path, invalid=True)
+    """``c2`` carries ``c1``'s change of the base image and is refused with it; ``c2``'s change made again on a branch
+    of its own is merged."""
 
-    reports = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
+    bench = await _bench(tmp_path, invalid=True)
+    apart = await _committed_elsewhere(bench, bench.deltas["c2"], 1.0)
+
+    reports = await bench.integrator.integrate_next(3, EXPLORE_TICK_SECONDS)
 
     assert [(r.candidate, r.outcome) for r in reports] == [
         (bench.commits["c1"], MergeOutcome.CONFLICT_SKIPPED),
-        (bench.commits["c2"], MergeOutcome.MERGED),
+        (bench.commits["c2"], MergeOutcome.CONFLICT_SKIPPED),
+        (apart, MergeOutcome.MERGED),
     ]
-    assert "does not combine" in reports[0].reason and "base image" in reports[0].reason
+    assert all("does not combine" in r.reason and "base image" in r.reason for r in reports[:2])
     assert await bench.outcome("c1") is MergeOutcome.CONFLICT_SKIPPED
 
 
@@ -1012,15 +1067,20 @@ async def test_a_candidate_naming_another_upstream_commit_is_merged_and_the_head
 
 
 async def test_a_merge_test_the_toolbox_refuses_is_skipped_and_the_round_goes_on(bench: Bench) -> None:
-    bench.refuse("c1")
+    """``c2``'s merge carries ``c1`` and is refused with it; ``c2``'s change made again on a branch of its own is
+    merged."""
 
-    reports = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
+    bench.refuse("c1")
+    apart = await _committed_elsewhere(bench, bench.deltas["c2"], 1.0)
+
+    reports = await bench.integrator.integrate_next(3, EXPLORE_TICK_SECONDS)
 
     assert [(r.candidate, r.outcome) for r in reports] == [
         (bench.commits["c1"], MergeOutcome.CONFLICT_SKIPPED),
-        (bench.commits["c2"], MergeOutcome.MERGED),
+        (bench.commits["c2"], MergeOutcome.CONFLICT_SKIPPED),
+        (apart, MergeOutcome.MERGED),
     ]
-    assert "base_image_mismatch" in reports[0].reason and reports[0].request_id is None
+    assert all("base_image_mismatch" in r.reason and r.request_id is None for r in reports[:2])
     assert bench.completion.calls == []
     assert await bench.outcome("c1") is MergeOutcome.CONFLICT_SKIPPED
 
