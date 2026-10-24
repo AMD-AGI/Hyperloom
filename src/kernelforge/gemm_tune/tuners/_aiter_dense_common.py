@@ -327,7 +327,7 @@ def _demand_input_csv(
     path = getattr(ctx, "demand_json", None)
     if not path:
         return None
-    from ..dense_shapes import compute_decode_m_values
+    from ..dense_shapes import MGrid, compute_decode_m_values
     from ..evidence import demand_for_tuner, demand_shapes, load_demand
 
     report = load_demand(path)
@@ -336,13 +336,11 @@ def _demand_input_csv(
     entry = demand_for_tuner(report, tuner_name)
     if entry is None:
         return None
-    # The a8w8 blockscale, a8w8 quant-type, and a4w4 lookup paths all retry the exact M followed by get_padded_m(...,
-    # gl=0) and gl=1, using the same gemm_op_common implementation as a16w16.
-    ranked = demand_shapes(entry)
+    ranked = demand_shapes(entry, bucket=ctx.m_grid is MGrid.BUCKET)
     if not ranked:
         return None
     budget = _demand_budget(ctx)
-    shapes = _demand_shapes_within_budget(ranked, compute_decode_m_values(ctx.conc), budget)
+    shapes = _demand_shapes_within_budget(ranked, compute_decode_m_values(ctx.conc, ctx.m_grid), budget)
 
     out = work_dir / f"untuned_{tuner_name}_demand.csv"
     header = "M,N,K,q_dtype_w" if needs_q_dtype_w else "M,N,K"
@@ -391,7 +389,7 @@ def _demand_shapes_within_budget(
         key = (int(shape["N"]), int(shape["K"]))
         trial = dict(group_m)
         trial[key] = group_m.get(key, set()) | {int(shape["M"])}
-        band = sum(len(b) for b in _decode_band_buckets([(n, ms) for (n, _k), ms in trial.items()], decode_m))
+        band = sum(len(b) for b in _decode_band_buckets(list(trial.values()), decode_m))
         if len(taken) + 1 + band <= budget:
             group_m = trial
             taken.append(shape)
@@ -431,61 +429,16 @@ def _resolve_input_csv(ctx: TuneContext, work_dir: Path, needs_q_dtype_w: bool =
     return csv
 
 
-def _padded_m_gl0(m: int) -> int:
-    """aiter's ``get_padded_m(..., gl=0)``: round up to a tile multiple."""
-    m = max(1, int(m))
-    if m <= 256:
-        step = 16
-    elif m <= 1024:
-        step = 32
-    elif m <= 4096:
-        step = 64
-    else:
-        step = 128
-    return -(-m // step) * step
+def _decode_band_buckets(groups: Sequence[set[int]], decode_m: Sequence[int]) -> list[list[int]]:
+    """Per group, the decode-band M it has no row for.
 
-
-def _next_pow2(m: int) -> int:
-    """Round up to a power of two (aiter's ``nextPow2``)."""
-    m = max(1, int(m))
-    return 1 << (m - 1).bit_length()
-
-
-def _padded_m_gl1(m: int, n: int) -> int:
-    """aiter's ``get_padded_m(..., gl=1)``, which is not a plain power of two."""
-    if int(m) > 8192 and int(n) > 4096:
-        return 8192
-    return _next_pow2(m)
-
-
-def _dispatch_lookup_ms(m: int, n: int) -> set[int]:
-    """The tuned-M values aiter will accept when serving runtime batch ``m``."""
-    return {int(m), _padded_m_gl0(m), _padded_m_gl1(m, n)}
-
-
-def _decode_band_buckets(
-    groups: Sequence[tuple[int, set[int]]],
-    decode_m: Sequence[int],
-) -> list[list[int]]:
-    """Per group, the padded-M buckets it still needs to cover the decode band.
-
-    ``groups`` is ``(N, tuned M)`` per dispatch group; N alone decides which
-    tuned M a runtime batch can reach, through ``get_padded_m(..., gl=1)``.
-    Sizing the reservation and appending the rows both read this, so the two
-    cannot drift.
+    ``groups`` is the tuned M per dispatch group. ``decode_m`` already
+    holds the M a row is tuned at, so a group needs exactly those rows: a row
+    reached only through a later aiter lookup serves the batch with another
+    batch size's kernel. Sizing the reservation and appending the rows both
+    read this, so the two cannot drift.
     """
-    plan: list[list[int]] = []
-    for n, tuned in groups:
-        reachable = set(tuned)
-        buckets: list[int] = []
-        for m in decode_m:
-            if reachable & _dispatch_lookup_ms(m, n):
-                continue
-            bucket = _padded_m_gl0(m)
-            reachable.add(bucket)  # also serves the other grid M padding into it
-            buckets.append(bucket)
-        plan.append(buckets)
-    return plan
+    return [[m for m in decode_m if m not in tuned] for tuned in groups]
 
 
 def _ensure_decode_m_coverage(
@@ -534,8 +487,8 @@ def _ensure_decode_m_coverage(
     if not group_order:
         return csv
 
-    decode_m = compute_decode_m_values(ctx.conc)
-    plan = _decode_band_buckets([(key[0], group_m[key]) for key in group_order], decode_m)
+    decode_m = compute_decode_m_values(ctx.conc, ctx.m_grid)
+    plan = _decode_band_buckets([group_m[key] for key in group_order], decode_m)
     additions: list[str] = []
     uncovered = 0
     for (n, k, q), buckets in zip(group_order, plan):
