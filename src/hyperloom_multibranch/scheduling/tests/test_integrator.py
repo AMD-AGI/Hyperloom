@@ -237,9 +237,9 @@ def _change(tag: str, patches: tuple[PatchRef, ...] = ()) -> RecipeDelta:
     return RecipeDelta(config=config, components=components)
 
 
-async def _commit_specialist_work(bench: Bench, invalid: bool, foundation: bool, tags: tuple[str, ...]) -> None:
+async def _commit_specialist_work(bench: Bench, invalid: bool, foundation: str, tags: tuple[str, ...]) -> None:
     """``s1`` commits ``tags`` in turn; with ``invalid``, ``c1`` also moves the base image, which no merge carries,
-    and with ``foundation`` the gate judged ``c1`` a foundation fix."""
+    and the gate judged the commit of tag ``foundation`` a foundation fix."""
 
     scheduler, toolbox, gate = (bench.handle(role) for role in (Role.SCHEDULER, Role.TOOLBOX, Role.GATE))
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s1", from_commit=bench.root, reason="first batch"))
@@ -255,7 +255,7 @@ async def _commit_specialist_work(bench: Bench, invalid: bool, foundation: bool,
         await toolbox.write_result(result(test.request_id))
         await gate.write_judgement(
             test.request_id,
-            judgement(GAINS[tag], (test.request_id,), foundation_fix=foundation and tag == "c1"),
+            judgement(GAINS[tag], (test.request_id,), foundation_fix=tag == foundation),
             Conclusion.COMMITTED,
             commit,
         )
@@ -268,7 +268,7 @@ async def _bench(
     *,
     accuracy: dict[str, float] | None = None,
     invalid: bool = False,
-    foundation: bool = False,
+    foundation: str = "",
     conflicting: bool = False,
     tags: tuple[str, ...] = ("c1", "c2"),
     toolbox_type: type[RecordingToolbox] = RecordingToolbox,
@@ -461,7 +461,7 @@ async def test_an_improving_merge_the_regression_set_fails_stays_pending_and_is_
 async def test_a_foundation_fix_that_passes_the_accuracy_gate_and_the_regression_set_merges_without_a_gain(
     tmp_path: Path, value: float, verdict: str
 ) -> None:
-    bench = await _bench(tmp_path, {**CURVES, frozenset({"c1"}): {MAIN_POINT: value}}, foundation=True)
+    bench = await _bench(tmp_path, {**CURVES, frozenset({"c1"}): {MAIN_POINT: value}}, foundation="c1")
 
     report = await _one(bench)
 
@@ -480,7 +480,7 @@ async def test_a_foundation_fix_that_passes_the_accuracy_gate_and_the_regression
 
 
 async def test_a_foundation_fix_the_regression_set_fails_stays_pending(tmp_path: Path) -> None:
-    bench = await _bench(tmp_path, {**CURVES, frozenset({"c1"}): {MAIN_POINT: 950.0}}, foundation=True)
+    bench = await _bench(tmp_path, {**CURVES, frozenset({"c1"}): {MAIN_POINT: 950.0}}, foundation="c1")
     bench.regression.failures = {bench.root: "case kv-overflow reproduced"}
 
     report = await _one(bench)
@@ -495,7 +495,7 @@ async def test_a_foundation_fix_the_accuracy_gate_fails_is_not_stackable_and_run
 ) -> None:
     curves = {**CURVES, frozenset({"c1"}): {MAIN_POINT: 950.0}}
     bench = await _bench(tmp_path, curves)
-    bench = await _bench(tmp_path / "again", curves, accuracy={bench.deltas["c1"].fingerprint(): 0.5}, foundation=True)
+    bench = await _bench(tmp_path / "again", curves, accuracy={bench.deltas["c1"].fingerprint(): 0.5}, foundation="c1")
 
     report = await _one(bench)
 
@@ -503,6 +503,43 @@ async def test_a_foundation_fix_the_accuracy_gate_fails_is_not_stackable_and_run
     assert report.reason.startswith("regressed")
     assert bench.regression.calls == []
     assert await bench.repo.head(INTEGRATION_BRANCH) == bench.root
+
+
+#: A foundation fix's change: a tag flag of its own and the environment variable it sets.
+FIX = RecipeDelta(config=ConfigDelta(server_args=f"{TAG_FLAG}fix", envs={"HL_FIX": "1"}))
+
+
+async def test_a_foundation_fix_whose_parent_is_merged_carries_only_itself_and_merges_without_a_gain(
+    tmp_path: Path,
+) -> None:
+    bench = await _bench(tmp_path, {**CURVES, frozenset({"c1", "fix"}): {MAIN_POINT: 1030.0}}, tags=("c1",))
+    parent = await _one(bench)
+    assert parent is not None and parent.outcome is MergeOutcome.MERGED
+    fix = await _committed_on(bench, "s1", bench.commits["c1"], FIX, 0.0, foundation=True, name="fix")
+
+    report = await _one(bench)
+
+    assert report is not None and (report.candidate, report.onto) == (fix, parent.merged_commit)
+    assert report.outcome is MergeOutcome.MERGED and report.foundation_fix
+    assert report.reason.startswith("a foundation fix, flat ")
+
+
+async def test_a_foundation_fix_that_carries_a_parent_never_merged_is_judged_like_any_candidate(
+    tmp_path: Path,
+) -> None:
+    """``c2``, a foundation fix cut from ``c1``, which regresses, would bring ``c1`` onto the integration head with it."""
+
+    regressed: Curves = {frozenset({"c1"}): {MAIN_POINT: 950.0}, frozenset({"c1", "c2"}): {MAIN_POINT: 950.0}}
+    bench = await _bench(tmp_path, regressed, foundation="c2")
+
+    report = await _one(bench)
+
+    assert report is not None and (report.candidate, report.onto) == (bench.commits["c2"], bench.root)
+    assert report.outcome is MergeOutcome.NOT_STACKABLE and not report.foundation_fix
+    assert report.reason.startswith("regressed ")
+    assert bench.regression.calls == []
+    assert await bench.repo.head(INTEGRATION_BRANCH) == bench.root
+    assert await bench.outcome("c1") is MergeOutcome.NOT_STACKABLE
 
 
 @pytest.mark.parametrize("verdict", [Verdict.NEEDS_CONFIRM, Verdict.BLOCKED, Verdict.INCONCLUSIVE])
