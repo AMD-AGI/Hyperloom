@@ -20,6 +20,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
+    RecipeUpsert,
     LocalRecipeStore,
     LocalRecipeStoreError,
     RecipeKB,
@@ -189,14 +190,16 @@ def test_record_fact_per_variant_does_not_clobber_better_best_config(
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
     coord.recipe_kb.put_recipe(
-        canonical_id=cid,
-        model=_MODEL,
-        hardware=_HW,
-        framework_name=_FW,
-        framework_version=_FWV,
-        precision=_PREC,
-        best_config={"extra_server_args": "--page-size 32"},
-        best_throughput=7000.0,
+        RecipeUpsert(
+            canonical_id=cid,
+            model=_MODEL,
+            hardware=_HW,
+            framework_name=_FW,
+            framework_version=_FWV,
+            precision=_PREC,
+            best_config={"extra_server_args": "--page-size 32"},
+            best_throughput=7000.0,
+        )
     )
     task = SimpleNamespace(kind="explore", task_id="t-weaker", params={})
     coord.recipe_journal._record_fact_per_variant(
@@ -256,13 +259,15 @@ def test_sdk_fallback_t0_anchors_into_self_recipe_kb(tmp_path: Path) -> None:
 # The on-disk row must preserve severity / dict measured_impact / session provenance, or warm-start + dedup lose data.
 def _put(store: LocalRecipeStore, **kw) -> None:
     store.put_recipe(
-        canonical_id=_expected_cid(),
-        model=_MODEL,
-        hardware=_HW,
-        framework_name=_FW,
-        framework_version=_FWV,
-        precision=_PREC,
-        **kw,
+        RecipeUpsert(
+            canonical_id=_expected_cid(),
+            model=_MODEL,
+            hardware=_HW,
+            framework_name=_FW,
+            framework_version=_FWV,
+            precision=_PREC,
+            **kw,
+        ),
     )
 
 
@@ -309,15 +314,17 @@ def test_amend_preserves_t0_extras_and_audit(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
     coord.recipe_kb.put_recipe(
-        canonical_id=cid,
-        model=_MODEL,
-        hardware=_HW,
-        framework_name=_FW,
-        framework_version=_FWV,
-        precision=_PREC,
-        extras={"model_class": "moe", "image_digest": "sha256:abc"},
-        authority="AUTHORITATIVE",
-        confidence=0.99,
+        RecipeUpsert(
+            canonical_id=cid,
+            model=_MODEL,
+            hardware=_HW,
+            framework_name=_FW,
+            framework_version=_FWV,
+            precision=_PREC,
+            authority="AUTHORITATIVE",
+            confidence=0.99,
+            extras={"model_class": "moe", "image_digest": "sha256:abc"},
+        )
     )
     coord.recipe_journal.kb_amend_recipe(
         append_lesson={"statement": "x", "measured_impact": "+1%"},
@@ -345,15 +352,17 @@ def test_close_does_not_clobber_better_best_config(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
     coord.recipe_kb.put_recipe(
-        canonical_id=cid,
-        model=_MODEL,
-        hardware=_HW,
-        framework_name=_FW,
-        framework_version=_FWV,
-        precision=_PREC,
-        best_config={"name": "good", "tput": "1000"},
-        best_throughput=1000.0,
-        stack_fingerprint={"vllm_version": "0.6.0"},
+        RecipeUpsert(
+            canonical_id=cid,
+            model=_MODEL,
+            hardware=_HW,
+            framework_name=_FW,
+            framework_version=_FWV,
+            precision=_PREC,
+            best_config={"name": "good", "tput": "1000"},
+            best_throughput=1000.0,
+            stack_fingerprint={"vllm_version": "0.6.0"},
+        )
     )
     coord.shared_state.current_best = {}
     coord.recipe_journal.finalize_recipe_and_journal()
@@ -368,15 +377,17 @@ def test_close_finalize_keeps_the_kernel_optimizations_an_earlier_session_record
     cid = _expected_cid()
     prior = {"kernel_id": "k006", "micro_speedup": 1.3202, "decision": "KEEP", "e2e_gain_pct": -0.094}
     coord.recipe_kb.put_recipe(
-        canonical_id=cid,
-        model=_MODEL,
-        hardware=_HW,
-        framework_name=_FW,
-        framework_version=_FWV,
-        precision=_PREC,
-        best_config={"name": "good", "tput": "1000"},
-        best_throughput=1000.0,
-        extras={"kernel_optimizations": [prior]},
+        RecipeUpsert(
+            canonical_id=cid,
+            model=_MODEL,
+            hardware=_HW,
+            framework_name=_FW,
+            framework_version=_FWV,
+            precision=_PREC,
+            best_config={"name": "good", "tput": "1000"},
+            best_throughput=1000.0,
+            extras={"kernel_optimizations": [prior]},
+        )
     )
 
     assert coord.recipe_journal.finalize_recipe_and_journal()["result_type"] == "written"
@@ -393,18 +404,20 @@ def test_close_does_not_clobber_with_bare_baseline_higher_tput(
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
     coord.recipe_kb.put_recipe(
-        canonical_id=cid,
-        model=_MODEL,
-        hardware=_HW,
-        framework_name=_FW,
-        framework_version=_FWV,
-        precision=_PREC,
-        best_config={
-            "name": "warm_replay",
-            "extra_server_args": "--schedule-policy lpm --page-size 16",
-            "tput": "2532",
-        },
-        best_throughput=2532.0,
+        RecipeUpsert(
+            canonical_id=cid,
+            model=_MODEL,
+            hardware=_HW,
+            framework_name=_FW,
+            framework_version=_FWV,
+            precision=_PREC,
+            best_config={
+                "name": "warm_replay",
+                "extra_server_args": "--schedule-policy lpm --page-size 16",
+                "tput": "2532",
+            },
+            best_throughput=2532.0,
+        )
     )
     # Bare baseline: no validated stack/gain, but a higher tput the better-throughput guard alone would let through.
     ss = coord.shared_state
@@ -452,14 +465,16 @@ def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
     coord.recipe_kb.put_recipe(
-        canonical_id=cid,
-        model=_MODEL,
-        hardware=_HW,
-        framework_name=_FW,
-        framework_version=_FWV,
-        precision=_PREC,
-        best_config={"name": "old", "extra_server_args": "--page-size 16", "tput": "2000"},
-        best_throughput=2000.0,
+        RecipeUpsert(
+            canonical_id=cid,
+            model=_MODEL,
+            hardware=_HW,
+            framework_name=_FW,
+            framework_version=_FWV,
+            precision=_PREC,
+            best_config={"name": "old", "extra_server_args": "--page-size 16", "tput": "2000"},
+            best_throughput=2000.0,
+        )
     )
     ss = coord.shared_state
     ss.current_best = {
@@ -819,13 +834,15 @@ def test_t0_anchor_does_not_write_under_agentx(native_benchmark, tmp_path, monke
 
 def _seed_recipe_with_lesson(coord: Coordinator) -> dict:
     coord.recipe_kb.put_recipe(
-        canonical_id=_expected_cid(),
-        model=_MODEL,
-        hardware=_HW,
-        framework_name=_FW,
-        framework_version=_FWV,
-        precision=_PREC,
-        lessons=[{"statement": "kept", "measured_impact": "+1%"}],
+        RecipeUpsert(
+            canonical_id=_expected_cid(),
+            model=_MODEL,
+            hardware=_HW,
+            framework_name=_FW,
+            framework_version=_FWV,
+            precision=_PREC,
+            lessons=[{"statement": "kept", "measured_impact": "+1%"}],
+        )
     )
     return coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
 
@@ -856,7 +873,7 @@ def test_kb_amend_recipe_read_failure_leaves_recipe_untouched(tmp_path: Path) ->
 def test_kb_amend_recipe_propagates_put_failure(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
 
-    def _boom(**_kwargs):
+    def _boom(_upsert):
         raise OSError("disk full")
 
     coord.recipe_kb.put_recipe = _boom
@@ -881,7 +898,7 @@ def test_finalize_reports_error_when_authority_read_fails(tmp_path: Path) -> Non
 def test_finalize_reports_error_when_put_recipe_fails(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
 
-    def _boom(**_kwargs):
+    def _boom(_upsert):
         raise OSError("disk full")
 
     coord.recipe_kb.put_recipe = _boom
@@ -936,7 +953,7 @@ def test_fact_write_hook_records_every_variant_when_the_recipe_store_fails(
     """A cross-session KB failure must not cost the session its later variants' rows."""
     coord = _make_coordinator(tmp_path)
 
-    def _boom(**_kwargs):
+    def _boom(*_args, **_kwargs):
         raise failure
 
     setattr(coord.recipe_kb, method, _boom)
@@ -954,7 +971,7 @@ def test_fact_write_hook_records_every_variant_when_the_recipe_store_fails(
 def test_fact_write_hook_lets_an_unexpected_recipe_store_error_propagate(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
 
-    def _boom(**_kwargs):
+    def _boom(_upsert):
         raise TypeError("put_recipe signature drifted")
 
     coord.recipe_kb.put_recipe = _boom

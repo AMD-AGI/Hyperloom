@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
+    RecipeUpsert,
     LocalRecipeStore,
     RecipeKB,
     recipe_canonical_id,
@@ -51,12 +52,7 @@ def test_local_search_prefer_reorders_without_dropping(
                 precision="fp8",
             )
         )
-        kb.put_recipe(
-            canonical_id=cid,
-            model="qwen3-32b",
-            hardware=hardware,
-            extras={"tp": tp},
-        )
+        kb.put_recipe(RecipeUpsert(canonical_id=cid, model="qwen3-32b", hardware=hardware, extras={"tp": tp}))
     found = kb.search(
         label_match={"model": "qwen3-32b"},
         prefer={"tp": 8},

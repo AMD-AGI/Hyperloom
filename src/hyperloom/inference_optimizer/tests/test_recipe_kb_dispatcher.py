@@ -11,6 +11,7 @@ import pytest
 
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
+    RecipeUpsert,
     LocalRecipeStore,
     Recipe,
     RecipeKB,
@@ -49,12 +50,7 @@ def kb(tmp_path: Path) -> RecipeKB:
 
 def test_local_crud_and_authority_read(kb: RecipeKB) -> None:
     cid = _cid()
-    result = kb.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="mi300x",
-        best_throughput=10.0,
-    )
+    result = kb.put_recipe(RecipeUpsert(canonical_id=cid, model="m", hardware="mi300x", best_throughput=10.0))
     assert result["created"] is True
     assert kb.get_recipe(canonical_id=cid)["best_throughput"] == 10.0
     assert kb.get_authoritative_recipe(canonical_id=cid)["canonical_id"] == cid
@@ -65,12 +61,14 @@ def test_audit_is_local_and_best_effort(kb: RecipeKB) -> None:
     events: list[dict] = []
     kb.audit_hook = events.append
     kb.put_recipe(
-        canonical_id=_cid(),
-        lessons=[{"statement": "x", "measured_impact": "1%"}],
-        provenance={
-            "generator": "coordinator",
-            "details": {"phase": "close_finalize"},
-        },
+        RecipeUpsert(
+            canonical_id=_cid(),
+            lessons=[{"statement": "x", "measured_impact": "1%"}],
+            provenance={
+                "generator": "coordinator",
+                "details": {"phase": "close_finalize"},
+            },
+        )
     )
     kb.get_recipe(canonical_id=_cid())
     assert events[0]["resolution"] == "local_write"

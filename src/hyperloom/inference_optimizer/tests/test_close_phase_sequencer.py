@@ -144,8 +144,8 @@ class _StubRecipeKB:
     def update_recipe(self, **kwargs) -> dict:
         return {"status": "auto_accepted"}
 
-    def put_recipe(self, **kwargs) -> dict:
-        return {"status": "written", "canonical_id": kwargs.get("canonical_id", "")}
+    def put_recipe(self, upsert) -> dict:
+        return {"status": "written", "canonical_id": upsert.canonical_id}
 
     def get_authoritative_recipe(self, *, canonical_id: str) -> dict:
         return {}

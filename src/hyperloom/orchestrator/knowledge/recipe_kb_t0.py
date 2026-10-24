@@ -20,6 +20,7 @@ from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import agentx_active
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     RecipeKB,
+    RecipeUpsert,
     cid_to_path_components,
     recipe_canonical_id,
 )
@@ -825,7 +826,7 @@ def _stamp_local_authority_row(
         if value and value != "unknown":
             sfp_payload[stored] = value
     try:
-        kb.put_recipe(
+        upsert = RecipeUpsert(
             canonical_id=identity["canonical_id"],
             model=identity["model"],
             hardware=identity["hardware"],
@@ -854,6 +855,7 @@ def _stamp_local_authority_row(
                 "details": {"sid": session_id},
             },
         )
+        kb.put_recipe(upsert)
     except Exception:
         log.exception("T0 anchor put_recipe raised unexpectedly")
 

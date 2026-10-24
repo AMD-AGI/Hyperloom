@@ -14,6 +14,7 @@ import pytest
 
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
+    RecipeUpsert,
     HISTORY_DIRNAME,
     InvalidCanonicalIdError,
     LocalRecipeStore,
@@ -124,7 +125,7 @@ def test_cid_to_path_components_rejects_absolute_segment() -> None:
 def test_put_recipe_rejects_traversal_cid(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     with pytest.raises(InvalidCanonicalIdError):
-        store.put_recipe(canonical_id="inference:..:hw:fw:mt:arch:fv:prec")
+        store.put_recipe(RecipeUpsert(canonical_id="inference:..:hw:fw:mt:arch:fv:prec"))
 
 
 def test_canonical_id_for_path_inverse_of_cid_decomposition(
@@ -156,15 +157,17 @@ def test_put_recipe_first_call_creates_live_at_version_1(
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     result = store.put_recipe(
-        canonical_id=cid,
-        model="deepseek-r1",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        best_config={"tp": "8"},
-        best_throughput=24300.5,
-        provenance={"source": "test", "generator": "ut"},
+        RecipeUpsert(
+            canonical_id=cid,
+            model="deepseek-r1",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+            best_config={"tp": "8"},
+            best_throughput=24300.5,
+            provenance={"source": "test", "generator": "ut"},
+        )
     )
     assert result["canonical_id"] == cid
     assert result["version"] == 1
@@ -201,14 +204,10 @@ def test_put_recipe_second_call_archives_prior_and_bumps_version(
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(
-        canonical_id=cid,
-        best_throughput=1000.0,
-        provenance={"source": "first", "generator": "ut"},
+        RecipeUpsert(canonical_id=cid, best_throughput=1000.0, provenance={"source": "first", "generator": "ut"})
     )
     second = store.put_recipe(
-        canonical_id=cid,
-        best_throughput=2000.0,
-        provenance={"source": "second", "generator": "ut"},
+        RecipeUpsert(canonical_id=cid, best_throughput=2000.0, provenance={"source": "second", "generator": "ut"})
     )
     assert second["canonical_id"] == cid
     assert second["version"] == 2
@@ -230,14 +229,10 @@ def test_put_recipe_keeps_existing_history_envelope_when_snapshot_matches(
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(
-        canonical_id=cid,
-        best_throughput=1000.0,
-        provenance={"source": "first", "generator": "ut"},
+        RecipeUpsert(canonical_id=cid, best_throughput=1000.0, provenance={"source": "first", "generator": "ut"})
     )
     store.put_recipe(
-        canonical_id=cid,
-        best_throughput=2000.0,
-        provenance={"source": "second", "generator": "ut"},
+        RecipeUpsert(canonical_id=cid, best_throughput=2000.0, provenance={"source": "second", "generator": "ut"})
     )
     live = store.get_recipe(canonical_id=cid)
     assert live is not None and live["version"] == 2
@@ -253,9 +248,7 @@ def test_put_recipe_keeps_existing_history_envelope_when_snapshot_matches(
     archive_path.write_text(json.dumps(crashed, indent=2, sort_keys=True), encoding="utf-8")
 
     third = store.put_recipe(
-        canonical_id=cid,
-        best_throughput=3000.0,
-        provenance={"source": "third", "generator": "ut"},
+        RecipeUpsert(canonical_id=cid, best_throughput=3000.0, provenance={"source": "third", "generator": "ut"})
     )
     assert third["version"] == 3
     live = store.get_recipe(canonical_id=cid)
@@ -280,14 +273,10 @@ def test_put_recipe_rewrites_unreadable_history_and_still_advances(
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(
-        canonical_id=cid,
-        best_throughput=1000.0,
-        provenance={"source": "first", "generator": "ut"},
+        RecipeUpsert(canonical_id=cid, best_throughput=1000.0, provenance={"source": "first", "generator": "ut"})
     )
     store.put_recipe(
-        canonical_id=cid,
-        best_throughput=2000.0,
-        provenance={"source": "second", "generator": "ut"},
+        RecipeUpsert(canonical_id=cid, best_throughput=2000.0, provenance={"source": "second", "generator": "ut"})
     )
     archive_path = store._history_version_path(cid, 2)
     archive_path.parent.mkdir(parents=True, exist_ok=True)
@@ -295,9 +284,7 @@ def test_put_recipe_rewrites_unreadable_history_and_still_advances(
 
     with caplog.at_level("WARNING"):
         third = store.put_recipe(
-            canonical_id=cid,
-            best_throughput=3000.0,
-            provenance={"source": "third", "generator": "ut"},
+            RecipeUpsert(canonical_id=cid, best_throughput=3000.0, provenance={"source": "third", "generator": "ut"})
         )
     assert third["version"] == 3
     live = store.get_recipe(canonical_id=cid)
@@ -317,18 +304,19 @@ def test_put_recipe_counts_report_pre_and_post_write_sizes(
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(
-        canonical_id=cid,
-        lessons=[{"statement": "raise tp to 8", "measured_impact": "+12%"}],
+        RecipeUpsert(canonical_id=cid, lessons=[{"statement": "raise tp to 8", "measured_impact": "+12%"}])
     )
 
     # Amend: one more lesson, one new pitfall.
     amend = store.put_recipe(
-        canonical_id=cid,
-        lessons=[
-            {"statement": "raise tp to 8", "measured_impact": "+12%"},
-            {"statement": "enable chunked prefill", "measured_impact": "+4%"},
-        ],
-        pitfalls=[{"description": "ep=8 OOMs on 30B", "severity": "crash"}],
+        RecipeUpsert(
+            canonical_id=cid,
+            pitfalls=[{"description": "ep=8 OOMs on 30B", "severity": "crash"}],
+            lessons=[
+                {"statement": "raise tp to 8", "measured_impact": "+12%"},
+                {"statement": "enable chunked prefill", "measured_impact": "+4%"},
+            ],
+        )
     )
     assert amend["prior_counts"]["lessons"] == 1
     assert amend["counts"]["lessons"] == 2
@@ -339,9 +327,7 @@ def test_put_recipe_counts_report_pre_and_post_write_sizes(
     live = store.get_recipe(canonical_id=cid)
     assert live is not None
     roundtrip = store.put_recipe(
-        canonical_id=cid,
-        lessons=list(live["lessons"]),
-        pitfalls=list(live["pitfalls"]),
+        RecipeUpsert(canonical_id=cid, pitfalls=list(live["pitfalls"]), lessons=list(live["lessons"]))
     )
     assert roundtrip["prior_counts"] == roundtrip["counts"]
 
@@ -352,7 +338,7 @@ def test_put_recipe_preserves_created_at_across_updates(
     """``created_at`` reflects the first put; only ``updated_at`` advances on subsequent puts."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
-    store.put_recipe(canonical_id=cid, best_throughput=1000.0)
+    store.put_recipe(RecipeUpsert(canonical_id=cid, best_throughput=1000.0))
     first_live = store.get_recipe(canonical_id=cid)
     assert first_live is not None
     created_first = first_live["created_at"]
@@ -360,7 +346,7 @@ def test_put_recipe_preserves_created_at_across_updates(
     import time
 
     time.sleep(0.001)
-    store.put_recipe(canonical_id=cid, best_throughput=2000.0)
+    store.put_recipe(RecipeUpsert(canonical_id=cid, best_throughput=2000.0))
     second_live = store.get_recipe(canonical_id=cid)
     assert second_live is not None
     assert second_live["created_at"] == created_first
@@ -370,7 +356,7 @@ def test_put_recipe_preserves_created_at_across_updates(
 def test_put_recipe_rejects_empty_canonical_id(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     with pytest.raises(ValueError):
-        store.put_recipe(canonical_id="")
+        store.put_recipe(RecipeUpsert(canonical_id=""))
 
 
 def test_get_recipe_rejects_empty_canonical_id(tmp_path: Path) -> None:
@@ -382,7 +368,7 @@ def test_get_recipe_rejects_empty_canonical_id(tmp_path: Path) -> None:
 def test_put_recipe_rejects_malformed_canonical_id(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     with pytest.raises(InvalidCanonicalIdError):
-        store.put_recipe(canonical_id="inference:bogus")
+        store.put_recipe(RecipeUpsert(canonical_id="inference:bogus"))
 
 
 def test_get_recipe_returns_none_for_unknown_cid(tmp_path: Path) -> None:
@@ -396,7 +382,7 @@ def test_get_recipe_with_version_returns_live_when_versions_match(
     """``?version=N`` where N == live.version returns the live row (not a 404)."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
-    store.put_recipe(canonical_id=cid)
+    store.put_recipe(RecipeUpsert(canonical_id=cid))
     out = store.get_recipe(canonical_id=cid, version=1)
     assert out is not None
     assert out["version"] == 1
@@ -407,8 +393,8 @@ def test_get_recipe_with_version_returns_archive_for_prior_version(
 ) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
-    store.put_recipe(canonical_id=cid, best_throughput=1000.0)
-    store.put_recipe(canonical_id=cid, best_throughput=2000.0)
+    store.put_recipe(RecipeUpsert(canonical_id=cid, best_throughput=1000.0))
+    store.put_recipe(RecipeUpsert(canonical_id=cid, best_throughput=2000.0))
     v1 = store.get_recipe(canonical_id=cid, version=1)
     assert v1 is not None
     assert v1["best_throughput"] == 1000.0
@@ -420,7 +406,7 @@ def test_get_recipe_with_version_returns_archive_for_prior_version(
 def test_get_recipe_with_unknown_version_returns_none(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
-    store.put_recipe(canonical_id=cid)
+    store.put_recipe(RecipeUpsert(canonical_id=cid))
     assert store.get_recipe(canonical_id=cid, version=99) is None
 
 
@@ -456,36 +442,42 @@ def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
     import time
 
     store.put_recipe(
-        canonical_id=cid_a,
-        model="m-a",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        best_throughput=10000.0,
-        extras={"task": "pretrain", "mfu": 0.4},
+        RecipeUpsert(
+            canonical_id=cid_a,
+            model="m-a",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+            best_throughput=10000.0,
+            extras={"task": "pretrain", "mfu": 0.4},
+        )
     )
     time.sleep(0.001)
     store.put_recipe(
-        canonical_id=cid_b,
-        model="m-b",
-        hardware="mi300x",
-        framework_name="vllm",
-        framework_version="0.6.0",
-        precision="bf16",
-        best_throughput=25000.0,
-        extras={"task": "inference", "mfu": 0.55},
+        RecipeUpsert(
+            canonical_id=cid_b,
+            model="m-b",
+            hardware="mi300x",
+            framework_name="vllm",
+            framework_version="0.6.0",
+            precision="bf16",
+            best_throughput=25000.0,
+            extras={"task": "inference", "mfu": 0.55},
+        )
     )
     time.sleep(0.001)
     store.put_recipe(
-        canonical_id=cid_c,
-        model="m-c",
-        hardware="mi355x",
-        framework_name="sglang",
-        framework_version="0.5.0",
-        precision="fp8",
-        best_throughput=5000.0,
-        extras={"task": "pretrain", "mfu": 0.30},
+        RecipeUpsert(
+            canonical_id=cid_c,
+            model="m-c",
+            hardware="mi355x",
+            framework_name="sglang",
+            framework_version="0.5.0",
+            precision="fp8",
+            best_throughput=5000.0,
+            extras={"task": "pretrain", "mfu": 0.30},
+        )
     )
     return {"a": cid_a, "b": cid_b, "c": cid_c}
 
@@ -543,7 +535,7 @@ def test_search_excludes_rows_missing_the_metric_key(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid(model="no-tput")
     # ``best_throughput`` defaults to 0.0; a high min trips the missing-key path.
-    store.put_recipe(canonical_id=cid, extras={"mfu": 0.5})
+    store.put_recipe(RecipeUpsert(canonical_id=cid, extras={"mfu": 0.5}))
     rows = store.search(filters=RecipeFilters(metric_filters={"throughput": {"min": 100}}))
     assert rows == []
 
@@ -559,14 +551,14 @@ def test_search_updated_since_filters_old_rows(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid_old = _cid(model="old")
     cid_new = _cid(model="new")
-    store.put_recipe(canonical_id=cid_old)
+    store.put_recipe(RecipeUpsert(canonical_id=cid_old))
     cutoff_marker = store.get_recipe(canonical_id=cid_old)
     assert cutoff_marker is not None
     cutoff = cutoff_marker["updated_at"]
     import time
 
     time.sleep(0.001)
-    store.put_recipe(canonical_id=cid_new)
+    store.put_recipe(RecipeUpsert(canonical_id=cid_new))
     rows = store.search(filters=RecipeFilters(updated_since=cutoff))
     assert [r["canonical_id"] for r in rows] == [cid_new, cid_old]
 
@@ -609,9 +601,11 @@ def test_put_recipe_concurrent_writers_keep_versions_monotonic(
 
     def write_once(idx: int) -> dict[str, Any]:
         return store.put_recipe(
-            canonical_id=cid,
-            best_throughput=float(1000 + idx),
-            provenance={"source": "concurrent", "generator": f"w{idx}"},
+            RecipeUpsert(
+                canonical_id=cid,
+                best_throughput=float(1000 + idx),
+                provenance={"source": "concurrent", "generator": f"w{idx}"},
+            )
         )
 
     n = 8
@@ -631,7 +625,7 @@ def test_search_skips_directories_with_corrupt_recipe_json(
     """A corrupt recipe.json must surface as LocalRecipeStoreError, not silently lie about the corpus."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
-    store.put_recipe(canonical_id=cid)
+    store.put_recipe(RecipeUpsert(canonical_id=cid))
     bad_path = tmp_path.joinpath(*cid_to_path_components(cid)) / RECIPE_FILENAME
     bad_path.write_text("{this is not json")
 
@@ -643,7 +637,7 @@ def test_walk_skips_non_5level_directories(tmp_path: Path) -> None:
     """A stray directory at the wrong depth must NOT be picked up by search."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
-    store.put_recipe(canonical_id=cid)
+    store.put_recipe(RecipeUpsert(canonical_id=cid))
     # Inject a recipe.json at depth 3 (wrong depth).
     stray = tmp_path / "model" / "hw" / "fw" / RECIPE_FILENAME
     stray.parent.mkdir(parents=True)
@@ -665,14 +659,14 @@ def test_str_root_accepted(tmp_path: Path) -> None:
     """``LocalRecipeStore(root=str(...))`` still works via coercion in __post_init__."""
     store = LocalRecipeStore(root=str(tmp_path))
     cid = _cid(model="m-x")
-    store.put_recipe(canonical_id=cid)
+    store.put_recipe(RecipeUpsert(canonical_id=cid))
     assert store.get_recipe(canonical_id=cid) is not None
 
 
 def test_recipe_payload_carries_canonical_id_and_version(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
-    store.put_recipe(canonical_id=cid)
+    store.put_recipe(RecipeUpsert(canonical_id=cid))
     payload = json.loads(
         (tmp_path.joinpath(*cid_to_path_components(cid)) / RECIPE_FILENAME).read_text(encoding="utf-8")
     )
@@ -684,8 +678,8 @@ def test_history_dir_lives_at_six_levels_below_root(tmp_path: Path) -> None:
     """``history/`` is the only directory that may sit below the 7-level recipe dir; the walker MUST NOT recurse into it."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
-    store.put_recipe(canonical_id=cid)
-    store.put_recipe(canonical_id=cid)
+    store.put_recipe(RecipeUpsert(canonical_id=cid))
+    store.put_recipe(RecipeUpsert(canonical_id=cid))
     history_dir = tmp_path.joinpath(*cid_to_path_components(cid)) / HISTORY_DIRNAME
     assert history_dir.is_dir()
     rel = history_dir.relative_to(tmp_path).parts

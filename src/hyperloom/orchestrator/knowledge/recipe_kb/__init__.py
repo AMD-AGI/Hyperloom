@@ -17,6 +17,7 @@ from .local_store import (
     LocalRecipeStore,
     LocalRecipeStoreError,
     RECIPE_FILENAME,
+    RecipeUpsert,
 )
 from .schema import Recipe
 
@@ -29,6 +30,7 @@ __all__ = [
     "RECIPE_FILENAME",
     "Recipe",
     "RecipeKB",
+    "RecipeUpsert",
     "canonical_id_for_path",
     "cid_to_path_components",
     "recipe_canonical_id",

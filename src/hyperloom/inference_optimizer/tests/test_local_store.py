@@ -142,17 +142,19 @@ def test_put_get_history_roundtrip(tmp_path):
     store = ls.LocalRecipeStore(root=str(tmp_path))
     cid = _cid()
     r1 = store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        best_throughput=100.0,
-        what_worked=[{"description": "w", "measured_impact": "i"}],
-        sessions=[{"date": "d", "throughput_before": 1.0}],
-        extras={"task": "pretrain"},
-        provenance={"who": "test"},
+        ls.RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            best_throughput=100.0,
+            what_worked=[{"description": "w", "measured_impact": "i"}],
+            sessions=[{"date": "d", "throughput_before": 1.0}],
+            provenance={"who": "test"},
+            extras={"task": "pretrain"},
+        )
     )
     assert r1["version"] == 1
     assert r1["created"] is True
-    r2 = store.put_recipe(canonical_id=cid, model="m", best_throughput=200.0)
+    r2 = store.put_recipe(ls.RecipeUpsert(canonical_id=cid, model="m", best_throughput=200.0))
     assert r2["version"] == 2
     assert r2["created"] is False
 
@@ -177,8 +179,8 @@ def test_get_recipe_missing(tmp_path):
 
 def test_search_filters(tmp_path):
     store = ls.LocalRecipeStore(root=tmp_path)
-    store.put_recipe(canonical_id=_cid(model="a"), model="a", best_throughput=100.0)
-    store.put_recipe(canonical_id=_cid(model="b"), model="b", best_throughput=300.0)
+    store.put_recipe(ls.RecipeUpsert(canonical_id=_cid(model="a"), model="a", best_throughput=100.0))
+    store.put_recipe(ls.RecipeUpsert(canonical_id=_cid(model="b"), model="b", best_throughput=300.0))
 
     # label match
     res = store.search(label_match={"model": "a"})

@@ -29,7 +29,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     derive_journal_outcome,
     summarize_change,
 )
-from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStoreError, recipe_canonical_id
+from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStoreError, RecipeUpsert, recipe_canonical_id
 from hyperloom.orchestrator.lever import LEVER_CONFIG, lever_kind_for_task
 
 from ..collaborator import CoordinatorCollaborator
@@ -1244,25 +1244,25 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         identity = _framework_identity(state)
         live = self.recipe_kb.get_authoritative_recipe(canonical_id=canonical_id) or {}
         overrides = dict(recipe_overrides or {})
-        put_kwargs: dict[str, Any] = {
-            "canonical_id": canonical_id,
-            "model": state.model_name or "unknown_model",
-            "hardware": self._kb_hardware_slug(),
-            "framework_name": identity.name,
-            "framework_version": identity.version,
-            "precision": identity.precision,
-            "pitfalls": appended(live.get("pitfalls"), append_pitfall),
-            "lessons": appended(live.get("lessons"), append_lesson),
-            "extras": amended_recipe_extras(live, overrides, state),
-            "provenance": {
+        upsert = RecipeUpsert(
+            canonical_id=canonical_id,
+            model=state.model_name or "unknown_model",
+            hardware=self._kb_hardware_slug(),
+            framework_name=identity.name,
+            framework_version=identity.version,
+            precision=identity.precision,
+            pitfalls=appended(live.get("pitfalls"), append_pitfall),
+            lessons=appended(live.get("lessons"), append_lesson),
+            extras=amended_recipe_extras(live, overrides, state),
+            provenance={
                 "source": "hyperloom-inference-optimizer",
                 "generator": "coordinator",
                 "generated_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
                 "details": dict(provenance_details or {}),
             },
             **amended_recipe_fields(live, overrides),
-        }
-        self.recipe_kb.put_recipe(**put_kwargs)
+        )
+        self.recipe_kb.put_recipe(upsert)
         self._local_recipe_cache = None
 
 

@@ -15,6 +15,7 @@ import pytest
 from hyperloom.inference_optimizer.cli.kb import _build_recipe_kb_dispatcher
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
+    RecipeUpsert,
     LocalRecipeStore,
     cid_to_path_components,
     recipe_canonical_id,
@@ -111,13 +112,15 @@ def test_item3_no_central_url_reads_and_writes_go_local(
         )
     )
     out = kb.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        best_throughput=12345.0,
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+            best_throughput=12345.0,
+        )
     )
     assert out["created"] is True
     row = kb.get_recipe(canonical_id=cid)
@@ -149,13 +152,15 @@ def test_item4_local_mode_ignores_central_credentials(
     assert kb.mode == "local"
 
     kb.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        best_throughput=11111.0,
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+            best_throughput=11111.0,
+        )
     )
     local_row = kb.local.get_recipe(canonical_id=cid)
     assert local_row is not None
@@ -188,22 +193,26 @@ def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
         )
     )
     store.put_recipe(
-        canonical_id=cid_v1,
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        best_throughput=1.0,
+        RecipeUpsert(
+            canonical_id=cid_v1,
+            model="m",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+            best_throughput=1.0,
+        )
     )
     store.put_recipe(
-        canonical_id=cid_v2,
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.5.0",
-        precision="fp8",
-        best_throughput=2.0,
+        RecipeUpsert(
+            canonical_id=cid_v2,
+            model="m",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.5.0",
+            precision="fp8",
+            best_throughput=2.0,
+        )
     )
     parts_v1 = cid_to_path_components(cid_v1)
     parts_v2 = cid_to_path_components(cid_v2)
@@ -230,12 +239,9 @@ def test_item6_path_levels_match_5_dimensions(tmp_path: Path) -> None:
         )
     )
     store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="hw",
-        framework_name="fw",
-        framework_version="ver",
-        precision="prec",
+        RecipeUpsert(
+            canonical_id=cid, model="m", hardware="hw", framework_name="fw", framework_version="ver", precision="prec"
+        )
     )
     expected = tmp_path / "m" / "hw" / "fw" / "unknown_model_type" / "unknown_arch" / "ver" / "prec" / "recipe.json"
     assert expected.is_file()
@@ -255,13 +261,15 @@ def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
     )
     assert cid == ("inference:qwen-qwen3-30b-a3b-base:mi355x:sglang:unknown_model_type:unknown_arch:0.4.5:bf16")
     store.put_recipe(
-        canonical_id=cid,
-        model="/hyperloom/models/Qwen-Qwen3-30B-A3B-Base",
-        hardware="mi355x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="bf16",
-        best_throughput=42.0,
+        RecipeUpsert(
+            canonical_id=cid,
+            model="/hyperloom/models/Qwen-Qwen3-30B-A3B-Base",
+            hardware="mi355x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="bf16",
+            best_throughput=42.0,
+        )
     )
     # Recipe lives at 7 levels below root; model component is the basename only.
     expected = (
@@ -292,12 +300,14 @@ def test_item7_model_with_double_slash_normalises(tmp_path: Path) -> None:
     )
     assert ":mymodel:" in cid
     store.put_recipe(
-        canonical_id=cid,
-        model="/some/path/MyModel/",
-        hardware="hw",
-        framework_name="fw",
-        framework_version="v",
-        precision="p",
+        RecipeUpsert(
+            canonical_id=cid,
+            model="/some/path/MyModel/",
+            hardware="hw",
+            framework_name="fw",
+            framework_version="v",
+            precision="p",
+        )
     )
     expected = tmp_path / "mymodel" / "hw" / "fw" / "unknown_model_type" / "unknown_arch" / "v" / "p" / "recipe.json"
     assert expected.is_file()
@@ -318,39 +328,43 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
         )
     )
     store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="hw",
-        framework_name="fw",
-        framework_version="v",
-        precision="p",
-        what_worked=[
-            {"name": "X helped", "gain_pct": 10.0},
-        ],
-        what_failed=[
-            {"name": "Y failed", "reason": "OOM"},
-        ],
-        pitfalls=[{"description": "watch for Z"}],
-        sessions=[
-            {"date": "2026-05-28", "throughput_before": 1.0, "throughput_after": 1.1, "actions_taken": ["a"]},
-        ],
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="hw",
+            framework_name="fw",
+            framework_version="v",
+            precision="p",
+            what_worked=[
+                {"name": "X helped", "gain_pct": 10.0},
+            ],
+            what_failed=[
+                {"name": "Y failed", "reason": "OOM"},
+            ],
+            pitfalls=[{"description": "watch for Z"}],
+            sessions=[
+                {"date": "2026-05-28", "throughput_before": 1.0, "throughput_after": 1.1, "actions_taken": ["a"]},
+            ],
+        )
     )
 
     live = store.get_recipe(canonical_id=cid)
     assert live is not None
     store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="hw",
-        framework_name="fw",
-        framework_version="v",
-        precision="p",
-        what_worked=list(live.get("what_worked") or []),
-        what_failed=list(live.get("what_failed") or []),
-        pitfalls=list(live.get("pitfalls") or []),
-        sessions=list(live.get("sessions") or []),
-        # only updating throughput
-        best_throughput=99.0,
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="hw",
+            framework_name="fw",
+            framework_version="v",
+            precision="p",
+            what_worked=list(live.get("what_worked") or []),
+            what_failed=list(live.get("what_failed") or []),
+            pitfalls=list(live.get("pitfalls") or []),
+            sessions=list(live.get("sessions") or []),
+            # only updating throughput
+            best_throughput=99.0,
+        ),
     )
 
     after = store.get_recipe(canonical_id=cid)
@@ -379,22 +393,26 @@ def test_item8_history_archives_prior_version(tmp_path: Path) -> None:
         )
     )
     store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="hw",
-        framework_name="fw",
-        framework_version="v",
-        precision="p",
-        best_throughput=1.0,
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="hw",
+            framework_name="fw",
+            framework_version="v",
+            precision="p",
+            best_throughput=1.0,
+        )
     )
     store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="hw",
-        framework_name="fw",
-        framework_version="v",
-        precision="p",
-        best_throughput=2.0,
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="hw",
+            framework_name="fw",
+            framework_version="v",
+            precision="p",
+            best_throughput=2.0,
+        )
     )
     archived = store.get_recipe(canonical_id=cid, version=1)
     assert archived is not None
@@ -415,27 +433,29 @@ def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
         )
     )
     store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="hw",
-        framework_name="fw",
-        framework_version="v",
-        precision="p",
-        best_config={"tp": "8"},
-        best_throughput=42.0,
-        what_worked=[{"name": "x", "gain_pct": 5.0}],
-        what_failed=[{"name": "y", "reason": "OOM"}],
-        remaining_gaps=[{"description": "z", "metrics": "tput"}],
-        pitfalls=[{"description": "watch out"}],
-        last_profiled="2026-05-28",
-        stack_fingerprint={
-            "vllm_version": "0.6.0",
-            "aiter_commit": "abc123",
-            "rocm_version": "7.2",
-        },
-        sessions=[
-            {"date": "2026-05-28", "throughput_before": 1.0, "throughput_after": 42.0, "actions_taken": ["tp+ep"]},
-        ],
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="hw",
+            framework_name="fw",
+            framework_version="v",
+            precision="p",
+            best_config={"tp": "8"},
+            best_throughput=42.0,
+            what_worked=[{"name": "x", "gain_pct": 5.0}],
+            what_failed=[{"name": "y", "reason": "OOM"}],
+            remaining_gaps=[{"description": "z", "metrics": "tput"}],
+            pitfalls=[{"description": "watch out"}],
+            last_profiled="2026-05-28",
+            stack_fingerprint={
+                "vllm_version": "0.6.0",
+                "aiter_commit": "abc123",
+                "rocm_version": "7.2",
+            },
+            sessions=[
+                {"date": "2026-05-28", "throughput_before": 1.0, "throughput_after": 42.0, "actions_taken": ["tp+ep"]},
+            ],
+        )
     )
     on_disk = json.loads(
         (tmp_path / "m" / "hw" / "fw" / "unknown_model_type" / "unknown_arch" / "v" / "p" / "recipe.json").read_text(

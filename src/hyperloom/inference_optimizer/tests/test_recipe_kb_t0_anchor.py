@@ -21,6 +21,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
 )
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
+    RecipeUpsert,
     LocalRecipeStore,
     RecipeKB,
     recipe_canonical_id,
@@ -193,15 +194,17 @@ def test_t0_anchor_surfaces_pitfalls_and_lessons_from_existing_row(
     state = _FakeSharedState()
     cid = _expected_cid(state, "M", "MI300X")
     kb.put_recipe(
-        canonical_id=cid,
-        model="M",
-        hardware="MI300X",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        pitfalls=[{"description": "watch for X"}],
-        lessons=[{"statement": "Y is the answer", "measured_impact": "+15%"}],
-        provenance={"source": "seed", "generator": "ut"},
+        RecipeUpsert(
+            canonical_id=cid,
+            model="M",
+            hardware="MI300X",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+            pitfalls=[{"description": "watch for X"}],
+            lessons=[{"statement": "Y is the answer", "measured_impact": "+15%"}],
+            provenance={"source": "seed", "generator": "ut"},
+        )
     )
     run_t0_anchor(
         kb,
@@ -239,14 +242,16 @@ def test_t0_anchor_drops_an_unparseable_row_on_disk_and_says_so(
     state = _FakeSharedState()
     cid = _expected_cid(state, "M", "MI300X")
     kb.put_recipe(
-        canonical_id=cid,
-        model="M",
-        hardware="MI300X",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        lessons=[{"statement": "placeholder", "measured_impact": "+1%"}],
-        provenance={"source": "seed", "generator": "ut"},
+        RecipeUpsert(
+            canonical_id=cid,
+            model="M",
+            hardware="MI300X",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+            lessons=[{"statement": "placeholder", "measured_impact": "+1%"}],
+            provenance={"source": "seed", "generator": "ut"},
+        )
     )
     recipe_path = next((tmp_path / "kb").rglob("recipe.json"))
     row = json.loads(recipe_path.read_text(encoding="utf-8"))
@@ -419,18 +424,25 @@ def test_t0_anchor_preserves_existing_best_config_on_metadata_stamp(
     state = _FakeSharedState()
     cid = _expected_cid(state, "m", "mi300x")
     kb.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        best_config={"tp": "16", "ep": "8"},
-        best_throughput=12345.6,
-        sessions=[
-            {"date": "2026-05-25", "throughput_before": 1.0, "throughput_after": 12345.6, "actions_taken": ["tp+ep"]}
-        ],
-        provenance={"source": "seed", "generator": "ut"},
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+            best_config={"tp": "16", "ep": "8"},
+            best_throughput=12345.6,
+            sessions=[
+                {
+                    "date": "2026-05-25",
+                    "throughput_before": 1.0,
+                    "throughput_after": 12345.6,
+                    "actions_taken": ["tp+ep"],
+                }
+            ],
+            provenance={"source": "seed", "generator": "ut"},
+        )
     )
     run_t0_anchor(
         kb,
@@ -457,13 +469,15 @@ def test_t0_anchor_increments_version_on_existing_row(
     state = _FakeSharedState()
     cid = _expected_cid(state, "m", "mi300x")
     kb.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        provenance={"source": "seed", "generator": "ut"},
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+            provenance={"source": "seed", "generator": "ut"},
+        )
     )
     assert kb.get_recipe(canonical_id=cid)["version"] == 1  # type: ignore[index]
     run_t0_anchor(
@@ -669,16 +683,18 @@ def test_t0_anchor_claims_only_the_reads_its_own_lookup_made(
 def _seed_actionable_row(kb: RecipeKB, cid: str) -> None:
     """Seed a row carrying a replayable config plus priors, under one exact identity."""
     kb.put_recipe(
-        canonical_id=cid,
-        model="M",
-        hardware="MI300X",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        best_config={"extra_server_args": "--from-an-spx-pod"},
-        pitfalls=[{"description": "watch for X"}],
-        lessons=[{"statement": "Y is the answer", "measured_impact": "+15%"}],
-        provenance={"source": "seed", "generator": "ut"},
+        RecipeUpsert(
+            canonical_id=cid,
+            model="M",
+            hardware="MI300X",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+            best_config={"extra_server_args": "--from-an-spx-pod"},
+            pitfalls=[{"description": "watch for X"}],
+            lessons=[{"statement": "Y is the answer", "measured_impact": "+15%"}],
+            provenance={"source": "seed", "generator": "ut"},
+        )
     )
 
 

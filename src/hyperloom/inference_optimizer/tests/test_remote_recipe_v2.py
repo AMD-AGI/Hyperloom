@@ -1262,7 +1262,7 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
         def get_authoritative_recipe(self, **kwargs):
             raise AssertionError("remote CLOSE read legacy RecipeKB")
 
-        def put_recipe(self, **kwargs):
+        def put_recipe(self, upsert):
             raise AssertionError("remote CLOSE wrote legacy RecipeKB")
 
     coordinator = SimpleNamespace(

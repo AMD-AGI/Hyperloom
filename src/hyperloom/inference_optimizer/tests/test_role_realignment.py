@@ -185,6 +185,7 @@ def _t0_warm_started(tmp_path, **put_kwargs) -> SharedState:
     """
     from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
     from hyperloom.orchestrator.knowledge.recipe_kb import (
+        RecipeUpsert,
         LocalRecipeStore,
         RecipeKB,
         recipe_canonical_id,
@@ -198,22 +199,24 @@ def _t0_warm_started(tmp_path, **put_kwargs) -> SharedState:
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"))
     if put_kwargs:
         kb.put_recipe(
-            canonical_id=recipe_canonical_id(
-                RecipeIdentity(
-                    model="kimi-k3",
-                    hardware="mi355x",
-                    framework_name=state.framework_name,
-                    framework_version=state.framework_version,
-                    precision=state.precision,
-                )
+            RecipeUpsert(
+                canonical_id=recipe_canonical_id(
+                    RecipeIdentity(
+                        model="kimi-k3",
+                        hardware="mi355x",
+                        framework_name=state.framework_name,
+                        framework_version=state.framework_version,
+                        precision=state.precision,
+                    )
+                ),
+                model="kimi-k3",
+                hardware="mi355x",
+                framework_name=state.framework_name,
+                framework_version=state.framework_version,
+                precision=state.precision,
+                provenance={"source": "seed", "generator": "ut"},
+                **put_kwargs,
             ),
-            model="kimi-k3",
-            hardware="mi355x",
-            framework_name=state.framework_name,
-            framework_version=state.framework_version,
-            precision=state.precision,
-            provenance={"source": "seed", "generator": "ut"},
-            **put_kwargs,
         )
     session_dir = tmp_path / "session"
     session_dir.mkdir(exist_ok=True)
