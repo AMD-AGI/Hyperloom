@@ -44,7 +44,7 @@ from hyperloom_multibranch.contracts.fork import RepairRequest
 from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistLifecycle
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver, LineageKind
+from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
@@ -350,9 +350,13 @@ class BranchControl:
         if entry.origin.cut_by_scheduler:
             reason = f"{entry.origin.value} branch" + (f" of {entry.from_branch}" if entry.from_branch else "")
             repairs = launch.repair.judgement.request_ids[0] if launch.repair is not None else ""
-            driver = BranchDriver.AUTONOMOUS if entry.origin is BranchOrigin.AGENT else BranchDriver.SPECIALIST
             opened = LineageEvent(
-                LineageKind.OPEN, entry.branch, from_commit=start_commit, reason=reason, repairs=repairs, driver=driver
+                LineageKind.OPEN,
+                entry.branch,
+                from_commit=start_commit,
+                reason=reason,
+                repairs=repairs,
+                driver=entry.origin.driver,
             )
             await self._notebook.record_lineage(opened)
             await self._repo.create_branch(entry.branch, start_commit)
