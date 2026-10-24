@@ -21,6 +21,8 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.io import append_jsonl, atomic_write_json
+from hyperloom.common.outside_facts.image_check import FactResult, ImageCheckMode, ImageCheckReport
+from hyperloom.common.outside_facts.image_check_eval import Status
 from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.recipe import Recipe
@@ -45,6 +47,7 @@ from hyperloom_multibranch.scheduling.close import CloseReport, Closer, ended_be
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.exports import (
+    IMAGE_CHECK_FILE,
     ExportServices,
     ExportSources,
     ScorerAuthoring,
@@ -186,6 +189,14 @@ def layout(tmp_path: Path) -> SessionLayout:
 
 
 AUTHOR_MODEL = "author-model"
+#: What the session's image check found: one fact of the pack that does not hold here.
+IMAGE_CHECK = ImageCheckReport(
+    ImageCheckMode.WARN,
+    rule_pack_identity(),
+    "2026-10-24T00:00:00Z",
+    {"python": "/usr/bin/python3"},
+    (FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone"),),
+)
 
 
 def _closer(
@@ -196,9 +207,10 @@ def _closer(
     kb_client: RemoteRecipeClient | None,
     author: ScriptedCompletion | None = None,
     curator: ScriptedCompletion | None = None,
+    image_check: ImageCheckReport | None = None,
 ) -> Closer:
     """CLOSE with ``recipe`` committed as :data:`CHOSEN`, its files in the session's blob store and not in the
-    repository; ``curator`` curates the lesson pool."""
+    repository; ``curator`` curates the lesson pool; ``image_check`` is what the session's image check found."""
 
     author = author or ScriptedCompletion()
     curator = curator or ScriptedCompletion()
@@ -210,7 +222,7 @@ def _closer(
     ):
         blobs.put((recipe.files_root / path).read_bytes())
     dashboard = SessionDashboard(notebook, progress, AfterStopToolbox(), METRIC, layout.dashboard)  # type: ignore[arg-type]
-    sources = ExportSources(notebook, ChosenRepo(recipe), blobs, dashboard)
+    sources = ExportSources(notebook, ChosenRepo(recipe), blobs, dashboard, image_check)
     services = ExportServices(kb_client, ScorerAuthoring(author, AUTHOR_MODEL), ScorerAuthoring(curator, AUTHOR_MODEL))
     exports = SessionExports(layout, sources, METRIC, BUDGET_SECONDS, services)  # type: ignore[arg-type]
     return Closer(layout, stopper, exports, CLOCK)  # type: ignore[arg-type]
@@ -236,9 +248,8 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     (layout.logs / "agents").mkdir(parents=True, exist_ok=True)
     (layout.logs / "agents" / "resources.jsonl").write_text(json.dumps(reading) + "\n", "utf-8")
 
-    report = await _closer(layout, notebook, stopper, final, RemoteRecipeClient(store), author, curator).close(
-        SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP
-    )
+    closer = _closer(layout, notebook, stopper, final, RemoteRecipeClient(store), author, curator, IMAGE_CHECK)
+    report = await closer.close(SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP)
 
     assert report.exports is not None and report.exports.kb_write_back.status == "written"
     assert store.promoted is not None and store.promoted[2] == 1041.0
@@ -248,6 +259,7 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     assert sorted(store.uploads.values()) == recipe_files and not any(layout.final.iterdir())
     assert (stopper.reasons, stopper.events) == ([SessionStopReason.TIME_EXHAUSTED], [f"stop by {HARD_STOP}"])
     assert report.exports.breakdown == layout.reports / "session_breakdown.json"
+    assert json.loads((layout.reports / IMAGE_CHECK_FILE).read_text()) == IMAGE_CHECK.to_json()
     breakdown = json.loads(report.exports.breakdown.read_text())
     assert breakdown["close"]["kb_write_back"]["status"] == "written"
     knowledge = breakdown["close"]["knowledge"]
@@ -290,6 +302,7 @@ async def test_without_a_kb_client_or_a_final_choice_the_write_back_is_recorded_
     )
     assert disabled.exports is not None
     assert json.loads(disabled.exports.breakdown.read_text())["close"]["final"]["commit_id"] == CHOSEN
+    assert not (layout.reports / IMAGE_CHECK_FILE).exists()
     no_choice = FinalChoice(None, (), "no candidate passed the final validation", METRIC, 64)
     skipped = await _closer(layout, notebook, _clean(), final, RemoteRecipeClient(FakeRecipeStore())).close(
         SessionStopReason.PRELUDE_FAILED, no_choice, "prelude failed", HARD_STOP

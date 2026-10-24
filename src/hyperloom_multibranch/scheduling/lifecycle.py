@@ -36,6 +36,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.outside_facts.image_check import ImageCheckReport, run_image_check
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.versions import socket_versions
@@ -79,7 +80,13 @@ from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, Judge
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.contracts.llm import Completion
 from hyperloom_multibranch.scheduling.llm import recorded
-from hyperloom_multibranch.scheduling.manifest import CodeVersion, SessionManifest, code_version, read_manifest
+from hyperloom_multibranch.scheduling.manifest import (
+    CodeVersion,
+    ImageCheckSummary,
+    SessionManifest,
+    code_version,
+    read_manifest,
+)
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.prelude import (
@@ -245,6 +252,7 @@ class Session:
         self._selector = FinalSelector(checks, settings.workload)
         self._signals = StopSignals()
         self._in_final = False
+        self._image_check: ImageCheckReport | None = None
 
     def _open_records(self) -> None:
         """The scheduler's notebook handle, the roster, the decision log and the blob store, on the session's layout."""
@@ -307,14 +315,20 @@ class Session:
         """Run every phase and CLOSE; an unhandled error propagates once CLOSE has run.
 
         The scheduler records itself before the first phase, so the directory says the session is running from the
-        start and a recovery over it is refused while it is. The reference material the run was given is copied in
-        before the manifest, so the manifest the session writes describes a directory that already holds it.
+        start and a recovery over it is refused while it is. The image check then compares the rule pack's outside
+        facts with this environment, off the event loop; its summary goes into the manifest and CLOSE attaches the
+        whole report. Under ``HYPERLOOM_IMAGE_CHECK=strict`` a failing fact raises :class:`ImageCheckFailed` here,
+        before the manifest is written and before any phase or CLOSE runs. The reference material the run was given
+        is copied in before the manifest, so the manifest the session writes describes a directory that already holds
+        it.
         """
 
         budget = SessionBudget.from_hours(self._settings.max_hours, self._clock.now())
         self._processes.record_scheduler()
+        image_check = await asyncio.to_thread(run_image_check)
+        self._image_check = image_check
         await asyncio.to_thread(copy_references, self._settings.references, self._layout.reference)
-        self._write_manifest(budget, await asyncio.to_thread(code_version))
+        self._write_manifest(budget, await asyncio.to_thread(code_version), image_check)
         hard_stop = HardStop(budget, self._clock)
         aborted = SessionOutcome(SessionStopReason.ABORTED, None, None, "")
         return await self._run_and_close(self._phases(budget, hard_stop), aborted, budget, hard_stop)
@@ -563,7 +577,8 @@ class Session:
         return Explorer(self._context, self._branches, self._integrator, steering)
 
     def _closer(self) -> Closer:
-        sources = ExportSources(self._notebook, self._repo, self._blobs, self._dashboard(self._scoring()))
+        dashboard = self._dashboard(self._scoring())
+        sources = ExportSources(self._notebook, self._repo, self._blobs, dashboard, self._image_check)
         services = ExportServices(self._recipe_kb, self._scorers, self._curator)
         closing = SessionExports(self._layout, sources, self._metric, self._budget_seconds, services)
         return Closer(self._layout, self._stopper, closing, self._clock)
@@ -659,7 +674,7 @@ class Session:
     def _phase(self, name: str, **detail: object) -> None:
         self._decisions.record(Decision(DecisionKind.PHASE, name, detail=detail))
 
-    def _write_manifest(self, budget: SessionBudget, version: CodeVersion) -> None:
+    def _write_manifest(self, budget: SessionBudget, version: CodeVersion, image_check: ImageCheckReport) -> None:
         SessionManifest(
             code_version=version,
             rule_pack=dict(rule_pack_identity()),
@@ -669,6 +684,7 @@ class Session:
             settings=self._settings,
             metric=self._settings.workload.metric,
             policy_versions=self._policy_versions(),
+            image_check=ImageCheckSummary(image_check.summary()),
         ).write(self._layout.manifest)
 
 
