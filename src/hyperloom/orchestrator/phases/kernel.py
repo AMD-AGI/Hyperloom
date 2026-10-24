@@ -47,6 +47,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     FusionRun,
     GeakDelegation,
     GeakProduct,
+    GeakRebenchAttempt,
     GemmTuningRun,
     IntegrateVerdict,
     KernelExit,
@@ -2290,12 +2291,14 @@ class KernelPhase(CoordinatorCollaborator):
         recorder = KernelPhase.timeline(self)
         if recorder is not None:
             recorder.record_geak_rebench_attempt(
-                attempt_id=attempt_id,
-                base_tput=current_best_tput,
-                measured_tput=measured_tput if measured_tput > 0 else None,
-                decision="no_promote",
-                decision_reason=reason,
-                status="no_promote",
+                GeakRebenchAttempt(
+                    attempt_id=attempt_id,
+                    base_tput=current_best_tput,
+                    measured_tput=measured_tput if measured_tput > 0 else None,
+                    decision="no_promote",
+                    decision_reason=reason,
+                    status="no_promote",
+                )
             )
             recorder.record_geak_rebench_conclusion(final_status="no_promote", final_error=reason)
 

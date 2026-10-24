@@ -1181,9 +1181,9 @@ class KernelEventRecorder:
         """Record the reproducible configuration GEAK handed back."""
         self._sink.record(SECTION_EVENT, {"geak_product": product.block()})
 
-    def record_geak_rebench_attempt(self, *, max_attempts: Any = None, **fields: Any) -> None:
+    def record_geak_rebench_attempt(self, attempt: GeakRebenchAttempt, *, max_attempts: Any = None) -> None:
         """Record one GEAK rebench attempt."""
-        row = GeakRebenchAttempt(**fields).row()
+        row = attempt.row()
         self._sink.record(
             SECTION_REBENCH,
             row,

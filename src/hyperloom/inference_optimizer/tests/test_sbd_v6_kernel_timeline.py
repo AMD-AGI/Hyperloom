@@ -33,6 +33,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     FusionRun,
     GeakProduct,
+    GeakRebenchAttempt,
     IntegrateVerdict,
     KernelExit,
     KernelReprofile,
@@ -1181,7 +1182,7 @@ def _geak_rebench(recorder, attempt_id: str, decision: str | None, **overrides: 
         "status": "settled",
     }
     fields.update(overrides)
-    recorder.record_geak_rebench_attempt(max_attempts=4, **fields)
+    recorder.record_geak_rebench_attempt(GeakRebenchAttempt(**fields), max_attempts=4)
 
 
 def _geak_with_one_acceptance():

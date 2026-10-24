@@ -19,6 +19,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     record_integrate_verdict,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
+    GeakRebenchAttempt,
     GemmTuningRun,
     IntegrateVerdict,
     KernelExit,
@@ -75,14 +76,16 @@ def _geak_visit(*, rebench: str | None, specs: list[dict[str, Any]]):
     recorder.record_geak_claim({"self_reported_gain_pct": 9.0, "geak_status": "ok"}, specs=specs)
     if rebench is not None:
         recorder.record_geak_rebench_attempt(
+            GeakRebenchAttempt(
+                attempt_id="geak-rb-1",
+                idempotency_key="geak-rb-1",
+                task_id="geak-rb-1",
+                base_tput=900.0,
+                measured_tput=950.0,
+                decision=rebench,
+                status="settled",
+            ),
             max_attempts=4,
-            attempt_id="geak-rb-1",
-            idempotency_key="geak-rb-1",
-            task_id="geak-rb-1",
-            base_tput=900.0,
-            measured_tput=950.0,
-            decision=rebench,
-            status="settled",
         )
     recorder.finish(KernelExit(tput_after=950.0))
 
