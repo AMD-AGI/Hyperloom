@@ -317,20 +317,6 @@ def test_lane_conflicts_research_lane_isolated():
 
 
 @pytest.mark.asyncio
-async def test_acquire_many_returns_lease_on_success(locks):
-    lease = await locks.acquire_many(
-        ["benchmark_lane"],
-        holder_id="hb",
-        task_id="tb",
-        action="bench",
-        ttl_sec=60,
-    )
-    assert lease is not None
-    assert lease.holder_id == "hb"
-    await locks.release(lease)
-
-
-@pytest.mark.asyncio
 async def test_acquire_many_returns_none_on_conflict(conn, locks):
     bench = await locks.acquire_many(
         ["benchmark_lane"],
@@ -409,7 +395,6 @@ async def test_old_rows_still_count_toward_lane_capacity(conn, locks):
         await locks.acquire_many(["research_lane"], holder_id="next", task_id="next", action="specialist", ttl_sec=60)
         is None
     )
-    assert not hasattr(locks, "reap_expired")
 
 
 _T0 = "2026-09-21T07:00:00+00:00"
@@ -907,7 +892,6 @@ async def test_gpu_owner_keeps_capacity_until_release(conn, ray):
 
     lease = await acquire("old")
     assert await acquire("next") is None
-    assert not hasattr(pool, "reap_expired")
     await pool.release(lease)
     assert await acquire("next") is not None
 

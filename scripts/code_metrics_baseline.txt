@@ -801,7 +801,7 @@ module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1429
 module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 4690
 module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1269
 module-lines src/hyperloom/orchestrator/loop/coordinator.py 1335
-module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1431
+module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1426
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1394
 module-lines src/hyperloom/orchestrator/phases/framework.py 3026
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4102
