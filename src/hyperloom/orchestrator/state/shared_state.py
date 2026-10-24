@@ -29,6 +29,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
     GradedComparison,
+    GradingAnchor,
     VERDICT_KEEP,
     VERDICT_REVERT,
     axis_of,
@@ -116,15 +117,14 @@ def resolve_graded_comparison(
     *,
     against_baseline: bool = False,
     keep_threshold_pct: float = 0.0,
-    anchor_perf: Any = None,
-    anchor_tput: float | None = None,
+    anchor: GradingAnchor = GradingAnchor(),
 ) -> "GradedComparison":
     """Resolve what a KEEP decision grades: candidate and reference, on one axis, plus the verdict on that pair."""
     # AgentX KEEPs on median interactivity clearing its threshold with the slow tail and output throughput both
     # inside the noise band; anything short of all three is REVERT. A pair that cannot supply the axes degrades
     # together and ``degrade_reason`` says why -- promotion lanes read ``comparable`` and fail closed rather than
     # KEEPing on the diagnostic output figure. ``keep_threshold_pct`` applies to the output axis only.
-    # ``anchor_perf``/``anchor_tput`` default to the session anchor; explore passes its own because variants stack
+    # ``anchor`` defaults to the session anchor; explore passes its own because variants stack
     # within a round. Objective and band come from ``resolved_grading``, so both are what the session was seeded
     # with rather than whatever the calling process's environment holds.
     on_intvty, noise_pct = resolved_grading(state)
@@ -132,8 +132,8 @@ def resolve_graded_comparison(
     # it. A candidate that already lost carries no veto, so the ledger names the gate that actually refused it.
     degrade_reason = ""
     if on_intvty:
-        if anchor_perf is not None:
-            ref_perf, reason = anchor_perf, ""
+        if anchor.perf is not None:
+            ref_perf, reason = anchor.perf, ""
         elif against_baseline:
             ref_perf = perf_snapshot_from_mapping(getattr(state, "baseline_perf", None))
             reason = "" if ref_perf else "baseline_axes_missing"
@@ -164,8 +164,8 @@ def resolve_graded_comparison(
             )
         degrade_reason = reason or "candidate_axes_missing"
 
-    if anchor_tput is not None:
-        reference = float(anchor_tput)
+    if anchor.tput is not None:
+        reference = float(anchor.tput)
     elif against_baseline:
         reference = float(getattr(state, "baseline_tput", 0.0))
     else:

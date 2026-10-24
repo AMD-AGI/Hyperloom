@@ -10,7 +10,7 @@ from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
 from hyperloom.common.coerce import to_float
-from hyperloom.common.perf_metric import VERDICT_KEEP, constraint_fields, graded_axes_of
+from hyperloom.common.perf_metric import VERDICT_KEEP, GradingAnchor, constraint_fields, graded_axes_of
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     GATE_ACCURACY,
@@ -2115,7 +2115,9 @@ class PreludePhase(CoordinatorCollaborator):
             )
             self._record_warm_patch_apply_items(recorder, result)
         keep_threshold = _phase_state.resolve_keep_threshold(state)
-        graded = resolve_graded_comparison(state, result, keep_threshold_pct=keep_threshold, anchor_tput=baseline_tput)
+        graded = resolve_graded_comparison(
+            state, result, keep_threshold_pct=keep_threshold, anchor=GradingAnchor(tput=baseline_tput)
+        )
         outcome["keep_threshold_pct"] = keep_threshold
         if graded.veto_reason:
             # The grading applies the session's constraints (latency, power), so the drift branch below rolls the

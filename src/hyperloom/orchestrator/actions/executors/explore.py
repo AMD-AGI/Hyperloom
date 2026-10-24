@@ -27,6 +27,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
     VERDICT_REVERT,
+    GradingAnchor,
     agentx_active,
     constraint_fields,
     graded_axes_of,
@@ -1497,8 +1498,10 @@ class _ExploreRound:
             self.ss,
             variant_meas,
             keep_threshold_pct=self.keep_threshold_pct,
-            anchor_perf=self.running_perf,
-            anchor_tput=self.running_tput,
+            anchor=GradingAnchor(
+                perf=self.running_perf,
+                tput=self.running_tput,
+            ),
         )
         on_intvty = graded.graded_on_intvty
         gain: float | None = None
