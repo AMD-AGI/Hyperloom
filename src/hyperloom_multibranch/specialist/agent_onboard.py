@@ -27,7 +27,7 @@ from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
 from hyperloom_multibranch.contracts.notebook.records import LlmUsage
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.specialist.agent_onboarding import ENCODING, AttemptFailed, Onboard, tail
-from hyperloom_multibranch.specialist.agent_sandbox import MARKER, marked_pids
+from hyperloom_multibranch.specialist.agent_watch import MARKER, marked_pids
 from hyperloom_multibranch.specialist.agent_session import AgentCommand
 from hyperloom_multibranch.specialist.llm_usage import launch_cost, launch_usage
 

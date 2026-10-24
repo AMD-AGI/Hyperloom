@@ -329,9 +329,10 @@ and TP flags come on top of them:
 The sandbox:
 - has the session's image and framework and no docker daemon. It sees only the GPUs in "cards", numbered from 0
   (ROCR_VISIBLE_DEVICES holds them): a GPU id the agent's config gives is one of those, 0 the first; never set
-  ROCR_VISIBLE_DEVICES, HIP_VISIBLE_DEVICES or CUDA_VISIBLE_DEVICES in a command of your own. A `docker` on PATH runs
-  `docker exec [-w DIR] [-e K=V] CONTAINER CMD...` as CMD in DIR and `docker cp C:SRC DST` as a copy, so an agent
-  written to drive a container works when its config names any container;
+  ROCR_VISIBLE_DEVICES, HIP_VISIBLE_DEVICES or CUDA_VISIBLE_DEVICES in a command of your own: a command whose
+  ROCR_VISIBLE_DEVICES reaches other cards is killed. A `docker` on PATH runs `docker exec [-w DIR] [-e K=V]
+  CONTAINER CMD...` as CMD in DIR and `docker cp C:SRC DST` as a copy, so an agent written to drive a container works
+  when its config names any container;
 - shares the host with other servers: `pkill`, `pgrep` and `killall` reach only the agent's own processes, but turn
   off any other sweep that kills what holds GPU memory, and give the agent's servers a port no one else uses;
 - the agent edits the framework source in "workspace", in place, and launches its servers from it;

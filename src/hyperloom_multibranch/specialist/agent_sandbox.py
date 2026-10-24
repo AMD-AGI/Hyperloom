@@ -3,20 +3,22 @@
 
 """A local stand-in for an autonomous branch's sandbox lease: commands run on this host, on the leased cards only.
 
-Every command runs with :data:`MARKER` in its environment, which every process it starts inherits, and that marker is
-the sandbox's whole extent: :meth:`LocalProcess.kill` ends every process that carries it, whichever session or process
-group a process moved to (a Claude CLI runs each of its shell commands in a session of its own, and an agent's model
-starts its servers through one). The pod forbids a PID namespace, so an agent's ``pkill``, ``pgrep`` and ``killall``
-would otherwise reach the whole host; Arbor stops its server with ``docker exec C pkill -TERM -f sglang.launch_server``,
-which through the docker shim would stop MB's measurement servers too. The sandbox puts wrappers for them first on
-``PATH`` that match only the processes carrying the caller's marker and never the caller or its ancestors, as a ``docker
-exec`` from outside a container would not: a shell that waits with ``until ! pgrep -f X`` carries ``X`` in its own
-command line. ``killall NAME`` is ``pkill -x`` on the name's first 15 characters, all the kernel keeps of a name, and
-takes no option but a signal and ``-q``: its others select by user, age or regex, which an agent confined to its own
-processes has no use for.
+Every command runs with :data:`~hyperloom_multibranch.specialist.agent_watch.MARKER` in its environment, which every
+process it starts inherits, and that marker is the sandbox's whole extent: :meth:`LocalProcess.kill` ends every process
+that carries it, whichever session or process group a process moved to (a Claude CLI runs each of its shell commands in
+a session of its own, and an agent's model starts its servers through one), and so does the session's watch
+(:mod:`agent_watch`) once the session's process is gone. The pod forbids a PID namespace, so an agent's ``pkill``,
+``pgrep`` and ``killall`` would otherwise reach the whole host; Arbor stops its server with ``docker exec C pkill -TERM
+-f sglang.launch_server``, which through the docker shim would stop MB's measurement servers too. The sandbox puts
+wrappers for them first on ``PATH`` that match only the processes carrying the caller's marker and never the caller or
+its ancestors, as a ``docker exec`` from outside a container would not: a shell that waits with ``until ! pgrep -f X``
+carries ``X`` in its own command line. ``killall NAME`` is ``pkill -x`` on the name's first 15 characters, all the
+kernel keeps of a name, and takes no option but a signal and ``-q``: its others select by user, age or regex, which an
+agent confined to its own processes has no use for.
 
 ``ROCR_VISIBLE_DEVICES`` holds the cards and ``HIP_VISIBLE_DEVICES`` numbers them from 0, so a HIP-level mask a command
-sets indexes into the cards and reaches no other card of the host.
+sets indexes into the cards and reaches no other card of the host; the watch kills a command that sets a ROCr-level
+one beyond them.
 
 Output goes to a numbered log file under the sandbox's root, not to a pipe, which an agent running for hours would
 fill.
@@ -30,12 +32,11 @@ import itertools
 import logging
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,6 +44,14 @@ from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult
 from hyperloom_multibranch.specialist.agent_session import Processes
+from hyperloom_multibranch.specialist.agent_watch import (
+    GRACE_SECONDS,
+    MARKER,
+    POLL_SECONDS,
+    kill_marked,
+    marked_pids,
+    watch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,14 +62,9 @@ LOG_DIR = "logs"
 TMP_PREFIX = "hyperloom-agent-"
 #: How much of a log :meth:`LocalProcess.output` and a run's result keep: the end, where the cause usually is.
 TAIL_BYTES = 64 * 1024
-#: SIGKILL skips sglang's cleanup and leaves its GPU memory held, so a kill waits this long after SIGTERM first.
-GRACE_SECONDS = 30.0
-POLL_SECONDS = 0.1
 #: The exit code a run that timed out reports, as ``timeout(1)`` does.
 TIMED_OUT = 124
 CONFINED = ("pkill", "pgrep", "killall")
-#: The environment variable every process of a sandbox carries, set to the sandbox's root.
-MARKER = "HYPERLOOM_AGENT_SANDBOX"
 
 CONFINE_SCRIPT = """#!{python} -I
 # pkill, pgrep and killall confined to the processes of the caller's sandbox, the caller and its ancestors spared.
@@ -313,6 +317,7 @@ class LocalAgentSandbox:
 
     def _spawn(self, kind: str, command: str, cwd: Path, env: Mapping[str, str]) -> LocalProcess:
         log = self.root / LOG_DIR / f"{next(self._numbers):04d}-{kind}.log"
+        watch(self.root, self.cards)
         argv = ["bash", "-c", command]
         if self.niceness:
             argv = ["nice", "-n", str(self.niceness), *argv]
@@ -337,45 +342,6 @@ class LocalAgentSandbox:
         return os.environ if self.base_env is None else self.base_env
 
 
-async def kill_marked(
-    marker: str, grace_seconds: float, poll_seconds: float, reap: Callable[[], object] = lambda: None
-) -> None:
-    """SIGTERM every process carrying ``marker``, SIGKILL what is left after ``grace_seconds``; return once none is
-    left. ``reap`` collects a child of this process that ended, which would otherwise linger as a zombie."""
-
-    until = time.monotonic() + grace_seconds
-    termed: set[int] = set()
-    while True:
-        reap()
-        pids = marked_pids(marker)
-        if not pids:
-            return
-        if time.monotonic() >= until:
-            _signal(pids, signal.SIGKILL)
-        else:
-            _signal(set(pids) - termed, signal.SIGTERM)
-            termed.update(pids)
-        await asyncio.sleep(poll_seconds)
-
-
-def marked_pids(value: str) -> list[int]:
-    """The live processes whose environment sets :data:`MARKER` to ``value``; a zombie, which has ended and only waits
-    for its parent to reap it, shows no environment."""
-
-    mark = f"{MARKER}={value}".encode()
-    pids = []
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            environ = (entry / "environ").read_bytes()
-        except OSError:
-            continue
-        if mark in environ.split(b"\0"):
-            pids.append(int(entry.name))
-    return pids
-
-
 def read_tail(log: Path, size: int = TAIL_BYTES) -> str:
     """The last ``size`` bytes of ``log``, decoded."""
 
@@ -384,23 +350,11 @@ def read_tail(log: Path, size: int = TAIL_BYTES) -> str:
         return file.read().decode(errors="replace")
 
 
-def _signal(pids: Iterable[int], number: int) -> None:
-    for pid in pids:
-        try:
-            os.kill(pid, number)
-        except ProcessLookupError:
-            continue
-
-
 __all__ = [
     "CONFINE_SCRIPT",
-    "MARKER",
-    "GRACE_SECONDS",
     "TAIL_BYTES",
     "TIMED_OUT",
     "LocalAgentSandbox",
     "LocalProcess",
-    "kill_marked",
     "read_tail",
-    "marked_pids",
 ]

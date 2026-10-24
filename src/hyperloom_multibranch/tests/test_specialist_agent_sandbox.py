@@ -14,7 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_multibranch.specialist.agent_sandbox import TIMED_OUT, LocalAgentSandbox, marked_pids
+from hyperloom_multibranch.specialist.agent_sandbox import TIMED_OUT, LocalAgentSandbox
+from hyperloom_multibranch.specialist.agent_watch import marked_pids
 
 BASE = {
     "PATH": os.environ["PATH"],
