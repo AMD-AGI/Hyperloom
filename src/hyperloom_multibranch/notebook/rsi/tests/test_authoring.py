@@ -22,6 +22,7 @@ from hyperloom_multibranch.notebook.rsi.authoring import (
     NOT_ARCHIVED,
     author_scorers,
     authoring_prompt,
+    feedback_for,
     parents,
     read_candidates,
     survey,
@@ -169,6 +170,80 @@ def test_the_prompt_holds_the_syntax_the_features_the_standings_the_session_the_
     assert "- younger-v1: 1000000 - age_s (behind frontier-v1 by -1.00 to -1.00)" in prompt
     assert "Parents to refine: frontier-v1, older-v1, older-v2." in prompt
     assert '"parents": ["..."]' in AUTHORING_SYSTEM_PROMPT
+    assert "Whether each change helped" not in prompt
+
+
+def _lineage(tmp_path: Path) -> ScorerPool:
+    """A pool whose champion ranks the races' branches backwards; one refinement of each parent ranks them better than
+    it, one worse, and one is too new for any race."""
+
+    pool = ScorerPool(tmp_path)
+    for record in (
+        OLDER,
+        _pooled("older-v2", "age_s * 2", refines=(FRONTIER_V1_LABEL,)),
+        _pooled("younger-v2", "1000000 - age_s", refines=("older-v1",)),
+        _pooled("late-v2", "since_last_commit_s", at=START + HOUR, refines=("older-v1",)),
+    ):
+        pool.register(record)
+    pool.crown(ChampionRecord("younger-v2", START, FRONTIER_V1_LABEL, "led"))
+    return pool
+
+
+def test_the_feedback_says_whether_each_refinement_helped_and_where_each_parent_misranked_worst(tmp_path: Path) -> None:
+    pool = _lineage(tmp_path)
+    found = survey(RACES, pool)
+
+    feedback = feedback_for(RACES, pool, found)
+
+    compared = {(item.compared.label, item.parent): item.compared for item in feedback.refinements}
+    assert list(compared) == [("older-v2", FRONTIER_V1_LABEL), ("younger-v2", "older-v1"), ("late-v2", "older-v1")]
+    better, worse, waiting = compared.values()
+    assert (better.difference_low, better.difference_high, better.rounds, better.sessions) == (1.0, 1.0, 32, 4)
+    assert worse.difference_high == pytest.approx(-2.0) and waiting.rounds == 0
+    assert parents(found) == ("younger-v2", "older-v1", "older-v2")
+    assert [
+        (item.picked.session_id, item.picked.t_s, item.picked.branch.name, item.best.branch.name)
+        for item in feedback.misranked["younger-v2"]
+    ] == [("race-0", 600.0, "b", "a"), ("race-1", 600.0, "b", "a"), ("race-2", 600.0, "b", "a")]
+    first = feedback.misranked["younger-v2"][0]
+    assert (first.picked.gain_after_pct, first.best.gain_after_pct) == (0.0, 2.0)
+    assert ("age_s", 0.0, 600.0) in first.differed and "open_branches" not in {name for name, *_ in first.differed}
+    assert feedback.misranked["older-v1"] == feedback.misranked["older-v2"] == () and not feedback.failures
+
+
+def test_the_prompt_holds_the_feedback_before_the_parents(tmp_path: Path) -> None:
+    pool = _lineage(tmp_path)
+    found = survey(RACES, pool)
+    searched = tree("sess", branch("s1", [(600.0, 1.0)], test_times=(0.0, 600.0)))
+
+    prompt = authoring_prompt(searched, found, feedback_for(RACES, pool, found))
+
+    assert "| older-v2 | frontier-v1 | 1.00 | 0.00 | 1.00 to 1.00 | 32 | 4 | better |" in prompt
+    assert "| younger-v2 | older-v1 | -1.00 | 1.00 | -2.00 to -2.00 | 32 | 4 | worse |" in prompt
+    assert "Too new to tell, no session like this one started after them: late-v2." in prompt
+    assert (
+        "- younger-v2, session race-0 at 10 min: it scored b highest (1000000.00), which gained +0.00% after; "
+        in prompt
+    )
+    assert "a gained +2.00% (scored 999400.00). Where they differed, b / a: age_s 0.00 / 600.00, " in prompt
+    assert "- older-v1: nowhere, the branch it scored highest gained the most in every round" in prompt
+    assert prompt.index("Whether each change helped") < prompt.index("Parents to refine: younger-v2, older-v1")
+    assert "where each parent misranked worst" in AUTHORING_SYSTEM_PROMPT
+
+
+def test_a_parent_whose_rounds_cannot_be_replayed_says_why(tmp_path: Path) -> None:
+    pool = ScorerPool(tmp_path)
+    pool.register(_pooled("ratio-v1", "1 / age_s"))
+    pool.crown(ChampionRecord("ratio-v1", START, FRONTIER_V1_LABEL, "led"))
+    found = survey(RACES, pool)
+
+    feedback = feedback_for(RACES, pool, found)
+
+    assert feedback.failures["ratio-v1"].startswith("ExpressionError: 1 / age_s: ")
+    assert "ratio-v1" not in feedback.misranked and feedback.refinements == ()
+    assert "- ratio-v1: its rounds could not be replayed: ExpressionError: " in authoring_prompt(
+        RACES[0], found, feedback
+    )
 
 
 async def test_close_writes_the_candidates_the_llm_gave_to_the_pool(snapshot: NotebookSnapshot, tmp_path: Path) -> None:
@@ -190,7 +265,7 @@ async def test_close_writes_the_candidates_the_llm_gave_to_the_pool(snapshot: No
     assert (written.label, written.registered_at, written.parents) == ("older-v1", snapshot.taken_at, ("frontier-v1",))
     assert written.provenance == {"model": "claude", "session_id": snapshot.profile.session_id}
     assert asked[0][0] == AUTHORING_SYSTEM_PROMPT and "This session's branches:" in asked[0][1]
-    assert "Parents to refine: frontier-v1." in asked[0][1]
+    assert "Whether each change helped" in asked[0][1] and "Parents to refine: frontier-v1." in asked[0][1]
 
 
 async def test_close_refuses_a_duplicate_and_retires_what_is_clearly_worse_than_the_champion(

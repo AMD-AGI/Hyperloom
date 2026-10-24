@@ -29,7 +29,8 @@ and :data:`MIN_ROUNDS` rounds; otherwise the report says why not. :func:`frontie
 recommendation changes how a session scores: a session starting on a task scores with the champion, the scorer that
 last earned the place (``frontier-v1`` until one does), or with what the calibration over its similar sessions
 recommends over it: a variation one step from the defaults while the champion is ``frontier-v1``, or another scorer.
-:func:`rankings` is how a scorer ranks the branches round by round, to tell a candidate that ranks like another.
+:func:`rankings` is how a scorer ranks the branches round by round, to tell a candidate that ranks like another, and
+:func:`replayed` each round's branches with the scores it gave them and the gains they made after.
 """
 
 from __future__ import annotations
@@ -425,6 +426,39 @@ def ranked_alike(first: Ranked, second: Ranked) -> float:
     return sum(1 for key in shared if first[key] == second[key]) / len(shared) if shared else 0.0
 
 
+@dataclass(frozen=True)
+class Replayed:
+    """A branch open at a replayed round of session ``session_id``, ``t_s`` into its clock: what the live scoring would
+    have read of it then, the score it got, and the gain it made after, until it stopped or the budget ran out."""
+
+    session_id: str
+    t_s: float
+    branch: TreeBranch
+    context: ScoringContext
+    readings: Readings
+    score: float
+    gain_after_pct: float
+
+
+def replayed(trees: Sequence[SearchTree], scorer: FrontierScorer) -> Iterator[tuple[Replayed, ...]]:
+    """Every round of ``trees`` as the calibration replays it: the branches open then, each scored with ``scorer`` under
+    its session's policy, each tree against the others as its history."""
+
+    for tree in trees:
+        history, policy = tuple(other for other in trees if other.session_id != tree.session_id), session_policy(tree)
+        for moment in _moments(tree, ROUND_SECONDS):
+            standing = {branch.name: branch for branch in moment.then.branches}
+            found = []
+            for branch in moment.branches:
+                point = _point(moment.then, standing[branch.name], moment.t_s, history, policy)
+                score = score_with(scorer, point.branch, moment.t_s, point.context, point.readings).expected_gain_pct
+                after = gain_after(tree, branch, moment.t_s)
+                found.append(
+                    Replayed(tree.session_id, moment.t_s, point.branch, point.context, point.readings, score, after)
+                )
+            yield tuple(found)
+
+
 def _logged_round(tree: SearchTree, line: Mapping[str, Any], horizon_seconds: float | None) -> _Round | None:
     branches = {branch.name: branch for branch in tree.branches}
     t_s = float(line["t_s"])
@@ -747,6 +781,7 @@ __all__ = [
     "PolicyChoice",
     "Ranked",
     "Registered",
+    "Replayed",
     "Scorer",
     "Variation",
     "calibrate",
@@ -757,6 +792,7 @@ __all__ = [
     "rank_correlation",
     "ranked_alike",
     "rankings",
+    "replayed",
     "score_archived",
     "scorer_baseline",
     "session_policy",
