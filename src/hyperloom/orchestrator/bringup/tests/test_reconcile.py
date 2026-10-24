@@ -12,9 +12,9 @@ import time
 
 import pytest
 
+from hyperloom.orchestrator.bringup import reconcile
 from hyperloom.orchestrator.bringup.reconcile import (
     TIMEOUT_VERDICT,
-    ReconcileLimits,
     ReconcileLinks,
     Reconciler,
     ReconcileStores,
@@ -94,7 +94,7 @@ def db(tmp_path):
 
 
 def _build(
-    db, *, proposals=None, state=None, result_pending=None, **limits
+    db, *, proposals=None, state=None, result_pending=None
 ) -> tuple[Reconciler, RoundStore, TaskRegistry, _State]:
     """A reconciler over ``db``, with the pieces a test needs to inspect."""
     rounds = RoundStore(db)
@@ -105,11 +105,11 @@ def _build(
         shared,
         links=ReconcileLinks(
             resources=ResourceFacts(),
-            proposals=(lambda: proposals) if proposals is not None else None,
+            proposals=lambda: proposals if proposals is not None else {},
+            drop_proposal=lambda _pending, _reason: None,
             session_dir=db.db_path.parent,
-            result_pending=result_pending,
+            result_pending=result_pending or (lambda _task_id: False),
         ),
-        limits=ReconcileLimits(**limits),
     )
     return rec, rounds, tasks, shared
 
@@ -236,7 +236,7 @@ async def test_a_terminal_holder_hands_the_round_to_the_integrate_that_follows_i
 async def test_terminal_holder_cannot_handoff_before_gpu_cleanup(db):
     from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 
-    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0)
+    rec, rounds, tasks, _ = _build(db)
     await _open_round(rounds, tasks, holder="spec-1", lease=1)
     await tasks.transition("spec-1", "running")
     await tasks.transition("spec-1", "succeeded")
@@ -259,7 +259,7 @@ async def test_terminal_holder_cannot_handoff_before_gpu_cleanup(db):
 @pytest.mark.parametrize("confirmed", [False, True], ids=["unconfirmed", "confirmed"])
 @pytest.mark.parametrize("with_successor", [False, True], ids=["expire", "handoff"])
 async def test_terminal_round_uses_latest_cleanup_outcome(db, state, appended, confirmed, with_successor):
-    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0)
+    rec, rounds, tasks, _ = _build(db)
     await _open_round(rounds, tasks, holder="spec-1", lease=1)
     await tasks.transition("spec-1", "running")
     evidence = {
@@ -313,7 +313,7 @@ async def test_an_undecided_review_holds_the_round_open_until_its_ttl(db):
 @pytest.mark.asyncio
 async def test_a_terminal_holder_with_nothing_following_it_expires_on_its_cap(db):
     """Not on the tick it went terminal -- the successor is created by a later one."""
-    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=300.0)
+    rec, rounds, tasks, _ = _build(db)
     await _open_round(rounds, tasks, holder="spec-1")
     await tasks.transition("spec-1", "running")
     await tasks.transition("spec-1", "succeeded")
@@ -356,7 +356,7 @@ async def test_a_running_task_whose_process_is_gone_is_failed_and_one_unobservab
 async def test_an_unanswered_review_is_denied_and_a_verdict_that_arrived_is_not_overwritten(db):
     """The timeout is a deny, and it is written compare-and-set."""
     pending = {"m-late": _Pending("spec-1"), "m-answered": _Pending("spec-2")}
-    rec, _rounds, _tasks, _ = _build(db, proposals=pending, review_ttl_sec=1.0)
+    rec, _rounds, _tasks, _ = _build(db, proposals=pending)
     async with db.transaction() as cur:
         for msg_id in ("m-late", "m-answered"):
             cur.execute(
@@ -388,7 +388,7 @@ async def test_a_timeout_deny_closes_the_proposal_span_once(db, tmp_path):
 
     pending = {"m-late": _Pending("spec-1")}
     pending["m-late"].action_name = "integrate_patch"
-    rec, _rounds, _tasks, _ = _build(db, proposals=pending, review_ttl_sec=1.0)
+    rec, _rounds, _tasks, _ = _build(db, proposals=pending)
     async with db.transaction() as cur:
         cur.execute(
             "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts)"
@@ -409,7 +409,7 @@ async def test_a_timeout_deny_closes_the_proposal_span_once(db, tmp_path):
 @pytest.mark.asyncio
 async def test_a_second_pass_does_not_deny_a_proposal_twice(db):
     """The compare-and-set is the guard, so the pass is safe to run every tick."""
-    rec, _rounds, _tasks, _ = _build(db, review_ttl_sec=1.0)
+    rec, _rounds, _tasks, _ = _build(db)
     async with db.transaction() as cur:
         cur.execute(
             "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts)"
@@ -575,7 +575,7 @@ async def _wedge_round_with_lane_rows(db, rounds, tasks, *, cleanup_confirmed: b
 
 
 @pytest.mark.asyncio
-async def test_a_round_whose_holder_left_cleanup_unconfirmed_keeps_everything(db):
+async def test_a_round_whose_holder_left_cleanup_unconfirmed_keeps_everything(db, monkeypatch):
     """The bound on the rule above: nothing is freed and nothing is advanced.
 
     This is the shape of the 2026-09-21 rows. Nothing resolves them, by design:
@@ -585,7 +585,8 @@ async def test_a_round_whose_holder_left_cleanup_unconfirmed_keeps_everything(db
     ended cleanly enough to move a round on. A pass that freed these lanes would
     be freeing a lane whose work may still be running.
     """
-    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0.0)
+    monkeypatch.setattr(reconcile, "TERMINAL_HOLDER_CAP_SEC", 0.0)
+    rec, rounds, tasks, _ = _build(db)
     await _wedge_round_with_lane_rows(db, rounds, tasks, cleanup_confirmed=False)
 
     report = await rec.run(_NOW + 10.0)
@@ -604,7 +605,7 @@ async def test_a_round_whose_holder_left_cleanup_unconfirmed_keeps_everything(db
 
 
 @pytest.mark.asyncio
-async def test_a_round_wedged_by_lane_rows_stays_wedged_and_is_reported(db):
+async def test_a_round_wedged_by_lane_rows_stays_wedged_and_is_reported(db, monkeypatch):
     """The cost of refusing to guess, pinned one level up.
 
     A holder that ended with its cleanup unconfirmed keeps its lane, so a round
@@ -614,7 +615,8 @@ async def test_a_round_wedged_by_lane_rows_stays_wedged_and_is_reported(db):
     rounds on the same cards. So the round waits, and the operator is told which
     lane to look at.
     """
-    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0.0)
+    monkeypatch.setattr(reconcile, "TERMINAL_HOLDER_CAP_SEC", 0.0)
+    rec, rounds, tasks, _ = _build(db)
     await _wedge_round_with_lane_rows(db, rounds, tasks, cleanup_confirmed=True)
 
     report = await rec.run(_NOW + 10.0)
