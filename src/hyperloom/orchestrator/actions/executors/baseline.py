@@ -2217,13 +2217,13 @@ class BenchmarkRunExecutor:
         if not runs_root.exists():
             return None
         try:
-            from ._accuracy_gate import _finite_score, parse_eval_results
+            from ._accuracy_gate import finite_score, parse_eval_results
 
             eval_data = parse_eval_results(runs_root, framework=framework)
         except Exception:
             log.debug("baseline_executor: sibling-accuracy salvage scan failed", exc_info=True)
             return None
-        if _finite_score(eval_data.get("accuracy")) is None:
+        if finite_score(eval_data.get("accuracy")) is None:
             return None
         return eval_data
 

@@ -66,12 +66,16 @@ ENABLEMENT_INTENT_TERMS: frozenset[str] = frozenset(
     }
 )
 
+# The seeds of both HIP kinds: a kernel that is absent and a HIP call that failed are searched for alike.
+_HIP_SEED_KEYWORDS: tuple[str, ...] = ("rocm", "hip", "aiter", "kernel")
+
 # Per-kind seed keywords appended to the auto-extracted set. Keys are failure
 # ``kind`` ids.
 _KIND_SEED_KEYWORDS: dict[str, tuple[str, ...]] = {
     "missing_model_arch": ("model", "architecture", "support", "add"),
     "unsupported_dtype": ("dtype", "fp8", "quant", "support"),
-    "hip_kernel_missing": ("rocm", "hip", "aiter", "kernel"),
+    "hip_kernel_missing": _HIP_SEED_KEYWORDS,
+    "hip_runtime_error": _HIP_SEED_KEYWORDS,
     "import_error": ("build", "import", "compile"),
     "shape_mismatch": ("shape", "reshape", "layout"),
     "not_implemented": ("implement", "support", "rocm"),
@@ -426,7 +430,7 @@ _LADDER_KIND_TO_RUNG: tuple[str, ...] = (
     "missing_model_arch (pure registration) / capability_disabled -> Rung 2",
     "missing_model_arch / missing_weight (absent here, present in another version) -> Rung 3",
     "import_error / merged-PR closure -> Rung 4",
-    "hip_kernel_missing / native unsupported_dtype / missing compiled symbol -> Rung 5",
+    "hip_kernel_missing / hip_runtime_error / native unsupported_dtype / missing compiled symbol -> Rung 5",
     "resource_constraint (OOM / GPU count) -> NOT a code gap; cannot be patched",
     "accuracy_below_floor / eval_generation_pathology / eval_runtime_failure -> "
     "re-diagnose against the failing eval contract (answer quality, or generation "

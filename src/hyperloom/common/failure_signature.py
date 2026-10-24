@@ -10,12 +10,31 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Callable, Pattern
 
+from hyperloom.common.outside_facts import (
+    ARGPARSE_INVALID_CHOICE,
+    ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE,
+    HIP_ERROR_PREFIX,
+    HIP_NO_BINARY_FOR_GPU,
+    HIP_NO_KERNEL_IMAGE,
+    HIP_UNDEFINED_SYMBOL,
+    HSA_STATUS_ERROR,
+    PY_IMPORT_ERROR,
+    PY_MODULE_NOT_FOUND_ERROR,
+    TRANSFORMERS_DOES_NOT_RECOGNIZE,
+    TRANSFORMERS_UNKNOWN_ARCHITECTURE,
+    spaced,
+)
+
 
 # --- Failure kinds ---------------------------------------------------------
 
 MISSING_MODEL_ARCH = "missing_model_arch"
 UNSUPPORTED_DTYPE = "unsupported_dtype"
 HIP_KERNEL_MISSING = "hip_kernel_missing"
+# A HIP call that failed while the program ran: a kernel faulted on an out-of-bounds address, a graph capture was
+# invalidated, a launch failed. The kernel was there and ran, so there is nothing to build; the line the log prints names
+# the fault. Distinct from HIP_KERNEL_MISSING, whose evidence is a binary or a symbol that is absent.
+HIP_RUNTIME_ERROR = "hip_runtime_error"
 IMPORT_ERROR = "import_error"
 SHAPE_MISMATCH = "shape_mismatch"
 MISSING_WEIGHT = "missing_weight"
@@ -141,8 +160,10 @@ _RULES: tuple[_Rule, ...] = (
             re.compile(r"[Aa]rchitectures?\s+\[?['\"]([A-Za-z0-9_]+)['\"].*?not\s+(?:yet\s+)?supported"),
             # Transformers/HF: a checkpoint whose ``model_type`` predates the installed transformers (or vLLM's
             # ModelConfig validation wrapping it).
-            re.compile(r"model type\s+[`'\"]?([A-Za-z0-9_]+)[`'\"]?\s+but\s+Transformers\s+does\s+not\s+recognize"),
-            re.compile(r"does\s+not\s+recognize\s+this\s+architecture"),
+            re.compile(
+                r"model type\s+[`'\"]?([A-Za-z0-9_]+)[`'\"]?\s+but\s+" + spaced(TRANSFORMERS_DOES_NOT_RECOGNIZE)
+            ),
+            re.compile(spaced(TRANSFORMERS_UNKNOWN_ARCHITECTURE)),
             re.compile(r"[Tt]he\s+checkpoint\s+.*?model\s+type\s+[`'\"]?([A-Za-z0-9_]+)[`'\"]?"),
         ),
         confidence=0.95,
@@ -168,7 +189,7 @@ _RULES: tuple[_Rule, ...] = (
     ),
     _Rule(
         # A kernel over the device's per-launch budget. Ordered ahead of both
-        # neighbours it would otherwise be swallowed by: the HIP rule matches
+        # neighbours it would otherwise be swallowed by: the HIP rules match
         # any ``hipError`` token, and ``hipErrorLaunchOutOfResources`` carries
         # exactly this text; the resource-constraint rule means the host is too
         # small and marks the gap as needing no code, while this is a launch
@@ -197,12 +218,22 @@ _RULES: tuple[_Rule, ...] = (
         kind=HIP_KERNEL_MISSING,
         bridge_layer="rocm_hip",
         patterns=(
-            re.compile(r"hipError[A-Za-z]*"),
-            re.compile(r"no kernel image is available"),
-            re.compile(r"hipErrorNoBinaryForGpu"),
-            re.compile(r"undefined symbol:\s*([A-Za-z0-9_:]+)"),
-            re.compile(r"HSA_STATUS_ERROR[A-Za-z_]*"),
+            re.compile(HIP_NO_KERNEL_IMAGE),
+            re.compile(HIP_NO_BINARY_FOR_GPU),
+            re.compile(HIP_UNDEFINED_SYMBOL + r":\s*([A-Za-z0-9_:]+)"),
+            re.compile(HSA_STATUS_ERROR + r"[A-Za-z_]*"),
         ),
+        confidence=0.85,
+        symbol_from=_grp,
+    ),
+    _Rule(
+        # Every other ``hipError`` token (hipErrorIllegalAddress, hipErrorStreamCaptureInvalidated, ...) reports a call
+        # that failed, not a kernel that is absent. It used to share the rule above, so a candidate whose own kernel
+        # read out of bounds came back as "hip_kernel_missing" and was read as a gap in the image. Same position and
+        # bridge layer as before, so the enablement ladder places and routes it as it always did.
+        kind=HIP_RUNTIME_ERROR,
+        bridge_layer="rocm_hip",
+        patterns=(re.compile(HIP_ERROR_PREFIX + r"[A-Za-z]*"),),
         confidence=0.85,
         symbol_from=_grp,
     ),
@@ -300,9 +331,9 @@ _RULES: tuple[_Rule, ...] = (
         kind=SERVE_FLAG,
         bridge_layer="framework",
         patterns=(
-            re.compile(r"unrecognized arguments?:\s*(-+[A-Za-z0-9_-]+)"),
+            re.compile(ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE + r":\s*(-+[A-Za-z0-9_-]+)"),
             re.compile(r"error:\s+argument\s+(-+[A-Za-z0-9_-]+)"),
-            re.compile(r"invalid\s+choice.*?for.*?argument\s+(-+[A-Za-z0-9_-]+)"),
+            re.compile(spaced(ARGPARSE_INVALID_CHOICE) + r".*?for.*?argument\s+(-+[A-Za-z0-9_-]+)"),
             re.compile(r"([A-Za-z][A-Za-z0-9_-]+):\s+error:\s+unrecognized"),
         ),
         confidence=0.70,
@@ -312,8 +343,8 @@ _RULES: tuple[_Rule, ...] = (
         kind=IMPORT_ERROR,
         bridge_layer="build",
         patterns=(
-            re.compile(r"ModuleNotFoundError:\s*No module named\s+['\"]([A-Za-z0-9_.]+)['\"]"),
-            re.compile(r"ImportError:\s*(?:cannot import name\s+['\"]?([A-Za-z0-9_]+)['\"]?)?"),
+            re.compile(PY_MODULE_NOT_FOUND_ERROR + r":\s*No module named\s+['\"]([A-Za-z0-9_.]+)['\"]"),
+            re.compile(PY_IMPORT_ERROR + r":\s*(?:cannot import name\s+['\"]?([A-Za-z0-9_]+)['\"]?)?"),
         ),
         confidence=0.7,
         symbol_from=_grp,
@@ -487,7 +518,7 @@ def runnable_decision(
 # Evidence that a dtype/capability miss is backed by a *compiled* op rather than pure-Python guard logic: a native
 # symbol, an .so/kernel/op reference, or a named compiled backend.
 _NATIVE_EVIDENCE_RE = re.compile(
-    r"undefined symbol|\.so\b|_C\b|aiter|sgl[_-]?kernel|hip[a-z]*kernel|"
+    HIP_UNDEFINED_SYMBOL + r"|\.so\b|_C\b|aiter|sgl[_-]?kernel|hip[a-z]*kernel|"
     r"\bkernel\b|custom[_ ]?op|torch\.ops|extension module|"
     r"\bfp4\b|\bfp8\b|marlin|cutlass",
     re.IGNORECASE,
@@ -517,6 +548,7 @@ __all__ = [
     "EVAL_GENERATION_PATHOLOGY",
     "EVAL_RUNTIME_FAILURE",
     "HIP_KERNEL_MISSING",
+    "HIP_RUNTIME_ERROR",
     "IMPORT_ERROR",
     "MISSING_MODEL_ARCH",
     "MISSING_WEIGHT",

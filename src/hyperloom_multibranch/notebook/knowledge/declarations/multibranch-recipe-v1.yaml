@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# The multi-branch notebook's declaration for the measured attempts the shared inference-recipe-v1 cannot hold: a
+# change that ships a kernel artifact, and every change of an AgentX session, which is graded on interactivity. Every
+# field means what it means in inference-recipe-v1. An InferenceX change of a configuration or a source patch is
+# recorded there instead, where the single-lineage flow reads it too.
+schema_version: 2
+
+objectives:
+  - id: e2e_throughput@v1
+    description: >-
+      Maximize the end-to-end output throughput of the declared synthetic workload, keeping only changes that pass
+      the accuracy gate when the workload requires one.
+    unit: token/s
+    direction: higher_is_better
+    failure_value: 0
+  - id: e2e_interactivity@v1
+    description: >-
+      Maximize the median interactivity of the declared AgentX trace replay, each request's output tokens over its
+      end-to-end latency, keeping only changes whose slow tail, output throughput and failed requests hold.
+    unit: token/s
+    direction: higher_is_better
+    failure_value: 0
+
+identity:
+  - {name: model, description: Model identifier from the task configuration., required: true}
+  - {name: gpu, description: GPU hardware model the attempt was measured on., required: true}
+  - {name: framework, description: Serving framework name., required: true}
+  - {name: model_type, description: Model configuration type., required: true}
+  - {name: architecture, description: Model architecture class., required: true}
+  - {name: framework_version, description: Serving framework version., kind: version, required: true}
+  - {name: precision, description: Numeric precision of the measured workload., required: true}
+  - {name: tp, description: Tensor-parallel degree., kind: number}
+  - {name: ep, description: Expert-parallel degree when greater than one., kind: number}
+  - {name: conc, description: Request concurrency., kind: number}
+  - {name: isl, description: Input sequence length in tokens; an AgentX trace replay has none., kind: number}
+  - {name: osl, description: Output sequence length in tokens; an AgentX trace replay has none., kind: number}
+  - {name: max_model_len, description: Maximum model context configured for the server., kind: number}
+  - {name: compute_partition_mode, description: GPU compute-partition mode such as SPX or CPX.}
+  - {name: partitions, description: Compute partitions per GPU when the card is partitioned., kind: number}
+
+baseline:
+  - name: baseline_fingerprint
+    description: SHA-256 of the exact runtime configuration the attempt was measured against.
+    required: true
+    group: true
+  - name: value
+    description: The objective's value for the baseline, measured in the same session as the change.
+    kind: number
+    required: true
+    role: measurement
+
+change:
+  - name: change_family
+    description: Whether the change is a serving configuration variant, a source patch, or a kernel artifact.
+    required: true
+    group: true
+    search: 4
+    values: [config_variant, source_patch, kernel_artifact]
+  - name: change_fingerprint
+    description: >-
+      SHA-256 of the normalized configuration, of the verified patch bytes, or of the change with the kernel
+      artifacts it ships.
+    required: true
+    group: true
+  - name: summary
+    description: What the change does, in one line.
+    required: true
+    role: summary
+    search: 4
+  - name: content
+    description: >-
+      The complete change: the configuration delta, the source patches, or with them the kernel artifacts it adds
+      and removes, as canonical JSON.
+    kind: text
+    required: true
+
+outcome:
+  - name: decision
+    description: Whether the change was kept, reverted, or failed.
+    required: true
+    role: decision
+    search: 0.5
+    values: [keep, revert, failed]
+  - name: value
+    description: The objective's value with the change applied.
+    kind: number
+    role: measurement
+  - name: constraints
+    description: Each gate the attempt was checked against, whether it passed, and the value observed.
+    kind: text
+    many: true
+  - name: error_class
+    description: What failed, for a failed attempt.
+    search: 0.5
+
+reflection:
+  - name: text
+    description: How the measured outcome reads.
+    kind: text
+    required: true

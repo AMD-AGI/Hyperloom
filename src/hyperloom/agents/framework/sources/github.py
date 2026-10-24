@@ -130,4 +130,9 @@ def fetch_raw_file(repo_slug: str, ref: str, path: str, *, timeout_sec: float = 
         return ""
 
 
-__all__ = ["search_perf_prs", "PERF_TERMS", "pr_patches", "fetch_raw_file"]
+#: Public names of ``_auth_headers`` (the headers of a GitHub API request, with the host's token when it holds one) and
+#: ``_build_query`` (the search query of a repository), for a caller that must see a failed search rather than an empty list.
+auth_headers = _auth_headers
+build_query = _build_query
+
+__all__ = ["search_perf_prs", "PERF_TERMS", "pr_patches", "fetch_raw_file", "auth_headers", "build_query"]

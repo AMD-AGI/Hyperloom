@@ -1,0 +1,60 @@
+[
+  {
+    "output_path": "decode_only_steady_state_prefill_0_prefilldecode_0_decode_32_bs64_conc64_1792592132.7468987-TP-0.trace.json.gz",
+    "steps": [
+      {
+        "batch_size": 64,
+        "num_requests": 64,
+        "context_requests": 0,
+        "context_sum": 0,
+        "generation_requests": 64,
+        "generation_sum": 64
+      },
+      {
+        "batch_size": 64,
+        "num_requests": 64,
+        "context_requests": 0,
+        "context_sum": 0,
+        "generation_requests": 64,
+        "generation_sum": 64
+      },
+      {
+        "batch_size": 64,
+        "num_requests": 64,
+        "context_requests": 0,
+        "context_sum": 0,
+        "generation_requests": 64,
+        "generation_sum": 64
+      },
+      {
+        "batch_size": 64,
+        "num_requests": 64,
+        "context_requests": 0,
+        "context_sum": 0,
+        "generation_requests": 64,
+        "generation_sum": 64
+      }
+    ]
+  },
+  {
+    "output_path": "prefilldecode_steady_state_prefill_5_prefilldecode_0_decode_0_bs13107_conc12_1792592132.7468987-TP-0.trace.json.gz",
+    "steps": [
+      {
+        "batch_size": 16384,
+        "num_requests": 16,
+        "context_requests": 16,
+        "context_sum": 16384,
+        "generation_requests": 0,
+        "generation_sum": 0
+      },
+      {
+        "batch_size": 16384,
+        "num_requests": 16,
+        "context_requests": 16,
+        "context_sum": 16384,
+        "generation_requests": 0,
+        "generation_sum": 0
+      }
+    ]
+  }
+]

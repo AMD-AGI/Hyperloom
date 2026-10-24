@@ -181,7 +181,7 @@ throughput-only measurement.
 | `MAGPIE_EVAL_LIMIT` | Unset (full task set) | Caps the number of eval problems (`lm_eval --limit`). Useful for smoke runs; see the noise caveat below before using it on a run whose `KEEP` decisions matter. |
 
 The tolerance is deliberately **not** an env knob: `ACCURACY_THRESHOLD` in
-`src/hyperloom/orchestrator/actions/executors/_accuracy_gate.py` is a fixed
+`src/hyperloom/common/accuracy.py` is a fixed
 `0.05`, that is, a candidate must stay within 5 percentage points of the recorded
 baseline accuracy.
 
@@ -601,7 +601,7 @@ to `all`:
   run with `stop_reason='baseline_failed'` instead of opening an authoring loop.
 
 The eval trigger and the enablement KEEP gate both judge a score against the
-fixed constant `_accuracy_gate.DEFAULT_ENABLEMENT_ACCURACY_FLOOR` (`0.5`):
+fixed constant `hyperloom.common.accuracy.DEFAULT_ENABLEMENT_ACCURACY_FLOOR` (`0.5`):
 `score >= floor` passes, and a score that is not finite or not above zero fails.
 The lanes differ only when a candidate's eval produced no score: an `eval`-lane
 candidate then fails, while a `launch`-lane candidate that serves is kept as

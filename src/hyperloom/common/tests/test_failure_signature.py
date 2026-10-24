@@ -16,6 +16,7 @@ from hyperloom.common.failure_signature import (
     EVAL_GENERATION_PATHOLOGY,
     EVAL_RUNTIME_FAILURE,
     HIP_KERNEL_MISSING,
+    HIP_RUNTIME_ERROR,
     IMPORT_ERROR,
     MISSING_MODEL_ARCH,
     MISSING_WEIGHT,
@@ -428,11 +429,40 @@ def test_a_hip_launch_resource_error_is_the_kernel_budget_not_a_missing_kernel()
     assert sig.kind != HIP_KERNEL_MISSING
 
 
-def test_a_plain_hip_error_is_still_a_missing_kernel() -> None:
-    """The counterpart: the HIP rule keeps everything it had."""
+def test_a_missing_binary_is_still_a_missing_kernel() -> None:
+    """The counterpart: what says a kernel is absent keeps its kind."""
     from hyperloom.common.failure_signature import HIP_KERNEL_MISSING
 
     assert classify_failure("hipErrorNoBinaryForGpu: no kernel image is available").kind == HIP_KERNEL_MISSING
+
+
+@pytest.mark.parametrize(
+    "log",
+    [
+        "torch.AcceleratorError: HIP error: an illegal memory access was encountered\n"
+        "Search for `hipErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__HIPRT__TYPES.html\n",
+        "Exception: Capture cuda graph failed: HIP error: operation failed due to a previous error during capture\n"
+        "Search for `hipErrorStreamCaptureInvalidated' in https://docs.nvidia.com/cuda/\n",
+    ],
+)
+def test_a_hip_call_that_failed_while_running_is_not_a_missing_kernel(log: str) -> None:
+    """The kernel was there and ran; every hipError token used to be called a missing kernel, which a candidate's own out-of-bounds read then claimed."""
+    sig = classify_failure(log)
+
+    assert sig.kind == HIP_RUNTIME_ERROR
+    assert sig.kind != HIP_KERNEL_MISSING
+    assert sig.bridge_layer == "rocm_hip"
+    # the enablement ladder still routes it as a compiled-layer gap, as it did when it shared the kind above
+    assert is_targeted_build_candidate(sig) is True
+
+
+def test_an_absent_symbol_beside_a_runtime_error_stays_a_missing_kernel() -> None:
+    sig = classify_failure(
+        "hipErrorIllegalAddress\nImportError: /opt/sglang/_C.so: undefined symbol: _ZN4aiter8fmha_fwdEv\n"
+    )
+
+    assert sig.kind == HIP_KERNEL_MISSING
+    assert HIP_RUNTIME_ERROR in sig.secondary_kinds
 
 
 def test_a_host_out_of_memory_is_still_not_a_kernel_budget() -> None:

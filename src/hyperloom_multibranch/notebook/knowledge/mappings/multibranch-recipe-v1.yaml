@@ -1,0 +1,197 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# multi-branch notebook export (multibranch.notebook.export.v1) test records -> multibranch-recipe-v1 Experiences.
+#
+# The test records the shared inference-recipe-v1 cannot hold: a change that ships a kernel artifact, and every
+# change of an AgentX session, on the interactivity objective. The multibranch-notebook-v1 mapping records the rest
+# from the same export, and refuses these, so no test is recorded twice. A configuration or a patch is fingerprinted
+# as multibranch-notebook-v1 fingerprints it, so the same change lands in the same Repeat Group in either schema.
+format: hyperloom-kb.collect.v2
+description: multi-branch notebook test records the shared declaration cannot hold
+declaration: ../declarations/multibranch-recipe-v1.yaml
+producer:
+  name: hyperloom-multibranch
+  version: notebook-export-v1
+  snapshot_version: multibranch.notebook.export.v1
+
+skip:
+  - reason: unsupported_multibranch_export_format
+    when: {ne: [{text: $doc.format}, multibranch.notebook.export.v1]}
+
+units:
+  - each: $doc.candidates
+    as: candidate
+
+unit_id: {first: [{text: $candidate.request_id}, unknown-request]}
+
+let:
+  run_id: {token: $doc.metadata.session_id}
+  request_id: {text: $candidate.request_id}
+  replays_traces: {ne: [{text: $doc.metadata.objective}, output_throughput]}
+  objective:
+    if: $replays_traces
+    then: e2e_interactivity@v1
+    else: e2e_throughput@v1
+  decision: {text: $candidate.decision}
+  baseline_value: {number: $candidate.baseline_value}
+  outcome_value: {number: $candidate.outcome_value}
+  change_family:
+    map: {lower: $candidate.change.family}
+    table: {config: config_variant, patch: source_patch, kernel: kernel_artifact}
+  config_delta:
+    object:
+      extra_server_args: {text: $candidate.change.content.extra_server_args}
+      extra_envs: {string_map: $candidate.change.content.extra_envs}
+      remove_args: {sorted_set: $candidate.change.content.remove_args}
+      unset_envs: {sorted_set: $candidate.change.content.unset_envs}
+      args_mode: {first: [{lower: $candidate.change.content.args_mode}, append]}
+  config_delta_is_effective:
+    any:
+      - {present: $config_delta.extra_server_args}
+      - {present: $config_delta.extra_envs}
+      - {present: $config_delta.remove_args}
+      - {present: $config_delta.unset_envs}
+      - {eq: [$config_delta.args_mode, replace]}
+  patches:
+    each: $candidate.change.content.patches
+    as: patch
+    where: {all: [{present: {text: $patch.path}}, {present: {text: $patch.sha256}}]}
+    value: {object: {path: {text: $patch.path}, sha256: {text: $patch.sha256}}}
+  patch_fingerprint:
+    if: {eq: [{length: $patches}, 1]}
+    then: $patches.0.sha256
+    else: {if: {present: $patches}, then: {sha256: $patches}}
+  added_kernels:
+    each: $candidate.change.content.add_kernels
+    as: kernel
+    where: {all: [{present: {text: $kernel.ref}}, {present: {text: $kernel.sha256}}]}
+    value:
+      object:
+        kind: {text: $kernel.kind}
+        target: {text: $kernel.target}
+        ref: {text: $kernel.ref}
+        sha256: {text: $kernel.sha256}
+  removed_kernels: {sorted_set: $candidate.change.content.remove_kernels}
+  change_content:
+    if: {eq: [$change_family, config_variant]}
+    then: {canonical_json: $config_delta}
+    else:
+      if: {eq: [$change_family, source_patch]}
+      then: {canonical_json: {object: {patches: $patches, patch_sha256: $patch_fingerprint}}}
+      else:
+        canonical_json:
+          object:
+            config: $config_delta
+            patches: $patches
+            add_kernels: $added_kernels
+            remove_kernels: $removed_kernels
+  reasoning: {squash: $candidate.reasoning}
+  learn: {squash: $candidate.learn}
+  constraints:
+    if: {is_bool: $candidate.accuracy.passed}
+    then:
+      - {object: {name: accuracy, passed: $candidate.accuracy.passed, value: $candidate.accuracy.value}}
+    else: []
+  constraint_lines:
+    each: $constraints
+    as: row
+    value: "{$row.name}: passed={$row.passed}, observed={$row.value}"
+  outcome_facts:
+    object:
+      decision: $decision
+      before: $baseline_value
+      after: $outcome_value
+      interval: {text: $candidate.interval_text}
+      tests: {length: $candidate.tests}
+
+require:
+  # A configuration or a source patch of an InferenceX session is multibranch-notebook-v1's, in the shared schema.
+  - reason: the shared inference-recipe-v1 holds this candidate
+    check: {any: [$replays_traces, {eq: [$change_family, kernel_artifact]}]}
+  - reason: request id is missing
+    check: {present: $request_id}
+  - reason: metadata.session_id is missing
+    check: {present: $run_id}
+  - reason: candidate has no recorded parent value
+    check: {gt: [$baseline_value, 0]}
+  - reason: change family is not one multibranch-recipe-v1 declares
+    check: {present: $change_family}
+  - reason: config candidate has no effective config delta
+    check: {any: [{ne: [$change_family, config_variant]}, $config_delta_is_effective]}
+  - reason: patch candidate has no patch fingerprint
+    check: {any: [{ne: [$change_family, source_patch]}, {present: $patch_fingerprint}]}
+  - reason: kernel candidate ships no kernel artifact
+    check: {any: [{ne: [$change_family, kernel_artifact]}, {present: $added_kernels}, {present: $removed_kernels}]}
+  - reason: decision reasoning is missing or non-specific
+    check:
+      all:
+        - {min_length: [$reasoning, 20]}
+        - not_in:
+            - {rstrip: [{lower: $reasoning}, "."]}
+            - [improve performance, improve throughput, optimize, optimization, test, try]
+  - reason: candidate has no supported terminal decision
+    check: {in: [$decision, [keep, revert, failed]]}
+  - reason: measured candidate has no valid outcome value
+    check: {any: [{eq: [$decision, failed]}, {gt: [$outcome_value, 0]}]}
+  - reason: kept candidate did not pass required accuracy
+    check:
+      any:
+        - {ne: [$decision, keep]}
+        - {ne: [$candidate.accuracy.required, true]}
+        - {eq: [$candidate.accuracy.passed, true]}
+
+experience:
+  run_id: $run_id
+  seq: {hash48: [$request_id]}
+  created_at: $candidate.created_at
+  completed_at: $candidate.completed_at
+  identity: $candidate.identity
+  objective: $objective
+  baseline:
+    baseline_fingerprint: {sha256: {text: $candidate.parent_state}}
+    value: $baseline_value
+  rationale:
+    preconditions:
+      - "measured_baseline={$baseline_value}"
+      - "parent_commit={$candidate.parent_commit}"
+    reasoning: $reasoning
+  provenance:
+    source_ref: "multibranch:{$run_id}:{$request_id}"
+    extra:
+      object:
+        request_id: $request_id
+        branch: {text: $candidate.branch}
+        parent_commit: {text: $candidate.parent_commit}
+        commit_id: {text: $candidate.commit_id}
+        direction: {text: $candidate.direction}
+        conclusion: {text: $candidate.conclusion}
+        tests: $candidate.tests
+        interval: $candidate.interval
+        gpu_seconds: {number: $candidate.gpu_seconds}
+        metric: {text: $doc.metadata.metric}
+        reflection_source:
+          if: {present: $learn}
+          then: {first: [{text: $candidate.learn_source}, specialist_branch_log]}
+          else: deterministic_outcome_summary
+  change:
+    change_family: $change_family
+    change_fingerprint:
+      if: {eq: [$change_family, source_patch]}
+      then: $patch_fingerprint
+      else: {sha256: $change_content}
+    summary: {first: [{text: $candidate.change.summary}, multi-branch candidate]}
+    content: $change_content
+  outcome:
+    decision: $decision
+    value: $outcome_value
+    constraints: $constraint_lines
+    error_class:
+      if: {eq: [$decision, failed]}
+      then: {token: {first: [$candidate.error_class, failed]}}
+      else: ""
+  reflection:
+    text:
+      if: {present: $learn}
+      then: "{$learn} (measured {$candidate.interval_text})"
+      else: "Recorded outcome: {$outcome_facts}"

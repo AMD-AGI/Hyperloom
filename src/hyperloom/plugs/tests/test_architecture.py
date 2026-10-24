@@ -77,8 +77,22 @@ def _plugs_modules() -> list[Path]:
     return [p for p in _PLUGS.rglob("*.py") if "tests" not in p.relative_to(_PLUGS).parts]
 
 
+# Modules of the dev-only packages that main itself carries; they stay subjects of rule 2.
+_ON_MAIN = ("hyperloom.hosted.__init__", "hyperloom.hosted.host_info")
+
+
+def _dotted(path: Path) -> str:
+    return ".".join(path.relative_to(_SRC).with_suffix("").parts)
+
+
 def _main_modules() -> list[Path]:
-    return [p for p in _SRC.rglob("*.py") if "tests" not in p.relative_to(_SRC).parts and ".venv" not in p.parts]
+    return [
+        p
+        for p in _SRC.rglob("*.py")
+        if "tests" not in p.relative_to(_SRC).parts
+        and ".venv" not in p.parts
+        and not (_under(_dotted(p), _DEV_ONLY) and not _under(_dotted(p), _ON_MAIN))
+    ]
 
 
 def test_rule_1_plugs_import_only_the_standard_library_and_entry_points() -> None:

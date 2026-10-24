@@ -1,0 +1,167 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The start-up script of the sealed measurement runner template (design 4.8.1).
+
+A hosted runner is not started from a copy of Hyperloom that the image ships. The template's start command is this
+script. It prepares the runner's software, then replaces itself with ``python -m hyperloom.measure.runner run``, the
+command the local sandbox starts too (:mod:`hyperloom.measure.local_templates`), so the sandbox's own process is the
+runner. The steps, each of which ends the script with ``runner_start_failed`` when it fails:
+
+1. The cache. A measurement sandbox has no network: there is no git, no package index and no pip configuration in
+   play. The commit's source and every wheel ``requirements/runner.lock`` pins are in the runner cache, a directory on
+   shared storage that the template mounts read-only (``HYPERLOOM_RUNNER_CACHE``, ``/runner-cache`` when unset; layout
+   and builder in :mod:`hyperloom.measure.runner.cache_layout` and :mod:`hyperloom.measure.runner.cache_build`).
+   ``HYPERLOOM_SOURCE_SHA`` (a full commit hash) names the entry. The script first checks it with the sandbox's own
+   interpreter in isolated mode (``-I``): the entry has a manifest (a build that did not finish has none), the source is
+   the tree the manifest recorded, and every pinned wheel is there with its recorded size. What is missing is named in
+   the failure. The same step writes ``$HYPERLOOM_SCRATCH_DIR/runner-wheels.lock``, the manifest's wheels each pinned to
+   its recorded hash.
+2. A virtual environment, ``$HYPERLOOM_SCRATCH_DIR/hl-venv``, made by ``HYPERLOOM_BASE_PYTHON`` (``python3``). In the
+   framework image ``python3`` is ``/opt/venv``, and a venv made with ``--system-site-packages`` does not see what is
+   installed there (torch, sglang, aiter), so the script drops a ``.pth`` file into the new venv that adds the source
+   (``<entry>/source/src``) and then the base interpreter's site directories, with their own ``.pth`` files processed, as
+   ``site.addsitedir`` does. The venv's own packages come first.
+3. ``pip install --isolated --no-index --find-links <entry>/wheels --only-binary=:all: --require-hashes --no-deps -r
+   runner-wheels.lock`` into that venv, after the ``.pth`` is in place: a pin the base already has is satisfied and left
+   alone, every other one is installed from the cache and must match its hash. ``--isolated`` makes pip ignore
+   ``PIP_INDEX_URL``, ``PIP_FIND_LINKS`` and the like, so the template's environment cannot point it anywhere else.
+4. A check that the runner imports, so a broken install ends the script instead of leaving the application waiting. Python
+   writes its bytecode below ``$HYPERLOOM_SCRATCH_DIR/pycache``, never into the cache's source tree.
+5. ``HYPERLOOM_CODE_REVISION`` is set to the commit and the runner replaces the script. The runner's remaining
+   arguments are the script's own (``--spec-wait-sec`` and so on); ``--in``, ``--out`` and ``--scratch`` come from
+   ``HYPERLOOM_IN_DIR``, ``HYPERLOOM_OUT_DIR`` and ``HYPERLOOM_SCRATCH_DIR`` (``/in``, ``/out``, ``/scratch``).
+   The unix times the script began and ended go to the runner as ``HYPERLOOM_BOOTSTRAP_STARTED_UNIX`` and
+   ``HYPERLOOM_BOOTSTRAP_ENDED_UNIX`` (empty when the image's ``date`` cannot say them), so the runner can state how long
+   the sandbox spent on the script, and how long the interpreter took to reach the runner, as phases of the test.
+
+A failing step writes ``/out/status.json`` itself (``state`` failed, ``error_class`` ``runner_start_failed``, the step
+and the last of its output in ``message``) and exits 2, as the runner does when it cannot start, so the application
+reads the failure instead of waiting for a runner that never came. Every step runs without
+``HYPERLOOM_SIGNING_KEY_FILE``: the key file exists before the script starts, and nothing the script installs or builds
+needs it; the runner takes it from its own environment.
+
+When the template sets ``HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256``, only the entry whose manifest file has that SHA-256 is
+accepted: the host takes the value from the builder's result and so binds the sandbox to the build it made. Without it the
+manifest vouches only for the entry it sits in, so the cache directory must then be writable by the builder alone.
+
+``BOOTSTRAP_SCRIPT`` is POSIX ``sh`` with a ``#!/bin/sh`` line, so it runs the same whether a template hands it over as
+a file or as the argument of ``sh -c``; one text serves the hosted template and the stand-in the contract suite runs.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from hyperloom.measure.runner import cache_layout
+
+__all__ = ["BOOTSTRAP_SCRIPT", "runner_start_command"]
+
+#: ``$0`` of ``sh -c`` is a name for messages, ``$@`` are the runner's own arguments.
+_NAME = "hyperloom-runner-bootstrap"
+
+_SCRIPT = r"""#!/bin/sh
+set -eu
+
+SCRATCH=${HYPERLOOM_SCRATCH_DIR:-/scratch}
+IN_DIR=${HYPERLOOM_IN_DIR:-/in}
+OUT_DIR=${HYPERLOOM_OUT_DIR:-/out}
+BASE_PY=${HYPERLOOM_BASE_PYTHON:-python3}
+CACHE=${@CACHE_ENV@:-@DEFAULT_CACHE@}
+SHA=${HYPERLOOM_SOURCE_SHA:-}
+REQS=$SCRATCH/@REQUIREMENTS_FILE@
+VENV=$SCRATCH/hl-venv
+LOG=${TMPDIR:-/tmp}/hl-bootstrap.$$.log
+STEP=start
+
+# now: the unix time, with fractions where this image's date has them, else whole seconds, else nothing.
+now() {
+    t=$(date +%s.%N 2>/dev/null) || t=
+    case $t in '' | *[!0-9.]*) t=$(date +%s 2>/dev/null) || t= ;; esac
+    printf '%s' "$t"
+}
+STARTED=$(now)
+
+# fail RC: leave the application a status.json that says what failed, then end like a runner that could not start.
+fail() {
+    detail=$(tail -c 600 "$LOG" 2>/dev/null | LC_ALL=C tr -cd ' -~' | tr -d '"\\') || detail=
+    mkdir -p "$OUT_DIR" 2>/dev/null || true
+    {
+        printf '{"error_class": "runner_start_failed", "message": "runner bootstrap, step %s, exit %s: %s", ' \
+            "$STEP" "$1" "$detail"
+        printf '"state": "failed"}\n'
+    } >"$OUT_DIR/.status.json.tmp" && mv "$OUT_DIR/.status.json.tmp" "$OUT_DIR/status.json" ||
+        echo "bootstrap: cannot write $OUT_DIR/status.json" >&2
+    exit 2
+}
+
+# refuse STEP MESSAGE: a failure of the script's own check.
+refuse() {
+    STEP=$1
+    echo "$2" >"$LOG"
+    cat "$LOG" >&2
+    fail 1
+}
+
+# step NAME COMMAND...: run one command with its output kept for the message of a failure and without the signing key.
+step() {
+    STEP=$1
+    shift
+    echo "bootstrap: $STEP" >&2
+    (unset HYPERLOOM_SIGNING_KEY_FILE; "$@") >"$LOG" 2>&1 || {
+        rc=$?
+        cat "$LOG" >&2
+        fail "$rc"
+    }
+}
+
+[ -n "$SHA" ] || refuse cache "HYPERLOOM_SOURCE_SHA is not set"
+step cache "$BASE_PY" -I - "$CACHE" "$SHA" "$REQS" <<'PY'
+@CACHE_CHECK@
+PY
+SRC=$CACHE/$SHA/source
+WHEELS=$CACHE/$SHA/wheels
+export HYPERLOOM_CODE_REVISION=$SHA
+export PYTHONPYCACHEPREFIX=$SCRATCH/pycache
+
+step scratch mkdir -p "$SCRATCH"
+step venv "$BASE_PY" -m venv --clear "$VENV"
+step base-packages "$VENV/bin/python" - "$BASE_PY" "$SRC/src" <<'PY'
+import json, os, subprocess, sys, sysconfig
+
+base_python, source = sys.argv[1:3]
+probe = (
+    "import json, site, sysconfig; paths = sysconfig.get_paths(); "
+    "print(json.dumps([*site.getsitepackages(), paths['purelib'], paths['platlib']]))"
+)
+found = subprocess.run([base_python, "-c", probe], check=True, capture_output=True, text=True).stdout
+base_dirs = [path for path in dict.fromkeys(json.loads(found)) if os.path.isdir(path)]
+if not base_dirs:
+    sys.exit("the base interpreter reports no site-packages directory")
+lines = [source, *(f"import site; site.addsitedir({path!r})" for path in base_dirs)]
+with open(os.path.join(sysconfig.get_path("purelib"), "hyperloom-runner.pth"), "w") as pth:
+    pth.write("\n".join(lines) + "\n")
+PY
+step lock "$VENV/bin/python" -m pip --isolated install --no-index --find-links "$WHEELS" --only-binary=:all: \
+    --require-hashes --no-deps --disable-pip-version-check --no-input -r "$REQS"
+step import "$VENV/bin/python" -c "import hyperloom.measure.runner.__main__"
+
+rm -f "$LOG"
+export HYPERLOOM_BOOTSTRAP_STARTED_UNIX=$STARTED HYPERLOOM_BOOTSTRAP_ENDED_UNIX=$(now)
+exec "$VENV/bin/python" -m hyperloom.measure.runner run --in "$IN_DIR" --out "$OUT_DIR" --scratch "$SCRATCH" "$@"
+"""
+
+BOOTSTRAP_SCRIPT = (
+    _SCRIPT.replace("@CACHE_ENV@", cache_layout.CACHE_ENV)
+    .replace("@DEFAULT_CACHE@", cache_layout.DEFAULT_CACHE_DIR)
+    .replace("@REQUIREMENTS_FILE@", cache_layout.REQUIREMENTS_FILE)
+    .replace("@CACHE_CHECK@", Path(cache_layout.__file__).read_text(encoding="utf-8").rstrip("\n"))
+)
+
+
+def runner_start_command(*runner_args: str) -> tuple[str, ...]:
+    """The start argv of a template that runs the script as ``sh -c``; ``runner_args`` are passed on to the runner.
+
+    A template that hands the script over as a file uses :data:`BOOTSTRAP_SCRIPT` itself.
+    """
+    return ("/bin/sh", "-c", BOOTSTRAP_SCRIPT, _NAME, *runner_args)
