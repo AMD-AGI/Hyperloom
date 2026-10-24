@@ -9,10 +9,14 @@ import statistics
 
 from hyperloom.common.accuracy import ACCURACY_METRICS
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
-from hyperloom.contracts.measurement import RoundValue, TestResult, Validity
+from hyperloom.contracts.measurement import RequestClasses, RoundValue, TestResult, Validity
 from hyperloom_multibranch.rulegate.inferencex import InferenceXReading
 
 _MEASURE = "measure"
+#: Requests the server left unserved (a transport failure or zero output tokens), summed over the measured rounds.
+GRADED_UNSERVED_REQUESTS = "graded_unserved_requests"
+#: Requests answered with output tokens the client still counted failed, summed over the measured rounds.
+GRADED_SHORT_REQUESTS = "graded_short_requests"
 
 
 class UnreadableResult(ValueError):
@@ -59,7 +63,7 @@ def eval_score(result: TestResult) -> float:
 
 
 def agentx_reading(result: TestResult) -> dict[str, float]:
-    """Each metric every measure-phase round reports, averaged over them.
+    """Each metric every measure-phase round reports, averaged over them, and the request classes summed over them.
 
     A guard or comparability metric some round lacks stays out, so the comparison fails closed on it rather than
     trusting a partial reading; without the graded P50 there is nothing to compare.
@@ -70,7 +74,18 @@ def agentx_reading(result: TestResult) -> dict[str, float]:
     shared = set(rounds[0].metrics).intersection(*(r.metrics for r in rounds[1:]))
     if GRADED_INTVTY_P50 not in shared:
         raise UnreadableResult(f"{result.request_id} does not report {GRADED_INTVTY_P50} in every measure-phase round")
-    return {key: statistics.fmean(r.metrics[key] for r in rounds) for key in sorted(shared)}
+    reading = {key: statistics.fmean(r.metrics[key] for r in rounds) for key in sorted(shared)}
+    return {**reading, **_request_classes(result.request_classes, len(rounds))}
+
+
+def _request_classes(classes: tuple[RequestClasses, ...], measured: int) -> dict[str, float]:
+    """Empty unless every measured round counted its empty and short failures: an uncounted round is no "none"."""
+    if len(classes) != measured or any(c.failed_empty is None or c.failed_transport is None for c in classes):
+        return {}
+    return {
+        GRADED_UNSERVED_REQUESTS: float(sum(c.failed_transport + c.failed_empty for c in classes)),
+        GRADED_SHORT_REQUESTS: float(sum(c.failed_short for c in classes)),
+    }
 
 
 def _measured(result: TestResult) -> list[RoundValue]:
@@ -90,4 +105,12 @@ def _require_measurement(result: TestResult) -> None:
         raise UnreadableResult(f"{result.request_id} is {result.validity.value}, not a measurement")
 
 
-__all__ = ["UnreadableResult", "agentx_reading", "dropped_requests", "eval_score", "inferencex_reading"]
+__all__ = [
+    "GRADED_SHORT_REQUESTS",
+    "GRADED_UNSERVED_REQUESTS",
+    "UnreadableResult",
+    "agentx_reading",
+    "dropped_requests",
+    "eval_score",
+    "inferencex_reading",
+]

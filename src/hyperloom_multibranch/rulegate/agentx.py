@@ -22,13 +22,23 @@ from hyperloom.common.perf_metric import (
 )
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok
+from hyperloom_multibranch.rulegate.readings import GRADED_SHORT_REQUESTS, GRADED_UNSERVED_REQUESTS
 
 P50_BELOW_THRESHOLD = "p50_gain_below_threshold"
 # Failing more requests than the parent is a defect of the candidate a repair can look at; the other reasons
-# ``incomparability_reason`` gives mean the pair did not measure the same work.
+# ``incomparability_reason`` gives mean the pair did not measure the same work. Only unserved requests count: a short
+# answer is the client's quality call, recorded for the specialist and never a refusal.
 _EXTRA_FAILED_REQUESTS = "extra_failed_requests"
 _GUARDS = (("p90_regressed", GRADED_INTVTY), ("output_regressed", GRADED_OUTPUT))
-_RECORDED_AXES = (GRADED_INTVTY_P50, GRADED_INTVTY, GRADED_OUTPUT, GRADED_DURATION, GRADED_ERROR_RATE)
+_RECORDED_AXES = (
+    GRADED_INTVTY_P50,
+    GRADED_INTVTY,
+    GRADED_OUTPUT,
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
+    GRADED_UNSERVED_REQUESTS,
+    GRADED_SHORT_REQUESTS,
+)
 
 
 @dataclass(frozen=True)
@@ -62,9 +72,17 @@ def _read(candidate: Mapping[str, float], parent: Mapping[str, float]) -> _Readi
     defects = [name for name, key in _GUARDS if not holds_within_band(candidate, parent, key)]
     incomparable = incomparability_reason(candidate, parent)
     if incomparable == _EXTRA_FAILED_REQUESTS:
-        defects.append(incomparable)
         incomparable = ""
+        if _more_unserved(candidate, parent):
+            defects.append(_EXTRA_FAILED_REQUESTS)
     return _Reading(gain, tuple(defects), incomparable, agentx_accuracy_ok(candidate.get(GRADED_ERROR_RATE)))
+
+
+def _more_unserved(candidate: Mapping[str, float], parent: Mapping[str, float]) -> bool:
+    """Whether the candidate left more requests unserved; a side that did not count them may have, so it did."""
+    if GRADED_UNSERVED_REQUESTS not in candidate or GRADED_UNSERVED_REQUESTS not in parent:
+        return True
+    return candidate[GRADED_UNSERVED_REQUESTS] > parent[GRADED_UNSERVED_REQUESTS]
 
 
 def _recorded(candidate: Mapping[str, float]) -> dict[str, float]:
@@ -77,7 +95,8 @@ def compare(candidate: Mapping[str, float], parent: Mapping[str, float], request
     A P50 gain held back by a broken guard, extra failed requests or the error-rate bar waits for a retest. Otherwise
     the single measurement is final: improved at the P50 bar with nothing broken; regressed when the P50 falls as far,
     a guard breaks, the candidate fails more requests than the parent or the pair did not measure the same work, so a
-    correctness fix measured on it forks rather than landing on the branch; flat in between.
+    correctness fix measured on it forks rather than landing on the branch; flat in between. More failed requests count
+    only when more of them went unserved: more short answers alone are recorded, not refused.
     """
     reading = _read(candidate, parent)
     if reading.blocked:

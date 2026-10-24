@@ -5,7 +5,7 @@ import pytest
 
 from hyperloom.common.accuracy import ACCURACY_METRICS
 from hyperloom.common.perf_metric import GRADED_DURATION, GRADED_ERROR_RATE, GRADED_INTVTY_P50, GRADED_OUTPUT
-from hyperloom.contracts.measurement import AccuracyValue, RoundValue, TestResult, Validity
+from hyperloom.contracts.measurement import AccuracyValue, RequestClasses, RoundValue, TestResult, Validity
 from hyperloom_multibranch.rulegate.inferencex import InferenceXReading
 from hyperloom_multibranch.rulegate.readings import (
     UnreadableResult,
@@ -13,6 +13,7 @@ from hyperloom_multibranch.rulegate.readings import (
     dropped_requests,
     inferencex_reading,
 )
+from hyperloom_multibranch.rulegate.readings import GRADED_SHORT_REQUESTS, GRADED_UNSERVED_REQUESTS
 
 STRICT, FLEXIBLE, _, ACC = ACCURACY_METRICS
 GSM8K = "gsm8k"
@@ -21,8 +22,20 @@ MEASURE = "measure"
 SCORES = (AccuracyValue(GSM8K, STRICT, 0.61), AccuracyValue(GSM8K, FLEXIBLE, 0.64))
 
 
-def _result(*rounds: RoundValue, accuracy=SCORES, validity=Validity.SUCCEEDED) -> TestResult:
-    return TestResult("r1", validity, rounds=rounds, accuracy=tuple(accuracy))
+def _result(*rounds: RoundValue, accuracy=SCORES, validity=Validity.SUCCEEDED, classes=()) -> TestResult:
+    return TestResult("r1", validity, rounds=rounds, accuracy=tuple(accuracy), request_classes=tuple(classes))
+
+
+def _classes(point: int, transport: int, empty: int | None, short: int | None) -> RequestClasses:
+    no_content = None if empty is None else empty + short
+    counts = (100, transport + no_content, transport, no_content) if no_content is not None else (None,) * 4
+    reason = "" if empty is not None else "the export carries no output token count"
+    return RequestClasses(point, "", None, *counts, empty, short, reason)
+
+
+def _agentx_rounds(*classes: RequestClasses) -> TestResult:
+    rounds = [RoundValue(MEASURE, None, {GRADED_INTVTY_P50: 40.0}) for _ in range(2)]
+    return _result(RoundValue("warmup", None, {GRADED_INTVTY_P50: 1.0}), *rounds, accuracy=(), classes=classes)
 
 
 def test_inferencex_reads_the_measure_rounds_at_the_graded_concurrency_and_the_strict_score():
@@ -116,3 +129,20 @@ def test_agentx_averages_the_measure_rounds_and_leaves_out_a_metric_one_round_la
 def test_agentx_refuses_what_it_cannot_judge(result):
     with pytest.raises(UnreadableResult):
         agentx_reading(result)
+
+
+def test_agentx_sums_the_unserved_and_the_short_requests_over_the_measured_rounds():
+    reading = agentx_reading(_agentx_rounds(_classes(0, 1, 2, 3), _classes(1, 4, 0, 5)))
+    assert reading[GRADED_UNSERVED_REQUESTS] == 7.0
+    assert reading[GRADED_SHORT_REQUESTS] == 8.0
+
+
+@pytest.mark.parametrize(
+    "classes",
+    [(), (_classes(0, 1, 2, 3),), (_classes(0, 1, 2, 3), _classes(1, 0, None, None))],
+    ids=["no-classes", "a-round-without-classes", "an-uncounted-round"],
+)
+def test_agentx_leaves_the_request_classes_out_when_a_round_does_not_count_them(classes):
+    reading = agentx_reading(_agentx_rounds(*classes))
+    assert GRADED_UNSERVED_REQUESTS not in reading
+    assert GRADED_SHORT_REQUESTS not in reading
