@@ -29,6 +29,7 @@ from hyperloom_multibranch.notebook.rsi.calibration import (
     rank_correlation,
     ranked_alike,
     rankings,
+    replayed,
     score_archived,
     session_policy,
 )
@@ -314,6 +315,21 @@ def test_a_branch_an_autonomous_agent_drove_is_in_no_round() -> None:
 
     assert rankings(joined, _Prefers("a")) == rankings(sessions, _Prefers("a"))
     assert rankings((alone,), _Prefers("a")) == {}
+
+
+def test_a_replay_gives_each_round_the_branches_as_they_stood_their_scores_and_the_gains_they_made_after() -> None:
+    sessions = tuple(_tied(n) for n in range(2))
+
+    rounds = list(replayed(sessions, _Prefers("b", "prefers-b")))
+    a, b = rounds[0]
+
+    assert len(rounds) == 2 * 11 and {item.session_id for item in rounds[11]} == {"tied-1"}
+    assert [(item.branch.name, item.t_s, item.gain_after_pct) for item in (a, b)] == [
+        ("a", 600.0, 2.0),
+        ("b", 600.0, 0.0),
+    ]
+    assert b.score == 2.0 > a.score and a.branch.commits == () and a.context.tree is not None
+    assert [item.gain_after_pct for item in rounds[10]] == [0.0, 0.0]
 
 
 def test_rank_correlation_ranks_ties_alike_and_needs_a_spread() -> None:
