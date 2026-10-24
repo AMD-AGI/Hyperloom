@@ -180,7 +180,8 @@ class SessionServices:
     Recipe KB PRELUDE reads the warm-start leads from and CLOSE writes the final recipe back to (``None`` when none is
     configured), what builds the critic the rule gate asks whether a proven correctness fix matters under the
     workload, on the scheduler's notebook handle its spend is recorded through, and the completion CLOSE asks for a
-    generation of frontier scorers, with ``scorer_model`` the model it runs on."""
+    generation of frontier scorers, with ``scorer_model`` the model it runs on; ``resolver_model`` is the model the
+    patch resolver runs on, which every patch it writes names."""
 
     judge_completion: Completion
     resolver_completion: Completion
@@ -188,6 +189,7 @@ class SessionServices:
     critic: Callable[[UsageSink], FixReviewer]
     scorer_completion: Completion
     scorer_model: str
+    resolver_model: str
 
 
 class Session:
@@ -247,7 +249,9 @@ class Session:
         self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo, peers.briefs)
         self._stopper = SessionStopper(context, self._branches, peers.toolbox, peers.mcp)
         resolver = LlmPatchResolver(
-            recorded(services.resolver_completion, self._notebook, UsageSource.RESOLVER), peers.repo
+            recorded(services.resolver_completion, self._notebook, UsageSource.RESOLVER),
+            peers.repo,
+            services.resolver_model,
         )
         warm_start = None if services.recipe_kb is None else WarmStartSource(services.recipe_kb, blobs)
         self._prelude = Prelude(

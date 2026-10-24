@@ -237,6 +237,7 @@ def _reply(document: dict[str, object]) -> str:
 
 
 SCORER_MODEL = "scorer-model"
+RESOLVER_MODEL = "resolver-model"
 OPENING = _reply({"open": 2, "open_k": 9, "branches": [{"branch": INTEGRATION_BRANCH, "k": 2}], "stop": []})
 STEER = _reply({"open": 0, "branches": [{"branch": "b01", "k": 7}], "stop": [{"branch": "b02", "reason": STOP_REASON}]})
 
@@ -452,7 +453,13 @@ class Stage:
             self.factory,
             host,
             SessionServices(
-                self.judge, ScriptedCompletion(), self.recipe_kb, self.critic, self.scorer_author, SCORER_MODEL
+                self.judge,
+                ScriptedCompletion(),
+                self.recipe_kb,
+                self.critic,
+                self.scorer_author,
+                SCORER_MODEL,
+                RESOLVER_MODEL,
             ),
         )
 

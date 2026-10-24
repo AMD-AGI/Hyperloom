@@ -458,7 +458,7 @@ def session_services(recipe_kb: RemoteRecipeClient | None) -> SessionServices:
     )
     critic = partial(LlmCritic, anthropic_critic(model, component=PROG))
     scorer = anthropic_completion(model, component=PROG, operation="author_scorers")
-    return SessionServices(judge, resolver, recipe_kb, critic, scorer, model)
+    return SessionServices(judge, resolver, recipe_kb, critic, scorer, model, model)
 
 
 def run_session(settings: RunSettings, peer_factory: PeerFactory, services: SessionServices) -> int:

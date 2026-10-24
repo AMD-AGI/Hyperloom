@@ -37,20 +37,21 @@ set it would run is still empty; what it leaves the integration branch at is the
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Sequence, Set
 from dataclasses import dataclass, field, replace
 from functools import partial
 
 from hyperloom.common.jsonio import extract_last_json_with_key
 from hyperloom.contracts.measurement import Purpose, TestKind
-from hyperloom.contracts.recipe import ComponentPatches, PatchRef, RecipeDelta, RecipeError, ValueChange, apply
+from hyperloom.contracts.recipe import ComponentPatches, RecipeDelta, RecipeError, ValueChange, apply
 from hyperloom.measure.compile import BlobError
 from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
 from hyperloom_multibranch.contracts.notebook.records import CommittedCommit, MergeAttempt, WarmReplay
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, MergeOutcome
-from hyperloom_multibranch.contracts.repo import ExperimentRepo, PatchConflict, RepoMerge, UnitedTable
+from hyperloom_multibranch.contracts.repo import ExperimentRepo, PatchConflict, RepoMerge, ResolvedPatch, UnitedTable
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay
 from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD
@@ -74,6 +75,8 @@ PATCH_KEY = "patch"
 #: The resolver's answers per conflicting patch: a rewrite that does not apply is asked for once more, with why.
 RESOLVER_ATTEMPTS = 2
 NO_PATCH = "the answer carried no patch"
+#: What the second prompt adds after the first, followed by why the first answer gave no rewrite that applies.
+RETRY_FEEDBACK = "Your last rewrite failed to apply: "
 RESOLVER_SYSTEM_PROMPT = (
     "You resolve patch conflicts while merging two optimizations of an LLM inference server. "
     "A patch of a component did not apply on top of the other patches of that component. Rewrite it so it applies "
@@ -81,6 +84,8 @@ RESOLVER_SYSTEM_PROMPT = (
     f'Answer with one JSON object {{"{PATCH_KEY}": "<the rewritten patch as a unified diff>"}}, or '
     f'{{"{PATCH_KEY}": null}} when the two changes cannot be combined.'
 )
+#: Names the resolver's prompts in the provenance of every patch it writes; it changes whenever they do.
+PROMPT_VERSION = hashlib.sha256(f"{RESOLVER_SYSTEM_PROMPT}\n{RETRY_FEEDBACK}".encode()).hexdigest()[:12]
 
 
 @dataclass(frozen=True)
@@ -123,6 +128,24 @@ def _rewritten(conflict: PatchConflict, reply: str) -> str | None:
 
 
 @dataclass(frozen=True)
+class _Rewrite:
+    """A rewrite that applies, and how many answers the model gave until it did."""
+
+    text: str
+    attempts: int
+
+
+def _adding(delta: RecipeDelta, resolved: Sequence[ResolvedPatch]) -> RecipeDelta:
+    """``delta`` with each of ``resolved`` added after the patches it adds to that component."""
+
+    changes = []
+    for change in delta.components:
+        written = tuple(made.patch for made in resolved if made.component == change.component)
+        changes.append(replace(change, add_patches=(*change.add_patches, *written)))
+    return replace(delta, components=tuple(changes))
+
+
+@dataclass(frozen=True)
 class _Sources:
     """Where the text of a patch of the merge is read: a rewrite this resolution wrote, else the candidate's recipe,
     else the integration head's."""
@@ -139,13 +162,15 @@ class LlmPatchResolver:
     not apply costs no merge test; the toolbox still builds the merged recipe once the merge is tested.
     """
 
-    def __init__(self, completion: Completion, repo: ExperimentRepo) -> None:
+    def __init__(self, completion: Completion, repo: ExperimentRepo, model: str) -> None:
         self._completion = completion
         self._repo = repo
+        self._model = model
 
-    async def resolve(self, merge: RepoMerge, candidate: str) -> RecipeDelta:
-        """``merge``'s delta with every conflicting patch rewritten and added; :class:`PatchUnresolved` when one stays
-        unresolved. Each rewrite applies on top of the rewrites before it.
+    async def resolve(self, merge: RepoMerge, candidate: str) -> RepoMerge:
+        """``merge`` with every conflicting patch rewritten: its delta adds each rewrite, and ``resolved_patches`` says
+        which patch each replaces and how it was written; :class:`PatchUnresolved` when one stays unresolved. Each
+        rewrite applies on top of the rewrites before it.
 
         A call that fails raises :class:`CompletionFailed`: a model that could not be asked is a different loss from
         a model that answered, and the merge log names them apart.
@@ -154,31 +179,29 @@ class LlmPatchResolver:
         merged = apply(await self._repo.read_recipe(merge.onto), merge.delta)
         stacks = {pinned.component: pinned for pinned in merged.components}
         sources = _Sources(candidate, merge.onto)
-        rewritten: dict[str, list[PatchRef]] = {}
+        resolved: list[ResolvedPatch] = []
         for conflict in merge.patch_conflicts:
             stack = stacks[conflict.component]
-            text = await self._rewrite(conflict, stack, await self._prompt(conflict, stack, sources))
-            patch = await self._repo.store_patch(conflict.component, text)
-            sources.written[patch.path] = text
+            rewrite = await self._rewrite(conflict, stack, await self._prompt(conflict, stack, sources))
+            patch = await self._repo.store_patch(conflict.component, rewrite.text)
+            sources.written[patch.path] = rewrite.text
             stacks[conflict.component] = replace(stack, patches=(*stack.patches, patch))
-            rewritten.setdefault(conflict.component, []).append(patch)
-        changes = tuple(
-            replace(change, add_patches=(*change.add_patches, *rewritten.get(change.component, ())))
-            for change in merge.delta.components
-        )
-        return replace(merge.delta, components=changes)
+            resolved.append(
+                ResolvedPatch(conflict.component, conflict.path, patch, self._model, PROMPT_VERSION, rewrite.attempts)
+            )
+        return replace(merge, delta=_adding(merge.delta, resolved), resolved_patches=tuple(resolved))
 
-    async def _rewrite(self, conflict: PatchConflict, stack: ComponentPatches, prompt: str) -> str:
+    async def _rewrite(self, conflict: PatchConflict, stack: ComponentPatches, prompt: str) -> _Rewrite:
         """The model's rewrite of ``conflict`` that applies on top of ``stack``; an answer that gave none is asked again
         with why, up to :data:`RESOLVER_ATTEMPTS` answers in all."""
 
         asked, error = prompt, NO_PATCH
-        for _ in range(RESOLVER_ATTEMPTS):
+        for attempt in range(1, RESOLVER_ATTEMPTS + 1):
             text = _rewritten(conflict, (await self._completion(RESOLVER_SYSTEM_PROMPT, asked)).text)
             error = NO_PATCH if text is None else await self._repo.apply_error(stack, text)
             if text is not None and error is None:
-                return text
-            asked = f"{prompt}\n\nYour last rewrite failed to apply: {error}"
+                return _Rewrite(text, attempt)
+            asked = f"{prompt}\n\n{RETRY_FEEDBACK}{error}"
         raise PatchUnresolved(
             f"no rewrite of {conflict.path} applied in {RESOLVER_ATTEMPTS} attempts, the last: {error}"
         )
@@ -359,15 +382,15 @@ class Integrator:
     async def _test(self, commit: CommittedCommit, head: str) -> _Tested:
         candidate = commit.commit_id
         try:
-            merge = await self._repo.merge(candidate, head, await self._foundation_fixes())
-            delta = await self._resolved(merge, candidate)
+            carried = await self._repo.merge(candidate, head, await self._foundation_fixes())
+            merge = await self._resolved(carried, candidate)
             onto = await self._repo.read_recipe(head)
-            if apply(onto, delta).digest() == onto.digest():
+            if apply(onto, merge.delta).digest() == onto.digest():
                 return await self._skip(
                     commit, head, ALREADY_ON_HEAD, MergeOutcome.ALREADY_ON_HEAD, merge.united_tables
                 )
-            request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, head, delta)
-            return await self._tests.judged(request, partial(self._judge, merge, delta, commit))
+            request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, head, merge.delta)
+            return await self._tests.judged(request, partial(self._judge, merge, commit))
         except RecipeError as exc:
             return await self._skip(commit, head, f"the merge does not combine: {exc}", MergeOutcome.CONFLICT_SKIPPED)
         except RequestRejected as exc:
@@ -386,9 +409,10 @@ class Integrator:
             commit.commit_id for commit in committed if commit.foundation_fix and commit.merged_into is not None
         )
 
-    async def _judge(self, merge: RepoMerge, delta: RecipeDelta, commit: CommittedCommit, request_id: str) -> _Tested:
+    async def _judge(self, merge: RepoMerge, commit: CommittedCommit, request_id: str) -> _Tested:
         candidate = commit.commit_id
-        await self._notebook.record_merge_attempt(MergeAttempt((candidate,), merge.onto, request_id))
+        attempt = MergeAttempt((candidate,), merge.onto, request_id, resolved_patches=merge.resolved_patches)
+        await self._notebook.record_merge_attempt(attempt)
         tested = MergeReport(
             candidate,
             merge.onto,
@@ -404,13 +428,13 @@ class Integrator:
             judgement = await self._gate.compare(request_id)
         except NotMeasured as exc:
             return replace(tested, reason=f"the merge test failed: {exc}")
-        return _TestedMerge(tested, delta, judgement)
+        return _TestedMerge(tested, merge.delta, judgement)
 
-    async def _resolved(self, merge: RepoMerge, candidate: str) -> RecipeDelta:
-        """The delta to test; raises :class:`_Skipped` when a conflicting patch stays unresolved."""
+    async def _resolved(self, merge: RepoMerge, candidate: str) -> RepoMerge:
+        """The merge to test; raises :class:`_Skipped` when a conflicting patch stays unresolved."""
 
         if merge.clean:
-            return merge.delta
+            return merge
         conflicts = "; ".join(f"{conflict.path}: {conflict.detail}" for conflict in merge.patch_conflicts)
         try:
             return await self._resolver.resolve(merge, candidate)
@@ -581,6 +605,7 @@ __all__ = [
     "MergeRecords",
     "MergeReport",
     "NO_PATCH",
+    "PROMPT_VERSION",
     "PatchUnresolved",
     "defects_beyond_gain",
     "not_stackable_reason",

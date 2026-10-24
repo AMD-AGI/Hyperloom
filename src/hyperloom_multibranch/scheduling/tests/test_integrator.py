@@ -47,7 +47,7 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, MergeOutcome
-from hyperloom_multibranch.contracts.repo import RepoMerge, UnitedTable
+from hyperloom_multibranch.contracts.repo import RepoMerge, ResolvedPatch, UnitedTable
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay
@@ -61,6 +61,7 @@ from hyperloom_multibranch.scheduling.integrator import (
     CONFLICT_UNRESOLVED,
     FOUNDATION_FIX_VERDICTS,
     NO_PATCH,
+    PROMPT_VERSION,
     RESOLVER_ATTEMPTS,
     RESOLVER_SYSTEM_PROMPT,
     RESOLVER_UNREACHED,
@@ -104,6 +105,7 @@ CANDIDATE_TEXT = _patch_text("x.py", "old", "candidate")
 CONFLICTING_TEXT = _patch_text("x.py", "old", "second")
 RESOLVED_TEXT = _patch_text("x.py", "candidate", "resolved")
 REFUSAL = "the base image moved"
+RESOLVER_MODEL = "resolver-model"
 GAINS = {"c1": 4.0, "c2": 2.0}
 ARGS = {"c1": "--max-num-seqs 256", "c2": "--max-num-seqs 128"}
 #: ``c1`` merged onto the root gains 3%, ``c2`` 2%, and ``c2`` onto a head holding ``c1`` gains another 1.9%.
@@ -288,7 +290,7 @@ async def _bench(
     await gate.establish_baseline(root, [await tests.submit(baseline) for _ in range(BASELINE_TESTS)])
     completion = ScriptedCompletion()
     decisions = tmp_path / "MB-decisions.jsonl"
-    resolver = LlmPatchResolver(completion, repo)
+    resolver = LlmPatchResolver(completion, repo, RESOLVER_MODEL)
     records = MergeRecords(merger, DecisionLog(decisions, Clock(now=clock)))
     regression = FakeRegressionCheck()
     integrator = Integrator(records, repo, SessionChecks(tests, gate, regression), resolver, Clock(clock, _poll))
@@ -817,6 +819,9 @@ async def test_a_patch_that_does_not_apply_on_the_head_is_rewritten_before_the_m
     head = await bench.repo.head(INTEGRATION_BRANCH)
     assert await bench.repo.patch_text(head, rewritten.path) == RESOLVED_TEXT
     assert rewritten in (await bench.repo.read_recipe(head)).component(COMPONENT).patches
+    conflicting = bench.deltas["c1"].components[0].add_patches[1]
+    written = ResolvedPatch(COMPONENT, conflicting.path, rewritten, RESOLVER_MODEL, PROMPT_VERSION, 1)
+    assert (await bench.handle(Role.OBSERVER).snapshot()).resolved_patches == (written,)
 
 
 @pytest.mark.parametrize(
@@ -914,6 +919,8 @@ async def test_a_rewrite_that_does_not_apply_is_asked_for_again_with_why(
     report = await _one(bench)
 
     assert report is not None and report.outcome is MergeOutcome.MERGED
+    [written] = (await bench.handle(Role.OBSERVER).snapshot()).resolved_patches
+    assert written.attempts == RESOLVER_ATTEMPTS
     (_, asked), (_, again) = bench.completion.calls
     assert again.startswith(asked)
     feedback = again.removeprefix(asked)
