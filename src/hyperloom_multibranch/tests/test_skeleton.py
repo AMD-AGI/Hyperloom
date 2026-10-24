@@ -1936,9 +1936,12 @@ def _admit_on_start(stage: Stage, admit: Callable[[str, str], Awaitable[ForkAdmi
 
 
 def _repair(branch: str, parent_commit: str, mechanism: str = "fp8 kv cache") -> RepairRequest:
+    """A repair of the blocked change ``mechanism`` names, one change per mechanism."""
+
     intent = Intent(branch, parent_commit, "attention", mechanism, IntentLayer.CONFIG)
     blocked = Judgement(Verdict.BLOCKED, 6.0, 2.0, ("r1", "r2"), {GRADED_OUTPUT: 1060.0}, accuracy_ok=False)
-    return RepairRequest(intent, tagged("fp8-kv"), blocked, "per-tensor KV scales; scale per head")
+    change = tagged(mechanism.replace(" ", "-"))
+    return RepairRequest(intent, change, blocked, "per-tensor KV scales; scale per head")
 
 
 def _judged_within_a_tick_of(stage: Stage, freed_at: float) -> None:

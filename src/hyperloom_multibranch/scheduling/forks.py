@@ -9,9 +9,11 @@ roster when a slot is free and nothing queued before it waits, which for a reque
 free is at once, answered ``ACCEPTED`` with its branch. One that has to wait is answered ``PENDING`` with its reserved
 branch, which stays off the roster until it enters when the explore loop fills the slots freed after it, before the
 judge's new branches. The queue holds at most ``max_branches`` requests. A request is refused when its branch is unknown
-or stopped, a repair of the same intent on the same commit is open or queued, the session is stopping, or the queue is
-full. A queued request is voided when its branch stops or the session stops; a voided request takes no slot and frees
-its intent for another repair.
+or stopped, the session is stopping, or the queue is full; a repair is also refused while a repair of the same change,
+on any head, or of the same intent on the same commit is open or queued, and the refusal names that repair's branch,
+whose result is the one the change waits for: one blocked change replayed onto two heads is repaired once. A queued
+request is voided when its branch stops or the session stops; a voided request takes no slot and frees its change and
+intent for another repair.
 
 A request that enters the roster takes a slot of the branch cap, with the K of the branch that asked, admitted but not
 started, and waits on the desk until the explore loop starts it: a repair at the commit the blocked candidate was
@@ -67,8 +69,11 @@ def _parent_refusal(roster: Roster, from_branch: str) -> str:
     return "parent branch is stopped" if parent.stop is not None else ""
 
 
-def _repair_key(repair: RepairRequest) -> tuple[str, str]:
-    return (repair.intent.parent_commit, repair.intent.fingerprint)
+def _repair_keys(repair: RepairRequest) -> tuple[tuple[str, ...], ...]:
+    """What makes two repairs the same: the blocked change, whose action fingerprint is the same on whatever head it
+    was measured, and its intent on the commit it was measured against."""
+
+    return ((repair.candidate_delta.fingerprint(),), (repair.intent.parent_commit, repair.intent.fingerprint))
 
 
 class ForkDesk:
@@ -80,7 +85,7 @@ class ForkDesk:
         self._clock = clock
         self._queue: deque[PendingBranch] = deque()
         self._waiting: dict[str, AdmittedBranch] = {}
-        self._repairs: set[tuple[str, str]] = set()
+        self._repairs: dict[tuple[str, ...], str] = {}
 
     async def admit(self, request: ForkRequest) -> ForkAdmission:
         pending = PendingBranch("", BranchOrigin.FORK, request.from_branch, request.parent_commit, self._clock.now())
@@ -88,15 +93,20 @@ class ForkDesk:
 
     async def admit_repair(self, request: RepairRequest) -> ForkAdmission:
         intent = request.intent
+        keys = _repair_keys(request)
         refusal = _parent_refusal(self._roster, intent.branch)
-        if not refusal and _repair_key(request) in self._repairs:
-            refusal = f"a repair of this intent on {intent.parent_commit} is already open or queued"
+        repairing = next((self._repairs[key] for key in keys if key in self._repairs), "")
+        if not refusal and repairing:
+            refusal = (
+                f"{repairing} already repairs this change, or this intent on {intent.parent_commit}, and is open or "
+                "queued; replay what it lands instead"
+            )
         pending = PendingBranch(
             "", BranchOrigin.REPAIR, intent.branch, intent.parent_commit, self._clock.now(), request
         )
         answer = self._admit(pending, f"repair of {intent.mechanism} on {intent.target}", refusal)
         if answer.status is not AdmissionStatus.REJECTED:
-            self._repairs.add(_repair_key(request))
+            self._repairs.update(dict.fromkeys(keys, answer.branch))
         return answer
 
     def _admit(self, pending: PendingBranch, reason: str, refusal: str) -> ForkAdmission:
@@ -160,7 +170,8 @@ class ForkDesk:
         self._queue = deque(pending for pending in self._queue if pending not in voided)
         for pending in voided:
             if pending.repair is not None:
-                self._repairs.discard(_repair_key(pending.repair))
+                for key in _repair_keys(pending.repair):
+                    del self._repairs[key]
             self._record(pending, f"voided: {reason}", "voided")
         return tuple(pending.branch for pending in voided)
 
