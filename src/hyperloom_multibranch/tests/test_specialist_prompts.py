@@ -78,12 +78,18 @@ def test_the_role_names_the_workload_every_step_s_tool_and_the_rules():
         role_prompt(" \n")
 
 
-def test_the_role_profiles_through_a_profile_test_and_tracelens_never_roofline():
+def test_the_role_profiles_through_a_profile_test_and_tracelens():
     prompt = role_prompt(WORKLOAD)
 
     assert 'submit_test with kind "profile", purpose "profile"' in prompt
     assert 'start_analysis with tool "tracelens" and that test\'s id as profile_request_id' in prompt
-    assert "roofline" not in prompt
+
+
+def test_the_role_uses_roofline_and_upstream_pr_search_only_when_start_analysis_lists_them():
+    prompt = role_prompt(WORKLOAD)
+
+    assert 'When start_analysis lists roofline, the same profile test with tool "roofline"' in prompt
+    assert 'When start_analysis lists upstream_pr_search, search with tool "upstream_pr_search"' in prompt
 
 
 def test_the_role_profiles_the_root_only_while_no_brief_lists_its_ceilings():

@@ -161,7 +161,11 @@ To profile: \
 submit_test with kind "profile", purpose "profile", your head as the parent commit and no delta. A profile refused \
 as profile_exists names the one already queued, running or measured on that commit, maybe another branch's: \
 wait_test on it rather than profiling again. Once the profile succeeded, start_analysis with tool "tracelens" and that test's id as profile_request_id reports each operator's share through \
-poll_inbox. Name the direction as an intent: the target (a bottleneck or an operator), the mechanism, and the layer: \
+poll_inbox. When start_analysis lists roofline, the same profile test with tool "roofline" reports how far \
+each kernel is from the card's compute or memory bound: a kernel far below its bound is one a kernel change can gain \
+on. When start_analysis lists upstream_pr_search, search with tool "upstream_pr_search" (params repo_url and \
+keywords) before you write a source or kernel change: an upstream PR that already does it is the patch to start from. \
+Name the direction as an intent: the target (a bottleneck or an operator), the mechanism, and the layer: \
 config for server arguments, environment variables and other settings, kernel when the change adds or replaces a GPU \
 kernel (a Triton, HIP or CK kernel, a fused kernel) or a kernel's tuned table, and source for any other code change. \
 For a source or kernel intent on a commit with operator shares, also give notebook_claim \
