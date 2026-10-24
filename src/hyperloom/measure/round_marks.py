@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
+from hyperloom.common.outside_facts import SGLANG_CUDA_GRAPH_CAPTURE_END
 from hyperloom.measure.boot_watch import read_ready_stamp
 from hyperloom.measure.phases import (
     ACCURACY_EVAL,
@@ -62,6 +63,8 @@ _WARMUP_DIR = "warmup_round"
 _ROUND_GLOB = "variant_*"
 _KV_FILE = "kv_metrics.json"
 _SERVER_LOG = "server.log"
+#: Magpie runs a server in a directory of its own below the run's: ``<run directory>/benchmark_sglang_<time>/server.log``.
+_SERVER_LOG_DIRS = "benchmark_*"
 _UTF8 = "utf-8"
 #: The phases ``kv_metrics.json`` records the instants of: the client's evaluation, and an AgentX client's own phases.
 _EVAL, _CLIENT_WARMUP, _CLIENT_MEASURED, _CLIENT_FINISHED = "eval", "warmup", "measured", "finished"
@@ -76,7 +79,7 @@ _WEIGHTS_PATTERNS = (
 )
 _COMPILE_PATTERNS = (re.compile(rf"torch\.compile takes {_SECONDS} s in total"),)
 _GRAPH_PATTERNS = (
-    re.compile(rf"Capture cuda graph end\. Time elapsed: {_SECONDS} s"),
+    re.compile(SGLANG_CUDA_GRAPH_CAPTURE_END),
     re.compile(rf"Graph capturing finished in {_SECONDS} secs?"),
 )
 #: SGLang states when it starts and ends loading the weights, not how long it took; each line begins with its time.
@@ -217,6 +220,22 @@ def _instant(value: object) -> float | None:
     return instant if math.isfinite(instant) else None
 
 
+def server_log_of(run_directory: Path) -> Path:
+    """The server log of the run in ``run_directory``: the one in it, else the newest launch's below it.
+
+    Magpie keeps a launch's log in ``benchmark_<framework>_<time>`` below the run's directory; the time is in the name, so
+    the last of them in name order is the launch that went on to serve (an earlier one is a launch that was started again).
+    """
+    direct = run_directory / _SERVER_LOG
+    if direct.is_file():
+        return direct
+    try:
+        launches = sorted(run_directory.glob(f"{_SERVER_LOG_DIRS}/{_SERVER_LOG}"))
+    except OSError:
+        return direct
+    return launches[-1] if launches else direct
+
+
 def boot_parts(server_log: Path) -> BootParts:
     """The parts of a boot the head of ``server_log`` accounts for (the longest mention of each: ranks boot in parallel)."""
     try:
@@ -302,7 +321,7 @@ def _boot_boundaries(run: RunMarks) -> list[Boundary]:
     """The boot of a run: one phase, or, when the engine's log says what part of it each took, its parts in the order an
     engine does them (what the log does not say first, then the weights, the compile, the graphs)."""
     spawned = run.ready - run.boot_seconds
-    known = boot_parts(run.directory / _SERVER_LOG).known()
+    known = boot_parts(server_log_of(run.directory)).known()
     if not known:
         return [Boundary(SERVER_BOOT, spawned)]
     left, parts = run.boot_seconds, []
