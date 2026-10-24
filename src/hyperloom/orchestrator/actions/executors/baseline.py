@@ -3135,7 +3135,7 @@ class BenchmarkRunExecutor:
             check_server_argv,
             write_boot_observation,
         )
-        from ...bringup.argv_preflight import OK, PARSED_AFTER_DROP, UNAVAILABLE
+        from ...bringup.argv_preflight import OK, PARSED_AFTER_DROP, UNAVAILABLE, ArgvRepair
         from ._server_argv import config_launch_env, config_server_argv, reseal_config_argv
 
         sealed = config_server_argv(config_path)
@@ -3162,8 +3162,10 @@ class BenchmarkRunExecutor:
             argv=probe_argv,
             text=sealed.text,
             launch_env=effective_launch_env,
-            repaired=spent,
-            digest=sealed.digest,
+            repair=ArgvRepair(
+                digest=sealed.digest,
+                spent=spent,
+            ),
         )
 
         if verdict.status == UNAVAILABLE:
