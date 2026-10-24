@@ -681,16 +681,15 @@ def _merge_profile_params(params: dict[str, Any]) -> None:
 
 # Restarts the multi-node server for this profiling round; returns the refusal result when it failed.
 async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -> dict[str, Any] | None:
-    from ._multi_node_server_lifecycle import ServerRestartFailed, restart_server_for_round
+    from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
     try:
         await restart_server_for_round(
-            extra_server_args=str(params.get("extra_server_args") or ""),
+            RoundServer.from_env(
+                str(params.get("extra_server_args") or ""),
+                str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None,
+            ),
             torch_profiler_dir=round_trace_root,
-            framework=os.environ.get("FRAMEWORK") or None,
-            model_path=str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None,
-            tp=int(os.environ.get("TP") or 0) or None,
-            ep=int(os.environ.get("EP") or 0) or None,
         )
     except ServerRestartFailed as exc:
         return {

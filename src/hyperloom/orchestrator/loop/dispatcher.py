@@ -51,7 +51,7 @@ from ..bus.resource_lock import (
 )
 from .sub_agent_runner import SubAgentResult
 from ..specialists.wall_budget import limit_wall_budget_extension
-from ..state.task_registry import IllegalTransition, Task, TaskNotFound
+from ..state.task_registry import IllegalTransition, Task, TaskNotFound, TaskSpec
 from .time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     expected_action_cost_minutes,
@@ -529,12 +529,14 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             for attempt in range(1, 6):
                 new_key = f"{child_key_prefix}{attempt}"
                 new_task, was_existing = await self.tasks.create_or_return_existing(
-                    kind=task.kind,
-                    params=params,
-                    idempotency_key=new_key,
-                    requires_lanes=list(task.requires_lanes or []),
-                    lease_ttl_sec=int(task.lease_ttl_sec or 0),
-                    dispatch_class="coordinator",
+                    TaskSpec(
+                        kind=task.kind,
+                        params=params,
+                        idempotency_key=new_key,
+                        requires_lanes=list(task.requires_lanes or []),
+                        lease_ttl_sec=int(task.lease_ttl_sec or 0),
+                        dispatch_class="coordinator",
+                    )
                 )
                 if not was_existing:
                     created.append(new_task.task_id)

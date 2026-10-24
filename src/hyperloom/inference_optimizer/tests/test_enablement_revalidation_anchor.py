@@ -23,6 +23,7 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
 @pytest.fixture
@@ -154,9 +155,11 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
     if script_source == "queued_without_override":
         # A persisted task created by an older producer may still lack the override.
         task = await coordinator.tasks.create(
-            kind="baseline",
-            params={"reason": ENABLEMENT_REVALIDATION_REASON, "config_path": str(config)},
-            idempotency_key="old-producer-revalidation",
+            TaskSpec(
+                kind="baseline",
+                params={"reason": ENABLEMENT_REVALIDATION_REASON, "config_path": str(config)},
+                idempotency_key="old-producer-revalidation",
+            ),
         )
         state.enablement.revalidation_task_id = task.task_id
     else:

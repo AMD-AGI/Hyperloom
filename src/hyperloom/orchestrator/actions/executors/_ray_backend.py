@@ -110,18 +110,20 @@ def _run_subprocess_worker(bench_round: SessionKillRound) -> tuple[int, str, str
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
         session_remaining_to_deadline_sec,
     )
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import RoundWatch, run_with_session_kill
 
     worker_env = _merge_worker_env(bench_round.env)
     proc = run_with_session_kill(
         bench_round.cmd,
         env=worker_env,
         cwd=bench_round.cwd,
-        timeout=bench_round.timeout,
-        silence_timeout_sec=bench_round.silence_timeout_sec,
-        server_log_path=bench_round.server_log_path,
-        server_already_ready=bench_round.server_already_ready,
-        session_deadline_sec=session_remaining_to_deadline_sec(bench_round.session_remaining_sec),
+        watch=RoundWatch(
+            timeout=bench_round.timeout,
+            silence_timeout_sec=bench_round.silence_timeout_sec,
+            server_log_path=bench_round.server_log_path,
+            server_already_ready=bench_round.server_already_ready,
+            session_deadline_sec=session_remaining_to_deadline_sec(bench_round.session_remaining_sec),
+        ),
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 

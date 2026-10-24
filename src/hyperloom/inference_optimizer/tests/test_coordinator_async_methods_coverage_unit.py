@@ -519,8 +519,8 @@ async def test_trajectory_reviewer_task_is_seeded_without_a_digest_when_the_dige
 
     created: list[dict] = []
 
-    async def _create_or_return_existing(**kwargs):
-        created.append(kwargs["params"])
+    async def _create_or_return_existing(spec):
+        created.append(spec.params)
         return SimpleNamespace(task_id="t-1"), False
 
     async def _warm(_params):

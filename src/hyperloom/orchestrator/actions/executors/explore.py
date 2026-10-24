@@ -27,6 +27,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
     VERDICT_REVERT,
+    GradingAnchor,
     agentx_active,
     constraint_fields,
     graded_axes_of,
@@ -62,8 +63,9 @@ from ._accuracy_gate import (
 )
 from . import _framework_switch_manifest as _switch_manifest
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
-from ._proposal_identity import effective_fingerprint, normalize_proposal
+from ._proposal_identity import BaseControls, effective_fingerprint, normalize_proposal
 from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
+from ._grid_variant_filter import ServingStack
 from ._grid_base import (
     TS_FAILED,
     TS_KILLED_OVERTIME,
@@ -1111,9 +1113,7 @@ class _ExploreRound:
                 gv.extra_server_args,
                 gv.extra_envs,
                 controls=_variant_control_fields(gv),
-                base_remove_args=self.base_remove_args,
-                base_unset_envs=self.base_unset_envs,
-                base_args_mode=self.args_mode,
+                base=BaseControls(self.base_remove_args, self.base_unset_envs, self.args_mode),
             )
         self.grid = grid
 
@@ -1125,10 +1125,12 @@ class _ExploreRound:
         # xDiT do-not-set list, plus flags the model class does not support.
         runnable, incompatible = apply_compatibility_filter(
             runnable,
-            framework=self.framework,
-            model_path=self.build["model_path"],
-            gpu_type=self.build["gpu_type"] or str(getattr(self.ss, "gpu_type", "") or ""),
-            stack_fingerprint=getattr(self.ss, "stack_fingerprint_meta", None),
+            serving=ServingStack(
+                framework=self.framework,
+                model_path=self.build["model_path"],
+                gpu_type=self.build["gpu_type"] or str(getattr(self.ss, "gpu_type", "") or ""),
+                stack_fingerprint=getattr(self.ss, "stack_fingerprint_meta", None),
+            ),
             base_server_args=compose_server_args(
                 inherited_args=self.inherited_args,
                 base_extra_args=self.base_args,
@@ -1496,8 +1498,10 @@ class _ExploreRound:
             self.ss,
             variant_meas,
             keep_threshold_pct=self.keep_threshold_pct,
-            anchor_perf=self.running_perf,
-            anchor_tput=self.running_tput,
+            anchor=GradingAnchor(
+                perf=self.running_perf,
+                tput=self.running_tput,
+            ),
         )
         on_intvty = graded.graded_on_intvty
         gain: float | None = None

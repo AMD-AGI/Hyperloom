@@ -21,6 +21,7 @@ from kernelforge.option_groups import option_group
 
 from . import __version__
 from .dense_shapes import MGrid
+from .router import RoutingEvidence, RoutingTarget
 
 if TYPE_CHECKING:
     from .tuners.base import TuneContext, TuneResult
@@ -333,12 +334,7 @@ def _route(
     """The tuners routed for this model and these inputs; ``plan`` asks the router exactly what ``run`` does."""
     from .router import select_tuners
 
-    return select_tuners(
-        profile,
-        framework=target.framework,
-        precision=target.precision,
-        quant_type=target.quant_type,
-        gpu_type=target.gpu_type,
+    evidence = RoutingEvidence(
         kernel_signature_log=sources.kernel_signature_log or None,
         has_untuned_csv=bool(sources.untuned_csv),
         # A demand file is a shape source like the others, and a stronger one: it lists the keys the runtime actually
@@ -348,6 +344,7 @@ def _route(
         # ...and a stronger *selection* input for the same reason.
         demand_report=demand_report,
     )
+    return select_tuners(profile, target, evidence)
 
 
 def _write_gpu_check(output_dir: Path) -> None:
@@ -555,16 +552,6 @@ def _write_artifact_manifest(report: Any, results: list, output_dir: Path, **pro
 @click.group("gemm-tune")
 def gemm_tune():
     """Deterministic GEMM tuning for AMD GPUs."""
-
-
-@dataclass(frozen=True)
-class RoutingTarget:
-    """The deployment the tuners are routed for: framework, precision, quant type and GPU."""
-
-    framework: str
-    precision: str
-    quant_type: str
-    gpu_type: str
 
 
 @dataclass(frozen=True)

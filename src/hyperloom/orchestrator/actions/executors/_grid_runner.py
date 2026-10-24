@@ -47,6 +47,7 @@ from ._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    RoundWatch,
     resolve_benchmark_timeouts,
     run_with_session_kill,
     server_log_death_excerpt,
@@ -64,7 +65,7 @@ from .benchmark_result import (
 from ._gpu_metrics import write_gpu_metrics_from_report
 from .benchmark_backend import build_benchmark_command
 from .benchmark_config import prepare_benchmark_runtime
-from ._launch_evidence import build_launch_evidence, persist_launch_evidence
+from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_launch_evidence
 from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, refuse_unpinned_speculative_change
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
@@ -438,7 +439,7 @@ def _run_magpie(
     # Ray-managed GPU execution (§12 T1): route the round through the serving lease's actor, which holds ``num_gpus``
     # across every round sharing this server.
     if serving_lease is not None:
-        from ._ray_backend import strip_visible_devices_from_config
+        from ._ray_backend import SessionKillRound, strip_visible_devices_from_config
 
         ray_config_path = strip_visible_devices_from_config(config_path)
         cmd = build_benchmark_command(
@@ -450,16 +451,18 @@ def _run_magpie(
         # (potentially on another node) and only its final ``(rc, stdout, stderr)`` comes back, so there is nothing
         # local to call per line.
         return serving_lease.run_session_kill(
-            cmd,
-            env=env,
-            cwd=cwd,
-            timeout=timeout_sec,
-            silence_timeout_sec=silence_timeout_sec,
-            server_log_path=server_log_path,
-            server_already_ready=server_already_ready,
-            # Converted here, at the last moment before the process boundary: the actor cannot read this process's
-            # monotonic clock.
-            session_remaining_sec=session_deadline_to_remaining_sec(session_deadline_sec),
+            SessionKillRound(
+                cmd,
+                env=env,
+                cwd=cwd,
+                timeout=timeout_sec,
+                silence_timeout_sec=silence_timeout_sec,
+                server_log_path=server_log_path,
+                server_already_ready=server_already_ready,
+                # Converted here, at the last moment before the process boundary: the actor cannot read this process's
+                # monotonic clock.
+                session_remaining_sec=session_deadline_to_remaining_sec(session_deadline_sec),
+            )
         )
 
     cmd = build_benchmark_command(
@@ -473,12 +476,14 @@ def _run_magpie(
         cmd,
         env=env,
         cwd=cwd,
-        timeout=timeout_sec,
-        silence_timeout_sec=silence_timeout_sec,
-        server_log_path=server_log_path,
-        server_already_ready=server_already_ready,
+        watch=RoundWatch(
+            timeout=timeout_sec,
+            silence_timeout_sec=silence_timeout_sec,
+            server_log_path=server_log_path,
+            server_already_ready=server_already_ready,
+            session_deadline_sec=session_deadline_sec,
+        ),
         on_output=on_output,
-        session_deadline_sec=session_deadline_sec,
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
@@ -1144,20 +1149,18 @@ def _log_variant_banner(run: _GridRun, at: _VariantSlot) -> None:
 
 async def _restart_multi_node_server(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> None:
     """Restart sglang/vllm with this variant's flags so each multi-node row runs against a fresh server."""
-    from ._multi_node_server_lifecycle import ServerRestartFailed, restart_server_for_round
+    from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
     unset_envs = [str(k) for k in getattr(at.variant, "unset_envs", []) or [] if str(k).strip()]
     try:
         # PD knobs auto-resolved from $PD_* env; PD config stays constant across variants within one run.
         await restart_server_for_round(
-            extra_server_args=rounds.mn_effective_args,
+            RoundServer(rounds.mn_effective_args, model_path=run.model_path, ep=int(os.environ.get("EP") or 0) or None),
             # Reference recipe envs under this variant's own overrides (e.g. MORI_* MoE-dispatch tuning) so
             # server-side env knobs proposed by specialists take effect on the restarted sglang without dropping
             # the envs the baseline was measured with.
             extra_env=_mn_restart_env(run.mn_reference_envs, at.variant, unset_envs),
             unset_env=unset_envs,
-            model_path=run.model_path,
-            ep=int(os.environ.get("EP") or 0) or None,
         )
     except ServerRestartFailed as exc:
         log.warning(
@@ -1766,9 +1769,8 @@ def _attach_grid_launch_evidence(
             evidence = native_launch_evidence(measurement, config_path, actual_server_log=actual_log)
         else:
             evidence = build_launch_evidence(
-                config_path=config_path,
+                RequestedLaunch(config_path, os.environ.get("FRAMEWORK", "")),
                 actual_server_log=actual_log,
-                framework=os.environ.get("FRAMEWORK", ""),
                 slot=slot,
                 caller_reused_ready_server=caller_reused_ready_server,
             )

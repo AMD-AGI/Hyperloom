@@ -43,6 +43,9 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_WARMUP,
     RUN_AFTER_MOE_RUNNER_FAILURE,
     RUN_INITIAL,
+    BaselineInvocation,
+    BaselineRequest,
+    BaselineRound,
     make_baseline_recorder,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
@@ -62,7 +65,7 @@ from ..stop_attribution import (
 )
 from . import _server_lifecycle as _lifecycle
 from ._aiter_jit import is_aiter_jit_registry_mismatch
-from ._launch_evidence import build_launch_evidence, persist_launch_evidence
+from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_launch_evidence
 
 # The grid module is the namespace the helpers both benching arms share ended up in: how a sentinel returncode reads
 # back, how a round's cap is clamped to the budget, how the two session bounds are resolved, and the hygiene every
@@ -79,6 +82,7 @@ from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     DETOKENIZER_STALL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
+    RoundWatch,
     clear_server_ready_stamp,
     post_ready_runtime_sec,
     resolve_benchmark_timeouts,
@@ -529,10 +533,7 @@ def _attach_baseline_launch_evidence(
         result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
         return
     evidence = build_launch_evidence(
-        config_path=config_path,
-        actual_server_log=actual_log,
-        framework=framework,
-        slot=output_dir,
+        RequestedLaunch(config_path, framework), actual_server_log=actual_log, slot=output_dir
     )
     result["launch_evidence"] = evidence
     result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
@@ -2311,12 +2312,14 @@ class BenchmarkRunExecutor:
         if recorder is not None:
             recorder.record_invocation(
                 run_index=run_index,
-                framework_args=server_args,
-                extra_envs=base_extra_envs,
-                config_path=config_path,
-                framework=fw,
-                model_path=resolved_model,
-                args_mode=str(params.get("args_mode") or "append"),
+                invocation=BaselineInvocation(
+                    framework_args=server_args,
+                    extra_envs=base_extra_envs,
+                    config_path=config_path,
+                    framework=fw,
+                    model_path=resolved_model,
+                    args_mode=str(params.get("args_mode") or "append"),
+                ),
             )
         return await self._run_attempt_rounds(
             {
@@ -2978,11 +2981,13 @@ class BenchmarkRunExecutor:
                 return
             recorder.record_round(
                 run_index=common["run_index"],
-                label=label,
-                started_at=started_at,
-                duration_sec=round(time.monotonic() - started_monotonic, 3),
-                timeout_sec=common.get("timeout_sec"),
-                result=result,
+                round_=BaselineRound(
+                    label=label,
+                    started_at=started_at,
+                    duration_sec=round(time.monotonic() - started_monotonic, 3),
+                    timeout_sec=common.get("timeout_sec"),
+                    result=result,
+                ),
             )
 
         benchmark_kwargs = {key: value for key, value in common.items() if key not in _ROUND_RECORDING_KEYS}
@@ -3066,12 +3071,14 @@ class BenchmarkRunExecutor:
                     warm_cmd,
                     env=warm_env,
                     cwd=str(warm_dir),
-                    timeout=timeout_sec,
-                    silence_timeout_sec=silence_timeout_sec,
-                    server_already_ready=True,
-                    server_log_path=_watchdog_server_log_path(warm_dir, framework),
+                    watch=RoundWatch(
+                        timeout=timeout_sec,
+                        silence_timeout_sec=silence_timeout_sec,
+                        server_already_ready=True,
+                        server_log_path=_watchdog_server_log_path(warm_dir, framework),
+                        session_deadline_sec=session_deadline_sec,
+                    ),
                     on_output=warm_activity.note,
-                    session_deadline_sec=session_deadline_sec,
                 )
             warm_rc = warm_proc.returncode
             log.info("baseline_executor: MN warmup pass done (discarded) rc=%s", warm_rc)
@@ -3128,7 +3135,7 @@ class BenchmarkRunExecutor:
             check_server_argv,
             write_boot_observation,
         )
-        from ...bringup.argv_preflight import OK, PARSED_AFTER_DROP, UNAVAILABLE
+        from ...bringup.argv_preflight import OK, PARSED_AFTER_DROP, UNAVAILABLE, ArgvRepair
         from ._server_argv import config_launch_env, config_server_argv, reseal_config_argv
 
         sealed = config_server_argv(config_path)
@@ -3155,8 +3162,10 @@ class BenchmarkRunExecutor:
             argv=probe_argv,
             text=sealed.text,
             launch_env=effective_launch_env,
-            repaired=spent,
-            digest=sealed.digest,
+            repair=ArgvRepair(
+                digest=sealed.digest,
+                spent=spent,
+            ),
         )
 
         if verdict.status == UNAVAILABLE:
@@ -3299,7 +3308,7 @@ class BenchmarkRunExecutor:
         server_args: str,
         resolved_model: str,
     ) -> dict[str, Any] | None:
-        from ._multi_node_server_lifecycle import ServerRestartFailed, restart_server_for_round
+        from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
         if round_.ctx_extra.get("mn_round_restarted"):
             return None
@@ -3320,12 +3329,10 @@ class BenchmarkRunExecutor:
             env = {str(key): str(value) for key, value in ref_envs.items()}
             # PD knobs auto-resolved by the helper from $PD_* env, falling back to state.json.
             await restart_server_for_round(
-                extra_server_args=merge_server_args(base, server_args) if base else server_args,
+                RoundServer.from_env(
+                    merge_server_args(base, server_args) if base else server_args, resolved_model or None
+                ),
                 extra_env=env or None,
-                framework=os.environ.get("FRAMEWORK") or None,
-                model_path=resolved_model or None,
-                tp=int(os.environ.get("TP") or 0) or None,
-                ep=int(os.environ.get("EP") or 0) or None,
             )
         except ServerRestartFailed as exc:
             return {
@@ -3453,25 +3460,27 @@ class BenchmarkRunExecutor:
         if round_.serving_lease is not None:
             # Ray-managed GPU execution (§12 T1): run inside the lease's actor (holds num_gpus across this run's
             # rounds).
-            from ._ray_backend import strip_visible_devices_from_config
+            from ._ray_backend import SessionKillRound, strip_visible_devices_from_config
 
             # No liveness callback is possible here: the round runs inside a Ray actor in another process
             # (potentially on another node) and only its final ``(rc, stdout, stderr)`` crosses back, so there is
             # nothing local to call per line of child output.
             returncode, stdout, stderr = await asyncio.to_thread(
                 round_.serving_lease.run_session_kill,
-                build_benchmark_command(
-                    python_exe=self.magpie_python,
-                    config_path=strip_visible_devices_from_config(round_.config_path),
-                    output_dir=round_.output_dir,
+                SessionKillRound(
+                    build_benchmark_command(
+                        python_exe=self.magpie_python,
+                        config_path=strip_visible_devices_from_config(round_.config_path),
+                        output_dir=round_.output_dir,
+                    ),
+                    env=round_.env,
+                    cwd=str(round_.output_dir),
+                    timeout=round_.timeout_sec,
+                    silence_timeout_sec=round_.silence_timeout_sec,
+                    server_already_ready=server_ready,
+                    server_log_path=round_.watchdog_server_log,
+                    session_remaining_sec=session_deadline_to_remaining_sec(round_.session_deadline_sec),
                 ),
-                env=round_.env,
-                cwd=str(round_.output_dir),
-                timeout=round_.timeout_sec,
-                silence_timeout_sec=round_.silence_timeout_sec,
-                server_already_ready=server_ready,
-                server_log_path=round_.watchdog_server_log,
-                session_remaining_sec=session_deadline_to_remaining_sec(round_.session_deadline_sec),
             )
         else:
             async with heartbeat_while_output_flows(unit="baseline_round", label="benchmark") as activity:
@@ -3480,12 +3489,14 @@ class BenchmarkRunExecutor:
                     round_.cmd,
                     env=round_.env,
                     cwd=str(round_.output_dir),
-                    timeout=round_.timeout_sec,
-                    silence_timeout_sec=round_.silence_timeout_sec,
-                    server_already_ready=server_ready,
-                    server_log_path=round_.watchdog_server_log,
+                    watch=RoundWatch(
+                        timeout=round_.timeout_sec,
+                        silence_timeout_sec=round_.silence_timeout_sec,
+                        server_already_ready=server_ready,
+                        server_log_path=round_.watchdog_server_log,
+                        session_deadline_sec=round_.session_deadline_sec,
+                    ),
                     on_output=activity.note,
-                    session_deadline_sec=round_.session_deadline_sec,
                 )
             returncode, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
         return _BenchProcess(
@@ -3957,14 +3968,16 @@ class BaselineExecutor(BenchmarkRunExecutor):
         streak, total = self._failure_counters(ctx)
         recorder = make_baseline_recorder(
             self._resolve_sink(ctx),
-            task_id=str(getattr(ctx.task, "task_id", "") or ""),
-            task_kind=str(getattr(ctx.task, "kind", "") or ""),
-            reason=str(params.get("reason") or ""),
-            framework=self._resolve_framework(ctx),
-            establishes_quality_ref=_should_establish_quality_ref(getattr(ctx.task, "kind", ""), params),
-            params=params,
-            failure_streak_before=streak,
-            total_failures_before=total,
+            BaselineRequest(
+                task_id=str(getattr(ctx.task, "task_id", "") or ""),
+                task_kind=str(getattr(ctx.task, "kind", "") or ""),
+                reason=str(params.get("reason") or ""),
+                framework=self._resolve_framework(ctx),
+                establishes_quality_ref=_should_establish_quality_ref(getattr(ctx.task, "kind", ""), params),
+                params=params,
+                failure_streak_before=streak,
+                total_failures_before=total,
+            ),
             owns_event=not str(params.get(INLINE_EVENT_PARAM) or ""),
         )
         try:

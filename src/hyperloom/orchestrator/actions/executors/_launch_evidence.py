@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -150,33 +151,40 @@ def _warm_reuse_record(actual_server_log: str | None, slot: Path, caller_reused_
     }
 
 
+@dataclass(frozen=True)
+class RequestedLaunch:
+    """The launch a measurement requested: its materialized config and any caller overrides of it."""
+
+    config_path: Path
+    framework: str
+    server_args: str | None = None
+    server_env: dict[str, str] | None = None
+    model_path: str | None = None
+
+
 def build_launch_evidence(
+    requested: RequestedLaunch,
     *,
-    config_path: Path,
     actual_server_log: str | None,
-    framework: str,
     slot: Path,
     caller_reused_ready_server: bool = False,
-    requested_server_args: str | None = None,
-    requested_server_env: dict[str, str] | None = None,
-    model_path: str | None = None,
 ) -> dict[str, Any]:
     """Build declared and observed evidence for one measured server launch."""
-    recipe = _read_config_recipe(config_path)
+    recipe = _read_config_recipe(requested.config_path)
     benchmark = recipe.benchmark
 
-    resolved_framework = str(benchmark.get("framework") or framework or "sglang").strip().lower()
+    resolved_framework = str(benchmark.get("framework") or requested.framework or "sglang").strip().lower()
     args_env = server_args_env_name(resolved_framework)
     envs = benchmark.get("envs") if isinstance(benchmark.get("envs"), dict) else {}
     declared_env = {str(key): str(value) for key, value in envs.items() if str(key) != args_env}
     declared_args = str(envs.get(args_env) or "").strip()
-    requested_env = requested_server_env if requested_server_env is not None else declared_env
-    requested_args = str(requested_server_args).strip() if requested_server_args is not None else declared_args
-    requested_model = str(model_path if model_path is not None else benchmark.get("model") or "")
+    requested_env = requested.server_env if requested.server_env is not None else declared_env
+    requested_args = str(requested.server_args).strip() if requested.server_args is not None else declared_args
+    requested_model = str(requested.model_path if requested.model_path is not None else benchmark.get("model") or "")
 
     return {
         "schema_version": 1,
-        "materialized_config_path": str(config_path) if recipe.raw else "",
+        "materialized_config_path": str(requested.config_path) if recipe.raw else "",
         "recipe_digest": f"sha256:{hashlib.sha256(recipe.raw).hexdigest()}" if recipe.raw else "",
         "framework": resolved_framework,
         "model_path": requested_model,

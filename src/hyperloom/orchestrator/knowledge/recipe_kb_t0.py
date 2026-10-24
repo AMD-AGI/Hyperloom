@@ -20,12 +20,17 @@ from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import agentx_active
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     RecipeKB,
+    RecipeUpsert,
     cid_to_path_components,
     recipe_canonical_id,
 )
 from hyperloom.orchestrator.knowledge.workload_tags import WORKLOAD_SHAPE_FIELDS, workload_shape_tags
 from hyperloom.inference_optimizer.breakdown.recorder import warm_start_event as _warm_start_event
-from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version, kb_hardware_slug
+from hyperloom.inference_optimizer.recipe_snapshot_constants import (
+    RecipeIdentity,
+    detect_framework_version,
+    kb_hardware_slug,
+)
 from hyperloom.inference_optimizer.session.session_paths import (
     recipe_kb_lessons_json,
     recipe_kb_pitfalls_json,
@@ -303,14 +308,10 @@ def _settle_warm_start_event(
     if status in _warm_start_event.MATCHED_STATUSES and recipe:
         replay = context.get("recommended_replay")
         matched = _warm_start_event.matched_block(
-            tier=match.get("tier"),
-            confidence=match.get("confidence"),
-            source=match.get("source"),
-            canonical_id=match.get("canonical_id"),
+            match=match,
             recipe=recipe,
+            experience=experience,
             expected_gain_pct=replay.get("expected_gain_pct") if isinstance(replay, Mapping) else None,
-            lessons=experience["lessons"],
-            pitfalls=experience["pitfalls"],
         )
     recorder.finish(match_status=status, matched=matched)
 
@@ -759,7 +760,7 @@ def _resolve_t0_identity(
     model = _text(workload) or "unknown_model"
     # Topology-aware hardware slug (multi-node appends ``_ws{world_size}``), resolved once so the cid, the stored
     # ``hardware`` field, and every warm-start tier share an identical, isolated key.
-    hardware = kb_hardware_slug(_text(hw) or "unknown_gpu", **resolve_kb_topology())
+    hardware = kb_hardware_slug(_text(hw) or "unknown_gpu", resolve_kb_topology())
     framework = _text(
         extra.get("framework_name")
         or extra.get("framework")
@@ -785,13 +786,15 @@ def _resolve_t0_identity(
         "precision": _text(getattr(shared_state, "precision", "")),
     }
     identity["canonical_id"] = recipe_canonical_id(
-        model=model,
-        hardware=hardware,
-        framework_name=framework,
-        framework_version=version,
-        precision=identity["precision"],
-        model_type=identity["model_type"],
-        architectures=architectures,
+        RecipeIdentity(
+            model=model,
+            hardware=hardware,
+            framework_name=framework,
+            framework_version=version,
+            precision=identity["precision"],
+            model_type=identity["model_type"],
+            architectures=architectures,
+        ),
         scheme=("agentx" if agentx_active(benchmark_mode=getattr(shared_state, "benchmark_mode", "")) else "inference"),
     )
     return identity
@@ -823,7 +826,7 @@ def _stamp_local_authority_row(
         if value and value != "unknown":
             sfp_payload[stored] = value
     try:
-        kb.put_recipe(
+        upsert = RecipeUpsert(
             canonical_id=identity["canonical_id"],
             model=identity["model"],
             hardware=identity["hardware"],
@@ -852,6 +855,7 @@ def _stamp_local_authority_row(
                 "details": {"sid": session_id},
             },
         )
+        kb.put_recipe(upsert)
     except Exception:
         log.exception("T0 anchor put_recipe raised unexpectedly")
 

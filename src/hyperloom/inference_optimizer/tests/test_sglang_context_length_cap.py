@@ -11,6 +11,7 @@ import yaml
 from hyperloom.inference_optimizer.grid_server_args import (
     DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS,
     DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
+    WorkloadTokenWindow,
     inject_sglang_attention_backend,
     inject_sglang_context_length,
     resolve_sglang_context_cap,
@@ -154,7 +155,7 @@ def test_cap_bad_env_falls_back_to_default(monkeypatch, bad):
 def test_inject_caps_huge_window_for_sglang(tmp_path):
     """Case 1: a huge max_position_embeddings → the injected ``--context-length`` never exceeds the workload cap."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
-    out = inject_sglang_context_length("--foo bar", "sglang", model, 256, 256)
+    out = inject_sglang_context_length("--foo bar", "sglang", model, WorkloadTokenWindow(256, 256))
     assert "--context-length" in out
     cap = resolve_sglang_context_cap(256, 256)
     value = _context_length_value(out)
@@ -167,21 +168,21 @@ def test_inject_caps_huge_window_for_sglang(tmp_path):
 def test_inject_caps_huge_window_via_nested_text_config(tmp_path):
     """Multimodal configs hide the window under ``text_config``; the cap must still apply."""
     model = _write_model(tmp_path, _HUGE_MAX_POS, nested=True)
-    out = inject_sglang_context_length("", "sglang", model, 256, 256)
+    out = inject_sglang_context_length("", "sglang", model, WorkloadTokenWindow(256, 256))
     assert _context_length_value(out) == 8192
 
 
 def test_inject_clamps_to_small_native_window(tmp_path):
     """A native window below the cap is never advertised above itself."""
     model = _write_model(tmp_path, 4096)
-    out = inject_sglang_context_length("", "sglang", model, 256, 256)
+    out = inject_sglang_context_length("", "sglang", model, WorkloadTokenWindow(256, 256))
     assert _context_length_value(out) == 4096
 
 
 def test_inject_uses_cap_below_native_window(tmp_path):
     """When the native window is large but finite, the workload cap wins."""
     model = _write_model(tmp_path, 131072)
-    out = inject_sglang_context_length("", "sglang", model, 4096, 4096)
+    out = inject_sglang_context_length("", "sglang", model, WorkloadTokenWindow(4096, 4096))
     assert _context_length_value(out) == 10240
 
 
@@ -190,7 +191,7 @@ def test_inject_clamps_to_max_model_len(tmp_path):
     """A huge native window + ISL/OSL whose cap exceeds an explicit --max-model-len must clamp --context-length down to --max-model-len."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
     # cap = 80000 + 2000 + 2048 = 84048, but max_model_len pins the ceiling.
-    out = inject_sglang_context_length("", "sglang", model, 80000, 2000, max_model_len=82000)
+    out = inject_sglang_context_length("", "sglang", model, WorkloadTokenWindow(80000, 2000, max_model_len=82000))
     assert _context_length_value(out) == 82000
 
 
@@ -198,14 +199,14 @@ def test_inject_max_model_len_above_cap_is_noop(tmp_path):
     """A max-model-len larger than the workload cap leaves the cap untouched."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
     # cap = 4096 + 4096 + 2048 = 10240 < max_model_len -> cap wins.
-    out = inject_sglang_context_length("", "sglang", model, 4096, 4096, max_model_len=131072)
+    out = inject_sglang_context_length("", "sglang", model, WorkloadTokenWindow(4096, 4096, max_model_len=131072))
     assert _context_length_value(out) == 10240
 
 
 def test_inject_native_window_still_wins_when_smallest(tmp_path):
     """When max_position_embeddings is the smallest ceiling it still wins."""
     model = _write_model(tmp_path, 4096)
-    out = inject_sglang_context_length("", "sglang", model, 80000, 2000, max_model_len=82000)
+    out = inject_sglang_context_length("", "sglang", model, WorkloadTokenWindow(80000, 2000, max_model_len=82000))
     assert _context_length_value(out) == 4096
 
 
@@ -213,7 +214,7 @@ def test_inject_native_window_still_wins_when_smallest(tmp_path):
 def test_inject_ignores_absent_or_nonpositive_max_model_len(tmp_path, bad):
     """An unset / non-positive max-model-len falls back to the prior behaviour."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
-    out = inject_sglang_context_length("", "sglang", model, 4096, 4096, max_model_len=bad)
+    out = inject_sglang_context_length("", "sglang", model, WorkloadTokenWindow(4096, 4096, max_model_len=bad))
     assert _context_length_value(out) == 10240
 
 
@@ -239,7 +240,7 @@ def test_materialize_sglang_clamps_context_length_to_max_model_len(tmp_path, mon
 def test_inject_does_not_override_existing(tmp_path, existing):
     """Required case 2: an operator-supplied ``--context-length`` wins."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
-    out = inject_sglang_context_length(existing, "sglang", model, 256, 256)
+    out = inject_sglang_context_length(existing, "sglang", model, WorkloadTokenWindow(256, 256))
     assert out == existing
     assert out.count("--context-length") == 1
     assert "8192" not in out
@@ -307,13 +308,9 @@ def test_warm_replay_rejects_target_above_max_model_len() -> None:
 def test_inject_noop_for_non_sglang(tmp_path, framework):
     """Required case 3: vllm / atom get no ``--context-length`` injected."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
-    assert inject_sglang_context_length("--foo", framework, model, 256, 256) == "--foo"
+    assert inject_sglang_context_length("--foo", framework, model, WorkloadTokenWindow(256, 256)) == "--foo"
     assert "--context-length" not in inject_sglang_context_length(
-        "--gpu-memory-utilization 0.9",
-        framework,
-        model,
-        256,
-        256,
+        "--gpu-memory-utilization 0.9", framework, model, WorkloadTokenWindow(256, 256)
     )
 
 
@@ -321,20 +318,20 @@ def test_inject_noop_when_maxpos_unreadable(tmp_path):
     """Required case 4: an unreadable window injects nothing (fail-safe)."""
     # config.json present but carries no max-length key.
     no_key = _write_model(tmp_path / "a", None)
-    assert inject_sglang_context_length("--foo", "sglang", no_key, 256, 256) == "--foo"
+    assert inject_sglang_context_length("--foo", "sglang", no_key, WorkloadTokenWindow(256, 256)) == "--foo"
     # config.json absent entirely.
     missing = str(tmp_path / "does-not-exist")
-    assert inject_sglang_context_length("--foo", "sglang", missing, 256, 256) == "--foo"
+    assert inject_sglang_context_length("--foo", "sglang", missing, WorkloadTokenWindow(256, 256)) == "--foo"
     # empty / None model path.
-    assert inject_sglang_context_length("--foo", "sglang", "", 256, 256) == "--foo"
-    assert inject_sglang_context_length("--foo", "sglang", None, 256, 256) == "--foo"
+    assert inject_sglang_context_length("--foo", "sglang", "", WorkloadTokenWindow(256, 256)) == "--foo"
+    assert inject_sglang_context_length("--foo", "sglang", None, WorkloadTokenWindow(256, 256)) == "--foo"
 
 
 def test_inject_empty_or_unknown_framework_treated_as_sglang(tmp_path):
     """An empty/unknown framework routes to EXTRA_SGLANG_ARGS, so the cap applies there too."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
-    assert _context_length_value(inject_sglang_context_length("", "", model, 256, 256)) == 8192
-    assert _context_length_value(inject_sglang_context_length("", None, model, 256, 256)) == 8192
+    assert _context_length_value(inject_sglang_context_length("", "", model, WorkloadTokenWindow(256, 256))) == 8192
+    assert _context_length_value(inject_sglang_context_length("", None, model, WorkloadTokenWindow(256, 256))) == 8192
 
 
 # materialize_config_with_envs (the production choke point)

@@ -43,7 +43,7 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
@@ -2026,9 +2026,11 @@ async def test_baseline_executor_fails_on_nonzero_rc_despite_valid_measurement(t
         return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="cleanup failed")
 
     task = await tr.create(
-        kind="baseline",
-        params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
-        idempotency_key="baseline-valid-warning",
+        TaskSpec(
+            kind="baseline",
+            params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
+            idempotency_key="baseline-valid-warning",
+        ),
     )
     sub.register_executor("baseline", BaselineExecutor(session_dir=tmp_path))
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=fake_run):
@@ -2174,9 +2176,11 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
     task = await tr.create(
-        kind="profile",
-        params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
-        idempotency_key="prof-1",
+        TaskSpec(
+            kind="profile",
+            params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
+            idempotency_key="prof-1",
+        ),
     )
     sub.register_executor("profile", pe)
     with patch.object(BenchmarkRunExecutor, "__call__", _fake_baseline):
@@ -2245,9 +2249,11 @@ async def test_profile_executor_patches_configured_inferencex_path(
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
     task = await tr.create(
-        kind="profile",
-        params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
-        idempotency_key="prof-inferencex-path",
+        TaskSpec(
+            kind="profile",
+            params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
+            idempotency_key="prof-inferencex-path",
+        ),
     )
     sub.register_executor("profile", pe)
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run_ix):
@@ -2302,9 +2308,11 @@ async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
     task = await tr.create(
-        kind="profile",
-        params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
-        idempotency_key="prof-capture",
+        TaskSpec(
+            kind="profile",
+            params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
+            idempotency_key="prof-capture",
+        ),
     )
     sub.register_executor("profile", pe)
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):

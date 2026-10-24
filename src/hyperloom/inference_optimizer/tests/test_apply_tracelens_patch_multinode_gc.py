@@ -255,7 +255,8 @@ def _fan_out_calls(monkeypatch, tmp_path: Path, *, patch_set: str, torch_profile
     with pytest.raises(Exception) as excinfo:
         asyncio.run(
             lifecycle.restart_server_for_round(
-                framework="sglang", model_path="/m", tp=8, ep=1, torch_profiler_dir=torch_profiler_dir
+                lifecycle.RoundServer(framework="sglang", model_path="/m", tp=8, ep=1),
+                torch_profiler_dir=torch_profiler_dir,
             )
         )
     chain, exc = [], excinfo.value
@@ -296,10 +297,7 @@ def test_a_failed_restart_restores_the_round_env(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError):
         asyncio.run(
             lifecycle.restart_server_for_round(
-                framework="sglang",
-                model_path="/m",
-                tp=8,
-                ep=1,
+                lifecycle.RoundServer(framework="sglang", model_path="/m", tp=8, ep=1),
                 torch_profiler_dir=str(tmp_path / "trace"),
                 extra_env={"HYPERLOOM_TEST_FWD": "1"},
                 unset_env=["HYPERLOOM_TEST_DROP"],

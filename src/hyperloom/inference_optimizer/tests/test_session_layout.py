@@ -27,7 +27,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.inference_optimizer.session.session_paths import (
     agent_prompt_snapshot,
     manifest_path,
@@ -423,9 +423,11 @@ async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
     sub = SubAgentRunner(locks, tasks, session_dir=sd)
     sub.register_executor("baseline", runner)
     task = await tasks.create(
-        kind="baseline",
-        params={},
-        idempotency_key="ws-test-1",
+        TaskSpec(
+            kind="baseline",
+            params={},
+            idempotency_key="ws-test-1",
+        ),
     )
     res = await sub.run_task(task)
     db.close()
@@ -453,9 +455,11 @@ async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
     sub = SubAgentRunner(locks, tasks, session_dir=sd)
     sub.register_executor("target_analysis", runner)
     task = await tasks.create(
-        kind="target_analysis",
-        params={},
-        idempotency_key="target-analysis-test-1",
+        TaskSpec(
+            kind="target_analysis",
+            params={},
+            idempotency_key="target-analysis-test-1",
+        ),
     )
     await sub.run_task(task)
     db.close()

@@ -77,6 +77,12 @@ def _write_yaml(path: Path, *, framework: str = "vllm") -> None:
         yaml.safe_dump(cfg, f)
 
 
+def _launch_kwargs(kwargs: dict) -> dict:
+    """A launch's keywords with its RoundWatch gates spelled out; a Ray round arrives already flat."""
+    watch = kwargs.get("watch")
+    return {**kwargs, **vars(watch)} if watch is not None else dict(kwargs)
+
+
 def _fake_workspace(slot: Path, *, tput: float) -> Path:
     ws = slot / "benchmark_vllm_20260602_010101"
     ws.mkdir(parents=True)
@@ -128,6 +134,7 @@ def _cold_then_hot_fake_run(
     state = {"calls": 0}
 
     def fake_run(cmd, *args, **kwargs):
+        kwargs = _launch_kwargs(kwargs)
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         if launches is not None:
@@ -924,6 +931,7 @@ def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
     state = {"calls": 0}
 
     def fake_run(cmd, *args, **kwargs):
+        kwargs = _launch_kwargs(kwargs)
         launches.append(kwargs)
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
@@ -2288,6 +2296,7 @@ def _capturing_fake_run(
         # The memoized interpreter probe is not a benchmark round.
         if "--output-dir" not in cmd:
             return subprocess.CompletedProcess(cmd, 0, "ok", "")
+        kwargs = _launch_kwargs(kwargs)
         slot = Path(cmd[cmd.index("--output-dir") + 1])
         calls.append({"round_slot": slot.name, **kwargs})
         granted = float(kwargs.get("timeout") or 0.0)
@@ -2324,9 +2333,10 @@ class _CapturingLease:
     def __init__(self) -> None:
         self._run, self.calls = _capturing_fake_run()
 
-    def run_session_kill(self, cmd, **kwargs) -> tuple[int | None, str, str]:
+    def run_session_kill(self, bench_round) -> tuple[int | None, str, str]:
         """Record the launch and answer as the actor does, with a bare triple."""
-        proc = self._run(cmd, **kwargs)
+        fields = dict(vars(bench_round))
+        proc = self._run(fields.pop("cmd"), **fields)
         return proc.returncode, proc.stdout, proc.stderr
 
     def close(self) -> None:

@@ -1212,8 +1212,8 @@ async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, m
     monkeypatch.setattr(mne, "is_multi_node", lambda: True)
     captured_restart: dict = {}
 
-    async def fake_restart_server_for_round(**kwargs):
-        captured_restart.update(kwargs)
+    async def fake_restart_server_for_round(server, **kwargs):
+        captured_restart.update(kwargs, extra_server_args=server.extra_server_args)
 
     def fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
@@ -1621,7 +1621,7 @@ def _capture_launches(recorded: list[dict]):
         if "--output-dir" not in cmd:
             return subprocess.CompletedProcess(cmd, 0, "ok", "")
         slot = Path(cmd[cmd.index("--output-dir") + 1])
-        recorded.append({"round_slot": slot.name, **kwargs})
+        recorded.append({"round_slot": slot.name, **kwargs, **vars(kwargs["watch"])})
         _fake_workspace(slot)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
@@ -2154,7 +2154,7 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
         monkeypatch.setattr(mne, "is_multi_node", lambda: True)
         monkeypatch.setattr(mne, "mn_bench_warmup_enabled", lambda: True)
 
-        async def fake_restart_server_for_round(**_kwargs):
+        async def fake_restart_server_for_round(_server, **_kwargs):
             return None
 
         monkeypatch.setattr(mnsl, "restart_server_for_round", fake_restart_server_for_round)
@@ -2227,7 +2227,7 @@ class TestSessionBudgetWarmupRounds:
         monkeypatch.setattr(mne, "mn_bench_warmup_enabled", lambda: True)
         restarts: list[float] = []
 
-        async def slow_restart(**_kwargs):
+        async def slow_restart(_server, **_kwargs):
             restarts.append(time.monotonic())
             await asyncio.sleep(3.0)
 
@@ -2300,8 +2300,8 @@ class TestSessionBudgetWarmupRounds:
             if "--output-dir" not in cmd:
                 return subprocess.CompletedProcess(cmd, 0, "ok", "")
             slot = Path(cmd[cmd.index("--output-dir") + 1])
-            recorded.append({"round_slot": slot.name, **kwargs})
-            raise subprocess.TimeoutExpired(cmd, float(kwargs.get("timeout") or 0.0))
+            recorded.append({"round_slot": slot.name, **kwargs, **vars(kwargs["watch"])})
+            raise subprocess.TimeoutExpired(cmd, float(kwargs["watch"].timeout or 0.0))
 
         with (
             patch(

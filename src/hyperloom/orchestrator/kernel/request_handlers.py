@@ -606,18 +606,17 @@ def _gemm_router_targets(
     """
     try:
         from kernelforge.gemm_tune.model_analyzer import analyze_model
-        from kernelforge.gemm_tune.router import select_tuners
+        from kernelforge.gemm_tune.router import RoutingEvidence, RoutingTarget, select_tuners
 
         specs = select_tuners(
             analyze_model(model_path),
-            framework=framework,
-            precision=precision,
-            quant_type=quant_type,
-            gpu_type=gpu_type,
-            kernel_signature_log=kernel_signature_log or None,
-            has_untuned_csv=has_untuned_csv,
-            has_shapes_json=has_shapes_json,
-            has_tunableop_input=has_tunableop_input,
+            RoutingTarget(framework, precision, quant_type, gpu_type),
+            RoutingEvidence(
+                kernel_signature_log=kernel_signature_log or None,
+                has_untuned_csv=has_untuned_csv,
+                has_shapes_json=has_shapes_json,
+                has_tunableop_input=has_tunableop_input,
+            ),
         )
     except Exception:
         log.debug("GEMM: could not consult the tuner router for lane cost estimates", exc_info=True)
@@ -3295,12 +3294,14 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     # snapshot failure must NOT discard the copy + repoint committed above.
     snap_dir = ""
     try:
-        from ..source_snapshot import snapshot_source_layer
+        from ..source_snapshot import SourceLayer, snapshot_source_layer
 
         snap = snapshot_source_layer(
-            framework_root=aiter_pkg,
-            base_sha=None,
-            rel_paths=rel_paths,
+            SourceLayer(
+                framework_root=aiter_pkg,
+                base_sha=None,
+                rel_paths=rel_paths,
+            ),
             dest_dir=Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}",
             provenance="kernelforge.gemm_tune",
             extra={
@@ -4204,17 +4205,17 @@ async def _multi_node_restart_failure(
     if not is_multi_node():
         return None
     from ..actions.executors._multi_node_server_lifecycle import (
+        RoundServer,
         ServerRestartFailed,
         restart_server_for_round,
     )
 
     try:
         await restart_server_for_round(
-            extra_server_args=rebaseline.server_args,
-            framework=os.environ.get("FRAMEWORK") or None,
-            model_path=(str(payload.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None),
-            tp=int(os.environ.get("TP") or 0) or None,
-            ep=int(os.environ.get("EP") or 0) or None,
+            RoundServer.from_env(
+                rebaseline.server_args,
+                (str(payload.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None),
+            ),
             force_full_restart=True,
         )
     except ServerRestartFailed as exc:

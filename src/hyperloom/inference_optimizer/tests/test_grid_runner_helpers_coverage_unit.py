@@ -14,6 +14,7 @@ import yaml
 
 from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
 from hyperloom.orchestrator.actions.executors import _benchmark_interpreter as bi
 
 # Patch compatibility-filter helpers in the ``_grid_variant_filter`` sibling, where apply_compatibility_filter
@@ -40,7 +41,7 @@ def test_validate_magpie_python_override_requires_python(tmp_path):
 def test_compatibility_filter_drops_on_model_class(monkeypatch) -> None:
     monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (False, False))
     grid = [_variant("mla", "--enable-flashinfer-mla"), _variant("plain", "")]
-    kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="meta-llama-3-8b")
+    kept, dropped = gr.apply_compatibility_filter(grid, serving=ServingStack("sglang", "meta-llama-3-8b"))
     assert [v.name for v in kept] == ["plain"]
     assert len(dropped) == 1
     assert dropped[0]["source"] == "compatibility_filter"
@@ -51,13 +52,13 @@ def test_compatibility_filter_keeps_a_flag_the_model_class_supports(monkeypatch)
     # Whether the installed server accepts the flag is left to its own argparse at launch.
     monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (True, True))
     grid = [_variant("moe", "--enable-ep-moe")]
-    kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="deepseek-moe")
+    kept, dropped = gr.apply_compatibility_filter(grid, serving=ServingStack("sglang", "deepseek-moe"))
     assert [v.name for v in kept] == ["moe"] and dropped == []
 
 
 def test_compatibility_filter_no_model_path_assumes_compatible() -> None:
     grid = [_variant("moe", "--enable-ep-moe")]
-    kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="")
+    kept, dropped = gr.apply_compatibility_filter(grid, serving=ServingStack("sglang", ""))
     assert [v.name for v in kept] == ["moe"] and dropped == []
 
 

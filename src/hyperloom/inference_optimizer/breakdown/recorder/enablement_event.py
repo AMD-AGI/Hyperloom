@@ -168,53 +168,59 @@ def _open(*, mode: str = "", origin: str = "", start_time: str = "") -> int | No
     )
 
 
-def record_trigger(
-    *,
-    origin: str,
-    mode: str,
-    kind: str = "",
-    evidence: Any = "",
-    observed_accuracy: Any = None,
-    accuracy_floor: Any = None,
-    observed_task: Any = None,
-    observed_metric: Any = None,
-    eval_contract_fingerprint: Any = None,
-    probe_config_path: Any = None,
-) -> None:
+@dataclass(frozen=True)
+class LaneTrigger:
+    """The failure that opened the lane; the accuracy fields are eval-origin only."""
+
+    origin: str
+    mode: str
+    kind: str = ""
+    evidence: Any = ""
+    observed_accuracy: Any = None
+    accuracy_floor: Any = None
+    observed_task: Any = None
+    observed_metric: Any = None
+    eval_contract_fingerprint: Any = None
+    probe_config_path: Any = None
+
+    def block(self) -> dict[str, Any]:
+        """The ``trigger`` block this trigger persists as."""
+        return {
+            "kind": str(self.kind or ""),
+            "recorded_at": _now(),
+            "evidence_excerpt": _tail(self.evidence),
+            "observed_accuracy": _float_or_none(self.observed_accuracy),
+            "accuracy_floor": _float_or_none(self.accuracy_floor),
+            "observed_task": _text_or_none(self.observed_task),
+            "observed_metric": _text_or_none(self.observed_metric),
+            "eval_contract_fingerprint": _text_or_none(self.eval_contract_fingerprint),
+            "probe_config_path": _text_or_none(self.probe_config_path),
+        }
+
+
+def record_trigger(trigger: LaneTrigger) -> None:
     """Open the lane and record what opened it. Never raises.
 
     The first call wins the ``trigger`` block: a lane reopened by a second
     failure is the same lane on the same gap, and letting the newest failure
     overwrite the oldest is how an eval-less re-baseline downgrades a measured
-    ``accuracy_below_floor`` to an empty ``accuracy_unavailable``. The accuracy
-    fields are eval-origin only.
+    ``accuracy_below_floor`` to an empty ``accuracy_unavailable``.
     """
     sink = _sink()
     if sink is None:
         return
-    _open(mode=mode, origin=origin)
+    _open(mode=trigger.mode, origin=trigger.origin)
     if _recorded_trigger():
         # Keyed rows deep-merge, so a second trigger would overwrite the
         # first field by field; mode and origin are already on the shell.
         return
-    trigger: dict[str, Any] = {
-        "kind": str(kind or ""),
-        "recorded_at": _now(),
-        "evidence_excerpt": _tail(evidence),
-        "observed_accuracy": _float_or_none(observed_accuracy),
-        "accuracy_floor": _float_or_none(accuracy_floor),
-        "observed_task": _text_or_none(observed_task),
-        "observed_metric": _text_or_none(observed_metric),
-        "eval_contract_fingerprint": _text_or_none(eval_contract_fingerprint),
-        "probe_config_path": _text_or_none(probe_config_path),
-    }
     sink.record(
         SECTION_EVENT,
         {
-            "mode": str(mode or ""),
-            "origin": str(origin or ""),
+            "mode": str(trigger.mode or ""),
+            "origin": str(trigger.origin or ""),
             # Under its own key so a later write cannot flatten it.
-            "trigger": trigger,
+            "trigger": trigger.block(),
         },
     )
 
@@ -442,16 +448,38 @@ def record_revalidation(
     _record_window(sink, row)
 
 
-def record_revalidation_outcome(
-    *,
-    generation: int,
-    promoted: bool,
-    task_id: str = "",
-    accuracy: Any = None,
-    accuracy_floor: Any = None,
-    error_class: str = "",
-    reason: str = "",
-) -> None:
+@dataclass(frozen=True)
+class RevalidationOutcome:
+    """How one revalidation window closed on the baseline that measured it."""
+
+    generation: int
+    promoted: bool
+    task_id: str = ""
+    accuracy: Any = None
+    accuracy_floor: Any = None
+    error_class: str = ""
+    reason: str = ""
+
+    def row(self) -> dict[str, Any]:
+        """The window row fields this outcome closes."""
+        row: dict[str, Any] = {
+            "generation": int(self.generation or 0),
+            "closed_at": _now(),
+            "promoted": bool(self.promoted),
+            "verdict": VERDICT_PROMOTED if self.promoted else VERDICT_REJECTED,
+            "accuracy": _float_or_none(self.accuracy),
+            "accuracy_floor": _float_or_none(self.accuracy_floor),
+        }
+        if self.task_id:
+            row["task_id"] = str(self.task_id)
+        if self.error_class:
+            row["error_class"] = str(self.error_class)
+        if self.reason:
+            row["reason"] = str(self.reason)
+        return row
+
+
+def record_revalidation_outcome(outcome: RevalidationOutcome) -> None:
     """Record how a revalidation window closed.
 
     ``error_class`` is set only when the baseline failed rather than measuring
@@ -462,21 +490,7 @@ def record_revalidation_outcome(
     if sink is None:
         return
     _open()
-    row: dict[str, Any] = {
-        "generation": int(generation or 0),
-        "closed_at": _now(),
-        "promoted": bool(promoted),
-        "verdict": VERDICT_PROMOTED if promoted else VERDICT_REJECTED,
-        "accuracy": _float_or_none(accuracy),
-        "accuracy_floor": _float_or_none(accuracy_floor),
-    }
-    if task_id:
-        row["task_id"] = str(task_id)
-    if error_class:
-        row["error_class"] = str(error_class)
-    if reason:
-        row["reason"] = str(reason)
-    _record_window(sink, row)
+    _record_window(sink, outcome.row())
 
 
 def record_revalidation_stopped(*, generation: int, task_id: str = "", accuracy_floor: Any = None) -> None:

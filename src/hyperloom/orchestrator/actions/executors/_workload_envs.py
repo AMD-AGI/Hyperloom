@@ -59,6 +59,7 @@ from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS, GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs
 from hyperloom.inference_optimizer.grid_server_args import (
+    WorkloadTokenWindow,
     compact_json_server_args,
     dedup_vllm_server_args,
     inject_sglang_attention_backend,
@@ -924,9 +925,7 @@ def _finalize_framework_server_args(
         resolved_server_args,
         bench.get("framework"),
         bench.get("model"),
-        window.isl,
-        window.osl,
-        max_model_len=envs.get("MAX_MODEL_LEN") or os.environ.get("MAX_MODEL_LEN"),
+        WorkloadTokenWindow(window.isl, window.osl, envs.get("MAX_MODEL_LEN") or os.environ.get("MAX_MODEL_LEN")),
     )
     resolved_server_args = inject_sglang_watchdog_timeout(
         resolved_server_args,
@@ -1412,7 +1411,7 @@ def _pin_accuracy_eval_envs(envs: dict[str, Any]) -> None:
         try:
             from ._multi_node_env import resolve_kb_topology
 
-            if str(resolve_kb_topology().get("pd_mode") or "").lower() == "disaggregated":
+            if str(resolve_kb_topology().pd_mode or "").lower() == "disaggregated":
                 _eval_tok_env = "false"
         except Exception as exc:  # noqa: BLE001 - best-effort; never block config materialization
             # Don't degrade silently: if this IS a PD run, failing to resolve the
