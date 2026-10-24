@@ -1230,7 +1230,6 @@ class FrameworkPhase(ProposalBench):
             params=params,
             idempotency_key=idem,
             requires_lanes=lanes,
-            side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
             dispatch_class="coordinator",
         )
@@ -1402,7 +1401,6 @@ class FrameworkPhase(ProposalBench):
             params=params,
             idempotency_key=idem,
             requires_lanes=lanes,
-            side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
             dispatch_class="coordinator",
         )
@@ -1601,7 +1599,6 @@ class FrameworkPhase(ProposalBench):
                 params=params,
                 idempotency_key=idem,
                 requires_lanes=lanes,
-                side_effects=["writes_results", "writes_patches"],
                 lease_ttl_sec=ttl,
                 dispatch_class="coordinator",
             )
@@ -2601,7 +2598,6 @@ class FrameworkPhase(ProposalBench):
             idempotency_key=f"candidate-discovery:{reason}{self._coord.dispatcher.cycle_idem_suffix()}:r{empties + failures}",
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
-            side_effects=["writes_results"],
             dispatch_class="coordinator",
         )
         _record_run(

@@ -302,7 +302,6 @@ class EnablementLane(CoordinatorCollaborator):
                     params=params,
                     idempotency_key=holder,
                     requires_lanes=lanes,
-                    side_effects=["writes_results", "writes_patches"],
                     lease_ttl_sec=lease_ttl_sec,
                     task_id=holder,
                     dispatch_class="coordinator",

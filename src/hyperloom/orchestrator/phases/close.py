@@ -598,7 +598,6 @@ class ClosePhase(CoordinatorCollaborator):
                 params=params,
                 idempotency_key=key,
                 requires_lanes=[],
-                side_effects=["writes_results"],
                 lease_ttl_sec=120,
                 dispatch_class="coordinator",
             )
@@ -930,7 +929,6 @@ class ClosePhase(CoordinatorCollaborator):
             },
             idempotency_key=idempotency_key,
             requires_lanes=[],
-            side_effects=["writes_results"],
             lease_ttl_sec=120,
             dispatch_class="coordinator",
         )
