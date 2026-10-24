@@ -12,13 +12,15 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 
-from ._ray_backend import SessionKillRound
 from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
+
+if TYPE_CHECKING:
+    from ._ray_backend import SessionKillRound
 
 log = logging.getLogger(__name__)
 
