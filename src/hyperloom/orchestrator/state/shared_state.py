@@ -41,6 +41,7 @@ from hyperloom.common.perf_metric import (
     total_tput_of,
 )
 from hyperloom.common.timeutil import now_iso
+from hyperloom.plugs import progress as _progress
 from hyperloom.common.jsonio import read_json_strict
 from hyperloom.common.profile_args import sanitize_profile_server_args
 from hyperloom.inference_optimizer.grading import resolved_grading
@@ -1191,8 +1192,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 does not already exist.
         """
         self.charge_elapsed()
-        # Backfill scriptable/diffusion (xDiT) ``e2el_mean_ms`` from ``tput``
-        # so current_best carries the primary latency metric. Best-effort.
+        # Backfill scriptable/diffusion (xDiT) ``e2el_mean_ms`` from ``tput`` so current_best has the latency metric.
         self._backfill_scriptable_latency()
         path = self.state_path(session_dir)
         atomic_write_json(path, self.to_dict())
@@ -1201,6 +1201,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
         instrument.snapshot_state_sections(session_dir, self)
+        _progress.emit_budget(self)
         # Derived artifact: re-render current_setting.sh from the current best route so the operator can audit /
         # re-feed it via --reference-script.
         try:
@@ -1848,7 +1849,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
         session_dir = getattr(self, "_session_dir", None)
         if session_dir:
-            from hyperloom.common.io import atomic_write_json
             from hyperloom.inference_optimizer.session.session_paths import failure_evidence_path
 
             try:
