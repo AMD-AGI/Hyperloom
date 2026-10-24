@@ -58,19 +58,6 @@ COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
 )
 
 
-# Request kinds an LLM may address to the kernel agent.
-LLM_REQUESTABLE_KERNEL_REQUEST_KINDS: frozenset[str] = (
-    frozenset(KERNEL_ACTION_REQUEST_KINDS.values())
-    | {
-        "trace_analyze",
-        "apply_patch",
-    }
-) - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
-
-# The two sets answer the same question and must never both claim a kind.
-assert not (LLM_REQUESTABLE_KERNEL_REQUEST_KINDS & COORDINATOR_OWNED_KERNEL_REQUEST_KINDS)
-
-
 # Coordinator-managed actions that agents should not directly propose.
 INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
     {
@@ -373,7 +360,6 @@ __all__ = [
     "COORDINATOR_OWNED_KERNEL_REQUEST_KINDS",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "KERNEL_REQUEST_KIND_ALIASES",
-    "LLM_REQUESTABLE_KERNEL_REQUEST_KINDS",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
     "REQUEST_KIND_TO_OWNED_ACTION",
 ]
