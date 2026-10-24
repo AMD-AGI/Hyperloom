@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import NamedTuple
@@ -489,13 +489,11 @@ def _holders(kfd: Path, procfs: Path, card_of: dict[int, int], *, named: bool) -
 def _census(kfd: Path, procfs: Path, selected: Mapping[int, _GpuNode]) -> CardReading:
     """The holders of ``selected`` (card to GPU) counted, with the memory the kernel lists on each card set against what the
     processes this reader sees hold. A card found to hold more than the tolerance that nothing accounts for is read again
-    and keeps the smaller of the two: a process that ended between the two reads is not an intruder."""
+    and the second reading decides: a process that ended between the two reads of the first is not an intruder."""
     first = _census_once(kfd, procfs, selected)
     if not any(extra > UNACCOUNTED_VRAM_TOLERANCE for extra in first.unaccounted.values()):
         return first
-    second = _census_once(kfd, procfs, selected)
-    settled = {card: min(extra, first.unaccounted.get(card, extra)) for card, extra in second.unaccounted.items()}
-    return replace(second, unaccounted=settled)
+    return _census_once(kfd, procfs, selected)
 
 
 def _census_once(kfd: Path, procfs: Path, selected: Mapping[int, _GpuNode]) -> CardReading:

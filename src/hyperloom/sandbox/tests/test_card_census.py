@@ -78,10 +78,10 @@ def test_before_the_test_starts_any_holder_of_its_card_is_foreign_and_named_by_i
 
 def test_before_the_test_a_holder_with_only_a_queue_is_foreign_and_during_it_is_not(pod: KernelTree) -> None:
     pod.holds(1845543, _CARD, vram=0, queues=2)
-    reading = _read(pod)
+    assert [i.key for i in _read(pod).intrusions(_NOBODY, before_test=True)] == [("host-pid", 1845543, _CARD)]
 
-    assert [i.key for i in reading.intrusions(_NOBODY, before_test=True)] == [("host-pid", 1845543, _CARD)]
-    assert _whats(reading, before_test=False) == [], "a queue with no memory is not a second holder of the card"
+    _serve(pod)  # the server's memory is the one holder of the card with memory: a queue with none is not a second one
+    assert _whats(_read(pod), before_test=False) == []
 
 
 def test_the_one_server_holder_of_a_card_with_its_memory_seen_in_the_pod_is_not_foreign_while_it_runs(
