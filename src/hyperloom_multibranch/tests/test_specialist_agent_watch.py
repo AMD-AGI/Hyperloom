@@ -15,7 +15,8 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox
-from hyperloom_multibranch.specialist.agent_watch import beyond, marked_pids
+from hyperloom.common.proctree import collect_tree, kill_tree
+from hyperloom_multibranch.specialist.agent_watch import REGISTRY_PREFIX, beyond, marked_pids
 
 
 @pytest.fixture(autouse=True)
@@ -94,25 +95,29 @@ import asyncio, os, sys, time
 from pathlib import Path
 from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox
 
-root, pids = Path(sys.argv[1]), Path(sys.argv[2])
+root, pids, command = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
 
 async def main():
     sandbox = LocalAgentSandbox(cards=(0,), python_path=(), root=root, base_env=dict(os.environ))
-    # The dummy agent: a server in a session of its own, as a Claude CLI's shell command starts one, and itself.
-    await sandbox.start(f"setsid sleep 1000 & echo $! >> {pids}; echo $$ >> {pids}; sleep 1000", root, {})
+    await sandbox.start(command.format(pids=pids), root, {})
     while True:
         await asyncio.sleep(1)
 
 asyncio.run(main())
 """
+#: The dummy agent: a server in a session of its own, as a Claude CLI's shell command starts one, and itself.
+AGENT = "setsid sleep 1000 & echo $! >> {pids}; echo $$ >> {pids}; sleep 1000"
+#: The same agent, deaf to SIGTERM as a server stuck in its shutdown is.
+DEAF_AGENT = "trap '' TERM; " + AGENT
 
 
-def _owner(tmp_path: Path) -> tuple[subprocess.Popen[bytes], Path]:
+def _owner(tmp_path: Path, agent: str = AGENT) -> tuple[subprocess.Popen[bytes], Path]:
     pids = tmp_path / "pids"
     script = tmp_path / "owner.py"
     script.write_text(textwrap.dedent(OWNER))
     env = {**os.environ, "TMPDIR": str(tmp_path / "local-tmp")}
-    owner = subprocess.Popen([sys.executable, str(script), str(tmp_path / "sandbox"), str(pids)], env=env)
+    argv = [sys.executable, str(script), str(tmp_path / "sandbox"), str(pids), agent]
+    owner = subprocess.Popen(argv, env=env)
     _until(lambda: len(_pids(pids)) == 2, 60.0)
     return owner, pids
 
@@ -129,24 +134,38 @@ def test_the_agent_s_whole_tree_ends_when_its_owner_is_killed(tmp_path: Path) ->
     assert marked_pids(str(tmp_path / "sandbox")) == []
 
 
-def test_the_agent_s_whole_tree_ends_when_the_watch_is_terminated(tmp_path: Path) -> None:
-    owner, pids = _owner(tmp_path)
+def test_a_terminated_watch_ends_a_deaf_agent_within_the_kill_all_grace_and_removes_its_registry(
+    tmp_path: Path,
+) -> None:
+    owner, pids = _owner(tmp_path, DEAF_AGENT)
     agent = _pids(pids)
-    watch = [pid for pid in _children(owner.pid) if pid not in agent]
+    [watch] = [pid for pid in _children(owner.pid) if pid not in agent]
     try:
-        assert len(watch) == 1
-        _until(lambda: _catches_sigterm(watch[0]))
-        # The session's stop terminates every child it did not register, the watch among them.
-        os.kill(watch[0], signal.SIGTERM)
-        _until(lambda: not any(_alive(pid) for pid in agent))
+        _until(lambda: _takes_sigterm(watch))
+        # What Processes.kill_all does to the session's children it did not register: SIGTERM, SIGKILL after a grace.
+        kill_tree(collect_tree([watch]))
+        _until(lambda: not any(_alive(pid) for pid in agent), 1.0)
+        assert not (tmp_path / "local-tmp" / f"{REGISTRY_PREFIX}{owner.pid}").exists()
     finally:
         owner.kill()
         owner.wait()
+        _kill(marked_pids(str(tmp_path / "sandbox")))
 
 
-def _catches_sigterm(pid: int) -> bool:
-    caught = next(line for line in Path(f"/proc/{pid}/status").read_text().splitlines() if line.startswith("SigCgt"))
-    return bool(int(caught.split()[1], 16) & (1 << (signal.SIGTERM - 1)))
+def _kill(pids: list[int]) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            continue
+
+
+def _takes_sigterm(pid: int) -> bool:
+    """Whether ``pid`` handles SIGTERM or holds it to wait for, rather than dying of it."""
+
+    status = Path(f"/proc/{pid}/status").read_text().splitlines()
+    masks = [int(line.split()[1], 16) for line in status if line.startswith(("SigCgt", "SigBlk"))]
+    return any(mask & (1 << (signal.SIGTERM - 1)) for mask in masks)
 
 
 def _children(pid: int) -> list[int]:

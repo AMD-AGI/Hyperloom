@@ -7,7 +7,8 @@ is gone, and kills a process of a sandbox that set a device mask reaching beyond
 A sandbox's processes carry :data:`MARKER`, set to the sandbox's root, whichever session or process group they moved
 to, so the marker is what the watch and every kill select by. The session's process registers each sandbox's root and
 cards in a directory of its own (:func:`watch`) and starts the watch with the first; the watch outlives a SIGKILL of
-the session, which is how an agent kept running for an hour after its session died.
+the session, which is how an agent kept running for an hour after its session died. The session's own kill terminates
+the watch with its other children and SIGKILLs it seconds later, so a terminated watch ends the sandboxes at once.
 
 The pod allows no device cgroup and no mount or user namespace, so the cards are confined by the environment:
 ``ROCR_VISIBLE_DEVICES`` names them and every HIP-level mask indexes into what ROCr exposes, so only a ROCr-level mask
@@ -31,12 +32,16 @@ import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 
+from hyperloom.common.proctree import TERM_GRACE_SEC
 from hyperloom.common.visible_devices import ROCR_LEVEL_VARS, effective_mask_tokens
 
 #: The environment variable every process of a sandbox carries, set to the sandbox's root.
 MARKER = "HYPERLOOM_AGENT_SANDBOX"
 #: SIGKILL skips sglang's cleanup and leaves its GPU memory held, so a kill waits this long after SIGTERM first.
 GRACE_SECONDS = 30.0
+#: The grace when the watch is terminated itself: the session's kill SIGKILLs the watch ``TERM_GRACE_SEC`` after its
+#: SIGTERM, so the sandboxes must be gone well before that.
+STOP_GRACE_SECONDS = TERM_GRACE_SEC / 3
 POLL_SECONDS = 0.1
 #: How often the watch looks: a command on a card it may not use has run at most this long.
 WATCH_SECONDS = 1.0
@@ -158,23 +163,32 @@ def _tell(pid: int, said: str) -> None:
         return
 
 
-async def _end(roots: Iterable[str]) -> None:
-    await asyncio.gather(*(kill_marked(root, GRACE_SECONDS, POLL_SECONDS) for root in roots))
+async def _end(roots: Iterable[str], grace_seconds: float) -> None:
+    await asyncio.gather(*(kill_marked(root, grace_seconds, POLL_SECONDS) for root in roots))
 
 
 def main(argv: Sequence[str]) -> int:
     """Watch the sandboxes ``argv``'s registry holds while ``argv``'s owner, this process's parent, runs or until a
-    SIGTERM, then end them all."""
+    SIGTERM, then end them all and remove the registry."""
 
     owner, registry = int(argv[0]), Path(argv[1])
-    terminated: list[int] = []
-    signal.signal(signal.SIGTERM, lambda number, _frame: terminated.append(number))
-    while os.getppid() == owner and not terminated:
-        _confine(_registered(registry))
-        time.sleep(WATCH_SECONDS)
-    asyncio.run(_end(_registered(registry)))
-    shutil.rmtree(registry)
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    try:
+        grace = STOP_GRACE_SECONDS if _watch(owner, registry) else GRACE_SECONDS
+        asyncio.run(_end(_registered(registry), grace))
+    finally:
+        shutil.rmtree(registry)
     return 0
+
+
+def _watch(owner: int, registry: Path) -> bool:
+    """Confine the sandboxes ``registry`` holds while ``owner`` runs; whether a SIGTERM ended the watch."""
+
+    while os.getppid() == owner:
+        _confine(_registered(registry))
+        if signal.sigtimedwait([signal.SIGTERM], WATCH_SECONDS) is not None:
+            return True
+    return False
 
 
 def _signal(pids: Iterable[int], number: int) -> None:
@@ -193,6 +207,8 @@ __all__ = [
     "GRACE_SECONDS",
     "MARKER",
     "POLL_SECONDS",
+    "REGISTRY_PREFIX",
+    "STOP_GRACE_SECONDS",
     "WATCH_LOG",
     "WATCH_SECONDS",
     "beyond",
