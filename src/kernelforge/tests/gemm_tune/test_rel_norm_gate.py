@@ -12,6 +12,7 @@ import pytest
 
 import kernelforge.gemm_tune.aiter_splitk_validate as validate
 import kernelforge.gemm_tune.tuners._aiter_dense_common as ac
+import kernelforge.gemm_tune.tuners._row_accuracy as accuracy
 from kernelforge.gemm_tune.tuners.base import TuneContext
 
 _HDR = ["gfx", "cu_num", "M", "N", "K", "libtype", "kernelId", "splitK", "us", "kernelName", "tflops", "bw", "errRatio"]
@@ -65,7 +66,7 @@ class TestDropInaccurateRows:
         art = _write(tmp_path / "a.csv", [_row("asm", 6, "0.0125", name="asm_sk6")])
         measured = _Measured(0.0047)
 
-        applied = ac.drop_inaccurate_rows(art, measured)
+        applied = accuracy.drop_inaccurate_rows(art, measured)
 
         assert applied.completed and applied.dropped == []
         assert measured.asked == [(64, 5120, 17408, 6, "asm_sk6")]
@@ -75,7 +76,7 @@ class TestDropInaccurateRows:
     def test_an_asm_splitk_row_beyond_the_norm_bound_is_dropped_with_its_figure(self, tmp_path):
         art = _write(tmp_path / "a.csv", [_row("asm", 6, "0.0125")])
 
-        applied = ac.drop_inaccurate_rows(art, _Measured(0.012))
+        applied = accuracy.drop_inaccurate_rows(art, _Measured(0.012))
 
         assert applied.completed
         assert [float(r["relNormErr"]) for r in applied.dropped] == [0.012]
@@ -84,7 +85,7 @@ class TestDropInaccurateRows:
     def test_an_unmeasurable_row_keeps_the_err_ratio_verdict(self, tmp_path):
         art = _write(tmp_path / "a.csv", [_row("asm", 6, "0.0125")])
 
-        applied = ac.drop_inaccurate_rows(art, _Measured(None))
+        applied = accuracy.drop_inaccurate_rows(art, _Measured(None))
 
         assert applied.completed and len(applied.dropped) == 1
         assert _read(art) == []
@@ -94,7 +95,7 @@ class TestDropInaccurateRows:
         art = _write(tmp_path / "a.csv", [_row(libtype, splitk, "0.0125")])
         measured = _Measured(0.0)
 
-        applied = ac.drop_inaccurate_rows(art, measured)
+        applied = accuracy.drop_inaccurate_rows(art, measured)
 
         assert len(applied.dropped) == 1 and measured.asked == []
 
@@ -103,7 +104,7 @@ class TestDropInaccurateRows:
         before = art.read_text()
         measured = _Measured(0.0)
 
-        applied = ac.drop_inaccurate_rows(art, measured)
+        applied = accuracy.drop_inaccurate_rows(art, measured)
 
         assert applied.completed and applied.dropped == [] and measured.asked == []
         assert art.read_text() == before
@@ -111,7 +112,7 @@ class TestDropInaccurateRows:
     def test_without_a_norm_check_errratio_decides(self, tmp_path):
         art = _write(tmp_path / "a.csv", [_row("asm", 6, "0.0125")])
 
-        applied = ac.drop_inaccurate_rows(art)
+        applied = accuracy.drop_inaccurate_rows(art)
 
         assert len(applied.dropped) == 1 and _read(art) == []
 

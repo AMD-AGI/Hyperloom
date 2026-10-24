@@ -282,3 +282,23 @@ def test_graph_batch_size_demand_keeps_its_own_rows(tmp_path, m_grid, expected):
 
     assert out is not None
     assert {int(line.split(",")[0]) for line in _rows(out)[1:]} == expected
+
+
+@pytest.mark.parametrize("conc", [64, 128, 256])
+def test_every_dispatch_group_keeps_its_rows_at_high_concurrency(tmp_path, conc):
+    # A Qwen3-14B-like model, four (N, K) groups, at the toolbox's 2999 s budget: the decode band must not
+    # grow with the concurrency until the budget drops whole groups.
+    groups = [(5120, 5120), (17408, 5120), (5120, 17408), (7168, 5120)]
+    keys = [
+        {"M": m, "N": n, "K": k, "requests": 100 - i}
+        for i, m in enumerate([2048, 4096, 8192, 1024, 512, 3000, 6000, 700])
+        for n, k in groups
+    ]
+    ctx = _Ctx(2_999, conc=conc)
+    ctx.demand_json = _write_demand(tmp_path / "demand.json", keys)
+
+    out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+
+    assert out is not None
+    tuned = {tuple(int(v) for v in line.split(",")[1:3]) for line in _rows(out)[1:]}
+    assert tuned == set(groups)

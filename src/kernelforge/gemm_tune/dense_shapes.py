@@ -14,8 +14,10 @@ from .evidence import padded_m
 
 log = logging.getLogger(__name__)
 
-# sglang's default CUDA-graph capture batch sizes up to 256 (no speculative decoding, padding on).
-_SGLANG_CUDAGRAPH_BS = (1, 2, 4, 8, 12, *range(16, 257, 8))
+# sglang's default CUDA-graph capture batch sizes up to 256 (no speculative decoding, padding on): every
+# _SGLANG_CUDAGRAPH_STEP from 16 on.
+_SGLANG_CUDAGRAPH_STEP = 8
+_SGLANG_CUDAGRAPH_BS = (1, 2, 4, 8, 12, *range(16, 257, _SGLANG_CUDAGRAPH_STEP))
 _SGLANG_CUDAGRAPH_BS_THOROUGH = [bs for bs in _SGLANG_CUDAGRAPH_BS if bs <= 128]
 
 
@@ -89,10 +91,18 @@ def compute_dense_nk_shapes(geometry: DenseGeometry, tp: int) -> list[tuple[int,
     return out
 
 
+#: The decode band has a row per graph batch size up to this M and one per power of two above it: a row per batch
+#: size up to 256 makes the band at high concurrency take the timeout budget of whole (N, K) groups.
+_FINE_DECODE_M = 64
+
+
 def compute_decode_m_values(conc: int, m_grid: MGrid = MGrid.BUCKET) -> list[int]:
-    """Decode-step M: the graph batch sizes up to ``conc``, plus ``conc`` itself, mapped through ``m_grid``."""
+    """Decode-step M: the graph batch sizes up to ``conc`` (only the powers of two above :data:`_FINE_DECODE_M`), plus
+    ``conc`` itself, mapped through ``m_grid``."""
     conc = max(1, int(conc or 64))
-    m_set = {bs for bs in _SGLANG_CUDAGRAPH_BS if bs <= conc} | {1, conc}
+    fine = {bs for bs in _SGLANG_CUDAGRAPH_BS if bs <= min(conc, _FINE_DECODE_M)}
+    coarse = {1 << p for p in range(_FINE_DECODE_M.bit_length(), conc.bit_length())}
+    m_set = fine | coarse | {1, conc}
     if m_grid is MGrid.BUCKET:
         m_set = {padded_m(m) for m in m_set}
     return sorted(m_set)

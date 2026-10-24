@@ -228,7 +228,7 @@ def test_decode_coverage_ignores_m_outside_the_decode_grid(tmp_path):
 
 @pytest.mark.parametrize(
     ("recorded", "expected_added"),
-    [(64, {1, *range(16, 257, 16)} - {64}), (128, {1, *range(16, 257, 16)} - {128})],
+    [(64, {1, 16, 32, 48, 128, 256}), (128, {1, 16, 32, 48, 64, 256})],
 )
 def test_one_decode_grid_member_does_not_cover_the_other_buckets(tmp_path, recorded, expected_added):
     """A tuned M=64 row does not stand in for the other buckets, even those that reach it through aiter's lookups."""

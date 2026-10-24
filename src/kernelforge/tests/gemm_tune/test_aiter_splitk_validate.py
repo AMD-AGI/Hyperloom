@@ -217,7 +217,7 @@ class TestBpreshuffleTrial:
 
 def _blockwise_reference(x, w, xs, ws):
     """fp32 blockscale GEMM written block by block, independent of the module's vectorized reference."""
-    import torch
+    torch = pytest.importorskip("torch")
 
     m, k = x.shape
     out = torch.zeros(m, w.shape[0], dtype=torch.float32)
@@ -228,8 +228,9 @@ def _blockwise_reference(x, w, xs, ws):
 
 
 def numeric_aiter(monkeypatch, scale: float = 1.0) -> list[dict]:
-    """Install a CPU ``aiter`` whose asm op computes the blockscale GEMM times ``scale``, reading x_scale column-major."""
-    import torch
+    """Install a CPU ``aiter`` whose asm op computes the blockscale GEMM times ``scale``, reading x_scale column-major;
+    skips the test where torch is not installed, as in CI."""
+    torch = pytest.importorskip("torch")
 
     monkeypatch.setattr(mod, "_resolve_device", lambda gpu_ids="": "cpu")
 
