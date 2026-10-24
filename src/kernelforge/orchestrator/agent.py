@@ -343,6 +343,7 @@ def _fill_session_sink(
     session_sink["end_reason"] = ending.end_reason
     session_sink["turns"] = ending.turns
     session_sink["workspace_contention"] = run_result.workspace_contention
+    session_sink["tool_calls"] = run_result.tool_calls
     if gate is not None:
         session_sink["findings"] = gate.findings_blob()
         session_sink["edit_count"] = gate.edit_count

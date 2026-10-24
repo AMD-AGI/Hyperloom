@@ -174,6 +174,7 @@ from kernelforge.evaluation.benchmark.baseline import (
     BASELINE_DRIFT_TOLERANCE_ENV,
     check_baseline_against_reference,
 )
+from kernelforge.knowledge.local_wiki.skills import skill_files_opened
 from kernelforge.loop.device_hazard import DeviceHazard, DeviceHazardLog
 from kernelforge.loop.fanout import LanePlan, LaneResult, run_lanes
 from kernelforge.loop.merge_candidates import (
@@ -770,6 +771,8 @@ class IterationResult:
     # / block_cap / turn_cap / gate_error / agent_stopped / sdk_*. "" when no agent ran.
     session_end_reason: str = ""
     turns: int | None = None
+    # The files of the external skills the session opened, as ``<skill>/<path>``.
+    skill_reads: list[str] = field(default_factory=list)
     # Independent of session termination: a candidate that changed protected measurement state is rejected before any
     # canonical driver is executed.
     integrity_violation: bool = False
@@ -4198,6 +4201,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 or (self.experiment.experiment_id if self.experiment else None)
             ),
             turns=result.turns,
+            skill_reads=result.skill_reads,
             validation_passed=result.validation_passed,
             commit_hash=result.commit_hash or None,
             lane_id=result.lane_id or None,
@@ -6434,6 +6438,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 result.agent_rationale = rationale
                 result.session_end_reason = session_sink.get("end_reason", "")
                 result.turns = session_sink.get("turns")
+                result.skill_reads = self._skill_reads(session_sink)
                 await self._abandon_iteration(
                     result,
                     frame,
@@ -6505,6 +6510,24 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         if on_iteration:
             on_iteration(result)
 
+    def _skill_reads(self, session_sink: dict) -> list[str]:
+        """The external skill files the session's tool calls named."""
+        skills = tuple(getattr(self.config, "external_skills", ()))
+        return skill_files_opened(session_sink.get("tool_calls") or (), skills) if skills else []
+
+    def _render_recent_skill_reads(self, rounds: int = 5) -> str:
+        """Which skill files the last few rounds opened, so this round can tell the cards its direction still lacks."""
+        if not getattr(self.config, "external_skills", ()):
+            return ""
+        events = [e for e in self.state_store.read_events() if e.get("type") == "iteration_result"][-rounds:]
+        if not events:
+            return ""
+        lines = [
+            f"- iteration {e.get('iter')}: " + (", ".join(e.get("skill_reads") or ()) or "no skill file opened")
+            for e in events
+        ]
+        return "## Skill files the recent rounds opened\n" + "\n".join(lines)
+
     def _implementer_history(self, *, digest, optimization_plan_path) -> str:
         """Assemble the cross-iteration experience the Implementer session reads.
 
@@ -6574,6 +6597,9 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         new_file_block = self._render_uncommittable_new_paths()
         if new_file_block:
             history = f"{new_file_block}\n\n{history}"
+        skill_block = self._render_recent_skill_reads()
+        if skill_block:
+            history = f"{skill_block}\n\n{history}"
         if self._search_policy_decision is not None:
             policy = self._search_policy_decision
             policy_lines = [
@@ -6855,6 +6881,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         # run's end-reason distribution (edit cap / turn cap / converged / …) is analyzable.
         result.session_end_reason = frame.session_sink.get("end_reason", "")
         result.turns = frame.session_sink.get("turns")
+        result.skill_reads = self._skill_reads(frame.session_sink)
         self._apply_iteration_planning_state(
             optimization_plan_created=optimization_plan_executable,
         )

@@ -119,6 +119,19 @@ def test_a_round_is_told_from_its_lesson_record_when_there_is_one(campaign: Path
     assert "a two-stage &lt;b&gt;prefetch&lt;/b&gt;." in round_2 and "Moved B loads up" not in round_2
 
 
+def test_each_round_names_the_skill_files_it_opened(campaign: Path) -> None:
+    events = [json.loads(line) for line in (campaign / "events.jsonl").read_text().splitlines()]
+    events[2]["skill_reads"] = ["flydsl-kernel-optimization/SKILL.md", "flydsl-kernel-optimization/gemm/x.md"]
+    events[3]["skill_reads"] = []
+    (campaign / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
+    rounds = publish_dashboard(campaign, _live()).read_text().split("<h2>Rounds</h2>")[1]
+    round_3, round_2 = rounds[: rounds.index("id='round-2'")], rounds[rounds.index("id='round-2'") :]
+    assert "Skill files it opened</h3><pre>none</pre>" in round_3
+    assert "flydsl-kernel-optimization/SKILL.md\nflydsl-kernel-optimization/gemm/x.md" in round_2
+    # Round 1 was recorded before skill reads were: it says nothing rather than "none".
+    assert rounds.count("Skill files it opened") == 2
+
+
 def test_a_run_that_ended_says_so_instead_of_counting_down(campaign: Path) -> None:
     html = publish_dashboard(campaign, _live(status="paused", termination_reason="budget_exhausted")).read_text()
     tile = html[html.index(">Time left<") :].split("</div></div>")[0]

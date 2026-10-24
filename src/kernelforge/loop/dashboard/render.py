@@ -612,6 +612,13 @@ def _plan_title(plan: str) -> str:
     return ""
 
 
+def _skill_reads_text(reads: list | None) -> str:
+    """The skill files a round opened; nothing for a round recorded before they were."""
+    if reads is None:
+        return ""
+    return "\n".join(reads) or "none"
+
+
 def _round_entry(entry: dict, *, open_: bool) -> str:
     iteration, score, before = entry.get("iter"), entry.get("score"), entry.get("best_before")
     change = ""
@@ -632,6 +639,7 @@ def _round_entry(entry: dict, *, open_: bool) -> str:
         ("Plan", entry.get("plan")),
         ("What the implementer reports", entry.get("account")),
         ("Why it failed", entry.get("validation")),
+        ("Skill files it opened", _skill_reads_text(entry.get("skill_reads"))),
         ("Verdict", " · ".join(verdict)),
     ]
     body = "".join(f"<h3>{name}</h3><pre>{escape(str(text))}</pre>" for name, text in sections if text)

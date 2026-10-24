@@ -282,13 +282,12 @@ def _render_pointer(root: Path, rel: str, *, carried: bool = True) -> str:
 
 
 def _render_skill(skill: ExternalSkill) -> str:
-    """Point at one external skill: where it is, what it covers, and how the paths it gives resolve."""
+    """One external skill with its entry file inlined, so every session reads it, and how the paths it gives resolve."""
     lines = [f"## skill {skill.name}/  —  base: {skill.root}", ""]
-    if skill.description:
-        lines += [skill.description, ""]
     lines.append(
-        f"`Read` `{skill.skill_file}` before planning or editing a kernel it covers; it routes to the cards "
-        f"beneath it. A path it lists relative to its own folder resolves against the `base:` above, and a "
+        f"Its entry file `{skill.skill_file}` is inlined below and applies to every round: follow it, and before "
+        f"planning or editing `Read` the cards it routes to for the direction you take; the cards are not inlined. "
+        f"A path it lists relative to its own folder resolves against the `base:` above, and a "
         f"sibling skill it links as `../<name>/SKILL.md` is `{skill.root.parent}/<name>/SKILL.md`."
     )
     if skill.repository_root is not None:
@@ -296,6 +295,8 @@ def _render_skill(skill: ExternalSkill) -> str:
             f"A path it gives relative to its repository resolves against `{skill.repository_root}`. A section "
             "it scopes to that repository applies only when this task lives in that repository."
         )
+    body = _strip_frontmatter(skill.skill_file.read_text(encoding="utf-8", errors="replace")).strip()
+    lines += ["", f"### {skill.skill_file.name} (inlined)", "", body]
     return "\n".join(lines)
 
 

@@ -104,6 +104,7 @@ def _iteration_row(event: dict) -> dict:
         "lane_id": event.get("lane_id"),
         "direction_id": event.get("direction_id"),
         "keep_bar": event.get("keep_bar"),
+        "skill_reads": event.get("skill_reads"),
     }
 
 

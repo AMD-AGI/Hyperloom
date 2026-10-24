@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from kernelforge.knowledge.local_wiki.index import _clip, _frontmatter_field
 
@@ -63,3 +66,20 @@ def resolve_external_skill(path: str | Path) -> ExternalSkill:
         description=_clip(_frontmatter_field(front, "description")),
         repository_root=_repository_root(root),
     )
+
+
+def skill_files_opened(
+    tool_calls: Iterable[tuple[str, Mapping[str, Any]]], skills: Iterable[ExternalSkill]
+) -> list[str]:
+    """The files under ``skills`` a session's tool calls named, as ``<skill>/<path>``, each once, first mention first.
+
+    A read through the shell (``cat``, ``sed``, ``grep``) names its file in the command, so every argument counts.
+    """
+    patterns = [(skill.name, re.compile(re.escape(str(skill.root)) + r"/([\w./+-]*\w\.\w+)")) for skill in skills]
+    opened: dict[str, None] = {}
+    for _tool, arguments in tool_calls:
+        text = " ".join(str(value) for value in (arguments or {}).values())
+        for name, pattern in patterns:
+            for match in pattern.finditer(text):
+                opened.setdefault(f"{name}/{match.group(1)}", None)
+    return list(opened)
