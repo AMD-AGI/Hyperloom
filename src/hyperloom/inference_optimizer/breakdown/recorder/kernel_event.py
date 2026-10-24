@@ -77,6 +77,7 @@ from .kernel_records import (
     SOURCE_KERNEL_REWRITE,
     GeakRebenchAttempt,
     IntegrateVerdict,
+    KernelReprofile,
     KernelRewriteRun,
     LaneRunFields,
     TraceAnalyzeRun,
@@ -1021,36 +1022,9 @@ class KernelEventRecorder:
 
     # ---- forge -----------------------------------------------------------
 
-    def record_reprofile(
-        self,
-        *,
-        ran: bool,
-        task_kind: str = "",
-        trigger: str = "",
-        skipped_reason: str = "",
-        idempotency_reason: str = "",
-        snapshot_landed: bool = False,
-        snapshot_id_before: Any = None,
-        snapshot_id_after: Any = None,
-        task_id: str = "",
-    ) -> None:
+    def record_reprofile(self, reprofile: KernelReprofile) -> None:
         """Record the entry re-profile that decides whether analysis is stale."""
-        self._sink.record(
-            SECTION_EVENT,
-            {
-                "forge_reprofile": {
-                    "ran": bool(ran),
-                    "task_id": _text(task_id),
-                    "task_kind": _text(task_kind),
-                    "trigger": _text(trigger),
-                    "skipped_reason": _text(skipped_reason),
-                    "idempotency_reason": _text(idempotency_reason),
-                    "snapshot_landed": bool(snapshot_landed),
-                    "snapshot_id_before": _int_or_none(snapshot_id_before),
-                    "snapshot_id_after": _int_or_none(snapshot_id_after),
-                }
-            },
-        )
+        self._sink.record(SECTION_EVENT, {"forge_reprofile": reprofile.block()})
 
     def _record_lane_run(self, row: Mapping[str, Any]) -> None:
         """Write one lane row, keyed by the run it describes."""

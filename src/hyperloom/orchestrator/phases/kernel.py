@@ -45,6 +45,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     IntegrateVerdict,
+    KernelReprofile,
 )
 from ..actions.stop_attribution import stopped_by_the_run_class
 from hyperloom.inference_optimizer.session.optimization_journal import (
@@ -634,13 +635,13 @@ class KernelPhase(CoordinatorCollaborator):
         workload_changed = self._profile_workload_changed()
         recorder = self.timeline()
 
-        def _note_reprofile(**fields: Any) -> None:
+        def _note_reprofile(reprofile: KernelReprofile) -> None:
             if recorder is None:
                 return
-            recorder.record_reprofile(**fields)
+            recorder.record_reprofile(reprofile)
 
         if cur <= 0:
-            _note_reprofile(ran=False, skipped_reason="no_projected_tput")
+            _note_reprofile(KernelReprofile(ran=False, skipped_reason="no_projected_tput"))
             return
         # With a measured trace, reprofile only on a material gain or a change in what is being measured.
         if (
@@ -649,7 +650,7 @@ class KernelPhase(CoordinatorCollaborator):
             and not config_changed
             and not workload_changed
         ):
-            _note_reprofile(ran=False, skipped_reason="within_tolerance")
+            _note_reprofile(KernelReprofile(ran=False, skipped_reason="within_tolerance"))
             return
         trigger = "config_changed" if config_changed else ("workload_changed" if workload_changed else "gain")
         snapshot_id_before = int(self.shared_state.roofline_snapshot_id or 0)
@@ -662,12 +663,14 @@ class KernelPhase(CoordinatorCollaborator):
         denied = self._coord.dispatcher.time_budget_denial_for_action(task_kind)
         if params is None or denied is not None:
             _note_reprofile(
-                ran=False,
-                task_kind=task_kind,
-                trigger=trigger,
-                skipped_reason=denied.rule if denied else analysis_skip_reason(self.shared_state),
-                idempotency_reason=idempotency_reason,
-                snapshot_id_before=snapshot_id_before,
+                KernelReprofile(
+                    ran=False,
+                    task_kind=task_kind,
+                    trigger=trigger,
+                    skipped_reason=denied.rule if denied else analysis_skip_reason(self.shared_state),
+                    idempotency_reason=idempotency_reason,
+                    snapshot_id_before=snapshot_id_before,
+                )
             )
             return
         # profile_lane conflicts with the benchmark_lane the kernel_agent task holds, so the reprofile is a step of
@@ -678,26 +681,30 @@ class KernelPhase(CoordinatorCollaborator):
         except Exception:
             log.exception("kernel-entry reprofile failed; the phase proceeds on the existing snapshot")
             _note_reprofile(
-                ran=True,
-                task_kind=task_kind,
-                trigger=trigger,
-                skipped_reason="dispatch_failed",
-                idempotency_reason=idempotency_reason,
-                snapshot_id_before=snapshot_id_before,
+                KernelReprofile(
+                    ran=True,
+                    task_kind=task_kind,
+                    trigger=trigger,
+                    skipped_reason="dispatch_failed",
+                    idempotency_reason=idempotency_reason,
+                    snapshot_id_before=snapshot_id_before,
+                )
             )
             return
         snapshot_landed = self._adopt_reprofile_snapshot(
             before=before, snapshot_id_before=snapshot_id_before, snapshots_before=snapshots_before
         )
         _note_reprofile(
-            ran=True,
-            task_kind=task_kind,
-            trigger=trigger,
-            idempotency_reason=idempotency_reason,
-            snapshot_landed=snapshot_landed,
-            snapshot_id_before=snapshot_id_before,
-            snapshot_id_after=int(self.shared_state.roofline_snapshot_id or 0),
-            task_id=str(getattr(reprofile_task, "task_id", "") or ""),
+            KernelReprofile(
+                ran=True,
+                task_kind=task_kind,
+                trigger=trigger,
+                idempotency_reason=idempotency_reason,
+                snapshot_landed=snapshot_landed,
+                snapshot_id_before=snapshot_id_before,
+                snapshot_id_after=int(self.shared_state.roofline_snapshot_id or 0),
+                task_id=str(getattr(reprofile_task, "task_id", "") or ""),
+            )
         )
         if snapshot_landed:
             self._record_kernel_discovered_from_cache(provenance="reprofile_snapshot")

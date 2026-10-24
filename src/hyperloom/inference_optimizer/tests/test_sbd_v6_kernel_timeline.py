@@ -32,6 +32,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     IntegrateVerdict,
+    KernelReprofile,
     KernelRewriteRun,
     LaneRunFields,
     TraceAnalyzeRun,
@@ -1373,7 +1374,7 @@ def _record_inline_reprofile(recorder, *, task_id: str = "rp-1") -> None:
     from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
     from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import RooflineRequest, make_roofline_recorder
 
-    recorder.record_reprofile(ran=True, task_kind="roofline", trigger="gain", task_id=task_id)
+    recorder.record_reprofile(KernelReprofile(ran=True, task_kind="roofline", trigger="gain", task_id=task_id))
     inline = make_roofline_recorder(
         make_sink(recorder.event_id, producer="orchestrator"),
         RooflineRequest(task_id=task_id, task_kind="roofline", reason="kernel_entry_reprofile"),

@@ -42,6 +42,7 @@ __all__ = [
     "SOURCE_KERNEL_REWRITE",
     "GeakRebenchAttempt",
     "IntegrateVerdict",
+    "KernelReprofile",
     "KernelRewriteRun",
     "LaneRunFields",
     "TraceAnalyzeRun",
@@ -132,6 +133,35 @@ class KernelRewriteRun:
             "correctness": self.correctness if isinstance(self.correctness, bool) else None,
             "artifact_path": _text(self.artifact_path),
             "trace_analyze_ref": _text(self.trace_analyze_ref),
+        }
+
+
+@dataclass(frozen=True)
+class KernelReprofile:
+    """The entry re-profile that decides whether the cached analysis is stale."""
+
+    ran: bool
+    task_kind: str = ""
+    trigger: str = ""
+    skipped_reason: str = ""
+    idempotency_reason: str = ""
+    snapshot_landed: bool = False
+    snapshot_id_before: Any = None
+    snapshot_id_after: Any = None
+    task_id: str = ""
+
+    def block(self) -> dict[str, Any]:
+        """The ``forge_reprofile`` block this re-profile persists as."""
+        return {
+            "ran": bool(self.ran),
+            "task_id": _text(self.task_id),
+            "task_kind": _text(self.task_kind),
+            "trigger": _text(self.trigger),
+            "skipped_reason": _text(self.skipped_reason),
+            "idempotency_reason": _text(self.idempotency_reason),
+            "snapshot_landed": bool(self.snapshot_landed),
+            "snapshot_id_before": _int_or_none(self.snapshot_id_before),
+            "snapshot_id_after": _int_or_none(self.snapshot_id_after),
         }
 
 
