@@ -444,13 +444,6 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 await self._record_materialize_skipped(pending, "critic_filter_empty_grid")
                 _record_config_dropped(self, pending, reason="critic_filter_empty_grid")
                 return False
-        if action == "profile":
-            # Stamp the server config that produced this trace.
-            inject_stack_base_params(params, self.shared_state)
-        if action == "sweep":
-            inject_stack_base_params(params, self.shared_state, anchor=True)
-            if self.shared_state.baseline_config_path:
-                params.setdefault("config_path", self.shared_state.baseline_config_path)
         if action == "explore":
             self.inject_explore_runtime_params(params)
             self.credit_predictor_proposals(params)

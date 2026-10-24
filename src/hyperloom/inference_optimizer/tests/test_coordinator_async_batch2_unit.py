@@ -2932,17 +2932,6 @@ async def test_materialize_explore_proposal_id_does_not_break_content_dedup(
 
 
 @pytest.mark.asyncio
-async def test_materialize_sweep_stamps_base(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    coord.shared_state.current_best = {"tput": 900.0, "extra_server_args": "--tp 1"}
-    coord.shared_state.baseline_config_path = "/tmp/base.yaml"
-    pending = _pending("sweep", {"params": {}}, msg_id="prop-sweep")
-    await coord.proposals.materialize_approved_proposal(pending)
-    task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
-    assert task.kind == "sweep"
-
-
-@pytest.mark.asyncio
 async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator, monkeypatch) -> None:
     # Regression: explore must inherit current_best.extra_envs as its env base, else the accepted stack's envs
     # collapse to the last variant's delta.

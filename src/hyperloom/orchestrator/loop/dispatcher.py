@@ -1232,9 +1232,6 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         sequence_actions = {
             "target_analysis",
             "baseline",
-            "profile",
-            "roofline",
-            "sweep",
             "report",
             "integrate",
             "explore",
