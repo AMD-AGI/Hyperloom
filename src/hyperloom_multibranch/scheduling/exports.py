@@ -11,8 +11,9 @@ the Experiences and the specialists' learnings go nowhere while MB1 runs on no E
 outcomes next to the chosen commit's recipe and how FINAL chose it; once the search tree is archived, the scheduler's
 LLM writes a generation of frontier scorers into the pool beside the archive (:func:`author_scorers`) and curates the
 RSI lesson pool the knowledge steps published the session's learnings to (:func:`curate_lessons`), steps that never
-stop CLOSE; ``session_breakdown.json`` and the knowledge steps' receipts land in ``MB-reports/``,
-and the dashboard is rebuilt a last time with the queue the stop left.
+stop CLOSE; ``session_breakdown.json``, the knowledge steps' receipts and :data:`IMAGE_CHECK_FILE`, the whole
+image check the session ran before its first phase, land in ``MB-reports/``, and the dashboard is rebuilt a last time
+with the queue the stop left.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom.common.outside_facts.image_check import ImageCheckReport
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom.measure.compile import BlobError, BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
@@ -53,6 +55,8 @@ from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_close_knowledge
 #: The single-lineage CLOSE's status when no Recipe KB is configured.
 KB_DISABLED = "disabled"
 KB_FAILED = "failed"
+#: The whole image check's report, under ``MB-reports/``.
+IMAGE_CHECK_FILE = "image_check.json"
 
 
 def knowledge_steps(knowledge: KnowledgeClose, scorers: CloseStep, curation: CloseStep) -> dict[str, CloseStep]:
@@ -114,12 +118,14 @@ class ScorerAuthoring:
 @dataclass(frozen=True)
 class ExportSources:
     """What CLOSE exports from: the scheduler's notebook handle, the repository and the blob store that hold the
-    chosen commit's recipe and its files, and the session's dashboard."""
+    chosen commit's recipe and its files, the session's dashboard and the image check it ran before its first phase,
+    ``None`` for a FINAL and CLOSE over a session that ended before FINAL, which run none."""
 
     notebook: Notebook
     repo: ExperimentRepo
     blobs: BlobStore
     dashboard: SessionDashboard
+    image_check: ImageCheckReport | None
 
 
 @dataclass(frozen=True)
@@ -156,12 +162,15 @@ class SessionExports:
         self._repo = sources.repo
         self._blobs = sources.blobs
         self._dashboard = sources.dashboard
+        self._image_check = sources.image_check
         self._metric = metric
         self._budget_seconds = budget_seconds
 
     async def export(self, final: FinalChoice | None, queue: QueueState | None) -> CloseExports:
         """Write the exports; ``queue`` is what the toolbox reported after the stop."""
 
+        if self._image_check is not None:
+            await asyncio.to_thread(self._image_check.write, self._layout.reports / IMAGE_CHECK_FILE)
         snapshot = await self._notebook.snapshot()
         chosen = await self._final_recipe(final)
         kb_write_back = await self._publish(snapshot, chosen)
@@ -224,6 +233,7 @@ class SessionExports:
 
 __all__ = [
     "KB_DISABLED",
+    "IMAGE_CHECK_FILE",
     "KB_FAILED",
     "CloseExports",
     "ExportServices",

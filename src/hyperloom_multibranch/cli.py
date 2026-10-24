@@ -47,7 +47,10 @@ directory; the measurement pins must be readable, the image the session runs on 
 ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` included; the framework's package must be
 installed in the image; and the agent CLI the specialists run must be installed. A canonical measurement that cannot
 be taken, one naming a launcher the InferenceX checkout lacks and Magpie cannot supply included, fails the command the
-same way once the session directory exists.
+same way once the session directory exists. Before PRELUDE the session checks the rule pack's facts about outside
+projects against this environment as ``HYPERLOOM_IMAGE_CHECK`` says: ``warn`` (the default) logs a failing fact,
+``strict`` fails the command the same way before any phase runs, ``off`` checks nothing, and any other value is a usage
+error. The manifest records the check's summary and CLOSE writes the whole report to ``MB-reports/image_check.json``.
 A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
@@ -77,6 +80,7 @@ from pathlib import Path
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
 from hyperloom.common.env import EnvValueError
+from hyperloom.common.outside_facts.image_check import ImageCheckFailed, mode_from_environment
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
@@ -580,6 +584,7 @@ def main(argv: list[str] | None = None) -> int:
                 settings = replace(settings, reuse_prelude=reused)
         require_workload_switch(settings.workload, os.environ)
         require_priced_models(settings.max_llm_usd, os.environ)
+        mode_from_environment(os.environ)
     except ValueError as exc:
         parser.print_usage(sys.stderr)
         print(f"{parser.prog}: error: {exc}", file=sys.stderr)
@@ -600,7 +605,7 @@ def main(argv: list[str] | None = None) -> int:
         if persisted is not None:
             return final_only(persisted, peer_factory, services)
         return run_session(settings, peer_factory, services)
-    except (EnvironmentIncomplete, PeersUnavailable) as exc:
+    except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
         return EXIT_FAILED
 

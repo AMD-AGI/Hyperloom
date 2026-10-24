@@ -31,6 +31,8 @@ import pytest
 from hyperloom.common.jsonio import read_jsonl
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom.common.proctree import running
+from hyperloom.common.outside_facts.image_check import FactResult, ImageCheckFailed, ImageCheckMode, ImageCheckReport
+from hyperloom.common.outside_facts.image_check_eval import Status
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import (
     NOT_REPRODUCED,
@@ -103,6 +105,7 @@ from hyperloom_multibranch.scheduling.budget import (
 from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE
 from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS, FORK_NOT_LANDED, OPEN_CUT_REASON
+from hyperloom_multibranch.scheduling.exports import IMAGE_CHECK_FILE
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL, PRIMARY_POINT_ONLY
 from hyperloom_multibranch.scheduling import judge
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, HoldReason
@@ -182,6 +185,14 @@ WORKLOAD = Workload(
 )
 #: The same workload as an AgentX trace replay.
 AGENTX = replace(WORKLOAD, inferencex=None)
+#: What the session's image check finds: one fact of the rule pack that does not hold here, under the default mode.
+IMAGE_CHECK = ImageCheckReport(
+    ImageCheckMode.WARN,
+    rule_pack_identity(),
+    "2023-11-14T22:13:20Z",
+    {"python": "/usr/bin/python3"},
+    (FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone"),),
+)
 SETTINGS = RunSettings(
     WORKLOAD,
     max_hours=0.5,
@@ -342,6 +353,7 @@ class Stage:
     critic: Callable[[UsageSink], FixReviewer] = lambda _usage: NoCritic()
     scorer_author: ScriptedCompletion = field(default_factory=ScriptedCompletion)
     learnings: LearningRecall | None = None
+    image_check: Callable[[], ImageCheckReport] = lambda: IMAGE_CHECK
     toolbox: RecordingToolbox = field(init=False)
     sessions: RecordedSessions = field(init=False)
     repo: HeldGitRepo = field(init=False)
@@ -453,7 +465,11 @@ class Stage:
         await then(branch, head)
 
     async def run(self) -> SessionOutcome:
-        return await self._session().run()
+        """Run the session, its image check answered by ``image_check`` instead of this environment."""
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(lifecycle, "run_image_check", self.image_check)
+            return await self._session().run()
 
     async def finish(self, ended: SessionStopReason) -> SessionOutcome:
         """FINAL and CLOSE alone over the session directory this stage was built on, as ``final-only`` runs them."""
@@ -618,6 +634,8 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     manifest = json.loads(stage.layout.manifest.read_text())
     assert set(manifest["code_version"]) == {"package", "git_sha"} and manifest["metric"] == GRADED_OUTPUT
     assert manifest["rule_pack"] == rule_pack_identity()
+    assert manifest["image_check"] == IMAGE_CHECK.summary()
+    assert json.loads((stage.layout.reports / IMAGE_CHECK_FILE).read_text()) == IMAGE_CHECK.to_json()
     judge_calls = len(stage.layout.judge.read_text().splitlines())
     spends = [_judge_state(prompt)["spend"] for prompt in _judge_prompts(stage)]
     assert [spend["scheduler_llm_usd"] for spend in spends[:2]] == [0.0, JUDGE_USD]
@@ -981,6 +999,23 @@ async def test_a_failed_prelude_skips_to_close(tmp_path: Path) -> None:
     assert outcome.final is None and outcome.close is not None and outcome.close.stop.clean
     assert stage.judge.calls == []
     assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.PRELUDE_FAILED.value
+
+
+def _fails_strictly() -> ImageCheckReport:
+    raise ImageCheckFailed(replace(IMAGE_CHECK, mode=ImageCheckMode.STRICT))
+
+
+async def test_a_strict_image_check_that_fails_stops_the_session_before_its_manifest_and_any_phase(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.image_check = _fails_strictly
+
+    with pytest.raises(ImageCheckFailed, match="sglang.renamed-flag"):
+        await stage.run()
+
+    assert not stage.layout.manifest.exists() and not stage.layout.report.exists()
+    assert stage.judge.calls == [] and not stage.layout.prelude_child.exists()
 
 
 async def test_a_stop_signal_skips_to_close_and_stops_every_branch(tmp_path: Path) -> None:
