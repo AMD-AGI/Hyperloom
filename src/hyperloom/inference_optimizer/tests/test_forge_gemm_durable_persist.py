@@ -105,7 +105,7 @@ def test_persist_snapshot_failure_keeps_copy_and_repoint(tmp_path, monkeypatch):
 
     import hyperloom.orchestrator.source_snapshot as ss
 
-    def _boom(**kwargs):
+    def _boom(layer, **kwargs):
         raise RuntimeError("snapshot dest not writable")
 
     monkeypatch.setattr(ss, "snapshot_source_layer", _boom)

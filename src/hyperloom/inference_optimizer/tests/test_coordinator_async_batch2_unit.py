@@ -619,16 +619,18 @@ async def test_resume_does_not_halt_on_a_kept_delete_the_git_tree_already_commit
 
 def _captured_keep(tmp_path: Path, tree: Path, name: str, rels: list[str], deleted: tuple[str, ...] = ()) -> dict:
     """Commit the tree's current edits as a KEEP and snapshot them the way integrate_patch does."""
-    from hyperloom.orchestrator.source_snapshot import snapshot_source_layer
+    from hyperloom.orchestrator.source_snapshot import SourceLayer, snapshot_source_layer
 
     _git(tree, "add", "-A")
     _git(tree, "commit", "-q", "-m", f"hyperloom KEEP {name}")
     snap = snapshot_source_layer(
-        framework_root=tree,
-        base_sha=_git(tree, "rev-parse", "HEAD").strip(),
-        rel_paths=rels,
+        SourceLayer(
+            framework_root=tree,
+            base_sha=_git(tree, "rev-parse", "HEAD").strip(),
+            rel_paths=rels,
+            declared_ops=dict.fromkeys(deleted, "delete"),
+        ),
         dest_dir=tmp_path / "optimization_stack" / "src" / name,
-        declared_ops=dict.fromkeys(deleted, "delete"),
     )
     assert snap is not None
     return {

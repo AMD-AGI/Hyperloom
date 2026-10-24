@@ -3294,12 +3294,14 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     # snapshot failure must NOT discard the copy + repoint committed above.
     snap_dir = ""
     try:
-        from ..source_snapshot import snapshot_source_layer
+        from ..source_snapshot import SourceLayer, snapshot_source_layer
 
         snap = snapshot_source_layer(
-            framework_root=aiter_pkg,
-            base_sha=None,
-            rel_paths=rel_paths,
+            SourceLayer(
+                framework_root=aiter_pkg,
+                base_sha=None,
+                rel_paths=rel_paths,
+            ),
             dest_dir=Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}",
             provenance="kernelforge.gemm_tune",
             extra={
