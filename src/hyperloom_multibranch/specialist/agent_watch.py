@@ -126,14 +126,47 @@ def _marked() -> Iterator[tuple[int, dict[str, str]]]:
                 yield int(entry.name), environ
 
 
-def _registered(registry: Path) -> dict[str, tuple[int, ...]]:
-    """The cards of every sandbox ``registry`` holds, by root."""
+def _registered(registry: Path, say: Callable[[str], None]) -> dict[str, tuple[int, ...]]:
+    """The cards of every sandbox ``registry`` holds, by root; an entry that cannot be read is said and left out, so
+    the other sandboxes are still confined."""
 
     sandboxes = {}
     for entry in registry.glob("*.json"):
-        document = json.loads(entry.read_text(encoding="utf-8"))
-        sandboxes[document["root"]] = tuple(document["cards"])
+        try:
+            document = json.loads(entry.read_text(encoding="utf-8"))
+            sandboxes[document["root"]] = tuple(document["cards"])
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            say(f"the registry entry {entry.name} cannot be read: {error!r}")
     return sandboxes
+
+
+class _Log:
+    """What the watch says of itself, in the log of every sandbox it knows, or on its stderr when none takes it; a line
+    said at every look is written once, until a look no longer says it."""
+
+    def __init__(self) -> None:
+        self.roots: tuple[str, ...] = ()
+        self._said: set[str] = set()
+        self._saying: set[str] = set()
+
+    def say(self, what: str) -> None:
+        self._saying.add(what)
+        if what in self._said:
+            return
+        line = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} watch: {what}\n"
+        written = False
+        for root in self.roots:
+            try:
+                with (Path(root) / WATCH_LOG).open("a", encoding="utf-8") as log:
+                    log.write(line)
+            except OSError:
+                continue
+            written = True
+        if not written:
+            print(line, end="", file=sys.stderr, flush=True)
+
+    def looked(self) -> None:
+        self._said, self._saying = self._saying, set()
 
 
 def _confine(sandboxes: Mapping[str, tuple[int, ...]]) -> None:
@@ -173,22 +206,39 @@ def main(argv: Sequence[str]) -> int:
 
     owner, registry = int(argv[0]), Path(argv[1])
     signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    log = _Log()
     try:
-        grace = STOP_GRACE_SECONDS if _watch(owner, registry) else GRACE_SECONDS
-        asyncio.run(_end(_registered(registry), grace))
+        grace = STOP_GRACE_SECONDS if _watch(owner, registry, log) else GRACE_SECONDS
+        asyncio.run(_end(_registered(registry, log.say), grace))
     finally:
         shutil.rmtree(registry)
     return 0
 
 
-def _watch(owner: int, registry: Path) -> bool:
+def _watch(owner: int, registry: Path, log: _Log) -> bool:
     """Confine the sandboxes ``registry`` holds while ``owner`` runs; whether a SIGTERM ended the watch."""
 
     while os.getppid() == owner:
-        _confine(_registered(registry))
+        _look(registry, log)
         if signal.sigtimedwait([signal.SIGTERM], WATCH_SECONDS) is not None:
             return True
     return False
+
+
+def _look(registry: Path, log: _Log) -> None:
+    """One look over the sandboxes; one that fails is said and the next look tries again, as a watch that ended would
+    leave every sandbox unconfined."""
+
+    try:
+        unread: list[str] = []
+        sandboxes = _registered(registry, unread.append)
+        log.roots = tuple(sandboxes)
+        for what in unread:
+            log.say(what)
+        _confine(sandboxes)
+    except OSError as error:
+        log.say(f"a look failed and is tried again: {error!r}")
+    log.looked()
 
 
 def _signal(pids: Iterable[int], number: int) -> None:

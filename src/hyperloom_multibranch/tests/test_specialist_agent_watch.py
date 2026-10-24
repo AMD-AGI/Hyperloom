@@ -111,14 +111,14 @@ AGENT = "setsid sleep 1000 & echo $! >> {pids}; echo $$ >> {pids}; sleep 1000"
 DEAF_AGENT = "trap '' TERM; " + AGENT
 
 
-def _owner(tmp_path: Path, agent: str = AGENT) -> tuple[subprocess.Popen[bytes], Path]:
+def _owner(tmp_path: Path, agent: str = AGENT, started: int = 2) -> tuple[subprocess.Popen[bytes], Path]:
     pids = tmp_path / "pids"
     script = tmp_path / "owner.py"
     script.write_text(textwrap.dedent(OWNER))
     env = {**os.environ, "TMPDIR": str(tmp_path / "local-tmp")}
     argv = [sys.executable, str(script), str(tmp_path / "sandbox"), str(pids), agent]
     owner = subprocess.Popen(argv, env=env)
-    _until(lambda: len(_pids(pids)) == 2, 60.0)
+    _until(lambda: len(_pids(pids)) == started, 60.0)
     return owner, pids
 
 
@@ -146,6 +146,23 @@ def test_a_terminated_watch_ends_a_deaf_agent_within_the_kill_all_grace_and_remo
         kill_tree(collect_tree([watch]))
         _until(lambda: not any(_alive(pid) for pid in agent), 1.0)
         assert not (tmp_path / "local-tmp" / f"{REGISTRY_PREFIX}{owner.pid}").exists()
+    finally:
+        owner.kill()
+        owner.wait()
+        _kill(marked_pids(str(tmp_path / "sandbox")))
+
+
+def test_the_watch_logs_a_registry_entry_it_cannot_read_and_keeps_confining_the_others(tmp_path: Path) -> None:
+    late = "echo $$ >> {pids}; sleep 3; (ROCR_VISIBLE_DEVICES=1 sleep 100 & echo $! >> {pids}); sleep 1000"
+    owner, pids = _owner(tmp_path, late, started=1)
+    try:
+        registry = tmp_path / "local-tmp" / f"{REGISTRY_PREFIX}{owner.pid}"
+        (registry / "torn.json").write_text("{", encoding="utf-8")
+        _until(lambda: len(_pids(pids)) == 2)
+        _until(lambda: not _alive(_pids(pids)[1]))
+        log = (tmp_path / "sandbox" / "watch.log").read_text()
+        assert log.count("torn.json cannot be read") == 1
+        assert "ROCR_VISIBLE_DEVICES=1 reaches beyond its cards" in log
     finally:
         owner.kill()
         owner.wait()
