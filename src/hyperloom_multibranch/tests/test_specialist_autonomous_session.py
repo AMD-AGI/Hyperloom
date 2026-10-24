@@ -767,3 +767,23 @@ async def test_a_sandbox_watch_started_again_is_noted_in_the_branch_log(tmp_path
     await asyncio.wait_for(running, 10)
 
     assert f"{NOTICE} the sandbox's watch had ended (exit 1) and was started again" in await rig.notices()
+
+
+async def test_a_finding_learnt_as_the_agent_finished_is_not_learnt_again_when_the_branch_is_stopped(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(256,), tail=1.0, ledger=((_entry("a", "FACT", KEPT),),)))
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    ledger = tmp_path / BRANCH / "session" / AGENT_DIR / "src" / "run" / "ledger.jsonl"
+    with ledger.open("a", encoding="utf-8") as lines:
+        lines.write(json.dumps(_entry("b", "DEAD_END", AFTER)) + "\n")
+    await rig.toolbox_notebook.write_result(result("r1"))
+
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+    await rig.session.stop()
+
+    learnt = [record.learning.content for record in await rig.notebook.learnings(branch=BRANCH)]
+    assert learnt == [f"FACT a: {KEPT}", f"DEAD_END b: {AFTER}"]

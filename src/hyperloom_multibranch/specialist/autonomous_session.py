@@ -358,7 +358,10 @@ class AutonomousSession:
 
     async def _learn(self, ledger: LedgerSource | None, watch: KeepWatch) -> None:
         """Append each finding of the agent's ``ledger`` the branch has not learnt as it reads now as the branch's
-        learning, superseding the one an earlier version of it became; one the notebook refuses is noted once."""
+        learning, superseding the one an earlier version of it became; one the notebook refuses is noted once.
+
+        The watch is saved after each finding: :meth:`stop` reads it from its file, and a finding learnt by a run that
+        ended before saving it would be learnt again."""
 
         if ledger is None:
             return
@@ -373,6 +376,7 @@ class AutonomousSession:
             except ValueError as error:
                 await self._note(f"the agent's finding {finding.id} is not learnt: {error}")
             watch.learnt[finding.id] = [earlier, digest]
+            watch.save(self._place.workspace / WATCH_FILE)
 
     async def _submit(self, manifest: AgentManifest, watch: KeepWatch) -> None:
         """Submit the pending keep once nothing of the branch is measured or being judged, against the head then.
