@@ -323,12 +323,7 @@ class Explorer:
             opening=opening,
             free_slots=self._roster.free_slots(),
             pending=self._desk.pending(),
-            history=judge_history(
-                snapshot,
-                self._progress.history,
-                self._metric,
-                budget_seconds=window.budget_seconds,
-            ),
+            history=judge_history(snapshot, self._progress.history, self._metric, budget_seconds=window.budget_seconds),
             widening=await self._widening.signals(),
             similar_to=await self._similarity.similar_to(),
             events=self._events.hand_over(),
