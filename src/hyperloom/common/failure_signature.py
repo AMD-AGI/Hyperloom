@@ -211,9 +211,8 @@ _RULES: tuple[_Rule, ...] = (
     ),
     _Rule(
         # Every other ``hipError`` token (hipErrorIllegalAddress, hipErrorStreamCaptureInvalidated, ...) reports a call
-        # that failed, not a kernel that is absent. It used to share the rule above, so a candidate whose own kernel
-        # read out of bounds came back as "hip_kernel_missing" and was read as a gap in the image. Same position and
-        # bridge layer as before, so the enablement ladder places and routes it as it always did.
+        # that failed, not a kernel that is absent. It shares the ``rocm_hip`` bridge layer with ``hip_kernel_missing``,
+        # so the ladder and the enablement rung route both alike.
         kind=HIP_RUNTIME_ERROR,
         bridge_layer="rocm_hip",
         patterns=(re.compile(r"hipError[A-Za-z]*"),),

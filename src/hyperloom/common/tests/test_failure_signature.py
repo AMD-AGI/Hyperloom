@@ -446,7 +446,7 @@ def test_a_missing_binary_is_still_a_missing_kernel() -> None:
     ],
 )
 def test_a_hip_call_that_failed_while_running_is_not_a_missing_kernel(log: str) -> None:
-    """The kernel was there and ran; every hipError token used to be called a missing kernel, which a candidate's own out-of-bounds read then claimed."""
+    """The kernel was there and ran; a hipError from a failed call is a runtime error, not a missing kernel."""
     sig = classify_failure(log)
 
     assert sig.kind == HIP_RUNTIME_ERROR
