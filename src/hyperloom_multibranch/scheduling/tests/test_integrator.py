@@ -47,7 +47,7 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, MergeOutcome
-from hyperloom_multibranch.contracts.repo import RepoMerge, ResolvedPatch, UnitedTable
+from hyperloom_multibranch.contracts.repo import ReplacedPatch, RepoMerge, ResolvedPatch, UnitedTable
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay
@@ -883,6 +883,27 @@ async def test_a_patch_a_foundation_fix_brought_is_never_replaced_by_a_later_mer
     head = await bench.repo.read_recipe(await bench.repo.head(INTEGRATION_BRANCH))
     [kept] = head.component(COMPONENT).patches
     assert await bench.repo.patch_text(merged.merged_commit, kept.path) == HEAD_TEXT
+
+
+async def test_a_merge_that_takes_a_head_patch_out_says_so_in_its_reason_and_the_merge_log(tmp_path: Path) -> None:
+    curves = {frozenset({"head"}): {MAIN_POINT: 1040.0}, frozenset({"head", "c1"}): {MAIN_POINT: 1070.0}}
+    bench = await _bench(tmp_path, curves, tags=("c1",))
+    await _committed_head_patch(bench, foundation=False)
+
+    first, replacing = await _one(bench), await _one(bench)
+
+    assert first is not None and replacing is not None and replacing.candidate == bench.commits["c1"]
+    [taken] = (await bench.repo.read_recipe(str(first.merged_commit))).component(COMPONENT).patches
+    [by] = bench.deltas["c1"].components[0].add_patches
+    assert replacing.outcome is MergeOutcome.MERGED
+    assert replacing.replaced_patches == (ReplacedPatch(COMPONENT, (taken.path,), by),)
+    swap = f"took out the head's {COMPONENT} patch {taken.path} for the candidate's {by.path}"
+    assert replacing.reason == f"improved +2.88% on the integration head; {swap}"
+    assert (await bench.repo.read_recipe(str(replacing.merged_commit))).component(COMPONENT).patches == (by,)
+    logged = bench.logged()[-1]
+    assert logged["reason"] == replacing.reason
+    assert logged["detail"]["replaced_patches"] == [{"component": COMPONENT, "removed": [taken.path], "by": by.path}]
+    assert bench.logged()[0]["detail"]["replaced_patches"] == []
 
 
 #: A rewrite of the conflicting patch against a line no stack of the bench holds, so it applies nowhere.

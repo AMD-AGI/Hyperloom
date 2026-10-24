@@ -51,7 +51,14 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
 from hyperloom_multibranch.contracts.notebook.records import CommittedCommit, MergeAttempt, WarmReplay
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, MergeOutcome
-from hyperloom_multibranch.contracts.repo import ExperimentRepo, PatchConflict, RepoMerge, ResolvedPatch, UnitedTable
+from hyperloom_multibranch.contracts.repo import (
+    ExperimentRepo,
+    PatchConflict,
+    ReplacedPatch,
+    RepoMerge,
+    ResolvedPatch,
+    UnitedTable,
+)
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay
 from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD
@@ -93,7 +100,8 @@ class MergeReport:
     """What came of one candidate on integration head ``onto``; ``config_conflicts`` took the candidate's value.
 
     ``united_tables`` are the kernel slots the merge filled with a union of both sides' tables: the tested recipe
-    loads a table neither branch measured, and the gain below was measured on it.
+    loads a table neither branch measured, and the gain below was measured on it. ``replaced_patches`` are the head
+    patches the merge took out for a candidate's patch that rewrites them, and the reason names them.
 
     A merged candidate carries the gain its merge test was judged to make and the bar it was judged against;
     ``foundation_fix`` says the candidate is a foundation fix, which merges without a gain.
@@ -107,9 +115,23 @@ class MergeReport:
     merged_commit: str | None = None
     config_conflicts: tuple[ValueChange, ...] = ()
     united_tables: tuple[UnitedTable, ...] = ()
+    replaced_patches: tuple[ReplacedPatch, ...] = ()
     gain_pct: float | None = None
     threshold_pct: float | None = None
     foundation_fix: bool = False
+
+
+def _naming_replaced(report: MergeReport) -> MergeReport:
+    """``report`` with its reason naming each head patch the merge took out and the candidate's patch it took them
+    out for: a merged candidate may have dropped another branch's accepted patch."""
+
+    if not report.replaced_patches:
+        return report
+    swaps = (
+        f"took out the head's {swap.component} patch {', '.join(swap.removed)} for the candidate's {swap.by.path}"
+        for swap in report.replaced_patches
+    )
+    return replace(report, reason="; ".join((report.reason, *swaps)))
 
 
 class PatchUnresolved(Exception):
@@ -268,9 +290,10 @@ def _verdict_on_head(judgement: Judgement) -> str:
 class _Skipped(Exception):
     """A merge that cannot be tested; ``reason`` says why."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, merge: RepoMerge) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.merge = merge
 
 
 @dataclass(frozen=True)
@@ -346,6 +369,7 @@ class Integrator:
                 while running and running[0].done():
                     item = running.pop(0).result()
                     report = item if isinstance(item, MergeReport) else await self._conclude(item, merged)
+                    report = _naming_replaced(report)
                     merged = merged or report.outcome is MergeOutcome.MERGED
                     self._decisions.record(_decision(report))
                     reports.append(report)
@@ -386,9 +410,7 @@ class Integrator:
             merge = await self._resolved(carried, candidate)
             onto = await self._repo.read_recipe(head)
             if apply(onto, merge.delta).digest() == onto.digest():
-                return await self._skip(
-                    commit, head, ALREADY_ON_HEAD, MergeOutcome.ALREADY_ON_HEAD, merge.united_tables
-                )
+                return await self._skip(commit, head, ALREADY_ON_HEAD, MergeOutcome.ALREADY_ON_HEAD, merge)
             request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, head, merge.delta)
             return await self._tests.judged(request, partial(self._judge, merge, commit))
         except RecipeError as exc:
@@ -398,7 +420,7 @@ class Integrator:
                 commit, head, f"the toolbox refused the merge test: {exc}", MergeOutcome.CONFLICT_SKIPPED
             )
         except _Skipped as exc:
-            return await self._skip(commit, head, exc.reason, MergeOutcome.CONFLICT_SKIPPED)
+            return await self._skip(commit, head, exc.reason, MergeOutcome.CONFLICT_SKIPPED, exc.merge)
 
     async def _foundation_fixes(self) -> frozenset[str]:
         """The foundation fixes merged onto the integration branch, as the notebook records them: no later merge may
@@ -422,6 +444,7 @@ class Integrator:
             None,
             merge.config_conflicts,
             merge.united_tables,
+            merge.replaced_patches,
             foundation_fix=commit.foundation_fix,
         )
         try:
@@ -439,27 +462,24 @@ class Integrator:
         try:
             return await self._resolver.resolve(merge, candidate)
         except CompletionFailed as exc:
-            raise _Skipped(f"{RESOLVER_UNREACHED}: {conflicts}: {exc}") from exc
+            raise _Skipped(f"{RESOLVER_UNREACHED}: {conflicts}: {exc}", merge) from exc
         except (BlobError, PatchUnresolved) as exc:
-            raise _Skipped(f"{CONFLICT_UNRESOLVED}: {conflicts}: {exc}") from exc
+            raise _Skipped(f"{CONFLICT_UNRESOLVED}: {conflicts}: {exc}", merge) from exc
 
     async def _skip(
-        self,
-        commit: CommittedCommit,
-        head: str,
-        reason: str,
-        outcome: MergeOutcome,
-        united: tuple[UnitedTable, ...] = (),
+        self, commit: CommittedCommit, head: str, reason: str, outcome: MergeOutcome, merge: RepoMerge | None = None
     ) -> MergeReport:
-        """A skipped candidate's report. ``united`` is what the merge united before the skip: a candidate whose every
-        tuned row the head already had reads as already on the head, which is true of the slot and says nothing about
-        the rows it cost, so the union is recorded even where nothing was tested."""
+        """A skipped candidate's report. ``merge`` is what the repository carried before the skip, if it got that far.
+        What it united and replaced is recorded even where nothing was tested: a candidate whose every tuned row the
+        head already had reads as already on the head, which is true of the slot and says nothing about the rows it
+        cost."""
 
         attempt = MergeAttempt((commit.commit_id,), head, skipped_reason=reason, skipped_outcome=outcome)
         await self._notebook.record_merge_attempt(attempt)
-        return MergeReport(
-            commit.commit_id, head, outcome, reason, united_tables=united, foundation_fix=commit.foundation_fix
-        )
+        report = MergeReport(commit.commit_id, head, outcome, reason, foundation_fix=commit.foundation_fix)
+        if merge is None:
+            return report
+        return replace(report, united_tables=merge.united_tables, replaced_patches=merge.replaced_patches)
 
     async def _conclude(self, tested: _TestedMerge, superseded: bool) -> MergeReport:
         """A superseded candidate gets no integration judgement and runs no regression set: it stays pending and is
@@ -578,6 +598,10 @@ def _decision(report: MergeReport) -> Decision:
         "threshold_pct": report.threshold_pct,
         "config_conflicts": [
             {"name": change.name, "before": change.before, "after": change.after} for change in report.config_conflicts
+        ],
+        "replaced_patches": [
+            {"component": swap.component, "removed": list(swap.removed), "by": swap.by.path}
+            for swap in report.replaced_patches
         ],
         "united_tables": [
             {
