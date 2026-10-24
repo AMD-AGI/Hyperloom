@@ -307,14 +307,10 @@ def _settle_warm_start_event(
     if status in _warm_start_event.MATCHED_STATUSES and recipe:
         replay = context.get("recommended_replay")
         matched = _warm_start_event.matched_block(
-            tier=match.get("tier"),
-            confidence=match.get("confidence"),
-            source=match.get("source"),
-            canonical_id=match.get("canonical_id"),
+            match=match,
             recipe=recipe,
+            experience=experience,
             expected_gain_pct=replay.get("expected_gain_pct") if isinstance(replay, Mapping) else None,
-            lessons=experience["lessons"],
-            pitfalls=experience["pitfalls"],
         )
     recorder.finish(match_status=status, matched=matched)
 
