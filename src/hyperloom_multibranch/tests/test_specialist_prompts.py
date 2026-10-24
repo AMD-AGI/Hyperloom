@@ -598,3 +598,33 @@ def test_the_role_and_gemm_direction_tune_with_kernel_tune_when_it_is_served():
 
 def test_the_role_profiles_a_head_right_after_its_branch_was_split_off():
     assert "or when your branch was just split off another branch's head" in role_prompt(WORKLOAD)
+
+
+def test_the_role_says_an_aiter_or_framework_kernel_is_source_a_branch_can_fork_and_call_differently():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "copy it into the framework tree and edit it there" in prompt
+    assert "calling one differently" in prompt and "accumulating a split-K GEMM into the residual" in prompt
+    assert '"Needs a C++ change" is never a reason to give up' in prompt
+    assert "A kernel inside aiter or the framework is not blocked_by_tool" in prompt
+    assert "a streaming read reaches about 5.7 TB/s on MI355X" in prompt
+
+
+def test_the_dev_sandbox_times_a_kernel_with_what_its_launcher_adds():
+    prompt = role_prompt(WORKLOAD, dev_leases=1)
+
+    assert "with what its launcher adds around it (a memset, a quantize) and cache-cold weights" in prompt
+
+
+def test_the_gemm_attention_and_fusion_directions_carry_the_strongest_kernel_examples():
+    gemm = DIRECTIONS[1]
+    (fusion,) = [text for text in DIRECTIONS if text.startswith("Fusion:")]
+    (attention,) = [text for text in DIRECTIONS if text.startswith("Attention and decode kernels:")]
+
+    assert "its split-K picks never pay the hipMemsetAsync" in gemm
+    assert "launched the same asm .co directly through ctypes" in gemm
+    assert "fixed by splitting the call along M, not by dropping the table" in gemm
+    assert "fused_qk_norm_rope_cache_pts_quant_shuffle" in fusion and "fused_rms_fp8_group_quant" in fusion
+    assert "copied into the framework tree and edited" in fusion
+    assert "page size included" in attention and "pa_decode_gluon" in attention
+    assert "scales from its epilogue" in attention

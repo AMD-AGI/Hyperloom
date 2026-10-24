@@ -32,13 +32,24 @@ DIRECTIONS = (
     "tuned rows or a stronger default; rows borrowed from tuned tables of the same kernel family at nearby shapes are "
     "an untimed guess, so say so in your branch log. Put only your rows with put_kernel_artifact and rows_only=true, "
     "carrying the rows of a table your head already has for that variable, and test several shapes in one test "
-    "rather than one shape per test.",
+    "rather than one shape per test. A split-K row's time counts in a CUDA graph with its memset (a dev sandbox "
+    "times it there; without one, a test is the measurement): aiter's tuner times the kernel alone, so its split-K picks never pay the hipMemsetAsync the launcher adds before each call. That memset "
+    "is not out of reach: one branch launched the same asm .co directly through ctypes, so o_proj and down_proj "
+    "accumulate into the residual and the norm before qkv and gate_up zeroes their outputs; that removed 160 memsets "
+    "and the residual adds per step, +4.2 to 5.1%. A tuned row that crashes at a large M (the padded-M lookup reuses "
+    "a row whose kernel rejects outputs over 2^30 elements) is fixed by splitting the call along M, not by dropping "
+    "the table.",
     "Fusion: fuse the elementwise work around the GEMMs and the attention (rmsnorm with the residual add, silu with "
     "mul, rope) with a source patch or a kernel, starting from the operators the profile ranks highest. Carry the "
     "fusion to the quantize: a norm, gate or attention output that an FP8 GEMM quantizes again should write the FP8 "
     "values and scales itself, and the all-reduce before a norm can take the residual add, the norm and the quantize "
     "in the same kernel. Fold an activation into the GEMM epilogue that consumes it, and profile again once a large "
-    "kernel on the path got faster: the small operators' shares then grow past the bar.",
+    "kernel on the path got faster: the small operators' shares then grow past the bar. Take the fused kernels aiter "
+    "ships first: fused_qk_norm_rope_cache_pts_quant_shuffle replaced six per-layer kernels (q/k split, QK-norm, "
+    "RoPE, KV write; 26 to 4.5 us a layer, +6.9%), and fused_rms_fp8_group_quant with a fused silu_mul and fp8 group "
+    "quant removed 120 quant kernels per step, +4.8%. A fused kernel that rejects the model's size (aiter's "
+    "silu_and_mul_quant above d 8192) or sits inside an aiter op is copied into the framework tree and edited there. "
+    "Fusions each below the bar go together as one intent.",
     "Server arguments and environment variables: yours is the one branch that tests settings alone; test the settings "
     "the profile or server.log point at, not a blind sweep. Before testing a setting, grep where it is read: one with "
     "no reader on this model's path, this backend or this phase (decode or prefill) is dead, and its test measures "
@@ -55,7 +66,13 @@ DIRECTIONS = (
     "kernel family (such as aiter's gluon paged attention) can read the KV cache in another layout, and then every "
     "kernel that writes the KV cache must write the layout the new one reads (a fused norm, rope and cache-write "
     "kernel included); a mismatch shows as an accuracy failure, not as a slowdown. Where the writer is already "
-    "patched, revise the patch your head already has for that writer instead of adding a second one.",
+    "patched, revise the patch your head already has for that writer instead of adding a second one. Compare "
+    "candidate kernels per layer at the graded batch and context, page size included, in a CUDA graph when you have "
+    "a dev sandbox and by a profile test otherwise: aiter's pa_decode_gluon on the SHUFFLE 5D fp8 layout at page 16 "
+    "read the KV cache at 5.6 TB/s where ll4mi read 3.5 to 4.1, while page 64 lost below context 2048 (one branch "
+    "went from 7779-8105 to 8467-8646 tok/s at page 16). A kernel aiter ships is a starting "
+    "point: one branch copied pa_decode_gluon into the framework tree and wrote the o_proj input's fp8 values and "
+    "scales from its epilogue, +1.3 to 1.8%.",
     "Existing PRs and patches: scan the GitHub PRs of aiter and of this session's framework (sglang, vllm or atom), "
     "merged or open, for ones on this model's architecture, its hot operators or ROCm and gfx950; check each against "
     "the version installed in the image, which can predate a merged PR, and port the ones it lacks as a patch to test. "
