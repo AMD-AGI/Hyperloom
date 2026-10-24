@@ -20,6 +20,7 @@ from typing import Any
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.jsonio import read_json_strict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
@@ -58,12 +59,18 @@ class BranchOrigin(str, Enum):
         return self in (BranchOrigin.FORK, BranchOrigin.REPAIR)
 
     @property
+    def driver(self) -> BranchDriver:
+        """Who drives the branch: the third-party agent the user named for an agent branch, else its specialist."""
+
+        return BranchDriver.AUTONOMOUS if self is BranchOrigin.AGENT else BranchDriver.SPECIALIST
+
+    @property
     def steered_by_judge(self) -> bool:
         """Whether the judge's stops and K orders apply to the branch; an agent's branch runs by the agent's own
         logic, and only the session's stops, the stop of a specialist that gave up and the judge's stop once its judging
         failed reach it."""
 
-        return self is not BranchOrigin.AGENT
+        return self.driver is BranchDriver.SPECIALIST
 
 
 class BranchStatus(str, Enum):
