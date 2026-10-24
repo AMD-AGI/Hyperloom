@@ -178,7 +178,9 @@ class SessionExports:
         stepped = knowledge_document(knowledge, scorers, curation)
         document = build_breakdown(
             snapshot,
-            CloseOutcome(final=chosen, selection=selection, kb_write_back=kb_write_back, knowledge=stepped),
+            CloseOutcome(
+                final=chosen, selection=selection, kb_write_back=kb_write_back, knowledge=stepped, metric=self._metric
+            ),
             SessionPlace(
                 session_dir=self._layout.root,
                 runner_dir=self._layout.logs,

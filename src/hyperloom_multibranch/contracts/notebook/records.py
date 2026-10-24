@@ -495,8 +495,9 @@ class MergeState:
 
 @dataclass(frozen=True)
 class CommittedCommit:
-    """A specialist commit as the integrator sees it; ``gain_pct`` is its own gain over its parent commit, and
-    ``merge_attempts`` how many merge attempts it took part in."""
+    """A specialist commit as the integrator sees it; ``gain_pct`` is its own gain over its parent commit,
+    ``merge_attempts`` how many merge attempts it took part in, and ``first_failed_at`` when the first of them that did
+    not carry it onto integration was recorded, ``None`` while none failed."""
 
     commit_id: str
     branch: str
@@ -508,6 +509,7 @@ class CommittedCommit:
     merged_into: str | None = None
     last_merge: MergeState | None = None
     merge_attempts: int = 0
+    first_failed_at: float | None = None
 
 
 @dataclass(frozen=True)

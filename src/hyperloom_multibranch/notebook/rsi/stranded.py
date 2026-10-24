@@ -18,10 +18,10 @@ from dataclasses import dataclass
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import CommittedCommit, NotebookSnapshot
-from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome
+from hyperloom_multibranch.contracts.notebook.vocab import FAILED_MERGES, MergeOutcome
 
 #: The outcomes of a merge that did not carry its commits onto integration.
-FAILED = frozenset({MergeOutcome.CONFLICT_SKIPPED, MergeOutcome.NOT_STACKABLE})
+FAILED = FAILED_MERGES
 SHORT_COMMIT = 8
 #: How much of a merge's reason a line keeps: its first line, a patch tool's errors under it left out.
 REASON_CHARS = 120

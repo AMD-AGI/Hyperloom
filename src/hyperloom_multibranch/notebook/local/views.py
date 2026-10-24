@@ -39,6 +39,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     priced_usd,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
+    FAILED_MERGES,
     INTEGRATION_BRANCH,
     BranchDriver,
     CommitOrigin,
@@ -182,7 +183,7 @@ def committed(state: NotebookState, view: LineageView) -> tuple[CommittedCommit,
             continue
         judgement = state.commit_writes[node.commit_id].judgement
         attempts = [
-            (attempt, at)
+            merge_state(state, attempt, at)
             for attempt, at in zip(state.merge_attempts, state.merge_attempted_at)
             if node.commit_id in attempt.source_commits
         ]
@@ -196,8 +197,9 @@ def committed(state: NotebookState, view: LineageView) -> tuple[CommittedCommit,
                 fixes_correctness=judgement.fixes_correctness,
                 foundation_fix=judgement.foundation_fix,
                 merged_into=next((merge.commit_id for merge in merges if node.commit_id in merge.merged_from), None),
-                last_merge=merge_state(state, *attempts[-1]) if attempts else None,
+                last_merge=attempts[-1] if attempts else None,
                 merge_attempts=len(attempts),
+                first_failed_at=next((item.at for item in attempts if item.outcome in FAILED_MERGES), None),
             )
         )
     return tuple(sorted(found, key=lambda commit: (not commit.foundation_fix, -commit.gain_pct)))

@@ -23,7 +23,8 @@ export has its own schema version and its own sections:
 * ``close``: the commit final selection chose and its recipe, how the scheduler chose it, and the Recipe KB
   write-back, as the single-lineage export reports it; when the scheduler passes them, what CLOSE's knowledge steps
   did (``knowledge``: the Experiences, the learnings and the archived search tree) and how the session's merges went
-  (``merges``: the integrator's conflict statistics).
+  (``merges``: the integrator's conflict statistics); given the session's metric, each branch whose lead over
+  integration was stranded, for how many minutes and at what peak (``stranded``).
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ from hyperloom_multibranch.contracts.notebook.peers import SandboxFacts
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, TestRecord
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import FinalRecipe
+from hyperloom_multibranch.notebook.knowledge.stranded_spans import stranded_spans
 
 SCHEMA_VERSION = "multibranch-2"
 EXPORTER_VERSION = "hyperloom-multibranch-breakdown-2"
@@ -190,7 +192,8 @@ class CloseOutcome:
     ``final`` is the commit final selection chose; ``selection`` is how the scheduler chose it, such as its candidates
     and their measurements, as JSON-ready data. ``knowledge`` is what CLOSE's knowledge steps did, as the
     ``rsi.session`` close reports them (``KnowledgeClose.document()``), and ``merges`` how the session's merges went,
-    as the integrator counts them, JSON-ready; ``close`` has each only when given.
+    as the integrator counts them, JSON-ready; ``close`` has each only when given. ``metric`` is the session's: given
+    it, ``close`` holds the stranded leads' spans on it (:func:`stranded_spans`).
     """
 
     final: FinalRecipe | None = None
@@ -198,6 +201,7 @@ class CloseOutcome:
     kb_write_back: RemoteWriteResult | None = None
     knowledge: Mapping[str, object] | None = None
     merges: Mapping[str, object] | None = None
+    metric: str = ""
 
 
 @dataclass(frozen=True)
@@ -232,6 +236,8 @@ def build_breakdown(
         close["knowledge"] = dict(outcome.knowledge)
     if outcome.merges is not None:
         close["merges"] = dict(outcome.merges)
+    if outcome.metric:
+        close["stranded"] = encode(stranded_spans(snapshot, outcome.metric))
     return {
         "schema_version": SCHEMA_VERSION,
         "exporter_version": EXPORTER_VERSION,

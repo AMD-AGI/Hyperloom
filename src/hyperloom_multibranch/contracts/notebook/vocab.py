@@ -118,6 +118,11 @@ class MergeOutcome(str, Enum):
     PENDING = "pending"
 
 
+#: The merge outcomes that did not carry their commits onto integration: skipped untested because they conflicted, or
+#: tested and not stackable.
+FAILED_MERGES = frozenset({MergeOutcome.CONFLICT_SKIPPED, MergeOutcome.NOT_STACKABLE})
+
+
 class InboxKind(str, Enum):
     """What an inbox item points at; a ``brief`` item points at the branch's head and asks for its brief again, and a
     ``peer_outcome`` item at another branch's test that refused the branch's claim, once that test ended."""
@@ -193,6 +198,7 @@ class UnfinishedReason(str, Enum):
 
 __all__ = [
     "COMMITTING",
+    "FAILED_MERGES",
     "INTEGRATION_BRANCH",
     "INTEGRATION_CONCLUSIONS",
     "LINEAGE_WRITERS",
