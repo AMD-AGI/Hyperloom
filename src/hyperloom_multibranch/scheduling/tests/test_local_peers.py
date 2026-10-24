@@ -390,8 +390,8 @@ async def _peers(
     dev_leases: int = 0,
 ) -> AsyncIterator[_Built]:
     """The real peers of a session of ``workload`` on ``host`` in ``tmp_path`` lending ``dev_leases`` dev sandboxes,
-    with the wiring their specialist sessions were built on; every branch's worktree holds no component. Every
-    variable the build exports is restored afterwards."""
+    with the wiring their specialist sessions were built on; a branch's worktree, holding no component, is served
+    only when the session lends dev sandboxes. Every variable the build exports is restored afterwards."""
 
     for name in (*workload_environment(workload), BENCHMARK_CONFIG_ENV):
         monkeypatch.setenv(name, "")
@@ -420,6 +420,8 @@ async def _peers(
             raise AssertionError("no specialist runs here")
 
         def worktrees(branch: str) -> BranchWorktree:
+            if not dev_leases:
+                raise AssertionError("no worktree is used here")
             return SimpleNamespace(path=tmp_path / branch, holds=lambda component: False)
 
         return ModelSessions(factory, worktrees)
@@ -608,11 +610,11 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
         return ModelSessions(lambda start: None, lambda branch: None)
 
     monkeypatch.setattr(model_sessions_module, "model_sessions", sessions)
-    leases = object()
+    leases = SimpleNamespace(limits=SimpleNamespace(cap=1))
     layout = SimpleNamespace(logs=tmp_path, source=tmp_path, branch_dir=lambda branch: tmp_path)
-    for lent, held in ((0, None), (1, leases)):
+    for held in (None, leases):
         wiring = SimpleNamespace(
-            setup=SimpleNamespace(layout=layout, workload=WORKLOAD, references={}, processes=None, dev_leases=lent),
+            setup=SimpleNamespace(layout=layout, workload=WORKLOAD, references={}, processes=None),
             tokens=None,
             repo=None,
             briefs=SimpleNamespace(text=None),

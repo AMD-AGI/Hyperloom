@@ -79,7 +79,7 @@ class PeerSetup:
     blobs: BlobStore
     critic: FixReviewer
     references: Mapping[str, Path]
-    dev_leases: int = 0
+    dev_leases: int
 
 
 PeerFactory = Callable[[PeerSetup], Peers]

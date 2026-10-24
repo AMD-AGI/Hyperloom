@@ -110,7 +110,7 @@ class SessionWiring:
     notebooks: Callable[[str], BranchLogStore]
     briefs: SessionBriefs
     toolbox: RealToolbox
-    dev_leases: DevLeases | None = None
+    dev_leases: DevLeases | None
 
 
 #: Builds the specialist runtime's session factory, and the worktree of each branch the worktree tools serve, on a
@@ -316,6 +316,8 @@ def _lend_dev_sandboxes(
     ``None``, and no tools, when ``setup`` lends none. ``worktrees`` is read only when a lease is granted, after the
     MCP service starts, so it may name sessions built after this call."""
 
+    if setup.dev_leases < 1:
+        return None
     from hyperloom_multibranch.specialist.dev_sandbox import (
         DevLeases,
         DevLimits,
@@ -323,8 +325,6 @@ def _lend_dev_sandboxes(
         register_dev_sandbox_tools,
     )
 
-    if setup.dev_leases < 1:
-        return None
     limits = DevLimits(cap=setup.dev_leases)
     leases = DevLeases(toolbox, local_dev_sandboxes(worktrees, setup.processes, limits), notebooks, limits=limits)
     register_dev_sandbox_tools(mcp, leases=leases, home=asyncio.get_running_loop())
@@ -505,7 +505,9 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
         agent = AgentSetup(
             command=command,
             role=role_prompt(
-                _specialist_role(workload), references=wiring.setup.references, dev_leases=wiring.setup.dev_leases
+                _specialist_role(workload),
+                references=wiring.setup.references,
+                dev_leases=wiring.dev_leases.limits.cap if wiring.dev_leases else 0,
             ),
             env=build_specialist_env(),
             runner=LocalAgentRunner(
