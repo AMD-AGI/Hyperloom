@@ -3303,7 +3303,7 @@ class BenchmarkRunExecutor:
         server_args: str,
         resolved_model: str,
     ) -> dict[str, Any] | None:
-        from ._multi_node_server_lifecycle import ServerRestartFailed, restart_server_for_round
+        from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
         if round_.ctx_extra.get("mn_round_restarted"):
             return None
@@ -3324,12 +3324,10 @@ class BenchmarkRunExecutor:
             env = {str(key): str(value) for key, value in ref_envs.items()}
             # PD knobs auto-resolved by the helper from $PD_* env, falling back to state.json.
             await restart_server_for_round(
-                extra_server_args=merge_server_args(base, server_args) if base else server_args,
+                RoundServer.from_env(
+                    merge_server_args(base, server_args) if base else server_args, resolved_model or None
+                ),
                 extra_env=env or None,
-                framework=os.environ.get("FRAMEWORK") or None,
-                model_path=resolved_model or None,
-                tp=int(os.environ.get("TP") or 0) or None,
-                ep=int(os.environ.get("EP") or 0) or None,
             )
         except ServerRestartFailed as exc:
             return {

@@ -1212,8 +1212,8 @@ async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, m
     monkeypatch.setattr(mne, "is_multi_node", lambda: True)
     captured_restart: dict = {}
 
-    async def fake_restart_server_for_round(**kwargs):
-        captured_restart.update(kwargs)
+    async def fake_restart_server_for_round(server, **kwargs):
+        captured_restart.update(kwargs, extra_server_args=server.extra_server_args)
 
     def fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
@@ -2154,7 +2154,7 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
         monkeypatch.setattr(mne, "is_multi_node", lambda: True)
         monkeypatch.setattr(mne, "mn_bench_warmup_enabled", lambda: True)
 
-        async def fake_restart_server_for_round(**_kwargs):
+        async def fake_restart_server_for_round(_server, **_kwargs):
             return None
 
         monkeypatch.setattr(mnsl, "restart_server_for_round", fake_restart_server_for_round)
@@ -2227,7 +2227,7 @@ class TestSessionBudgetWarmupRounds:
         monkeypatch.setattr(mne, "mn_bench_warmup_enabled", lambda: True)
         restarts: list[float] = []
 
-        async def slow_restart(**_kwargs):
+        async def slow_restart(_server, **_kwargs):
             restarts.append(time.monotonic())
             await asyncio.sleep(3.0)
 

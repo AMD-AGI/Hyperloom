@@ -161,7 +161,7 @@ class TestVariantBoundaryReportsEveryOutcome:
         _write_base_yaml(base)
         notes: list[dict] = []
 
-        async def _restart_fail(**_kwargs):
+        async def _restart_fail(_server, **_kwargs):
             raise mnsl.ServerRestartFailed("server /health did not return 200")
 
         results, _ = _run_capturing_variant_notes(
@@ -183,7 +183,7 @@ class TestVariantBoundaryReportsEveryOutcome:
         _write_base_yaml(base)
         notes: list[dict] = []
 
-        async def _restart_fail(**_kwargs):
+        async def _restart_fail(_server, **_kwargs):
             raise mnsl.ServerRestartFailed("health probe timed out")
 
         results, _ = _run_capturing_variant_notes(

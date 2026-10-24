@@ -259,7 +259,7 @@ def baseline_launch(monkeypatch, tmp_path):
     monkeypatch.setattr(baseline.BenchmarkRunExecutor, "_preflight_server_argv", lambda *args, **kwargs: None)
     monkeypatch.setattr(baseline, "build_benchmark_command", lambda **kwargs: ["fake-benchmark"])
 
-    async def no_restart(**kwargs):
+    async def no_restart(_server, **kwargs):
         return None
 
     monkeypatch.setattr(_multi_node_server_lifecycle, "restart_server_for_round", no_restart)
