@@ -33,7 +33,9 @@ prompt, and the judge neither stops it nor lowers its K for its first judged tes
 more files than ``--max-branches``, is a usage error.
 Each ``--reference NAME=DIR`` names a directory the specialists read as reference, such as GEAK's tuning and kernel
 knowledge: it is copied to ``MB-reference/NAME`` before PRELUDE and the commit its checkout is on is recorded in the
-manifest, so every branch reads one fixed copy and the session says which. A ``DIR`` that is no readable directory
+manifest, so every branch reads one fixed copy and the session says which. Only an InferenceX checkout named
+:data:`~hyperloom_multibranch.notebook.knowledge.reference_leads.INFERENCEX_REFERENCE` briefs the specialists on its
+reference launches for the workload. A ``DIR`` that is no readable directory
 in a git checkout, and a ``NAME`` given twice, are usage errors. A session never refreshes its copy; knowledge that
 lands after it starts is what the next session takes. A session whose toolbox has fewer
 usable cards left than one test needs ends EXPLORE with ``no_measurement_cards`` and skips FINAL. Exit codes: 0 when
@@ -87,6 +89,7 @@ from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
+from hyperloom_multibranch.notebook.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
@@ -303,7 +306,9 @@ def _add_specialist_input_options(run: argparse.ArgumentParser) -> None:
         default=None,
         metavar="NAME=DIR",
         help="A directory of reference material the specialists read; repeatable. It is copied to MB-reference/NAME"
-        " before PRELUDE, and the commit its checkout is on is recorded in the manifest.",
+        " before PRELUDE, and the commit its checkout is on is recorded in the manifest. The specialists are briefed on"
+        " leads from InferenceX's reference launches for the workload only when an InferenceX checkout is given as"
+        f" --reference {INFERENCEX_REFERENCE}=DIR; under any other name it is plain reference.",
     )
 
 

@@ -49,6 +49,7 @@ from hyperloom.measure.points import PointError
 from hyperloom_multibranch import cli
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.notebook.codec import encode
+from hyperloom_multibranch.notebook.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
 from hyperloom_multibranch.scheduling.layout import SessionLayout
@@ -119,6 +120,17 @@ def test_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
         cli.main(["--help"])
     assert exc.value.code == 0
     assert cli.PROG in capsys.readouterr().out
+
+
+def test_reference_help_says_which_name_briefs_inferencex_reference_launches(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--help"])
+
+    words = " ".join(capsys.readouterr().out.split())
+    assert "leads from InferenceX's reference launches for the workload only when an InferenceX checkout" in words
+    assert f"is given as --reference {INFERENCEX_REFERENCE}=DIR;" in words
 
 
 def test_run_defaults() -> None:
