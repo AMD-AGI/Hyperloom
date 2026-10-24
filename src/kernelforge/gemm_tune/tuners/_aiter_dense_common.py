@@ -25,9 +25,9 @@ from .. import tune_robustness as _tr
 
 log = logging.getLogger(__name__)
 
-# The only op whose production dispatch the per-shape split-K trial validates:
-# aiter_splitk_validate can only build a trial for ops it has a registered
-# production callable for, so the trial is correct only for this script_key.
+# The a8w8_blockscale tuner's script_key, which must match the op key
+# aiter_splitk_validate registers its trial under; a mismatch silently falls
+# back to the static cap.
 SPLITK_TRIAL_SCRIPT_KEY = "a8w8_blockscale"
 
 # Which (op, libtype) pairs reach a production wrapper that actually forwards

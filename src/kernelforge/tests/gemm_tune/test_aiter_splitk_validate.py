@@ -8,6 +8,10 @@ The registered per-op probe is the only GPU-touching call; substituting it in
 
 from __future__ import annotations
 
+import sys
+import types
+from unittest import mock
+
 import pytest
 
 import kernelforge.gemm_tune.aiter_splitk_validate as mod
@@ -110,9 +114,7 @@ class TestOpAwareness:
     """
 
     def test_only_verified_ops_are_registered(self):
-        # bpreshuffle's ck/cktile wrappers take no splitK argument at all, so
-        # there is no production limit to measure for them.
-        assert set(mod._TRIAL_OPS) == {"a8w8_blockscale"}
+        assert set(mod._TRIAL_OPS) == {"a8w8_blockscale", "a8w8_blockscale_bpreshuffle"}
 
     def test_unregistered_op_never_trials(self, monkeypatch):
         calls = []
@@ -122,7 +124,7 @@ class TestOpAwareness:
             return True
 
         _probe(monkeypatch, fake)
-        assert max_supported_splitk((64, 5120, 17408), op="a8w8_blockscale_bpreshuffle") is None
+        assert max_supported_splitk((64, 5120, 17408), op="a4w4_blockscale") is None
         assert not calls, "an unregistered op must not dispatch another op's kernel"
 
     def test_unregistered_op_support_fn_answers_unknown(self, monkeypatch):
@@ -160,3 +162,54 @@ class TestResolveDevice:
         _probe(monkeypatch, lambda m, n, k, sk, device="cuda": False)
         fn = make_support_fn(gpu_ids="1", op=OP)
         assert fn(64, 5120, 5120) is None
+
+
+def _asm_accepts(k: int, split_k: int) -> bool:
+    """The explicit-splitK alignment check of aiter's asm_a8w8_blockscale_bpreshuffle.cu."""
+    sk = split_k or 1
+    per_split = -(-(-(-k // sk)) // 128) * 128
+    return -(-k // per_split) == sk
+
+
+def fake_aiter(monkeypatch, k: int) -> list[tuple[str, int]]:
+    """Install fake ``torch``/``aiter`` modules whose GEMM entry points mimic production dispatch for K=``k``."""
+    calls: list[tuple[str, int]] = []
+
+    def asm(x, w, out, xs, ws, bias=None, splitK=None, kernelName=None):
+        calls.append(("asm", splitK))
+        if not _asm_accepts(k, splitK):
+            raise RuntimeError("gemm_a8w8_blockscale_bpreshuffle_asm failed: Kdim alignment check failed for splitK!")
+        return out
+
+    def ck(x, w, xs, ws, out, splitK=0):
+        calls.append(("ck", splitK))
+        return out
+
+    aiter = types.ModuleType("aiter")
+    aiter.dtypes = mock.MagicMock()
+    aiter.gemm_a8w8_blockscale_bpreshuffle_asm = asm
+    aiter.gemm_a8w8_blockscale_ck = ck
+    monkeypatch.setitem(sys.modules, "aiter", aiter)
+    monkeypatch.setitem(sys.modules, "torch", mock.MagicMock())
+    return calls
+
+
+class TestBpreshuffleTrial:
+    """bpreshuffle trials its asm kernel, scanning to the splitK=8 aiter's tuner generates asm candidates for."""
+
+    def test_trials_the_asm_kernel_up_to_eight(self, monkeypatch):
+        calls = fake_aiter(monkeypatch, k=5120)
+        fn = make_support_fn(op="a8w8_blockscale_bpreshuffle")
+        assert fn(64, 5120, 5120) == 8
+        assert calls == [("asm", sk) for sk in range(9)]
+
+    def test_stops_at_the_first_splitk_the_launcher_rejects(self, monkeypatch):
+        # K=1280 is 10 tiles: splitK 6 partitions as 2 tiles -> 5 splits, so the launcher rejects it.
+        fake_aiter(monkeypatch, k=1280)
+        fn = make_support_fn(op="a8w8_blockscale_bpreshuffle")
+        assert fn(64, 5120, 1280) == 5
+
+    def test_blockscale_still_trials_ck_up_to_six(self, monkeypatch):
+        calls = fake_aiter(monkeypatch, k=5120)
+        assert make_support_fn(op="a8w8_blockscale")(64, 5120, 5120) == 6
+        assert calls == [("ck", sk) for sk in range(7)]

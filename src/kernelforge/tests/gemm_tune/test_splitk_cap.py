@@ -5,11 +5,15 @@
 from __future__ import annotations
 
 import csv
+import sys
 from pathlib import Path
 
 import pytest
 
+import kernelforge.gemm_tune.tuners._aiter_dense_common as ac
 from kernelforge.gemm_tune.tuners._aiter_dense_common import _cap_splitk_to_serve_safe
+
+from .test_aiter_splitk_validate import fake_aiter
 
 _HDR = ["gfx", "cu_num", "M", "N", "K", "libtype", "kernelId", "splitK", "us", "kernelName", "tflops", "bw", "errRatio"]
 
@@ -386,3 +390,56 @@ def test_bpreshuffle_contract_excludes_ck_and_cktile():
     assert _SPLITK_FORWARDING_LIBTYPES["a8w8_blockscale_bpreshuffle"] == {"asm"}
     # Fail closed for anything unverified.
     assert _SPLITK_FORWARDING_LIBTYPES.get("a4w4_blockscale") is None
+
+
+def _asm_row(sk, us, name):
+    return ["gfx950", "256", "64", "5120", "17408", "asm", "3", str(sk), str(us), name, "100", "1000", "0.0"]
+
+
+@pytest.mark.parametrize("asm_splitk", [3, 6])
+def test_bpreshuffle_asm_cap_uses_the_per_shape_trial(tmp_path, monkeypatch, asm_splitk):
+    # Arbor's down_proj rows were asm splitK 3-6; the static FORGE_MAX_SPLITK=2 would rewrite them to splitK<=2.
+    monkeypatch.delenv("FORGE_SPLITK_TRIAL", raising=False)
+    monkeypatch.delenv("FORGE_MAX_SPLITK", raising=False)
+    fake_aiter(monkeypatch, k=17408)
+    art, prof = tmp_path / "a.csv", tmp_path / "p.csv"
+    _write(art, [_asm_row(asm_splitk, 24.4, "asm_win")])
+    _write(prof, [_asm_row(asm_splitk, 24.4, "asm_win"), _asm_row(2, 30.0, "asm_sk2")])
+
+    has = ac._apply_splitk_cap(str(art), prof, script_key="a8w8_blockscale_bpreshuffle", ctx=object())
+
+    assert has is True
+    assert _read(art)[1][_HDR.index("kernelName")] == "asm_win"
+
+
+def test_unregistered_op_keeps_the_static_cap(tmp_path, monkeypatch):
+    monkeypatch.delenv("FORGE_SPLITK_TRIAL", raising=False)
+    calls = fake_aiter(monkeypatch, k=17408)
+    assert ac._splitk_support_fn("a4w4_blockscale", object())(64, 5120, 17408) is None
+    assert not calls
+
+
+def _tuner_spec(monkeypatch, tuner_cls):
+    """The DenseTunerSpec ``tuner_cls.run`` hands to aiter's dense tuner driver."""
+    seen = {}
+    module = sys.modules[tuner_cls.__module__]
+    monkeypatch.setattr(module, "run_aiter_dense_tuner", lambda spec, ctx, wd: seen.setdefault("spec", spec))
+    tuner = tuner_cls.__new__(tuner_cls)
+    tuner.ctx, tuner.work_dir = object(), None
+    tuner.run()
+    return seen["spec"]
+
+
+def test_bpreshuffle_tuner_asks_aiter_for_splitk(monkeypatch):
+    from kernelforge.gemm_tune.tuners.a8w8_blockscale_bpreshuffle import A8W8BlockscaleBpreshuffleTuner
+
+    spec = _tuner_spec(monkeypatch, A8W8BlockscaleBpreshuffleTuner)
+    assert spec.script_key == "a8w8_blockscale_bpreshuffle"
+    assert {"--preshuffle", "--splitK"} <= set(spec.extra_args)
+
+
+def test_blockscale_tuner_args_unchanged(monkeypatch):
+    from kernelforge.gemm_tune.tuners.a8w8_blockscale import A8W8BlockscaleTuner
+
+    spec = _tuner_spec(monkeypatch, A8W8BlockscaleTuner)
+    assert spec.extra_args == ("--libtype", "all", "--splitK")

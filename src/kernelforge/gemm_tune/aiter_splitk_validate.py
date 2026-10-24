@@ -6,10 +6,10 @@ The trial is per-op: a limit measured on one op's kernel says nothing about
 another's, so :data:`_TRIAL_OPS` registers the production callable per op and an
 unregistered op answers ``None`` (caller keeps its static cap). Answering with
 the wrong kernel's limit would license a splitK the real kernel rejects (crash)
-or tighten one it accepts (silent loss). ``a8w8_blockscale_bpreshuffle`` is
-absent on purpose: its ck/cktile wrappers take no ``splitK`` at all, so
-``_SPLITK_FORWARDING_LIBTYPES`` in ``tuners._aiter_dense_common`` is the gate
-that matters there.
+or tighten one it accepts (silent loss). ``a8w8_blockscale_bpreshuffle`` trials
+its asm kernel only: its ck/cktile wrappers take no ``splitK`` at all, and
+``_SPLITK_FORWARDING_LIBTYPES`` in ``tuners._aiter_dense_common`` caps those
+rows to 0.
 """
 
 from __future__ import annotations
@@ -39,10 +39,9 @@ def _resolve_device(gpu_ids: str = "") -> str:
     return f"cuda:{first}"
 
 
-def _supports_a8w8_blockscale(m: int, n: int, k: int, split_k: int, device: str = "cuda") -> bool:
-    """True if the production a8w8_blockscale CK kernel dispatches (m,n,k,split_k)."""
+def _operands(m: int, n: int, k: int, device: str):
+    """Random fp8 blockscale operands (x, w, x_scale, w_scale, bf16 out) for one trial dispatch."""
     import torch
-    import aiter
     from aiter import dtypes
 
     sn = (n + _BLOCK_N - 1) // _BLOCK_N
@@ -52,7 +51,32 @@ def _supports_a8w8_blockscale(m: int, n: int, k: int, split_k: int, device: str 
     xs = torch.rand([m, sk_dim], dtype=dtypes.fp32, device=device)
     ws = torch.rand([sn, sk_dim], dtype=dtypes.fp32, device=device)
     out = torch.empty(m, n, dtype=dtypes.bf16, device=device)
+    return x, w, xs, ws, out
+
+
+def _supports_a8w8_blockscale(m: int, n: int, k: int, split_k: int, device: str = "cuda") -> bool:
+    """True if the production a8w8_blockscale CK kernel dispatches (m,n,k,split_k)."""
+    import torch
+    import aiter
+
+    x, w, xs, ws, out = _operands(m, n, k, device)
     aiter.gemm_a8w8_blockscale_ck(x, w, xs, ws, out, splitK=split_k)
+    torch.cuda.synchronize()
+    return True
+
+
+def _supports_a8w8_blockscale_bpreshuffle(m: int, n: int, k: int, split_k: int, device: str = "cuda") -> bool:
+    """True if the production a8w8_blockscale_bpreshuffle asm kernel dispatches (m,n,k,split_k).
+
+    A tuned asm row passes its splitK explicitly, and the launcher then rejects
+    any splitK whose 128-aligned K partition yields a different split count.
+    Operand contents do not matter: the check runs on shapes before launch.
+    """
+    import torch
+    import aiter
+
+    x, w, xs, ws, out = _operands(m, n, k, device)
+    aiter.gemm_a8w8_blockscale_bpreshuffle_asm(x, w, out, xs, ws, splitK=split_k)
     torch.cuda.synchronize()
     return True
 
@@ -61,7 +85,14 @@ def _supports_a8w8_blockscale(m: int, n: int, k: int, split_k: int, device: str 
 #: tuner ``script_key``. Absent => no trial, caller keeps its static cap.
 _TRIAL_OPS = {
     "a8w8_blockscale": _supports_a8w8_blockscale,
+    "a8w8_blockscale_bpreshuffle": _supports_a8w8_blockscale_bpreshuffle,
 }
+
+#: Highest splitK the trial scans per op. aiter's tuner generates asm candidates
+#: up to splitK=8 (``get_valid_asm_splitK_list(K, 8)``), so a lower scan would
+#: rewrite valid picks.
+_SCAN_CEILING = {"a8w8_blockscale_bpreshuffle": 8}
+_DEFAULT_SCAN_CEILING = 6
 
 
 def max_supported_splitk(
@@ -97,15 +128,18 @@ def max_supported_splitk(
     return best
 
 
-def make_support_fn(ceiling: int = 6, gpu_ids: str = "", op: str = "a8w8_blockscale"):
+def make_support_fn(ceiling: int | None = None, gpu_ids: str = "", op: str = "a8w8_blockscale"):
     """Return an (m,n,k)->int|None callable memoized per shape for reuse as the ``support_fn`` of ``_cap_splitk_to_serve_safe``.
 
     ``op`` selects the production kernel to trial; an unregistered op answers
     ``None`` for every shape so the caller falls back to its static cap instead
-    of being handed another op's limit.
+    of being handed another op's limit. ``ceiling`` defaults to the op's scan
+    ceiling.
     """
     if op not in _TRIAL_OPS:
         return lambda m, n, k: None
+    if ceiling is None:
+        ceiling = _SCAN_CEILING.get(op, _DEFAULT_SCAN_CEILING)
 
     cache: dict[tuple[int, int, int], int | None] = {}
     device = _resolve_device(gpu_ids)
