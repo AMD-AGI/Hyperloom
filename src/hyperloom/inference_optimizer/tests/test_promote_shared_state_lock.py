@@ -1289,7 +1289,7 @@ async def test_keep_kb_hook_runs_only_after_authoritative_save(session_dir, tmp_
     monkeypatch.setattr(
         coord.writeback,
         "_stage_agent_keep",
-        lambda **_kwargs: events.append("stage") or True,
+        lambda _row: events.append("stage") or True,
     )
 
     await coord.writeback.promote_to_shared_state(
@@ -1326,7 +1326,7 @@ def test_outbox_drain_acknowledges_only_confirmed_success(
     monkeypatch.setattr(
         coord.writeback,
         "_stage_agent_keep",
-        lambda **_kwargs: False,
+        lambda _row: False,
     )
 
     coord.writeback._drain_agent_keep_outbox()
@@ -1415,7 +1415,7 @@ async def test_resume_settles_state_before_draining_kb_outbox(
     def _save(_session_dir):
         events.append("save")
 
-    def _stage(**_kwargs):
+    def _stage(_row):
         events.append("stage")
         staged.append(dict(coord.shared_state.current_best))
         return True

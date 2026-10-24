@@ -8,7 +8,6 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Mapping
 
 from hyperloom.orchestrator.lever import (
@@ -230,29 +229,25 @@ class AgentKeepStagingMixin:
             row[HOST_ORIGIN_KEY] = origin
         return row
 
-    def _stage_agent_keep(
-        self,
-        *,
-        owner: str,
-        stack_index: int,
-        result: Mapping[str, Any],
-        task: "Task | None",
-        include_patches: bool,
-        provenance: Mapping[str, Any] | None = None,
-    ) -> bool:
-        """Stage one KEEP into the patch column.
+    def _stage_agent_keep(self, row: Mapping[str, Any]) -> bool:
+        """Stage one outbox row's KEEP into the patch column.
 
         Returns ``False`` when staging must be retried. The overlay bytes are
         captured now rather than at CLOSE because the worktree they were
         harvested from does not outlive the round. Config and kernel are
         published once from the settled stack at CLOSE.
         """
-        if not str(owner or "").strip():
+        owner = str(row.get("owner") or "")
+        stack_index = int(row.get("stack_index") or 0)
+        result = {"patches": list(row.get("patch_sources") or [])}
+        include_patches = bool(row.get("include_patches"))
+        provenance = row.get("provenance")
+        if not owner.strip():
             return False
         patch_kb = PatchKB.open()
         if not patch_kb.active:
             return False
-        sources, missing = self._keep_patch_sources(result, task)
+        sources, missing = self._keep_patch_sources(result, None)
         if include_patches and missing:
             log.warning(
                 "patch kb: KEEP at stack index %d references missing patch members: %s",
@@ -365,14 +360,7 @@ class AgentKeepStagingMixin:
             missing = _unstageable_patch_sources(row)
             if missing:
                 dead_letter = self._dead_letter_keep_section(dead_letter, row, missing)
-            elif not self._stage_agent_keep(
-                owner=str(row.get("owner") or ""),
-                stack_index=int(row.get("stack_index") or 0),
-                result={"patches": list(row.get("patch_sources") or [])},
-                task=SimpleNamespace(params={}),
-                include_patches=bool(row.get("include_patches")),
-                provenance=row.get("provenance"),
-            ):
+            elif not self._stage_agent_keep(row):
                 retained.append(row)
         self.shared_state.kb_stage_outbox = retained
         self.shared_state.kb_stage_dead_letter = dead_letter[-200:]
