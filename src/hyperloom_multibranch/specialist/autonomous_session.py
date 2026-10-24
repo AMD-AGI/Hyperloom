@@ -5,7 +5,8 @@
 
 The preflight leases the branch's sandbox, its own cards, from the toolbox, makes the agent ready in it
 (:mod:`agent_onboarding`) and keeps the lease and the manifest in the branch's session directory, so a run after a crash
-resumes the agent in the same sandbox without onboarding again; the lease goes back when the branch stops. A run then
+resumes the agent in the same sandbox without onboarding again, and records the manifest in the notebook for CLOSE's
+archive; the lease goes back when the branch stops. A run then
 watches the agent's keep signal and reads each keep whole (:mod:`agent_import`) the moment it shows, since the agent
 goes on to its next candidate in the same workspace. Keeps are submitted as claimless explore tests against the branch
 head, one at a time: a keep that lands while an import is measured or judged waits, and a later keep replaces it, since
@@ -200,7 +201,9 @@ class AutonomousSession:
         self._sandbox = self._setup.sandbox(lease)
         ready = await make_ready(self._start.task.agent, spec, self._agent_dir, self._setup.onboarding(self._sandbox))
         self._manifest, self._process = ready.manifest, ready.process
-        (self._place.workspace / MANIFEST_FILE).write_text(json.dumps(ready.manifest.to_document()), encoding=ENCODING)
+        document = ready.manifest.to_document()
+        (self._place.workspace / MANIFEST_FILE).write_text(json.dumps(document), encoding=ENCODING)
+        await self._place.notebook.record_agent_manifest(self._start.branch, document)
         KeepWatch(root, mark=self._mark(ready.manifest)).save(self._place.workspace / WATCH_FILE)
         await self._note(f"the agent {ready.manifest.source} at {ready.manifest.commit} is running")
 

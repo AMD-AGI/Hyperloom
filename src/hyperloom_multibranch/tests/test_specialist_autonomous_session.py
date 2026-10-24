@@ -28,6 +28,7 @@ from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
 from hyperloom_multibranch.specialist.autonomous_session import (
     AGENT_DIR,
+    MANIFEST_FILE,
     AutonomousSession,
     AutonomousSetup,
     collection_margin,
@@ -558,6 +559,17 @@ async def test_an_agent_with_no_keep_signal_has_its_workspace_collected_once_bef
     [request] = rig.toolbox.requests
     assert "+max_num_seqs = 512" in rig.patch(request)
     assert any("EXPLORE ends" in note for note in await rig.notices())
+
+
+async def test_a_passed_preflight_records_the_agent_s_manifest_in_the_notebook(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path)
+
+    await rig.session.preflight()
+    await rig.session.release()
+
+    stored = json.loads((tmp_path / BRANCH / "session" / MANIFEST_FILE).read_text(encoding="utf-8"))
+    recorded = (await rig.notebook.snapshot()).agent_manifests[BRANCH].manifest
+    assert recorded["source"] == stored["source"] and recorded["commit"] == stored["commit"]
 
 
 async def test_an_agent_whose_lease_would_leave_no_card_to_measure_fails_its_preflight(tmp_path: Path) -> None:
