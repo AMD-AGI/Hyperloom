@@ -52,6 +52,7 @@ WATCH_LOG = "watch.log"
 REGISTRY_PREFIX = "hyperloom-agent-watch-"
 #: The file of the registry the watch's stderr goes to.
 WATCH_ERR = "watch.err"
+_ENCODING = "utf-8"
 
 _watches: dict[int, tuple[subprocess.Popen[bytes], Path]] = {}
 #: Every sandbox a process registered, by the process, so a watch started again watches them all.
@@ -91,7 +92,7 @@ def revive() -> tuple[int, Path] | None:
 def _register(registry: Path, root: str, cards: tuple[int, ...]) -> None:
     entry = registry / f"{hashlib.sha256(root.encode()).hexdigest()[:16]}.json"
     written = entry.with_suffix(".tmp")
-    written.write_text(json.dumps({"root": root, "cards": list(cards)}), encoding="utf-8")
+    written.write_text(json.dumps({"root": root, "cards": list(cards)}), encoding=_ENCODING)
     written.replace(entry)
 
 
@@ -157,7 +158,7 @@ def _registered(registry: Path, say: Callable[[str], None]) -> dict[str, tuple[i
     sandboxes = {}
     for entry in registry.glob("*.json"):
         try:
-            document = json.loads(entry.read_text(encoding="utf-8"))
+            document = json.loads(entry.read_text(encoding=_ENCODING))
             sandboxes[document["root"]] = tuple(document["cards"])
         except (OSError, ValueError, KeyError, TypeError) as error:
             say(f"the registry entry {entry.name} cannot be read: {error!r}")
@@ -181,7 +182,7 @@ class _Log:
         written = False
         for root in self.roots:
             try:
-                with (Path(root) / WATCH_LOG).open("a", encoding="utf-8") as log:
+                with (Path(root) / WATCH_LOG).open("a", encoding=_ENCODING) as log:
                     log.write(line)
             except OSError:
                 continue
@@ -205,7 +206,7 @@ def _confine(sandboxes: Mapping[str, tuple[int, ...]]) -> None:
         said = f"killed by the sandbox: {reaches} reaches beyond its cards {list(sandboxes[root])}"
         _tell(pid, said)
         _signal([pid], signal.SIGKILL)
-        with (Path(root) / WATCH_LOG).open("a", encoding="utf-8") as log:
+        with (Path(root) / WATCH_LOG).open("a", encoding=_ENCODING) as log:
             log.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} pid {pid} {said}\n")
 
 
@@ -214,7 +215,7 @@ def _tell(pid: int, said: str) -> None:
     killed process has no descriptors left to write to."""
 
     try:
-        with open(f"/proc/{pid}/fd/2", "a", encoding="utf-8") as stderr:
+        with open(f"/proc/{pid}/fd/2", "a", encoding=_ENCODING) as stderr:
             stderr.write(f"\n{said}\n")
     except OSError:
         return

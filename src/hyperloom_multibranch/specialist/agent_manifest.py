@@ -23,6 +23,9 @@ from typing import Any
 
 from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
 
+#: The field that names a file in the agent's checkout, in every part of the manifest that reads one.
+_PATH_FIELD = "path"
+
 
 class ManifestError(ValueError):
     """An onboarding answer that is not a valid manifest; the message names the field."""
@@ -90,7 +93,7 @@ class KeepSignal:
 
     @classmethod
     def read(cls, document: object) -> KeepSignal:
-        fields = _fields(document, "keep", {"path", "field", "where"})
+        fields = _fields(document, "keep", {_PATH_FIELD, "field", "where"})
         where = fields.get("where", {})
         if not isinstance(where, Mapping):
             raise ManifestError(f"keep.where must be an object, got {where!r}")
@@ -136,7 +139,7 @@ class ConfigSource:
 
     @classmethod
     def read(cls, document: object) -> ConfigSource:
-        fields = _fields(document, "config_source", {"path", "server_args", "envs"})
+        fields = _fields(document, "config_source", {_PATH_FIELD, "server_args", "envs"})
         return cls(
             _relative(fields.get("path"), "config_source.path"),
             _text(fields.get("server_args"), "config_source.server_args"),
@@ -161,7 +164,7 @@ class LedgerSource:
 
     @classmethod
     def read(cls, document: object) -> LedgerSource:
-        fields = _fields(document, "ledger", {"path", "id", "kind", "text", "kinds"})
+        fields = _fields(document, "ledger", {_PATH_FIELD, "id", "kind", "text", "kinds"})
         kinds = fields.get("kinds")
         if not isinstance(kinds, Mapping) or not kinds:
             raise ManifestError(f"ledger.kinds must be a non-empty object, got {kinds!r}")

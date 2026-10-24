@@ -47,6 +47,10 @@ _FIXED_CONFIG = ("-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c",
 _STAGE = ("add", "--all", "--")
 _HEAD = "HEAD"
 _QUIET = "--quiet"
+_DIFF = "diff"
+_CACHED = "--cached"
+#: A diff as the toolbox applies it, whatever colour or external diff driver the user's git config asks for.
+_PLAIN = ("--no-color", "--no-ext-diff")
 
 
 class WorktreeError(RuntimeError):
@@ -232,7 +236,7 @@ class BranchWorktree:
 
     def diff(self, component: str) -> str:
         """The worktree's change to ``component`` against its head, as the patch the toolbox applies; empty when none."""
-        return self._staged_diff(component, "--no-color", "--no-ext-diff")
+        return self._staged_diff(component, *_PLAIN)
 
     def commit(self) -> str:
         """The git commit the worktree's HEAD is at."""
@@ -250,7 +254,7 @@ class BranchWorktree:
             index = Path(scratch) / "index"
             _git(self.path, "read-tree", commit, index=index)
             _git(self.path, *_STAGE, *paths, index=index)
-            return _git(self.path, "diff", "--cached", "--no-color", "--no-ext-diff", commit, "--", *paths, index=index)
+            return _git(self.path, _DIFF, _CACHED, *_PLAIN, commit, "--", *paths, index=index)
 
     def diff_between(self, commit: str, before: Sequence[str], after: str, component: str) -> str:
         """The patch that takes ``component``'s files from ``commit`` with the patches ``before`` applied in order to
@@ -262,7 +266,7 @@ class BranchWorktree:
         with tempfile.TemporaryDirectory(prefix="mb-between-") as scratch:
             start = self._tree(commit, before, Path(scratch) / "before")
             end = self._tree(commit, (after,), Path(scratch) / "after")
-            return _git(self.path, "diff", "--no-color", "--no-ext-diff", start, end, "--", *paths)
+            return _git(self.path, _DIFF, *_PLAIN, start, end, "--", *paths)
 
     def _tree(self, commit: str, patches: Sequence[str], scratch: Path) -> str:
         """The git tree of ``commit`` with ``patches`` applied in order, written through the index under ``scratch``."""
@@ -272,7 +276,7 @@ class BranchWorktree:
         for number, patch in enumerate(text for text in patches if text):
             patch_file = scratch / f"{number:04d}.patch"
             patch_file.write_text(patch, encoding="utf-8")
-            _git(self.path, "apply", "--cached", "--whitespace=nowarn", str(patch_file), index=index)
+            _git(self.path, "apply", _CACHED, "--whitespace=nowarn", str(patch_file), index=index)
         return _git(self.path, "write-tree", index=index).strip()
 
     def changed(self, component: str) -> Changes:
@@ -291,7 +295,7 @@ class BranchWorktree:
     def _staged_diff(self, component: str, *options: str) -> str:
         paths = self._paths(component)
         _git(self.path, *_STAGE, *paths)
-        return _git(self.path, "diff", "--cached", *options, _HEAD, "--", *paths)
+        return _git(self.path, _DIFF, _CACHED, *options, _HEAD, "--", *paths)
 
     def _paths(self, component: str) -> tuple[str, ...]:
         """``component``'s package and the meta trees the source base laid out beside it."""
