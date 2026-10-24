@@ -66,6 +66,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, MergeOutc
 from hyperloom_multibranch.contracts.repo import (
     ExperimentRepo,
     PatchConflict,
+    RebasedPatch,
     ReplacedPatch,
     RepoMerge,
     ResolvedPatch,
@@ -118,7 +119,9 @@ class MergeReport:
 
     ``united_tables`` are the kernel slots the merge filled with a union of both sides' tables: the tested recipe
     loads a table neither branch measured, and the gain below was measured on it. ``replaced_patches`` are the head
-    patches the merge took out for a candidate's patch that rewrites them, and the reason names them.
+    patches the merge took out for a candidate's patch that rewrites them, and the reason names them;
+    ``rebased_patches`` the candidate's patches the three-way rebase settled, and ``resolved_patches`` those a model
+    rewrote. A skipped candidate carries what the repository's merge found before the skip.
 
     A merged candidate carries the gain its merge test was judged to make and the bar it was judged against;
     ``foundation_fix`` says the candidate is a foundation fix, which merges without a gain; a tested one is judged as
@@ -139,6 +142,22 @@ class MergeReport:
     threshold_pct: float | None = None
     foundation_fix: bool = False
     adopts: str = ""
+    rebased_patches: tuple[RebasedPatch, ...] = ()
+    resolved_patches: tuple[ResolvedPatch, ...] = ()
+
+
+def _found(report: MergeReport, merge: RepoMerge) -> MergeReport:
+    """``report`` with what ``merge`` found where the two sides met: overridden values, united tables and each patch
+    the merge rebased, replaced or had a model rewrite."""
+
+    return replace(
+        report,
+        config_conflicts=merge.config_conflicts,
+        united_tables=merge.united_tables,
+        replaced_patches=merge.replaced_patches,
+        rebased_patches=merge.rebased_patches,
+        resolved_patches=merge.resolved_patches,
+    )
 
 
 def _pending(commit: CommittedCommit, head: str) -> MergeReport:
@@ -494,11 +513,8 @@ class Integrator:
         attempt = MergeAttempt(merge.carried, merge.onto, request_id, resolved_patches=merge.resolved_patches)
         await self._notebook.record_merge_attempt(attempt)
         tested = replace(
-            pending,
+            _found(pending, merge),
             request_id=request_id,
-            config_conflicts=merge.config_conflicts,
-            united_tables=merge.united_tables,
-            replaced_patches=merge.replaced_patches,
             foundation_fix=pending.foundation_fix and merge.carried == (pending.candidate,),
         )
         try:
@@ -526,17 +542,16 @@ class Integrator:
         self, pending: MergeReport, reason: str, outcome: MergeOutcome, merge: RepoMerge | None = None
     ) -> MergeReport:
         """A skipped candidate's report. ``merge`` is what the repository carried before the skip, if it got that far.
-        What it united and replaced is recorded even where nothing was tested: a candidate whose every tuned row the
-        head already had reads as already on the head, which is true of the slot and says nothing about the rows it
-        cost. The notebook's record of a skipped lead adoption says it is one."""
+        What it found is recorded even where nothing was tested: a candidate whose every tuned row the head already had
+        reads as already on the head, which is true of the slot and says nothing about the rows it cost, and a merge
+        lost to a conflicting patch still names the patches the rebase settled. The notebook's record of a skipped lead
+        adoption says it is one."""
 
         report = replace(pending, outcome=outcome, reason=reason)
         skipped = _naming_adoption(report).reason
         attempt = MergeAttempt((pending.candidate,), pending.onto, skipped_reason=skipped, skipped_outcome=outcome)
         await self._notebook.record_merge_attempt(attempt)
-        if merge is None:
-            return report
-        return replace(report, united_tables=merge.united_tables, replaced_patches=merge.replaced_patches)
+        return report if merge is None else _found(report, merge)
 
     async def _conclude(self, tested: _TestedMerge, superseded: bool) -> MergeReport:
         """A superseded candidate gets no integration judgement and runs no regression set: it stays pending and is
@@ -660,6 +675,18 @@ def _decision(report: MergeReport) -> Decision:
         "replaced_patches": [
             {"component": swap.component, "removed": list(swap.removed), "by": swap.by.path}
             for swap in report.replaced_patches
+        ],
+        "rebased_patches": [
+            {"component": rebased.component, "path": rebased.path} for rebased in report.rebased_patches
+        ],
+        "resolved_patches": [
+            {
+                "component": written.component,
+                "replaces": written.replaces,
+                "patch": written.patch.path,
+                "attempts": written.attempts,
+            }
+            for written in report.resolved_patches
         ],
         "united_tables": [
             {

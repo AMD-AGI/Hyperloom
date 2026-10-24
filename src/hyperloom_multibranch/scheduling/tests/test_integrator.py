@@ -47,7 +47,7 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, MergeOutcome
-from hyperloom_multibranch.contracts.repo import ReplacedPatch, RepoMerge, ResolvedPatch, UnitedTable
+from hyperloom_multibranch.contracts.repo import RebasedPatch, ReplacedPatch, RepoMerge, ResolvedPatch, UnitedTable
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay
@@ -942,6 +942,11 @@ async def test_a_patch_that_does_not_apply_on_the_head_is_rewritten_before_the_m
     conflicting = bench.deltas["c1"].components[0].add_patches[1]
     written = ResolvedPatch(COMPONENT, conflicting.path, rewritten, RESOLVER_MODEL, PROMPT_VERSION, 1)
     assert (await bench.handle(Role.OBSERVER).snapshot()).resolved_patches == (written,)
+    assert report.resolved_patches == (written,)
+    [logged] = bench.logged()
+    assert logged["detail"]["resolved_patches"] == [
+        {"component": COMPONENT, "replaces": conflicting.path, "patch": rewritten.path, "attempts": 1}
+    ]
 
 
 @pytest.mark.parametrize(
@@ -981,6 +986,32 @@ async def test_an_unresolved_patch_conflict_is_skipped_and_recorded(
     assert bench.merge_tests() == {}
     following = await _one(bench)
     assert following is not None and following.candidate == bench.commits["c2"]
+
+
+REBASED = RebasedPatch(COMPONENT, "patch/vllm/0001-x.patch", PatchRef("patch/vllm/0001-x.rebased.patch", "f" * 64))
+
+
+class RebasingRepo(GitExperimentRepo):
+    """Reports every merge as having rebased one patch three ways; a test double for the rebase, which needs a file of
+    more lines than the bench's package holds."""
+
+    async def merge(self, candidate: str, onto: str, protected: frozenset[str] = frozenset()) -> RepoMerge:
+        return replace(await super().merge(candidate, onto, protected), rebased_patches=(REBASED,))
+
+
+async def test_a_merge_lost_to_a_conflict_names_the_patches_the_rebase_settled_in_the_merge_log(
+    tmp_path: Path,
+) -> None:
+    bench = await _bench(tmp_path, conflicting=True, repo_type=RebasingRepo)
+    bench.completion.fallback = json.dumps({"patch": None})
+
+    report = await _one(bench)
+
+    assert report is not None and report.outcome is MergeOutcome.CONFLICT_SKIPPED
+    assert report.rebased_patches == (REBASED,) and report.resolved_patches == ()
+    [logged] = bench.logged()
+    assert logged["detail"]["rebased_patches"] == [{"component": COMPONENT, "path": REBASED.path}]
+    assert logged["detail"]["resolved_patches"] == []
 
 
 #: A patch of the line ``c1``'s patch rewrites as well, so that ``c1``'s patch replaces it where it may.
