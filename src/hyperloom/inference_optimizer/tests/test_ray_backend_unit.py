@@ -1197,7 +1197,7 @@ def test_gpu_specialist_lease_lifecycle(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(rb, "get_ray_backend", _StubBackendP2)
 
     lease = rs.GpuSpecialistLease(num_gpus=2)
-    lease.start_async(["claude"], env={"A": "1"}, cwd="/tmp", log_path="/tmp/p.log")
+    lease.start_async(rs.ActorLaunch(["claude"], env={"A": "1"}, cwd="/tmp", log_path="/tmp/p.log"))
     assert lease.poll_started() == 4242
     assert lease.pid() == 4242
     assert actor.started_with["log_path"] == "/tmp/p.log"
@@ -1226,7 +1226,7 @@ def test_gpu_specialist_lease_forwards_replace_env_and_stdin(
     stdin_path.write_text("prompt\n", encoding="utf-8")
 
     lease = rs.GpuSpecialistLease(num_gpus=2)
-    lease.start_async(["codex"], env={"SAFE": "1"}, env_mode="replace", stdin_path=str(stdin_path))
+    lease.start_async(rs.ActorLaunch(["codex"], env={"SAFE": "1"}, env_mode="replace", stdin_path=str(stdin_path)))
 
     assert lease.poll_started() == 4242
     assert actor.started_with["env_mode"] == "replace"
@@ -1320,7 +1320,7 @@ def test_gpu_specialist_lease_start_async_poll_and_pending(monkeypatch: pytest.M
     monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
 
     lease = rs.GpuSpecialistLease(num_gpus=2)
-    lease.start_async(["claude"], env={"A": "1"}, cwd="/tmp", log_path="/tmp/p.log")
+    lease.start_async(rs.ActorLaunch(["claude"], env={"A": "1"}, cwd="/tmp", log_path="/tmp/p.log"))
 
     # Pending: no pid yet, positive pending time, remote call submitted (ref stored) without blocking on a result.
     assert lease._start_ref is not None
@@ -1408,7 +1408,7 @@ def test_gpu_specialist_lease_start_passes_serving_slot(monkeypatch: pytest.Monk
     monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
 
     lease = rs.GpuSpecialistLease(num_gpus=8, serving_slot=True)
-    lease.start_async(["claude"])
+    lease.start_async(rs.ActorLaunch(["claude"]))
     assert lease.poll_started() == 4242
     assert seen == {"num_gpus": 8.0, "serving_slot": True}
 
@@ -1846,7 +1846,7 @@ def test_releasing_a_specialist_lease_reaps_its_subprocess(monkeypatch: pytest.M
     monkeypatch.setattr(rb, "get_ray_backend", lambda: SimpleNamespace(ensure=lambda **_kw: None))
 
     lease = rs.GpuSpecialistLease(num_gpus=1)
-    lease.start_async(["sleep", "60"])
+    lease.start_async(rs.ActorLaunch(["sleep", "60"]))
     deadline = time.time() + 10.0
     pid: int | None = None
     while time.time() < deadline and pid is None:
@@ -1969,7 +1969,7 @@ def test_gpu_specialist_lease_infeasible_raises(monkeypatch: pytest.MonkeyPatch)
 
     lease = rs.GpuSpecialistLease(num_gpus=4)
     with pytest.raises(rs.RayInfeasibleError, match="GPU"):
-        lease.start_async(["agent"])
+        lease.start_async(rs.ActorLaunch(["agent"]))
 
 
 class _PendingAcquireFakeRay:

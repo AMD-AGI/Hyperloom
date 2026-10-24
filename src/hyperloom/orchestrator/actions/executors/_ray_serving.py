@@ -951,16 +951,7 @@ class GpuSpecialistLease:
         # §3.3 non-blocking start: the pending ObjectRef for the actor's ``start`` remote call.
         self._start_ref: Any = None
 
-    def start_async(
-        self,
-        cmd: list[str],
-        *,
-        env: dict[str, str] | None = None,
-        cwd: str | None = None,
-        log_path: str | None = None,
-        env_mode: str = "merge",
-        stdin_path: str | None = None,
-    ) -> None:
+    def start_async(self, launch: ActorLaunch) -> None:
         """Create the actor and SUBMIT the subprocess launch without blocking."""
         from ._ray_backend import get_ray_backend
 
@@ -971,9 +962,7 @@ class GpuSpecialistLease:
             )
             self._actor = make_gpu_specialist_actor(self._num_gpus, serving_slot=self._serving_slot)
             _note_lease_actor_submitted()
-        self._start_ref = self._actor.start.remote(
-            ActorLaunch(cmd, env=env, cwd=cwd, log_path=log_path, env_mode=env_mode, stdin_path=stdin_path)
-        )
+        self._start_ref = self._actor.start.remote(launch)
 
     def poll_started(self) -> int | None:
         """Non-blocking poll for the launched pid."""
