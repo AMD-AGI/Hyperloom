@@ -10,7 +10,7 @@ cards in a directory of its own (:func:`watch`) and starts the watch with the fi
 the session, which is how an agent kept running for an hour after its session died. The session's own kill terminates
 the watch with its other children and SIGKILLs it seconds later, so a terminated watch ends the sandboxes at once. A
 look that fails is logged and the next one tries again; a watch that ended all the same is started again by
-:func:`revive`.
+:func:`revive`, which an autonomous branch calls through its sandbox as it polls its agent.
 
 The pod allows no device cgroup and no mount or user namespace, so the cards are confined by the environment:
 ``ROCR_VISIBLE_DEVICES`` names them and every HIP-level mask indexes into what ROCr exposes, so only a ROCr-level mask

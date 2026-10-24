@@ -129,6 +129,10 @@ class LocalSandbox:
     def __init__(self, logs: Path) -> None:
         self._logs, self.started, self.envs, self.leases, self.prompts = logs, [], [], [], []
         self.usage = _Usage()
+        self.watch_said: list[str] = []
+
+    def watched(self) -> str:
+        return self.watch_said.pop(0) if self.watch_said else ""
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
         done = subprocess.run(command, shell=True, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True)
@@ -750,3 +754,16 @@ async def test_ledger_findings_written_after_the_last_keep_are_learnt_when_the_b
 
     learnt = [record.learning.content for record in await rig.notebook.learnings(branch=BRANCH)]
     assert learnt == [f"FACT a: {KEPT}", f"DEAD_END b: {AFTER}"]
+
+
+async def test_a_sandbox_watch_started_again_is_noted_in_the_branch_log(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(), tail=30.0))
+    await rig.session.preflight()
+    rig.sandbox.watch_said.append("the sandbox's watch had ended (exit 1) and was started again")
+    running = asyncio.create_task(rig.session.run())
+
+    await _until(lambda: not rig.sandbox.watch_said, "the watch check")
+    await rig.session.stop()
+    await asyncio.wait_for(running, 10)
+
+    assert f"{NOTICE} the sandbox's watch had ended (exit 1) and was started again" in await rig.notices()

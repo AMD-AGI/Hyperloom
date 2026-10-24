@@ -150,6 +150,10 @@ class AgentSandbox(Protocol):
 
     async def start(self, command: str, cwd: Path, env: Mapping[str, str]) -> AgentProcess: ...
 
+    def watched(self) -> str:
+        """Start the watch confining the sandbox's processes again when it ended; what to say of it, empty when it
+        runs."""
+
 
 #: Asks the onboarding model ``prompt`` with the agent's checkout as its working directory; its answer.
 Onboard = Callable[[Path, str], Awaitable[str]]

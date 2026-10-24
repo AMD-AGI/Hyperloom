@@ -180,6 +180,7 @@ class AutonomousSession:
         self._agent_dir = place.workspace / AGENT_DIR
         self._manifest: AgentManifest | None = None
         self._process: AgentProcess | None = None
+        self._sandbox: AgentSandbox | None = None
         self._root = LaunchConfig()
         self._root_commit = ""
         self._unread = ""
@@ -195,15 +196,15 @@ class AutonomousSession:
         spec = replace(self._setup.spec, server_args=launch.server_args, envs=dict(launch.envs), workspace=workspace)
         lease = await self._lease(spec.tp)
         spec = replace(spec, cards=lease.gpu_ids)
-        onboarding = self._setup.onboarding(self._setup.sandbox(lease))
-        ready = await make_ready(self._start.task.agent, spec, self._agent_dir, onboarding)
+        self._sandbox = self._setup.sandbox(lease)
+        ready = await make_ready(self._start.task.agent, spec, self._agent_dir, self._setup.onboarding(self._sandbox))
         self._manifest, self._process = ready.manifest, ready.process
         (self._place.workspace / MANIFEST_FILE).write_text(json.dumps(ready.manifest.to_document()), encoding=ENCODING)
         KeepWatch(root, mark=self._mark(ready.manifest)).save(self._place.workspace / WATCH_FILE)
         await self._note(f"the agent {ready.manifest.source} at {ready.manifest.commit} is running")
 
     async def run(self) -> None:
-        manifest, process = await self._running()
+        manifest, process, sandbox = await self._running()
         self._unread = ""
         self._root = (await self._setup.repo.read_recipe(self._start.start_commit)).launch
         watch = KeepWatch.load(self._place.workspace / WATCH_FILE)
@@ -213,6 +214,8 @@ class AutonomousSession:
             while not self._stopped.is_set():
                 ended = process.returncode is not None
                 await self._observe(manifest, watch)
+                if said := sandbox.watched():
+                    await self._note(said)
                 await self._collect_before_the_end(manifest, watch)
                 await self._record_spend(spend, final=False)
                 if ended:
@@ -273,19 +276,20 @@ class AutonomousSession:
             await self._learn(self._manifest.ledger, watch)
             watch.save(watch_file)
 
-    async def _running(self) -> tuple[AgentManifest, AgentProcess]:
-        """The agent preflight started, or, in a run after a crash, the agent resumed by the stored manifest."""
+    async def _running(self) -> tuple[AgentManifest, AgentProcess, AgentSandbox]:
+        """The agent preflight started, or, in a run after a crash, the agent resumed by the stored manifest, and the
+        sandbox it runs in."""
 
-        if self._manifest is not None and self._process is not None:
-            return self._manifest, self._process
+        if self._manifest is not None and self._process is not None and self._sandbox is not None:
+            return self._manifest, self._process, self._sandbox
         document = json.loads((self._place.workspace / MANIFEST_FILE).read_text(encoding=ENCODING))
         manifest = AgentManifest.read(document)
         command = manifest.resume or manifest.launch
         sandbox = self._setup.sandbox(self._held())
         process = await sandbox.start(command, self._agent_dir / SOURCE_DIR, agent_env(self._agent_dir))
-        self._manifest, self._process = manifest, process
+        self._manifest, self._process, self._sandbox = manifest, process, sandbox
         await self._note(f"the agent resumed with `{command}`")
-        return manifest, process
+        return manifest, process, sandbox
 
     async def _lease(self, cards: int) -> BranchLease:
         """Lease ``cards`` for the branch's sandbox and keep the lease for :meth:`release` and a later run."""
