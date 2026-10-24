@@ -578,7 +578,7 @@ function-lines src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase.ma
 function-lines src/hyperloom/orchestrator/phases/framework.py::_framework_config_levers_from_done 84
 function-lines src/hyperloom/orchestrator/phases/framework.py::_record_source_attempt 150
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._fmoe_apply_verdict 131
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._maybe_reprofile_for_kernel 97
+function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._maybe_reprofile_for_kernel 87
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._merge_gemm_candidate_with_runtime 151
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._record_geak_candidate 99
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._record_gemm_tuning_timeline 88

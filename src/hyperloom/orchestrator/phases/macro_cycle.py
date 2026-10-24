@@ -232,15 +232,23 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         return summary
 
     async def on_cycle_start_reprofile(self, *, from_phase: str) -> None:
-        """Force a fresh analysis at the start of a reopened macro-cycle.
+        """Take a fresh analysis at the start of a reopened macro-cycle whose stack moved since the last trace.
 
         Reached on every cycle start, whichever phase the reloop targets, so a
         new cycle never re-targets the bottleneck the *previous* cycle measured.
+        A trace of the stack still being served already is this cycle's; on an
+        AgentX replay a second one costs an hour of the GPUs.
 
         Args:
             from_phase: The phase being left; only a SWEEP origin starts a cycle.
         """
         if (from_phase or "").upper() == _phase_state.PHASE_SWEEP and int(self.shared_state.macro_cycle or 0) > 0:
+            if self._coord.phase_kernel.last_trace_profiles_the_live_stack():
+                log.info(
+                    "cycle %d start: the last trace profiles the live stack; no reprofile",
+                    int(self.shared_state.macro_cycle or 0),
+                )
+                return
             task = await self._coord.phase_prelude.enqueue_internal_analysis_task(
                 reason="cycle_start",
             )

@@ -624,6 +624,24 @@ async def test_kernel_entry_does_not_reprofile_the_stack_its_cycle_just_profiled
     assert coord.sub.tasks_run == []
 
 
+@pytest.mark.parametrize(("gain_since_trace", "reprofiles"), [(0.0, False), (10.0, True)])
+@pytest.mark.asyncio
+async def test_a_new_cycle_profiles_again_only_a_stack_that_moved(coord: Coordinator, gain_since_trace, reprofiles):
+    """A cycle that opens on the stack its predecessor profiled already has that trace; one that moved needs its own."""
+    state = coord.shared_state
+    state.current_best = {"action": "baseline", "tput": 100.0}
+    state.last_roofline_tput = 100.0
+    state.cumulative_gain_validated = gain_since_trace
+    state.last_profile_status = "succeeded"
+    state.last_profile_workload = state.current_profile_workload_context()
+    state.macro_cycle = 2
+    state.auto_roofline_pending_task_id = ""
+
+    await coord.phase_macro_cycle.on_cycle_start_reprofile(from_phase="SWEEP")
+
+    assert bool(state.auto_roofline_pending_task_id) is reprofiles
+
+
 @pytest.mark.asyncio
 async def test_kernel_entry_reprofiles_legacy_trace_without_runtime_fingerprint(
     coord: Coordinator,

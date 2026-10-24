@@ -359,12 +359,23 @@ class KernelPhase(CoordinatorCollaborator):
         identity = self.shared_state.profile_workload_identity
         return identity(recorded) != identity(self.shared_state.profile_workload_context())
 
-    async def _maybe_reprofile_for_kernel(self) -> None:
-        """Reprofile inline when the validated stack moved since the last trace, so the phase targets the live bottleneck.
+    def last_trace_profiles_the_live_stack(self) -> bool:
+        """Whether the latest trace was taken on the validated stack, config and workload being served now.
 
         Compares the projection with the anchor the watermark keeps in it, never with a snapshot's measured tok/s:
-        under AgentX the validated gain is the latency objective's, and the two never meet."""
+        under AgentX the validated gain is the latency objective's, and the two never meet.
+        """
         before = float(self.shared_state.last_roofline_tput or 0.0)
+        cur = self.current_tput_from_validated_gain()
+        return (
+            before > 0
+            and abs(cur - before) / before < self._REPROFILE_CHANGE_TOL
+            and not self._profile_config_changed(self._current_profile_config_signature())
+            and not self._profile_workload_changed()
+        )
+
+    async def _maybe_reprofile_for_kernel(self) -> None:
+        """Reprofile inline when the validated stack moved since the last trace, so the phase targets the live bottleneck."""
         cur = self.current_tput_from_validated_gain()
         profile_signature = self._current_profile_config_signature()
         config_changed = self._profile_config_changed(profile_signature)
@@ -379,13 +390,7 @@ class KernelPhase(CoordinatorCollaborator):
         if cur <= 0:
             _note_reprofile(ran=False, skipped_reason="no_projected_tput")
             return
-        # With a measured trace, reprofile only on a material gain or a change in what is being measured.
-        if (
-            before > 0
-            and abs(cur - before) / before < self._REPROFILE_CHANGE_TOL
-            and not config_changed
-            and not workload_changed
-        ):
+        if self.last_trace_profiles_the_live_stack():
             _note_reprofile(ran=False, skipped_reason="within_tolerance")
             return
         trigger = "config_changed" if config_changed else ("workload_changed" if workload_changed else "gain")
