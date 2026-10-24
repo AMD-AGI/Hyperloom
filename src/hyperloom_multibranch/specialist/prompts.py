@@ -7,10 +7,10 @@ The role says how a long-running specialist works through the session's tools, w
 how its candidates are judged, how it
 declares a correctness fix with its repro case, and which gains the toolbox refuses as fake (main's ``FAKE_GAINS``
 catalog, so a new row reaches the role). The
-launch prompt opens with the repair a repair branch was opened for, the branch's direction (one the user wrote, or
-the session's) and the startup brief, right after the role, then
-the branch, its head, K and the branch's latest memory, so a new session goes on where the last one stopped; a branch
-log longer than the launch shows is first summed up, what was tried, its results and the latest plan. A
+launch prompt opens, on a branch log longer than it shows, with a summary of what was tried, its results and the
+latest plan; then the repair a repair branch was opened for, the branch's direction (one the user wrote, or the
+session's) and the startup brief; then the branch, its head, K and the branch's latest memory, so a new session goes
+on where the last one stopped. A
 session whose turn ended is woken by :func:`wake_message`, with what its inbox and the runtime's notices brought, or
 by :func:`nudge_message` when nothing came and it has nothing running. A CLI restarted on its crashed conversation
 is told by :func:`resume_message` why it stopped, where its worktree stands and what arrived while it was down; one
