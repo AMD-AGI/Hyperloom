@@ -33,8 +33,13 @@ __all__ = [
     "AIPERF_PHASE_KEY",
     "AIPERF_PROFILING_PHASE",
     "AIPERF_SUBMODULE",
+    "AITER_DEVELOP_MODE",
+    "AITER_INSTALL_MODE_FILE",
     "AITER_LOG_TUNED_CONFIG_ENV",
     "AITER_MERGED_VIEW_DIR",
+    "AITER_META_DIR_ENV",
+    "AITER_META_MARKER_DIR",
+    "AITER_META_WHEEL_DIR",
     "AITER_TUNED_HIT",
     "AITER_TUNED_HIT_MARKER",
     "ARGPARSE_INVALID_CHOICE",
@@ -87,6 +92,13 @@ _PACK = default_pack()
 
 _aiter = _PACK.names("aiter_merged_view", "dir")
 AITER_MERGED_VIEW_DIR = _aiter["dir"]
+
+_meta = _PACK.names("aiter_meta_dir", "variable", "wheel_dir", "marker_dir", "install_mode_file", "develop_mode")
+AITER_META_DIR_ENV = _meta["variable"]
+AITER_META_WHEEL_DIR = _meta["wheel_dir"]
+AITER_META_MARKER_DIR = _meta["marker_dir"]
+AITER_INSTALL_MODE_FILE = _meta["install_mode_file"]
+AITER_DEVELOP_MODE = _meta["develop_mode"]
 
 AITER_LOG_TUNED_CONFIG_ENV = _PACK.names("aiter_log_tuned_config", "env")["env"]
 AITER_TUNED_HIT = _PACK.pattern("aiter_tuned_hit")

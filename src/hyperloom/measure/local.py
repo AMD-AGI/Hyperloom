@@ -47,7 +47,7 @@ from hyperloom.measure import log_causes
 from hyperloom.measure.boot_watch import BOOT_CANCEL_REASON, BootGuard, boot_limit_sec
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure, decides_test
-from hyperloom.measure.farm import FarmError, build_farm, place_farm, server_python, verify_farm
+from hyperloom.measure.farm import FarmError, build_farm, inherited_environment, place_farm, server_python, verify_farm
 from hyperloom.measure.framework.copies import PrivateFramework, private_framework
 from hyperloom.measure.framework.rows import RowsOnlyRefused
 from hyperloom.measure.magpie_launchers import install_launchers
@@ -379,7 +379,8 @@ def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path
         )
         python = server_python(_point_config(call.points[0]), default=sys.executable)
         roots = [SpecEnvRoot.parse(root.to_document(), "environment.roots") for root in environment.roots]
-        farm = build_farm(roots, work / "farm", python=python, read_blob=read_blob)
+        inherited = inherited_environment(os.environ, call.env_overrides, call.unset_envs)
+        farm = build_farm(roots, work / "farm", python=python, read_blob=read_blob, inherited=inherited)
         points = []
         for index, point in enumerate(call.points):
             config = yaml.safe_load(substitute(Path(point).read_text(encoding=_UTF8), placed)) or {}

@@ -17,7 +17,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "7"
+version: "8"
 facts:
   aiter_merged_view:
     kind: names
@@ -59,6 +59,64 @@ facts:
                 class AITER_CONFIG:
                     def merge_config_files(self, file_path: str, merge_name: str):
                         return file_path
+
+  aiter_meta_dir:
+    kind: names
+    project: aiter
+    reason: >-
+      aiter reads its device sources and code generators (csrc, hsa, 3rdparty) from one meta directory, which it also puts
+      first on sys.path so that "from csrc.cpp_itfs.pa.pa import ..." resolves while aiter.ops is imported. It works the
+      directory out from where aiter/jit/core.py sits: the install_mode file beside the package says develop (also when
+      the file is missing) for a source checkout, whose meta directory is the directory around the package, and anything
+      else for a wheel, whose meta directory is the aiter_meta package beside it. The variable overrides that, and aiter
+      ignores a value whose directory holds no csrc. An aiter package laid anywhere else, as the farm lays a patched one,
+      therefore finds none of it and "import aiter" stops at "No module named 'csrc'" unless the variable names the
+      image's own directory.
+    names:
+      variable: AITER_META_DIR
+      wheel_dir: aiter_meta
+      marker_dir: csrc
+      install_mode_file: install_mode
+      develop_mode: develop
+    examples:
+      - "hyperloom.measure.farm: a farm that lays a patched aiter sets the variable to the image's own meta directory, resolved as aiter resolves it, unless the server already inherits one"
+      - "hyperloom_multibranch.toolbox.tools.kernel_tune: the tuner is pinned to the directory around the aiter package or its aiter_meta, whichever holds csrc"
+    image_check:
+      - check: source_contains
+        module: aiter.jit.core
+        text:
+          - {ref: aiter_meta_dir.variable}
+          - {ref: aiter_meta_dir.wheel_dir}
+          - {ref: aiter_meta_dir.marker_dir}
+          - {ref: aiter_meta_dir.install_mode_file}
+          - {ref: aiter_meta_dir.develop_mode}
+        match: word
+        examples:
+          pass:
+            - source: |-
+                try:
+                    with open(f"{this_dir}/../install_mode", "r") as f:
+                        isDevelopMode = f.read().strip() == "develop"
+                except FileNotFoundError:
+                    isDevelopMode = True
+                AITER_META_DIR = AITER_ROOT_DIR if isDevelopMode else os.path.abspath(f"{AITER_ROOT_DIR}/aiter_meta/")
+                env_meta = os.environ.get("AITER_META_DIR")
+                if env_meta:
+                    AITER_META_DIR = os.path.abspath(env_meta)
+                if not os.path.exists(os.path.join(AITER_META_DIR, "csrc")):
+                    AITER_META_DIR = AITER_ROOT_DIR
+          fail:
+            - source: |-
+                AITER_META_DIR = os.path.abspath(f"{AITER_ROOT_DIR}/aiter_meta/")
+                env_meta = os.environ.get("AITER_META_DIR")
+                if env_meta:
+                    AITER_META_DIR = os.path.abspath(env_meta)
+                if not os.path.exists(os.path.join(AITER_META_DIR, "csrc")):
+                    AITER_META_DIR = AITER_ROOT_DIR
+            - source: |-
+                AITER_SOURCE_DIR = os.environ.get("AITER_SOURCE_DIR") or AITER_ROOT_DIR
+                if not os.path.exists(os.path.join(AITER_SOURCE_DIR, "csrc")):
+                    AITER_SOURCE_DIR = os.path.join(AITER_ROOT_DIR, "aiter_src")
 
   sglang_image_layout:
     kind: names

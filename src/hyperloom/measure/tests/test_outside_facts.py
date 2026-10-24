@@ -137,12 +137,12 @@ _PROBE = textwrap.dedent(
 
     from hyperloom.common import env_safety, failure_signature, visible_devices
     from hyperloom.measure import compile as compiled
-    from hyperloom.measure import agentx_requests, eval_context, hosted_spec, local, log_causes, points, surface
+    from hyperloom.measure import agentx_requests, eval_context, farm, hosted_spec, local, log_causes, points, surface
     from hyperloom.measure.framework import base as framework_base
     from hyperloom.measure.runner import run
     from hyperloom.sandbox import card_occupancy, templates
     from hyperloom_multibranch.toolbox import acceptance, hosted_executor, mcp_tools
-    from hyperloom_multibranch.toolbox.tools import tracelens_report
+    from hyperloom_multibranch.toolbox.tools import kernel_tune, tracelens_report
 
     out = {
         "signature": [pattern.pattern for rule in failure_signature._RULES for pattern in rule.patterns],
@@ -174,6 +174,14 @@ _PROBE = textwrap.dedent(
             card_occupancy.PID_NAMESPACE_LINK,
             card_occupancy.INITIAL_PID_NAMESPACE,
         ],
+        "meta": [
+            farm.AITER_META_DIR_ENV,
+            farm.AITER_META_MARKER_DIR,
+            farm.AITER_META_WHEEL_DIR,
+            farm.AITER_INSTALL_MODE_FILE,
+            farm.AITER_DEVELOP_MODE,
+        ],
+        "tuner": kernel_tune.AITER_META_MARKER_DIR,
     }
     print(json.dumps(out))
     """
@@ -288,6 +296,18 @@ def test_aiperf_export_names_are_read_from_the_owner(probe: dict[str, Any]) -> N
         "AIPERF_EXPORT_DIR/AIPERF_EXPORT_FILE",
         "*/AIPERF_EXPORT_DIR/AIPERF_EXPORT_FILE",
     ]
+
+
+def test_aiter_meta_directory_names_are_read_from_the_owner(probe: dict[str, Any]) -> None:
+    """The farm names the variable, the directories and the install mode it resolves, and the tuner's refusal the marker."""
+    assert probe["meta"] == [
+        "AITER_META_DIR_ENV",
+        "AITER_META_MARKER_DIR",
+        "AITER_META_WHEEL_DIR",
+        "AITER_INSTALL_MODE_FILE",
+        "AITER_DEVELOP_MODE",
+    ]
+    assert probe["tuner"] == "AITER_META_MARKER_DIR"
 
 
 def test_standalone_hook_holds_the_owners_merge_directory() -> None:

@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.measure.farm import FarmError, build_farm, prepend_pythonpath, verify_farm
+from hyperloom.measure.farm import FarmError, build_farm, place_farm, prepend_pythonpath, verify_farm
 from hyperloom.measure.spec import EnvEntry, EnvRoot
 
 INSTALLED = Path(yaml.__file__).parent
@@ -125,3 +125,15 @@ def test_a_farm_that_is_not_first_on_the_path_is_refused(tmp_path):
 
     with pytest.raises(FarmError, match="would be imported from"):
         verify_farm(farm, {"PYTHONPATH": ""}, python=sys.executable, cwd=tmp_path)
+
+
+def test_a_farm_that_rebuilds_no_aiter_carries_no_meta_directory_and_adds_no_variable(tmp_path):
+    farm = _build(tmp_path, EnvEntry("error.py", "delete"))
+    point = tmp_path / "point.yaml"
+    point.write_text(yaml.safe_dump({"benchmark": {"envs": {"TP": 1}}}), encoding="utf-8")
+
+    envs = place_farm(point, farm)
+
+    assert farm.aiter_meta is None
+    assert dict(envs) == {"TP": 1, "PYTHONPATH": str(farm.site)}
+    assert yaml.safe_load(point.read_text())["benchmark"]["envs"] == dict(envs)

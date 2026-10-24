@@ -44,7 +44,15 @@ from hyperloom.measure.runner import hardware
 from hyperloom.measure.runner.card_watch import BEFORE_TEST, CardWatch
 from hyperloom.measure.runner.aiperf_patch import ReplayClientPatchError, patch_replay_client
 from hyperloom.measure.attachments import AttachmentError, place_attachments
-from hyperloom.measure.farm import Farm, FarmError, build_farm, server_environment, server_python, verify_farm
+from hyperloom.measure.farm import (
+    Farm,
+    FarmError,
+    build_farm,
+    inherited_environment,
+    server_environment,
+    server_python,
+    verify_farm,
+)
 from hyperloom.measure.runner.jit import STAGING_DIR, ColdStart, Surroundings, build_session, cold_start
 from hyperloom.measure.runner.inventory import OutputRejected, drop_agentx_runtime, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
@@ -234,7 +242,13 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
     try:
         placed = place_attachments(spec.attachments, ctx.work / "attach", ctx.read_blob)
         python = server_python(yaml.safe_load(spec.config[0].yaml) or {}, default="python3")
-        farm = build_farm(spec.environment.roots, ctx.work / "farm", python=python, read_blob=ctx.read_blob)
+        farm = build_farm(
+            spec.environment.roots,
+            ctx.work / "farm",
+            python=python,
+            read_blob=ctx.read_blob,
+            inherited=inherited_environment(ctx.environ, spec.process_env, spec.unset_envs),
+        )
         placement = Placement(
             placed=placed,
             pid_dir=ctx.work / "pids",

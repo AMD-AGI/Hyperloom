@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import GPU_MASK_ENV_NAMES, is_secret_shaped_env_name, scrub_benchmark_process_env
-from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
+from hyperloom.common.outside_facts import AITER_META_MARKER_DIR, AITER_META_WHEEL_DIR, ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
 from hyperloom.orchestrator.actions.executors import COOPERATIVE_REAP_BUDGET_SEC, run_with_session_kill
 from hyperloom.orchestrator.kernel import forge_gemm_tuning
@@ -104,9 +104,8 @@ MAX_SHAPES = 64
 #: What the subprocess is given beyond the budget Forge keeps itself to, to write its report.
 _GRACE_SEC = 300
 _CARDS = 1
-#: The variable Forge reads the aiter it tunes against from, and where an aiter install keeps its tuner scripts.
+#: The variable Forge reads the aiter it tunes against from.
 _AITER_ROOT_ENV = "AITER_ROOT_DIR"
-_AITER_SOURCE_DIR = "csrc"
 _CANCEL_REASON = "kernel_tune_cancelled"
 _SHAPE_NAMES = frozenset({"env", "M", "N", "K", "dtype", "otype", "bias", "scaleAB", "bpreshuffle"})
 _ADVICE = (
@@ -232,12 +231,12 @@ def serving_aiter_root(configs: Path) -> Path:
     """
     package = Path(os.path.abspath(configs)).parent
     if configs.name == "configs" and configs.is_dir() and (package / "jit" / "core.py").is_file():
-        for root in (package.parent, package.parent / "aiter_meta"):
-            if (root / _AITER_SOURCE_DIR).is_dir():
+        for root in (package.parent, package.parent / AITER_META_WHEEL_DIR):
+            if (root / AITER_META_MARKER_DIR).is_dir():
                 return root
     raise ToolFailure(
         f"the aiter the tests' servers run cannot be found from {str(configs)!r}: it is not the aiter/configs of an "
-        f"install with aiter/jit/core.py beside it and {_AITER_SOURCE_DIR} around it, so the tuner cannot be pinned to "
+        f"install with aiter/jit/core.py beside it and {AITER_META_MARKER_DIR} around it, so the tuner cannot be pinned to "
         f"it ({_AITER_ROOT_ENV}) and is not run against whatever aiter it finds"
     )
 

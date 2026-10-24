@@ -69,6 +69,13 @@ usage: serve [-h] --model-path MODEL_PATH
 _SUMMARY = "usage: serve [options]\nConfig groups:\n  ModelConfig  Configuration for the model\n"
 _OLD_AITER = 'config_path = Path("/tmp/aiter_configs/")'
 _NEW_AITER = 'config_path = Path(tempfile.gettempdir()) / "aiter_configs"'
+_AITER_META = (
+    'develop = open(f"{this_dir}/../install_mode").read().strip() == "develop"\n'
+    'AITER_META_DIR = AITER_ROOT_DIR if develop else f"{AITER_ROOT_DIR}/aiter_meta/"\n'
+    'AITER_META_DIR = os.path.abspath(os.environ.get("AITER_META_DIR") or AITER_META_DIR)\n'
+    'if not os.path.exists(os.path.join(AITER_META_DIR, "csrc")):\n'
+    "    AITER_META_DIR = AITER_ROOT_DIR"
+)
 _LOGGER = "hyperloom.common.outside_facts.image_check"
 
 
@@ -410,6 +417,7 @@ def _reference_image(tmp_path: Path, merge_line: str) -> HostImage:
         "aiter",
         {
             "jit/core.py": f'AITER_LOG_TUNED_CONFIG = int(os.getenv("AITER_LOG_TUNED_CONFIG", "0"))\n'
+            f"{_AITER_META}\n"
             f"class AITER_CONFIG:\n    def update_config_files(self, file_path, merge_name, env_name=None):\n        {merge_line}\n",
             "tuned_gemm.py": 'f"found padded_M: {m} is tuned on cu_num = {c} in {t}, libtype is {l}, kernel name is {k}"\n',
         },
@@ -455,7 +463,7 @@ def test_the_reference_pack_over_an_image_that_holds_every_fact_it_can_confirm(t
         name for name, entry in pack.entries.items() if entry.image_checks
     ]
     assert all(held[name] is Status.UNVERIFIABLE for name, entry in pack.entries.items() if not entry.image_checks)
-    assert report.counts() == {"pass": 11, "fail": 0, "unverifiable": 15}
+    assert report.counts() == {"pass": 12, "fail": 0, "unverifiable": 15}
     assert report.pack == {"version": pack.version, "digest": pack.digest}
 
 
@@ -474,7 +482,7 @@ def test_an_aiter_that_no_longer_holds_the_merge_directory_literal_fails_that_fa
     assert report.summary() == {
         "mode": "warn",
         "pack_digest": report.pack["digest"],
-        "pass": 10,
+        "pass": 11,
         "unverifiable": 15,
         "fail": ["aiter_merged_view"],
     }
@@ -484,12 +492,12 @@ def test_the_report_is_json_for_close_and_lines_for_people_and_is_written_whole(
     report = build_report(load_pack(DEFAULT_PACK_PATH), _reference_image(tmp_path, _NEW_AITER))
 
     document = json.loads(json.dumps(report.to_json()))
-    assert document["counts"] == {"pass": 10, "fail": 1, "unverifiable": 15}
+    assert document["counts"] == {"pass": 11, "fail": 1, "unverifiable": 15}
     assert document["environment"]["python_version"].count(".") == 2
     assert document["environment"]["packages"]["vllm"] == {"installed": True, "version": None}
     assert {fact["fact"] for fact in document["facts"]} == set(load_pack(DEFAULT_PACK_PATH).entries)
     lines = report.markdown_lines()
-    assert lines[0].startswith("Image check (warn) of rule pack 7: 10 pass, 1 fail, 15 unverifiable")
+    assert lines[0].startswith("Image check (warn) of rule pack 8: 11 pass, 1 fail, 15 unverifiable")
     assert lines[1] == "- FAIL aiter_merged_view (aiter)"
     assert lines[-1].startswith("- Unverifiable here: python_import_errors, ")
     target = tmp_path / "attached" / "image_check.json"
@@ -567,7 +575,7 @@ def test_the_command_line_prints_the_report_and_exits_one_when_a_fact_fails(
 ) -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
     assert main([], pack=pack, image=_reference_image(tmp_path, _OLD_AITER)) == 0
-    assert capsys.readouterr().out.startswith("Image check (warn) of rule pack 7: 11 pass, 0 fail, 15 unverifiable")
+    assert capsys.readouterr().out.startswith("Image check (warn) of rule pack 8: 12 pass, 0 fail, 15 unverifiable")
 
     other = tmp_path / "other"
     other.mkdir()
