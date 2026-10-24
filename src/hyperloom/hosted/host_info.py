@@ -59,6 +59,7 @@ class Var:
     AWS_ACCESS_KEY_ID = "AWS_ACCESS_KEY_ID"
     AWS_SECRET_ACCESS_KEY = "AWS_SECRET_ACCESS_KEY"
     AWS_SESSION_TOKEN = "AWS_SESSION_TOKEN"
+    GRANT_LIMITS = "HYPERLOOM_GRANT_LIMITS"
     NODE_NAME = "NODE_NAME"
     CLAW_SESSION_ID = "CLAW_SESSION_ID"
 
@@ -185,6 +186,16 @@ class SandboxKeys:
 
 
 @dataclass(frozen=True)
+class GrantLimits:
+    """The totals the host granted the run; a total the host did not state is ``None``."""
+
+    max_sandboxes: int | None
+    max_gpus: int | None
+    gpu_hours: float | None
+    max_runtime_sec: int | None
+
+
+@dataclass(frozen=True)
 class HostInfo:
     """Everything the host injected, typed.  Optional fields are ``None`` when the host did not set them."""
 
@@ -206,6 +217,7 @@ class HostInfo:
     archive_credentials: ArchiveCredentials | None
     node_name: str | None
     claw_session_id: str | None
+    grant_limits: GrantLimits | None = None
 
 
 class _Reader:
@@ -264,6 +276,9 @@ class _Reader:
 
     def archive(self, name: str) -> ArchiveLocation | None:
         return self._parsed(name, _archive_location)
+
+    def grant_limits(self, name: str) -> GrantLimits | None:
+        return self._parsed(name, _grant_limits)
 
     def secret(self, name: str, *, force: bool = False) -> Secret | None:
         value = self._parsed(name, _plain_text, force=force)
@@ -349,6 +364,33 @@ def _is_template_entry(entry: object) -> bool:
     return _is_template_name(entry)
 
 
+_GRANT_COUNTS = ("max_sandboxes", "max_gpus", "max_runtime_sec")
+
+
+def _grant_total(value: object, name: str, *, whole: bool) -> int | float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value >= 0 or value == float("inf"):
+        raise ValueError(f"{name} must be a number >= 0")
+    if whole and value != int(value):
+        raise ValueError(f"{name} must be a whole number")
+    return int(value) if whole else value
+
+
+def _grant_limits(value: str) -> GrantLimits:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"is not valid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})") from None
+    if not isinstance(parsed, dict):
+        raise ValueError("must be a JSON object")
+    totals = {
+        name: _grant_total(parsed.get(name), name, whole=name in _GRANT_COUNTS)
+        for name in (*_GRANT_COUNTS, "gpu_hours")
+    }
+    return GrantLimits(**totals)  # type: ignore[arg-type]
+
+
 def _archive_location(value: str) -> ArchiveLocation:
     parts = urlsplit(value)
     if parts.scheme != "s3" or parts.query or parts.fragment:
@@ -413,6 +455,7 @@ def _build(reader: _Reader) -> HostInfo:
         archive_credentials=_archive_credentials(reader, result_archive),
         node_name=reader.text(Var.NODE_NAME),
         claw_session_id=reader.text(Var.CLAW_SESSION_ID),
+        grant_limits=reader.grant_limits(Var.GRANT_LIMITS),
     )
 
 
