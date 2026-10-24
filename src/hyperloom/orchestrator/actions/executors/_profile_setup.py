@@ -99,64 +99,6 @@ def _atom_tracelens_caps() -> _AtomTracelensCaps:
     )
 
 
-_ANNOTATION_CAPS_PROBE = (
-    "import dataclasses, sys\n"
-    "def fields(cls):\n"
-    "    names = set()\n"
-    "    for base in cls.__mro__:\n"
-    "        names.update(getattr(base, '__annotations__', {}))\n"
-    "    if dataclasses.is_dataclass(cls):\n"
-    "        names.update(field.name for field in dataclasses.fields(cls))\n"
-    "    for table in ('model_fields', '__struct_fields__'):\n"
-    "        names.update(getattr(cls, table, None) or ())\n"
-    "    return names\n"
-    "if sys.argv[1] == 'sglang':\n"
-    "    from sglang.srt.managers import io_struct\n"
-    "    from sglang.srt.server_args import ServerArgs\n"
-    "    requests = [getattr(io_struct, name) for name in ('ProfileReqInput', 'ProfileReq') if hasattr(io_struct, name)]\n"
-    "    ok = 'enable_profile_cuda_graph' in fields(ServerArgs) and bool(requests) and all(\n"
-    "        'detailed_annotations' in fields(cls) for cls in requests\n"
-    "    )\n"
-    "else:\n"
-    "    try:\n"
-    "        from vllm.config import ProfilerConfig\n"
-    "    except ImportError:\n"
-    "        from vllm.config.profiler import ProfilerConfig\n"
-    "    ok = {'capture_torch_profiler', 'detailed_trace_annotation'} <= fields(ProfilerConfig)\n"
-    "print(int(ok))\n"
-)
-
-
-@cache
-def profiler_annotations_supported(framework: str) -> bool:
-    """Whether the installed SGLang or vLLM server accepts TraceLens step annotations.
-
-    SGLang needs ``--enable-profile-cuda-graph`` and ``detailed_annotations`` on its
-    start-profile request (``ProfileReqInput`` and/or ``ProfileReq``); vLLM needs ``capture_torch_profiler`` and
-    ``detailed_trace_annotation`` on ``ProfilerConfig``. A probe that cannot run
-    counts as unsupported. Cached after the first call per framework.
-    """
-    try:
-        proc = subprocess.run(
-            [_resolve_probe_python(framework), "-c", _ANNOTATION_CAPS_PROBE, framework],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        log.warning("%s annotation probe failed (%s); profiling without detailed annotations", framework, exc)
-        return False
-    lines = (proc.stdout or "").split()
-    if proc.returncode == 0 and lines and lines[-1] == "1":
-        return True
-    log.warning(
-        "%s server lacks TraceLens annotation support (exit=%s); profiling without detailed annotations",
-        framework,
-        proc.returncode,
-    )
-    return False
-
-
 def _tracelens_patch_enabled() -> bool:
     """Read the ``HYPERLOOM_ENABLE_PATCH`` kill switch (default on).
 

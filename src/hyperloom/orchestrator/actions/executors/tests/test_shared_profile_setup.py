@@ -6,18 +6,15 @@
 from copy import deepcopy
 import json
 from pathlib import Path
-import subprocess
 
 import pytest
 import yaml
 
 from hyperloom.inference_optimizer.session.paths import asset_root
-from hyperloom.orchestrator.actions.executors import _profile_setup, _server_patcher
+from hyperloom.orchestrator.actions.executors import _server_patcher
 from hyperloom.orchestrator.actions.executors._profile_setup import prepare_profile
 from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
 from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime, enable_profile, load_benchmark
-
-_probe_annotations = _profile_setup.profiler_annotations_supported
 
 
 @pytest.fixture(autouse=True)
@@ -38,7 +35,6 @@ def profile_environment(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(_server_patcher, "ensure_vllm_patched_for_tracelens", lambda: True)
     monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: True)
-    monkeypatch.setattr(_profile_setup, "profiler_annotations_supported", lambda framework: True)
 
 
 def _fixed_profile(framework: str) -> dict:
@@ -124,47 +120,8 @@ def test_native_profile_preserves_explicit_capture_settings(tmp_path, monkeypatc
         "detailed_annotations": detailed,
     }
     path = _native_config(tmp_path, framework, profiler={"torch_profiler": deepcopy(requested)})
-    monkeypatch.setattr(_profile_setup, "profiler_annotations_supported", pytest.fail)
     enable_profile(path)
     assert load_benchmark(path)["profiler"]["torch_profiler"] == {**requested, "enabled": True}
-
-
-@pytest.mark.parametrize("framework", ["sglang", "vllm"])
-def test_native_profile_without_server_annotation_support_omits_annotations(tmp_path, monkeypatch, framework):
-    probed = []
-    monkeypatch.setattr(_profile_setup, "profiler_annotations_supported", lambda name: probed.append(name) or False)
-    path = _native_config(tmp_path, framework)
-    enable_profile(path)
-    assert probed == [framework]
-    assert load_benchmark(path)["profiler"]["torch_profiler"]["detailed_annotations"] is False
-
-
-def _fake_probe_run(stdout: str, returncode: int = 0):
-    def run(argv, **kwargs):
-        return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr="")
-
-    return run
-
-
-@pytest.mark.parametrize(
-    ("stdout", "returncode", "supported"),
-    [("1\n", 0, True), ("import noise\n1\n", 0, True), ("0\n", 0, False), ("", 1, False)],
-)
-def test_annotation_probe_reads_the_server_verdict(monkeypatch, stdout, returncode, supported):
-    _probe_annotations.cache_clear()
-    monkeypatch.setattr(_profile_setup.subprocess, "run", _fake_probe_run(stdout, returncode))
-    assert _probe_annotations("vllm") is supported
-    _probe_annotations.cache_clear()
-
-
-def test_annotation_probe_that_cannot_run_counts_as_unsupported(monkeypatch):
-    def unavailable(argv, **kwargs):
-        raise subprocess.TimeoutExpired(argv, 120)
-
-    _probe_annotations.cache_clear()
-    monkeypatch.setattr(_profile_setup.subprocess, "run", unavailable)
-    assert _probe_annotations("sglang") is False
-    _probe_annotations.cache_clear()
 
 
 def test_fixed_sequence_materialization_keeps_its_capture_plan(tmp_path):

@@ -216,15 +216,9 @@ def enable_profile(config_path: Path) -> None:
 
     An explicit ``num_steps``, ``num_profiles``, ``start_seconds``,
     ``interval_seconds``, or ``detailed_annotations`` already present in the
-    profile copy is left unchanged. A missing ``detailed_annotations`` is true only
-    when the installed server supports TraceLens annotations.
+    profile copy is left unchanged. A missing ``detailed_annotations`` becomes true.
     """
-    from ._profile_setup import (
-        apply_sglang_shape_tool,
-        patch_for_profile,
-        profiler_annotations_supported,
-        shape_discovery_enabled,
-    )
+    from ._profile_setup import apply_sglang_shape_tool, patch_for_profile, shape_discovery_enabled
 
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     bench = config["benchmark"]
@@ -251,8 +245,7 @@ def enable_profile(config_path: Path) -> None:
     torch_profiler.setdefault("num_profiles", 1)
     torch_profiler.setdefault("start_seconds", 300)
     torch_profiler.setdefault("interval_seconds", 900)
-    if "detailed_annotations" not in torch_profiler:
-        torch_profiler["detailed_annotations"] = profiler_annotations_supported(framework)
+    torch_profiler.setdefault("detailed_annotations", True)
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 
