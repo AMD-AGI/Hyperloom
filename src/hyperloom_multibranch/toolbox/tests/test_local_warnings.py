@@ -3,9 +3,10 @@
 
 """The warnings ``run_grid`` writes reach the notebook's stored result of a test run by the local factory (CPU only).
 
-The shipped runner and the real local backend run in a local sandbox; only ``run_grid`` is replaced, by a stand-in that
-measures and warns. What this proves is the carriage: run_grid, the local backend, the signed rounds file, the
-verified bundle, the executor, the result in the notebook, and the verification again.
+The shipped runner and the real local backend run in a local sandbox; only ``run_grid`` (a stand-in that measures and
+warns) and the probes of the machine (a machine whose cards nothing else holds, so that no host adds a warning of its own)
+are replaced. What this proves is the carriage: run_grid, the local backend, the signed rounds file, the verified bundle,
+the executor, the result in the notebook, and the verification again.
 """
 
 from __future__ import annotations
@@ -32,11 +33,6 @@ from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
 from hyperloom_multibranch.toolbox.tests.test_local_hosted import _require_tool_checkout
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
-
-
-def _run_grid_warnings(result: TestResult) -> tuple[str, ...]:
-    """The warnings ``run_grid`` wrote: a machine with no GPU driver also warns that its cards could not be looked at."""
-    return tuple(w for w in result.nonfatal_warnings if not w.startswith("card_occupancy_unknown"))
 
 
 def _runner_python(tmp_path: Path) -> str:
@@ -77,9 +73,9 @@ async def test_the_warnings_run_grid_wrote_are_on_the_stored_result_and_an_edite
         assert entry is not None and entry.outcome is not None and "result" in entry.outcome, entry
         result = TestResult.from_document(entry.outcome["result"])
         assert result.validity is Validity.SUCCEEDED, result.failure_reason
-        assert _run_grid_warnings(result) == tuple(WARNINGS)
+        assert result.nonfatal_warnings == tuple(WARNINGS)
         stored = (await notebook.record(request_id)).result
-        assert stored is not None and _run_grid_warnings(stored) == tuple(WARNINGS)
+        assert stored is not None and stored.nonfatal_warnings == tuple(WARNINGS)
         executor = toolbox._executor
         await executor.reverify(result)  # type: ignore[attr-defined]
         with pytest.raises(ResultUnverified, match="nonfatal_warnings: recorded"):
