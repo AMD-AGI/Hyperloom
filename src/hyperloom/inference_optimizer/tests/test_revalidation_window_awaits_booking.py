@@ -68,7 +68,7 @@ async def _finished_revalidation(coord, tmp_path: Path):
     state.phase = "ENABLEMENT"
     state.enablement.validation_pending = True
     state.enablement.revalidation_generation = 1
-    task = await coord.tasks.create(
+    task, _ = await coord.tasks.create_or_return_existing(
         kind="baseline",
         params={"source": "coordinator_internal", "reason": ENABLEMENT_REVALIDATION_REASON},
         idempotency_key="enablement_revalidation:gen1",

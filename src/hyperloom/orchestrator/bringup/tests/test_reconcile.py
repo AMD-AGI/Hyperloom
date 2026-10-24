@@ -117,7 +117,7 @@ def _build(
 
 async def _open_round(rounds: RoundStore, tasks: TaskRegistry, *, holder: str, lease: float = _LEASE) -> None:
     """Open a round held by a real task row."""
-    await tasks.create(kind="specialist", params={}, idempotency_key=f"k:{holder}", task_id=holder)
+    await tasks.create_or_return_existing(kind="specialist", params={}, idempotency_key=f"k:{holder}", task_id=holder)
     result = await rounds.open(
         f"round-{holder}",
         RoundRequest(now_unix=_NOW, request_id=f"open:{holder}"),
@@ -213,7 +213,7 @@ async def test_a_terminal_holder_hands_the_round_to_the_integrate_that_follows_i
     await _open_round(rounds, tasks, holder="spec-1")
     await tasks.transition("spec-1", "running")
     await tasks.transition("spec-1", "succeeded")
-    integrate = await tasks.create(
+    integrate, _ = await tasks.create_or_return_existing(
         kind="integrate_patch",
         params={"specialist_task_id": "spec-1"},
         idempotency_key="integrate:1",
@@ -237,7 +237,7 @@ async def test_terminal_holder_cannot_handoff_before_gpu_cleanup(db):
     await _open_round(rounds, tasks, holder="spec-1", lease=1)
     await tasks.transition("spec-1", "running")
     await tasks.transition("spec-1", "succeeded")
-    successor = await tasks.create(
+    successor, _ = await tasks.create_or_return_existing(
         kind="integrate_patch", params={"specialist_task_id": "spec-1"}, idempotency_key="next"
     )
     pool = SpecialistGpuPool(db, gpu_ids=[0])
@@ -272,7 +272,7 @@ async def test_terminal_round_uses_latest_cleanup_outcome(db, state, appended, c
             history.append({"progress": {"message": "completion recorded"}})
             cur.execute("UPDATE tasks SET history=? WHERE task_id='spec-1'", (json.dumps(history),))
     if with_successor:
-        await tasks.create(
+        await tasks.create_or_return_existing(
             kind="integrate_patch", params={"specialist_task_id": "spec-1"}, idempotency_key="next", task_id="next"
         )
 
@@ -337,8 +337,8 @@ async def test_a_holder_that_reported_its_own_end_is_proof_but_a_lease_watchdog_
 async def test_a_running_task_whose_process_is_gone_is_failed_and_one_unobservable_is_not(db, monkeypatch):
     """Inability to observe is UNKNOWN. Nothing is manufactured from it."""
     rec, _rounds, tasks, _ = _build(db)
-    dead = await tasks.create(kind="specialist", params={}, idempotency_key="dead")
-    blind = await tasks.create(kind="specialist", params={}, idempotency_key="blind")
+    dead, _ = await tasks.create_or_return_existing(kind="specialist", params={}, idempotency_key="dead")
+    blind, _ = await tasks.create_or_return_existing(kind="specialist", params={}, idempotency_key="blind")
     await tasks.transition(dead.task_id, "running")
     await tasks.transition(blind.task_id, "running")
     gone = subprocess.Popen([sys.executable, "-c", "pass"])  # nosec B603
@@ -492,7 +492,7 @@ async def test_a_revalidation_window_whose_task_is_terminal_is_closed(db):
     state.enablement.validation_pending = True
     state.enablement.revalidation_task_id = "reval-1"
     rec, _, tasks, _ = _build(db, state=state)
-    await tasks.create(kind="baseline", params={}, idempotency_key="k:reval-1", task_id="reval-1")
+    await tasks.create_or_return_existing(kind="baseline", params={}, idempotency_key="k:reval-1", task_id="reval-1")
     await tasks.transition("reval-1", "running")
     await tasks.transition("reval-1", "failed")
 
@@ -511,7 +511,7 @@ async def test_a_revalidation_window_whose_task_still_runs_is_left_alone(db):
     state.enablement.validation_pending = True
     state.enablement.revalidation_task_id = "reval-1"
     rec, _, tasks, _ = _build(db, state=state)
-    await tasks.create(kind="baseline", params={}, idempotency_key="k:reval-1", task_id="reval-1")
+    await tasks.create_or_return_existing(kind="baseline", params={}, idempotency_key="k:reval-1", task_id="reval-1")
 
     report = await rec.run(_NOW + 1.0)
 
@@ -570,7 +570,7 @@ async def _wedge_round_with_lane_rows(db, rounds, tasks, *, cleanup_confirmed: b
         "succeeded",
         evidence={"outcome": {"state": "succeeded"}, "cleanup_confirmed": cleanup_confirmed},
     )
-    successor = await tasks.create(
+    successor, _ = await tasks.create_or_return_existing(
         kind="integrate_patch", params={"specialist_task_id": "spec-1"}, idempotency_key="next"
     )
     # Nothing here is reclaimable by liveness: the pid on the rows is this test.
@@ -638,7 +638,7 @@ async def test_a_revalidation_window_whose_result_is_still_to_be_booked_is_left_
     state.enablement.revalidation_task_id = "reval-1"
     owed = {"reval-1"}
     rec, _, tasks, _ = _build(db, state=state, result_pending=lambda task_id: task_id in owed)
-    await tasks.create(kind="baseline", params={}, idempotency_key="k:reval-1", task_id="reval-1")
+    await tasks.create_or_return_existing(kind="baseline", params={}, idempotency_key="k:reval-1", task_id="reval-1")
     await tasks.transition("reval-1", "running")
     await tasks.transition("reval-1", "succeeded")
 

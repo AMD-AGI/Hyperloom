@@ -375,31 +375,6 @@ class TaskRegistry:
             )
         return task, False
 
-    async def create(
-        self,
-        *,
-        kind: str,
-        params: dict,
-        idempotency_key: str,
-        requires_lanes: list[str] | None = None,
-        lease_ttl_sec: int = 0,
-        task_id: str | None = None,
-        dispatch_class: str | None = None,
-        dispatch_origin: Mapping[str, Any] | None = None,
-    ) -> Task:
-        """Thin wrapper around :meth:`create_or_return_existing` for callers that don't need ``was_existing``."""
-        task, _was_existing = await self.create_or_return_existing(
-            kind=kind,
-            params=params,
-            idempotency_key=idempotency_key,
-            requires_lanes=requires_lanes,
-            lease_ttl_sec=lease_ttl_sec,
-            task_id=task_id,
-            dispatch_class=dispatch_class,
-            dispatch_origin=dispatch_origin,
-        )
-        return task
-
     async def get(self, task_id: str) -> Task:
         """Fetch a single task by id."""
         row = await self.db.fetchone("SELECT * FROM tasks WHERE task_id=?", (task_id,))

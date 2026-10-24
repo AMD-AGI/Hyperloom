@@ -2476,7 +2476,7 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
     sub = SubAgentRunner(locks, tr)
     sub.register_executor("report", ReportExecutor())
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="report",
         params={"session_dir": str(session_dir)},
         idempotency_key="rep-1",
@@ -2522,7 +2522,7 @@ async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path, mo
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
     sub.register_executor("report", ReportExecutor())
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="report",
         params={},
         idempotency_key="rep-fail-1",

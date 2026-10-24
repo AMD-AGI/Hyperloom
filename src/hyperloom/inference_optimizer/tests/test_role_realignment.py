@@ -444,7 +444,7 @@ async def test_running_tasks_reader_reports_held_resources(coordinator_with_mock
     """Lease expiry, lanes and GPU ids reach the planner."""
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             kind="specialist",
             params={},
             idempotency_key="k-resources",
@@ -511,7 +511,7 @@ async def test_running_tasks_reader_reports_heartbeat_age(
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             kind="specialist",
             params={},
             idempotency_key="k-heartbeat",
@@ -539,7 +539,7 @@ async def test_running_tasks_reader_skips_heartbeat_for_non_specialist(
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             kind="explore",
             params={},
             idempotency_key="k-explore-hb",
@@ -564,7 +564,7 @@ async def test_running_tasks_reader_reports_in_flight_task(coordinator_with_mock
     c = coordinator_with_mocks
     try:
         assert "no tasks in flight" in c.conversation._context_running_tasks_reader()
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             kind="specialist",
             params={"domain": "serving_specialist", "gap_canonical_id": "gap.x"},
             idempotency_key="k-running-1",
@@ -599,7 +599,7 @@ async def test_running_tasks_reader_states_the_backlog_dispatch_order(coordinato
     try:
         c.shared_state.phase = phase
         for i, kind in enumerate(kinds):
-            await c.tasks.create(kind=kind, params={}, idempotency_key=f"k-backlog-{i}")
+            await c.tasks.create_or_return_existing(kind=kind, params={}, idempotency_key=f"k-backlog-{i}")
         out = c.conversation._context_running_tasks_reader()
         assert "queued backlog: " in out
         assert "dispatches before" in out if order_note else "dispatches before" not in out
@@ -616,7 +616,7 @@ async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             kind="specialist",
             params={},
             idempotency_key="k-extend-1",
@@ -666,7 +666,7 @@ async def test_extend_lease_does_not_regrant_elapsed_time(coordinator_with_mocks
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             kind="specialist",
             params={},
             idempotency_key="k-extend-elapsed",
@@ -709,7 +709,7 @@ async def test_extend_lease_late_grant_keeps_new_increment_for_lanes(coordinator
     """A late extension must not reduce newly granted lane time to one second."""
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             kind="specialist",
             params={},
             idempotency_key="k-extend-late",
@@ -750,7 +750,7 @@ async def test_extend_lease_grants_live_subprocess_extension(coordinator_with_mo
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             kind="specialist",
             params={},
             idempotency_key="k-extend-live",
@@ -790,7 +790,7 @@ async def test_extend_lease_survives_wall_budget_grant_failure(coordinator_with_
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             kind="specialist",
             params={},
             idempotency_key="k-extend-grant-fail",
@@ -838,7 +838,7 @@ async def test_extend_lease_survives_unreadable_running_age(coordinator_with_moc
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             kind="specialist",
             params={},
             idempotency_key="k-extend-age-fail",
@@ -892,7 +892,7 @@ async def test_extend_lease_rejects_non_running_task(coordinator_with_mocks):
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             kind="specialist",
             params={},
             idempotency_key="k-extend-2",
@@ -918,9 +918,16 @@ async def test_prune_branch_on_a_catalogue_family_cancels_every_member_action(co
     try:
         members = sorted(name for name, meta in ACTION_CATALOGUE.items() if meta.family == "prep")
         assert len(members) > 1
-        queued = [await c.tasks.create(kind=kind, params={}, idempotency_key=f"k-prune-{kind}") for kind in members]
-        bystander = await c.tasks.create(kind="explore", params={}, idempotency_key="k-prune-bystander")
-        running = await c.tasks.create(kind=members[0], params={}, idempotency_key="k-prune-running")
+        queued = [
+            (await c.tasks.create_or_return_existing(kind=kind, params={}, idempotency_key=f"k-prune-{kind}"))[0]
+            for kind in members
+        ]
+        bystander, _ = await c.tasks.create_or_return_existing(
+            kind="explore", params={}, idempotency_key="k-prune-bystander"
+        )
+        running, _ = await c.tasks.create_or_return_existing(
+            kind=members[0], params={}, idempotency_key="k-prune-running"
+        )
         await c.tasks.transition(running.task_id, "running")
 
         await c.router.handle_intent(
@@ -951,8 +958,12 @@ async def test_prune_branch_queued_scope_on_an_action_name_drains_only_that_kind
     """A single action name still works, and ``scope='queued'`` leaves the family usable."""
     c = coordinator_with_mocks
     try:
-        target = await c.tasks.create(kind="profile", params={}, idempotency_key="k-drain-profile")
-        sibling = await c.tasks.create(kind="roofline", params={}, idempotency_key="k-drain-roofline")
+        target, _ = await c.tasks.create_or_return_existing(
+            kind="profile", params={}, idempotency_key="k-drain-profile"
+        )
+        sibling, _ = await c.tasks.create_or_return_existing(
+            kind="roofline", params={}, idempotency_key="k-drain-roofline"
+        )
 
         await c.router.handle_intent(
             "orchestration",

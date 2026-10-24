@@ -28,7 +28,7 @@ _ORIGIN = {"phase": "PRELUDE", "macro_cycle": 2, "tick": 7}
 async def _running_task(tmp_path, name: str) -> tuple[TaskRegistry, str]:
     """Create a registry holding one task already in ``running``."""
     registry = TaskRegistry(SqliteConnection(tmp_path / f"{name}.db"))
-    task = await registry.create(kind="roofline", params={}, idempotency_key=name)
+    task, _ = await registry.create_or_return_existing(kind="roofline", params={}, idempotency_key=name)
     await registry.transition(task.task_id, "running")
     return registry, task.task_id
 
@@ -113,7 +113,7 @@ async def test_a_note_lands_whole_and_readable_under_the_bound(tmp_path):
 async def test_dispatch_class_is_persisted_without_a_schema_migration(tmp_path):
     registry = TaskRegistry(SqliteConnection(tmp_path / "dispatch-class.db"))
     try:
-        task = await registry.create(
+        task, _ = await registry.create_or_return_existing(
             kind="baseline",
             params={},
             idempotency_key="llm-baseline",
@@ -138,7 +138,7 @@ async def test_unknown_dispatch_class_fails_before_insert(tmp_path):
     registry = TaskRegistry(SqliteConnection(tmp_path / "bad-dispatch-class.db"))
     try:
         with pytest.raises(ValueError, match="unknown dispatch_class"):
-            await registry.create(
+            await registry.create_or_return_existing(
                 kind="baseline",
                 params={},
                 idempotency_key="bad",
@@ -219,7 +219,7 @@ async def test_cursor_reuse_validates_dispatch_class(tmp_path):
 async def test_exists_with_key_prefix_matches_the_prefix_literally(tmp_path):
     registry = TaskRegistry(SqliteConnection(tmp_path / "key-prefix.db"))
     try:
-        await registry.create(kind="integrate_patch", params={}, idempotency_key="aab-reconcile1")
+        await registry.create_or_return_existing(kind="integrate_patch", params={}, idempotency_key="aab-reconcile1")
 
         assert await registry.exists_with_key_prefix("integrate_patch", "aab-reconcile", states=("queued",))
         # Real keys carry ``_``; it must match only itself, not any character.

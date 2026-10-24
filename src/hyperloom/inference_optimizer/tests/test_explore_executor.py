@@ -647,7 +647,7 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
             "provenance": "llm_direct",
         },
     ]
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -706,7 +706,7 @@ async def _explore_on_an_observed_fp8_stack(sub_agent_runner, tmp_path, monkeypa
         _fake_workspace(slot, tput=tputs[name])
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={"config_path": str(base), "output_dir": str(tmp_path / "out"), "base_tput": 800.0, "grid": grid},
         idempotency_key="ex-noop-stack",
@@ -1066,7 +1066,7 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
     fingerprint = canonical_fingerprint("--test-flag", {})
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -1178,7 +1178,7 @@ async def test_explore_missing_axes_fails_closed(
         _fake_workspace(slot, tput=output, perf_axes=candidate_axes)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -1255,7 +1255,7 @@ async def test_explore_guard_revert_row_reads_as_measured(sub_agent_runner, tmp_
         )
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -1344,7 +1344,7 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
         _fake_workspace(slot, tput=output, perf_axes=axes)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -1442,7 +1442,7 @@ async def test_an_agentx_explore_keep_is_promoted_by_writeback(sub_agent_runner,
         )
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -1502,7 +1502,7 @@ async def test_explore_required_axes_output_modes_keep_legacy_behavior(
         _fake_workspace(slot, tput=output, perf_axes={})
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -1562,7 +1562,7 @@ async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner
             "provenance": "llm_direct",
         }
     ]
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -1620,7 +1620,7 @@ async def test_explore_gates_a_variant_no_flag_catalogue_would_have_caught(sub_a
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
     extra_args = '--online_quant_config {"global_quant_config":"ptpc_fp8"}'
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -1669,7 +1669,7 @@ async def test_explore_accuracy_gate_falls_back_to_shared_state(sub_agent_runner
         _fake_workspace(slot, tput=840.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -1720,7 +1720,7 @@ async def test_explore_executor_keep_persists_effective_removal_stack(sub_agent_
             stderr="",
         )
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -1787,7 +1787,7 @@ async def test_explore_executor_recovers_base_tput_from_shared_state(
             "provenance": "default_grid",
         }
     ]
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -1839,7 +1839,7 @@ async def test_per_variant_rows_carry_the_verdicts_and_the_stack(
         _fake_workspace(Path(cmd[out_idx + 1]), tput=840.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -1921,7 +1921,7 @@ async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
             "provenance": "default_grid",
         }
     ]
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -1992,7 +1992,7 @@ async def test_explore_executor_supersedes_stale_params_base_tput(
             "provenance": "specialist:research_scout",
         }
     ]
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -2045,7 +2045,7 @@ async def test_explore_executor_takes_live_base_args_with_the_live_anchor(
         _fake_workspace(Path(cmd[out_idx + 1]), tput=1100.0)  # +10% vs the live 1000
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -2113,7 +2113,7 @@ async def test_explore_executor_historical_fingerprint_reruns(sub_agent_runner, 
         # Exact same-grid duplicate of v_prior_revert — collapsed to round_dup.
         {"name": "v_same_again", "extra_args": "--dup-flag", "extra_envs": {}, "provenance": "llm_direct"},
     ]
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -2180,7 +2180,7 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
         _fake_workspace(slot, tput=920.0)  # +15% vs 800 — KEEP and stable
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -2249,7 +2249,7 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
         _fake_workspace(slot, tput=920.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -2303,7 +2303,7 @@ async def test_explore_cold_decision_keeps_eval(
         _fake_workspace(slot, tput=920.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -2355,7 +2355,7 @@ async def test_explore_decision_stays_cold_when_the_session_skips_the_double_run
         _fake_workspace(slot, tput=920.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -2397,7 +2397,7 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
         # Warmup boot fails (nonzero) — no workspace written.
         return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="boom")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -2465,7 +2465,7 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
             stderr="",
         )
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -2527,7 +2527,7 @@ async def test_explore_variant_cap_is_clamped_to_the_session_budget(
         _fake_workspace(slot, tput=840.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -2583,7 +2583,7 @@ async def test_explore_skips_a_variant_the_budget_cannot_fit(
         _fake_workspace(slot, tput=840.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -2639,7 +2639,7 @@ async def _explore_under_phase_budget(sub_agent_runner, tmp_path, *, phase_left_
         {"name": f"v{i}", "extra_args": f"--max-num-seqs {64 << i}", "extra_envs": {}, "provenance": "default_grid"}
         for i in range(variants)
     ]
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -2729,7 +2729,7 @@ async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
             stderr="reaped",
         )
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -2812,7 +2812,7 @@ async def test_explore_leaves_a_variant_out_when_the_run_reaped_its_grid_warmup(
         _fake_workspace(slot, tput=840.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -2872,7 +2872,7 @@ async def test_explore_attributes_a_round_the_run_reaped_before_anything_measure
             stderr="cancelled",
         )
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -2907,7 +2907,7 @@ async def test_explore_executor_empty_grid_returns_failed(sub_agent_runner, tmp_
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -3083,7 +3083,7 @@ async def test_explore_executor_atom_empty_grid_seeds_default_grid(
 
     monkeypatch.setattr(explore_mod, "run_grid", _capture_run_grid)
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -3116,7 +3116,7 @@ async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base_sglang.yaml"
     _write_baseline_yaml(base)
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -3172,7 +3172,7 @@ async def test_explore_executor_measures_and_attributes_authored_levers(
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", _fake_run)
     grid = [{"name": "llm_proposal", "extra_server_args": "--max-num-seqs 256"}] if with_llm_proposal else []
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -3244,7 +3244,7 @@ async def test_explore_rejects_unsafe_aiter_unified_attn_before_benchmark(
         _fake_workspace(slot, tput=800.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -3495,7 +3495,7 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
         {"name": "rerun_failed", "extra_args": "--prev-failed", "extra_envs": {}, "provenance": "llm_direct"},
         {"name": "rerun_kept", "extra_args": "--prev-kept", "extra_envs": {}, "provenance": "llm_direct"},
     ]
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -3582,7 +3582,7 @@ async def test_explore_refuses_an_over_budget_winner_in_the_round_that_measured_
         _fake_workspace(slot, tput=20000.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -3645,7 +3645,7 @@ async def test_an_explore_winner_inside_the_budget_is_promoted_by_writeback(sub_
         _fake_workspace(slot, tput=20000.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -3696,7 +3696,7 @@ async def _mlperf_round(
         _fake_workspace(slot, tput=candidate["output_throughput"], perf_axes=candidate)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -3804,7 +3804,7 @@ async def test_explore_grades_the_rounds_own_gpu_power_against_the_budget(
         )
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),
@@ -3870,7 +3870,7 @@ async def _run_explore_round(
     base = tmp_path / "base.yaml"
     if not base.exists():
         _write_baseline_yaml(base)
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="explore",
         params={
             "config_path": str(base),

@@ -1066,7 +1066,7 @@ async def test_cancelled_thread_keeps_capacity_until_execution_cleanup(coord, mo
         return {"ok": True}
 
     coord.sub.register_executor(_CHEAP_ACTION, execute)
-    task = await coord.tasks.create(
+    task, _ = await coord.tasks.create_or_return_existing(
         kind=_CHEAP_ACTION, params={}, idempotency_key="retained-thread", requires_lanes=[_CHEAP_ACTION_LANE]
     )
     action = asyncio.create_task(coord.dispatcher.run_task_registered(task))
@@ -1120,7 +1120,7 @@ async def test_stop_defers_db_close_until_pending_worker_cleanup(coord, monkeypa
     monkeypatch.setattr(coord.db, "close", close)
     monkeypatch.setattr(coord.dispatcher, "close_db_after_executions", drain)
     coord.sub.register_executor(_CHEAP_ACTION, execute)
-    task = await coord.tasks.create(
+    task, _ = await coord.tasks.create_or_return_existing(
         kind=_CHEAP_ACTION, params={}, idempotency_key="deferred-db", requires_lanes=[_CHEAP_ACTION_LANE]
     )
     action = asyncio.create_task(coord.dispatcher.run_task_registered(task))
@@ -1154,7 +1154,9 @@ async def test_cancelled_result_bookkeeping_does_not_release_gpu_capacity(coord)
     from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 
     coord.gpu_specialist_pool = SpecialistGpuPool(coord.db, gpu_ids=[0])
-    task = await coord.tasks.create(kind="specialist", params={}, idempotency_key="pending-cleanup")
+    task, _ = await coord.tasks.create_or_return_existing(
+        kind="specialist", params={}, idempotency_key="pending-cleanup"
+    )
     await coord.gpu_specialist_pool.try_acquire(count=1, holder_id=task.task_id, task_id=task.task_id)
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
@@ -1179,7 +1181,7 @@ async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed
             return confirmed
 
     coord.sub.register_executor(_CHEAP_ACTION, lambda _ctx: _done({"ok": True}))
-    task = await coord.tasks.create(
+    task, _ = await coord.tasks.create_or_return_existing(
         kind=_CHEAP_ACTION, params={}, idempotency_key="cleanup-order", requires_lanes=[_CHEAP_ACTION_LANE]
     )
     gpu = await coord.gpu_specialist_pool.try_acquire(count=1, holder_id=task.task_id, task_id=task.task_id)
@@ -1295,7 +1297,7 @@ class TestThePumpStopsWorkItCannotWaitFor:
             return await asyncio.to_thread(work)
 
         coord.sub.register_executor(_CHEAP_ACTION, execute)
-        task = await coord.tasks.create(
+        task, _ = await coord.tasks.create_or_return_existing(
             kind=_CHEAP_ACTION, params={}, idempotency_key="p-orphan", requires_lanes=[_CHEAP_ACTION_LANE]
         )
         try:

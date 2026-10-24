@@ -2024,7 +2024,7 @@ async def test_baseline_executor_fails_on_nonzero_rc_despite_valid_measurement(t
         (ws / "benchmark_report.json").write_text(report_body)
         return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="cleanup failed")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="baseline",
         params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
         idempotency_key="baseline-valid-warning",
@@ -2172,7 +2172,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
         }
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="profile",
         params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
         idempotency_key="prof-1",
@@ -2243,7 +2243,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="profile",
         params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
         idempotency_key="prof-inferencex-path",
@@ -2300,7 +2300,7 @@ async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         kind="profile",
         params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
         idempotency_key="prof-capture",

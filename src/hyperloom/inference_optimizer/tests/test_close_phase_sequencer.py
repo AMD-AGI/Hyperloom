@@ -447,7 +447,9 @@ async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
         return {"status": "ok"}
 
     coord.sub.register_executor("report", execute)
-    queued = await coord.tasks.create(kind="report", params={}, idempotency_key="internal-report-close_phase_entry")
+    queued, _ = await coord.tasks.create_or_return_existing(
+        kind="report", params={}, idempotency_key="internal-report-close_phase_entry"
+    )
     try:
         started = time.monotonic()
         state = await coord.phase_close._run_close_task(queued, step="1 (report)")
