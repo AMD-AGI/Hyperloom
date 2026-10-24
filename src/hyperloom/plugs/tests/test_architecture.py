@@ -24,7 +24,6 @@ _HOSTED = (
     "hyperloom.measure.hosted",
     "hyperloom.measure.sandboxes",
     "hyperloom.measure.consistency",
-    "hyperloom.measure.archive",
     "hyperloom.measure.runner",
     "hyperloom_multibranch",
 )
