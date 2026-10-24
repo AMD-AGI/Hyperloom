@@ -76,6 +76,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, InboxKind, UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
+from hyperloom_multibranch.specialist.exhausted import exhausted_refusal
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.llm_usage import launch_cost, launch_usage
 from hyperloom_multibranch.specialist.prompts import (
@@ -573,11 +574,17 @@ class AgentSession:
         return None
 
     async def _arrived(self, seen: _Seen) -> tuple[Sequence[InboxItem], list[BranchLogRecord]]:
-        """The inbox items and the runtime's notices past ``seen``, which moves past them; a notice of a session's
-        restart is left out, as the resumed or fresh session's first message says why it starts."""
+        """The inbox items and the runtime's notices past ``seen``, which moves past them, among them the refusal of
+        each exhausted record past ``seen`` that :func:`exhausted_refusal` refuses; a notice of a session's restart is
+        left out, as the resumed or fresh session's first message says why it starts."""
         notebook, branch = self._place.notebook, self._start.branch
         page = await notebook.poll(branch, seen.cursor)
         log = await notebook.branch_log(branch)
+        refusals = [why for record in log[seen.logged :] if (why := exhausted_refusal(record.entry.content))]
+        for why in refusals:
+            await notebook.append_branch_log(BranchLogEntry(branch, BranchLogType.RESULT, f"{NOTICE} {why}"))
+        if refusals:
+            log = await notebook.branch_log(branch)
         notices = [
             record
             for record in log[seen.logged :]

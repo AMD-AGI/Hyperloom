@@ -653,6 +653,7 @@ def test_the_role_says_a_blocked_or_missing_capability_exhausted_names_the_path_
     prompt = role_prompt(WORKLOAD)
 
     assert "for blocked_by_tool or needs_capability, the path you tried: the file, the call and the error" in prompt
+    assert "the error it gave, or the record is refused" in prompt
 
 
 def test_the_role_checks_the_head_for_a_lead_s_change_before_replaying_it():

@@ -301,6 +301,46 @@ async def test_a_runtime_notice_written_while_the_turn_is_over_reaches_the_cli(r
     assert "you may now have 3 tests running at once" in rig.runner.sent[0]
 
 
+def _exhausted(why: str, detail: str) -> BranchLogEntry:
+    record = {"direction": "Fusion", "head": "a" * 40, "tried": ["r0"], "why": why, "detail": detail, "reopen_if": "-"}
+    return BranchLogEntry(BRANCH, BranchLogType.PLAN, f"Fusion is done. EXHAUSTED {json.dumps(record)}")
+
+
+async def test_an_exhausted_record_its_turn_wrote_with_no_tried_path_is_refused_back_to_the_cli(rig):
+    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+
+    await rig.notebook.append_branch_log(_exhausted("blocked_by_tool", "Memset needs an aiter C++ change."))
+    _end_turn(rig)
+    await _until(lambda: len(rig.runner.sent) == 1, "the refusal to wake the CLI")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert "EXHAUSTED record of 'Fusion' was refused" in rig.runner.sent[0]
+    assert "names no file or call you tried and no error it gave" in rig.runner.sent[0]
+    logged = [record.entry.content for record in await rig.notebook.branch_log(BRANCH)]
+    assert sum(content.startswith(NOTICE) and "was refused" in content for content in logged) == 1
+
+
+async def test_an_exhausted_record_that_names_its_tried_path_is_not_sent_back(rig):
+    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+
+    detail = "aiter.jit.module_gemm_a8w8_bpreshuffle fails to import: ModuleNotFoundError"
+    await rig.notebook.append_branch_log(_exhausted("blocked_by_tool", detail))
+    _end_turn(rig)
+    beats = rig.runner.beats
+    await _until(lambda: rig.runner.beats > beats + 2, "the turn's end to be waited out")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert rig.runner.sent == []
+
+
 async def test_idle_turns_in_a_row_with_nothing_running_end_the_session_idle_with_a_nudge_between(rig):
     await rig.toolbox_notebook.write_request(request("r0", intent(BRANCH, rig.root)))
     await rig.toolbox_notebook.write_result(result("r0"))

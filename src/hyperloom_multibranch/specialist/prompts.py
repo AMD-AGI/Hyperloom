@@ -224,8 +224,8 @@ and goes on with one JSON object with the keys direction (the name of the sessio
 below), head (your head commit), tried (the request ids of its \
 tests, at least one: a direction you have not tested is not done), why (no_ceiling_above_bar, \
 all_tested_or_claimed, blocked_by_tool or needs_capability), detail (one sentence; for blocked_by_tool or \
-needs_capability, the path you tried: the file, the call and the error it gave) and reopen_if (what would make \
-it worth trying again). It is kept for the record and for later sessions and does not stop your branch. A kernel \
+needs_capability, the path you tried: the file, the call and the error it gave, or the record is refused) and \
+reopen_if (what would make it worth trying again). It is kept for the record and for later sessions and does not stop your branch. A kernel \
 inside aiter or the framework is not blocked_by_tool: fork it into your worktree. Then take another of the \
 session's directions, preferring one no running branch covers: \
 {{directions}}.
