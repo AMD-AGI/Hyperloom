@@ -331,10 +331,8 @@ class TaskRegistry:
     ):
         """Initialise the registry.
 
-        A registry without an origin provider retains the legacy task shape
-        unless a caller supplies ``dispatch_origin`` explicitly. Production
-        coordinators install the provider so every fresh dispatched task gets
-        complete author-time evidence.
+        ``dispatch_origin_provider`` supplies the author-time evidence of a fresh
+        dispatched task whose caller passed no ``dispatch_origin``.
         """
         self.db = db
         self._dispatch_origin_provider = dispatch_origin_provider
@@ -359,11 +357,8 @@ class TaskRegistry:
             _validate_dispatch_reuse(task, dispatch_class)
             return task, True
 
-        if dispatch_class is not None and dispatch_origin is None:
-            if self._dispatch_origin_provider is None:
-                dispatch_class = None
-            else:
-                dispatch_origin = self._dispatch_origin_provider()
+        if dispatch_class is not None and dispatch_origin is None and self._dispatch_origin_provider is not None:
+            dispatch_origin = self._dispatch_origin_provider()
         async with self.db.transaction() as cur:
             task = _insert_queued_task(
                 cur,

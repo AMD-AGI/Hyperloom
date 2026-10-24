@@ -94,12 +94,15 @@ def _project(gate: PolicyGate, **fields) -> None:
         setattr(gate.resources, name, value)
 
 
+_ORIGIN = {"phase": "EXPLORE", "macro_cycle": 0, "tick": 0}
+
+
 def _runner_with_policy(tmp_path: Path, monkeypatch, *, shared_state: object | None = None) -> SubAgentRunner:
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "coord.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
-    tasks = TaskRegistry(db)
+    tasks = TaskRegistry(db, dispatch_origin_provider=lambda: _ORIGIN)
     state = shared_state if shared_state is not None else SharedState.load_or_init(sd)
     gate = PolicyGate(
         role_registry=default_role_registry(),

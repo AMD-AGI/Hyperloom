@@ -134,23 +134,6 @@ async def test_dispatch_class_is_persisted_without_a_schema_migration(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_unconfigured_registry_does_not_publish_partial_dispatch_evidence(tmp_path):
-    registry = TaskRegistry(SqliteConnection(tmp_path / "legacy-registry.db"))
-    try:
-        task = await registry.create(
-            kind="baseline",
-            params={},
-            idempotency_key="legacy-registry",
-            dispatch_class="coordinator",
-        )
-    finally:
-        registry.db.close()
-
-    assert task_dispatch_evidence(task) is None
-    assert task_dispatch_record(task) is None
-
-
-@pytest.mark.asyncio
 async def test_unknown_dispatch_class_fails_before_insert(tmp_path):
     registry = TaskRegistry(SqliteConnection(tmp_path / "bad-dispatch-class.db"))
     try:
