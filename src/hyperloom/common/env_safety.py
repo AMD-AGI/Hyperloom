@@ -5,6 +5,18 @@
 
 from __future__ import annotations
 
+from hyperloom.common.outside_facts import (
+    ENV_CONC,
+    ENV_EP,
+    ENV_ISL,
+    ENV_MAX_MODEL_LEN,
+    ENV_NUM_PROMPTS,
+    ENV_NUM_WARMUPS,
+    ENV_OSL,
+    ENV_RANDOM_RANGE_RATIO,
+    ENV_RUN_EVAL,
+    ENV_TP,
+)
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES as _GPU_MASK_ENV_NAMES
 
 import json
@@ -267,18 +279,18 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
             "HOME",
             "MODEL",
             "MODEL_PATH",
-            "TP",
-            "EP",
-            "CONC",
-            "ISL",
-            "OSL",
-            "MAX_MODEL_LEN",
+            ENV_TP,
+            ENV_EP,
+            ENV_CONC,
+            ENV_ISL,
+            ENV_OSL,
+            ENV_MAX_MODEL_LEN,
             "PRECISION",
             "PORT",
-            "NUM_PROMPTS",
-            "NUM_WARMUPS",
-            "RANDOM_RANGE_RATIO",
-            "RUN_EVAL",
+            ENV_NUM_PROMPTS,
+            ENV_NUM_WARMUPS,
+            ENV_RANDOM_RANGE_RATIO,
+            ENV_RUN_EVAL,
             "PROFILE",
             "RESULT_DIR",
             "RESULT_FILENAME",
