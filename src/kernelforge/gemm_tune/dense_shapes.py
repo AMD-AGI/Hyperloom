@@ -14,10 +14,10 @@ from .evidence import padded_m
 
 log = logging.getLogger(__name__)
 
-# sglang's default CUDA-graph capture batch sizes up to 256 (no speculative decoding, padding on): every
-# _SGLANG_CUDAGRAPH_STEP from 16 on.
+# sglang's default CUDA-graph capture batch sizes up to 256 (no speculative decoding, padding on): 1, 2, 4, 12 and
+# every multiple of _SGLANG_CUDAGRAPH_STEP.
 _SGLANG_CUDAGRAPH_STEP = 8
-_SGLANG_CUDAGRAPH_BS = (1, 2, 4, 8, 12, *range(16, 257, _SGLANG_CUDAGRAPH_STEP))
+_SGLANG_CUDAGRAPH_BS = tuple(sorted((1, 2, 4, 12, *range(_SGLANG_CUDAGRAPH_STEP, 257, _SGLANG_CUDAGRAPH_STEP))))
 _SGLANG_CUDAGRAPH_BS_THOROUGH = [bs for bs in _SGLANG_CUDAGRAPH_BS if bs <= 128]
 
 
