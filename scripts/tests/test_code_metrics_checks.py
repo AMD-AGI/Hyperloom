@@ -357,6 +357,18 @@ def test_diff_only_checks_judge_the_change_and_skip_tests(tmp_path: Path) -> Non
     assert checks.run_all(tmp_path, ["src"], [], Units(tmp_path), None) == []
 
 
+def test_show_reads_a_file_and_refuses_a_directory(tmp_path: Path) -> None:
+    """A caller writes what ``show`` returns as a file, and ``git show <ref>:<dir>`` prints a tree listing."""
+    (tmp_path / "src/pkg").mkdir(parents=True)
+    (tmp_path / "src/pkg/a.py").write_text("x = 1\n", encoding="utf-8")
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-q", "-m", "base")
+    assert checks.show(tmp_path, "HEAD", "src/pkg/a.py") == "x = 1\n"
+    assert checks.show(tmp_path, "HEAD", "src/pkg") is None
+    assert checks.show(tmp_path, "HEAD", "src/pkg/gone.py") is None
+
+
 def commit_base(root: Path, files: dict[str, str]) -> None:
     for path, text in files.items():
         (root / path).parent.mkdir(parents=True, exist_ok=True)

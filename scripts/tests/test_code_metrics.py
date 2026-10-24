@@ -182,6 +182,25 @@ def test_baseline_value_raised_relative_to_base_fails(repo: Repo) -> None:
     assert section(report, WORSE) == ""
 
 
+def test_a_directory_finding_is_never_measured_as_a_file_at_the_base(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``base_values`` reads blobs: ``git show <ref>:<dir>`` prints a tree listing, which ruff rejects as syntax."""
+    asked: list[set[str]] = []
+    monkeypatch.setattr(code_metrics, "base_values", lambda root, since, paths, config: asked.append(set(paths)) or {})
+    directory = (collect.DIRECTORY_ENTRIES, "src/pkg", collect.MODULE)
+    repo.touch("src/pkg/a.py")
+    repo.write_baseline({key("src/pkg/a.py", "f"): 21, directory: 2})
+    base = repo.commit()
+    repo.touch("src/pkg/a.py", "src/pkg/b.py")
+    repo.findings = [
+        cc("src/pkg/a.py", "f", 22),
+        collect.Finding(collect.DIRECTORY_ENTRIES, "src/pkg", collect.MODULE, 3, 1),
+    ]
+    repo.gate("--base-ref", base)
+    assert asked == [{"src/pkg/a.py"}]
+
+
 def test_moved_unit_is_matched_not_new_and_its_update_passes_against_the_base(repo: Repo) -> None:
     repo.write_baseline({key("src/old.py", "Planner.pick"): 14})
     base = repo.commit()
