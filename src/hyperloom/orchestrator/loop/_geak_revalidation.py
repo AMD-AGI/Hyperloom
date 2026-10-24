@@ -35,11 +35,6 @@ from ..state.task_registry import Task
 log = _logging.getLogger(__name__)
 
 
-# Minimum over-baseline gain a same-harness revalidation must show to count as "engaged"; detects a collapse back to
-# ~baseline.
-_MIN_KERNEL_ENGAGED_GAIN_PCT: float = 2.0
-
-
 class _GeakRebench(NamedTuple):
     variant: Mapping[str, Any]
     measurement: dict[str, Any]
@@ -465,7 +460,6 @@ class GeakRevalidation(CoordinatorCollaborator):
             baseline=baseline_grade.reference,
             got_hash=got_hash,
             expected_hash=expected_hash,
-            min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
             current_best=current_grade.reference,
         )
         if not _grades_can_rule(result, measured, baseline_grade, current_grade):
