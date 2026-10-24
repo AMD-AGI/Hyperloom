@@ -24,17 +24,12 @@ _RAY_OBS_ID_BASE = 100000
 GPU_LEASE_TTL_GRACE = 0.1
 
 
-def _parse_gpu_list(raw: str) -> list[int]:
-    """Parse a GPU-id list through the shared visible-device parser."""
-    return parse_device_list(raw)
-
-
 def _explicit_pool() -> list[int] | None:
     """Resolve the operator's explicit GPU pool, or ``None`` when unset."""
     raw = os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES")
     if raw is None or not raw.strip():
         return None
-    ids = _parse_gpu_list(raw)
+    ids = parse_device_list(raw)
     if not ids:
         log.error("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES=%r has no valid GPU ids", raw)
     return ids
@@ -46,7 +41,7 @@ def _visible_device_mask() -> tuple[list[int], bool]:
         raw = os.environ.get(env_name)
         if raw is None:
             continue
-        return _parse_gpu_list(raw), True
+        return parse_device_list(raw), True
     return [], False
 
 
