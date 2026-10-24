@@ -40,7 +40,9 @@ __all__ = [
     "SOURCE_GEAK_AUTHORED_KERNEL",
     "SOURCE_GEMM_TUNING",
     "SOURCE_KERNEL_REWRITE",
+    "FusionRun",
     "GeakRebenchAttempt",
+    "GemmTuningRun",
     "IntegrateVerdict",
     "KernelExit",
     "KernelReprofile",
@@ -134,6 +136,54 @@ class KernelRewriteRun:
             "correctness": self.correctness if isinstance(self.correctness, bool) else None,
             "artifact_path": _text(self.artifact_path),
             "trace_analyze_ref": _text(self.trace_analyze_ref),
+        }
+
+
+@dataclass(frozen=True)
+class FusionRun:
+    """One forge-fusion run."""
+
+    lane: LaneRunFields
+    pattern: str = ""
+    target_module: str = ""
+    applied: bool = False
+    gain_pct: Any = None
+    patch_path: str = ""
+
+    def row(self) -> dict[str, Any]:
+        """The lane row this fusion run persists as."""
+        return {
+            **self.lane.row(SOURCE_FUSION),
+            "pattern": _text(self.pattern),
+            "target_module": _text(self.target_module),
+            "applied": bool(self.applied),
+            "gain_pct": _float_or_none(self.gain_pct),
+            "patch_path": _text(self.patch_path),
+        }
+
+
+@dataclass(frozen=True)
+class GemmTuningRun:
+    """One GEMM shape-table tuning run."""
+
+    lane: LaneRunFields
+    shapes_total: Any = None
+    shapes_tuned: Any = None
+    config_path: str = ""
+    gain_pct: Any = None
+    graded_objective: str = ""
+    tuner: str = ""
+
+    def row(self) -> dict[str, Any]:
+        """The lane row this tuning run persists as."""
+        return {
+            **self.lane.row(SOURCE_GEMM_TUNING),
+            "shapes_total": _int_or_none(self.shapes_total),
+            "shapes_tuned": _int_or_none(self.shapes_tuned),
+            "config_path": _text(self.config_path),
+            "gain_pct": _float_or_none(self.gain_pct),
+            "graded_objective": _text(self.graded_objective),
+            "tuner": _text(self.tuner),
         }
 
 

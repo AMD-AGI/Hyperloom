@@ -31,6 +31,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     reject_geak_attempts,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
+    FusionRun,
     IntegrateVerdict,
     KernelExit,
     KernelReprofile,
@@ -543,13 +544,14 @@ def test_a_fusion_is_settled_by_the_integration_it_queued(tmp_path):
     """Fusion produces no kernel of its own, so the gate is found by integration id."""
     recorder = _forge_recorder()
     recorder.record_fusion_run(
-        run_id="fusion-1",
-        status="success",
-        pattern="rmsnorm+silu",
-        applied=True,
-        gain_pct=2.0,
-        micro_decision="keep",
-        integrate_ref="int-fusion-1",
+        FusionRun(
+            lane=LaneRunFields(
+                run_id="fusion-1", status="success", micro_decision="keep", integrate_ref="int-fusion-1"
+            ),
+            pattern="rmsnorm+silu",
+            applied=True,
+            gain_pct=2.0,
+        )
     )
     record_integrate_verdict(
         macro_cycle=3, verdict=IntegrateVerdict(integration_id="int-fusion-1", kernel_id="", decision="REVERT")
@@ -1361,8 +1363,12 @@ def test_recording_the_same_rebench_twice_updates_one_row(tmp_path):
 
 def test_attempts_are_ordered_by_when_they_started(tmp_path):
     recorder = _forge_recorder()
-    recorder.record_fusion_run(run_id="late", status="success", started_at="2026-09-02T00:05:00")
-    recorder.record_fusion_run(run_id="early", status="success", started_at="2026-09-02T00:01:00", applied=True)
+    recorder.record_fusion_run(
+        FusionRun(lane=LaneRunFields(run_id="late", status="success", started_at="2026-09-02T00:05:00"))
+    )
+    recorder.record_fusion_run(
+        FusionRun(lane=LaneRunFields(run_id="early", status="success", started_at="2026-09-02T00:01:00"), applied=True)
+    )
     recorder.finish(KernelExit(tput_after=1000.0))
 
     rows = _kernel_events(tmp_path)[0]["ext"]["attempts"]

@@ -44,9 +44,12 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     reject_geak_attempts,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
+    FusionRun,
+    GemmTuningRun,
     IntegrateVerdict,
     KernelExit,
     KernelReprofile,
+    LaneRunFields,
 )
 from ..actions.stop_attribution import stopped_by_the_run_class
 from hyperloom.inference_optimizer.session.optimization_journal import (
@@ -872,23 +875,27 @@ class KernelPhase(CoordinatorCollaborator):
             artifact = _first_text(row, "artifact", "env_value")
             applied = not tuner_rows or artifact == tuned_file != ""
             recorder.record_gemm_tuning_run(
-                run_id=f"{base_run_id}-{tuner_name}" if tuner_rows and tuner_name else base_run_id,
-                status=_first_text(row, "status", default=_first_text(result, "status", default="unknown")),
-                shapes_total=row.get("total_shapes", result.get("shapes_total", shape_capture.get("shape_count"))),
-                shapes_tuned=row.get("improved_shapes"),
-                config_path=artifact,
-                # _validate_gemm_tuning_e2e writes the validated gain to e2e_gain_pct, not
-                # gain_pct -- no producer on this path sets a bare "gain_pct" key.
-                gain_pct=result.get("e2e_gain_pct") if applied else None,
-                graded_objective=_first_text(result, "graded_objective") if applied else "",
-                tuner=tuner_name,
-                micro_decision=_first_text(result, "micro_decision", "decision"),
-                integrate_ref=_first_text(result, "integration_id"),
-                started_at=_first_text(result, "started_at"),
-                ended_at=_first_text(result, "ended_at", "ts"),
-                duration_sec=row.get("elapsed_s", result.get("duration_sec")),
-                error_class=_first_text(row, "error_class"),
-                failure_reason=_first_text(row, "error", "skip_reason", "error_class"),
+                GemmTuningRun(
+                    lane=LaneRunFields(
+                        run_id=f"{base_run_id}-{tuner_name}" if tuner_rows and tuner_name else base_run_id,
+                        status=_first_text(row, "status", default=_first_text(result, "status", default="unknown")),
+                        micro_decision=_first_text(result, "micro_decision", "decision"),
+                        integrate_ref=_first_text(result, "integration_id"),
+                        started_at=_first_text(result, "started_at"),
+                        ended_at=_first_text(result, "ended_at", "ts"),
+                        duration_sec=row.get("elapsed_s", result.get("duration_sec")),
+                        error_class=_first_text(row, "error_class"),
+                        failure_reason=_first_text(row, "error", "skip_reason", "error_class"),
+                    ),
+                    shapes_total=row.get("total_shapes", result.get("shapes_total", shape_capture.get("shape_count"))),
+                    shapes_tuned=row.get("improved_shapes"),
+                    config_path=artifact,
+                    # _validate_gemm_tuning_e2e writes the validated gain to e2e_gain_pct, not
+                    # gain_pct -- no producer on this path sets a bare "gain_pct" key.
+                    gain_pct=result.get("e2e_gain_pct") if applied else None,
+                    graded_objective=_first_text(result, "graded_objective") if applied else "",
+                    tuner=tuner_name,
+                )
             )
         backend = _first_text(result, "backend", "engine").lower()
         if backend:
@@ -900,20 +907,26 @@ class KernelPhase(CoordinatorCollaborator):
         if recorder is None or not isinstance(result, dict):
             return
         recorder.record_fusion_run(
-            run_id=str(result.get("fusion_run_id") or ""),
-            status=str(result.get("status") or "unknown"),
-            pattern=str(result.get("pattern") or result.get("fusion_pattern") or ""),
-            target_module=str(result.get("target_module") or result.get("kernel_name") or ""),
-            applied=bool(result.get("kept")),
-            gain_pct=result.get("gain_pct"),
-            patch_path=str(result.get("patch_path") or result.get("source_patch") or ""),
-            micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
-            integrate_ref=str(result.get("integration_id") or ""),
-            started_at=str(result.get("started_at") or ""),
-            ended_at=str(result.get("ended_at") or result.get("ts") or ""),
-            duration_sec=result.get("duration_sec"),
-            error_class=str(result.get("error_class") or ""),
-            failure_reason=str(result.get("error") or result.get("skip_reason") or result.get("error_class") or ""),
+            FusionRun(
+                lane=LaneRunFields(
+                    run_id=str(result.get("fusion_run_id") or ""),
+                    status=str(result.get("status") or "unknown"),
+                    micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
+                    integrate_ref=str(result.get("integration_id") or ""),
+                    started_at=str(result.get("started_at") or ""),
+                    ended_at=str(result.get("ended_at") or result.get("ts") or ""),
+                    duration_sec=result.get("duration_sec"),
+                    error_class=str(result.get("error_class") or ""),
+                    failure_reason=str(
+                        result.get("error") or result.get("skip_reason") or result.get("error_class") or ""
+                    ),
+                ),
+                pattern=str(result.get("pattern") or result.get("fusion_pattern") or ""),
+                target_module=str(result.get("target_module") or result.get("kernel_name") or ""),
+                applied=bool(result.get("kept")),
+                gain_pct=result.get("gain_pct"),
+                patch_path=str(result.get("patch_path") or result.get("source_patch") or ""),
+            )
         )
         tool_versions.record_tool_version(self.session_dir, tool="forge")
         agent_backend = str(result.get("agent_backend") or "").lower()

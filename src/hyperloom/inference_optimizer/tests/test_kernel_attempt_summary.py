@@ -19,6 +19,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     record_integrate_verdict,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
+    GemmTuningRun,
     IntegrateVerdict,
     KernelExit,
     KernelRewriteRun,
@@ -189,7 +190,9 @@ def test_an_acceptance_no_rebench_ruled_on_is_unvalidated(tmp_path: Path) -> Non
 
 def test_gemm_tuning_counts_in_its_own_lane(tmp_path: Path) -> None:
     recorder = _forge_visit()
-    recorder.record_gemm_tuning_run(run_id="gemm-c0", status="ok", micro_decision="REVERT", tuner="hipblaslt")
+    recorder.record_gemm_tuning_run(
+        GemmTuningRun(lane=LaneRunFields(run_id="gemm-c0", status="ok", micro_decision="REVERT"), tuner="hipblaslt")
+    )
     recorder.finish(KernelExit(tput_after=1000.0))
 
     out = build_kernel_optimization_summary(_state(), tmp_path)

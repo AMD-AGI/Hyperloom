@@ -75,12 +75,13 @@ from .kernel_records import (
     SOURCE_GEAK_AUTHORED_KERNEL,
     SOURCE_GEMM_TUNING,
     SOURCE_KERNEL_REWRITE,
+    FusionRun,
     GeakRebenchAttempt,
+    GemmTuningRun,
     IntegrateVerdict,
     KernelExit,
     KernelReprofile,
     KernelRewriteRun,
-    LaneRunFields,
     TraceAnalyzeRun,
 )
 from .baseline_event import assemble_baseline_actions
@@ -1040,65 +1041,11 @@ class KernelEventRecorder:
         """Record one forge source-level kernel rewrite."""
         self._record_lane_run(run.row())
 
-    def record_fusion_run(
-        self,
-        *,
-        run_id: str,
-        status: str,
-        pattern: str = "",
-        target_module: str = "",
-        applied: bool = False,
-        gain_pct: Any = None,
-        patch_path: str = "",
-        micro_decision: str = "",
-        integrate_ref: str = "",
-        started_at: str = "",
-        ended_at: str = "",
-        duration_sec: Any = None,
-        failure_reason: str = "",
-        error_class: str = "",
-    ) -> None:
+    def record_fusion_run(self, run: FusionRun) -> None:
         """Record one forge-fusion run."""
-        self._record_lane_run(
-            {
-                **LaneRunFields(
-                    run_id=run_id,
-                    status=status,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    duration_sec=duration_sec,
-                    micro_decision=micro_decision,
-                    integrate_ref=integrate_ref,
-                    failure_reason=failure_reason,
-                    error_class=error_class,
-                ).row(SOURCE_FUSION),
-                "pattern": _text(pattern),
-                "target_module": _text(target_module),
-                "applied": bool(applied),
-                "gain_pct": _float_or_none(gain_pct),
-                "patch_path": _text(patch_path),
-            }
-        )
+        self._record_lane_run(run.row())
 
-    def record_gemm_tuning_run(
-        self,
-        *,
-        run_id: str,
-        status: str,
-        shapes_total: Any = None,
-        shapes_tuned: Any = None,
-        config_path: str = "",
-        gain_pct: Any = None,
-        graded_objective: str = "",
-        tuner: str = "",
-        micro_decision: str = "",
-        integrate_ref: str = "",
-        started_at: str = "",
-        ended_at: str = "",
-        duration_sec: Any = None,
-        failure_reason: str = "",
-        error_class: str = "",
-    ) -> None:
+    def record_gemm_tuning_run(self, run: GemmTuningRun) -> None:
         """Record one GEMM shape-table tuning run.
 
         ``graded_objective`` names the axis ``gain_pct`` was measured on, so a
@@ -1106,27 +1053,7 @@ class KernelEventRecorder:
         output gain. ``tuner`` names which backend produced the table, which is
         a separate question from which axis judged it.
         """
-        self._record_lane_run(
-            {
-                **LaneRunFields(
-                    run_id=run_id,
-                    status=status,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    duration_sec=duration_sec,
-                    micro_decision=micro_decision,
-                    integrate_ref=integrate_ref,
-                    failure_reason=failure_reason,
-                    error_class=error_class,
-                ).row(SOURCE_GEMM_TUNING),
-                "shapes_total": _int_or_none(shapes_total),
-                "shapes_tuned": _int_or_none(shapes_tuned),
-                "config_path": _text(config_path),
-                "gain_pct": _float_or_none(gain_pct),
-                "graded_objective": _text(graded_objective),
-                "tuner": _text(tuner),
-            }
-        )
+        self._record_lane_run(run.row())
 
     # ---- geak ------------------------------------------------------------
 
