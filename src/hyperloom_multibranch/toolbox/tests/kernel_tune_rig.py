@@ -7,6 +7,9 @@ real local toolbox (pool, leases, tool jobs, notebook) built over them.
 The server log lines are copied from the log of a real Qwen3-14B-FP8 test on gfx950 (SGLang, aiter): the ones that say
 a dense blockscale GEMM missed its tuned table, a per-token one that Forge's reader does not take, and the lines between
 them. The tuned rows are rows of the image's own ``a8w8_blockscale_bpreshuffle`` table (``kernel_rows_cc2bf0ef``).
+``SERVER_ARGS`` is the line SGLang printed at that server's launch, cut to the arguments the readers use (the decode graph
+batch sizes among them), and ``HIT_LOG`` the lines aiter logged for lookups that resolved in a tuned row, in the words of
+the lines of that run.
 """
 
 from __future__ import annotations
@@ -54,6 +57,30 @@ Capturing batches (bs=512 avail_mem=54.88 GB):   2%|▏         | 1/52 [00:03<03
 [aiter] shape is M:496, N:34816, K:5120, not found tuned config in /tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv, will use default config!
 [aiter] shape is M:496, N:5120, K:17408, not found tuned config in /tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv, will use default config!
 """
+#: The ``server_args`` line of that server, cut to the keys of the graph config. Its decode graphs were captured for the
+#: sizes of ``GRAPH_SIZES``; the prefill list, a flag that is unset and the key a reader must not take for the list are in it.
+GRAPH_SIZES = (1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 256, 512)
+SERVER_ARGS = (
+    "[2026-10-22 04:34:21] server_args={'model_path': '/models/m', 'tp_size': 1, 'cuda_graph_bs_decode': None, "
+    "'cuda_graph_bs_prefill': None, 'cuda_graph_config': {'decode': {'backend': 'full', 'max_bs': 512, "
+    f"'bs': {list(GRAPH_SIZES)}, 'tc_compiler': 'eager', 'max_context_size': None}}, "
+    "'prefill': {'backend': 'disabled', 'max_bs': 16384, 'bs': [4, 8, 12, 16, 20, 24, 28, 32, 48, 64]}}, "
+    "'disable_cuda_graph': False}\n"
+)
+#: Lookups that resolved in a tuned row: M is the one asked for, ``padded_M`` the row found. Two of the blockscale table
+#: (one at its merged view, one at the private copy of a table a test put), one of a per-token a8w8 table (its line does not
+#: print ``q_dtype_w``, which keys it) and one of the dense bf16 table (which prints every column that keys it).
+HIT_LOG = """\
+[aiter] shape is M:12, N:7168, K:5120, found padded_M: 16, N:7168, K:5120 is tuned on cu_num = 256 in /tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv , kernel name is a8w8_blockscale_bpreshuffle_1x128x128_256x16x64x256!
+[aiter] shape is M:64, N:5120, K:17408, found padded_M: 64, N:5120, K:17408 is tuned on cu_num = 256 in /work/tables/AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE/5c34e83d432c56e2/k-5c34e83d432c56e2 , kernel name is a8w8_blockscale_bpreshuffle_1x128x128_256x16x64x256!
+[aiter] shape is M:512, N:7168, K:5120 found padded_M: 512, N:7168, K:5120 is tuned on cu_num = 256 in /tmp/aiter_configs/a8w8_bpreshuffle_tuned_gemm.csv , kernel name is a8w8_bpreshuffle_x!
+[aiter] shape is M:4, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 4, N:6144, K:4096 is tuned on cu_num = 256 in /tmp/aiter_configs/bf16_tuned_gemm.csv, libtype is torch, kernel name is torch
+"""
+#: The shapes of ``HIT_LOG`` that become demand: (M of the row found, N, K) per table variable.
+HIT_SHAPES = {
+    ENV: {("16", "7168", "5120"), ("64", "5120", "17408")},
+    "AITER_CONFIG_GEMM_BF16": {("4", "6144", "4096")},
+}
 #: The dense blockscale shapes of that log (at M=496): what Forge's demand holds for it, ranked by misses (all one).
 LOG_SHAPES = {("496", "7168", "5120"), ("496", "5120", "5120"), ("496", "34816", "5120"), ("496", "5120", "17408")}
 SECRET_ENV = "HF_TOKEN"
@@ -73,6 +100,42 @@ def tuned_rows(*, us: Sequence[float] = (7.9691, 8.1), err: Sequence[float] = (0
         cells[HEADER.split(",").index("errRatio")] = str(ratio)
         rows.append(",".join(cells))
     return tuple(rows)
+
+
+def profile_row(
+    m: int, n: int, k: int, *, lib: str, kernel_id: int, split_k: int, us: float, err: float, name: str
+) -> str:
+    """A line of the profile of every candidate the tuner measured: the columns of the table, whichever candidate won."""
+    columns = HEADER.split(",")
+    cells = dict.fromkeys(columns, "0") | {
+        "gfx": "gfx950",
+        "cu_num": "256",
+        "M": str(m),
+        "N": str(n),
+        "K": str(k),
+        "libtype": lib,
+        "kernelId": str(kernel_id),
+        "splitK": str(split_k),
+        "us": str(us),
+        "kernelName": name,
+        "errRatio": str(err),
+    }
+    return ",".join(cells[column] for column in columns)
+
+
+def forge_dropped(
+    m: int, n: int, k: int, *, lib: str = "asm", split_k: int = 6, us: float = 24.4, err: float = 0.0125
+) -> dict[str, Any]:
+    """What Forge's report says of a row it took out of the table: its shape, libtype, splitK, microseconds and ratio."""
+    return {
+        "M": str(m),
+        "N": str(n),
+        "K": str(k),
+        "libtype": lib,
+        "splitK": str(split_k),
+        "us": str(us),
+        "err_ratio": err,
+    }
 
 
 def landed_test(session: Path, model: Path, *, log: str | None = SERVER_LOG, concs: Sequence[int] = (32, 128)) -> Path:
@@ -120,7 +183,9 @@ def flags(cmd: Sequence[str]) -> dict[str, str]:
 class FakeForge:
     """Answers a Forge command as the tuner does: its ``result.json`` and the table it names under ``tuners/<tuner>/``.
 
-    ``rows`` are the lines of the table; ``dropped`` the rows Forge says it removed as wrong; ``hold`` makes the run wait,
+    ``rows`` are the lines of the table; ``dropped`` the rows Forge says it removed as wrong, and ``profile`` the lines of
+    the profile of every candidate the tuner measured (written beside the table, as the tuner does, under ``profile_file``
+    when the tuner names it its own way); ``hold`` makes the run wait,
     as a tuner on a card does, until ``release`` is set or the job's cancel scope fires (which ends a real child's process
     group); ``fail`` makes it leave no result.
     """
@@ -128,6 +193,8 @@ class FakeForge:
     rows: Sequence[str] = field(default_factory=tuned_rows)
     header: str = HEADER
     dropped: Sequence[Mapping[str, Any]] = ()
+    profile: Sequence[str] = ()
+    profile_file: str = ""
     hold: bool = False
     fail: bool = False
     release: threading.Event = field(default_factory=threading.Event)
@@ -153,6 +220,9 @@ class FakeForge:
         artifact = out / "tuners" / tuner / f"candidate_{tuner}.csv"
         artifact.parent.mkdir(parents=True)
         artifact.write_text(table_text(self.header, self.rows), encoding="utf-8")
+        if self.profile:
+            name = self.profile_file or f"profile_{tuner}.csv"
+            (artifact.parent / name).write_text(table_text(self.header, self.profile), encoding="utf-8")
         run = {"tuner": tuner, "status": "ok", "dropped_inaccurate": list(self.dropped), "shape_results": []}
         report = {
             "status": "ok",
@@ -227,8 +297,12 @@ def build_rig(tmp_path: Path, monkeypatch: Any, made: list[LocalHostedToolbox], 
 
 __all__ = [
     "ENV",
+    "GRAPH_SIZES",
+    "HIT_LOG",
+    "HIT_SHAPES",
     "LOG_SHAPES",
     "SECRET_ENV",
+    "SERVER_ARGS",
     "SERVER_LOG",
     "TABLE",
     "TEST_ID",
@@ -238,7 +312,9 @@ __all__ = [
     "build_rig",
     "csv_rows",
     "flags",
+    "forge_dropped",
     "landed_test",
+    "profile_row",
     "record_test",
     "tuned_rows",
 ]

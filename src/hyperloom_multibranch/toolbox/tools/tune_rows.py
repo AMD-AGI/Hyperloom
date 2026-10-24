@@ -15,6 +15,13 @@ or cannot be checked is returned as such, with the reason, and is never in the C
 The CSV is keyed as aiter keys the variable's table (``framework.tables.table_key``): one row to a shape (the fastest,
 if the tuner left several), in the numeric order of the key, so the same rows are the same bytes and the same artifact
 whichever branch puts them.
+
+A call may allow a higher ratio (up to :data:`MAX_ERR_RATIO_LIMIT`, aiter's own filter). The rows Forge then took out
+of the table for a ratio above the default and within the allowed one are not handed over as checked: they come back in
+a CSV of their own, each marked ``verified`` false with the reason :data:`RELAXED_REASON` and its ratio, and never in the
+default CSV. Forge's report names such a row by shape, libtype, splitK, microseconds and ratio, not by kernel, so the
+full row is read back from the profile of every candidate the tuner measured; a row that cannot be found there, or
+matches several candidates, stays rejected. Whether such rows stand is for an end-to-end accuracy check to say.
 """
 
 from __future__ import annotations
@@ -34,17 +41,30 @@ from hyperloom_multibranch.toolbox.kernel_artifacts import shape_order
 __all__ = [
     "ERR_COLUMNS",
     "ERR_RATIO_LIMIT",
+    "MAX_ERR_RATIO_LIMIT",
+    "RELAXED_REASON",
+    "Relax",
     "RowsRefused",
     "TunedRows",
     "dropped_by_forge",
     "from_artifact",
+    "split_dropped",
 ]
 
 #: The columns that hold aiter's mismatch ratio of a row, by the tables that name it so.
 ERR_COLUMNS = ("errRatio", "err_ratio")
 #: The most a row's mismatch ratio may be: Forge's own limit for a dense table (aiter's tuner filters at 0.05).
 ERR_RATIO_LIMIT = 0.01
+#: The most a call may allow: aiter's tuner filters its candidates at it, so no row above it was ever measured as usable.
+MAX_ERR_RATIO_LIMIT = 0.05
+#: Why a relaxed row is not verified.
+RELAXED_REASON = "err_ratio_above_default"
 _US = "us"
+_SPLITK = "splitK"
+_LIBTYPE = "libtype"
+#: How close a profile row's microseconds and ratio must be to the figures Forge's report names for the same row.
+_US_TOLERANCE = 1e-3
+_RATIO_TOLERANCE = 1e-6
 _SHAPE = ("M", "N", "K")
 _TUNED_SUFFIX = "_tuned_gemm"
 _UTF8 = "utf-8"
@@ -60,13 +80,17 @@ class TunedRows:
 
     ``verified`` are the rows of ``csv``, each as the table has it plus ``verified`` (true) and its ``err_ratio``;
     ``refused`` are the rows left out, each with ``verified`` false and the ``reason``. ``target`` is the target the
-    table is put under (:func:`suggested_target`).
+    table is put under (:func:`suggested_target`). ``relaxed`` are the rows of ``relaxed_csv``, each with ``verified``
+    false, its ``err_ratio`` and :data:`RELAXED_REASON`; ``relax_limit`` is the highest ratio the call allowed.
     """
 
     csv: str
     verified: tuple[Mapping[str, Any], ...]
     refused: tuple[Mapping[str, Any], ...]
     target: str
+    relaxed_csv: str = ""
+    relaxed: tuple[Mapping[str, Any], ...] = ()
+    relax_limit: float = ERR_RATIO_LIMIT
 
 
 @dataclass(frozen=True)
@@ -86,6 +110,17 @@ class _Row:
 class _Checked:
     kept: list[_Row] = field(default_factory=list)
     refused: list[Mapping[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Relax:
+    """What a call allowed beyond the default ratio: the highest ratio it takes, the rows Forge took out of the table for a
+    ratio above the default and within it (as :func:`dropped_by_forge` lists them), and the files of the profile of every
+    candidate the tuner measured (each tuner names its own), which the full rows are read back from."""
+
+    limit: float
+    dropped: tuple[Mapping[str, Any], ...]
+    profiles: tuple[Path, ...]
 
 
 def suggested_target(tuned: str) -> str:
@@ -178,8 +213,88 @@ def dropped_by_forge(run: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
     )
 
 
-def from_artifact(artifact: Path, env: str, configs: Path) -> TunedRows:
-    """The rows of the tuned table ``artifact``, which tunes the variable ``env`` of the aiter install at ``configs``.
+def split_dropped(
+    dropped: Sequence[Mapping[str, Any]], limit: float
+) -> tuple[tuple[Mapping[str, Any], ...], tuple[Mapping[str, Any], ...]]:
+    """The rows Forge dropped, as (those whose ratio is above the default and within ``limit``, all the others)."""
+    within = tuple(row for row in dropped if _within(row.get("err_ratio"), limit))
+    return within, tuple(row for row in dropped if row not in within)
+
+
+def _within(ratio: Any, limit: float) -> bool:
+    return isinstance(ratio, (int, float)) and math.isfinite(ratio) and ERR_RATIO_LIMIT < ratio <= limit
+
+
+def _profile(paths: Sequence[Path]) -> list[dict[str, str]]:
+    """The candidates the tuner measured, one record each; a file that is missing or cannot be read has none."""
+    records: list[dict[str, str]] = []
+    for path in paths:
+        try:
+            with path.open(newline="", encoding=_UTF8) as handle:
+                records.extend(csv.DictReader(handle))
+        except (OSError, ValueError, csv.Error):
+            continue
+    return records
+
+
+def _same_row(record: Mapping[str, str], dropped: Mapping[str, Any], column: str) -> bool:
+    """Whether the profile ``record`` is the row Forge's report names: the shape, libtype and splitK, and the microseconds
+    and ratio to the tolerance a rounded figure keeps."""
+    try:
+        same_shape = all(int(float(record[name])) == int(float(dropped[name])) for name in (*_SHAPE, _SPLITK))
+        same_lib = dropped.get(_LIBTYPE) is None or record[_LIBTYPE].strip() == str(dropped[_LIBTYPE]).strip()
+        same_us = abs(float(record[_US]) - float(dropped[_US])) <= _US_TOLERANCE
+        same_ratio = abs(float(record[column]) - float(dropped["err_ratio"])) <= _RATIO_TOLERANCE
+    except (KeyError, ValueError, TypeError):
+        return False
+    return same_shape and same_lib and same_us and same_ratio
+
+
+def _read_back(
+    dropped: Mapping[str, Any], profile: Sequence[Mapping[str, str]], header: Sequence[str], column: str
+) -> _Row | str:
+    """The full row of the profile that the dropped row is, or why it cannot be told."""
+    if not column:
+        return f"the table has no accuracy column ({' or '.join(ERR_COLUMNS)})"
+    if not profile:
+        return "the tuner's profile of its candidates is missing or cannot be read"
+    found = [dict(record) for record in profile if _same_row(record, dropped, column)]
+    distinct = [record for index, record in enumerate(found) if record not in found[:index]]
+    if not distinct:
+        return "no candidate of the tuner's profile has its shape, libtype, splitK, microseconds and ratio"
+    if len(distinct) > 1:
+        return f"{len(distinct)} different candidates of the tuner's profile have its shape, libtype, splitK, microseconds and ratio"
+    if missing := [name for name in header if name not in distinct[0]]:
+        return f"the tuner's profile row lacks the table's column(s) {missing}"
+    return _Row({name: distinct[0][name] for name in header}, float(dropped["err_ratio"]))
+
+
+def _relaxed(relax: Relax, header: Sequence[str], column: str | None) -> _Checked:
+    """The rows within the allowed ratio, read back from the profile; the ones that cannot be read back are refused."""
+    checked = _Checked()
+    profile = _profile(relax.profiles) if relax.dropped else []
+    for dropped in relax.dropped:
+        found = _read_back(dropped, profile, header, column or "")
+        if isinstance(found, _Row):
+            checked.kept.append(found)
+            continue
+        checked.refused.append(
+            {
+                **dropped,
+                "reason": f"its ratio {dropped['err_ratio']:.4g} is within the allowed {relax.limit:g}, but the row "
+                f"cannot be read back, so it is not handed over: {found}",
+            }
+        )
+    return checked
+
+
+def _flagged(rows: Sequence[_Row]) -> tuple[Mapping[str, Any], ...]:
+    return tuple({**row.record, "verified": False, "err_ratio": row.ratio, "reason": RELAXED_REASON} for row in rows)
+
+
+def from_artifact(artifact: Path, env: str, configs: Path, relax: Relax | None = None) -> TunedRows:
+    """The rows of the tuned table ``artifact``, which tunes the variable ``env`` of the aiter install at ``configs``, and,
+    when the call allowed a higher ratio (``relax``), the rows within it that Forge took out of the table.
 
     Raises:
         RowsRefused: When the table cannot be read, or the install declares no shape key for ``env`` (aiter checks none
@@ -194,7 +309,22 @@ def from_artifact(artifact: Path, env: str, configs: Path) -> TunedRows:
             "so the rows cannot be laid over the variable's default table"
         )
     checked = _check(header, rows)
-    best = _fastest(checked.kept, key)
-    chosen = [best[shape] for shape in sorted(best, key=shape_order)]
-    verified = tuple({**row.record, "verified": True, "err_ratio": row.ratio} for row in chosen)
-    return TunedRows(_text(header, chosen), verified, tuple(checked.refused), suggested_target(variable.tuned))
+    verified = _sorted_fastest(checked.kept, key)
+    column = next((name for name in ERR_COLUMNS if name in header), None)
+    loose = _relaxed(relax, header, column) if relax is not None else _Checked()
+    relaxed = _sorted_fastest(loose.kept, key)
+    return TunedRows(
+        _text(header, verified),
+        tuple({**row.record, "verified": True, "err_ratio": row.ratio} for row in verified),
+        (*checked.refused, *loose.refused),
+        suggested_target(variable.tuned),
+        _text(header, relaxed) if relaxed else "",
+        _flagged(relaxed),
+        ERR_RATIO_LIMIT if relax is None else relax.limit,
+    )
+
+
+def _sorted_fastest(kept: Sequence[_Row], key: Sequence[str]) -> list[_Row]:
+    """The fastest row of each shape, in the numeric order of the key."""
+    best = _fastest(kept, key)
+    return [best[shape] for shape in sorted(best, key=shape_order)]

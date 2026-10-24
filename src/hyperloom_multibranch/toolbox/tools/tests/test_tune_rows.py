@@ -16,12 +16,16 @@ import pytest
 from hyperloom.contracts.recipe import KernelKind
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
 from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import ENV, HEADER, SHARED, install
-from hyperloom_multibranch.toolbox.tests.kernel_tune_rig import table_text
+from hyperloom_multibranch.toolbox.tests.kernel_tune_rig import forge_dropped, profile_row, table_text
 from hyperloom_multibranch.toolbox.tools.tune_rows import (
     ERR_RATIO_LIMIT,
+    MAX_ERR_RATIO_LIMIT,
+    RELAXED_REASON,
+    Relax,
     RowsRefused,
     dropped_by_forge,
     from_artifact,
+    split_dropped,
 )
 
 COLUMNS = HEADER.split(",")
@@ -183,3 +187,199 @@ def test_no_row_is_ever_both_in_the_csv_and_refused(tmp_path: Path, configs: Pat
     in_csv = {r["M"] for r in rows.verified}
     assert in_csv and {r["M"] for r in rows.refused} and not in_csv & {r["M"] for r in rows.refused}
     assert all(r["err_ratio"] <= ERR_RATIO_LIMIT and math.isfinite(r["err_ratio"]) for r in rows.verified)
+
+
+# --- rows within a higher ratio the call allowed -----------------------------------------------------------------------------
+
+ASM = "_ZN5aiter42fp8gemm_bf16_blockscale_BpreShuffle_32x128E"
+
+
+def profile(tmp_path: Path, *lines: str, header: str = HEADER) -> Path:
+    path = tmp_path / "profile.csv"
+    path.write_text(table_text(header, lines), encoding="utf-8")
+    return path
+
+
+def relax(tmp_path: Path, dropped: list[dict], *lines: str, limit: float = 0.05, header: str = HEADER) -> Relax:
+    within, _beyond = split_dropped(dropped_by_forge({"dropped_inaccurate": dropped}), limit)
+    return Relax(limit, within, (profile(tmp_path, *lines, header=header),))
+
+
+#: Arbor's down_proj at a decode M: the asm row at splitK 6 won at 24.4 us with a ratio just above the default, and the best
+#: row the default check lets through is the CK one at 38.9 us.
+DOWN = (64, 5120, 17408)
+
+
+def test_a_row_forge_dropped_for_a_ratio_within_the_allowed_one_is_read_back_whole_and_handed_over_as_relaxed(
+    tmp_path: Path, configs: Path
+) -> None:
+    lines = (
+        profile_row(*DOWN, lib="ck", kernel_id=17, split_k=0, us=38.9, err=0.0, name="ck_kernel"),
+        profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM),
+        profile_row(*DOWN, lib="asm", kernel_id=5, split_k=4, us=25.1, err=0.0125, name=ASM),
+    )
+    allowed = relax(tmp_path, [forge_dropped(*DOWN)], *lines)
+
+    rows = from_artifact(table(tmp_path, row(16, 512, 7168)), ENV, configs, allowed)
+
+    assert [r["M"] for r in rows.verified] == ["16"] and shapes(rows.csv) == [("16", "512", "7168")]
+    (relaxed,) = rows.relaxed
+    assert (relaxed["M"], relaxed["libtype"], relaxed["kernelId"], relaxed["splitK"], relaxed["kernelName"]) == (
+        "64",
+        "asm",
+        "4",
+        "6",
+        ASM,
+    )
+    assert (relaxed["verified"], relaxed["err_ratio"], relaxed["reason"]) == (False, 0.0125, RELAXED_REASON)
+    assert shapes(rows.relaxed_csv) == [("64", "5120", "17408")] and ASM in rows.relaxed_csv
+    assert rows.relaxed_csv.splitlines()[0] == HEADER and rows.refused == () and rows.relax_limit == 0.05
+
+
+def test_a_relaxed_row_is_never_in_the_default_csv_or_among_the_verified_rows(tmp_path: Path, configs: Path) -> None:
+    lines = (profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM),)
+
+    rows = from_artifact(
+        table(tmp_path, row(16, 512, 7168)), ENV, configs, relax(tmp_path, [forge_dropped(*DOWN)], *lines)
+    )
+
+    assert ("64", "5120", "17408") not in shapes(rows.csv) and ASM not in rows.csv
+    assert not {r["M"] for r in rows.verified} & {r["M"] for r in rows.relaxed}
+
+
+def test_without_a_higher_ratio_allowed_nothing_is_relaxed(tmp_path: Path, configs: Path) -> None:
+    rows = from_artifact(table(tmp_path, row(16, 512, 7168)), ENV, configs)
+
+    assert (rows.relaxed, rows.relaxed_csv, rows.relax_limit) == ((), "", ERR_RATIO_LIMIT)
+
+
+def test_the_rows_forge_dropped_are_split_at_the_allowed_ratio_and_the_default_is_not_within_it() -> None:
+    dropped = dropped_by_forge(
+        {
+            "dropped_inaccurate": [
+                forge_dropped(1, 2, 3, err=0.0116),
+                forge_dropped(4, 5, 6, err=0.0145),
+                forge_dropped(7, 8, 9, err=0.4),
+                forge_dropped(10, 11, 12, err=ERR_RATIO_LIMIT),
+                {**forge_dropped(13, 14, 15), "err_ratio": None},
+            ]
+        }
+    )
+
+    within, beyond = split_dropped(dropped, 0.0145)
+
+    assert [r["M"] for r in within] == ["1", "4"], (
+        "the limit itself is allowed; the default itself is not above the default"
+    )
+    assert [r["M"] for r in beyond] == ["7", "10", "13"]
+    assert split_dropped(dropped, ERR_RATIO_LIMIT)[0] == ()
+
+
+def test_the_most_a_call_may_allow_is_aiters_own_filter() -> None:
+    assert MAX_ERR_RATIO_LIMIT == 0.05 and MAX_ERR_RATIO_LIMIT > ERR_RATIO_LIMIT
+
+
+@pytest.mark.parametrize(
+    ("lines", "why"),
+    [
+        pytest.param((), "missing or cannot be read", id="no-profile"),
+        pytest.param(
+            (profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=30.0, err=0.0125, name=ASM),),
+            "no candidate of the tuner's profile has its shape",
+            id="no-candidate-has-its-figures",
+        ),
+        pytest.param(
+            (
+                profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM),
+                profile_row(*DOWN, lib="asm", kernel_id=9, split_k=6, us=24.4, err=0.0125, name=ASM + "_2"),
+            ),
+            "2 different candidates of the tuner's profile",
+            id="two-candidates-have-them",
+        ),
+    ],
+)
+def test_a_row_within_the_allowed_ratio_that_the_profile_cannot_give_back_stays_rejected_with_the_reason(
+    tmp_path: Path, configs: Path, lines: tuple[str, ...], why: str
+) -> None:
+    allowed = relax(tmp_path, [forge_dropped(*DOWN)], *lines)
+
+    rows = from_artifact(table(tmp_path, row(16, 512, 7168)), ENV, configs, allowed)
+
+    assert rows.relaxed == () and rows.relaxed_csv == ""
+    (refused,) = rows.refused
+    assert (refused["verified"], refused["M"], refused["err_ratio"]) == (False, "64", 0.0125)
+    assert "within the allowed 0.05" in refused["reason"] and why in refused["reason"]
+
+
+def test_a_relax_with_no_profile_file_at_all_leaves_the_row_rejected_and_says_the_profile_is_missing(
+    tmp_path: Path, configs: Path
+) -> None:
+    within, _ = split_dropped(dropped_by_forge({"dropped_inaccurate": [forge_dropped(*DOWN)]}), 0.05)
+
+    rows = from_artifact(
+        table(tmp_path, row(16, 512, 7168)), ENV, configs, Relax(0.05, within, (tmp_path / "absent.csv",))
+    )
+
+    assert rows.relaxed == () and "missing or cannot be read" in rows.refused[0]["reason"]
+
+
+def test_the_candidates_of_every_profile_file_are_read(tmp_path: Path, configs: Path) -> None:
+    other = tmp_path / "second"
+    other.mkdir()
+    line = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM)
+    unrelated = profile_row(16, 512, 7168, lib="ck", kernel_id=1, split_k=0, us=1.0, err=0.0, name="x")
+    within, _ = split_dropped(dropped_by_forge({"dropped_inaccurate": [forge_dropped(*DOWN)]}), 0.05)
+
+    rows = from_artifact(
+        table(tmp_path, row(16, 512, 7168)),
+        ENV,
+        configs,
+        Relax(0.05, within, (profile(tmp_path, unrelated), profile(other, line))),
+    )
+
+    assert shapes(rows.relaxed_csv) == [("64", "5120", "17408")]
+
+
+def test_a_profile_without_a_column_of_the_table_is_not_a_row_to_hand_over(tmp_path: Path, configs: Path) -> None:
+    short = ",".join(name for name in COLUMNS if name != "bw")
+    line = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM)
+    line = ",".join(cell for cell, name in zip(line.split(","), COLUMNS, strict=True) if name != "bw")
+
+    rows = from_artifact(
+        table(tmp_path, row(16, 512, 7168)), ENV, configs, relax(tmp_path, [forge_dropped(*DOWN)], line, header=short)
+    )
+
+    assert rows.relaxed == () and "lacks the table's column(s) ['bw']" in rows.refused[0]["reason"]
+
+
+def test_a_shape_with_two_relaxed_candidates_keeps_the_fastest_and_the_csv_is_in_key_order(
+    tmp_path: Path, configs: Path
+) -> None:
+    slow = profile_row(*DOWN, lib="asm", kernel_id=5, split_k=4, us=25.1, err=0.012, name=ASM)
+    fast = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0125, name=ASM)
+    first = profile_row(16, 512, 7168, lib="ck", kernel_id=2, split_k=0, us=9.0, err=0.02, name="ck")
+    dropped = [
+        forge_dropped(*DOWN, split_k=4, us=25.1, err=0.012),
+        forge_dropped(*DOWN),
+        forge_dropped(16, 512, 7168, lib="ck", split_k=0, us=9.0, err=0.02),
+    ]
+
+    rows = from_artifact(
+        table(tmp_path, row(20480, 512, 7168)), ENV, configs, relax(tmp_path, dropped, slow, fast, first)
+    )
+
+    assert shapes(rows.relaxed_csv) == [("16", "512", "7168"), ("64", "5120", "17408")]
+    assert [(r["M"], r["splitK"]) for r in rows.relaxed] == [("16", "0"), ("64", "6")]
+
+
+def test_a_row_above_the_allowed_ratio_is_not_read_back_even_when_the_profile_holds_it(
+    tmp_path: Path, configs: Path
+) -> None:
+    line = profile_row(*DOWN, lib="asm", kernel_id=4, split_k=6, us=24.4, err=0.0145, name=ASM)
+    within, beyond = split_dropped(dropped_by_forge({"dropped_inaccurate": [forge_dropped(*DOWN, err=0.0145)]}), 0.0125)
+
+    rows = from_artifact(
+        table(tmp_path, row(16, 512, 7168)), ENV, configs, Relax(0.0125, within, (profile(tmp_path, line),))
+    )
+
+    assert rows.relaxed == () and rows.refused == () and [r["M"] for r in beyond] == ["64"]
