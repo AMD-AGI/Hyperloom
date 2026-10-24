@@ -75,6 +75,7 @@ from .kernel_records import (
     SOURCE_GEAK_AUTHORED_KERNEL,
     SOURCE_GEMM_TUNING,
     SOURCE_KERNEL_REWRITE,
+    GeakRebenchAttempt,
     IntegrateVerdict,
     KernelRewriteRun,
     LaneRunFields,
@@ -848,63 +849,6 @@ def _discovered_kernel_row(
     }
 
 
-def _rebench_row(
-    *,
-    attempt_id: str,
-    source_kind: str,
-    ledger: str,
-    source_ref: str | None = None,
-    idempotency_key: str | None = None,
-    task_id: str | None = None,
-    dispatched_at: str | None = None,
-    settled_at: str | None = None,
-    base_tput: float | None = None,
-    measured_tput: float | None = None,
-    decision: str | None = None,
-    decision_reason: str | None = None,
-    status: str | None = None,
-    engagement: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build one rebench attempt row.
-
-    ``engagement`` is the part the orchestrator already computed but never
-    persisted: the GEAK verdict path compares the config fingerprint and the
-    overlay digest to decide ``validated`` versus ``fallback``, and dropped both
-    booleans on the floor once the decision was made.
-
-    """
-    verified = _as_dict(engagement)
-    base = _float_or_none(base_tput)
-    measured = _float_or_none(measured_tput)
-    delta = None
-    if base is not None and measured is not None and base > 0:
-        delta = round((measured - base) / base * 100.0, 4)
-    return {
-        "attempt_id": str(attempt_id or ""),
-        "source_kind": str(source_kind),
-        "ledger": str(ledger),
-        "source_ref": _text(source_ref),
-        "idempotency_key": _text(idempotency_key),
-        "task_id": _text(task_id),
-        "dispatched_at": _text(dispatched_at),
-        "settled_at": _text(settled_at),
-        "base_tput": base,
-        "measured_tput": measured,
-        "delta_pct": delta,
-        "decision": _text(decision),
-        "decision_reason": _text(decision_reason),
-        "status": _text(status),
-        "engagement": {
-            "config_matched": verified.get("config_matched"),
-            "overlay_loaded": verified.get("overlay_loaded"),
-            "expected_cfg_hash": _text(verified.get("expected_cfg_hash")),
-            "observed_cfg_hash": _text(verified.get("observed_cfg_hash")),
-            "expected_overlay_digest": _text(verified.get("expected_overlay_digest")),
-            "observed_overlay_digest": _text(verified.get("observed_overlay_digest")),
-        },
-    }
-
-
 def _acceptance_rows(specs: Any) -> list[dict[str, Any]]:
     """Split GEAK's acceptances into authored kernels and env selections."""
     rows: list[dict[str, Any]] = []
@@ -1400,9 +1344,7 @@ class KernelEventRecorder:
 
     def record_geak_rebench_attempt(self, *, max_attempts: Any = None, **fields: Any) -> None:
         """Record one GEAK rebench attempt."""
-        fields.setdefault("source_kind", SOURCE_GEAK_AUTHORED_KERNEL)
-        fields["ledger"] = LEDGER_GEAK
-        row = _rebench_row(**fields)
+        row = GeakRebenchAttempt(**fields).row()
         self._sink.record(
             SECTION_REBENCH,
             row,

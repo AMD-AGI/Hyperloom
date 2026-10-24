@@ -40,6 +40,7 @@ __all__ = [
     "SOURCE_GEAK_AUTHORED_KERNEL",
     "SOURCE_GEMM_TUNING",
     "SOURCE_KERNEL_REWRITE",
+    "GeakRebenchAttempt",
     "IntegrateVerdict",
     "KernelRewriteRun",
     "LaneRunFields",
@@ -226,4 +227,58 @@ class TraceAnalyzeRun:
             "analysis_md_path": _text(produced.get("analysis_md_path")),
             "reusable_native_kernel_ids": [str(item) for item in _as_list(produced.get("reusable_native_kernel_ids"))],
             **_analysis_detail(self.result),
+        }
+
+
+@dataclass(frozen=True)
+class GeakRebenchAttempt:
+    """One end-to-end re-measurement of a GEAK candidate."""
+
+    attempt_id: str
+    source_kind: str = SOURCE_GEAK_AUTHORED_KERNEL
+    source_ref: str | None = None
+    idempotency_key: str | None = None
+    task_id: str | None = None
+    dispatched_at: str | None = None
+    settled_at: str | None = None
+    base_tput: float | None = None
+    measured_tput: float | None = None
+    decision: str | None = None
+    decision_reason: str | None = None
+    status: str | None = None
+    #: The config fingerprint and overlay digest the verdict compared to decide
+    #: ``validated`` versus ``fallback``.
+    engagement: dict[str, Any] | None = None
+
+    def row(self) -> dict[str, Any]:
+        """The rebench row this attempt persists as."""
+        verified = _as_dict(self.engagement)
+        base = _float_or_none(self.base_tput)
+        measured = _float_or_none(self.measured_tput)
+        delta = None
+        if base is not None and measured is not None and base > 0:
+            delta = round((measured - base) / base * 100.0, 4)
+        return {
+            "attempt_id": str(self.attempt_id or ""),
+            "source_kind": str(self.source_kind),
+            "ledger": LEDGER_GEAK,
+            "source_ref": _text(self.source_ref),
+            "idempotency_key": _text(self.idempotency_key),
+            "task_id": _text(self.task_id),
+            "dispatched_at": _text(self.dispatched_at),
+            "settled_at": _text(self.settled_at),
+            "base_tput": base,
+            "measured_tput": measured,
+            "delta_pct": delta,
+            "decision": _text(self.decision),
+            "decision_reason": _text(self.decision_reason),
+            "status": _text(self.status),
+            "engagement": {
+                "config_matched": verified.get("config_matched"),
+                "overlay_loaded": verified.get("overlay_loaded"),
+                "expected_cfg_hash": _text(verified.get("expected_cfg_hash")),
+                "observed_cfg_hash": _text(verified.get("observed_cfg_hash")),
+                "expected_overlay_digest": _text(verified.get("expected_overlay_digest")),
+                "observed_overlay_digest": _text(verified.get("observed_overlay_digest")),
+            },
         }
