@@ -538,6 +538,8 @@ def _specialist_role(workload: Workload) -> str:
 
 
 AGENT_PORT = 31100
+#: The component every session's source base lays out beside the framework when the image has a develop install of it.
+AITER = "aiter"
 
 
 def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
@@ -575,13 +577,14 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             briefs=wiring.briefs.text,
             dev_leases=wiring.dev_leases,
         )
-        sessions = model_sessions(
+        open_sessions = partial(
+            model_sessions,
             agent,
             base=SourceBase(layout.source),
-            components=(workload.framework,),
             branch_dir=layout.branch_dir,
             notebook_for=wiring.notebooks,
         )
+        sessions = _sessions_over_source(open_sessions, layout.source, workload.framework)
         agents = AgentSessions(
             _agent_spec(workload),
             command,
@@ -593,6 +596,21 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
         return with_agents(sessions, agents, branch_dir=layout.branch_dir, notebook_for=wiring.notebooks)
 
     return build
+
+
+def _sessions_over_source(open_sessions: Callable[..., ModelSessions], source: Path, framework: str) -> ModelSessions:
+    """The sessions ``open_sessions`` opens over a source base laid out at ``source`` from ``framework`` and aiter, or
+    from ``framework`` alone when the base refuses aiter: not installed in the image, or installed from a wheel, whose
+    version names only an abbreviated commit. :func:`peers_on` checked the framework, so a refusal is aiter's."""
+
+    from hyperloom.measure.compile import UnsupportedComponentError
+
+    try:
+        return open_sessions(components=(framework, AITER))
+    except UnsupportedComponentError as refused:
+        logger.warning("the specialists' source base leaves aiter out, so they cannot change it: %s", refused)
+        shutil.rmtree(source)
+        return open_sessions(components=(framework,))
 
 
 def _agent_spec(workload: Workload) -> AgentSpec:

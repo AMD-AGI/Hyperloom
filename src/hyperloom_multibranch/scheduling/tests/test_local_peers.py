@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -83,6 +84,7 @@ from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
 from hyperloom_multibranch.specialist import model_sessions as model_sessions_module
+from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSetup
 from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions
@@ -671,6 +673,77 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
     assert (without.dev_leases, lending.dev_leases) == (None, leases)
     assert without.role == role_prompt(_specialist_role(WORKLOAD), references={})
     assert lending.role == role_prompt(_specialist_role(WORKLOAD), references={}, dev_leases=1) != without.role
+
+
+def _package(root: Path, name: str, dist: str, version: str, *files: str) -> PackageBase:
+    """A package ``name`` installed at ``root / name``, with ``files`` (relative to ``root``) beside it."""
+
+    for relative in (f"{name}/__init__.py", *files):
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text("x = 1\n")
+    return PackageBase(name, root / name, dist, version)
+
+
+def _develop_aiter(checkout: Path) -> PackageBase:
+    """aiter installed in develop mode from a git checkout whose commit its version names, csrc beside the package."""
+
+    _package(checkout, "aiter", "amd-aiter", "", "csrc/kernels/gemm.cu")
+    commit = _git_checkout_of(checkout)
+    return PackageBase("aiter", checkout / "aiter", "amd-aiter", f"0.1.23.dev183+g{commit[:9]}.d20261008")
+
+
+def _git_checkout_of(root: Path) -> str:
+    git = ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run([*git, "remote", "add", "origin", "https://github.com/ROCm/aiter"], check=True)
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "c"], check=True)
+    return subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+
+
+@pytest.mark.parametrize(
+    ("aiter", "laid_out"),
+    [
+        ("develop", ["aiter/__init__.py", "csrc/kernels/gemm.cu", "python/sglang/__init__.py"]),
+        ("wheel", ["python/sglang/__init__.py"]),
+        ("absent", ["python/sglang/__init__.py"]),
+    ],
+)
+def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_a_develop_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, aiter: str, laid_out: list[str]
+) -> None:
+    installed = {"sglang": _package(tmp_path / "site", "sglang", "sglang", "0.5.0")}
+    if aiter == "develop":
+        installed["aiter"] = _develop_aiter(tmp_path / "aiter-checkout")
+    elif aiter == "wheel":
+        installed["aiter"] = _package(tmp_path / "site", "aiter", "amd-aiter", "0.1.23.dev183+ge7d2453f2.d20261008")
+
+    def locate(layout: ComponentLayout) -> PackageBase:
+        if layout.import_name not in installed:
+            raise UnsupportedComponentError(f"package {layout.import_name} is not installed in this image")
+        return installed[layout.import_name]
+
+    monkeypatch.setattr(worktree_module, "SourceBase", partial(worktree_module.SourceBase, locator=locate))
+    layout = SimpleNamespace(
+        logs=tmp_path / "logs", source=tmp_path / "MB-source", branch_dir=lambda branch: tmp_path / branch
+    )
+    wiring = SimpleNamespace(
+        setup=SimpleNamespace(layout=layout, workload=WORKLOAD, references={}, processes=None),
+        tokens=None,
+        repo=None,
+        briefs=SimpleNamespace(text=None),
+        toolbox=None,
+        notebooks=None,
+        dev_leases=None,
+    )
+
+    model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
+
+    tracked = subprocess.run(["git", "ls-files"], cwd=layout.source, check=True, capture_output=True, text=True)
+    assert sorted(tracked.stdout.split()) == laid_out
+    left_out = [record.getMessage() for record in caplog.records if "leaves aiter out" in record.getMessage()]
+    assert len(left_out) == (0 if aiter == "develop" else 1)
+    assert all(("no git checkout" if aiter == "wheel" else "not installed") in message for message in left_out)
 
 
 async def test_a_fix_case_a_specialist_declares_is_stored_in_the_session_blob_store(built: _Built) -> None:
