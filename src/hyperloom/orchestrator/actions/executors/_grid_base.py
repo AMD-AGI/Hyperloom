@@ -32,9 +32,9 @@ class GridVariant:
 
     name: str
     extra_server_args: str = ""
-    extra_envs: dict[str, str] = field(default_factory=dict)
-    remove_args: list[str] = field(default_factory=list, kw_only=True)
-    unset_envs: list[str] = field(default_factory=list, kw_only=True)
+    extra_envs: dict[str, str] | None = None
+    remove_args: list[str] | tuple[str, ...] | set[str] | str | None = field(default=None, kw_only=True)
+    unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = field(default=None, kw_only=True)
     args_mode: str = field(default="append", kw_only=True)
     note: str = ""
 
