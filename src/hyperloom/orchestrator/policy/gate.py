@@ -662,7 +662,7 @@ class PolicyGate:
                 raise PolicyDenied(
                     f"review_verdict.verdict={verdict!r} not in allowed set {sorted(ALLOWED_VERDICTS)!r}",
                     rule="payload",
-                    hint="use one of approve/reject/redirect/advise/needs_review",
+                    hint=f"use one of {'/'.join(sorted(ALLOWED_VERDICTS))}",
                 )
             return
         # verdict_map path — every entry's verdict must be in the closed vocab.
@@ -674,7 +674,7 @@ class PolicyGate:
                     f"{v!r} not in allowed set "
                     f"{sorted(ALLOWED_VERDICTS)!r}",
                     rule="payload",
-                    hint=("every per-variant verdict must be one of approve/reject/redirect/advise/needs_review"),
+                    hint=f"every per-variant verdict must be one of {'/'.join(sorted(ALLOWED_VERDICTS))}",
                 )
 
     # GEMM tuning ownership

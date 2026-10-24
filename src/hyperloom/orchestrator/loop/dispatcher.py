@@ -977,29 +977,24 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         floor_ttl_sec: int = 0,
         *,
         params: dict[str, Any] | None = None,
-        deadline: Deadline | None = None,
     ) -> int:
-        """Single source for the GPU-specialist lease / ``gpu_research_lane`` TTL.
+        """Single source for the ``gpu_research_lane`` TTL.
 
         Nothing releases a lease when this TTL passes; the reaper stops the
         specialist at its deadline. The lane expiry feeds the in-flight
         ``lease_expires_in_sec`` countdown and ``recover --confirm-scope-gone``'s
         liveness check, so covering the deadline keeps both from calling a lease
-        lapsed while its specialist can still run. A caller that has already
-        anchored the deadline passes it in, so the kill and the lease are timed
-        from one reading of the clock.
+        lapsed while its specialist can still run.
 
         Args:
             floor_ttl_sec: A lower bound (e.g. the registry / existing
                 ``lease_ttl_sec``) the computed TTL is raised to.
-            params: Specialist dispatch parameters, used to derive the deadline
-                when the caller has none to hand over.
-            deadline: The instant the reaper will kill on.
+            params: Specialist dispatch parameters, used to derive the deadline.
 
         Returns:
             int: ``max(floor_ttl_sec, time_to_deadline × (1 + grace))``.
         """
-        stop_at = deadline if deadline is not None else self._specialist_deadline(params=params)
+        stop_at = self._specialist_deadline(params=params)
         return max(
             int(floor_ttl_sec or 0),
             math.ceil(max(0.0, stop_at.remaining()) * (1.0 + GPU_LEASE_TTL_GRACE)),
