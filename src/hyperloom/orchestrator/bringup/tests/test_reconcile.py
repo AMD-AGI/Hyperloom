@@ -21,7 +21,6 @@ from hyperloom.orchestrator.bringup.reconcile import (
 )
 from hyperloom.orchestrator.bus.resource_lock import (
     BRINGUP_ROUND_LANE,
-    ResourceLockManager,
     SqliteLeaseBackend,
     drop_round_lane,
 )
@@ -102,7 +101,7 @@ def _build(
     tasks = TaskRegistry(db)
     shared = state or _State()
     rec = Reconciler(
-        ReconcileStores(rounds=rounds, tasks=tasks, locks=ResourceLockManager(SqliteLeaseBackend(db))),
+        ReconcileStores(rounds=rounds, tasks=tasks, locks=SqliteLeaseBackend(db)),
         shared,
         links=ReconcileLinks(
             resources=ResourceFacts(),
@@ -561,7 +560,7 @@ async def _wedge_round_with_lane_rows(db, rounds, tasks, *, cleanup_confirmed: b
     Returns:
         str: The successor task's id.
     """
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     await _open_round(rounds, tasks, holder="spec-1")
     await locks.acquire_many(["server_lifecycle"], holder_id="h1", task_id="spec-1", action="explore", ttl_sec=7200)
     await tasks.transition("spec-1", "running")

@@ -15,7 +15,7 @@ from typing import Any
 
 from hyperloom.common.timeutil import now_iso
 
-from ..bus.resource_lock import BRINGUP_ROUND_LANE, ResourceLockManager
+from ..bus.resource_lock import BRINGUP_ROUND_LANE, SqliteLeaseBackend
 from ..state.round_store import (
     EXPIRED_REAPED,
     Round,
@@ -90,12 +90,12 @@ class ReconcileStores:
     Attributes:
         rounds: The durable round store.
         tasks: The task registry.
-        locks: The lease manager; this pass is its only sweeper.
+        locks: The lane lease store; this pass is its only sweeper.
     """
 
     rounds: RoundStore
     tasks: TaskRegistry
-    locks: ResourceLockManager
+    locks: SqliteLeaseBackend
 
 
 @dataclass(frozen=True)

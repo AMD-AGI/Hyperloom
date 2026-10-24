@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""ResourceLockManager + SqliteLeaseBackend."""
+"""Lane leases: the ``leases`` table, its acquire/release/reap operations and the retained-lane diagnosis."""
 
 from __future__ import annotations
 
@@ -440,7 +440,7 @@ class LaneFull(RuntimeError):
 
 
 class SqliteLeaseBackend:
-    """Lease backend behind :class:`ResourceLockManager`; ``BEGIN IMMEDIATE`` + PK uniqueness gives atomic acquire-many."""
+    """Lane lease store; ``BEGIN IMMEDIATE`` + PK uniqueness gives atomic acquire-many."""
 
     def __init__(self, db: SqliteConnection):
         """Bind the backend to a SQLite connection."""
@@ -541,6 +541,13 @@ class SqliteLeaseBackend:
             acquired_at=stamp,
             expires_at=expires_iso,
         )
+
+    async def try_acquire_many(self, lanes: list[str], **kwargs) -> Lease | None:
+        """Non-blocking variant of :meth:`acquire_many`."""
+        try:
+            return await self.acquire_many(lanes, **kwargs)
+        except (LaneBusy, LaneFull):
+            return None
 
     async def heartbeat_by_task(self, task_id: str, *, ttl_sec: int) -> list[str]:
         """Refresh every lane row a task holds, whoever the holder is."""
@@ -672,57 +679,6 @@ class SqliteLeaseBackend:
         return out
 
 
-class ResourceLockManager:
-    """Coordinator-facing wrapper."""
-
-    def __init__(self, backend: SqliteLeaseBackend):
-        """Wrap a lease backend."""
-        self.backend = backend
-
-    async def acquire_many(self, lanes: list[str], **kwargs) -> Lease:
-        """Acquire lanes via the backend."""
-        return await self.backend.acquire_many(lanes, **kwargs)
-
-    async def try_acquire_many(self, lanes: list[str], **kwargs) -> Lease | None:
-        """Non-blocking variant of :meth:`acquire_many`."""
-        try:
-            return await self.acquire_many(lanes, **kwargs)
-        except (LaneBusy, LaneFull):
-            return None
-
-    async def heartbeat_by_task(self, task_id: str, *, ttl_sec: int) -> list[str]:
-        """Refresh every lane row a task holds."""
-        return await self.backend.heartbeat_by_task(task_id, ttl_sec=ttl_sec)
-
-    async def release(self, lease: Lease) -> int:
-        """Release a lease via the backend."""
-        return await self.backend.release(lease)
-
-    async def reap_dead_holders(self) -> list[dict]:
-        """Release leases whose holder process is dead via the backend."""
-        return await self.backend.reap_dead_holders()
-
-    async def diagnose_unverifiable_holders(self) -> list[dict]:
-        """Report retained lanes nothing can prove free, via the backend."""
-        return await self.backend.diagnose_unverifiable_holders()
-
-    async def cleanup_confirmation_rate(self) -> tuple[int, int]:
-        """Unconfirmed-cleanup count and total ended tasks, via the backend."""
-        return await self.backend.cleanup_confirmation_rate()
-
-    async def lane_holders(self) -> dict[str, int]:
-        """Return ``{lane: live_holder_count}`` via the backend."""
-        return await self.backend.lane_holders()
-
-    def lanes_by_task_sync(self) -> dict[str, tuple[list[str], str]]:
-        """Return ``{task_id: (lanes, soonest_expiry)}`` via the backend."""
-        return self.backend.lanes_by_task_sync()
-
-    async def lane_capacities(self) -> dict[str, int]:
-        """Return ``{lane: capacity}`` via the backend."""
-        return await self.backend.lane_capacities()
-
-
 __all__ = [
     "BRINGUP_ROUND_LANE",
     "CLEANUP_CONFIRMED_KEY",
@@ -736,7 +692,6 @@ __all__ = [
     "LaneBusy",
     "LaneFull",
     "Lease",
-    "ResourceLockManager",
     "SqliteLeaseBackend",
     "drop_round_lane",
     "hold_round_lane",

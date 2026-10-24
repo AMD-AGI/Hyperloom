@@ -17,7 +17,7 @@ from hyperloom.inference_optimizer.session.session_paths import reports_dir
 from hyperloom.orchestrator.actions.executors import baseline as bl
 from hyperloom.orchestrator.bringup import load_boot_observation
 from hyperloom.orchestrator.bringup.reconcile import ReconcileLimits, Reconciler, ReconcileStores
-from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 from hyperloom.orchestrator.enablement.build import EnablementBuild
@@ -96,7 +96,7 @@ def registry(tmp_path):
     """A real ``TaskRegistry``, round store and lock manager over one database."""
     db = SqliteConnection(tmp_path / "coordinator.db")
     ensure_schema(db.raw)
-    yield TaskRegistry(db), RoundStore(db), ResourceLockManager(SqliteLeaseBackend(db))
+    yield TaskRegistry(db), RoundStore(db), SqliteLeaseBackend(db)
     db.close()
 
 
@@ -282,7 +282,7 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
         # open a second round while the first is still held: the repair pass is
         # what ends it, and it runs before anything is admitted.
         await Reconciler(
-            ReconcileStores(rounds=rounds, tasks=tasks, locks=ResourceLockManager(SqliteLeaseBackend(rounds.db))),
+            ReconcileStores(rounds=rounds, tasks=tasks, locks=SqliteLeaseBackend(rounds.db)),
             None,
             limits=ReconcileLimits(terminal_holder_cap_sec=0.0),
         ).run(time.time())

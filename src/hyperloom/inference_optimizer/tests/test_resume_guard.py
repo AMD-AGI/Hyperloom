@@ -919,7 +919,7 @@ def test_confirmation_cli_reports_confirmation_failure_without_reports(tmp_path,
 @pytest.mark.asyncio
 async def test_confirmation_leaves_round_fence_and_events_for_existing_reconciler(tmp_path):
     from hyperloom.orchestrator.bringup.reconcile import ReconcileLimits, Reconciler, ReconcileStores
-    from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+    from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
     from hyperloom.orchestrator.state.round_store import EXPIRED_REAPED, RoundRequest, RoundStore
     from hyperloom.orchestrator.state.task_registry import TaskRegistry
@@ -937,7 +937,7 @@ async def test_confirmation_leaves_round_fence_and_events_for_existing_reconcile
         )
         assert opened.ok
         reconciler = Reconciler(
-            ReconcileStores(rounds=rounds, tasks=tasks, locks=ResourceLockManager(SqliteLeaseBackend(db))),
+            ReconcileStores(rounds=rounds, tasks=tasks, locks=SqliteLeaseBackend(db)),
             None,
             limits=ReconcileLimits(terminal_holder_cap_sec=0),
         )

@@ -23,7 +23,7 @@ DEFAULT_LANE_CAPACITIES: dict[str, int] = {
 
 
 _DDL = [
-    # leases — Resource Lock Manager. Composite PK (lane, holder_id).
+    # leases — lane ownership. Composite PK (lane, holder_id).
     """
     CREATE TABLE IF NOT EXISTS leases (
         lane          TEXT    NOT NULL,

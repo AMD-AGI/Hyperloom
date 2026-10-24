@@ -49,7 +49,6 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.perf_metric import perf_snapshot_from_mapping
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.bus.resource_lock import (
-    ResourceLockManager,
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
@@ -137,7 +136,7 @@ def _fake_workspace(slot: Path, *, tput: float = 800.0, perf_axes: dict[str, flo
 @pytest.fixture
 def sub_agent_runner(tmp_path):
     db = SqliteConnection(tmp_path / "db.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     runner = SubAgentRunner(locks, tr)
     yield runner, tr, tmp_path

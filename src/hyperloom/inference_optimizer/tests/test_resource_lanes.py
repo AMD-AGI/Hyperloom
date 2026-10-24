@@ -22,7 +22,6 @@ from hyperloom.orchestrator.bus.resource_lock import (
     LANE_CONFLICTS,
     LaneBusy,
     LaneFull,
-    ResourceLockManager,
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.bus.storage import SqliteConnection
@@ -49,7 +48,7 @@ def conn(db_path):
 
 @pytest.fixture
 def locks(conn):
-    return ResourceLockManager(SqliteLeaseBackend(conn))
+    return SqliteLeaseBackend(conn)
 
 
 def test_schema_version_records_owner_provenance():
@@ -1021,7 +1020,7 @@ async def test_unknown_owner_scope_is_not_probed(conn, locks, monkeypatch, scope
     monkeypatch.setattr("hyperloom.orchestrator.bus.resource_lock.local_owner_scope", lambda: "test-node")
     lease = await locks.acquire_many(["research_lane"], holder_id="old", task_id="old", action="specialist", ttl_sec=-1)
     await conn.execute("UPDATE leases SET owner_scope=?, pid=12345", (scope,))
-    monkeypatch.setattr(locks.backend, "_pid_alive", lambda pid: pytest.fail("foreign PID must not be probed"))
+    monkeypatch.setattr(locks, "_pid_alive", lambda pid: pytest.fail("foreign PID must not be probed"))
     assert await locks.reap_dead_holders() == []
     assert await locks.lane_holders() == {"research_lane": 1}
     await locks.release(lease)

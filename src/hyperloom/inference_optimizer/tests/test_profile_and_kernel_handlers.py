@@ -45,7 +45,6 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.orchestrator.bus.resource_lock import (
-    ResourceLockManager,
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import (
@@ -1994,7 +1993,7 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
 async def test_baseline_executor_fails_on_nonzero_rc_despite_valid_measurement(tmp_path):
     """A parseable measurement must not launder a non-zero process exit into success."""
     db = SqliteConnection(tmp_path / "baseline.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
 
@@ -2127,7 +2126,7 @@ async def test_coordinator_promotes_valid_baseline_even_with_failed_status(sessi
 async def test_profile_executor_extracts_trace_dir(tmp_path):
     """When the workspace has torch_trace/*.trace.json.gz, the runner surfaces them in the result."""
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
 
@@ -2213,7 +2212,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
     monkeypatch.setenv("INFERENCEX_PATH", str(fake_ix))
 
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
 
@@ -2264,7 +2263,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
 @pytest.mark.asyncio
 async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
 

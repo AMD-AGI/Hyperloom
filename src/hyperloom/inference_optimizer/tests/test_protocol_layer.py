@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Protocol-layer tests (intent envelope, MessageBus, ResourceLockManager, TaskRegistry, CursorStore)."""
+"""Protocol-layer tests (intent envelope, MessageBus, SqliteLeaseBackend, TaskRegistry, CursorStore)."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ from hyperloom.orchestrator.bus.resource_lock import (
     KNOWN_LANES,
     LANE_CONFLICTS,
     LaneBusy,
-    ResourceLockManager,
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.state.task_registry import (
@@ -183,7 +182,7 @@ def test_lane_conflicts_symmetric_for_bench_profile_server():
 
 @pytest.mark.asyncio
 async def test_resource_lock_acquire_release(db):
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     lease = await locks.acquire_many(
         ["workspace_mutation"],
         holder_id="h1",
@@ -200,7 +199,7 @@ async def test_resource_lock_acquire_release(db):
 
 @pytest.mark.asyncio
 async def test_resource_lock_lane_busy_rolls_back(db):
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     a = await locks.acquire_many(
         ["benchmark_lane"],
         holder_id="ha",
@@ -225,7 +224,7 @@ async def test_resource_lock_lane_busy_rolls_back(db):
 @pytest.mark.asyncio
 async def test_resource_lock_cross_lane_conflict_blocks_profile_during_bench(db):
     """benchmark_lane held → profile_lane acquire must fail."""
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     bench = await locks.acquire_many(
         ["benchmark_lane"],
         holder_id="hb",
@@ -246,7 +245,7 @@ async def test_resource_lock_cross_lane_conflict_blocks_profile_during_bench(db)
 
 @pytest.mark.asyncio
 async def test_resource_lock_unknown_lane_rejected(db):
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     with pytest.raises(ValueError, match="unknown lane"):
         await locks.acquire_many(
             ["bogus_lane"],
@@ -259,7 +258,7 @@ async def test_resource_lock_unknown_lane_rejected(db):
 
 @pytest.mark.asyncio
 async def test_resource_lock_release_ignores_another_holder(db):
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     lease = await locks.acquire_many(
         ["profile_lane"],
         holder_id="h1",
@@ -285,7 +284,7 @@ async def test_resource_lock_release_ignores_another_holder(db):
 
 @pytest.mark.asyncio
 async def test_resource_lock_does_not_expire_a_live_owner(db):
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     await locks.acquire_many(
         ["workspace_mutation"],
         holder_id="h1",
