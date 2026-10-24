@@ -915,13 +915,17 @@ def test_confirmation_cli_reports_confirmation_failure_without_reports(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_confirmation_leaves_round_fence_and_events_for_existing_reconciler(tmp_path):
-    from hyperloom.orchestrator.bringup.reconcile import ReconcileLimits, Reconciler, ReconcileStores
+async def test_confirmation_leaves_round_fence_and_events_for_existing_reconciler(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.bringup import reconcile
+    from hyperloom.orchestrator.bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
     from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
     from hyperloom.orchestrator.state.round_store import EXPIRED_REAPED, RoundRequest, RoundStore
+    from hyperloom.orchestrator.policy.projection import ResourceFacts
+    from hyperloom.orchestrator.state.shared_state import SharedState
     from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
+    monkeypatch.setattr(reconcile, "TERMINAL_HOLDER_CAP_SEC", 0.0)
     path = db_path_for(tmp_path)
     db = SqliteConnection(path)
     try:
@@ -936,8 +940,14 @@ async def test_confirmation_leaves_round_fence_and_events_for_existing_reconcile
         assert opened.ok
         reconciler = Reconciler(
             ReconcileStores(rounds=rounds, tasks=tasks, locks=SqliteLeaseBackend(db)),
-            None,
-            limits=ReconcileLimits(terminal_holder_cap_sec=0),
+            SharedState(),
+            links=ReconcileLinks(
+                resources=ResourceFacts(),
+                proposals=dict,
+                drop_proposal=lambda _pending, _reason: None,
+                session_dir=tmp_path,
+                result_pending=lambda _task_id: False,
+            ),
         )
         report = await reconciler.run(2_000_000_000)
         assert not report.settled and not report.failures

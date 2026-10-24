@@ -460,20 +460,12 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     """
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
-    from hyperloom.orchestrator.bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
-    from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
-
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-stuck", holder_state="succeeded")
-    reconciler = Reconciler(
-        ReconcileStores(rounds=fake.rounds, tasks=fake.tasks, locks=SqliteLeaseBackend(fake.rounds.db)),
-        fake.shared_state,
-        links=ReconcileLinks(proposals=lambda: fake.state.pending_proposals),
-    )
 
-    await reconciler.run(time.time() + 3600.0)
+    await fake.reconciler.run(time.time() + 3600.0)
 
     settled = await fake.rounds.get("enablement-spec-stuck")
     assert settled.state == "settled"

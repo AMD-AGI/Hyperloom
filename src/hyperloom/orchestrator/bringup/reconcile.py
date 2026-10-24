@@ -63,7 +63,6 @@ _TIMEOUT_DENY_SQL = """
 
 __all__ = [
     "TIMEOUT_VERDICT",
-    "ReconcileLimits",
     "ReconcileLinks",
     "ReconcileReport",
     "ReconcileStores",
@@ -88,38 +87,24 @@ class ReconcileStores:
 
 @dataclass(frozen=True)
 class ReconcileLinks:
-    """The running loop's state the pass reads and writes, each optional.
+    """The running loop's state the pass reads and writes.
 
     Attributes:
-        resources: The gate's resource facts; ``None`` skips the update.
+        resources: The gate's resource facts.
         proposals: Returns the in-memory pending proposals, so a durable
             timeout deny also reaches the copy the loop consults.
         drop_proposal: Settles a timed-out pending proposal as dropped on the
             framework timeline, as a Critic reject would.
         session_dir: Where SharedState is saved after a terminal is set.
         result_pending: Whether a terminal task's result is still to be
-            booked by the dispatcher; ``None`` treats every terminal row
-            as booked.
+            booked by the dispatcher.
     """
 
-    resources: Any = None
-    proposals: Callable[[], Mapping[str, Any]] | None = None
-    drop_proposal: Callable[[Any, str], None] | None = None
-    session_dir: Any = None
-    result_pending: Callable[[str], bool] | None = None
-
-
-@dataclass(frozen=True)
-class ReconcileLimits:
-    """How long the pass waits before it settles a round or denies a review.
-
-    Attributes:
-        terminal_holder_cap_sec: Cap for a round whose holder went terminal.
-        review_ttl_sec: TTL for an undecided review.
-    """
-
-    terminal_holder_cap_sec: float = TERMINAL_HOLDER_CAP_SEC
-    review_ttl_sec: float = REVIEW_TTL_SEC
+    resources: Any
+    proposals: Callable[[], Mapping[str, Any]]
+    drop_proposal: Callable[[Any, str], None]
+    session_dir: Any
+    result_pending: Callable[[str], bool]
 
 
 @dataclass
@@ -159,9 +144,6 @@ class Reconciler:
     """The unconditional repair pass, and the projection rebuild that ends it.
 
     Attributes:
-        terminal_holder_cap_sec (float): How long a round waits after its
-            holder went terminal with no successor.
-        review_ttl_sec (float): How long a proposal may sit undecided.
         last_report (ReconcileReport): What the most recent pass did; read by
             the maintenance tick, which leaves lease sweeping to this pass.
     """
@@ -171,8 +153,7 @@ class Reconciler:
         stores: ReconcileStores,
         shared_state: Any,
         *,
-        links: ReconcileLinks = ReconcileLinks(),
-        limits: ReconcileLimits = ReconcileLimits(),
+        links: ReconcileLinks,
     ):
         """Initialise the reconciler.
 
@@ -181,7 +162,6 @@ class Reconciler:
             shared_state: SharedState, read for the projection and written when
                 an unreaped round stops the session.
             links: The running loop's state the pass reads and writes.
-            limits: How long a round or a review may wait.
         """
         self._rounds = stores.rounds
         # One connection serves the whole session; a second would have to be
@@ -195,8 +175,6 @@ class Reconciler:
         self._drop_proposal = links.drop_proposal
         self._session_dir = links.session_dir
         self._result_pending = links.result_pending
-        self.terminal_holder_cap_sec = max(0.0, float(limits.terminal_holder_cap_sec))
-        self.review_ttl_sec = max(0.0, float(limits.review_ttl_sec))
         self.last_report = ReconcileReport()
 
     async def run(self, now_unix: float) -> ReconcileReport:
@@ -242,7 +220,7 @@ class Reconciler:
         rows = await self._db.fetchall(_UNDECIDED_PROPOSALS_SQL, ())
         for row in rows:
             age = float(now_unix) - _unix_of(row["ts"])
-            if age < self.review_ttl_sec:
+            if age < REVIEW_TTL_SEC:
                 continue
             await self._author_timeout_deny(str(row["msg_id"]), str(row["from_agent"]), age=age, now_unix=now_unix)
 
@@ -253,7 +231,7 @@ class Reconciler:
                 "target_proposal_msg_id": msg_id,
                 "verdict": TIMEOUT_VERDICT,
                 "reasoning": (
-                    f"no review verdict arrived within {self.review_ttl_sec:.0f}s "
+                    f"no review verdict arrived within {REVIEW_TTL_SEC:.0f}s "
                     f"(waited {age:.0f}s); denied by the coordinator so the round "
                     "it holds can end. A patch nobody reviewed is not an accepted layer."
                 ),
@@ -270,9 +248,9 @@ class Reconciler:
         if not applied:
             return
         log.warning("RECONCILE: review timeout denied proposal %s after %.0fs", msg_id, age)
-        pending = self._proposals().pop(msg_id, None) if self._proposals is not None else None
+        pending = self._proposals().pop(msg_id, None)
         self._record_timeout_terminal(msg_id, pending, age=age)
-        if pending is not None and self._drop_proposal is not None:
+        if pending is not None:
             self._drop_proposal(pending, "review_timeout")
 
     def _record_timeout_terminal(self, msg_id: str, pending: Any, *, age: float) -> None:
@@ -306,7 +284,7 @@ class Reconciler:
         succeeds although the baseline it was waiting for passed.
         """
         state = self._shared_state
-        if state is None or not bool(state.enablement.validation_pending):
+        if not bool(state.enablement.validation_pending):
             return
         tracked = str(state.enablement.revalidation_task_id or "").strip()
         if not tracked:
@@ -314,14 +292,14 @@ class Reconciler:
         row = await self._task(tracked)
         if row is not None and row.state not in TERMINAL_STATES:
             return
-        if self._result_pending is not None and self._result_pending(tracked):
+        if self._result_pending(tracked):
             return
         enablement_event.record_revalidation_cleared(
             generation=int(state.enablement.revalidation_generation or 0), task_id=tracked
         )
         state.enablement.validation_pending = False
         state.enablement.revalidation_task_id = ""
-        self._save_state()
+        state.save(self._session_dir)
         report.closed_windows.append(tracked)
         log.info("RECONCILE: closed revalidation window held by terminal task %s", tracked)
 
@@ -384,7 +362,7 @@ class Reconciler:
             return
         if self._review_owes_a_verdict(round_row.holder_task_id):
             return
-        if float(now_unix) - _unix_of(holder.updated_at) < self.terminal_holder_cap_sec:
+        if float(now_unix) - _unix_of(holder.updated_at) < TERMINAL_HOLDER_CAP_SEC:
             return
         await self._expire(round_row, now_unix, report, why="holder_terminal_without_result")
 
@@ -413,16 +391,8 @@ class Reconciler:
         )
         return row is not None
 
-    def _save_state(self) -> None:
-        """Persist SharedState after a terminal, if there is somewhere to put it."""
-        if self._session_dir is None or self._shared_state is None:
-            return
-        self._shared_state.save(self._session_dir)
-
     async def _rebuild_projection(self, now_unix: float, report: ReconcileReport) -> None:
         """Re-read the facts the gate's resource rules judge against."""
-        if self._resources is None:
-            return
         self._resources.update(
             self._shared_state,
             rounds=await self._rounds.excluding(now_unix),
@@ -445,8 +415,6 @@ class Reconciler:
 
     def _review_owes_a_verdict(self, holder_task_id: str) -> bool:
         """Whether an undecided proposal still stands on the holder's work."""
-        if self._proposals is None:
-            return False
         for pending in self._proposals().values():
             params = pending.payload.get("params", {})
             if str(params.get("specialist_task_id", "")) == holder_task_id:
