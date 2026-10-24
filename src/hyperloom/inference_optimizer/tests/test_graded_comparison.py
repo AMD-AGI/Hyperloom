@@ -15,6 +15,8 @@ from hyperloom.common.perf_metric import (
     GRADED_ERROR_RATE,
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
+    GRADED_REQUESTS_TOTAL,
+    GRADED_UNSERVED_REQUESTS,
     VERDICT_KEEP,
     VERDICT_REVERT,
     graded_axes_of,
@@ -741,6 +743,26 @@ def test_agentx_keeps_through_one_extra_failure_inside_the_slack(native_benchmar
         keep_threshold_pct=2.0,
     )
     assert graded.verdict == VERDICT_KEEP
+
+
+@pytest.mark.parametrize(
+    ("unserved", "verdict"),
+    [(0.0, VERDICT_KEEP), (9.0, VERDICT_REVERT)],
+    ids=["short-replies-only", "unserved-requests"],
+)
+def test_agentx_reverts_on_unserved_requests_not_on_short_replies(native_benchmark, monkeypatch, unserved, verdict):
+    """A gain whose extra failures are all short replies keeps; one that left requests unserved does not."""
+    _agentx(monkeypatch, native_benchmark)
+    counts = {GRADED_UNSERVED_REQUESTS: 0.0, GRADED_REQUESTS_TOTAL: 1000.0}
+    state = _State(current_best={**_ANCHOR, **counts})
+    measurement = {
+        **_full_measurement(total=25984.0, output=183.0, intvty=24.8, error_rate=5.0),
+        **counts,
+        GRADED_UNSERVED_REQUESTS: unserved,
+    }
+    graded = resolve_graded_comparison(state, measurement, keep_threshold_pct=2.0)
+    assert graded.verdict == verdict
+    assert graded.refused_by == ("" if verdict == VERDICT_KEEP else "extra_failed_requests")
 
 
 def test_agentx_revert_when_a_comparability_input_is_unreported(native_benchmark, monkeypatch):

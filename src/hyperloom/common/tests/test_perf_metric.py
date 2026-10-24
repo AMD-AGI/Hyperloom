@@ -8,10 +8,16 @@ import pytest
 from hyperloom.common.env import EnvValueError
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import (
+    ERROR_RATE_SLACK_PCT,
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
     GRADED_INTVTY,
+    GRADED_REQUESTS_TOTAL,
     GRADED_TOTAL,
+    GRADED_UNSERVED_REQUESTS,
     INTVTY_V1,
     holds_within_band,
+    incomparability_reason,
     intvty_grading_enabled,
     intvty_of,
     intvty_serving_grading_enabled,
@@ -402,3 +408,81 @@ def test_baseline_on_axis_is_none_when_the_axis_was_not_measured():
 
     assert baseline_on_axis(SimpleNamespace(baseline_tput=183.44, baseline_perf={}), GRADED_INTVTY_P50) is None
     assert baseline_on_axis(SimpleNamespace(baseline_tput=0.0, baseline_perf={}), GRADED_OUTPUT) is None
+
+
+# --- the extra-failed-requests guard ---
+
+_WINDOW = {GRADED_DURATION: 3600.0}
+# 1000 requests, 2 of them unserved and 18 short: the client counted 20 failed.
+_COUNTED = {**_WINDOW, GRADED_ERROR_RATE: 2.0, GRADED_UNSERVED_REQUESTS: 2.0, GRADED_REQUESTS_TOTAL: 1000.0}
+
+
+def _uncounted(side: dict[str, float]) -> dict[str, float]:
+    return {key: value for key, value in side.items() if key not in (GRADED_UNSERVED_REQUESTS, GRADED_REQUESTS_TOTAL)}
+
+
+def test_more_unserved_requests_than_the_slack_refuse_the_pair():
+    candidate = {**_COUNTED, GRADED_UNSERVED_REQUESTS: 8.0}
+    assert incomparability_reason(candidate, _COUNTED) == "extra_failed_requests"
+
+
+def test_more_short_replies_alone_never_refuse_the_pair():
+    """A K=1 round whose client counted 30% of its replies failed for being short still measured the same work."""
+    candidate = {**_COUNTED, GRADED_ERROR_RATE: 30.0}
+    assert incomparability_reason(candidate, _COUNTED) == ""
+
+
+@pytest.mark.parametrize(
+    ("unserved", "expected"),
+    [(7.0, ""), (8.0, "extra_failed_requests")],
+    ids=["at-the-slack", "past-the-slack"],
+)
+def test_the_slack_is_in_points_of_the_unserved_rate(unserved, expected):
+    """The anchor left 0.2% unserved; the slack admits up to 0.7%, not a single request past it."""
+    candidate = {**_COUNTED, GRADED_UNSERVED_REQUESTS: unserved}
+    assert ERROR_RATE_SLACK_PCT == 0.5
+    assert incomparability_reason(candidate, _COUNTED) == expected
+
+
+def test_the_guard_compares_unserved_rates_not_counts():
+    """A round that sent twice the requests may leave twice as many unserved at the same rate."""
+    candidate = {**_COUNTED, GRADED_UNSERVED_REQUESTS: 4.0, GRADED_REQUESTS_TOTAL: 2000.0}
+    assert incomparability_reason(candidate, _COUNTED) == ""
+    assert incomparability_reason({**candidate, GRADED_REQUESTS_TOTAL: 500.0}, _COUNTED) == "extra_failed_requests"
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        _uncounted({**_COUNTED, GRADED_ERROR_RATE: 30.0}),
+        {**_COUNTED, GRADED_ERROR_RATE: 30.0, GRADED_UNSERVED_REQUESTS: None},
+        {**_COUNTED, GRADED_ERROR_RATE: 30.0, GRADED_REQUESTS_TOTAL: 0.0},
+    ],
+    ids=["no-counts", "null-count", "no-requests"],
+)
+def test_a_side_that_did_not_count_is_judged_on_every_failed_request(candidate):
+    """An uncounted side may have left all its failures unserved, so it is never read as having left none."""
+    assert incomparability_reason(candidate, _COUNTED) == "extra_failed_requests"
+    assert incomparability_reason(_COUNTED, candidate) == ""
+
+
+def test_a_pair_reporting_no_failures_at_all_is_not_comparable():
+    bare = {key: value for key, value in _uncounted(_COUNTED).items() if key != GRADED_ERROR_RATE}
+    assert incomparability_reason(bare, _COUNTED) == "comparability_inputs_missing"
+    assert incomparability_reason(_COUNTED, bare) == "comparability_inputs_missing"
+    assert incomparability_reason({**bare, GRADED_ERROR_RATE: None}, _COUNTED) == "comparability_inputs_missing"
+
+
+def test_counted_sides_need_no_error_rate():
+    counted = {key: value for key, value in _COUNTED.items() if key != GRADED_ERROR_RATE}
+    assert incomparability_reason(counted, counted) == ""
+
+
+def test_the_request_counts_survive_both_projections():
+    """The KEEP decision reads the snapshot, and the next anchor is the record ``graded_axes_of`` stamps."""
+    from hyperloom.common.perf_metric import graded_axes_of
+
+    source = {**_BASELINE, **_COUNTED, GRADED_UNSERVED_REQUESTS: 0.0}
+    for projected in (perf_snapshot_from_mapping(source), graded_axes_of(source)):
+        assert projected[GRADED_UNSERVED_REQUESTS] == 0.0
+        assert projected[GRADED_REQUESTS_TOTAL] == 1000.0
