@@ -35,7 +35,7 @@ from hyperloom_multibranch.specialist.agent_session import (
     BranchPlace,
 )
 from hyperloom_multibranch.specialist.judging import NOTICE
-from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart
+from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart, restart_notice
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 
 BRANCH, TOKEN_ENV, FIRST_PID = "s1", "HYPERLOOM_SPECIALIST_MCP_TOKEN", 4000
@@ -913,3 +913,45 @@ async def test_codex_never_resumes(rig):
 
     assert not crashed.value.resumable and not (rig.workspace / CLI_SESSION_FILE).exists()
     assert "--session-id" not in rig.runner.specs[0].argv
+
+
+_IDLE_RESTART = (
+    f"{NOTICE} the specialist found nothing to test (its model ended 3 turns in a row with nothing to test); the "
+    "branch resumes its conversation"
+)
+_CRASH_RESTART = (
+    f"{NOTICE} the specialist crashed (SessionCrashed('the agent CLI exited 1')) and is restarted on this branch, "
+    "resuming its conversation"
+)
+_MORE_ROOM = f"{NOTICE} you may now have 3 tests running at once"
+
+
+async def _log(rig, *contents: str) -> None:
+    for content in contents:
+        await rig.notebook.append_branch_log(BranchLogEntry(BRANCH, BranchLogType.RESULT, content))
+
+
+async def test_an_idle_resume_leaves_the_runtime_s_notice_of_the_restart_out_of_what_arrived(rig):
+    await _idle_after_turns(rig, _call(50_000), _SUCCESS)
+    await _log(rig, _IDLE_RESTART)
+
+    session, running = await _next_launch(rig, 2)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    message = rig.runner.prompts[1]
+    assert restart_notice(_IDLE_RESTART) and "--resume" in rig.runner.specs[1].argv
+    assert "Nothing arrived for your branch" in message and "resumes its conversation" not in message
+
+
+async def test_a_crash_resume_shows_the_notices_that_arrived_but_not_the_one_of_its_own_restart(rig):
+    await _crash_after_a_turn(rig, rig.session(), 1)
+    await _log(rig, _MORE_ROOM, _CRASH_RESTART)
+
+    session, running = await _next_launch(rig, 2)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    message = rig.runner.prompts[1]
+    assert restart_notice(_CRASH_RESTART) and "--resume" in rig.runner.specs[1].argv
+    assert "3 tests running at once" in message and "is restarted on this branch" not in message

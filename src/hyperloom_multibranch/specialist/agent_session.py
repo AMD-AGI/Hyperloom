@@ -27,10 +27,11 @@ A Claude session runs under a conversation id it is given at launch, written wit
 an error or is lost after its conversation finished a turn is resumed by the next run: ``--resume`` on that
 conversation, told what arrived since and whether its worktree was kept, which it is while the branch head did not move.
 A session that ends idle is resumed the same way, told what changed since its last turn, the integration head included,
-as a fresh briefing would bring little the conversation lacks. A clean end, a conversation past ``RESUME_CONTEXT_MAX``
-or one the model refused as too long, and a resumed CLI that crashes again before finishing a turn are followed by a
-fresh session. A resume the CLI refuses at once is followed by a fresh session in the same run, with a notice and no
-crash. A conversation record that cannot be read means a fresh session and a warning.
+as a fresh briefing would bring little the conversation lacks. Neither resume lists the runtime's notice of the restart
+among what arrived. A clean end, a conversation past ``RESUME_CONTEXT_MAX`` or one the model
+refused as too long, and a resumed CLI that crashes again before finishing a turn are followed by a fresh session. A
+resume the CLI refuses at once is followed by a fresh session in the same run, with a notice and no crash. A
+conversation record that cannot be read means a fresh session and a warning.
 """
 
 from __future__ import annotations
@@ -85,7 +86,7 @@ from hyperloom_multibranch.specialist.prompts import (
     resume_message,
     wake_message,
 )
-from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart
+from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart, restart_notice
 from hyperloom_multibranch.specialist.tools import sync_to_head
 from hyperloom_multibranch.specialist.worktree import BranchWorktree
 
@@ -548,11 +549,16 @@ class AgentSession:
         return None
 
     async def _arrived(self, seen: _Seen) -> tuple[Sequence[InboxItem], list[BranchLogRecord]]:
-        """The inbox items and the runtime's notices past ``seen``, which moves past them."""
+        """The inbox items and the runtime's notices past ``seen``, which moves past them; a notice of a session's
+        restart is left out, as the resumed or fresh session's first message says why it starts."""
         notebook, branch = self._place.notebook, self._start.branch
         page = await notebook.poll(branch, seen.cursor)
         log = await notebook.branch_log(branch)
-        notices = [record for record in log[seen.logged :] if record.entry.content.startswith(NOTICE)]
+        notices = [
+            record
+            for record in log[seen.logged :]
+            if record.entry.content.startswith(NOTICE) and not restart_notice(record.entry.content)
+        ]
         seen.cursor, seen.logged = page.cursor, len(log)
         return page.items, notices
 

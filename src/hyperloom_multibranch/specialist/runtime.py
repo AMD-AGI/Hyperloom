@@ -404,15 +404,25 @@ async def _notice(state: _Branch, content: str) -> None:
     await state.notebook.append_branch_log(BranchLogEntry(state.name, BranchLogType.RESULT, f"{NOTICE} {content}"))
 
 
+#: How the notices of a crashed and of an idle session's restart open.
+_CRASHED, _IDLE = "the specialist crashed (", "the specialist found nothing to test ("
+
+
+def restart_notice(content: str) -> bool:
+    """Whether the branch-log ``content`` is the runtime's notice that a session ended and the next one starts: the
+    next session is told why in its own first message, so the notice brings it nothing new."""
+    return content.startswith((f"{NOTICE} {_CRASHED}", f"{NOTICE} {_IDLE}"))
+
+
 def _restarted(error: Exception) -> str:
     resumed = isinstance(error, SessionCrashed) and error.resumable
     how = "resuming its conversation" if resumed else "with a fresh session"
-    return f"the specialist crashed ({error!r}) and is restarted on this branch, {how}"
+    return f"{_CRASHED}{error!r}) and is restarted on this branch, {how}"
 
 
 def _idle_restarted(error: SessionIdle) -> str:
     how = "resumes its conversation" if error.resumable else "starts a fresh session"
-    return f"the specialist found nothing to test ({error}); the branch {how}"
+    return f"{_IDLE}{error}); the branch {how}"
 
 
 def _log_failure(task: asyncio.Task[None]) -> None:
@@ -435,4 +445,5 @@ __all__ = [
     "SessionFactory",
     "SessionStart",
     "SpecialistRuntime",
+    "restart_notice",
 ]

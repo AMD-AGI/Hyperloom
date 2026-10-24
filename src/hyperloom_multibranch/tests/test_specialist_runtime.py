@@ -33,6 +33,7 @@ from hyperloom_multibranch.specialist.runtime import (
     SessionIdle,
     SessionStart,
     SpecialistRuntime,
+    restart_notice,
 )
 from hyperloom_multibranch.specialist.scripted import ScriptedSession, ScriptedSetup
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, RecordingVerifier
@@ -696,3 +697,19 @@ async def test_a_crash_notice_says_whether_the_conversation_is_resumed(session):
     assert ["resuming its conversation" in n for n in restarted] == [True, False]
     assert "with a fresh session" in restarted[1]
     await runtime.stop(BRANCH)
+
+
+async def test_the_notices_of_a_restart_are_told_apart_from_the_branch_s_other_notices(session):
+    errors = (_idle(resumable=True), SessionCrashed("the agent CLI exited 1", resumable=True), _idle(tested=True))
+    runs = _Runs(errors=errors)
+    runtime = session.runtime(runs)
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH))
+    await _until(lambda: _true(len(runs.started) == 4), "every restart")
+    await runtime.set_k(BRANCH, 3)
+    await runtime.stop(BRANCH)
+
+    notices = await session.notices()
+    restarts = [notice for notice in notices if "is restarted" in notice or "the branch" in notice]
+    assert len(restarts) == 3 and all(restart_notice(notice) for notice in restarts)
+    assert [restart_notice(notice) for notice in notices if notice not in restarts] == [False]
