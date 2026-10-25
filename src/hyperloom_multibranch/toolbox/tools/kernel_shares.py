@@ -23,6 +23,9 @@ excluded, in the windows without a replay in flight. The window is **degraded**,
 
 * it has no GPU kernel events, or the events kept fill under :data:`MIN_GPU_BUSY_PERCENT` of its GPU span: the kernels of
   its graph replays are missing from the trace, so what is left is the eager ops around them, not the step;
+* a collective (an all-reduce, all-gather, reduce-scatter or all-to-all) lasts on average over
+  :data:`MAX_COLLECTIVE_STALL` times its median: some of its calls waited for a rank that was held up, so the window's time
+  is that wait (a decode step of a second where the test measured 8 ms per token), not the step's work;
 * an excluded kernel has no clean instance anywhere in the trace, so what it costs is unknown; or
 * the excluded events' estimated cost is over :data:`MAX_EXCLUDED_SHARE` of the kept kernel time: the shares could rank
   wrongly, because every kept share is that much too high and an excluded kernel might outrank a listed one.
@@ -65,6 +68,13 @@ MIN_GPU_BUSY_PERCENT = 10.0
 #: The excluded events' estimated cost, as a share of the kept kernel time, above which the shares are not given: the
 #: Qwen3-14B-FP8 decode window's six excluded kernels cost 23 us of its 7.9 ms (0.3%), a graph replay with its eager tail.
 MAX_EXCLUDED_SHARE = 0.05
+#: How many times its median a collective may last on average before the window is a stall. The healthy Qwen3-Next-80B TP2
+#: profiles' ``ar_ll128`` calls are within 1.5x of their median, and no kernel of theirs is past 5.5x; the five stalled ones
+#: put 91 to 99% of their windows in ``ar_ll128``, at 321x its median over one whole trace.
+MAX_COLLECTIVE_STALL = 20.0
+#: The fewest calls of a collective whose median says what one call costs.
+MIN_COLLECTIVE_CALLS = 8
+COLLECTIVE = re.compile(r"all_?reduce|all_?gather|reduce_?scatter|all_?to_?all|all2all|ar_ll|nccl|rccl", re.IGNORECASE)
 KERNEL_SHARES_FILE = "kernel_shares.csv"
 _LABEL_CHARS = 120
 _LAUNCHER_CHARS = 60
@@ -254,11 +264,12 @@ class KernelWindow:
     excluded_claimed_ms: float
     excluded_estimated_ms: float
     unbounded: tuple[str, ...]
+    stalled_reason: str = ""
 
     @property
     def degraded_reason(self) -> str:
         """Why the window gives no shares, empty when it does."""
-        return self.starved_reason or self.excluded_reason
+        return self.starved_reason or self.stalled_reason or self.excluded_reason
 
     @property
     def starved_reason(self) -> str:
@@ -343,6 +354,24 @@ def _excluded_cost(excluded: list[GpuEvent], reference: Callable[[], Iterable[Gp
     return ExcludedCost(cost_us / _US_PER_MS, tuple(sorted(unknown)))
 
 
+def stalled_collective(kept: Iterable[GpuEvent]) -> str:
+    """Why the collectives of ``kept`` say the window is a stall (see :data:`MAX_COLLECTIVE_STALL`); empty when not."""
+    durations: dict[str, list[float]] = defaultdict(list)
+    for event in kept:
+        label = kernel_label(event.name)
+        if COLLECTIVE.search(label):
+            durations[label].append(event.duration)
+    for label, calls in sorted(durations.items()):
+        median, mean = statistics.median(calls), statistics.fmean(calls)
+        if len(calls) >= MIN_COLLECTIVE_CALLS and median > 0 and mean > MAX_COLLECTIVE_STALL * median:
+            return (
+                f"the collective {label} lasts {mean:.1f} us on average over its {len(calls)} calls against a median of "
+                f"{median:.1f} us (over {MAX_COLLECTIVE_STALL:g}x): its calls waited for a rank that was held up, so the "
+                "window's time is that wait, not the step's work"
+            )
+    return ""
+
+
 def kernel_window(window: list[GpuEvent], reference: Callable[[], Iterable[GpuEvent]]) -> KernelWindow:
     """The kernel shares of the GPU events of one window; ``reference`` reads the whole rank trace's, only if needed."""
     ordered = split_in_order(window)
@@ -358,6 +387,7 @@ def kernel_window(window: list[GpuEvent], reference: Callable[[], Iterable[GpuEv
         excluded_claimed_ms=math.fsum(event.duration for event in ordered.excluded) / _US_PER_MS,
         excluded_estimated_ms=cost.time_ms,
         unbounded=cost.unbounded,
+        stalled_reason=stalled_collective(ordered.kept),
     )
 
 
@@ -370,9 +400,12 @@ def write_kernel_table(window: KernelWindow, path: Path) -> None:
 
 
 __all__ = [
+    "COLLECTIVE",
     "JITTER_US",
     "KERNEL_SHARES_FILE",
+    "MAX_COLLECTIVE_STALL",
     "MAX_EXCLUDED_SHARE",
+    "MIN_COLLECTIVE_CALLS",
     "MIN_GPU_BUSY_PERCENT",
     "GpuEvent",
     "InOrder",
@@ -384,6 +417,7 @@ __all__ = [
     "kernel_window",
     "read_gpu_events",
     "split_in_order",
+    "stalled_collective",
     "trace_events",
     "write_kernel_table",
 ]

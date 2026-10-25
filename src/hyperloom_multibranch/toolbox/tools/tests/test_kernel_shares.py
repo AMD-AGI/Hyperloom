@@ -19,7 +19,9 @@ import pytest
 
 from hyperloom_multibranch.toolbox.tools.kernel_shares import (
     JITTER_US,
+    MAX_COLLECTIVE_STALL,
     MAX_EXCLUDED_SHARE,
+    MIN_COLLECTIVE_CALLS,
     MIN_GPU_BUSY_PERCENT,
     GpuEvent,
     KernelTraceError,
@@ -27,6 +29,7 @@ from hyperloom_multibranch.toolbox.tools.kernel_shares import (
     kernel_window,
     read_gpu_events,
     split_in_order,
+    stalled_collective,
     write_kernel_table,
 )
 
@@ -279,3 +282,55 @@ def test_only_complete_gpu_events_with_finite_times_are_read(tmp_path: Path) -> 
     path = tmp_path / "t.json"
     path.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
     assert [event.name for event in read_gpu_events(path)] == ["k", "Memcpy DtoD (Device -> Device)"]
+
+
+AR = "aiter::ar_ll128_unroll2"
+
+
+def _decode_steps(stall_us: float, steps: int = 32, calls: int = 96) -> list[GpuEvent]:
+    """``steps`` decode steps on one stream: a GEMM and ``calls`` all-reduces of 10 us each, the first all-reduce of
+    each step lasting ``stall_us`` instead (what a rank held up by its peer records)."""
+    events, at = [], 0.0
+    for _ in range(steps):
+        for call in range(calls):
+            events.append(_event(at, 20.0, GEMM))
+            duration = stall_us if call == 0 else 10.0
+            events.append(_event(at + 20.0, duration, f"void {AR}<float>(int)"))
+            at += 20.0 + duration
+    return events
+
+
+def test_a_window_whose_all_reduce_waits_on_a_held_up_rank_is_degraded_naming_the_collective() -> None:
+    window = kernel_window(_decode_steps(stall_us=1_100_000.0), list)
+
+    assert window.degraded_reason == window.stalled_reason
+    assert window.stalled_reason.startswith(f"the collective {AR} lasts ")
+    assert f"over {MAX_COLLECTIVE_STALL:g}x" in window.stalled_reason
+    assert window.shares[AR] > 99.0, "the shares alone would have read as a 99% all-reduce ceiling"
+
+
+def test_the_same_window_with_its_all_reduces_at_their_usual_length_is_not_degraded() -> None:
+    assert kernel_window(_decode_steps(stall_us=10.0), list).degraded_reason == ""
+
+
+@pytest.mark.parametrize(
+    ("ratio", "stalled"), [(MAX_COLLECTIVE_STALL * 0.99, False), (MAX_COLLECTIVE_STALL * 1.01, True)]
+)
+def test_the_stall_threshold_is_the_mean_over_the_median_of_one_collectives_calls(ratio: float, stalled: bool) -> None:
+    calls = 100
+    long = 10.0 * (ratio * calls - (calls - 1))
+    events = [_event(30.0 * i, long if i == 0 else 10.0, AR) for i in range(calls)]
+
+    assert bool(stalled_collective(events)) is stalled
+
+
+def test_a_collective_with_too_few_calls_to_have_a_median_and_a_slow_gemm_are_no_stall() -> None:
+    few = [_event(30.0 * i, 10_000.0 if i == 0 else 10.0, AR) for i in range(MIN_COLLECTIVE_CALLS - 1)]
+    gemm = [_event(30.0 * i, 10_000.0 if i == 0 else 10.0, GEMM) for i in range(100)]
+
+    assert stalled_collective(few) == "" and stalled_collective(gemm) == ""
+
+
+@pytest.mark.parametrize("name", ["b06_window", "b40_window", "qwen3_8b_window", "qwen3_8b_tp2_window", "root_window"])
+def test_no_real_window_of_the_suite_is_a_stall(name: str) -> None:
+    assert stalled_collective(split_in_order(_real(name)).kept) == ""
