@@ -802,6 +802,7 @@ deployments.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `OPENAI_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
+| `HYPERLOOM_SPECIALIST_USER` | Unset (no change) | Account name to run legacy-flow specialist subprocesses as (the `claude`, `codex` and `dsh` CLIs), so they cannot read the app's files, `/proc/<pid>/environ` or key files. Needs a Hyperloom process that can start a child as another user and later stop it: root, or all of `CAP_SETUID`, `CAP_SETGID` and `CAP_KILL` (`CAP_KILL` is what lets the deadline, stale-heartbeat, done-file and cancel reaps signal the child; without it none of them could be confirmed). The launch fails with a clear error, and no specialist runs, if one of those is missing, the account does not exist, is uid 0, is the app's own user, or belongs to group 0; so does a GPU specialist on the Ray actor path, which cannot be demoted. The child gets that account's `HOME`, `USER` and `LOGNAME`, supplementary groups, and `umask 007` (group full access, others none); the Hyperloom process's own umask is left alone, and each launch re-shares the workspace and worktree, so files the app rebuilt in between become group-writable again. The child starts through `setpriv` (util-linux, required), which clears its inheritable and ambient capabilities and sets `no_new_privs`, so a non-root app that holds `CAP_SETUID` as an ambient capability does not hand it to the child. Each task's workspace and worktree stay owned by the app but get the account's group with group read-write (setgid directories); the app must be root or a member of that group to do so, and the account must be able to traverse every parent directory of the session directory (the app never changes the modes of those parents), read the checkout the worktree is branched from, and execute the agent CLI. The worktree's `.git` file and its admin directory under the repository's `.git/worktrees` are shared read-only (git inside the worktree works for status, diff and log, not for writes), and a copy of the `--mcp-config` file is staged in the workspace. The app reads and writes the paths the child can rewrite (`specialist_done.json`, `patches/`, the harvested patch, the Codex config, `prompt.md`, `process.log` and its redaction copy, the `dsh` home and session logs) without following symlinks. Does not apply to the multi-branch specialist path. |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ---
@@ -1061,11 +1062,18 @@ With `HYPERLOOM_AGENTX=1`, Hyperloom generates and archives the native Magpie YA
 from its ordinary workload flags. `--docker-image` supplies an explicit serving
 image identity, required for custom models.
 
-Native AgentX profiling is configured in the Magpie YAML's
-`benchmark.profiler.torch_profiler` mapping: `num_steps`, `num_profiles`,
-`interval_seconds` (default 200), `start_seconds`, and `detailed_annotations`.
-Magpie starts after the replay reaches measurement and owns the capture/flush
-lifecycle. Each time window remains a separate trace input to TraceLens.
+Native AgentX profiling shares TraceLens patch and kernel-shape-tool preparation with
+fixed-sequence profiling. Configure capture steps, count, delay and interval through
+`benchmark.profiler.torch_profiler` (`num_steps`, `num_profiles`, `start_seconds`,
+`interval_seconds`). The diagnostic copy preserves those settings and explicit
+`detailed_annotations`. When profiling is enabled, a missing capture setting becomes
+one capture of 256 steps, starting 300 seconds after measurement, with a 900-second
+interval. A missing `detailed_annotations` becomes true, and false when the TraceLens
+runtime patch was attempted and did not apply: Magpie probes the server whenever the field
+is true and refuses to launch when the server lacks it.
+Hyperloom adds the shape-tool environment through `agentx.launch_overrides` while
+preserving the server's runtime paths. Magpie owns profiling flags, starts after replay
+reaches measurement, and manages capture/flush. Each window remains a separate TraceLens input.
 Profile reports are diagnostic only and cannot supply KEEP evidence.
 See [Optimize an AgentX workload](../how-to/optimize.md#optimize-an-agentx-workload).
 

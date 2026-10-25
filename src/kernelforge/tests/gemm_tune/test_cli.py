@@ -12,6 +12,7 @@ from click.testing import CliRunner
 
 from kernelforge.gemm_tune import cli as cli_mod
 from kernelforge.gemm_tune.cli import gemm_tune
+from kernelforge.gemm_tune.dense_shapes import MGrid
 from kernelforge.gemm_tune.tuners.base import TuneResult
 
 
@@ -289,6 +290,8 @@ def test_plan_routes_the_same_inputs_as_run_and_run_builds_the_tuner_context(tmp
             "3",
             "--min-improvement-pct",
             "1.5",
+            "--m-grid",
+            "exact",
             "--skip-gpu-check",
             "--output-dir",
             str(output),
@@ -311,6 +314,7 @@ def test_plan_routes_the_same_inputs_as_run_and_run_builds_the_tuner_context(tmp
 
     (ctx,) = contexts
     assert (ctx.iters, ctx.warmup, ctx.min_improvement_pct) == (7, 3, 1.5)
+    assert ctx.m_grid is MGrid.EXACT
     assert {
         "untuned_csv": ctx.untuned_csv,
         "moe_untuned_csv": ctx.moe_untuned_csv,

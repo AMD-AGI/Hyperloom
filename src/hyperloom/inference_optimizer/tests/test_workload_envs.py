@@ -14,6 +14,7 @@ import yaml
 
 from hyperloom.common.env_safety import OPERATOR_EXTRA_ENV_VAR
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from hyperloom.orchestrator.actions.executors import _profile_setup as profile_setup
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
 
@@ -463,7 +464,7 @@ def test_profile_atom_num_prompts_equals_conc(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("CONC", "16")
-    monkeypatch.setattr(we, "_atom_tracelens_caps", lambda: we._ATOM_CAPS_NONE)
+    monkeypatch.setattr(profile_setup, "_atom_tracelens_caps", lambda: profile_setup._ATOM_CAPS_NONE)
     src = tmp_path / "cfg.yaml"
     src.write_text(
         yaml.safe_dump({"benchmark": {"framework": "atom", "model": "/m", "envs": {"PROFILE": "1"}}}), encoding="utf-8"
@@ -482,9 +483,9 @@ def test_profile_atom_injects_tracelens_knobs_when_probe_hits(monkeypatch, tmp_p
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("CONC", "8")
     monkeypatch.setattr(
-        we,
+        profile_setup,
         "_atom_tracelens_caps",
-        lambda: we._AtomTracelensCaps(True, True, True),
+        lambda: profile_setup._AtomTracelensCaps(True, True, True),
     )
     src = tmp_path / "cfg.yaml"
     src.write_text(
@@ -510,18 +511,18 @@ def test_profile_atom_injects_tracelens_knobs_when_probe_hits(monkeypatch, tmp_p
 
 
 def test_atom_tracelens_caps_parses_and_fail_soft(monkeypatch):
-    we._atom_tracelens_caps.cache_clear()
-    monkeypatch.setattr(we, "_resolve_probe_python", lambda fw: "python3")
+    profile_setup._atom_tracelens_caps.cache_clear()
+    monkeypatch.setattr(profile_setup, "_resolve_probe_python", lambda fw: "python3")
     monkeypatch.setattr(
-        we.subprocess,
+        profile_setup.subprocess,
         "run",
         lambda *a, **k: SimpleNamespace(returncode=0, stdout="1\n1\n0\n"),
     )
-    assert we._atom_tracelens_caps() == we._AtomTracelensCaps(True, True, False)
-    we._atom_tracelens_caps.cache_clear()
-    monkeypatch.setattr(we.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("gone")))
-    assert we._atom_tracelens_caps() == we._ATOM_CAPS_NONE
-    we._atom_tracelens_caps.cache_clear()
+    assert profile_setup._atom_tracelens_caps() == profile_setup._AtomTracelensCaps(True, True, False)
+    profile_setup._atom_tracelens_caps.cache_clear()
+    monkeypatch.setattr(profile_setup.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("gone")))
+    assert profile_setup._atom_tracelens_caps() == profile_setup._ATOM_CAPS_NONE
+    profile_setup._atom_tracelens_caps.cache_clear()
 
 
 def test_profile_sglang_bad_extra_body(monkeypatch, tmp_path):

@@ -20,6 +20,7 @@ import click
 from kernelforge.option_groups import option_group
 
 from . import __version__
+from .dense_shapes import MGrid
 
 if TYPE_CHECKING:
     from .tuners.base import TuneContext, TuneResult
@@ -573,6 +574,7 @@ class ServingWorkload:
     tp: int
     conc: int
     tokens: str
+    m_grid: str
 
 
 @dataclass(frozen=True)
@@ -650,6 +652,7 @@ class TuneRequest:
             **dataclasses.asdict(target),
             tp=self.workload.tp,
             conc=self.workload.conc,
+            m_grid=MGrid(self.workload.m_grid),
             tokens=tokens,
             mp=self.mp,
             output_dir=Path(self.output_dir),
@@ -691,6 +694,12 @@ class TuneRequest:
         click.option("--tp", default=1, type=int, help="Tensor parallel degree"),
         click.option("--conc", default=64, type=int, help="Target serving concurrency (for token coverage)"),
         click.option("--tokens", default="", help="Comma-separated explicit token list (overrides auto)"),
+        click.option(
+            "--m-grid",
+            default=MGrid.BUCKET.value,
+            type=click.Choice([g.value for g in MGrid]),
+            help="Decode and demand M: aiter's multiple-of-16 bucket up to 256 (bucket), or exact batch sizes (exact)",
+        ),
     ),
     click.option("--mp", default=1, type=int, help="Number of GPUs for parallel tuning"),
     click.option("--output-dir", required=True, type=click.Path(), help="Output directory for all artifacts"),
