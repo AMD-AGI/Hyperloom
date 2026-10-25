@@ -5,10 +5,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Sequence
 
@@ -18,10 +19,17 @@ from kernelforge.loop.path_ownership import PRODUCER_PATH_PATTERNS, runtime_giti
 log = logging.getLogger("forge_fusion")
 
 _GIT_TIMEOUT_SEC = 120
+_TEXT_ENCODING = "utf-8"
 
 #: Branch the baseline is committed onto. The loop refuses a workspace on an
 #: unnamed, ``main`` or ``master`` branch, and a fresh repository is on one.
 SHADOW_BRANCH = "forge-fusion"
+
+#: Where in a forge-fuse output directory the run keeps its shadow repository.
+SHADOW_GIT_DIRNAME = "shadow.git"
+#: The shadow's own description, kept in its git dir so a run killed before its
+#: reset can still be undone by whoever killed it.
+_SHADOW_RECORD = "forge-shadow.json"
 
 #: forge-fuse's own in-worktree staging directory (see ``author.FUSION_SCRATCH_DIRNAME``).
 #: Named here rather than imported to keep this module free of the authoring stack.
@@ -163,7 +171,7 @@ def ensure_git_workspace(
         for path in extra_paths:
             placeholder = Path(path)
             placeholder.parent.mkdir(parents=True, exist_ok=True)
-            placeholder.write_text("", encoding="utf-8")
+            placeholder.write_text("", encoding=_TEXT_ENCODING)
         # A placeholder normally sits inside the package the scope admits, but a framework whose source is directly in
         # the export root has no such package, so each is named too.
         indexed = list(dict.fromkeys([*scopes, *(_relative(root, p) for p in extra_paths)]))
@@ -175,7 +183,7 @@ def ensure_git_workspace(
         (git_path / "info").mkdir(parents=True, exist_ok=True)
         (git_path / "info" / "exclude").write_text(
             _EXCLUDE_HEADER + "".join(f"{_admit(root, entry)}\n" for entry in indexed) + _EXCLUDE_ARTIFACTS,
-            encoding="utf-8",
+            encoding=_TEXT_ENCODING,
         )
         for args in (
             ("config", "user.email", "forge-fuse@localhost"),
@@ -189,7 +197,15 @@ def ensure_git_workspace(
             result = _git(str(root), *args, env=env)
             if result.returncode != 0:
                 raise RuntimeError(f"git {' '.join(args)} failed: {(result.stderr or result.stdout).strip()}")
-        base_commit = result.stdout.strip()  # the rev-parse above
+        shadow = ShadowRepo(
+            root=str(root),
+            git_dir=str(git_path),
+            base_commit=result.stdout.strip(),  # the rev-parse above
+            env=env,
+            created_paths=tuple(extra_paths),
+            pointer_path="" if detached else str(pointer),
+        )
+        (git_path / _SHADOW_RECORD).write_text(json.dumps(asdict(shadow)), encoding=_TEXT_ENCODING)
     except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
         log.error("could not initialize a shadow repo over %s: %s", repo_root, exc)
         if not detached:
@@ -200,11 +216,29 @@ def ensure_git_workspace(
         return None
 
     log.info("shadow repo over %s indexed %s", repo_root, ", ".join(indexed))
-    return ShadowRepo(
-        root=str(root),
-        git_dir=str(git_path),
-        base_commit=base_commit,
-        env=env,
-        created_paths=tuple(extra_paths),
-        pointer_path="" if detached else str(pointer),
-    )
+    return shadow
+
+
+def reclaim_killed_shadow(output_dir: str) -> str:
+    """Put back the framework tree a forge-fuse run was killed in the middle of editing.
+
+    The run resets the tree between recipes and on its way out, and a hard kill
+    skips both: the candidate it was measuring stays live in a framework install
+    that the next server boots and the next rewrite campaign seals as its
+    baseline. The run's shadow survives the kill, and with it the commit the tree
+    has to return to.
+
+    Returns the tree restored, or "" when the run left no shadow behind. A tree
+    whose reset fails keeps its shadow, the only record of what it should be.
+    """
+    record = Path(output_dir) / SHADOW_GIT_DIRNAME / _SHADOW_RECORD
+    try:
+        fields = json.loads(record.read_text(encoding=_TEXT_ENCODING))
+    except FileNotFoundError:
+        return ""
+    shadow = ShadowRepo(**{**fields, "created_paths": tuple(fields["created_paths"])})
+    if not shadow.reset_to_base():
+        return ""
+    shadow.dispose()
+    log.warning("restored %s to the baseline a killed fusion run left it off", shadow.root)
+    return shadow.root

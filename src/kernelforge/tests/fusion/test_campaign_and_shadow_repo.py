@@ -27,7 +27,12 @@ from kernelforge.fusion.campaign import (
 )
 from kernelforge.fusion.driver_shim import DriverSpec, render_driver
 from kernelforge.fusion.models import Recipe
-from kernelforge.fusion.shadow_repo import SHADOW_BRANCH, ensure_git_workspace
+from kernelforge.fusion.shadow_repo import (
+    SHADOW_BRANCH,
+    SHADOW_GIT_DIRNAME,
+    ensure_git_workspace,
+    reclaim_killed_shadow,
+)
 
 
 def _recipe(**over) -> Recipe:
@@ -426,6 +431,38 @@ class TestShadowRepo:
         assert not unused.exists()
         assert authored.is_file(), "the export has not read this yet"
         assert not (tmp_path / "out" / "shadow.git").exists()
+
+    def test_a_killed_runs_candidate_is_taken_back_out_of_the_framework_tree(self, tmp_path):
+        """A hard kill skips the run's own reset, and the tree is what the next server boots."""
+        root, source = _framework_tree(tmp_path)
+        user_head = _make_checkout(root)
+        placeholder = source.parent / "lfm2_fused_residual.py"
+        out = tmp_path / "out"
+        shadow = ensure_git_workspace(
+            str(root),
+            str(source),
+            git_dir=str(out / SHADOW_GIT_DIRNAME),
+            extra_paths=(str(placeholder),),
+        )
+        source.write_text("from .lfm2_fused_helper import fused as forward\n", encoding="utf-8")
+        helper = source.parent / "lfm2_fused_helper.py"
+        helper.write_text("def fused(x):\n    return x\n", encoding="utf-8")
+
+        assert reclaim_killed_shadow(str(out)) == shadow.root
+
+        assert source.read_text(encoding="utf-8") == "def forward(x):\n    return x\n"
+        assert not helper.exists(), "the hook's module must not outlive the hook"
+        assert not placeholder.exists()
+        assert not (out / SHADOW_GIT_DIRNAME).exists()
+        head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True)
+        assert head.stdout.strip() == user_head
+
+    def test_a_run_that_reset_its_own_tree_leaves_nothing_to_reclaim(self, tmp_path):
+        root, source = _framework_tree(tmp_path)
+        out = tmp_path / "out"
+        ensure_git_workspace(str(root), str(source), git_dir=str(out / SHADOW_GIT_DIRNAME)).dispose()
+
+        assert reclaim_killed_shadow(str(out)) == ""
 
     def test_a_source_outside_the_root_is_refused(self, tmp_path):
         """Nothing can be indexed for a file the export root does not contain."""

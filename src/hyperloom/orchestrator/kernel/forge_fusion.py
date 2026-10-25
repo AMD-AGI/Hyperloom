@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import os
 import re
@@ -19,6 +20,7 @@ from typing import Any
 from hyperloom.common.codex_session import CodexSessionError
 from hyperloom.common.env import is_truthy
 from kernelforge.agent_backends import watchdog_timeout_sec
+from kernelforge.fusion.shadow_repo import reclaim_killed_shadow
 
 from ..actions.executors._kernel_agent_tool import _run_subprocess
 
@@ -569,5 +571,9 @@ async def run_forge_fusion(args: dict[str, Any]) -> dict[str, Any]:
     try:
         rc, _stdout, _stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec, env=env, label="forge_fusion")
     except subprocess.TimeoutExpired as exc:
-        return _timeout_result(output_dir, timeout_sec, exc)
-    return _normalize_manifest(output_dir, rc)
+        result = _timeout_result(output_dir, timeout_sec, exc)
+    else:
+        result = _normalize_manifest(output_dir, rc)
+    # A run killed before its own reset left the candidate it was measuring live in the framework tree.
+    await asyncio.to_thread(reclaim_killed_shadow, output_dir)
+    return result

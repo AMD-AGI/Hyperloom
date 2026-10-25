@@ -21,6 +21,7 @@ from hyperloom.common.codex_session import (
 )
 from hyperloom.orchestrator.kernel import forge_fusion
 from hyperloom.orchestrator.kernel.nomination_result import parse_outcome
+from kernelforge.fusion.shadow_repo import SHADOW_GIT_DIRNAME, ensure_git_workspace
 
 
 @pytest.fixture(autouse=True)
@@ -295,6 +296,28 @@ def test_run_timeout_salvages_micro_keep_and_patch(tmp_path, monkeypatch):
     assert result["salvaged"] is True
     assert result["patch"] == str(patch)
     assert result["kernel_speedup"] == 2.69
+
+
+def test_a_killed_run_hands_the_framework_tree_back_as_it_found_it(tmp_path, monkeypatch):
+    """The kill skips forge-fuse's own reset, and the next server and rewrite seal read this tree."""
+    framework = tmp_path / "sglang"
+    model = framework / "python" / "sglang" / "glm4_moe.py"
+    model.parent.mkdir(parents=True)
+    model.write_text("def gate(x):\n    return x\n", encoding="utf-8")
+    hook_module = model.parent / "glm4_moe_fused_gate.py"
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    async def killed_mid_candidate(cmd, *, timeout_sec, env, label):
+        ensure_git_workspace(str(framework), str(model), git_dir=str(output_dir / SHADOW_GIT_DIRNAME))
+        model.write_text("from .glm4_moe_fused_gate import gate\n", encoding="utf-8")
+        hook_module.write_text("def gate(x):\n    return x\n", encoding="utf-8")
+        raise subprocess.TimeoutExpired(cmd, timeout_sec, output="", stderr="")
+
+    _run(monkeypatch, _payload(output_dir), killed_mid_candidate)
+
+    assert model.read_text(encoding="utf-8") == "def gate(x):\n    return x\n"
+    assert not hook_module.exists()
 
 
 def test_run_timeout_does_not_salvage_stale_previous_run(tmp_path, monkeypatch):
