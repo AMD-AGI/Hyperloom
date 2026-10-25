@@ -24,7 +24,13 @@ from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import AttachmentRef, FailureClass
 from hyperloom.measure import signing
 from hyperloom.measure.docs import DocumentError
-from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure
+from hyperloom.measure.failures import (
+    DISK_FULL,
+    Disposition,
+    FailureClassification,
+    classify_test_failure,
+    is_disk_full,
+)
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.magpie_launchers import install_launchers
 from hyperloom.measure.manifest import encode_manifest, RESULT_SCHEMA
@@ -589,7 +595,8 @@ def run(
             write_status(out_dir, state=_FAILED, error_class=failure.error_class, message=str(failure))
             return failure.exit_code
         except Exception as exc:  # noqa: BLE001 - the application reads status.json, not a traceback
-            write_status(out_dir, state=_FAILED, error_class="runner_error", message=f"{type(exc).__name__}: {exc}")
+            error_class = DISK_FULL if is_disk_full(exc) else "runner_error"
+            write_status(out_dir, state=_FAILED, error_class=error_class, message=f"{type(exc).__name__}: {exc}")
             return 1
         write_status(out_dir, state="succeeded", message=join_notes(ctx.notes))
     return 0

@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -197,6 +199,30 @@ def test_a_failed_test_is_a_signed_result_with_its_failure_class(tmp_path, env, 
     outcome = ResultManifest.from_bytes((tmp_path / "out" / "manifest.json").read_bytes()).outcome
     assert outcome.returncode == 1 and (outcome.failure_class or outcome.error_class)
     assert _status(tmp_path)["state"] == "succeeded"
+
+
+@pytest.mark.parametrize("code", [errno.EDQUOT, errno.ENOSPC], ids=["edquot", "enospc"])
+def test_a_runner_that_ran_out_of_disk_reports_disk_full_not_its_own_error(tmp_path, env, monkeypatch, code):
+    def full(call):
+        raise OSError(code, os.strerror(code))
+
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(full))
+
+    assert _go(tmp_path, env, _sheet()) == 1
+
+    status = _status(tmp_path)
+    assert (status["state"], status["error_class"]) == ("failed", "disk_full")
+    assert f"[Errno {code}]" in status["message"]
+
+
+def test_a_runner_that_failed_for_any_other_os_error_stays_a_runner_error(tmp_path, env, monkeypatch):
+    def denied(call):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(denied))
+
+    assert _go(tmp_path, env, _sheet()) == 1
+    assert _status(tmp_path)["error_class"] == "runner_error"
 
 
 def test_the_cause_the_backend_read_in_the_logs_is_what_the_signed_result_records(tmp_path, env, monkeypatch):

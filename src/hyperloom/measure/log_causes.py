@@ -69,6 +69,9 @@ _MISSING_KERNEL = re.compile(
 #: The exception a failed HIP call raised (``torch.AcceleratorError: HIP error: an illegal memory access was
 #: encountered``, ``RuntimeError: HIP runtime error: operation failed ...``), which states the fault in words. The
 #: ``HIP warning:`` a stream prints for the same fault is not it.
+#: A write the file system refused for want of room: ``ENOSPC`` (errno 28) or ``EDQUOT`` (errno 122), as Python and the C
+#: library print them.
+_DISK_FULL = re.compile(r"\[Errno (?:28|122)\]|No space left on device|Disk quota exceeded", re.IGNORECASE)
 _HIP_EXCEPTION = re.compile(r"\bHIP (?:runtime )?error: ")
 #: The name of the failed call, on its own line when the exception text was cut (``Search for `hipErrorIllegalAddress'``).
 _HIP_ERROR_TOKEN = re.compile(HIP_ERROR_PREFIX + r"[A-Za-z]+")
@@ -120,6 +123,11 @@ def import_error(text: str) -> str | None:
 def python_exception(text: str) -> str | None:
     """The last ``SomeError: message`` line of a traceback or of a logged exception."""
     return _last_matching(text, lambda line: bool(_EXCEPTION_WITH_MESSAGE.search(line) or _EXCEPTION_ALONE.match(line)))
+
+
+def disk_full(text: str) -> str | None:
+    """The line that says a write failed because the disk or the quota was full."""
+    return _last_matching(text, lambda line: bool(_DISK_FULL.search(line)))
 
 
 def missing_hip_kernel(text: str) -> str | None:

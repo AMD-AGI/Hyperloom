@@ -1586,8 +1586,14 @@ def test_a_warmup_whose_server_crashed_or_refused_to_serve_ends_the_test_with_no
     [
         (test_log_causes.PLAIN_LOG, "unclear", "no_known_signature"),
         ("OSError: [Errno 98] Address already in use\n", "infra", "port_in_use"),
+        (
+            'Traceback (most recent call last):\n  File "triton/runtime/cache.py", line 1\n'
+            "OSError: [Errno 122] Disk quota exceeded: '/work/.cache/triton/x.json'\n",
+            "infra",
+            "disk_full: OSError: [Errno 122] Disk quota exceeded: '/work/.cache/triton/x.json'",
+        ),
     ],
-    ids=["no_known_signature", "port_in_use"],
+    ids=["no_known_signature", "port_in_use", "disk_full_in_the_server_log"],
 )
 def test_a_warmup_that_failed_for_a_cause_no_log_names_keeps_the_measured_round_as_before(
     grid, server, tmp_path, log, failure_class, reason

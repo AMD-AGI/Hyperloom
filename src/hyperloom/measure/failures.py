@@ -19,6 +19,7 @@ so it gets no failure class at all: calling it ``candidate`` would write a false
 
 from __future__ import annotations
 
+import errno
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -54,6 +55,13 @@ LOG_LINE_CHARS = 2000
 #: other cards like any infrastructure failure (``hyperloom.measure.runner.card_watch``).
 FOREIGN_PROCESS_ON_CARD = "foreign_process_on_card"
 
+#: A write failed because the disk or the user's quota was full (``ENOSPC``, ``EDQUOT``), in the runner or in the server
+#: (a Triton cache under the sandbox's work directory, say). A candidate's patch cannot fill a shared volume, and the next
+#: sandbox may find room, so nothing about the candidate was learned: retried like any infrastructure failure. The reason
+#: is ``disk_full: <the log's line>``; a runner that failed this way reports it as its ``error_class``.
+DISK_FULL = "disk_full"
+_DISK_FULL_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT})
+
 #: ``error_class`` values a runner, the hosted backend or the platform reports that are not about the candidate.
 INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
     {
@@ -62,6 +70,7 @@ INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
         "runner_lost",
         "preflight_mismatch",
         FOREIGN_PROCESS_ON_CARD,
+        DISK_FULL,
         "node_fault",
         "no_spec",
         "sandbox_create_failed",
@@ -205,6 +214,11 @@ def decides_test(verdict: FailureClassification) -> bool:
     return verdict.disposition is Disposition.FAILED and reason.split(":", 1)[0] in _DECISIVE_REASONS
 
 
+def is_disk_full(exc: BaseException) -> bool:
+    """Whether ``exc`` is a write the file system refused for want of room (:data:`DISK_FULL`)."""
+    return isinstance(exc, OSError) and exc.errno in _DISK_FULL_ERRNOS
+
+
 def _from_error_class(error_class: str) -> FailureClassification:
     if error_class in INFRA_ERROR_CLASSES:
         return _infra(error_class)
@@ -219,6 +233,10 @@ def _named_by_logs(text: str) -> FailureClassification | None:
     """The verdict a log gives by itself: a port taken, a known signature, a refused command line; else ``None``."""
     if _PORT_IN_USE.search(text):
         return _infra(PORT_IN_USE_REASON)
+    full = log_causes.disk_full(text)
+    if full:
+        # Before the signatures: a full disk breaks whatever was writing, and the traceback it leaves can match one.
+        return _infra(f"{DISK_FULL}: {full}")
     signature = classify_failure(text)
     if signature.kind == EVAL_RUNTIME_FAILURE:
         refusal = log_causes.bad_request(text)

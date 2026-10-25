@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from hyperloom.contracts.measurement import (
     FailureClass,
     Purpose,
@@ -20,6 +22,7 @@ from hyperloom_multibranch.toolbox.attempts import AttemptRunner, TestJob
 
 INERT_REASON = f"{INERT_PATCH}: process 1 imported aiter from /sgl-workspace/aiter/aiter/__init__.py, not from the farm"
 PORT_REASON = "port_in_use: [Errno 98] address already in use"
+DISK_FULL_REASON = "disk_full: OSError: [Errno 122] Disk quota exceeded: '/work/.cache/triton/k.json'"
 
 
 class _ScriptedExecutor:
@@ -77,9 +80,10 @@ async def test_an_inert_patch_is_not_retried_and_stays_an_infrastructure_failure
     assert reported == []
 
 
-async def test_another_infrastructure_failure_is_still_retried_on_other_nodes() -> None:
-    result, executor, reported = await _run(PORT_REASON)
+@pytest.mark.parametrize("reason", [PORT_REASON, DISK_FULL_REASON], ids=["port_in_use", "disk_full"])
+async def test_another_infrastructure_failure_is_still_retried_on_other_nodes(reason) -> None:
+    result, executor, reported = await _run(reason)
     assert len(executor.jobs) == 4
     assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
-    assert result.failure_reason == f"4 attempts failed for infrastructure reasons: {PORT_REASON}"
+    assert result.failure_reason == f"4 attempts failed for infrastructure reasons: {reason}"
     assert reported == ["n1", "n2", "n3", "n4"]

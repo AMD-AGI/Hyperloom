@@ -3,13 +3,14 @@
 
 from __future__ import annotations
 
+import errno
 import importlib
 import time
 
 import pytest
 
 from hyperloom.common import failure_signature
-from hyperloom.measure import returncodes
+from hyperloom.measure import failures, returncodes
 from hyperloom.measure.failures import (
     LOG_TAIL_CHARS,
     Disposition,
@@ -78,6 +79,59 @@ def test_a_server_that_was_not_ready_in_time_is_the_candidates_failure_unless_it
     assert (bare.failure_class, bare.failure_reason) == (FailureClass.CANDIDATE, "server_boot_timeout")
     assert (crashed.failure_class, crashed.failure_reason) == (FailureClass.CANDIDATE, IMPORT_ERROR_REASON)
     assert (bound.failure_class, bound.failure_reason) == (FailureClass.INFRA, "port_in_use")
+
+
+#: A full disk as sglang's Triton cache met it in the server's log, and as the runner's own stderr carries it.
+QUOTA_IN_SERVER_LOG = (
+    'Traceback (most recent call last):\n  File "triton/runtime/cache.py", line 88, in put\n'
+    "OSError: [Errno 122] Disk quota exceeded: '/work/.cache/triton/k.json'\n"
+)
+NO_SPACE_IN_RUNNER_STDERR = "shutil.Error: [Errno 28] No space left on device: '/work/out/rounds.json'\n"
+
+
+@pytest.mark.parametrize(
+    ("logs", "line"),
+    [
+        (["", QUOTA_IN_SERVER_LOG], "OSError: [Errno 122] Disk quota exceeded: '/work/.cache/triton/k.json'"),
+        ([NO_SPACE_IN_RUNNER_STDERR, ""], "shutil.Error: [Errno 28] No space left on device: '/work/out/rounds.json'"),
+        (["write failed: Disk quota exceeded"], "write failed: Disk quota exceeded"),
+        (["cc1plus: fatal error: No space left on device"], "cc1plus: fatal error: No space left on device"),
+    ],
+    ids=["edquot_server", "enospc_runner", "edquot_words", "enospc_words"],
+)
+def test_a_full_disk_in_the_runners_or_the_servers_output_is_an_infrastructure_failure(logs, line) -> None:
+    verdict = _classify(returncode=1, logs=logs)
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, f"{failures.DISK_FULL}: {line}")
+
+
+def test_a_full_disk_beats_the_candidate_signature_and_the_boot_timeout_it_caused() -> None:
+    with_import = _classify(returncode=1, logs=[IMPORT_ERROR_LOG + QUOTA_IN_SERVER_LOG])
+    slow = _classify(
+        returncode=returncodes.SERVER_BOOT_TIMEOUT_RC, logs=[QUOTA_IN_SERVER_LOG], detail="not ready within 1800s"
+    )
+
+    assert with_import.failure_class is FailureClass.INFRA and with_import.failure_reason.startswith("disk_full: ")
+    assert slow.failure_class is FailureClass.INFRA and slow.failure_reason.startswith("disk_full: ")
+
+
+def test_a_full_disk_does_not_turn_a_class_the_runner_reported_or_another_errno_into_infra() -> None:
+    rejected = _classify(returncode=0, error_class="spec_rejected", logs=[QUOTA_IN_SERVER_LOG])
+    other = _classify(returncode=1, logs=["OSError: [Errno 13] Permission denied: '/x'\n"])
+
+    assert rejected.disposition is Disposition.PROGRAM_ERROR
+    assert (other.failure_class, other.failure_reason) == (
+        FailureClass.UNCLEAR,
+        "python_exception: OSError: [Errno 13] Permission denied: '/x'",
+    )
+
+
+def test_a_runner_that_reports_a_full_disk_is_an_infrastructure_failure() -> None:
+    verdict = _classify(returncode=0, error_class=failures.DISK_FULL)
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, "disk_full")
+    assert failures.is_disk_full(OSError(errno.EDQUOT, "Disk quota exceeded"))
+    assert failures.is_disk_full(OSError(errno.ENOSPC, "No space left on device"))
+    assert not failures.is_disk_full(OSError(errno.EACCES, "Permission denied"))
+    assert not failures.is_disk_full(ValueError("Disk quota exceeded"))
 
 
 def test_a_clean_exit_is_a_success() -> None:
