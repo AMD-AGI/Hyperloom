@@ -3115,25 +3115,12 @@ class BenchmarkRunExecutor:
             capture_meta=round_.capture_meta,
         )
 
-    def _preflight_server_argv(
-        self,
-        *,
-        config_path: Path,
-        framework: str,
-        launch_env: dict[str, str],
-        output_dir: Path,
-        attempt: int,
-        capture_meta: dict[str, Any],
-    ) -> dict[str, Any] | None:
+    def _preflight_server_argv(self, round_: _BenchmarkRound, attempt: int) -> dict[str, Any] | None:
         """Ask the installed framework's parser about this round's argv.
 
         Args:
-            config_path: The materialised YAML this round launches.
-            framework: Framework the config serves.
-            launch_env: The environment the benchmark subprocess will get.
-            output_dir: The round slot, for the observation artifact.
-            attempt: This attempt's index within the slot.
-            capture_meta: Result fields echoed onto whatever this round returns.
+            round_: The round about to launch; its capture_meta is echoed onto a refusal.
+            attempt: This attempt's index within the round slot.
 
         Returns:
             dict | None: A terminal failure result when the argv is refused;
@@ -3142,7 +3129,7 @@ class BenchmarkRunExecutor:
         """
         from .magpie_agentx import native_config
 
-        if native_config(config_path):
+        if native_config(round_.config_path):
             return None
         from ...bringup import (
             ARGV_INVALID,
@@ -3153,18 +3140,18 @@ class BenchmarkRunExecutor:
         from ...bringup.argv_preflight import OK, PARSED_AFTER_DROP, UNAVAILABLE, ArgvRepair
         from ._server_argv import config_launch_env, config_server_argv, reseal_config_argv
 
-        sealed = config_server_argv(config_path)
+        sealed = config_server_argv(round_.config_path)
         if not sealed.tokenized or not sealed.argv:
             return None
 
-        effective_launch_env = config_launch_env(config_path, launch_env)
+        effective_launch_env = config_launch_env(round_.config_path, round_.env)
         probe_argv = sealed.argv
-        if framework.strip().lower() == "vllm" and effective_launch_env.get("PROFILE") == "1":
+        if round_.framework.strip().lower() == "vllm" and effective_launch_env.get("PROFILE") == "1":
             probe_argv = (
                 "--profiler-config.profiler",
                 "torch",
                 "--profiler-config.torch_profiler_dir",
-                str(output_dir / "torch_trace"),
+                str(round_.output_dir / "torch_trace"),
                 *probe_argv,
             )
 
@@ -3173,7 +3160,7 @@ class BenchmarkRunExecutor:
         enablement = getattr(self._resolve_shared_state(), "enablement", None)
         spent: list[str] = enablement.argv_repairs if enablement is not None else []
         verdict = check_server_argv(
-            framework=framework,
+            framework=round_.framework,
             argv=probe_argv,
             text=sealed.text,
             launch_env=effective_launch_env,
@@ -3192,33 +3179,33 @@ class BenchmarkRunExecutor:
             return None
         if verdict.status == OK:
             if verdict.reason == PARSED_AFTER_DROP:
-                reseal_config_argv(config_path, verdict.text)
+                reseal_config_argv(round_.config_path, verdict.text)
                 if verdict.repaired_digest:
                     spent.append(verdict.repaired_digest)
-                capture_meta["server_argv_dropped"] = list(verdict.dropped)
+                round_.capture_meta["server_argv_dropped"] = list(verdict.dropped)
             return None
 
         observation = argv_invalid_observation(verdict, session_dir=self.session_dir)
-        capture_meta["boot_observation_path"] = write_boot_observation(
+        round_.capture_meta["boot_observation_path"] = write_boot_observation(
             observation,
             session_dir=self.session_dir,
-            output_dir=output_dir,
+            output_dir=round_.output_dir,
             attempt=attempt,
         )
         excerpt = observation.excerpt
         log.error(
             "argv preflight: %s refused the server argv (%s); not launching",
-            framework or "the framework",
+            round_.framework or "the framework",
             verdict.reason,
         )
         return {
             "status": "failed",
             "error_class": ARGV_INVALID,
-            "error": f"{framework or 'framework'} rejected the server argv ({verdict.reason}): {verdict.detail}",
-            "output_dir": str(output_dir),
+            "error": f"{round_.framework or 'framework'} rejected the server argv ({verdict.reason}): {verdict.detail}",
+            "output_dir": str(round_.output_dir),
             "enablement_launch_log": excerpt.text if excerpt is not None else "",
             "server_argv": list(verdict.argv),
-            **capture_meta,
+            **round_.capture_meta,
         }
 
     async def _run_single_benchmark(
@@ -3360,14 +3347,7 @@ class BenchmarkRunExecutor:
         server_log = round_.output_dir / "server.log"
         attempt_index = open_bringup_attempt(round_.output_dir)
         clear_server_ready_stamp(str(server_log))
-        refusal = self._preflight_server_argv(
-            config_path=round_.config_path,
-            framework=round_.framework,
-            launch_env=round_.env,
-            output_dir=round_.output_dir,
-            attempt=attempt_index,
-            capture_meta=round_.capture_meta,
-        )
+        refusal = self._preflight_server_argv(round_, attempt_index)
         if refusal is not None:
             return refusal
         ready = bool(round_.server_already_ready or round_.ctx_extra.get("server_already_ready") or is_multi_node())

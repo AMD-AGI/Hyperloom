@@ -26,6 +26,7 @@ from hyperloom.orchestrator.actions.executors import trace_analyze as ta
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
     BenchmarkRunExecutor,
+    _BenchmarkRound,
 )
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     default_baseline_config,
@@ -1815,14 +1816,27 @@ def test_profile_argv_preflight_includes_inferencex_vllm_profiler_args(tmp_path,
     state = SimpleNamespace(enablement=SimpleNamespace(argv_repairs=[]))
     executor = BaselineExecutor(session_dir=tmp_path, shared_state=state)
 
-    result = executor._preflight_server_argv(
+    round_ = _BenchmarkRound(
         config_path=config_path,
-        framework="vllm",
-        launch_env={},
+        materialized_config_path=config_path,
         output_dir=tmp_path / "round",
-        attempt=1,
+        result_dir=tmp_path / "round",
+        ctx=None,
+        ctx_extra={},
+        cmd=[],
+        env={},
+        framework="vllm",
+        watchdog_server_log=None,
         capture_meta={},
+        timeout_sec=0,
+        silence_timeout_sec=None,
+        session_deadline_sec=None,
+        serving_lease=None,
+        server_already_ready=False,
+        run_eval_disabled=False,
     )
+
+    result = executor._preflight_server_argv(round_, 1)
 
     assert result is None
     assert seen["argv"][:4] == (

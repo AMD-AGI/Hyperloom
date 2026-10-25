@@ -172,7 +172,7 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.baseline.build_benchmark_command", cpu_benchmark)
     executor = BaselineExecutor(magpie_python=sys.executable, session_dir=coordinator.session_dir, shared_state=state)
     monkeypatch.setattr(executor, "_after_materialize_config", lambda *_args: None)
-    monkeypatch.setattr(executor, "_preflight_server_argv", lambda **_kwargs: None)
+    monkeypatch.setattr(executor, "_preflight_server_argv", lambda *_args: None)
     result = await executor(
         RunnerContext(task=task, lease=None, extra={"session_dir": coordinator.session_dir, "shared_state": state})
     )
