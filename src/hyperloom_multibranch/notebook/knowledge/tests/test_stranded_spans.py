@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role
-from hyperloom_multibranch.contracts.notebook.peers import Purpose
+from hyperloom_multibranch.contracts.notebook.peers import Purpose, Validity
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent, MergeAttempt, NotebookSnapshot
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, MergeOutcome
 from hyperloom_multibranch.notebook.knowledge.breakdown import CloseOutcome, build_breakdown
@@ -71,6 +71,40 @@ async def test_a_commit_keeps_when_its_first_merge_failed_once_a_later_one_merge
     assert c3.last_merge is not None and c3.last_merge.outcome is MergeOutcome.MERGED
     assert c3.first_failed_at == pytest.approx(failed_at, abs=1.0)
     assert all(commit.first_failed_at is None for commit in snapshot.committed if commit.commit_id != "c3")
+
+
+async def test_a_merge_test_the_candidate_failed_fails_its_commit_and_a_failed_measurement_does_not(
+    tmp_path: Path,
+) -> None:
+    root, clock = tmp_path / "notebook", FakeClock()
+    await scripted_session(root, clock)
+    w = Writers(root, clock)
+    scheduler, gate, integrator, toolbox = (
+        w.as_role(role) for role in (Role.SCHEDULER, Role.GATE, Role.INTEGRATOR, Role.TOOLBOX)
+    )
+    tested = (("s3", "c3", "m2", Validity.CANDIDATE_FAILED), ("s4", "c4", "m3", Validity.MEASUREMENT_FAILED))
+    for branch, commit, _, _ in tested:
+        change = delta(f"--{branch}-fused")
+        await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit="i1", reason="refill"))
+        await w.measure(branch, f"u-{branch}", intent(branch, "i1", "sampler", f"fused {branch}"), change)
+        kept = judgement(8.0, (f"u-{branch}",), recorded={METRIC: 1124.0})
+        await gate.write_judgement(f"u-{branch}", kept, Conclusion.COMMITTED, commit)
+    clock.advance(10 * MINUTE)
+    failed_at = clock.now
+    for branch, commit, merge, validity in tested:
+        merging = intent(INTEGRATION_BRANCH, "i1", "merge", commit)
+        await toolbox.write_request(request(merge, merging, delta(f"--{branch}-fused"), purpose=Purpose.INTEGRATION))
+        await integrator.record_merge_attempt(MergeAttempt((commit,), "i1", request_id=merge))
+        await toolbox.write_result(result(merge, validity=validity, failure_reason="server exited during warmup"))
+    clock.advance(30 * MINUTE)
+    snapshot = await w.as_role(Role.OBSERVER).snapshot()
+
+    failed = {commit.commit_id: commit.first_failed_at for commit in snapshot.committed if commit.branch != "s1"}
+
+    assert failed["c3"] == pytest.approx(failed_at, abs=1.0)
+    assert failed["c4"] is None
+    (span,) = stranded_spans(snapshot, METRIC)
+    assert (span.branch, span.minutes) == ("s3", pytest.approx(30.0, abs=0.1))
 
 
 async def test_the_breakdown_holds_the_spans_when_the_scheduler_names_the_metric(tmp_path: Path) -> None:

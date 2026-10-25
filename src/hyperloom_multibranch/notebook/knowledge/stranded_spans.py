@@ -4,7 +4,7 @@
 """How long each branch's lead over integration stayed stranded in a session, for CLOSE's breakdown.
 
 A lead is stranded while a branch's head leads integration's by more than the merge bar on the session's metric and
-one of the branch's commits has already failed to merge (``FAILED_MERGES``), the view
+one of the branch's commits has already failed to merge (``CommittedCommit.first_failed_at``), the view
 :mod:`~hyperloom_multibranch.notebook.rsi.stranded` gives of one moment. Over the session,
 each value holds from the commit that recorded it until the next one on its branch, so :func:`stranded_spans` adds up
 the minutes such a lead held, until the snapshot was taken, and finds when it peaked. In session 4aef3318 three

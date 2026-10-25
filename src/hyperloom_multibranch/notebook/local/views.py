@@ -205,10 +205,21 @@ def committed(state: NotebookState, view: LineageView) -> tuple[CommittedCommit,
                 merged_into=next((merge.commit_id for merge in merges if node.commit_id in merge.merged_from), None),
                 last_merge=attempts[-1] if attempts else None,
                 merge_attempts=len(attempts),
-                first_failed_at=next((item.at for item in attempts if item.outcome in FAILED_MERGES), None),
+                first_failed_at=next((item.at for item in attempts if _failed(state, item)), None),
             )
         )
     return tuple(sorted(found, key=lambda commit: (not commit.foundation_fix, -commit.gain_pct)))
+
+
+def _failed(state: NotebookState, merge: MergeState) -> bool:
+    """Whether ``merge`` failed its commits: skipped on a conflict, not stackable, or a merge test the candidate failed,
+    which the integrator leaves pending and unjudged and offers again only on a head that changes what the commit
+    changes."""
+
+    if merge.outcome in FAILED_MERGES:
+        return True
+    result = state.results.get(merge.request_id) if merge.request_id is not None else None
+    return merge.outcome is MergeOutcome.PENDING and result is not None and result.validity is Validity.CANDIDATE_FAILED
 
 
 def recorded_value(state: NotebookState, view: LineageView, commit_id: str) -> RecordedValue:
