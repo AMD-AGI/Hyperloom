@@ -136,3 +136,28 @@ def test_a_build_that_finished_has_no_failure_and_an_open_record_at_the_end_of_t
     cut = "failed jit build [module_cut]↓\n/a/b.cu:4:2: error: stops here\n"
 
     assert scan_builds([_log(tmp_path, cut)]).failed == {}, "a record that never closed is not a finished account"
+
+
+# The lines a real server printed when CUDA-graph capture hit a kernel the loaded module lacks (2026-10-25, mb8).
+REGISTRY_MISS = (
+    "RuntimeError: gemm_a8w8_blockscale_bpreshuffle kernel 'a8w8_blockscale_bpreshuffle_1x128x128_256x64x128x128_"
+    "intrawave_v1' is not present in the compiled registry. The tuned CSV references a kernel that was not built into "
+    "aiter. Rebuild aiter (or remove this row from aiter/configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv) and try "
+    "again.\n"
+    "Exception: Capture cuda graph failed: gemm_a8w8_blockscale_cktile kernel 'a8w8_blockscale_cktile_x' is not "
+    "present in the compiled registry. The tuned CSV references a kernel\n"
+)
+
+
+def test_a_kernel_missing_from_the_compiled_registry_names_the_module_it_was_asked_of(tmp_path) -> None:
+    built = scan_builds([_log(tmp_path, MODULE + REGISTRY_MISS)])
+
+    assert built.missing_kernels == {
+        "module_gemm_a8w8_blockscale_bpreshuffle": "a8w8_blockscale_bpreshuffle_1x128x128_256x64x128x128_intrawave_v1",
+        "module_gemm_a8w8_blockscale_cktile": "a8w8_blockscale_cktile_x",
+    }
+    assert built.started == {"module_gemm_a8w8"}
+
+
+def test_a_log_without_the_registry_error_names_no_missing_kernel(tmp_path) -> None:
+    assert scan_builds([_log(tmp_path, CPP + MODULE)]).missing_kernels == {}

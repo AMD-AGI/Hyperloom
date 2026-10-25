@@ -272,6 +272,11 @@ class JitCacheSession:
             os.close(root_fd)
         return new
 
+    def gave(self, module: str) -> bool:
+        """Whether the cache gave this test the compiled ``module``: built under this test's key, which covers the tuned
+        tables the module is generated from."""
+        return any(f"{module}{_PREBUILT_SUFFIX}" in seeded.files for seeded in self._kinds.values())
+
     def stale_modules(self, built: BuildLog) -> list[str]:
         """The touched modules the test ran from a stale copy; call it once the server has stopped.
 
