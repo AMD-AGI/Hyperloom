@@ -609,11 +609,14 @@ def test_comment_poster_never_runs_pull_request_code() -> None:
     assert gate["name"] in poster[True]["workflow_run"]["workflows"]
 
 
-def test_a_pending_metric_may_lack_a_threshold_and_is_then_not_measured() -> None:
+def test_a_pending_metric_may_lack_a_threshold_and_is_then_not_measured(monkeypatch: pytest.MonkeyPatch) -> None:
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    pending = collect.PENDING[0]
-    config = code_metrics.parse_config(text.replace(f"{pending} = 5\n", ""))
-    assert config is not None and pending not in config.thresholds
+    without_args = text.replace("function-args = 5\n", "")
+    with pytest.raises(collect.ToolError, match="thresholds must name"):
+        code_metrics.parse_config(without_args)
+    monkeypatch.setattr(code_metrics, "PENDING", (collect.FUNCTION_ARGS,))
+    config = code_metrics.parse_config(without_args)
+    assert config is not None and collect.FUNCTION_ARGS not in config.thresholds
     assert [code for code, (metric, _) in collect.RUFF_RULES.items() if metric in config.thresholds] == [
         "C901",
         "PLR1702",
@@ -1305,6 +1308,44 @@ def test_a_directory_is_judged_when_the_change_touches_a_file_under_it() -> None
         False,
         False,
     ]
+
+
+def test_a_worse_directory_is_not_measured_again_at_the_base_as_a_file(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[str] = []
+    monkeypatch.setattr(code_metrics, "base_values", lambda root, since, paths, config: asked.extend(paths) or {})
+    repo.write_baseline({key("src/a", collect.MODULE, collect.DIRECTORY_ENTRIES): 51})
+    base = repo.commit()
+    repo.touch("src/a/new.py")
+    repo.findings = [
+        collect.Finding(collect.DIRECTORY_ENTRIES, "src/a", collect.MODULE, 52, 1),
+        cc("src/a/new.py", "f", 25),
+    ]
+
+    code, report = repo.gate("--base-ref", base)
+
+    assert asked == ["src/a/new.py"]
+    assert code == 1 and "| Directory size (entries) | 51 | 52 |" in section(report, WORSE)
+
+
+def test_a_new_directory_is_not_measured_again_at_the_base_as_a_file(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[str] = []
+    monkeypatch.setattr(code_metrics, "base_values", lambda root, since, paths, config: asked.extend(paths) or {})
+    repo.write_baseline({})
+    base = repo.commit()
+    repo.touch("src/a/new.py")
+    repo.findings = [
+        collect.Finding(collect.DIRECTORY_ENTRIES, "src/a", collect.MODULE, 51, 1),
+        cc("src/a/new.py", "f", 25),
+    ]
+
+    code, report = repo.gate("--base-ref", base)
+
+    assert asked == ["src/a/new.py"]
+    assert code == 1 and "| Directory size (entries) | 51 |" in section(report, NEW)
 
 
 @pytest.mark.skipif(shutil.which("ruff") is None or shutil.which("complexipy") is None, reason="ruff/complexipy")

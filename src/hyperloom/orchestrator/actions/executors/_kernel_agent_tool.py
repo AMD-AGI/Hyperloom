@@ -99,9 +99,9 @@ def _maybe_apply_kernel_patch(
 ) -> HandlerResult:
     """Apply a kernel patch via the kernel-agent ``apply_kernel_patch`` tool.
 
-    Resolves a backup root under the session's patches dir when none is given,
-    then delegates to the tool with rebuild / dry-run / target options pulled
-    from the payload.
+    Backs the apply up under the session's patches dir, where a multi-node
+    resume finds kept patches to restore, then delegates to the tool with
+    rebuild / dry-run / target options pulled from the payload.
 
     Args:
         payload (dict): Request payload carrying ``patch_path`` plus
@@ -121,12 +121,12 @@ def _maybe_apply_kernel_patch(
             "status": "skipped",
             "reason": "missing patch_path or target_file/source_file",
         }
-    from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, patches_dir
+    from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, kernel_patch_backup_root
 
     kid = str(kernel_id or payload.get("kernel_id") or "")
     # Same fold as the integrate workspace: a fusion sibling keys this dir by its
     # ``llm:<recipe>`` operator name, which ``mkdir`` rejects on some filesystems.
-    backup_root = payload.get("backup_root") or (patches_dir(session_dir, fs_safe_id(kid)) / "backup")
+    backup_root = kernel_patch_backup_root(session_dir, fs_safe_id(kid))
     # Snapshot mode: a snapshot dir of byte-exact final files lands atomically.
     snapshot_dir = str(payload.get("snapshot_dir") or "").strip() or None
     repo_root = str(payload.get("kernel_repo") or payload.get("repo") or "").strip() or None
@@ -364,7 +364,7 @@ async def _run_subprocess(
             ray_gcs_address_from_state,
             infera_ssh_env_from_state,
         )
-        from ._subprocess_kill import run_with_session_kill
+        from ._subprocess_kill import RoundWatch, run_with_session_kill
 
         if is_multi_node():
             # Infera backend: route GEAK GPU work to a pod over SSH (no Ray).
@@ -385,8 +385,7 @@ async def _run_subprocess(
         cp = run_with_session_kill(
             cmd,
             env=child_env,
-            timeout=timeout_sec,
-            text=True,
+            watch=RoundWatch(timeout=timeout_sec),
             on_output=on_output,
         )
         return cp.returncode, cp.stdout or "", cp.stderr or ""

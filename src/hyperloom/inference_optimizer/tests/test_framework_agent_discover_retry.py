@@ -95,8 +95,8 @@ class _TasksStub:
         self._fail = fail
         self.calls: list[dict[str, Any]] = []
 
-    async def create_or_return_existing(self, **kwargs: Any) -> Any:
-        self.calls.append(kwargs)
+    async def create_or_return_existing(self, spec) -> Any:
+        self.calls.append(vars(spec))
         if self._fail:
             raise RuntimeError("simulated registry failure")
         return SimpleNamespace(task_id="t-ok")

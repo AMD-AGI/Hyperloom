@@ -20,7 +20,7 @@ from hyperloom.inference_optimizer import framework_registry
 from . import machine_state as _phase_state
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
-from ..state.task_registry import TaskNotFound
+from ..state.task_registry import TaskNotFound, TaskSpec
 from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
 
 if TYPE_CHECKING:
@@ -448,8 +448,10 @@ def _record_review_outcome(
     recorder = _recorder(coord)
     if recorder is None or not proposal_id:
         return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import CriticReview
+
     if verdict:
-        recorder.record_proposal_review(proposal_id, verdict=verdict, reason=reason)
+        recorder.record_proposal_review(proposal_id, CriticReview(verdict=verdict, reason=reason))
         recorder.record_proposal_step(proposal_id, step="reviewed", outcome=verdict, reason=reason)
     recorder.record_proposal_review_outcome(proposal_id, **outcome)
 
@@ -1226,13 +1228,15 @@ class FrameworkPhase(ProposalBench):
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _spec_existing = await self.tasks.create_or_return_existing(
-            kind="specialist",
-            params=params,
-            idempotency_key=idem,
-            requires_lanes=lanes,
-            side_effects=["writes_results", "writes_patches"],
-            lease_ttl_sec=ttl,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="specialist",
+                params=params,
+                idempotency_key=idem,
+                requires_lanes=lanes,
+                side_effects=["writes_results", "writes_patches"],
+                lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
+            )
         )
         if _spec_existing and await self._settle_finished_authoring_specialist(
             spec_task, cand_id=cand_id, batch_id=batch_id, label="authoring"
@@ -1398,13 +1402,15 @@ class FrameworkPhase(ProposalBench):
         idem = f"perf_explore_authoring:{gap_cid}:retry:{retry.attempt}{self._coord.dispatcher.cycle_idem_suffix()}"
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _ = await self.tasks.create_or_return_existing(
-            kind="specialist",
-            params=params,
-            idempotency_key=idem,
-            requires_lanes=lanes,
-            side_effects=["writes_results", "writes_patches"],
-            lease_ttl_sec=ttl,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="specialist",
+                params=params,
+                idempotency_key=idem,
+                requires_lanes=lanes,
+                side_effects=["writes_results", "writes_patches"],
+                lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
+            )
         )
         new_tid = str(getattr(spec_task, "task_id", "") or "")
         log.info(
@@ -1597,13 +1603,15 @@ class FrameworkPhase(ProposalBench):
         for attempt in range(_LOCAL_EXPLORE_MAX_ATTEMPTS):
             idem = base_idem if attempt == 0 else f"{base_idem}:r{attempt}"
             spec_task, existing = await self.tasks.create_or_return_existing(
-                kind="specialist",
-                params=params,
-                idempotency_key=idem,
-                requires_lanes=lanes,
-                side_effects=["writes_results", "writes_patches"],
-                lease_ttl_sec=ttl,
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind="specialist",
+                    params=params,
+                    idempotency_key=idem,
+                    requires_lanes=lanes,
+                    side_effects=["writes_results", "writes_patches"],
+                    lease_ttl_sec=ttl,
+                    dispatch_class="coordinator",
+                )
             )
             if not (existing and first_str(getattr(spec_task, "state", "")) == "failed"):
                 return spec_task, existing
@@ -1824,12 +1832,14 @@ class FrameworkPhase(ProposalBench):
             if not lanes:
                 raise RuntimeError("integrate_patch resolved to no lanes; the task would run without GPU exclusivity.")
             await self.tasks.create_or_return_existing(
-                kind="integrate_patch",
-                params=params,
-                idempotency_key=idem,
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind="integrate_patch",
+                    params=params,
+                    idempotency_key=idem,
+                    requires_lanes=lanes,
+                    lease_ttl_sec=ttl,
+                    dispatch_class="coordinator",
+                )
             )
             log.info(
                 "FRAMEWORK: enqueued candidate=%s batch=%s",
@@ -2594,15 +2604,17 @@ class FrameworkPhase(ProposalBench):
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         task = await self.tasks.create_or_return_existing(
-            kind="specialist",
-            params=params,
-            # The round count is part of the key: the registry returns the row a key already names, so a fixed key
-            # would re-fetch the finished first attempt and neither streak could advance.
-            idempotency_key=f"candidate-discovery:{reason}{self._coord.dispatcher.cycle_idem_suffix()}:r{empties + failures}",
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
-            side_effects=["writes_results"],
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="specialist",
+                params=params,
+                # The round count is part of the key: the registry returns the row a key already names, so a fixed key
+                # would re-fetch the finished first attempt and neither streak could advance.
+                idempotency_key=f"candidate-discovery:{reason}{self._coord.dispatcher.cycle_idem_suffix()}:r{empties + failures}",
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                side_effects=["writes_results"],
+                dispatch_class="coordinator",
+            ),
         )
         _record_run(
             self,
@@ -2785,12 +2797,14 @@ class FrameworkPhase(ProposalBench):
             params["benchmark_script"] = benchmark_script
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("explore")
         etask, was_existing = await self.tasks.create_or_return_existing(
-            kind="explore",
-            params=params,
-            idempotency_key=self._bench_key(rows, operator_priority=operator_priority),
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="explore",
+                params=params,
+                idempotency_key=self._bench_key(rows, operator_priority=operator_priority),
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
+            )
         )
         if was_existing:
             return False

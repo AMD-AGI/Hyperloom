@@ -22,7 +22,7 @@ from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 
 
 def _warm_replay_dispatch_params(
@@ -123,12 +123,14 @@ async def test_dispatched_integrate_patch_without_critic_verdict_is_cancelled(tm
 
     sub.register_executor("integrate_patch", _stub)
     task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={
-            "specialist_task_id": "evil0",
-            "apply_only": True,
-        },
-        idempotency_key="forged-integrate",
+        TaskSpec(
+            kind="integrate_patch",
+            params={
+                "specialist_task_id": "evil0",
+                "apply_only": True,
+            },
+            idempotency_key="forged-integrate",
+        ),
     )
     res = await sub.run_task(task)
     assert res.state == "cancelled"
@@ -156,7 +158,7 @@ async def test_dispatch_denied_baseline_is_not_charged_to_baseline_failures(sess
 
     monkeypatch.setattr(coord.policy, "validate_dispatched_task", _deny)
     for i in range(3):
-        task = await coord.tasks.create(kind="baseline", params={}, idempotency_key=f"denied-baseline-{i}")
+        task = await coord.tasks.create(TaskSpec(kind="baseline", params={}, idempotency_key=f"denied-baseline-{i}"))
         result = await coord.sub.run_task(task)
         await coord.dispatcher.reap_dispatched_task(task, result)
         assert result.state == "cancelled"
@@ -182,9 +184,11 @@ async def test_dispatched_internal_roofline_passes_delegate_gates(tmp_path, monk
 
     sub.register_executor("roofline", _stub)
     task = await sub.tasks.create(
-        kind="roofline",
-        params={"reason": "prelude_bootstrap"},
-        idempotency_key="internal-roofline",
+        TaskSpec(
+            kind="roofline",
+            params={"reason": "prelude_bootstrap"},
+            idempotency_key="internal-roofline",
+        ),
     )
     res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -212,9 +216,11 @@ async def test_dispatched_internal_conc_sweep_passes_auto_enqueue_singleton(tmp_
 
     sub.register_executor("conc_sweep", _stub)
     task = await sub.tasks.create(
-        kind="conc_sweep",
-        params={"reason": "phase_entry"},
-        idempotency_key="internal-conc-sweep",
+        TaskSpec(
+            kind="conc_sweep",
+            params={"reason": "phase_entry"},
+            idempotency_key="internal-conc-sweep",
+        ),
     )
     res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -233,9 +239,11 @@ async def test_dispatched_recover_executes_when_queued(tmp_path, monkeypatch):
 
     sub.register_executor("recover", _stub)
     task = await sub.tasks.create(
-        kind="recover",
-        params={"reason": "gpu_memory_leaked", "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]}},
-        idempotency_key="queued-recover",
+        TaskSpec(
+            kind="recover",
+            params={"reason": "gpu_memory_leaked", "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]}},
+            idempotency_key="queued-recover",
+        ),
     )
     res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -464,9 +472,11 @@ async def test_dispatched_revalidation_holding_its_own_round_runs(tmp_path, monk
 
     sub.register_executor("baseline", _stub)
     task = await sub.tasks.create(
-        kind="baseline",
-        params={"reason": "enablement_eval_revalidation"},
-        idempotency_key="enablement-revalidation",
+        TaskSpec(
+            kind="baseline",
+            params={"reason": "enablement_eval_revalidation"},
+            idempotency_key="enablement-revalidation",
+        ),
     )
     _project(sub.policy, excluding_round_id="revalidation-1", excluding_round_holder=task.task_id)
 
@@ -490,9 +500,11 @@ async def test_dispatched_integrate_patch_with_verdict_passes(tmp_path, monkeypa
 
     sub.register_executor("integrate_patch", _stub)
     task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={"specialist_task_id": "spec-ok", "apply_only": True},
-        idempotency_key="legit-integrate",
+        TaskSpec(
+            kind="integrate_patch",
+            params={"specialist_task_id": "spec-ok", "apply_only": True},
+            idempotency_key="legit-integrate",
+        ),
     )
     res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -513,9 +525,11 @@ async def test_dispatched_integrate_patch_resume_with_persisted_verdict_passes(t
     db = SqliteConnection(db_path)
     tasks = TaskRegistry(db)
     task = await tasks.create(
-        kind="integrate_patch",
-        params={"specialist_task_id": "spec-resume", "apply_only": True},
-        idempotency_key="resume-integrate",
+        TaskSpec(
+            kind="integrate_patch",
+            params={"specialist_task_id": "spec-resume", "apply_only": True},
+            idempotency_key="resume-integrate",
+        ),
     )
     assert task.state == "queued"
     task_id = task.task_id
@@ -560,9 +574,11 @@ async def test_reconcile_cancelled_integrate_patch_when_verdict_restored(tmp_pat
     """Dispatch-time policy cancel is re-queued once Critic verdicts are restored."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
     task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={"specialist_task_id": "spec-reconcile", "apply_only": True},
-        idempotency_key="approved-prop-reconcile",
+        TaskSpec(
+            kind="integrate_patch",
+            params={"specialist_task_id": "spec-reconcile", "apply_only": True},
+            idempotency_key="approved-prop-reconcile",
+        ),
     )
     res = await sub.run_task(task)
     assert res.state == "cancelled"
@@ -589,9 +605,11 @@ async def test_reconcile_does_not_spawn_second_child_after_first_succeeds(tmp_pa
     """A succeeded reconcile child must not trigger reconcile2 on later pump passes."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
     task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={"specialist_task_id": "spec-once", "apply_only": True},
-        idempotency_key="approved-prop-once",
+        TaskSpec(
+            kind="integrate_patch",
+            params={"specialist_task_id": "spec-once", "apply_only": True},
+            idempotency_key="approved-prop-once",
+        ),
     )
     await sub.run_task(task)
 
@@ -623,9 +641,11 @@ async def test_reconcile_does_not_spawn_second_child_while_first_is_live(tmp_pat
     """A queued or running reconcile child must not trigger reconcile2 on the next pump pass."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
     task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={"specialist_task_id": "spec-live", "apply_only": True},
-        idempotency_key="approved-prop-live",
+        TaskSpec(
+            kind="integrate_patch",
+            params={"specialist_task_id": "spec-live", "apply_only": True},
+            idempotency_key="approved-prop-live",
+        ),
     )
     await sub.run_task(task)
 
@@ -648,9 +668,11 @@ async def test_reconcile_does_not_spawn_second_child_while_first_is_live(tmp_pat
 async def test_reconcile_skips_when_verdict_still_missing(tmp_path, monkeypatch):
     sub = _runner_with_policy(tmp_path, monkeypatch)
     task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={"specialist_task_id": "spec-no-verdict", "apply_only": True},
-        idempotency_key="approved-prop-no-verdict",
+        TaskSpec(
+            kind="integrate_patch",
+            params={"specialist_task_id": "spec-no-verdict", "apply_only": True},
+            idempotency_key="approved-prop-no-verdict",
+        ),
     )
     await sub.run_task(task)
     disp = _reconcile_dispatcher(
@@ -669,13 +691,15 @@ async def test_reconcile_skips_non_critic_policy_denials(tmp_path, monkeypatch):
     assert isinstance(state, SharedState)
     state.record_specialist_patch_verdict("spec-root", "approve")
     task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={
-            "specialist_task_id": "spec-root",
-            "framework_source_root": "/root",
-            "apply_only": True,
-        },
-        idempotency_key="approved-prop-bad-root",
+        TaskSpec(
+            kind="integrate_patch",
+            params={
+                "specialist_task_id": "spec-root",
+                "framework_source_root": "/root",
+                "apply_only": True,
+            },
+            idempotency_key="approved-prop-bad-root",
+        ),
     )
     await sub.run_task(task)
     disp = _reconcile_dispatcher(sub=sub, tasks=sub.tasks, shared_state=state)
@@ -693,9 +717,11 @@ async def test_dispatched_internal_framework_agent_passes(tmp_path, monkeypatch)
 
     sub.register_executor("framework_agent", _stub)
     task = await sub.tasks.create(
-        kind="framework_agent",
-        params={"candidate": {"repo": "x/y", "pr_number": 1}},
-        idempotency_key="internal-framework-agent",
+        TaskSpec(
+            kind="framework_agent",
+            params={"candidate": {"repo": "x/y", "pr_number": 1}},
+            idempotency_key="internal-framework-agent",
+        ),
     )
     res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -719,9 +745,11 @@ async def test_runner_without_policy_skips_dispatch_validation(tmp_path, monkeyp
 
     sub.register_executor("integrate_patch", _stub)
     task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={"specialist_task_id": "no-gate", "apply_only": True},
-        idempotency_key="no-policy-gate",
+        TaskSpec(
+            kind="integrate_patch",
+            params={"specialist_task_id": "no-gate", "apply_only": True},
+            idempotency_key="no-policy-gate",
+        ),
     )
     res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -733,9 +761,11 @@ async def test_killed_running_task_keeps_its_result(tmp_path, monkeypatch):
     """A task cancelled mid-flight still returns its executor result."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
     task = await sub.tasks.create(
-        kind="report",
-        params={},
-        idempotency_key="k-kill-midflight",
+        TaskSpec(
+            kind="report",
+            params={},
+            idempotency_key="k-kill-midflight",
+        ),
     )
 
     async def _stub(ctx):

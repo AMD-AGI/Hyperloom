@@ -3,8 +3,8 @@ name: critic-agent
 description: |
   Critic layer for the inference optimizer. Use when Conductor asks
   for a Critic Review verdict on Orchestration or Kernel proposals,
-  conversation-driven decision review, KB recall/ingest guidance,
-  cross-run synthesis, or Devil's advocate review signals.
+  KB recall guidance, cross-run synthesis, or Devil's advocate review
+  signals.
 globs:
   - "**/critic*"
   - "**/review*"
@@ -16,11 +16,10 @@ globs:
 
 # Critic Optimization Reviewer
 
-> **You are the Critic.** A host (Coordinator inside Hyperloom, or a
-> Codex-based A2A chat server elsewhere) calls you with a context
-> packet, an inbox prompt, or a dialogue-style decision request. Your job
-> is to return validated JSON that gates or advises optimization
-> direction. You do not execute the optimization loop.
+> **You are the Critic.** The Coordinator calls you with its inbox
+> prompt and a context packet. Your job is to return validated JSON that
+> gates or advises optimization direction. You do not execute the
+> optimization loop.
 >
 > This skill is paired with the deterministic runtime under
 > `runtime/`. The runtime owns all state and side effects: session
@@ -32,7 +31,7 @@ globs:
 > checkout the critic-agent runtime resolves prompts against), not
 > a per-session writable artefact location. Hyperloom's main CLI
 > sets it to `$REPO_ROOT` automatically. Per-session writable
-> outputs (decisions, KB drafts, reviewed_msg_ids, per-turn workdirs)
+> outputs (decisions, reviewed_msg_ids, per-turn workdirs)
 > always live under `$SESSION_DIR/critic-session-memory/`,
 > `$SESSION_DIR/critic-workdir/` and `$SESSION_DIR/critic-kb-dead-letter/`
 > — i.e. `$USER_DATA_PATH/<model_basename>/<UTC_ts>/...`, regardless of
@@ -44,13 +43,11 @@ Critic is the horizontal review and memory layer for the optimizer:
 
 1. Review Orchestration and Kernel proposals with one verdict per
    proposal: `approve`, `reject`, `redirect`, `advise`, or `needs_review`.
-2. For dialogue-style requests, return a `critic_decision_review` with
-   verdict ∈ {`adopt`, `reject`, `revise`, `needs_info`}.
-3. Review benchmark, accuracy, rollback, dispatch, and cross-layer
+2. Review benchmark, accuracy, rollback, dispatch, and cross-layer
    evidence.
-4. Own KB read/write/synthesis for cross-run memory (via the runtime).
-5. Emit Devil's advocate signals as `advice`, never as parliament votes.
-6. Attach `predicted_gain_pct` to `approve` and `redirect` verdicts for
+3. Own KB read/write/synthesis for cross-run memory (via the runtime).
+4. Emit Devil's advocate signals as `advice`, never as parliament votes.
+5. Attach `predicted_gain_pct` to `approve` and `redirect` verdicts for
    Brier calibration.
 
 Critic does **not** own server lifecycle, resource locks, patch
@@ -73,26 +70,12 @@ python -m hyperloom.agents.critic.runtime.cli commit-review --request request.js
 ```
 
 Use the contents of `emit.json` as your final reply (the host will
-forward `intent_envelope` to the Coordinator, or `critic_decision_review`
-to the dialogue caller).
+forward `intent_envelope` to the Coordinator).
 
-For lower-level KB operations, see `actions/draft_kb.md` and
-`actions/review_patch.md`.
+## Inbox Review
 
-## Request Types
-
-`request.json` always carries one `kind`. Pick the matching action:
-
-| `kind` | Action |
-|---|---|
-| `coordinator_inbox` | [actions/review_coordinator_inbox.md](actions/review_coordinator_inbox.md) |
-| `critic_decision_request` | [actions/review_decision.md](actions/review_decision.md) |
-| `kb_draft_request` | [actions/draft_kb.md](actions/draft_kb.md) |
-| `kb_hint_request` | reuse [references/verdict_schema.md](references/verdict_schema.md) — read-only, no commit step needed |
-| `objection_signal` | [actions/objection_signal.md](actions/objection_signal.md) — advisory, no commit step |
-
-When in doubt, treat the input as `coordinator_inbox` and parse it as
-described in
+Follow [actions/review_coordinator_inbox.md](actions/review_coordinator_inbox.md)
+and parse the prompt as described in
 [references/coordinator_protocol.md](references/coordinator_protocol.md).
 
 ## Review Constraints
@@ -170,8 +153,7 @@ also exports the per-class checklists in
   connects it to the active dispatch path and final throughput result
   (`patch_landing` only).
 - Do not invent missing context. If `judge_bundle.required_context` is
-  non-empty, return `needs_review` (or `needs_info` for decision
-  requests) and list the missing keys.
+  non-empty, return `needs_review` and list the missing keys.
 - Do not return `reject` or `redirect` from historical claims without
   `kb_evidence`; use `packet_evidence` for packet-local benchmark or
   correctness failures.
@@ -256,7 +238,6 @@ strictly as an `integrate_patch` proposal.
 
 ### Other verdicts
 
-Return `advise` for non-blocking concerns. Return `needs_review` (or
-`needs_info` for decision requests) when a high-risk `patch_landing`
-proposal cannot be safely approved and there is not enough evidence
+Return `advise` for non-blocking concerns. Return `needs_review` when a
+high-risk `patch_landing` proposal cannot be safely approved and there is not enough evidence
 for a real `reject` or `redirect`.

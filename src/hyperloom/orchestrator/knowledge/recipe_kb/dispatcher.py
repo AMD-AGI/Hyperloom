@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from .local_store import RecipeFilters
+from .local_store import RecipeFilters, RecipeUpsert
 
 
 log = logging.getLogger(__name__)
@@ -101,12 +101,12 @@ class RecipeKB:
             },
         }
 
-    def put_recipe(self, **kwargs: Any) -> dict[str, Any]:
+    def put_recipe(self, upsert: RecipeUpsert) -> dict[str, Any]:
         """Write one local Recipe row and emit a best-effort audit event."""
 
-        canonical_id = str(kwargs.get("canonical_id") or "")
+        canonical_id = str(upsert.canonical_id or "")
         try:
-            result = self.local.put_recipe(**kwargs)
+            result = self.local.put_recipe(upsert)
         except Exception as exc:
             self._emit_audit(
                 {
@@ -125,7 +125,7 @@ class RecipeKB:
             )
             raise
 
-        provenance = kwargs.get("provenance")
+        provenance = upsert.provenance
         provenance = provenance if isinstance(provenance, dict) else {}
         details = provenance.get("details")
         details = details if isinstance(details, dict) else {}
@@ -145,21 +145,18 @@ class RecipeKB:
                 "phase": str(details.get("phase") or ""),
                 "request": {"canonical_id": canonical_id or None},
                 "identity": {
-                    key: str(kwargs.get(key) or "")
-                    for key in (
-                        "model",
-                        "hardware",
-                        "framework_name",
-                        "framework_version",
-                        "precision",
-                    )
+                    "model": str(upsert.model or ""),
+                    "hardware": str(upsert.hardware or ""),
+                    "framework_name": str(upsert.framework_name or ""),
+                    "framework_version": str(upsert.framework_version or ""),
+                    "precision": str(upsert.precision or ""),
                 },
                 "result": {
                     "canonical_id": str(result.get("canonical_id") or canonical_id),
                     "version": int(result.get("version") or 0),
                     "created": bool(result.get("created")),
-                    "best_throughput": float(kwargs.get("best_throughput") or 0.0),
-                    "best_config_nonempty": bool(kwargs.get("best_config")),
+                    "best_throughput": float(upsert.best_throughput or 0.0),
+                    "best_config_nonempty": bool(upsert.best_config),
                     "write_safety": {},
                 },
                 "counts": {key: int(value) for key, value in counts.items()},

@@ -8,18 +8,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from hyperloom.inference_optimizer.recipe_snapshot_constants import (
-    DEFAULT_ARCHITECTURES_SLUG,
-    DEFAULT_FRAMEWORK_SLUG,
-    DEFAULT_FRAMEWORK_VERSION_SLUG,
-    DEFAULT_HARDWARE_SLUG,
-    DEFAULT_MODEL_SLUG,
-    DEFAULT_MODEL_TYPE_SLUG,
-    DEFAULT_PRECISION_SLUG,
-    canonical_labels,
-    detect_framework_version,
-    recipe_canonical_id,
-)
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, recipe_canonical_id
 
 # One canonical-id segment: a path component safe to join onto a store root.
 SLUG_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
@@ -97,30 +86,23 @@ def canonical_id_for_path(*, root: Path, recipe_dir: Path) -> str:
         )
     model, hardware, framework_name, model_type, architectures, framework_version, precision = parts
     return recipe_canonical_id(
-        model=model,
-        hardware=hardware,
-        framework_name=framework_name,
-        model_type=model_type,
-        architectures=architectures,
-        framework_version=framework_version,
-        precision=precision,
+        RecipeIdentity(
+            model=model,
+            hardware=hardware,
+            framework_name=framework_name,
+            model_type=model_type,
+            architectures=architectures,
+            framework_version=framework_version,
+            precision=precision,
+        )
     )
 
 
 __all__ = [
     "CANONICAL_ID_PREFIX",
     "CANONICAL_ID_DIMENSIONS",
-    "DEFAULT_ARCHITECTURES_SLUG",
-    "DEFAULT_FRAMEWORK_SLUG",
-    "DEFAULT_FRAMEWORK_VERSION_SLUG",
-    "DEFAULT_HARDWARE_SLUG",
-    "DEFAULT_MODEL_SLUG",
-    "DEFAULT_MODEL_TYPE_SLUG",
-    "DEFAULT_PRECISION_SLUG",
     "InvalidCanonicalIdError",
     "canonical_id_for_path",
-    "canonical_labels",
     "cid_to_path_components",
-    "detect_framework_version",
     "recipe_canonical_id",
 ]

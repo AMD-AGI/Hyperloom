@@ -157,6 +157,7 @@ __all__ = [
     "STEP_REAUTHORED",
     "STEP_REVIEWED",
     "STEP_ROUTED",
+    "CriticReview",
     "FrameworkEventRecorder",
     "GateVerdict",
     "assemble_framework_ext",
@@ -292,6 +293,21 @@ class GateVerdict:
     reason: str = ""
     observed: Any = None
     threshold: Any = None
+
+
+@dataclass(frozen=True)
+class CriticReview:
+    """The Critic's ruling on one proposal, both as authored and as the loop committed it."""
+
+    verdict: str
+    effective_verdict: str = ""
+    held_to_rule: str = ""
+    reviewer: str = REVIEWER_CRITIC
+    reason: str = ""
+    confidence: Any = None
+    failure_reason_code: str = ""
+    advisory: Mapping[str, Any] | None = None
+    variants: Iterable[Mapping[str, Any]] | None = None
 
 
 class FrameworkEventRecorder:
@@ -486,21 +502,7 @@ class FrameworkEventRecorder:
             row["confidence"] = _float_or_none(fields.get("confidence"))
         self._sink.record(SECTION_PROPOSAL, row, row_type=ROW_PROPOSAL, natural_ids=_key(key))
 
-    def record_proposal_review(
-        self,
-        proposal_id: str,
-        *,
-        verdict: str,
-        effective_verdict: str = "",
-        held_to_rule: str = "",
-        reviewer: str = REVIEWER_CRITIC,
-        reason: str = "",
-        confidence: Any = None,
-        failure_reason_code: str = "",
-        concerns: Any = None,
-        advisory: Mapping[str, Any] | None = None,
-        variants: Iterable[Mapping[str, Any]] | None = None,
-    ) -> None:
+    def record_proposal_review(self, proposal_id: str, review: CriticReview) -> None:
         """Record the Critic's ruling on one proposal, inline on its row.
 
         The review lives on the proposal so that it follows the proposal
@@ -508,32 +510,31 @@ class FrameworkEventRecorder:
         to a rule that only declared ``advise`` is two facts, and reporting
         either alone misreads the round.
 
-        Args:
-            advisory: Recorded as given, since the vocabulary is the Critic's
-                own and a re-spelling here would drift from what it emitted.
-            variants: Per-variant rulings for a grid reviewed by
-                ``verdict_map``; a rejected variant reaches no bench, so no
-                attempt row carries its ruling.
+        ``review.advisory`` is recorded as given, since the vocabulary is the
+        Critic's own and a re-spelling here would drift from what it emitted.
+        ``review.variants`` holds the per-variant rulings for a grid reviewed by
+        ``verdict_map``; a rejected variant reaches no bench, so no attempt row
+        carries its ruling.
         """
         key = str(proposal_id or "")
         if not key:
             return
-        authored = str(verdict or "")
-        review: dict[str, Any] = {
+        authored = str(review.verdict or "")
+        ruling: dict[str, Any] = {
             "verdict": authored,
-            "effective_verdict": str(effective_verdict or "") or authored,
-            "held_to_rule": str(held_to_rule or ""),
-            "reviewer": str(reviewer or ""),
-            "reason": str(reason or ""),
-            "confidence": _float_or_none(confidence),
-            "failure_reason_code": str(failure_reason_code or ""),
-            "concerns": [str(item) for item in (concerns or []) if str(item or "")],
+            "effective_verdict": str(review.effective_verdict or "") or authored,
+            "held_to_rule": str(review.held_to_rule or ""),
+            "reviewer": str(review.reviewer or ""),
+            "reason": str(review.reason or ""),
+            "confidence": _float_or_none(review.confidence),
+            "failure_reason_code": str(review.failure_reason_code or ""),
+            "concerns": [],
             "reviewed_at": _now(),
         }
-        for field, value in _as_dict(advisory).items():
+        for field, value in _as_dict(review.advisory).items():
             name = str(field or "")
-            if name and name not in review:
-                review[name] = value
+            if name and name not in ruling:
+                ruling[name] = value
         rows = [
             {
                 "variant_name": str(row.get("variant_name") or ""),
@@ -543,14 +544,14 @@ class FrameworkEventRecorder:
                 "reason": str(row.get("reason") or ""),
                 "failure_reason_code": str(row.get("failure_reason_code") or ""),
             }
-            for row in (variants or [])
+            for row in (review.variants or [])
             if str(row.get("variant_name") or "")
         ]
         if rows:
-            review["variants"] = rows
+            ruling["variants"] = rows
         self._sink.record(
             SECTION_PROPOSAL,
-            {"proposal_id": key, "critic_review": review},
+            {"proposal_id": key, "critic_review": ruling},
             row_type=ROW_PROPOSAL,
             natural_ids=_key(key),
         )

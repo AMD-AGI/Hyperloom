@@ -1470,15 +1470,14 @@ def test_framework_outside_the_marker_table_has_no_observable_binding(tmp_path):
 
 
 def test_evidence_builder_carries_the_binding_and_the_requested_digest(tmp_path):
-    from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+    from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 
     config = tmp_path / "materialized.yaml"
     config.write_text("benchmark:\n  framework: vllm\n  model: /models/b\n", encoding="utf-8")
     log = _log(tmp_path, "server.log", "INFO vllm serve /models/b --tensor-parallel-size 4\n")
     evidence = build_launch_evidence(
-        config_path=config,
+        RequestedLaunch(config, "vllm"),
         actual_server_log=log,
-        framework="vllm",
         slot=tmp_path,
     )
     assert evidence["observed_model_binding"]["model_digest"] == evidence["requested_model_digest"]

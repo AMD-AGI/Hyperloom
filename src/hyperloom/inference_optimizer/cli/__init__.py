@@ -19,6 +19,7 @@ from typing import Any
 
 from hyperloom.common import llm_config
 from hyperloom.common.env import EnvValueError, env_bool
+from hyperloom.common.gpu_partition import PartitionModel
 from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
 from hyperloom.common.llm_headers import parse_custom_headers
 from .executors import (
@@ -69,6 +70,10 @@ from .bootstrap import (
     _print_final_summary,
     _print_session_skeleton,
     _reconcile_crash_count,
+    open_plug_host,
+    resolve_plug_manifest,
+    warn_without_target_gpu,
+    running_plug_host,
     _seed_shared_state,
     _snapshot_system_prompts,
     agentx_state_is_stale,
@@ -1334,15 +1339,6 @@ class PartitionRequest:
     streams_per_partition: int | None = None
 
 
-@dataclass(frozen=True)
-class PartitionModel:
-    """The model a partition shape must fit: its path and precision, and the session state holding its identity."""
-
-    model_path: str | None = None
-    precision: str | None = None
-    shared_state: Any = None
-
-
 def _export_partition_shape(
     request: PartitionRequest,
     *,
@@ -1422,11 +1418,7 @@ def _export_partition_shape(
         declared_mode=mode,
         streams=streams,
         gpu_type=gpu_type,
-        params={
-            "model_path": str(model.model_path or ""),
-            "precision": str(model.precision or ""),
-        },
-        shared_state=model.shared_state,
+        model=model,
         # The footprint refusal is arithmetic about streams sharing a partition.
         fanout_expected=fanout or bool(mode) or streams_named,
     )
@@ -2415,6 +2407,7 @@ def _settle_custom_specialist_only(args: argparse.Namespace) -> None:
 
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
+    plug_manifest = resolve_plug_manifest(args)  # first: a refused flag must leave any session as it was
     nodes_resolved = _resolve_run_topology(args)
     _settle_custom_specialist_only(args)
 
@@ -2482,6 +2475,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     session_dir = session.session_dir
     session_lock = session.session_lock
     manifest = session.manifest
+    plug_host = open_plug_host(plug_manifest, session_dir)
 
     # Recipe KB T0 anchor (after seed/restore for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
     recipe_kb_client = _bootstrap_recipe_kb(
@@ -2650,27 +2644,21 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     print(f"Tick interval   : {args.tick_interval_sec}s")
     print()
 
-    if not (getattr(args, "compare_against_gpu", None) or "").strip():
-        print(
-            "[target_analysis] no --compare-against-gpu set; will write a "
-            "marker JSON at $SESSION_DIR/target_analysis/target_baseline.json "
-            "(reason=no_target_gpu_configured) — set --compare-against-gpu "
-            "to fetch real InferenceX reference data.",
-            file=sys.stderr,
-        )
+    warn_without_target_gpu(args)
 
     stop_reason: str | None = None
     try:
-        stop_reason = await coordinator.run(
-            objective=objective,
-            options=RunOptions(
-                max_minutes=args.max_hours * 60.0,
-                tick_interval_sec=args.tick_interval_sec,
-                max_ticks=args.max_ticks,
-                install_signal_handlers=True,
-                closing_grace_sec=args.closing_grace_sec,
-            ),
-        )
+        with running_plug_host(plug_host):
+            stop_reason = await coordinator.run(
+                objective=objective,
+                options=RunOptions(
+                    max_minutes=args.max_hours * 60.0,
+                    tick_interval_sec=args.tick_interval_sec,
+                    max_ticks=args.max_ticks,
+                    install_signal_handlers=True,
+                    closing_grace_sec=args.closing_grace_sec,
+                ),
+            )
     finally:
         state = coordinator.shared_state
         effective_stop_reason = stop_reason or coordinator.stop_classification
