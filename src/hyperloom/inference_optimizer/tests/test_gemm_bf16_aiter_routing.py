@@ -226,9 +226,12 @@ class TestDtypePairSupport:
 
 
 class TestWriteFmoeUntunedCsvFromLog:
-    def test_writes_one_row_per_problem_and_token(self, tmp_path):
+    def test_writes_one_row_per_problem_and_missed_token(self, tmp_path):
+        """aiter pads a batch's token count before the lookup and logs the padded count: that is the row's key."""
+        missed = [REAL_NO_TUNED_FLYDSL.replace("256, 256, 4096", f"256, {token}, 4096") for token in (4, 512)]
+        tuned = REAL_2STAGE_DEFAULT.replace("256, 256, 4096", "256, 1024, 4096")
         path, report = krh._write_fmoe_untuned_csv_from_log(
-            _log(tmp_path, REAL_2STAGE_DEFAULT), [4, 512], tmp_path / "ws"
+            _log(tmp_path, "\n".join([*missed, tuned])), tmp_path / "ws"
         )
         rows = [line for line in open(path, encoding="utf-8").read().splitlines() if line]
         assert rows[0].split(",") == [
@@ -245,7 +248,7 @@ class TestWriteFmoeUntunedCsvFromLog:
             "use_g1u1",
             "doweight_stage1",
         ]
-        assert len(rows) == 3  # header + 2 tokens
+        assert [row.split(",")[0] for row in rows[1:]] == ["4", "512"]
         assert rows[1] == (
             "4,4096,512,256,6,ActivationType.Silu,torch.bfloat16,"
             "torch.float8_e4m3fn,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0"
@@ -262,7 +265,7 @@ class TestWriteFmoeUntunedCsvFromLog:
             + "\n"
             + _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2", expert=129),
         )
-        path, report = krh._write_fmoe_untuned_csv_from_log(log, [8], tmp_path / "ws")
+        path, report = krh._write_fmoe_untuned_csv_from_log(log, tmp_path / "ws")
 
         body = open(path, encoding="utf-8").read()
         assert "torch.bfloat16,torch.float4_e2m1fn_x2" not in body
@@ -272,7 +275,7 @@ class TestWriteFmoeUntunedCsvFromLog:
 
     def test_no_tunable_problem_yields_no_csv(self, tmp_path):
         log = _log(tmp_path, _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2"))
-        path, report = krh._write_fmoe_untuned_csv_from_log(log, [8], tmp_path / "ws")
+        path, report = krh._write_fmoe_untuned_csv_from_log(log, tmp_path / "ws")
 
         assert path == ""
         assert report["observed"] == 1
@@ -287,16 +290,14 @@ class TestWriteFmoeUntunedCsvFromLog:
 
         monkeypatch.setattr(krh.Path, "write_text", _boom)
 
-        path, report = krh._write_fmoe_untuned_csv_from_log(log, [8], tmp_path / "ws")
+        path, report = krh._write_fmoe_untuned_csv_from_log(log, tmp_path / "ws")
 
         assert path == ""
         assert report["tunable"] == 1
         assert "No space left on device" in report["write_error"]
 
     def test_no_moe_evidence_yields_no_csv(self, tmp_path):
-        path, report = krh._write_fmoe_untuned_csv_from_log(
-            _log(tmp_path, "INFO server started\n"), [8], tmp_path / "ws"
-        )
+        path, report = krh._write_fmoe_untuned_csv_from_log(_log(tmp_path, "INFO server started\n"), tmp_path / "ws")
         assert path == ""
         assert report["observed"] == 0
 

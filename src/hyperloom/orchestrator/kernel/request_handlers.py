@@ -1970,39 +1970,8 @@ _FORGE_BARREN_MICRO_DECISIONS = (
 )
 
 
-def _fmoe_token_list(tokens: Any) -> list[int]:
-    """Positive token counts to sweep, keyed off whatever the caller sends.
-
-    Accepts forge's comma-separated string (what :func:`_normalize_tokens`
-    produces) or a sequence. Unparseable and non-positive entries are dropped
-    rather than raising -- one bad entry is not worth the run -- and ``[1]`` is
-    the floor so there is always a token to key on.
-    """
-    if isinstance(tokens, str):
-        raw: list[str] = [part.strip() for part in tokens.split(",")]
-    elif isinstance(tokens, (list, tuple, set, frozenset)):
-        raw = [str(item).strip() for item in tokens]
-    elif tokens is None:
-        raw = []
-    else:
-        raw = [str(tokens).strip()]
-
-    out: set[int] = set()
-    for item in raw:
-        if not item:
-            continue
-        try:
-            value = int(item)
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            out.add(value)
-    return sorted(out) or [1]
-
-
 def _write_fmoe_untuned_csv_from_log(
     server_log: str,
-    tokens: Any,
     workspace: Path,
 ) -> tuple[str, dict[str, Any]]:
     """Turn the MoE problems observed in ``server_log`` into a tuning input CSV.
@@ -2013,6 +1982,13 @@ def _write_fmoe_untuned_csv_from_log(
     expert/topk counts are all properties of what the serving framework chose,
     and every attempt to re-derive them from the model config is a guess that has
     already produced tables no runtime lookup could reach.
+
+    The token column is held to the same rule: each problem is tuned at the token
+    counts its lookups missed, as aiter logged them. aiter pads a batch's token
+    count before the lookup, so a row keyed on a workload's raw M is never read.
+    Rows taken from the dense GEMMs' M values were: on GLM-5.3, sixteen prefill
+    counts between 16639 and 32768 that all pad to one key, while every decode
+    lookup ran the untuned default.
 
     Problems whose dtype pair aiter's codegen rejects are dropped rather than
     passed through, because one unsupported row aborts the whole tuner run.
@@ -2044,8 +2020,7 @@ def _write_fmoe_untuned_csv_from_log(
     if not tunable:
         return "", report
 
-    token_list = _fmoe_token_list(tokens)
-    rendered = [moe_untuned_csv_text(key, tokens=token_list).splitlines() for key in tunable]
+    rendered = [moe_untuned_csv_text(key).splitlines() for key in tunable]
     lines = rendered[0][:1] + [row for key_lines in rendered for row in key_lines[1:]]
 
     csv_path = workspace / "untuned_fmoe_from_runtime.csv"
@@ -2060,9 +2035,9 @@ def _write_fmoe_untuned_csv_from_log(
         log.warning("Forge GEMM shapes: cannot write %s: %s", csv_path, exc)
         return "", report
     log.info(
-        "Forge GEMM shapes: derived %d MoE problem(s) x %d token(s) from %s%s",
+        "Forge GEMM shapes: derived %d MoE problem(s), %d row(s) at their missed token counts, from %s%s",
         len(tunable),
-        len(token_list),
+        len(lines) - 1,
         server_log,
         (f"; dropped {report['dropped_unsupported']} as untunable by aiter" if report["dropped_unsupported"] else ""),
     )
@@ -2889,13 +2864,6 @@ async def _run_forge_gemm_tuning(
     # forge's own fallback derives --tokens from ``conc``, which is a guess
     # about M. The serving log records the M values the model actually ran, so
     # prefer those whenever a log with dispatch evidence was resolved.
-    #
-    # This has to happen BEFORE the MoE untuned CSV is built, not just before
-    # the payload is assembled: ``_write_fmoe_untuned_csv_from_log`` consumes
-    # ``tokens`` directly, and its fallback for an empty one is ``[1]``. Derived
-    # afterwards, the dense lane would get the full observed sweep while the MoE
-    # lane gets a table with a single M=1 row, which misses on every prefill and
-    # large-batch lookup and is reverted as no_shape_key_matched.
     if not tokens and kernel_sig_log:
         tokens = _normalize_tokens(await asyncio.to_thread(_tokens_from_serving_log, kernel_sig_log))
         if tokens:
@@ -2911,7 +2879,7 @@ async def _run_forge_gemm_tuning(
         moe_untuned_csv = ""
     moe_key_report: dict[str, Any] = {}
     if not moe_untuned_csv:
-        moe_untuned_csv, moe_key_report = _write_fmoe_untuned_csv_from_log(kernel_sig_log, tokens, workspace)
+        moe_untuned_csv, moe_key_report = _write_fmoe_untuned_csv_from_log(kernel_sig_log, workspace)
 
     tunableop_input = str(payload.get("tunableop_input") or "").strip()
     forge_framework = _forge_framework_for_vllm(

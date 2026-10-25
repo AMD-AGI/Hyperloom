@@ -291,7 +291,6 @@ duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integra
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_helpers_unit.py 12
 duplicated-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py 80
 duplicated-lines src/hyperloom/orchestrator/enablement/runtime/tests/test_targeted_build_recipes.py 34
-duplicated-lines src/hyperloom/orchestrator/kernel/tests/test_forge_server_log_evidence.py 48
 duplicated-lines src/hyperloom/orchestrator/measurement/tests/test_apply_verification.py 12
 duplicated-lines src/hyperloom/orchestrator/tests/_helpers.py 53
 duplicated-lines src/hyperloom/orchestrator/trace_analysis/tests/test_tracelens_csv.py 37
@@ -527,7 +526,7 @@ function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_grade_int
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_persist_forge_gemm_csv_durably 95
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_resolve_integrate_payload 87
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_fusion 144
-function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_gemm_tuning 467
+function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_gemm_tuning 460
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_integrate_rebaseline_with_lock_retry 111
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::integrate_handler 540
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._build_recipe_attrs_from_state 99
@@ -737,7 +736,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/report.py 1364
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303
 module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2657
 module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1429
-module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 4718
+module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 4686
 module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1671
 module-lines src/hyperloom/orchestrator/loop/coordinator.py 1423
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1503

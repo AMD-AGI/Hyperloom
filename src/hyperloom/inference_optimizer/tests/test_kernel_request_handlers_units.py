@@ -1866,25 +1866,42 @@ class TestForgeGemmHelperCoverage:
         assert values["q_dtype_w"] == "torch.float4_e2m1fn_x2"
         assert values["q_type"] == "QuantType.per_1x32"
 
-    def test_the_token_column_comes_from_the_workload(self, tmp_path):
-        """``tokens`` arrives as forge's comma-separated string, not a list."""
-        log = tmp_path / "server.log"
-        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
+    @pytest.mark.asyncio
+    async def test_the_token_column_is_what_the_moe_lookups_missed_not_the_dense_m(self, tmp_path, monkeypatch):
+        """aiter pads the token count before the MoE lookup, so a raw dense M keys a row no lookup reads.
 
-        for tokens, expected in (
-            ("1,32,64", ["1", "32", "64"]),
-            ("64", ["64"]),
-            ([1, 32, 64], ["1", "32", "64"]),
-            ("", ["1"]),
-            ("  16 , 16 ,bad,-8, 0 ", ["16"]),
-        ):
-            csv_path, _report = krh._write_fmoe_untuned_csv_from_log(
-                str(log), tokens, tmp_path / f"ws_{str(tokens)[:12].strip()}"
+        On GLM-5.3 the rows came from the dense GEMMs' sixteen prefill M values between 16639 and 32768, which all
+        pad to one key, while every decode lookup ran the untuned default.
+        """
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+
+        def moe_miss(token: int) -> str:
+            return self._REAL_MOE_DISPATCH.replace("using 2stage default", "no tuned FlyDSL config").replace(
+                "256, 256, 4096", f"256, {token}, 4096"
             )
-            assert csv_path, f"no CSV for tokens={tokens!r}"
-            rows = Path(csv_path).read_text(encoding="utf-8").strip().splitlines()
-            got = [r.split(",")[0] for r in rows[1:]]
-            assert got == expected, f"tokens={tokens!r} -> {got}"
+
+        log = tmp_path / "server.log"
+        log.write_text(
+            "\n".join(["[aiter] shape is M:16639, N:4096, K:4096, not found tuned config in bf16_tuned_gemm.csv"])
+            + "\n"
+            + "\n".join(moe_miss(token) for token in (8, 32768))
+            + "\n",
+            encoding="utf-8",
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec, **_kwargs):
+            return 0, self._sentinel(), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        payload = {"task_id": "moe-tokens", "kernel_signature_log": str(log)}
+
+        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        written = _FORGE_GEMM_PAYLOADS[-1]
+        assert "16639" in str(written.get("tokens"))
+        rows = Path(written["moe_untuned_csv"]).read_text(encoding="utf-8").strip().splitlines()
+        assert [row.split(",")[0] for row in rows[1:]] == ["8", "32768"]
 
     @pytest.mark.asyncio
     async def test_the_moe_csv_reaches_the_forge_argv(self, tmp_path, monkeypatch):
