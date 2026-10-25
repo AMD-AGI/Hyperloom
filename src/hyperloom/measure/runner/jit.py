@@ -239,7 +239,7 @@ def _build_environment(environment: Mapping[str, str], farm: Farm | None) -> dic
         parts = [part for part in result.pop(_PYTHONPATH).split(os.pathsep) if part and part != str(farm.site)]
         if parts:
             result[_PYTHONPATH] = os.pathsep.join(parts)
-    if farm is not None and farm.meta_patched and result.get(AITER_META_DIR_ENV) == str(farm.aiter_meta):
+    if farm is not None and farm.aiter_meta is not None and result.get(AITER_META_DIR_ENV) == str(farm.aiter_meta):
         del result[AITER_META_DIR_ENV]
     return result
 

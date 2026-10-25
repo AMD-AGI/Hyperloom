@@ -394,13 +394,17 @@ def _pinned_meta_directory(rig: Rig) -> str | None:
     return rig.grid.configs[0]["benchmark"]["envs"].get("AITER_META_DIR")
 
 
-def test_a_patched_aiter_server_is_told_the_images_meta_directory_and_an_unpatched_one_nothing(rig) -> None:
+_FARM_META = "/farm/site/aiter_meta"
+
+
+def test_a_patched_aiter_server_is_told_the_farms_mirrored_meta_directory_and_an_unpatched_one_nothing(rig) -> None:
     rig.run("base", _arm(rig))
     assert _pinned_meta_directory(rig) is None
 
     rig.run("patched", _arm(rig, roots=_aiter_patch(rig)))
 
-    assert _pinned_meta_directory(rig) == str(rig.bases), "the directory around the image's aiter, where csrc is"
+    pinned = _pinned_meta_directory(rig)
+    assert pinned is not None and pinned.endswith(_FARM_META), "the farm's mirror of the image's meta directory"
 
 
 def test_a_meta_directory_the_server_inherits_is_kept_and_one_the_test_unsets_is_not(rig) -> None:
@@ -411,7 +415,7 @@ def test_a_meta_directory_the_server_inherits_is_kept_and_one_the_test_unsets_is
     rig.run("process", _arm(rig, roots=_aiter_patch(rig), process_env=inherited))
     assert _pinned_meta_directory(rig) is None, "the test's own process variables name one"
     rig.run("unset", _arm(rig, roots=_aiter_patch(rig), unset_envs=["AITER_META_DIR"]), extra_env=inherited)
-    assert _pinned_meta_directory(rig) == str(rig.bases), "the test removes it, so the server would find none"
+    assert str(_pinned_meta_directory(rig)).endswith(_FARM_META), "the test removes it, so the server would find none"
 
 
 def test_a_runtime_snapshot_is_part_of_the_aiter_key_because_the_sources_outside_the_package_are_in_it(rig) -> None:

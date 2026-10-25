@@ -54,6 +54,7 @@ from hyperloom.measure.farm import (
     verify_farm,
 )
 from hyperloom.measure.runner.jit import STAGING_DIR, ColdStart, Surroundings, build_session, cold_start
+from hyperloom.measure.runner.import_outcome import refine_imports
 from hyperloom.measure.runner.jit_outcome import refine_outcome
 from hyperloom.measure.runner.inventory import OutputRejected, drop_agentx_runtime, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
@@ -511,7 +512,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     _write_bundle(
         ctx,
         _Signed(spec, raw, key),
-        refine_outcome(_outcome_document(outcome, timed_out), session, cold.builds),
+        refine_imports(refine_outcome(_outcome_document(outcome, timed_out), session, cold.builds), farm),
         _Findings(files, facts, changed, timing, visible, surface, None if report is None else report.document()),
     )
 

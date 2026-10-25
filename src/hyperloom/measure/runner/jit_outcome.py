@@ -22,7 +22,7 @@ from hyperloom.measure.jit.builds import BuildLog
 from hyperloom.measure.jit.session import JitCacheSession
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC
 
-__all__ = ["COMPILE_ERROR", "STALE_MODULE", "refine_outcome"]
+__all__ = ["COMPILE_ERROR", "STALE_MODULE", "failed_outcome", "refine_outcome"]
 
 COMPILE_ERROR = "compile_error"
 STALE_MODULE = "stale_aiter_module"
@@ -39,12 +39,14 @@ def refine_outcome(document: dict[str, Any], session: JitCacheSession | None, bu
     if failure_class is None and document["returncode"] == 0:
         stale = session.stale_modules(builds)
         if stale:
-            return _failed(document, FailureClass.INFRA, f"{STALE_MODULE}: {_named(stale)} ran as the image built it")
+            return failed_outcome(
+                document, FailureClass.INFRA, f"{STALE_MODULE}: {_named(stale)} ran as the image built it"
+            )
     elif failure_class in _OPEN_CLASSES:
         broken = sorted(module for module in builds.failed if module in session.touched)
         if broken:
             reason = f"{COMPILE_ERROR}: {broken[0]}: {builds.failed[broken[0]]}"
-            return _failed(document, FailureClass.CANDIDATE, reason)
+            return failed_outcome(document, FailureClass.CANDIDATE, reason)
     return document
 
 
@@ -53,7 +55,8 @@ def _named(modules: list[str]) -> str:
     return ", ".join(modules[:_SHOWN_MODULES]) + (f" and {more} more" if more > 0 else "")
 
 
-def _failed(document: dict[str, Any], failure_class: FailureClass, reason: str) -> dict[str, Any]:
+def failed_outcome(document: dict[str, Any], failure_class: FailureClass, reason: str) -> dict[str, Any]:
+    """``document`` ended as a ``failure_class`` failure for ``reason``; a run that exited 0 gets the infra exit code."""
     refined = {**document, "error_class": None, "failure_class": failure_class.value, "failure_reason": reason}
     if refined["returncode"] == 0:
         refined["returncode"] = HOSTED_INFRA_FAILURE_RC

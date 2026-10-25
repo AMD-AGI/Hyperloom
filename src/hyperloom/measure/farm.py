@@ -10,16 +10,24 @@ interpreter and the same path the server gets: a farm that exists but is not the
 the image's framework and call it the candidate's.
 
 A rebuilt aiter also has to be told where the image keeps the sources it imports ``csrc`` from and builds from, because
-aiter looks for them around its own location, which is now the farm: unless the server already inherits one, the farm
-sets ``AITER_META_DIR`` to the image's own meta directory, resolved the way aiter resolves it. A patch to ``csrc`` or
-``hsa`` is a root of its own (``aiter_meta``): the farm mirrors the image's meta directory with the patched files laid
-over it, and ``AITER_META_DIR`` names that copy, which aiter builds its modules from and imports ``csrc`` from.
+aiter looks for them around its own location, which is now the farm. ``aiter/jit/core.py`` puts that meta directory first
+on ``sys.path`` of the server's process, and every worker the server spawns starts from that ``sys.path``; the image's own
+meta directory of a develop install holds the image's ``aiter`` package, which then shadows the farm's in every worker. So
+the farm mirrors the image's meta directory without its ``aiter`` and sets ``AITER_META_DIR`` to the mirror; a server that
+inherits a meta directory holding an ``aiter`` package is refused. A patch to ``csrc`` or ``hsa`` is a root of its own
+(``aiter_meta``): its patched files are laid over the same mirror, which aiter then builds its modules from.
+
+Which copy each process of the server really imported is noted at run time by
+:mod:`~hyperloom.measure.runner.import_origin_hook`, which the farm installs as the ``sitecustomize`` of its ``site``
+directory; :mod:`~hyperloom.measure.runner.import_outcome` reads the notes.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import shutil
 import subprocess
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass
@@ -30,6 +38,7 @@ import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_MARKER_DIR, AITER_META_WHEEL_DIR
+from hyperloom.measure.runner import import_origin_hook
 from hyperloom.measure.jit.key import AITER_PACKAGE
 from hyperloom.measure.jit.modules import image_aiter_meta
 from hyperloom.measure.spec import EnvEntry, EnvRoot
@@ -58,6 +67,9 @@ _FIND_SPEC = (
 _PROBE_TIMEOUT_SEC = 120
 _AGENTX_DEFAULT_PYTHON = "python3"
 _UTF8 = "utf-8"
+#: Where the processes of the server note which copy of each rebuilt package they imported, beside ``site``.
+IMPORT_NOTES_DIR = "imports"
+_HOOK_FILE = "sitecustomize.py"
 
 
 class FarmError(Exception):
@@ -77,6 +89,11 @@ class Farm:
     roots: tuple[EnvRoot, ...] = ()
     aiter_meta: Path | None = None
     meta_patched: bool = False
+
+    @property
+    def import_notes(self) -> Path:
+        """The directory the server's processes note the copy of each rebuilt package they imported in."""
+        return self.site.parent / IMPORT_NOTES_DIR
 
 
 def locate_package(import_name: str, python: str, cwd: Path) -> Path:
@@ -171,65 +188,81 @@ def build_farm(
 
     ``read_blob`` returns the bytes of a ``sha256:<hex>`` address and raises when it is not there. ``inherited`` is what the
     server's process inherits (:func:`inherited_environment`), this process's environment when not given: a rebuilt aiter
-    is told the image's meta directory only when it names none.
+    gets the farm's mirror of the image's meta directory only when it inherits none.
     """
     site = farm_dir / "site"
-    server_has = os.environ if inherited is None else inherited
-    built = []
-    rebuilt = []
-    meta = None
-    meta_root = None
+    roots = list(roots)
+    meta_root = next((root for root in roots if root.import_name == AITER_META_WHEEL_DIR), None)
+    packages = [root for root in roots if root is not meta_root]
     for root in roots:
         if root.kind != "package":
             raise FarmError(f"{root.id}: a runtime root is not supported by this runner yet")
-        if root.import_name == AITER_META_WHEEL_DIR:
-            meta_root = root
-            continue
-        base = locate_package(root.import_name, python, farm_dir.parent)
-        _build_root(root, base, site / root.import_name, read_blob)
-        if root.import_name == AITER_PACKAGE and not server_has.get(AITER_META_DIR_ENV):
-            meta = _checked_aiter_meta(root, base)
-        built.append(root.import_name)
-        rebuilt.append(root)
-    if meta_root is not None:
+    for root in packages:
+        _build_root(root, locate_package(root.import_name, python, farm_dir.parent), site / root.import_name, read_blob)
+    meta = None
+    if meta_root is not None or any(root.import_name == AITER_PACKAGE for root in packages):
         aiter = locate_package(AITER_PACKAGE, python, farm_dir.parent)
-        meta = _build_meta_root(meta_root, aiter, site, server_has, read_blob)
-        rebuilt.append(meta_root)
+        meta = _build_meta_root(meta_root, aiter, site, os.environ if inherited is None else inherited, read_blob)
+    rebuilt = tuple(packages) + (() if meta_root is None else (meta_root,))
     if not rebuilt:
         return None
-    return Farm(site, tuple(built), tuple(rebuilt), meta, meta_patched=meta_root is not None)
+    farm = Farm(site, tuple(root.import_name for root in packages), rebuilt, meta, meta_patched=meta_root is not None)
+    _install_import_watch(farm)
+    return farm
+
+
+def _install_import_watch(farm: Farm) -> None:
+    """Make the server's processes note where they import each rebuilt package from (``import_origin_hook``)."""
+    if not farm.packages:
+        return
+    shutil.copyfile(Path(import_origin_hook.__file__), farm.site / _HOOK_FILE)
+    watch = {import_origin_hook.PACKAGES_KEY: list(farm.packages), import_origin_hook.NOTES_KEY: str(farm.import_notes)}
+    (farm.site / import_origin_hook.WATCH_FILE).write_text(json.dumps(watch), encoding=_UTF8)
 
 
 def _build_meta_root(
-    root: EnvRoot, aiter: Path, site: Path, server_has: Mapping[str, str], read_blob: Callable[[str], bytes]
-) -> Path:
-    """Mirror the image's meta directory into ``site`` with the patched ``csrc`` and ``hsa`` laid over it.
+    root: EnvRoot | None, aiter: Path, site: Path, server_has: Mapping[str, str], read_blob: Callable[[str], bytes]
+) -> Path | None:
+    """Mirror the image's meta directory into ``site`` with the patched ``csrc`` and ``hsa`` of ``root`` (when there is
+    one) laid over it; ``None`` when the sheet patches only aiter's Python and the server inherits a meta directory.
 
-    The server must read this copy, so a server that inherits a meta directory of its own is refused: it would build the
-    image's sources and call them the candidate's. The image's own ``aiter`` directory is left out, since aiter puts the
-    meta directory first on its import path, where a second ``aiter`` would shadow the package of the farm.
+    The image's own ``aiter`` directory is left out, since aiter puts the meta directory first on its import path, where a
+    second ``aiter`` would shadow the package of the farm in every worker. For the same reason an inherited meta directory
+    that holds an ``aiter`` package is refused; one that patched sources need is refused whatever it holds, since the server
+    would build the image's sources and call them the candidate's.
     """
     inherited = server_has.get(AITER_META_DIR_ENV)
     if inherited:
-        raise FarmError(
-            f"{root.id}: the server inherits {AITER_META_DIR_ENV}={inherited!r}, which it would read instead of the "
-            "patched csrc and hsa; the test cannot be measured with it set"
-        )
+        if root is not None:
+            raise FarmError(
+                f"{root.id}: the server inherits {AITER_META_DIR_ENV}={inherited!r}, which it would read instead of the "
+                "patched csrc and hsa; the test cannot be measured with it set"
+            )
+        if (Path(inherited) / AITER_PACKAGE).is_dir():
+            raise FarmError(
+                f"the server inherits {AITER_META_DIR_ENV}={inherited!r}, which holds an {AITER_PACKAGE} package: aiter "
+                f"puts that directory first on the import path its workers start from, so they would import that "
+                f"{AITER_PACKAGE} and not the farm's"
+            )
+        return None
+    target, left_out = site / AITER_META_WHEEL_DIR, frozenset({AITER_PACKAGE})
+    image_meta = _checked_aiter_meta(aiter)
+    if root is None:
+        _mirror(image_meta, target, "", set(), set(left_out))
+        return target
     shadowing = next((entry.path for entry in root.entries if entry.path.split("/")[0] == AITER_PACKAGE), None)
     if shadowing is not None:
         raise FarmError(f"{root.id}: {shadowing} would put a second {AITER_PACKAGE} package ahead of the farm's")
-    target = site / root.import_name
-    _build_root(root, _checked_aiter_meta(root, aiter), target, read_blob, left_out=frozenset({AITER_PACKAGE}))
+    _build_root(root, image_meta, target, read_blob, left_out=left_out)
     return target
 
 
-def _checked_aiter_meta(root: EnvRoot, base: Path) -> Path:
-    meta = image_aiter_meta(base)
+def _checked_aiter_meta(aiter: Path) -> Path:
+    meta = image_aiter_meta(aiter)
     if not (meta / AITER_META_MARKER_DIR).is_dir():
         raise FarmError(
-            f"{root.id}: the installed {root.import_name} at {base} keeps no {AITER_META_MARKER_DIR} directory in {meta}, "
-            f"so a rebuilt copy of it could not be told where to read its sources from ({AITER_META_DIR_ENV}) and would "
-            f"not import"
+            f"the installed {AITER_PACKAGE} at {aiter} keeps no {AITER_META_MARKER_DIR} directory in {meta}, so a rebuilt "
+            f"copy of it could not be told where to read its sources from ({AITER_META_DIR_ENV}) and would not import"
         )
     return meta
 
