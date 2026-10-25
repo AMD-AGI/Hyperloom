@@ -36,10 +36,7 @@ def _default_tp() -> int:
     if masked:
         visible = len([d for d in masked.split(",") if d.strip()])
     if visible < 2:
-        try:
-            visible = torch.cuda.device_count()
-        except Exception:  # noqa: BLE001 - no CUDA context is not fatal here
-            visible = 0
+        visible = torch.cuda.device_count()
     # A collective on one rank measures nothing, so never fall below two.
     return visible if visible > 1 else 2
 
