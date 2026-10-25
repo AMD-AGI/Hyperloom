@@ -23,12 +23,16 @@ signal are machine failures (:class:`~hyperloom.measure.jit.native.store.BuildIn
 from __future__ import annotations
 
 import os
+import re
 import resource
 import shutil
+import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from hyperloom.contracts.recipe import ComponentPatches
 from hyperloom.measure.compile import BlobStore, EnvRoot, PackageBase, apply_patch_stack
@@ -47,6 +51,12 @@ _TREE = "tree"
 _SOURCE_MODES = {EXECUTABLE: 0o700}
 _SOURCE_MODE = 0o600
 _WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+#: A compiler's diagnostic line (``file:line:col: error: ...``). The compile's output is kept only as its tails, and a
+#: parallel build prints the failing file's error long before its tail (the other jobs' output and the build tool's
+#: traceback follow), so the error lines are taken from the whole output first.
+_COMPILER_ERROR = re.compile(r"^\S.*?:\d+(?::\d+)?: (?:fatal )?error: .*$", re.MULTILINE)
+_MAX_ERRORS = 20
+_MAX_ERROR_CHARS = 500
 
 
 @dataclass(frozen=True)
@@ -114,24 +124,43 @@ def compile_tree(
         raise BuildInfraError(f"the builder failed its preflight: {checked.problem}")
     toolchain = {**checked.toolchain, "gfx": request.machine.gfx_arch, "max_jobs": str(recipe.max_jobs)}
     started, cpu_before = time.monotonic(), _children_cpu_seconds()
+    errors: list[str] = []
     result = run_argv(
         recipe.argv(request.machine.python),
         cwd=tree,
         env=recipe.environment(request.machine.gfx_arch, Path(scratch)),
         timeout_sec=recipe.budget_sec,
+        run=_keeping_errors(errors, f"{tree}{os.sep}"),
     )
     timing = (_children_cpu_seconds() - cpu_before, time.monotonic() - started)
-    log = f"{result.stdout_tail}\n{result.stderr_tail}"
+    log = "\n".join([*errors, result.stdout_tail, result.stderr_tail])
     if result.timed_out or result.returncode < 0:
         raise BuildInfraError(f"the compile of {recipe.component} timed out or was killed (rc={result.returncode})")
     if result.returncode != 0:
-        return _failed(f"{COMPILE_ERROR}: the compile exited {result.returncode}", toolchain, timing, log, scratch)
+        exited = f"{COMPILE_ERROR}: the compile exited {result.returncode}"
+        return _failed(f"{exited}: {errors[0]}" if errors else exited, toolchain, timing, log, scratch)
     image = Path(request.image_root) if against_image else None
     try:
         outputs = harvest(tree / recipe.package_dir, recipe.outputs, image, recipe.max_output_bytes, Path(scratch))
     except HarvestError as exc:
         return _failed(f"{COMPILE_ERROR}: {exc}", toolchain, timing, log, scratch)
     return Staged(READY, outputs, toolchain, timing[0], timing[1], log, Path(scratch))
+
+
+def _keeping_errors(errors: list[str], tree_prefix: str) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """A ``subprocess.run`` that also collects the compiler's distinct error lines from the whole output, paths made
+    relative to the tree."""
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        done = subprocess.run(argv, **kwargs)
+        for stream in (done.stdout or "", done.stderr or ""):
+            for line in _COMPILER_ERROR.findall(stream):
+                error = line.replace(tree_prefix, "")[:_MAX_ERROR_CHARS]
+                if len(errors) < _MAX_ERRORS and error not in errors:
+                    errors.append(error)
+        return done
+
+    return run
 
 
 def _failed(failure: str, toolchain: dict[str, str], timing: tuple[float, float], log: str, scratch: Path) -> Staged:

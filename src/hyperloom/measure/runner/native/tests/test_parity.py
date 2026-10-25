@@ -74,7 +74,9 @@ def test_an_unpatched_tree_that_does_not_build_fails_parity(tmp_path: Path) -> N
 
     report = _parity(bench)
 
-    assert report.differences == ("the unpatched tree does not build: compile_error: the compile exited 1",)
+    assert report.differences == (
+        "the unpatched tree does not build: compile_error: the compile exited 1: src/kernel.c:1: error: stop",
+    )
 
 
 def test_the_import_probe_names_why_a_package_does_not_import(tmp_path: Path) -> None:

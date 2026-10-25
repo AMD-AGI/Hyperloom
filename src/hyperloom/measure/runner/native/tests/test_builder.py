@@ -68,10 +68,18 @@ def test_a_compile_error_is_stored_signed_and_answered_again_without_a_rebuild(b
     first, second = _build(bench, patch), _build(bench, patch)
 
     assert (first.record.status, second.reused, len(bench.preflight.calls)) == (FAILED, True, 1)
-    assert first.record.failure == "compile_error: the compile exited 1"
+    assert first.record.failure == "compile_error: the compile exited 1: src/kernel.c:1: error: stop"
     entry = bench.store.entry_dir(first.record.inputs)
     assert sorted(p.name for p in entry.iterdir()) == sorted([*RECORD_FILES[FAILED], LOG_NAME])
     assert "error: stop" in (entry / LOG_NAME).read_text()
+
+
+def test_the_compilers_error_is_kept_when_later_output_buries_it(bench: Bench) -> None:
+    record = _build(bench, bench.patch({KERNEL: "#noisy\n"})).record
+
+    assert record.failure == "compile_error: the compile exited 1: src/kernel.c:3:2: error: W178 noisy failure"
+    log = (bench.store.entry_dir(record.inputs) / LOG_NAME).read_text()
+    assert log.startswith("src/kernel.c:3:2: error: W178 noisy failure\n")
 
 
 @pytest.mark.parametrize(

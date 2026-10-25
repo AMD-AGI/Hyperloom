@@ -37,6 +37,11 @@ import hashlib, os, pathlib, sys
 print(" ".join(sorted(os.environ)))
 src = pathlib.Path("src/kernel.c").read_text()
 out = pathlib.Path("python/fakepkg/kernel.so")
+if "#noisy" in src:
+    print("src/kernel.c:3:2: error: W178 noisy failure")
+    print("ninja: build stopped " * 500)
+    sys.stderr.write("Traceback (most recent call last) " * 500)
+    sys.exit(1)
 if "#error" in src:
     sys.stderr.write("src/kernel.c:1: error: stop\\n")
     sys.exit(1)
