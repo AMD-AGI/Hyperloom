@@ -3040,25 +3040,12 @@ class BenchmarkRunExecutor:
         _record(result)
         return result
 
-    async def _mn_warmup_pass(
-        self,
-        *,
-        cmd: list[str],
-        env: dict[str, str],
-        output_dir: Path,
-        framework: str,
-        timeout_sec: int,
-        session_deadline_sec: float | None,
-        silence_timeout_sec: float | None = None,
-        capture_meta: dict[str, Any],
-        round_warnings: list[str],
-        ctx_extra: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | None:
+    async def _mn_warmup_pass(self, round_: _BenchmarkRound, round_warnings: list[str]) -> dict[str, Any] | None:
         """Run the discarded multi-node client warmup against the restarted server."""
         # A multi-node round is two client passes of the same shape against a server the round did not boot, and the
         # session's measured figure is one of them -- the round's wall-clock is taken after this pass -- so the pair
         # costs twice it.
-        state = (ctx_extra or {}).get("shared_state") or self.shared_state
+        state = round_.ctx_extra.get("shared_state") or self.shared_state
         one_pass_sec = _phase_state.measured_seconds(state, "baseline_runtime_sec")
         affordable, evidence = self._round_affordable(
             state,
@@ -3076,20 +3063,20 @@ class BenchmarkRunExecutor:
             refused = _unlaunched_round_result(
                 STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
                 round_label="multi-node round",
-                output_dir=output_dir,
-                capture_meta=capture_meta,
+                output_dir=round_.output_dir,
+                capture_meta=round_.capture_meta,
             )
             refused["budget_shortfall"] = evidence
             return refused
-        warm_dir = output_dir / "mn_warmup"
+        warm_dir = round_.output_dir / "mn_warmup"
         started_unix = time.time()
         # The measurement is discarded, but the returncode is not: this pass is a full benchmark round, so a stop here
         # ends the baseline round.
         warm_rc: int | None = None
         try:
             warm_dir.mkdir(parents=True, exist_ok=True)
-            warm_cmd = [str(warm_dir) if c == str(output_dir) else c for c in cmd]
-            warm_env = dict(env)
+            warm_cmd = [str(warm_dir) if c == str(round_.output_dir) else c for c in round_.cmd]
+            warm_env = dict(round_.env)
             warm_env["RESULT_DIR"] = str(warm_dir)
             warm_env["EVAL_RESULT_DIR"] = str(warm_dir / "eval_output")
             warm_env["SERVER_LOG"] = str(warm_dir / "server.log")
@@ -3104,11 +3091,11 @@ class BenchmarkRunExecutor:
                     env=warm_env,
                     cwd=str(warm_dir),
                     watch=RoundWatch(
-                        timeout=timeout_sec,
-                        silence_timeout_sec=silence_timeout_sec,
+                        timeout=round_.timeout_sec,
+                        silence_timeout_sec=round_.silence_timeout_sec,
                         server_already_ready=True,
-                        server_log_path=_watchdog_server_log_path(warm_dir, framework),
-                        session_deadline_sec=session_deadline_sec,
+                        server_log_path=_watchdog_server_log_path(warm_dir, round_.framework),
+                        session_deadline_sec=round_.session_deadline_sec,
                     ),
                     on_output=warm_activity.note,
                 )
@@ -3124,8 +3111,8 @@ class BenchmarkRunExecutor:
             warm_rc,
             round_label="multi-node warmup pass",
             runtime_sec=max(0.0, time.time() - started_unix),
-            output_dir=output_dir,
-            capture_meta=capture_meta,
+            output_dir=round_.output_dir,
+            capture_meta=round_.capture_meta,
         )
 
     def _preflight_server_argv(
@@ -3313,18 +3300,7 @@ class BenchmarkRunExecutor:
         log.info("baseline_executor: launching Magpie cmd=%s output_dir=%s", round_.cmd, output_dir)
         round_warnings: list[str] = []
         if is_multi_node() and mn_bench_warmup_enabled() and not ctx_extra.get("mn_round_restarted"):
-            warmup = await self._mn_warmup_pass(
-                cmd=round_.cmd,
-                env=round_.env,
-                output_dir=output_dir,
-                framework=framework,
-                timeout_sec=round_.timeout_sec,
-                session_deadline_sec=session_deadline_sec,
-                silence_timeout_sec=silence_timeout_sec,
-                capture_meta=round_.capture_meta,
-                round_warnings=round_warnings,
-                ctx_extra=ctx_extra,
-            )
+            warmup = await self._mn_warmup_pass(round_, round_warnings)
             if warmup is not None:
                 return warmup
         return await self._measured_round_result(round_, round_warnings)
