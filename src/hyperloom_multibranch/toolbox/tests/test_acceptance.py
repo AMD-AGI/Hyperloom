@@ -10,7 +10,8 @@ import pytest
 from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind
 from hyperloom.contracts.recipe import ComponentChange, ComponentPatches, PatchRef, Recipe, RecipeDelta
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
-from hyperloom_multibranch.toolbox.tests.helpers import BAD_DELTA, IMAGE, OTHER_IMAGE, FakeRepo, build, req
+from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup
+from hyperloom_multibranch.toolbox.tests.helpers import BAD_DELTA, IMAGE, OTHER_IMAGE, FakePlanner, FakeRepo, build, req
 
 
 async def _rejected(rig, request, code: str) -> None:
@@ -232,3 +233,42 @@ async def test_a_component_the_parent_lacks_still_needs_its_repository_and_commi
     rig = build(tmp_path, repo=_with_sglang())
     bare = RecipeDelta(components=(ComponentChange("triton", add_patches=(PATCH,)),))
     await _rejected(rig, req(change=bare), "delta_not_applicable")
+
+
+# --- GSM8K on confirm, lead adoption and FINAL only, once the rule gate takes an explore without it (board topic 128) --
+
+
+def _skipping_explore() -> Acceptance:
+    setup = AcceptanceSetup(FakeRepo(), FakePlanner(), IMAGE, explore_accuracy=False)
+    return Acceptance(setup, is_accepted=lambda request_id: True)
+
+
+@pytest.mark.parametrize("asked", [False, True])
+def test_a_plain_explore_skips_accuracy_and_its_request_records_the_skip_when_explore_accuracy_is_off(
+    asked: bool,
+) -> None:
+    accepted = _skipping_explore().with_required_accuracy(req(purpose=Purpose.EXPLORE, accuracy=asked))
+
+    assert accepted.accuracy is False
+
+
+def test_an_explore_that_adopts_a_lead_with_the_consistency_check_still_runs_accuracy() -> None:
+    request = req(purpose=Purpose.EXPLORE, consistency_check=True)
+
+    assert _skipping_explore().with_required_accuracy(request).accuracy is True
+
+
+@pytest.mark.parametrize("purpose", [Purpose.BASELINE, Purpose.INTEGRATION, Purpose.FINAL])
+def test_with_explore_accuracy_off_every_other_purpose_the_gate_reads_still_runs_accuracy(purpose: Purpose) -> None:
+    assert _skipping_explore().with_required_accuracy(req(purpose=purpose)).accuracy is True
+
+
+def test_with_explore_accuracy_off_a_confirm_still_runs_accuracy() -> None:
+    request = req(purpose=Purpose.CONFIRM, retest_of="first")
+
+    assert _skipping_explore().with_required_accuracy(request).accuracy is True
+
+
+async def test_by_default_a_plain_explore_still_runs_accuracy_because_the_gate_reads_its_score(tmp_path: Path) -> None:
+    assert AcceptanceSetup(FakeRepo(), FakePlanner(), IMAGE).explore_accuracy is True
+    assert await _accepted_accuracy(build(tmp_path), req(purpose=Purpose.EXPLORE)) == (True, True)

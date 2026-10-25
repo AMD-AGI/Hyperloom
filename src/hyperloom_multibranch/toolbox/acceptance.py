@@ -137,6 +137,13 @@ class AcceptanceSetup:
     pack says which), whose purpose the pack always checks, or whose request forces it, runs the check; ``None`` runs none.
     ``long_context`` is the staged prompt set of the long-context check, which a request that sets ``long_context_check``
     runs; ``None`` runs none.
+
+    ``explore_accuracy`` off leaves the accuracy evaluation (GSM8K) out of a plain ``explore`` test (one that does not
+    force the consistency check), whose accepted request then records ``accuracy=False``: the check was skipped, and the
+    result carries no score that could read as a pass. Confirm, integration, FINAL and baseline tests, and an explore
+    that forces the consistency check (a lead being adopted), still run it. It is on by default because the rule gate
+    still reads an eval score from every explore (``rulegate.readings.eval_score``); once the gate judges an explore
+    without one, the default turns off and this field goes.
     """
 
     repo: ExperimentRepo
@@ -146,6 +153,7 @@ class AcceptanceSetup:
     supported_kinds: Collection[str] | None = None
     short_prompts: ShortPromptSetup | None = None
     long_context: LongContextSetup | None = None
+    explore_accuracy: bool = True
 
 
 @dataclass(frozen=True)
@@ -173,18 +181,21 @@ class Acceptance:
         self._workload = setup.workload_kind
         self._short_prompts = setup.short_prompts
         self._long_context = setup.long_context
+        self._explore_accuracy = setup.explore_accuracy
 
     def with_required_accuracy(self, request: TestRequest) -> TestRequest:
         """The request an InferenceX campaign runs: ``baseline``, ``explore``, ``confirm``, ``integration`` and
-        ``final`` tests always carry accuracy.
+        ``final`` tests always carry accuracy, except a plain explore when ``explore_accuracy`` is off, which never does.
 
         The rule gate refuses to judge an InferenceX result that has no score, so acceptance sets the flag (the
         accepted request records it) rather than refusing. AgentX campaigns and every other purpose are unchanged.
         """
 
-        if self._workload is WorkloadKind.INFERENCEX and request.purpose in _ACCURACY_PURPOSES and not request.accuracy:
-            return replace(request, accuracy=True)
-        return request
+        if self._workload is not WorkloadKind.INFERENCEX or request.purpose not in _ACCURACY_PURPOSES:
+            return request
+        plain_explore = request.purpose is Purpose.EXPLORE and not request.forces_consistency_check
+        wanted = not (plain_explore and not self._explore_accuracy and request.kind is not TestKind.ACCURACY)
+        return request if request.accuracy == wanted else replace(request, accuracy=wanted)
 
     async def prepare(self, request: TestRequest, *, replay: bool = False) -> Prepared:
         """Run the checks; ``replay`` re-prepares an already accepted request after a restart (it has its id)."""
