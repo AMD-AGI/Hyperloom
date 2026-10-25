@@ -6190,6 +6190,9 @@ def test_resume_runs_again_the_round_a_lost_process_started(tmp_path, monkeypatc
             phase=state.phase,
         )
     )
+    # Opening the round persisted it as the state's current iteration before the process was lost.
+    state.iteration = interrupted_iteration
+    store.save(state)
 
     resumed = IterationLoop(
         first.ic,

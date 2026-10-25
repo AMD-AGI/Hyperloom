@@ -6793,6 +6793,9 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         self._set_state_identity(self.run_state)
         self._stage_validated_warm_start_state()
         start_session(self.run_state)
+        if self._restarted_iteration is not None:
+            # start_session never reopens an iteration that was opened; the rerun of one a lost process never judged must.
+            self.run_state.next_iteration = self._restarted_iteration
         self._record_agent_availability()
         self.experiment = self.tracker.create_segment(
             CampaignSegment(self.run_state.campaign_id, next_segment_index, parent_experiment_id),
