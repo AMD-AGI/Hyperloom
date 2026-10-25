@@ -2668,7 +2668,6 @@ class BenchmarkRunExecutor:
             attempt.materialized_config_path,
             round_dir,
             cleanup=config.pop("cleanup"),
-            pid_dir=round_dir.parent,
             port=port,
             run_eval=config.pop("run_eval"),
         )
@@ -2972,7 +2971,6 @@ class BenchmarkRunExecutor:
         dest_dir: Path,
         *,
         cleanup: bool,
-        pid_dir: Path,
         port: int,
         run_eval: bool | None = None,
     ) -> Path:
@@ -2980,10 +2978,11 @@ class BenchmarkRunExecutor:
         with Path(base_config_path).open(encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
         bench = cfg.setdefault("benchmark", {})
+        # The rounds of one attempt share the server's pid files in the slot above their own dirs.
         _lifecycle.inject_lifecycle(
             bench,
             cleanup=cleanup,
-            pid_dir=pid_dir,
+            pid_dir=dest_dir.parent,
             port=port,
         )
         if run_eval is not None:
