@@ -19,6 +19,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 )
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_config_with_envs,
+    LaunchLayer,
 )
 
 # Mistral-Nemo-12B's native window — the value that triggered the production aiter OOM.
@@ -107,8 +108,7 @@ def _materialize_envs(
     materialized = materialize_config_with_envs(
         base,
         out,
-        extra_server_args=extra_server_args,
-        extra_envs=extra_envs,
+        launch=LaunchLayer(extra_server_args=extra_server_args, extra_envs=extra_envs),
     )
     cfg = yaml.safe_load(materialized.read_text())
     return cfg["benchmark"]["envs"]

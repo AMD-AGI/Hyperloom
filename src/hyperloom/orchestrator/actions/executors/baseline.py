@@ -97,7 +97,10 @@ from ._accuracy_gate import (
 from ._workload_envs import (
     VLLM_SOURCE_ROOT_ENVS,
     _client_tokenizer_mode,
+    BenchmarkTarget,
     FrameworkScriptMismatchError,
+    LaunchLayer,
+    MaterializeOptions,
     agentx_active,
     default_baseline_config,
     prepare_agentx_runtime,
@@ -2325,24 +2328,30 @@ class BenchmarkRunExecutor:
             config_path = materialize_benchmark_config(
                 config_path,
                 output_dir,
-                extra_server_args=server_args,
-                extra_envs=base_extra_envs,
-                remove_args=params.get("remove_args"),
-                unset_envs=params.get("unset_envs"),
-                args_mode=str(params.get("args_mode") or "append"),
-                model_path=resolved_model,
-                # gpu_type: task.params > $GPU_TYPE (cli.py canonicalizes mi325x->mi300x).
-                gpu_type=str(params.get("gpu_type") or "").strip().lower()
-                or os.environ.get("GPU_TYPE", "").strip().lower(),
-                benchmark_script=override_script,
-                # Only a genuine ``baseline`` task may establish/overwrite the quality reference;
-                # ``replay_warm_recipe`` reuses this executor but must compare against the pure baseline reference
-                # rather than redefine it.
-                establish_quality_ref=_should_establish_quality_ref(getattr(ctx.task, "kind", ""), params),
-                drop_moe_runner_backend=force_drop_moe_runner_backend,
-                flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
-                agentx_mode=agentx_active(shared_state),
-                grading=getattr(shared_state, "grading", None),
+                launch=LaunchLayer(
+                    extra_server_args=server_args,
+                    extra_envs=base_extra_envs,
+                    remove_args=params.get("remove_args"),
+                    unset_envs=params.get("unset_envs"),
+                    args_mode=str(params.get("args_mode") or "append"),
+                ),
+                target=BenchmarkTarget(
+                    model_path=resolved_model,
+                    # gpu_type: task.params > $GPU_TYPE (cli.py canonicalizes mi325x->mi300x).
+                    gpu_type=str(params.get("gpu_type") or "").strip().lower()
+                    or os.environ.get("GPU_TYPE", "").strip().lower(),
+                    benchmark_script=override_script,
+                ),
+                options=MaterializeOptions(
+                    # Only a genuine ``baseline`` task may establish/overwrite the quality reference;
+                    # ``replay_warm_recipe`` reuses this executor but must compare against the pure baseline reference
+                    # rather than redefine it.
+                    establish_quality_ref=_should_establish_quality_ref(getattr(ctx.task, "kind", ""), params),
+                    drop_moe_runner_backend=force_drop_moe_runner_backend,
+                    flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
+                    agentx_mode=agentx_active(shared_state),
+                    grading=getattr(shared_state, "grading", None),
+                ),
             )
         except (FrameworkScriptMismatchError, ServerArgvInvalidError) as exc:
             return {

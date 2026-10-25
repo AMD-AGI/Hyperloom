@@ -49,6 +49,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 )
 
 from .conftest import enable_multi_node, launches_by_round_slot
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
 
 
 # Section 1: _write_variant_abort_marker
@@ -1371,7 +1372,9 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
 
     monkeypatch.setattr(gr, "run_with_session_kill", launch_observer)
     with session_scope(session):
-        materialized = materialize_config_with_envs(base, tmp_path / "materialized", model_path="/models/test")
+        materialized = materialize_config_with_envs(
+            base, tmp_path / "materialized", target=BenchmarkTarget(model_path="/models/test")
+        )
         await run_grid(
             base_yaml_path=materialized,
             base_extra_args="",

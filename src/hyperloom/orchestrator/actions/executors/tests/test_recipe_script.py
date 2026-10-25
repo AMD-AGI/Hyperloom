@@ -17,7 +17,11 @@ from hyperloom.orchestrator.actions.executors._recipe_script import (
     launcher_overwritten_envs,
     resolve_launch_server_script,
 )
-from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
+from hyperloom.orchestrator.actions.executors._workload_envs import (
+    materialize_config_with_envs,
+    BenchmarkTarget,
+    MaterializeOptions,
+)
 
 
 @pytest.fixture
@@ -73,7 +77,10 @@ def test_the_launcher_gets_launcher_defaults(checkout, tmp_path, agentx):
     (model / "config.json").write_text(json.dumps(config), encoding="utf-8")
 
     out = materialize_config_with_envs(
-        _config(tmp_path), tmp_path / "out", model_path=str(model), gpu_type="mi355x", agentx_mode=agentx
+        _config(tmp_path),
+        tmp_path / "out",
+        target=BenchmarkTarget(model_path=str(model), gpu_type="mi355x"),
+        options=MaterializeOptions(agentx_mode=agentx),
     )
 
     assert "--block-size 128" in yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]

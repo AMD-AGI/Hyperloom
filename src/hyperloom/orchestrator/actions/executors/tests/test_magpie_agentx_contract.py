@@ -16,7 +16,11 @@ from hyperloom.common.perf_metric import constraint_veto_reason, graded_axes_of
 from hyperloom.inference_optimizer.cli.benchmark_config import bind_benchmark, configure_benchmark
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml
-from hyperloom.orchestrator.actions.executors._workload_envs import materialize_benchmark_config
+from hyperloom.orchestrator.actions.executors._workload_envs import (
+    materialize_benchmark_config,
+    BenchmarkTarget,
+    LaunchLayer,
+)
 from hyperloom.orchestrator.actions.executors.benchmark_result import (
     extract_benchmark_measurement,
     is_valid_measurement,
@@ -74,9 +78,8 @@ def test_materializer_does_not_turn_native_workload_into_synthetic(source, tmp_p
     rendered = materialize_benchmark_config(
         source,
         tmp_path / "round",
-        gpu_type="mi300x",
-        extra_server_args="--disable-cuda-graph",
-        extra_envs={"SGLANG_TEST": "1"},
+        launch=LaunchLayer(extra_server_args="--disable-cuda-graph", extra_envs={"SGLANG_TEST": "1"}),
+        target=BenchmarkTarget(gpu_type="mi300x"),
     )
     bench = load_benchmark(rendered)
     assert bench["runner_type"] == "mi355x"
@@ -89,7 +92,9 @@ def test_materializer_does_not_turn_native_workload_into_synthetic(source, tmp_p
 
 def test_grid_composes_accepted_launch_then_candidate(source, tmp_path):
     base = materialize_benchmark_config(
-        source, tmp_path / "base", extra_server_args="--chunked-prefill-size 4096", extra_envs={"SGLANG_TEST": "1"}
+        source,
+        tmp_path / "base",
+        launch=LaunchLayer(extra_server_args="--chunked-prefill-size 4096", extra_envs={"SGLANG_TEST": "1"}),
     )
     variant = GridVariant("candidate", "--chunked-prefill-size 2048", {"SGLANG_NEXT": "1"}, unset_envs=["SGLANG_TEST"])
     candidate = _build_variant_yaml(base, "", variant, output_subdir=tmp_path / "candidate")
@@ -123,7 +128,9 @@ def test_grid_ablation_removes_the_option_from_its_owning_layers(source, tmp_pat
 
 def test_recipe_removal_survives_readding_and_ablating_an_override(source, tmp_path):
     base = materialize_benchmark_config(
-        source, tmp_path / "base", remove_args=["--cuda-graph-max-bs"], extra_server_args="--cuda-graph-max-bs 256"
+        source,
+        tmp_path / "base",
+        launch=LaunchLayer(remove_args=["--cuda-graph-max-bs"], extra_server_args="--cuda-graph-max-bs 256"),
     )
     candidate = _build_variant_yaml(
         base,
@@ -149,7 +156,9 @@ def test_source_evidence_is_taken_after_application_and_survives_materialization
     bind_source_evidence(rendered, [{"framework_root": str(root), "patch_file": str(patch)}])
     evidence = load_benchmark(rendered)["agentx"]["launch_overrides"]["source_files"]
     assert str(module) in evidence
-    next_round = materialize_benchmark_config(rendered, tmp_path / "next", extra_server_args="--disable-cuda-graph")
+    next_round = materialize_benchmark_config(
+        rendered, tmp_path / "next", launch=LaunchLayer(extra_server_args="--disable-cuda-graph")
+    )
     assert load_benchmark(next_round)["agentx"]["launch_overrides"]["source_files"] == evidence
 
 
@@ -525,7 +534,7 @@ def vllm_source(source):
 def test_json_server_args_survive_every_native_composition(vllm_source, tmp_path, args):
     from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
 
-    base = materialize_benchmark_config(vllm_source, tmp_path / "base", extra_server_args=args)
+    base = materialize_benchmark_config(vllm_source, tmp_path / "base", launch=LaunchLayer(extra_server_args=args))
     assert load_benchmark(base)["agentx"]["launch_overrides"]["append_args"] == args.split(" ")
     bind_source_evidence(base, [])
     apply_native_runtime(base, {})
@@ -550,7 +559,7 @@ def test_a_value_with_a_single_quote_survives_repeated_native_composition(vllm_s
     from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
 
     argv = args.split(" ")
-    base = materialize_benchmark_config(vllm_source, tmp_path / "base", extra_server_args=args)
+    base = materialize_benchmark_config(vllm_source, tmp_path / "base", launch=LaunchLayer(extra_server_args=args))
     for _ in range(2):
         bind_source_evidence(base, [])
         apply_native_runtime(base, {})
@@ -592,7 +601,7 @@ def test_server_args_that_cannot_become_argv_are_refused_as_argv_invalid(vllm_so
     from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
     with pytest.raises(ValueError) as refused:
-        materialize_benchmark_config(vllm_source, tmp_path / "base", extra_server_args=args)
+        materialize_benchmark_config(vllm_source, tmp_path / "base", launch=LaunchLayer(extra_server_args=args))
     assert refused.value.error_class == ARGV_INVALID
     base = materialize_benchmark_config(vllm_source, tmp_path / "accepted")
     with pytest.raises(ValueError) as refused:

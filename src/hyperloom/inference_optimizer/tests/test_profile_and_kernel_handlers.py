@@ -31,6 +31,8 @@ from hyperloom.orchestrator.actions.executors.baseline import (
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     default_baseline_config,
     materialize_benchmark_config,
+    BenchmarkTarget,
+    LaunchLayer,
 )
 from hyperloom.orchestrator.actions.executors.profile import (
     ProfileExecutor,
@@ -165,7 +167,7 @@ def test_materialize_config_injects_model_path(tmp_path):
     out = materialize_benchmark_config(
         _PROFILE_SGLANG_CONFIG,
         tmp_path,
-        model_path="/path/models/DeepSeek-R1-0528",
+        target=BenchmarkTarget(model_path="/path/models/DeepSeek-R1-0528"),
     )
     with out.open() as f:
         rendered = yaml.safe_load(f)
@@ -192,8 +194,8 @@ def test_materialize_config_injects_model_with_other_overrides(tmp_path):
     out = materialize_benchmark_config(
         _PROFILE_SGLANG_CONFIG,
         tmp_path,
-        extra_envs={"BENCH_FOO": "bar"},
-        model_path="/some/model",
+        launch=LaunchLayer(extra_envs={"BENCH_FOO": "bar"}),
+        target=BenchmarkTarget(model_path="/some/model"),
     )
     with out.open() as f:
         rendered = yaml.safe_load(f)
@@ -208,7 +210,7 @@ def test_materialize_config_injects_runner_type(tmp_path):
     out = materialize_benchmark_config(
         _PROFILE_SGLANG_CONFIG,
         tmp_path,
-        gpu_type="mi355x",
+        target=BenchmarkTarget(gpu_type="mi355x"),
     )
     with out.open() as f:
         rendered = yaml.safe_load(f)
@@ -223,7 +225,7 @@ def test_r9700_baseline_and_profile_use_vllm_gfx12_runner(tmp_path, monkeypatch)
         out = materialize_benchmark_config(
             config_path,
             tmp_path / config_path.stem,
-            gpu_type="r9700",
+            target=BenchmarkTarget(gpu_type="r9700"),
         )
         rendered = yaml.safe_load(out.read_text())["benchmark"]
         assert rendered["runner_type"] == "gfx12"
@@ -251,7 +253,7 @@ def test_materialize_config_forces_generic_benchmark_script(tmp_path):
     out = materialize_benchmark_config(
         src_yaml,
         out_dir,
-        gpu_type="mi355x",
+        target=BenchmarkTarget(gpu_type="mi355x"),
     )
     with out.open() as f:
         rendered = yaml.safe_load(f)
@@ -284,7 +286,7 @@ def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
     out = materialize_benchmark_config(
         src_yaml,
         out_dir,
-        gpu_type="mi300x",
+        target=BenchmarkTarget(gpu_type="mi300x"),
     )
     with out.open() as f:
         rendered = yaml.safe_load(f)
@@ -531,8 +533,7 @@ def test_materialize_profile_bounds_survive_a_replacing_candidate(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_server_args=candidate,
-        args_mode="replace",
+        launch=LaunchLayer(extra_server_args=candidate, args_mode="replace"),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
@@ -560,7 +561,7 @@ def test_materialize_profile_bounds_survive_an_extra_envs_override(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_envs={"EXTRA_VLLM_ARGS": "--quantization fp8"},
+        launch=LaunchLayer(extra_envs={"EXTRA_VLLM_ARGS": "--quantization fp8"}),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
@@ -700,8 +701,7 @@ def test_materialize_profile_restore_rejects_a_zero_max_iterations(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_server_args="--profiler-config.max_iterations 0",
-        args_mode="replace",
+        launch=LaunchLayer(extra_server_args="--profiler-config.max_iterations 0", args_mode="replace"),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.max_iterations 128" in extra, extra
@@ -722,8 +722,7 @@ def test_materialize_profile_restore_rejects_a_max_iterations_above_the_cap(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_server_args="--profiler-config.max_iterations 100000",
-        args_mode="replace",
+        launch=LaunchLayer(extra_server_args="--profiler-config.max_iterations 100000", args_mode="replace"),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert extra.rindex("max_iterations 128") > extra.rindex("max_iterations 100000"), extra
@@ -744,8 +743,7 @@ def test_materialize_profile_restore_rejects_ignore_frontend_false(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_server_args="--profiler-config.ignore_frontend False",
-        args_mode="replace",
+        launch=LaunchLayer(extra_server_args="--profiler-config.ignore_frontend False", args_mode="replace"),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.ignore_frontend True" in extra, extra
@@ -767,8 +765,9 @@ def test_materialize_profile_disables_the_summary_table_even_when_a_candidate_re
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_server_args="--profiler-config.torch_profiler_dump_cuda_time_total True",
-        args_mode="replace",
+        launch=LaunchLayer(
+            extra_server_args="--profiler-config.torch_profiler_dump_cuda_time_total True", args_mode="replace"
+        ),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     flag = "--profiler-config.torch_profiler_dump_cuda_time_total"
@@ -790,18 +789,20 @@ def test_materialize_profile_restore_accepts_a_bound_that_already_holds(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_envs={
-            "EXTRA_VLLM_ARGS": (
-                "--profiler-config.profiler torch "
-                "--profiler-config.torch_profiler_dir /tmp/already-set "
-                "--profiler-config.delay_iterations 6080 "
-                "--profiler-config.max_iterations 64 "
-                "--profiler-config.ignore_frontend True "
-                "--profiler-config.capture_torch_profiler True "
-                "--profiler-config.detailed_trace_annotation True "
-                "--profiler-config.torch_profiler_dump_cuda_time_total False"
-            ),
-        },
+        launch=LaunchLayer(
+            extra_envs={
+                "EXTRA_VLLM_ARGS": (
+                    "--profiler-config.profiler torch "
+                    "--profiler-config.torch_profiler_dir /tmp/already-set "
+                    "--profiler-config.delay_iterations 6080 "
+                    "--profiler-config.max_iterations 64 "
+                    "--profiler-config.ignore_frontend True "
+                    "--profiler-config.capture_torch_profiler True "
+                    "--profiler-config.detailed_trace_annotation True "
+                    "--profiler-config.torch_profiler_dump_cuda_time_total False"
+                ),
+            }
+        ),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert extra.count("--profiler-config.max_iterations") == 1, extra
@@ -824,9 +825,11 @@ def test_materialize_profile_bounds_outlive_remove_args(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_server_args="--no-enable-prefix-caching",
-        args_mode="replace",
-        remove_args=["--profiler-config.max_iterations"],
+        launch=LaunchLayer(
+            extra_server_args="--no-enable-prefix-caching",
+            args_mode="replace",
+            remove_args=["--profiler-config.max_iterations"],
+        ),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.max_iterations 128" in extra, extra
@@ -846,8 +849,7 @@ def test_materialize_profile_restores_max_iterations_even_when_delay_survives(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_server_args="--profiler-config.delay_iterations 0",
-        args_mode="replace",
+        launch=LaunchLayer(extra_server_args="--profiler-config.delay_iterations 0", args_mode="replace"),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.max_iterations 128" in extra, extra
@@ -871,9 +873,11 @@ def test_materialize_profile_restore_does_not_duplicate_surviving_flags(
     out = materialize_benchmark_config(
         src,
         tmp_path,
-        extra_envs={
-            "EXTRA_VLLM_ARGS": "--profiler-config.ignore_frontend True --quantization fp8",
-        },
+        launch=LaunchLayer(
+            extra_envs={
+                "EXTRA_VLLM_ARGS": "--profiler-config.ignore_frontend True --quantization fp8",
+            }
+        ),
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert extra.count("--profiler-config.ignore_frontend True") == 1, extra
@@ -1371,7 +1375,7 @@ def test_materialize_profile_sglang_drops_graph_capture_flag_when_eager(
         "sglang",
         {"CONC": 32, "ISL": 256, "OSL": 1024, "EXTRA_SGLANG_ARGS": "--enable-profile-cuda-graph"},
     )
-    out = materialize_benchmark_config(src, tmp_path, extra_server_args="--disable-cuda-graph")
+    out = materialize_benchmark_config(src, tmp_path, launch=LaunchLayer(extra_server_args="--disable-cuda-graph"))
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
     assert "--disable-cuda-graph" in extra.split(), extra
     assert "--enable-profile-cuda-graph" not in extra.split(), extra

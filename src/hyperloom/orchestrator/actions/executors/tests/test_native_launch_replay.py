@@ -25,6 +25,7 @@ from hyperloom.orchestrator.actions.executors._launch_evidence import persist_la
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
     prepare_grid_benchmark_config,
+    LaunchLayer,
 )
 from hyperloom.orchestrator.actions.executors.magpie_agentx import load_benchmark
 from hyperloom.orchestrator.state.shared_state import SharedState, stack_base_params
@@ -76,7 +77,7 @@ def native_session(tmp_path, monkeypatch):
             )
         )
         baseline = materialize_benchmark_config(
-            source, tmp_path / "baseline", extra_server_args=appended, extra_envs=initial_env
+            source, tmp_path / "baseline", launch=LaunchLayer(extra_server_args=appended, extra_envs=initial_env)
         )
         evidence = _evidence(baseline, canonical, canonical + shlex.split(appended), initial_env)
         persist_launch_evidence(evidence, slot=baseline.parent)

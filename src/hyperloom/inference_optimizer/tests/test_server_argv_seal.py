@@ -22,7 +22,7 @@ from hyperloom.orchestrator.actions.executors._server_argv import (
     reseal_config_argv,
     seal_server_argv,
 )
-from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
+from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs, LaunchLayer
 
 #: The name every composer ends on.
 SEAL = "seal_server_argv"
@@ -240,7 +240,9 @@ def test_what_the_preflight_reads_back_is_what_the_launch_exports(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
 
-    config = materialize_config_with_envs(source, out, extra_server_args="--attention-backend aiter")
+    config = materialize_config_with_envs(
+        source, out, launch=LaunchLayer(extra_server_args="--attention-backend aiter")
+    )
 
     sealed = config_server_argv(config)
     exported = config_launch_env(config, {})[sealed.env_name]
