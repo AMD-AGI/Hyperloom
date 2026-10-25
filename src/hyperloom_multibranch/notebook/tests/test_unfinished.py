@@ -98,6 +98,21 @@ async def test_the_brief_lists_what_the_session_left_unfinished_in_order_and_dro
     assert len(brief.unfinished) <= MAX_UNFINISHED
 
 
+async def test_a_near_miss_gained_more_than_half_its_bar_so_a_lower_bar_does_not_offer_noise(tmp_path: Path) -> None:
+    root, clock = tmp_path / "notebook", FakeClock()
+    observer = await _leftovers(root, clock)
+    w = Writers(root, clock)
+    for request_id, target, gain in (("q1", "moe", 0.4), ("q2", "gdn", 0.2)):
+        await w.measure("s4", request_id, intent("s4", "c0", target, f"fused {target}"), delta(f"--{request_id}"))
+        short = judgement(gain, (request_id,), verdict=Verdict.FLAT, threshold_pct=0.6)
+        await w.as_role(Role.GATE).write_judgement(request_id, short, Conclusion.RECORDED_ONLY)
+
+    brief = await observer.startup_brief("i1")
+
+    near = [(item.request_id, item.detail) for item in brief.unfinished if item.reason is UnfinishedReason.NEAR_BAR]
+    assert near == [("n1", "bar 1.00%"), ("q1", "bar 0.60%")]
+
+
 async def test_a_lead_another_branch_replayed_drops_out_and_a_withdrawn_replay_of_a_measured_change_is_none(
     tmp_path: Path,
 ) -> None:

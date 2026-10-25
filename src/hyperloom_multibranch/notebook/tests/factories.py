@@ -131,11 +131,12 @@ def judgement(
     verdict: Verdict = Verdict.IMPROVED,
     foundation_fix: bool = False,
     fixes_correctness: bool = False,
+    threshold_pct: float = 1.0,
 ) -> Judgement:
     return Judgement(
         verdict=verdict,
         gain_pct=gain_pct,
-        threshold_pct=1.0,
+        threshold_pct=threshold_pct,
         request_ids=request_ids,
         recorded_value=dict(recorded or {"output_tps_pct": gain_pct}),
         accuracy_ok=True,

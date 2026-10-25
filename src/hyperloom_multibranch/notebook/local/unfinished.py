@@ -8,7 +8,8 @@
 * a commit of a stopped branch whose last merge onto the integration head was not stackable: that answer stands until
   the head moves in a way that offers the commit again, while a commit not merge-tested yet, or skipped on a conflict,
   is the integrator's to offer again, not a lead;
-* a measured explore that kept accuracy, gained, and fell short of its bar by less than :data:`NEAR_BAR_PCT`;
+* a measured explore that kept accuracy and fell short of its bar, having gained more than :data:`NEAR_BAR_SHARE`
+  of it;
 * a blocked candidate whose repair never finished;
 * an explore withdrawn before its result, a branch stop's withdrawal included, unless another explore measured its
   change.
@@ -48,8 +49,9 @@ from hyperloom_multibranch.notebook.changes import describe_change
 from hyperloom_multibranch.notebook.local.state import NotebookState
 from hyperloom_multibranch.notebook.local.views import committed
 
-#: How far short of its bar a measured explore may fall and still be worth finishing, in points.
-NEAR_BAR_PCT = 0.5
+#: How much of its bar a measured explore that fell short of it must have gained to be worth finishing. A share of the
+#: bar, not points, so a lower bar does not offer gains within the measurement noise.
+NEAR_BAR_SHARE = 0.5
 MAX_UNFINISHED = 8
 #: How soon after its branch stopped a claim's release is the stop's, not the answer of a replay that could not be made.
 STOP_RELEASE_SECONDS = 60.0
@@ -84,8 +86,7 @@ def _near_bar(record: TestRecord) -> bool:
         judgement is not None
         and record.conclusion is Conclusion.RECORDED_ONLY
         and judgement.accuracy_ok
-        and 0.0 < judgement.gain_pct < judgement.threshold_pct
-        and judgement.threshold_pct - judgement.gain_pct < NEAR_BAR_PCT
+        and judgement.threshold_pct * NEAR_BAR_SHARE < judgement.gain_pct < judgement.threshold_pct
     )
 
 
@@ -256,4 +257,4 @@ def _distinct(
     return kept
 
 
-__all__ = ["MAX_UNFINISHED", "NEAR_BAR_PCT", "STOP_RELEASE_SECONDS", "refused_replays", "unfinished_leads"]
+__all__ = ["MAX_UNFINISHED", "NEAR_BAR_SHARE", "STOP_RELEASE_SECONDS", "refused_replays", "unfinished_leads"]
