@@ -215,19 +215,28 @@ def bind_source_evidence(config_path: Path, patches: list[dict[str, Any]]) -> No
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 
-def enable_profile(config_path: Path) -> None:
+def enable_profile(config_path: Path, shape_tool: Path | None = None) -> None:
     """Derive the diagnostic run without modifying the accepted YAML.
 
     The capture window is the operator's when the YAML sets one, else a steady-state window. Magpie's own default
     is the first 20 steps of the replay, which opens on its sessions' cold long-context prefills: every GLM-5.3
     capture taken that way held bs=1 steps only, while the same replay ran 80% of its decode steps at bs>=2 --
     where MTP verify reaches the M>=12 GEMM, MoE and all-reduce shapes several hand-tuned kernel fixes are about.
+
+    Given TraceLens's shape tool, the server loads it and the run records operator shapes, without which the
+    analysis cannot size a single GEMM. Only a caller that has established the server's graph capture can be
+    profiled may pass it: detailed annotations make Magpie profile that capture too.
     """
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     profile = config["benchmark"].setdefault("profiler", {}).setdefault("torch_profiler", {})
     profile["enabled"] = True
     for key, value in _STEADY_STATE_CAPTURE.items():
         profile.setdefault(key, value)
+    if shape_tool is not None and profile.setdefault("detailed_annotations", True):
+        env = config["benchmark"]["agentx"].setdefault("launch_overrides", {}).setdefault("env", {})
+        inherited = str(env.get("PYTHONPATH") or "")
+        env["PYTHONPATH"] = str(shape_tool) + (os.pathsep + inherited if inherited else "")
+        env["TRACELENS_SHAPE_DISCOVERY"] = "1"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 

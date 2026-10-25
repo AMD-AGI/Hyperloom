@@ -756,6 +756,24 @@ def _candidate_trace_dirs(workspace: Path) -> list[Path]:
     ]
 
 
+def _native_shape_tool(config_path: Path) -> Path | None:
+    """TraceLens's shape tool for a native AgentX SGLang profile, once that server's graph capture can be profiled.
+
+    Shapes come with detailed annotations, which make Magpie profile CUDA-graph capture, and an SGLang tree without
+    TraceLens's graph-capture patch raises IndexError there on a multi-variant (DSA) decode graph: the first GLM-5.3
+    profile taken that way died at boot and the session ran with no profile at all. Without the patch in place the
+    profile stays shapeless rather than failing.
+    """
+    from ._server_patcher import ensure_sglang_patched_for_tracelens, kernel_shape_tool_dir, resolve_sglang_shape_mode
+    from .magpie_agentx import load_benchmark
+
+    if str(load_benchmark(config_path).get("framework") or "").lower() != "sglang":
+        return None
+    if resolve_sglang_shape_mode() != "sitecustomize" or not ensure_sglang_patched_for_tracelens():
+        return None
+    return kernel_shape_tool_dir()
+
+
 def _default_profile_config() -> Path:
     """Resolve the shipped profile YAML for ``$FRAMEWORK``, or for the default framework when it is unset."""
     fw = os.environ.get("FRAMEWORK") or framework_registry.DEFAULT_FRAMEWORK
@@ -900,7 +918,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         from .magpie_agentx import enable_profile, native_config
 
         if native_config(config_path):
-            enable_profile(config_path)
+            enable_profile(config_path, shape_tool=_native_shape_tool(config_path))
             return None
         try:
             self._host_probe_dir = self._inject_host_probe(config_path, output_dir)

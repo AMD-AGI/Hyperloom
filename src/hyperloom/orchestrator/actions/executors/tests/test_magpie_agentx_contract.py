@@ -5,6 +5,7 @@
 
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -268,6 +269,65 @@ def test_a_profile_with_no_window_of_its_own_captures_the_steady_state(source, t
         "start_seconds": 900.0,
         "num_steps": 100,
     }
+
+
+def test_a_profile_given_the_shape_tool_records_shapes_through_it(source, tmp_path):
+    """The server loads TraceLens's shape tool ahead of whatever overlay the round already carries."""
+    config = yaml.safe_load(source.read_text())
+    config["benchmark"]["profiler"] = {"torch_profiler": {"enabled": False}}
+    config["benchmark"]["agentx"].setdefault("launch_overrides", {"version": 1})["env"] = {"PYTHONPATH": "/overlay"}
+    source.write_text(yaml.safe_dump(config))
+    rendered = materialize_benchmark_config(source, tmp_path / "profile")
+
+    enable_profile(rendered, shape_tool=Path("/tracelens/kernel_shape_tool"))
+
+    bench = load_benchmark(rendered)
+    assert bench["profiler"]["torch_profiler"]["detailed_annotations"] is True
+    env = bench["agentx"]["launch_overrides"]["env"]
+    assert env["PYTHONPATH"].split(os.pathsep) == ["/tracelens/kernel_shape_tool", "/overlay"]
+    assert env["TRACELENS_SHAPE_DISCOVERY"] == "1"
+
+
+def test_a_profile_without_the_shape_tool_stays_shapeless_rather_than_crash_at_boot(source, tmp_path):
+    """Detailed annotations profile CUDA-graph capture, which an unpatched SGLang tree dies on."""
+    rendered = materialize_benchmark_config(source, tmp_path / "profile")
+
+    enable_profile(rendered)
+
+    bench = load_benchmark(rendered)
+    assert "detailed_annotations" not in bench["profiler"]["torch_profiler"]
+    assert "TRACELENS_SHAPE_DISCOVERY" not in bench["agentx"]["launch_overrides"].get("env", {})
+
+
+def test_a_native_profile_gets_the_shape_tool_only_once_graph_capture_can_be_profiled(source, tmp_path, monkeypatch):
+    """Without TraceLens's graph-capture patch the profiled capture raises IndexError on a DSA decode graph."""
+    from hyperloom.orchestrator.actions.executors import _server_patcher, profile
+
+    rendered = materialize_benchmark_config(source, tmp_path / "profile")
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
+    monkeypatch.setattr(_server_patcher, "kernel_shape_tool_dir", lambda: Path("/tracelens/kernel_shape_tool"))
+
+    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: False)
+    assert profile._native_shape_tool(rendered) is None
+
+    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: True)
+    assert profile._native_shape_tool(rendered) == Path("/tracelens/kernel_shape_tool")
+
+    config = yaml.safe_load(rendered.read_text())
+    config["benchmark"]["framework"] = "vllm"
+    rendered.write_text(yaml.safe_dump(config))
+    assert profile._native_shape_tool(rendered) is None
+
+
+def test_an_operator_who_turned_detailed_annotations_off_gets_no_shape_tool(source, tmp_path):
+    config = yaml.safe_load(source.read_text())
+    config["benchmark"]["profiler"] = {"torch_profiler": {"enabled": False, "detailed_annotations": False}}
+    source.write_text(yaml.safe_dump(config))
+    rendered = materialize_benchmark_config(source, tmp_path / "profile")
+
+    enable_profile(rendered, shape_tool=Path("/tracelens/kernel_shape_tool"))
+
+    assert "TRACELENS_SHAPE_DISCOVERY" not in load_benchmark(rendered)["agentx"]["launch_overrides"].get("env", {})
 
 
 @pytest.mark.parametrize("checkout", ["default", "yaml", "environment"])
