@@ -250,8 +250,8 @@ layer of every step that takes it. Take the bound from host-side metadata the sc
 inside the kernel instead of checking on the host.
 - Before working on a top operator, divide the bytes it must move per call (the weights it reads, the state it reads \
 and writes) by its time: near the device's HBM bandwidth no kernel change pays whatever its share (a streaming \
-read reaches about 5.7 TB/s on MI355X, a device-to-device copy about 5), so take the next operator. A kernel at \
-4 TB/s is not near it: measure the bytes, do not assume them from a share. A claim that an operator is at its \
+read or a device-to-device copy reaches about 6.2 TB/s on MI355X), so take the next operator. A kernel at 4 or 5 \
+TB/s is not near it: measure the bytes, do not assume them from a share. A claim that an operator is at its \
 bound, as the reason for an EXHAUSTED record or for leaving the operator, cites the bandwidth or roofline figure a \
 tool reported for that operator (the roofline analysis of a profile, or a timing with the bytes it moved); a hand \
 estimate of its bytes is a hypothesis to measure, not a bound, and a roofline report with no kernels bounds \

@@ -650,7 +650,7 @@ def test_the_role_says_an_aiter_or_framework_kernel_is_source_a_branch_can_fork_
     assert "calling one differently" in prompt and "accumulating a split-K GEMM into the residual" in prompt
     assert '"Needs a C++ change" is never a reason to give up' in prompt
     assert "A kernel inside aiter or the framework is not blocked_by_tool" in prompt
-    assert "a streaming read reaches about 5.7 TB/s on MI355X" in prompt
+    assert "a streaming read or a device-to-device copy reaches about 6.2 TB/s on MI355X" in prompt
 
 
 def test_the_role_says_sglang_jit_kernels_are_framework_source_the_test_rebuilds():
