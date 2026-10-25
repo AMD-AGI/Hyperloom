@@ -31,7 +31,7 @@ import stat
 import subprocess
 import tempfile
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal, NamedTuple, Protocol, TypeVar
@@ -64,8 +64,10 @@ from hyperloom.measure.jit.modules import (
     image_aiter_meta,
     prebuilt_names,
     read_config,
+    touched_entries,
     touched_modules,
 )
+from hyperloom.measure.framework.table_modules import named_table_modules
 from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
 
 ATTACH_PLACEHOLDER = "${HL_ATTACH:%s}"
@@ -557,24 +559,35 @@ def _patched_config(entries: tuple[EnvEntry, ...], blobs: BlobStore) -> dict | N
     return None
 
 
-def refuse_costly_rebuild(roots: tuple[EnvRoot, ...], bases: Mapping[str, PackageBase], blobs: BlobStore) -> None:
+def refuse_costly_rebuild(
+    roots: tuple[EnvRoot, ...],
+    bases: Mapping[str, PackageBase],
+    blobs: BlobStore,
+    table_variables: Collection[str] = (),
+) -> None:
     """Refuse a stack that touches so many of aiter's modules that their first build would not fit the time given to it.
 
-    The modules are the prebuilt ones the patch leaves stale (:func:`~hyperloom.measure.jit.modules.touched_modules`); the
-    first test of the stack builds them on its card, when its server calls them.
+    The modules are the prebuilt ones the patch leaves stale (:func:`~hyperloom.measure.jit.modules.touched_modules`),
+    with the ones generated from a tuned table that the patch (below ``configs``) or one of ``table_variables`` (the
+    ``AITER_CONFIG_*`` the test sets) may change; the first test of the stack builds them on its card, when its server
+    calls them.
     """
     package, meta = bases[PACKAGE_BASE], bases[META_BASE]
     by_id = {root.import_name: root for root in roots}
     meta_entries = by_id[meta.import_name].entries if meta.import_name in by_id else ()
+    package_entries = by_id[package.import_name].entries if package.import_name in by_id else ()
     try:
         before = read_config(config_path(package.path))
-        after = _patched_config(by_id[package.import_name].entries, blobs) or before
+        after = _patched_config(package_entries, blobs) or before
     except (OSError, ValueError) as exc:
         raise PatchApplyError(f"cannot tell which of aiter's modules the patch touches: {exc}") from exc
-    if not meta_entries and after == before:
+    tables = named_table_modules(after, package.path, table_variables, [entry.path for entry in package_entries])
+    if not meta_entries and after == before and not tables:
         return
     overlay = {entry.path: blobs.get(entry.blob or "") if entry.op == _UPSERT else None for entry in meta_entries}
-    found = touched_modules(before, after, SourceTree(meta.path, overlay), overlay, prebuilt_names(package.path))
+    tree = SourceTree(meta.path, overlay)
+    prebuilt = prebuilt_names(package.path)
+    found = touched_modules(before, after, tree, overlay, prebuilt) | touched_entries(tables, after, prebuilt)
     seconds = len(found.rebuilt) * ESTIMATED_MODULE_SECONDS
     if seconds > MAX_REBUILD_SECONDS:
         examples = ", ".join(sorted(found.rebuilt)[:5])
@@ -698,8 +711,15 @@ class EnvironmentCompiler:
     def _compile(self, recipe: Recipe, action: RecipeDelta) -> CompiledEnvironment:
         check_base_image(recipe, self.active_image_digest)
         target = apply(recipe, action)
-        roots = tuple(root for component in target.components if component.patches for root in self._roots(component))
         attachments, envs = kernel_attachments(target.kernels, target.launch.envs, self.blobs)
+        tables = sorted(
+            name
+            for name, value in {**target.launch.envs, **envs}.items()
+            if name.startswith(AITER_VARIABLE_PREFIX) and str(value).strip()
+        )
+        roots = tuple(
+            root for component in target.components if component.patches for root in self._roots(component, tables)
+        )
         return CompiledEnvironment(
             recipe=target,
             base_image_digest=target.base_image_digest,
@@ -709,7 +729,7 @@ class EnvironmentCompiler:
             blob_root=self.blobs.root,
         )
 
-    def _roots(self, component: ComponentPatches) -> tuple[EnvRoot, ...]:
+    def _roots(self, component: ComponentPatches, table_variables: Collection[str] = ()) -> tuple[EnvRoot, ...]:
         layout = self.layouts.get(component.component)
         if layout is None:
             raise UnsupportedComponentError(
@@ -723,7 +743,7 @@ class EnvironmentCompiler:
             )
         roots = apply_component_stack(component, layout, bases, self.blobs)
         if META_BASE in bases:
-            refuse_costly_rebuild(roots, bases, self.blobs)
+            refuse_costly_rebuild(roots, bases, self.blobs, table_variables)
         return roots
 
 

@@ -20,6 +20,8 @@ measures the old code. A module is touched when a patched path is
   that names no module, else the modules whose ``-m <name>`` the path's ``hsa/<arch>/<name>/`` directory names;
 * in a module whose entry in the config differs from the image's.
 
+A module generated from a tuned table that differs from the image's is touched too (``framework.table_modules``).
+
 A prebuilt name that is not an entry of the config is a module aiter names at run time (``mha_varlen_fwd_<variant>``
 from ``module_mha_varlen_fwd``, ``module_moe_ck2stages_<variant>``); it follows the entry it starts with, and one that
 follows none is read as touched whenever anything is.
@@ -54,6 +56,7 @@ __all__ = [
     "image_aiter_meta",
     "prebuilt_names",
     "read_config",
+    "touched_entries",
     "touched_modules",
 ]
 
@@ -87,6 +90,9 @@ class Touched:
 
     names: frozenset[str] = frozenset()
     rebuilt: frozenset[str] = frozenset()
+
+    def __or__(self, other: Touched) -> Touched:
+        return Touched(self.names | other.names, self.rebuilt | other.rebuilt)
 
 
 @dataclass(frozen=True)
@@ -323,9 +329,16 @@ def touched_modules(
         for key, entry in after.items()
         if entry != before.get(key) or (paths and _entry_touched(entry, closure, paths, known_hsa))
     }
+    return touched_entries(keys, after, prebuilt)
+
+
+def touched_entries(keys: Collection[str], config: Mapping[str, Any], prebuilt: Collection[str]) -> Touched:
+    """The entries ``keys`` of ``config`` as touched modules, with the prebuilt names that follow them: what a module
+    generated from a tuned table that differs from the image's is
+    (:func:`~hyperloom.measure.framework.table_modules.stale_table_modules`)."""
     names = set(keys)
     for name in prebuilt:
-        owner = _entry_of(name, after)
+        owner = _entry_of(name, config)
         if (owner in keys) or (owner is None and keys):
             names.add(name)
     return Touched(frozenset(names), frozenset(names & set(prebuilt)))

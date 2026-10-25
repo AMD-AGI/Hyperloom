@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.measure.jit.modules import SourceTree, config_path, prebuilt_names, touched_modules
+from hyperloom.measure.jit.modules import SourceTree, config_path, prebuilt_names, touched_entries, touched_modules
 from hyperloom.measure.tests._recipes import write_tree
 
 CSRC = "f'{AITER_CSRC_DIR}/"
@@ -186,6 +186,22 @@ def test_a_prebuilt_name_that_follows_no_entry_is_touched_whenever_anything_is(t
 
     assert ORPHAN in touched(tree, ["csrc/kernels/activation_kernels.cu"], prebuilt=with_orphan)
     assert touched(tree, [], prebuilt=with_orphan) == set()
+
+
+def test_an_entry_generated_from_a_table_that_differs_is_touched_with_no_patched_path_and_so_are_its_runtime_names(
+    tree,
+):
+    found = touched_modules(CONFIG, CONFIG, tree, [], PREBUILT | {ORPHAN}) | touched_entries(
+        {"module_gemm_a8w8", "module_moe_ck2stages"}, CONFIG, PREBUILT | {ORPHAN}
+    )
+
+    assert found.names == {
+        "module_gemm_a8w8",
+        "module_moe_ck2stages",
+        "module_moe_ck2stages_b16_silu_Stage1",
+        ORPHAN,
+    }, "a prebuilt name that follows no entry is touched whenever anything is"
+    assert found.rebuilt == found.names & (PREBUILT | {ORPHAN})
 
 
 def test_the_prebuilt_modules_are_the_so_files_of_the_jit_directory(tmp_path):

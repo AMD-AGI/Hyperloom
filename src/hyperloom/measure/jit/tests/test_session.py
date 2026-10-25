@@ -511,7 +511,8 @@ def test_a_module_the_patch_touches_is_not_linked_from_the_image_and_one_it_does
     assert not (directory / "module_gemm.so").exists() and (directory / "module_other.so").is_symlink()
     assert session.touched == {"module_gemm", "module_not_prebuilt"}
     assert any(
-        "the patch touches 2 aiter modules, built when first called" in note for note in session.report(NO_BUILDS).notes
+        "the patch or the tuned tables touch 2 aiter modules, built when first called" in note
+        for note in session.report(NO_BUILDS).notes
     )
 
 

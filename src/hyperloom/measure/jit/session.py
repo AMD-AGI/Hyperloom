@@ -70,8 +70,8 @@ class KindPlan:
     ``read_only`` is the reason a test may be given the cache and not add to it: it runs code the key does not cover, and
     code in the server can write any file into the directory the compiler uses, which no test sharing the key may load.
 
-    ``touched`` are the modules a patch to aiter's sources makes stale: the test's directory does not link the image's copy
-    of them, so the server builds each when it first calls it."""
+    ``touched`` are the modules a patch to aiter's sources, or a tuned table they are generated from, makes stale: the
+    test's directory does not link the image's copy of them, so the server builds each when it first calls it."""
 
     kind: CacheKind
     key: str
@@ -326,7 +326,8 @@ def _touched_note(plan: KindPlan) -> str:
     names = sorted(plan.touched)
     listed = ", ".join(names[:LISTED]) + (f", and {len(names) - LISTED} more" if len(names) > LISTED else "")
     return (
-        f"jit cache: {plan.kind.name}: the patch touches {len(names)} aiter modules, built when first called ({listed})"
+        f"jit cache: {plan.kind.name}: the patch or the tuned tables touch {len(names)} aiter modules, "
+        f"built when first called ({listed})"
     )
 
 
