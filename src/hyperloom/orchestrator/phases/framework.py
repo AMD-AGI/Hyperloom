@@ -2603,7 +2603,7 @@ class FrameworkPhase(ProposalBench):
         }
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
-        task = await self.tasks.create_or_return_existing(
+        task, existing = await self.tasks.create_or_return_existing(
             TaskSpec(
                 kind="specialist",
                 params=params,
@@ -2616,16 +2616,18 @@ class FrameworkPhase(ProposalBench):
                 dispatch_class="coordinator",
             ),
         )
-        _record_run(
-            self,
-            task,
-            role="discovery",
-            status="dispatched",
-            domain=str(params.get("domain") or ""),
-            gap_canonical_id=str(params.get("gap_canonical_id") or ""),
-            reason=reason,
-            parallelism=len(lanes or ()),
-        )
+        if not existing:
+            # A row the key already names was recorded when it was dispatched; recording it again would reopen it.
+            _record_run(
+                self,
+                task,
+                role="discovery",
+                status="dispatched",
+                domain=str(params.get("domain") or ""),
+                gap_canonical_id=str(params.get("gap_canonical_id") or ""),
+                reason=reason,
+                parallelism=len(lanes or ()),
+            )
         log.info("FRAMEWORK: dispatched candidate discovery (reason=%s)", reason)
         return True
 
