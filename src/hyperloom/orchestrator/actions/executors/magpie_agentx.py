@@ -21,6 +21,9 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
 
 _ENCODING = "utf-8"
+#: Where a diagnostic profile captures when the YAML does not say: past the replay's opening prefill burst, and
+#: long enough to span the decode batch mix rather than one batch size.
+_STEADY_STATE_CAPTURE: Mapping[str, Any] = {"start_seconds": 300.0, "num_steps": 100}
 
 
 class ServerArgvInvalidError(ValueError):
@@ -212,10 +215,18 @@ def bind_source_evidence(config_path: Path, patches: list[dict[str, Any]]) -> No
 
 
 def enable_profile(config_path: Path) -> None:
-    """Derive the diagnostic run without modifying the accepted YAML."""
+    """Derive the diagnostic run without modifying the accepted YAML.
+
+    The capture window is the operator's when the YAML sets one, else a steady-state window. Magpie's own default
+    is the first 20 steps of the replay, which opens on its sessions' cold long-context prefills: every GLM-5.3
+    capture taken that way held bs=1 steps only, while the same replay ran 80% of its decode steps at bs>=2 --
+    where MTP verify reaches the M>=12 GEMM, MoE and all-reduce shapes several hand-tuned kernel fixes are about.
+    """
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     profile = config["benchmark"].setdefault("profiler", {}).setdefault("torch_profiler", {})
     profile["enabled"] = True
+    for key, value in _STEADY_STATE_CAPTURE.items():
+        profile.setdefault(key, value)
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 
