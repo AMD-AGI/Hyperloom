@@ -555,6 +555,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
         from hyperloom.orchestrator.specialists.agent_runner import Liveness, LocalAgentRunner, build_specialist_env
         from hyperloom_multibranch.specialist.agent_session import SPECIALIST_LOST_AFTER_S, AgentSetup
         from hyperloom_multibranch.specialist.agent_sessions import AgentSessions, with_agents
+        from hyperloom_multibranch.specialist.gate_client import GateClient
         from hyperloom_multibranch.specialist.model_sessions import model_sessions
         from hyperloom_multibranch.specialist.prompts import role_prompt
         from hyperloom_multibranch.specialist.worktree import SourceBase
@@ -592,6 +593,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             wiring.toolbox,
             wiring.repo,
             wiring.setup.processes,
+            client=GateClient.read(layout.toolbox / CANONICAL_DIR / "canonical.yaml"),
         )
         return with_agents(sessions, agents, branch_dir=layout.branch_dir, notebook_for=wiring.notebooks)
 

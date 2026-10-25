@@ -62,6 +62,7 @@ from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, SessionLayou
 from hyperloom_multibranch.scheduling import local_peers as local_peers_module
 from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
+    CANONICAL_DIR,
     InferenceXCheckout,
     LocalCards,
     MeasurementHost,
@@ -645,6 +646,14 @@ async def test_a_hosted_session_measures_in_the_services_sandboxes_under_its_too
         assert (layout.toolbox / "canonical" / "canonical.yaml").is_file()
 
 
+def _toolbox(tmp_path: Path) -> Path:
+    """A toolbox directory whose rendered canonical has no InferenceX client, so an agent gets none."""
+    canonical = tmp_path / "toolbox" / CANONICAL_DIR / "canonical.yaml"
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    canonical.write_text("benchmark:\n  model: /models/m\n  envs:\n    CONC: '8'\n", encoding="utf-8")
+    return tmp_path / "toolbox"
+
+
 async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_session_lends(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -656,7 +665,9 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
 
     monkeypatch.setattr(model_sessions_module, "model_sessions", sessions)
     leases = SimpleNamespace(limits=SimpleNamespace(cap=1))
-    layout = SimpleNamespace(logs=tmp_path, source=tmp_path, branch_dir=lambda branch: tmp_path)
+    layout = SimpleNamespace(
+        logs=tmp_path, source=tmp_path, branch_dir=lambda branch: tmp_path, toolbox=_toolbox(tmp_path)
+    )
     for held in (None, leases):
         wiring = SimpleNamespace(
             setup=SimpleNamespace(layout=layout, workload=WORKLOAD, references={}, processes=None),
@@ -725,7 +736,10 @@ def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_
 
     monkeypatch.setattr(worktree_module, "SourceBase", partial(worktree_module.SourceBase, locator=locate))
     layout = SimpleNamespace(
-        logs=tmp_path / "logs", source=tmp_path / "MB-source", branch_dir=lambda branch: tmp_path / branch
+        logs=tmp_path / "logs",
+        source=tmp_path / "MB-source",
+        branch_dir=lambda branch: tmp_path / branch,
+        toolbox=_toolbox(tmp_path),
     )
     wiring = SimpleNamespace(
         setup=SimpleNamespace(layout=layout, workload=WORKLOAD, references={}, processes=None),
