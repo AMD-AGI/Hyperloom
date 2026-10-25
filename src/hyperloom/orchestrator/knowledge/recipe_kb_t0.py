@@ -11,7 +11,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, NamedTuple
 
 from packaging.version import InvalidVersion, Version
 
@@ -316,25 +316,31 @@ def _settle_warm_start_event(
     recorder.finish(match_status=status, matched=matched)
 
 
+class WarmMatch(NamedTuple):
+    """A Recipe KB row a warm-start tier matched, with that tier and its confidence."""
+
+    recipe: Mapping[str, Any] | None
+    tier: str
+    confidence: float
+
+
 def _build_warm_start_context(
     *,
-    tier: str,
-    confidence: float,
+    match: WarmMatch,
     canonical_id: str,
     source: str,
-    recipe: Mapping[str, Any],
-    config_donor: Mapping[str, Any] | None = None,
-    config_donor_tier: str = "",
-    config_donor_confidence: float | None = None,
+    config_donor: WarmMatch | None = None,
 ) -> dict[str, Any]:
     """Build the model-facing WarmStartContext from a KB recipe row."""
     from .remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE
 
+    recipe, tier, confidence = match
     # Priors ride the identity match independent of replay config, and come from the exact identity when the
     # cascade carried one across from a borrowed row.
     priors = recipe.get("exact_history") or recipe
-    if config_donor_confidence is None:
-        config_donor_confidence = confidence
+    if config_donor is None:
+        config_donor = WarmMatch(None, "", confidence)
+    donor, config_donor_tier, config_donor_confidence = config_donor
     ctx: dict[str, Any] = {
         # A cascade that matched nothing reports tier ``miss``, so the tier is the status.
         "status": tier if tier in ("miss", "seed_only") else "hit",
@@ -357,7 +363,6 @@ def _build_warm_start_context(
     if recipe.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE:
         return ctx
     # Replay config comes from the donor, or the identity recipe as self-donor.
-    donor = config_donor
     if donor is None:
         if not _has_replayable_config(recipe):
             return ctx
@@ -634,7 +639,7 @@ def _tier_matches(
     tiers: tuple[tuple[str, float, dict[str, str], list[str] | None, bool], ...],
     identity: Mapping[str, Any],
     shape: Mapping[str, Any],
-) -> Iterator[tuple[Mapping[str, Any], str, float]]:
+) -> Iterator[WarmMatch]:
     """Walk the degradation tiers, yielding each tier's trustworthy candidates best first."""
     seen = {_text(identity.get("canonical_id"))}
     hardware = _text(identity.get("hardware"))
@@ -667,7 +672,7 @@ def _tier_matches(
         if rows and not usable:
             log.info("warm-start tier %s rejected all %d candidates", tier, len(rows))
         for candidate in _rank_warm_candidates(usable, target_framework_version=version):
-            yield candidate, tier, confidence
+            yield WarmMatch(candidate, tier, confidence)
 
 
 def _cascade_warm_start_search(
@@ -677,7 +682,7 @@ def _cascade_warm_start_search(
     identity: Mapping[str, Any],
     shape: Mapping[str, Any],
     warm_prefer: Any,
-) -> "tuple[dict[str, Any], str, float]":
+) -> WarmMatch:
     """Resolve exact plus cumulative four-tier seven-tuple fallbacks."""
     exact_history: Mapping[str, Any] | None = None
     try:
@@ -690,24 +695,24 @@ def _cascade_warm_start_search(
         exact = None
     if isinstance(exact, Mapping) and exact and str(exact.get("canonical_id") or "") == cid:
         if _recipe_is_actionable(exact):
-            return dict(exact), "exact", 1.0
+            return WarmMatch(dict(exact), "exact", 1.0)
         exact_history = exact
 
     # An unparseable cid — every agentx id is one — keeps the dimensions resolved from SharedState.
     stored = {**identity, **_cid_dimensions(cid)}
     for candidate, tier, confidence in _tier_matches(kb, _warm_search_tiers(stored), stored, shape):
         if _select_remote_candidate(kb, candidate):
-            return _with_exact_history(candidate, exact_history), tier, confidence
+            return WarmMatch(_with_exact_history(candidate, exact_history), tier, confidence)
     if exact_history is not None:
-        return dict(exact_history), "exact", 1.0
-    return {}, "miss", 0.0
+        return WarmMatch(dict(exact_history), "exact", 1.0)
+    return WarmMatch({}, "miss", 0.0)
 
 
 def _find_config_donor(
     kb: Any,
     identity: Mapping[str, Any],
     shape: Mapping[str, Any],
-) -> tuple[Mapping[str, Any] | None, str, float]:
+) -> WarmMatch:
     """Borrow a replayable config through the standard degradation tiers."""
     tiers = tuple(
         (
@@ -723,25 +728,25 @@ def _find_config_donor(
         )
         for tier, confidence, labels, hardware_in, relax_framework_version in _warm_search_tiers(identity)
     )
-    return next(_tier_matches(kb, tiers, identity, shape), (None, "", 0.0))
+    return next(_tier_matches(kb, tiers, identity, shape), WarmMatch(None, "", 0.0))
 
 
 def _warm_replay_donor(
     kb: "RecipeKB",
-    match: tuple[Mapping[str, Any], str, float],
+    match: WarmMatch,
     identity: Mapping[str, Any],
     shape: Mapping[str, Any],
-) -> tuple[Mapping[str, Any] | None, str, float]:
+) -> WarmMatch:
     """Pick the row whose champion config T0 recommends replaying."""
     from .remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE
 
     recipe, tier, confidence = match
     if not recipe or recipe.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE:
-        return None, "", 0.0
+        return WarmMatch(None, "", 0.0)
     # A true-self (identity ``exact``) champion always replays; a cross-model borrow must clear the trustworthiness
     # gate before it becomes the donor.
     if _has_replayable_config(recipe) and (tier == "exact" or _donor_is_trustworthy(recipe, identity, shape)):
-        return recipe, "self", confidence
+        return WarmMatch(recipe, "self", confidence)
     return _find_config_donor(kb, identity, shape)
 
 
@@ -918,7 +923,8 @@ def _warm_start_lookup(
         tier, confidence = "seed_only", 0.0
     # Config-donor decoupling: the identity match supplies the priors; a champion config is borrowed from the
     # nearest same-arch sibling when the match carries none.
-    donor, donor_tier, donor_confidence = _warm_replay_donor(kb, (recipe, tier, confidence), identity, shape)
+    identity_match = WarmMatch(recipe, tier, confidence)
+    donor = _warm_replay_donor(kb, identity_match, identity, shape)
     match = {
         "workload": identity["model"],
         "hw": identity["hardware"],
@@ -927,14 +933,10 @@ def _warm_start_lookup(
         "recipe": recipe,
     }
     return match, _build_warm_start_context(
-        config_donor=donor,
-        config_donor_tier=donor_tier,
-        config_donor_confidence=donor_confidence,
-        tier=tier,
-        confidence=confidence,
+        match=identity_match,
         canonical_id=cid,
         source=_warm_recipe_source(recipe, kb),
-        recipe=recipe,
+        config_donor=donor,
     )
 
 
