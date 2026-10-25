@@ -1271,9 +1271,11 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             state,
             pending,
         )
+        # The resume sets aside the edits of a round a lost process never judged (_set_aside_interrupted_round).
+        interrupted = pending is None and self._unfinished_iteration(before=sys.maxsize) is not None
         self._validate_resume_state(
             planned,
-            allow_dirty=status == "uncommitted",
+            allow_dirty=status == "uncommitted" or interrupted,
         )
         return state
 

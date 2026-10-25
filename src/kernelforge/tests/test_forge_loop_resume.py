@@ -41,6 +41,7 @@ from kernelforge.loop.run_state import (
     LoopStateStore,
     RunState,
     WorkspaceLockError,
+    make_event,
 )
 from kernelforge.loop.runner import IterationConfig, IterationLoop
 
@@ -1823,3 +1824,17 @@ def test_fresh_campaign_captures_post_prep_driver_digest_and_base(tmp_path, monk
     loop = captured["loops"][0]
     assert loop.ic.canonical_driver_sha256 == post_prep_digest
     assert loop.ic.campaign_base_commit == post_prep_head
+
+
+def test_resume_preflight_accepts_the_edits_of_a_round_a_lost_process_never_judged(tmp_path, monkeypatch):
+    loop, store, _campaign, _driver = _driver_integrity_resume(tmp_path, monkeypatch)
+    (tmp_path / "workspace" / "kernel.py").write_text("def kernel():\n    return 3\n")
+    with pytest.raises(ValueError, match="uncommitted tracked changes"):
+        loop.validate_resume_preflight()
+
+    store.append_event(make_event("iteration_started", 1))
+    loop.validate_resume_preflight()
+
+    store.append_event(make_event("iteration_result", 1, decision="REVERT_PERF"))
+    with pytest.raises(ValueError, match="uncommitted tracked changes"):
+        loop.validate_resume_preflight()
