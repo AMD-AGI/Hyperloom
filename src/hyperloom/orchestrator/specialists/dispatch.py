@@ -18,6 +18,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..collaborator import CoordinatorCollaborator
 from ..measurement.runtime_findings import render_runtime_findings
 from ..state.shared_state import KbInjection
+from ..state.task_registry import TaskSpec
 from ..phases import machine_state as _phase_state
 from ..policy.gate import (
     PolicyDenied,
@@ -416,12 +417,14 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         with trajectory_scope(parent_span_id=task.task_id):
             new_task, was_existing = await self.tasks.create_or_return_existing(
-                kind="specialist",
-                params=retry_params,
-                idempotency_key=retry_key,
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind="specialist",
+                    params=retry_params,
+                    idempotency_key=retry_key,
+                    requires_lanes=lanes,
+                    lease_ttl_sec=ttl,
+                    dispatch_class="coordinator",
+                )
             )
         if was_existing:
             # Retry slot already taken: let normal bookkeeping record this attempt.

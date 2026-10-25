@@ -7,32 +7,25 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
+
+from .evidence import padded_m
 
 log = logging.getLogger(__name__)
 
-# sglang CUDAGraph capture batch sizes - key decode sizes (thorough mode).
-_SGLANG_CUDAGRAPH_BS_THOROUGH = [
-    1,
-    2,
-    4,
-    8,
-    12,
-    16,
-    24,
-    32,
-    48,
-    56,
-    64,
-    72,
-    80,
-    88,
-    96,
-    104,
-    112,
-    120,
-    128,
-]
+# sglang's default CUDA-graph capture batch sizes up to 256 (no speculative decoding, padding on): 1, 2, 4, 12 and
+# every multiple of _SGLANG_CUDAGRAPH_STEP.
+_SGLANG_CUDAGRAPH_STEP = 8
+_SGLANG_CUDAGRAPH_BS = tuple(sorted((1, 2, 4, 12, *range(_SGLANG_CUDAGRAPH_STEP, 257, _SGLANG_CUDAGRAPH_STEP))))
+_SGLANG_CUDAGRAPH_BS_THOROUGH = [bs for bs in _SGLANG_CUDAGRAPH_BS if bs <= 128]
+
+
+class MGrid(Enum):
+    """How a decode or demand M becomes the M a row is tuned at."""
+
+    BUCKET = "bucket"  # evidence.padded_m: aiter's multiple of 16 up to 256, a power of two above
+    EXACT = "exact"
 
 
 @dataclass(frozen=True)
@@ -98,14 +91,20 @@ def compute_dense_nk_shapes(geometry: DenseGeometry, tp: int) -> list[tuple[int,
     return out
 
 
-_DECODE_M_GRID = (1, 4, 16, 32, 64, 128, 256)
+#: The decode band has a row per graph batch size up to this M and one per power of two above it: a row per batch
+#: size up to 256 makes the band at high concurrency take the timeout budget of whole (N, K) groups.
+_FINE_DECODE_M = 64
 
 
-def compute_decode_m_values(conc: int) -> list[int]:
-    """Decode-step M (batch) sizes: ``M ≈ num_running_requests``, capped by ``conc``."""
+def compute_decode_m_values(conc: int, m_grid: MGrid = MGrid.BUCKET) -> list[int]:
+    """Decode-step M: the graph batch sizes up to ``conc`` (only the powers of two above :data:`_FINE_DECODE_M`), plus
+    ``conc`` itself, mapped through ``m_grid``."""
     conc = max(1, int(conc or 64))
-    m_set = {m for m in _DECODE_M_GRID if m <= conc}
-    m_set.update((1, conc))
+    fine = {bs for bs in _SGLANG_CUDAGRAPH_BS if bs <= min(conc, _FINE_DECODE_M)}
+    coarse = {1 << p for p in range(_FINE_DECODE_M.bit_length(), conc.bit_length())}
+    m_set = fine | coarse | {1, conc}
+    if m_grid is MGrid.BUCKET:
+        m_set = {padded_m(m) for m in m_set}
     return sorted(m_set)
 
 

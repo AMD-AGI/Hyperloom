@@ -72,25 +72,18 @@ class _StubTaskRegistry:
     def __init__(self):
         self.calls: list[dict] = []
 
-    async def create_or_return_existing(
-        self,
-        *,
-        kind,
-        params,
-        idempotency_key,
-        **kwargs,
-    ):
+    async def create_or_return_existing(self, spec):
         self.calls.append(
             {
-                "kind": kind,
-                "params": dict(params),
-                "idempotency_key": idempotency_key,
+                "kind": spec.kind,
+                "params": dict(spec.params),
+                "idempotency_key": spec.idempotency_key,
             }
         )
         task = _StubTask(
-            task_id=f"task-{idempotency_key}",
-            kind=kind,
-            params=dict(params),
+            task_id=f"task-{spec.idempotency_key}",
+            kind=spec.kind,
+            params=dict(spec.params),
         )
         return task, False
 
@@ -2017,7 +2010,7 @@ async def test_enqueue_failure_rolls_back_prepared_kernel(tmp_path, monkeypatch)
             "snapshots": snapshots,
         }
 
-    async def _raise(**_kwargs):
+    async def _raise(_spec):
         raise RuntimeError("registry unavailable")
 
     rollbacks: list[tuple[list[dict], list[dict]]] = []
@@ -2058,7 +2051,7 @@ async def test_enqueue_failure_retains_pending_when_kernel_restore_fails(
             "snapshots": [{"target": "/tmp/kernel.py"}],
         }
 
-    async def _raise(**_kwargs):
+    async def _raise(_spec):
         raise RuntimeError("registry unavailable")
 
     coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
@@ -3505,3 +3498,32 @@ def test_a_promotion_commit_that_cannot_be_undone_fails_the_rollback(tmp_path, m
 
     assert verdict is Verdict.FAILED
     assert coord.shared_state.warm_replay_outcome["status"] == "rollback_failed"
+
+
+@pytest.mark.parametrize("failure", ["head", "parent"])
+def test_an_unreadable_promotion_commit_fails_the_rollback(tmp_path, monkeypatch, failure):
+    from hyperloom.orchestrator.phases import warm_replay_stack
+
+    tree = _stock_sglang_tree(tmp_path / "sglang")
+    pre_sha = _tree_git(tree, "rev-parse", "HEAD").strip()
+    _tree_git(
+        tree,
+        "-c",
+        "user.name=Hyperloom Tests",
+        "-c",
+        "user.email=tests@hyperloom.invalid",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "promote overlays",
+    )
+    pending = {"recipe_overlays_committed": True}
+
+    if failure == "head":
+        monkeypatch.setattr(warm_replay_stack, "_git_head_sha", lambda _root: "")
+    else:
+        monkeypatch.setattr(warm_replay_stack, "_run_git_cp", lambda *_args, **_kwargs: None)
+
+    error = warm_replay_stack.uncommit_promoted_overlays(pending, str(tree), pre_sha)
+
+    assert "promotion_commit_state_unreadable" in error

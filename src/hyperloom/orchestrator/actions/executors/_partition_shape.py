@@ -17,6 +17,7 @@ from hyperloom.common.gpu_partition import (
     PARTITION_STREAMS_ENV,
     PARTITION_TOTAL_STREAMS_ENV,
     PartitionLayout,
+    PartitionModel,
     fits_in_partition,
     observe_partition,
 )
@@ -107,9 +108,7 @@ def validate_session_shape(
     declared_mode: str = "",
     streams: int | None = None,
     gpu_type: str | None = None,
-    params: dict[str, Any] | None = None,
-    shared_state: Any = None,
-    gpu_id: int | None = None,
+    model: PartitionModel = PartitionModel(),
     fanout_expected: bool = True,
 ) -> ShapeVerdict:
     """Check, at launch, that this session can run in the shape it was given."""
@@ -131,7 +130,7 @@ def validate_session_shape(
             ),
         )
     streams = requested_streams
-    gpu = partition_gpu_id() if gpu_id is None else gpu_id
+    gpu = partition_gpu_id()
 
     layout = observe_partition(gpu, gpu_type=gpu_type)
     if layout is None:
@@ -184,7 +183,9 @@ def validate_session_shape(
 
     notes.append(f"Streams per partition: {streams} ({streams * layout.partitions} total)")
 
-    footprint_gib, source = per_stream_footprint_gib(params, shared_state)
+    footprint_gib, source = per_stream_footprint_gib(
+        {"model_path": str(model.model_path or ""), "precision": str(model.precision or "")}, model.shared_state
+    )
     if footprint_gib <= 0:
         warnings.append(
             f"Cannot size this workload against a {layout.mode} partition: the checkpoint's "

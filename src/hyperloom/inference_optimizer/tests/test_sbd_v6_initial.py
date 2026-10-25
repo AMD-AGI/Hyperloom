@@ -712,7 +712,6 @@ def test_timeline_writer_does_not_migrate_flat_files(tmp_path):
 
 
 def _stub_preflight_steps(tmp_path, monkeypatch):
-    from hyperloom.agents.framework import kb as framework_kb
     from hyperloom.inference_optimizer.cli import preflight
     from hyperloom.orchestrator.actions.executors import benchmark_backend
 
@@ -728,9 +727,8 @@ def _stub_preflight_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight, "_restore_provider_only_mode", lambda *_args: None)
     monkeypatch.setattr(preflight, "_normalize_legacy_deepseek_env", lambda: None)
     monkeypatch.setattr(preflight, "_validate_credentials", lambda: None)
-    monkeypatch.setattr(framework_kb, "prepare_kb_environment", lambda: None)
     monkeypatch.setattr(preflight, "_ensure_python_sdks", lambda *_args: None)
-    monkeypatch.setattr(preflight, "_resolve_llm_endpoints", lambda: ("", ""))
+    monkeypatch.setattr(preflight, "_export_llm_endpoints", lambda: ("", ""))
     monkeypatch.setattr(preflight, "_normalize_hip_visible_devices", lambda: None)
     monkeypatch.setattr(preflight, "_check_gpu_visibility", lambda: None)
     monkeypatch.setattr(preflight, "_check_shm_disk", lambda: None)
@@ -738,7 +736,6 @@ def _stub_preflight_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight, "_ensure_ray", lambda *_args: None)
     monkeypatch.setattr(preflight, "_ensure_bench_serving_deps", lambda *_args: None)
     monkeypatch.setattr(preflight, "_ensure_lm_eval_dep", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(preflight, "_ensure_framework_deps", lambda *_args: None)
     monkeypatch.setattr(preflight, "_check_serving_framework", lambda *_args: None)
     monkeypatch.setattr(preflight.inferencex_checkout, "checkout_ok", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(preflight.inferencex_checkout, "head_sha", lambda *_args: "abc123")
@@ -780,7 +777,6 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         "validate_server_args",
         "normalize_legacy_deepseek_env",
         "validate_credentials",
-        "prepare_kb_environment",
         "ensure_python_sdks",
         "check_gpu_visibility",
         "check_shm_disk",
@@ -788,7 +784,6 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         "ensure_ray",
         "ensure_bench_serving_deps",
         "ensure_lm_eval",
-        "framework_deps",
         "check_serving_framework",
         "ensure_magpie",
         "clone_inferencex",
@@ -800,8 +795,6 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         "diagnostics_snapshot",
     ]
     steps = {step["step_id"]: step for step in event["ext"]["steps"]}
-    assert steps["prepare_kb_environment"]["status"] == "skipped"
-    assert steps["prepare_kb_environment"]["skip_reason"] == "explicit_flag"
     assert steps["check_kernel_tuning_clis"]["status"] == "skipped"
     assert steps["check_kernel_tuning_clis"]["skip_reason"] == "no_kernel"
     assert steps["ensure_magpie"]["message"] == "benchmark backend is 'bypass'"

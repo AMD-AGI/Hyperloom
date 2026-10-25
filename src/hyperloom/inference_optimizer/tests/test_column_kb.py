@@ -14,6 +14,7 @@ import pytest
 from hyperloom.orchestrator.knowledge.agent_kb import (
     ConfigKB,
     KernelAgentKB,
+    OverlayProvenance,
     PatchKB,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
@@ -263,10 +264,7 @@ def test_provenance_records_how_the_overlay_was_captured(tmp_path: Path) -> None
 
     assert PatchKB(sections).stage_provenance(
         stack_index=3,
-        base_sha="abc123",
-        complete=False,
-        artifacts_outside_root=2,
-        realized=True,
+        provenance=OverlayProvenance(base_sha="abc123", complete=False, artifacts_outside_root=2, realized=True),
     )
 
     assert sections.staged("patch").knowledge["provenance"] == [
@@ -284,7 +282,7 @@ def test_provenance_carries_no_files(tmp_path: Path) -> None:
     """Provenance is metadata; nothing about it is uploadable."""
     sections = KnowledgeSections(tmp_path / "draft")
 
-    PatchKB(sections).stage_provenance(stack_index=0, base_sha="abc")
+    PatchKB(sections).stage_provenance(stack_index=0, provenance=OverlayProvenance(base_sha="abc"))
 
     assert sections.staged("patch").files == []
 
@@ -293,8 +291,8 @@ def test_restaging_provenance_replaces_its_row(tmp_path: Path) -> None:
     sections = KnowledgeSections(tmp_path / "draft")
     kb = PatchKB(sections)
 
-    assert kb.stage_provenance(stack_index=1, complete=True)
-    assert kb.stage_provenance(stack_index=1, complete=False)
+    assert kb.stage_provenance(stack_index=1, provenance=OverlayProvenance(complete=True))
+    assert kb.stage_provenance(stack_index=1, provenance=OverlayProvenance(complete=False))
 
     rows = sections.staged("patch").knowledge["provenance"]
     assert len(rows) == 1
@@ -447,7 +445,7 @@ def test_close_carries_overlays_and_provenance_into_the_patch_column(tmp_path: P
     patch.write_bytes(b"diff")
     kb = PatchKB(sections)
     refs = kb.stage_patches([patch], stack_index=0)
-    kb.stage_provenance(stack_index=0, base_sha="abc123", complete=True, realized=True)
+    kb.stage_provenance(stack_index=0, provenance=OverlayProvenance(base_sha="abc123", complete=True, realized=True))
 
     bundle = build_remote_knowledge(
         _state([{"action": "integrate_patch", "source_phase": "FRAMEWORK_AGENT", "kb_required_owner": "PATCH"}]),
@@ -617,7 +615,7 @@ def test_close_carries_prior_apply_root_onto_adopted_overlay(tmp_path: Path, sta
     )
     sections = KnowledgeSections(tmp_path / "draft", warm_start_dir=warm)
     if staged_base_sha is not None:
-        assert PatchKB(sections).stage_provenance(stack_index=0, base_sha=staged_base_sha)
+        assert PatchKB(sections).stage_provenance(stack_index=0, provenance=OverlayProvenance(base_sha=staged_base_sha))
     state = _state(
         [
             {
@@ -715,15 +713,17 @@ def test_provenance_records_a_checkout_per_overlay_ref(tmp_path: Path) -> None:
 
     assert PatchKB(sections).stage_provenance(
         stack_index=0,
-        host_origin={
-            "apply_roots": {
-                "patch/overlays/000000/00-sglang.patch": "/sglang",
-                "patch/overlays/000000/01-tuned-csv.patch": "/workspace/tuning",
-            },
-            "snapshot": "/session/optimization_stack/src/spec-1",
-            "manifest": "/session/optimization_stack/src/spec-1/manifest.json",
-            "sources": ["/session/optimization_stack/src/spec-1/realized.patch"],
-        },
+        provenance=OverlayProvenance(
+            host_origin={
+                "apply_roots": {
+                    "patch/overlays/000000/00-sglang.patch": "/sglang",
+                    "patch/overlays/000000/01-tuned-csv.patch": "/workspace/tuning",
+                },
+                "snapshot": "/session/optimization_stack/src/spec-1",
+                "manifest": "/session/optimization_stack/src/spec-1/manifest.json",
+                "sources": ["/session/optimization_stack/src/spec-1/realized.patch"],
+            }
+        ),
     )
 
     assert sections.staged("patch").knowledge["provenance"][0]["host_origin"] == {
@@ -743,11 +743,13 @@ def test_provenance_keeps_only_absolute_origins(tmp_path: Path) -> None:
 
     PatchKB(sections).stage_provenance(
         stack_index=0,
-        host_origin={
-            "apply_roots": {"patch/overlays/000000/00-fix.patch": "relative/tree"},
-            "snapshot": "relative/dir",
-            "sources": ["patch/overlays/000000/00-fix.patch", "/abs/realized.patch"],
-        },
+        provenance=OverlayProvenance(
+            host_origin={
+                "apply_roots": {"patch/overlays/000000/00-fix.patch": "relative/tree"},
+                "snapshot": "relative/dir",
+                "sources": ["patch/overlays/000000/00-fix.patch", "/abs/realized.patch"],
+            }
+        ),
     )
 
     assert sections.staged("patch").knowledge["provenance"][0]["host_origin"] == {
@@ -758,6 +760,6 @@ def test_provenance_keeps_only_absolute_origins(tmp_path: Path) -> None:
 def test_provenance_omits_host_origin_when_nothing_absolute_is_known(tmp_path: Path) -> None:
     sections = KnowledgeSections(tmp_path / "draft")
 
-    PatchKB(sections).stage_provenance(stack_index=0, host_origin={"apply_roots": {}})
+    PatchKB(sections).stage_provenance(stack_index=0, provenance=OverlayProvenance(host_origin={"apply_roots": {}}))
 
     assert "host_origin" not in sections.staged("patch").knowledge["provenance"][0]

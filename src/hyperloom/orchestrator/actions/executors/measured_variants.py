@@ -13,7 +13,13 @@ from hyperloom.inference_optimizer.canonical_fingerprint import workload_signatu
 from ...policy.gate import PolicyDenied
 
 from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT
-from ._proposal_identity import content_fingerprint, controls_of, effective_fingerprint, normalize_proposal
+from ._proposal_identity import (
+    BaseControls,
+    content_fingerprint,
+    controls_of,
+    effective_fingerprint,
+    normalize_proposal,
+)
 
 __all__ = [
     "GAIN_BELOW_THRESHOLD",
@@ -72,9 +78,7 @@ def grid_fingerprints(params: Mapping[str, Any]) -> list[str]:
                 fields["extra_args"],
                 fields["extra_envs"],
                 controls=controls_of(fields),
-                base_remove_args=params.get("base_remove_args"),
-                base_unset_envs=params.get("base_unset_envs"),
-                base_args_mode=params.get("base_args_mode"),
+                base=BaseControls.of_params(params),
             )
         )
     return out

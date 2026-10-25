@@ -65,16 +65,16 @@ class _Tasks:
     async def running(self) -> list[Any]:
         return list(self._running)
 
-    async def create_or_return_existing(self, **kwargs: Any) -> tuple[Any, bool]:
-        self.created.append(kwargs)
-        key = str(kwargs.get("idempotency_key") or "")
+    async def create_or_return_existing(self, spec) -> tuple[Any, bool]:
+        self.created.append(vars(spec))
+        key = str(spec.idempotency_key or "")
         existing = self._by_idem.get(key)
         if existing is not None:
             return existing, True
         task = SimpleNamespace(
-            kind=kwargs.get("kind"),
+            kind=spec.kind,
             task_id=f"t-{len(self.created)}",
-            params=kwargs.get("params") or {},
+            params=spec.params or {},
             state="queued",
         )
         self._queued.append(task)

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from hyperloom.inference_optimizer.cli import _resolve_run_max_model_len
 from hyperloom.inference_optimizer.grid_server_args import (
+    WorkloadTokenWindow,
     inject_sglang_context_length,
 )
 
@@ -95,7 +96,9 @@ def test_max_model_len_agentx_falls_back_when_config_unreadable(native_benchmark
 def test_sglang_context_synthetic_path_unchanged(tmp_path, monkeypatch):
     """AgentX OFF still clamps to max(ISL+OSL+headroom, floor)."""
     _clear(monkeypatch)
-    out = inject_sglang_context_length("", "sglang", _model_dir(tmp_path), 1024, 1024, max_model_len=6144)
+    out = inject_sglang_context_length(
+        "", "sglang", _model_dir(tmp_path), WorkloadTokenWindow(1024, 1024, max_model_len=6144)
+    )
     assert out.strip() == "--context-length 6144"
 
 
@@ -103,7 +106,9 @@ def test_sglang_context_agentx_skips_isl_osl_cap(native_benchmark, tmp_path, mon
     """AgentX ON sizes the window off the model, not the placeholder ISL/OSL."""
     _clear(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
-    out = inject_sglang_context_length("", "sglang", _model_dir(tmp_path), 1024, 1024, max_model_len=_NATIVE)
+    out = inject_sglang_context_length(
+        "", "sglang", _model_dir(tmp_path), WorkloadTokenWindow(1024, 1024, max_model_len=_NATIVE)
+    )
     assert out.strip() == f"--context-length {_NATIVE}"
 
 
@@ -111,7 +116,9 @@ def test_sglang_context_agentx_still_honours_explicit_ceiling(native_benchmark, 
     """An explicit MAX_MODEL_LEN ceiling keeps clamping under AgentX."""
     _clear(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
-    out = inject_sglang_context_length("", "sglang", _model_dir(tmp_path), 1024, 1024, max_model_len=131072)
+    out = inject_sglang_context_length(
+        "", "sglang", _model_dir(tmp_path), WorkloadTokenWindow(1024, 1024, max_model_len=131072)
+    )
     assert out.strip() == "--context-length 131072"
 
 
@@ -119,7 +126,7 @@ def test_sglang_context_non_sglang_untouched(native_benchmark, tmp_path, monkeyp
     """vLLM runs never receive --context-length, AgentX or not."""
     _clear(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
-    assert inject_sglang_context_length("", "vllm", _model_dir(tmp_path), 1024, 1024) == ""
+    assert inject_sglang_context_length("", "vllm", _model_dir(tmp_path), WorkloadTokenWindow(1024, 1024)) == ""
 
 
 # --- eval opt-out -------------------------------------------------------------

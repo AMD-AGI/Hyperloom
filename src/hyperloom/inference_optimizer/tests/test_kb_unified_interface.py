@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
+    RecipeUpsert,
     LocalRecipeStore,
     RecipeKB,
     recipe_canonical_id,
@@ -15,6 +17,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _build_warm_prefer,
     _build_warm_start_context,
     _recipe_is_actionable,
+    WarmMatch,
 )
 
 
@@ -42,18 +45,15 @@ def test_local_search_prefer_reorders_without_dropping(
     ]
     for hardware, tp in rows:
         cid = recipe_canonical_id(
-            model="qwen3-32b",
-            hardware=hardware,
-            framework_name="sglang",
-            framework_version="0.5.11",
-            precision="fp8",
+            RecipeIdentity(
+                model="qwen3-32b",
+                hardware=hardware,
+                framework_name="sglang",
+                framework_version="0.5.11",
+                precision="fp8",
+            )
         )
-        kb.put_recipe(
-            canonical_id=cid,
-            model="qwen3-32b",
-            hardware=hardware,
-            extras={"tp": tp},
-        )
+        kb.put_recipe(RecipeUpsert(canonical_id=cid, model="qwen3-32b", hardware=hardware, extras={"tp": tp}))
     found = kb.search(
         label_match={"model": "qwen3-32b"},
         prefer={"tp": 8},
@@ -66,18 +66,20 @@ def test_recipe_actionability_and_warm_context() -> None:
     assert _recipe_is_actionable({"best_config": {"extra_server_args": "--x 1"}})
     assert not _recipe_is_actionable({"canonical_id": "inference:m:h:f:mt:a:v:p", "best_config": {}})
     context = _build_warm_start_context(
-        tier="exact",
-        confidence=1.0,
+        match=WarmMatch(
+            {
+                "canonical_id": "inference:m:h:f:mt:a:v:p",
+                "best_config": {
+                    "extra_server_args": "--x 1",
+                    "extra_envs": {"A": "1"},
+                },
+                "best_throughput": 100.0,
+            },
+            "exact",
+            1.0,
+        ),
         canonical_id="inference:m:h:f:mt:a:v:p",
         source="recipe-kb",
-        recipe={
-            "canonical_id": "inference:m:h:f:mt:a:v:p",
-            "best_config": {
-                "extra_server_args": "--x 1",
-                "extra_envs": {"A": "1"},
-            },
-            "best_throughput": 100.0,
-        },
     )
     assert context["status"] == "hit"
     assert context["recommended_replay"]["extra_server_args"] == "--x 1"

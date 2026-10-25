@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from hyperloom.orchestrator.loop.coordinator import RunOptions
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
 class _Gated:
@@ -59,7 +60,7 @@ def coord(tmp_path: Path):
 
 async def _enqueue(coord, kind: str, key: str, lanes: list[str] | None = None, params: dict | None = None):
     await coord.tasks.create_or_return_existing(
-        kind=kind, params=params or {}, idempotency_key=key, requires_lanes=lanes or [], lease_ttl_sec=600
+        TaskSpec(kind=kind, params=params or {}, idempotency_key=key, requires_lanes=lanes or [], lease_ttl_sec=600)
     )
 
 

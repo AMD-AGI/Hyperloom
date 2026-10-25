@@ -15,7 +15,7 @@ from ..actions.executors._nogit_patch import _is_git_tree
 from ..actions.executors.baseline import _revert_warm_patch_state
 from ..actions.executors._patch_snapshot import _git_commit_kept, _patch_touched_paths, _patch_touched_paths_split
 from ..enablement.runtime.adapters import get_adapter
-from ..source_snapshot import MANIFEST_NAME, snapshot_source_layer
+from ..source_snapshot import MANIFEST_NAME, SourceLayer, snapshot_source_layer
 
 log = logging.getLogger(__name__)
 
@@ -87,13 +87,15 @@ def warm_replay_source_layer(result: Mapping[str, Any], session_dir: str | Path,
     base_sha = _git_head_sha(root)
     try:
         snap = snapshot_source_layer(
-            framework_root=root,
-            base_sha=base_sha,
-            rel_paths=upserted + deleted,
+            SourceLayer(
+                framework_root=root,
+                base_sha=base_sha,
+                rel_paths=upserted + deleted,
+                declared_ops=declared_ops,
+                import_root=get_adapter(framework).source_import_root(root_text),
+            ),
             dest_dir=Path(session_dir) / "optimization_stack" / "src" / _SNAPSHOT_SLOT,
             provenance="replay_warm_recipe",
-            declared_ops=declared_ops,
-            import_root=get_adapter(framework).source_import_root(root_text),
         )
     except OSError:
         log.exception("warm replay: snapshotting the applied overlays under %s failed", root)
@@ -147,8 +149,17 @@ def uncommit_promoted_overlays(pending: Mapping[str, Any], root: str, pre_sha: s
     if not pending.get(_OVERLAYS_COMMITTED_KEY) or not pre_sha:
         return ""
     head = _git_head_sha(root)
+    if not head:
+        return f"recipe:{root}:promotion_commit_state_unreadable:HEAD"
+    if head == pre_sha:
+        return ""
     parent = _run_git_cp(["-C", root, "rev-parse", "HEAD^"], timeout=30.0)
-    if not head or head == pre_sha or parent is None or parent.stdout.strip() != pre_sha:
+    if parent is None:
+        return f"recipe:{root}:promotion_commit_state_unreadable:HEAD^:spawn failed"
+    if parent.returncode != 0:
+        detail = (parent.stderr or "").strip()
+        return f"recipe:{root}:promotion_commit_state_unreadable:HEAD^:{detail}"
+    if parent.stdout.strip() != pre_sha:
         return ""
     reset = _run_git_cp(["-C", root, "reset", "-q", pre_sha], timeout=30.0)
     if reset is None or reset.returncode != 0:

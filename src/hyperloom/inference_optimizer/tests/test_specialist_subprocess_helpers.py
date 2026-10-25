@@ -14,6 +14,8 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.bringup.trees import head_commit
+
 from hyperloom.orchestrator.specialists import patch_safety as ps
 from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.subprocess_ import (
@@ -301,7 +303,7 @@ def test_harvest_off_an_installed_package_snapshot_applies_to_the_package(tmp_pa
     (wt / "model_executor" / "models" / "qwen3.py").write_text("BLOCK = 128\n", encoding="utf-8")
     (wt / "envs.py").write_text("VLLM_USE_X = 1\n", encoding="utf-8")
     patches, roots = SpecialistSubprocessDispatcher._collect_patches(
-        wt, tmp_path / "ws", worktree_base=package, worktree_base_commit=ss.head_commit(wt)
+        wt, tmp_path / "ws", worktree_base=package, worktree_base_commit=head_commit(wt)
     )
 
     assert len(patches) == 1
@@ -318,15 +320,15 @@ def test_snapshot_refresh_follows_the_package_and_a_held_snapshot_does_not(tmp_p
     package = _installed_package(tmp_path)
     repo = tmp_path / "session" / "tree_snapshots" / "vllm.git"
     snapshot_tree(package, repo, refresh=True)
-    first = ss.head_commit(repo)
+    first = head_commit(repo)
 
     (package / "envs.py").write_text("VLLM_USE_X = 2\n", encoding="utf-8")
     held, err = snapshot_tree(package, repo, refresh=False)
     assert err == "" and held == repo
-    assert ss.head_commit(repo) == first
+    assert head_commit(repo) == first
 
     snapshot_tree(package, repo, refresh=True)
-    assert ss.head_commit(repo) != first
+    assert head_commit(repo) != first
     wt, _ = _setup_worktree(repo, tmp_path / "ws" / "worktree", "specialist-t2")
     assert wt is not None and (wt / "envs.py").read_text(encoding="utf-8") == "VLLM_USE_X = 2\n"
 
