@@ -170,6 +170,28 @@ def test_the_costliest_fold_is_raised_whichever_step_class_the_trace_opens_with(
     assert folds[0].startswith("In VERIFY bs=3, reduce runs 50 times per step")
 
 
+def test_one_launch_seen_at_several_batch_widths_is_one_fold(tmp_path):
+    """A steady-state capture spans several widths; the same fold must not take a slot per width."""
+    events = []
+    start = 0.0
+    for width in (7, 8, 9):
+        events.append(step(f"step[VERIFY bs={width}]", start, 2000.0))
+        ts = start + 1.0
+        for _ in range(50):
+            events += [kernel("split_k", ts, 14.0), kernel("reduce", ts + 14.0, 5.0), kernel("norm", ts + 19.0, 4.0)]
+            events += [kernel("gemm", ts + 23.0, 14.0)]
+            ts += 40.0
+        start += 2500.0
+
+    gaps = reg.run_evidence_gaps(session_dir=tmp_path, trace_path=_trace(tmp_path, events), workspace="")
+
+    folds = [g["symptom"] for g in gaps if g["provenance"] == "foldable_launch"]
+    assert len(folds) == 2
+    assert sum(" reduce runs 50 times per step" in f for f in folds) == 1
+    assert sum(" norm runs 50 times per step" in f for f in folds) == 1
+    assert all("at 3 batch width(s)" in f for f in folds)
+
+
 def test_the_same_evidence_upserts_rather_than_multiplying(tmp_path):
     _jit_leak(tmp_path, "_fused_fp8_bmm_rope", 40)
 

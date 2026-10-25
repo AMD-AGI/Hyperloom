@@ -16,6 +16,7 @@ a number to improve.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from hashlib import sha1
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from hyperloom.orchestrator.measurement.jit_variants import variant_counts
 from hyperloom.orchestrator.state._shared_state.phase_state import GAP_SEVERITY_HIGH
 from kernelforge.foldable_launches import foldable_launches
 from kernelforge.graph_coverage import graph_coverage
+from kernelforge.serving_windows import step_kind
 from kernelforge.trace_events import resolve_capture
 
 log = logging.getLogger(__name__)
@@ -95,25 +97,29 @@ def _foldable_gaps(trace_path: Any) -> list[dict[str, Any]]:
     Ranked across step classes by what each costs over the whole capture. Taken a class at a time, the cap went to
     whichever class the trace opened with: the GLM-5.3 session raised four EXTEND folds and none from VERIFY, whose
     1.15 ms-per-step quant launch in front of every blockscale GEMM was the costliest fold in its trace.
+
+    One launch is one fold at every batch width of its step kind. A steady-state capture spans several widths, and
+    counted per width that same quant launch took two of the three slots.
     """
-    folds = [
-        (window_class, row)
-        for window_class, rows in foldable_launches(trace_path).items()
-        for row in rows
-        if (row.get("after") or row.get("before")) and row["ms_per_step"] >= _FOLD_MIN_MS_PER_STEP
-    ]
-    folds.sort(key=lambda fold: fold[1]["ms_in_capture"], reverse=True)
+    widths: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = defaultdict(list)
+    for window_class, rows in foldable_launches(trace_path).items():
+        for row in rows:
+            if (row.get("after") or row.get("before")) and row["ms_per_step"] >= _FOLD_MIN_MS_PER_STEP:
+                widths[(step_kind(window_class), row["kernel"])].append((window_class, row))
+    ranked = sorted(widths.values(), key=lambda seen: sum(row["ms_in_capture"] for _, row in seen), reverse=True)
     out: list[dict[str, Any]] = []
-    for window_class, row in folds[:_PER_CENSUS_CAP]:
+    for seen in ranked[:_PER_CENSUS_CAP]:
+        window_class, row = max(seen, key=lambda item: item[1]["ms_in_capture"])
         neighbour = row.get("after") or row.get("before")
         out.append(
             _gap(
                 "foldable_launch",
-                f"{window_class}::{row['kernel']}",
+                f"{step_kind(window_class)}::{row['kernel']}",
                 f"In {window_class}, {row['kernel']} runs {row['launches_per_step']:.0f} times per step at "
                 f"{row['us_per_call']:.1f} us a call ({row['ms_per_step']:.2f} ms per step), always beside "
-                f"{neighbour['name']} ({neighbour['share']:.0%}). Folding it into that neighbour removes a "
-                "launch per call without changing what is computed.",
+                f"{neighbour['name']} ({neighbour['share']:.0%}), and it does at {len(seen)} batch width(s) of "
+                "these steps. Folding it into that neighbour removes a launch per call without changing what is "
+                "computed.",
                 severity="medium",
                 domain_hint=KERNEL_DOMAIN,
             )

@@ -38,6 +38,8 @@ _US_PER_MS: float = 1000.0
 _REPORTED_PLACES: int = 3
 #: Kernels named per window class.
 TOP_N: int = 15
+#: What separates a window class's step kind from its batch width.
+_WIDTH_SEPARATOR: str = " bs="
 
 
 @dataclass(frozen=True)
@@ -52,11 +54,16 @@ class StepWindow:
     @property
     def window_class(self) -> str:
         """The group this step is ranked within: what it does and how wide it is."""
-        return f"{self.kind} bs={self.batch_size}"
+        return f"{self.kind}{_WIDTH_SEPARATOR}{self.batch_size}"
 
     @property
     def is_decode(self) -> bool:
         return self.kind in DECODE_KINDS
+
+
+def step_kind(window_class: str) -> str:
+    """The step kind a window class names, whatever its batch width."""
+    return window_class.split(_WIDTH_SEPARATOR, 1)[0]
 
 
 def step_windows(events: list[dict[str, Any]]) -> list[StepWindow]:
@@ -197,5 +204,6 @@ __all__ = [
     "StepWindow",
     "hot_kernels_by_class",
     "render_hot_kernels_by_class",
+    "step_kind",
     "step_windows",
 ]
