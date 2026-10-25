@@ -24,6 +24,7 @@ ACCEPTED = "accepted"
 OUTCOME = "outcome"
 SETTLED = "settled"
 ABORTED = "aborted"
+RECIPE_DIGEST = "recipe_digest"
 
 
 @dataclass
@@ -39,6 +40,8 @@ class LogEntry:
     outcome: Mapping[str, object] | None = None
     settled: bool = False
     aborted: bool = False
+    #: The digest of the recipe the request measures; empty in an entry logged before it was recorded.
+    recipe_digest: str = ""
 
     @property
     def waiting(self) -> bool:
@@ -91,6 +94,7 @@ class SubmissionLog:
                 "request": entry.request,
                 "priority": entry.priority,
                 "queued_at": entry.queued_at,
+                **({RECIPE_DIGEST: entry.recipe_digest} if entry.recipe_digest else {}),
             }
         )
 
@@ -136,6 +140,7 @@ class SubmissionLog:
                 record["request"],  # type: ignore[arg-type]
                 int(record["priority"]),  # type: ignore[call-overload]
                 float(record["queued_at"]),  # type: ignore[arg-type]
+                recipe_digest=str(record.get(RECIPE_DIGEST) or ""),
             )
             return
         entry = self._entries.get(request_id)

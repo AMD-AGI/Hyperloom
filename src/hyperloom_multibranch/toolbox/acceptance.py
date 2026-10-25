@@ -136,7 +136,7 @@ def _check_upstream_label(parent: Recipe, request: TestRequest) -> None:
             )
 
 
-def _no_live_profile(request: TestRequest) -> str | None:
+def _no_live_profile(request: TestRequest, recipe_digest: str) -> str | None:
     return None
 
 
@@ -186,9 +186,11 @@ class AcceptanceSetup:
 
 @dataclass(frozen=True)
 class Prepared:
-    """What acceptance learned: the compiled environment, handed to the executor with every attempt."""
+    """What acceptance learned: the compiled environment, handed to the executor with every attempt, and the digest of
+    the recipe the request measures (the parent's with the delta applied; it names the image too)."""
 
     environment: object
+    recipe_digest: str = ""
 
 
 class Acceptance:
@@ -197,10 +199,10 @@ class Acceptance:
         setup: AcceptanceSetup,
         *,
         is_accepted: Callable[[str], bool],
-        live_profile: Callable[[TestRequest], str | None] = _no_live_profile,
+        live_profile: Callable[[TestRequest, str], str | None] = _no_live_profile,
     ) -> None:
-        """``live_profile`` answers, for a PROFILE request, the id of the profile of the same commit and recipe that
-        is queued, running or measured, or ``None``; the toolbox reads it from its submit log."""
+        """``live_profile`` answers, for a PROFILE request and the digest of the recipe it measures, the id of a profile
+        of the same recipe that is queued, running or measured, or ``None``; the toolbox reads it from its submit log."""
         self._repo = setup.repo
         self._planner = setup.planner
         self._image = setup.active_image_digest
@@ -234,19 +236,20 @@ class Acceptance:
         _check_explore_changes_something(request)
         if not replay and request.retest_of is not None and not self._is_accepted(request.retest_of):
             raise RequestRejected(f"retest_of {request.retest_of!r} names no accepted request", "unknown_retest")
-        if not replay:
-            self._check_profile_exists(request)
         recipe = await self._read_parent(request)
         self._check_image(recipe)
         if not replay:  # a request an earlier toolbox accepted is not withdrawn by a later rule
             _check_upstream_label(recipe, request)
         candidate = self._check_delta(recipe, request)
+        digest = candidate.digest()
+        if not replay:
+            self._check_profile_exists(request, digest)
         self._check_fake_gain(recipe, candidate)
         if not replay:
             _check_explore_changes_the_parent(recipe, candidate, request)
             _check_online_tuning(candidate)
         accepted = self._with_short_prompts(self._plan(recipe, request), recipe, candidate, request)
-        return Prepared(self._with_long_context(accepted, request))
+        return Prepared(self._with_long_context(accepted, request), digest)
 
     def _with_short_prompts(self, accepted: object, parent: Recipe, candidate: Recipe, request: TestRequest) -> object:
         """``accepted`` with the consistency check this request runs, when it runs one and ``accepted`` can carry it."""
@@ -266,21 +269,23 @@ class Acceptance:
             else accepted
         )
 
-    def _check_profile_exists(self, request: TestRequest) -> None:
-        """Refuse a PROFILE of a commit and recipe that already has a live one, and name that one.
+    def _check_profile_exists(self, request: TestRequest, recipe_digest: str) -> None:
+        """Refuse a PROFILE of a recipe that already has a live one, and name that one.
 
-        A profile is not a claimed test, so nothing else keeps branches from profiling one commit over and over; each
+        A profile is not a claimed test, so nothing else keeps branches from profiling one recipe over and over; each
         repeat holds a card for a trace the session already has or is about to have. The point is always the
-        canonical one (a profile ignores ``concurrency``) and the image is the commit's own, so the commit and the
-        recipe change say whether it is the same measurement. The caller waits for the existing request instead.
+        canonical one (a profile ignores ``concurrency``), so the recipe the request measures, whose digest names its
+        image too, says whether it is the same measurement, whatever commit holds it: a merge commit whose recipe is
+        its source's is the same profile (two such pairs were profiled twice in one session). The caller waits for the
+        existing request instead.
         """
 
         if request.kind is not TestKind.PROFILE:
             return
-        existing = self._live_profile(request)
+        existing = self._live_profile(request, recipe_digest)
         if existing is not None:
             raise RequestRejected(
-                f"commit {request.parent_commit} already has a profile of this recipe, request {existing}, queued, "
+                f"the recipe of commit {request.parent_commit} already has a profile, request {existing}, queued, "
                 "running or measured; wait_test on it, or read the commit's op shares from the notebook",
                 "profile_exists",
                 existing_request_id=existing,

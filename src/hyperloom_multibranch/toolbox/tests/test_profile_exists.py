@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 from hyperloom.contracts.measurement import FailureClass, Purpose, TestKind, TestRequest
-from hyperloom.contracts.recipe import Recipe, RecipeDelta
+from hyperloom.contracts.recipe import Recipe, RecipeDelta, apply
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, CancelOutcome, RequestRejected
@@ -30,6 +30,7 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox.mcp_tools import SpecialistToolOptions, register_specialist_tools
 from hyperloom_multibranch.toolbox.tests.helpers import (
     IMAGE,
+    OTHER_IMAGE,
     PARENT,
     FakeRepo,
     Rig,
@@ -59,8 +60,9 @@ def gated() -> ScriptedExecutor:
     return executor
 
 
-def with_second_commit(rig: Rig) -> Rig:
-    rig.repo.recipes[OTHER_COMMIT] = Recipe(base_image_digest=IMAGE)
+def with_second_commit(rig: Rig, recipe: Recipe | None = None) -> Rig:
+    """``OTHER_COMMIT`` holds ``recipe``, by default one that differs from the parent's in its launch."""
+    rig.repo.recipes[OTHER_COMMIT] = recipe or apply(rig.repo.recipes[PARENT], delta("--elsewhere"))
     return rig
 
 
@@ -150,6 +152,70 @@ async def test_another_commit_another_recipe_and_other_kinds_are_accepted(tmp_pa
 
     assert len({first, *accepted}) == 4
     await rig.toolbox.close()
+
+
+async def test_a_merge_commit_whose_recipe_is_its_sources_reuses_the_sources_profile(tmp_path: Path) -> None:
+    """Two merge commits of one session held their source's recipe (the same tree) and were profiled again, about 70
+    GPU-minutes. The recipe, not the commit, keys a profile."""
+    rig = build(tmp_path, executor=gated())
+    with_second_commit(rig, rig.repo.recipes[PARENT])
+    first = await rig.toolbox.submit_test(profile("b1"))
+
+    assert (await refused(rig, profile("b2", commit=OTHER_COMMIT))).existing_request_id == first
+    await rig.toolbox.close()
+
+
+async def test_a_commit_that_holds_the_recipe_a_profile_measured_as_a_delta_reuses_it(tmp_path: Path) -> None:
+    rig = build(tmp_path, executor=gated())
+    with_second_commit(rig)  # the parent's recipe with --elsewhere applied
+    first = await rig.toolbox.submit_test(profile("b1", change=delta("--elsewhere")))
+
+    assert (await refused(rig, profile("b2", commit=OTHER_COMMIT))).existing_request_id == first
+    await rig.toolbox.close()
+
+
+async def test_the_same_launch_on_another_image_is_another_profile(tmp_path: Path) -> None:
+    rig = build(tmp_path, executor=gated(), active_image=None)
+    with_second_commit(rig, replace(rig.repo.recipes[PARENT], base_image_digest=OTHER_IMAGE))
+    first = await rig.toolbox.submit_test(profile("b1"))
+
+    assert await rig.toolbox.submit_test(profile("b2", commit=OTHER_COMMIT)) != first
+    await rig.toolbox.close()
+
+
+async def test_a_restarted_toolbox_still_knows_the_recipe_a_logged_profile_measured(tmp_path: Path) -> None:
+    rig = build(tmp_path, executor=gated())
+    first = await rig.toolbox.submit_test(profile("b1"))
+    await settle()
+    await rig.toolbox.close()
+
+    again = with_second_commit(build(tmp_path, executor=gated()), Recipe(base_image_digest=IMAGE))
+    await again.toolbox.start()
+
+    assert (await refused(again, profile("b2", commit=OTHER_COMMIT))).existing_request_id == first
+    await again.toolbox.close()
+
+
+async def test_a_profile_logged_before_digests_were_recorded_still_covers_its_commit_and_delta(
+    tmp_path: Path,
+) -> None:
+    rig = build(tmp_path, executor=gated())
+    first = await rig.toolbox.submit_test(profile("b1"))
+    await settle()
+    await rig.toolbox.close()
+    log = rig.toolbox._log.path
+    records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert [r.pop("recipe_digest") for r in records if r["type"] == "accepted"] == [
+        Recipe(base_image_digest=IMAGE).digest()
+    ]
+    log.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records), encoding="utf-8")
+
+    again = with_second_commit(build(tmp_path, executor=gated()), Recipe(base_image_digest=IMAGE))
+    await again.toolbox.start()
+
+    assert (await refused(again, profile("b2"))).existing_request_id == first
+    assert await again.toolbox.submit_test(profile("b3", commit=OTHER_COMMIT)) != first, "an old entry knows no recipe"
+    await again.toolbox.close()
 
 
 async def test_asking_for_another_concurrency_does_not_make_it_another_profile(tmp_path: Path) -> None:

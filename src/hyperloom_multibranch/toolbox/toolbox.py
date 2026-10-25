@@ -66,6 +66,14 @@ CLAIM_TTL_SECONDS = 600.0
 WRITE_RETRIES = 3
 
 
+def _same_commit_and_delta(entry: LogEntry, request: TestRequest) -> bool:
+    """Whether a logged request is of ``request``'s commit with the same delta: how a profile was keyed before the log
+    recorded the digest of the recipe it measures."""
+    if entry.request.get("parent_commit") != request.parent_commit:
+        return False
+    return TestRequest.from_document(entry.request).delta.fingerprint() == request.delta.fingerprint()
+
+
 @dataclass(frozen=True)
 class ToolboxStores:
     """Where the toolbox keeps what it must not lose: the submit log and the notebook's ports.
@@ -180,7 +188,13 @@ class RealToolbox:
             sequence = self._log.next_sequence(request.branch_id)
             accepted = request.accepted(self._log.request_id(request.branch_id, sequence))
             entry = LogEntry(
-                accepted.request_id or "", request.branch_id, sequence, accepted.to_document(), priority, self._clock()
+                accepted.request_id or "",
+                request.branch_id,
+                sequence,
+                accepted.to_document(),
+                priority,
+                self._clock(),
+                recipe_digest=prepared.recipe_digest,
             )
             self._log.accept(entry)
             await self._publish(entry, accepted)
@@ -470,25 +484,25 @@ class RealToolbox:
         entry = self._log.get(request_id)
         return entry is not None and not entry.aborted
 
-    def _live_profile(self, request: TestRequest) -> str | None:
-        """The id of the earliest PROFILE of ``request``'s commit and recipe that the submit log holds as queued,
-        running or measured successfully; ``None`` when there is none.
+    def _live_profile(self, request: TestRequest, recipe_digest: str) -> str | None:
+        """The id of the earliest PROFILE of the recipe whose digest is ``recipe_digest`` that the submit log holds as
+        queued, running or measured successfully; ``None`` when there is none.
 
-        Read from the log, never from a set of its own, so a restarted toolbox answers as the one before it did. A
-        profile that failed, was withdrawn or was aborted covers nothing, and so does one the log knows only as
-        settled in the notebook with no outcome of its own. :meth:`submit_test` calls this under the lock that also
-        logs the accepted request, so two submits of one profile cannot both pass.
+        The recipe, not the commit, is the key: a merge commit whose recipe is its source's has the same profile. An
+        entry logged before the log recorded digests is matched by its commit and delta, as then. Read from the log,
+        never from a set of its own, so a restarted toolbox answers as the one before it did. A profile that failed, was
+        withdrawn or was aborted covers nothing, and so does one the log knows only as settled in the notebook with no
+        outcome of its own. :meth:`submit_test` calls this under the lock that also logs the accepted request, so two
+        submits of one profile cannot both pass.
         """
 
-        recipe = request.delta.fingerprint()
         for entry in self._log.entries():
-            if entry.aborted or entry.request.get("kind") != TestKind.PROFILE.value:
+            if entry.aborted or entry.request.get("kind") != TestKind.PROFILE.value or not self._holds_profile(entry):
                 continue
-            if entry.request.get("parent_commit") != request.parent_commit:
-                continue
-            if not self._holds_profile(entry) or TestRequest.from_document(entry.request).delta.fingerprint() != recipe:
-                continue
-            return entry.request_id
+            if entry.recipe_digest == recipe_digest or (
+                not entry.recipe_digest and _same_commit_and_delta(entry, request)
+            ):
+                return entry.request_id
         return None
 
     @staticmethod

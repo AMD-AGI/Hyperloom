@@ -28,7 +28,8 @@ from hyperloom_multibranch.toolbox.mcp_tools import (
     SpecialistToolOptions,
     register_specialist_tools,
 )
-from hyperloom_multibranch.toolbox.tests.helpers import PARENT, Rig, build, ok, req
+from hyperloom.contracts.recipe import apply
+from hyperloom_multibranch.toolbox.tests.helpers import PARENT, Rig, build, delta, ok, req
 from hyperloom_multibranch.toolbox.tools import ToolJobs, ToolOutput, ToolRequest
 from hyperloom_multibranch.toolbox.tools import op_shares as op_shares_module
 from hyperloom_multibranch.toolbox.tools.op_shares import with_op_shares
@@ -116,7 +117,8 @@ async def _stack(
 
     rig = build(tmp_path, tools=make if with_tools else None)
     rig.repo.heads["b1"] = HEAD
-    rig.repo.recipes[HEAD] = rig.repo.recipes[PARENT]
+    # b1's head holds a recipe of its own: a profile of it is not the parent's (a profile is keyed by recipe).
+    rig.repo.recipes[HEAD] = apply(rig.repo.recipes[PARENT], delta("--head-of-b1"))
     await rig.toolbox.start()
     server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="w32")
     root = tmp_path
