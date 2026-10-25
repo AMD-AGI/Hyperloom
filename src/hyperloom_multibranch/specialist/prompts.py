@@ -33,6 +33,7 @@ from hyperloom_multibranch.contracts.fork import RepairRequest
 from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord, InboxItem
 from hyperloom_multibranch.rulegate.fix_case import CASE_SCRIPT
 from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name
+from hyperloom_multibranch.specialist.following import REROOT
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionStart, restart_notice
 
@@ -216,10 +217,17 @@ to notebook_learn. A learning names its direction and cites its tests in request
 (lsn-...) that this session's tests show wrong here: revise it with supersedes, or retire it with retires when it no \
 longer holds at all. Then go back to step 2: the session decides when your branch stops, not you.
 
-The integration head is where the session's gains stack. Your launch prompt, and the message that wakes you after \
-it moves, lists what it holds: its launch, the commits merged into it, those your head lacks, and your head's commits \
-not on it with how their merges went. Never test or replay a change it holds: on a head behind it, that measures a \
-gain the session has already and stacks nowhere. Merging your commits into it is the integrator's job, not yours.
+Your branch follows the integration head, where the session's gains stack. Your launch prompt, and the message that \
+wakes you after it moves, lists what it holds: its launch, the commits merged into it, those your head lacks, and \
+your head's commits not on it with how their merges went. Never test or replay a change it holds: on a head behind \
+it, that measures a gain the session has already and stacks nowhere. When it holds a change your head lacks, move \
+your branch onto it: write a branch-log entry that starts with "{REROOT}" and says why, submit nothing more on your \
+old head, and end your turn once your running tests and their retests have landed. The runtime moves your branch at \
+the end of a turn with no candidate test of yours in flight, and the message that wakes you says what it did. Your \
+old head's commits the integration head lacks come back as one delta on the new head: one the integrator has not \
+tried or is testing is its job, so leave it; one whose merge conflicted is yours to port and test there; one \
+measured not stackable on the new head is done. Keep your head instead while your next candidate builds on a \
+commit of yours not merged yet, or while your head's recorded value is above the integration head's.
 
 Your launch prompt names your branch's direction: work on it first. When the brief names a "Focus", start from \
 that operator within your direction: the scheduler opened your branch on it. When the first idea fails, profile and dig \
@@ -493,7 +501,7 @@ def _summary(log: Sequence[BranchLogRecord]) -> str:
 
 def wake_message(items: Sequence[InboxItem], notices: Sequence[BranchLogRecord], *, integration: str = "") -> str:
     """The message that wakes a specialist whose turn ended: what its inbox and the runtime's notices brought since,
-    and ``integration``, what the integration head holds, once it moved."""
+    and ``integration``, what the integration head holds, once it moved or the branch followed it."""
     woken = _WAKE.format(items=_arrivals(items, notices)) if items or notices else _MOVED
     return f"{woken}\n\n{integration_section(integration)}" if integration else woken
 

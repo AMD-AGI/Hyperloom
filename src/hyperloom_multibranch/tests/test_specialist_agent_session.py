@@ -14,14 +14,15 @@ from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import ComponentPatches, ConfigDelta, LaunchConfig, Recipe, RecipeDelta, apply
 from hyperloom.orchestrator.specialists.agent_runner import AgentEnded, AgentHandle, AgentStatus, LocalAgentRunner
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
+from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook.records import LlmUsage
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, UsageSource
+from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion, UsageSource
 from hyperloom_multibranch.contracts.toolbox import SpecialistGrant
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import intent, request, result
+from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
 from hyperloom_multibranch.specialist.agent_session import (
     CLI_SESSION_FILE,
     IDLE_TURNS,
@@ -1097,3 +1098,41 @@ async def test_a_resume_after_the_integration_head_moved_mid_turn_shows_what_it_
     assert recorded == rig.root
     assert "--resume" in rig.runner.specs[1].argv
     assert f"Where the session's gains stack:\nThe integration head is {moved}" in rig.runner.prompts[1]
+
+
+async def test_a_reroot_asked_for_waits_for_the_branch_s_test_then_moves_it_and_says_what_it_carried(rig, tmp_path):
+    branched = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+    await rig.toolbox_notebook.write_request(request("r9", intent(BRANCH, branched.own)))
+    session, running = await _next_launch(rig, 1)
+
+    await rig.notebook.append_branch_log(BranchLogEntry(BRANCH, BranchLogType.PLAN, "REROOT: it holds chunked prefill"))
+    _end_turn(rig)
+    beats = rig.runner.beats
+    await _until(lambda: rig.runner.beats > beats + 2, "the turn's end to be waited out")
+    assert await rig.repo.head(BRANCH) == branched.own and rig.runner.sent == []
+    await rig.toolbox_notebook.write_result(result("r9"))
+    await _until(lambda: len(rig.runner.sent) == 1, "the result to wake the CLI")
+    _end_turn(rig)
+    await _until(lambda: rig.runner.beats > beats + 6, "the judgement to be waited for")
+    assert await rig.repo.head(BRANCH) == branched.own and len(rig.runner.sent) == 1
+    flat = judgement(0.2, ("r9",), verdict=Verdict.FLAT)
+    await LocalNotebook(tmp_path / "notebook", Writer(Role.GATE, "gate")).write_judgement(
+        "r9", flat, Conclusion.RECORDED_ONLY
+    )
+    await _until(lambda: len(rig.runner.sent) == 2, "the judgement to wake the CLI")
+    if "re-rooted" not in rig.runner.sent[1]:
+        _end_turn(rig)
+        await _until(lambda: len(rig.runner.sent) == 3, "the re-root to wake the CLI")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert await rig.repo.head(BRANCH) == branched.onto
+    rows = (await rig.notebook.snapshot()).progress
+    assert next(row.head_commit for row in rows if row.branch == BRANCH) == branched.onto
+    woken = rig.runner.sent[-1]
+    assert f"re-rooted from {branched.own} onto the integration head {branched.onto}" in woken
+    assert (
+        '"extra_envs": {"VLLM_ROCM_USE_AITER": "1"}' in woken and f"Your head {branched.onto} holds all of it" in woken
+    )
+    answers = [r.entry.content for r in await rig.notebook.branch_log(BRANCH) if r.entry.content.startswith(NOTICE)]
+    assert sum("re-rooted" in content for content in answers) == 1

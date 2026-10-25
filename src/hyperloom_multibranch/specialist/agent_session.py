@@ -35,7 +35,10 @@ resume the CLI refuses at once is followed by a fresh session in the same run, w
 conversation record that cannot be read means a fresh session and a warning.
 
 A launch, and the message that wakes a CLI once the integration head moved, say what the integration head holds and
-what of it the branch head lacks (:mod:`~hyperloom_multibranch.specialist.following`).
+what of it the branch head lacks (:mod:`~hyperloom_multibranch.specialist.following`). A branch whose specialist asked
+to follow the integration head is moved onto the one the notebook recorded between turns, once no candidate test of
+the branch is in flight or waits for its judge, and the notebook records the move; the next message says what the move
+carried.
 """
 
 from __future__ import annotations
@@ -53,7 +56,7 @@ from pathlib import Path
 from typing import Protocol
 
 from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
-from hyperloom.contracts.measurement import TestKind
+from hyperloom.contracts.measurement import Purpose, TestKind, Validity
 from hyperloom.orchestrator.specialists.agent_runner import (
     PROCESS_LOG,
     STATE_LOST,
@@ -73,6 +76,7 @@ from hyperloom_multibranch.contracts.notebook.interfaces import (
     BranchLogStore,
     Inbox,
     LearningStore,
+    LineageSink,
     UsageSink,
 )
 from hyperloom_multibranch.contracts.notebook.records import (
@@ -86,7 +90,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, I
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
 from hyperloom_multibranch.specialist.exhausted import exhausted_refusal
-from hyperloom_multibranch.specialist.following import integration_holdings
+from hyperloom_multibranch.specialist.following import REROOT, Followed, follow, integration_holdings, reroot_requested
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.llm_usage import launch_cost, launch_usage
 from hyperloom_multibranch.specialist.prompts import (
@@ -132,6 +136,8 @@ RESUME_CONTEXT_MAX = 600_000
 #: How long the resume of an idle session waits for something to arrive first: about one test's time, so a result or
 #: a merge usually lands within it, while a branch that nothing reaches still goes on before its slot sits idle long.
 IDLE_RESUME_WAIT_S = 600.0
+#: Where a re-root writes the patches of the branch's change that no longer apply on the integration head.
+REROOTED_DIR = "rerooted"
 PROMPT_FILE, ROLE_FILE, DONE_FILE, HEARTBEAT_FILE, CLI_SESSION_FILE = (
     "prompt.md",
     "system_prompt.md",
@@ -262,10 +268,10 @@ class AgentSetup:
     dev_leases: DevLeaseHolder | None = None
 
 
-class SessionNotebook(BranchLogStore, UsageSink, Inbox, LearningStore, AgentRecords, Protocol):
+class SessionNotebook(BranchLogStore, UsageSink, Inbox, LearningStore, AgentRecords, LineageSink, Protocol):
     """A branch's runtime handle as its sessions use it: the branch log, the spend of each turn, the inbox that wakes
-    a CLI whose turn ended, the learnings an autonomous agent's findings become, its agent's manifest, and the
-    snapshot that says whether the branch has a test in flight."""
+    a CLI whose turn ended, the learnings an autonomous agent's findings become, its agent's manifest, the re-root of
+    its branch, and the snapshot that says whether the branch has a test in flight."""
 
     async def snapshot(self) -> NotebookSnapshot: ...
 
@@ -344,15 +350,17 @@ class AgentSession:
 
     async def _fresh(self, last_end: str) -> _Launch:
         branch, worktree = self._start.branch, self._place.worktree
+        followed = await self._follow()
         head = await sync_to_head(self._setup.repo, branch, worktree)
         recent = await self._place.notebook.branch_log(branch)
         start = await self._briefed(head)
         integration = await self._setup.repo.head(INTEGRATION_BRANCH)
+        holdings = _joined(followed.detail if followed else "", await self._holdings(head))
         prompt = _joined(
             launch_prompt(start, head=head, worktree=str(worktree.path), recent=recent, last_end=last_end),
-            integration_section(await self._holdings(head)),
+            integration_section(holdings),
         )
-        seen = _Seen((await self._place.notebook.poll(branch)).cursor, len(recent), integration)
+        seen = _Seen((await self._place.notebook.poll(branch)).cursor, len(recent), integration=integration)
         if not self._setup.command.interactive:
             return _Launch(prompt, seen)
         cli = _CliState(
@@ -371,23 +379,24 @@ class AgentSession:
         cli = await asyncio.to_thread(self._read_cli)
         if cli is None or not cli.resumable:
             return None
-        if cli.idle:
-            await self._until_news(cli)
+        followed = await self._until_news(cli) if cli.idle else None
+        followed = followed or await self._follow()
         branch, worktree = self._start.branch, self._place.worktree
         head = await self._setup.repo.head(branch)
         kept = await asyncio.to_thread(worktree.head) == head
         if not kept:
             head = await sync_to_head(self._setup.repo, branch, worktree)
         integration = IntegrationHeads(cli.integration, await self._setup.repo.head(INTEGRATION_BRANCH))
-        seen = _Seen(cli.seen_cursor, cli.logged, integration.now)
+        seen = _Seen(cli.seen_cursor, cli.logged, integration=integration.now)
         items, notices = await self._arrived(seen)
         resume = Resume(cli.reason, head, str(worktree.path), kept=kept)
         if cli.idle:
             prompt = idle_resume_message(resume, integration, items, notices)
         else:
             prompt = resume_message(resume, items, notices)
-        if integration.seen != integration.now:
-            prompt = _joined(prompt, integration_section(await self._holdings(head)))
+        if followed or integration.seen != integration.now:
+            holdings = _joined(followed.detail if followed else "", await self._holdings(head))
+            prompt = _joined(prompt, integration_section(holdings))
         cli = replace(
             cli,
             resumable=False,
@@ -400,19 +409,24 @@ class AgentSession:
         )
         return _Launch(prompt, seen, cli, resumed=True)
 
-    async def _until_news(self, cli: _CliState) -> None:
-        """Wait, with no CLI running, until something arrives past what the idle conversation ``cli`` saw or the
-        integration head moves from where it saw it, at most ``idle_resume_wait_s`` and while the session runs: a model
-        resumed with nothing new to act on idles again, and its branch's last idle session goes with it."""
+    async def _until_news(self, cli: _CliState) -> Followed | None:
+        """Wait, with no CLI running, until something arrives past what the idle conversation ``cli`` saw, the
+        integration head moves from where it saw it or the branch follows it as its specialist asked, at most
+        ``idle_resume_wait_s`` and while the session runs: a model resumed with nothing new to act on idles again, and
+        its branch's last idle session goes with it. What following the integration head did, when it did."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._setup.idle_resume_wait_s
         while not self._stopped.is_set() and loop.time() < deadline:
-            if any(await self._arrived(_Seen(cli.seen_cursor, cli.logged, cli.integration))):
-                return
+            followed = await self._follow()
+            if followed is not None:
+                return followed
+            if any(await self._arrived(_Seen(cli.seen_cursor, cli.logged))):
+                return None
             if await self._setup.repo.head(INTEGRATION_BRANCH) != cli.integration:
-                return
+                return None
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stopped.wait(), min(self._setup.poll_seconds, deadline - loop.time()))
+        return None
 
     async def _run_launch(self, grant: SpecialistGrant, launch: _Launch) -> _Ended | None:
         """Run ``launch``'s CLI to its end; ``None`` when the session was stopped meanwhile."""
@@ -571,6 +585,7 @@ class AgentSession:
         while not self._stopped.is_set() and (await self._setup.runner.poll(handle)).state == _RUNNING:
             if self._beat is not None:
                 self._beat()
+            followed = await self._follow()
             items, notices = await self._arrived(seen)
             shared = await self._shared_profiles()
             landed = [
@@ -579,10 +594,14 @@ class AgentSession:
             seen.profiles = {record.request_id for record in shared if record.in_flight}
             integration = await self._setup.repo.head(INTEGRATION_BRANCH)
             moved = integration != seen.integration
-            if items or notices or landed or moved:
+            if items or notices or landed or moved or followed:
                 seen.integration = integration
-                holdings = await self._holdings(await self._setup.repo.head(self._start.branch)) if moved else ""
-                return wake_message((*items, *landed), notices, integration=holdings)
+                holdings = (
+                    await self._holdings(await self._setup.repo.head(self._start.branch)) if moved or followed else ""
+                )
+                return wake_message(
+                    (*items, *landed), notices, integration=_joined(followed.detail if followed else "", holdings)
+                )
             if seen.profiles or await self._tests_in_flight():
                 quiet_since = None
             else:
@@ -628,8 +647,50 @@ class AgentSession:
         records = (await self._place.notebook.snapshot()).records
         return any(record.request.branch == branch and record.in_flight for record in records)
 
+    async def _follow(self) -> Followed | None:
+        """Move the branch onto the integration head when its specialist asked to since the runtime last answered,
+        once no candidate of the branch is unsettled: one measured on the old head could no longer land. Writes the
+        answer to the branch log; ``None`` while there is nothing to do yet or the notebook cannot record the move yet."""
+        notebook, branch = self._place.notebook, self._start.branch
+        log = [record.entry for record in await notebook.branch_log(branch)]
+        asked = max((index for index, entry in enumerate(log) if reroot_requested(entry.content)), default=-1)
+        answered = max((index for index, entry in enumerate(log) if entry.content.startswith(_ANSWER)), default=-1)
+        if asked <= answered or await self._candidates_unsettled():
+            return None
+        notes = self._place.workspace / REROOTED_DIR
+        followed = await follow(self._setup.repo, notebook, await notebook.snapshot(), log[asked], notes)
+        if followed is None:
+            return None
+        logger.info("%s asked to follow the integration head: %s", branch, followed.notice)
+        await notebook.append_branch_log(BranchLogEntry(branch, BranchLogType.RESULT, f"{_ANSWER} {followed.notice}"))
+        return followed
+
     async def _holdings(self, head: str) -> str:
         return await integration_holdings(self._setup.repo, await self._place.notebook.snapshot(), head)
+
+    async def _candidates_unsettled(self) -> bool:
+        """Whether a candidate test of the branch is in flight, or measured and neither judged nor answered with a
+        notice by its judge, which may still retest it on the head it was measured against."""
+        branch = self._start.branch
+        snapshot = await self._place.notebook.snapshot()
+        answered = {
+            request_id
+            for record in snapshot.branch_logs.get(branch, ())
+            if record.entry.content.startswith(NOTICE)
+            for request_id in record.entry.request_ids
+        }
+        return any(
+            record.in_flight
+            or (
+                record.request.purpose is Purpose.EXPLORE
+                and record.judgement is None
+                and record.result is not None
+                and record.result.validity is Validity.SUCCEEDED
+                and record.request_id not in answered
+            )
+            for record in snapshot.records
+            if record.request.branch == branch and record.request.kind is TestKind.TEST
+        )
 
     async def _shared_profiles(self) -> list[TestRecord]:
         """Other branches' profiles of this branch's head: a specialist whose own profile was refused as
@@ -753,13 +814,13 @@ class AgentSession:
 
 @dataclass
 class _Seen:
-    """What a launch has shown its CLI: the inbox cursor it read up to, how many branch-log entries, the integration
-    head, and the other branches' profiles of its head that were still running."""
+    """What a launch has shown its CLI: the inbox cursor it read up to, how many branch-log entries, the other
+    branches' profiles of its head that were still running, and the integration head."""
 
     cursor: str
     logged: int
-    integration: str
     profiles: set[str] = field(default_factory=set)
+    integration: str = ""
 
 
 @dataclass(frozen=True)
@@ -810,6 +871,11 @@ class _Launch:
 class _Ended:
     status: AgentStatus
     seconds: float
+
+
+#: Opens the runtime's answer to a request to follow the integration head, so a later request is told from an answered
+#: one.
+_ANSWER = f"{NOTICE} {REROOT}:"
 
 
 def _joined(*sections: str) -> str:

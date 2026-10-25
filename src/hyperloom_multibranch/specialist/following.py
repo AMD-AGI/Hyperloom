@@ -2,26 +2,52 @@
 # SPDX-License-Identifier: MIT
 
 """A branch against the integration head, where the session's gains stack: what the integration head holds that the
-branch head lacks.
+branch head lacks, and the branch moved onto it.
 
 A change the integration head holds is measured already: :func:`integration_holdings` names its launch and the
 specialist commits merged into it, marks those the branch head lacks, and lists the branch's own commits not on it
 with how their merges went, so that the specialist neither tests nor replays what the integration already took in.
+
+A specialist asks for its branch to follow the integration head with a branch-log entry opening with :data:`REROOT`.
+Its session moves the branch (:func:`follow`) only once no candidate test of the branch is in flight: a gain lands only
+on the head it was measured against. The move is recorded in the notebook too, so the branch's head there is the new
+one and the judge sees what waits on it. The branch's change the integration head lacks comes back as one delta on the
+new head, the patches that no longer apply there written out to port by hand; the old head stays a merge candidate.
 """
 
 from __future__ import annotations
 
-from hyperloom.contracts.recipe import Recipe, diff
-from hyperloom_multibranch.contracts.notebook.records import CommitNode, CommittedCommit, NotebookSnapshot
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, CommitOrigin, MergeOutcome
-from hyperloom_multibranch.contracts.repo import ExperimentRepo
+import asyncio
+import json
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+
+from hyperloom.contracts.recipe import Recipe, RecipeError, diff
+from hyperloom_multibranch.contracts.branch_log import BranchLogEntry
+from hyperloom_multibranch.contracts.notebook.interfaces import ConflictingWrite, LineageSink
+from hyperloom_multibranch.contracts.notebook.records import (
+    CommitNode,
+    CommittedCommit,
+    LineageEvent,
+    NotebookSnapshot,
+)
+from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, CommitOrigin, LineageKind, MergeOutcome
+from hyperloom_multibranch.contracts.repo import BranchMoved, ExperimentRepo, RepoMerge
 from hyperloom_multibranch.notebook.changes import describe_change
 
+#: Opens the branch-log entry with which a specialist asks for its branch to follow the integration head.
+REROOT = "REROOT"
 #: Merged commits a listing names, the latest last: a long session merges a few dozen, and older ones are what every
 #: branch opened since holds anyway.
 MERGED_SHOWN = 40
 SHORT = 12
 _SPECIALIST_ORIGINS = frozenset({CommitOrigin.COMMIT, CommitOrigin.SPLIT})
+
+
+def reroot_requested(content: str) -> bool:
+    """Whether the branch-log entry ``content`` asks for the branch to follow the integration head."""
+    return content.lstrip().startswith(REROOT)
 
 
 async def integration_holdings(repo: ExperimentRepo, snapshot: NotebookSnapshot, head: str) -> str:
@@ -45,6 +71,58 @@ async def integration_holdings(repo: ExperimentRepo, snapshot: NotebookSnapshot,
         lines.append("Commits of your head that are not on it:")
         lines += [f"- {_named(snapshot, node)}: {_merge(committed.get(node.commit_id))}" for node in pending]
     return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class Followed:
+    """What a request to follow the integration head did: ``notice`` for the branch log, ``detail`` for the
+    specialist's next message (empty when the branch did not move)."""
+
+    notice: str
+    detail: str = ""
+
+
+async def follow(
+    repo: ExperimentRepo, notebook: LineageSink, snapshot: NotebookSnapshot, asked: BranchLogEntry, notes: Path
+) -> Followed | None:
+    """Move the branch that ``asked`` to follow the integration head onto the integration head ``snapshot`` records,
+    carrying its change the integration head lacks onto it as a delta, and record the move through ``notebook``, the
+    branch's runtime handle; the patches of that change that do not apply there are written under ``notes``. ``None``
+    while the notebook cannot record a move yet: the branch has not started there, or the integration branch has no
+    head.
+
+    The integration head is the notebook's, not the repository's: the integrator lands a merge before it writes the
+    judgement, and the notebook refuses a re-root onto a commit it has not recorded. A move the notebook refuses all the
+    same, the branch stopped meanwhile, is taken back."""
+
+    nodes = {node.branch: node for node in snapshot.lineage.branches}
+    own, integration = nodes.get(asked.branch), nodes.get(INTEGRATION_BRANCH)
+    if own is None or integration is None:
+        return None
+    if own.stop_reason is not None:
+        return Followed(f"your branch was not re-rooted: it was stopped ({own.stop_reason})")
+    branch, head, onto = asked.branch, await repo.head(asked.branch), integration.head_commit
+    try:
+        carried = await repo.merge(head, onto)
+        await repo.reroot(branch, head, onto)
+    except RecipeError as error:
+        return Followed(
+            f"your branch was not re-rooted: its change cannot be carried onto the integration head ({error})"
+        )
+    except BranchMoved:
+        return Followed(f"your branch was not re-rooted: it moved off {head} meanwhile; ask again once it settles")
+    except ValueError:
+        return Followed(f"your head {head} holds the integration head {onto} already; your branch stays where it is")
+    try:
+        await notebook.record_lineage(
+            LineageEvent(LineageKind.REROOT, branch, commit_id=onto, from_commit=head, reason=asked.content)
+        )
+    except ConflictingWrite as error:
+        await repo.rewind(branch, onto, head)
+        return Followed(f"your branch was not re-rooted: the notebook refused the move ({error})")
+    ported = await _write_conflicts(repo, head, carried, notes / head[:SHORT])
+    notice = f"your branch was re-rooted from {head} onto the integration head {onto}"
+    return Followed(notice, _carried(snapshot, head, onto, carried, ported))
 
 
 def _launch(recipe: Recipe) -> str:
@@ -107,4 +185,51 @@ def _merge(commit: CommittedCommit | None) -> str:
     return f"{last.outcome.value} on {last.integration_head} ({last.reason})"
 
 
-__all__ = ["MERGED_SHOWN", "integration_holdings"]
+async def _write_conflicts(repo: ExperimentRepo, head: str, carried: RepoMerge, notes: Path) -> list[Path]:
+    """Write each patch of ``carried`` that does not apply on the new head where the specialist can read it."""
+    written = []
+    for conflict in carried.patch_conflicts:
+        text = await repo.patch_text(head, conflict.path)
+        path = notes / f"{conflict.component}-{PurePosixPath(conflict.path).name}"
+        await asyncio.to_thread(_write, path, text)
+        written.append(path)
+    return written
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _carried(snapshot: NotebookSnapshot, head: str, onto: str, carried: RepoMerge, ported: Sequence[Path]) -> str:
+    lines = [
+        f"Your branch now starts at the integration head {onto}; your old head {head} stays a merge candidate. "
+        "Call worktree_sync before your next change."
+    ]
+    if not carried.carried and not ported:
+        lines.append("Every commit of your old head is on the integration head: nothing of it is left out.")
+        return "\n".join(lines)
+    committed = {item.commit_id: item for item in snapshot.committed}
+    by_id = {node.commit_id: node for node in snapshot.lineage.commits}
+    lines.append("Your commits the integration head lacks:")
+    lines += [
+        f"- {_named(snapshot, by_id[commit]) if commit in by_id else commit[:SHORT]}: {_merge(committed.get(commit))}"
+        for commit in carried.carried
+    ]
+    lines.append(
+        "Their change carried onto the new head, as one delta: "
+        + json.dumps(carried.delta.to_document(), sort_keys=True)
+    )
+    lines += [
+        f"In it, {item.name} takes your {item.after} over the integration head's {item.before}."
+        for item in carried.config_conflicts
+    ]
+    if ported:
+        lines.append(
+            "These patches of it do not apply on the new head and are left out of the delta; port them by hand: "
+            + ", ".join(map(str, ported))
+        )
+    return "\n".join(lines)
+
+
+__all__ = ["MERGED_SHOWN", "REROOT", "Followed", "follow", "integration_holdings", "reroot_requested"]

@@ -266,12 +266,16 @@ def test_a_wake_after_the_integration_head_moved_carries_what_it_holds():
     assert "gains stack" not in prompts.wake_message([item], [])
 
 
-def test_the_role_never_tests_or_replays_what_the_integration_head_holds():
+def test_the_role_follows_the_integration_head_with_a_reroot_entry_and_never_replays_what_it_holds():
     prompt = role_prompt(WORKLOAD)
 
     assert "A replayable champion in the brief that the integration head does not hold" in prompt
     assert "Never test or replay a change it holds" in prompt
-    assert "REROOT" not in prompt
+    assert 'write a branch-log entry that starts with "REROOT"' in prompt
+    assert "submit nothing more on your old head" in prompt
+    assert "with no candidate test of yours in flight" in prompt
+    assert "one whose merge conflicted is yours to port" in prompt
+    assert "Keep your head instead while your next candidate builds on a commit of yours not merged yet" in prompt
 
 
 def test_a_resumed_cli_hears_why_it_stopped_its_worktree_and_what_arrived_meanwhile():

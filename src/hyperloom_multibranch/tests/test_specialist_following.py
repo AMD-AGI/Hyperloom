@@ -1,10 +1,22 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe
-from hyperloom_multibranch.specialist.following import integration_holdings
-from hyperloom_multibranch.tests.branch_rig import branch_rig
-from hyperloom_multibranch.tests.following_rig import diverged
+import json
+from dataclasses import replace
+from pathlib import Path
+
+from hyperloom.contracts.measurement import RoundValue
+from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe, RecipeDelta
+from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
+from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.notebook.peers import Purpose
+from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, BranchProgress, LineageEvent
+from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, LineageKind
+from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.tests.factories import intent, request, result
+from hyperloom_multibranch.specialist.following import Followed, follow, integration_holdings, reroot_requested
+from hyperloom_multibranch.tests.branch_rig import BranchRig, branch_rig
+from hyperloom_multibranch.tests.following_rig import OWN, diverged
 
 BRANCH = "s1"
 ROOT = Recipe(
@@ -12,6 +24,24 @@ ROOT = Recipe(
     LaunchConfig(server_args="--max-num-seqs 128"),
     components=(ComponentPatches("vllm", "https://github.com/vllm-project/vllm", "1" * 40),),
 )
+#: The metric ``diverged``'s judgements record.
+METRIC = "output_tps_pct"
+REASON = "REROOT: the integration head took in chunked prefill"
+ASKED = BranchLogEntry(BRANCH, BranchLogType.PLAN, REASON)
+
+
+def _as(tmp_path: Path, role: Role) -> LocalNotebook:
+    return LocalNotebook(tmp_path / "notebook", Writer(role, role.value))
+
+
+async def _follow(rig: BranchRig, tmp_path: Path) -> Followed:
+    followed = await follow(rig.repo, rig.notebook, await rig.notebook.snapshot(), ASKED, tmp_path / "notes")
+    assert followed is not None
+    return followed
+
+
+async def _row(rig: BranchRig, branch: str) -> BranchProgress:
+    return next(row for row in (await rig.notebook.snapshot()).progress if row.branch == branch)
 
 
 async def test_the_holdings_name_the_integration_launch_its_merged_intents_and_what_the_head_lacks(tmp_path):
@@ -38,3 +68,99 @@ async def test_a_head_on_the_integration_head_lacks_nothing_of_it(tmp_path):
 
     assert f"Your head {session.onto} holds all of it." in text and "[not on your head]" not in text
     assert "Commits of your head" not in text
+
+
+async def test_following_moves_the_branch_and_carries_its_own_change_onto_the_integration_head(tmp_path):
+    rig = await branch_rig(tmp_path, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+
+    followed = await _follow(rig, tmp_path)
+
+    assert await rig.repo.head(BRANCH) == session.onto
+    assert followed.notice == f"your branch was re-rooted from {session.own} onto the integration head {session.onto}"
+    carried = followed.detail.split("as one delta: ", 1)[1].splitlines()[0]
+    assert RecipeDelta.from_document(json.loads(carried)) == OWN
+    assert "Call worktree_sync" in followed.detail and "the integrator has not tried it yet" in followed.detail
+
+
+async def test_following_records_the_reroot_so_an_explore_on_the_new_head_waits_for_its_confirm(tmp_path):
+    rig = await branch_rig(tmp_path, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+    baseline = BaselineRecord(rig.root, {METRIC: 1.0}, {METRIC: 0.8}, {METRIC: 1.6}, ("b1", "b2"))
+    await _as(tmp_path, Role.GATE).write_baseline(baseline)
+
+    await _follow(rig, tmp_path)
+    on_onto = intent(BRANCH, session.onto, "sampler", "fused top-k")
+    toolbox = _as(tmp_path, Role.TOOLBOX)
+    await toolbox.write_request(request("r5", on_onto))
+    rounds = (RoundValue("warmup", 64, {METRIC: 1.0}), RoundValue("measure", 64, {METRIC: 3.5}))
+    await toolbox.write_result(replace(result("r5"), rounds=rounds))
+    await toolbox.write_request(replace(request("r5c", on_onto), purpose=Purpose.CONFIRM, retest_of="r5"))
+    row = await _row(rig, BRANCH)
+
+    assert (row.head_commit, [item.request_id for item in row.pending]) == (session.onto, ["r5"])
+    assert [hit.summary for hit in await rig.notebook.search("reroot")] == [
+        f"reroot {BRANCH} at {session.onto}: {REASON}"
+    ]
+
+
+async def test_following_moves_onto_the_integration_head_the_notebook_recorded_not_one_still_unjudged(tmp_path):
+    rig = await branch_rig(tmp_path, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+    unjudged = await rig.repo.commit_integration(session.onto, OWN, (session.own,))
+
+    followed = await _follow(rig, tmp_path)
+
+    assert await rig.repo.head(INTEGRATION_BRANCH) == unjudged
+    assert await rig.repo.head(BRANCH) == session.onto and (await _row(rig, BRANCH)).head_commit == session.onto
+    assert f"onto the integration head {session.onto}" in followed.notice
+
+
+async def test_following_a_stopped_branch_moves_nothing(tmp_path):
+    rig = await branch_rig(tmp_path, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+    await _as(tmp_path, Role.SCHEDULER).record_lineage(LineageEvent(LineageKind.STOP, BRANCH, reason="no progress"))
+
+    followed = await _follow(rig, tmp_path)
+
+    assert await rig.repo.head(BRANCH) == session.own and followed.detail == ""
+    assert followed.notice == "your branch was not re-rooted: it was stopped (no progress)"
+
+
+async def test_a_branch_stopped_while_it_moves_is_taken_back_to_its_old_head(tmp_path):
+    rig = await branch_rig(tmp_path, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+    before = await rig.notebook.snapshot()
+    await _as(tmp_path, Role.SCHEDULER).record_lineage(LineageEvent(LineageKind.STOP, BRANCH, reason="no progress"))
+
+    followed = await follow(rig.repo, rig.notebook, before, ASKED, tmp_path / "notes")
+
+    assert followed is not None and followed.detail == ""
+    assert await rig.repo.head(BRANCH) == session.own and (await _row(rig, BRANCH)).head_commit == session.own
+    assert "the notebook refused the move" in followed.notice and "already stopped" in followed.notice
+
+
+async def test_following_waits_while_the_notebook_has_not_started_the_branch(tmp_path):
+    rig = await branch_rig(tmp_path, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+    await rig.repo.create_branch("s9", rig.root)
+
+    asked = replace(ASKED, branch="s9")
+    waited = await follow(rig.repo, rig.notebook, await rig.notebook.snapshot(), asked, tmp_path / "notes")
+
+    assert waited is None and await rig.repo.head("s9") == rig.root != session.onto
+
+
+async def test_following_from_a_head_that_holds_the_integration_head_moves_nothing(tmp_path):
+    rig = await branch_rig(tmp_path, ROOT, BRANCH)
+    head = await rig.repo.head(INTEGRATION_BRANCH)
+
+    followed = await _follow(rig, tmp_path)
+
+    assert await rig.repo.head(BRANCH) == head and followed.detail == ""
+    assert "holds the integration head" in followed.notice
+
+
+def test_only_an_entry_that_opens_with_reroot_asks_to_follow():
+    assert reroot_requested("REROOT: the integration head took in fp8 KV, which my head lacks")
+    assert not reroot_requested("I will not REROOT yet: my next fusion builds on c1")
