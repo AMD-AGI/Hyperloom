@@ -4813,5 +4813,5 @@ async def test_a_shape_capture_for_a_lane_the_phase_cannot_fund_never_starts(tmp
     result = await forge_gemm_tuning._run_forge_gemm_tuning({"task_id": "capture"}, session_dir=tmp_path)
 
     assert (result["status"], result["error_class"]) == ("skipped", lane_budget.INSUFFICIENT_BUDGET)
-    assert [call["has_tunableop_input"] for call in router_calls] == [True]
+    assert [call["evidence"].has_tunableop_input for call in router_calls] == [True]
     assert _FORGE_GEMM_PAYLOADS == []
