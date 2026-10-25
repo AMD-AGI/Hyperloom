@@ -101,7 +101,6 @@ class KeepSession:
     session_dir: Path
     shared_state: Any
     record_keep: KeepRecorder
-    framework: str
 
 
 def _priority_ordered_patch_dirs(patches_root: str | Path) -> tuple[Path, ...]:
@@ -486,7 +485,7 @@ async def integrate_controller_patches(
                 keep_commit,
                 publication.operator_id,
                 session.session_dir,
-                session.framework,
+                str(session.shared_state.framework or ""),
             )
             await session.record_keep({**_keep_result(publication, validation, keep_commit), **layer})
             session.shared_state.save(Path(session.session_dir))

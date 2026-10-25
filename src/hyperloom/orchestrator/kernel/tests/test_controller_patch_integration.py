@@ -218,7 +218,6 @@ async def _integrate(
             session_dir=session_dir,
             shared_state=shared_state,
             record_keep=coordinator.writeback.record_integrate_keep,
-            framework=str(shared_state.framework or ""),
         ),
         validator=validator,
         **options,
@@ -1330,7 +1329,6 @@ async def test_synthetic_controller_keep_updates_state_and_stack_ledger(tmp_path
                 session_dir=session_dir,
                 shared_state=state,
                 record_keep=coordinator.writeback.record_integrate_keep,
-                framework=str(state.framework or ""),
             ),
             validator=_validate,
         )
@@ -1660,7 +1658,6 @@ async def test_a_controller_keep_is_reinstalled_on_a_fresh_tree(tmp_path: Path) 
             session_dir=session_dir,
             shared_state=coordinator.shared_state,
             record_keep=coordinator.writeback.record_integrate_keep,
-            framework="sglang",
         ),
         validator=_validate,
     )

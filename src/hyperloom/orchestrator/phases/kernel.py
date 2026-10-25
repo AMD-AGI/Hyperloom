@@ -3868,7 +3868,6 @@ class KernelPhase(CoordinatorCollaborator):
                     session_dir=self.session_dir,
                     shared_state=self.shared_state,
                     record_keep=self._coord.writeback.record_integrate_keep,
-                    framework=str(self.shared_state.framework or ""),
                 ),
                 admit_round=lambda rounds_run: controller_round_stop(self.shared_state, rounds_run),
             )
