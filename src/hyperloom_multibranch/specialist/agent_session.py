@@ -91,7 +91,7 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
 from hyperloom_multibranch.specialist.exhausted import exhausted_refusal
 from hyperloom_multibranch.specialist.following import REROOT, Followed, follow, integration_holdings, reroot_requested
-from hyperloom_multibranch.specialist.judging import NOTICE
+from hyperloom_multibranch.specialist.judging import NOTICE, left_unjudged
 from hyperloom_multibranch.specialist.llm_usage import launch_cost, launch_usage
 from hyperloom_multibranch.specialist.prompts import (
     IntegrationHeads,
@@ -669,14 +669,15 @@ class AgentSession:
         return await integration_holdings(self._setup.repo, await self._place.notebook.snapshot(), head)
 
     async def _candidates_unsettled(self) -> bool:
-        """Whether a candidate test of the branch is in flight, or measured and neither judged nor answered with a
-        notice by its judge, which may still retest it on the head it was measured against."""
+        """Whether a candidate test of the branch is in flight, or measured and neither judged nor closed by a notice
+        of its judge's that no judgement follows: until then the judge may still retest or commit it on the head it
+        was measured against."""
         branch = self._start.branch
         snapshot = await self._place.notebook.snapshot()
         answered = {
             request_id
             for record in snapshot.branch_logs.get(branch, ())
-            if record.entry.content.startswith(NOTICE)
+            if record.entry.content.startswith(NOTICE) and left_unjudged(record.entry.content)
             for request_id in record.entry.request_ids
         }
         return any(

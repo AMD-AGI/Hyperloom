@@ -40,6 +40,11 @@ from hyperloom_multibranch.specialist.fix_check import FixCheck, FixChecking, ch
 
 #: Opens every branch log entry the runtime writes, so the specialist tells them from its own.
 NOTICE = "rule gate:"
+#: The endings of the notices after which the judge never judges the candidate: a retest that ended without a
+#: measurement, a result it cannot read, a result that did not re-verify. Every other notice precedes a judgement.
+_NOTHING_JUDGED = "nothing was judged"
+_CANNOT_BE_JUDGED = "cannot be judged:"
+_NOT_COMMITTED = "was not committed:"
 
 
 class JudgeNotebook(Inbox, SnapshotQuery, BranchLogStore, CommitQuery, Protocol):
@@ -104,7 +109,7 @@ class BranchJudge:
                         return
                     last = max(retests, key=lambda retest: retest.requested_at)
                     if not _failed_as_candidate(last):
-                        content = f"the retest of {first.request_id} {_ended(last)}; nothing was judged"
+                        content = f"the retest of {first.request_id} {_ended(last)}; {_NOTHING_JUDGED}"
                         await self._notice(logged, content, first.request_id, last.request_id)
                         return
                     content = f"the retest of {first.request_id} {_ended(last)}; recorded as regressed"
@@ -114,7 +119,7 @@ class BranchJudge:
                 latest = max(measured, key=lambda retest: retest.requested_at)
                 judgement = await self._rule.retest(judgement, latest, parent)
         except (UnreadableResult, NotRecorded) as error:
-            await self._notice(logged, f"{first.request_id} cannot be judged: {error}", first.request_id)
+            await self._notice(logged, f"{first.request_id} {_CANNOT_BE_JUDGED} {error}", first.request_id)
             return
         await self._settle(first, judgement, logged)
 
@@ -139,7 +144,7 @@ class BranchJudge:
                 await self._notice(logged, _forked(first, admission), *judgement.request_ids)
         except ResultUnverified as error:
             unverified = "a result behind it did not re-verify against its signed bundle"
-            content = f"{first.request_id} was not committed: {unverified} ({error.request_id}: {error.reason})"
+            content = f"{first.request_id} {_NOT_COMMITTED} {unverified} ({error.request_id}: {error.reason})"
             await self._notice(logged, content, *judgement.request_ids)
             return
         if action is Action.COMMIT:
@@ -168,6 +173,12 @@ class BranchJudge:
         if entry not in logged:
             await self._notebook.append_branch_log(entry)
             logged.add(entry)
+
+
+def left_unjudged(notice: str) -> bool:
+    """Whether the judge's ``notice`` closes its candidate without a judgement; a notice such as a fix judged on its
+    performance alone or a diagnosis precedes the gate's judgement and commit."""
+    return _NOTHING_JUDGED in notice or _CANNOT_BE_JUDGED in notice or _NOT_COMMITTED in notice
 
 
 def _awaits_judgement(record: TestRecord) -> bool:
@@ -211,4 +222,4 @@ def _ended(record: TestRecord) -> str:
     return f"ended {record.result.validity.value} ({record.result.failure_reason or 'no reason given'})"
 
 
-__all__ = ["NOTICE", "BranchJudge", "JudgeNotebook", "Judging"]
+__all__ = ["NOTICE", "BranchJudge", "JudgeNotebook", "Judging", "left_unjudged"]

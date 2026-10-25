@@ -1136,3 +1136,30 @@ async def test_a_reroot_asked_for_waits_for_the_branch_s_test_then_moves_it_and_
     )
     answers = [r.entry.content for r in await rig.notebook.branch_log(BRANCH) if r.entry.content.startswith(NOTICE)]
     assert sum("re-rooted" in content for content in answers) == 1
+
+
+async def test_a_reroot_waits_out_a_judge_notice_that_precedes_its_judgement(rig, tmp_path):
+    """A fix judged on its performance alone is noticed before the gate commits it: moving the branch then would turn
+    its retested gain into a record-only one."""
+    branched = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+    await rig.toolbox_notebook.write_request(request("r9", intent(BRANCH, branched.own)))
+    await rig.toolbox_notebook.write_result(result("r9"))
+    session, running = await _next_launch(rig, 1)
+
+    await rig.notebook.append_branch_log(BranchLogEntry(BRANCH, BranchLogType.PLAN, "REROOT: it holds chunked prefill"))
+    alone = f"{NOTICE} r9 is judged on its performance alone: the case is not available"
+    await rig.notebook.append_branch_log(BranchLogEntry(BRANCH, BranchLogType.RESULT, alone, ("r9",)))
+    _end_turn(rig)
+    await _until(lambda: len(rig.runner.sent) == 1, "the notice to wake the CLI")
+    _end_turn(rig)
+    beats = rig.runner.beats
+    await _until(lambda: rig.runner.beats > beats + 2, "the notice to be waited past")
+    assert await rig.repo.head(BRANCH) == branched.own
+
+    gate = LocalNotebook(tmp_path / "notebook", Writer(Role.GATE, "gate"))
+    await gate.write_judgement("r9", judgement(0.2, ("r9",), verdict=Verdict.FLAT), Conclusion.RECORDED_ONLY)
+    await _until(lambda: any("re-rooted" in sent for sent in rig.runner.sent), "the re-root once judged")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert await rig.repo.head(BRANCH) == branched.onto

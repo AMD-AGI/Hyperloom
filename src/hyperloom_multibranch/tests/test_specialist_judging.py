@@ -439,3 +439,13 @@ async def test_the_judge_wakes_when_a_result_arrives(session):
         await running
 
     assert (await session.runtime.record(first)).conclusion is Conclusion.RECORDED_ONLY
+
+
+def test_only_a_notice_that_no_judgement_follows_closes_a_candidate():
+    from hyperloom_multibranch.specialist.judging import left_unjudged
+
+    assert left_unjudged(f"{NOTICE} r1 cannot be judged: no score")
+    assert left_unjudged(f"{NOTICE} the retest of r1 failed; nothing was judged")
+    assert left_unjudged(f"{NOTICE} r1 was not committed: a result behind it did not re-verify")
+    assert not left_unjudged(f"{NOTICE} r1 is judged on its performance alone: the case is not available")
+    assert not left_unjudged(f"{NOTICE} r1 held its gain on the retest and is held back by the accuracy gate")
