@@ -79,7 +79,11 @@ class LineageKind(str, Enum):
     OPEN = "open"
     SPLIT = "split"
     STOP = "stop"
+    REROOT = "reroot"
 
+
+#: The events that start a branch, once each.
+LINEAGE_STARTS = frozenset({LineageKind.ROOT, LineageKind.OPEN, LineageKind.SPLIT})
 
 #: The one role that records each lineage event.
 LINEAGE_WRITERS: dict[LineageKind, Role] = {
@@ -87,6 +91,7 @@ LINEAGE_WRITERS: dict[LineageKind, Role] = {
     LineageKind.OPEN: Role.SCHEDULER,
     LineageKind.SPLIT: Role.GATE,
     LineageKind.STOP: Role.SCHEDULER,
+    LineageKind.REROOT: Role.SPECIALIST_RUNTIME,
 }
 
 
@@ -201,6 +206,7 @@ __all__ = [
     "FAILED_MERGES",
     "INTEGRATION_BRANCH",
     "INTEGRATION_CONCLUSIONS",
+    "LINEAGE_STARTS",
     "LINEAGE_WRITERS",
     "ClaimStatus",
     "CommitOrigin",

@@ -181,13 +181,19 @@ class MergeAttempt:
 
 @dataclass(frozen=True)
 class LineageEvent:
-    """A branch starting (``from_commit``), splitting off ``from_branch`` with fix ``commit_id``, or stopping.
+    """A branch starting (``from_commit``), splitting off ``from_branch`` with fix ``commit_id``, re-rooted onto
+    ``commit_id``, or stopping.
 
     ``ROOT`` records the baseline commit ``commit_id`` the integration branch starts from, and may name the digest of
     its recipe (``Recipe.digest()``); a judgement names the recipe digest of every other commit. The ``OPEN`` of a
     repair branch names in ``repairs`` the test whose blocked gain it was opened to repair. Only an ``OPEN`` names a
     ``driver`` other than the specialist: an autonomous branch's, written before its agent starts, so a branch whose
     start fails is known for one too.
+
+    ``REROOT`` moves a running branch's head from ``from_commit`` onto ``commit_id``, an integration commit; the
+    branch's runtime records it for its own branch once it has moved the branch in the repository. From then on only a
+    commit built on the branch's head moves it, so one measured on the old head that lands later does not take the
+    branch back.
     """
 
     kind: LineageKind

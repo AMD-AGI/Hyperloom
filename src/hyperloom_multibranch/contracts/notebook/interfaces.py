@@ -167,14 +167,16 @@ class GateRecords(Protocol):
 
 
 class LineageSink(Protocol):
-    """Branch starts and stops (the scheduler) and splits (the rule gate)."""
+    """Branch starts and stops (the scheduler), splits (the rule gate) and re-roots (the specialist runtime)."""
 
     async def record_lineage(self, event: LineageEvent) -> None:
         """Start a branch once (``ROOT``, ``OPEN`` or ``SPLIT``) and stop it once; the same event again is a no-op.
 
         A split starts its branch, so the branch takes no ``OPEN`` after it. Another start of a started branch, another
         stop of a stopped one or a second root raises :class:`ConflictingWrite`; stopping a branch that never started
-        raises :class:`NotRecorded`.
+        raises :class:`NotRecorded`. A running branch may be re-rooted (``REROOT``) as often as its runtime moves it,
+        by that runtime alone and onto an integration commit the notebook recorded: re-rooting a stopped branch raises
+        :class:`ConflictingWrite`, one that never started or onto another commit :class:`NotRecorded`.
         """
 
 

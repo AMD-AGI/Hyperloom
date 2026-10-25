@@ -67,6 +67,7 @@ class _BranchDraft:
     stopped_at: float | None = None
     repairs: str = ""
     driver: BranchDriver = BranchDriver.SPECIALIST
+    rerooted: bool = False
 
     def node(self) -> BranchNode:
         return BranchNode(
@@ -97,7 +98,9 @@ def lineage_view(state: NotebookState) -> LineageView:
         if node is not None and node.commit_id not in commits:
             commits[node.commit_id] = node
             implicit = _BranchDraft(node.branch, LineageKind.OPEN, node.parent_commit, opened_at=entry.at)
-            branches.setdefault(node.branch, implicit).head = node.commit_id
+            draft = branches.setdefault(node.branch, implicit)
+            if not draft.rerooted or node.parent_commit == draft.head:
+                draft.head = node.commit_id
     return LineageView(tuple(commits.values()), tuple(draft.node() for draft in branches.values()))
 
 
@@ -114,6 +117,9 @@ def _apply_event(
     elif event.kind is LineageKind.STOP:
         if draft is not None:
             draft.stop_reason, draft.stopped_at = event.reason, at
+    elif event.kind is LineageKind.REROOT:
+        if draft is not None:
+            draft.head, draft.rerooted = event.commit_id, True
     elif draft is None:
         branches[event.branch] = _BranchDraft(
             event.branch,

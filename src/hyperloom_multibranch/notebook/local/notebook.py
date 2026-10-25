@@ -97,6 +97,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     COMMITTING,
     INTEGRATION_BRANCH,
     INTEGRATION_CONCLUSIONS,
+    LINEAGE_STARTS,
     LINEAGE_WRITERS,
     BranchDriver,
     ClaimStatus,
@@ -126,12 +127,15 @@ from hyperloom_multibranch.notebook.local.unfinished import refused_replays, unf
 
 SEGMENTS_DIR = "segments"
 CLAIMS_DIR = "claims"
+_COMMIT_ID = "commit_id"
+_FROM_COMMIT = "from_commit"
 #: The fields each lineage event must name.
 _LINEAGE_FIELDS: dict[LineageKind, tuple[str, ...]] = {
-    LineageKind.ROOT: ("commit_id",),
-    LineageKind.OPEN: ("from_commit",),
-    LineageKind.SPLIT: ("commit_id", "from_commit", "from_branch"),
+    LineageKind.ROOT: (_COMMIT_ID,),
+    LineageKind.OPEN: (_FROM_COMMIT,),
+    LineageKind.SPLIT: (_COMMIT_ID, _FROM_COMMIT, "from_branch"),
     LineageKind.STOP: (),
+    LineageKind.REROOT: (_COMMIT_ID, _FROM_COMMIT),
 }
 _RECIPE_DIGEST = re.compile(re.escape(DIGEST_PREFIX) + "[0-9a-f]{64}")
 #: What a merge attempt without a test may say of itself.
@@ -261,8 +265,10 @@ def _check_lineage(event: LineageEvent) -> None:
     missing = [name for name in _LINEAGE_FIELDS[event.kind] if not getattr(event, name)]
     if missing:
         raise ValueError(f"a {event.kind.value} event needs {', '.join(missing)}")
-    if event.kind is not LineageKind.STOP and (event.kind is LineageKind.ROOT) != (event.branch == INTEGRATION_BRANCH):
+    if event.kind in LINEAGE_STARTS and (event.kind is LineageKind.ROOT) != (event.branch == INTEGRATION_BRANCH):
         raise ValueError(f"the root commit, and only it, starts the {INTEGRATION_BRANCH} branch")
+    if event.kind is LineageKind.REROOT and event.branch == INTEGRATION_BRANCH:
+        raise ValueError(f"the {INTEGRATION_BRANCH} branch moves by its merges, never by a re-root")
     if event.recipe_digest is not None and event.kind is not LineageKind.ROOT:
         raise ValueError("only the root event names its commit's recipe digest; judgements name the others'")
     if event.driver is not BranchDriver.SPECIALIST and event.kind is not LineageKind.OPEN:
@@ -275,8 +281,8 @@ def _new_lineage(state: NotebookState, event: LineageEvent) -> bool:
     recorded = [item for item in state.lineage if item.branch == event.branch]
     if event in recorded:
         return False
-    started = [item for item in recorded if item.kind is not LineageKind.STOP]
-    if event.kind is not LineageKind.STOP:
+    started = [item for item in recorded if item.kind in LINEAGE_STARTS]
+    if event.kind in LINEAGE_STARTS:
         if started:
             raise ConflictingWrite(f"branch {event.branch} already started with a {started[0].kind.value} event")
     elif not started:
@@ -284,6 +290,12 @@ def _new_lineage(state: NotebookState, event: LineageEvent) -> bool:
     elif any(item.kind is LineageKind.STOP for item in recorded):
         raise ConflictingWrite(f"branch {event.branch} is already stopped")
     return True
+
+
+def _check_on_integration(state: NotebookState, commit_id: str) -> None:
+    node = views.lineage_view(state).commit(commit_id)
+    if node is None or node.branch != INTEGRATION_BRANCH:
+        raise NotRecorded(f"{INTEGRATION_BRANCH} has recorded no commit {commit_id} to re-root onto")
 
 
 def _check_recipe_digest(state: NotebookState, commit_id: str | None, digest: str | None) -> None:
@@ -549,6 +561,9 @@ class LocalNotebook(
         self._require(LINEAGE_WRITERS[event.kind])
         _check_lineage(event)
         state = self._state()
+        if event.kind is LineageKind.REROOT:
+            self._own_branch(event.branch)
+            _check_on_integration(state, event.commit_id)
         _check_recipe_digest(state, event.commit_id, event.recipe_digest)
         if not _new_lineage(state, event):
             return
