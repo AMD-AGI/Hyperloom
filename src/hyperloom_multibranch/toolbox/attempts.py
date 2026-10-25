@@ -7,7 +7,8 @@ An :class:`Executor` runs ONE attempt in a fresh sandbox and returns a ``TestRes
 attempts into the request's single result:
 
 * ``infra`` failure: another sandbox, away from every node tried, up to ``max_infra_retries`` retries, then
-  ``measurement_failed``; the node is reported as an infrastructure failure.
+  ``measurement_failed``; the node is reported as an infrastructure failure. An infrastructure failure every sandbox
+  repeats (:data:`UNRETRIED_INFRA_REASONS`) ends as ``measurement_failed`` at once, and its node is not reported.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
 * ``unclear`` failure: one rerun away from the first node. A second failure is ``candidate_failed``; a success is the
   result, and the first attempt is re-labelled an infrastructure failure of its node and reported as a failure that
@@ -25,6 +26,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import NamedTuple, Protocol
 
+from hyperloom.measure.runner.import_outcome import INERT_PATCH
 from hyperloom.contracts.measurement import (
     Attempt,
     FailureClass,
@@ -36,6 +38,10 @@ from hyperloom.contracts.measurement import (
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 
 DEFAULT_MAX_INFRA_RETRIES = 3
+#: Infrastructure failures a fresh sandbox repeats, by the name a reason starts with (before its ``: <detail>``). They are
+#: about how the test was built, not about a node: a patch whose files the server did not import from the farm imports
+#: them from the same place in every sandbox, so a retry only spends GPU time.
+UNRETRIED_INFRA_REASONS: frozenset[str] = frozenset({INERT_PATCH})
 #: The kinds whose result holds no measured round: a profile names its traces, a repro its verdict.
 UNMEASURED_KINDS = (TestKind.PROFILE, TestKind.REPRO)
 
@@ -88,6 +94,11 @@ class Executor(Protocol):
 NodeFailure = Callable[[str, str, bool], Awaitable[None]]
 """Hears ``(node, reason, reproduced)``: ``reproduced`` is False for an unclear failure that did not recur on its rerun
 and True for an infrastructure failure the executor classified."""
+
+
+def _repeats_in_every_sandbox(reason: str | None) -> bool:
+    """Whether an infrastructure failure's ``reason`` names one that a retry in a fresh sandbox repeats."""
+    return bool(reason) and reason.partition(":")[0].strip() in UNRETRIED_INFRA_REASONS
 
 
 def _attempt_of(result: TestResult) -> Attempt:
@@ -165,6 +176,13 @@ class AttemptRunner:
                     )
                 reran = True
                 continue
+            if _repeats_in_every_sandbox(result.failure_reason):
+                return self._final(
+                    job,
+                    result,
+                    attempts,
+                    _Ending(Validity.MEASUREMENT_FAILED, FailureClass.INFRA, result.failure_reason),
+                )
             await self._report(attempts[-1], result.failure_reason, reproduced=True)
             if infra_retries >= self._max_infra_retries:
                 reason = f"{infra_retries + 1} attempts failed for infrastructure reasons: {result.failure_reason}"
