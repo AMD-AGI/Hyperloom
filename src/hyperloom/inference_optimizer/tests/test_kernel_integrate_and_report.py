@@ -269,7 +269,7 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(
         "accuracy_metric": "exact_match,strict-match",
     }
 
-    async def _measure(executor, *, config_path, output_dir, **_kwargs):
+    async def _measure(executor, _attempt, *, config_path, output_dir, **_kwargs):
         seen["shared_state"] = executor.shared_state
         seen["benchmark"] = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
         workspace = output_dir / "benchmark_sglang_e2e"
@@ -358,7 +358,7 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
     state.save(session_dir)
     benchmarks = []
 
-    async def _measure(executor, *, config_path, output_dir, **_kwargs):
+    async def _measure(executor, _attempt, *, config_path, output_dir, **_kwargs):
         benchmark = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
         benchmarks.append(benchmark)
         tput = 100.0 if benchmark["envs"].get("LEG") == "A" else 110.0
@@ -666,7 +666,7 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     rounds = []
     measured = {}
 
-    async def _benchmark(executor, *, config_path, output_dir, **_kwargs):
+    async def _benchmark(executor, _attempt, *, config_path, output_dir, **_kwargs):
         assert target.read_text(encoding="utf-8") == patch_file.read_text(encoding="utf-8")
         bench = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
         rounds.append((output_dir.name, bench))

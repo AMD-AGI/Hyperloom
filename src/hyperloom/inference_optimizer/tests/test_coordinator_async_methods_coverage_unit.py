@@ -1394,16 +1394,18 @@ async def _executor_nonzero_result(
     cfg.write_text("benchmark:\n  framework: vllm\n  model: /tmp/m\n", encoding="utf-8")
     ex = bl.BaselineExecutor(session_dir=session, magpie_python="/usr/bin/python3")
     return await ex._run_single_benchmark(
+        bl.BenchmarkAttempt(
+            timeout_sec=30,
+            override_result_dir=None,
+            resolved_model="/tmp/m",
+            materialized_config_path=cfg,
+            inferencex_path="",
+            effective_extra_server_args="",
+            params={"framework": "vllm"},
+            ctx=RunnerContext(task=_baseline_task(name), lease=None, extra={}),
+        ),
         config_path=cfg,
         output_dir=out,
-        timeout_sec=30,
-        override_result_dir=None,
-        resolved_model="/tmp/m",
-        materialized_config_path=cfg,
-        inferencex_path="",
-        effective_extra_server_args="",
-        params={"framework": "vllm"},
-        ctx=RunnerContext(task=_baseline_task(name), lease=None, extra={}),
     )
 
 

@@ -36,7 +36,7 @@ from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
-from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor, BenchmarkAttempt
 
 
 @pytest.fixture(autouse=True)
@@ -540,14 +540,25 @@ async def test_the_executor_records_the_rounds_it_actually_ran(tmp_path: Path) -
     async def _run_once(ctx, *, recorder=None, run_index=0, **_kwargs):
         for label in (ROUND_WARMUP, ROUND_MEASURE):
             await executor._run_reported_round(
-                {"recorder": recorder, "run_index": run_index, "timeout_sec": 7800},
+                BenchmarkAttempt(
+                    timeout_sec=7800,
+                    override_result_dir=None,
+                    resolved_model="",
+                    materialized_config_path=Path("/cfg.yaml"),
+                    inferencex_path="",
+                    effective_extra_server_args="",
+                    params={},
+                    ctx=ctx,
+                    recorder=recorder,
+                    run_index=run_index,
+                ),
                 label=label,
                 config_path=Path("/cfg.yaml"),
                 output_dir=tmp_path / label,
             )
         return _measured()
 
-    async def _benchmark(**_kwargs):
+    async def _benchmark(_attempt, **_kwargs):
         return _measured()
 
     executor._run_once = _run_once  # type: ignore[method-assign]

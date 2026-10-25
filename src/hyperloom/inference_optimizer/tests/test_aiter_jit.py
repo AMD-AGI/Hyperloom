@@ -275,16 +275,18 @@ def baseline_launch(monkeypatch, tmp_path):
     async def launch(*, profile=False, ready=False, extra=None):
         executor = profile_executor if profile else baseline_executor
         return await executor._run_single_benchmark(
+            baseline.BenchmarkAttempt(
+                timeout_sec=123,
+                override_result_dir=None,
+                resolved_model="fixture-model",
+                materialized_config_path=config,
+                inferencex_path="",
+                effective_extra_server_args="",
+                params={},
+                ctx=SimpleNamespace(extra=extra or {}),
+            ),
             config_path=config,
             output_dir=tmp_path / "round",
-            timeout_sec=123,
-            override_result_dir=None,
-            resolved_model="fixture-model",
-            materialized_config_path=config,
-            inferencex_path="",
-            effective_extra_server_args="",
-            params={},
-            ctx=SimpleNamespace(extra=extra or {}),
             server_already_ready=ready,
         )
 

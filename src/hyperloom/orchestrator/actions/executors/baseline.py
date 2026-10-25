@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 import time
 from contextlib import ExitStack, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, NamedTuple
@@ -175,9 +175,6 @@ _DETOKENIZER_STALL_ERROR = (
 
 #: The file Magpie writes its own measurement to, inside the workspace it creates.
 _BENCHMARK_REPORT_NAME = "benchmark_report.json"
-
-#: Round-kwargs entries that address the timeline recorder rather than the benchmark subprocess.
-_ROUND_RECORDING_KEYS = ("recorder", "run_index")
 
 # Markers identifying a MoE quant scheme with no implementation for the ``--moe-runner-backend`` in use:
 # ``create_moe_runner`` falls through without building a runner and the first forward pass dies (e.g. Quark MXFP4 on
@@ -1615,6 +1612,24 @@ def _iter_log_tails(root: Path, *, max_bytes: int, limit: int = 64) -> Iterator[
         return
 
 
+@dataclass(frozen=True)
+class BenchmarkAttempt:
+    """What every benchmark round of one attempt runs with, and the recorder its rounds report to."""
+
+    timeout_sec: int
+    override_result_dir: str | None
+    resolved_model: str
+    materialized_config_path: Path
+    inferencex_path: str
+    effective_extra_server_args: str
+    params: dict[str, Any]
+    ctx: RunnerContext
+    run_eval_disabled: bool = False
+    serving_lease: Any = None
+    recorder: Any = None
+    run_index: int = 0
+
+
 class _BenchmarkRound(NamedTuple):
     config_path: Path
     materialized_config_path: Path
@@ -2360,18 +2375,18 @@ class BenchmarkRunExecutor:
                 ),
             )
         return await self._run_attempt_rounds(
-            {
-                "timeout_sec": self._resolve_timeout(params),
-                "override_result_dir": override_result_dir,
-                "resolved_model": resolved_model,
-                "materialized_config_path": config_path,
-                "inferencex_path": os.environ.get("INFERENCEX_PATH", "").strip(),
-                "effective_extra_server_args": server_args,
-                "params": params,
-                "ctx": ctx,
-                "recorder": recorder,
-                "run_index": run_index,
-            },
+            BenchmarkAttempt(
+                timeout_sec=self._resolve_timeout(params),
+                override_result_dir=override_result_dir,
+                resolved_model=resolved_model,
+                materialized_config_path=config_path,
+                inferencex_path=os.environ.get("INFERENCEX_PATH", "").strip(),
+                effective_extra_server_args=server_args,
+                params=params,
+                ctx=ctx,
+                recorder=recorder,
+                run_index=run_index,
+            ),
             output_dir,
         )
 
@@ -2406,16 +2421,16 @@ class BenchmarkRunExecutor:
             params["extra_server_args"] = server_args
         return fw, server_args
 
-    async def _run_attempt_rounds(self, common: dict[str, Any], output_dir: Path) -> dict[str, Any]:
-        params = common["params"]
-        config_path = common["materialized_config_path"]
-        extra = getattr(common["ctx"], "extra", None) or {}
+    async def _run_attempt_rounds(self, attempt: BenchmarkAttempt, output_dir: Path) -> dict[str, Any]:
+        params = attempt.params
+        config_path = attempt.materialized_config_path
+        extra = getattr(attempt.ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or self.shared_state
         # MLPerf prepares its delegated client off-loop; native AgentX is entirely managed by Magpie.
         agx_err = await asyncio.to_thread(
             prepare_agentx_runtime,
             env=os.environ,
-            inferencex_path=common["inferencex_path"],
+            inferencex_path=attempt.inferencex_path,
             config_path=config_path,
             active=agentx_active(shared_state),
         )
@@ -2437,9 +2452,9 @@ class BenchmarkRunExecutor:
             _set_materialized_run_eval(config_path, enabled=False)
         # Whether THIS run actually executes lm-eval, read back from the materialized config the subprocess
         # consumes -- the single source of truth.
-        common["run_eval_disabled"] = materialized_run_eval_disabled(config_path)
+        attempt = replace(attempt, run_eval_disabled=materialized_run_eval_disabled(config_path))
         # Asked before the lease, because a round that will not be run should not hold a GPU while being refused.
-        refused = self._round_refused_before_ignition(common, output_dir, double_run=double_run, ctx_extra=extra)
+        refused = self._round_refused_before_ignition(attempt, output_dir, double_run=double_run, ctx_extra=extra)
         if refused is not None:
             return refused
         application = self._prepare_round_patches(params, output_dir, shared_state)
@@ -2450,7 +2465,8 @@ class BenchmarkRunExecutor:
         from ._grid_runner import _num_gpus_for_config
         from ._ray_serving import maybe_serving_lease
 
-        common["serving_lease"] = lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path))
+        lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path))
+        attempt = replace(attempt, serving_lease=lease)
         # Deep-clean any lingering server right before this round actually boots -- after every earlier gate that can
         # still bail out without starting a server (budget, warm-patch failure), so a round that will not run does not
         # pay for a scan it gets no benefit from.
@@ -2459,14 +2475,14 @@ class BenchmarkRunExecutor:
         try:
             if double_run:
                 guarded = self._run_cold_start_guarded_rounds
-                return await guarded(common, output_dir, lifecycle, application, defer_accuracy=defer_accuracy)
+                return await guarded(attempt, output_dir, lifecycle, application, defer_accuracy=defer_accuracy)
             if double_run_wanted:
                 log.info(
                     "baseline_executor: cold-start double-run not eligible (%s); running single round.",
                     lifecycle["reason"],
                 )
             result = await self._run_reported_round(
-                common, label=ROUND_SINGLE, config_path=config_path, output_dir=output_dir
+                attempt, label=ROUND_SINGLE, config_path=config_path, output_dir=output_dir
             )
             _stamp_warm_patch_outcome(result, application, params)
             return result
@@ -2596,7 +2612,7 @@ class BenchmarkRunExecutor:
 
     def _round_refused_before_ignition(
         self,
-        common: Mapping[str, Any],
+        attempt: BenchmarkAttempt,
         output_dir: Path,
         *,
         double_run: bool,
@@ -2610,8 +2626,8 @@ class BenchmarkRunExecutor:
             round_label="baseline round",
             output_dir=output_dir,
             capture_meta={
-                "materialized_config": str(common["materialized_config_path"]),
-                "run_eval_disabled": bool(common["run_eval_disabled"]),
+                "materialized_config": str(attempt.materialized_config_path),
+                "run_eval_disabled": bool(attempt.run_eval_disabled),
             },
         )
         stopped_result["budget_shortfall"] = evidence
@@ -2641,7 +2657,7 @@ class BenchmarkRunExecutor:
 
     async def _run_guarded_round(
         self,
-        common: dict[str, Any],
+        attempt: BenchmarkAttempt,
         label: str,
         round_dir: Path,
         *,
@@ -2649,7 +2665,7 @@ class BenchmarkRunExecutor:
         **config: Any,
     ) -> dict[str, Any]:
         round_cfg = self._write_lifecycle_config(
-            common["materialized_config_path"],
+            attempt.materialized_config_path,
             round_dir,
             cleanup=config.pop("cleanup"),
             pid_dir=round_dir.parent,
@@ -2657,7 +2673,7 @@ class BenchmarkRunExecutor:
             run_eval=config.pop("run_eval"),
         )
         return await self._run_reported_round(
-            common,
+            attempt,
             label=label,
             config_path=round_cfg,
             output_dir=round_dir,
@@ -2666,14 +2682,14 @@ class BenchmarkRunExecutor:
 
     async def _run_cold_start_guarded_rounds(
         self,
-        common: dict[str, Any],
+        attempt: BenchmarkAttempt,
         output_dir: Path,
         lifecycle: Mapping[str, Any],
         application: list[dict[str, str]] | dict[str, Any],
         *,
         defer_accuracy: bool,
     ) -> dict[str, Any]:
-        params = common["params"]
+        params = attempt.params
         warmup_dir = output_dir / _WARMUP_ROUND_DIR
         log.info(
             "baseline_executor: cold-start guard — warmup round (discarded, boots persistent server) in %s",
@@ -2681,13 +2697,13 @@ class BenchmarkRunExecutor:
         )
         # A replayed KB config is promoted onto ``current_best`` and becomes the reference every later measurement
         # in the session is taken against, so it may not be adopted on throughput alone.
-        replayed = str(getattr(common["ctx"].task, "kind", "") or "") == "replay_warm_recipe"
+        replayed = str(getattr(attempt.ctx.task, "kind", "") or "") == "replay_warm_recipe"
         # A round that re-attaches to the server the warmup left up rather than booting one of its own.
         hot_round = {"port": lifecycle["port"], "server_already_ready": True}
         warmup_eval = True if replayed and not defer_accuracy else None
         # Each warmup starts a fresh benchmark cap; the session deadline never resets.
         warmup_result = await self._run_guarded_round(
-            common, ROUND_WARMUP, warmup_dir, port=lifecycle["port"], cleanup=False, run_eval=warmup_eval
+            attempt, ROUND_WARMUP, warmup_dir, port=lifecycle["port"], cleanup=False, run_eval=warmup_eval
         )
         if warmup_result.get("status") != "succeeded":
             # Warmup failure almost certainly recurs, so skip the measured round.
@@ -2708,7 +2724,7 @@ class BenchmarkRunExecutor:
             output_throughput=warmup_tput,
             runtime_sec=warmup_result.get("subprocess_runtime_sec"),
         )
-        if not defer_accuracy and (cold := self._cold_anchor_when_hot_pass_unaffordable(warmup_result, common)):
+        if not defer_accuracy and (cold := self._cold_anchor_when_hot_pass_unaffordable(warmup_result, attempt)):
             return cold
         measure_dir = output_dir / _MEASURE_ROUND_DIR
         log.info(
@@ -2719,7 +2735,7 @@ class BenchmarkRunExecutor:
         )
         # Round 2 (measured): re-attach to the hot server (client only).
         result = await self._run_guarded_round(
-            common, ROUND_MEASURE, measure_dir, cleanup=not defer_accuracy, run_eval=False, **hot_round
+            attempt, ROUND_MEASURE, measure_dir, cleanup=not defer_accuracy, run_eval=False, **hot_round
         )
         _stamp_warm_patch_outcome(result, application, params)
         if result.get("status") != "succeeded":
@@ -2736,18 +2752,18 @@ class BenchmarkRunExecutor:
             return _cold_anchor_from_warmup(warmup_result, dropped=dropped)
         self._record_measured_against_warmup(result, warmup_result)
         if defer_accuracy:
-            await self._settle_deferred_accuracy(common, output_dir, hot_round, result)
+            await self._settle_deferred_accuracy(attempt, output_dir, hot_round, result)
         return result
 
     def _cold_anchor_when_hot_pass_unaffordable(
         self,
         warmup_result: dict[str, Any],
-        common: Mapping[str, Any],
+        attempt: BenchmarkAttempt,
     ) -> dict[str, Any] | None:
         affordable, evidence = self._measure_round_affordable(
             warmup_runtime_sec=warmup_result.get("subprocess_runtime_sec"),
             warmup_post_ready_sec=warmup_result.get("post_ready_runtime_sec"),
-            ctx_extra=getattr(common["ctx"], "extra", None) or {},
+            ctx_extra=getattr(attempt.ctx, "extra", None) or {},
         )
         if affordable:
             return None
@@ -2814,12 +2830,12 @@ class BenchmarkRunExecutor:
 
     async def _settle_deferred_accuracy(
         self,
-        common: dict[str, Any],
+        attempt: BenchmarkAttempt,
         output_dir: Path,
         hot_round: Mapping[str, Any],
         result: dict[str, Any],
     ) -> None:
-        params = common["params"]
+        params = attempt.params
         hot = float(result.get("output_throughput") or 0.0)
         keep_policy = params.get("post_measure_accuracy_keep_policy")
         if keep_policy is None:
@@ -2835,7 +2851,7 @@ class BenchmarkRunExecutor:
                 "observed_tput": hot,
             }
         else:
-            ctx_extra = getattr(common["ctx"], "extra", None) or {}
+            ctx_extra = getattr(attempt.ctx, "extra", None) or {}
             performance = assess_integrate_performance(
                 ctx_extra.get("shared_state") or self.shared_state,
                 result,
@@ -2862,12 +2878,11 @@ class BenchmarkRunExecutor:
             result["accuracy_stage"] = skipped
             return
         accuracy_result = await self._run_guarded_round(
-            common,
+            replace(attempt, run_eval_disabled=False),
             ROUND_ACCURACY,
             output_dir / _ACCURACY_ROUND_DIR,
             cleanup=True,
             run_eval=True,
-            run_eval_disabled=False,
             **hot_round,
         )
         result["accuracy_stage"] = {
@@ -2998,7 +3013,7 @@ class BenchmarkRunExecutor:
 
     async def _run_reported_round(
         self,
-        common: dict[str, Any],
+        attempt: BenchmarkAttempt,
         *,
         label: str,
         config_path: Path,
@@ -3006,7 +3021,7 @@ class BenchmarkRunExecutor:
         **overrides: Any,
     ) -> dict[str, Any]:
         """Announce a benchmark round before it blocks, run it, and record it."""
-        recorder = common["recorder"]
+        recorder = attempt.recorder
         await report_progress(unit="baseline_round", label=label, status="started")
         started_at = now_iso("seconds")
         started_monotonic = time.monotonic()
@@ -3015,22 +3030,22 @@ class BenchmarkRunExecutor:
             if recorder is None:
                 return
             recorder.record_round(
-                run_index=common["run_index"],
+                run_index=attempt.run_index,
                 round_=BaselineRound(
                     label=label,
                     started_at=started_at,
                     duration_sec=round(time.monotonic() - started_monotonic, 3),
-                    timeout_sec=common.get("timeout_sec"),
+                    timeout_sec=attempt.timeout_sec,
                     result=result,
                 ),
             )
 
-        benchmark_kwargs = {key: value for key, value in common.items() if key not in _ROUND_RECORDING_KEYS}
         try:
             result = await self._run_single_benchmark(
+                attempt,
                 config_path=config_path,
                 output_dir=output_dir,
-                **{**benchmark_kwargs, **overrides},
+                **overrides,
             )
         except BaseException as exc:
             # A round that raised still happened, and its row is the only place the timeline can say which round the
@@ -3210,19 +3225,10 @@ class BenchmarkRunExecutor:
 
     async def _run_single_benchmark(
         self,
+        attempt: BenchmarkAttempt,
         *,
         config_path: Path,
         output_dir: Path,
-        timeout_sec: int,
-        override_result_dir: str | None,
-        resolved_model: str,
-        materialized_config_path: Path,
-        inferencex_path: str,
-        effective_extra_server_args: str,
-        params: dict[str, Any],
-        ctx: RunnerContext,
-        run_eval_disabled: bool = False,
-        serving_lease: Any = None,
         server_already_ready: bool = False,
     ) -> dict[str, Any]:
         """Run one Magpie benchmark subprocess and parse its result."""
@@ -3234,30 +3240,33 @@ class BenchmarkRunExecutor:
         )
         from .magpie_agentx import bind_source_evidence
 
-        await asyncio.to_thread(bind_source_evidence, config_path, params.get("patches") or [])
-        result_dir = _resolve_result_dir(output_dir, override_result_dir)
-        env = _benchmark_process_env(config_path, output_dir, result_dir, inferencex_path)
+        await asyncio.to_thread(bind_source_evidence, config_path, attempt.params.get("patches") or [])
+        result_dir = _resolve_result_dir(output_dir, attempt.override_result_dir)
+        env = _benchmark_process_env(config_path, output_dir, result_dir, attempt.inferencex_path)
         # Multi-node (--nodes >= 2): inject MAGPIE_RUN_PHASE=client + BENCHMARK_BASE_URL so Magpie skips its server
         # launch and targets the RayJob head.
         env.update(magpie_remote_env())
-        ctx_extra = getattr(ctx, "extra", None) or {}
+        ctx_extra = getattr(attempt.ctx, "extra", None) or {}
         # The session's wall-clock budget, resolved per round rather than once per task: a baseline runs up to three
         # of them, and a warmup that overran has already spent budget the ones after it were counting on.
         session_deadline_sec, _ = session_grid_bounds(ctx_extra.get("shared_state") or self.shared_state)
         silence_timeout_sec = None
+        timeout_sec = attempt.timeout_sec
         if self.benchmark_watchdog:
             silence_timeout_sec, timeout_sec = resolve_benchmark_timeouts()
             env["PYTHONUNBUFFERED"] = "1"
             sync_benchmark_timeout(config_path, timeout_sec)
         # The materialized YAML is authoritative for the framework: params and $FRAMEWORK are both optional on a
         # baseline task.
-        framework = _config_framework(materialized_config_path) or (_requested_framework(params) or "").lower()
+        framework = (
+            _config_framework(attempt.materialized_config_path) or (_requested_framework(attempt.params) or "").lower()
+        )
         round_ = _BenchmarkRound(
             config_path=config_path,
-            materialized_config_path=materialized_config_path,
+            materialized_config_path=attempt.materialized_config_path,
             output_dir=output_dir,
             result_dir=result_dir,
-            ctx=ctx,
+            ctx=attempt.ctx,
             ctx_extra=ctx_extra,
             cmd=build_benchmark_command(python_exe=self.magpie_python, config_path=config_path, output_dir=output_dir),
             env=env,
@@ -3266,20 +3275,20 @@ class BenchmarkRunExecutor:
             # Config/eval-contract facts echoed onto every failure result so an eval-rooted failure can be
             # fingerprinted and re-run by enablement.
             capture_meta={
-                "materialized_config": str(materialized_config_path),
+                "materialized_config": str(attempt.materialized_config_path),
                 "result_dir": str(result_dir),
-                "run_eval_disabled": bool(run_eval_disabled),
+                "run_eval_disabled": bool(attempt.run_eval_disabled),
             },
             timeout_sec=timeout_sec,
             silence_timeout_sec=silence_timeout_sec,
             session_deadline_sec=session_deadline_sec,
-            serving_lease=serving_lease,
+            serving_lease=attempt.serving_lease,
             server_already_ready=server_already_ready,
-            run_eval_disabled=run_eval_disabled,
+            run_eval_disabled=attempt.run_eval_disabled,
         )
         # Multi-node only: restart sglang/vllm per round for a fresh server.
         restart_failure = await self._restart_multi_node_server(
-            round_, server_args=effective_extra_server_args, resolved_model=resolved_model
+            round_, server_args=attempt.effective_extra_server_args, resolved_model=attempt.resolved_model
         )
         if restart_failure is not None:
             return restart_failure
@@ -4039,6 +4048,7 @@ baseline_executor = BaselineExecutor()
 
 __all__ = [
     "BaselineExecutor",
+    "BenchmarkAttempt",
     "BenchmarkRunExecutor",
     "baseline_executor",
 ]
