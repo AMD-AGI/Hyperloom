@@ -266,6 +266,23 @@ async def test_a_trace_with_no_kernel_or_no_trace_fails_the_job_instead_of_answe
     assert record["summary"].startswith(("none of the first", "trace_input does not exist", "no trace files"))
 
 
+async def test_an_analysis_that_scanned_none_of_the_traces_kernels_fails_the_job_instead_of_answering_ok(
+    served: Local, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What ``roofline-83e37a2e0267`` answered: ``Events scanned: 0`` over a trace with GPU kernels, and ``ok``."""
+    from hyperloom_multibranch.toolbox.tools import roofline as module
+
+    async def scanned_nothing(payload: dict, *, session_dir: Path) -> dict:
+        warning = {"code": "bypass_trace_aggregation_truncated", "severity": "warning"}
+        return {"status": "ok", "route": "bypass", "hot_kernels": [], "trace_health_warnings": [warning]}
+
+    monkeypatch.setattr(module, "trace_analyze_handler", scanned_nothing)
+    status, record = await _roofline(served, TRACE)
+
+    assert status is JobStatus.FAILED and record["result"]["error_class"] == "roofline_without_kernels"
+    assert "no hot kernel" in record["summary"] and "bypass_trace_aggregation_truncated" in record["result"]["error"]
+
+
 # --- upstream PR search ---------------------------------------------------------------------------------------------
 
 

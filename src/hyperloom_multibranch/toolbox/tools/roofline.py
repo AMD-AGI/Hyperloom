@@ -35,6 +35,9 @@ ROOFLINE_TOOL = "roofline"
 TRACELENS_TOOL = "tracelens"
 #: The only route of the roofline: the orchestrator's analysis with no model session (``agent`` starts one on the host).
 ROOFLINE_ROUTE = "bypass"
+#: The error class of a roofline that answered ``ok`` with no hot kernel.
+ROOFLINE_WITHOUT_KERNELS = "roofline_without_kernels"
+HOT_KERNELS_KEY = "hot_kernels"
 
 
 class _SharesOps:
@@ -52,7 +55,8 @@ async def roofline_handler(payload: dict, *, session_dir: Path) -> dict:
     """The kernel roofline of ``payload['trace_input']``: ``bypass`` analysis for the platform the request names (else
     :data:`~.tracelens_report.DEFAULT_PLATFORM`). Any other ``analysis_route`` fails the job by name instead of being
     ignored, and the route the host's environment names is not read: it could start a model session. A trace that is missing or
-    holds no GPU kernel fails by name: the analysis itself answers ``ok`` with no kernel for both."""
+    holds no GPU kernel fails by name: the analysis itself answers ``ok`` with no kernel for both. So does an analysis that
+    answers ``ok`` with no hot kernel for a trace that has some (it scanned none of its events)."""
     route = str(payload.get("analysis_route") or "").strip().lower()
     if route and route != ROOFLINE_ROUTE:
         return {
@@ -64,9 +68,26 @@ async def roofline_handler(payload: dict, *, session_dir: Path) -> dict:
     if unusable is not None:
         return unusable
     platform = str(payload.get("target_platform") or "").strip() or DEFAULT_PLATFORM
-    return await trace_analyze_handler(
+    result = await trace_analyze_handler(
         {**payload, "analysis_route": ROOFLINE_ROUTE, "target_platform": platform}, session_dir=session_dir
     )
+    return _without_kernels(result) or result
+
+
+def _without_kernels(result: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The failed result of an ``ok`` analysis that found no hot kernel in a trace that has GPU kernels; ``None`` otherwise."""
+    if result.get("status") != "ok" or result.get(HOT_KERNELS_KEY):
+        return None
+    warnings = [str(w.get("code") or "") for w in result.get("trace_health_warnings") or () if isinstance(w, Mapping)]
+    return {
+        **result,
+        "status": "failed",
+        "error_class": ROOFLINE_WITHOUT_KERNELS,
+        "error": (
+            "the roofline analysis answered ok with no hot kernel, though the trace has GPU kernels: it scanned none of "
+            f"their events (trace health warnings: {', '.join(filter(None, warnings)) or 'none'})"
+        ),
+    }
 
 
 def roofline_tool() -> ScratchHandlerTool:
