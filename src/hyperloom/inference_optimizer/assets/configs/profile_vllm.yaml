@@ -69,12 +69,19 @@ benchmark:
     #                  clamped at 0
     EXTRA_VLLM_ARGS: "--profiler-config.ignore_frontend True"
     # --- Profiler: graph replays ---
-    # A HIP runtime setting, independent of the framework: by default the runtime replays a captured graph from its
-    # recorded packets and the ROCm profiler records a replay's kernels only for the replay that a host sync follows, so
-    # a decode window's shares are those of the eager ops around the replays. Replayed node by node (0) every replay is
-    # recorded, its kernels named in capture order. Measured on SGLang only (Qwen3-14B-FP8: 128 of 128 replays of a
-    # 128-step window recorded, 1 of 127 by default); not yet on vLLM.
+    # The HIP runtime replays a captured graph by dispatching its pre-recorded AQL packets, and the ROCm profiler then
+    # records a replay's kernels only for the replay that a host sync follows (the profiler's stop, or a prefill step),
+    # so a decode window's shares are those of the eager ops around the replays. Each ROCm line has its own switch to
+    # the per-node dispatch path instead; a runtime ignores the switches it does not define, so all three are set:
+    #   ROCm 7.1.0-7.2.3:  DEBUG_CLR_GRAPH_PACKET_CAPTURE=0      (packet capture off)
+    #   ROCm 7.2.4:        DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING=0  (segmented executor off, so no packet capture)
+    #   ROCm 10.x:         DEBUG_HIP_GRAPH_CLASSIC_PATH=1        (classic executor, no packet capture; single-device
+    #                      graphs only). On 10.x SEGMENT_SCHEDULING=0 is that runtime's default and changes nothing.
+    # Measured on SGLang on ROCm 7.2.0 only (128 of 128 replays of a 128-step window recorded, 1 of 127 by default);
+    # not yet on vLLM, nor with the 7.2.4 and 10.x switches.
     DEBUG_CLR_GRAPH_PACKET_CAPTURE: "0"
+    DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING: "0"
+    DEBUG_HIP_GRAPH_CLASSIC_PATH: "1"
     # vLLM timeout must be extended during profiling (graph capture is slow)
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
     # --- Profile mode: cap prompts to reduce trace size ---
