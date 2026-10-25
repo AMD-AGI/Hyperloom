@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""A tiny native component for the build-store tests: a C file "compiled" by a Python script into an ELF-tagged file.
+
+The dev and CI machines need not have a C compiler, so ``build.py`` stands in for one: it is deterministic in the source
+(the output is the ELF magic plus the hash of ``src/kernel.c``), fails like a compiler on ``#error``, and can be told by
+a marker in the source to misbehave in each way the harvest must refuse.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from hyperloom.contracts.recipe import ComponentPatches, PatchRef
+from hyperloom.measure import signing
+from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.measure.runner.native.builder import BuildMachine, BuildRequest
+from hyperloom.measure.runner.native.recipes import NativeRecipe, Preflight
+from hyperloom.measure.jit.native.store import BuildStore
+from hyperloom.measure.jit.native.trust import Signer, Trust, TrustedKey
+from hyperloom.measure.tests._recipes import COMMIT, IMAGE, git_patch, put_patch, write_tree
+
+BUILDER_IMAGE = "sha256:" + "c" * 64
+OTHER_IMAGE = "sha256:" + "d" * 64
+COMPONENT = "fakepkg"
+KERNEL = "native/src/kernel.c"
+BASE_SOURCE = "int kernel(void) { return 1; }\n"
+OUTPUT = f"{COMPONENT}/kernel.so"
+MAX_OUTPUT_BYTES = 1024
+
+COMPILER = """\
+import hashlib, os, pathlib, sys
+print(" ".join(sorted(os.environ)))
+src = pathlib.Path("src/kernel.c").read_text()
+out = pathlib.Path("python/fakepkg/kernel.so")
+if "#error" in src:
+    sys.stderr.write("src/kernel.c:1: error: stop\\n")
+    sys.exit(1)
+if "#signal" in src:
+    os.kill(os.getpid(), 9)
+if "#symlink" in src:
+    out.symlink_to("../../src/kernel.c")
+elif "#notelf" in src:
+    out.write_bytes(b"not an object")
+elif "#big" in src:
+    out.write_bytes(b"\\x7fELF" + b"0" * 2048)
+elif "#none" not in src:
+    out.write_bytes(b"\\x7fELF" + hashlib.sha256(src.encode()).digest())
+"""
+
+
+def compiled(source: str) -> bytes:
+    """What the stand-in compiler makes of ``source``."""
+    return b"\x7fELF" + hashlib.sha256(source.encode()).digest()
+
+
+@dataclass
+class CountingPreflight:
+    """Counts compiles (each one runs the preflight once); ``problem`` makes the machine fail it."""
+
+    problem: str | None = None
+    calls: list[Path] = field(default_factory=list)
+
+    def __call__(self, scratch: Path, gfx_arch: str) -> Preflight:
+        self.calls.append(scratch)
+        return Preflight(self.problem, {"compiler": "stand-in"})
+
+
+def fake_recipe(preflight: CountingPreflight) -> NativeRecipe:
+    return NativeRecipe(
+        component=COMPONENT,
+        import_name=COMPONENT,
+        version="fake/1",
+        source_dir="native",
+        package_dir="python",
+        outputs=(f"{COMPONENT}/*.so",),
+        command=("{python}", "build.py"),
+        budget_sec=120,
+        max_jobs=1,
+        max_output_bytes=MAX_OUTPUT_BYTES,
+        preflight=preflight,
+    )
+
+
+def upstream_tree(root: Path, source: str = BASE_SOURCE) -> Path:
+    return write_tree(
+        root,
+        {
+            "native/build.py": COMPILER,
+            KERNEL: source,
+            "native/CMakeLists.txt": "project(fake)\n",
+            f"native/python/{COMPONENT}/__init__.py": "",
+        },
+    )
+
+
+def image_root(root: Path, source: str = BASE_SOURCE) -> Path:
+    """The image's site-packages: the package and the binary an unpatched build makes."""
+    write_tree(root, {f"{COMPONENT}/__init__.py": ""})
+    (root / OUTPUT).write_bytes(compiled(source))
+    return root
+
+
+@dataclass
+class Bench:
+    """Everything one test needs: blobs, keys, store, a request factory."""
+
+    tmp: Path
+    preflight: CountingPreflight = field(default_factory=CountingPreflight)
+
+    def __post_init__(self) -> None:
+        self.blobs = LocalBlobStore(self.tmp / "recipe-blobs")
+        key = signing.generate_private_key()
+        self.signer = Signer(key)
+        self.trust = Trust((TrustedKey(signing.public_key_pem(key), 1),), 1)
+        self.store = BuildStore(self.tmp / "store", self.trust)
+        self.upstream = upstream_tree(self.tmp / "upstream")
+        self.image = image_root(self.tmp / "image")
+        self._patches = 0
+
+    def patch(self, after: dict[str, str | None], before: dict[str, str] | None = None) -> PatchRef:
+        self._patches += 1
+        data = git_patch(self.tmp / f"patch-{self._patches}", before or {KERNEL: BASE_SOURCE}, after)
+        return put_patch(self.blobs, f"{self._patches:04d}.patch", data)
+
+    def request(self, *patches: PatchRef, image_digest: str = IMAGE) -> BuildRequest:
+        stack = ComponentPatches(COMPONENT, "https://example.invalid/fake.git", COMMIT, tuple(patches))
+        machine = BuildMachine(image_digest, BUILDER_IMAGE, "gfx942")
+        return BuildRequest(fake_recipe(self.preflight), stack, self.upstream, self.image, machine)

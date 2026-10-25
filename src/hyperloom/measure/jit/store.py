@@ -52,7 +52,11 @@ __all__ = [
     "Snapshot",
     "SnapshotInvalid",
     "StoredFile",
+    "copy_blob",
+    "file_sha256",
+    "read_bounded",
     "read_staged_snapshot",
+    "store_blob",
 ]
 
 SNAPSHOT_SCHEMA = "hyperloom.jit-cache-snapshot/v1"
@@ -467,3 +471,10 @@ def _copy_checked(source: int, target: Path, stored: StoredFile, shown: str, *, 
     if digest.hexdigest() != stored.sha256:
         target.unlink(missing_ok=True)
         raise SnapshotInvalid(f"{shown}: the bytes are not the {stored.size} bytes whose hash is listed")
+
+
+#: Public names of the blob and bounded-read primitives the native build store (``hyperloom.measure.jit.native``) shares.
+copy_blob = _copy_blob
+file_sha256 = _file_sha256
+read_bounded = _read_bounded
+store_blob = DirJitStore._store_blob

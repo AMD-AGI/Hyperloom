@@ -79,6 +79,7 @@ __all__ = [
     "WheelSource",
     "WheelTarget",
     "ensure_runner_cache",
+    "exclusive",
     "main",
 ]
 
@@ -413,6 +414,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     print(json.dumps({"path": str(entry.path), "manifest_sha256": entry.manifest_sha256, "reused": entry.reused}))
     return 0
+
+
+#: Public name of the per-key ``flock`` the native build service (``hyperloom.measure.runner.native``) coalesces with.
+exclusive = _exclusive
 
 
 if __name__ == "__main__":

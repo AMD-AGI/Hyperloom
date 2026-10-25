@@ -854,12 +854,17 @@ def _driver_main(argv: list[str] | None = None) -> int:
     return 0 if result.ok else 1
 
 
+#: Public name of the sgl-kernel recipe, whose preflight and budgets the native build store reuses.
+SglKernelBuild = _SglKernelBuild
+
+
 if __name__ == "__main__":
     sys.exit(_driver_main())
 
 
 __all__ = [
     "BuildHandle",
+    "SglKernelBuild",
     "_driver_main",
     "_load_result_json",
     "classify_build_exit",
