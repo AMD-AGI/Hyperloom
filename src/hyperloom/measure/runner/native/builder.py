@@ -1,12 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Build a component's patched native tree into the store.
+"""Compile a component's patched native tree: the build runner's half of a native build.
 
 Front: the stack is applied with :func:`~hyperloom.measure.compile.apply_patch_stack` over the build directory of the
-pinned upstream checkout (never in place, never into the image), which yields the changed files and so the key. Middle:
-under the key's lock, a copy of that directory with the changed files laid over it is compiled by the recipe, in an
-environment of its own, within the recipe's budget. Back: the declared outputs are harvested and the store publishes them.
+pinned upstream checkout (never in place, never into the image), which yields the changed files and so the key
+(:func:`plan`, which compiles nothing and runs no candidate code). Middle: a copy of that directory with the changed
+files laid over it is compiled by the recipe, in an environment of its own, within the recipe's budget. Back: the
+declared outputs are harvested into a staging directory (:func:`compile_tree`).
+
+:func:`compile_tree` runs code the candidate controls, so it must run in the CPU build runner: a sandbox in the image's
+digest that holds no signing key and no credential and cannot read the build service's files. It never signs. The
+service (:func:`hyperloom.measure.runner.native.service.ensure_build`) holds the key, starts the runner for a key that is
+not stored, and signs what the runner staged. Nothing in this module starts that runner; calling :func:`compile_tree`
+in the process that holds the key would let a candidate read the key and forge records.
 
 A compiler that exits non-zero, and outputs that are not what the recipe declares, are the candidate's ``compile_error``,
 stored signed so the next test of the key gets the same answer. A failed preflight, a timeout and a compiler killed by a
@@ -29,12 +36,11 @@ from hyperloom.measure.runner.native.harvest import HarvestError, harvest
 from hyperloom.measure.jit.native.key import BuildInputs, native_digest
 from hyperloom.measure.jit.native.record import EXECUTABLE, FAILED, READY
 from hyperloom.measure.runner.native.recipes import NativeRecipe
-from hyperloom.measure.runner.native.service import Ensured, Staged, ensure_build
-from hyperloom.measure.jit.native.store import BuildInfraError, BuildStore
-from hyperloom.measure.jit.native.trust import Signer
+from hyperloom.measure.runner.native.service import Staged
+from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.orchestrator.enablement.runtime.build_utils import run_argv
 
-__all__ = ["BuildMachine", "BuildRequest", "build_native", "compile_tree", "plan", "tree_dir"]
+__all__ = ["BuildMachine", "BuildRequest", "compile_tree", "plan", "tree_dir"]
 
 COMPILE_ERROR = "compile_error"
 _TREE = "tree"
@@ -82,12 +88,6 @@ def plan(request: BuildRequest, blobs: BlobStore) -> tuple[BuildInputs, EnvRoot]
         recipe.version,
     )
     return inputs, root
-
-
-def build_native(request: BuildRequest, blobs: BlobStore, store: BuildStore, signer: Signer) -> Ensured:
-    """The store's entry for ``request``, compiled when no request built it before."""
-    inputs, root = plan(request, blobs)
-    return ensure_build(store, inputs, lambda scratch: compile_tree(request, root, blobs, scratch), signer)
 
 
 def tree_dir(scratch: Path) -> Path:

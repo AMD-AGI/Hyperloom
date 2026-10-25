@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.measure.compile import PatchApplyError
-from hyperloom.measure.runner.native.builder import build_native, plan
+from hyperloom.measure.runner.native.builder import plan
 from hyperloom.measure.jit.native.record import FAILED, LOG_NAME, READY, RECORD_FILES
 from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.measure.runner.native.tests._native import KERNEL, OUTPUT, Bench, compiled
@@ -24,7 +24,7 @@ def bench(tmp_path: Path) -> Bench:
 
 
 def _build(bench: Bench, *patches):
-    return build_native(bench.request(*patches), bench.blobs, bench.store, bench.signer)
+    return bench.build(*patches)
 
 
 def test_patched_build_publishes_the_output_that_differs_from_the_image(bench: Bench, tmp_path: Path) -> None:

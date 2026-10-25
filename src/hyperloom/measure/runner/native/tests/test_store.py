@@ -204,3 +204,16 @@ def test_a_refused_entry_is_never_rebuilt_over(store: BuildStore, key, tmp_path:
 
     _refused(Refusal.BAD_SIGNATURE, lambda: ensure_build(store, INPUTS, build, Signer(key)))
     assert (build.calls, signature.read_bytes()) == (0, b"AAAA")
+
+
+def test_a_store_that_cannot_be_written_is_an_infra_failure(
+    store: BuildStore, key, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def full(source, target) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("hyperloom.measure.jit.native.store.os.rename", full)
+    with pytest.raises(BuildInfraError, match="the store could not be written: OSError"):
+        ensure_build(store, INPUTS, FakeBuild(tmp_path / "count"), Signer(key))
+    monkeypatch.undo()
+    assert store.read(INPUTS) is None

@@ -5,8 +5,12 @@
 
 :func:`ensure_build` holds the key's exclusive ``flock`` (:func:`hyperloom.measure.runner.cache_build.exclusive`, the
 runner cache's own) around looking the key up and building it, so a second request of a key waits for the first and
-gets its entry with ``reused`` set: build seconds are charged once, to the request that built. The private key stays
-here; the build itself runs candidate-controlled code and never sees it.
+gets its entry with ``reused`` set: build seconds are charged once, to the request that built.
+
+The private key stays in this process. The ``build`` it is given must run the compile elsewhere: in the CPU build runner
+(a sandbox in the image's digest with no key, no credential and no view of this process or its files), returning what
+that runner staged. A ``build`` that ran :func:`hyperloom.measure.runner.native.builder.compile_tree` in this process
+would hand candidate code the means to read the key and forge records; that composition belongs in tests only.
 """
 
 from __future__ import annotations

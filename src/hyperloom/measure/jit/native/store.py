@@ -141,9 +141,12 @@ class BuildStore:
         Raises:
             BuildInfraError: When an output could not be stored; no entry is made.
         """
-        self.entry_dir(record.inputs).parent.mkdir(parents=True, exist_ok=True)
-        self._store_blobs(record, staging)
-        self._write_entry(record, log, signer)
+        try:
+            self.entry_dir(record.inputs).parent.mkdir(parents=True, exist_ok=True)
+            self._store_blobs(record, staging)
+            self._write_entry(record, log, signer)
+        except OSError as exc:
+            raise BuildInfraError(f"the store could not be written: {type(exc).__name__}") from None
 
     def _store_blobs(self, record: BuildRecord, staging: Path) -> None:
         """Store the outputs' blobs; one already stored is kept (its name is the hash of what it must hold)."""

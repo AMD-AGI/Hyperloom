@@ -17,8 +17,9 @@ from pathlib import Path
 from hyperloom.contracts.recipe import ComponentPatches, PatchRef
 from hyperloom.measure import signing
 from hyperloom.measure.compile import LocalBlobStore
-from hyperloom.measure.runner.native.builder import BuildMachine, BuildRequest
+from hyperloom.measure.runner.native.builder import BuildMachine, BuildRequest, compile_tree, plan
 from hyperloom.measure.runner.native.recipes import NativeRecipe, Preflight
+from hyperloom.measure.runner.native.service import Ensured, ensure_build
 from hyperloom.measure.jit.native.store import BuildStore
 from hyperloom.measure.jit.native.trust import Signer, Trust, TrustedKey
 from hyperloom.measure.tests._recipes import COMMIT, IMAGE, git_patch, put_patch, write_tree
@@ -130,3 +131,12 @@ class Bench:
         stack = ComponentPatches(COMPONENT, "https://example.invalid/fake.git", COMMIT, tuple(patches))
         machine = BuildMachine(image_digest, BUILDER_IMAGE, "gfx942")
         return BuildRequest(fake_recipe(self.preflight), stack, self.upstream, self.image, machine)
+
+    def build(self, *patches: PatchRef) -> Ensured:
+        """Plan, compile and publish in this one process: a test composition only, since the compile and the key would
+        share a process (see :mod:`hyperloom.measure.runner.native.service`)."""
+        request = self.request(*patches)
+        inputs, root = plan(request, self.blobs)
+        return ensure_build(
+            self.store, inputs, lambda scratch: compile_tree(request, root, self.blobs, scratch), self.signer
+        )
