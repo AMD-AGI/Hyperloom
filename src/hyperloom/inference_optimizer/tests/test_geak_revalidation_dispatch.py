@@ -324,13 +324,12 @@ async def test_geak_launch_controls_reach_materialized_rebench(
         output.mkdir()
         path = _build_variant_yaml(
             GridRecipe(
-                base_yaml_path=kwargs["base_yaml_path"],
-                base=LaunchLayer(extra_server_args=kwargs["base_extra_args"], args_mode=kwargs["base_args_mode"]),
-                target=BenchmarkTarget(
-                    model_path=kwargs["model_path"],
-                    gpu_type=kwargs["gpu_type"],
-                    benchmark_script=kwargs["benchmark_script"],
+                base_yaml_path=kwargs["recipe"].base_yaml_path,
+                base=LaunchLayer(
+                    extra_server_args=kwargs["recipe"].base.extra_server_args,
+                    args_mode=kwargs["recipe"].base.args_mode,
                 ),
+                target=kwargs["recipe"].target,
             ),
             kwargs["grid"][0],
             output_subdir=output,
@@ -1129,11 +1128,13 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
     finished = time.monotonic()
 
     assert len(calls) == 1
-    assert calls[0]["variant_expected_sec"] == (baseline_runtime or None)
+    assert calls[0]["stop"].variant_expected_sec == (baseline_runtime or None)
     if session_remaining_sec is None:
-        assert calls[0]["session_deadline_sec"] is None
+        assert calls[0]["stop"].session_deadline_sec is None
     else:
-        assert started + session_remaining_sec <= calls[0]["session_deadline_sec"] <= finished + session_remaining_sec
+        assert (
+            started + session_remaining_sec <= calls[0]["stop"].session_deadline_sec <= finished + session_remaining_sec
+        )
     assert task.params.get("baseline_runtime_sec", 0.0) == baseline_runtime
     for retired_param in ("variant_timeout_sec", "soft_deadline_sec", "overtime_kill_ratio"):
         assert retired_param not in calls[0]
@@ -1202,8 +1203,11 @@ async def test_internal_stack_rebench_preserves_baseline_script(
         output.mkdir()
         variant_path = _build_variant_yaml(
             GridRecipe(
-                base_yaml_path=kwargs["base_yaml_path"],
-                target=BenchmarkTarget(gpu_type=kwargs["gpu_type"], benchmark_script=kwargs["benchmark_script"]),
+                base_yaml_path=kwargs["recipe"].base_yaml_path,
+                target=BenchmarkTarget(
+                    gpu_type=kwargs["recipe"].target.gpu_type,
+                    benchmark_script=kwargs["recipe"].target.benchmark_script,
+                ),
             ),
             kwargs["grid"][0],
             output_subdir=output,
@@ -1223,7 +1227,7 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     assert len(calls) == 1
     assert calls[0][1]["benchmark_script"] == "sglang_custom.sh"
     assert calls[0][1]["runner_type"] == "mi355x"
-    assert calls[0][0]["server_lifecycle"] is None
+    assert calls[0][0]["launch"].server_lifecycle is None
 
 
 @pytest.mark.asyncio

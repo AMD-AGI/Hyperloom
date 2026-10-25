@@ -194,11 +194,11 @@ def test_conc_sweep_preserves_retained_launch_controls(
         monkeypatch.setattr(_server_lifecycle, "resolve_lifecycle_params", lambda _: {"eligible": False})
     children = []
 
-    async def launch_children(*, grid: list[GridVariant], base_yaml_path: Path, **kwargs):
+    async def launch_children(*, grid: list[GridVariant], recipe: GridRecipe, **kwargs):
         results = []
         for variant in grid:
             config = _build_variant_yaml(
-                GridRecipe(base_yaml_path=base_yaml_path),
+                GridRecipe(base_yaml_path=recipe.base_yaml_path),
                 variant,
                 output_subdir=session_dir / "children" / variant.name,
             )
@@ -589,7 +589,7 @@ def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
         return out
 
     async def _fake_run_grid(*, grid: list[GridVariant], **kw):
-        seen["run_grid_gpu"] = kw.get("gpu_type")
+        seen["run_grid_gpu"] = kw["recipe"].target.gpu_type
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
@@ -634,8 +634,11 @@ def test_conc_sweep_preserves_baseline_script_through_variant_materialization(se
         output.mkdir()
         path = _build_variant_yaml(
             GridRecipe(
-                base_yaml_path=kwargs["base_yaml_path"],
-                target=BenchmarkTarget(gpu_type=kwargs["gpu_type"], benchmark_script=kwargs.get("benchmark_script")),
+                base_yaml_path=kwargs["recipe"].base_yaml_path,
+                target=BenchmarkTarget(
+                    gpu_type=kwargs["recipe"].target.gpu_type,
+                    benchmark_script=kwargs["recipe"].target.benchmark_script,
+                ),
             ),
             variant,
             output_subdir=output,
@@ -653,7 +656,7 @@ def test_conc_sweep_preserves_baseline_script_through_variant_materialization(se
         assert bench["runner_type"] == "mi355x"
         assert int(bench["envs"]["NUM_PROMPTS"]) == 320
         assert bench["envs"]["RUN_EVAL"] == "false"
-        assert kwargs.get("server_lifecycle") is None
+        assert kwargs["launch"].server_lifecycle is None
 
 
 def test_run_conc_sweep_optimized_oom_yields_failed_pair(
@@ -2285,8 +2288,8 @@ def test_single_server_option_a_boot_and_reuse(
         grid_calls.append(
             {
                 "name": grid[0].name,
-                "server_lifecycle": kw.get("server_lifecycle"),
-                "server_already_ready": kw.get("server_already_ready"),
+                "server_lifecycle": kw["launch"].server_lifecycle,
+                "server_already_ready": kw["launch"].server_already_ready,
             }
         )
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
@@ -2351,12 +2354,12 @@ def test_single_server_boot_only_is_measured_by_reuse_round(
         calls.append(
             {
                 "name": variant.name,
-                "server_lifecycle": kw.get("server_lifecycle"),
-                "server_already_ready": kw.get("server_already_ready"),
-                "base_extra_envs": kw.get("base_extra_envs") or {},
+                "server_lifecycle": kw["launch"].server_lifecycle,
+                "server_already_ready": kw["launch"].server_already_ready,
+                "base_extra_envs": kw["recipe"].base.extra_envs or {},
             }
         )
-        if kw.get("server_lifecycle") and kw.get("server_already_ready") is False:
+        if kw["launch"].server_lifecycle and kw["launch"].server_already_ready is False:
             booted = _fake_variant(
                 variant.name,
                 throughput=None,
@@ -2399,7 +2402,7 @@ def test_single_server_boot_retry_descend(
 
     async def _fake_run_grid(*, grid: list[GridVariant], **kw):
         name = grid[0].name
-        is_boot = kw.get("server_already_ready") is False
+        is_boot = kw["launch"].server_already_ready is False
         if is_boot:
             boot_attempts.append(name)
             # Fail the very first (highest-conc) boot attempt only.
@@ -2437,10 +2440,10 @@ def test_single_server_all_boot_fail_falls_back_option_b(
     async def _fake_run_grid(*, grid: list[GridVariant], **kw):
         name = grid[0].name
         # Boot rounds (server_lifecycle set, not already ready) always fail.
-        if kw.get("server_already_ready") is False and kw.get("server_lifecycle"):
+        if kw["launch"].server_already_ready is False and kw["launch"].server_lifecycle:
             return [_fake_variant(name, throughput=None, status="failed", envs=grid[0].extra_envs, error="boot fail")]
         # Option B path = no server_lifecycle kwarg.
-        if kw.get("server_lifecycle") is None:
+        if kw["launch"].server_lifecycle is None:
             option_b_calls.append(name)
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
@@ -2473,7 +2476,7 @@ def test_single_server_not_eligible_uses_option_b(
     calls: list[dict] = []
 
     async def _fake_run_grid(*, grid: list[GridVariant], **kw):
-        calls.append({"name": grid[0].name, "server_lifecycle": kw.get("server_lifecycle")})
+        calls.append({"name": grid[0].name, "server_lifecycle": kw["launch"].server_lifecycle})
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
@@ -2500,7 +2503,7 @@ def test_single_server_reuse_loop_stops_on_closing_phase(
 
     async def _fake_run_grid(*, grid: list[GridVariant], **kw):
         # After the boot round (server_already_ready=False), flip closing_phase.
-        if kw.get("server_already_ready") is False:
+        if kw["launch"].server_already_ready is False:
             state.closing_phase = True
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
@@ -2529,7 +2532,7 @@ def test_single_server_reuse_exception_recorded_as_failed(
 
     async def _fake_run_grid(*, grid: list[GridVariant], **kw):
         # Boot round succeeds; reuse rounds raise.
-        if kw.get("server_already_ready") is True:
+        if kw["launch"].server_already_ready is True:
             raise RuntimeError("reuse boom")
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
@@ -2562,7 +2565,7 @@ def test_single_server_boot_exception_falls_back(
     async def _fake_run_grid(*, grid: list[GridVariant], **kw):
         name = grid[0].name
         # Highest-conc boot raises; lower-conc boot succeeds.
-        if kw.get("server_already_ready") is False and name.endswith("conc64"):
+        if kw["launch"].server_already_ready is False and name.endswith("conc64"):
             raise RuntimeError("boot boom")
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 

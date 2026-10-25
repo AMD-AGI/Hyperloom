@@ -205,9 +205,12 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
         output.mkdir()
         variant = _build_variant_yaml(
             GridRecipe(
-                base_yaml_path=kwargs["base_yaml_path"],
-                base=LaunchLayer(extra_server_args=kwargs["base_extra_args"]),
-                target=BenchmarkTarget(gpu_type=kwargs["gpu_type"], benchmark_script=kwargs["benchmark_script"]),
+                base_yaml_path=kwargs["recipe"].base_yaml_path,
+                base=LaunchLayer(extra_server_args=kwargs["recipe"].base.extra_server_args),
+                target=BenchmarkTarget(
+                    gpu_type=kwargs["recipe"].target.gpu_type,
+                    benchmark_script=kwargs["recipe"].target.benchmark_script,
+                ),
             ),
             kwargs["grid"][0],
             output_subdir=output,

@@ -29,12 +29,16 @@ from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     run_grid,
+    GridLaunch,
+    GridRecipe,
+    GridStop,
 )
 from hyperloom.orchestrator.actions.executors._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, STOPPED_BY_THE_RUN
 from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 
 from .conftest import chatty_child
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
 
 
 @pytest.fixture(autouse=True)
@@ -138,13 +142,11 @@ def _run_capturing_variant_notes(
         grid = [GridVariant(name=f"c{i}") for i in range(grid_n)]
         results = asyncio.run(
             run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=grid,
                 output_root=out,
-                magpie_python=sys.executable,
-                gpu_type="mi300x",
-                keep_going_on_failure=True,
+                recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+                launch=GridLaunch(magpie_python=sys.executable),
+                stop=GridStop(keep_going_on_failure=True),
             )
         )
     return results, notes
@@ -282,13 +284,11 @@ class TestKeepGoingAsymmetry:
         ):
             return asyncio.run(
                 run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
                     grid=[GridVariant(name="c0"), GridVariant(name="c1")],
                     output_root=out,
-                    magpie_python=sys.executable,
-                    gpu_type="mi300x",
-                    keep_going_on_failure=False,
+                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+                    launch=GridLaunch(magpie_python=sys.executable),
+                    stop=GridStop(keep_going_on_failure=False),
                 )
             )
 
@@ -403,13 +403,11 @@ class TestVariantAbort:
         ):
             return asyncio.run(
                 run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
                     grid=[GridVariant(name="c0"), GridVariant(name="c1"), GridVariant(name="c2")],
                     output_root=tmp_path / "out",
-                    magpie_python=sys.executable,
-                    gpu_type="mi300x",
-                    keep_going_on_failure=keep_going,
+                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+                    launch=GridLaunch(magpie_python=sys.executable),
+                    stop=GridStop(keep_going_on_failure=keep_going),
                 )
             )
 
@@ -463,12 +461,10 @@ class TestAutoWarmupTeardown:
         ):
             results = asyncio.run(
                 run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
                     grid=[GridVariant(name="cand")],
                     output_root=out,
-                    magpie_python=sys.executable,
-                    gpu_type="mi300x",
+                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+                    launch=GridLaunch(magpie_python=sys.executable),
                 )
             )
         return results, teardown_calls
@@ -618,12 +614,10 @@ class TestRoundServerTeardown:
         with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=_round):
             return asyncio.run(
                 run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
                     grid=[GridVariant(name="cand")],
                     output_root=out,
-                    magpie_python=sys.executable,
-                    gpu_type="mi300x",
+                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+                    launch=GridLaunch(magpie_python=sys.executable),
                 )
             )
 
@@ -702,12 +696,10 @@ class TestRoundServerTeardown:
         with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=_round):
             results = asyncio.run(
                 run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
                     grid=[GridVariant(name="c28"), GridVariant(name="c20")],
                     output_root=out,
-                    magpie_python=sys.executable,
-                    gpu_type="mi300x",
+                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+                    launch=GridLaunch(magpie_python=sys.executable),
                 )
             )
 
@@ -813,12 +805,10 @@ class TestVariantHeartbeat:
         ):
             results = asyncio.run(
                 run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
                     grid=[GridVariant(name=f"c{i}") for i in range(grid_n)],
                     output_root=out,
-                    magpie_python=sys.executable,
-                    gpu_type="mi300x",
+                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+                    launch=GridLaunch(magpie_python=sys.executable),
                 )
             )
         return results, notes

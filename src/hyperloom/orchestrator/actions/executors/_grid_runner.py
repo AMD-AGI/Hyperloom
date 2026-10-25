@@ -401,6 +401,30 @@ class GridRecipe:
 
 
 @dataclass(frozen=True)
+class GridLaunch:
+    """How each round of a grid is launched: its benchmark interpreter and result dir, and the server it runs on."""
+
+    magpie_python: str | None = None
+    result_dir: str | None = None
+    serving_lease: Any = None
+    server_lifecycle: dict[str, Any] | None = None
+    server_already_ready: bool = False
+    ready_server_log: str | None = None
+    warmup_before_measure: bool | None = None
+    lifecycle_boot_only: bool = False
+
+
+@dataclass(frozen=True)
+class GridStop:
+    """When a grid must stop: the session deadline and its owner, a variant's expected cost, and failure policy."""
+
+    session_deadline_sec: float | None = None
+    variant_expected_sec: float | None = None
+    deadline_stop: StoppedByTheRun = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS]
+    keep_going_on_failure: bool = True
+
+
+@dataclass(frozen=True)
 class MagpieRound:
     """One Magpie benchmark round: the interpreter, config and directories it runs with, and its stop gates."""
 
@@ -715,21 +739,15 @@ class _GridRun(NamedTuple):
     grid: list[GridVariant]
     output_root: Path
     recipe: GridRecipe
-    server_lifecycle: dict[str, Any] | None
+    launch: GridLaunch
+    stop: GridStop
     magpie_python: str
-    result_dir: str | None
-    serving_lease: Any
-    session_deadline_sec: float | None
     silence_timeout_sec: float
     benchmark_timeout_sec: float
-    server_already_ready: bool
-    variant_expected_sec: float | None
-    deadline_stop: StoppedByTheRun
     rounds_per_variant: int
     mn_warmup_rounds: int
     mn_reference_envs: dict[str, str]
     auto_warmup_requested: bool
-    lifecycle_boot_only: bool
 
 
 class _VariantRounds(NamedTuple):
@@ -809,7 +827,7 @@ def _abort_on_round_stop(
     round_label: str,
 ) -> NoReturn:
     if attempt.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE:
-        stopped = run.deadline_stop
+        stopped = run.stop.deadline_stop
     at = attempt.at
     runtime_sec = round(max(0.0, time.time() - attempt.started_unix), 2)
     log.warning(
@@ -850,7 +868,7 @@ def _abort_on_round_stop(
 
 
 def _abandon_rest_of_grid(run: _GridRun, at: _VariantSlot) -> NoReturn:
-    stop = run.deadline_stop
+    stop = run.stop.deadline_stop
     raise _VariantAborted(
         _not_run_skip_result(at.variant, stop),
         halt=_Halt.STOP,
@@ -860,10 +878,12 @@ def _abandon_rest_of_grid(run: _GridRun, at: _VariantSlot) -> NoReturn:
 
 def _warn_budget_cannot_admit(run: _GridRun, idx: int, *, rounds_left: int, spent_on: str) -> bool:
     """Warn when the session budget can no longer admit ``rounds_left`` rounds, and say whether it can."""
-    if run.session_deadline_sec is None:
+    if run.stop.session_deadline_sec is None:
         return False
-    remaining_sec = run.session_deadline_sec - time.monotonic()
-    required_sec = float(run.variant_expected_sec) * rounds_left if run.variant_expected_sec is not None else None
+    remaining_sec = run.stop.session_deadline_sec - time.monotonic()
+    required_sec = (
+        float(run.stop.variant_expected_sec) * rounds_left if run.stop.variant_expected_sec is not None else None
+    )
     if remaining_sec > 0 and (required_sec is None or remaining_sec >= required_sec):
         return False
     log.warning(
@@ -902,7 +922,7 @@ async def _reported_magpie(run: _GridRun, at: _VariantSlot, label: str, bench_ro
             _run_magpie,
             bench_round,
             unset_envs=at.variant.unset_envs,
-            serving_lease=run.serving_lease,
+            serving_lease=run.launch.serving_lease,
             on_output=activity.note,
         )
     return _RoundProcess(returncode, stdout, stderr)
@@ -986,7 +1006,7 @@ async def _variant_yaml_or_abort(
 
 
 async def _prepare_variant_rounds(run: _GridRun, at: _VariantSlot) -> _VariantRounds:
-    cfg_path = await _variant_yaml_or_abort(run, at, into=at.path, lifecycle=run.server_lifecycle)
+    cfg_path = await _variant_yaml_or_abort(run, at, into=at.path, lifecycle=run.launch.server_lifecycle)
     mn_effective_args = _resolve_mn_effective_server_args(
         cfg_path,
         run.recipe.base_yaml_path,
@@ -1051,8 +1071,8 @@ async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRou
                 timeout_sec=warmup_cap_sec,
                 silence_timeout_sec=run.silence_timeout_sec,
                 cwd=str(run.output_root),
-                result_dir=run.result_dir,
-                session_deadline_sec=run.session_deadline_sec,
+                result_dir=run.launch.result_dir,
+                session_deadline_sec=run.stop.session_deadline_sec,
             ),
         )
     except subprocess.TimeoutExpired as exc:
@@ -1208,7 +1228,7 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
             server_already_ready=True,
             cwd=str(run.output_root),
             result_dir=None,
-            session_deadline_sec=run.session_deadline_sec,
+            session_deadline_sec=run.stop.session_deadline_sec,
         ),
     )
     log.info(
@@ -1241,10 +1261,10 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
                 output_dir=at.path,
                 timeout_sec=measure_cap_sec,
                 cwd=str(run.output_root),
-                result_dir=run.result_dir,
+                result_dir=run.launch.result_dir,
                 silence_timeout_sec=run.silence_timeout_sec,
-                server_already_ready=(run.server_already_ready or rounds.auto_warmup or is_multi_node()),
-                session_deadline_sec=run.session_deadline_sec,
+                server_already_ready=(run.launch.server_already_ready or rounds.auto_warmup or is_multi_node()),
+                session_deadline_sec=run.stop.session_deadline_sec,
             ),
         )
     except subprocess.TimeoutExpired as exc:
@@ -1455,7 +1475,7 @@ async def _variant_row(run: _GridRun, at: _VariantSlot, measured: _MeasuredVaria
     outcome = _VariantOutcome(measured, report, measurement, _round_warnings(measurement, measured))
     if round_succeeded(measurement):
         return _measured_row(at, outcome)
-    if run.lifecycle_boot_only and measured.round.proc.returncode == 0:
+    if run.launch.lifecycle_boot_only and measured.round.proc.returncode == 0:
         return _booted_server_row(at, outcome)
     _abort_on_invalid_measurement(run, at, outcome)
 
@@ -1582,35 +1602,18 @@ async def _measure_variant(run: _GridRun, at: _VariantSlot) -> VariantResult:
 
 async def run_grid(
     *,
-    base_yaml_path: Path,
-    base_extra_args: str,
     grid: list[GridVariant],
     output_root: Path,
-    magpie_python: str | None = None,
-    keep_going_on_failure: bool = True,
-    model_path: str | None = None,
-    gpu_type: str | None = None,
-    benchmark_script: str | None = None,
-    result_dir: str | None = None,
-    server_lifecycle: dict[str, Any] | None = None,
-    base_args_mode: str = "append",
-    base_extra_envs: dict[str, str] | None = None,
-    base_remove_args: list[str] | None = None,
-    base_unset_envs: list[str] | None = None,
-    warmup_before_measure: bool | None = None,
-    server_already_ready: bool = False,
-    ready_server_log: str | None = None,
-    serving_lease: Any = None,
-    session_deadline_sec: float | None = None,
-    variant_expected_sec: float | None = None,
-    deadline_stop: StoppedByTheRun = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
-    lifecycle_boot_only: bool = False,
+    recipe: GridRecipe,
+    launch: GridLaunch = GridLaunch(),
+    stop: GridStop = GridStop(),
 ) -> list[VariantResult]:
-    """Execute variants; ``deadline_stop`` names the owner of the supplied deadline.
+    """Execute variants; ``stop.deadline_stop`` names the owner of the supplied deadline.
 
-    ``ready_server_log`` is the log of the caller's ready server, measured when no variant log exists.
+    ``launch.ready_server_log`` is the log of the caller's ready server, measured when no variant log exists.
     """
     silence_timeout_sec, benchmark_timeout_sec = resolve_benchmark_timeouts()
+    magpie_python = launch.magpie_python
     if not magpie_python:
         # Backend-aware: bypass uses a plain python3, not Magpie's venv.
         from .benchmark_backend import resolve_benchmark_interpreter
@@ -1618,37 +1621,28 @@ async def run_grid(
         magpie_python = resolve_benchmark_interpreter()
     else:
         magpie_python = _validate_magpie_python_override(magpie_python)
+    warmup_before_measure = launch.warmup_before_measure
     if warmup_before_measure is None:
         warmup_before_measure = _run_grid_warmup_enabled()
-    auto_warmup_requested = bool(warmup_before_measure and server_lifecycle is None)
+    auto_warmup_requested = bool(warmup_before_measure and launch.server_lifecycle is None)
     # This function names the working directory, so it creates it: callers and the per-variant config writer both
     # happen to create it first today, and neither is a contract.
     output_root.mkdir(parents=True, exist_ok=True)
     _sweep_stale_aiter_locks()
-    mn_warmup_rounds = _multi_node_warmup_rounds(variant_expected_sec)
+    mn_warmup_rounds = _multi_node_warmup_rounds(stop.variant_expected_sec)
     run = _GridRun(
         grid=grid,
         output_root=output_root,
-        recipe=GridRecipe(
-            base_yaml_path,
-            LaunchLayer(base_extra_args, base_extra_envs, base_remove_args, base_unset_envs, base_args_mode),
-            BenchmarkTarget(model_path, gpu_type, benchmark_script),
-        ),
-        server_lifecycle=server_lifecycle,
+        recipe=recipe,
+        launch=launch,
+        stop=stop,
         magpie_python=magpie_python,
-        result_dir=result_dir,
-        serving_lease=serving_lease,
-        session_deadline_sec=session_deadline_sec,
         silence_timeout_sec=silence_timeout_sec,
         benchmark_timeout_sec=benchmark_timeout_sec,
-        server_already_ready=server_already_ready,
-        variant_expected_sec=variant_expected_sec,
-        deadline_stop=deadline_stop,
         rounds_per_variant=1 + (1 if auto_warmup_requested else 0) + mn_warmup_rounds,
         mn_warmup_rounds=mn_warmup_rounds,
         mn_reference_envs=_multi_node_reference_envs(),
         auto_warmup_requested=auto_warmup_requested,
-        lifecycle_boot_only=lifecycle_boot_only,
     )
     results: list[VariantResult] = []
     for i, variant in enumerate(grid):
@@ -1668,7 +1662,7 @@ async def run_grid(
             await _report_finished_variant(grid, results, i)
             if abort.abandoned is not None:
                 results.extend(_not_run_skip_result(rest, abort.abandoned) for rest in grid[i + 1 :])
-            if abort.halt is _Halt.STOP or (abort.halt is _Halt.ON_FAILURE and not keep_going_on_failure):
+            if abort.halt is _Halt.STOP or (abort.halt is _Halt.ON_FAILURE and not stop.keep_going_on_failure):
                 break
         else:
             await _report_finished_variant(grid, results, i)
@@ -1677,8 +1671,8 @@ async def run_grid(
         results,
         grid=grid,
         output_root=output_root,
-        caller_reused_ready_server=server_already_ready,
-        ready_server_log=ready_server_log,
+        caller_reused_ready_server=launch.server_already_ready,
+        ready_server_log=launch.ready_server_log,
     )
     return results
 

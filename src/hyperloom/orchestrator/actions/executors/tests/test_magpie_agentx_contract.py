@@ -629,10 +629,9 @@ async def test_run_grid_writes_no_launch_evidence_for_a_refused_argv(vllm_source
     base = materialize_benchmark_config(vllm_source, tmp_path / "base")
     output_root = tmp_path / "grid"
     results = await _grid_runner.run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
         grid=[GridVariant("refused", "--speculative-config {1:2}", {})],
         output_root=output_root,
+        recipe=_grid_runner.GridRecipe(base_yaml_path=base),
     )
     assert [(result.status, result.error_class) for result in results] == [("failed", ARGV_INVALID)]
     assert not results[0].launch_evidence

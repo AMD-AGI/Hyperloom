@@ -19,9 +19,10 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.perf_metric import constraint_fields
-from ..actions.executors._grid_runner import GridVariant, run_grid
+from ..actions.executors._grid_runner import GridLaunch, GridRecipe, GridStop, GridVariant, run_grid
 from ..actions.executors._workload_envs import (
     BenchmarkTarget,
+    LaunchLayer,
     MaterializeOptions,
     default_baseline_config,
 )
@@ -124,16 +125,15 @@ async def run_specialist_rebench(
     warnings: list[str] = []
     try:
         results = await run_grid(
-            base_yaml_path=materialized,
-            base_extra_args=(server.base_extra_args or "").strip(),
             grid=[variant],
             output_root=out_root,
-            keep_going_on_failure=False,
-            model_path=benchmark.model_path or None,
-            gpu_type=benchmark.gpu_type or None,
-            benchmark_script=benchmark.benchmark_script or None,
-            magpie_python=benchmark.magpie_python or None,
-            server_lifecycle=server_lifecycle,
+            recipe=GridRecipe(
+                base_yaml_path=materialized,
+                base=LaunchLayer(extra_server_args=(server.base_extra_args or "").strip()),
+                target=target,
+            ),
+            launch=GridLaunch(magpie_python=benchmark.magpie_python or None, server_lifecycle=server_lifecycle),
+            stop=GridStop(keep_going_on_failure=False),
         )
     except Exception as exc:  # noqa: BLE001 — surface as a structured failure
         log.warning("specialist rebench failed: %s", exc)

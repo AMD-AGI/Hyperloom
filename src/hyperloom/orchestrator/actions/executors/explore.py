@@ -76,7 +76,9 @@ from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
+    GridLaunch,
     GridRecipe,
+    GridStop,
     GridVariant,
     SessionDirField,
     _build_variant_yaml,
@@ -1061,18 +1063,6 @@ class _ExploreRound:
         )
         return stack
 
-    def _stack_build(self) -> dict[str, Any]:
-        return {
-            "base_extra_args": self.args,
-            "base_extra_envs": dict(self.envs),
-            "base_remove_args": list(self.remove_args),
-            "base_unset_envs": list(self.unset_envs),
-            "base_args_mode": self.args_mode,
-            "model_path": self.target.model_path,
-            "gpu_type": self.target.gpu_type,
-            "benchmark_script": self.target.benchmark_script,
-        }
-
     def _recipe(self) -> GridRecipe:
         return GridRecipe(
             base_yaml_path=self.config_path,
@@ -1373,17 +1363,19 @@ class _ExploreRound:
         # ``parse_eval_results`` falls back to the score the warmup took. Without a warmup there is nothing to
         # fall back to, so a cold decision round keeps its own eval.
         results = await run_grid(
-            base_yaml_path=self.config_path,
             grid=[_variant_with_eval_off(run_gv) if self.use_warm_decision else run_gv],
             output_root=slot,
-            result_dir=self.result_dir,
-            server_lifecycle=lifecycle,
-            server_already_ready=self.use_warm_decision,
-            ready_server_log=warmup.server_log_path if warmup is not None else None,
-            serving_lease=self.lease,
-            session_deadline_sec=self.session_deadline_sec,
-            variant_expected_sec=self.decision_expected_sec,
-            **self._stack_build(),
+            recipe=self._recipe(),
+            launch=GridLaunch(
+                result_dir=self.result_dir,
+                serving_lease=self.lease,
+                server_lifecycle=lifecycle,
+                server_already_ready=self.use_warm_decision,
+                ready_server_log=warmup.server_log_path if warmup is not None else None,
+            ),
+            stop=GridStop(
+                session_deadline_sec=self.session_deadline_sec, variant_expected_sec=self.decision_expected_sec
+            ),
         )
         if not results:
             # run_grid returns one result per grid entry.
@@ -1395,15 +1387,13 @@ class _ExploreRound:
         warmup_slot = slot / "warmup_round"
         warmup_slot.mkdir(parents=True, exist_ok=True)
         results = await run_grid(
-            base_yaml_path=self.config_path,
             grid=[run_gv],
             output_root=warmup_slot,
-            result_dir=self.result_dir,
-            server_lifecycle=lifecycle,
-            serving_lease=self.lease,
-            session_deadline_sec=self.session_deadline_sec,
-            variant_expected_sec=self.warmup_expected_sec,
-            **self._stack_build(),
+            recipe=self._recipe(),
+            launch=GridLaunch(result_dir=self.result_dir, serving_lease=self.lease, server_lifecycle=lifecycle),
+            stop=GridStop(
+                session_deadline_sec=self.session_deadline_sec, variant_expected_sec=self.warmup_expected_sec
+            ),
         )
         warmup = results[0] if results else None
         if self._stopped_by_the_run(warmup, gv, idx, "warmup"):

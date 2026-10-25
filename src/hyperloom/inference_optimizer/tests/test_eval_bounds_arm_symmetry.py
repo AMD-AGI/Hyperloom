@@ -22,6 +22,8 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     _run_magpie,
     run_grid,
     MagpieRound,
+    GridLaunch,
+    GridRecipe,
 )
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     EVAL_PROBE_UNPATCHABLE_RETURNCODE,
@@ -251,11 +253,10 @@ async def test_run_grid_labels_the_bounds_gap_instead_of_a_missing_workspace(tmp
         patch(f"{_PATCHER}.run_with_session_kill") as launch,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("vA")],
             output_root=tmp_path / "out",
-            warmup_before_measure=False,
+            recipe=GridRecipe(base_yaml_path=base),
+            launch=GridLaunch(warmup_before_measure=False),
         )
 
     run_magpie.assert_called_once()

@@ -32,7 +32,10 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     SESSION_TIME_EXHAUSTED_CLASS,
     GridVariant,
     run_grid,
+    GridLaunch,
+    GridRecipe,
 )
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -1441,6 +1444,16 @@ def test_baseline_double_run_can_be_disabled_by_task_param(tmp_path, monkeypatch
     assert "server_lifecycle" not in captured[0]["benchmark"]
 
 
+def _candidate_grid(base: Path, output_dir: Path):
+    """The one-variant mi300x grid run the two ``run_grid`` round-count tests launch."""
+    return run_grid(
+        grid=[GridVariant(name="candidate")],
+        output_root=output_dir,
+        recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+        launch=GridLaunch(magpie_python=sys.executable),
+    )
+
+
 def test_run_grid_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch):
     """The shared grid runner reports the HOT measured round when lifecycle reuse is eligible."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
@@ -1455,16 +1468,7 @@ def test_run_grid_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
         "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
-        results = _run(
-            run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
-                grid=[GridVariant(name="candidate")],
-                output_root=output_dir,
-                magpie_python=sys.executable,
-                gpu_type="mi300x",
-            )
-        )
+        results = _run(_candidate_grid(base, output_dir))
 
     assert state["calls"] == 2
     assert len(results) == 1
@@ -1495,16 +1499,7 @@ def test_run_grid_single_round_when_warmup_disabled(tmp_path, monkeypatch):
         "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
-        results = _run(
-            run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
-                grid=[GridVariant(name="candidate")],
-                output_root=output_dir,
-                magpie_python=sys.executable,
-                gpu_type="mi300x",
-            )
-        )
+        results = _run(_candidate_grid(base, output_dir))
 
     assert state["calls"] == 1
     assert len(results) == 1

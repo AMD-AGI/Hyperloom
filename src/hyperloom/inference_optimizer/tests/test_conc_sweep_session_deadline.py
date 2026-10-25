@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -165,8 +166,8 @@ def test_session_deadline_is_shared_across_rungs_and_anchor(sweep_run, persisten
     assert [call["grid"][0].name for call in calls] == [
         f"{arm}_conc{conc}" for arm in ("optimized", "baseline") for conc in (8, 4, 2)
     ]
-    assert [call.get("session_deadline_sec") for call in calls] == [10100.0] * 6
-    assert [call.get("variant_expected_sec") for call in calls] == [5.0] * 6
+    assert [call["stop"].session_deadline_sec for call in calls] == [10100.0] * 6
+    assert [call["stop"].variant_expected_sec for call in calls] == [5.0] * 6
     assert [call.session_deadline_sec for call in backend.calls] == [10100.0] * 6
     assert clock.elapsed == 30.0
 
@@ -196,7 +197,7 @@ def test_budget_exhaustion_stops_ladder_and_preserves_attribution(sweep_run, pat
     assert len(backend.calls) == len(prefix) + 1
     assert len(calls) == len(backend.calls)
     assert len(bounds) == 1
-    assert all(call.get("session_deadline_sec") == 10040.0 for call in calls)
+    assert all(call["stop"].session_deadline_sec == 10040.0 for call in calls)
     assert all(call.session_deadline_sec == 10040.0 for call in backend.calls)
     assert payload["budget_exhausted"] is True
     assert payload["budget_skip_reason"] == ("total_budget_exhausted" if sweep_budget else SESSION_TIME_EXHAUSTED_CLASS)
@@ -236,7 +237,7 @@ def test_unbounded_session_keeps_unbounded_grid(sweep_run):
     assert payload["status"] == "succeeded"
     assert payload["budget_exhausted"] is False
     assert len(backend.calls) == 6
-    assert all(call.get("session_deadline_sec") is None for call in calls)
+    assert all(call["stop"].session_deadline_sec is None for call in calls)
     assert clock.elapsed == 30.0
 
 
@@ -255,7 +256,7 @@ def test_two_hour_sweep_admits_work_below_hard_cap(sweep_run, persistent, baseli
     assert payload["status"] == "succeeded"
     assert len(backend.calls) == 6
     assert clock.elapsed == 30.0
-    assert [call.get("variant_expected_sec") for call in calls] == [baseline_runtime_sec] * 6
+    assert [call["stop"].variant_expected_sec for call in calls] == [baseline_runtime_sec] * 6
     assert [call.session_deadline_sec for call in backend.calls] == [17080.0] * 6
     assert all(call.timeout == 7800.0 for call in backend.calls)
     assert len(bounds) == 1
@@ -443,7 +444,7 @@ def test_grid_deadline_attribution_does_not_relabel_cancellation(sweep_run, monk
     original_grid = conc_sweep.run_grid
 
     async def attributed_grid(**kwargs):
-        kwargs["deadline_stop"] = sweep_stop
+        kwargs["stop"] = replace(kwargs["stop"], deadline_stop=sweep_stop)
         return await original_grid(**kwargs)
 
     monkeypatch.setattr(conc_sweep, "run_grid", attributed_grid)

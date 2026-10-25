@@ -47,6 +47,8 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     run_grid,
     MagpieRound,
     GridRecipe,
+    GridLaunch,
+    GridStop,
 )
 
 from .conftest import enable_multi_node, launches_by_round_slot
@@ -642,10 +644,9 @@ async def test_run_grid_rejects_stale_leak_from_previous_run(
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("vA")],
             output_root=output_root,
+            recipe=GridRecipe(base_yaml_path=base),
         )
 
     assert len(results) == 1
@@ -678,10 +679,9 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("vA")],
             output_root=output_root,
+            recipe=GridRecipe(base_yaml_path=base),
         )
 
     assert len(results) == 1
@@ -717,12 +717,10 @@ async def test_run_grid_reused_ready_server_records_warmup_log_evidence(tmp_path
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("reused")],
             output_root=output_root,
-            server_already_ready=True,
-            warmup_before_measure=False,
+            recipe=GridRecipe(base_yaml_path=base),
+            launch=GridLaunch(server_already_ready=True, warmup_before_measure=False),
         )
 
     result = results[0]
@@ -768,13 +766,10 @@ async def test_run_grid_scans_the_ready_server_log_named_by_the_caller(tmp_path)
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("kv")],
             output_root=output_root,
-            server_already_ready=True,
-            ready_server_log=str(warm_log),
-            warmup_before_measure=False,
+            recipe=GridRecipe(base_yaml_path=base),
+            launch=GridLaunch(server_already_ready=True, ready_server_log=str(warm_log), warmup_before_measure=False),
         )
 
     result = results[0]
@@ -810,12 +805,10 @@ async def test_run_grid_failure_reused_ready_server_uses_same_warmup_fallback(tm
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("reused_failure")],
             output_root=output_root,
-            server_already_ready=True,
-            warmup_before_measure=False,
+            recipe=GridRecipe(base_yaml_path=base),
+            launch=GridLaunch(server_already_ready=True, warmup_before_measure=False),
         )
 
     result = results[0]
@@ -1076,12 +1069,11 @@ async def test_run_grid_forwards_benchmark_script_per_variant(tmp_path):
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=grid,
             output_root=output_root,
-            gpu_type="mi300x",
-            benchmark_script="sglang_mi300x.sh",
+            recipe=GridRecipe(
+                base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x", benchmark_script="sglang_mi300x.sh")
+            ),
         )
 
     assert len(results) == 2
@@ -1111,11 +1103,10 @@ async def test_run_grid_forwards_result_dir_to_subprocess_env(tmp_path):
         side_effect=fake_run,
     ):
         await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=grid,
             output_root=output_root,
-            result_dir="/tmp/redirect",
+            recipe=GridRecipe(base_yaml_path=base),
+            launch=GridLaunch(result_dir="/tmp/redirect"),
         )
 
     assert len(captured_envs) == 2
@@ -1144,10 +1135,9 @@ async def test_run_grid_default_result_dir_is_per_variant_slot(tmp_path):
         side_effect=fake_run,
     ):
         await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=grid,
             output_root=output_root,
+            recipe=GridRecipe(base_yaml_path=base),
         )
 
     for slot_path, result_dir in captured_envs:
@@ -1176,10 +1166,9 @@ async def test_run_grid_benchmark_runs_inside_the_session_that_owns_it(tmp_path)
         side_effect=fake_run,
     ):
         await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("vA"), GridVariant("vB")],
             output_root=output_root,
+            recipe=GridRecipe(base_yaml_path=base),
         )
 
     assert captured_cwds
@@ -1219,8 +1208,6 @@ async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, m
         side_effect=fake_run,
     ):
         await run_grid(
-            base_yaml_path=base,
-            base_extra_args="--base-extra 3",
             grid=[
                 GridVariant(
                     "remove_inherited",
@@ -1231,6 +1218,7 @@ async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, m
                 )
             ],
             output_root=tmp_path / "out",
+            recipe=GridRecipe(base_yaml_path=base, base=LaunchLayer(extra_server_args="--base-extra 3")),
         )
 
     args = captured_restart["extra_server_args"]
@@ -1281,7 +1269,7 @@ async def test_grid_removals_reach_actual_child_environment(tmp_path, monkeypatc
         return result
 
     monkeypatch.setattr(gr, "run_with_session_kill", launch_observer)
-    await run_grid(base_yaml_path=base, base_extra_args="", grid=[variant], output_root=tmp_path / "out")
+    await run_grid(grid=[variant], output_root=tmp_path / "out", recipe=GridRecipe(base_yaml_path=base))
     assert observed
     expected_args = "" if case in {"replace-empty", "remove-all"} else "--ambient-flag 1"
     expected_env = None if case == "unset" else ("accepted" if case == "unset-and-reassign" else "recipe")
@@ -1372,10 +1360,9 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
             base, tmp_path / "materialized", target=BenchmarkTarget(model_path="/models/test")
         )
         await run_grid(
-            base_yaml_path=materialized,
-            base_extra_args="",
             grid=[GridVariant("reference")],
             output_root=tmp_path / "out",
+            recipe=GridRecipe(base_yaml_path=materialized),
         )
     assert observed
     for child in observed:
@@ -1533,11 +1520,10 @@ async def test_run_grid_skips_all_variants_when_budget_already_exhausted(tmp_pat
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("v0"), GridVariant("v1")],
             output_root=tmp_path / "out",
-            session_deadline_sec=time.monotonic() - 1.0,
+            recipe=GridRecipe(base_yaml_path=base),
+            stop=GridStop(session_deadline_sec=time.monotonic() - 1.0),
         )
 
     assert ran == []
@@ -1564,12 +1550,10 @@ async def test_run_grid_skips_remaining_when_budget_cannot_fit_a_variant(tmp_pat
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("v0"), GridVariant("v1")],
             output_root=tmp_path / "out",
-            session_deadline_sec=time.monotonic() + 5.0,
-            variant_expected_sec=10.0,
+            recipe=GridRecipe(base_yaml_path=base),
+            stop=GridStop(session_deadline_sec=time.monotonic() + 5.0, variant_expected_sec=10.0),
         )
 
     assert ran == []
@@ -1594,11 +1578,10 @@ async def test_run_grid_runs_all_when_no_session_deadline(tmp_path):
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("v0"), GridVariant("v1")],
             output_root=tmp_path / "out",
-            session_deadline_sec=None,
+            recipe=GridRecipe(base_yaml_path=base),
+            stop=GridStop(session_deadline_sec=None),
         )
 
     assert len(ran) == 2
@@ -1651,13 +1634,11 @@ async def _launch_every_pass_of_one_variant(
         ),
     ):
         await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("v0")],
             output_root=tmp_path / "out",
-            session_deadline_sec=session_deadline_sec,
-            variant_expected_sec=30.0,
-            warmup_before_measure=True,
+            recipe=GridRecipe(base_yaml_path=base),
+            launch=GridLaunch(warmup_before_measure=True),
+            stop=GridStop(session_deadline_sec=session_deadline_sec, variant_expected_sec=30.0),
         )
     return recorded
 
@@ -1740,12 +1721,10 @@ class TestSessionBudgetAdmission:
             side_effect=_capture_launches(recorded),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 120.0,
-                variant_expected_sec=30.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 120.0, variant_expected_sec=30.0),
             )
 
         assert [r.status for r in results] == ["succeeded"]
@@ -1762,12 +1741,10 @@ class TestSessionBudgetAdmission:
             side_effect=_capture_launches(recorded),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 10.0,
-                variant_expected_sec=300.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 10.0, variant_expected_sec=300.0),
             )
 
         assert recorded == []
@@ -1785,12 +1762,10 @@ class TestSessionBudgetAdmission:
             side_effect=_capture_launches(recorded),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 120.0,
-                variant_expected_sec=None,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 120.0, variant_expected_sec=None),
             )
 
         assert len(recorded) == 1
@@ -1814,12 +1789,10 @@ class TestSessionBudgetAdmission:
             side_effect=_capture_launches(recorded),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 700.0,
-                variant_expected_sec=None,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 700.0, variant_expected_sec=None),
             )
 
         assert len(recorded) == 1
@@ -1853,12 +1826,10 @@ class TestSessionBudgetIndependentWatchdog:
 
         with patch.object(gr, "run_with_session_kill", side_effect=fake_run):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("policy")],
                 output_root=tmp_path / "out",
-                warmup_before_measure=False,
-                magpie_python=sys.executable,
+                recipe=GridRecipe(base_yaml_path=base),
+                launch=GridLaunch(warmup_before_measure=False, magpie_python=sys.executable),
             )
 
         assert [result.status for result in results] == ["succeeded"]
@@ -1881,12 +1852,10 @@ class TestSessionBudgetIndependentWatchdog:
             side_effect=_capture_launches(recorded),
         ):
             await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 120.0,
-                variant_expected_sec=30.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 120.0, variant_expected_sec=30.0),
             )
 
         assert len(recorded) == 1
@@ -1905,12 +1874,10 @@ class TestSessionBudgetIndependentWatchdog:
             side_effect=_capture_launches(recorded),
         ):
             await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 36000.0,
-                variant_expected_sec=30.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 36000.0, variant_expected_sec=30.0),
             )
 
         assert _granted_timeouts(recorded) == [7800]
@@ -1926,12 +1893,10 @@ class TestSessionBudgetIndependentWatchdog:
             side_effect=_capture_launches(recorded),
         ):
             await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=None,
-                variant_expected_sec=30.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=None, variant_expected_sec=30.0),
             )
 
         assert _granted_timeouts(recorded) == [7800]
@@ -1953,12 +1918,10 @@ class TestSessionKillAttribution:
             side_effect=fake_run,
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 120.0,
-                variant_expected_sec=30.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 120.0, variant_expected_sec=30.0),
             )
 
         assert [r.status for r in results] == ["skipped"]
@@ -1986,11 +1949,10 @@ class TestSessionKillAttribution:
             side_effect=fake_run,
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                variant_expected_sec=30.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(variant_expected_sec=30.0),
             )
 
         assert [r.status for r in results] == ["skipped"]
@@ -2010,12 +1972,10 @@ class TestSessionKillAttribution:
             side_effect=_capture_launches(recorded),
         ):
             await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 60.0,
-                variant_expected_sec=30.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 60.0, variant_expected_sec=30.0),
             )
 
         assert len(recorded) == 1
@@ -2088,13 +2048,11 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
             ),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("cand0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 600.0,
-                variant_expected_sec=30.0,
-                warmup_before_measure=True,
+                recipe=GridRecipe(base_yaml_path=base),
+                launch=GridLaunch(warmup_before_measure=True),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 600.0, variant_expected_sec=30.0),
             )
 
         assert launched == ["warmup_round"], "the measured round must not run after the warmup was reaped"
@@ -2120,14 +2078,13 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
             ),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("c0"), GridVariant("c1"), GridVariant("c2")],
                 output_root=tmp_path / "out",
-                keep_going_on_failure=True,
-                session_deadline_sec=time.monotonic() + 600.0,
-                variant_expected_sec=30.0,
-                warmup_before_measure=True,
+                recipe=GridRecipe(base_yaml_path=base),
+                launch=GridLaunch(warmup_before_measure=True),
+                stop=GridStop(
+                    keep_going_on_failure=True, session_deadline_sec=time.monotonic() + 600.0, variant_expected_sec=30.0
+                ),
             )
 
         assert launched == ["warmup_round"], f"a cancelled action kept launching rounds: {launched}"
@@ -2156,13 +2113,12 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
             side_effect=fake_run,
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("c0"), GridVariant("c1")],
                 output_root=tmp_path / "out",
-                keep_going_on_failure=True,
-                session_deadline_sec=time.monotonic() + 600.0,
-                variant_expected_sec=30.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(
+                    keep_going_on_failure=True, session_deadline_sec=time.monotonic() + 600.0, variant_expected_sec=30.0
+                ),
             )
 
         assert launched == ["mn_warmup"], f"a cancelled action kept launching rounds: {launched}"
@@ -2190,13 +2146,11 @@ class TestSessionBudgetWarmupRounds:
             ),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 40.0,
-                variant_expected_sec=30.0,
-                warmup_before_measure=True,
+                recipe=GridRecipe(base_yaml_path=base),
+                launch=GridLaunch(warmup_before_measure=True),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 40.0, variant_expected_sec=30.0),
             )
 
         assert recorded == []
@@ -2230,12 +2184,10 @@ class TestSessionBudgetWarmupRounds:
             side_effect=_capture_launches(recorded),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 6.0,
-                variant_expected_sec=2.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 6.0, variant_expected_sec=2.0),
             )
 
         assert restarts, "the restart never ran, so this is not the case under test"
@@ -2261,13 +2213,11 @@ class TestSessionBudgetWarmupRounds:
             ),
         ):
             await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 300.0,
-                variant_expected_sec=60.0,
-                warmup_before_measure=True,
+                recipe=GridRecipe(base_yaml_path=base),
+                launch=GridLaunch(warmup_before_measure=True),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 300.0, variant_expected_sec=60.0),
             )
 
         by_round = launches_by_round_slot(recorded)
@@ -2306,13 +2256,11 @@ class TestSessionBudgetWarmupRounds:
             caplog.at_level("WARNING"),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 300.0,
-                variant_expected_sec=60.0,
-                warmup_before_measure=True,
+                recipe=GridRecipe(base_yaml_path=base),
+                launch=GridLaunch(warmup_before_measure=True),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 300.0, variant_expected_sec=60.0),
             )
 
         granted = int(recorded[0]["timeout"])

@@ -40,6 +40,9 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from ..actions.executors._grid_runner import (
+    GridLaunch,
+    GridRecipe,
+    GridStop,
     GridVariant,
     VariantResult,
     run_grid,
@@ -58,6 +61,7 @@ from ..actions.stop_attribution import (
 from ..actions.executors._workload_envs import (
     BenchmarkTarget,
     FrameworkScriptMismatchError,
+    LaunchLayer,
     MaterializeOptions,
     default_baseline_config,
 )
@@ -457,18 +461,6 @@ class _RungNote:
     budget_remaining_sec: float | None = None
 
 
-@dataclass(frozen=True)
-class _RungServer:
-    """The serving lease and server lifecycle a rung runs under."""
-
-    serving_lease: Any
-    base_extra_envs: dict[str, str] | None = None
-    server_lifecycle: dict[str, Any] | None = None
-    server_already_ready: bool = False
-    warmup_before_measure: bool | None = None
-    lifecycle_boot_only: bool = False
-
-
 @dataclass
 class _SweepRun:
     """One conc sweep's fixed inputs, and the progress both of its arms add to.
@@ -598,29 +590,32 @@ class _SweepRun:
         else:
             self.recorder.fail_arm(arm_name, exc)
 
-    async def run_rung(self, variant: GridVariant, server: _RungServer) -> list[VariantResult]:
+    async def run_rung(
+        self, variant: GridVariant, launch: GridLaunch, base: LaunchLayer = LaunchLayer()
+    ) -> list[VariantResult]:
         """Run one rung from the sweep's base config; a deadline stop inside it exhausts the sweep's budget."""
         if self.observe_cancel():
             return [_deadline_skip_result(variant, _CANCEL_STOP)]
         if self.budget.exhausted:
             return [_deadline_skip_result(variant, self.deadline_stop)]
         results = await run_grid(
-            base_yaml_path=self.base_yaml_path,
-            base_extra_args="",
             grid=[variant],
             output_root=self.workspace,
-            model_path=self.model_path,
-            gpu_type=self.gpu_type,
-            benchmark_script=self.benchmark_script,
-            server_lifecycle=server.server_lifecycle,
-            base_extra_envs=server.base_extra_envs,
-            warmup_before_measure=server.warmup_before_measure,
-            server_already_ready=server.server_already_ready,
-            serving_lease=server.serving_lease,
-            session_deadline_sec=self.session_deadline_sec,
-            variant_expected_sec=self.variant_expected_sec,
-            deadline_stop=self.deadline_stop,
-            lifecycle_boot_only=server.lifecycle_boot_only,
+            recipe=GridRecipe(
+                base_yaml_path=self.base_yaml_path,
+                base=base,
+                target=BenchmarkTarget(
+                    model_path=self.model_path,
+                    gpu_type=self.gpu_type,
+                    benchmark_script=self.benchmark_script,
+                ),
+            ),
+            launch=launch,
+            stop=GridStop(
+                session_deadline_sec=self.session_deadline_sec,
+                variant_expected_sec=self.variant_expected_sec,
+                deadline_stop=self.deadline_stop,
+            ),
         )
         self.observe_cancel(results)
         if any(result.error_class == self.deadline_stop.error_class for result in results):
@@ -840,14 +835,14 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
         try:
             boot_results = await run.run_rung(
                 boot_variant,
-                _RungServer(
+                GridLaunch(
                     serving_lease=arm_lease,
-                    base_extra_envs=dict(resolve_backend().boot_phase_envs),
                     server_lifecycle=server_lifecycle_boot,
                     server_already_ready=False,
                     warmup_before_measure=False,
                     lifecycle_boot_only=True,
                 ),
+                base=LaunchLayer(extra_envs=dict(resolve_backend().boot_phase_envs)),
             )
         except Exception as exc:  # noqa: BLE001
             log.warning(
@@ -1012,7 +1007,7 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
             try:
                 reuse_results = await run.run_rung(
                     variant,
-                    _RungServer(
+                    GridLaunch(
                         serving_lease=arm_lease,
                         server_lifecycle=server_lifecycle_reuse,
                         server_already_ready=True,
@@ -1100,7 +1095,7 @@ async def _sweep_arm_option_b(
         rung_started_iso = now_iso("seconds")
         rung_started_at = time.time()
         try:
-            sub = await run.run_rung(variant, _RungServer(serving_lease=serving_lease))
+            sub = await run.run_rung(variant, GridLaunch(serving_lease=serving_lease))
         except Exception as exc:  # noqa: BLE001
             log.warning("conc_sweep option B: arm=%s variant=%s raised %r", arm_name, variant.name, exc)
             sub = [

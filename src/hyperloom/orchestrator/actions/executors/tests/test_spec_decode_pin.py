@@ -324,10 +324,9 @@ async def test_run_grid_records_the_refusal_without_launching(tmp_path, monkeypa
     monkeypatch.setattr(gr, "_run_magpie", _never_launched)
     base = _base_yaml(tmp_path, "vllm", VLLM_SYNTHETIC, {})
     results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
         grid=[GridVariant("more-draft", extra_server_args=_spec_config(num_speculative_tokens=5))],
         output_root=tmp_path / "out",
+        recipe=GridRecipe(base_yaml_path=base),
     )
     assert [(r.status, r.error_class) for r in results] == [("failed", SPECULATIVE_DECODING_PINNED)]
     assert "num_speculative_tokens" in results[0].error

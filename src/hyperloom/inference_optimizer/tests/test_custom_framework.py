@@ -13,6 +13,8 @@ import pytest
 import yaml
 
 from hyperloom.inference_optimizer import framework_registry as fr
+from hyperloom.orchestrator.actions.executors._grid_runner import GridLaunch, GridRecipe
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
 
 
 class TestRegistryEntry:
@@ -640,8 +642,6 @@ class TestCustomAdapterMeasurement:
         ) as launch:
             results = asyncio.run(
                 run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
                     grid=[
                         GridVariant(name="baseline"),
                         GridVariant(
@@ -650,8 +650,8 @@ class TestCustomAdapterMeasurement:
                         ),
                     ],
                     output_root=tmp_path / "out",
-                    magpie_python=sys.executable,
-                    gpu_type="mi355x",
+                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi355x")),
+                    launch=GridLaunch(magpie_python=sys.executable),
                 )
             )
         assert launch.call_count == 2

@@ -112,15 +112,9 @@ def _stub_gpu(monkeypatch, session, *, effective):
         variant = kwargs["grid"][0]
         config = _grid_runner._build_variant_yaml(
             _grid_runner.GridRecipe(
-                base_yaml_path=kwargs["base_yaml_path"],
-                base=LaunchLayer(
-                    extra_server_args=kwargs.get("base_extra_args", ""),
-                    args_mode=kwargs.get("base_args_mode", "append"),
-                    extra_envs=kwargs.get("base_extra_envs"),
-                    remove_args=kwargs.get("base_remove_args"),
-                    unset_envs=kwargs.get("base_unset_envs"),
-                ),
-                target=BenchmarkTarget(model_path=kwargs.get("model_path")),
+                base_yaml_path=kwargs["recipe"].base_yaml_path,
+                base=kwargs["recipe"].base,
+                target=BenchmarkTarget(model_path=kwargs["recipe"].target.model_path),
             ),
             variant,
             output_subdir=kwargs["output_root"] / "variant_00_native",
