@@ -214,13 +214,13 @@ def test_a_candidate_validated_as_a_baseline_kind_task_is_not_judged(tmp_path):
 @pytest.mark.parametrize("anchor_tput", [0.0, 200.0], ids=["first_baseline", "rebaseline_after_an_anchor"])
 async def test_writeback_refuses_to_anchor_and_stops_without_opening_enablement(session_dir, monkeypatch, anchor_tput):
     """The server booted and measured, so the refusal is no boot failure: nothing is left for enablement to author."""
-    from hyperloom.orchestrator.loop import writeback
+    from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
     from hyperloom.orchestrator.state.task_registry import Task
 
     from .conftest import make_coordinator
 
     triggers: list[dict[str, Any]] = []
-    monkeypatch.setattr(writeback.enablement_event, "record_trigger", lambda **kw: triggers.append(kw))
+    monkeypatch.setattr(enablement_event, "record_trigger", lambda **kw: triggers.append(kw))
     coord = make_coordinator(
         session_dir,
         shared_state_overrides={"enablement_mode": "all", "benchmark_mode": "agentx", "baseline_tput": anchor_tput},

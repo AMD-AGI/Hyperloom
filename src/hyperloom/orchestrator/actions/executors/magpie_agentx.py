@@ -212,10 +212,48 @@ def bind_source_evidence(config_path: Path, patches: list[dict[str, Any]]) -> No
 
 
 def enable_profile(config_path: Path) -> None:
-    """Derive the diagnostic run without modifying the accepted YAML."""
+    """Prepare TraceLens instrumentation and fill any missing AgentX capture settings.
+
+    An explicit ``num_steps``, ``num_profiles``, ``start_seconds``,
+    ``interval_seconds``, or ``detailed_annotations`` already present in the
+    profile copy is left unchanged. A missing ``detailed_annotations`` follows the patch
+    outcome, as the fixed-sequence request body does: Magpie probes the server whenever the
+    field is true and raises when the server lacks it, so claiming it on a runtime the patch
+    did not reach ends the round before the server starts.
+    """
+    from ._profile_setup import (
+        annotations_supported,
+        apply_sglang_shape_tool,
+        patch_for_profile,
+        shape_discovery_enabled,
+    )
+
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
-    profile = config["benchmark"].setdefault("profiler", {}).setdefault("torch_profiler", {})
-    profile["enabled"] = True
+    bench = config["benchmark"]
+    framework = str(bench["framework"]).lower()
+    _, sitecustomize = patch_for_profile(bench.setdefault("envs", {}), framework)
+    apply_launch_changes(bench, LaunchChanges())
+    launch = bench["agentx"]["launch_overrides"]
+    server_env = launch["env"]
+    profile_env: dict[str, str] = {}
+    if sitecustomize:
+        if "PYTHONPATH" in server_env:
+            profile_env["PYTHONPATH"] = str(server_env["PYTHONPATH"])
+        if "PYTHONPATH" in launch["unset_env"]:
+            profile_env["PYTHONPATH"] = ""
+        apply_sglang_shape_tool(profile_env, shape_discovery=shape_discovery_enabled(bench))
+    if framework == "vllm":
+        name = "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
+        inherited = "1200" if name in launch["unset_env"] else os.environ.get(name, "1200")
+        profile_env[name] = str(max(1200, int(server_env.get(name, inherited))))
+    apply_launch_changes(bench, LaunchChanges(env=profile_env))
+    torch_profiler = bench.setdefault("profiler", {}).setdefault("torch_profiler", {})
+    torch_profiler["enabled"] = True
+    torch_profiler.setdefault("num_steps", 256)
+    torch_profiler.setdefault("num_profiles", 1)
+    torch_profiler.setdefault("start_seconds", 300)
+    torch_profiler.setdefault("interval_seconds", 900)
+    torch_profiler.setdefault("detailed_annotations", annotations_supported(bench["envs"]))
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 

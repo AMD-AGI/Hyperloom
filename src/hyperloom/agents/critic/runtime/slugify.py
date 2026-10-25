@@ -14,7 +14,6 @@ from .errors import SlugifyError
 
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 _LEADING_TRAILING_DASH_RE = re.compile(r"^-+|-+$")
-_REPEATED_DASH_RE = re.compile(r"-+")
 
 _ASCII_RE = re.compile(r"^[\x00-\x7f]*$")
 
@@ -45,22 +44,17 @@ def slugify(topic: str) -> str:
     lowered = normalised.lower()
     replaced = _NON_ALNUM_RE.sub("-", lowered)
     trimmed = _LEADING_TRAILING_DASH_RE.sub("", replaced)
-    folded = _REPEATED_DASH_RE.sub("-", trimmed)
-    if not folded:
+    if not trimmed:
         raise SlugifyError("empty: slug collapsed to empty after normalisation")
-    if len(folded) > _MAX_LEN:
+    if len(trimmed) > _MAX_LEN:
         digest = hashlib.sha256(topic.encode("utf-8")).hexdigest()[:7]
-        return f"{folded[:_TRUNC_LEN]}-{digest}"
-    if len(folded) < _MIN_LEN:
-        raise SlugifyError(f"too_short: slug={folded!r} length={len(folded)} < {_MIN_LEN}")
-    return folded
+        return f"{trimmed[:_TRUNC_LEN]}-{digest}"
+    if len(trimmed) < _MIN_LEN:
+        raise SlugifyError(f"too_short: slug={trimmed!r} length={len(trimmed)} < {_MIN_LEN}")
+    return trimmed
 
 
-def slugify_safe(
-    topic: str,
-    *,
-    fallback_prefix: str = "auto",
-) -> str:
+def slugify_safe(topic: str) -> str:
     """Non-ASCII safe wrapper (contract §7.2 / G-6)."""
     if not isinstance(topic, str) or not topic.strip():
         raise SlugifyError("empty: topic is empty or whitespace-only")
@@ -68,7 +62,7 @@ def slugify_safe(
     if _ascii_only(normalised):
         return slugify(topic)
     digest = hashlib.sha256(topic.encode("utf-8")).hexdigest()[:8]
-    return f"{fallback_prefix}-{digest}"
+    return f"auto-{digest}"
 
 
 __all__ = ["slugify", "slugify_safe"]

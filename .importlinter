@@ -94,7 +94,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.policy.gate
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.agents.framework.kb
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._inferencex_patcher
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._magpie_patcher
@@ -314,7 +313,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.policy.gate
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.agents.framework.kb
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._inferencex_patcher
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._magpie_patcher
@@ -360,8 +358,9 @@ ignore_imports =
     hyperloom.orchestrator.enablement.revalidation -> hyperloom.orchestrator.actions.executors._accuracy_gate
     hyperloom.orchestrator.enablement.setup_script -> hyperloom.orchestrator.enablement.recipe.projections
     hyperloom.orchestrator.gpu_lanes -> hyperloom.orchestrator.specialists.profile
-    hyperloom.orchestrator.kernel.request_handlers -> hyperloom.orchestrator.loop.sub_agent_runner
-    hyperloom.orchestrator.kernel.request_handlers -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.orchestrator.kernel._forge_lane_budget -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.orchestrator.kernel._integrate_rebaseline -> hyperloom.orchestrator.loop.sub_agent_runner
+    hyperloom.orchestrator.kernel._shape_capture -> hyperloom.orchestrator.loop.sub_agent_runner
     hyperloom.orchestrator.knowledge.recipe_journal -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.orchestrator.knowledge.recipe_kb_t0 -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.orchestrator.knowledge.remote_recipe -> hyperloom.orchestrator.knowledge.agent_kb
@@ -389,7 +388,6 @@ ignore_imports =
     hyperloom.orchestrator.specialists.selfcheck -> hyperloom.orchestrator.enablement.runtime.build_utils
     hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.actions.cancel_channel
     hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.actions.executors._ray_serving
-    hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.bringup.trees
     hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.loop.sub_agent_runner
     hyperloom.orchestrator.state._shared_state.phase_state -> hyperloom.orchestrator.specialists.domains
     hyperloom.orchestrator.state._shared_state.render -> hyperloom.orchestrator.actions.executors._proposal_identity

@@ -2678,9 +2678,9 @@ class KernelPhase(CoordinatorCollaborator):
 
     def _runtime_uses_aiter_fused_moe(self) -> bool:
         """Return whether the served model dispatches MoE through aiter."""
-        from ..kernel.request_handlers import _resolve_forge_server_log
+        from ..kernel.serving_log_evidence import resolve_forge_server_log
 
-        log_path = _resolve_forge_server_log(self.shared_state, self.session_dir)
+        log_path = resolve_forge_server_log(self.shared_state, self.session_dir)
         if not log_path:
             return False
         try:
@@ -4015,14 +4015,12 @@ class KernelPhase(CoordinatorCollaborator):
     async def _integrate_fusion(self, result: dict) -> None:
         """Queue every KEPT forge-fusion sibling for the shared e2e integrate lane."""
         from ..kernel._kernel_decisions import enqueue_nominated_patch
-        from ..kernel.nomination_result import parse_outcome
-
-        from ..kernel.request_handlers import _summarize_dropped_patches
+        from ..kernel.nomination_result import parse_outcome, summarize_dropped_patches
 
         outcome = parse_outcome(result)
         # Counted before the empty check: an all-refused envelope and a run that kept nothing are the same ``queued``
         # figure and differ only in reasons.
-        refused = _summarize_dropped_patches(outcome.dropped)
+        refused = summarize_dropped_patches(outcome.dropped)
         if outcome.is_empty:
             if outcome.schema_error:
                 log.warning(

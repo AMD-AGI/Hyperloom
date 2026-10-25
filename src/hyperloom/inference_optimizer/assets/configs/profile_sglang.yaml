@@ -68,7 +68,7 @@ benchmark:
     # into the benchmark request body. start_step skips warmup, num_steps
     # limits trace size. Values are overridden at runtime by
     # materialize_config_with_envs (see
-    # orchestrator/actions/executors/_workload_envs.py for the
+    # orchestrator/actions/executors/_profile_setup.py for the
     # authoritative logic):
     #   num_steps   (max_iters)   = HYPERLOOM_PROFILE_MAX_STEPS_CAP,
     #                                 default 128 (hard override via
