@@ -245,6 +245,7 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
         "num_steps": 5,
         "num_profiles": 3,
         "start_seconds": 900.0,
+        "detailed_annotations": True,
     }
     assert load_benchmark(source)["profiler"]["torch_profiler"]["enabled"] is False
     report["agentx_metrics"]["diagnostic_only"] = True
@@ -254,8 +255,8 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
     assert constraint_veto_reason(measured, SimpleNamespace()) == "agentx_evidence_invalid"
 
 
-def test_a_profile_with_no_window_of_its_own_captures_the_steady_state(source, tmp_path):
-    """Magpie's default is the replay's first 20 steps: the opening prefills alone, at bs=1."""
+def test_a_profile_with_no_settings_of_its_own_captures_the_steady_state_with_shapes(source, tmp_path):
+    """Magpie's defaults capture the replay's first 20 steps, at bs=1, with no operator shapes to size a GEMM by."""
     config = yaml.safe_load(source.read_text())
     config["benchmark"]["profiler"] = {"torch_profiler": {"enabled": False}}
     source.write_text(yaml.safe_dump(config))
@@ -267,7 +268,19 @@ def test_a_profile_with_no_window_of_its_own_captures_the_steady_state(source, t
         "enabled": True,
         "start_seconds": 900.0,
         "num_steps": 100,
+        "detailed_annotations": True,
     }
+
+
+def test_an_operator_who_turned_detailed_annotations_off_keeps_them_off(source, tmp_path):
+    config = yaml.safe_load(source.read_text())
+    config["benchmark"]["profiler"] = {"torch_profiler": {"enabled": False, "detailed_annotations": False}}
+    source.write_text(yaml.safe_dump(config))
+    rendered = materialize_benchmark_config(source, tmp_path / "profile")
+
+    enable_profile(rendered)
+
+    assert load_benchmark(rendered)["profiler"]["torch_profiler"]["detailed_annotations"] is False
 
 
 @pytest.mark.parametrize("checkout", ["default", "yaml", "environment"])
