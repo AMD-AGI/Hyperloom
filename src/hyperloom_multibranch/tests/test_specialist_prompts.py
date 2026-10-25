@@ -769,3 +769,22 @@ def test_the_summary_of_a_log_stays_bounded_however_long_its_entries_and_a_short
     bound = 2 * SUMMARY_ENTRIES * (SUMMARY_ENTRY_CHARS + 40) + ENTRY_CHARS + 200
     assert len(summary) <= bound and "[e398] hypothesis" not in summary
     assert "Your branch so far" not in short
+
+
+def test_the_nudge_and_role_send_later_heads_on_a_path_whose_profile_analysis_failed_to_other_evidence():
+    # Each head is profiled once already (toolbox profile_exists); the waste was profiling the next head on a path
+    # whose analysis fails, so the rule has to cover later heads, not the failed one.
+    failed = "Once a profile analysis failed, profile no later head on the same execution path"
+    nudge = prompts.nudge_message()
+    role = role_prompt(WORKLOAD)
+
+    assert failed in nudge and failed in role
+    assert "log its dispatch path or break down a flat result instead" in nudge
+    assert "profile your head unless a profile analysis already failed on its execution path" in role
+
+
+def test_the_role_retries_a_lead_the_integrator_refused_only_with_a_reason_it_would_now_stack():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "A lead the integrator measured not stackable on the integration head" in prompt
+    assert "only with a stated reason it would now stack" in prompt

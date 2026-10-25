@@ -84,8 +84,9 @@ comes only when the integration head moves, and no one hands your branch a new d
 your head and act now. Settings run out; source work does not: take the operator the profile ranks highest in your \
 direction and write a patch, a fused or tuned kernel, or a port of a PR the image lacks, and test it. If your \
 direction is done on this head, take another of the session's directions. If no candidate clears the bar, buy the \
-number first: profile, log the dispatch path, or break down a flat result. Turns that end with nothing to test stop \
-your branch."""
+number first: profile, log the dispatch path, or break down a flat result. Once a profile analysis failed, profile \
+no later head on the same execution path: read the code on the top operator's path, log its dispatch path or break \
+down a flat result instead. Turns that end with nothing to test stop your branch."""
 _RESUMED = """\
 Your CLI stopped ({reason}) and was restarted on the same conversation: go on from where you stopped.
 {worktree}
@@ -162,7 +163,9 @@ commit serves every branch. Profile the session's root only while no brief lists
 head only once it carries gains you committed and you need its shares to find the next bottleneck, after a change of \
 execution path (attention backend, precision format, kernel switch), after a large gain since the commit last \
 profiled, or when your branch was just split off another branch's head and no brief lists ceilings for it. \
-To profile: \
+Once a profile analysis failed, profile no later head on the same execution path until that path changes: it fails \
+the same way, so read the code on the top operator's path, log its dispatch path or break a flat result down \
+instead. To profile: \
 submit_test with kind "profile", purpose "profile", your head as the parent commit and no delta. A profile refused \
 as profile_exists names the one already queued, running or measured on that commit, maybe another branch's: \
 wait_test on it rather than profiling again. Once the profile succeeded, start_analysis with tool "tracelens" and that test's id as profile_request_id reports each operator's share through \
@@ -191,7 +194,9 @@ upstream commit already, and you set them only when its reply carries a note say
 upstream_repo on a component your head already has, which the toolbox refuses as upstream_label_unsupported. A replayable champion in the brief that the integration head does not hold: get its delta with notebook_replay and test it on your head before other \
 directions. A champion the brief lists as "already on your head, nothing to replay" is in your head already: build on \
 it, do not test it again. A lead under "Unfinished in this session" in the brief is a change another branch measured \
-but left unfinished: finish one in your direction the same way before starting a new idea. Before you replay a \
+but left unfinished: finish one in your direction the same way before starting a new idea. A lead the integrator \
+measured not stackable on the integration head is retried only with a stated reason it would now stack, written to \
+your branch log first. Before you replay a \
 lead, check whether your head already carries its change (its patch's lines in your synced worktree, its settings \
 or table in a commit your branch log or the brief names): one already on your head is done, build on it.
 4. Submit it with submit_test: kind "test", purpose "explore", the parent commit, the delta, and the intent \
@@ -237,7 +242,8 @@ profile ranks highest. That every setting near your direction was tried never me
 lesson, a learning or another branch's flat result closes nothing on a different head: what was flat on another \
 parent can gain on yours, so retest it on your current head before you call it closed. Never \
 end a turn to wait for a brief: one comes only when the session moves, and a branch that keeps finding nothing to \
-test is stopped. That no candidate clears the bar is a missing measurement, not a stop: profile your head, add a \
+test is stopped. That no candidate clears the bar is a missing measurement, not a stop: profile your head unless a \
+profile analysis already failed on its execution path, add a \
 one-time log line on the top operator's dispatch path, or break a flat result down, and write the hypothesis it \
 tests to your branch log with the cheapest test that would prove it wrong. Once it is done, with nothing promising left in it (a tuning pass \
 can be done within the hour), record that before you move on: one branch-log entry that starts with "EXHAUSTED " \
