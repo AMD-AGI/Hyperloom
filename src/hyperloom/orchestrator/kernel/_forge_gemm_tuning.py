@@ -45,6 +45,7 @@ from ._forge_shapes import (
 from ._integrate_payload import _requested_framework, _requested_setting
 from .serving_log_evidence import resolve_forge_server_log, _tokens_from_serving_log
 from ._shape_capture import (
+    SuppliedShapes,
     _capture_vllm_tunableop_shapes,
     _reuse_vllm_block_fp8_roofline_shapes,
     _vllm_block_fp8_profile_capture_required,
@@ -257,8 +258,7 @@ def _profiled_block_fp8_shapes(
         framework=run.framework,
         precision=run.precision,
         quant_type=run.quant_type,
-        shapes_json=sources.shapes_json,
-        tunableop_input=sources.tunableop_input,
+        supplied=SuppliedShapes(shapes_json=sources.shapes_json, tunableop_input=sources.tunableop_input),
         dry_run=bool(payload.get("dry_run")),
     ):
         return sources
@@ -283,12 +283,12 @@ async def _captured_forge_shapes(
     priced_lane: Any,
 ) -> tuple[_ForgeShapeSources, HandlerResult | None]:
     sources = _profiled_block_fp8_shapes(state, payload, run, sources)
+    supplied = SuppliedShapes(shapes_json=sources.shapes_json, tunableop_input=sources.tunableop_input)
     block_fp8_capture = _vllm_block_fp8_profile_capture_required(
         framework=run.framework,
         precision=run.precision,
         quant_type=run.quant_type,
-        shapes_json=sources.shapes_json,
-        tunableop_input=sources.tunableop_input,
+        supplied=supplied,
         dry_run=bool(payload.get("dry_run")),
     )
     # Keyed on the routed framework: a run handed to the AITER tuner family has
@@ -298,8 +298,7 @@ async def _captured_forge_shapes(
         _vllm_dense_shape_capture_required(
             framework=run.tuning_framework,
             model_path=run.model_dir,
-            shapes_json=sources.shapes_json,
-            tunableop_input=sources.tunableop_input,
+            supplied=supplied,
             dry_run=bool(payload.get("dry_run")),
         )
         and not block_fp8_capture

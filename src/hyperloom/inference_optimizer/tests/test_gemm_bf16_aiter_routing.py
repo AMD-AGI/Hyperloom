@@ -450,14 +450,12 @@ class TestTunableOpCaptureIsSkippedWhenRouted:
         assert not shape_capture._vllm_dense_shape_capture_required(
             framework="vllm-aiter",
             model_path=_model(tmp_path),
-            shapes_json="",
-            tunableop_input="",
+            supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
             dry_run=False,
         )
         assert shape_capture._vllm_dense_shape_capture_required(
             framework="vllm",
             model_path=_model(tmp_path),
-            shapes_json="",
-            tunableop_input="",
+            supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
             dry_run=False,
         )

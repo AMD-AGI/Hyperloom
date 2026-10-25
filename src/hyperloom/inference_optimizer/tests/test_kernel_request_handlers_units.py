@@ -2817,8 +2817,7 @@ class TestRunGemmTuningHandler:
                 framework="vllm",
                 precision="fp8",
                 quant_type="blockscale",
-                shapes_json="",
-                tunableop_input="",
+                supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
                 dry_run=False,
             )
             is False
@@ -2834,8 +2833,7 @@ class TestRunGemmTuningHandler:
             shape_capture._vllm_dense_shape_capture_required(
                 framework="vllm",
                 model_path=str(model),
-                shapes_json="",
-                tunableop_input="",
+                supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
                 dry_run=False,
             )
             is False
@@ -2845,8 +2843,7 @@ class TestRunGemmTuningHandler:
                 framework="vllm",
                 precision="fp8",
                 quant_type="blockscale",
-                shapes_json="",
-                tunableop_input="",
+                supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
                 dry_run=False,
             )
             is False
@@ -2919,8 +2916,7 @@ class TestRunGemmTuningHandler:
             shape_capture._vllm_dense_shape_capture_required(
                 framework=framework,
                 model_path=str(model),
-                shapes_json=shapes_json,
-                tunableop_input=tunableop_input,
+                supplied=shape_capture.SuppliedShapes(shapes_json=shapes_json, tunableop_input=tunableop_input),
                 dry_run=dry_run,
             )
             is False
@@ -2938,8 +2934,7 @@ class TestRunGemmTuningHandler:
             shape_capture._vllm_dense_shape_capture_required(
                 framework="vllm",
                 model_path=str(model),
-                shapes_json="",
-                tunableop_input="",
+                supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
                 dry_run=False,
             )
             is False
@@ -2962,8 +2957,7 @@ class TestRunGemmTuningHandler:
             shape_capture._vllm_dense_shape_capture_required(
                 framework="vllm",
                 model_path=str(model),
-                shapes_json="",
-                tunableop_input="",
+                supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
                 dry_run=False,
             )
             is False
