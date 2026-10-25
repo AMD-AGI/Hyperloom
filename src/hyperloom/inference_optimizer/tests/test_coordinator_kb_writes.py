@@ -811,7 +811,7 @@ def test_finalize_recipe_still_runs_without_agentx(tmp_path, monkeypatch) -> Non
 
 def test_t0_anchor_does_not_write_under_agentx(native_benchmark, tmp_path, monkeypatch) -> None:
     """The third Recipe sink, and the one the first two gates never saw."""
-    from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
+    from hyperloom.orchestrator.knowledge.recipe_kb_t0 import T0AnchorRequest, run_t0_anchor
 
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     coord = _make_coordinator(tmp_path)
@@ -822,14 +822,7 @@ def test_t0_anchor_does_not_write_under_agentx(native_benchmark, tmp_path, monke
         def __getattr__(self, name: str):
             raise AssertionError(f"AgentX T0 anchor reached the recipe KB: {name}")
 
-    run_t0_anchor(
-        _ForbiddenKB(),
-        coord.shared_state,
-        workload=_MODEL,
-        hw=_HW,
-        session_dir=tmp_path,
-        save_state=False,
-    )
+    run_t0_anchor(_ForbiddenKB(), coord.shared_state, T0AnchorRequest(workload=_MODEL, hw=_HW), session_dir=tmp_path)
 
 
 def _seed_recipe_with_lesson(coord: Coordinator) -> dict:

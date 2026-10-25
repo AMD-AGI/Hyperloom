@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, NamedTuple
@@ -940,19 +941,25 @@ def _warm_start_lookup(
     )
 
 
+@dataclass(frozen=True)
+class T0AnchorRequest:
+    """The workload a T0 anchor stamps and warm-starts, and whether the session resumes."""
+
+    workload: str
+    hw: str
+    image_digest: str = ""
+    stack_fingerprint: Mapping[str, str] | None = None
+    extra_attrs: Mapping[str, Any] | None = None
+    resume: bool = False
+
+
 def run_t0_anchor(
     kb: RecipeKB,
     shared_state: Any,
+    request: T0AnchorRequest,
     *,
-    workload: str,
-    hw: str,
-    image_digest: str = "",
-    stack_fingerprint: Mapping[str, str] | None = None,
-    extra_attrs: Mapping[str, Any] | None = None,
-    resume: bool = False,
     on_status: Callable[[str], None] = _default_status_emitter,
     session_dir: Path | None = None,
-    save_state: bool = True,
 ) -> None:
     """Run the T0 recipe-snapshot anchor and seven-tuple warm-start search."""
     if session_dir is None:
@@ -968,18 +975,20 @@ def run_t0_anchor(
     sid = _text(getattr(shared_state, "recipe_kb_session_id", "")) or sd.name
     shared_state.recipe_kb_session_id = sid
     # Short-circuit when already anchored; resume=True bypasses.
-    if not resume and _text(getattr(shared_state, "warm_start_ts", "")):
+    if not request.resume and _text(getattr(shared_state, "warm_start_ts", "")):
         on_status(f"Recipe KB        : already anchored session_id={sid}")
         return
-    if resume:
+    if request.resume:
         on_status(f"Recipe KB        : resumed session_id={sid}")
     began_now = not getattr(shared_state, "warm_start_ts", "")
     if began_now:
         shared_state.warm_start_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    extra: Mapping[str, Any] = extra_attrs or {}
-    fingerprint: Mapping[str, Any] = stack_fingerprint or {}
-    identity = _resolve_t0_identity(shared_state, workload=workload, hw=hw, extra=extra, fingerprint=fingerprint)
+    extra: Mapping[str, Any] = request.extra_attrs or {}
+    fingerprint: Mapping[str, Any] = request.stack_fingerprint or {}
+    identity = _resolve_t0_identity(
+        shared_state, workload=request.workload, hw=request.hw, extra=extra, fingerprint=fingerprint
+    )
     cid = str(identity["canonical_id"])
     # Each is empty only where SharedState already held nothing, and CLOSE/KEEP derives the same cid from them.
     shared_state.framework = identity["framework_name"]
@@ -996,7 +1005,7 @@ def run_t0_anchor(
             start_time=shared_state.warm_start_ts,
         )
     # T0 only stamps metadata (best_config preserved, rewritten at CLOSE).
-    extras = _build_t0_trace_extras(shared_state, extra=extra, fp=fingerprint, image_digest=image_digest)
+    extras = _build_t0_trace_extras(shared_state, extra=extra, fp=fingerprint, image_digest=request.image_digest)
     _stamp_local_authority_row(kb, session_id=sid, fingerprint=fingerprint, identity=identity, extras=extras)
     match, context = _warm_start_lookup(kb, shared_state, identity)
     shared_state.warm_start_recipe = match
@@ -1013,13 +1022,13 @@ def run_t0_anchor(
             f"Recipe KB        : session_id={sid} workload={cid} (warm={warm_label}, "
             f"pitfalls={len(experience['pitfalls'])}, lessons={len(experience['lessons'])})"
         )
-    if save_state:
-        try:
-            shared_state.save(sd)
-        except Exception:
-            log.exception("Recipe KB T0: SharedState.save failed (sid=%s, workload=%s)", sid, identity["model"])
+    try:
+        shared_state.save(sd)
+    except Exception:
+        log.exception("Recipe KB T0: SharedState.save failed (sid=%s, workload=%s)", sid, identity["model"])
 
 
 __all__ = [
+    "T0AnchorRequest",
     "run_t0_anchor",
 ]

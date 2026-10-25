@@ -169,16 +169,13 @@ class MachinePhase(CoordinatorCollaborator):
             "boot_origin": "coordinator_fallback",
         }
         try:
-            from ..knowledge.recipe_kb_t0 import run_t0_anchor
+            from ..knowledge.recipe_kb_t0 import T0AnchorRequest, run_t0_anchor
 
             run_t0_anchor(
                 client,
                 state,
-                workload=workload,
-                hw=hw,
-                extra_attrs=extra_attrs,
+                T0AnchorRequest(workload=workload, hw=hw, extra_attrs=extra_attrs),
                 session_dir=self.session_dir,
-                save_state=True,
             )
         except Exception:
             log.exception(

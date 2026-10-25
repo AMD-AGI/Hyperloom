@@ -191,7 +191,7 @@ def _t0_warm_started(tmp_path, **put_kwargs) -> SharedState:
         RecipeKB,
         recipe_canonical_id,
     )
-    from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
+    from hyperloom.orchestrator.knowledge.recipe_kb_t0 import T0AnchorRequest, run_t0_anchor
 
     state = SharedState()
     state.framework_name = "vllm"
@@ -224,9 +224,7 @@ def _t0_warm_started(tmp_path, **put_kwargs) -> SharedState:
     run_t0_anchor(
         kb,
         state,
-        workload="kimi-k3",
-        hw="mi355x",
-        extra_attrs={"framework_name": state.framework_name},
+        T0AnchorRequest(workload="kimi-k3", hw="mi355x", extra_attrs={"framework_name": state.framework_name}),
         session_dir=session_dir,
     )
     return state
