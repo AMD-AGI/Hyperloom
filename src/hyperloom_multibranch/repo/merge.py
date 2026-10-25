@@ -19,7 +19,8 @@ it builds a test's environment, so a conflict shows before the merge test is pai
 that does not apply there is rebased by a three-way merge of the
 files it touches. Where a line is changed by both sides, a head patch the candidate's stack does not hold is replaced
 by the candidate's patch when that patch rewrites every line the head patch changes (see ``_replacement``); otherwise
-the patch is a conflict.
+the candidate's patch is split by file: the files that merge three ways are carried rebased, and only the rest stays a
+conflict for the integrator's resolver (see ``_split``).
 """
 
 from __future__ import annotations
@@ -95,12 +96,14 @@ class _Kernels:
 @dataclass(frozen=True)
 class _Settled:
     """Where the patches of merged stacks that do not apply went: left out, rebased, put in for the head patches they
-    replace, or ``held`` by the stack already."""
+    replace, or ``held`` by the stack already. ``parts`` are the conflicts split off a candidate's patch, which no
+    stack holds."""
 
     conflicts: tuple[PatchConflict, ...] = ()
     rebased: tuple[RebasedPatch, ...] = ()
     held: frozenset[str] = field(default_factory=frozenset)
     replaced: tuple[ReplacedPatch, ...] = ()
+    parts: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)
@@ -364,7 +367,7 @@ def _settle(
 ) -> _Settled:
     """Each patch of ``component`` that does not apply after the ones before it that do: rebased where the candidate
     ``brought`` it and no line overlaps, put in for the head patches it replaces where it supersedes them, held where
-    the stack before it already makes its change, a conflict otherwise."""
+    the stack before it already makes its change, split where only some of its files overlap, a conflict otherwise."""
     if component is None or not component.patches or _apply_error(component, stored.stack_files) is None:
         return _Settled()
     heads = frozenset(
@@ -374,29 +377,81 @@ def _settle(
         and patch.path not in stored.protected
         and (theirs is None or patch not in theirs.patches)
     )
-    applied: list[PatchRef] = []
-    conflicts, rebased, replaced, held = [], [], [], set()
+    settling = _Settling(component, theirs, frozenset(brought), heads, stored)
     for patch in component.patches:
-        stack = replace(component, patches=tuple(applied))
-        error = _apply_error(replace(stack, patches=(*applied, patch)), stored.stack_files)
+        settling.add(patch)
+    return settling.settled()
+
+
+@dataclass
+class _Settling:
+    """``_settle`` of one component's stack under way: ``applied`` are the patches that apply so far, in order."""
+
+    component: ComponentPatches
+    theirs: ComponentPatches | None
+    brought: frozenset[str]
+    heads: frozenset[PatchRef]
+    stored: Stored
+    applied: list[PatchRef] = field(default_factory=list)
+    conflicts: list[PatchConflict] = field(default_factory=list)
+    rebased: list[RebasedPatch] = field(default_factory=list)
+    replaced: list[ReplacedPatch] = field(default_factory=list)
+    held: set[str] = field(default_factory=set)
+    parts: set[str] = field(default_factory=set)
+
+    def add(self, patch: PatchRef) -> None:
+        name = self.component.component
+        stack = replace(self.component, patches=tuple(self.applied))
+        error = self._error(patch)
         if error is None:
-            applied.append(patch)
-            continue
-        sides = _sides(stack, theirs, patch, stored) if theirs is not None and patch.path in brought else None
+            self.applied.append(patch)
+            return
+        theirs = self.theirs
+        sides = _sides(stack, theirs, patch, self.stored) if theirs is not None and patch.path in self.brought else None
         text = None if sides is None else _rebased_text(stack, sides)
-        kept = _replacement(stack, sides, patch, heads, stored) if sides is not None and text is None else None
-        if kept is not None:
-            removed = tuple(head.path for head in applied if head not in kept)
-            applied = [*kept, patch]
-            replaced.append(ReplacedPatch(component.component, removed, patch))
+        if sides is not None and text is None:
+            self._overlapping(stack, sides, patch, error)
         elif text is None:
-            conflicts.append(PatchConflict(component.component, patch.path, error))
+            self.conflicts.append(PatchConflict(name, patch.path, error))
         elif text:
-            applied.append(stored.store_patch(component.component, text))
-            rebased.append(RebasedPatch(component.component, patch.path, applied[-1]))
+            self.applied.append(self.stored.store_patch(name, text))
+            self.rebased.append(RebasedPatch(name, patch.path, self.applied[-1]))
         else:
-            held.add(patch.path)
-    return _Settled(tuple(conflicts), tuple(rebased), frozenset(held), tuple(replaced))
+            self.held.add(patch.path)
+
+    def _overlapping(self, stack: ComponentPatches, sides: _Sides, patch: PatchRef, error: str) -> None:
+        """A candidate's ``patch`` some line of which the stack also changed: put in for the head patches it replaces,
+        else split so only the files that overlap stay a conflict, else a conflict whole."""
+        name = self.component.component
+        kept = _replacement(stack, sides, patch, self.heads, self.stored)
+        if kept is not None:
+            removed = tuple(head.path for head in self.applied if head not in kept)
+            self.applied = [*kept, patch]
+            self.replaced.append(ReplacedPatch(name, removed, patch))
+            return
+        split = _split(name, sides, self.stored)
+        if split is None:
+            self.conflicts.append(PatchConflict(name, patch.path, error))
+            return
+        if split.carried is None:
+            self.held.add(patch.path)
+        else:
+            self.applied.append(split.carried)
+            self.rebased.append(RebasedPatch(name, patch.path, split.carried))
+        self.conflicts.append(PatchConflict(name, split.rest.path, self._error(split.rest) or error))
+        self.parts.add(split.rest.path)
+
+    def _error(self, patch: PatchRef) -> str | None:
+        return _apply_error(replace(self.component, patches=(*self.applied, patch)), self.stored.stack_files)
+
+    def settled(self) -> _Settled:
+        return _Settled(
+            tuple(self.conflicts),
+            tuple(self.rebased),
+            frozenset(self.held),
+            tuple(self.replaced),
+            frozenset(self.parts),
+        )
 
 
 def _sides(stack: ComponentPatches, theirs: ComponentPatches, patch: PatchRef, stored: Stored) -> _Sides | None:
@@ -417,6 +472,40 @@ def _rebased_text(stack: ComponentPatches, sides: _Sides) -> str | None:
     ``stack`` already makes the change, ``None`` when a line is changed by both."""
     merged = merge_files(sides.original, sides.current, sides.changed)
     return None if merged is None else patch_between(sides.current, merged)
+
+
+@dataclass(frozen=True)
+class _Split:
+    """A candidate's patch split by file: ``carried`` is the change to the files that merge three ways, rebased onto the
+    stack (``None`` where the stack already makes it), and ``rest`` the change to the others as the candidate wrote
+    it."""
+
+    carried: PatchRef | None
+    rest: PatchRef
+
+
+def _split(component: str, sides: _Sides, stored: Stored) -> _Split | None:
+    """A patch some of whose files overlap the stack, split by file so only those files go to the resolver; ``None``
+    when every file the patch changes overlaps.
+
+    A patch is resolved by one model call that rewrites all of it, so a large one is cut off by the gateway or by the
+    output cap even when only a few of its files conflict (c7eddf22's 3b275cb2: 9 files, 3 conflicting, 35.5 KB).
+    """
+    touched = [path for path, content in sides.changed.items() if content != sides.original[path]]
+    merged, overlapping = dict(sides.current), []
+    for path in touched:
+        files = merge_files(sides.original, sides.current, {path: sides.changed[path]})
+        if files is None:
+            overlapping.append(path)
+        else:
+            merged[path] = files[path]
+    if len(overlapping) == len(touched):
+        return None
+    text = patch_between(sides.current, merged)
+    rest = patch_between(
+        {path: sides.original[path] for path in overlapping}, {path: sides.changed[path] for path in overlapping}
+    )
+    return _Split(stored.store_patch(component, text) if text else None, stored.store_patch(component, rest))
 
 
 def _replacement(
@@ -473,13 +562,14 @@ def _joined(settled: Iterable[_Settled]) -> _Settled:
         tuple(rebased for part in parts for rebased in part.rebased),
         frozenset().union(*(part.held for part in parts)),
         tuple(replaced for part in parts for replaced in part.replaced),
+        frozenset().union(*(part.parts for part in parts)),
     )
 
 
 def _without(delta: RecipeDelta, settled: _Settled) -> RecipeDelta:
     """``delta`` with every conflicting patch left out, not added when the candidate brings it and dropped otherwise;
     a rebased patch in place of the candidate's, none for one the stack already holds, and the head patches a
-    candidate's patch replaces dropped."""
+    candidate's patch replaces dropped. A conflict split off a candidate's patch is in no stack to drop."""
     if not (settled.conflicts or settled.rebased or settled.held or settled.replaced):
         return delta
     changes = []
@@ -493,7 +583,7 @@ def _without(delta: RecipeDelta, settled: _Settled) -> RecipeDelta:
             replace(
                 change,
                 add_patches=tuple(moved.get(patch.path, patch) for patch in kept),
-                remove_patches=(*change.remove_patches, *sorted(failed - brought)),
+                remove_patches=(*change.remove_patches, *sorted(failed - brought - settled.parts)),
             )
         )
     return replace(delta, components=tuple(changes))

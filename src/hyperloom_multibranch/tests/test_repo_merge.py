@@ -3,6 +3,7 @@
 
 import difflib
 import hashlib
+import json
 import os
 import subprocess
 from collections.abc import Collection
@@ -34,11 +35,14 @@ from hyperloom.measure.compile import (
     apply_patch_stack,
     kernel_rows_only,
 )
+from hyperloom_multibranch.contracts.llm import CompletionReply
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ReplacedPatch, RepoMerge, ResolvedPatch, UnitedTable
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot, wider_table
 from hyperloom_multibranch.repo.rebase import Files
+from hyperloom_multibranch.scheduling.integrator import LlmPatchResolver
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact, union_rows
 from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import (
     B01_HEAD,
@@ -852,3 +856,58 @@ async def test_a_reverse_merge_carries_every_merge_integration_took_since_the_br
 
 def _adding_patch(patch: PatchRef) -> RecipeDelta:
     return RecipeDelta(components=(ComponentChange("vllm", add_patches=(patch,)),))
+
+
+SCHEDULER = "policy = 'fcfs'\n"
+#: c7eddf22's 3b275cb2 in miniature: one patch over two files, only one of which the head also changed.
+WIDE = _edit(a="11") + _git_patch("scheduler.py", "policy = 'fcfs'", "policy = 'lpm'")
+
+
+async def _wide_onto(tmp_path) -> tuple[GitExperimentRepo, PackageBase, str, str, RepoMerge]:
+    installed = _installed(tmp_path, config="".join(_config()), scheduler=SCHEDULER)
+    repo = _repository(tmp_path, installed)
+    root = await repo.init_root(BASE)
+    first = await _candidate(repo, "s1", root, _edit(a="10", g="70"))
+    head = await repo.commit_integration(root, (await repo.merge(first, root)).delta, (first,))
+    candidate = await _candidate(repo, "s2", root, WIDE)
+    return repo, installed, head, candidate, await repo.merge(candidate, head)
+
+
+def _built(stack: ComponentPatches, installed: PackageBase, tmp_path) -> dict[str, str]:
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    entries = apply_patch_stack(stack, COMPONENT_LAYOUTS["vllm"], installed, blobs).entries
+    return {entry.path: blobs.get(entry.blob).decode() for entry in entries}
+
+
+async def test_only_the_files_of_a_patch_that_overlap_the_head_stay_a_conflict(tmp_path):
+    repo, installed, head, candidate, merge = await _wide_onto(tmp_path)
+
+    (wide,) = (await repo.read_recipe(candidate)).component("vllm").patches
+    (rebased,) = merge.rebased_patches
+    (conflict,) = merge.patch_conflicts
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    assert rebased.path == wide.path and "scheduler.py" in blobs.get(rebased.patch.sha256).decode()
+    assert "config.py" not in blobs.get(rebased.patch.sha256).decode()
+    rest = await repo.patch_text(candidate, conflict.path)
+    assert "config.py" in rest and "scheduler.py" not in rest and "does not apply" in conflict.detail
+    (change,) = merge.delta.components
+    assert (change.add_patches, change.remove_patches) == ((rebased.patch,), ())
+    built = _built(apply(await repo.read_recipe(head), merge.delta).component("vllm"), installed, tmp_path)
+    assert built == {"config.py": "".join(_config(a="10", g="70")), "scheduler.py": "policy = 'lpm'\n"}
+
+
+async def test_the_resolver_is_asked_about_the_overlapping_files_alone(tmp_path):
+    repo, installed, head, candidate, merge = await _wide_onto(tmp_path)
+    asked: list[str] = []
+    rewrite = _on(_config(a="11", g="70"), _config(a="10", g="70"))
+
+    async def completion(_system: str, prompt: str) -> CompletionReply:
+        asked.append(prompt)
+        return CompletionReply(json.dumps({"patch": rewrite}), TokenCounts(1, 1), None)
+
+    resolved = await LlmPatchResolver(completion, repo, "model").resolve(merge, candidate)
+
+    (to_rewrite,) = [prompt.split("Why it does not apply")[0] for prompt in asked]
+    assert "config.py" in to_rewrite and "scheduler.py" not in to_rewrite
+    built = _built(apply(await repo.read_recipe(head), resolved.delta).component("vllm"), installed, tmp_path)
+    assert built == {"config.py": "".join(_config(a="11", g="70")), "scheduler.py": "policy = 'lpm'\n"}

@@ -30,6 +30,7 @@ from hyperloom.contracts.recipe import (
 )
 from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
+    BlobError,
     BlobStore,
     ComponentLayout,
     PackageLocator,
@@ -49,6 +50,8 @@ _UPDATE_REF = "update-ref"
 _NO_COMMIT = "0" * 40
 # The notebook knows a state only by its full commit id; git would also resolve a branch name or a short id.
 _COMMIT_ID = re.compile(r"[0-9a-f]{40}")
+# The path ``_put_patch`` gives a patch it keeps, which names the blob it is kept in.
+_STORED_PATCH = re.compile(rf"{re.escape(PATCH_ROOT)}/[^/]+/(?P<sha256>[0-9a-f]{{64}})\.patch")
 # Plumbing on a local bare repository takes milliseconds; this only bounds a wedged filesystem.
 GIT_TIMEOUT_S = 60.0
 # Session commits carry this identity whoever runs the session, so the operator's git config never decides it.
@@ -197,10 +200,18 @@ class GitExperimentRepo:
         return await asyncio.to_thread(self._apply_error, stack, text)
 
     async def patch_text(self, commit: str, path: str) -> str:
+        """Also the text of a patch :meth:`store_patch` kept under ``path`` that the recipe does not name: a patch
+        conflict a merge split off a candidate's patch is in no recipe until the resolver rewrites it."""
         recipe = await self.read_recipe(commit)
         for patch in (patch for component in recipe.components for patch in component.patches):
             if patch.path == path:
                 return (await asyncio.to_thread(self._blobs.get, patch.sha256)).decode()
+        stored = _STORED_PATCH.fullmatch(path)
+        if stored is not None:
+            try:
+                return (await asyncio.to_thread(self._blobs.get, stored["sha256"])).decode()
+            except BlobError:
+                pass
         raise KeyError(f"the recipe of {commit} names no patch {path}")
 
     async def checkout(self, commit: str, destination: Path) -> None:

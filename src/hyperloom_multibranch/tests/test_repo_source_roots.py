@@ -129,11 +129,16 @@ async def test_a_patch_spanning_the_package_and_csrc_is_rebased_three_ways(tmp_p
     assert _laid_out(tmp_path, stack) == {path: "".join(_lines(c="30", e="50")) for path in (OPS, KERNEL)}
 
 
-async def test_a_csrc_line_both_sides_changed_stays_a_conflict(tmp_path):
-    *_, merge = await _merged_onto(
+async def test_a_csrc_line_both_sides_changed_stays_a_conflict_and_the_package_file_is_rebased(tmp_path):
+    repo, head, merge = await _merged_onto(
         tmp_path, _edit(ops={"c": "30"}, kernel={"c": "30", "h": "80"}), _edit(ops={"e": "50"}, kernel={"c": "31"})
     )
 
     (conflict,) = merge.patch_conflicts
+    (rebased,) = merge.rebased_patches
     assert conflict.component == "aiter" and "does not apply" in conflict.detail
-    assert merge.rebased_patches == ()
+    rest = await repo.patch_text(head, conflict.path)
+    assert KERNEL in rest and OPS not in rest
+    stack = apply(await repo.read_recipe(head), merge.delta).component("aiter")
+    assert stack is not None and stack.patches[-1] == rebased.patch
+    assert _laid_out(tmp_path, stack) == {OPS: "".join(_lines(c="30", e="50")), KERNEL: "".join(_lines(c="30", h="80"))}

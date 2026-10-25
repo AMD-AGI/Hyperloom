@@ -177,7 +177,7 @@ async def test_an_integration_merge_keeps_what_either_side_leaves_unexpressed(re
     assert (await repo.read_recipe(merged)).unexpressed == ("setup_commands",)
 
 
-async def test_a_stored_patch_reads_back_from_the_commits_whose_recipe_names_it(repo, blobs):
+async def test_a_stored_patch_reads_back_from_any_commit_and_an_unknown_one_is_a_key_error(repo, blobs):
     root = await repo.head(INTEGRATION_BRANCH)
     await repo.create_branch("s1", root)
 
@@ -187,8 +187,10 @@ async def test_a_stored_patch_reads_back_from_the_commits_whose_recipe_names_it(
     assert stored.path.startswith("patch/vllm/")
     assert blobs.get(stored.sha256) == PATCH.encode()
     assert await repo.patch_text(tip, stored.path) == PATCH
-    with pytest.raises(KeyError):
-        await repo.patch_text(root, stored.path)
+    assert await repo.patch_text(root, stored.path) == PATCH
+    for unknown in ("patch/vllm/0001-fix.patch", f"patch/vllm/{'0' * 64}.patch"):
+        with pytest.raises(KeyError):
+            await repo.patch_text(tip, unknown)
 
 
 async def test_a_checkout_writes_every_file_the_recipe_names_at_its_path(tmp_path, repo, blobs):
