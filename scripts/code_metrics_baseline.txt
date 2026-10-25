@@ -594,7 +594,7 @@ function-lines src/hyperloom/orchestrator/phases/sweep.py::SweepPhase._start_con
 function-lines src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_specialist_gpu_request 82
 function-lines src/hyperloom/orchestrator/prompts/prompt_builder.py::_section_decision_framework 102
 function-lines src/hyperloom/orchestrator/prompts/prompt_builder.py::build_orchestration_prompt 86
-function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_framework_rewrite_specialist 125
+function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_framework_rewrite_specialist 95
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_kernel_switch_specialist 81
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_serving_specialist 83
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_static_recon_specialist 91

@@ -90,7 +90,7 @@ def test_prompt_explains_why_the_default_off_switch_is_enforced():
     """A rule with a stated reason survives an LLM's judgement; a bare rule may not."""
     text = _focus_text()
     assert "defaults OFF" in text or "default-off" in text
-    assert "parity leg" in text
+    assert "must be inert" in text
     assert "independently measurable" in text
 
 
@@ -410,11 +410,12 @@ def test_scriptable_dispatch_drops_the_serving_hot_path_language(tmp_path):
     assert "step-invariant" in prompt
 
 
-def test_serving_dispatch_is_unchanged(tmp_path):
-    """The serving arm keeps its domain and its own hot-path language."""
+def test_serving_dispatch_keeps_its_domain_and_the_switch_contract(tmp_path):
+    """The serving arm keeps its domain and its own hot-path language, and delivers its rewrites switched too."""
     assert _dispatch(tmp_path, "sglang")["domain"] == "serving_specialist"
     prompt = _dispatched_prompt(tmp_path, "sglang")
-    assert "framework_switches" not in prompt
+    assert "framework rewrite specialist" not in prompt
+    assert "framework_switches" in prompt
 
 
 def test_scriptable_dispatch_inlines_the_measured_evidence(tmp_path):

@@ -918,6 +918,20 @@ async def test_parity_guards_the_inert_keep_too(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_an_agentic_replay_keeps_a_switched_patch_dormant_without_a_parity_hour(tmp_path, monkeypatch):
+    """There the parity leg is a whole replay hour, judged in a band narrower than the replay's own drift."""
+    from hyperloom.orchestrator.actions.executors import integrate_patch
+
+    monkeypatch.setattr(integrate_patch, "agentx_enabled", lambda: True)
+    result, _, _, legs = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2, parity_delta_pct=-5.0)
+
+    assert [leg for leg in legs if leg.get("unset_envs")] == []
+    assert result["status"] == "kept_inert"
+    assert result["switch_off_parity"]["ran"] is False
+    assert "agentic replay" in result["switch_off_parity"]["reason"]
+
+
+@pytest.mark.asyncio
 async def test_a_correctness_failure_still_spends_a_parity_leg_on_a_switched_bundle(tmp_path, monkeypatch):
     """A quality regression condemns one switch, not the whole bundle."""
     result, repo, _, legs = await _run_rewrite_integrate(

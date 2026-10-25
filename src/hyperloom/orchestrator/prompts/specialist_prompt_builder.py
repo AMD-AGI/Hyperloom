@@ -696,6 +696,53 @@ def _focus_enablement_specialist(
     ]
 
 
+def _switch_contract_lines() -> list[str]:
+    """The default-off switch contract a source rewrite is delivered under, whichever domain authors it.
+
+    It is also what lets a rewrite below the KEEP threshold count at all: kept dormant behind its switch, it is
+    benchmarked with every other dormant lever, where the hand-tuned GLM-5.3 stack found most of its 44 patches.
+    """
+    return [
+        "**Deliverable contract — every rewrite is a default-off switch**",
+        "Each rewrite MUST be gated by its own environment switch that defaults",
+        "OFF, so that with no switches set the code path is byte-for-byte the",
+        "original. This is not a style preference; it is what makes each rewrite",
+        "independently measurable and composable, and it is checked:",
+        "- with every switch unset the patch must be inert, and a rewrite that",
+        "  changes behaviour when disabled is rejected;",
+        "- accepted switches become search levers, so the orchestrator measures",
+        "  each one's own contribution and searches combinations rather than",
+        "  taking your bundle as given.",
+        "",
+        "**The manifest is not optional and not documentation — it is what makes",
+        "the guarantees above run.** With a gate the manifest does not declare,",
+        "nothing is turned on for the measurement, no inertness check runs and no",
+        "lever is registered: the patch is benched as an ordinary diff and whatever",
+        "it does when 'off' is never checked. Integration now refuses a deliverable",
+        "whose patch reads an `os.environ` switch the manifest omits, so an",
+        "undeclared gate costs you the whole attempt.",
+        "",
+        "Alongside the patch, emit a `framework_switches` manifest — one entry per",
+        "switch, each with: `switch` (the env var name), `category` (the kind of",
+        "rewrite, e.g. `eliminate_host_sync`, `fuse_collectives`, `drop_noop_glue`),",
+        "`target` (file and symbol), `evidence` (which measured candidate it",
+        "addresses), `depends_on` (switches that must also be on for this one to",
+        "pay), and `enables` (switches that only pay once this one is on).",
+        "",
+        "**Declare `depends_on` / `enables` honestly — this is load-bearing.**",
+        "An enabler measured alone shows no gain. If you do not declare the",
+        "relationship, it is judged on its standalone number, rejected, and every",
+        "rewrite that depended on it is silently devalued along with it. Declared,",
+        "the whole bundle is benchmarked together and survives on its joint gain.",
+        "",
+        "**A gain you expect below the KEEP threshold is no reason to withhold the",
+        "rewrite.** Below the threshold a switched rewrite stays in the tree, off,",
+        "as a registered lever, and every dormant lever is benchmarked together, so",
+        "rewrites no single round could credit clear the bar jointly. A small but",
+        "real rewrite you decline to write is a gain no later round can recover.",
+    ]
+
+
 def _focus_framework_rewrite_specialist(
     inp: SpecialistPromptInputs,
 ) -> list[str]:
@@ -776,37 +823,7 @@ def _focus_framework_rewrite_specialist(
         "  classifier-free guidance the positive and negative branches alternate,",
         "  so a single-entry cache thrashes to a 0% hit rate.",
         "",
-        "**Deliverable contract — every rewrite is a default-off switch**",
-        "Each rewrite MUST be gated by its own environment switch that defaults",
-        "OFF, so that with no switches set the code path is byte-for-byte the",
-        "original. This is not a style preference; it is what makes each rewrite",
-        "independently measurable and composable, and it is checked:",
-        "- a parity leg runs with every switch unset and must reproduce the",
-        "  baseline within its noise band, so a rewrite that changes behaviour",
-        "  when disabled is rejected;",
-        "- accepted switches become search levers, so the orchestrator measures",
-        "  each one's own contribution and searches combinations rather than",
-        "  taking your bundle as given.",
-        "",
-        "**The manifest is not optional and not documentation — it is what makes",
-        "the guarantees above run.** With a gate the manifest does not declare,",
-        "nothing is turned on for the measurement, no parity leg runs and no lever",
-        "is registered: the patch is benched as an ordinary diff and whatever it",
-        "does when 'off' is never checked. Integration now refuses a deliverable",
-        "whose patch reads an `os.environ` switch the manifest omits, so an",
-        "undeclared gate costs you the whole attempt.",
-        "",
-        "Alongside the patch, emit a `framework_switches` manifest — one entry per",
-        "switch, each with: `switch` (the env var name), `category` (a taxonomy id",
-        "above), `target` (file and symbol), `evidence` (which measured candidate",
-        "it addresses), `depends_on` (switches that must also be on for this one",
-        "to pay), and `enables` (switches that only pay once this one is on).",
-        "",
-        "**Declare `depends_on` / `enables` honestly — this is load-bearing.**",
-        "An enabler measured alone shows no gain. If you do not declare the",
-        "relationship, it is judged on its standalone number, rejected, and every",
-        "rewrite that depended on it is silently devalued along with it. Declared,",
-        "the whole bundle is benchmarked together and survives on its joint gain.",
+        *_switch_contract_lines(),
         "",
         "**Always keep a fallback path.** Guard the fast path on the shapes and",
         "dtypes it actually requires and fall through to the original code",
@@ -1032,6 +1049,8 @@ def _source_patch_altitude_block(inp: SpecialistPromptInputs) -> list[str]:
         "Deliver a unified diff in your worktree `patches/` dir, small (target ≤5",
         "files) and grounded: a patch you cannot point at a profile line or a",
         "source predicate is budget spent for nothing.",
+        "",
+        *_switch_contract_lines(),
     ]
 
 

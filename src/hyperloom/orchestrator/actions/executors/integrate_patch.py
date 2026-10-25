@@ -60,6 +60,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     GRADED_OUTPUT,
     VERDICT_KEEP,
+    agentx_enabled,
     constraint_fields,
     holds_within_band,
     constraint_veto_reason,
@@ -155,6 +156,15 @@ _HYPERLOOM_QUARANTINE_STASH_MSG = "hyperloom-quarantine: unresolved merge cleare
 # spread well under 1%, so a band this wide clears noise by a comfortable margin
 # while still catching a patch that is not actually inert when disabled.
 DEFAULT_SWITCH_OFF_PARITY_BAND_PCT = 2.0
+
+#: Why an agentic replay keeps a switched patch without a switches-off bench. That leg is a whole replay hour, the
+#: replay's own run-to-run drift (6-8.5% on GLM-5.3) is wider than the band it would be judged in, so it would cost
+#: every switched patch a round and then revert most of them on noise; an off path that cannot even import already
+#: fails the switches-on bench before any of this runs.
+_AGENTIC_PARITY_NOT_BENCHED = (
+    "switch-off parity not benched under an agentic replay: one leg is a full replay hour and the replay's run-to-run "
+    "drift is wider than the parity band, so the leg could only revert on noise"
+)
 
 
 #: Where the patches this action applies came from. Every source lands through
@@ -4005,14 +4015,16 @@ class IntegratePatchExecutor:
 
         Returns:
             ``{"ran", "ok", "tput", "delta_pct", "band_pct", "accuracy_pass",
-            "reason"}``. ``ran`` is False when the check was skipped: disabled
-            passes and says so; no usable base to compare against is
-            inconclusive and reverts.
+            "reason"}``. ``ran`` is False when the check was skipped: disabled,
+            or an agentic replay, passes and says why; no usable base to
+            compare against is inconclusive and reverts.
         """
         params = bench.params
         band_pct = float(params.get("switch_off_parity_band_pct", DEFAULT_SWITCH_OFF_PARITY_BAND_PCT))
         if not bool(params.get("enable_switch_off_parity", True)):
             return {"ran": False, "ok": True, "reason": "switch-off parity check disabled"}
+        if agentx_enabled():
+            return {"ran": False, "ok": True, "reason": _AGENTIC_PARITY_NOT_BENCHED}
         if base_tput <= 0:
             return {
                 "ran": False,
