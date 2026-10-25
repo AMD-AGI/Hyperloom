@@ -21,10 +21,10 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
 
 _ENCODING = "utf-8"
-#: What a diagnostic profile captures when the YAML does not say (see :func:`enable_profile`). On the window's start:
-#: the GLM-5.3 replay's decode batch ran a median of 4 (max 10) between 5 and 10 minutes in, as every session's first
-#: turns overlapped, and 1-3 in each 5-minute window after; a capture started at 300 s caught bs 7-9 only.
-_DIAGNOSTIC_CAPTURE: Mapping[str, Any] = {"start_seconds": 900.0, "num_steps": 100, "detailed_annotations": True}
+#: Where a diagnostic profile captures when the YAML does not say. The GLM-5.3 replay's decode batch ran a median
+#: of 4 (max 10) between 5 and 10 minutes in, as every session's first turns overlapped, and 1-3 in each 5-minute
+#: window after; a capture started at 300 s caught bs 7-9 only.
+_STEADY_STATE_CAPTURE: Mapping[str, Any] = {"start_seconds": 900.0, "num_steps": 100}
 
 
 class ServerArgvInvalidError(ValueError):
@@ -222,15 +222,11 @@ def enable_profile(config_path: Path) -> None:
     is the first 20 steps of the replay, which opens on its sessions' cold long-context prefills: every GLM-5.3
     capture taken that way held bs=1 steps only, while the same replay ran 80% of its decode steps at bs>=2 --
     where MTP verify reaches the M>=12 GEMM, MoE and all-reduce shapes several hand-tuned kernel fixes are about.
-
-    Detailed annotations likewise default on. Without them the server records no operator shapes and profiles no
-    graph capture, so the analysis cannot size a single GEMM: every GLM-5.3 trace failed the structure check on
-    both counts and its evidence reported the hot GEMMs' tuned configs as "not available".
     """
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     profile = config["benchmark"].setdefault("profiler", {}).setdefault("torch_profiler", {})
     profile["enabled"] = True
-    for key, value in _DIAGNOSTIC_CAPTURE.items():
+    for key, value in _STEADY_STATE_CAPTURE.items():
         profile.setdefault(key, value)
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
