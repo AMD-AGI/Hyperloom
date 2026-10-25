@@ -568,7 +568,7 @@ function-lines src/kernelforge/gemm_tune/cli.py::run 58
 function-lines src/kernelforge/gemm_tune/model_analyzer.py::analyze_model 74
 function-lines src/kernelforge/gemm_tune/router.py::_select_sglang_dense_tuners 57
 function-lines src/kernelforge/gemm_tune/tier3/dispatch.py::_Bf16DenseAdapter._build 67
-function-lines src/kernelforge/gemm_tune/tier3/generate.py::generate_tuner 61
+function-lines src/kernelforge/gemm_tune/tier3/generate.py::generate_tuner 65
 function-lines src/kernelforge/gemm_tune/tier3/runner.py::attempt_generated_tuner 101
 function-lines src/kernelforge/gemm_tune/tier3/sandbox.py::run_generated_tuner 59
 function-lines src/kernelforge/gemm_tune/tune_robustness.py::run_isolated 59
