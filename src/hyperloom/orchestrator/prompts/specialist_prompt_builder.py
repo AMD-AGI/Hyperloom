@@ -34,6 +34,7 @@ from .proposal_schemas import (
 from ..measurement.runtime_findings import CORRECTNESS_FIX_MAX_DROP_PCT, CORRECTNESS_FIX_RULES
 
 from ..specialists.domains import (
+    CUSTOM_SPECIALIST_KEY,
     DEFAULT_SPECIALIST_MAX_TURNS,
     SpecialistDomain,
     domain_for_tag,
@@ -1053,8 +1054,11 @@ def _source_patch_altitude_block(inp: SpecialistPromptInputs) -> list[str]:
 
 
 #: Patch authors that do not take the switch contract from the shared block: enablement climbs only as far as
-#: runnability needs and is never benched for a gain, and the framework-rewrite focus carries the contract itself.
-_OWN_SWITCH_CONTRACT_DOMAINS = frozenset({"enablement_specialist", "framework_rewrite_specialist"})
+#: runnability needs and is never benched for a gain, the framework-rewrite focus carries the contract itself, and the
+#: operator writes the custom specialist's whole mandate.
+_OWN_SWITCH_CONTRACT_DOMAINS = frozenset(
+    {"enablement_specialist", "framework_rewrite_specialist", CUSTOM_SPECIALIST_KEY}
+)
 
 
 def _switch_contract_block(inp: SpecialistPromptInputs) -> list[str]:
