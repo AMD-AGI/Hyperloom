@@ -31,6 +31,7 @@ from hyperloom.measure.jit.publish import STAGING_PATH, publish_contributions
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.jit.tests.triton_cache import find_kernel, get_group
 from hyperloom.measure.manifest import JitCacheFacts, ResultManifest
+from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC
 from hyperloom.measure.runner import jit as runner_jit
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
 from hyperloom.measure.runner.tests.test_run import (  # noqa: F401 - fixtures
@@ -579,3 +580,14 @@ def test_a_directory_attachment_is_code_no_key_covers_so_every_kind_is_read_only
 
     assert _contributions(manifest) == dict.fromkeys(STATES, False)
     assert "jit cache: triton is read only in this test" in status["message"]
+
+
+def test_a_run_whose_server_never_imported_the_patched_aiter_ends_as_an_inert_patch_not_a_measurement(rig) -> None:
+    """The stand-in server is no Python process, so none notes importing the farm's aiter: the patch never ran."""
+    base, _, _ = rig.run("base", _arm(rig))
+    patched, _, run = rig.run("patched", _arm(rig, roots=_aiter_patch(rig)))
+
+    assert base.outcome.failure_class is None
+    assert (patched.outcome.failure_class, patched.outcome.returncode) == ("infra", HOSTED_INFRA_FAILURE_RC)
+    assert str(patched.outcome.failure_reason).startswith("inert_patch: no process of the server noted importing aiter")
+    assert (run / "scratch" / "test" / "farm" / "site" / "sitecustomize.py").is_file(), "the runner installed the watch"

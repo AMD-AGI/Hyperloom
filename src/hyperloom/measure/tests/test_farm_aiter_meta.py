@@ -35,7 +35,13 @@ from hyperloom.measure.farm import (
 )
 from hyperloom.measure import aiter_merge_hook
 from hyperloom.measure.framework.merge import MergeView
-from hyperloom.measure.runner.import_outcome import INERT_PATCH, read_import_notes, refine_imports
+from hyperloom.measure.runner.import_outcome import (
+    INERT_PATCH,
+    import_notes,
+    install_import_watch,
+    read_import_notes,
+    refine_imports,
+)
 from hyperloom.measure.spec import EnvEntry, EnvRoot
 from hyperloom.measure.tests._recipes import write_tree
 
@@ -136,6 +142,7 @@ def _build(tmp_path: Path, image: Image, **kwargs) -> Farm:
         [_aiter_root()], tmp_path / "farm", python=image.python, read_blob=lambda address: PATCHED, **kwargs
     )
     assert farm is not None
+    install_import_watch(farm)
     return farm
 
 
@@ -412,8 +419,8 @@ def test_a_server_that_failed_before_importing_is_not_called_inert_but_one_that_
 
 def test_an_unreadable_note_is_an_import_from_an_unknown_place(tmp_path, image):
     farm = _build(tmp_path, image)
-    farm.import_notes.mkdir()
-    (farm.import_notes / "41-aiter.json").write_text("{", encoding="utf-8")
+    import_notes(farm).mkdir()
+    (import_notes(farm) / "41-aiter.json").write_text("{", encoding="utf-8")
 
     refined = refine_imports(dict(_ENDED_WELL), farm)
 

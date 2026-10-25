@@ -8,7 +8,7 @@ still import the image's copy: a worker inherits its parent's ``sys.path``, and 
 image's package ahead of the farm in the parent (aiter puts its meta directory first) sends every worker to the image. The
 patch is then inert in the processes that run the model, and the test measures the image.
 
-The farm copies this file as ``sitecustomize.py`` into its ``site`` directory, beside a ``WATCH_FILE`` naming the packages
+The runner copies this file as ``sitecustomize.py`` into the farm's ``site`` directory, beside a ``WATCH_FILE`` naming the packages
 and the directory the notes go to. In every Python process started with that ``PYTHONPATH``, the first time one of the
 packages is executed the hook writes ``<pid>-<package>.json`` with the file it was loaded from. It changes nothing the
 import does; what it cannot do it leaves undone, and it never stops a process from starting.

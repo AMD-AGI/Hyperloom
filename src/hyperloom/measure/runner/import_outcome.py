@@ -8,7 +8,8 @@ interpreter finds it there, but that is the start of the server only: a worker s
 which the framework may have changed by then (aiter puts its meta directory first). A worker that imported the image's
 copy runs none of the patch, and the test would report the image's numbers as the candidate's.
 
-Each process notes where it imported every rebuilt package from (:mod:`.import_origin_hook`, installed by the farm). A
+Each process notes where it imported every rebuilt package from (:mod:`.import_origin_hook`, which
+:func:`install_import_watch` puts in the farm's ``site`` directory as its ``sitecustomize``). A
 test where one of them came from anywhere but the farm ends as an infrastructure failure, ``inert_patch``, naming the file
 that was loaded: it is a ``measurement_failed`` that no negative result is written for, whatever the run itself ended
 with. A test that ended well although no process imported a rebuilt package at all, or whose processes noted nothing,
@@ -21,18 +22,22 @@ before the server answers, and the file read is the same.
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from hyperloom.contracts.measurement import FailureClass
 from hyperloom.measure.farm import Farm
+from hyperloom.measure.runner import import_origin_hook
 from hyperloom.measure.runner.import_origin_hook import ORIGIN_FIELD, PACKAGE_FIELD
 from hyperloom.measure.runner.jit_outcome import failed_outcome
 
-__all__ = ["INERT_PATCH", "ImportNote", "read_import_notes", "refine_imports"]
+__all__ = ["INERT_PATCH", "ImportNote", "import_notes", "install_import_watch", "read_import_notes", "refine_imports"]
 
 INERT_PATCH = "inert_patch"
+_NOTES_DIR = "imports"
+_HOOK_FILE = "sitecustomize.py"
 _SHOWN = 3
 
 
@@ -45,10 +50,28 @@ class ImportNote:
     origin: str
 
 
+def import_notes(farm: Farm) -> Path:
+    """The directory the server's processes note the copy of each rebuilt package they imported in, beside ``site``."""
+    return farm.site.parent / _NOTES_DIR
+
+
+def install_import_watch(farm: Farm) -> None:
+    """Make every Python process started with the farm on its path note where it imports each rebuilt package from."""
+    if not farm.packages:
+        return
+    shutil.copyfile(Path(import_origin_hook.__file__), farm.site / _HOOK_FILE)
+    watch = {
+        import_origin_hook.PACKAGES_KEY: list(farm.packages),
+        import_origin_hook.NOTES_KEY: str(import_notes(farm)),
+    }
+    (farm.site / import_origin_hook.WATCH_FILE).write_text(json.dumps(watch), encoding="utf-8")
+
+
 def read_import_notes(farm: Farm) -> list[ImportNote]:
     """The notes the server's processes left; an unreadable note counts as an import from an unknown place."""
     notes = []
-    for path in sorted(farm.import_notes.glob("*.json")) if farm.import_notes.is_dir() else []:
+    directory = import_notes(farm)
+    for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
             notes.append(ImportNote(int(document["pid"]), str(document[PACKAGE_FIELD]), str(document[ORIGIN_FIELD])))

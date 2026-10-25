@@ -54,7 +54,7 @@ from hyperloom.measure.farm import (
     verify_farm,
 )
 from hyperloom.measure.runner.jit import STAGING_DIR, ColdStart, Surroundings, build_session, cold_start
-from hyperloom.measure.runner.import_outcome import refine_imports
+from hyperloom.measure.runner.import_outcome import install_import_watch, refine_imports
 from hyperloom.measure.runner.jit_outcome import refine_outcome
 from hyperloom.measure.runner.inventory import OutputRejected, drop_agentx_runtime, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
@@ -251,6 +251,8 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
             read_blob=ctx.read_blob,
             inherited=inherited_environment(ctx.environ, spec.process_env, spec.unset_envs),
         )
+        if farm is not None:
+            install_import_watch(farm)
         placement = Placement(
             placed=placed,
             pid_dir=ctx.work / "pids",

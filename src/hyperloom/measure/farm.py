@@ -17,17 +17,14 @@ the farm mirrors the image's meta directory without its ``aiter`` and sets ``AIT
 inherits a meta directory holding an ``aiter`` package is refused. A patch to ``csrc`` or ``hsa`` is a root of its own
 (``aiter_meta``): its patched files are laid over the same mirror, which aiter then builds its modules from.
 
-Which copy each process of the server really imported is noted at run time by
-:mod:`~hyperloom.measure.runner.import_origin_hook`, which the farm installs as the ``sitecustomize`` of its ``site``
-directory; :mod:`~hyperloom.measure.runner.import_outcome` reads the notes.
+Which copy each process of the server really imported is checked by the runner
+(:mod:`~hyperloom.measure.runner.import_outcome`), which watches the imports from the farm's ``site`` directory.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import os
-import shutil
 import subprocess
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass
@@ -38,7 +35,6 @@ import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_MARKER_DIR, AITER_META_WHEEL_DIR
-from hyperloom.measure.runner import import_origin_hook
 from hyperloom.measure.jit.key import AITER_PACKAGE
 from hyperloom.measure.jit.modules import image_aiter_meta
 from hyperloom.measure.spec import EnvEntry, EnvRoot
@@ -67,9 +63,6 @@ _FIND_SPEC = (
 _PROBE_TIMEOUT_SEC = 120
 _AGENTX_DEFAULT_PYTHON = "python3"
 _UTF8 = "utf-8"
-#: Where the processes of the server note which copy of each rebuilt package they imported, beside ``site``.
-IMPORT_NOTES_DIR = "imports"
-_HOOK_FILE = "sitecustomize.py"
 
 
 class FarmError(Exception):
@@ -89,11 +82,6 @@ class Farm:
     roots: tuple[EnvRoot, ...] = ()
     aiter_meta: Path | None = None
     meta_patched: bool = False
-
-    @property
-    def import_notes(self) -> Path:
-        """The directory the server's processes note the copy of each rebuilt package they imported in."""
-        return self.site.parent / IMPORT_NOTES_DIR
 
 
 def locate_package(import_name: str, python: str, cwd: Path) -> Path:
@@ -206,18 +194,7 @@ def build_farm(
     rebuilt = tuple(packages) + (() if meta_root is None else (meta_root,))
     if not rebuilt:
         return None
-    farm = Farm(site, tuple(root.import_name for root in packages), rebuilt, meta, meta_patched=meta_root is not None)
-    _install_import_watch(farm)
-    return farm
-
-
-def _install_import_watch(farm: Farm) -> None:
-    """Make the server's processes note where they import each rebuilt package from (``import_origin_hook``)."""
-    if not farm.packages:
-        return
-    shutil.copyfile(Path(import_origin_hook.__file__), farm.site / _HOOK_FILE)
-    watch = {import_origin_hook.PACKAGES_KEY: list(farm.packages), import_origin_hook.NOTES_KEY: str(farm.import_notes)}
-    (farm.site / import_origin_hook.WATCH_FILE).write_text(json.dumps(watch), encoding=_UTF8)
+    return Farm(site, tuple(root.import_name for root in packages), rebuilt, meta, meta_patched=meta_root is not None)
 
 
 def _build_meta_root(
