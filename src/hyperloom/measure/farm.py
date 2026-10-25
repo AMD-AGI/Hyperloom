@@ -5,7 +5,9 @@
 
 The farm mirrors the installed package: a directory no entry touches is one symlink to the image's directory, a
 directory an entry touches is real, its untouched files are symlinks, an ``upsert`` is a copied file and a ``delete`` is
-absent. The image is never written. Whether the rebuilt copy is what the server imports is then checked with the same
+absent. A directory the package itself writes into while the server runs is real too, whatever the entries touch,
+so nothing a test's server writes reaches the image, where every later test on the node would load it. The image is
+never written. Whether the rebuilt copy is what the server imports is then checked with the same
 interpreter and the same path the server gets: a farm that exists but is not the first import location would measure
 the image's framework and call it the candidate's.
 
@@ -25,9 +27,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import subprocess
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +66,22 @@ _FIND_SPEC = (
 _PROBE_TIMEOUT_SEC = 120
 _AGENTX_DEFAULT_PYTHON = "python3"
 _UTF8 = "utf-8"
+
+#: How the farm lays a directory a package writes into at run time. ``linked``: real, its files links (a writer that
+#: renames a new file over a name replaces the link, not the image's file). ``empty``: real and empty. ``linked_tree``:
+#: real down to every level, its files links, and lock files left out (a lock is opened for writing). ``copied``: real
+#: down to every level, its files copies (a writer that opens a file in place would write through a link).
+_LINKED, _EMPTY, _LINKED_TREE, _COPIED = "linked", "empty", "linked_tree", "copied"
+_WHOLE_TREE = frozenset({_LINKED_TREE, _COPIED})
+_LOCK_SUFFIX = ".lock"
+#: The directories each package writes into while the server runs, by import name. aiter installs a module it built by
+#: writing a temporary file in its JIT directory and renaming it over ``<module>.so`` (``atomic_copy`` of
+#: ``aiter/jit/utils/jit_cache.py``), builds below ``jit/build``, keeps FlyDSL's kernel cache in ``jit/flydsl_cache``
+#: (added by rename, guarded by ``<key>.lock`` files opened read-write) and, when a tuned table has duplicate rows,
+#: rewrites the table in place below ``configs``.
+_RUNTIME_WRITTEN: Mapping[str, Mapping[str, str]] = {
+    AITER_PACKAGE: {"jit": _LINKED, "jit/build": _EMPTY, "jit/flydsl_cache": _LINKED_TREE, "configs": _COPIED},
+}
 
 
 class FarmError(Exception):
@@ -122,18 +141,44 @@ def _touched_directories(entries: Iterable[EnvEntry]) -> set[str]:
     }
 
 
-def _mirror(base: Path, target: Path, relative: str, touched: set[str], skip: set[str]) -> None:
-    """Symlink every file and untouched directory of ``base/relative`` into ``target/relative``."""
-    source, destination = base / relative, target / relative
+@dataclass(frozen=True)
+class _Mirror:
+    """What a mirror of ``base`` into ``target`` lays: ``touched`` directories are real, ``skip`` paths are absent, and
+    a directory in ``written`` (relative path to how it is laid, :data:`_RUNTIME_WRITTEN`) is real whether or not an
+    entry touches it."""
+
+    base: Path
+    target: Path
+    touched: set[str]
+    skip: set[str]
+    written: Mapping[str, str] = field(default_factory=dict)
+
+
+def _lay(mirror: _Mirror, relative: str, mode: str | None) -> None:
+    """Symlink every file and untouched directory of ``base/relative`` into ``target/relative``, the directory laid as
+    ``mode`` says (``None``: its files are links)."""
+    source, destination = mirror.base / relative, mirror.target / relative
     destination.mkdir(parents=True, exist_ok=True)
+    if mode == _EMPTY:
+        return
     for child in sorted(source.iterdir()):
         child_rel = f"{relative}/{child.name}" if relative else child.name
-        if child_rel in skip:
+        if child_rel in mirror.skip:
             continue
-        if child.is_dir() and not child.is_symlink() and child_rel in touched:
-            _mirror(base, target, child_rel, touched, skip)
-        else:
-            (destination / child.name).symlink_to(child)
+        if child.is_dir() and not child.is_symlink():
+            inner = mirror.written.get(child_rel) or (mode if mode in _WHOLE_TREE else None)
+            if inner is not None or child_rel in mirror.touched:
+                _lay(mirror, child_rel, inner)
+                continue
+        _lay_file(child, destination / child.name, mode)
+
+
+def _lay_file(source: Path, destination: Path, mode: str | None) -> None:
+    """Lay one entry of a mirrored directory: a link to the image's, a copy of it, or nothing for a lock file."""
+    if mode == _COPIED and source.is_file():
+        shutil.copy2(source, destination)
+    elif not (mode == _LINKED_TREE and source.name.endswith(_LOCK_SUFFIX)):
+        destination.symlink_to(source)
 
 
 def _write_upsert(entry: EnvEntry, destination: Path, read_blob: Callable[[str], bytes]) -> None:
@@ -158,7 +203,8 @@ def _build_root(
         if not (base / path).is_file():
             raise FarmError(f"{root.id}: {path} is to be deleted but the installed {root.import_name} has no such file")
     touched = _touched_directories(root.entries)
-    _mirror(base, target, "", touched, deletes | {e.path for e in root.entries if e.op == "upsert"} | left_out)
+    skip = deletes | {e.path for e in root.entries if e.op == "upsert"} | left_out
+    _lay(_Mirror(base, target, touched, skip, _RUNTIME_WRITTEN.get(root.import_name, {})), "", None)
     for entry in root.entries:
         if entry.op == "upsert":
             _write_upsert(entry, target / entry.path, read_blob)
@@ -225,7 +271,7 @@ def _build_meta_root(
     target, left_out = site / AITER_META_WHEEL_DIR, frozenset({AITER_PACKAGE})
     image_meta = _checked_aiter_meta(aiter)
     if root is None:
-        _mirror(image_meta, target, "", set(), set(left_out))
+        _lay(_Mirror(image_meta, target, set(), set(left_out)), "", None)
         return target
     shadowing = next((entry.path for entry in root.entries if entry.path.split("/")[0] == AITER_PACKAGE), None)
     if shadowing is not None:
