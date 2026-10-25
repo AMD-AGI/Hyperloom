@@ -147,6 +147,10 @@ class TestCall:
     #: The long-context check this test runs after its rounds, on a fresh server of its own launch
     #: (``measure.long_context``); ``None`` runs no check. It never changes the test's rounds or its outcome.
     long_context: LongContextPlan | None = None
+    #: The tuned tables the test's rebuilt aiter patches, by their path below aiter's ``configs``: the patched file, or
+    #: ``None`` for one the patch deletes (``measure.farm.patched_configs``). The test's private copies of the tables
+    #: (``measure.framework.copies``) carry them, so the server reads, and builds its modules from, the patched tables.
+    tables_patch: Mapping[str, Path | None] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

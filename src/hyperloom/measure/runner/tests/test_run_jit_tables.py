@@ -12,10 +12,12 @@ test's table, in the test's JIT directory, and the image keeps its own."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
+from hyperloom.measure.framework.base import FRAMEWORK_BASE_FILE, framework_envs
 from hyperloom.measure.runner.tests import test_run_jit
 from hyperloom.measure.runner.tests.test_run import _blob
 from hyperloom.measure.runner.tests.test_run_jit import (  # noqa: F401 - fixtures
@@ -163,3 +165,27 @@ def test_a_module_this_test_built_from_its_table_that_lacks_a_kernel_is_the_cand
 
     assert manifest.outcome.failure_class == "candidate"
     assert manifest.outcome.failure_reason.startswith("kernel_not_built: module_gemm was built by this test")
+
+
+def test_a_configs_patch_reaches_the_server_of_a_sandbox_that_reads_private_copies_of_the_tables(
+    image, monkeypatch
+) -> None:
+    """A local sandbox's runner gives the server private copies of the session's tables and names them by every variable;
+    the copies carry the patched table, so the module the patch makes stale is built from it and not the image's."""
+    for name, value in framework_envs(image.tmp_path / "framework", str(image.bases / "aiter" / "configs")).items():
+        monkeypatch.setenv(name, value)
+    served: list[str] = []
+    grid = test_run_jit._CompilingGrid.__call__
+
+    async def reading(self, **kwargs):
+        served.append(Path(os.environ[TABLE_VARIABLE]).read_text(encoding="utf-8"))
+        return await grid(self, **kwargs)
+
+    monkeypatch.setattr(test_run_jit._CompilingGrid, "__call__", reading)
+
+    manifest, status, run = image.run("private", _deliver(image, _by_patch(image, TEST_TABLE)))
+
+    assert served and set(served) == {TEST_TABLE}
+    _assert_built_in_the_test(image, manifest, status)
+    document = json.loads((run / "out" / "files" / FRAMEWORK_BASE_FILE).read_text())
+    assert document["isolation"] == "private_copies" and document["configs_patched"] == ["a8w8_tuned_gemm.csv"]

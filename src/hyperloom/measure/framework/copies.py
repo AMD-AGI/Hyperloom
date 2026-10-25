@@ -13,6 +13,10 @@ A value that lists ``DEFAULT_TABLE_PLACEHOLDER`` beside a file of tuned rows (a 
 default table for that variable plus those rows; ``framework.rows`` takes the rows' shapes out of the default's copy
 first, since aiter rewrites its sources and raises on a shape both carry, and the result says how many it took out.
 
+A test whose rebuilt aiter patches tables below ``configs`` (``TestCall.tables_patch``) gets them in its private copies,
+laid over the snapshot's: the copies are what every variable names, so a server given the snapshot's alone would read,
+and build its table-generated modules from, the image's tables, and the patch would never be measured.
+
 What no variable redirects is checked instead: the shared tables are hashed against the snapshot before and after the
 test, anything that differs is put back, and the result says so (``framework_base.json``, covered by the signature).
 aiter writes the merged view of a variable to ``/tmp/aiter_configs`` whatever the environment says, and local sandboxes
@@ -31,7 +35,7 @@ import logging
 import os
 import shutil
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -63,6 +67,7 @@ log = logging.getLogger(__name__)
 
 _SCHEMA = "hyperloom.framework-base/v1"
 _CONFIGS = "configs"
+_MODEL_CONFIGS = "model_configs"
 _SANDBOX_ROOT_ENV = "HYPERLOOM_SANDBOX_ROOT"
 _UTF8 = "utf-8"
 _TABLE_DIGEST_CHARS = 16
@@ -79,8 +84,9 @@ class PrivateFramework:
 class _Redirect:
     """Copies of the tables the test reads, in a directory of the test's own, and the variable values that name them."""
 
-    def __init__(self, snapshot: Snapshot, private: Path) -> None:
+    def __init__(self, snapshot: Snapshot, private: Path, patched: Mapping[str, str | None]) -> None:
         self._snapshot = snapshot
+        self._patched = patched
         self._configs = private / _CONFIGS
         self._tables = private / "tables"
         self._points = private / "points"
@@ -158,8 +164,8 @@ class _Redirect:
             return None
         pattern = f"*{variable.tuned}*.csv"
         models = [
-            str(self._configs / "model_configs" / model)
-            for model in self._snapshot.model_order
+            str(self._configs / _MODEL_CONFIGS / model)
+            for model in self._model_order()
             if fnmatch.fnmatchcase(model, pattern) and "untuned" not in model
         ]
         default = self._configs / variable.default
@@ -167,6 +173,14 @@ class _Redirect:
             # aiter skips a listed table that does not exist, and merges what is left only when more than one is listed.
             return os.pathsep.join([str(self._snapshot.source / variable.default), *models]) if models else None
         return os.pathsep.join([str(default), *models])
+
+    def _model_order(self) -> list[str]:
+        """The per-model tables in the order aiter merges them: the snapshot's, less those the patch deletes, then those
+        it adds."""
+        prefix = f"{_MODEL_CONFIGS}/"
+        changed = {name.removeprefix(prefix): sha for name, sha in self._patched.items() if name.startswith(prefix)}
+        kept = [model for model in self._snapshot.model_order if changed.get(model, "") is not None]
+        return kept + sorted(model for model, sha in changed.items() if sha is not None and model not in kept)
 
     def process_env(self, call: TestCall, unset: frozenset[str]) -> dict[str, str]:
         """The value of every ``AITER_CONFIG_*`` variable the test's process sees, with private tables."""
@@ -211,9 +225,8 @@ class _Redirect:
     def rewritten(self, private: Path) -> list[str]:
         """The private files that differ from what they were copied from: aiter's write-back, kept in the test."""
         configs = tree_files(self._configs)
-        names = {
-            name for name in (*configs, *self._snapshot.files) if configs.get(name) != self._snapshot.files.get(name)
-        }
+        began = {**self._snapshot.files, **self._patched}
+        names = {name for name in (*configs, *began) if configs.get(name) != began.get(name)}
         changed = {f"{_CONFIGS}/{name}" for name in names}
         for listed in self.copied.values():
             for table in listed:
@@ -242,6 +255,23 @@ def refuse_default_table(call: TestCall, why: str) -> None:
                 f"{named} lists the image's default table next to tuned rows, which needs the test's private "
                 f"copies of the framework tables, and the test has none ({why})"
             )
+
+
+def _lay_patch(patch: Mapping[str, Path | None], configs: Path) -> dict[str, str | None]:
+    """Lay the test's patched tables over its private ``configs``; the hash of each by its path below it, ``None`` for a
+    table the patch deletes."""
+    laid: dict[str, str | None] = {}
+    for relative, source in sorted(patch.items()):
+        target = configs / relative
+        if source is None:
+            target.unlink(missing_ok=True)
+            laid[relative] = None
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.unlink(missing_ok=True)
+        shutil.copyfile(source, target)
+        laid[relative] = file_sha256(target)
+    return laid
 
 
 def _private_base() -> str | None:
@@ -277,6 +307,7 @@ class _TestBase:
             "redirected": [],
             "point_tables": {},
             "rows_only": {},
+            "configs_patched": [],
             "private_rewritten": [],
             "merge_isolation": "shared",
             "merge_reason": "no private directory",
@@ -312,7 +343,8 @@ class _TestBase:
         private = self._private = Path(tempfile.mkdtemp(prefix="hl-framework-", dir=_private_base()))
         shutil.copytree(snapshot.copies, private / _CONFIGS)
         private_sha = files_digest(tree_files(private / _CONFIGS))
-        redirect = self._redirect = _Redirect(snapshot, private)
+        patched = _lay_patch(call.tables_patch, private / _CONFIGS)
+        redirect = self._redirect = _Redirect(snapshot, private, patched)
         unset = frozenset(call.unset_envs) | frozenset(
             call.session_facts.reference_unset_envs if call.session_facts else ()
         )
@@ -323,6 +355,7 @@ class _TestBase:
             isolation="private_copies",
             private_sha256=private_sha,
             matches_session=private_sha == self._session,
+            configs_patched=sorted(patched),
             redirected=sorted(values),
             point_tables=redirect.provenance(),
             rows_only=redirect.rows_only,

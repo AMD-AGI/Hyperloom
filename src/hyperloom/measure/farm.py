@@ -50,6 +50,7 @@ __all__ = [
     "image_aiter_meta",
     "inherited_environment",
     "locate_package",
+    "patched_configs",
     "patches_aiter_sources",
     "place_farm",
     "prepend_pythonpath",
@@ -66,6 +67,7 @@ _FIND_SPEC = (
 _PROBE_TIMEOUT_SEC = 120
 _AGENTX_DEFAULT_PYTHON = "python3"
 _UTF8 = "utf-8"
+_CONFIGS_DIR = "configs"
 
 #: How the farm lays a directory a package writes into at run time. ``linked``: real, its files links (a writer that
 #: renames a new file over a name replaces the link, not the image's file). ``empty``: real and empty. ``linked_tree``:
@@ -80,7 +82,7 @@ _LOCK_SUFFIX = ".lock"
 #: (added by rename, guarded by ``<key>.lock`` files opened read-write) and, when a tuned table has duplicate rows,
 #: rewrites the table in place below ``configs``.
 _RUNTIME_WRITTEN: Mapping[str, Mapping[str, str]] = {
-    AITER_PACKAGE: {"jit": _LINKED, "jit/build": _EMPTY, "jit/flydsl_cache": _LINKED_TREE, "configs": _COPIED},
+    AITER_PACKAGE: {"jit": _LINKED, "jit/build": _EMPTY, "jit/flydsl_cache": _LINKED_TREE, _CONFIGS_DIR: _COPIED},
 }
 
 
@@ -343,6 +345,23 @@ def _launch_environment(config: dict[str, Any]) -> dict[str, Any]:
     if is_magpie_agentx(bench):
         return bench["agentx"].setdefault("launch_overrides", {}).setdefault("env", {})
     return bench.setdefault("envs", {})
+
+
+def patched_configs(farm: Farm | None) -> dict[str, Path | None]:
+    """The tuned tables the farm's aiter patches, by their path below ``configs``: the farm's copy of each, ``None`` for
+    one the patch deletes. Empty when the farm rebuilds no aiter or leaves its ``configs`` as the image has them."""
+    if farm is None:
+        return {}
+    package = farm.site / AITER_PACKAGE
+    patched: dict[str, Path | None] = {}
+    for root in farm.roots:
+        if root.import_name != AITER_PACKAGE:
+            continue
+        for entry in root.entries:
+            relative = entry.path.removeprefix(f"{_CONFIGS_DIR}/")
+            if relative != entry.path:
+                patched[relative] = None if entry.op == "delete" else package / entry.path
+    return patched
 
 
 def place_farm(config_path: Path, farm: Farm) -> Mapping[str, Any]:

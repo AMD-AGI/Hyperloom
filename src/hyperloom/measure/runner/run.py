@@ -55,6 +55,7 @@ from hyperloom.measure.farm import (
     FarmError,
     build_farm,
     inherited_environment,
+    patched_configs,
     server_environment,
     server_python,
     verify_farm,
@@ -490,7 +491,8 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     _patch_replay_client(ctx, points, inferencex)
     surface = _surface_sha256(spec, points)
     session = _jit_session(ctx, spec, points, farm, facts)
-    call = dataclasses.replace(_call(ctx, spec, points, inferencex, progress), jit=session)
+    tables = patched_configs(farm)
+    call = dataclasses.replace(_call(ctx, spec, points, inferencex, progress), jit=session, tables_patch=tables)
     ctx.cards.check(BEFORE_TEST)
     ctx.cards.enforce_guard()
     progress.phase("running")
