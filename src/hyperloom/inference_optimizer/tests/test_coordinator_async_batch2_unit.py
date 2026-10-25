@@ -33,6 +33,7 @@ from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.actions.executors import _patch_artifacts as patch_artifacts
 from hyperloom.orchestrator.actions.executors import _patch_sources as patch_sources
+from hyperloom.orchestrator.loop.verdicts import CriticRuling
 
 
 def _idle_intent() -> Intent:
@@ -3295,8 +3296,7 @@ async def test_framework_agent_reject_records_critic_denied(coord: Coordinator, 
     await coord.router._handle_single_verdict(
         source="critic",
         pending=pending,
-        verdict="reject",
-        reasoning="unsafe",
+        ruling=CriticRuling(verdict="reject", reasoning="unsafe"),
     )
     prog = coord.shared_state.framework_agent_phase_progress
     assert any(p.get("status") == "critic_denied" and p.get("candidate_id") == "c1" for p in prog)
@@ -3330,8 +3330,7 @@ async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, mon
     await coord.router._handle_single_verdict(
         source="critic",
         pending=pending,
-        verdict="approve",
-        reasoning="ok",
+        ruling=CriticRuling(verdict="approve", reasoning="ok"),
     )
     assert enq
 
