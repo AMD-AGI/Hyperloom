@@ -1462,32 +1462,23 @@ def _skip_to_close_reason(
     return reason, evidence
 
 
-def skip_to_close_contradiction(state: Any, *, now_unix: float | None = None) -> str | None:
-    """What the session's own facts say against a new ``skip_to_close``, or ``None`` when they leave it standing.
+def skip_to_close_contradiction(state: Any) -> str | None:
+    """Why the session's own facts refuse a new ``skip_to_close``, or ``None`` when they admit it.
 
-    The hint ends the run on the agent's word, so it may only earn a close those facts name: a baseline that was
-    never measured, or a budget that cannot fund another cycle. Anything else would be booked as
-    ``global_converged`` for a run that never converged. GPU work that keeps failing ends the run through its sweep.
+    Only an unmeasured baseline or a budget that cannot fund another cycle earns that close; anything else would
+    be booked as ``global_converged`` for a run that never converged.
     """
     baseline_tput = _number(state.baseline_tput) or 0.0
-    reason, evidence = _skip_to_close_reason(
-        {
-            "session_remaining_sec": session_remaining_seconds(state, now_unix=now_unix),
-            "cycle_reloop_min_remaining_sec": _cycle_reloop_min_remaining_sec(state),
-            "baseline_tput": baseline_tput,
-        },
+    remaining = session_remaining_seconds(state)
+    floor = _cycle_reloop_min_remaining_sec(state)
+    reason, _ = _skip_to_close_reason(
+        {"session_remaining_sec": remaining, "cycle_reloop_min_remaining_sec": floor, "baseline_tput": baseline_tput},
         ESCALATE_HINT_SKIP_TO_CLOSE,
     )
     if reason != "global_converged":
         return None
-    remaining = evidence.get("session_remaining_seconds")
-    if remaining is None:
-        return f"baseline_tput={baseline_tput:.2f} is measured and no deadline bounds the session"
-    floor_min = evidence["min_remaining_sec_effective"] / 60.0
-    return (
-        f"baseline_tput={baseline_tput:.2f} is measured and {remaining / 60.0:.0f} min remain, "
-        f"above the {floor_min:.0f} min a cycle needs"
-    )
+    left = "no deadline bounds the session" if remaining is None else f"{remaining / 60.0:.0f} min remain"
+    return f"baseline_tput={baseline_tput:.2f} is measured and {left}; a new cycle needs {floor / 60.0:.0f} min"
 
 
 def _holds_for_initial_analysis(baseline: dict[str, Any]) -> bool:

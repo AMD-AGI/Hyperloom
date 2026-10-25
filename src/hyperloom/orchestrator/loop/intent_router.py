@@ -1292,18 +1292,12 @@ class IntentRouter(CoordinatorCollaborator):
             return
         contradiction = skip_to_close_contradiction(self.shared_state) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None
         if contradiction is not None:
-            await self.record_policy_denied(
-                source,
-                intent,
-                PolicyDenied(
-                    f"skip_to_close refused: {contradiction}",
-                    rule="skip_to_close_contradicted",
-                    hint=(
-                        "A run with a measured baseline and budget for another cycle is not abandoned: keep driving "
-                        "this phase. The Coordinator closes the run itself when the budget runs out or the sweep fails."
-                    ),
-                ),
+            denied = PolicyDenied(
+                f"skip_to_close refused: {contradiction}",
+                rule="skip_to_close_contradicted",
+                hint="Keep driving this phase; the run closes itself when the budget runs out or the sweep fails.",
             )
+            await self.record_policy_denied(source, intent, denied)
             return
         # skip_to_kernel / skip_to_close are deferred; next compute_next_phase picks them up.
         self.shared_state.set_pending_escalate_hint(hint)
