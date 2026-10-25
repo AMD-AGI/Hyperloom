@@ -38,6 +38,7 @@ from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
+from hyperloom_multibranch.rulegate.inferencex import FLOOR_PCT
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling import prelude as prelude_module
 from hyperloom_multibranch.scheduling.prelude import (
@@ -502,7 +503,7 @@ async def test_baseline_is_measured_through_the_toolbox(tmp_path: Path) -> None:
     assert baseline.root_commit == result.root_commit
     assert sorted(baseline.request_ids) == sorted(requests)
     assert baseline.values[GRADED_OUTPUT] == pytest.approx(1000.0)
-    assert dict(baseline.threshold_pct) == {GRADED_OUTPUT: 1.0}
+    assert dict(baseline.threshold_pct) == {GRADED_OUTPUT: FLOOR_PCT}
     assert set(peers.toolbox.results) == set(requests)
     for request in requests.values():
         assert (request.branch_id, request.parent_commit) == (INTEGRATION_BRANCH, result.root_commit)

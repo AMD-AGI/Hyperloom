@@ -57,14 +57,14 @@ class Reports:
     seconds: float = 0.0
 
 
-# Per (branch, purpose), in the order the tests are submitted. Baselines 1000 and 1004: the bar is 1.0% (the floor).
-# s1's patch gains 6% and holds on the retest; s2's change gains 4% and does not.
+# Per (branch, purpose), in the order the tests are submitted. Baselines 1000 and 1004: the bar is the floor.
+# s1's patch gains 6% and holds on the retest; s2's change gains 4% and loses it on the retest.
 SCRIPT = {
     (INTEGRATION_BRANCH, "baseline"): [Reports(1000.0, 0.80), Reports(1004.0, 0.81)],
     ("s1", "explore"): [Reports(1060.0, 0.80, seconds=3.0), Reports(1001.0, 0.80, seconds=6.0)],
     ("s1", "confirm"): [Reports(1055.0, 0.80)],
     ("s2", "explore"): [Reports(1040.0, 0.80, seconds=3.0), Reports(1000.0, 0.80)],
-    ("s2", "confirm"): [Reports(1003.0, 0.80)],
+    ("s2", "confirm"): [Reports(995.0, 0.80)],
     ("s3", "explore"): [Reports(1000.0, 0.80), Reports(1000.0, 0.80)],
 }
 
