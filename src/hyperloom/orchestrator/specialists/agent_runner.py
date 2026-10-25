@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import time
 from concurrent.futures import CancelledError as ScopeCancelled
 from dataclasses import dataclass, field
@@ -37,7 +38,7 @@ from typing import Any, Awaitable, Callable, Literal, Mapping, Protocol
 
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.env_safety import RunAs, RunAsError, redact_file_in_place
-from hyperloom.common.fs_utils import create_nofollow, read_text_nofollow, write_text_nofollow
+from hyperloom.common.fs_utils import create_nofollow, read_bytes_nofollow, read_text_nofollow, write_text_nofollow
 from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
@@ -602,11 +603,15 @@ class LocalAgentRunner:
             self._claims.discard(claim)
 
     def _spawn(self, spec: AgentLaunchSpec, argv: list[str], env: dict[str, str], demote: dict[str, Any]) -> Any:
-        prompt = spec.workspace / PROMPT_FILE
+        prompt = _read_prompt(spec.workspace / PROMPT_FILE)
         if spec.stdin_open:
             stdin: Any = subprocess.PIPE
+        elif prompt is None:
+            stdin = subprocess.DEVNULL
         else:
-            stdin = prompt.open("rb") if prompt.exists() else subprocess.DEVNULL
+            stdin = tempfile.TemporaryFile()
+            stdin.write(prompt)
+            stdin.seek(0)
         try:
             # Created fresh, never through a name a previous (possibly demoted) child left in the workspace.
             with create_nofollow(spec.workspace, (PROCESS_LOG,), mode=PRIVATE_FILE_MODE) as out:
@@ -623,8 +628,8 @@ class LocalAgentRunner:
         finally:
             if hasattr(stdin, "close"):
                 stdin.close()
-        if spec.stdin_open and prompt.exists():
-            proc.stdin.write(prompt.read_bytes())
+        if spec.stdin_open and prompt is not None:
+            proc.stdin.write(prompt)
             proc.stdin.flush()
         return proc
 
@@ -795,3 +800,12 @@ class LocalAgentRunner:
             "max_concurrent_specialists": self._max_concurrent,
             "ts_unix": self._wall(),
         }
+
+
+def _read_prompt(path: Path) -> bytes | None:
+    """The bytes of ``prompt.md``, ``None`` when there is none; a symlink (or FIFO, or device) there is refused, never
+    followed: a demoted child of an earlier session could have left one pointing at a file only the runner may read."""
+    try:
+        return read_bytes_nofollow(path)
+    except FileNotFoundError:
+        return None

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from pathlib import Path
@@ -223,3 +224,33 @@ async def test_a_demoted_child_runs_as_the_user_writes_its_worktree_and_reads_on
         assert proof["proof_prompt.rc"] != "0"
     finally:
         shutil.rmtree(base, ignore_errors=True)
+
+
+def _reading_popen(seen: list[bytes]):
+    def popen(argv: list[str], **kwargs: Any) -> Any:
+        seen.append(kwargs["stdin"].read())
+        raise _Refused("spawn refused by test")
+
+    return popen
+
+
+async def test_the_prompt_reaches_the_cli_on_stdin(tmp_path: Path) -> None:
+    seen: list[bytes] = []
+    runner = make_runner(tmp_path / "session", popen=_reading_popen(seen))
+    with pytest.raises(_Refused):
+        await runner.launch(make_spec(tmp_path / "w"))
+    assert seen == [b"do the task\n"]
+
+
+async def test_a_symlinked_prompt_is_refused_not_followed(tmp_path: Path) -> None:
+    seen: list[bytes] = []
+    runner = make_runner(tmp_path / "session", popen=_reading_popen(seen))
+    spec = make_spec(tmp_path / "w")
+    secret = tmp_path / "runner-only.txt"
+    secret.write_text("not for the agent\n", encoding="utf-8")
+    (spec.workspace / "prompt.md").unlink()
+    (spec.workspace / "prompt.md").symlink_to(secret)
+    with pytest.raises(OSError) as refused:
+        await runner.launch(spec)
+    assert refused.value.errno == errno.ELOOP
+    assert seen == []
