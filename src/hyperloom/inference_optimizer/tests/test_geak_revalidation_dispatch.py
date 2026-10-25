@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant
+from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, GridRecipe
 from hyperloom.orchestrator.actions.executors._proposal_identity import BaseControls, effective_fingerprint
 from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
 from hyperloom.orchestrator.actions.executors._subprocess_kill import REAP_MARK_ENV, run_with_session_kill
@@ -22,6 +22,7 @@ from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEE
 
 from ._geak_helpers import forbid_geak_launch, stop_geak_before_launch
 from hyperloom.orchestrator.state.task_registry import TaskSpec
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
 
 
 @pytest.fixture
@@ -322,14 +323,17 @@ async def test_geak_launch_controls_reach_materialized_rebench(
         output = tmp_path / f"materialized_{len(calls)}"
         output.mkdir()
         path = _build_variant_yaml(
-            kwargs["base_yaml_path"],
-            kwargs["base_extra_args"],
+            GridRecipe(
+                base_yaml_path=kwargs["base_yaml_path"],
+                base=LaunchLayer(extra_server_args=kwargs["base_extra_args"], args_mode=kwargs["base_args_mode"]),
+                target=BenchmarkTarget(
+                    model_path=kwargs["model_path"],
+                    gpu_type=kwargs["gpu_type"],
+                    benchmark_script=kwargs["benchmark_script"],
+                ),
+            ),
             kwargs["grid"][0],
             output_subdir=output,
-            model_path=kwargs["model_path"],
-            gpu_type=kwargs["gpu_type"],
-            benchmark_script=kwargs["benchmark_script"],
-            base_args_mode=kwargs["base_args_mode"],
         )
         calls.append(yaml.safe_load(path.read_text())["benchmark"]["envs"])
         if len(calls) > 1:
@@ -1197,12 +1201,12 @@ async def test_internal_stack_rebench_preserves_baseline_script(
         output = tmp_path / f"variant_{len(calls)}"
         output.mkdir()
         variant_path = _build_variant_yaml(
-            kwargs["base_yaml_path"],
-            "",
+            GridRecipe(
+                base_yaml_path=kwargs["base_yaml_path"],
+                target=BenchmarkTarget(gpu_type=kwargs["gpu_type"], benchmark_script=kwargs["benchmark_script"]),
+            ),
             kwargs["grid"][0],
             output_subdir=output,
-            gpu_type=kwargs["gpu_type"],
-            benchmark_script=kwargs["benchmark_script"],
         )
         calls.append((kwargs, yaml.safe_load(variant_path.read_text())["benchmark"]))
         return []

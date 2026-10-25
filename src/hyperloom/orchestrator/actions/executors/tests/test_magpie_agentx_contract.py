@@ -15,7 +15,7 @@ from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom.common.perf_metric import constraint_veto_reason, graded_axes_of
 from hyperloom.inference_optimizer.cli.benchmark_config import bind_benchmark, configure_benchmark
 from hyperloom.inference_optimizer.cli.parser import _build_parser
-from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml
+from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml, GridRecipe
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
     BenchmarkTarget,
@@ -97,7 +97,7 @@ def test_grid_composes_accepted_launch_then_candidate(source, tmp_path):
         launch=LaunchLayer(extra_server_args="--chunked-prefill-size 4096", extra_envs={"SGLANG_TEST": "1"}),
     )
     variant = GridVariant("candidate", "--chunked-prefill-size 2048", {"SGLANG_NEXT": "1"}, unset_envs=["SGLANG_TEST"])
-    candidate = _build_variant_yaml(base, "", variant, output_subdir=tmp_path / "candidate")
+    candidate = _build_variant_yaml(GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "candidate")
     launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
     assert launch["append_args"] == ["--chunked-prefill-size", "2048"]
     assert launch["env"] == {"SGLANG_NEXT": "1"}
@@ -116,8 +116,7 @@ def test_grid_ablation_removes_the_option_from_its_owning_layers(source, tmp_pat
     receipt["base_argv"] = list(receipt["effective_argv"]) + ([option, "128"] if recipe else [])
     persist_launch_evidence(native_launch_evidence(extract_benchmark_measurement(report), base), slot=base.parent)
     candidate = _build_variant_yaml(
-        base,
-        f"{option}=256" if appended else "",
+        GridRecipe(base_yaml_path=base, base=LaunchLayer(extra_server_args=f"{option}=256" if appended else "")),
         GridVariant("ablate", "--mem-fraction-static 0.85", {}, remove_args=[option]),
         output_subdir=tmp_path / "candidate",
     )
@@ -133,8 +132,7 @@ def test_recipe_removal_survives_readding_and_ablating_an_override(source, tmp_p
         launch=LaunchLayer(remove_args=["--cuda-graph-max-bs"], extra_server_args="--cuda-graph-max-bs 256"),
     )
     candidate = _build_variant_yaml(
-        base,
-        "",
+        GridRecipe(base_yaml_path=base),
         GridVariant("ablate", "", {}, remove_args=["--cuda-graph-max-bs"]),
         output_subdir=tmp_path / "candidate",
     )
@@ -541,12 +539,16 @@ def test_json_server_args_survive_every_native_composition(vllm_source, tmp_path
     assert load_benchmark(base)["agentx"]["launch_overrides"]["append_args"] == args.split(" ")
 
     candidate = _build_variant_yaml(
-        base, "", GridVariant("candidate", "--max-num-seqs 32", {}), output_subdir=tmp_path / "candidate"
+        GridRecipe(base_yaml_path=base),
+        GridVariant("candidate", "--max-num-seqs 32", {}),
+        output_subdir=tmp_path / "candidate",
     )
     argv = load_benchmark(candidate)["agentx"]["launch_overrides"]["append_args"]
     assert _json_values(argv) == _json_values(args.split(" "))
     assert argv[argv.index("--max-num-seqs") + 1] == "32"
-    again = _build_variant_yaml(candidate, "", GridVariant("again", "", {}), output_subdir=tmp_path / "again")
+    again = _build_variant_yaml(
+        GridRecipe(base_yaml_path=candidate), GridVariant("again", "", {}), output_subdir=tmp_path / "again"
+    )
     assert load_benchmark(again)["agentx"]["launch_overrides"]["append_args"] == argv
 
 
@@ -565,7 +567,9 @@ def test_a_value_with_a_single_quote_survives_repeated_native_composition(vllm_s
         apply_native_runtime(base, {})
         assert load_benchmark(base)["agentx"]["launch_overrides"]["append_args"] == argv
     candidate = _build_variant_yaml(
-        base, "", GridVariant("candidate", "--max-num-seqs 32", {}), output_subdir=tmp_path / "candidate"
+        GridRecipe(base_yaml_path=base),
+        GridVariant("candidate", "--max-num-seqs 32", {}),
+        output_subdir=tmp_path / "candidate",
     )
     assert load_benchmark(candidate)["agentx"]["launch_overrides"]["append_args"] == [*argv, "--max-num-seqs", "32"]
 
@@ -605,7 +609,9 @@ def test_server_args_that_cannot_become_argv_are_refused_as_argv_invalid(vllm_so
     assert refused.value.error_class == ARGV_INVALID
     base = materialize_benchmark_config(vllm_source, tmp_path / "accepted")
     with pytest.raises(ValueError) as refused:
-        _build_variant_yaml(base, "", GridVariant("candidate", args, {}), output_subdir=tmp_path / "candidate")
+        _build_variant_yaml(
+            GridRecipe(base_yaml_path=base), GridVariant("candidate", args, {}), output_subdir=tmp_path / "candidate"
+        )
     assert refused.value.error_class == ARGV_INVALID
     offending = args.split(" ", 1)[1] if " " in args else args.partition("=")[2]
     assert offending in str(refused.value)

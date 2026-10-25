@@ -387,10 +387,10 @@ class TestVariantAbort:
         _write_base_yaml(base)
         real_build = gr._build_variant_yaml
 
-        def _fail_on_second(base_yaml_path, base_extra_args, variant, **kwargs):
+        def _fail_on_second(recipe, variant, **kwargs):
             if variant.name == "c1":
                 raise RuntimeError("boom")
-            return real_build(base_yaml_path, base_extra_args, variant, **kwargs)
+            return real_build(recipe, variant, **kwargs)
 
         monkeypatch.setattr(gr, "_build_variant_yaml", _fail_on_second)
 

@@ -349,8 +349,7 @@ def test_build_variant_yaml_injects_extra_envs(tmp_path: Path) -> None:
     )
     variant = _variant("v1", "--foo 1", envs={"USE_AITER": "1"})
     out = gr._build_variant_yaml(
-        base,
-        "",
+        gr.GridRecipe(base_yaml_path=base),
         variant,
         output_subdir=tmp_path / "v1",
     )
@@ -380,8 +379,7 @@ def test_build_variant_yaml_dedupes_repeated_flags(tmp_path: Path) -> None:
     )
     variant = _variant("v1", "--attention-backend ROCM_AITER_FA")
     out = gr._build_variant_yaml(
-        base,
-        "",
+        gr.GridRecipe(base_yaml_path=base),
         variant,
         output_subdir=tmp_path / "v1",
     )
@@ -402,7 +400,7 @@ def test_build_variant_yaml_prepends_legit_overlay(tmp_path: Path) -> None:
     overlay.mkdir()
     variant = _variant("v1")
     variant.overlay_pythonpath = str(overlay)  # type: ignore[attr-defined]
-    out = gr._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v1")
+    out = gr._build_variant_yaml(gr.GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "v1")
     envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
     assert envs.get("PYTHONPATH", "").startswith(str(overlay))
 
@@ -424,7 +422,7 @@ def test_build_variant_yaml_overlay_builds_on_the_launch_pythonpath(tmp_path, mo
     base.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": config_envs}}), encoding="utf-8")
     variant = _variant("v1")
     variant.overlay_pythonpath = "overlay"  # type: ignore[attr-defined]
-    out = gr._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v1")
+    out = gr._build_variant_yaml(gr.GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "v1")
     envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
     assert envs["PYTHONPATH"] == os.pathsep.join(["overlay", *tail])
 
@@ -442,7 +440,7 @@ def test_build_variant_yaml_drops_unsafe_overlay(tmp_path: Path) -> None:
     for bad in (f"{overlay}:/etc", f"{overlay}/../evil", str(tmp_path / "missing")):
         variant = _variant("v1")
         variant.overlay_pythonpath = bad  # type: ignore[attr-defined]
-        out = gr._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v1")
+        out = gr._build_variant_yaml(gr.GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "v1")
         envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
         assert "PYTHONPATH" not in envs or bad not in envs.get("PYTHONPATH", ""), bad
 

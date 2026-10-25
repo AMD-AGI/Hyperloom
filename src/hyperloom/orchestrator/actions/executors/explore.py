@@ -76,6 +76,7 @@ from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
+    GridRecipe,
     GridVariant,
     SessionDirField,
     _build_variant_yaml,
@@ -108,6 +109,7 @@ from ._server_lifecycle import (
 from ._workload_envs import (
     BenchmarkTarget,
     FrameworkScriptMismatchError,
+    LaunchLayer,
     MaterializeOptions,
     default_baseline_config,
 )
@@ -530,16 +532,14 @@ def _is_noop_filter_exempt(variant: GridVariant) -> bool:
     return str(getattr(variant, "provenance", "") or "").strip() in _NOOP_FILTER_ALWAYS_RUNS
 
 
-def _materialized_launch(
-    base_yaml_path: Path, base_extra_args: str, gv: GridVariant, output_subdir: Path, **build: Any
-) -> tuple[str, dict[str, str]]:
+def _materialized_launch(recipe: GridRecipe, gv: GridVariant, output_subdir: Path) -> tuple[str, dict[str, str]]:
     """The server argv and benchmark envs ``run_grid`` would launch *gv* with."""
-    out_path = _build_variant_yaml(base_yaml_path, base_extra_args, gv, output_subdir=output_subdir, **build)
+    out_path = _build_variant_yaml(recipe, gv, output_subdir=output_subdir)
     return config_server_argv(out_path).text, config_envs(out_path)
 
 
 def filter_context_copy_drafts(
-    grid: list[GridVariant], *, base_yaml_path: Path, base_extra_args: str, **build: Any
+    grid: list[GridVariant], *, recipe: GridRecipe
 ) -> tuple[list[GridVariant], list[tuple[str, str]]]:
     """Drop variants that introduce or change a context-copying speculative-decoding draft (synthetic sessions only).
 
@@ -556,16 +556,14 @@ def filter_context_copy_drafts(
     with tempfile.TemporaryDirectory(prefix="explore_spec_probe_") as tmp_dir:
         tmp_root = Path(tmp_dir)
         try:
-            base = _materialized_launch(
-                base_yaml_path, base_extra_args, GridVariant(_NOOP_PROBE_BASE_NAME), tmp_root / "base", **build
-            )
+            base = _materialized_launch(recipe, GridVariant(_NOOP_PROBE_BASE_NAME), tmp_root / "base")
         except (OSError, ValueError, yaml.YAMLError, ConfigUnreadable) as exc:
             log.warning("explore: could not materialize the base to read its speculative decoding (%s)", exc)
             base = ("", {})
         for idx, gv in enumerate(grid):
             against = base
             try:
-                launch = _materialized_launch(base_yaml_path, base_extra_args, gv, tmp_root / f"v{idx}", **build)
+                launch = _materialized_launch(recipe, gv, tmp_root / f"v{idx}")
             except (OSError, ValueError, yaml.YAMLError, ConfigUnreadable) as exc:
                 log.warning("explore: could not materialize %s to read its speculative decoding (%s)", gv.name, exc)
                 launch = (str(gv.extra_server_args or ""), {str(k): str(v) for k, v in (gv.extra_envs or {}).items()})
@@ -583,9 +581,7 @@ def filter_baseline_noop_variants(
     *,
     framework: str,
     observed: tuple[Mapping[str, Any], Mapping[str, str]],
-    base_yaml_path: Path,
-    base_extra_args: str,
-    **build: Any,
+    recipe: GridRecipe,
 ) -> tuple[list[GridVariant], list[tuple[str, str]]]:
     """Drop variants that would launch the server the stack is already running.
 
@@ -620,9 +616,7 @@ def filter_baseline_noop_variants(
     with tempfile.TemporaryDirectory(prefix="explore_noop_probe_") as tmp_dir:
         tmp_root = Path(tmp_dir)
         try:
-            base_argv, base_envs = _materialized_launch(
-                base_yaml_path, base_extra_args, GridVariant(_NOOP_PROBE_BASE_NAME), tmp_root / "base", **build
-            )
+            base_argv, base_envs = _materialized_launch(recipe, GridVariant(_NOOP_PROBE_BASE_NAME), tmp_root / "base")
         except (OSError, ValueError, yaml.YAMLError) as exc:
             log.warning(
                 "explore: baseline-noop probe could not materialize the baseline (%s); keeping every variant", exc
@@ -634,9 +628,7 @@ def filter_baseline_noop_variants(
                 kept.append(gv)
                 continue
             try:
-                variant_argv, variant_envs = _materialized_launch(
-                    base_yaml_path, base_extra_args, gv, tmp_root / f"v{idx}", **build
-                )
+                variant_argv, variant_envs = _materialized_launch(recipe, gv, tmp_root / f"v{idx}")
             except (OSError, ValueError, yaml.YAMLError) as exc:
                 log.warning("explore: baseline-noop probe failed for variant %s (%s); keeping it", gv.name, exc)
                 kept.append(gv)
@@ -724,7 +716,9 @@ class _RoundRefused(Exception):
         self.result: dict[str, Any] = {"status": "failed", "error_class": error_class, "error": error, **extra}
 
 
-def _materialized_round_config(params: dict[str, Any], output_root: Path, build: dict[str, Any], grading: Any) -> Path:
+def _materialized_round_config(
+    params: dict[str, Any], output_root: Path, target: BenchmarkTarget, grading: Any
+) -> Path:
     # Re-materialize the baseline config so variant YAMLs honour the operator's actual workload.
     #
     # CONC / ISL / OSL / TP / MAX_MODEL_LEN / PRECISION all reach the variants through it.
@@ -736,9 +730,9 @@ def _materialized_round_config(params: dict[str, Any], output_root: Path, build:
             config_path,
             output_root,
             target=BenchmarkTarget(
-                model_path=build["model_path"] or None,
-                gpu_type=build["gpu_type"] or None,
-                benchmark_script=build["benchmark_script"] or None,
+                model_path=target.model_path or None,
+                gpu_type=target.gpu_type or None,
+                benchmark_script=target.benchmark_script or None,
             ),
             options=MaterializeOptions(out_name="explore_base.with_envs.yaml", grading=grading),
         )
@@ -925,18 +919,18 @@ class _ExploreRound:
         self.ss = extra.get("shared_state") or extra.get("state")
         self.phase_deadline = extra.get("phase_deadline")
         script, self.result_dir = _sanitized_overrides(params)
-        self.build: dict[str, Any] = {
-            "model_path": resolve_session_model_path(
+        self.target = BenchmarkTarget(
+            model_path=resolve_session_model_path(
                 params=params,
                 state_model_path=str(getattr(self.ss, "model_path", "") or ""),
                 for_serving=True,
             ),
-            "gpu_type": str(params.get("gpu_type") or "").strip().lower()
+            gpu_type=str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower(),
-            "benchmark_script": script,
-        }
+            benchmark_script=script,
+        )
         grading = getattr(self.ss, "grading", None)
-        self.config_path = _materialized_round_config(params, output_root, self.build, grading)
+        self.config_path = _materialized_round_config(params, output_root, self.target, grading)
         _anchor_the_params(params, self.ss)
         self.framework, bench = _framework_of(self.config_path)
         self.bench = bench
@@ -1074,8 +1068,23 @@ class _ExploreRound:
             "base_remove_args": list(self.remove_args),
             "base_unset_envs": list(self.unset_envs),
             "base_args_mode": self.args_mode,
-            **self.build,
+            "model_path": self.target.model_path,
+            "gpu_type": self.target.gpu_type,
+            "benchmark_script": self.target.benchmark_script,
         }
+
+    def _recipe(self) -> GridRecipe:
+        return GridRecipe(
+            base_yaml_path=self.config_path,
+            base=LaunchLayer(
+                extra_server_args=self.args,
+                extra_envs=dict(self.envs),
+                remove_args=list(self.remove_args),
+                unset_envs=list(self.unset_envs),
+                args_mode=self.args_mode,
+            ),
+            target=self.target,
+        )
 
     def _run_remove_args(self, gv: GridVariant) -> list[str]:
         own = to_str_list(getattr(gv, "remove_args", []))
@@ -1132,8 +1141,8 @@ class _ExploreRound:
             runnable,
             serving=ServingStack(
                 framework=self.framework,
-                model_path=self.build["model_path"],
-                gpu_type=self.build["gpu_type"] or str(getattr(self.ss, "gpu_type", "") or ""),
+                model_path=self.target.model_path,
+                gpu_type=self.target.gpu_type or str(getattr(self.ss, "gpu_type", "") or ""),
                 stack_fingerprint=getattr(self.ss, "stack_fingerprint_meta", None),
             ),
             base_server_args=compose_server_args(
@@ -1167,13 +1176,17 @@ class _ExploreRound:
                 self.runnable,
                 framework=self.framework,
                 observed=self.observed,
-                base_yaml_path=self.config_path,
-                base_extra_args=self.base_args,
-                base_extra_envs=self.base_envs,
-                base_remove_args=self.base_remove_args,
-                base_unset_envs=self.base_unset_envs,
-                base_args_mode=self.args_mode,
-                **self.build,
+                recipe=GridRecipe(
+                    base_yaml_path=self.config_path,
+                    base=LaunchLayer(
+                        extra_server_args=self.base_args,
+                        extra_envs=self.base_envs,
+                        remove_args=self.base_remove_args,
+                        unset_envs=self.base_unset_envs,
+                        args_mode=self.args_mode,
+                    ),
+                    target=self.target,
+                ),
             )
             kept_ids = {id(gv) for gv in kept}
             leading = next((i for i, gv in enumerate(self.runnable) if id(gv) in kept_ids), before)
@@ -1240,8 +1253,7 @@ class _ExploreRound:
             [gv],
             framework=self.framework,
             observed=observed_launch_after(*self.observed, self.opening_stack, self.launched_stack(), self.framework),
-            base_yaml_path=self.config_path,
-            **self._stack_build(),
+            recipe=self._recipe(),
         )
         return restated[0][1] if restated else ""
 
@@ -1304,7 +1316,7 @@ class _ExploreRound:
         # Judged against the stack as it stands now: a KEEP earlier in this round may have changed it.
         if not self.refuse_context_copy:
             return False
-        _, refused = filter_context_copy_drafts([gv], base_yaml_path=self.config_path, **self._stack_build())
+        _, refused = filter_context_copy_drafts([gv], recipe=self._recipe())
         if not refused:
             return False
         log.warning("explore: refusing variant %s (%s)", gv.name, refused[0][1])

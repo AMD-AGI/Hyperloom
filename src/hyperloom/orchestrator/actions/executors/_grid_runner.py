@@ -76,6 +76,7 @@ from hyperloom.inference_optimizer.runtime_environment import apply_runtime_over
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import seal_server_argv
 from .magpie_agentx import LaunchChanges, ServerArgvInvalidError, materialize_variant
+from ._workload_envs import BenchmarkTarget, LaunchLayer
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
@@ -388,6 +389,15 @@ def _benchmark_server_log(config_path: Path, output_dir: Path) -> str | None:
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     framework = str(cfg["benchmark"].get("framework", "")).lower()
     return None if framework in {"custom", "xdit"} else str(output_dir / "server.log")
+
+
+@dataclass(frozen=True)
+class GridRecipe:
+    """The base config a grid's variants are materialized from, the layer they launch on, and their target."""
+
+    base_yaml_path: Path
+    base: LaunchLayer = LaunchLayer()
+    target: BenchmarkTarget = BenchmarkTarget()
 
 
 @dataclass(frozen=True)
@@ -704,15 +714,7 @@ class _GridRun(NamedTuple):
 
     grid: list[GridVariant]
     output_root: Path
-    base_yaml_path: Path
-    base_extra_args: str
-    base_args_mode: str
-    base_extra_envs: dict[str, str] | None
-    base_remove_args: list[str] | None
-    base_unset_envs: list[str] | None
-    model_path: str | None
-    gpu_type: str | None
-    benchmark_script: str | None
+    recipe: GridRecipe
     server_lifecycle: dict[str, Any] | None
     magpie_python: str
     result_dir: str | None
@@ -954,18 +956,10 @@ def _refuse_unsupported_capability(run: _GridRun, at: _VariantSlot) -> None:
 async def _variant_yaml(run: _GridRun, at: _VariantSlot, *, into: Path, lifecycle: dict[str, Any] | None) -> Path:
     return await asyncio.to_thread(
         _build_variant_yaml,
-        run.base_yaml_path,
-        run.base_extra_args,
+        run.recipe,
         at.variant,
         output_subdir=into,
-        model_path=run.model_path,
-        gpu_type=run.gpu_type,
-        benchmark_script=run.benchmark_script,
         server_lifecycle=lifecycle,
-        base_args_mode=run.base_args_mode,
-        base_extra_envs=run.base_extra_envs,
-        base_remove_args=run.base_remove_args,
-        base_unset_envs=run.base_unset_envs,
     )
 
 
@@ -995,10 +989,10 @@ async def _prepare_variant_rounds(run: _GridRun, at: _VariantSlot) -> _VariantRo
     cfg_path = await _variant_yaml_or_abort(run, at, into=at.path, lifecycle=run.server_lifecycle)
     mn_effective_args = _resolve_mn_effective_server_args(
         cfg_path,
-        run.base_yaml_path,
+        run.recipe.base_yaml_path,
         at.variant,
-        base_extra_args=run.base_extra_args,
-        base_args_mode=run.base_args_mode,
+        base_extra_args=run.recipe.base.extra_server_args,
+        base_args_mode=run.recipe.base.args_mode,
     )
     cold = _VariantRounds(cfg_path, {"eligible": False}, False, mn_effective_args)
     if not run.auto_warmup_requested:
@@ -1170,7 +1164,11 @@ async def _restart_multi_node_server(run: _GridRun, at: _VariantSlot, rounds: _V
     try:
         # PD knobs auto-resolved from $PD_* env; PD config stays constant across variants within one run.
         await restart_server_for_round(
-            RoundServer(rounds.mn_effective_args, model_path=run.model_path, ep=int(os.environ.get("EP") or 0) or None),
+            RoundServer(
+                rounds.mn_effective_args,
+                model_path=run.recipe.target.model_path,
+                ep=int(os.environ.get("EP") or 0) or None,
+            ),
             # Reference recipe envs under this variant's own overrides (e.g. MORI_* MoE-dispatch tuning) so
             # server-side env knobs proposed by specialists take effect on the restarted sglang without dropping
             # the envs the baseline was measured with.
@@ -1631,15 +1629,11 @@ async def run_grid(
     run = _GridRun(
         grid=grid,
         output_root=output_root,
-        base_yaml_path=base_yaml_path,
-        base_extra_args=base_extra_args,
-        base_args_mode=base_args_mode,
-        base_extra_envs=base_extra_envs,
-        base_remove_args=base_remove_args,
-        base_unset_envs=base_unset_envs,
-        model_path=model_path,
-        gpu_type=gpu_type,
-        benchmark_script=benchmark_script,
+        recipe=GridRecipe(
+            base_yaml_path,
+            LaunchLayer(base_extra_args, base_extra_envs, base_remove_args, base_unset_envs, base_args_mode),
+            BenchmarkTarget(model_path, gpu_type, benchmark_script),
+        ),
         server_lifecycle=server_lifecycle,
         magpie_python=magpie_python,
         result_dir=result_dir,
@@ -1955,63 +1949,61 @@ def _pin_xdit_tool_path(envs: dict[str, Any], framework: Any) -> None:
 
 
 def _build_variant_yaml(
-    base_yaml_path: Path,
-    base_extra_args: str,
+    recipe: GridRecipe,
     variant: GridVariant,
     *,
     output_subdir: Path,
-    model_path: str | None = None,
-    gpu_type: str | None = None,
-    benchmark_script: str | None = None,
     server_lifecycle: dict[str, Any] | None = None,
-    base_args_mode: str = "append",
-    base_extra_envs: dict[str, str] | None = None,
-    base_remove_args: list[str] | None = None,
-    base_unset_envs: list[str] | None = None,
 ) -> Path:
     """Materialize a per-variant Magpie YAML on disk."""
-    cfg = yaml.safe_load(base_yaml_path.read_text(encoding="utf-8"))
+    base = recipe.base
+    target = recipe.target
+    cfg = yaml.safe_load(recipe.base_yaml_path.read_text(encoding="utf-8"))
     bench = cfg.setdefault("benchmark", {})
     if is_magpie_agentx(bench):
         return materialize_variant(
-            base_yaml_path,
+            recipe.base_yaml_path,
             variant,
             output_subdir,
-            model_path=model_path,
+            model_path=target.model_path,
             base=LaunchChanges(
-                base_extra_args,
-                base_extra_envs or {},
-                base_remove_args or [],
-                base_unset_envs or [],
-                base_args_mode == "replace",
+                base.extra_server_args,
+                base.extra_envs or {},
+                base.remove_args or [],
+                base.unset_envs or [],
+                base.args_mode == "replace",
             ),
         )
-    replacing = str(base_args_mode).strip().lower() == "replace"
+    replacing = str(base.args_mode).strip().lower() == "replace"
     envs = apply_runtime_benchmark_overrides(
         bench,
-        model_path=model_path,
-        gpu_type=gpu_type,
-        benchmark_script=benchmark_script,
+        model_path=target.model_path,
+        gpu_type=target.gpu_type,
+        benchmark_script=target.benchmark_script,
         conc=variant_conc(variant),
     )
     extra_args_env = server_args_env_name(bench.get("framework"))
 
     # A replacing base drops the inherited string wholesale, so its own removals have nothing left to strip.
-    inherited, base_remove = ("", []) if replacing else (str(envs.get(extra_args_env, "")), base_remove_args)
-    base_args = compose_server_args(inherited_args=inherited, base_extra_args=base_extra_args, remove_args=base_remove)
+    inherited, base_remove = ("", []) if replacing else (str(envs.get(extra_args_env, "")), base.remove_args)
+    base_args = compose_server_args(
+        inherited_args=inherited, base_extra_args=base.extra_server_args, remove_args=base_remove
+    )
     combined = compose_server_args(
         inherited_args=inherited,
-        base_extra_args=base_extra_args,
+        base_extra_args=base.extra_server_args,
         variant_extra_args=variant.extra_server_args,
         remove_args=to_str_list(base_remove) + to_str_list(getattr(variant, "remove_args", [])),
         args_mode=getattr(variant, "args_mode", "append"),
     )
-    combined = _runnable_moe_backend_args(combined, args_env=extra_args_env, model_path=model_path, variant=variant)
+    combined = _runnable_moe_backend_args(
+        combined, args_env=extra_args_env, model_path=target.model_path, variant=variant
+    )
     if combined:
         envs[extra_args_env] = shell_safe_dedupe(combined)
-    elif extra_args_env in envs or variant.args_mode == "replace" or base_args_mode == "replace":
+    elif extra_args_env in envs or variant.args_mode == "replace" or base.args_mode == "replace":
         envs[extra_args_env] = ""
-    base_envs = _apply_variant_env(envs, variant, base_extra_envs, base_unset_envs)
+    base_envs = _apply_variant_env(envs, variant, base.extra_envs, base.unset_envs)
     from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 
     pin_mlperf_round_concurrency(envs)

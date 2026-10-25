@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.canonical_fingerprint import (
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     apply_compatibility_filter,
+    GridRecipe,
 )
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -58,6 +59,7 @@ from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 
 from .conftest import make_coordinator
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
 
 
 def _eval_off(value: object) -> bool:
@@ -199,16 +201,13 @@ def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
     kwargs = {
         "framework": "sglang",
         "base_yaml_path": base_yaml,
-        "base_extra_args": "",
-        "base_extra_envs": {},
-        "base_remove_args": [],
-        "base_unset_envs": [],
-        "base_args_mode": "append",
-        "model_path": None,
-        "gpu_type": None,
-        "benchmark_script": None,
     }
     kwargs.update(overrides)
+    kwargs["recipe"] = GridRecipe(
+        base_yaml_path=kwargs.pop("base_yaml_path"),
+        base=LaunchLayer(extra_server_args="", extra_envs={}, remove_args=[], unset_envs=[], args_mode="append"),
+        target=BenchmarkTarget(model_path=None, gpu_type=None, benchmark_script=None),
+    )
     kwargs["observed"] = (
         kwargs.pop("observed_server_config", _stack_config()),
         kwargs.pop("observed_server_env", _stack_env()),

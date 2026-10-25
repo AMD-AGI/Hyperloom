@@ -409,7 +409,11 @@ def test_a_replacing_grid_variant_keeps_the_expert_parallel_flag(tmp_path, varia
     variant = GridVariant(name="v", extra_server_args="--max-num-seqs 64", args_mode=variant_mode)
 
     config = _grid_runner._build_variant_yaml(
-        base, "--max-num-seqs 32", variant, output_subdir=tmp_path / "v", base_args_mode=base_mode
+        _grid_runner.GridRecipe(
+            base_yaml_path=base, base=LaunchLayer(extra_server_args="--max-num-seqs 32", args_mode=base_mode)
+        ),
+        variant,
+        output_subdir=tmp_path / "v",
     )
 
     argv = config_server_argv(config).argv
@@ -454,7 +458,9 @@ def test_a_grid_variant_ep_that_does_not_divide_tp_adds_no_flag(tmp_path, caplog
     variant = GridVariant(name="v", extra_envs={"EP": "3"})
 
     with caplog.at_level("WARNING"):
-        config = _grid_runner._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v")
+        config = _grid_runner._build_variant_yaml(
+            _grid_runner.GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "v"
+        )
 
     assert "--ep-size" not in config_server_argv(config).argv
     assert "EP=3 does not divide the launched TP=8" in caplog.text

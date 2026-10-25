@@ -22,6 +22,7 @@ import pytest
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
+    GridRecipe,
 )
 from hyperloom.orchestrator.kernel import conc_sweep as conc_sweep_module
 from hyperloom.orchestrator.kernel.conc_sweep import (
@@ -41,6 +42,7 @@ from hyperloom.common.gain_math import conc_pair_comparison as _build_comparison
 from hyperloom.common.perf_metric import graded_metric_key
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.phases.kernel_stack import KernelStackPhase
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
 
 
 # Fixtures
@@ -196,7 +198,9 @@ def test_conc_sweep_preserves_retained_launch_controls(
         results = []
         for variant in grid:
             config = _build_variant_yaml(
-                base_yaml_path, "", variant, output_subdir=session_dir / "children" / variant.name
+                GridRecipe(base_yaml_path=base_yaml_path),
+                variant,
+                output_subdir=session_dir / "children" / variant.name,
             )
             envs = yaml.safe_load(config.read_text())["benchmark"]["envs"]
             code = "import json, os, sys; print(json.dumps([sys.argv[1:], os.environ.get('SGLANG_SWEEP_TEST')]))"
@@ -263,7 +267,9 @@ def test_conc_sweep_loads_retained_overlay_only_in_optimized_arm(
         outputs = []
         for variant in grid:
             config = _build_variant_yaml(
-                baseline_yaml, "", variant, output_subdir=session_dir / "child_configs" / variant.name
+                GridRecipe(base_yaml_path=baseline_yaml),
+                variant,
+                output_subdir=session_dir / "child_configs" / variant.name,
             )
             envs = yaml.safe_load(config.read_text())["benchmark"]["envs"]
             child = subprocess.run(
@@ -627,12 +633,12 @@ def test_conc_sweep_preserves_baseline_script_through_variant_materialization(se
         output = session_dir / f"variant_{len(calls)}"
         output.mkdir()
         path = _build_variant_yaml(
-            kwargs["base_yaml_path"],
-            "",
+            GridRecipe(
+                base_yaml_path=kwargs["base_yaml_path"],
+                target=BenchmarkTarget(gpu_type=kwargs["gpu_type"], benchmark_script=kwargs.get("benchmark_script")),
+            ),
             variant,
             output_subdir=output,
-            gpu_type=kwargs["gpu_type"],
-            benchmark_script=kwargs.get("benchmark_script"),
         )
         calls.append((kwargs, yaml.safe_load(path.read_text())["benchmark"]))
         return [_fake_variant(variant.name, throughput=120.0, envs=variant.extra_envs)]

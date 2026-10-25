@@ -26,6 +26,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
     prepare_grid_benchmark_config,
     LaunchLayer,
+    BenchmarkTarget,
 )
 from hyperloom.orchestrator.actions.executors.magpie_agentx import load_benchmark
 from hyperloom.orchestrator.state.shared_state import SharedState, stack_base_params
@@ -110,15 +111,19 @@ def _stub_gpu(monkeypatch, session, *, effective):
     async def run_grid(**kwargs):
         variant = kwargs["grid"][0]
         config = _grid_runner._build_variant_yaml(
-            kwargs["base_yaml_path"],
-            kwargs.get("base_extra_args", ""),
+            _grid_runner.GridRecipe(
+                base_yaml_path=kwargs["base_yaml_path"],
+                base=LaunchLayer(
+                    extra_server_args=kwargs.get("base_extra_args", ""),
+                    args_mode=kwargs.get("base_args_mode", "append"),
+                    extra_envs=kwargs.get("base_extra_envs"),
+                    remove_args=kwargs.get("base_remove_args"),
+                    unset_envs=kwargs.get("base_unset_envs"),
+                ),
+                target=BenchmarkTarget(model_path=kwargs.get("model_path")),
+            ),
             variant,
             output_subdir=kwargs["output_root"] / "variant_00_native",
-            model_path=kwargs.get("model_path"),
-            base_args_mode=kwargs.get("base_args_mode", "append"),
-            base_extra_envs=kwargs.get("base_extra_envs"),
-            base_remove_args=kwargs.get("base_remove_args"),
-            base_unset_envs=kwargs.get("base_unset_envs"),
         )
         launch = load_benchmark(config)["agentx"]["launch_overrides"]
         observed.append(deepcopy(launch))
@@ -255,7 +260,9 @@ def test_unknown_and_protected_removals_reach_magpie_validation(native_session, 
     session = native_session(recipe=_PREFIX + ["--port", "30000"])
     intermediate = prepare_grid_benchmark_config(session.config, tmp_path / "explore")
     variant = _grid_runner._build_variant_yaml(
-        intermediate, "", GridVariant("remove", remove_args=[option]), output_subdir=tmp_path / "candidate"
+        _grid_runner.GridRecipe(base_yaml_path=intermediate),
+        GridVariant("remove", remove_args=[option]),
+        output_subdir=tmp_path / "candidate",
     )
     launch = load_benchmark(variant)["agentx"]["launch_overrides"]
     assert option in launch["remove_args"]

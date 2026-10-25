@@ -18,12 +18,13 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors import BaselineExecutor, ExploreExecutor
 from hyperloom.orchestrator.actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
-from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml, GridRecipe
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskSpec
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
 
 
 @pytest.fixture
@@ -203,12 +204,13 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
         output = tmp_path / "resumed_rebench"
         output.mkdir()
         variant = _build_variant_yaml(
-            kwargs["base_yaml_path"],
-            kwargs["base_extra_args"],
+            GridRecipe(
+                base_yaml_path=kwargs["base_yaml_path"],
+                base=LaunchLayer(extra_server_args=kwargs["base_extra_args"]),
+                target=BenchmarkTarget(gpu_type=kwargs["gpu_type"], benchmark_script=kwargs["benchmark_script"]),
+            ),
             kwargs["grid"][0],
             output_subdir=output,
-            gpu_type=kwargs["gpu_type"],
-            benchmark_script=kwargs["benchmark_script"],
         )
         subprocess.run(
             cpu_benchmark(python_exe=sys.executable, config_path=variant, output_dir=output),

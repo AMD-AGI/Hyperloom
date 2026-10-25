@@ -46,10 +46,11 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     resolve_skip_spec,
     run_grid,
     MagpieRound,
+    GridRecipe,
 )
 
 from .conftest import enable_multi_node, launches_by_round_slot
-from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
 
 
 # Section 1: _write_variant_abort_marker
@@ -922,12 +923,9 @@ def test_build_variant_yaml_propagates_benchmark_script(tmp_path):
     base = tmp_path / "base.yaml"
     _write_baseline_yaml_overrides(base)
     out = _build_variant_yaml(
-        base,
-        base_extra_args="",
-        variant=GridVariant("vA", "--attention-backend aiter"),
+        GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x", benchmark_script="sglang_mi300x.sh")),
+        GridVariant("vA", "--attention-backend aiter"),
         output_subdir=tmp_path / "vA",
-        gpu_type="mi300x",
-        benchmark_script="sglang_mi300x.sh",
     )
     cfg = yaml.safe_load(out.read_text())
     assert cfg["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
@@ -945,9 +943,8 @@ def test_build_variant_yaml_can_remove_base_args_and_unset_envs(tmp_path):
     base.write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
     out = _build_variant_yaml(
-        base,
-        base_extra_args="--enable-bar --block-size 128",
-        variant=GridVariant(
+        GridRecipe(base_yaml_path=base, base=LaunchLayer(extra_server_args="--enable-bar --block-size 128")),
+        GridVariant(
             "without_user_foo",
             "--max-num-seqs 256",
             {"SGLANG_KEEP": "1"},
@@ -978,9 +975,8 @@ def test_build_variant_yaml_refuses_to_unset_pinned_envs(tmp_path):
     base.write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
     out = _build_variant_yaml(
-        base,
-        base_extra_args="",
-        variant=GridVariant(
+        GridRecipe(base_yaml_path=base),
+        GridVariant(
             "unset_the_world",
             unset_envs=["TP", "CONC", "ROCR_VISIBLE_DEVICES", "SGLANG_ENABLE_FOO"],
         ),
