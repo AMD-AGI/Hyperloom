@@ -10,71 +10,72 @@ from pathlib import Path
 
 from hyperloom.orchestrator.kernel import lane_budget
 from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as kernel_agent_tool
-from hyperloom.orchestrator.kernel import request_handlers as krh
+from hyperloom.orchestrator.kernel import _forge_lane_budget as forge_lane_budget
+from hyperloom.orchestrator.kernel import _integrate_payload as integrate_payload
 
 
 # -- _normalize_precision / _normalize_kernel_id --------------------------
 def test_normalize_precision() -> None:
-    assert krh._normalize_precision("  FP8 ") == "fp8"
-    assert krh._normalize_precision(None) == ""
-    assert krh._normalize_precision(0) == ""
+    assert integrate_payload._normalize_precision("  FP8 ") == "fp8"
+    assert integrate_payload._normalize_precision(None) == ""
+    assert integrate_payload._normalize_precision(0) == ""
 
 
 # -- _gemm_tuning_timeout_sec ---------------------------------------------
 def test_gemm_tuning_timeout_payload_floor(monkeypatch) -> None:
     monkeypatch.delenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", raising=False)
-    assert krh._gemm_tuning_timeout_sec({"timeout_sec": 30}) == 60  # floored
-    assert krh._gemm_tuning_timeout_sec({"timeout_sec": 900}) == 900
+    assert forge_lane_budget._gemm_tuning_timeout_sec({"timeout_sec": 30}) == 60  # floored
+    assert forge_lane_budget._gemm_tuning_timeout_sec({"timeout_sec": 900}) == 900
 
 
 def test_gemm_tuning_timeout_env_and_invalid(monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", "300")
-    assert krh._gemm_tuning_timeout_sec({}) == 300
+    assert forge_lane_budget._gemm_tuning_timeout_sec({}) == 300
     monkeypatch.setenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", "bad")
-    assert krh._gemm_tuning_timeout_sec({}) == max(60, krh._DEFAULT_GEMM_TUNING_TIMEOUT_SEC)
+    assert forge_lane_budget._gemm_tuning_timeout_sec({}) == max(60, forge_lane_budget._DEFAULT_GEMM_TUNING_TIMEOUT_SEC)
 
 
 def test_gemm_tuning_timeout_takes_the_lane_share(monkeypatch) -> None:
     monkeypatch.delenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", raising=False)
-    assert krh._gemm_tuning_timeout_sec({}, lane_budget_sec=7140) == 7140
+    assert forge_lane_budget._gemm_tuning_timeout_sec({}, lane_budget_sec=7140) == 7140
 
 
 def test_gemm_tuning_timeout_without_an_allocation_keeps_the_module_default(monkeypatch) -> None:
     """An unbounded phase must not collapse the lane to a zero-second session."""
     monkeypatch.delenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", raising=False)
-    assert krh._gemm_tuning_timeout_sec({}, lane_budget_sec=0) == 18000
+    assert forge_lane_budget._gemm_tuning_timeout_sec({}, lane_budget_sec=0) == 18000
 
 
 def test_an_explicit_gemm_timeout_outranks_the_lane_share(monkeypatch) -> None:
     monkeypatch.delenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", raising=False)
-    assert krh._gemm_tuning_timeout_sec({"timeout_sec": 900}, lane_budget_sec=7140) == 900
+    assert forge_lane_budget._gemm_tuning_timeout_sec({"timeout_sec": 900}, lane_budget_sec=7140) == 900
 
 
 def test_the_gemm_timeout_env_outranks_the_lane_share(monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", "300")
-    assert krh._gemm_tuning_timeout_sec({}, lane_budget_sec=7140) == 300
+    assert forge_lane_budget._gemm_tuning_timeout_sec({}, lane_budget_sec=7140) == 300
 
 
 # -- _forge_fusion_timeout_sec --------------------------------------------
 def test_fusion_timeout_takes_the_lane_share(monkeypatch) -> None:
     monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
-    assert krh._forge_fusion_timeout_sec({}, lane_budget_sec=10710) == 10710
+    assert forge_lane_budget._forge_fusion_timeout_sec({}, lane_budget_sec=10710) == 10710
 
 
 def test_fusion_timeout_without_an_allocation_keeps_the_module_default(monkeypatch) -> None:
     """An unbounded phase must not collapse the lane to a one-second session."""
     monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
-    assert krh._forge_fusion_timeout_sec({}, lane_budget_sec=0) == 7200
+    assert forge_lane_budget._forge_fusion_timeout_sec({}, lane_budget_sec=0) == 7200
 
 
 def test_an_explicit_fusion_timeout_outranks_the_lane_share(monkeypatch) -> None:
     monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
-    assert krh._forge_fusion_timeout_sec({"timeout": 900}, lane_budget_sec=10710) == 900
+    assert forge_lane_budget._forge_fusion_timeout_sec({"timeout": 900}, lane_budget_sec=10710) == 900
 
 
 def test_the_fusion_timeout_env_outranks_the_lane_share(monkeypatch) -> None:
     monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "300")
-    assert krh._forge_fusion_timeout_sec({}, lane_budget_sec=10710) == 300
+    assert forge_lane_budget._forge_fusion_timeout_sec({}, lane_budget_sec=10710) == 300
 
 
 # -- _gemm_router_targets / _gemm_capped_tuner ----------------------------
@@ -92,12 +93,12 @@ _ROUTER_PROBE = {
 
 
 def test_an_unconsultable_router_yields_no_estimates() -> None:
-    assert krh._gemm_router_targets(**_ROUTER_PROBE) == ()
+    assert forge_lane_budget._gemm_router_targets(**_ROUTER_PROBE) == ()
 
 
 def test_without_estimates_the_gemm_ceiling_divides_by_its_default_cost() -> None:
     """7140s of lane share buys five 20-minute targets when nothing is estimated."""
-    costs = tuple(cost for _, cost in krh._gemm_router_targets(**_ROUTER_PROBE))
+    costs = tuple(cost for _, cost in forge_lane_budget._gemm_router_targets(**_ROUTER_PROBE))
     assert lane_budget.max_targets(lane_budget.LANE_GEMM, 7140, target_costs_sec=costs) == 5
     assert 7140 // lane_budget.GEMM_DEFAULT_TARGET_SEC == 5
 
@@ -128,17 +129,17 @@ def test_no_gemm_ceiling_leaves_the_routed_tuner_set_untouched() -> None:
 
 # -- _gemm_tuning_workspace -----------------------------------------------
 def test_gemm_tuning_workspace_explicit(tmp_path: Path) -> None:
-    out = krh._gemm_tuning_workspace({"workspace_path": str(tmp_path / "ws")}, session_dir=tmp_path)
+    out = forge_lane_budget._gemm_tuning_workspace({"workspace_path": str(tmp_path / "ws")}, session_dir=tmp_path)
     assert out == tmp_path / "ws"
 
 
 def test_gemm_tuning_workspace_from_task_id(tmp_path: Path) -> None:
-    out = krh._gemm_tuning_workspace({"task_id": "t-1"}, session_dir=tmp_path)
+    out = forge_lane_budget._gemm_tuning_workspace({"task_id": "t-1"}, session_dir=tmp_path)
     assert out == tmp_path / "runs" / "gemm_tuning" / "t-1"
 
 
 def test_gemm_tuning_workspace_timestamp_fallback(tmp_path: Path) -> None:
-    out = krh._gemm_tuning_workspace({}, session_dir=tmp_path)
+    out = forge_lane_budget._gemm_tuning_workspace({}, session_dir=tmp_path)
     assert out.parent == tmp_path / "runs" / "gemm_tuning"
     assert out.name.startswith("request_")
 

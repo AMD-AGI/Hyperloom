@@ -58,7 +58,7 @@ benchmark:
     # TraceLens-relevant knobs that map to upstream ProfilerConfig in
     # the validation vLLM build (0.19+). delay_iterations and
     # max_iterations are overridden by materialize_config_with_envs (see
-    # orchestrator/actions/executors/_workload_envs.py):
+    # orchestrator/actions/executors/_profile_setup.py):
     #   max_iters    = HYPERLOOM_PROFILE_MAX_STEPS_CAP, default 128
     #                  (serialization-safe cap; hard override via
     #                  HYPERLOOM_PROFILE_MAX_ITERS)

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from ..dense_shapes import MGrid
 from ..model_analyzer import ModelProfile
 
 log = logging.getLogger(__name__)
@@ -152,6 +153,7 @@ class TuneContext:
     min_improvement_pct: float
     timeout_s: int
     thorough: bool = False  # Full search: all libtypes, more shapes, no per-shape timeout
+    m_grid: MGrid = MGrid.BUCKET
     # Optional input files
     untuned_csv: Path | None = None
     # MoE shapes are kept in their own field because the dense and MoE untuned CSVs are different schemas (M,N,K
