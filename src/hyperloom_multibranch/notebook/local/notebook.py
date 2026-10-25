@@ -65,6 +65,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     BaselineRecord,
     BranchLogRecord,
     BranchProgress,
+    BuildNotice,
     Claim,
     ClaimKey,
     CommittedCommit,
@@ -100,6 +101,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     LINEAGE_STARTS,
     LINEAGE_WRITERS,
     BranchDriver,
+    BuildOutcome,
     ClaimStatus,
     Conclusion,
     DedupStatus,
@@ -483,6 +485,16 @@ class LocalNotebook(
         self._require(Role.TOOLBOX)
         summary = f"tool {pointer.job_id}: {pointer.summary}"
         self._append(EntryKind.TOOL_RESULT, pointer, branch=pointer.branch, parent="", summary=summary)
+
+    async def notify_build(self, notice: BuildNotice) -> None:
+        self._require(Role.TOOLBOX)
+        if not notice.key or not notice.component:
+            raise ValueError("a build notice names its build's key and component")
+        stored = replace(notice, state=BuildOutcome(notice.state))
+        request = self._state().record(notice.request_id).request
+        why = f": {notice.detail}" if notice.detail else ""
+        summary = f"build {notice.component} {notice.key} {stored.state.value} for {notice.request_id}{why}"
+        self._append(EntryKind.BUILD, stored, branch=request.branch, parent=request.parent_commit, summary=summary)
 
     # --- node health ----------------------------------------------------------------------------------------------
 

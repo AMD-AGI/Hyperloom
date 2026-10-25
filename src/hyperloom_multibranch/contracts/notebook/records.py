@@ -28,6 +28,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
     BranchDriver,
+    BuildOutcome,
     ClaimStatus,
     CommitOrigin,
     Conclusion,
@@ -260,6 +261,19 @@ class ToolResultPointer:
             raise ValueError(f"a pointer carries at most {MAX_OP_SHARES} op shares, not {len(self.op_shares)}")
         if self.op_shares and not self.commit_id:
             raise ValueError("op shares need the commit they were profiled on")
+
+
+@dataclass(frozen=True)
+class BuildNotice:
+    """A build the test ``request_id`` waits on, by its ``key`` and ``component``, became ready, or failed for the
+    infrastructure and is retried; ``detail`` says why it failed. The toolbox sends one for each request waiting on the
+    build. A build that fails for the candidate sends none: its request ends with a result."""
+
+    request_id: str
+    key: str
+    component: str
+    state: BuildOutcome
+    detail: str = ""
 
 
 def amdahl_ceiling_pct(share_pct: float) -> float:
@@ -791,6 +805,7 @@ __all__ = [
     "BranchLogRecord",
     "BranchNode",
     "BranchProgress",
+    "BuildNotice",
     "Claim",
     "ClaimKey",
     "CommitNode",

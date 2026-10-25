@@ -40,6 +40,7 @@ from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.repo import ResolvedPatch
 from hyperloom_multibranch.contracts.notebook.records import (
     BaselineRecord,
+    BuildNotice,
     Learning,
     LineageEvent,
     LlmUsage,
@@ -51,6 +52,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
     BranchDriver,
+    BuildOutcome,
     ClaimStatus,
     Conclusion,
     DedupStatus,
@@ -105,7 +107,7 @@ def test_a_record_is_judged_once_the_gate_judged_a_test_it_measured(
 def test_the_local_notebook_implements_every_interface_method() -> None:
     names = [name for name, member in inspect.getmembers(interfaces.Notebook) if inspect.iscoroutinefunction(member)]
 
-    assert len(names) == 41
+    assert len(names) == 42
     assert all(getattr(LocalNotebook, name) is not getattr(interfaces.Notebook, name) for name in names)
 
 
@@ -560,6 +562,38 @@ async def test_a_tool_result_pointer_reaches_only_its_branch_and_a_bad_cursor_is
     assert theirs.items == ()
     with pytest.raises(ValueError):
         await toolbox.poll("s1", '["not", "a", "cursor"]')
+
+
+async def test_a_build_notice_is_the_build_item_of_the_branch_whose_test_waits_on_it(open_as: Open) -> None:
+    toolbox = open_as(Role.TOOLBOX)
+    await toolbox.write_request(request("r1", intent("s1", "c0")))
+    await toolbox.notify_build(BuildNotice("r1", "sgl-kernel-3f2a", "sgl_kernel", BuildOutcome.READY))
+    await toolbox.notify_build(BuildNotice("r1", "vllm-9c1d", "vllm", "failed", "registry timeout"))
+
+    mine, theirs = await toolbox.poll("s1"), await toolbox.poll("s2")
+
+    assert [(item.kind, item.pointer, item.summary) for item in mine.items] == [
+        (InboxKind.BUILD, "r1", "build sgl_kernel sgl-kernel-3f2a ready for r1"),
+        (InboxKind.BUILD, "r1", "build vllm vllm-9c1d failed for r1: registry timeout"),
+    ]
+    assert theirs.items == ()
+    assert [value.state for _, value in toolbox._state().decoded[1:]] == [BuildOutcome.READY, BuildOutcome.FAILED]
+
+
+async def test_only_the_toolbox_sends_a_build_notice_for_a_test_it_holds(open_as: Open) -> None:
+    toolbox = open_as(Role.TOOLBOX)
+    await toolbox.write_request(request("r1", intent("s1", "c0")))
+    ready = BuildNotice("r1", "sgl-kernel-3f2a", "sgl_kernel", BuildOutcome.READY)
+
+    with pytest.raises(WriterNotAllowed):
+        await open_as(Role.SPECIALIST_RUNTIME, "s1").notify_build(ready)
+    with pytest.raises(UnknownRequest):
+        await toolbox.notify_build(replace(ready, request_id="r-missing"))
+    with pytest.raises(ValueError, match="key and component"):
+        await toolbox.notify_build(replace(ready, key=""))
+    with pytest.raises(ValueError, match="BuildOutcome"):
+        await toolbox.notify_build(replace(ready, state="building"))
+    assert len(toolbox._state().entries) == 1
 
 
 async def test_lifting_a_node_returns_all_its_gpus_to_service(open_as: Open) -> None:

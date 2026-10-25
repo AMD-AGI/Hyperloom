@@ -129,8 +129,9 @@ FAILED_MERGES = frozenset({MergeOutcome.CONFLICT_SKIPPED, MergeOutcome.NOT_STACK
 
 
 class InboxKind(str, Enum):
-    """What an inbox item points at; a ``brief`` item points at the branch's head and asks for its brief again, and a
-    ``peer_outcome`` item at another branch's test that refused the branch's claim, once that test ended."""
+    """What an inbox item points at; a ``brief`` item points at the branch's head and asks for its brief again, a
+    ``peer_outcome`` item at another branch's test that refused the branch's claim, once that test ended, and a
+    ``build`` item at the branch's test waiting on a build that became ready, or failed and will be retried."""
 
     RESULT = "result"
     JUDGEMENT = "judgement"
@@ -138,6 +139,14 @@ class InboxKind(str, Enum):
     LINEAGE = "lineage"
     BRIEF = "brief"
     PEER_OUTCOME = "peer_outcome"
+    BUILD = "build"
+
+
+class BuildOutcome(str, Enum):
+    """What came of a build a waiting test needs: it is ready, or it failed for the infrastructure and is retried."""
+
+    READY = "ready"
+    FAILED = "failed"
 
 
 class UsageSource(str, Enum):
@@ -208,6 +217,7 @@ __all__ = [
     "INTEGRATION_CONCLUSIONS",
     "LINEAGE_STARTS",
     "LINEAGE_WRITERS",
+    "BuildOutcome",
     "ClaimStatus",
     "CommitOrigin",
     "Conclusion",

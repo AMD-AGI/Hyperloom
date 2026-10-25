@@ -28,6 +28,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     BaselineRecord,
     BranchLogRecord,
     BranchProgress,
+    BuildNotice,
     Claim,
     ClaimKey,
     CommittedCommit,
@@ -127,6 +128,13 @@ class TestRecordSink(Protocol):
 
     async def notify_tool_result(self, pointer: ToolResultPointer) -> None:
         """Push a pointer to an asynchronous tool's result to the branch that asked for it."""
+
+    async def notify_build(self, notice: BuildNotice) -> None:
+        """Push a build's outcome to the branch of the test waiting on it, as that branch's ``build`` inbox item.
+
+        Raises :class:`UnknownRequest` for a request the notebook does not hold, and ``ValueError`` for a notice
+        without its build's key or component or with another state than ``ready`` or ``failed``.
+        """
 
 
 class NodeHealth(Protocol):

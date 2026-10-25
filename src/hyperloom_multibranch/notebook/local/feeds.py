@@ -81,6 +81,7 @@ _INBOX_KINDS = {
     EntryKind.JUDGEMENT: InboxKind.JUDGEMENT,
     EntryKind.TOOL_RESULT: InboxKind.TOOL_RESULT,
     EntryKind.LINEAGE: InboxKind.LINEAGE,
+    EntryKind.BUILD: InboxKind.BUILD,
 }
 
 

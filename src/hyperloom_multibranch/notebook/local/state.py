@@ -21,6 +21,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     AgentManifestRecord,
     BaselineRecord,
     BranchLogRecord,
+    BuildNotice,
     Learning,
     LearningRecord,
     LineageEvent,
@@ -95,6 +96,7 @@ PAYLOADS: dict[EntryKind, type] = {
     EntryKind.MANIFEST: ManifestFingerprint,
     EntryKind.LLM_USAGE: LlmUsage,
     EntryKind.AGENT_MANIFEST: AgentManifestRecord,
+    EntryKind.BUILD: BuildNotice,
 }
 
 
@@ -165,6 +167,8 @@ class NotebookState:
                 LlmUsageRecord(entry.entry_id, entry.at, value)
             ),
             EntryKind.AGENT_MANIFEST: self._agent_manifest,
+            # A build notice indexes nothing: the inbox reads it from ``decoded``.
+            EntryKind.BUILD: lambda _entry, _notice: None,
         }
 
     def _request(self, entry: Entry, request: TestRequest) -> None:

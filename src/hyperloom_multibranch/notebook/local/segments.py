@@ -55,6 +55,7 @@ class EntryKind(str, Enum):
     MANIFEST = "manifest"
     LLM_USAGE = "llm_usage"
     AGENT_MANIFEST = "agent_manifest"
+    BUILD = "build"
 
 
 def require_token(value: str, name: str) -> str:
