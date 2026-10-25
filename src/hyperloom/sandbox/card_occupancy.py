@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -51,6 +52,7 @@ from hyperloom.sandbox.launcher import LAUNCHER_SOURCE
 __all__ = [
     "CARD_GUARD_ENV",
     "COMMAND_CHARS",
+    "EXCESS_SETTLE_SEC",
     "KFD_PATH",
     "METHOD_CENSUS",
     "METHOD_CENSUS_FDINFO",
@@ -84,6 +86,11 @@ METHOD_CENSUS_FDINFO = "census+fdinfo"
 #: Memory on a card the kernel lists and no process this reader sees holds, up to which it is not a foreign holder: what a
 #: process allocates between the two reads, and what the driver keeps for itself.
 UNACCOUNTED_VRAM_TOLERANCE = 512 << 20
+#: How long an excess of memory is read again before it counts. A process that ended stays in the kernel's list, its
+#: queues gone and its memory still there, while the driver frees that memory: measured on a GPU pod, a server that had
+#: exited kept its 237.9 GiB listed for 2 to 4 seconds, which an immediate second read still saw.
+EXCESS_SETTLE_SEC = 6.0
+_SETTLE_STEP_SEC = 0.5
 _GIB = 1 << 30
 #: A command line is kept to this many characters: it names the process, it is not a record of its arguments.
 COMMAND_CHARS = 160
@@ -489,11 +496,19 @@ def _holders(kfd: Path, procfs: Path, card_of: dict[int, int], *, named: bool) -
 def _census(kfd: Path, procfs: Path, selected: Mapping[int, _GpuNode]) -> CardReading:
     """The holders of ``selected`` (card to GPU) counted, with the memory the kernel lists on each card set against what the
     processes this reader sees hold. A card found to hold more than the tolerance that nothing accounts for is read again
-    and the second reading decides: a process that ended between the two reads of the first is not an intruder."""
-    first = _census_once(kfd, procfs, selected)
-    if not any(extra > UNACCOUNTED_VRAM_TOLERANCE for extra in first.unaccounted.values()):
-        return first
-    return _census_once(kfd, procfs, selected)
+    until the excess is gone or ``EXCESS_SETTLE_SEC`` has passed, and the last reading decides: a process that ended (the
+    test's own server, as it stops) keeps its memory listed for a few seconds after it is gone from ``/proc``, and is not an
+    intruder."""
+    reading = _census_once(kfd, procfs, selected)
+    deadline = time.monotonic() + EXCESS_SETTLE_SEC
+    while _has_excess(reading) and time.monotonic() < deadline:
+        time.sleep(_SETTLE_STEP_SEC)
+        reading = _census_once(kfd, procfs, selected)
+    return reading
+
+
+def _has_excess(reading: CardReading) -> bool:
+    return any(extra > UNACCOUNTED_VRAM_TOLERANCE for extra in reading.unaccounted.values())
 
 
 def _census_once(kfd: Path, procfs: Path, selected: Mapping[int, _GpuNode]) -> CardReading:

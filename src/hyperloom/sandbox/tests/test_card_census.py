@@ -43,6 +43,28 @@ def pod(tmp_path: Path) -> KernelTree:
     return tree
 
 
+class _Clock:
+    """Stands in for ``time`` in the probe: a sleep moves the clock on at once, and the sleeps are kept."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture(autouse=True)
+def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    fake = _Clock()
+    monkeypatch.setattr(card_occupancy, "time", fake)
+    return fake
+
+
 def _serve(tree: KernelTree, *, host_pid: int = 1827025, pod_pid: int = 6495, kib: int | None = None) -> None:
     """The test's server: one holder with memory and queues on the card, seen in the pod through its render node."""
     tree.holds(host_pid, _CARD, vram=_SERVER_VRAM, queues=6)
@@ -194,7 +216,7 @@ def test_a_memory_size_with_a_unit_the_reader_does_not_know_is_not_taken_for_zer
     assert reading.accounting_gap is not None and "not a size it knows" in reading.accounting_gap
 
 
-def test_an_excess_that_is_gone_at_the_second_read_was_a_process_that_ended_between_the_two(
+def test_an_excess_that_is_gone_at_the_next_read_was_a_process_that_ended_between_the_two(
     pod: KernelTree, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _serve(pod)
@@ -215,3 +237,38 @@ def test_an_excess_that_is_gone_at_the_second_read_was_a_process_that_ended_betw
 
 
 TREE_MINOR = KernelTree.render_minor(_CARD)
+
+
+def test_a_server_that_exited_keeps_its_memory_listed_for_seconds_and_is_not_foreign_once_the_kernel_frees_it(
+    pod: KernelTree, monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    """Measured on a GPU pod: the server's process was gone from ``/proc`` while the kernel listed its 237.9 GiB, with no
+    queue, for 2 to 4 seconds; an immediate second read still saw it and called the test's own server foreign."""
+    pod.holds(1827025, _CARD, vram=_SERVER_VRAM, queues=0)  # the server is gone from the pod; the kernel still lists it
+    real = card_occupancy._census_once
+    reads: list[float] = []
+
+    def census_once(kfd: Path, procfs: Path, selected):
+        reads.append(clock.now)
+        if clock.now >= 3.0:  # the driver has freed the memory and dropped the entry
+            pod.holds(1827025, _CARD, vram=0, queues=0)
+        return real(kfd, procfs, selected)
+
+    monkeypatch.setattr(card_occupancy, "_census_once", census_once)
+
+    reading = _read(pod)
+
+    assert _whats(reading, before_test=False) == []
+    assert reading.unaccounted == {_CARD: 0}
+    assert reads == [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+
+
+def test_an_excess_that_outlasts_the_settle_time_is_foreign_and_is_read_no_longer_than_that(
+    pod: KernelTree, clock: _Clock
+) -> None:
+    pod.holds(1845543, _CARD, vram=_FOREIGN_VRAM, queues=2)
+
+    reading = _read(pod)
+
+    assert _whats(reading, before_test=False) == ["2.6 GiB on card 5 that no process this container sees accounts for"]
+    assert sum(clock.sleeps) == pytest.approx(card_occupancy.EXCESS_SETTLE_SEC)
