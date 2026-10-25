@@ -33,6 +33,9 @@ notice of the restart among what arrived. A clean end, a conversation past ``RES
 refused as too long, and a resumed CLI that crashes again before finishing a turn are followed by a fresh session. A
 resume the CLI refuses at once is followed by a fresh session in the same run, with a notice and no crash. A
 conversation record that cannot be read means a fresh session and a warning.
+
+A launch, and the message that wakes a CLI once the integration head moved, say what the integration head holds and
+what of it the branch head lacks (:mod:`~hyperloom_multibranch.specialist.following`).
 """
 
 from __future__ import annotations
@@ -83,12 +86,14 @@ from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, I
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
 from hyperloom_multibranch.specialist.exhausted import exhausted_refusal
+from hyperloom_multibranch.specialist.following import integration_holdings
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.llm_usage import launch_cost, launch_usage
 from hyperloom_multibranch.specialist.prompts import (
     IntegrationHeads,
     Resume,
     idle_resume_message,
+    integration_section,
     launch_prompt,
     nudge_message,
     resume_message,
@@ -342,11 +347,14 @@ class AgentSession:
         head = await sync_to_head(self._setup.repo, branch, worktree)
         recent = await self._place.notebook.branch_log(branch)
         start = await self._briefed(head)
-        prompt = launch_prompt(start, head=head, worktree=str(worktree.path), recent=recent, last_end=last_end)
-        seen = _Seen((await self._place.notebook.poll(branch)).cursor, len(recent))
+        integration = await self._setup.repo.head(INTEGRATION_BRANCH)
+        prompt = _joined(
+            launch_prompt(start, head=head, worktree=str(worktree.path), recent=recent, last_end=last_end),
+            integration_section(await self._holdings(head)),
+        )
+        seen = _Seen((await self._place.notebook.poll(branch)).cursor, len(recent), integration)
         if not self._setup.command.interactive:
             return _Launch(prompt, seen)
-        integration = await self._setup.repo.head(INTEGRATION_BRANCH)
         cli = _CliState(
             str(uuid.uuid4()), head=head, integration=integration, seen_cursor=seen.cursor, logged=seen.logged
         )
@@ -370,14 +378,16 @@ class AgentSession:
         kept = await asyncio.to_thread(worktree.head) == head
         if not kept:
             head = await sync_to_head(self._setup.repo, branch, worktree)
-        seen = _Seen(cli.seen_cursor, cli.logged)
+        integration = IntegrationHeads(cli.integration, await self._setup.repo.head(INTEGRATION_BRANCH))
+        seen = _Seen(cli.seen_cursor, cli.logged, integration.now)
         items, notices = await self._arrived(seen)
         resume = Resume(cli.reason, head, str(worktree.path), kept=kept)
-        integration = IntegrationHeads(cli.integration, await self._setup.repo.head(INTEGRATION_BRANCH))
         if cli.idle:
             prompt = idle_resume_message(resume, integration, items, notices)
         else:
             prompt = resume_message(resume, items, notices)
+        if integration.seen != integration.now:
+            prompt = _joined(prompt, integration_section(await self._holdings(head)))
         cli = replace(
             cli,
             resumable=False,
@@ -397,7 +407,7 @@ class AgentSession:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._setup.idle_resume_wait_s
         while not self._stopped.is_set() and loop.time() < deadline:
-            if any(await self._arrived(_Seen(cli.seen_cursor, cli.logged))):
+            if any(await self._arrived(_Seen(cli.seen_cursor, cli.logged, cli.integration))):
                 return
             if await self._setup.repo.head(INTEGRATION_BRANCH) != cli.integration:
                 return
@@ -509,7 +519,7 @@ class AgentSession:
             resumes_in_row=0,
             context_tokens=turns.context,
             head=await self._setup.repo.head(self._start.branch),
-            integration=await self._setup.repo.head(INTEGRATION_BRANCH),
+            integration=launch.seen.integration,
             seen_cursor=launch.seen.cursor,
             logged=launch.seen.logged,
         )
@@ -567,8 +577,12 @@ class AgentSession:
                 _landed(record) for record in shared if record.request_id in seen.profiles and not record.in_flight
             ]
             seen.profiles = {record.request_id for record in shared if record.in_flight}
-            if items or notices or landed:
-                return wake_message((*items, *landed), notices)
+            integration = await self._setup.repo.head(INTEGRATION_BRANCH)
+            moved = integration != seen.integration
+            if items or notices or landed or moved:
+                seen.integration = integration
+                holdings = await self._holdings(await self._setup.repo.head(self._start.branch)) if moved else ""
+                return wake_message((*items, *landed), notices, integration=holdings)
             if seen.profiles or await self._tests_in_flight():
                 quiet_since = None
             else:
@@ -613,6 +627,9 @@ class AgentSession:
         branch = self._start.branch
         records = (await self._place.notebook.snapshot()).records
         return any(record.request.branch == branch and record.in_flight for record in records)
+
+    async def _holdings(self, head: str) -> str:
+        return await integration_holdings(self._setup.repo, await self._place.notebook.snapshot(), head)
 
     async def _shared_profiles(self) -> list[TestRecord]:
         """Other branches' profiles of this branch's head: a specialist whose own profile was refused as
@@ -736,11 +753,12 @@ class AgentSession:
 
 @dataclass
 class _Seen:
-    """What a launch has shown its CLI: the inbox cursor it read up to, how many branch-log entries, and the other
-    branches' profiles of its head that were still running."""
+    """What a launch has shown its CLI: the inbox cursor it read up to, how many branch-log entries, the integration
+    head, and the other branches' profiles of its head that were still running."""
 
     cursor: str
     logged: int
+    integration: str
     profiles: set[str] = field(default_factory=set)
 
 
@@ -792,6 +810,10 @@ class _Launch:
 class _Ended:
     status: AgentStatus
     seconds: float
+
+
+def _joined(*sections: str) -> str:
+    return "\n\n".join(section.strip("\n") for section in sections if section)
 
 
 def _landed(record: TestRecord) -> InboxItem:

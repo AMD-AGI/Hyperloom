@@ -254,6 +254,26 @@ def test_the_wake_and_nudge_messages_say_what_arrived_or_that_nothing_did():
     assert "decides when your branch stops" not in nudge
 
 
+def test_a_wake_after_the_integration_head_moved_carries_what_it_holds():
+    item = InboxItem(InboxKind.RESULT, "s1", "r7", "r7 has its result", 0.0)
+
+    moved = prompts.wake_message([], [], integration="The integration head is i2: server arguments --x 1.")
+    with_item = prompts.wake_message([item], [], integration="The integration head is i2.")
+
+    assert moved.startswith("Since your last turn ended, the integration head moved.")
+    assert "Where the session's gains stack:\nThe integration head is i2: server arguments --x 1." in moved
+    assert with_item.index("- result r7") < with_item.index("The integration head is i2.")
+    assert "gains stack" not in prompts.wake_message([item], [])
+
+
+def test_the_role_never_tests_or_replays_what_the_integration_head_holds():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "A replayable champion in the brief that the integration head does not hold" in prompt
+    assert "Never test or replay a change it holds" in prompt
+    assert "REROOT" not in prompt
+
+
 def test_a_resumed_cli_hears_why_it_stopped_its_worktree_and_what_arrived_meanwhile():
     item = InboxItem(InboxKind.RESULT, "s1", "r7", "r7 has its result", 0.0)
     notice = _record(9, "the specialist crashed")

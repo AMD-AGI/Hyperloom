@@ -37,6 +37,7 @@ from hyperloom_multibranch.specialist.agent_session import (
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart, restart_notice
 from hyperloom_multibranch.tests.branch_rig import branch_rig
+from hyperloom_multibranch.tests.following_rig import diverged
 
 BRANCH, TOKEN_ENV, FIRST_PID = "s1", "HYPERLOOM_SPECIALIST_MCP_TOKEN", 4000
 ROOT = Recipe(
@@ -789,6 +790,7 @@ async def test_an_idle_end_under_the_context_cap_is_resumed_with_what_changed_si
     assert "Startup brief" not in message and "result r1" in message
     assert "nothing to test" in message and "as you left it" in message
     assert f"integration head moved from {rig.root} to {moved}" in message
+    assert f"Where the session's gains stack:\nThe integration head is {moved}" in message
 
 
 async def test_an_idle_resume_with_nothing_new_says_so_and_names_the_unmoved_integration_head(rig):
@@ -801,6 +803,7 @@ async def test_an_idle_resume_with_nothing_new_says_so_and_names_the_unmoved_int
     message = rig.runner.prompts[1]
     assert "--resume" in rig.runner.specs[1].argv
     assert "Nothing arrived for your branch" in message and f"integration head is still {rig.root}" in message
+    assert "gains stack" not in message
 
 
 @pytest.mark.parametrize(
@@ -1046,3 +1049,51 @@ async def test_a_branch_stopped_while_its_idle_resume_waits_launches_nothing(rig
     await asyncio.wait_for(running, 1)
 
     assert len(rig.runner.specs) == 1
+
+
+async def test_a_fresh_launch_shows_what_the_integration_head_holds_and_what_the_head_lacks(rig, tmp_path):
+    branched = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+
+    session, running = await _next_launch(rig, 1)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    prompt = rig.runner.prompts[0]
+    assert f"Where the session's gains stack:\nThe integration head is {branched.onto}" in prompt
+    assert f"{branched.merged[:12]} of s0" in prompt and f"Your head {branched.own} lacks of it" in prompt
+
+
+async def test_the_integration_head_moving_wakes_the_cli_with_what_it_now_holds(rig):
+    session, running = await _next_launch(rig, 1)
+    _end_turn(rig)
+    beats = rig.runner.beats
+    await _until(lambda: rig.runner.beats > beats, "the turn's end to be waited out")
+    moved = await _move_integration(rig)
+    await _until(lambda: len(rig.runner.sent) == 1, "the move to wake the CLI")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert rig.runner.sent[0].startswith("Since your last turn ended, the integration head moved.")
+    assert f"The integration head is {moved}" in rig.runner.sent[0] and "--enable-chunked-prefill" in rig.runner.sent[0]
+
+
+async def test_a_resume_after_the_integration_head_moved_mid_turn_shows_what_it_now_holds(rig):
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "launch 1")
+    moved = await _move_integration(rig)
+    beats = rig.runner.beats
+    _end_turn(rig, _INIT, _call(50_000))
+    await _until(lambda: rig.runner.beats > beats, "the turn to end")
+    rig.runner.end(1, CRASHED, 3600.0)
+    with pytest.raises(SessionCrashed):
+        await asyncio.wait_for(running, 1)
+    recorded = json.loads((rig.workspace / CLI_SESSION_FILE).read_text())["integration"]
+
+    session, running = await _next_launch(rig, 2)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert recorded == rig.root
+    assert "--resume" in rig.runner.specs[1].argv
+    assert f"Where the session's gains stack:\nThe integration head is {moved}" in rig.runner.prompts[1]

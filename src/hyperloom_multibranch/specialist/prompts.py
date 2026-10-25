@@ -10,7 +10,7 @@ catalog, so a new row reaches the role). The
 launch prompt opens, on a branch log longer than it shows, with a summary of what was tried, its results and the
 latest plan; then the repair a repair branch was opened for, the branch's direction (one the user wrote, or the
 session's) and the startup brief; then the branch, its head, K and the branch's latest memory, so a new session goes
-on where the last one stopped. A
+on where the last one stopped, and what the integration head holds against the branch head. A
 session whose turn ended is woken by :func:`wake_message`, with what its inbox and the runtime's notices brought, or
 by :func:`nudge_message` when nothing came and it has nothing running. A CLI restarted on its crashed conversation
 is told by :func:`resume_message` why it stopped, where its worktree stands and what arrived while it was down; one
@@ -48,6 +48,7 @@ SUMMARY_ENTRY_CHARS = 160
 VERSION_HEX = 12
 
 _BRIEF = "Startup brief:\n{brief}"
+_INTEGRATION = "Where the session's gains stack:\n{integration}"
 _SUMMARY = "Your branch so far, from its whole log of {count} entries:\n{sections}"
 _SUMMARY_KIND = "{title}, the latest {shown} of {total}:\n{entries}"
 _SUMMARY_NEXT = "Next, by your latest plan:\n{entry}"
@@ -75,6 +76,7 @@ Since your last turn ended, this arrived for your branch:
 {items}
 Read what bears on your work (test_result, notebook_brief) and carry on from where you stopped."""
 _WAKE_ITEM = "- {kind} {pointer}: {summary}"
+_MOVED = "Since your last turn ended, the integration head moved."
 _NUDGE = """\
 Your turn ended with no test of yours running and nothing new for your branch. Nothing arrives on its own: a brief \
 comes only when the integration head moves, and no one hands your branch a new direction, so read notebook_brief for \
@@ -113,6 +115,7 @@ _LAUNCH = (
     _REPAIR,
     _DIRECTION,
     _BRIEF,
+    _INTEGRATION,
     _STANDING,
     _LOG,
     _FIRST,
@@ -120,6 +123,7 @@ _LAUNCH = (
     _ENTRY,
     _WAKE,
     _WAKE_ITEM,
+    _MOVED,
     _NUDGE,
     _RESUMED,
     _KEPT,
@@ -183,7 +187,7 @@ to test. When your change adds a code path, put a one-time log line on the path 
 flat or worse, check the test's server.log shows that line before you call the idea dead: a patch that never ran \
 measured nothing. Submit the delta worktree_patch returns as it is: for a component new on your head it names the \
 upstream commit already, and you set them only when its reply carries a note saying so; never set upstream_ref or \
-upstream_repo on a component your head already has, which the toolbox refuses as upstream_label_unsupported. A replayable champion in the brief: get its delta with notebook_replay and test it on your head before other \
+upstream_repo on a component your head already has, which the toolbox refuses as upstream_label_unsupported. A replayable champion in the brief that the integration head does not hold: get its delta with notebook_replay and test it on your head before other \
 directions. A champion the brief lists as "already on your head, nothing to replay" is in your head already: build on \
 it, do not test it again. A lead under "Unfinished in this session" in the brief is a change another branch measured \
 but left unfinished: finish one in your direction the same way before starting a new idea. Before you replay a \
@@ -211,6 +215,11 @@ held back, or a test that could not be judged. What another specialist should kn
 to notebook_learn. A learning names its direction and cites its tests in request_ids. A past session's lesson \
 (lsn-...) that this session's tests show wrong here: revise it with supersedes, or retire it with retires when it no \
 longer holds at all. Then go back to step 2: the session decides when your branch stops, not you.
+
+The integration head is where the session's gains stack. Your launch prompt, and the message that wakes you after \
+it moves, lists what it holds: its launch, the commits merged into it, those your head lacks, and your head's commits \
+not on it with how their merges went. Never test or replay a change it holds: on a head behind it, that measures a \
+gain the session has already and stacks nowhere. Merging your commits into it is the integrator's job, not yours.
 
 Your launch prompt names your branch's direction: work on it first. When the brief names a "Focus", start from \
 that operator within your direction: the scheduler opened your branch on it. When the first idea fails, profile and dig \
@@ -482,9 +491,16 @@ def _summary(log: Sequence[BranchLogRecord]) -> str:
     return _SUMMARY.format(count=len(log), sections="\n".join(sections)) if sections else ""
 
 
-def wake_message(items: Sequence[InboxItem], notices: Sequence[BranchLogRecord]) -> str:
-    """The message that wakes a specialist whose turn ended: what its inbox and the runtime's notices brought since."""
-    return _WAKE.format(items=_arrivals(items, notices))
+def wake_message(items: Sequence[InboxItem], notices: Sequence[BranchLogRecord], *, integration: str = "") -> str:
+    """The message that wakes a specialist whose turn ended: what its inbox and the runtime's notices brought since,
+    and ``integration``, what the integration head holds, once it moved."""
+    woken = _WAKE.format(items=_arrivals(items, notices)) if items or notices else _MOVED
+    return f"{woken}\n\n{integration_section(integration)}" if integration else woken
+
+
+def integration_section(holdings: str) -> str:
+    """``holdings``, what the integration head holds against the branch head, as a launch or a resume ends with it."""
+    return _INTEGRATION.format(integration=holdings)
 
 
 @dataclass(frozen=True)
@@ -594,6 +610,7 @@ __all__ = [
     "IntegrationHeads",
     "Resume",
     "idle_resume_message",
+    "integration_section",
     "launch_prompt",
     "nudge_message",
     "prompt_versions",
