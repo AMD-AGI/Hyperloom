@@ -13,7 +13,12 @@ from .machine_state import PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT
 if TYPE_CHECKING:
     from ..state.task_registry import Task
 
-__all__ = ["PHASE_DISPATCH_FIRST", "in_dispatch_order", "is_operator_work"]
+__all__ = ["LEVER_BUNDLE_REASON", "PHASE_DISPATCH_FIRST", "in_dispatch_order", "is_operator_work"]
+
+#: The ``reason`` of the explore that benches every dormant rewrite lever together. It goes ahead of queued integrates:
+#: its patches are already written and in the tree, each missed the KEEP threshold alone, and benched together is the
+#: only way they clear it. Behind the integrates it never ran -- they filled the phase first.
+LEVER_BUNDLE_REASON: str = "dormant_lever_bundle"
 
 # In FRAMEWORK_AGENT a reviewed patch and a configuration grid hold the same serving lanes for a whole round: a grid
 # can be proposed again, but a patch still queued when the phase exits is cancelled unmeasured.
@@ -33,12 +38,18 @@ def is_operator_work(kind: str, params: dict[str, Any] | None) -> bool:
     return kind == "explore" and bool(params.get("operator_priority"))
 
 
+def _is_lever_bundle(kind: str, params: dict[str, Any] | None) -> bool:
+    """Whether a task is the round benching every dormant rewrite lever together."""
+    return kind == "explore" and str((params or {}).get("reason") or "") == LEVER_BUNDLE_REASON
+
+
 def in_dispatch_order(queued: list[Task], phase: str) -> list[Task]:
-    """Return ``queued`` grouped as operator work, then ``phase``'s dispatch-first kinds, then the rest, each in order."""
+    """Return ``queued`` grouped as operator work and the dormant-lever bundle, then ``phase``'s dispatch-first kinds,
+    then the rest, each in order."""
     first = PHASE_DISPATCH_FIRST.get(phase, frozenset())
 
     def tier(task: Task) -> int:
-        if is_operator_work(task.kind, task.params):
+        if is_operator_work(task.kind, task.params) or _is_lever_bundle(task.kind, task.params):
             return 0
         return 1 if task.kind in first else 2
 

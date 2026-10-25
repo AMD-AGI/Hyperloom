@@ -281,20 +281,21 @@ def additive_variants(
     variants.sort(key=lambda v: (len(v["framework_lever_bundle"]), v["name"]))
 
     # The full stack, when it is not already one of the bundles above.
-    if len(switches) > 1:
-        full = frozenset(entry["switch"] for entry in switches)
-        if full not in seen:
-            variants.append(
-                {
-                    "name": f"{name_prefix}_all",
-                    "extra_envs": switch_env(switches),
-                    "note": f"all {len(switches)} framework rewrite levers together",
-                    "provenance": "framework_rewrite_lever",
-                    "framework_lever": "",
-                    "framework_lever_bundle": sorted(full),
-                }
-            )
+    if len(switches) > 1 and frozenset(entry["switch"] for entry in switches) not in seen:
+        variants.append(bundle_variant(switches, name=f"{name_prefix}_all"))
     return variants
+
+
+def bundle_variant(switches: list[dict[str, Any]], *, name: str) -> dict[str, Any]:
+    """Build the explore variant that switches every given lever ON together."""
+    return {
+        "name": name,
+        "extra_envs": switch_env(switches),
+        "note": f"all {len(switches)} framework rewrite levers together",
+        "provenance": "framework_rewrite_lever",
+        "framework_lever": "",
+        "framework_lever_bundle": sorted(entry["switch"] for entry in switches),
+    }
 
 
 def leave_one_out_variants(
@@ -365,6 +366,7 @@ __all__ = [
     "MANIFEST_KEY",
     "MAX_SWITCHES",
     "additive_variants",
+    "bundle_variant",
     "dependency_closure",
     "dependents_closure",
     "leave_one_out_variants",

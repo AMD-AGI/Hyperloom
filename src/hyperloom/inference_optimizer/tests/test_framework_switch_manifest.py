@@ -396,6 +396,38 @@ def test_dormant_levers_seed_additive_variants():
     assert all("extra_envs" in v for v in payload)
 
 
+def test_a_dormant_patch_is_not_benched_whole_again():
+    """Its integrate round benched every switch on together; only one switch of several is new."""
+    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+
+    state = _state()
+    state.record_authored_framework_levers(_chain(), default_on=False, specialist_task_id="t-chain")
+    state.record_authored_framework_levers([_entry_parsed("HL_SOLO")], default_on=False, specialist_task_id="t-solo")
+
+    payload = framework_lever_grid(state)
+
+    benched = {v["framework_lever"] for v in payload}
+    assert benched and "" not in benched, "the all-switches set repeats what the integrate rounds measured"
+    assert "HL_SOLO" not in benched, "a one-switch patch alone is exactly what its integrate round measured"
+
+
+def test_dormant_levers_of_several_patches_are_bundled_together():
+    """Each missed the bar alone; together is the only way they clear it."""
+    from hyperloom.orchestrator.actions.executors.explore import dormant_lever_bundle
+
+    state = _state()
+    state.record_authored_framework_levers([_entry_parsed("HL_ONE")], default_on=False, specialist_task_id="t-1")
+    assert dormant_lever_bundle(state) is None, "one patch's set is its own integrate round"
+
+    state.record_authored_framework_levers([_entry_parsed("HL_TWO")], default_on=False, specialist_task_id="t-2")
+    state.record_authored_framework_levers([_entry_parsed("HL_LIVE")], default_on=True, specialist_task_id="t-3")
+    bundle = dormant_lever_bundle(state)
+
+    assert bundle is not None
+    assert bundle["framework_lever_bundle"] == ["HL_ONE", "HL_TWO"]
+    assert set(bundle["extra_envs"]) == {"HL_ONE", "HL_TWO"}
+
+
 def test_active_levers_seed_leave_one_out_variants():
     """A stack that already won is attributed by removing one lever at a time."""
     from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid

@@ -89,6 +89,33 @@ async def test_same_queue_head_maps_to_the_same_idempotency_key():
     assert len(keys) == 1
 
 
+async def test_dormant_levers_of_several_patches_get_one_bundle_round_per_set():
+    """A set is benched once, a grown set again, and one patch's set never: its integrate round measured it."""
+    from hyperloom.orchestrator.phases.dispatch_order import LEVER_BUNDLE_REASON
+
+    fp = _phase()
+    state = fp._coord.shared_state
+
+    def dormant(switch: str, patch: str) -> None:
+        state.record_authored_framework_levers([{"switch": switch}], default_on=False, specialist_task_id=patch)
+
+    dormant("HL_ONE", "t-1")
+    assert await fp.enqueue_dormant_lever_bundle() is False
+    dormant("HL_TWO", "t-2")
+    assert await fp.enqueue_dormant_lever_bundle() is True
+    assert await fp.enqueue_dormant_lever_bundle() is False
+    dormant("HL_THREE", "t-3")
+    assert await fp.enqueue_dormant_lever_bundle() is True
+
+    rounds = _explores(fp)
+    assert {c["params"]["reason"] for c in rounds} == {LEVER_BUNDLE_REASON}
+    assert [c["params"]["grid"][0]["framework_lever_bundle"] for c in (rounds[0], rounds[-1])] == [
+        ["HL_ONE", "HL_TWO"],
+        ["HL_ONE", "HL_THREE", "HL_TWO"],
+    ]
+    assert rounds[0]["params"]["config_path"] == "/cfg.yaml"
+
+
 async def test_already_benched_fingerprints_are_skipped():
     fp = _phase(rounds=[_round("enable-x")])
     fp._coord.shared_state.explore_search = {"tested": {"fp": {"extra_server_args": "--enable-x", "outcome": "KEEP"}}}

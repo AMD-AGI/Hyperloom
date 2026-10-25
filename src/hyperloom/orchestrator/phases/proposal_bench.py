@@ -8,11 +8,15 @@ from __future__ import annotations
 import logging as _logging
 from collections.abc import Iterable, Mapping
 from hashlib import sha1
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..collaborator import CoordinatorCollaborator
 from ..specialists.domains import CUSTOM_SPECIALIST_KEY
-from .dispatch_order import is_operator_work
+from ..state.shared_state import inject_stack_base_params
+from .dispatch_order import LEVER_BUNDLE_REASON, is_operator_work
+
+if TYPE_CHECKING:
+    from ..state.task_registry import Task
 
 log = _logging.getLogger(__name__)
 
@@ -58,6 +62,53 @@ class ProposalBench(CoordinatorCollaborator):
         fp_hash = sha1(",".join(sorted(row["fingerprint"] for row in rows)).encode(), usedforsecurity=False)
         prefix = "auto-explore-custom" if operator_priority else "auto-explore"
         return f"{prefix}-c{int(self.shared_state.macro_cycle or 0)}-{fp_hash.hexdigest()[:12]}"
+
+    async def _enqueue_coordinator_explore(self, params: Mapping[str, Any], *, idempotency_key: str) -> "Task | None":
+        """Enqueue an explore the Coordinator owns, on the accepted stack; the new task, or ``None`` if the key exists."""
+        state = self.shared_state
+        task_params = dict(params)
+        if state.baseline_config_path:
+            task_params["config_path"] = state.baseline_config_path
+        inject_stack_base_params(task_params, state, anchor=True)
+        last_baseline = state.last_baseline or {}
+        benchmark_script = (
+            str(last_baseline.get("benchmark_script") or "").strip() if isinstance(last_baseline, dict) else ""
+        )
+        if benchmark_script:
+            task_params["benchmark_script"] = benchmark_script
+        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("explore")
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="explore",
+            params=task_params,
+            idempotency_key=idempotency_key,
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
+            dispatch_class="coordinator",
+        )
+        return None if was_existing else task
+
+    async def enqueue_dormant_lever_bundle(self) -> bool:
+        """Enqueue one round benching every dormant rewrite lever together; whether a new round was enqueued.
+
+        Keyed on the set of switches, so a set is benched once and a grown set again. Dispatched ahead of queued
+        integrates (see :mod:`.dispatch_order`): left to the orchestration it waited behind them, and no explore fit
+        the phase they had already filled.
+        """
+        from ..actions.executors.explore import dormant_lever_bundle
+
+        variant = dormant_lever_bundle(self.shared_state)
+        if variant is None:
+            return False
+        switches = sha1(",".join(variant["framework_lever_bundle"]).encode(), usedforsecurity=False).hexdigest()[:12]
+        task = await self._enqueue_coordinator_explore(
+            {"source": "coordinator_internal", "reason": LEVER_BUNDLE_REASON, "grid": [variant]},
+            idempotency_key=f"lever-bundle-c{int(self.shared_state.macro_cycle or 0)}-{switches}",
+        )
+        if task is not None:
+            log.info(
+                "lever bundle: enqueued explore task_id=%s over %s", task.task_id, variant["framework_lever_bundle"]
+            )
+        return task is not None
 
     async def operator_work_pending(self) -> bool:
         """Whether the operator-defined specialist or the bench of its proposals has not run yet."""

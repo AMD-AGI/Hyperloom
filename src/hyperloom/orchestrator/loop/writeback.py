@@ -2938,6 +2938,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 stack_delta_pct=result.get("delta_pct"),
             ):
                 changed = True
+                await self._coord.phase_framework.enqueue_dormant_lever_bundle()
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         enablement_landing = bool(
             result.get("enablement") or task_params.get("enablement") or task_params.get("enablement_landing")

@@ -662,6 +662,22 @@ def test_operator_work_dispatches_first_in_every_phase(phase, expected):
     assert [t.task_id for t in in_dispatch_order(queued, phase)] == expected
 
 
+def test_the_dormant_lever_bundle_goes_ahead_of_queued_integrates():
+    """Behind the integrates it never ran: they filled the phase, and every explore after them was refused."""
+    from hyperloom.orchestrator.phases.dispatch_order import LEVER_BUNDLE_REASON
+
+    queued = [
+        _task("patch-1", "integrate_patch"),
+        _task("patch-2", "integrate_patch"),
+        _task("explore", "explore", grid=[]),
+        _task("bundle", "explore", grid=[], reason=LEVER_BUNDLE_REASON),
+    ]
+
+    order = [t.task_id for t in in_dispatch_order(queued, "FRAMEWORK_AGENT")]
+
+    assert order == ["bundle", "patch-1", "patch-2", "explore"]
+
+
 # Bench of custom proposals
 class _BenchTasks:
     def __init__(self, queued=(), running=()) -> None:

@@ -21,7 +21,7 @@ from . import machine_state as _phase_state
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 from ..state.task_registry import TaskNotFound
-from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
+from ..state.shared_state import resolve_grading_anchor_tput
 
 if TYPE_CHECKING:
     from ..predictor.payload import PhaseBudget
@@ -2941,7 +2941,6 @@ class FrameworkPhase(ProposalBench):
         """Enqueue one explore grid benching ``rows``; returns whether a new task was created."""
         from ..actions.executors._proposal_identity import controls_of
 
-        state = self.shared_state
         grid = [
             {
                 "name": row["name"],
@@ -2965,24 +2964,10 @@ class FrameworkPhase(ProposalBench):
         }
         if operator_priority:
             params["operator_priority"] = True
-        if state.baseline_config_path:
-            params["config_path"] = state.baseline_config_path
-        inject_stack_base_params(params, state, anchor=True)
-        last_bl = state.last_baseline or {}
-        if isinstance(last_bl, dict):
-            bs = str(last_bl.get("benchmark_script") or "").strip()
-            if bs:
-                params["benchmark_script"] = bs
-        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("explore")
-        etask, was_existing = await self.tasks.create_or_return_existing(
-            kind="explore",
-            params=params,
-            idempotency_key=self._bench_key(rows, operator_priority=operator_priority),
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
-            dispatch_class="coordinator",
+        etask = await self._enqueue_coordinator_explore(
+            params, idempotency_key=self._bench_key(rows, operator_priority=operator_priority)
         )
-        if was_existing:
+        if etask is None:
             return False
         log.info("auto_bench: enqueued explore task_id=%s (variants=%d)", etask.task_id, len(grid))
         from ..loop.proposals import record_config_proposal

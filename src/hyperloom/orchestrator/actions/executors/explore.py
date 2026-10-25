@@ -294,25 +294,51 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
 
 
 def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
-    """Build explore variants that attribute each registered rewrite lever."""
-    if shared_state is None:
-        return []
-    rows = list(getattr(shared_state, "authored_framework_levers", None) or [])
-    if not rows:
-        return []
-    pending = [row for row in rows if isinstance(row, dict) and row.get("attributed_gain_pct") is None]
-    if not pending:
-        return []
+    """Build explore variants that attribute each registered rewrite lever.
+
+    A dormant lever's patch was benched with all its switches on when it was integrated, below the KEEP threshold, so
+    that set benched again repeats the round: a switch on its own is new only out of a patch that carried several.
+    The dormant levers of several patches together are new as well, and get their own round
+    (:func:`dormant_lever_bundle`) rather than a seat in every grid.
+    """
+    rows = _lever_rows(shared_state)
+    pending = [row for row in rows if row.get("attributed_gain_pct") is None]
     dormant = [row for row in pending if not row.get("default_on")]
     active = [row for row in pending if row.get("default_on")]
     payload: list[dict[str, Any]] = []
-    if dormant:
-        for variant in _switch_manifest.additive_variants(dormant):
+    decomposable = [row for patch in _by_patch(dormant) if len(patch) > 1 for row in patch]
+    for variant in _switch_manifest.additive_variants(decomposable):
+        if variant["framework_lever"]:
             payload.append({**variant, "framework_lever_source": "additive"})
     if active:
         for variant in _switch_manifest.leave_one_out_variants(active):
             payload.append({**variant, "framework_lever_source": "leave_one_out"})
     return payload
+
+
+def dormant_lever_bundle(shared_state: Any) -> dict[str, Any] | None:
+    """The variant that switches every dormant lever on together, once they come from more than one patch.
+
+    Each was kept dormant for missing the KEEP threshold alone; together is the only way several of them clear it,
+    which is how the hand-tuned GLM-5.3 stack landed most of its 44 patches.
+    """
+    dormant = [row for row in _lever_rows(shared_state) if not row.get("default_on")]
+    if len(_by_patch(dormant)) < 2:
+        return None
+    return _switch_manifest.bundle_variant(dormant, name="fwlever_bundle")
+
+
+def _lever_rows(shared_state: Any) -> list[dict[str, Any]]:
+    """The session's registered rewrite levers."""
+    return [row for row in getattr(shared_state, "authored_framework_levers", None) or [] if isinstance(row, dict)]
+
+
+def _by_patch(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Lever rows grouped by the registration that recorded them together: one integrated patch's switches."""
+    patches: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        patches.setdefault((str(row.get("specialist_task_id") or ""), str(row.get("ts") or "")), []).append(row)
+    return list(patches.values())
 
 
 def _framework_lever_attributions(
