@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.measure.runner import card_watch
+from hyperloom.measure.runner import card_watch, hardware
 from hyperloom.measure.runner.tests.bootstrap_rig import Rig, make_rig
 from hyperloom.sandbox import card_occupancy
 from hyperloom.sandbox.card_occupancy import CardReading
@@ -43,8 +43,9 @@ class SettleClock:
 
 @pytest.fixture(autouse=True)
 def settle_clock(monkeypatch: pytest.MonkeyPatch) -> SettleClock:
-    """Reading a card again to let an exiting process go takes no wall time in these tests."""
+    """Reading a card again to let an exiting process go, or its memory be released, takes no wall time in these tests."""
     fake = SettleClock()
     monkeypatch.setattr(card_watch, "time", fake)
+    monkeypatch.setattr(hardware, "time", fake)
     monkeypatch.setattr(card_occupancy, "time", fake)
     return fake

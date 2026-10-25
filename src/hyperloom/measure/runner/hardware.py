@@ -13,6 +13,7 @@ import json
 import re
 import shutil
 import subprocess
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -25,9 +26,24 @@ from hyperloom.common.gpu_identity import (
 )
 from hyperloom.common.rocm_smi import GpuVram, gpu_vram_usage, vram_busy
 
-__all__ = ["GpuFacts", "EccCounts", "busy_gpus", "check_hardware", "ecc_counts", "read_gpu_facts"]
+__all__ = [
+    "CARD_RELEASE_WAIT_SEC",
+    "EccCounts",
+    "GpuFacts",
+    "busy_gpus",
+    "check_hardware",
+    "ecc_counts",
+    "read_gpu_facts",
+    "released_gpus",
+]
 
 _JSON = "--json"
+#: How long a visible card that holds memory before the test is read again. A server that crashed in the test before on
+#: the card frees its memory only once its processes are torn down, and a retry that starts at once (8 s after the crash
+#: on the GPU check) found the card still held and failed three times over; a holder that lasts longer is not the last
+#: test's. The census's settle (``EXCESS_SETTLE_SEC``) is for a server that exited, which frees its memory in seconds.
+CARD_RELEASE_WAIT_SEC = 60.0
+_RELEASE_STEP_SEC = 1.0
 _TIMEOUT_SEC = 30.0
 Runner = Callable[[Sequence[str]], str | None]
 
@@ -180,6 +196,17 @@ def busy_gpus(visible: Sequence[int], usage: Callable[[], list[GpuVram] | None] 
     if used is None or any(index >= len(used) for index in visible):
         return None
     return [index for index in visible if vram_busy(used[index])]
+
+
+def released_gpus(visible: Sequence[int]) -> list[int] | None:
+    """:func:`busy_gpus`, read again every second while a card holds memory, until it is released or
+    :data:`CARD_RELEASE_WAIT_SEC` has passed; the last reading decides."""
+    deadline = time.monotonic() + CARD_RELEASE_WAIT_SEC
+    busy = busy_gpus(visible)
+    while busy and time.monotonic() < deadline:
+        time.sleep(_RELEASE_STEP_SEC)
+        busy = busy_gpus(visible)
+    return busy
 
 
 def _wrong_card(gpu: GpuFacts, gpu_type: str) -> bool:

@@ -191,8 +191,9 @@ def _check_cards_free(ctx: _Context, visible: list[int]) -> None:
 
 
 def _check_vram_free(ctx: _Context, visible: list[int]) -> None:
-    """A visible GPU that already holds memory is not free for the test (design 4.8.1 step 3)."""
-    busy = hardware.busy_gpus(visible)
+    """A visible GPU that still holds memory once the last test's server had time to release it is not free for the
+    test (design 4.8.1 step 3)."""
+    busy = hardware.released_gpus(visible)
     if busy is None:
         ctx.notes.append("GPU memory use could not be read; the visible GPUs were not checked for free memory")
     elif busy:

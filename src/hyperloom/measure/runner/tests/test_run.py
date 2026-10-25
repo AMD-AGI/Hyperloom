@@ -474,8 +474,38 @@ def test_a_visible_card_that_holds_memory_stops_the_runner_before_it_waits_for_a
 
     status = _status(tmp_path)
     assert status["error_class"] == "runner_start_failed" and "GPU 0 already holds memory" in status["message"]
-    assert seen == [[0]], "only the cards this sandbox may use are asked about"
+    assert seen and all(visible == [0] for visible in seen), "only the cards this sandbox may use are asked about"
     assert backend.calls == [] and not (tmp_path / "out" / "manifest.json").exists()
+
+
+def test_a_card_whose_memory_is_released_while_it_is_read_again_lets_the_test_run(
+    tmp_path, env, monkeypatch, settle_clock
+):
+    """The retry of a test whose server crashed starts on the same card while the crashed server is still torn down."""
+    looks: list[float] = []
+
+    def releasing(visible):
+        looks.append(settle_clock.now)
+        return [0] if settle_clock.now < 20.0 else []
+
+    monkeypatch.setattr(runner.hardware, "busy_gpus", releasing)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    assert _status(tmp_path)["state"] == "succeeded"
+    assert looks[0] == 0.0 and looks[-1] == 20.0 and len(looks) == 21, "read every second until it was released"
+
+
+def test_a_card_still_held_after_the_release_wait_fails_the_start_once_the_wait_is_over(
+    tmp_path, env, monkeypatch, settle_clock
+):
+    monkeypatch.setattr(runner.hardware, "busy_gpus", lambda visible: [0])
+
+    assert _go(tmp_path, env, None) == 2
+
+    assert "GPU 0 already holds memory" in _status(tmp_path)["message"]
+    assert settle_clock.now == runner.hardware.CARD_RELEASE_WAIT_SEC
 
 
 def test_a_free_card_lets_the_test_run_and_leaves_no_note(tmp_path, env, monkeypatch):
