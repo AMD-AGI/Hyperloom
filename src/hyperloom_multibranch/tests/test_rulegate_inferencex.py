@@ -84,7 +84,8 @@ def test_the_eval_score_is_held_to_the_baseline_score(baseline_accuracy, accurac
         (False, 1025.0, False, Verdict.BLOCKED, ()),
         (True, 1025.0, False, Verdict.INCONCLUSIVE, ()),
         (False, 1025.0, True, Verdict.INCONCLUSIVE, ()),
-        (True, 1015.0, True, Verdict.FLAT, (GAIN_NOT_CONFIRMED,)),
+        (True, 1015.0, True, Verdict.IMPROVED, ()),
+        (True, 1005.0, True, Verdict.FLAT, (GAIN_NOT_CONFIRMED,)),
         (True, 900.0, True, Verdict.REGRESSED, (GAIN_NOT_CONFIRMED,)),
     ],
 )
@@ -129,6 +130,25 @@ def test_a_gain_is_blocked_only_by_a_defect_both_measurements_show(first, retest
     reading = InferenceXReading(1025.0, SCORES[retest[0]], dropped=retest[1])
     judgement = confirm(provisional, reading, BASELINE, PARENT, "r2")
     assert (judgement.verdict, judgement.refused_by) == (verdict, refused_by)
+
+
+def test_a_retest_that_loses_the_gain_does_not_confirm_it_whatever_the_mean():
+    first = compare(_reading(1050.0), BASELINE, PARENT, "r1")
+    judgement = confirm(first, _reading(995.0), BASELINE, PARENT, "r2")
+    assert judgement.gain_pct == pytest.approx(2.25)
+    assert (judgement.verdict, judgement.refused_by) == (Verdict.FLAT, (GAIN_NOT_CONFIRMED,))
+
+
+@pytest.mark.parametrize(
+    ("parent", "first", "retest"),
+    [(7861.0, 8037.0, 7908.0), (8070.0, 8145.0, 8175.0)],
+    ids=["b07-686cd806", "b09-cuda-graph-backend-prefill"],
+)
+def test_a_gain_near_one_percent_on_a_quiet_machine_is_confirmed(parent, first, retest):
+    quiet = InferenceXBaseline(DispersionThreshold((8000.0, 8008.0, 7992.0)).threshold_pct, 0.90)
+    provisional = compare(_reading(first), quiet, {GRADED_OUTPUT: parent}, "r1")
+    judgement = confirm(provisional, _reading(retest), quiet, {GRADED_OUTPUT: parent}, "r2")
+    assert (provisional.verdict, judgement.verdict) == (Verdict.NEEDS_CONFIRM, Verdict.IMPROVED)
 
 
 def test_only_a_provisional_judgement_is_retested():

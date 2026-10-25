@@ -127,7 +127,7 @@ class BranchJudge:
             # Before the gate holds the candidate: once held, it is never judged again, so a notice lost after that
             # would never be written.
             held_back_by = ", ".join(judgement.refused_by) or "the accuracy gate"
-            content = f"{first.request_id} cleared the bar twice and is held back by {held_back_by}"
+            content = f"{first.request_id} held its gain on the retest and is held back by {held_back_by}"
             await self._notice(
                 logged, f"{content}; diagnose it, then request_repair or decline_repair", *judgement.request_ids
             )

@@ -16,12 +16,14 @@ from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, Judgement, Verdict
 from hyperloom_multibranch.rulegate.accuracy import inferencex_accuracy_ok
 
-# With the retest, at a 1% spread and three baselines (simulated): about 2% of no-op candidates get committed and about
-# 70% of real +3% gains are confirmed.
+# With the retest, at a 1% spread and three baselines (simulated): about 6% of no-op candidates get committed and about
+# 75% of real +3% gains are confirmed.
 NOISE_MULTIPLE = 2.0
 
-# Three near-identical baselines would otherwise let every flicker through.
-FLOOR_PCT = 1.0
+# Three near-identical baselines would otherwise let every flicker through. Repeated tests of one recipe in session
+# c7eddf22 spread 0.34%; at that spread this floor commits about 2% of no-op candidates and confirms about 67% of real
+# +1% gains (simulated), where 1.0 confirmed 29%.
+FLOOR_PCT = 0.6
 
 MIN_BASELINES = 2
 
@@ -132,8 +134,9 @@ def confirm(
     """Settles a provisional gain with a retest on another sandbox; the record is the mean of both measurements, their
     eval scores included.
 
-    A gain both measurements cleared is improved when neither showed a defect (a failed accuracy gate, dropped
-    requests), blocked when both showed the same one, and inconclusive otherwise. A blocked judgement names the
+    A gain holds when the mean of both measurements clears the bar and the retest is still a gain; one that holds is
+    improved when neither showed a defect (a failed accuracy gate, dropped requests), blocked when both showed the same
+    one, and inconclusive otherwise. A blocked judgement names the
     performance defects both showed; the accuracy gate is in ``accuracy_ok``.
     """
     if first.verdict is not Verdict.NEEDS_CONFIRM:
@@ -148,7 +151,7 @@ def confirm(
     accuracy_ok = inferencex_accuracy_ok(baseline.accuracy, reading.accuracy)
     both_ok = first.accuracy_ok and accuracy_ok
     seen = tuple(dict.fromkeys((*first.refused_by, *reading.defects)))
-    if first.gain_pct > bar and _gain(reading.throughput, parent) > bar:
+    if gain > bar and _gain(reading.throughput, parent) > 0:
         before = {*first.refused_by, *(() if first.accuracy_ok else (_ACCURACY,))}
         after = {*reading.defects, *(() if accuracy_ok else (_ACCURACY,))}
         if before & after:

@@ -340,7 +340,7 @@ Known fake gains: a measurement can show them without the candidate being better
 not spend tests on them.
 {{fake_gains}}
 
-A blocked candidate cleared the bar on both measurements and was held back on both by the same defect: the accuracy \
+A blocked candidate held its gain on the retest and was held back on both measurements by the same defect: the accuracy \
 gate, on InferenceX requests it did not complete (dropped_requests), or on AgentX a guard (P90, output throughput) or \
 more failed requests than its parent. It waits for your \
 diagnosis; conclude it before your next candidate. Read both results with test_result and find the cause.

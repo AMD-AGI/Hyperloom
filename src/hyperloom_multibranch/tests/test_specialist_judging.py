@@ -254,7 +254,7 @@ async def test_a_gain_the_accuracy_gate_holds_back_twice_is_held_for_the_special
     assert len(session.retests()) == 1
     (notice,) = await session.notices()
     assert notice == (
-        f"{NOTICE} {first} cleared the bar twice and is held back by the accuracy gate; "
+        f"{NOTICE} {first} held its gain on the retest and is held back by the accuracy gate; "
         "diagnose it, then request_repair or decline_repair"
     )
 
@@ -271,7 +271,7 @@ async def test_a_gain_that_drops_requests_on_both_measurements_is_held_for_the_s
     assert record.conclusion is Conclusion.DIAGNOSIS_PENDING
     assert await session.repo.head(BRANCH) == ROOT
     (notice,) = await session.notices()
-    assert f"{first} cleared the bar twice and is held back by {DROPPED_REQUESTS};" in notice
+    assert f"{first} held its gain on the retest and is held back by {DROPPED_REQUESTS};" in notice
 
 
 class _Critic:
