@@ -85,7 +85,7 @@ def generate_tuner(
     timeout_s: int = DEFAULT_TIMEOUT_S,
     retry_note: str = "",
 ) -> GeneratedTuner:
-    """Author a tuner script into ``work_dir``; an unusable provider is a failed outcome, a failed session raises."""
+    """Author a tuner script into ``work_dir``; an unusable provider or a failed session is a failed outcome."""
     work_dir.mkdir(parents=True, exist_ok=True)
     script_path = work_dir / "tuner.py"
 
@@ -143,7 +143,11 @@ def generate_tuner(
         allow_untracked=True,
     )
 
-    result = _run(backend, spec)
+    try:
+        result = _run(backend, spec)
+    except Exception as exc:  # per-run boundary: the failure is written to the tier-3 outcome
+        log.warning("tier-3 authoring session failed", exc_info=True)
+        return GeneratedTuner(False, None, f"authoring session failed: {exc!r}")
 
     provider = str(getattr(backend, "name", "") or "")
     session = str(getattr(result, "session_id", "") or "")

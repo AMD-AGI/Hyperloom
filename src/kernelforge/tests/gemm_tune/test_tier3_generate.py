@@ -3,10 +3,11 @@
 
 """Tests for asking an agent to author a generated tuner.
 
-A missing provider, an unusable one, and a session that ends without writing
-the file come back as a ``GeneratedTuner`` the caller can read; a session that
-dies raises to the tier-3 boundary in ``gemm_tune.cli``. These tests pin each of
-those paths, and the calling convention ``_run`` has to tolerate.
+Every failure here has to be survivable, because the tier is optional: a
+missing provider, an unusable one, a session that dies, and a session that ends
+without writing the file all have to come back as a ``GeneratedTuner`` the
+caller can read, never as an exception that ends the tuning run. These tests
+pin each of those paths, and the calling convention ``_run`` has to tolerate.
 """
 
 from __future__ import annotations
@@ -130,6 +131,14 @@ class TestEveryFailureComesBackAsData:
         assert got.ok is False
         assert "agent provider unusable" in got.reason
 
+    def test_a_session_that_dies_is_reported_not_raised(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
+        _install_provider(monkeypatch, _Backend(raises=True))
+
+        got = generate_tuner(_mandate(), tmp_path / "work")
+
+        assert got.ok is False
+        assert "authoring session failed" in got.reason
+
     def test_a_session_that_writes_nothing_names_why_it_ended(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
         _install_provider(monkeypatch, _Backend(writes=None))
 
@@ -138,14 +147,6 @@ class TestEveryFailureComesBackAsData:
         assert got.ok is False
         assert "without writing tuner.py" in got.reason
         assert (got.provider, got.session_id) == ("fake-provider", "sess-1")
-
-
-def test_a_session_that_dies_raises_to_the_tier3_boundary(tmp_path, monkeypatch: pytest.MonkeyPatch):
-    """The tier-3 attempt in ``gemm_tune.cli`` records the traceback and tuning continues."""
-    _install_provider(monkeypatch, _Backend(raises=True))
-
-    with pytest.raises(RuntimeError, match="session died"):
-        generate_tuner(_mandate(), tmp_path / "work")
 
 
 class TestASuccessfulAuthoringSession:

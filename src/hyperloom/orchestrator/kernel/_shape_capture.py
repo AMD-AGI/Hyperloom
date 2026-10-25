@@ -27,7 +27,7 @@ async def _served_capture_workload(
     run: _ShapeCaptureRun,
     capture_state: Any,
     task_params: dict[str, Any],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], HandlerResult | None]:
     from ..loop.sub_agent_runner import RunnerContext
     from ..state.task_registry import Task
 
@@ -46,8 +46,12 @@ async def _served_capture_workload(
         "session_dir": run.session_dir,
         "workspace": run.capture_dir,
     }
-    benchmark_result = await executor(ctx)
-    return benchmark_result if isinstance(benchmark_result, dict) else {}
+    try:
+        benchmark_result = await executor(ctx)
+    except Exception as exc:  # per-run boundary: the fault becomes the run's recorded capture verdict
+        log.warning("vLLM TunableOp shape capture raised", exc_info=True)
+        return {}, _shape_capture_failure(f"vLLM TunableOp shape capture raised {exc!r}", run.capture_dir)
+    return (benchmark_result if isinstance(benchmark_result, dict) else {}), None
 
 
 async def _capture_block_fp8_profile_shapes(run: _ShapeCaptureRun, state: Any, payload: dict) -> HandlerResult:
@@ -58,7 +62,11 @@ async def _capture_block_fp8_profile_shapes(run: _ShapeCaptureRun, state: Any, p
     benchmark_script = state.accepted_baseline_script()
     if benchmark_script:
         task_params["benchmark_script"] = benchmark_script
-    benchmark_result = await _served_capture_workload(RooflineExecutor(shared_state=state), run, state, task_params)
+    benchmark_result, fault = await _served_capture_workload(
+        RooflineExecutor(shared_state=state), run, state, task_params
+    )
+    if fault is not None:
+        return fault
 
     steady_state_trace = str(benchmark_result.get("steady_state_trace") or "").strip()
     shapes_json, shape_count = "", 0
@@ -124,12 +132,14 @@ async def _capture_tunableop_recording(run: _ShapeCaptureRun, state: Any, payloa
     )
     capture_state = copy.deepcopy(state)
     capture_state.baseline_eager_fallback = False
-    benchmark_result = await _served_capture_workload(
+    benchmark_result, fault = await _served_capture_workload(
         BaselineExecutor(session_dir=run.session_dir, shared_state=capture_state),
         run,
         capture_state,
         task_params,
     )
+    if fault is not None:
+        return fault
 
     untuned_base = run.capture_dir / _TUNABLEOP_UNTUNED_NAME
     row_count = _merge_tunableop_untuned_files(untuned_base)
