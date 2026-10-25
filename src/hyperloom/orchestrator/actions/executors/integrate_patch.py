@@ -4153,9 +4153,11 @@ class IntegratePatchExecutor:
                 delta_pct=delta_pct,
                 bench_result=measured.bench_result,
             )
+        from ...knowledge import kb_writeback as _kb
+
         enablers = [entry["switch"] for entry in switch_manifest if entry.get("enabler")]
         await self._maybe_write_framework_kb_record(
-            measured.lesson("kept_inert_levers_registered"),
+            measured.lesson(_kb.OUTCOME_KEPT_INERT),
             done_payload=attempt.done_payload,
             params=params,
             extra=extra,
