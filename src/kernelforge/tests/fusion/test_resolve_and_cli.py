@@ -1602,3 +1602,24 @@ def test_the_fuse_cli_names_its_model_and_target_as_the_loop_does():
     assert "--gpu-target TEXT" in help_text
     assert "--llm-model" not in help_text
     assert "--gpu-arch" not in help_text
+
+
+def test_every_campaign_inherits_the_runs_deadline(tmp_path):
+    """``forge-fuse --deadline-unix`` reaches the runtime each recipe's forge-loop is built from."""
+    run = cli_module._FusionRun(
+        out=tmp_path,
+        repo_root=str(tmp_path),
+        pristine_dir="",
+        framework_root="",
+        repo_scope=False,
+        session=cli_module.ServingSession("sglang", "", "0", 512, 64),
+        author=cli_module.AuthorAgent(backend=object, gpu="0", model="m", max_turns=1),
+        gpu_arch="gfx950",
+        target_speedup=1.03,
+        deadline_unix=1792893600.5,
+    )
+    agent = cli_module.FuseAgentOptions(
+        agent_backend="claude", agent_sandbox_mode="workspace-write", llm_model="m", max_turns=1
+    )
+
+    assert cli_module._campaign_runtime(run, agent, "m").deadline_unix == 1792893600.5

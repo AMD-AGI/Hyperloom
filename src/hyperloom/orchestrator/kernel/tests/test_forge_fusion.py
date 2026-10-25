@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -232,9 +233,13 @@ def test_run_passes_timeout_and_author_env_to_the_subprocess(tmp_path, monkeypat
         captured.update(cmd=cmd, timeout=timeout_sec, env=env, label=label)
         return 0, "OUT\n", "ERR\n"
 
+    before = time.time()
     result = _run(monkeypatch, _payload(output_dir), fake_run)
 
-    assert captured["timeout"] == 9
+    cmd = captured["cmd"]
+    deadline = float(cmd[cmd.index("--deadline-unix") + 1])
+    assert before + 9 <= deadline <= time.time() + 9
+    assert captured["timeout"] > 9, "the kill backstops the deadline instead of racing it"
     assert captured["label"] == "forge_fusion"
     assert captured["cmd"][3] == "forge-fuse"
     assert captured["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"

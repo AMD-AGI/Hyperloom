@@ -376,7 +376,7 @@ def _log_located_recipes(discovery: _Discovery, *, dry_run: bool) -> None:
 
 @dataclass(frozen=True)
 class _FusionRun:
-    """The run-wide context the authoring paths share: where it writes, what it serves, who authors, the bar."""
+    """The run-wide context the authoring paths share: where it writes, what it serves, who authors, the bar, the end."""
 
     out: Path
     repo_root: str
@@ -387,6 +387,7 @@ class _FusionRun:
     author: AuthorAgent
     gpu_arch: str
     target_speedup: float
+    deadline_unix: float = 0.0
 
     def claim_serving(self) -> ClaimServing:
         """Where this run's compile-pass claims serve their A/B arms."""
@@ -621,6 +622,7 @@ class FuseRequest:
     gpu: str
     agent: FuseAgentOptions
     max_recipes: int
+    deadline_unix: float
     smoke: SmokeOptions
     gpu_arch: str
     layout: ServingLayout
@@ -773,6 +775,12 @@ class FuseRequest:
         default=0,
         type=int,
         help="Cap how many ranked recipes to try. 0 means uncapped: every discovered recipe is considered.",
+    ),
+    click.option(
+        "--deadline-unix",
+        default=0.0,
+        type=float,
+        help="Absolute time every recipe's forge-loop must finish by. 0 leaves each loop its own default budget.",
     ),
     option_group(
         "smoke",
@@ -1007,6 +1015,7 @@ def run(request: FuseRequest) -> None:
             ),
             gpu_arch=run_arch,
             target_speedup=target_speedup,
+            deadline_unix=request.deadline_unix,
         )
 
         exported_ok = False
@@ -1109,6 +1118,7 @@ def _campaign_runtime(run: _FusionRun, agent: FuseAgentOptions, llm_model: Optio
         model=llm_model or "",
         agent_backend=_campaign_agent_provider(agent.agent_backend, llm_model),
         agent_sandbox_mode=agent.agent_sandbox_mode,
+        deadline_unix=run.deadline_unix,
     )
 
 
