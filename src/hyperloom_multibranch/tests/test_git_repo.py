@@ -98,6 +98,33 @@ async def test_a_commit_is_taken_back_only_from_the_head_it_made(repo):
         await repo.rewind("s1", tip, root)
 
 
+async def test_a_branch_behind_the_integration_head_is_re_rooted_onto_it_and_its_old_head_kept(tmp_path, repo):
+    root = await repo.head(INTEGRATION_BRANCH)
+    await repo.create_branch("s1", root)
+    await repo.create_branch("s0", root)
+    own = await repo.commit("s1", root, apply(BASELINE, RecipeDelta(config=ConfigDelta(envs={"A": "1"}))), "own")
+    merged = await repo.commit("s0", root, CHUNKED, "chunked")
+    onto = await repo.commit_integration(root, CHUNKING, (merged,))
+
+    await repo.reroot("s1", own, onto)
+
+    assert await repo.head("s1") == onto
+    refs = ["git", "--git-dir", str(tmp_path / "experiments.git"), "for-each-ref", "--format=%(objectname)"]
+    assert subprocess.run([*refs, "refs/rerooted"], capture_output=True, text=True, check=True).stdout.split() == [own]
+    with pytest.raises(BranchMoved):
+        await repo.reroot("s1", own, onto)
+
+
+async def test_a_branch_that_holds_the_integration_head_already_is_not_re_rooted(repo):
+    root = await repo.head(INTEGRATION_BRANCH)
+    await repo.create_branch("s1", root)
+    tip = await repo.commit("s1", root, CHUNKED, "first")
+
+    with pytest.raises(ValueError, match="holds"):
+        await repo.reroot("s1", tip, root)
+    assert await repo.head("s1") == tip
+
+
 async def test_two_writers_racing_on_one_branch_leave_one_commit(repo):
     root = await repo.head(INTEGRATION_BRANCH)
     await repo.create_branch("s1", root)

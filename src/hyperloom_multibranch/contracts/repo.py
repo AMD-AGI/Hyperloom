@@ -115,15 +115,17 @@ class RepoMerge:
 
 
 class ExperimentRepo(Protocol):
-    """A specialist branch takes commits only from the rule gate and ``INTEGRATION_BRANCH`` only from the integrator;
-    every other caller reads.
+    """A specialist branch takes commits only from the rule gate, and moves onto an integration commit only by its
+    runtime's ``reroot``; ``INTEGRATION_BRANCH`` takes commits only from the integrator; every other caller reads.
 
     ``commit`` lands only while ``branch`` is still at ``parent``, the commit the candidate was measured against, and
     raises ``BranchMoved`` otherwise: a gain judged against one parent must not land on another. ``rewind`` takes
     ``branch`` from ``commit`` back to ``parent`` while it is still at ``commit``, for a commit whose judgement could
-    not be recorded. Unknown branches and commits raise ``KeyError``, an existing branch ``ValueError``. A commit's
-    recorded value lives with its judgement in the notebook, and two commits are compared with
-    ``hyperloom.contracts.recipe.diff`` on the recipes read here.
+    not be recorded or a re-root the notebook refused. ``reroot`` moves ``branch`` from ``head`` onto ``onto`` while it
+    is still at ``head``, keeping ``head`` reachable for the commits merges still name, and raises ``ValueError`` when
+    ``head`` holds ``onto`` already. Unknown branches and commits raise ``KeyError``, an existing branch
+    ``ValueError``. A commit's recorded value lives with its judgement in the notebook, and two commits are compared
+    with ``hyperloom.contracts.recipe.diff`` on the recipes read here.
     """
 
     async def init_root(self, recipe: Recipe) -> str:
@@ -154,6 +156,8 @@ class ExperimentRepo(Protocol):
         """
 
     async def rewind(self, branch: str, commit: str, parent: str) -> None: ...
+
+    async def reroot(self, branch: str, head: str, onto: str) -> None: ...
 
     async def store_patch(self, component: str, text: str) -> PatchRef:
         """Keep a patch file of ``component`` for a later delta to add; the same text gets the same reference."""

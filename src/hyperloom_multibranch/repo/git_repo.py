@@ -48,6 +48,9 @@ from hyperloom_multibranch.repo.stack import ScratchBlobs, stack_files
 RECIPE_FILE = "recipe.json"
 _UPDATE_REF = "update-ref"
 _NO_COMMIT = "0" * 40
+# A re-rooted branch's old head stays under this prefix: its commits are still merge candidates, which a repack must
+# keep.
+_REROOTED = "refs/rerooted"
 # The notebook knows a state only by its full commit id; git would also resolve a branch name or a short id.
 _COMMIT_ID = re.compile(r"[0-9a-f]{40}")
 # The path ``_put_patch`` gives a patch it keeps, which names the blob it is kept in.
@@ -192,6 +195,15 @@ class GitExperimentRepo:
         moved = await self._run(_UPDATE_REF, _ref(branch), await self._commit_of(parent), commit)
         if moved.code != 0:
             raise BranchMoved(f"{branch} is no longer at {commit}: {moved.err}")
+
+    async def reroot(self, branch: str, head: str, onto: str) -> None:
+        resolved, target = await self._commit_of(head), await self._commit_of(onto)
+        if (await self._run("merge-base", "--is-ancestor", target, resolved)).code == 0:
+            raise ValueError(f"{branch} at {resolved} holds {target} already")
+        await self._git(_UPDATE_REF, f"{_REROOTED}/{branch}/{resolved}", resolved)
+        moved = await self._run(_UPDATE_REF, _ref(branch), target, resolved)
+        if moved.code != 0:
+            raise BranchMoved(f"{branch} is no longer at {resolved}: {moved.err}")
 
     async def store_patch(self, component: str, text: str) -> PatchRef:
         return await asyncio.to_thread(self._put_patch, component, text)
