@@ -92,12 +92,12 @@ class ProposalBench(CoordinatorCollaborator):
 
         Keyed on the set of switches, so a set is benched once and a grown set again. Dispatched ahead of queued
         integrates (see :mod:`.dispatch_order`): left to the orchestration it waited behind them, and no explore fit
-        the phase they had already filled.
+        the phase they had already filled. Nothing is enqueued into a phase on its way out, which would cancel it.
         """
         from ..actions.executors.explore import dormant_lever_bundle
 
         variant = dormant_lever_bundle(self.shared_state)
-        if variant is None:
+        if variant is None or self._coord.dispatcher.admission_frozen:
             return False
         switches = sha1(",".join(variant["framework_lever_bundle"]).encode(), usedforsecurity=False).hexdigest()[:12]
         task = await self._enqueue_coordinator_explore(

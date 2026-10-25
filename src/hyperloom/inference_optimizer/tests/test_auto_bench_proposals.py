@@ -116,6 +116,17 @@ async def test_dormant_levers_of_several_patches_get_one_bundle_round_per_set():
     assert rounds[0]["params"]["config_path"] == "/cfg.yaml"
 
 
+async def test_a_phase_on_its_way_out_gets_no_bundle_round():
+    """It would be cancelled by the transition the moment it was queued."""
+    fp = _phase(frozen=True)
+    state = fp._coord.shared_state
+    state.record_authored_framework_levers([{"switch": "HL_ONE"}], default_on=False, specialist_task_id="t-1")
+    state.record_authored_framework_levers([{"switch": "HL_TWO"}], default_on=False, specialist_task_id="t-2")
+
+    assert await fp.enqueue_dormant_lever_bundle() is False
+    assert not _explores(fp)
+
+
 async def test_already_benched_fingerprints_are_skipped():
     fp = _phase(rounds=[_round("enable-x")])
     fp._coord.shared_state.explore_search = {"tested": {"fp": {"extra_server_args": "--enable-x", "outcome": "KEEP"}}}
