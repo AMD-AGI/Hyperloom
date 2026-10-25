@@ -11,7 +11,8 @@ measures nothing: what it writes is chosen by ``fake_mode`` and friends in the Y
 (non-zero, no signature), ``timed_out``, ``spec_rejected`` and ``node_fault`` (``status.json`` failures), ``tamper``
 (a listed file changes after signing), ``wrong_key`` (signed with another key), ``other_sandbox``, ``other_request``,
 ``other_spec`` (the manifest names another sandbox, request or sheet), ``extra_file`` (a file the manifest does not
-list), ``no_manifest`` and ``hang`` (never finishes). ``fake_delay`` seconds pass before the work starts;
+list), ``no_manifest`` and ``hang`` (never finishes); ``fake_ready: true`` stamps the server ready first.
+``fake_delay`` seconds pass before the work starts;
 ``fake_throughput`` and ``fake_completed`` set the report. ``fake_accuracy`` adds an accuracy round to the rounds file
 with that score (``none``: a round that holds no score). ``fake_trace: true`` adds the torch-profiler trace a profile
 test leaves (``profile/torch_trace/...``), ``capture_only`` only a CUDA-graph capture sidecar; ``fake_report: false`` leaves out the benchmark report, as a profiled round
@@ -367,6 +368,8 @@ def main() -> int:
         mode = str(config.get("fake_mode", "ok"))
         if "fake_log_line" in config:
             _atomic(out / "files" / "server.log", f"boot\n{config['fake_log_line']}\n".encode())
+        if config.get("fake_ready"):
+            _atomic(out / "files" / "server_ready_at", f"{time.time()} 5\n".encode())
         progress.touch()
         progress.phase("running")
         time.sleep(float(config.get("fake_delay", 0)))

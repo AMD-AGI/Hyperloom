@@ -35,6 +35,7 @@ from hyperloom.common.failure_signature import (
 )
 from hyperloom.contracts.measurement import FailureClass
 from hyperloom.measure import log_causes
+from hyperloom.measure.boot_watch import HUNG_BEFORE_READY
 from hyperloom.measure.returncodes import (
     HOSTED_INFRA_FAILURE_RC,
     HOSTED_RESULT_REJECTED_RC,
@@ -78,6 +79,8 @@ INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
         "image_pull_failed",
         "result_read_failed",
         "archive_failed",
+        # The test went silent before its server was ready (``boot_watch``): a hang a new sandbox does not repeat.
+        HUNG_BEFORE_READY,
     }
 )
 #: ``error_class`` values that mean the framework or the result is wrong, not the measurement or the candidate.

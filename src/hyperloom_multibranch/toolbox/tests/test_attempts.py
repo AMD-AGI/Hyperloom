@@ -17,12 +17,14 @@ from hyperloom.contracts.measurement import (
     Validity,
 )
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
+from hyperloom.measure.boot_watch import HUNG_BEFORE_READY
 from hyperloom.measure.runner.import_outcome import INERT_PATCH
 from hyperloom_multibranch.toolbox.attempts import AttemptRunner, TestJob
 
 INERT_REASON = f"{INERT_PATCH}: process 1 imported aiter from /sgl-workspace/aiter/aiter/__init__.py, not from the farm"
 PORT_REASON = "port_in_use: [Errno 98] address already in use"
 DISK_FULL_REASON = "disk_full: OSError: [Errno 122] Disk quota exceeded: '/work/.cache/triton/k.json'"
+HUNG_REASON = f"{HUNG_BEFORE_READY}: no output for 901s before the server was ready"
 
 
 class _ScriptedExecutor:
@@ -80,7 +82,9 @@ async def test_an_inert_patch_is_not_retried_and_stays_an_infrastructure_failure
     assert reported == []
 
 
-@pytest.mark.parametrize("reason", [PORT_REASON, DISK_FULL_REASON], ids=["port_in_use", "disk_full"])
+@pytest.mark.parametrize(
+    "reason", [PORT_REASON, DISK_FULL_REASON, HUNG_REASON], ids=["port_in_use", "disk_full", "hung_before_ready"]
+)
 async def test_another_infrastructure_failure_is_still_retried_on_other_nodes(reason) -> None:
     result, executor, reported = await _run(reason)
     assert len(executor.jobs) == 4

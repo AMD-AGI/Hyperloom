@@ -48,6 +48,7 @@ from hyperloom.measure.jit.publish import publish_contributions
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.phases import ACQUIRED, LANDED, RUNNER_DONE, HostTimeline
+from hyperloom.measure.boot_watch import HUNG_BEFORE_READY, PRE_READY_SILENCE_SEC, PreReadySilence
 from hyperloom.measure.runner.rounds import ROUNDS_FILE, WARMUP_DIR
 from hyperloom.measure.returncodes import (
     HOSTED_INFRA_FAILURE_RC,
@@ -146,6 +147,7 @@ class HostedConfig:
     runner_start_timeout_sec: float = DEFAULT_RUNNER_START_TIMEOUT_SEC
     timeout_slack_sec: int = DEFAULT_TIMEOUT_SLACK_SEC
     poll_interval_sec: float = 5.0
+    pre_ready_silence_sec: float = PRE_READY_SILENCE_SEC
     max_parallel_tests: int = DEFAULT_MAX_PARALLEL_TESTS
     allow_unsigned: bool = False
     nodes: int = 1
@@ -505,15 +507,17 @@ class HostedMeasurementBackend:
             attempt.timeline.mark(LANDED)
 
     def _wait(self, attempt: _Attempt) -> dict[str, Any] | TestOutcome:
-        """Poll until the runner writes ``status.json``; a stop, a timeout or a lost sandbox ends the wait early."""
+        """Poll until the runner writes ``status.json``; a stop, a timeout, a lost sandbox or a test silent before its server
+        is ready (``boot_watch``) ends the wait early."""
         call, config = attempt.call, self._config
         handle = _handle(attempt.runner)
         last_output = 0.0
         unreachable_since: float | None = None
+        silence = PreReadySilence(self._clock(), config.pre_ready_silence_sec)
         while True:
             try:
                 status = _read_status(handle)
-                last_output = self._report_progress(handle, call, last_output)
+                last_output = self._report_progress(handle, call, last_output, silence)
                 unreachable_since = None
             except (SandboxGone, SandboxUnavailable):
                 unreachable_since = unreachable_since or self._clock()
@@ -525,6 +529,13 @@ class HostedMeasurementBackend:
             if config.should_stop() or attempt.stop.is_set():
                 self._save_logs(handle, Path(call.output_dir))
                 return _refusal(call, STOPPED_RETURNCODE, STOPPED_REASON, "the run is stopping")
+            silent = silence.silent_for(self._clock())
+            if silent is not None:
+                self._save_logs(handle, Path(call.output_dir))
+                detail = f"no output for {silent:.0f}s before the server was ready"
+                return _infra(
+                    call, HOSTED_INFRA_FAILURE_RC, HUNG_BEFORE_READY, detail, facts=_facts_of(attempt.runner, None)
+                )
             if self._timed_out(attempt):
                 attempt.timeline.mark(RUNNER_DONE)
                 self._save_logs(handle, Path(call.output_dir))
@@ -541,11 +552,12 @@ class HostedMeasurementBackend:
         deadline = call.session_deadline_sec
         return deadline is not None and time.monotonic() >= deadline
 
-    def _report_progress(self, handle: Sandbox, call: TestCall, last_output: float) -> float:
+    def _report_progress(self, handle: Sandbox, call: TestCall, last_output: float, silence: PreReadySilence) -> float:
         try:
             progress = _read_json(handle, PROGRESS_PATH)
         except (ValueError, KeyError):
             return last_output
+        silence.observe(progress, self._clock())
         self._live.note(call.task_id, progress)
         latest = finite_number((progress or {}).get("last_output_unix")) or 0.0
         if latest > last_output and call.on_output is not None:

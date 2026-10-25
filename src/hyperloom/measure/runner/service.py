@@ -14,8 +14,10 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from hyperloom.measure.boot_watch import server_ready
 from hyperloom.measure.failures import FOREIGN_PROCESS_ON_CARD
 from hyperloom.measure.live_log import last_output
+from hyperloom.measure.boot_watch import SERVER_READY_KEY
 
 __all__ = [
     "EXIT_CODES",
@@ -114,7 +116,8 @@ class Progress:
 
     With ``files_dir``, the directory the test's logs are written below, it also says how long ago the newest live log was
     written (``last_log_age_sec``, as the runner's clock sees it) and that log's last line (``last_line``, cleaned and
-    shortened), so the application can show how a running test is doing.
+    shortened), so the application can show how a running test is doing, and whether a round's server has reported ready
+    (``server_ready``): until then the application bounds how long the test may go without output.
     """
 
     def __init__(self, out_dir: Path, *, refresh_sec: float = _REFRESH_SEC, files_dir: Path | None = None) -> None:
@@ -125,6 +128,7 @@ class Progress:
         self._state: dict[str, Any] = {"phase": "starting", "last_output_unix": None}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._ready = False
 
     def phase(self, name: str) -> None:
         with self._lock:
@@ -142,8 +146,12 @@ class Progress:
         write_json_atomic(self._path, {**document, **self._live_log()})
 
     def _live_log(self) -> dict[str, Any]:
-        found = None if self._files_dir is None else last_output(self._files_dir, time.time())
-        return {} if found is None else {"last_log_age_sec": found[0], "last_line": found[1]}
+        if self._files_dir is None:
+            return {}
+        self._ready = self._ready or server_ready(self._files_dir)
+        found = last_output(self._files_dir, time.time())
+        live = {} if found is None else {"last_log_age_sec": found[0], "last_line": found[1]}
+        return {**live, SERVER_READY_KEY: self._ready}
 
     def __enter__(self) -> Progress:
         def refresh() -> None:
