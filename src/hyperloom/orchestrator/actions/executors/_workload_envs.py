@@ -75,13 +75,8 @@ from hyperloom.inference_optimizer.grid_server_args import validate_server_args_
 from hyperloom.inference_optimizer import framework_registry
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
-from ._profile_setup import (
-    _AtomTracelensCaps,
-    _profiler_bound_holds,
-    _profiler_flag_value,
-    apply_atom_profile_caps,
-    fit_capture_to_speculative,
-)
+from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
+from ._profile_setup import fit_capture_to_speculative
 from hyperloom.inference_optimizer.model_config_utils import (
     _fp8_is_per_channel_per_token,
     _load_model_config_dict,

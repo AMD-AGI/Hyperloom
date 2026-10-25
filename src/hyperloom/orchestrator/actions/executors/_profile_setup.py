@@ -44,6 +44,10 @@ _SPECULATIVE_BOUNDS = (
     (re.compile(r"num[-_]speculative[-_]tokens[\"']?\s*[:=\s]\s*(\d+)"), 1),
 )
 _SPECULATIVE_FALLBACK_TOKENS_PER_STEP = 8
+# vLLM ``--profiler-config`` keys that bound the capture window, and the delay an operator-set window defaults to.
+_DELAY_ITERATIONS = "delay_iterations"
+_MAX_ITERATIONS = "max_iterations"
+_DEFAULT_PROFILE_DELAY_ITERS = 8
 _VLLM_DELAY_FLAG = re.compile(r"(--profiler-config\.delay_iterations[=\s]+)\d+")
 
 # ``HYPERLOOM_PROFILE_DEGRADED_REASON`` value meaning the TraceLens runtime patch
@@ -169,7 +173,7 @@ def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
     """
     if value is None:
         return False
-    if name == "max_iterations":
+    if name == _MAX_ITERATIONS:
         try:
             iterations = int(value)
         except ValueError:
@@ -205,9 +209,9 @@ def _profile_capture_window(
     if max_iters <= 0:
         return delay_iters, cap
     try:
-        delay_iters = max(0, int(policy_env.get("HYPERLOOM_PROFILE_DELAY_ITERS") or 8))
+        delay_iters = max(0, int(policy_env.get("HYPERLOOM_PROFILE_DELAY_ITERS") or _DEFAULT_PROFILE_DELAY_ITERS))
     except ValueError:
-        delay_iters = 8
+        delay_iters = _DEFAULT_PROFILE_DELAY_ITERS
     if steady_floor is not None and max_iters < steady_floor:
         log.warning("HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state floor of %d", max_iters, steady_floor)
     elif max_iters > cap:
@@ -326,13 +330,13 @@ def fit_capture_to_speculative(envs: dict[str, Any], framework_env: str) -> None
     if tokens == 1 or _explicit_capture_window(os.environ) > 0:
         return
     body = _profile_extra_body(envs)
-    vllm_delay = _profiler_flag_value(server_args, "delay_iterations")
+    vllm_delay = _profiler_flag_value(server_args, _DELAY_ITERATIONS)
     if isinstance(body.get("start_step"), int):
         delay, steps = body["start_step"], int(body.get("num_steps") or 0)
         body["start_step"] = delay // tokens
         envs["PROFILE_EXTRA_BODY"] = json.dumps(body)
     elif vllm_delay is not None and vllm_delay.isdigit():
-        delay, steps = int(vllm_delay), int(_profiler_flag_value(server_args, "max_iterations") or 0)
+        delay, steps = int(vllm_delay), int(_profiler_flag_value(server_args, _MAX_ITERATIONS) or 0)
         envs[framework_env] = _VLLM_DELAY_FLAG.sub(rf"\g<1>{delay // tokens}", server_args)
     else:
         return
@@ -456,8 +460,8 @@ def _apply_vllm_profile(
 ) -> list[tuple[str, str]]:
     existing = str(envs.get("EXTRA_VLLM_ARGS", ""))
     flags = [
-        ("delay_iterations", f"--profiler-config.delay_iterations {delay_iters}"),
-        ("max_iterations", f"--profiler-config.max_iterations {max_iters}"),
+        (_DELAY_ITERATIONS, f"--profiler-config.delay_iterations {delay_iters}"),
+        (_MAX_ITERATIONS, f"--profiler-config.max_iterations {max_iters}"),
     ]
     # Magpie's launcher puts ``profiler=torch`` before EXTRA_VLLM_ARGS. The argv
     # probe only sees EXTRA_VLLM_ARGS, and vLLM rejects the bounds without it.
@@ -474,7 +478,7 @@ def _apply_vllm_profile(
     profiler_args = " ".join(
         flag for sentinel, flag in flags if sentinel != "ignore_frontend" or "ignore_frontend" not in existing
     )
-    if "delay_iterations" not in existing:
+    if _DELAY_ITERATIONS not in existing:
         envs["EXTRA_VLLM_ARGS"] = f"{existing} {profiler_args}".strip()
     return flags
 
