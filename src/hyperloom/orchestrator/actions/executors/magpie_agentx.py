@@ -21,9 +21,10 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
 
 _ENCODING = "utf-8"
-#: Where a diagnostic profile captures when the YAML does not say: past the replay's opening prefill burst, and
-#: long enough to span the decode batch mix rather than one batch size.
-_STEADY_STATE_CAPTURE: Mapping[str, Any] = {"start_seconds": 300.0, "num_steps": 100}
+#: Where a diagnostic profile captures when the YAML does not say. The GLM-5.3 replay's decode batch ran a median
+#: of 4 (max 10) between 5 and 10 minutes in, as every session's first turns overlapped, and 1-3 in each 5-minute
+#: window after; a capture started at 300 s caught bs 7-9 only.
+_STEADY_STATE_CAPTURE: Mapping[str, Any] = {"start_seconds": 900.0, "num_steps": 100}
 
 
 class ServerArgvInvalidError(ValueError):

@@ -244,7 +244,7 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
         "enabled": True,
         "num_steps": 5,
         "num_profiles": 3,
-        "start_seconds": 300.0,
+        "start_seconds": 900.0,
     }
     assert load_benchmark(source)["profiler"]["torch_profiler"]["enabled"] is False
     report["agentx_metrics"]["diagnostic_only"] = True
@@ -265,7 +265,7 @@ def test_a_profile_with_no_window_of_its_own_captures_the_steady_state(source, t
 
     assert load_benchmark(rendered)["profiler"]["torch_profiler"] == {
         "enabled": True,
-        "start_seconds": 300.0,
+        "start_seconds": 900.0,
         "num_steps": 100,
     }
 
