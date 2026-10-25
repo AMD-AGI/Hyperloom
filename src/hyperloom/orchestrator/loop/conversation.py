@@ -15,6 +15,7 @@ from ..phases import dispatch_order
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
 from ..specialists.in_flight import in_flight_domains
+from ..specialists.reap_watch import newest_activity, specialist_activity_paths
 from ..roles.base import BackendTurnResult
 from ..bus.message_bus import Message
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
@@ -462,18 +463,11 @@ class ConversationCollaborator(CoordinatorCollaborator):
         )
 
     def _task_heartbeat_age_sec(self, task: "Task", *, now_unix: float) -> float | None:
-        """Age of a specialist's freshest liveness file, mirroring the reaper."""
+        """Age of a specialist's freshest liveness signal, read from the same paths the reaper polls."""
         if (task.kind or "").strip() != "specialist":
             return None
-        ws = runs_dir(self.session_dir, "specialist", task.task_id)
-        newest = 0.0
-        for name in ("heartbeat.json", "process.log"):
-            try:
-                mtime = (ws / name).stat().st_mtime
-            except OSError:
-                continue
-            newest = max(newest, mtime)
-        if newest <= 0:
+        newest = newest_activity(specialist_activity_paths(runs_dir(self.session_dir, "specialist", task.task_id)))
+        if newest is None:
             return None
         return max(0.0, now_unix - newest)
 
