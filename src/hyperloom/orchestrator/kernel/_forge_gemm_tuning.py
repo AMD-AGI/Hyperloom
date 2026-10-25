@@ -541,7 +541,7 @@ async def _run_forge_gemm_tuning(
             precision=run.precision,
             quant_type=run.quant_type,
             tunableop_input=str(payload.get("tunableop_input") or "").strip(),
-            **_resolve_vllm_aiter_routing(model_path=run.model_dir, server_log=server_log, tp=run.tp),
+            aiter_routing=_resolve_vllm_aiter_routing(model_path=run.model_dir, server_log=server_log, tp=run.tp),
         ),
     )
     priced_gemm_lane = functools.partial(
