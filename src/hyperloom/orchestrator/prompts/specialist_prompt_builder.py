@@ -1049,13 +1049,27 @@ def _source_patch_altitude_block(inp: SpecialistPromptInputs) -> list[str]:
         "Deliver a unified diff in your worktree `patches/` dir, small (target ≤5",
         "files) and grounded: a patch you cannot point at a profile line or a",
         "source predicate is budget spent for nothing.",
-        "",
-        *_switch_contract_lines(),
     ]
 
 
+#: Patch authors that do not take the switch contract from the shared block: enablement climbs only as far as
+#: runnability needs and is never benched for a gain, and the framework-rewrite focus carries the contract itself.
+_OWN_SWITCH_CONTRACT_DOMAINS = frozenset({"enablement_specialist", "framework_rewrite_specialist"})
+
+
+def _switch_contract_block(inp: SpecialistPromptInputs) -> list[str]:
+    """The switch contract for every patch author whose patch is benched for a gain.
+
+    Freeform dispatches have no domain focus of their own, and they author most of the patches: 28 of the GLM-5.3
+    session's 40 and 5 of the next session's first 8.
+    """
+    if not _authors_patches(inp) or inp.domain.key in _OWN_SWITCH_CONTRACT_DOMAINS:
+        return []
+    return ["", "### Deliver every rewrite behind a switch", "", *_switch_contract_lines()]
+
+
 def _domain_focus_blocks(inp: SpecialistPromptInputs) -> list[str]:
-    """Render the focus block of the active domain, then of each extra tag on a multi-tag dispatch, closing on the altitude coda that spans them."""
+    """Render the focus block of the active domain, then of each extra tag on a multi-tag dispatch, closing on the altitude and switch-contract codas that span them."""
     body: list[str] = []
     rendered: set[str] = set()
     for key in (inp.domain.key, *(getattr(domain_for_tag(t), "key", "") for t in inp.extra_focus_tags)):
@@ -1066,6 +1080,7 @@ def _domain_focus_blocks(inp: SpecialistPromptInputs) -> list[str]:
         body.extend(["", f"### Domain focus — {key}", "", *lines])
         rendered.add(key)
     body.extend(_source_patch_altitude_block(inp))
+    body.extend(_switch_contract_block(inp))
     return body
 
 
