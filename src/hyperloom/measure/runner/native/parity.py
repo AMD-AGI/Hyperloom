@@ -13,6 +13,7 @@ measurement against it would compare two different compilers, not two candidates
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -27,6 +28,9 @@ __all__ = ["ParityReport", "exported_symbols", "import_problem", "parity_build"]
 _NM_TIMEOUT_SEC = 120
 _IMPORT_TIMEOUT_SEC = 300
 _SHOWN = 5
+#: hipcc exports one ``__hip_cuid_<hash>`` symbol per HIP translation unit, and the hash covers the source file's path:
+#: a build of the same sources in another directory differs in these names alone, so they are not compared.
+_PATH_DEPENDENT_SYMBOL = re.compile(r"__hip_cuid_[0-9a-f]+")
 
 Symbols = Callable[[Path], frozenset[str]]
 Importer = Callable[[str, Path, str], str | None]
@@ -44,7 +48,8 @@ class ParityReport:
 
 
 def exported_symbols(path: Path) -> frozenset[str]:
-    """The names of the dynamic symbols ``path`` defines, as ``nm -D --defined-only`` lists them."""
+    """The names of the dynamic symbols ``path`` defines, as ``nm -D --defined-only`` lists them, less the HIP
+    compilation-unit ids (which name the build directory, not the code)."""
     done = subprocess.run(
         ["nm", "-D", "--defined-only", "--format=posix", str(path)],
         capture_output=True,
@@ -52,7 +57,8 @@ def exported_symbols(path: Path) -> frozenset[str]:
         timeout=_NM_TIMEOUT_SEC,
         check=True,
     )
-    return frozenset(line.split()[0] for line in done.stdout.splitlines() if line.strip())
+    names = (line.split()[0] for line in done.stdout.splitlines() if line.strip())
+    return frozenset(name for name in names if not _PATH_DEPENDENT_SYMBOL.fullmatch(name))
 
 
 def import_problem(python: str, package_parent: Path, import_name: str) -> str | None:

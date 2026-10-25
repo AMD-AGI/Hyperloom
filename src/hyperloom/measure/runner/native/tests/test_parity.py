@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from hyperloom.measure.runner.native.parity import import_problem, parity_build
+from hyperloom.measure.runner.native import parity
+from hyperloom.measure.runner.native.parity import exported_symbols, import_problem, parity_build
 from hyperloom.measure.runner.native.tests._native import OUTPUT, Bench, upstream_tree
 
 
@@ -83,3 +85,18 @@ def test_the_import_probe_names_why_a_package_does_not_import(tmp_path: Path) ->
 
     assert import_problem(sys.executable, tmp_path, "good") is None
     assert import_problem(sys.executable, tmp_path, "bad") == "ImportError: no symbol"
+
+
+def test_hip_compilation_unit_ids_are_not_compared(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    listing = (
+        "__hip_cuid_1391fe7dff99c08a B 00000000011f4a10 0000000000000001\n"
+        "_Z10topk_fusedv T 0000000000102340 00000000000001a0\n"
+        "my__hip_cuid_ff B 00000000011f4a11 0000000000000001\n"
+    )
+
+    def nm(argv: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, stdout=listing, stderr="")
+
+    monkeypatch.setattr(parity.subprocess, "run", nm)
+
+    assert exported_symbols(tmp_path / "common_ops.so") == frozenset({"_Z10topk_fusedv", "my__hip_cuid_ff"})
