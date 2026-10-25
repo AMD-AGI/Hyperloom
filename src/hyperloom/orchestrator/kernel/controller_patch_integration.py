@@ -84,6 +84,22 @@ KeepRecorder = Callable[[dict[str, Any]], Awaitable[None]]
 RoundAdmission = Callable[[int], StoppedByTheRun | None]
 
 
+@dataclass(frozen=True)
+class KeepSession:
+    """The session a Controller integration records its KEEPs into.
+
+    Attributes:
+        session_dir: The session whose state the KEEPs are recorded into.
+        shared_state: The live session state, persisted after each recorded KEEP.
+        record_keep: The session-owned writeback every KEEP is recorded through,
+            so a promotion also lands on the stack ledger.
+    """
+
+    session_dir: Path
+    shared_state: Any
+    record_keep: KeepRecorder
+
+
 def _priority_ordered_patch_dirs(patches_root: str | Path) -> tuple[Path, ...]:
     """Order publications by their original Controller task priority."""
     root = Path(patches_root).resolve()
@@ -396,9 +412,7 @@ def _measured(validation: dict[str, Any]) -> dict[str, float]:
 async def integrate_controller_patches(
     *,
     patches_root: str | Path,
-    session_dir: Path,
-    shared_state: Any,
-    record_keep: KeepRecorder,
+    session: KeepSession,
     validator: PatchValidator | None = None,
     admit_round: RoundAdmission = lambda _rounds_run: None,
 ) -> ControllerIntegrationSummary:
@@ -406,10 +420,7 @@ async def integrate_controller_patches(
 
     Args:
         patches_root: The Controller's published patch directory.
-        session_dir: The session whose state the KEEPs are recorded into.
-        shared_state: The live session state, persisted after each recorded KEEP.
-        record_keep: The session-owned writeback every KEEP is recorded through,
-            so a promotion also lands on the stack ledger.
+        session: The session every KEEP is recorded into.
         validator: Runs the E2E decision for one publication; defaults to the
             optimizer's own integrate handler.
         admit_round: Asked before each patch is applied; a stop leaves the patch
@@ -425,15 +436,15 @@ async def integrate_controller_patches(
         keep_commit: str,
     ) -> str:
         try:
-            await record_keep(_keep_result(publication, validation, keep_commit))
-            shared_state.save(Path(session_dir))
+            await session.record_keep(_keep_result(publication, validation, keep_commit))
+            session.shared_state.save(Path(session.session_dir))
         except Exception as error:  # noqa: BLE001 - KEEP is already committed to Git; record_keep runs the whole writeback
             log.warning("KEEP %s committed but recording it failed: %s", publication.operator_id, error)
             return f"Git KEEP committed; SharedState recording failed: {error}"
         return ""
 
     run = _ControllerIntegration(
-        validator or (lambda publication: _default_validator(publication, session_dir=Path(session_dir))),
+        validator or (lambda publication: _default_validator(publication, session_dir=Path(session.session_dir))),
         persist_keep,
         admit_round,
     )
@@ -466,6 +477,7 @@ async def integrate_controller_patches(
 
 __all__ = [
     "ControllerIntegrationSummary",
+    "KeepSession",
     "PatchIntegrationResult",
     "integrate_controller_patches",
 ]

@@ -27,7 +27,16 @@ from ._accuracy_gate import (
     parse_eval_results,
     read_eval_probe,
 )
-from ._grid_runner import GridVariant, _num_gpus_for_config, run_grid, sanitize_result_dir, sanitize_script_name
+from ._grid_runner import (
+    GridLaunch,
+    GridRecipe,
+    GridStop,
+    GridVariant,
+    _num_gpus_for_config,
+    run_grid,
+    sanitize_result_dir,
+    sanitize_script_name,
+)
 from ._grid_variant_filter import (
     apply_aiter_moe_pin_filter,
     apply_multi_node_invalid_variants,
@@ -36,7 +45,7 @@ from ._grid_variant_filter import (
 )
 from ._integrate_results import _PatchBench
 from ._patch_artifacts import _ArtifactSpec
-from ._workload_envs import default_baseline_config
+from ._workload_envs import BenchmarkTarget, LaunchLayer, MaterializeOptions, default_baseline_config
 
 
 class BenchStageMixin:
@@ -188,17 +197,20 @@ class BenchStageMixin:
         base_extra_args = str(params.get("base_extra_args") or "").strip()
         args_mode = str(params.get("base_args_mode") or "append")
         base_remove = to_str_list(params.get("base_remove_args"))
+        target = BenchmarkTarget(
+            model_path=model_path or None, gpu_type=gpu_type or None, benchmark_script=benchmark_script
+        )
         config_path = prepare_grid_benchmark_config(
             base_config,
             bench_leg.output_root,
-            model_path=model_path or None,
-            gpu_type=gpu_type or None,
-            benchmark_script=benchmark_script,
-            extra_envs=framework_run_eval_envs(params),
-            remove_args=params.get("base_remove_args"),
-            unset_envs=params.get("base_unset_envs"),
-            args_mode=args_mode,
-            out_name="integrate_patch.with_envs.yaml",
+            launch=LaunchLayer(
+                extra_envs=framework_run_eval_envs(params),
+                remove_args=params.get("base_remove_args"),
+                unset_envs=params.get("base_unset_envs"),
+                args_mode=args_mode,
+            ),
+            target=target,
+            options=MaterializeOptions(out_name="integrate_patch.with_envs.yaml"),
         )
 
         envs = dict(extra_envs_applied)
@@ -246,23 +258,29 @@ class BenchStageMixin:
         serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path))
         try:
             results = await run_grid(
-                base_yaml_path=config_path,
-                base_extra_args=base_extra_args,
                 grid=grid,
                 output_root=bench_leg.output_root,
-                magpie_python=params.get("magpie_python") or None,
-                keep_going_on_failure=False,
-                model_path=model_path or None,
-                gpu_type=gpu_type or None,
-                benchmark_script=benchmark_script,
-                result_dir=result_dir,
-                base_args_mode=args_mode,
-                base_extra_envs=dict(params.get("base_extra_envs") or {}),
-                base_remove_args=base_remove,
-                base_unset_envs=to_str_list(params.get("base_unset_envs")),
-                serving_lease=serving_lease,
-                session_deadline_sec=bench_leg.session_deadline_sec,
-                variant_expected_sec=bench_leg.variant_expected_sec,
+                recipe=GridRecipe(
+                    base_yaml_path=config_path,
+                    base=LaunchLayer(
+                        extra_server_args=base_extra_args,
+                        extra_envs=dict(params.get("base_extra_envs") or {}),
+                        remove_args=base_remove,
+                        unset_envs=to_str_list(params.get("base_unset_envs")),
+                        args_mode=args_mode,
+                    ),
+                    target=target,
+                ),
+                launch=GridLaunch(
+                    magpie_python=params.get("magpie_python") or None,
+                    result_dir=result_dir,
+                    serving_lease=serving_lease,
+                ),
+                stop=GridStop(
+                    session_deadline_sec=bench_leg.session_deadline_sec,
+                    variant_expected_sec=bench_leg.variant_expected_sec,
+                    keep_going_on_failure=False,
+                ),
             )
         finally:
             if serving_lease is not None:

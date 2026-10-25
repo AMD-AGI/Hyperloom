@@ -60,7 +60,7 @@ def _materialize(src, out, **kw):
 def test_switch_off_keeps_synthetic_script(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     src = _write(tmp_path / "base.yaml")
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(gpu_type="mi300x", model_path="/m"))
     assert bench["benchmark_script"] == "vllm_mi300x.sh"
     assert not any(k.startswith("AGENTX") for k in bench.get("envs", {}))
 
@@ -69,7 +69,7 @@ def test_switch_off_no_agentx_leakage(tmp_path, monkeypatch):
     """OFF output must carry no trace of the AgentX feature."""
     _clear_env(monkeypatch)
     src = _write(tmp_path / "base.yaml")
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(gpu_type="mi300x", model_path="/m"))
     dumped = yaml.safe_dump(bench).lower()
     assert "aiperf" not in dumped
     assert "agentx" not in dumped
@@ -89,7 +89,7 @@ def _pin_extra_env(monkeypatch, **pins):
 def test_switch_off_omits_workload_spec(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     src = _write(tmp_path / "base.yaml")
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(gpu_type="mi300x", model_path="/m"))
     assert "workload_spec" not in bench
 
 
@@ -119,7 +119,7 @@ from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
 assert not we.agentx_enabled()
 we.materialize_config_with_envs(
-    Path(sys.argv[1]), Path(sys.argv[2]), gpu_type="mi300x", model_path="/m"
+    Path(sys.argv[1]), Path(sys.argv[2]), target=we.BenchmarkTarget(gpu_type="mi300x", model_path="/m")
 )
 leaked = [m for m in sys.modules if m.startswith("hyperloom.inference_optimizer.agentx")]
 assert not leaked, "agentx package imported on OFF path: %r" % (leaked,)
@@ -175,7 +175,7 @@ def test_switch_on_mlperf_backend_pins_client_and_port(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
     monkeypatch.setenv("CONC", "16")
     src = _write(tmp_path / "base.yaml", framework="sglang")
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/m")
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(gpu_type="mi355x", model_path="/m"))
     assert bench["benchmark_script"] == "mlperf_agentic_client.sh"
     spec = bench.get("workload_spec") or {}
     assert spec.get("client") == "mlperf"
@@ -202,5 +202,7 @@ def test_mlperf_concurrency_follows_the_round_not_the_baseline(tmp_path, monkeyp
         framework="sglang",
         envs={"CONC": 4, "AGENTIC_CONCURRENCY": "16"},
     )
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/models/kimi-k3")
+    bench = _materialize(
+        src, tmp_path / "out", target=we.BenchmarkTarget(gpu_type="mi355x", model_path="/models/kimi-k3")
+    )
     assert bench["envs"]["AGENTIC_CONCURRENCY"] == "4"

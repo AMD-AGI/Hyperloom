@@ -259,7 +259,7 @@ def baseline_launch(monkeypatch, tmp_path):
     monkeypatch.setattr(baseline.BenchmarkRunExecutor, "_preflight_server_argv", lambda *args, **kwargs: None)
     monkeypatch.setattr(baseline, "build_benchmark_command", lambda **kwargs: ["fake-benchmark"])
 
-    async def no_restart(**kwargs):
+    async def no_restart(_server, **kwargs):
         return None
 
     monkeypatch.setattr(_multi_node_server_lifecycle, "restart_server_for_round", no_restart)
@@ -275,16 +275,18 @@ def baseline_launch(monkeypatch, tmp_path):
     async def launch(*, profile=False, ready=False, extra=None):
         executor = profile_executor if profile else baseline_executor
         return await executor._run_single_benchmark(
+            baseline.BenchmarkAttempt(
+                timeout_sec=123,
+                override_result_dir=None,
+                resolved_model="fixture-model",
+                materialized_config_path=config,
+                inferencex_path="",
+                effective_extra_server_args="",
+                params={},
+                ctx=SimpleNamespace(extra=extra or {}),
+            ),
             config_path=config,
             output_dir=tmp_path / "round",
-            timeout_sec=123,
-            override_result_dir=None,
-            resolved_model="fixture-model",
-            materialized_config_path=config,
-            inferencex_path="",
-            effective_extra_server_args="",
-            params={},
-            ctx=SimpleNamespace(extra=extra or {}),
             server_already_ready=ready,
         )
 
@@ -309,7 +311,7 @@ async def test_baseline_sweeps_before_every_server_launch(monkeypatch, baseline_
             assert layout["ninja_lock"].exists() is (compiler_alive is not False)
             assert layout["fresh_lock"].exists()
             assert layout["non_lock"].exists()
-            assert kwargs["timeout"] == 7800
+            assert kwargs["watch"].timeout == 7800
             raise _LaunchObserved
 
         monkeypatch.setattr(baseline, "run_with_session_kill", observe_launch)
@@ -329,7 +331,7 @@ async def test_baseline_does_not_sweep_for_profile_or_client_round(monkeypatch, 
     def observe_launch(*args, **kwargs):
         assert all(path.exists() for path in layout.values())
         if mode == "profile":
-            assert kwargs["timeout"] == 123
+            assert kwargs["watch"].timeout == 123
         raise _LaunchObserved
 
     if mode == "multi-node":

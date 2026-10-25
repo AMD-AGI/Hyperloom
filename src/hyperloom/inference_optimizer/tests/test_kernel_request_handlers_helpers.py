@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from kernelforge.gemm_tune.router import RoutingEvidence, RoutingTarget
 
 from hyperloom.orchestrator.kernel import lane_budget
 from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as kernel_agent_tool
@@ -81,14 +82,13 @@ def test_the_fusion_timeout_env_outranks_the_lane_share(monkeypatch) -> None:
 # -- _gemm_router_targets / _gemm_capped_tuner ----------------------------
 _ROUTER_PROBE = {
     "model_path": "/nonexistent-model-dir",
-    "framework": "sglang",
-    "precision": "bf16",
-    "quant_type": "auto",
-    "gpu_type": "auto",
-    "kernel_signature_log": "",
-    "has_untuned_csv": False,
-    "has_shapes_json": False,
-    "has_tunableop_input": False,
+    "target": RoutingTarget(framework="sglang", precision="bf16", quant_type="auto", gpu_type="auto"),
+    "evidence": RoutingEvidence(
+        kernel_signature_log=None,
+        has_untuned_csv=False,
+        has_shapes_json=False,
+        has_tunableop_input=False,
+    ),
 }
 
 

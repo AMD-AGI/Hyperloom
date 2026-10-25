@@ -25,6 +25,7 @@ from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.phases.framework import ProgressStamp
+from hyperloom.orchestrator.loop.verdicts import CriticRuling
 
 
 def _tr(reason: str) -> Transition:
@@ -1065,11 +1066,13 @@ def test_a_rejected_grid_is_reviewed_and_dropped(session_dir: Path):
         coord.router._handle_single_verdict(
             source="critic",
             pending=coord.state.pending_proposals[msg_id],
-            verdict="reject",
-            authored_verdict="reject",
-            reasoning="every variant raises the memory floor",
-            advisory=None,
-            approved_variant_names=None,
+            ruling=CriticRuling(
+                verdict="reject",
+                authored_verdict="reject",
+                reasoning="every variant raises the memory floor",
+                advisory=None,
+                approved_variant_names=None,
+            ),
         )
     )
     coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
@@ -1265,10 +1268,12 @@ def test_a_patch_review_lands_on_the_candidate_it_judged(session_dir: Path):
         coord.router._handle_single_verdict(
             source="critic",
             pending=pending,
-            verdict="reject",
-            authored_verdict="reject",
-            reasoning="touches the serving loop",
-            payload={"verdict": "reject", "failure_reason_code": "serving_loop_touched"},
+            ruling=CriticRuling(
+                verdict="reject",
+                authored_verdict="reject",
+                reasoning="touches the serving loop",
+                payload={"verdict": "reject", "failure_reason_code": "serving_loop_touched"},
+            ),
         )
     )
     coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))

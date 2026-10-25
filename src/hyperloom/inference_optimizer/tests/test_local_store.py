@@ -9,17 +9,19 @@ import threading
 
 import pytest
 
-from hyperloom.inference_optimizer.recipe_snapshot_constants import recipe_canonical_id
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, recipe_canonical_id
 from hyperloom.orchestrator.knowledge.recipe_kb import local_store as ls
 
 
 def _cid(model="m", hardware="mi300", framework_name="sglang", framework_version="v1", precision="fp8") -> str:
     return recipe_canonical_id(
-        model=model,
-        hardware=hardware,
-        framework_name=framework_name,
-        framework_version=framework_version,
-        precision=precision,
+        RecipeIdentity(
+            model=model,
+            hardware=hardware,
+            framework_name=framework_name,
+            framework_version=framework_version,
+            precision=precision,
+        )
     )
 
 
@@ -140,17 +142,19 @@ def test_put_get_history_roundtrip(tmp_path):
     store = ls.LocalRecipeStore(root=str(tmp_path))
     cid = _cid()
     r1 = store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        best_throughput=100.0,
-        what_worked=[{"description": "w", "measured_impact": "i"}],
-        sessions=[{"date": "d", "throughput_before": 1.0}],
-        extras={"task": "pretrain"},
-        provenance={"who": "test"},
+        ls.RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            best_throughput=100.0,
+            what_worked=[{"description": "w", "measured_impact": "i"}],
+            sessions=[{"date": "d", "throughput_before": 1.0}],
+            provenance={"who": "test"},
+            extras={"task": "pretrain"},
+        )
     )
     assert r1["version"] == 1
     assert r1["created"] is True
-    r2 = store.put_recipe(canonical_id=cid, model="m", best_throughput=200.0)
+    r2 = store.put_recipe(ls.RecipeUpsert(canonical_id=cid, model="m", best_throughput=200.0))
     assert r2["version"] == 2
     assert r2["created"] is False
 
@@ -175,8 +179,8 @@ def test_get_recipe_missing(tmp_path):
 
 def test_search_filters(tmp_path):
     store = ls.LocalRecipeStore(root=tmp_path)
-    store.put_recipe(canonical_id=_cid(model="a"), model="a", best_throughput=100.0)
-    store.put_recipe(canonical_id=_cid(model="b"), model="b", best_throughput=300.0)
+    store.put_recipe(ls.RecipeUpsert(canonical_id=_cid(model="a"), model="a", best_throughput=100.0))
+    store.put_recipe(ls.RecipeUpsert(canonical_id=_cid(model="b"), model="b", best_throughput=300.0))
 
     # label match
     res = store.search(label_match={"model": "a"})

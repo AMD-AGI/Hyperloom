@@ -175,6 +175,6 @@ def test_an_invalid_restart_setting_fails_before_the_cluster_is_touched(monkeypa
     monkeypatch.setattr(life, "_collect_worker_server_logs", lambda _state, _why: calls.append("logs"))
 
     with pytest.raises(life.ServerRestartFailed, match=f"invalid multi-node restart setting: {name}='invalid'"):
-        asyncio.run(life.restart_server_for_round(framework="vllm", model_path="/model", tp=1, ep=1))
+        asyncio.run(life.restart_server_for_round(life.RoundServer(framework="vllm", model_path="/model", tp=1, ep=1)))
 
     assert calls == []

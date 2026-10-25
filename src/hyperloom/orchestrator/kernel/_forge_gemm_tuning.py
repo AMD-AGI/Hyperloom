@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from kernelforge.gemm_tune.router import RoutingEvidence, RoutingTarget
+
 from . import forge_gemm_tuning
 from ..actions.executors._kernel_agent_tool import HandlerResult, _run_subprocess, _shape_tool_result
 from ._aiter_tuner_support import _align_forge_shapes_for_aiter, _write_fmoe_untuned_csv_from_log
@@ -43,6 +45,7 @@ from ._forge_shapes import (
 from ._integrate_payload import _requested_framework, _requested_setting
 from .serving_log_evidence import resolve_forge_server_log, _tokens_from_serving_log
 from ._shape_capture import (
+    SuppliedShapes,
     _capture_vllm_tunableop_shapes,
     _reuse_vllm_block_fp8_roofline_shapes,
     _vllm_block_fp8_profile_capture_required,
@@ -255,8 +258,7 @@ def _profiled_block_fp8_shapes(
         framework=run.framework,
         precision=run.precision,
         quant_type=run.quant_type,
-        shapes_json=sources.shapes_json,
-        tunableop_input=sources.tunableop_input,
+        supplied=SuppliedShapes(shapes_json=sources.shapes_json, tunableop_input=sources.tunableop_input),
         dry_run=bool(payload.get("dry_run")),
     ):
         return sources
@@ -281,12 +283,12 @@ async def _captured_forge_shapes(
     priced_lane: Any,
 ) -> tuple[_ForgeShapeSources, HandlerResult | None]:
     sources = _profiled_block_fp8_shapes(state, payload, run, sources)
+    supplied = SuppliedShapes(shapes_json=sources.shapes_json, tunableop_input=sources.tunableop_input)
     block_fp8_capture = _vllm_block_fp8_profile_capture_required(
         framework=run.framework,
         precision=run.precision,
         quant_type=run.quant_type,
-        shapes_json=sources.shapes_json,
-        tunableop_input=sources.tunableop_input,
+        supplied=supplied,
         dry_run=bool(payload.get("dry_run")),
     )
     # Keyed on the routed framework: a run handed to the AITER tuner family has
@@ -296,8 +298,7 @@ async def _captured_forge_shapes(
         _vllm_dense_shape_capture_required(
             framework=run.tuning_framework,
             model_path=run.model_dir,
-            shapes_json=sources.shapes_json,
-            tunableop_input=sources.tunableop_input,
+            supplied=supplied,
             dry_run=bool(payload.get("dry_run")),
         )
         and not block_fp8_capture
@@ -306,9 +307,12 @@ async def _captured_forge_shapes(
         return sources, None
     # A capture costs a full extra server boot, wasted on a lane the phase cannot fund once it has the shapes.
     lane_after_capture = await priced_lane(
-        has_untuned_csv=tunableop_capture and bool(sources.untuned_csv),
-        has_shapes_json=block_fp8_capture,
-        has_tunableop_input=tunableop_capture,
+        evidence=RoutingEvidence(
+            kernel_signature_log=run.server_log or None,
+            has_untuned_csv=tunableop_capture and bool(sources.untuned_csv),
+            has_shapes_json=block_fp8_capture,
+            has_tunableop_input=tunableop_capture,
+        )
     )
     if lane_after_capture is None:
         return sources, _unfunded_lane_skip(LANE_GEMM)
@@ -537,18 +541,19 @@ async def _run_forge_gemm_tuning(
             precision=run.precision,
             quant_type=run.quant_type,
             tunableop_input=str(payload.get("tunableop_input") or "").strip(),
-            **_resolve_vllm_aiter_routing(model_path=run.model_dir, server_log=server_log, tp=run.tp),
+            aiter_routing=_resolve_vllm_aiter_routing(model_path=run.model_dir, server_log=server_log, tp=run.tp),
         ),
     )
     priced_gemm_lane = functools.partial(
         _priced_gemm_lane,
         state,
         model_path=run.model_dir,
-        framework=run.tuning_framework,
-        precision=run.precision,
-        quant_type=run.quant_type,
-        gpu_type=run.gpu_type,
-        kernel_signature_log=run.server_log,
+        target=RoutingTarget(
+            framework=run.tuning_framework,
+            precision=run.precision,
+            quant_type=run.quant_type,
+            gpu_type=run.gpu_type,
+        ),
     )
 
     sources = await _forge_shape_sources(state, payload, run)
@@ -558,9 +563,12 @@ async def _run_forge_gemm_tuning(
     sources = sources._replace(shapes_manifest=await _forge_dense_shape_manifest(state, payload, run, sources))
 
     gemm_lane = await priced_gemm_lane(
-        has_untuned_csv=bool(sources.untuned_csv),
-        has_shapes_json=bool(sources.shapes_json or sources.shapes_manifest or sources.demand_json),
-        has_tunableop_input=bool(sources.tunableop_input),
+        evidence=RoutingEvidence(
+            kernel_signature_log=run.server_log or None,
+            has_untuned_csv=bool(sources.untuned_csv),
+            has_shapes_json=bool(sources.shapes_json or sources.shapes_manifest or sources.demand_json),
+            has_tunableop_input=bool(sources.tunableop_input),
+        )
     )
     if gemm_lane is None:
         return _unfunded_lane_skip(LANE_GEMM)
@@ -666,12 +674,14 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     # snapshot failure must NOT discard the copy + repoint committed above.
     snap_dir = ""
     try:
-        from ..source_snapshot import snapshot_source_layer
+        from ..source_snapshot import SourceLayer, snapshot_source_layer
 
         snap = snapshot_source_layer(
-            framework_root=aiter_pkg,
-            base_sha=None,
-            rel_paths=rel_paths,
+            SourceLayer(
+                framework_root=aiter_pkg,
+                base_sha=None,
+                rel_paths=rel_paths,
+            ),
             dest_dir=Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}",
             provenance="kernelforge.gemm_tune",
             extra={

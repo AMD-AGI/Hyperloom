@@ -44,16 +44,18 @@ async def _round(session: Path, out: Path) -> dict:
     cfg = session / "bench.yaml"
     cfg.write_text("benchmark:\n  framework: vllm\n  model: /tmp/m\n", encoding="utf-8")
     return await ex._run_single_benchmark(
+        bl.BenchmarkAttempt(
+            timeout_sec=30,
+            override_result_dir=None,
+            resolved_model="/tmp/m",
+            materialized_config_path=cfg,
+            inferencex_path="",
+            effective_extra_server_args="",
+            params={"framework": "vllm"},
+            ctx=_ctx(),
+        ),
         config_path=cfg,
         output_dir=out,
-        timeout_sec=30,
-        override_result_dir=None,
-        resolved_model="/tmp/m",
-        materialized_config_path=cfg,
-        inferencex_path="",
-        effective_extra_server_args="",
-        params={"framework": "vllm"},
-        ctx=_ctx(),
     )
 
 

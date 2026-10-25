@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.proctree import running
-from hyperloom.orchestrator.actions.executors._subprocess_kill import REAP_MARK_ENV, run_with_session_kill
+from hyperloom.orchestrator.actions.executors._subprocess_kill import REAP_MARK_ENV, RoundWatch, run_with_session_kill
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="procfs is Linux-only")
 
@@ -72,7 +72,7 @@ def _launch(tmp_path: Path, runner: Path, *, timeout: float) -> subprocess.Compl
     env = dict(os.environ, GEAK_E2E_RUNNER=str(runner), GEAK_FLUSH_GRACE_S="1")
     env[REAP_MARK_ENV] = uuid.uuid4().hex
     cmd = [sys.executable, "-m", "hyperloom.orchestrator.kernel.geak_runner", str(handoff), str(tmp_path / "out")]
-    return run_with_session_kill(cmd, env=env, timeout=timeout)
+    return run_with_session_kill(cmd, env=env, watch=RoundWatch(timeout=timeout))
 
 
 def _server_pid(tmp_path: Path) -> int:

@@ -81,10 +81,9 @@ def test_record_lifecycle_event_appends_and_defaults_phase():
     s.phase = PHASE_KERNEL_AGENT
     row = record_lifecycle_event(
         s,
-        step="run_optimization",
-        status="START",
-        artifacts={"workspace": "/tmp/ws"},
-        detail="kernel tg001",
+        LifecycleMark(
+            step="run_optimization", status="START", artifacts={"workspace": "/tmp/ws"}, detail="kernel tg001"
+        ),
     )
     assert len(s.lifecycle) == 1
     assert row is s.lifecycle[0]
@@ -99,12 +98,7 @@ def test_record_lifecycle_event_explicit_phase_and_label_override():
     s = SharedState(session_id="abc")
     s.phase = PHASE_KERNEL_AGENT
     row = record_lifecycle_event(
-        s,
-        step="custom",
-        status="END",
-        phase="EXPLORE",
-        label="Custom Label",
-        duration_s=2.0,
+        s, LifecycleMark(step="custom", status="END", phase="EXPLORE", label="Custom Label", duration_s=2.0)
     )
     assert row["phase"] == "EXPLORE"
     assert row["label"] == "Custom Label"
@@ -115,7 +109,7 @@ def test_record_lifecycle_event_monotonic_seq_and_cap():
     s = SharedState(session_id="abc")
     total = _LIFECYCLE_CAP + 25
     for i in range(total):
-        record_lifecycle_event(s, step="trace_analyze", status="END", detail=f"#{i}")
+        record_lifecycle_event(s, LifecycleMark(step="trace_analyze", status="END", detail=f"#{i}"))
     # Cap is enforced ...
     assert len(s.lifecycle) == _LIFECYCLE_CAP
     # ... but seq stays monotonic across the trim.
@@ -129,11 +123,7 @@ def test_lifecycle_persists_round_trip(tmp_path):
     s = SharedState(session_id="abc")
     s.phase = PHASE_KERNEL_AGENT
     record_lifecycle_event(
-        s,
-        step="trace_analyze",
-        status="END",
-        artifacts={"candidates": "/tmp/kc.json"},
-        duration_s=42.0,
+        s, LifecycleMark(step="trace_analyze", status="END", artifacts={"candidates": "/tmp/kc.json"}, duration_s=42.0)
     )
     s.save(tmp_path)
 
