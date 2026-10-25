@@ -18,7 +18,7 @@ import uuid
 from concurrent.futures import CancelledError as FuturesCancelledError
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -1707,7 +1707,7 @@ class KernelPhase(CoordinatorCollaborator):
     def _finish_geak_skip(
         self, result: dict[str, Any], *, handoff: dict[str, Any], facts: GeakRunnerFacts = GeakRunnerFacts()
     ) -> None:
-        self._record_geak_delegation_timeline(result, handoff=handoff, **asdict(facts))
+        self._record_geak_delegation_timeline(result, handoff=handoff, facts=facts)
         self._settle_geak_skip(result)
 
     def _promote_recovered_geak_result(
@@ -1719,7 +1719,7 @@ class KernelPhase(CoordinatorCollaborator):
         facts: GeakRunnerFacts = GeakRunnerFacts(),
     ) -> bool:
         state = self.shared_state
-        self._record_geak_delegation_timeline(result, handoff=handoff, recovered_from_disk=True, **asdict(facts))
+        self._record_geak_delegation_timeline(result, handoff=handoff, recovered_from_disk=True, facts=facts)
         previous = state.geak_result or {}
         if previous.get("kernel_event_id") and _geak_rebench.geak_candidate_matches(previous, result):
             result["kernel_event_id"] = previous["kernel_event_id"]
@@ -1990,7 +1990,7 @@ class KernelPhase(CoordinatorCollaborator):
                 await self._revalidate_geak_candidate(reason="geak_e2e_win_sigterm_recovered", handoff_cards=cards)
             return
 
-        self._record_geak_delegation_timeline(result, handoff=handoff, **asdict(facts))
+        self._record_geak_delegation_timeline(result, handoff=handoff, facts=facts)
         state.geak_result = result
         self._record_geak_measurement(result)
         status = str(result.get("status") or "")
@@ -2628,11 +2628,8 @@ class KernelPhase(CoordinatorCollaborator):
         result: dict[str, Any],
         *,
         handoff: dict[str, Any],
+        facts: GeakRunnerFacts,
         recovered_from_disk: bool = False,
-        started_at: str = "",
-        duration_sec: float | None = None,
-        runner_timeout_sec: int | None = None,
-        kill_timeout_sec: int | None = None,
     ) -> None:
         """Record the delegated GEAK runner's terminal state."""
         absent = geak_absent_backends(str(result.get("eval_dir") or handoff.get("eval_dir") or ""))
@@ -2650,16 +2647,18 @@ class KernelPhase(CoordinatorCollaborator):
         recorder.record_geak_delegation(
             GeakDelegation(
                 runner_status=str(result.get("status") or "unknown"),
-                started_at=started_at or str(result.get("started_at") or ""),
+                started_at=facts.started_at or str(result.get("started_at") or ""),
                 ended_at=str(result.get("ended_at") or datetime.now(timezone.utc).isoformat()),
-                duration_sec=duration_sec if duration_sec is not None else result.get("duration_sec"),
+                duration_sec=facts.duration_sec if facts.duration_sec is not None else result.get("duration_sec"),
                 error_class=str(result.get("error_class") or ""),
                 error=str(result.get("error") or ""),
                 returncode=result.get("returncode"),
                 runner_timeout_sec=(
-                    runner_timeout_sec if runner_timeout_sec is not None else result.get("runner_timeout_s")
+                    facts.runner_timeout_sec if facts.runner_timeout_sec is not None else result.get("runner_timeout_s")
                 ),
-                kill_timeout_sec=kill_timeout_sec if kill_timeout_sec is not None else result.get("kill_timeout_s"),
+                kill_timeout_sec=(
+                    facts.kill_timeout_sec if facts.kill_timeout_sec is not None else result.get("kill_timeout_s")
+                ),
                 exp_root=str(result.get("exp_root") or handoff.get("exp_root") or ""),
                 eval_dir=str(result.get("eval_dir") or handoff.get("eval_dir") or ""),
                 report_path=str(result.get("report_path") or ""),
