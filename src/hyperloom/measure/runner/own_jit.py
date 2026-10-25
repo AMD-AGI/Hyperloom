@@ -41,14 +41,14 @@ def own_aiter_jit(
 ) -> dict[str, str]:
     """``{AITER_JIT_DIR: directory}`` with the image's prebuilt modules linked into ``directory``, for a server that
     would otherwise build into the image; empty when the cache's session gives aiter its directory, the farm rebuilds
-    aiter (its ``jit`` is the farm's own), something already sets the variable, or the server's interpreter has no aiter.
+    aiter (its ``jit`` is the farm's own: the links to the image's modules its tuned tables make stale are taken out of
+    it, so the server builds them from the farm's tables), something already sets the variable, or the server's
+    interpreter has no aiter.
 
     ``environ`` is what the server inherits, before the sheet's ``call.env_overrides`` and ``call.unset_envs``.
     """
     variable = AITER_JIT.env_var
     if session is not None and variable in session.environment():
-        return {}
-    if farm is not None and AITER_PACKAGE in farm.packages:
         return {}
     configs = [yaml.safe_load(Path(point).read_text(encoding=_UTF8)) or {} for point in call.points]
     inherited = {name: value for name, value in environ.items() if name not in call.unset_envs}
@@ -61,6 +61,9 @@ def own_aiter_jit(
     try:
         image = locate_package(AITER_PACKAGE, server_python(configs[0], default="python3"), directory.parent)
     except FarmError:
+        return {}
+    if farm is not None and AITER_PACKAGE in farm.packages:
+        _unlink_stale(farm.site / AITER_PACKAGE, image, servers)
         return {}
     directory.mkdir(parents=True, exist_ok=True)
     link_prebuilt(image / "jit", directory, _stale(image, servers))
@@ -80,3 +83,20 @@ def _stale(image: Path, servers: list[dict[str, str]]) -> frozenset[str]:
         return frozenset()
     stale = stale_table_modules(config, image, image, servers)
     return touched_entries(stale, config, prebuilt_names(image)).names if stale else frozenset()
+
+
+def _unlink_stale(package: Path, image: Path, servers: list[dict[str, str]]) -> None:
+    """Take out of the farm's ``jit`` (links to the image's modules) the modules the farm's tuned tables, as the servers
+    resolve them, make stale: aiter builds a module only when its ``.so`` is missing, and the image's holds only the
+    kernels the image's tables name."""
+    try:
+        config = read_config(config_path(package))
+    except (OSError, ValueError):
+        return
+    stale = stale_table_modules(config, image, package, servers)
+    if not stale:
+        return
+    for name in touched_entries(stale, config, prebuilt_names(image)).names:
+        link = package / "jit" / f"{name}.so"
+        if link.is_symlink():
+            link.unlink()

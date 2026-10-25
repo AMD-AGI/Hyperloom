@@ -31,6 +31,7 @@ from hyperloom.measure.runner.tests.test_run_jit import (  # noqa: F401 - fixtur
 from hyperloom.measure.runner.tests.test_run_jit_tables import (  # noqa: F401 - fixtures
     IMAGE_MODULE,
     TEST_TABLE,
+    _by_patch,
     _by_variable,
     _deliver,
     image,
@@ -141,3 +142,14 @@ def _plain_point(tmp_path: Path) -> Path:
     point = tmp_path / "plain.yaml"
     point.write_text(yaml.safe_dump({"benchmark": {"envs": {"TP": 1}}}), encoding="utf-8")
     return point
+
+
+def test_a_farm_with_no_cache_leaves_out_the_module_its_patched_table_makes_stale(image, monkeypatch) -> None:
+    """A configs patch rebuilds aiter in the farm, whose ``jit`` links the image's modules. With no cache to leave the
+    stale one out, the server loaded the image's module and stopped on a kernel 'not present in the compiled registry'."""
+    _, _, run = image.run("patched", _deliver(image, _by_patch(image, TEST_TABLE)), cache=False)
+
+    farm_jit = next(run.rglob("farm/site/aiter/jit"))
+    assert (farm_jit / "module_other.so").is_symlink(), "a module the table does not feed stays the image's"
+    assert not os.path.lexists(farm_jit / "module_gemm.so"), "the stale module is built from the farm's table"
+    assert (image.bases / "aiter" / "jit" / "module_gemm.so").read_text() == IMAGE_MODULE
