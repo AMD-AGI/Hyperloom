@@ -423,7 +423,8 @@ brief:
   `optimize_no_more_leverage`. The LLM may also emit
   `escalate_strategy_change{hint='skip_to_kernel'}` when it judges
   further effort unproductive. `skip_to_close` is not a phase advance: it abandons
-  the remaining budget and is reserved for genuine early abandonment.
+  the remaining budget, so it is denied (`skip_to_close_contradicted`) once a
+  baseline is measured and the remaining budget still funds another cycle.
 
 ### FRAMEWORK_AGENT phase — the optimisation phase
 
