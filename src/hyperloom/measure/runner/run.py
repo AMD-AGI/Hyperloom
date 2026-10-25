@@ -64,6 +64,7 @@ from hyperloom.measure.runner.jit import STAGING_DIR, ColdStart, Surroundings, b
 from hyperloom.measure.runner.import_outcome import install_import_watch, refine_imports
 from hyperloom.measure.runner.jit_outcome import refine_outcome
 from hyperloom.measure.runner.own_jit import OWN_AITER_JIT_DIR, own_aiter_jit
+from hyperloom.measure.runner.own_tmp import own_tmpdir
 from hyperloom.measure.runner.inventory import OutputRejected, drop_agentx_runtime, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
 from hyperloom.measure.runner.rewrite import Placement, rewrite_config
@@ -507,7 +508,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     ctx.cards.enforce_guard()
     progress.phase("running")
     started = time.time()
-    with ctx.cards.watching():
+    with own_tmpdir(call, ctx.environ), ctx.cards.watching():
         outcome, timed_out = _execute(call)
     ctx.cards.enforce_guard()
     observed = ctx.cards.observation()

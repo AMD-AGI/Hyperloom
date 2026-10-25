@@ -28,7 +28,7 @@ from hyperloom.measure.jit.session import JitCacheSession, link_prebuilt
 from hyperloom.measure.jit_kinds import AITER_JIT
 from hyperloom.measure.socket import TestCall
 
-__all__ = ["OWN_AITER_JIT_DIR", "own_aiter_jit"]
+__all__ = ["OWN_AITER_JIT_DIR", "own_aiter_jit", "point_configs", "server_environments"]
 
 #: The directory below the test's work directory. Not below the cache's private root, which seeding empties.
 OWN_AITER_JIT_DIR = "aiter_jit"
@@ -50,12 +50,8 @@ def own_aiter_jit(
     variable = AITER_JIT.env_var
     if session is not None and variable in session.environment():
         return {}
-    configs = [yaml.safe_load(Path(point).read_text(encoding=_UTF8)) or {} for point in call.points]
-    inherited = {name: value for name, value in environ.items() if name not in call.unset_envs}
-    servers = [
-        {**inherited, **call.env_overrides, **{str(k): str(v) for k, v in server_environment(config).items()}}
-        for config in configs
-    ]
+    configs = point_configs(call)
+    servers = server_environments(call, configs, environ)
     if any((server.get(variable) or "").strip() for server in servers):
         return {}
     try:
@@ -68,6 +64,21 @@ def own_aiter_jit(
     directory.mkdir(parents=True, exist_ok=True)
     link_prebuilt(image / "jit", directory, _stale(image, servers))
     return {variable: str(directory)}
+
+
+def point_configs(call: TestCall) -> list[dict]:
+    """The configuration of each of the test's points."""
+    return [yaml.safe_load(Path(point).read_text(encoding=_UTF8)) or {} for point in call.points]
+
+
+def server_environments(call: TestCall, configs: list[dict], environ: Mapping[str, str]) -> list[dict[str, str]]:
+    """The environment each point's server is launched with: ``environ`` without what the sheet unsets, then the sheet's
+    ``call.env_overrides``, then the point's own server environment."""
+    inherited = {name: value for name, value in environ.items() if name not in call.unset_envs}
+    return [
+        {**inherited, **call.env_overrides, **{str(k): str(v) for k, v in server_environment(config).items()}}
+        for config in configs
+    ]
 
 
 def _stale(image: Path, servers: list[dict[str, str]]) -> frozenset[str]:
