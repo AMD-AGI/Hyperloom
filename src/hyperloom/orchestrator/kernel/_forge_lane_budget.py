@@ -177,10 +177,7 @@ def _fusion_attn_tp_size(state: object, payload: dict, *, tp: int) -> int:
 
     server_args = str(payload.get("extra_server_args") or "").strip()
     if not server_args:
-        try:
-            server_args = resolve_runtime_workload(state, arm="current_best").server_args
-        except Exception:  # noqa: BLE001 - best-effort for partial state / test doubles
-            server_args = ""
+        server_args = resolve_runtime_workload(state, arm="current_best").server_args
 
     if "--enable-dp-attention" not in str(server_args).replace("=", " ").split():
         return tp

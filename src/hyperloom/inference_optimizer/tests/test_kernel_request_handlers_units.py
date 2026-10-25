@@ -2807,6 +2807,33 @@ class TestRunGemmTuningHandler:
         assert result["shape_count"] == 0
         assert "shapes_json" not in result
 
+    def test_capture_executor_fault_reaches_the_gemm_tuning_caller(self, tmp_path, monkeypatch):
+        """An executor that raises is a fault for KernelPhase.run_agent to record, not a capture verdict."""
+        from hyperloom.orchestrator.actions.executors import roofline as roofline_module
+
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        state = SharedState(framework="vllm", model_path="/models/qwen")
+
+        class FailingRooflineExecutor:
+            def __init__(self, *, shared_state, persist_state=True):
+                pass
+
+            async def __call__(self, ctx):
+                raise OSError("No space left on device")
+
+        monkeypatch.setattr(roofline_module, "RooflineExecutor", FailingRooflineExecutor)
+
+        with pytest.raises(OSError, match="No space left on device"):
+            asyncio.run(
+                shape_capture._capture_vllm_tunableop_shapes(
+                    state=state,
+                    session_dir=session_dir,
+                    payload={"task_id": "capture", "_shape_capture_mode": "block_fp8_profile"},
+                    workspace=session_dir / "runs" / "gemm_tuning" / "capture",
+                )
+            )
+
     def test_multi_node_vllm_block_fp8_preserves_existing_no_capture_behavior(self, monkeypatch):
         from hyperloom.orchestrator.actions.executors import _multi_node_env
 
