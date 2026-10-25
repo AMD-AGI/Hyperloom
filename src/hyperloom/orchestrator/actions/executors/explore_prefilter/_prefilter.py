@@ -264,7 +264,11 @@ async def prefilter_variants(
         return Prefiltered(list(variants))
     candidates, dropped = _drop_known_reverts(candidates, ctx, stack)
     candidates, screened_out = await asyncio.to_thread(
-        screen_variants, candidates, ctx.config_path, session_dir=ctx.session_dir
+        screen_variants,
+        candidates,
+        lambda gv, subdir: ctx.materialize(gv, stack, subdir),
+        Path(ctx.output_root) / "_screen",
+        session_dir=ctx.session_dir,
     )
     request = ProjectionRequest(
         materialize=lambda gv, subdir: ctx.materialize(gv, stack, subdir),

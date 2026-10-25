@@ -59,7 +59,10 @@ from typing import Any, Callable
 
 import yaml
 
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+
 from .._grid_base import GridVariant
+from ._reuse import HARNESS_ENVS
 
 log = logging.getLogger(__name__)
 
@@ -161,9 +164,10 @@ def _target_backend(bench: dict[str, Any], session_dir: Path | None) -> str | No
     return _target_kernels(session_dir).get("attention")
 
 
-def _probe_command(variant: GridVariant, bench: dict[str, Any], out_path: str, backend: str | None) -> list[str]:
-    """The ``benchmark_vllm`` invocation that screens one variant."""
+def _probe_command(bench: dict[str, Any], out_path: str, backend: str | None) -> list[str]:
+    """The ``benchmark_vllm`` invocation that screens a launch, from the ``benchmark`` block it is materialized as."""
     envs = bench.get("envs") or {}
+    args_env = server_args_env_name(str(bench.get("framework") or "vllm"))
     root = os.environ.get(ENV_INFERA_ROOT, "")
     model = os.environ.get(ENV_MODEL) or str(bench.get("model") or envs.get("MODEL", ""))
     layers = os.environ.get(ENV_LAYERS, "").strip()
@@ -202,11 +206,12 @@ def _probe_command(variant: GridVariant, bench: dict[str, Any], out_path: str, b
     # it holds the rest of the stack at the target's regime, it does not override
     # the lever under test.
     pin = [BACKEND_FLAG, backend] if backend else []
-    server_args = " ".join([*pin, variant.extra_server_args or ""]).strip()
+    server_args = " ".join([*pin, str(envs.get(args_env) or "")]).strip()
     if server_args:
         cmd += ["--server-args=" + server_args]
-    for key, value in (variant.extra_envs or {}).items():
-        cmd += ["--env", f"{key}={value}"]
+    for key, value in envs.items():
+        if str(key).upper() not in HARNESS_ENVS and key != args_env:
+            cmd += ["--env", f"{key}={value}"]
     return cmd
 
 
@@ -240,7 +245,7 @@ def _probe(
     """
     with tempfile.TemporaryDirectory(prefix="explore-screen-") as tmp:
         out_path = os.path.join(tmp, "probe.json")
-        cmd = _probe_command(variant, bench, out_path, backend)
+        cmd = _probe_command(bench, out_path, backend)
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -267,14 +272,28 @@ def _probe(
             return None, kernels
 
 
+def _launched(materialize: Callable[[GridVariant, Path], Path], variant: GridVariant, subdir: Path) -> dict | None:
+    """The ``benchmark`` block ``variant`` launches with on the round's stack, or None when it cannot be written."""
+    try:
+        with Path(materialize(variant, subdir)).open(encoding="utf-8") as fh:
+            return dict((yaml.safe_load(fh) or {}).get("benchmark") or {})
+    except Exception as exc:  # noqa: BLE001 - a variant that cannot be materialized is benchmarked
+        log.warning("explore screen: could not materialize %r (%s)", variant.name, exc)
+        return None
+
+
 def screen_variants(
     variants: list[GridVariant],
-    config_path: Path,
+    materialize: Callable[[GridVariant, Path], Path],
+    output_root: Path,
     *,
     session_dir: Path | None = None,
     margin_pct: float | None = None,
 ) -> tuple[list[GridVariant], list[dict[str, str]]]:
     """Return the variants still worth benchmarking, plus a record of what was cut.
+
+    ``materialize`` writes the config a variant launches with on the round's stack; the baseline probe is the
+    stack itself, so each variant is screened exactly as the round would benchmark it.
 
     A variant is cut only when the screen puts it more than ``margin_pct`` behind
     the screened baseline -- a gap far wider than the screen's own noise. The
@@ -292,11 +311,8 @@ def screen_variants(
         log.warning("explore screen: %s is not set; skipping the screen", ENV_INFERA_ROOT)
         return list(variants), []
 
-    try:
-        with open(config_path) as fh:
-            bench = (yaml.safe_load(fh) or {}).get("benchmark") or {}
-    except (OSError, yaml.YAMLError) as exc:
-        log.warning("explore screen: could not read %s (%s); skipping", config_path, exc)
+    stack = _launched(materialize, GridVariant(name=BASELINE), Path(output_root) / "stack")
+    if stack is None:
         return list(variants), []
 
     target = _target_kernels(session_dir)
@@ -309,8 +325,8 @@ def screen_variants(
         return list(variants), []
 
     timeout_sec = _as_int(os.environ.get(ENV_TIMEOUT), DEFAULT_TIMEOUT_SEC)
-    backend = _target_backend(bench, session_dir)
-    baseline, probed = _probe(GridVariant(name=BASELINE), bench, timeout_sec, backend)
+    backend = _target_backend(stack, session_dir)
+    baseline, probed = _probe(GridVariant(name=BASELINE), stack, timeout_sec, backend)
     if baseline is None:
         log.warning("explore screen: baseline probe failed; benchmarking the full grid")
         return list(variants), []
@@ -325,7 +341,12 @@ def screen_variants(
         return list(variants), []
 
     margin = margin_pct if margin_pct is not None else _margin_pct()
-    survivors, dropped = _cut_slower(variants, lambda v: _probe(v, bench, timeout_sec, backend)[0], baseline, margin)
+
+    def probe(variant: GridVariant) -> float | None:
+        bench = _launched(materialize, variant, Path(output_root) / re.sub(r"[^\w.-]", "_", variant.name))
+        return None if bench is None else _probe(variant, bench, timeout_sec, backend)[0]
+
+    survivors, dropped = _cut_slower(variants, probe, baseline, margin)
     log.info(
         "explore screen: %d/%d variants forwarded to benchmark; cut %s",
         len(survivors),

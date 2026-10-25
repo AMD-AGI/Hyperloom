@@ -19,7 +19,7 @@ _SESSION = {
     "framework": "sglang",
     "gpu": "mi355x",
     "workload_signature": "abc123",
-    "runtime": {"image_digest": "sha256:aaa"},
+    "runtime": {"image_digest": "sha256:aaa", "framework_version": "0.5.1"},
     "benchmark": {"framework": "sglang", "envs": {"CONC": "8"}},
     "inherited_args": "",
     "decision_protocol": "cold",
@@ -50,7 +50,9 @@ def test_off_without_a_store(monkeypatch):
 
 def test_a_measurement_that_cannot_be_pinned_is_not_keyed():
     assert _identity(runtime={}) is None
-    assert _identity(runtime={"framework_version": "0.5.1"}) is not None
+    assert _identity(runtime={"framework_version": "0.5.1"}) is None
+    assert _identity(runtime={"image_digest": "sha256:aaa"}) is None
+    assert _identity(runtime={"image_digest": "sha256:aaa", "framework_version": "0.5.1"}) is not None
 
 
 def test_runtime_identity_reads_the_boot_fingerprint():
@@ -62,7 +64,7 @@ def test_runtime_identity_reads_the_boot_fingerprint():
 @pytest.mark.parametrize(
     "change",
     [
-        {"runtime": {"image_digest": "sha256:bbb"}},
+        {"runtime": {"image_digest": "sha256:bbb", "framework_version": "0.5.1"}},
         {"gpu": "mi300x"},
         {"workload_signature": "zzz"},
         {"decision_protocol": "warm"},

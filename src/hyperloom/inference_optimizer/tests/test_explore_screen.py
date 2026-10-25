@@ -77,6 +77,11 @@ def variants(n=4):
 MATCHING_KERNELS = {"attention": "ROCM_AITER_UNIFIED_ATTN", "moe": "TRITON"}
 
 
+def launches(path):
+    """A round with an empty stack: every variant materializes as ``path``."""
+    return lambda gv, subdir: path
+
+
 def fake_probe(readings, baseline=10.0, kernels=None):
     """Stand in for the GPU probe: a canned reading and kernel set per variant."""
     resolved = MATCHING_KERNELS if kernels is None else kernels
@@ -93,7 +98,7 @@ def fake_probe(readings, baseline=10.0, kernels=None):
 
 
 def test_disabled_by_default(config, session):
-    kept, dropped = screen_variants(variants(), config, session_dir=session)
+    kept, dropped = screen_variants(variants(), launches(config), config.parent / "screen", session_dir=session)
     assert [v.name for v in kept] == ["v0", "v1", "v2", "v3"]
     assert dropped == []
 
@@ -107,27 +112,27 @@ def test_enabled_flag_is_explicit(monkeypatch):
 
 
 def test_small_grid_is_not_worth_pruning(config, enabled, session):
-    kept, dropped = screen_variants(variants(2), config, session_dir=session)
+    kept, dropped = screen_variants(variants(2), launches(config), config.parent / "screen", session_dir=session)
     assert len(kept) == 2 and dropped == []
 
 
 def test_no_infera_checkout_means_no_screen(config, session, monkeypatch):
     monkeypatch.setenv(ENV_ENABLED, "1")
     monkeypatch.delenv(ENV_INFERA_ROOT, raising=False)
-    kept, dropped = screen_variants(variants(), config, session_dir=session)
+    kept, dropped = screen_variants(variants(), launches(config), config.parent / "screen", session_dir=session)
     assert len(kept) == 4 and dropped == []
 
 
 def test_unreadable_config_means_no_screen(tmp_path, enabled, session):
     missing = tmp_path / "absent.yaml"
-    kept, dropped = screen_variants(variants(), missing, session_dir=session)
+    kept, dropped = screen_variants(variants(), launches(missing), missing.parent / "screen", session_dir=session)
     assert len(kept) == 4 and dropped == []
 
 
 def test_failed_baseline_probe_benchmarks_the_whole_grid(config, enabled, session, monkeypatch):
     """Without a reference reading there is nothing to measure a margin against."""
     monkeypatch.setattr(_explore_screen, "_probe", lambda v, b, t, backend: (None, {}))
-    kept, dropped = screen_variants(variants(), config, session_dir=session)
+    kept, dropped = screen_variants(variants(), launches(config), config.parent / "screen", session_dir=session)
     assert len(kept) == 4 and dropped == []
 
 
@@ -150,7 +155,7 @@ def test_a_probe_on_different_kernels_prunes_nothing(config, enabled, session, m
             kernels={"attention": "ROCM_AITER_FA", "moe": "AITER_MXFP4_BF16"},
         ),
     )
-    kept, dropped = screen_variants(variants(), config, session_dir=session)
+    kept, dropped = screen_variants(variants(), launches(config), config.parent / "screen", session_dir=session)
     assert len(kept) == 4 and dropped == []
 
 
@@ -164,14 +169,16 @@ def test_one_matching_kernel_is_not_enough(config, enabled, session, monkeypatch
             kernels={"attention": "ROCM_AITER_UNIFIED_ATTN", "moe": "AITER_MXFP4_BF16"},
         ),
     )
-    kept, dropped = screen_variants(variants(), config, session_dir=session)
+    kept, dropped = screen_variants(variants(), launches(config), config.parent / "screen", session_dir=session)
     assert len(kept) == 4 and dropped == []
 
 
 def test_no_pruning_when_nothing_says_what_the_deployment_runs(config, enabled, tmp_path, monkeypatch):
     """An unverifiable regime is not a matching one."""
     monkeypatch.setattr(_explore_screen, "_probe", fake_probe({"v0": 99.0, "v1": 9.0, "v2": 9.0, "v3": 9.0}))
-    kept, dropped = screen_variants(variants(), config, session_dir=tmp_path / "empty")
+    kept, dropped = screen_variants(
+        variants(), launches(config), config.parent / "screen", session_dir=tmp_path / "empty"
+    )
     assert len(kept) == 4 and dropped == []
 
 
@@ -199,14 +206,34 @@ def test_target_backend_is_read_from_the_deployments_own_flags(tmp_path, enabled
     assert _explore_screen._target_backend(bench, None) == "TRITON_ATTN"
 
 
+def test_the_screen_probes_the_stack_and_each_variant_on_it(config, enabled, session, monkeypatch, tmp_path):
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+
+    def on_stack(gv, subdir):
+        return _build_variant_yaml(config, "--stack-flag", gv, output_subdir=subdir, base_extra_envs={"STACK_ENV": "1"})
+
+    probed: dict[str, dict] = {}
+
+    def recording_probe(variant, bench, timeout_sec, backend):
+        probed[variant.name] = dict(bench["envs"])
+        return 10.0, MATCHING_KERNELS
+
+    monkeypatch.setattr(_explore_screen, "_probe", recording_probe)
+    screen_variants(variants(), on_stack, tmp_path / "screen", session_dir=session)
+    assert probed[BASELINE]["EXTRA_VLLM_ARGS"] == "--stack-flag"
+    assert probed[BASELINE]["STACK_ENV"] == "1"
+    assert probed["v2"]["EXTRA_VLLM_ARGS"].split() == ["--stack-flag", "--max-num-seqs", "2"]
+    assert probed["v2"]["STACK_ENV"] == "1"
+
+
 def test_the_pin_precedes_the_variants_own_flags(config, enabled):
     """A variant testing a backend must override the pin, not be overridden by it."""
     with open(config) as fh:
         import yaml
 
         bench = yaml.safe_load(fh)["benchmark"]
-    variant = GridVariant(name="v", extra_server_args="--attention-backend TRITON_ATTN")
-    cmd = _explore_screen._probe_command(variant, bench, "/tmp/o.json", "ROCM_AITER_UNIFIED_ATTN")
+    bench["envs"]["EXTRA_VLLM_ARGS"] = "--attention-backend TRITON_ATTN"
+    cmd = _explore_screen._probe_command(bench, "/tmp/o.json", "ROCM_AITER_UNIFIED_ATTN")
     args = next(c for c in cmd if c.startswith("--server-args="))
     assert args.endswith("--attention-backend TRITON_ATTN")
 
@@ -217,7 +244,7 @@ def test_the_pin_precedes_the_variants_own_flags(config, enabled):
 def test_cuts_only_what_is_beyond_the_margin(config, enabled, session, monkeypatch):
     # Baseline 10ms, margin 10%: 11.0ms survives, 11.1ms does not.
     monkeypatch.setattr(_explore_screen, "_probe", fake_probe({"v0": 14.0, "v1": 9.0, "v2": 11.0, "v3": 11.1}))
-    kept, dropped = screen_variants(variants(), config, session_dir=session)
+    kept, dropped = screen_variants(variants(), launches(config), config.parent / "screen", session_dir=session)
     assert [v.name for v in kept] == ["v1", "v2"]
     assert {d["name"] for d in dropped} == {"v0", "v3"}
     assert all(d["reason"] == "screen_decisively_slower" for d in dropped)
@@ -226,14 +253,14 @@ def test_cuts_only_what_is_beyond_the_margin(config, enabled, session, monkeypat
 def test_a_grid_of_near_ties_is_forwarded_whole(config, enabled, session, monkeypatch):
     """Differences the screen cannot resolve are left to the real benchmark."""
     monkeypatch.setattr(_explore_screen, "_probe", fake_probe({"v0": 10.4, "v1": 9.7, "v2": 10.9, "v3": 10.1}))
-    kept, dropped = screen_variants(variants(), config, session_dir=session)
+    kept, dropped = screen_variants(variants(), launches(config), config.parent / "screen", session_dir=session)
     assert len(kept) == 4 and dropped == []
 
 
 def test_survivors_keep_the_grid_order(config, enabled, session, monkeypatch):
     """The screen prunes; it does not get to decide what EXPLORE tries first."""
     monkeypatch.setattr(_explore_screen, "_probe", fake_probe({"v0": 10.5, "v1": 9.0, "v2": 20.0, "v3": 9.5}))
-    kept, _ = screen_variants(variants(), config, session_dir=session)
+    kept, _ = screen_variants(variants(), launches(config), config.parent / "screen", session_dir=session)
     assert [v.name for v in kept] == ["v0", "v1", "v3"]
 
 
@@ -241,7 +268,7 @@ def test_margin_is_configurable(config, enabled, session, monkeypatch):
     """A wider margin trusts the screen less: v3, cut at the default, survives."""
     monkeypatch.setenv(ENV_MARGIN_PCT, "30")
     monkeypatch.setattr(_explore_screen, "_probe", fake_probe({"v0": 14.0, "v1": 9.0, "v2": 11.0, "v3": 11.1}))
-    kept, dropped = screen_variants(variants(), config, session_dir=session)
+    kept, dropped = screen_variants(variants(), launches(config), config.parent / "screen", session_dir=session)
     assert [v.name for v in kept] == ["v1", "v2", "v3"]
     assert [d["name"] for d in dropped] == ["v0"]
 
@@ -249,40 +276,46 @@ def test_margin_is_configurable(config, enabled, session, monkeypatch):
 def test_nonsense_margin_falls_back_to_the_measured_one(config, enabled, session, monkeypatch):
     monkeypatch.setenv(ENV_MARGIN_PCT, "not-a-number")
     monkeypatch.setattr(_explore_screen, "_probe", fake_probe({"v0": 14.0, "v1": 9.0, "v2": 11.0, "v3": 10.5}))
-    kept, _ = screen_variants(variants(), config, session_dir=session)
+    kept, _ = screen_variants(variants(), launches(config), config.parent / "screen", session_dir=session)
     assert [v.name for v in kept] == ["v1", "v2", "v3"]
 
 
 def test_unreadable_variant_is_kept_not_dropped(config, enabled, session, monkeypatch):
     """A probe that fails for one variant must not decide against it."""
     monkeypatch.setattr(_explore_screen, "_probe", fake_probe({"v0": 90.0, "v1": 3.0, "v2": 7.0}))  # v3 unreadable
-    kept, dropped = screen_variants(variants(), config, session_dir=session)
+    kept, dropped = screen_variants(variants(), launches(config), config.parent / "screen", session_dir=session)
     assert "v3" in {v.name for v in kept}
     assert "v3" not in {d["name"] for d in dropped}
 
 
 def test_dropped_records_carry_the_measurement(config, enabled, session, monkeypatch):
     monkeypatch.setattr(_explore_screen, "_probe", fake_probe({"v0": 14.0, "v1": 9.0, "v2": 7.0, "v3": 1.0}))
-    _, dropped = screen_variants(variants(), config, session_dir=session)
+    _, dropped = screen_variants(variants(), launches(config), config.parent / "screen", session_dir=session)
     assert dropped[0]["detail"] == "probe decode 14.000 ms vs baseline 10.000 ms (+40%)"
 
 
 # --- the probe carries the variant's own levers -----------------------------
 
 
-def test_probe_command_applies_variant_flags_and_env(config, enabled, tmp_path):
-    with open(config) as fh:
-        import yaml
+def test_the_probe_launches_the_variant_on_the_stack(config, enabled, tmp_path):
+    import yaml
 
-        bench = yaml.safe_load(fh)["benchmark"]
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+
     variant = GridVariant(
         name="aiter_off",
         extra_server_args="--max-num-seqs 512 --enable-chunked-prefill",
         extra_envs={"VLLM_ROCM_USE_AITER": "0"},
     )
-    cmd = _explore_screen._probe_command(variant, bench, "/tmp/out.json", None)
-    assert "--server-args=--max-num-seqs 512 --enable-chunked-prefill" in cmd
-    assert "VLLM_ROCM_USE_AITER=0" in cmd
+    path = _build_variant_yaml(
+        config, "--stack-flag", variant, output_subdir=tmp_path / "v", base_extra_envs={"STACK_ENV": "1"}
+    )
+    bench = yaml.safe_load(path.read_text())["benchmark"]
+    cmd = _explore_screen._probe_command(bench, "/tmp/out.json", None)
+    server_args = next(a for a in cmd if a.startswith("--server-args="))
+    assert "--stack-flag" in server_args and "--max-num-seqs 512 --enable-chunked-prefill" in server_args
+    assert "VLLM_ROCM_USE_AITER=0" in cmd and "STACK_ENV=1" in cmd
+    assert not any(a.startswith(("TP=", "CONC=", "ISL=")) for a in cmd)
     # The probe runs at the deployment's target TP but on fewer GPUs, which is
     # where the saving comes from.
     assert cmd[cmd.index("--tp") + 1] == "8"
@@ -297,7 +330,7 @@ def test_probe_gpu_count_and_depth_are_configurable(config, enabled, monkeypatch
         import yaml
 
         bench = yaml.safe_load(fh)["benchmark"]
-    cmd = _explore_screen._probe_command(GridVariant(name="v"), bench, "/tmp/o.json", None)
+    cmd = _explore_screen._probe_command(bench, "/tmp/o.json", None)
     assert cmd[cmd.index("--benchmark-gpus") + 1] == "2"
     assert cmd[cmd.index("--num-hidden-layers") + 1] == "8"
 
@@ -308,7 +341,7 @@ def test_probe_never_asks_for_more_gpus_than_the_target_has(config, enabled, mon
         import yaml
 
         bench = yaml.safe_load(fh)["benchmark"]
-    cmd = _explore_screen._probe_command(GridVariant(name="v"), bench, "/tmp/o.json", None)
+    cmd = _explore_screen._probe_command(bench, "/tmp/o.json", None)
     assert cmd[cmd.index("--benchmark-gpus") + 1] == "8"
 
 

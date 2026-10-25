@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS
 
 from . import _reuse as reuse
 
@@ -102,11 +103,7 @@ _DEFAULT_SEQ_LEN = 1024
 _DEFAULT_FRAMEWORK = "sglang"
 _MAX_SEQS_FLAGS = ("--max-num-seqs", "--max-running-requests")
 ATTENTION_BACKEND_FLAG = "--attention-backend"
-# Envs whose effect the projection prices itself, so they stay out of the launch digest.
-_PRICED_ENVS = frozenset({"MODEL", "TP", "EP", "PP", "CONC", "ISL", "OSL", "NUM_PROMPTS"})
 _MINIMAX_M25 = "minimax_m2.5"
-# Per-GPU HBM by arch (GB); only used when HBM is not supplied explicitly.
-_ARCH_HBM_GB = {"mi300x": 192.0, "mi325x": 256.0, "mi355x": 288.0}
 
 # Best-effort HF-path/name substring -> InferaSim megatron preset. The longest
 # match wins; extend freely. Override any time with HYPERLOOM_INFERASIM_MODEL.
@@ -442,7 +439,7 @@ def spec_from_benchmark(bench: dict, *, ambient: bool = True) -> ServingSpec:
         kv_cache_dtype=kv_dtype,
         extra_server_args=extra_args,
         num_prompts=max(0, _as_int(_first_env_or(envs, "NUM_PROMPTS", 0, ambient=ambient), 0)),
-        launch=reuse.launch_digest(envs, _PRICED_ENVS | {server_args_env_name(framework)}),
+        launch=reuse.launch_digest(envs, reuse.HARNESS_ENVS | {server_args_env_name(framework)}),
     )
 
 
@@ -644,7 +641,7 @@ def _build_argv(
     """Build the ``inferasim inference`` argv for this serving spec."""
     mode = mode or projection_mode()
     arch = gpu_arch(spec.gpu)
-    hbm_gb = os.environ.get(ENV_HBM_GB) or _ARCH_HBM_GB.get(arch)
+    hbm_gb = os.environ.get(ENV_HBM_GB) or (HW_SPECS.get(arch) or {}).get("hbm_gb")
     serving_model = str(os.environ.get(ENV_SERVING_MODEL) or "continuous").lower()
 
     argv: list[str] = [

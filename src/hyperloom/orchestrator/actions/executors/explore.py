@@ -893,6 +893,7 @@ class _ExploreRound:
     """One explore round: the stack it accumulates, the variants it measures, and the ledgers it writes."""
 
     projection: dict[str, Any] | None = None
+    prefilter_dropped = 0
 
     def __init__(self, ctx: Any, params: dict[str, Any], output_root: Path) -> None:
         extra = getattr(ctx, "extra", None) or {}
@@ -1016,6 +1017,7 @@ class _ExploreRound:
         prefiltered = await prefilter_variants(self.runnable, round_ctx, stack, is_stack_revalidation(self.params))
         self.runnable, self.projection = prefiltered.runnable, prefiltered.projection
         self.skipped.extend(prefiltered.dropped)
+        self.prefilter_dropped = len(prefiltered.dropped)
         return round_ctx
 
     # ----- the stack the round accumulates ---------------------------------
@@ -1717,9 +1719,10 @@ class _ExploreRound:
             )
         best = max(self.winners, key=lambda w: to_float(w.get("gain_pct"), 0.0) or 0.0, default=None)
         best_gain_pct = (to_float(best.get("gain_pct"), 0.0) or 0.0) if best else 0.0
-        # A round whose every variant already had its verdict, or only restated the stack, is answered, as if
-        # measured again.
-        answered = bool(self.runnable) and self.judged_without_measuring == len(self.runnable)
+        # A round whose every variant a pre-filter dropped, already had its verdict, or only restated the stack is
+        # answered, as if measured again.
+        offered = len(self.runnable) + self.prefilter_dropped
+        answered = bool(offered) and self.judged_without_measuring + self.prefilter_dropped == offered
         measured = any(t.get("outcome") in ("KEEP", "REVERT", TS_KILLED_OVERTIME) for t in self.tested.values())
         status = "succeeded" if measured or self.winners or answered else "failed"
         return {
@@ -1754,7 +1757,7 @@ class _ExploreRound:
             "framework": self.framework,
             # gain_pct for the audit trail (best gain of the batch).
             "gain_pct": best_gain_pct,
-            "explore_grid_exhausted": not self.runnable,
+            "explore_grid_exhausted": not self.runnable and not self.prefilter_dropped,
             "projection": self.projection,
         }
 

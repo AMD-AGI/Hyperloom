@@ -1176,11 +1176,50 @@ async def test_a_launch_that_reverted_before_is_skipped_and_a_keep_is_measured_a
 
 
 @pytest.mark.asyncio
-async def test_a_revalidation_is_never_skipped(sub_agent_runner, tmp_path, monkeypatch):
+async def test_a_round_the_store_answers_entirely_is_answered_not_failed(sub_agent_runner, tmp_path, monkeypatch):
+    sub, tr, _ = sub_agent_runner
+    monkeypatch.setenv("HYPERLOOM_MEASUREMENT_STORE", str(tmp_path / "measurements"))
+    monkeypatch.delenv("HYPERLOOM_INFERASIM_ANCHOR_STORE", raising=False)
+    state = SharedState()
+    state.stack_fingerprint_meta = {"image_digest": "sha256:aaa", "sglang": "0.5.1"}
+    sub.shared_state = state
+    benchmarked: list[str] = []
+    fake = _benchmarking_fake(benchmarked, lambda slug: 800.4)
+    grid = [{"name": "v_revert", "extra_args": "--revert-flag", "extra_envs": {}, "provenance": "llm_direct"}]
+    await _explore_round(sub, tr, tmp_path, "a", base_tput=800.0, grid=grid, fake_run=fake)
+    assert benchmarked
+
+    benchmarked.clear()
+    second = await _explore_round(sub, tr, tmp_path, "b", base_tput=800.0, grid=grid, fake_run=fake)
+    assert not benchmarked
+    assert second["status"] == "succeeded"
+    assert not second["explore_grid_exhausted"]
+    assert [(s["name"], s["reason"]) for s in second["skipped_dup"]] == [("v_revert", "measured_revert_before")]
+
+
+@pytest.mark.asyncio
+async def test_a_launch_known_only_by_its_image_is_measured_again(sub_agent_runner, tmp_path, monkeypatch):
     sub, tr, _ = sub_agent_runner
     monkeypatch.setenv("HYPERLOOM_MEASUREMENT_STORE", str(tmp_path / "measurements"))
     state = SharedState()
     state.stack_fingerprint_meta = {"image_digest": "sha256:aaa"}
+    sub.shared_state = state
+    benchmarked: list[str] = []
+    fake = _benchmarking_fake(benchmarked, lambda slug: 800.4)
+    grid = [{"name": "v_revert", "extra_args": "--revert-flag", "extra_envs": {}, "provenance": "llm_direct"}]
+    await _explore_round(sub, tr, tmp_path, "a", base_tput=800.0, grid=grid, fake_run=fake)
+    benchmarked.clear()
+    second = await _explore_round(sub, tr, tmp_path, "b", base_tput=800.0, grid=grid, fake_run=fake)
+    assert benchmarked
+    assert not second["skipped_dup"]
+
+
+@pytest.mark.asyncio
+async def test_a_revalidation_is_never_skipped(sub_agent_runner, tmp_path, monkeypatch):
+    sub, tr, _ = sub_agent_runner
+    monkeypatch.setenv("HYPERLOOM_MEASUREMENT_STORE", str(tmp_path / "measurements"))
+    state = SharedState()
+    state.stack_fingerprint_meta = {"image_digest": "sha256:aaa", "sglang": "0.5.1"}
     sub.shared_state = state
     benchmarked: list[str] = []
     fake = _benchmarking_fake(benchmarked, lambda slug: 800.4)
@@ -1200,14 +1239,14 @@ async def test_a_different_image_measures_again(sub_agent_runner, tmp_path, monk
     sub, tr, _ = sub_agent_runner
     monkeypatch.setenv("HYPERLOOM_MEASUREMENT_STORE", str(tmp_path / "measurements"))
     state = SharedState()
-    state.stack_fingerprint_meta = {"image_digest": "sha256:aaa"}
+    state.stack_fingerprint_meta = {"image_digest": "sha256:aaa", "sglang": "0.5.1"}
     sub.shared_state = state
     benchmarked: list[str] = []
     fake = _benchmarking_fake(benchmarked, lambda slug: 800.4)
     grid = [{"name": "v_revert", "extra_args": "--revert-flag", "extra_envs": {}, "provenance": "llm_direct"}]
     await _explore_round(sub, tr, tmp_path, "a", base_tput=800.0, grid=grid, fake_run=fake)
     benchmarked.clear()
-    state.stack_fingerprint_meta = {"image_digest": "sha256:bbb"}
+    state.stack_fingerprint_meta = {"image_digest": "sha256:bbb", "sglang": "0.5.1"}
     second = await _explore_round(sub, tr, tmp_path, "b", base_tput=800.0, grid=grid, fake_run=fake)
     assert benchmarked
     assert not second["skipped_dup"]

@@ -743,6 +743,14 @@ def test_the_projection_is_priced_for_the_session_gpu(monkeypatch):
     assert argv[argv.index("--hbm-capacity-gb") + 1] == "192.0"
 
 
+def test_hbm_comes_from_the_shared_hardware_table(monkeypatch):
+    from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS
+
+    monkeypatch.delenv(ib.ENV_HBM_GB, raising=False)
+    argv = ib._build_argv(_spec(gpu="MI308X"), "w.yaml", mode=ib.MODE_SIMULATE, estimator_name=ib.ESTIMATOR_ANALYTICAL)
+    assert argv[argv.index("--hbm-capacity-gb") + 1] == str(HW_SPECS["mi308x"]["hbm_gb"])
+
+
 def test_the_arch_override_only_names_an_unknown_session_gpu(monkeypatch):
     monkeypatch.setenv(ib.ENV_GPU_ARCH, "mi325x")
     assert ib.recipe_from_spec(_spec())["gpu_arch"] == "mi325x"

@@ -669,8 +669,9 @@ its default.
 
 ### Screen (reduced-GPU probe)
 
-A real engine probe on fewer GPUs, using Infera's vLLM benchmark script. It
-drops a variant only when the probe resolved the same kernels as the deployment
+A real engine probe on fewer GPUs, using Infera's vLLM benchmark script. The
+baseline probe is the round's stack, and each variant is probed on that stack,
+with the server args and envs the round would launch it with. It drops a variant only when the probe resolved the same kernels as the deployment
 did, read from both sides' logs; otherwise it returns the round untouched. A
 variant whose probe fails is kept. It needs at least three variants and
 `HYPERLOOM_INFERASIM_ROOT`. On the one grid it was measured against, the order
@@ -715,7 +716,7 @@ checkout, or install the `inferasim` extra.
 | `HYPERLOOM_INFERASIM_MODEL` | inferred | InferaSim model preset to project, for example `gpt_oss_120B`. By default it is inferred from the model path: the most specific match wins, and a distilled checkpoint uses its student. With no match and neither this nor `HYPERLOOM_INFERASIM_WORKLOAD` set, the round is benchmarked. |
 | `HYPERLOOM_INFERASIM_WORKLOAD` | bundled template | Full InferaSim workload YAML; takes precedence over `HYPERLOOM_INFERASIM_MODEL`. |
 | `HYPERLOOM_INFERASIM_GPU_ARCH` | `mi355x` | Part to price when the session's GPU type is unknown. When it is known, the session GPU always wins. |
-| `HYPERLOOM_INFERASIM_HBM_GB` | from the part | Per-GPU HBM capacity in GB. By default 192 (MI300X), 256 (MI325X) or 288 (MI355X). |
+| `HYPERLOOM_INFERASIM_HBM_GB` | from the part | Per-GPU HBM capacity in GB. By default the part's entry in the shared hardware table (`roofline_ceiling.HW_SPECS`), e.g. 192 (MI300X / MI308X), 256 (MI325X) or 288 (MI355X). |
 | `HYPERLOOM_INFERASIM_SERVING_MODEL` | `continuous` | InferaSim serving model: `continuous` or `static` batching. |
 
 ### InferaSim anchors

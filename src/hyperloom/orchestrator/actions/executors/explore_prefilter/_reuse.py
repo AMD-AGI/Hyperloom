@@ -56,6 +56,8 @@ _OVERLAY_MAX_BYTES = 256 * 1024 * 1024
 _LOCATION_ENV = re.compile(r"(DIR|PATH|LOG|FILE|PORT|HOST|URL|TOKEN|SECRET|PASSWORD)")
 _RUNTIME_KEYS = (("image_digest", "image_digest"), ("rocm", "rocm"), ("aiter", "aiter"))
 _PYTHONPATH = "PYTHONPATH"
+# Envs the benchmark harness reads for the workload and parallelism, as opposed to launch levers.
+HARNESS_ENVS = frozenset({"MODEL", "TP", "EP", "PP", "CONC", "ISL", "OSL", "NUM_PROMPTS"})
 
 
 def store_root() -> Path | None:
@@ -178,7 +180,7 @@ def measurement_identity(
     args, decision protocol and grading.
     """
     runtime = session.get("runtime") or {}
-    if not (runtime.get("image_digest") or runtime.get("framework_version")):
+    if not (runtime.get("image_digest") and runtime.get("framework_version")):
         return None
     overlays = overlay_identity(pythonpath_entries)
     if overlays is None:
