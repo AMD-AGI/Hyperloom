@@ -711,6 +711,20 @@ async def test_a_fresh_launch_names_its_conversation_and_writes_it_down_before_t
     assert (rig.workspace / CLI_SESSION_FILE).stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.parametrize("planted", [f".{CLI_SESSION_FILE}.partial", "system_prompt.md", "prompt.md"])
+async def test_a_link_the_cli_left_in_the_workspace_is_not_written_through(rig, tmp_path, planted):
+    target = tmp_path / "apps-file"
+    rig.workspace.mkdir(parents=True)
+    (rig.workspace / planted).symlink_to(target)
+
+    session, running = await _next_launch(rig, 1)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert not target.exists()
+    assert rig.runner.states[0] is not None and not (rig.workspace / planted).is_symlink()
+
+
 @pytest.mark.parametrize("status", [CRASHED, LOST], ids=["error-exit", "lost"])
 async def test_a_crashed_cli_is_resumed_by_the_next_run_with_what_arrived_while_it_was_down(rig, status):
     await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))

@@ -4,6 +4,7 @@
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from hyperloom.contracts.measurement import RoundValue
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe, RecipeDelta
@@ -12,9 +13,17 @@ from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.peers import Purpose
 from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, BranchProgress, LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, LineageKind
+from hyperloom_multibranch.contracts.repo import PatchConflict
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import intent, request, result
-from hyperloom_multibranch.specialist.following import Followed, follow, integration_holdings, reroot_requested
+from hyperloom_multibranch.specialist.following import (
+    SHORT,
+    Followed,
+    _write_conflicts,
+    follow,
+    integration_holdings,
+    reroot_requested,
+)
 from hyperloom_multibranch.tests.branch_rig import BranchRig, branch_rig
 from hyperloom_multibranch.tests.following_rig import OWN, diverged
 
@@ -164,3 +173,22 @@ async def test_following_from_a_head_that_holds_the_integration_head_moves_nothi
 def test_only_an_entry_that_opens_with_reroot_asks_to_follow():
     assert reroot_requested("REROOT: the integration head took in fp8 KV, which my head lacks")
     assert not reroot_requested("I will not REROOT yet: my next fusion builds on c1")
+
+
+async def test_a_conflicting_patch_is_written_readable_and_never_through_a_link_the_specialist_left(tmp_path):
+    class _Repo:
+        async def patch_text(self, head, path):
+            return f"diff of {path} at {head}\n"
+
+    head, target = "a" * 40, tmp_path / "apps-file"
+    notes = tmp_path / "workspace" / "rerooted"
+    (notes / head[:SHORT]).mkdir(parents=True)
+    (notes / head[:SHORT] / "vllm-fix.patch").symlink_to(target)
+    carried = SimpleNamespace(patch_conflicts=(PatchConflict("vllm", "patch/vllm/fix.patch", "does not apply"),))
+
+    [written] = await _write_conflicts(_Repo(), head, carried, notes)
+
+    assert not target.exists()
+    assert written == notes / head[:SHORT] / "vllm-fix.patch" and not written.is_symlink()
+    assert written.read_text() == f"diff of patch/vllm/fix.patch at {head}\n"
+    assert written.stat().st_mode & 0o044 == 0o044

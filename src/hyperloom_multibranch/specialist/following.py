@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from hyperloom.common.fs_utils import write_text_nofollow
 from hyperloom.contracts.recipe import Recipe, RecipeError, diff
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry
 from hyperloom_multibranch.contracts.notebook.interfaces import ConflictingWrite, LineageSink
@@ -120,7 +121,7 @@ async def follow(
     except ConflictingWrite as error:
         await repo.rewind(branch, onto, head)
         return Followed(f"your branch was not re-rooted: the notebook refused the move ({error})")
-    ported = await _write_conflicts(repo, head, carried, notes / head[:SHORT])
+    ported = await _write_conflicts(repo, head, carried, notes)
     notice = f"your branch was re-rooted from {head} onto the integration head {onto}"
     return Followed(notice, _carried(snapshot, head, onto, carried, ported))
 
@@ -186,19 +187,14 @@ def _merge(commit: CommittedCommit | None) -> str:
 
 
 async def _write_conflicts(repo: ExperimentRepo, head: str, carried: RepoMerge, notes: Path) -> list[Path]:
-    """Write each patch of ``carried`` that does not apply on the new head where the specialist can read it."""
+    """Write each patch of ``carried`` that does not apply on the new head under ``notes/<head>``, readable by the
+    specialist; ``notes`` sits in its workspace, so nothing on the way is followed through a link it left."""
     written = []
     for conflict in carried.patch_conflicts:
         text = await repo.patch_text(head, conflict.path)
-        path = notes / f"{conflict.component}-{PurePosixPath(conflict.path).name}"
-        await asyncio.to_thread(_write, path, text)
-        written.append(path)
+        rel = (notes.name, head[:SHORT], f"{conflict.component}-{PurePosixPath(conflict.path).name}")
+        written.append(await asyncio.to_thread(write_text_nofollow, notes.parent, rel, text, mode=0o644))
     return written
-
-
-def _write(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
 
 
 def _carried(snapshot: NotebookSnapshot, head: str, onto: str, carried: RepoMerge, ported: Sequence[Path]) -> str:

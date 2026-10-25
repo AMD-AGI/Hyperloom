@@ -47,7 +47,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -55,6 +54,7 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Protocol
 
+from hyperloom.common.fs_utils import read_text_nofollow, write_text_nofollow
 from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 from hyperloom.contracts.measurement import Purpose, TestKind, Validity
 from hyperloom.orchestrator.specialists.agent_runner import (
@@ -146,6 +146,8 @@ PROMPT_FILE, ROLE_FILE, DONE_FILE, HEARTBEAT_FILE, CLI_SESSION_FILE = (
     "cli_session.json",
 )
 _RUNNING = "running"
+#: The mode these files had when written with ``write_bytes`` under the default umask.
+_SHARED_MODE = 0o644
 
 
 def _keep_process_log(workspace: Path) -> None:
@@ -503,7 +505,7 @@ class AgentSession:
         workspace = self._place.workspace
         path = workspace / CLI_SESSION_FILE
         try:
-            return _CliState.parse(json.loads(path.read_text(encoding="utf-8")))
+            return _CliState.parse(json.loads(read_text_nofollow(path)))
         except FileNotFoundError:
             if (workspace / PROCESS_LOG).exists():
                 logger.warning("%s has no conversation record after a launch; a fresh session starts", workspace)
@@ -514,13 +516,10 @@ class AgentSession:
 
     def _write_cli(self, cli: _CliState) -> None:
         """Replace the conversation record whole, readable by its owner only: it names a conversation to resume."""
-        path = self._place.workspace / CLI_SESSION_FILE
-        path.parent.mkdir(parents=True, exist_ok=True)
-        partial = path.with_name(f".{path.name}.partial")
-        descriptor = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(asdict(cli), handle)
-        partial.replace(path)
+        workspace = self._place.workspace
+        workspace.mkdir(parents=True, exist_ok=True)
+        partial = write_text_nofollow(workspace, (f".{CLI_SESSION_FILE}.partial",), json.dumps(asdict(cli)))
+        partial.replace(workspace / CLI_SESSION_FILE)
 
     async def _turn_finished(self, launch: _Launch) -> None:
         """Record in the conversation record a turn that finished without an error, and what the CLI had seen."""
@@ -736,9 +735,10 @@ class AgentSession:
         done = workspace / DONE_FILE
         done.unlink(missing_ok=True)
         _keep_process_log(workspace)
-        role_file = workspace / ROLE_FILE
-        role_file.write_bytes(setup.role.encode())
-        (workspace / PROMPT_FILE).write_bytes(setup.command.stdin(setup.role, launch.prompt).encode())
+        role_file = write_text_nofollow(workspace, (ROLE_FILE,), setup.role, mode=_SHARED_MODE)
+        write_text_nofollow(
+            workspace, (PROMPT_FILE,), setup.command.stdin(setup.role, launch.prompt), mode=_SHARED_MODE
+        )
         cli = launch.cli
         session_id = cli.session_id if cli is not None else ""
         conversation = {"resume_id": session_id} if launch.resumed else {"session_id": session_id}

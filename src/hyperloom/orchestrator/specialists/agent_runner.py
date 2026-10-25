@@ -14,6 +14,10 @@ further messages.
 
 Tokens reach the CLI only through environment variables: the MCP configuration
 written to disk names the variable, never its value.
+
+``HYPERLOOM_SPECIALIST_USER`` starts the CLI as that account, as the legacy
+launcher does: the workspace and ``cwd`` are shared with it, and every file the
+runner writes there is created without following a link the account left.
 """
 
 from __future__ import annotations
@@ -32,10 +36,12 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Mapping, Protocol
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.env_safety import redact_file_in_place
+from hyperloom.common.env_safety import RunAs, RunAsError, redact_file_in_place
+from hyperloom.common.fs_utils import create_nofollow, read_text_nofollow, write_text_nofollow
 from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
+from .launch_env import prepare_demote, resolve_launch_user, stage_mcp_config
 from .mcp_config import SPECIALIST_MCP_CONFIG_FILENAME
 from .resources import (
     CONTAINER_RECORD_KIND,
@@ -93,6 +99,7 @@ ACTIVITY_CPU_SECONDS = 0.1
 
 CLAUDE_CONFIG_DIRNAME = ".claude-config"
 PROCESS_LOG = "process.log"
+PROMPT_FILE = "prompt.md"
 ISOLATED = "isolated"
 UNKNOWN = "unknown"
 STATE_LOST = "lost"
@@ -231,14 +238,11 @@ def _write_mcp_json(spec: AgentLaunchSpec) -> Path:
         }
         for endpoint in spec.mcp_servers
     }
-    runtime_dir = spec.workspace / "runtime"
-    runtime_dir.mkdir(parents=True, exist_ok=True)
-    path = runtime_dir / SPECIALIST_MCP_CONFIG_FILENAME
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, PRIVATE_FILE_MODE)
-    with os.fdopen(fd, "w", encoding=UTF8) as handle:
-        handle.write(json.dumps({"mcpServers": servers}, indent=2, sort_keys=True) + "\n")
-    path.chmod(PRIVATE_FILE_MODE)
-    return path
+    text = json.dumps({"mcpServers": servers}, indent=2, sort_keys=True) + "\n"
+    spec.workspace.mkdir(parents=True, exist_ok=True)
+    return write_text_nofollow(
+        spec.workspace, ("runtime", SPECIALIST_MCP_CONFIG_FILENAME), text, mode=PRIVATE_FILE_MODE
+    )
 
 
 def _strip_mcp_block(text: str) -> str:
@@ -262,7 +266,7 @@ def _wire_codex(spec: AgentLaunchSpec, env: dict[str, str], mcp_json: Path) -> N
     )
     codex_home = Path(env["CODEX_HOME"])
     config = codex_home / "config.toml"
-    existing = _strip_mcp_block(config.read_text(encoding=UTF8)) if config.exists() else ""
+    existing = _strip_mcp_block(read_text_nofollow(config)) if config.exists() else ""
     for endpoint in spec.mcp_servers:
         if re.search(rf"^\[mcp_servers\.{re.escape(endpoint.name)}[.\]]", existing, re.MULTILINE):
             raise AgentConfigError(f"Codex config already defines MCP server {endpoint.name!r}")
@@ -287,8 +291,7 @@ def _wire_claude(spec: AgentLaunchSpec, env: dict[str, str], argv: list[str], mc
         config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         settings = config_dir / "settings.json"
         if not settings.exists():
-            settings.write_text(json.dumps({"enabledPlugins": {}}) + "\n", encoding=UTF8)
-            settings.chmod(PRIVATE_FILE_MODE)
+            write_text_nofollow(config_dir, (settings.name,), json.dumps({"enabledPlugins": {}}) + "\n")
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
 
 
@@ -379,6 +382,14 @@ class _Spawned:
     version: str
 
 
+def _launch_user() -> RunAs | None:
+    """The account ``HYPERLOOM_SPECIALIST_USER`` names, or ``None``; one that cannot be used refuses the launch."""
+    try:
+        return resolve_launch_user(None)
+    except RunAsError as exc:
+        raise AgentConfigError(f"specialist user refused: {exc}") from exc
+
+
 def _refuse_stale_done_paths(spec: AgentLaunchSpec) -> None:
     stale = [str(path) for path in spec.done_paths if path.exists()]
     if stale:
@@ -427,11 +438,12 @@ class LocalAgentRunner:
         backend = _infer_backend(spec)
         _refuse_stale_done_paths(spec)
         clear_wall_budget_extension(spec.task_id)  # an extension left by an earlier run must not move this deadline
+        run_as = _launch_user()
         env = dict(spec.env)
         argv = list(spec.argv)
-        claim = self._prepare(spec, backend, env, argv)
+        claim = self._prepare(spec, backend, env, argv, run_as)
         try:
-            spawned = await self._spawned(spec, argv, env)
+            spawned = await self._spawned(spec, argv, env, run_as)
         except BaseException:
             self._release(claim)
             raise
@@ -447,13 +459,19 @@ class LocalAgentRunner:
             task_id=spec.task_id, pid=spawned.proc.pid, started_unix=session.started_unix, session=session
         )
 
-    async def _spawned(self, spec: AgentLaunchSpec, argv: list[str], env: dict[str, str]) -> _Spawned:
+    async def _spawned(
+        self, spec: AgentLaunchSpec, argv: list[str], env: dict[str, str], run_as: RunAs | None
+    ) -> _Spawned:
         spec.workspace.mkdir(parents=True, exist_ok=True)
         tokens = tuple(env[e.token_env] for e in spec.mcp_servers)
         version = await asyncio.to_thread(
             self._version_probe, spec.argv[0], {k: v for k, v in env.items() if v not in tokens}
         )
-        return _Spawned(self._spawn(spec, argv, env), tokens, version)
+        private = (spec.workspace / PROMPT_FILE, spec.workspace / PROCESS_LOG)
+        # The child works in ``cwd``, so that is the tree it must be able to write.
+        demote = await asyncio.to_thread(prepare_demote, run_as, spec.workspace, spec.cwd, env, private)
+        command = argv if run_as is None else run_as.command(argv)
+        return _Spawned(self._spawn(spec, command, env, demote), tokens, version)
 
     def _supervised(self, spec: AgentLaunchSpec, backend: str, spawned: _Spawned, claim: str | None) -> _Session:
         """The live session of the CLI just ``spawned``, sampled and supervised from now on."""
@@ -553,7 +571,9 @@ class LocalAgentRunner:
         self._log.append(self._container_record())
 
     # Internals
-    def _prepare(self, spec: AgentLaunchSpec, backend: str, env: dict[str, str], argv: list[str]) -> str | None:
+    def _prepare(
+        self, spec: AgentLaunchSpec, backend: str, env: dict[str, str], argv: list[str], run_as: RunAs | None
+    ) -> str | None:
         claim: str | None = None
         if backend == AGENT_BACKEND_CLAUDE and spec.claude_config_dir == ISOLATED:
             claim = str((spec.workspace / CLAUDE_CONFIG_DIRNAME).resolve())
@@ -568,6 +588,7 @@ class LocalAgentRunner:
                     _wire_codex(spec, env, mcp_json)
             else:
                 _wire_claude(spec, env, argv, mcp_json)
+            stage_mcp_config(run_as, spec.workspace, argv)
             if spec.gpus == 0:
                 for name in GPU_MASK_ENV_NAMES:
                     env.setdefault(name, "")
@@ -580,16 +601,15 @@ class LocalAgentRunner:
         if claim is not None:
             self._claims.discard(claim)
 
-    def _spawn(self, spec: AgentLaunchSpec, argv: list[str], env: dict[str, str]) -> Any:
-        process_log = spec.workspace / PROCESS_LOG
-        prompt = spec.workspace / "prompt.md"
+    def _spawn(self, spec: AgentLaunchSpec, argv: list[str], env: dict[str, str], demote: dict[str, Any]) -> Any:
+        prompt = spec.workspace / PROMPT_FILE
         if spec.stdin_open:
             stdin: Any = subprocess.PIPE
         else:
             stdin = prompt.open("rb") if prompt.exists() else subprocess.DEVNULL
-        fd = os.open(process_log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, PRIVATE_FILE_MODE)
         try:
-            with os.fdopen(fd, "wb") as out:
+            # Created fresh, never through a name a previous (possibly demoted) child left in the workspace.
+            with create_nofollow(spec.workspace, (PROCESS_LOG,), mode=PRIVATE_FILE_MODE) as out:
                 proc = self._popen(
                     argv,
                     stdin=stdin,
@@ -598,6 +618,7 @@ class LocalAgentRunner:
                     env=env,
                     cwd=str(spec.cwd),
                     start_new_session=True,
+                    **demote,
                 )
         finally:
             if hasattr(stdin, "close"):
@@ -671,8 +692,12 @@ class LocalAgentRunner:
         path = session.spec.heartbeat_path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.touch(exist_ok=True)
-            os.utime(path, (now, now))
+            # O_NONBLOCK: a FIFO the demoted account planted fails the open instead of hanging the beat.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+            try:
+                os.utime(fd, (now, now))
+            finally:
+                os.close(fd)
         except OSError:
             log.debug("agent %s: cannot refresh the heartbeat file", session.spec.task_id, exc_info=True)
 
@@ -704,8 +729,7 @@ class LocalAgentRunner:
                 scrubbed = scrubbed.replace(value, "[REDACTED]")
             if scrubbed != text:
                 temporary = process_log.with_name(process_log.name + ".scrub")
-                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, PRIVATE_FILE_MODE)
-                with os.fdopen(fd, "w", encoding=UTF8) as handle:
+                with create_nofollow(temporary.parent, (temporary.name,), mode=PRIVATE_FILE_MODE) as handle:
                     handle.write(scrubbed)
                 os.replace(temporary, process_log)
         redact_file_in_place(process_log, mode=PRIVATE_FILE_MODE)
@@ -720,11 +744,10 @@ class LocalAgentRunner:
             "plugins": UNKNOWN,
             "mcp_servers": [endpoint.name for endpoint in spec.mcp_servers],
         }
-        target = spec.workspace / AGENT_RUNTIME_FILENAME
         if plugins is not None and isinstance(plugins.get("plugins"), list):
             payload["plugins"] = plugins["plugins"]
-        target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding=UTF8)
-        target.chmod(PRIVATE_FILE_MODE)
+        text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        write_text_nofollow(spec.workspace, (AGENT_RUNTIME_FILENAME,), text, mode=PRIVATE_FILE_MODE)
 
     def _ended_by(self, session: _Session) -> str:
         outcome = session.outcome
