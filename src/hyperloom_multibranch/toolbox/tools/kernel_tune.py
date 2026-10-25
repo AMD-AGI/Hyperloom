@@ -14,7 +14,9 @@ at a splitK above 1, by its relative-norm error when its mismatch ratio is above
 The tuner is pinned to the aiter the tests' servers run: ``AITER_ROOT_DIR`` of its process is the root of the aiter install
 whose ``configs`` the tool reads the tables' shape keys from (``serving_aiter_root``), and the job's result says so
 (``aiter``). Without a pin Forge tunes against whatever aiter it finds, which need not be the one that serves; a toolbox
-whose install cannot be found fails the job before it takes a card.
+whose install cannot be found fails the job before it takes a card. What the tuner builds is the job's: its process is
+given an ``AITER_JIT_DIR`` below the job's directory, with links to the image's prebuilt modules (:mod:`.tune_jit`),
+so it never installs a module into the image's ``aiter/jit``.
 
 The card is a lease from the pool the measurements and the branches' sandboxes take theirs from: the tool job counts in
 ``MeasurementCapacity.leased_cards`` from the moment it starts until it ends, whatever way it ends, and a job that
@@ -37,7 +39,7 @@ import math
 import os
 import subprocess
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +69,7 @@ from hyperloom_multibranch.toolbox.tools.tune_tables import (
     skipped,
     tables_summary,
 )
+from hyperloom_multibranch.toolbox.tools.tune_jit import own_jit_dir
 
 __all__ = [
     "DEFAULT_TIMEOUT_SEC",
@@ -205,6 +208,8 @@ class _Plan:
     max_err_ratio: float
     #: What was added to the demand beyond the shapes (``demand_notes``), and the mismatch ratio the call allowed.
     notes: Mapping[str, Any]
+    #: The job's own ``AITER_JIT_DIR`` the tuner is given (:func:`.tune_jit.own_jit_dir`).
+    own_jit: Mapping[str, str] = field(default_factory=dict)
 
 
 def _plan(landed: Path, params: Mapping[str, Any], configs: Path) -> _Plan:
@@ -245,16 +250,17 @@ def serving_aiter_root(configs: Path) -> Path:
     )
 
 
-def _tuner_env(cards: Sequence[int], aiter_root: Path) -> dict[str, str]:
-    """This process's environment without credentials, hooks or a mask of the visible cards, masked to ``cards`` and
-    with the tuner's aiter pinned to ``aiter_root``."""
+def _tuner_env(cards: Sequence[int], plan: _Plan) -> dict[str, str]:
+    """This process's environment without credentials, hooks or a mask of the visible cards, masked to ``cards``, with
+    the tuner's aiter pinned to the plan's ``aiter_root`` and the job's own JIT directory."""
     env = {
         name: value
         for name, value in os.environ.items()
         if name not in GPU_MASK_ENV_NAMES and not is_secret_shaped_env_name(name)
     }
     env[ROCR_VISIBLE_DEVICES_ENV] = ",".join(map(str, cards))
-    env[_AITER_ROOT_ENV] = str(aiter_root)
+    env[_AITER_ROOT_ENV] = str(plan.aiter_root)
+    env.update(plan.own_jit)
     return scrub_benchmark_process_env(env)
 
 
@@ -301,6 +307,7 @@ class KernelTuneTool:
     async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
         params = request.params
         plan = await asyncio.to_thread(_plan, Path(params[LANDED_PARAM]), params, self._configs)
+        plan = replace(plan, own_jit=await asyncio.to_thread(own_jit_dir, self._configs, workdir))
         lease = await self._lease(workdir)
         try:
             tables = await self._tune_all(plan, lease, workdir, int(params.get(TIMEOUT_PARAM, DEFAULT_TIMEOUT_SEC)))
@@ -351,7 +358,7 @@ class KernelTuneTool:
             }
         )
         try:
-            done = await _forge(cmd, _tuner_env(cards, plan.aiter_root), budget + _GRACE_SEC)
+            done = await _forge(cmd, _tuner_env(cards, plan), budget + _GRACE_SEC)
         except subprocess.TimeoutExpired:
             return failed(demand, f"the tuner did not end within {budget + _GRACE_SEC} s and was stopped")
         return read_run(demand, out, done, self._configs, plan.max_err_ratio)
