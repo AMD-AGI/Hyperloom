@@ -3982,7 +3982,6 @@ class KernelPhase(CoordinatorCollaborator):
             cycle = int(self.shared_state.macro_cycle or 0)
             result["fusion_run_id"] = f"fusion-c{cycle}-{time.time_ns():x}"
         self.shared_state.last_fusion = result if isinstance(result, dict) else {"status": status}
-        self.shared_state.save(self.session_dir)
         if isinstance(result, dict):
             self._record_fusion_timeline(result)
         try:
@@ -4005,6 +4004,8 @@ class KernelPhase(CoordinatorCollaborator):
         # A KEPT fusion is handed to integrate for the e2e re-baseline decision.
         if isinstance(result, dict) and result.get("kept") and result.get("requires_e2e_validation"):
             await self._integrate_fusion(result)
+        # One save after the queue is filled: a failed save cannot leave a kept fusion recorded without its siblings.
+        self.shared_state.save(self.session_dir)
 
     async def _integrate_fusion(self, result: dict) -> None:
         """Queue every KEPT forge-fusion sibling for the shared e2e integrate lane."""
@@ -4044,7 +4045,6 @@ class KernelPhase(CoordinatorCollaborator):
             len(outcome.patches),
             refused or "none",
         )
-        self.shared_state.save(self.session_dir)
 
     def current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed)."""
