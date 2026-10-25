@@ -486,7 +486,7 @@ def prepare_agentx_runtime(
         )
     except AgentXPreflightError as exc:
         return f"AgentX preflight failed: {exc}"
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, yaml.YAMLError) as exc:
         return f"AgentX runtime preparation failed: {type(exc).__name__}: {exc}"
     return None
 

@@ -266,7 +266,7 @@ def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
         return {"status": "skipped", "reason": "no applied patch manifest"}
     try:
         return apply_kernel_patch.revert_kernel_patch(apply_result["manifest_path"])
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError) as exc:
         return {
             "status": "failed",
             "error_class": "patch_revert_exception",
@@ -288,7 +288,7 @@ def _maybe_finalize_kernel_patch(
         return {"status": "skipped", "reason": "no applied patch manifest"}
     try:
         return apply_kernel_patch.finalize_kernel_patch(apply_result["manifest_path"])
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError, TypeError, AttributeError, RuntimeError, subprocess.TimeoutExpired) as exc:
         return {
             "status": "failed",
             "error_class": "patch_finalize_exception",
