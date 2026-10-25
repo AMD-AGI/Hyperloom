@@ -319,7 +319,7 @@ def test_building_a_variant_leaves_a_real_draft_base_open(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_grid_records_the_refusal_without_launching(tmp_path, monkeypatch):
-    def _never_launched(**_kwargs):
+    def _never_launched(_bench_round, **_kwargs):
         raise AssertionError("a refused variant must not reach Magpie")
 
     monkeypatch.setattr(gr, "_run_magpie", _never_launched)

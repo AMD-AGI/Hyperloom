@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import time
+from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, NoReturn
@@ -389,23 +390,32 @@ def _benchmark_server_log(config_path: Path, output_dir: Path) -> str | None:
     return None if framework in {"custom", "xdit"} else str(output_dir / "server.log")
 
 
+@dataclass(frozen=True)
+class MagpieRound:
+    """One Magpie benchmark round: the interpreter, config and directories it runs with, and its stop gates."""
+
+    magpie_python: str
+    config_path: Path
+    output_dir: Path
+    timeout_sec: int
+    cwd: str
+    result_dir: str | None = None
+    silence_timeout_sec: float | None = None
+    server_already_ready: bool = False
+    session_deadline_sec: float | None = None
+
+
 def _run_magpie(
+    bench_round: MagpieRound,
     *,
-    magpie_python: str,
-    config_path: Path,
-    output_dir: Path,
-    timeout_sec: int,
-    cwd: str,
-    result_dir: str | None = None,
-    silence_timeout_sec: float | None = None,
-    server_already_ready: bool = False,
+    unset_envs: list[str] | None = None,
     serving_lease: Any = None,
     on_output: Callable[[], None] | None = None,
-    session_deadline_sec: float | None = None,
-    unset_envs: list[str] | None = None,
 ) -> tuple[int, str, str]:
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr)."""
-    sync_benchmark_timeout(config_path, timeout_sec)
+    config_path = bench_round.config_path
+    output_dir = bench_round.output_dir
+    sync_benchmark_timeout(config_path, bench_round.timeout_sec)
     server_log_path = _benchmark_server_log(config_path, output_dir)
     env = scrub_benchmark_process_env(os.environ.copy())
     env["PYTHONUNBUFFERED"] = "1"
@@ -429,7 +439,7 @@ def _run_magpie(
     if preparation_failure is not None:
         return preparation_failure.returncode, "", preparation_failure.error
     # RESULT_DIR default; leaks are picked up by the salvage path.
-    env["RESULT_DIR"] = result_dir or str(output_dir)
+    env["RESULT_DIR"] = bench_round.result_dir or str(output_dir)
     # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing lm-eval output.
     env["EVAL_RESULT_DIR"] = str(Path(env["RESULT_DIR"]) / "eval_output")
     # Pin SERVER_LOG / GPU_METRICS_CSV per-task so logs land alongside ``benchmark_report.json``.
@@ -443,7 +453,7 @@ def _run_magpie(
 
         ray_config_path = strip_visible_devices_from_config(config_path)
         cmd = build_benchmark_command(
-            python_exe=magpie_python,
+            python_exe=bench_round.magpie_python,
             config_path=ray_config_path,
             output_dir=output_dir,
         )
@@ -454,19 +464,19 @@ def _run_magpie(
             SessionKillRound(
                 cmd,
                 env=env,
-                cwd=cwd,
-                timeout=timeout_sec,
-                silence_timeout_sec=silence_timeout_sec,
+                cwd=bench_round.cwd,
+                timeout=bench_round.timeout_sec,
+                silence_timeout_sec=bench_round.silence_timeout_sec,
                 server_log_path=server_log_path,
-                server_already_ready=server_already_ready,
+                server_already_ready=bench_round.server_already_ready,
                 # Converted here, at the last moment before the process boundary: the actor cannot read this process's
                 # monotonic clock.
-                session_remaining_sec=session_deadline_to_remaining_sec(session_deadline_sec),
+                session_remaining_sec=session_deadline_to_remaining_sec(bench_round.session_deadline_sec),
             )
         )
 
     cmd = build_benchmark_command(
-        python_exe=magpie_python,
+        python_exe=bench_round.magpie_python,
         config_path=config_path,
         output_dir=output_dir,
     )
@@ -475,13 +485,13 @@ def _run_magpie(
     proc = run_with_session_kill(
         cmd,
         env=env,
-        cwd=cwd,
+        cwd=bench_round.cwd,
         watch=RoundWatch(
-            timeout=timeout_sec,
-            silence_timeout_sec=silence_timeout_sec,
+            timeout=bench_round.timeout_sec,
+            silence_timeout_sec=bench_round.silence_timeout_sec,
             server_log_path=server_log_path,
-            server_already_ready=server_already_ready,
-            session_deadline_sec=session_deadline_sec,
+            server_already_ready=bench_round.server_already_ready,
+            session_deadline_sec=bench_round.session_deadline_sec,
         ),
         on_output=on_output,
     )
@@ -877,17 +887,21 @@ async def _unit_started(grid: list[GridVariant], idx: int, label: str) -> None:
     )
 
 
-async def _reported_magpie(grid: list[GridVariant], idx: int, label: str, **kwargs: Any) -> _RoundProcess:
+async def _reported_magpie(run: _GridRun, at: _VariantSlot, label: str, bench_round: MagpieRound) -> _RoundProcess:
     """Run one Magpie pass, announced on entry and kept alive by its output."""
-    await _unit_started(grid, idx, label)
+    await _unit_started(run.grid, at.idx, label)
     async with heartbeat_while_output_flows(
         unit="variant_step",
-        label=f"{grid[idx].name}:{label}",
-        index=idx + 1,
-        total=len(grid),
+        label=f"{at.variant.name}:{label}",
+        index=at.idx + 1,
+        total=len(run.grid),
     ) as activity:
         returncode, stdout, stderr = await asyncio.to_thread(
-            _run_magpie, on_output=activity.note, unset_envs=grid[idx].unset_envs, **kwargs
+            _run_magpie,
+            bench_round,
+            unset_envs=at.variant.unset_envs,
+            serving_lease=run.serving_lease,
+            on_output=activity.note,
         )
     return _RoundProcess(returncode, stdout, stderr)
 
@@ -1033,18 +1047,19 @@ async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRou
     warmup_cap_sec = run.benchmark_timeout_sec
     try:
         proc = await _reported_magpie(
-            run.grid,
-            at.idx,
+            run,
+            at,
             "warmup",
-            magpie_python=run.magpie_python,
-            config_path=cfg_path,
-            output_dir=warmup_slot,
-            timeout_sec=warmup_cap_sec,
-            silence_timeout_sec=run.silence_timeout_sec,
-            cwd=str(run.output_root),
-            result_dir=run.result_dir,
-            serving_lease=run.serving_lease,
-            session_deadline_sec=run.session_deadline_sec,
+            MagpieRound(
+                magpie_python=run.magpie_python,
+                config_path=cfg_path,
+                output_dir=warmup_slot,
+                timeout_sec=warmup_cap_sec,
+                silence_timeout_sec=run.silence_timeout_sec,
+                cwd=str(run.output_root),
+                result_dir=run.result_dir,
+                session_deadline_sec=run.session_deadline_sec,
+            ),
         )
     except subprocess.TimeoutExpired as exc:
         _teardown_variant_server(at.path, rounds.lifecycle)
@@ -1183,19 +1198,20 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
     warm_slot = at.path / "mn_warmup"
     started_unix = time.time()
     proc = await _reported_magpie(
-        run.grid,
-        at.idx,
+        run,
+        at,
         "mn_warmup",
-        magpie_python=run.magpie_python,
-        config_path=rounds.cfg_path,
-        output_dir=warm_slot,
-        timeout_sec=run.benchmark_timeout_sec,
-        silence_timeout_sec=run.silence_timeout_sec,
-        server_already_ready=True,
-        cwd=str(run.output_root),
-        result_dir=None,
-        serving_lease=run.serving_lease,
-        session_deadline_sec=run.session_deadline_sec,
+        MagpieRound(
+            magpie_python=run.magpie_python,
+            config_path=rounds.cfg_path,
+            output_dir=warm_slot,
+            timeout_sec=run.benchmark_timeout_sec,
+            silence_timeout_sec=run.silence_timeout_sec,
+            server_already_ready=True,
+            cwd=str(run.output_root),
+            result_dir=None,
+            session_deadline_sec=run.session_deadline_sec,
+        ),
     )
     log.info(
         "grid_runner: MN warmup pass done (discarded) %s rc=%s",
@@ -1218,19 +1234,20 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
     measure_cap_sec = run.benchmark_timeout_sec
     try:
         proc = await _reported_magpie(
-            run.grid,
-            at.idx,
+            run,
+            at,
             "benchmark",
-            magpie_python=run.magpie_python,
-            config_path=rounds.cfg_path,
-            output_dir=at.path,
-            timeout_sec=measure_cap_sec,
-            cwd=str(run.output_root),
-            result_dir=run.result_dir,
-            silence_timeout_sec=run.silence_timeout_sec,
-            server_already_ready=(run.server_already_ready or rounds.auto_warmup or is_multi_node()),
-            serving_lease=run.serving_lease,
-            session_deadline_sec=run.session_deadline_sec,
+            MagpieRound(
+                magpie_python=run.magpie_python,
+                config_path=rounds.cfg_path,
+                output_dir=at.path,
+                timeout_sec=measure_cap_sec,
+                cwd=str(run.output_root),
+                result_dir=run.result_dir,
+                silence_timeout_sec=run.silence_timeout_sec,
+                server_already_ready=(run.server_already_ready or rounds.auto_warmup or is_multi_node()),
+                session_deadline_sec=run.session_deadline_sec,
+            ),
         )
     except subprocess.TimeoutExpired as exc:
         # Harvest pre-timeout leaks.

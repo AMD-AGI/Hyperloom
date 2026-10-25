@@ -45,6 +45,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     reorder_grid_for_multi_node,
     resolve_skip_spec,
     run_grid,
+    MagpieRound,
 )
 
 from .conftest import enable_multi_node, launches_by_round_slot
@@ -992,6 +993,19 @@ def test_build_variant_yaml_refuses_to_unset_pinned_envs(tmp_path):
     assert "SGLANG_ENABLE_FOO" not in envs
 
 
+def _slot_round(tmp_path: Path, result_dir: str | None = None) -> MagpieRound:
+    """The Magpie round the ``_run_magpie`` env tests launch into ``tmp_path / "slot"``."""
+    return MagpieRound(
+        magpie_python="/opt/venv/bin/python",
+        config_path=tmp_path / "config.yaml",
+        output_dir=tmp_path / "slot",
+        timeout_sec=5,
+        silence_timeout_sec=600,
+        cwd=str(tmp_path),
+        result_dir=result_dir,
+    )
+
+
 def test_run_magpie_default_result_dir_is_output_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
     captured: dict = {}
@@ -1005,14 +1019,7 @@ def test_run_magpie_default_result_dir_is_output_dir(tmp_path, monkeypatch):
         "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
-        _run_magpie(
-            magpie_python="/opt/venv/bin/python",
-            config_path=tmp_path / "config.yaml",
-            output_dir=tmp_path / "slot",
-            timeout_sec=5,
-            silence_timeout_sec=600,
-            cwd=str(tmp_path),
-        )
+        _run_magpie(_slot_round(tmp_path))
     assert captured["env"]["RESULT_DIR"] == str(tmp_path / "slot")
 
 
@@ -1031,14 +1038,7 @@ def test_run_magpie_does_not_forward_llm_credentials(tmp_path, monkeypatch):
         "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
-        _run_magpie(
-            magpie_python="/opt/venv/bin/python",
-            config_path=tmp_path / "config.yaml",
-            output_dir=tmp_path / "slot",
-            timeout_sec=5,
-            silence_timeout_sec=600,
-            cwd=str(tmp_path),
-        )
+        _run_magpie(_slot_round(tmp_path))
 
     assert "OPENAI_API_KEY" not in captured["env"]
     assert "ANTHROPIC_API_KEY" not in captured["env"]
@@ -1057,15 +1057,7 @@ def test_run_magpie_explicit_result_dir_overrides_default(tmp_path, monkeypatch)
         "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
-        _run_magpie(
-            magpie_python="/opt/venv/bin/python",
-            config_path=tmp_path / "config.yaml",
-            output_dir=tmp_path / "slot",
-            timeout_sec=5,
-            silence_timeout_sec=600,
-            cwd=str(tmp_path),
-            result_dir="/tmp/redirect_leak",
-        )
+        _run_magpie(_slot_round(tmp_path, result_dir="/tmp/redirect_leak"))
     assert captured["env"]["RESULT_DIR"] == "/tmp/redirect_leak"
 
 

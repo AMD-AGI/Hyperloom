@@ -607,7 +607,7 @@ async def test_run_grid_writes_no_launch_evidence_for_a_refused_argv(vllm_source
     from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
     from hyperloom.orchestrator.actions.executors import _grid_runner
 
-    def never_launched(**kwargs):
+    def never_launched(_bench_round, **kwargs):
         raise AssertionError("a refused variant must not reach Magpie")
 
     monkeypatch.setattr(_grid_runner, "_run_magpie", never_launched)

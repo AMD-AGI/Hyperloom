@@ -975,11 +975,7 @@ def test_run_magpie_routes_through_lease_and_strips_devices(tmp_path: Path, monk
 
     lease = _RecordingLease()
     rc, out, err = gr._run_magpie(
-        magpie_python="python3",
-        config_path=cfg,
-        output_dir=out_dir,
-        timeout_sec=10,
-        cwd=str(tmp_path),
+        gr.MagpieRound(magpie_python="python3", config_path=cfg, output_dir=out_dir, timeout_sec=10, cwd=str(tmp_path)),
         serving_lease=lease,
     )
     assert (rc, out, err) == (0, "ok", "")
@@ -1015,13 +1011,15 @@ class TestTheSessionBudgetReachesTheRayWorker:
 
         lease = _RecordingLease()
         gr._run_magpie(
-            magpie_python="python3",
-            config_path=cfg,
-            output_dir=out_dir,
-            timeout_sec=10,
-            cwd=str(tmp_path),
+            gr.MagpieRound(
+                magpie_python="python3",
+                config_path=cfg,
+                output_dir=out_dir,
+                timeout_sec=10,
+                cwd=str(tmp_path),
+                session_deadline_sec=1250.0,
+            ),
             serving_lease=lease,
-            session_deadline_sec=1250.0,
         )
 
         assert lease.calls[0]["session_remaining_sec"] == pytest.approx(250.0)
@@ -1044,11 +1042,9 @@ class TestTheSessionBudgetReachesTheRayWorker:
 
         lease = _RecordingLease()
         gr._run_magpie(
-            magpie_python="python3",
-            config_path=cfg,
-            output_dir=out_dir,
-            timeout_sec=10,
-            cwd=str(tmp_path),
+            gr.MagpieRound(
+                magpie_python="python3", config_path=cfg, output_dir=out_dir, timeout_sec=10, cwd=str(tmp_path)
+            ),
             serving_lease=lease,
         )
 
@@ -1444,11 +1440,7 @@ def test_run_magpie_local_path_untouched(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setattr(gr, "run_with_session_kill", _fake_run)
 
     rc, out, err = gr._run_magpie(
-        magpie_python="python3",
-        config_path=cfg,
-        output_dir=out_dir,
-        timeout_sec=10,
-        cwd=str(tmp_path),
+        gr.MagpieRound(magpie_python="python3", config_path=cfg, output_dir=out_dir, timeout_sec=10, cwd=str(tmp_path)),
         serving_lease=None,
     )
     assert (rc, out) == (0, "local")

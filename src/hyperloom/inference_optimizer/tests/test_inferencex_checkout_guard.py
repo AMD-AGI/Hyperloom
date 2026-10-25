@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _run_magpie, run_grid
+from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _run_magpie, run_grid, MagpieRound
 from hyperloom.orchestrator.actions.executors._subprocess_kill import INFERENCEX_CHECKOUT_INVALID_RETURNCODE
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
@@ -60,11 +60,13 @@ def _run(tmp_path: Path, launched: list[object]) -> tuple[int, str, str]:
         side_effect=lambda cmd, *a, **k: launched.append(cmd) or subprocess.CompletedProcess(cmd, 0, "ok", ""),
     ):
         return _run_magpie(
-            magpie_python="/opt/venv/bin/python",
-            config_path=_config(tmp_path / "config.yaml"),
-            output_dir=tmp_path / "slot",
-            timeout_sec=5,
-            cwd=str(tmp_path),
+            MagpieRound(
+                magpie_python="/opt/venv/bin/python",
+                config_path=_config(tmp_path / "config.yaml"),
+                output_dir=tmp_path / "slot",
+                timeout_sec=5,
+                cwd=str(tmp_path),
+            )
         )
 
 

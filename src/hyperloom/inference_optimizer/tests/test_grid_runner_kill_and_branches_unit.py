@@ -211,8 +211,8 @@ async def test_run_grid_invalid_measurement_branch(tmp_path, monkeypatch):
     base = tmp_path / "base.yaml"
     _write_base_yaml(base)
 
-    def _empty_report(magpie_python, config_path, output_dir, **_k):
-        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+    def _empty_report(bench_round, **_k):
+        ws = Path(bench_round.output_dir) / "benchmark_sglang_20260101_000000"
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "benchmark_report.json").write_text(
             '{"success": false, "framework": "sglang"}',
@@ -239,8 +239,8 @@ async def test_run_grid_nonzero_rc_with_valid_measurement_fails(tmp_path, monkey
     base = tmp_path / "base.yaml"
     _write_base_yaml(base)
 
-    def _nonzero_but_valid(magpie_python, config_path, output_dir, **_k):
-        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+    def _nonzero_but_valid(bench_round, **_k):
+        ws = Path(bench_round.output_dir) / "benchmark_sglang_20260101_000000"
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "benchmark_report.json").write_text(
             json.dumps(
@@ -294,8 +294,8 @@ def _valid_report_body(completed: int, requested: int) -> str:
 def _magpie_writing(completed: int, requested: int, rc: int, stderr: str):
     """A fake ``_run_magpie`` that writes one report and exits ``rc``."""
 
-    def _run(magpie_python, config_path, output_dir, **_k):
-        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+    def _run(bench_round, **_k):
+        ws = Path(bench_round.output_dir) / "benchmark_sglang_20260101_000000"
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "benchmark_report.json").write_text(_valid_report_body(completed, requested))
         return rc, "", stderr
@@ -374,8 +374,8 @@ async def test_run_grid_fails_when_the_run_recorded_no_request_count(tmp_path, m
     base = tmp_path / "base.yaml"
     _write_base_yaml(base)
 
-    def _no_request_count(magpie_python, config_path, output_dir, **_k):
-        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+    def _no_request_count(bench_round, **_k):
+        ws = Path(bench_round.output_dir) / "benchmark_sglang_20260101_000000"
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "benchmark_report.json").write_text(
             json.dumps(
@@ -410,8 +410,8 @@ async def test_server_dead_surfaces_log_excerpt(tmp_path, monkeypatch):
     _write_base_yaml(base)
     out_root = tmp_path / "out"
 
-    def _dead(magpie_python, config_path, output_dir, **_k):
-        slog = Path(output_dir) / "server.log"
+    def _dead(bench_round, **_k):
+        slog = Path(bench_round.output_dir) / "server.log"
         slog.parent.mkdir(parents=True, exist_ok=True)
         slog.write_text(
             "Worker init started\n"
@@ -449,8 +449,8 @@ async def test_server_dead_cause_read_from_the_harvested_log(tmp_path, monkeypat
     leak_root.mkdir()
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(leak_root))
 
-    def _dead(magpie_python, config_path, output_dir, **_k):
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
+    def _dead(bench_round, **_k):
+        Path(bench_round.output_dir).mkdir(parents=True, exist_ok=True)
         (leak_root / "server.log").write_text(
             "Worker init started\n"
             "mori_ep_dispatch supports at most 128 experts, got 256\n"

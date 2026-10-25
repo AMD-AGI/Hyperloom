@@ -21,6 +21,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     _run_magpie,
     run_grid,
+    MagpieRound,
 )
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     EVAL_PROBE_UNPATCHABLE_RETURNCODE,
@@ -145,11 +146,13 @@ def test_the_grid_arm_asserts_bounds_even_when_inferencex_path_is_unset(tmp_path
         ),
     ):
         rc, _out, _err = _run_magpie(
-            magpie_python="/opt/venv/bin/python",
-            config_path=_write_config(tmp_path / "config.yaml"),
-            output_dir=tmp_path / "slot",
-            timeout_sec=5,
-            cwd=str(tmp_path),
+            MagpieRound(
+                magpie_python="/opt/venv/bin/python",
+                config_path=_write_config(tmp_path / "config.yaml"),
+                output_dir=tmp_path / "slot",
+                timeout_sec=5,
+                cwd=str(tmp_path),
+            )
         )
 
     assert calls == [None], "bounds install must be attempted with env discovery"
@@ -170,11 +173,13 @@ def test_a_variant_fails_when_the_bounds_target_is_present_but_unpatchable(tmp_p
         ),
     ):
         rc, _out, err = _run_magpie(
-            magpie_python="/opt/venv/bin/python",
-            config_path=_write_config(tmp_path / "config.yaml"),
-            output_dir=tmp_path / "slot",
-            timeout_sec=5,
-            cwd=str(tmp_path),
+            MagpieRound(
+                magpie_python="/opt/venv/bin/python",
+                config_path=_write_config(tmp_path / "config.yaml"),
+                output_dir=tmp_path / "slot",
+                timeout_sec=5,
+                cwd=str(tmp_path),
+            )
         )
 
     assert rc == EVAL_PROBE_UNPATCHABLE_RETURNCODE
@@ -195,11 +200,13 @@ def test_a_variant_still_runs_when_no_bounds_target_exists(tmp_path, monkeypatch
         ),
     ):
         rc, _out, _err = _run_magpie(
-            magpie_python="/opt/venv/bin/python",
-            config_path=_write_config(tmp_path / "config.yaml"),
-            output_dir=tmp_path / "slot",
-            timeout_sec=5,
-            cwd=str(tmp_path),
+            MagpieRound(
+                magpie_python="/opt/venv/bin/python",
+                config_path=_write_config(tmp_path / "config.yaml"),
+                output_dir=tmp_path / "slot",
+                timeout_sec=5,
+                cwd=str(tmp_path),
+            )
         )
 
     assert rc == 0
@@ -218,11 +225,13 @@ def test_a_variant_that_runs_no_eval_is_not_failed_by_the_bounds_check(tmp_path,
         ),
     ):
         rc, _out, _err = _run_magpie(
-            magpie_python="/opt/venv/bin/python",
-            config_path=_write_config(tmp_path / "config.yaml", RUN_EVAL="false"),
-            output_dir=tmp_path / "slot",
-            timeout_sec=5,
-            cwd=str(tmp_path),
+            MagpieRound(
+                magpie_python="/opt/venv/bin/python",
+                config_path=_write_config(tmp_path / "config.yaml", RUN_EVAL="false"),
+                output_dir=tmp_path / "slot",
+                timeout_sec=5,
+                cwd=str(tmp_path),
+            )
         )
 
     assert rc == 0
@@ -250,8 +259,8 @@ async def test_run_grid_labels_the_bounds_gap_instead_of_a_missing_workspace(tmp
         )
 
     run_magpie.assert_called_once()
-    assert run_magpie.call_args.kwargs["timeout_sec"] == 7800
-    assert run_magpie.call_args.kwargs["silence_timeout_sec"] == 600
+    assert run_magpie.call_args.args[0].timeout_sec == 7800
+    assert run_magpie.call_args.args[0].silence_timeout_sec == 600
     launch.assert_not_called()
     assert len(results) == 1
     assert results[0].status == "failed"
