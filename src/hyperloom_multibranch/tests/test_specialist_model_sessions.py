@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import shlex
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,7 +13,8 @@ from hyperloom_multibranch.contracts.toolbox import BranchLease
 from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec
 from hyperloom_multibranch.specialist.agent_sessions import AgentSessions, with_agents
 from hyperloom_multibranch.specialist.autonomous_session import AutonomousSession
-from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession, AgentSetup
+from hyperloom_multibranch.specialist.gate_client import GateClient
+from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession, AgentSetup, BranchPlace
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions, model_sessions
 from hyperloom_multibranch.specialist.prompts import role_prompt
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
@@ -83,3 +87,61 @@ def test_a_branch_whose_task_names_an_agent_runs_it_on_ports_of_its_own_in_the_s
     assert isinstance(built.factory(SessionStart("s1", "c0", 1, BranchTask("leads"))), AgentSession)
     with pytest.raises(ValueError, match="no specialist stands for"):
         sessions.factory(SessionStart("a1", "c0", 1, BranchTask(agent="https://example.com/agent.git")))
+
+
+#: The canonical measurement as the toolbox renders it, the fields the gate's client is run with.
+CANONICAL = """\
+benchmark:
+  framework: sglang
+  model: /models/Qwen3-Next-80B-A3B-Instruct-FP8
+  envs:
+    TP: 2
+    CONC: '64'
+    ISL: 1024
+    OSL: 1024
+    RANDOM_RANGE_RATIO: 1
+    NUM_PROMPTS: 320
+    NUM_WARMUPS: 8
+    RUN_EVAL: 'true'
+    MAGPIE_TRUST_REMOTE_CODE: '1'
+  benchmark_script: sglang_mi355x.sh
+  inferencex_path: /cache/InferenceX
+"""
+
+
+def test_each_agent_is_given_the_client_the_gate_measures_with_on_its_own_port(tmp_path):
+    canonical = tmp_path / "canonical.yaml"
+    canonical.write_text(CANONICAL, encoding="utf-8")
+    agents = replace(_agent_sessions(), client=GateClient.read(canonical))
+    places = [
+        BranchPlace(SimpleNamespace(path=tmp_path / branch / "worktree"), object(), tmp_path / branch / "session")
+        for branch in ("a1", "a2")
+    ]
+
+    first, second = (
+        agents.session(SessionStart(branch, "c0", 1, BranchTask(agent="agent")), place)
+        for branch, place in zip(("a1", "a2"), places)
+    )
+
+    command = shlex.split(second._setup.spec.client)
+    assert command[:2] == ["python3", "/cache/InferenceX/utils/bench_serving/benchmark_serving.py"]
+    flags = dict(zip(command[2::2], command[3::2]))
+    assert {key: flags[key] for key in ("--model", "--backend", "--base-url", "--dataset-name")} == {
+        "--model": "/models/Qwen3-Next-80B-A3B-Instruct-FP8",
+        "--backend": "vllm",
+        "--base-url": "http://0.0.0.0:31110",
+        "--dataset-name": "random",
+    }
+    assert [flags[key] for key in ("--random-input-len", "--random-output-len", "--max-concurrency")] == [
+        "1024", "1024", "64",
+    ]  # fmt: skip
+    assert (flags["--num-prompts"], flags["--num-warmups"], float(flags["--random-range-ratio"])) == ("320", "128", 1)
+    assert "--ignore-eos" in command and "--trust-remote-code" in command
+    assert "http://0.0.0.0:31100" in first._setup.spec.client
+
+
+def test_an_agentx_canonical_has_no_client_to_give(tmp_path):
+    canonical = tmp_path / "canonical.yaml"
+    canonical.write_text("benchmark:\n  model: /models/m\n  envs:\n    CONC: '8'\n", encoding="utf-8")
+
+    assert GateClient.read(canonical) is None

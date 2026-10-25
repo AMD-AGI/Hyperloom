@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     OnboardingSetup,
     agent_env,
     make_ready,
+    onboarding_prompt,
     split_source,
 )
 from hyperloom_multibranch.specialist.agent_session import AgentCommand
@@ -137,6 +139,19 @@ async def test_an_agent_is_fetched_onboarded_configured_installed_and_started(tm
     assert os.access(shim, os.X_OK)
     assert '"workspace": "/ws/sglang"' in onboard.prompts[0] and str(repo) in onboard.prompts[0]
     assert f"checkout, {ready.source_dir}, a clone" in onboard.prompts[0]
+
+
+def test_the_prompt_has_every_a_b_measured_with_the_gate_s_client_and_the_integration_notes_read() -> None:
+    client = "python3 /cache/InferenceX/utils/bench_serving/benchmark_serving.py --backend vllm --ignore-eos"
+    spec = replace(SPEC, client=client, baseline=6290.7, knowledge="/b01/agent/mb-integration.md")
+
+    prompt = onboarding_prompt(spec, "agent", Path("/b01/agent/src"), "c", ())
+
+    document = json.loads(prompt[prompt.index("{\n") : prompt.index("\n}\n") + 2])
+    assert (document["client"], document["baseline"], document["knowledge"]) == (
+        client, 6290.7, "/b01/agent/mb-integration.md",
+    )  # fmt: skip
+    assert "every A/B" in prompt and "every iteration" in prompt
 
 
 async def test_each_failed_attempt_reaches_the_next_prompt_and_three_give_up(tmp_path: Path) -> None:

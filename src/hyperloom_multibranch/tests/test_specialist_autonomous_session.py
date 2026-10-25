@@ -15,11 +15,21 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import TestRequest
-from hyperloom.contracts.recipe import ComponentPatches, KernelArtifact, KernelKind, LaunchConfig, Recipe, apply
+from hyperloom.contracts.recipe import (
+    ComponentPatches,
+    ConfigDelta,
+    KernelArtifact,
+    KernelKind,
+    LaunchConfig,
+    Recipe,
+    RecipeDelta,
+    apply,
+)
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, RequestRejected
-from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.notebook.records import BaselineRecord
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.local.notebook import LEARNING_MAX_CHARS
 from hyperloom_multibranch.notebook.tests.factories import result
@@ -816,3 +826,41 @@ def test_the_collection_margin_covers_the_tests_queued_and_the_import_s_test_and
     assert collection_margin(measured, 600.0) == 2 * 540.0
     assert collection_margin([*measured, _record(), _record(), _record()], 600.0) == 5 * 540.0
     assert collection_margin([*measured, _record()], 2400.0) == 2400.0
+
+
+async def test_the_agent_runs_until_its_imports_can_still_be_judged_against_the_gate_s_baseline(
+    tmp_path: Path,
+) -> None:
+    now = time.time()
+    rig = await _rig(tmp_path, Agent(keeps=(), tail=30.0), clock=lambda: now, deadline=now + 3600.0)
+    gate = LocalNotebook(tmp_path / "notebook", Writer(Role.GATE, "gate"))
+    rates = {"output_throughput": 0.2}
+    root = await rig.repo.head(INTEGRATION_BRANCH)
+    await gate.write_baseline(BaselineRecord(root, {"output_throughput": 6290.7}, rates, rates, ("b1",)))
+
+    await rig.session.preflight()
+
+    prompt = rig.sandbox.prompts[0]
+    spec = json.loads(prompt[prompt.index("{\n") : prompt.index("\n}\n") + 2])
+    assert spec["seconds"] == pytest.approx(3600.0 - 0.5)
+    assert spec["baseline"] == 6290.7
+    assert spec["knowledge"] == str(tmp_path / BRANCH / "session" / AGENT_DIR / "mb-integration.md")
+    await rig.session.stop()
+
+
+async def test_the_agent_s_integration_notes_follow_the_integration_head(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(), tail=30.0))
+    notes = tmp_path / BRANCH / "session" / AGENT_DIR / "mb-integration.md"
+
+    root = await rig.repo.head(INTEGRATION_BRANCH)
+    await rig.session.preflight()
+    assert root in notes.read_text() and "--max-num-seqs 512" not in notes.read_text()
+    running = asyncio.create_task(rig.session.run())
+    await rig.repo.create_branch("b2", root)
+    other = await rig.repo.commit("b2", root, replace(ROOT, launch=LaunchConfig("--max-num-seqs 512")), "b2")
+    head = await rig.repo.commit_integration(root, RecipeDelta(config=ConfigDelta("--max-num-seqs 512")), (other,))
+    await _until(lambda: head in notes.read_text(), "the notes of the new integration head")
+
+    assert "--max-num-seqs 512" in notes.read_text()
+    await rig.session.stop()
+    await asyncio.wait_for(running, 10)

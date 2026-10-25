@@ -17,7 +17,9 @@ submitted by the run after it. The agent's own LLM spend is read from its Claude
 every :data:`SPEND_SECONDS` and once more when the run ends, and recorded as the branch's. At each keep, the findings
 the agent wrote down in its ledger since the last one become the branch's learnings, a finding it revised superseding
 what it said before, so other branches read them; what it wrote after its last keep is learnt when the branch stops. The
-branch's judge judges the imports as it judges any branch's tests; nothing of its verdicts reaches the agent. An agent
+branch's judge judges the imports as it judges any branch's tests; nothing of its verdicts reaches the agent, but
+what the integration head holds does, through the notes (:mod:`agent_knowledge`) rewritten whenever the head moves,
+and the agent is given until its last import can still be judged in EXPLORE as its time budget. An agent
 that exits 0 finishes the run once what it kept last settled; one that exits otherwise is a crash the runtime restarts
 it from. A session never ends idle: what the agent keeps, or does not, is its own business, bounded by the session's
 stops.
@@ -56,6 +58,7 @@ from hyperloom_multibranch.specialist.agent_import import (
     read_kept_change,
 )
 from hyperloom_multibranch.notebook.local.notebook import LEARNING_MAX_CHARS
+from hyperloom_multibranch.specialist.agent_knowledge import NOTES_FILE, IntegrationNotes
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, LedgerSource, read_field
 from hyperloom_multibranch.specialist.agent_onboarding import (
     AgentProcess,
@@ -180,6 +183,7 @@ class AutonomousSession:
         self._setup = setup
         self._place = place
         self._agent_dir = place.workspace / AGENT_DIR
+        self._notes = IntegrationNotes(setup.repo, place.notebook, self._agent_dir / NOTES_FILE)
         self._manifest: AgentManifest | None = None
         self._process: AgentProcess | None = None
         self._sandbox: AgentSandbox | None = None
@@ -194,8 +198,17 @@ class AutonomousSession:
         await sync_to_head(self._setup.repo, self._start.branch, self._place.worktree)
         root = self._place.worktree.commit()
         launch = (await self._setup.repo.read_recipe(self._start.start_commit)).launch
-        workspace = str(self._place.worktree.path)
-        spec = replace(self._setup.spec, server_args=launch.server_args, envs=dict(launch.envs), workspace=workspace)
+        await self._notes.refresh()
+        baseline = (await self._place.notebook.snapshot()).baseline
+        spec = replace(
+            self._setup.spec,
+            server_args=launch.server_args,
+            envs=dict(launch.envs),
+            workspace=str(self._place.worktree.path),
+            seconds=self._run_seconds(),
+            baseline=None if baseline is None else baseline.values.get(self._setup.spec.metric),
+            knowledge=str(self._notes.path),
+        )
         lease = await self._lease(spec.tp)
         spec = replace(spec, cards=lease.gpu_ids)
         self._sandbox = self._setup.sandbox(lease)
@@ -206,6 +219,16 @@ class AutonomousSession:
         await self._place.notebook.record_agent_manifest(self._start.branch, document)
         KeepWatch(root, mark=self._mark(ready.manifest)).save(self._place.workspace / WATCH_FILE)
         await self._note(f"the agent {ready.manifest.source} at {ready.manifest.commit} is running")
+
+    def _run_seconds(self) -> float:
+        """How long the agent may run: until the import of what it keeps last can still be measured and judged in
+        EXPLORE, or, when the branch starts later than that, until EXPLORE ends; 0, no end, with no deadline."""
+
+        deadline = self._start.task.deadline
+        if not deadline:
+            return 0.0
+        left = deadline - self._setup.clock()
+        return left - self._setup.cutoff_seconds if left > self._setup.cutoff_seconds else max(left, 1.0)
 
     async def run(self) -> None:
         manifest, process, sandbox = await self._running()
@@ -218,6 +241,7 @@ class AutonomousSession:
             while not self._stopped.is_set():
                 ended = process.returncode is not None
                 await self._observe(manifest, watch)
+                await self._notes.refresh()
                 if said := sandbox.watched():
                     await self._note(said)
                 await self._collect_before_the_end(manifest, watch)

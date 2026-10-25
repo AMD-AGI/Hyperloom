@@ -90,8 +90,10 @@ sys.exit(f"docker {' '.join(args[:1])}: this sandbox runs commands in place and 
 class AgentSpec:
     """What MB asks of the agent, which its config must be derived from: the workload, the metric it is judged on, the
     server arguments and environment of the commit its branch starts on, ``workspace``, the framework checkout it edits,
-    ``cards``, the GPUs it may use, ``seconds``, how long it may run (0: until MB stops it), and ``port``, the first of
-    the ports its servers may listen on."""
+    ``cards``, the GPUs it may use, ``seconds``, how long it may run (0: until MB stops it), ``port``, the first of
+    the ports its servers may listen on, ``client``, the command the gate measures a server on ``port`` with (empty when
+    the session has none to give), ``baseline``, what the gate measured of the metric on the session's root (``None``
+    before it did), and ``knowledge``, the notes on the integration head the agent reads each iteration."""
 
     model: str
     framework: str
@@ -106,6 +108,9 @@ class AgentSpec:
     cards: tuple[int, ...]
     seconds: float
     port: int
+    client: str = ""
+    baseline: float | None = None
+    knowledge: str = ""
 
     def to_document(self) -> dict[str, object]:
         return {
@@ -122,6 +127,9 @@ class AgentSpec:
             "cards": list(self.cards),
             "seconds": self.seconds,
             "port": self.port,
+            "client": self.client,
+            "baseline": self.baseline,
+            "knowledge": self.knowledge,
         }
 
 
@@ -341,6 +349,17 @@ The sandbox:
   off any other sweep that kills what holds GPU memory, and give the agent's servers a port no one else uses;
 - the agent edits the framework source in "workspace", in place, and launches its servers from it;
 - "seconds" is how long the agent may run, 0 when MB stops it: then give it a time budget it cannot reach.
+
+MB judges every change the agent keeps by measuring it with "client", the gate's own benchmark client, against a
+server on "port"; another client sends other prompts and ranks changes otherwise. Unless "client" is empty, make the
+agent measure every A/B, its baseline included, with exactly that command, changing only the port of --base-url to the
+server it measures and --result-dir to a directory of its own: no other client, dataset, prompt count or warmup, even
+when the agent ships a benchmark of its own. "baseline" is what the gate measured of "metric" on the session's root
+with it, which the agent's own measurement of that recipe should come close to.
+
+"knowledge" is a markdown file MB rewrites whenever the session's integration branch takes a change from another
+branch: its server arguments, environment, patches and the changes merged into it. Make the agent read it at the start
+of every iteration, through its goal, notes or instructions, and never redo a change it lists.
 
 Answer with one JSON object and nothing else, with exactly these fields:
 - "source": "{source}", "commit": "{commit}";

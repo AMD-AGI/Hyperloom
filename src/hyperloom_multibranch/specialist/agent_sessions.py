@@ -8,7 +8,8 @@ one, and a branch keeps its block for the session, a restart included. Its sandb
 cards and in the directory its preflight leases from the toolbox, with the lease's environment on top of the
 session's; its onboarding model is the specialists' CLI (:mod:`agent_onboard`) with its spend recorded in the branch's
 notebook, where the agent's own spend goes too, read from the transcripts of the Claude CLI's directory the session's
-environment names (:mod:`agent_spend`).
+environment names (:mod:`agent_spend`). Given the gate's benchmark client (:mod:`gate_client`), each agent's spec names
+it aimed at the branch's first port.
 """
 
 from __future__ import annotations
@@ -27,7 +28,8 @@ from hyperloom_multibranch.specialist.agent_onboarding import AgentSandbox, Agen
 from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, BranchPlace, Processes, SessionNotebook
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend
-from hyperloom_multibranch.specialist.autonomous_session import AutonomousSession, AutonomousSetup
+from hyperloom_multibranch.specialist.autonomous_session import AGENT_DIR, AutonomousSession, AutonomousSetup
+from hyperloom_multibranch.specialist.gate_client import GateClient
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions, branch_place
 from hyperloom_multibranch.specialist.runtime import Session, SessionStart
 
@@ -39,14 +41,17 @@ CLAUDE_CONFIG_ENV = "CLAUDE_CONFIG_DIR"
 DEFAULT_CLAUDE_CONFIG = ".claude"
 #: Ports a branch's agent may give its servers, from its spec's ``port`` on.
 PORTS_PER_AGENT = 10
+#: Where, in a branch's agent directory, the gate's client writes the results of the agent's measurements.
+BENCH_DIR = "mb-bench"
 
 
 @dataclass
 class AgentSessions:
     """What a session's agents run on: ``spec``, the workload every agent is asked to optimize (the cards, the port, the
     start commit's arguments and the workspace are each branch's own); the onboarding ``command`` and its ``env``; the
-    ``toolbox`` the sandboxes are leased from and imports go to, and the ``repo`` they are read against; and the
-    ``processes`` registry every agent process joins."""
+    ``toolbox`` the sandboxes are leased from and imports go to, and the ``repo`` they are read against; the
+    ``processes`` registry every agent process joins; and ``client``, the gate's benchmark client, ``None`` when the
+    session has none to give."""
 
     spec: AgentSpec
     command: AgentCommand
@@ -54,6 +59,7 @@ class AgentSessions:
     toolbox: RealToolbox
     repo: ExperimentRepo
     processes: Processes
+    client: GateClient | None = None
     _taken: dict[str, int] = field(default_factory=dict, init=False)
 
     def session(self, start: SessionStart, place: BranchPlace) -> AutonomousSession:
@@ -61,7 +67,9 @@ class AgentSessions:
 
         branch, component = start.branch, self.spec.framework
         index = self._taken.setdefault(branch, len(self._taken))
-        spec = replace(self.spec, port=self.spec.port + index * PORTS_PER_AGENT)
+        port = self.spec.port + index * PORTS_PER_AGENT
+        client = "" if self.client is None else self.client.command(port, place.workspace / AGENT_DIR / BENCH_DIR)
+        spec = replace(self.spec, port=port, client=client)
         source = place.worktree.path / PurePosixPath(COMPONENT_LAYOUTS[component].upstream_prefix).parent
         onboard = cli_onboard(self.command, self.env, branch, place.notebook)
 
