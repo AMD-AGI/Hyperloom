@@ -54,6 +54,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     OpShares,
     REPLAY_TARGET,
     REPLAY_TOOL,
+    SHORT_COMMIT,
     StartupBrief,
     TestRecord,
     PeerReplay,
@@ -238,12 +239,17 @@ def _ceilings(shares: OpShares | None) -> list[str]:
 
 
 def _unfinished(item: UnfinishedLead) -> str:
-    where = f"- {item.request_id} on {item.branch}: {item.target or UNKNOWN} / {item.mechanism or UNKNOWN}"
-    shown = UNCHANGED if item.change == NO_CHANGE else item.change
-    change = f" ({shown})" if shown else ""
+    """One lead, why it is unfinished before what it changes, so that clipping its line cuts the change, never the
+    verdict."""
+
     gain = f" {item.gain_pct:+.2f}%" if item.gain_pct is not None else ""
     detail = f" ({item.detail})" if item.detail else ""
-    return f"{where}{change} on {item.measured_on}{gain}: {_UNFINISHED[item.reason]}{detail}"
+    shown = UNCHANGED if item.change == NO_CHANGE else item.change
+    change = f" ({shown})" if shown else ""
+    return (
+        f"- {item.request_id} on {item.branch}, {item.measured_on[:SHORT_COMMIT]}{gain}: {_UNFINISHED[item.reason]}"
+        f"{detail}; {item.target or UNKNOWN} / {item.mechanism or UNKNOWN}{change}"
+    )
 
 
 def render_brief(brief: StartupBrief) -> str:

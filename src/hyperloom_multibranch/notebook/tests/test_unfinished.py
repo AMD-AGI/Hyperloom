@@ -14,14 +14,21 @@ import pytest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer, Purpose, Verdict
-from hyperloom_multibranch.contracts.notebook.records import REPLAY_TARGET, LineageEvent, MergeAttempt, Withdrawal
+from hyperloom_multibranch.contracts.notebook.records import (
+    REPLAY_TARGET,
+    LineageEvent,
+    MergeAttempt,
+    StartupBrief,
+    UnfinishedLead,
+    Withdrawal,
+)
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, UnfinishedReason
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.local.unfinished import MAX_UNFINISHED
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.notebook.tests.factories import TTL, FakeClock, delta, intent, judgement, request, result
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, Writers, scripted_session
-from hyperloom_multibranch.notebook.tools import UNFINISHED_TITLE, render_brief
+from hyperloom_multibranch.notebook.tools import LINE_CHARS, UNFINISHED_TITLE, render_brief
 
 LANDED = intent("s3", "i1", "sampler", "fused top-k")
 NEAR = intent("s3", "i1", "attention", "fused rope")
@@ -91,7 +98,7 @@ async def test_the_brief_lists_what_the_session_left_unfinished_in_order_and_dro
     ]
     landed, near, _, withdrawn = brief.unfinished
     assert (landed.branch, landed.measured_on, landed.gain_pct) == ("s3", "i1", 3.0)
-    assert landed.detail == "commit c3; merge m2 on i1 -0.50%, bar 1.00%"
+    assert landed.detail == "merge on i1 -0.50%, bar 1.00%; commit c3"
     assert (near.target, near.mechanism, near.gain_pct, near.detail) == ("attention", "fused rope", 0.8, "bar 1.00%")
     assert (withdrawn.gain_pct, withdrawn.detail) == (None, "branch stopped")
     assert withdrawn.change == "add args --chunked-prefill-size 8192"
@@ -237,10 +244,31 @@ async def test_the_rendered_brief_names_each_lead_and_how_to_finish_it(tmp_path:
 
     assert "notebook_replay" in UNFINISHED_TITLE and lines.index("Tried:") < start
     assert lines[start + 1] == (
-        "- u1 on s3: sampler / fused top-k (add args --sampler fused) on i1 +3.00%: committed, merge not stackable "
-        "(commit c3; merge m2 on i1 -0.50%, bar 1.00%)"
+        "- u1 on s3, i1 +3.00%: committed, merge not stackable (merge on i1 -0.50%, bar 1.00%; commit c3); "
+        "sampler / fused top-k (add args --sampler fused)"
     )
     assert lines[start + 4] == (
-        "- x1 on s3: scheduler / chunked prefill 8k (add args --chunked-prefill-size 8192) on i1: withdrawn before its "
-        "result (branch stopped)"
+        "- x1 on s3, i1: withdrawn before its result (branch stopped); scheduler / chunked prefill 8k "
+        "(add args --chunked-prefill-size 8192)"
     )
+
+
+def test_a_clipped_lead_line_keeps_the_verdict_and_cuts_the_change() -> None:
+    lead = UnfinishedLead(
+        request_id="d5d47a20-6da3-5f11-a2b1-d187c7c15e05",
+        branch="b13",
+        target="scheduler",
+        mechanism="min free slots delay on NEXTN",
+        change="add args --min-free-slots-delay 8 --speculative-num-steps 3 --speculative-eagle-topk 1",
+        measured_on="a785ed60" + "0" * 32,
+        reason=UnfinishedReason.NOT_STACKABLE,
+        gain_pct=20.27,
+        detail="merge on 2a13404f -15.38%, bar 0.60%; commit 1af0dc55",
+    )
+
+    text = render_brief(StartupBrief("c9", (), unfinished=(lead,)))
+    (line,) = (item for item in text.splitlines() if item.startswith(f"- {lead.request_id}"))
+
+    verdict = "committed, merge not stackable (merge on 2a13404f -15.38%, bar 0.60%; commit 1af0dc55)"
+    assert line.startswith(f"- {lead.request_id} on b13, a785ed60 +20.27%: {verdict}; ")
+    assert len(line) == LINE_CHARS and line.endswith("...")

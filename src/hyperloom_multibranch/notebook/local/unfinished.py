@@ -33,6 +33,7 @@ from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.notebook.peers import Purpose, TestKind
 from hyperloom_multibranch.contracts.notebook.records import (
     REPLAY_TARGET,
+    SHORT_COMMIT,
     Claim,
     LineageView,
     TestRecord,
@@ -116,7 +117,7 @@ def _not_stackable(state: NotebookState, view: LineageView) -> list[UnfinishedLe
         if commit.branch not in stopped or commit.commit_id in on_head:
             continue
         found = _merge_found(state, last.request_id)
-        detail = f"commit {commit.commit_id}; merge {last.request_id} on {last.integration_head}{found}"
+        detail = f"merge on {last.integration_head[:SHORT_COMMIT]}{found}; commit {commit.commit_id[:SHORT_COMMIT]}"
         leads.append(_lead(state, record, UnfinishedReason.NOT_STACKABLE, detail))
     return leads
 

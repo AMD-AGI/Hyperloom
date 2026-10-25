@@ -46,6 +46,8 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
 
 CLAIM_TOKEN_LENGTH = 24
 MAX_OP_SHARES = 50
+#: How many leading characters of a commit id a one-line summary names it by.
+SHORT_COMMIT = 8
 WHOLE_PCT = 100.0
 SECONDS_PER_HOUR = 3600.0
 #: The facts of a node's measurement environment that change what a test there measures (#63).
@@ -802,6 +804,7 @@ __all__ = [
     "ENVIRONMENT_FIELDS",
     "LESSON_ID",
     "MAX_OP_SHARES",
+    "SHORT_COMMIT",
     "AgentManifestRecord",
     "BaselineRecord",
     "BranchLogRecord",
