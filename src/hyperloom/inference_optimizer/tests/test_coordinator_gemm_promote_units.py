@@ -535,6 +535,42 @@ class TestQueueFusionSiblings:
         assert next(iter(queue.values()))["source_file"] == "/repo/g.py"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "method, result",
+        [
+            ("_handle_fusion_result", {"status": "failed", "engine": "forge_fusion", "infrastructure_abort": True}),
+            (
+                "_integrate_fusion",
+                {
+                    "patches": [
+                        {
+                            "kernel_name": "fuse_a",
+                            "patch_path": "/out/fuse_a.patch",
+                            "target_file": "/repo/a.py",
+                            "micro_speedup": 1.4,
+                            "kind": "fusion",
+                        }
+                    ]
+                },
+            ),
+        ],
+    )
+    async def test_a_fusion_record_that_cannot_be_persisted_fails_the_kernel_entry(
+        self, tmp_path, monkeypatch, method, result
+    ):
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+
+        def _disk_full(_session_dir):
+            raise OSError("No space left on device")
+
+        monkeypatch.setattr(coord.shared_state, "save", _disk_full)
+
+        with pytest.raises(OSError, match="No space left on device"):
+            await getattr(phase, method)(result)
+
+    @pytest.mark.asyncio
     async def test_handle_fusion_result_posts_and_integrates_kept_candidate(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0)
         coord.bus = _Bus()

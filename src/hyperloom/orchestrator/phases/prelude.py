@@ -525,17 +525,11 @@ class PreludePhase(CoordinatorCollaborator):
                 "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in kernel_id)[:96] or "warm_kernel"
             )
             snapshot_dir = Path(self.session_dir) / "runtime" / "warm_kernel_materialized" / safe_kernel_id
-            try:
-                materialized = materialize_unified_patch_snapshot(
-                    patch_path=patch_path,
-                    repo_root=repo_root,
-                    snapshot_dir=snapshot_dir,
-                )
-            except Exception as exc:  # noqa: BLE001
-                return {
-                    "status": "failed",
-                    "error": (f"warm replay unified diff materialization failed: {type(exc).__name__}: {exc}"),
-                }
+            materialized = materialize_unified_patch_snapshot(
+                patch_path=patch_path,
+                repo_root=repo_root,
+                snapshot_dir=snapshot_dir,
+            )
             payload["snapshot_dir"] = materialized
             payload["kernel_repo"] = str(repo_root)
 
@@ -742,12 +736,7 @@ class PreludePhase(CoordinatorCollaborator):
             "kernel_apply_results": [],
             "kernel_snapshots": [],
         }
-        try:
-            state.save(self.session_dir)
-        except Exception as exc:  # noqa: BLE001
-            return self._set_warm_kernel_outcome(
-                {"status": "error", "reason": f"kernel_pending_state_persist_failed:{type(exc).__name__}"}
-            )
+        state.save(self.session_dir)
         for index, entry in enumerate(plan):
             if not (entry.get("source_paths") or entry.get("patch_path")):
                 entry["decision"] = "DEFERRED"
@@ -1044,7 +1033,7 @@ class PreludePhase(CoordinatorCollaborator):
             return None
         try:
             sdk_replay = self._read_current_recipe_replay()
-        except Exception as exc:  # noqa: BLE001 — current replay fails closed
+        except (OSError, ValueError, RuntimeError, AttributeError, TypeError) as exc:  # current replay fails closed
             self._skip_warm_replay(
                 code=SKIP_RECIPE_READ_FAILED,
                 outcome={
