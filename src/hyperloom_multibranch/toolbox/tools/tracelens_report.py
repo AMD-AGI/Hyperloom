@@ -55,7 +55,7 @@ from typing import TYPE_CHECKING, Any
 from hyperloom.common.outside_facts import ENV_CONC, ENV_ISL, ENV_OSL, ENV_RANDOM_RANGE_RATIO
 from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.orchestrator.actions.executors import run_with_session_kill
-from hyperloom.orchestrator.trace_analysis import count_gpu_kernel_events, discover_trace_inputs
+from hyperloom.orchestrator.trace_analysis import count_gpu_kernel_events, discover_trace_inputs, is_capture_fragment
 from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import resolve_arch_json_path
 from hyperloom.orchestrator.trace_analysis.tracelens_skill_runner import discover_capture_folder
 from hyperloom_multibranch.toolbox.tools.kernel_launchers import Relabelled, read_launched_window
@@ -178,11 +178,23 @@ def _sh(run: _Run, step: str, cmd: list[str]) -> None:
 
 
 def _analysed_trace(trace_input: Path) -> Path:
-    """The trace of the input that holds GPU kernels: the file itself, or the first trace of a directory that does."""
+    """The trace of the input that holds GPU kernels: the file itself, or the first trace of a directory that does.
+
+    A CUDA-graph capture sidecar is never it: it holds the kernels of one graph capture (two fill kernels on a NEXTN head's
+    profile), not serving steps, so the splitter finds no steady state in it. An input with nothing else is refused as
+    ``trace_without_serving_steps``.
+    """
     try:
-        _, files = discover_trace_inputs(trace_input)
+        _, found = discover_trace_inputs(trace_input)
     except FileNotFoundError as exc:
         raise _Refused("trace_input_missing", str(exc)) from None
+    root = trace_input if trace_input.is_dir() else trace_input.parent
+    files = [path for path in found if not is_capture_fragment(path, root)]
+    if found and not files:
+        raise _Refused(
+            "trace_without_serving_steps",
+            f"every trace under {trace_input} is a CUDA-graph capture sidecar: the profiler recorded no serving step",
+        )
     for candidate in files[:_PROBE_LIMIT]:
         if count_gpu_kernel_events(candidate):
             return candidate

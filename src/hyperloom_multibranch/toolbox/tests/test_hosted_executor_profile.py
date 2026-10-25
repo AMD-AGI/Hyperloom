@@ -15,7 +15,7 @@ from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
-from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
+from hyperloom_multibranch.toolbox.hosted_executor import PROFILE_WITHOUT_STEPS, HostedExecutor
 from hyperloom_multibranch.toolbox.tests.helpers import BackendSpy, req
 
 
@@ -77,6 +77,19 @@ async def test_a_profile_result_that_holds_no_trace_is_refused(tmp_path: Path, r
 
     with pytest.raises(MeasurementRefused, match="holds no trace file"):
         await executor.run(_job(tmp_path, TestKind.PROFILE))
+
+
+async def test_a_profile_whose_traces_are_all_graph_capture_sidecars_is_refused_with_the_reason(
+    tmp_path: Path, rig: Rig
+) -> None:
+    """A NEXTN head's profile: the server captured its CUDA graphs at boot, then the run ended before the capture window,
+    so ``graph_capture_profile/`` is all that landed. It is no result, and says why, rather than a success no analysis
+    can read op shares from."""
+    executor = HostedExecutor(rig.backend, tmp_path / "session")
+
+    with pytest.raises(MeasurementRefused) as refused:
+        await executor.run(_job(tmp_path, TestKind.PROFILE, fake_trace="capture_only", fake_report="false"))
+    assert str(refused.value) == PROFILE_WITHOUT_STEPS
 
 
 async def test_a_plain_test_without_a_measured_round_is_still_refused(tmp_path: Path, rig: Rig) -> None:

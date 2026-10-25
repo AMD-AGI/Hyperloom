@@ -629,6 +629,39 @@ async def test_a_step_that_fails_fails_the_job_with_its_reason(
     assert record["result"]["error_class"] == error_class and record["result"]["error"] in pointer.summary
 
 
+CAPTURE_SIDECAR = "EAGLEDraftExtendCudaGraphRunner_bs_14_rank0.json.gz"
+#: The GPU events of a real CUDA-graph capture sidecar of a NEXTN head's profile (``CAPTURE_SIDECAR``), all of
+#: them: a graph capture launches the fills that set it up, and nothing of a serving step.
+CAPTURE_KERNELS = [
+    {
+        "ph": "X",
+        "cat": "kernel",
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<long>, std::array<char*, 1ul> >"
+        "(int, at::native::FillFunctor<long>, std::array<char*, 1ul>)",
+        "pid": 8,
+        "tid": 5,
+        "ts": ts,
+        "dur": dur,
+        "args": {"device": 8, "stream": 5, "kind": "Dispatch Kernel", "grid": [1, 1, 1], "block": [256, 1, 1]},
+    }
+    for ts, dur in ((2070753192525.363, 4.679), (2070753192530.043, 3.319))
+]
+
+
+async def test_a_profile_of_graph_capture_sidecars_alone_is_refused_before_the_splitter_runs(
+    rig: Rig, tmp_path: Path
+) -> None:
+    """What 13 of 13 analyses of a NEXTN head's profiles met: no rank trace, only the boot's graph captures, whose two fill
+    kernels made one pass for a trace that ran on a card; the splitter then found no window (``steady_state_chunk_missing``).
+    The sidecar is refused by name and the splitter is not run on it."""
+    rig.trace.unlink()
+    sidecar = rig.trace_input / "torch_trace" / "graph_capture_profile" / CAPTURE_SIDECAR
+    sidecar.write_bytes(gzip.compress(json.dumps({"traceEvents": CAPTURE_KERNELS}).encode()))
+    status, pointer, record = await _run(tmp_path, HINTS, rig)
+    assert status is JobStatus.FAILED and not pointer.op_shares and rig.shell.commands == []
+    assert record["result"]["error_class"] == "trace_without_serving_steps"
+
+
 async def test_the_trace_is_found_by_the_orchestrators_own_discovery_not_by_a_stand_in(
     rig: Rig, tmp_path: Path
 ) -> None:

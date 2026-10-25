@@ -14,7 +14,7 @@ measures nothing: what it writes is chosen by ``fake_mode`` and friends in the Y
 list), ``no_manifest`` and ``hang`` (never finishes). ``fake_delay`` seconds pass before the work starts;
 ``fake_throughput`` and ``fake_completed`` set the report. ``fake_accuracy`` adds an accuracy round to the rounds file
 with that score (``none``: a round that holds no score). ``fake_trace: true`` adds the torch-profiler trace a profile
-test leaves (``profile/torch_trace/...``); ``fake_report: false`` leaves out the benchmark report, as a profiled round
+test leaves (``profile/torch_trace/...``), ``capture_only`` only a CUDA-graph capture sidecar; ``fake_report: false`` leaves out the benchmark report, as a profiled round
 that printed no readable measurement. ``fake_repro: true`` runs the repro case the sheet carries for real (the shipped
 attachment placement and ``run_case``) against no server, and lists the verdict and log it leaves in the manifest.
 ``fake_attached_env: [NAME, ...]`` places the sheet's attachments as the runner does and lists, in
@@ -69,6 +69,9 @@ from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
 
 REPORT_PATH = "benchmark_fake_20261014_000000/benchmark_report.json"
 TRACE_PATH = "profile/torch_trace/rank0.pt.trace.json.gz"
+#: What ``fake_trace: capture_only`` leaves instead: the CUDA-graph capture sidecar a profile whose profiler never started
+#: holds alone (named as on a NEXTN head, where the run ended before the capture window).
+CAPTURE_TRACE_PATH = "profile/torch_trace/graph_capture_profile/EAGLEDraftExtendCudaGraphRunner_bs_14_rank0.json.gz"
 EXPORT_PATH = "benchmark_fake_20261014_000000/aiperf_artifacts/profile_export.jsonl"
 #: What a runner of the removed greedy decode pass left in a bundle: a header line, then one line per prompt.
 LEGACY_DECODE_PATH = "decode/outputs.jsonl"
@@ -130,7 +133,9 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
     files = {"server.log": b"server up\nserver down\n"}
     if config.get("fake_report", True):
         files[REPORT_PATH] = json.dumps(report).encode()
-    if config.get("fake_trace"):
+    if config.get("fake_trace") == "capture_only":
+        files[CAPTURE_TRACE_PATH] = b"fake capture trace bytes"
+    elif config.get("fake_trace"):
         files[TRACE_PATH] = b"fake trace bytes"
     if "fake_export" in config:
         files[EXPORT_PATH] = "".join(f"{line}\n" for line in config["fake_export"]).encode()

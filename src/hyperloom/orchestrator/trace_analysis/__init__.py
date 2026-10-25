@@ -6,5 +6,6 @@
 from __future__ import annotations
 
 from ._trace_inputs import count_gpu_kernel_events, discover_trace_inputs
+from ._capture_shapes import is_capture_fragment
 
-__all__ = ["count_gpu_kernel_events", "discover_trace_inputs"]
+__all__ = ["count_gpu_kernel_events", "discover_trace_inputs", "is_capture_fragment"]

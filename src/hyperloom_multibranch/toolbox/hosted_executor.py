@@ -58,7 +58,7 @@ from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMI
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.phases import RESULT_READ, account
 from hyperloom.measure.points import AcceptedMeasurement
-from hyperloom.measure.profile_traces import PROFILE_DIR, has_traces, is_trace_file
+from hyperloom.measure.profile_traces import PROFILE_DIR, has_step_traces, has_traces, is_trace_file
 from hyperloom.measure.repro import REPRO_DIR, VERDICT_FILE, ReproError, read_verdict
 from hyperloom.measure.socket import MeasurementTimeout, RoundOutcome, RoundPlan, TestCall, TestMeta, TestOutcome
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
@@ -103,6 +103,13 @@ _UTF8 = "utf-8"
 #: A profiled round, and a repro case's server, run once with no warmup: neither is a statistic.
 _NO_WARMUP = RoundPlan(warmup_rounds=0)
 _REASON_DETAIL_CHARS = 300
+#: Why a profile whose traces are all CUDA-graph capture sidecars is no result. Measured on a NEXTN head: the server's log
+#: has ``POST /start_profile`` but never ``Profiling starts``, because the run's last forward step came before the step the
+#: capture window starts at (speculative decoding takes several tokens per step).
+PROFILE_WITHOUT_STEPS = (
+    "profile_without_steps: the profile holds only CUDA-graph capture traces; the profiler never recorded a serving "
+    "step (the server log says whether 'Profiling starts' followed /start_profile)"
+)
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
 
 
@@ -342,11 +349,15 @@ class HostedExecutor:
         return replace(result, request_classes=classes)
 
     def _profile_location(self, call: TestCall) -> str:
-        """Where the landed traces of a profile test are, relative to the session; a profile with none is no result."""
+        """Where the landed traces of a profile test are, relative to the session; a profile with none is no result, and
+        neither is one whose traces are all CUDA-graph capture sidecars: its profiler never recorded a serving step, so
+        no analysis of it can give op shares."""
         directory = Path(call.output_dir) / PROFILE_DIR
         location = _relative(directory, self._session)
         if not location or not has_traces(directory):
             raise MeasurementRefused("the verified profile result holds no trace file")
+        if not has_step_traces(directory):
+            raise MeasurementRefused(PROFILE_WITHOUT_STEPS)
         return location
 
     def _cacheless_baseline(self, request: TestRequest, accepted: AcceptedMeasurement, outcome: TestOutcome) -> str:
