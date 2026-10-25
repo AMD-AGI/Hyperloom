@@ -33,6 +33,7 @@ from hyperloom.measure.jit.tests.triton_cache import find_kernel, get_group
 from hyperloom.measure.manifest import JitCacheFacts, ResultManifest
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC
 from hyperloom.measure.runner import jit as runner_jit
+from hyperloom.measure.runner import own_jit
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
 from hyperloom.measure.runner.tests.test_run import (  # noqa: F401 - fixtures
     POINT,
@@ -132,6 +133,7 @@ class Rig:
         self._make_bases()
         monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
         monkeypatch.setattr(runner_jit, "locate_package", self._locate)
+        monkeypatch.setattr(own_jit, "locate_package", self._locate)
         monkeypatch.setattr(farm_module, "locate_package", self._locate)
         _Server(monkeypatch)
 

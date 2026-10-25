@@ -63,6 +63,7 @@ from hyperloom.measure.farm import (
 from hyperloom.measure.runner.jit import STAGING_DIR, ColdStart, Surroundings, build_session, cold_start
 from hyperloom.measure.runner.import_outcome import install_import_watch, refine_imports
 from hyperloom.measure.runner.jit_outcome import refine_outcome
+from hyperloom.measure.runner.own_jit import OWN_AITER_JIT_DIR, own_aiter_jit
 from hyperloom.measure.runner.inventory import OutputRejected, drop_agentx_runtime, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
 from hyperloom.measure.runner.rewrite import Placement, rewrite_config
@@ -464,6 +465,15 @@ def _jit_session(
     return build_session(spec, points, farm, facts[0] if facts else None, around)
 
 
+def _own_directories(ctx: _Context, call: TestCall, session: JitCacheSession | None, farm: Farm | None) -> TestCall:
+    """``call`` with the test's compiled-code cache, the tables its farm patches and, when the cache gives aiter no JIT
+    directory, one of the test's own, so nothing the server builds lands in the image."""
+    own = own_aiter_jit(call, farm, session, ctx.environ, ctx.work / OWN_AITER_JIT_DIR)
+    return dataclasses.replace(
+        call, jit=session, tables_patch=patched_configs(farm), env_overrides={**call.env_overrides, **own}
+    )
+
+
 def _cold_start_timing(cold: ColdStart) -> dict[str, float]:
     """The two parts of a start the result states beside its phases, when the server's logs gave them."""
     timing = {}
@@ -491,8 +501,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     _patch_replay_client(ctx, points, inferencex)
     surface = _surface_sha256(spec, points)
     session = _jit_session(ctx, spec, points, farm, facts)
-    tables = patched_configs(farm)
-    call = dataclasses.replace(_call(ctx, spec, points, inferencex, progress), jit=session, tables_patch=tables)
+    call = _own_directories(ctx, _call(ctx, spec, points, inferencex, progress), session, farm)
     ctx.cards.check(BEFORE_TEST)
     ctx.cards.enforce_guard()
     progress.phase("running")

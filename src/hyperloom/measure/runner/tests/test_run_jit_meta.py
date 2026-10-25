@@ -131,9 +131,9 @@ def test_a_server_that_called_the_module_from_the_images_copy_is_a_failed_measur
     """A copy of the image's module that is in the test's directory when the patch touched it is stale code."""
     from hyperloom.measure.jit import session as session_module
 
-    real = session_module._link_prebuilt
+    real = session_module.link_prebuilt
     monkeypatch.setattr(
-        session_module, "_link_prebuilt", lambda prebuilt, content, skip: real(prebuilt, content, frozenset())
+        session_module, "link_prebuilt", lambda prebuilt, content, skip: real(prebuilt, content, frozenset())
     )
 
     manifest, _, _ = image.run("stale", _arm(image, roots=_meta_patch(image)))

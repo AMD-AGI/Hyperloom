@@ -50,6 +50,7 @@ __all__ = [
     "JitCacheSession",
     "KindPlan",
     "KindReport",
+    "link_prebuilt",
 ]
 
 _TMP = ".tmp-"
@@ -195,7 +196,7 @@ class JitCacheSession:
             os.makedirs(content, mode=_DIR_MODE, exist_ok=True)
             self._seed_kind(seeded, content)
             if seeded.plan.prebuilt is not None:
-                _link_prebuilt(seeded.plan.prebuilt, content, seeded.plan.touched)
+                link_prebuilt(seeded.plan.prebuilt, content, seeded.plan.touched)
 
     def _seed_kind(self, seeded: _Seeded, content: Path) -> None:
         kind = seeded.plan.kind
@@ -331,7 +332,7 @@ def _touched_note(plan: KindPlan) -> str:
     )
 
 
-def _link_prebuilt(prebuilt: Path, content: Path, skip: frozenset[str]) -> None:
+def link_prebuilt(prebuilt: Path, content: Path, skip: frozenset[str]) -> None:
     """Link each compiled module the image ships into ``content`` unless the cache already gave one of that name, or the
     module is one in ``skip`` (stale: the patch changed what it is built from)."""
     try:
