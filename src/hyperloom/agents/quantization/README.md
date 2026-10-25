@@ -129,6 +129,14 @@ can read these directly:
   retry N+1).
 - `blocked.md` — present when the SDK aborted; may carry `outcome_id: <id>`
   to short-circuit classification.
+- `<marker>.attempt_N` — the Nth archived end in this workspace: the
+  `blocked.md`, `last_phase.txt`, `eval_report.json` and `eval_skipped.txt` an
+  earlier attempt or an earlier run left, renamed before the next attempt
+  starts so that attempt is judged on its own files. An attempt on a workspace
+  holding any such archive that stops without writing its own `blocked.md`,
+  `eval_report.json` or `eval_skipped.txt` is judged only on the error it
+  raised (`unclassified_failure` when it raised none), never on the earlier
+  model and reports left on disk.
 
 ## Environment knobs
 
