@@ -87,6 +87,7 @@ REJECTION_CODES = (
     "unsupported_kind",  # the toolbox's backend does not run this kind of test (a local backend: profile, repro), or has no cards to lease
     "profile_exists",  # a PROFILE of this commit and recipe is already queued, running or measured: ``existing_request_id``
     "empty_delta",  # an explore test whose delta changes nothing
+    "no_effective_change",  # an explore test whose candidate recipe equals its parent's: the delta restates the parent
     "upstream_label_unsupported",  # a delta moves the upstream_ref or upstream_repo of a component the parent has
     "online_tuning_unsupported",  # the candidate runs TunableOp with tuning on: its test never ends in a bounded time
     "context_below_eval",  # an accuracy test whose launch serves less context than its evaluation runs in (every request answers 400)

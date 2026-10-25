@@ -8,8 +8,16 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind
-from hyperloom.contracts.recipe import ComponentChange, ComponentPatches, PatchRef, Recipe, RecipeDelta
-from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
+from hyperloom.contracts.recipe import (
+    ComponentChange,
+    ComponentPatches,
+    ConfigDelta,
+    LaunchConfig,
+    PatchRef,
+    Recipe,
+    RecipeDelta,
+)
+from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup
 from hyperloom_multibranch.toolbox.tests.helpers import BAD_DELTA, IMAGE, OTHER_IMAGE, FakePlanner, FakeRepo, build, req
 
@@ -233,6 +241,43 @@ async def test_a_component_the_parent_lacks_still_needs_its_repository_and_commi
     rig = build(tmp_path, repo=_with_sglang())
     bare = RecipeDelta(components=(ComponentChange("triton", add_patches=(PATCH,)),))
     await _rejected(rig, req(change=bare), "delta_not_applicable")
+
+
+def _parent_with_settings() -> FakeRepo:
+    launch = LaunchConfig("--max-num-seqs 256", {"SGLANG_FUSE": "1"})
+    sglang = ComponentPatches("sglang", SGLANG_REPO, SGLANG_REF, patches=(PATCH,))
+    return FakeRepo(Recipe(base_image_digest=IMAGE, launch=launch, components=(sglang,)))
+
+
+RESTATED = RecipeDelta(
+    config=ConfigDelta(server_args="--max-num-seqs 256", envs={"SGLANG_FUSE": "1"}),
+    components=(ComponentChange("sglang", add_patches=(PATCH,), remove_patches=(PATCH.path,)),),
+)
+
+
+async def test_an_explore_whose_candidate_equals_its_parent_is_refused_naming_the_settings(tmp_path: Path) -> None:
+    rig = build(tmp_path, repo=_parent_with_settings())
+    with pytest.raises(RequestRejected) as refused:
+        await rig.toolbox.submit_test(req(change=RESTATED))
+    assert refused.value.code == "no_effective_change" and "no_effective_change" in REJECTION_CODES
+    for setting in ("--max-num-seqs 256", "SGLANG_FUSE=1", PATCH.path):
+        assert setting in refused.value.reason
+    await _rejected(rig, req(change=RESTATED), "no_effective_change")
+    assert rig.planner.calls == []
+
+
+async def test_an_explore_that_changes_one_setting_of_its_parent_is_accepted(tmp_path: Path) -> None:
+    rig = build(tmp_path, repo=_parent_with_settings())
+    change = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256", envs={"SGLANG_FUSE": "0"}))
+    assert await rig.toolbox.submit_test(req(change=change))
+
+
+@pytest.mark.parametrize("purpose", [Purpose.CONFIRM, Purpose.INTEGRATION, Purpose.FINAL])
+async def test_a_confirm_integration_or_final_may_re_run_the_parent_recipe(tmp_path: Path, purpose: Purpose) -> None:
+    rig = build(tmp_path, repo=_parent_with_settings())
+    first = await rig.toolbox.submit_test(req(change=RecipeDelta(config=ConfigDelta(envs={"SGLANG_FUSE": "0"}))))
+    retest = {"retest_of": first} if purpose is Purpose.CONFIRM else {}
+    assert await rig.toolbox.submit_test(req(purpose=purpose, change=RESTATED, **retest))
 
 
 # --- GSM8K on confirm, lead adoption and FINAL only, once the rule gate takes an explore without it (board topic 128) --

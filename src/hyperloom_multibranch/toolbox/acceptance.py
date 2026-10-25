@@ -5,7 +5,7 @@
 
 Steps: the request validates (3.7, done by its constructor, plus the toolbox's own: no preset ``request_id``, a
 ``retest_of`` that names an accepted request, a PROFILE that no live profile already covers); the parent recipe is read from the experiment repository; the delta
-applies and the environment compiles; the measurement surface matches the canonical one, and a test that carries the accuracy
+applies, changes an explore's parent recipe, and the environment compiles; the measurement surface matches the canonical one, and a test that carries the accuracy
 evaluation serves a context that evaluation can run in. Compile, points, surface and the evaluation's context come from
 hosted measurement (``hyperloom.measure``) through the one :class:`MeasurementPlanner` seam.
 """
@@ -18,7 +18,7 @@ from typing import Protocol
 
 from hyperloom.common.outside_facts import TUNABLEOP_ENABLED_ENV, TUNABLEOP_TABLE_ENV, TUNABLEOP_TUNING_ENV
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
-from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError, apply
+from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError, apply, diff
 from hyperloom.measure.compile import BaseImageMismatchError
 from hyperloom.measure.eval_context import EvalContextError
 from hyperloom.measure.points import AcceptedMeasurement
@@ -41,6 +41,7 @@ from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, decide
 #: ``hyperloom.common.outside_facts``.
 ONLINE_TUNING_CODE = "online_tuning_unsupported"
 CONTEXT_BELOW_EVAL_CODE = "context_below_eval"
+NO_EFFECTIVE_CHANGE_CODE = "no_effective_change"
 ONLINE_TUNING_REASON = (
     f"{TUNABLEOP_ENABLED_ENV}=1 without {TUNABLEOP_TUNING_ENV}=0 tunes every GEMM shape the first time the server runs it: at "
     "boot, in the warmup, and for each new prompt length of the evaluation. The test then takes a time no candidate "
@@ -79,6 +80,33 @@ def _check_explore_changes_something(request: TestRequest) -> None:
     """An explore measures a change; with an empty delta it would re-measure the parent and record the intent as tried."""
     if request.purpose is Purpose.EXPLORE and request.delta.fingerprint() == RecipeDelta().fingerprint():
         raise RequestRejected("an explore test must change something, and its delta is empty", "empty_delta")
+
+
+def _restated_settings(delta: RecipeDelta) -> str:
+    """The flags, environment variables, patches and kernels ``delta`` sets, in one line."""
+    config = delta.config
+    named = [
+        *([f"flags {config.server_args!r}"] if config.server_args else []),
+        *(f"env {name}={value}" for name, value in sorted(config.envs.items())),
+        *(f"patch {patch.path}" for change in delta.components for patch in change.add_patches),
+        *(f"kernel for {artifact.target}" for artifact in delta.add_kernels),
+    ]
+    return ", ".join(named) or "the settings it names"
+
+
+def _check_explore_changes_the_parent(parent: Recipe, candidate: Recipe, request: TestRequest) -> None:
+    """An explore whose delta applies to no effect would re-measure the parent: every setting it names is there already.
+
+    The comparison is ``hyperloom.contracts.recipe.diff``, the one ``notebook.changes.same_recipe`` builds on (that
+    module sits above the toolbox in the import layers). Confirm, integration, FINAL and baseline tests re-run a recipe
+    on purpose and pass.
+    """
+    if request.purpose is Purpose.EXPLORE and diff(parent, candidate).is_empty:
+        raise RequestRejected(
+            f"the candidate recipe equals parent commit {request.parent_commit}'s: it already has "
+            f"{_restated_settings(request.delta)}; change something the parent does not have",
+            NO_EFFECTIVE_CHANGE_CODE,
+        )
 
 
 def _check_online_tuning(candidate: Recipe) -> None:
@@ -215,6 +243,7 @@ class Acceptance:
         candidate = self._check_delta(recipe, request)
         self._check_fake_gain(recipe, candidate)
         if not replay:
+            _check_explore_changes_the_parent(recipe, candidate, request)
             _check_online_tuning(candidate)
         accepted = self._with_short_prompts(self._plan(recipe, request), recipe, candidate, request)
         return Prepared(self._with_long_context(accepted, request))
