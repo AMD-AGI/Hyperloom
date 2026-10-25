@@ -6,7 +6,8 @@
 A throughput measured on a card another process was using is not the candidate's number, and nothing in the result would
 say so. The runner therefore reads who holds its cards (:mod:`hyperloom.sandbox.card_occupancy`) before the test starts,
 at a fixed interval while it runs, and once more when it has ended. A holder that is not a process of this sandbox is
-remembered with the time it was first seen.
+remembered with the time it was first seen. Before the test, a holder is read again for up to ``EXCESS_SETTLE_SEC`` and
+counts only if it is still there: the previous test's server, as it exits, stays listed for a few seconds.
 
 What is done about it is the card guard's say. Enforcing, the result is refused as ``foreign_process_on_card``: an
 infrastructure failure, whatever the test itself did, because a failure it showed may be the intruder's doing as much as a
@@ -34,6 +35,7 @@ from hyperloom.measure.runner.service import RunnerFailure
 from hyperloom.sandbox import card_occupancy
 from hyperloom.sandbox.card_occupancy import (
     CARD_GUARD_ENV,
+    EXCESS_SETTLE_SEC,
     METHOD_CENSUS,
     METHOD_CENSUS_FDINFO,
     METHOD_PID_MATCH,
@@ -62,6 +64,7 @@ AFTER_TEST = "after the test"
 _NAMED = 2
 _COMMAND_CHARS = 80
 _STOP_WAIT_SEC = 10.0
+_SETTLE_STEP_SEC = 0.5
 _NEVER_LOOKED = "the cards were not looked at"
 
 
@@ -129,13 +132,10 @@ class CardWatch:
         """Look at who holds the cards now; ``when`` says which stage of the test this is, for the record."""
         if not self._cards:
             return
-        found: tuple[Intrusion, ...] = ()
-        try:
-            reading = card_occupancy.read_holders(self._cards)
-            if reading.unavailable is None:
-                found = reading.intrusions(self._own, before_test=when == BEFORE_TEST)
-        except Exception as exc:  # noqa: BLE001 - a look that failed must leave the result unknown, never clean
-            reading = CardReading(unavailable=f"a look at the cards failed ({type(exc).__name__})")
+        first_seen = self._clock()
+        reading, found = self._look(when)
+        if when == BEFORE_TEST:
+            reading, found = self._settled(reading, found)
         with self._lock:
             if reading.unavailable is not None:
                 self._unavailable = self._unavailable or reading.unavailable
@@ -143,7 +143,27 @@ class CardWatch:
             self._checks += 1
             self._method = _weaker(self._method, reading.method)
             for intrusion in found:
-                self._sightings.setdefault(intrusion.key, Sighting(intrusion, self._clock(), when))
+                self._sightings.setdefault(intrusion.key, Sighting(intrusion, first_seen, when))
+
+    def _look(self, when: str) -> tuple[CardReading, tuple[Intrusion, ...]]:
+        """One reading of the cards and what on them is not the test's."""
+        try:
+            reading = card_occupancy.read_holders(self._cards)
+        except Exception as exc:  # noqa: BLE001 - a look that failed must leave the result unknown, never clean
+            return CardReading(unavailable=f"a look at the cards failed ({type(exc).__name__})"), ()
+        if reading.unavailable is not None:
+            return reading, ()
+        return reading, reading.intrusions(self._own, before_test=when == BEFORE_TEST)
+
+    def _settled(self, reading: CardReading, found: tuple[Intrusion, ...]) -> tuple[CardReading, tuple[Intrusion, ...]]:
+        """Read the cards again while something is on them, until it is gone or ``EXCESS_SETTLE_SEC`` has passed; the
+        last reading decides. A process that is exiting (the previous test's server) stays listed for a few seconds and
+        is not an intruder; one that is still there after that is."""
+        deadline = time.monotonic() + EXCESS_SETTLE_SEC
+        while found and time.monotonic() < deadline:
+            time.sleep(_SETTLE_STEP_SEC)
+            reading, found = self._look(BEFORE_TEST)
+        return reading, found
 
     @contextlib.contextmanager
     def watching(self) -> Iterator[None]:

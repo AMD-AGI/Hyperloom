@@ -17,8 +17,9 @@ import pytest
 from hyperloom.contracts.measurement import CARD_CLEAN, CARD_FOREIGN, CARD_UNKNOWN
 from hyperloom.measure.runner.card_watch import AFTER_TEST, BEFORE_TEST, DURING_TEST, CardStatement, CardWatch
 from hyperloom.measure.runner.service import RunnerFailure
+from hyperloom.measure.runner.tests.conftest import SettleClock
 from hyperloom.sandbox import card_occupancy
-from hyperloom.sandbox.card_occupancy import METHOD_PID_MATCH, CardGuard, CardReading, OwnProcesses
+from hyperloom.sandbox.card_occupancy import EXCESS_SETTLE_SEC, METHOD_PID_MATCH, CardGuard, CardReading, OwnProcesses
 from hyperloom.sandbox.card_occupancy import read_holders as read_the_machine
 from hyperloom.sandbox.tests.kernel_tree import KernelTree
 
@@ -267,3 +268,44 @@ def test_a_process_seen_wins_over_a_look_that_could_not_say(tree: KernelTree, mo
     statement = watch.statement()
 
     assert statement is not None and statement.state == CARD_FOREIGN and "pid 950" in (statement.reason or "")
+
+
+def test_a_holder_that_leaves_within_the_settle_time_before_the_test_is_not_foreign(
+    tree: KernelTree, monkeypatch: pytest.MonkeyPatch, settle_clock: SettleClock
+) -> None:
+    """The previous test's server, as it exits, still holds the card when the next test looks before it starts."""
+    tree.process(900, command=("python3", "-m", "sglang.launch_server"))
+    tree.holds(900, 1)
+    looks: list[float] = []
+
+    def read(cards: Sequence[int]) -> CardReading:
+        looks.append(settle_clock.now)
+        if settle_clock.now >= 2.0:
+            tree.exit(900)
+        return read_the_machine(cards, kfd=tree.kfd, procfs=tree.procfs)
+
+    monkeypatch.setattr(card_occupancy, "read_holders", read)
+    watch = _watch(tree)
+
+    watch.check(BEFORE_TEST)
+    watch.enforce_guard()
+
+    assert watch.statement() == CardStatement(CARD_CLEAN, None, 1, METHOD_PID_MATCH)
+    assert looks == [0.0, 0.5, 1.0, 1.5, 2.0]
+
+
+def test_a_holder_that_outlasts_the_settle_time_before_the_test_is_foreign_and_a_look_during_it_does_not_wait(
+    tree: KernelTree, settle_clock: SettleClock
+) -> None:
+    tree.process(900)
+    tree.holds(900, 1)
+    watch = _watch(tree)
+
+    watch.check(BEFORE_TEST)
+    assert sum(settle_clock.sleeps) == pytest.approx(EXCESS_SETTLE_SEC)
+    settle_clock.sleeps.clear()
+    watch.check(DURING_TEST)
+
+    assert settle_clock.sleeps == []
+    with pytest.raises(RunnerFailure, match=r"pid 900 on card 1, first seen \S+ before the test"):
+        watch.enforce_guard()

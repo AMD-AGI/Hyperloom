@@ -13,6 +13,7 @@ import pytest
 
 from hyperloom.contracts.measurement import CARD_CLEAN, CARD_FOREIGN, CARD_UNKNOWN
 from hyperloom.measure.runner.card_watch import AFTER_TEST, BEFORE_TEST, DURING_TEST, CardWatch
+from hyperloom.measure.runner.tests.conftest import SettleClock
 from hyperloom.measure.runner.service import RunnerFailure
 from hyperloom.sandbox import card_occupancy
 from hyperloom.sandbox.card_occupancy import METHOD_CENSUS, METHOD_CENSUS_FDINFO, CardGuard, OwnProcesses
@@ -127,3 +128,27 @@ def test_a_look_the_probe_cannot_make_leaves_the_result_unknown_with_no_method(p
     statement = watch.statement()
     assert statement is not None and statement.state == CARD_UNKNOWN and statement.method is None
     assert statement.reason is not None and "no AMD GPU driver" in statement.reason
+
+
+def test_the_previous_tests_server_still_listed_before_the_test_is_not_foreign_once_it_has_gone(
+    pod: KernelTree, monkeypatch: pytest.MonkeyPatch, settle_clock: SettleClock
+) -> None:
+    """In a pod the census cannot name a holder, so before the test any holder counts; the previous test's exiting server
+    (its memory already freed, a queue still listed) is gone from the kernel's list within the settle time."""
+    pod.holds(1827025, CARD, vram=0, queues=1)
+    read_pod = card_occupancy.read_holders
+
+    def read(cards):
+        if settle_clock.now >= 1.0 and (pod.kfd / "proc" / "1827025").exists():
+            shutil.rmtree(pod.kfd / "proc" / "1827025")
+        return read_pod(cards)
+
+    monkeypatch.setattr(card_occupancy, "read_holders", read)
+    watch = _watch(pod, CardGuard.ENFORCE)
+
+    watch.check(BEFORE_TEST)
+    watch.enforce_guard()
+
+    statement = watch.statement()
+    assert statement is not None and (statement.state, statement.checks) == (CARD_CLEAN, 1)
+    assert settle_clock.sleeps == [0.5, 0.5]
