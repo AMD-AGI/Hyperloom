@@ -12,7 +12,8 @@ A snapshot lists ``relative path -> (sha256, size)``. It only adds: nothing here
 snapshot, a name becomes visible in one rename, and two publishers of the same name store the same bytes (a blob's name is
 its hash). A stored blob is never rewritten, except that bytes which verify against the hash of a stored blob that does
 not are put in its place: a damaged blob would otherwise stay damaged for every later test, and the name of the blob is
-the hash of what it must hold, so the replacement can only repair. Publishers that extend the same snapshot concurrently
+the hash of what it must hold, so the replacement can only repair. The one removal is of a blob a reader found damaged:
+its bytes can never be read, and a rebuild seldom makes the same bytes again to repair it (:func:`_drop_damaged`). Publishers that extend the same snapshot concurrently
 make two snapshots, both valid; a reader takes the one with the most files.
 
 Reading proves every byte: the snapshot's own name is the hash of its bytes, it names the kind and key that were asked
@@ -26,6 +27,7 @@ paths: the reader's directory is written into its private copy (:mod:`hyperloom.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import shutil
@@ -68,6 +70,7 @@ SNAPSHOTS_DIR = "snapshots"
 _MAX_MANIFEST_BYTES = 32 * 1024**2
 _GENERATIONS_TRIED = 3
 _INCOMING = ".incoming-"
+_DAMAGED = ".damaged-"
 _FILE_MODE = 0o600
 _BLOB_MODE = 0o444
 _FETCH_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -447,8 +450,39 @@ def _copy_blob(root_fd: int, stored: StoredFile, target: Path) -> None:
         raise SnapshotInvalid(f"{target.name}: the blob is not a plain file ({exc.kind})") from None
     try:
         _copy_checked(source, target, stored, target.name, mode=_FILE_MODE)
+    except SnapshotInvalid:
+        _drop_damaged(root_fd, stored.sha256, os.fstat(source))
+        raise
     finally:
         os.close(source)
+
+
+def _drop_damaged(root_fd: int, sha256: str, read: os.stat_result) -> None:
+    """Remove the stored blob ``sha256`` whose bytes (the file ``read``) did not verify, so no later reader copies them
+    again and a publisher of the hash stores it anew.
+
+    Safe beside other readers and publishers: the blob is renamed aside under a name of this call's own (a reader that
+    has it open keeps reading the same file; of two readers that found it damaged one moves it, the other finds it gone)
+    and removed only when what was moved is the file that was read. When a publisher put sound bytes in its place in
+    between, those are linked back (their name is still free unless another publisher stored them again). A store this
+    process cannot write keeps the blob; the next reader tries again.
+    """
+    try:
+        directory = fsafe.open_dir_beneath(root_fd, [BLOBS_DIR, sha256[:2]])
+    except (fsafe.MissingEntry, fsafe.UnsafeEntry):
+        return
+    aside = f"{sha256}{_DAMAGED}{uuid.uuid4().hex}"
+    try:
+        os.rename(sha256, aside, src_dir_fd=directory, dst_dir_fd=directory)
+        moved = os.stat(aside, dir_fd=directory, follow_symlinks=False)
+        if (moved.st_dev, moved.st_ino) != (read.st_dev, read.st_ino):
+            with contextlib.suppress(FileExistsError):
+                os.link(aside, sha256, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+        os.unlink(aside, dir_fd=directory)
+    except OSError:
+        return
+    finally:
+        os.close(directory)
 
 
 def _copy_checked(source: int, target: Path, stored: StoredFile, shown: str, *, mode: int) -> None:
