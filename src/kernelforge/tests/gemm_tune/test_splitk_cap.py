@@ -386,7 +386,7 @@ def test_bpreshuffle_contract_excludes_ck_and_cktile():
     shipped 12 of 14 rows with a dropped splitK. The contract is what makes that
     mistake loud instead of silent.
     """
-    from kernelforge.gemm_tune.tuners._aiter_dense_common import _SPLITK_FORWARDING_LIBTYPES
+    from kernelforge.gemm_tune.tuners._serve_safe import _SPLITK_FORWARDING_LIBTYPES
 
     assert _SPLITK_FORWARDING_LIBTYPES["a8w8_blockscale"] == {"ck", "cktile"}
     assert _SPLITK_FORWARDING_LIBTYPES["a8w8_blockscale_bpreshuffle"] == {"asm"}
@@ -408,7 +408,8 @@ def test_bpreshuffle_asm_cap_uses_the_per_shape_trial(tmp_path, monkeypatch, asm
     _write(art, [_asm_row(asm_splitk, 24.4, "asm_win")])
     _write(prof, [_asm_row(asm_splitk, 24.4, "asm_win"), _asm_row(2, 30.0, "asm_sk2")])
 
-    has = ac._apply_splitk_cap(str(art), prof, script_key="a8w8_blockscale_bpreshuffle", ctx=object())
+    limit = ac._serve_safe_limit("a8w8_blockscale_bpreshuffle", object())
+    has = ac._apply_splitk_cap(str(art), prof, limit, script_key="a8w8_blockscale_bpreshuffle")
 
     assert has is True
     assert _read(art)[1][_HDR.index("kernelName")] == "asm_win"
