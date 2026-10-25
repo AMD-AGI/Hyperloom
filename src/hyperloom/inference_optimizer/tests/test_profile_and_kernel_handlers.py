@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import sys
 import asyncio
 import json
 import os
@@ -54,6 +55,7 @@ from hyperloom.orchestrator.loop.sub_agent_runner import (
 from hyperloom.inference_optimizer.session.manifest import build_manifest
 from hyperloom.inference_optimizer.session.paths import asset_root, make_session_dir
 from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.kernel import _integrate_payload as integrate_payload
 
 _PROFILE_SGLANG_CONFIG = asset_root() / "assets" / "configs" / "profile_sglang.yaml"
 _PROFILE_VLLM_CONFIG = asset_root() / "assets" / "configs" / "profile_vllm.yaml"
@@ -2463,7 +2465,7 @@ async def test_trace_analyze_handler_rejects_non_string_analysis_route(session_d
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_dir, monkeypatch):
     """With no explicit route, every framework (incl. xDiT) DEFAULTS to the TraceLens ``agent`` route (the shipped default); bypass is an explicit route."""
-    monkeypatch.setattr(krh.sys, "executable", "/task/deps/venv/bin/python")
+    monkeypatch.setattr(sys, "executable", "/task/deps/venv/bin/python")
     monkeypatch.setenv("PATH", "/opt/venv/bin:/usr/bin")
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     monkeypatch.setattr(ta, "_resolve_tracelens_root", lambda: session_dir)
@@ -4062,10 +4064,10 @@ def test_an_integrate_naming_only_a_kernel_id_resolves_any_queued_keep(session_d
     seed_kernel_keep(state, "k001", micro=2.0, source_file="/p/moe_op.py", artifact="/tmp/k001.py")
     state.save(session_dir)
 
-    payload = krh._fill_integrate_defaults_from_state(
+    payload = integrate_payload._fill_integrate_defaults_from_state(
         {"kernel_id": "k001", "base_tput": 4500.0}, session_dir=session_dir
     )
-    resolved, missing = krh._resolve_integrate_payload(payload, session_dir=session_dir)
+    resolved, missing = integrate_payload._resolve_integrate_payload(payload, session_dir=session_dir)
 
     assert missing is None, missing
     assert resolved.get("patch_path") == "/tmp/k001.py"

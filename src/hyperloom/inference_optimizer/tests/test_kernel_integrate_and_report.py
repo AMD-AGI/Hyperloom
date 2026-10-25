@@ -40,6 +40,9 @@ from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.message_bus import Message
 
 from .conftest import seed_kernel_keep
+from hyperloom.orchestrator.kernel import _integrate_payload as integrate_payload
+from hyperloom.orchestrator.kernel import _integrate_rebaseline as integrate_rebaseline
+from hyperloom.orchestrator.kernel import _integrate_outcomes as integrate_outcomes
 
 
 # fixtures
@@ -959,11 +962,12 @@ async def test_integrate_retries_once_after_stale_aiter_baton(tmp_path, monkeypa
             {"scanned": 1, "deleted": 1, "errors": 0},
         ]
     )
-    monkeypatch.setattr(
-        krh,
-        "_sweep_integrate_aiter_locks",
-        lambda **_kwargs: next(sweeps),
-    )
+    for _module in (krh, integrate_rebaseline):
+        monkeypatch.setattr(
+            _module,
+            "_sweep_integrate_aiter_locks",
+            lambda **_kwargs: next(sweeps),
+        )
     calls = 0
 
     async def _executor(_ctx):
@@ -973,7 +977,7 @@ async def test_integrate_retries_once_after_stale_aiter_baton(tmp_path, monkeypa
             return {"status": "failed", "error_class": "timeout"}
         return {"status": "succeeded", "output_throughput": 100.0}
 
-    result = await krh._run_integrate_rebaseline_with_lock_retry(
+    result = await integrate_rebaseline._run_integrate_rebaseline_with_lock_retry(
         _executor,
         object(),
         workspace=tmp_path,
@@ -1002,11 +1006,12 @@ async def test_integrate_does_not_delete_or_retry_live_baton_owner(tmp_path, mon
             },
         ]
     )
-    monkeypatch.setattr(
-        krh,
-        "_sweep_integrate_aiter_locks",
-        lambda **_kwargs: next(sweeps),
-    )
+    for _module in (krh, integrate_rebaseline):
+        monkeypatch.setattr(
+            _module,
+            "_sweep_integrate_aiter_locks",
+            lambda **_kwargs: next(sweeps),
+        )
     calls = 0
 
     async def _executor(_ctx):
@@ -1014,7 +1019,7 @@ async def test_integrate_does_not_delete_or_retry_live_baton_owner(tmp_path, mon
         calls += 1
         return {"status": "failed", "error_class": "timeout"}
 
-    result = await krh._run_integrate_rebaseline_with_lock_retry(
+    result = await integrate_rebaseline._run_integrate_rebaseline_with_lock_retry(
         _executor,
         object(),
         workspace=tmp_path,
@@ -1035,7 +1040,8 @@ async def test_integrate_retries_once_after_aiter_jit_registry_mismatch(tmp_path
         dropped.append({"envs": envs, "backup_dir": backup_dir, "also_modules": also_modules})
         return {"action": "invalidate"}
 
-    monkeypatch.setattr(krh, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
+    for _module in (krh, integrate_rebaseline):
+        monkeypatch.setattr(_module, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
         _drop,
@@ -1057,7 +1063,7 @@ async def test_integrate_retries_once_after_aiter_jit_registry_mismatch(tmp_path
         extra={},
         task=types.SimpleNamespace(params={"extra_envs": extra_envs}),
     )
-    result = await krh._run_integrate_rebaseline_with_lock_retry(
+    result = await integrate_rebaseline._run_integrate_rebaseline_with_lock_retry(
         _executor,
         ctx,
         workspace=tmp_path,
@@ -1078,7 +1084,8 @@ async def test_integrate_registry_retry_does_not_restamp_unrelated_retry_failure
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(krh, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
+    for _module in (krh, integrate_rebaseline):
+        monkeypatch.setattr(_module, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
         lambda *args, **kwargs: {"action": "invalidate"},
@@ -1100,7 +1107,7 @@ async def test_integrate_registry_retry_does_not_restamp_unrelated_retry_failure
         )
         return {"status": "failed", "error_class": "oom", "error": "HIP out of memory"}
 
-    result = await krh._run_integrate_rebaseline_with_lock_retry(
+    result = await integrate_rebaseline._run_integrate_rebaseline_with_lock_retry(
         _executor,
         types.SimpleNamespace(
             extra={},
@@ -1129,10 +1136,10 @@ def test_resolve_integrate_payload_fills_source_when_patch_path_present(
     seed_kernel_keep(state, "k001", source_file=str(source_path), artifact=str(patch_path))
     state.save(session_dir)
 
-    payload = krh._fill_integrate_defaults_from_state(
+    payload = integrate_payload._fill_integrate_defaults_from_state(
         {"kernel_id": "k001", "patch_path": str(patch_path)}, session_dir=session_dir
     )
-    resolved, err = krh._resolve_integrate_payload(payload, session_dir=session_dir)
+    resolved, err = integrate_payload._resolve_integrate_payload(payload, session_dir=session_dir)
 
     assert err is None
     assert resolved["patch_path"] == str(patch_path)
@@ -2072,7 +2079,7 @@ async def test_integrate_handler_accepts_runtime_jit_deferred_apply(
     }
     with (
         patch.object(
-            krh,
+            integrate_outcomes,
             "_maybe_apply_kernel_patch",
             return_value=apply_result,
         ),
