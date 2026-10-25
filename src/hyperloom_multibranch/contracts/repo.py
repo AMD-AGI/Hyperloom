@@ -33,7 +33,8 @@ class PatchConflict:
 @dataclass(frozen=True)
 class RebasedPatch:
     """A candidate's patch ``path`` of ``component`` that did not apply where the merge puts it, carried as ``patch``:
-    its change merged three ways into the files the stack before it leaves, where no line is changed by both."""
+    its change merged three ways into the files the stack before it leaves, where no line is changed by both. When
+    only some of its files overlap the stack, ``patch`` carries the others and the overlapping ones are a conflict."""
 
     component: str
     path: str
@@ -89,7 +90,8 @@ class RepoMerge:
     ``delta`` turns ``onto``'s recipe into the merged one. Where both changed a server argument or an environment
     variable, the candidate's value is taken and the setting listed in ``config_conflicts`` as ``onto``'s value
     before the candidate's. ``patch_conflicts`` are the patches that do not apply to the installed package where the
-    merge puts them; ``delta`` leaves them out. ``rebased_patches`` are the candidate's patches ``delta`` carries
+    merge puts them, or the remainder of a patch split by file, holding only its files that overlap the stack;
+    ``delta`` leaves them out. ``rebased_patches`` are the candidate's patches ``delta`` carries
     rebased onto the stack before them in place of the originals. ``united_tables`` are the kernel slots both sides
     filled that ``delta`` fills with a union of their tables in place of the candidate's, or leaves at ``onto``'s table
     where the union is its rows and a shape of the candidate's lost to the head's row. ``resolved_patches`` are the
@@ -161,7 +163,8 @@ class ExperimentRepo(Protocol):
         that component, or ``None`` when it applies; keeps nothing."""
 
     async def patch_text(self, commit: str, path: str) -> str:
-        """The patch file ``path`` of ``commit``'s recipe; ``KeyError`` when the recipe names no such patch."""
+        """The patch file ``path`` of ``commit``'s recipe, or a patch the repository stored for a merge that no recipe
+        names (the conflicting remainder of a split patch); ``KeyError`` when it holds neither."""
 
     async def checkout(self, commit: str, destination: Path) -> None:
         """Write every patch and kernel file ``commit``'s recipe names under ``destination``, at the path it names."""
