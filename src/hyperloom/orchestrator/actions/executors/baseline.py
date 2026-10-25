@@ -1679,6 +1679,7 @@ class BenchmarkRunExecutor:
 
     benchmark_watchdog = False
     runs_accuracy_eval = True
+    default_timeout_sec: int | None = None
     session_dir = SessionDirField()
 
     def __init__(
@@ -1688,8 +1689,6 @@ class BenchmarkRunExecutor:
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
         shared_state: Any | None = None,
-        default_timeout_sec: int | None = None,
-        cwd: Path | str | None = None,
     ):
         """Initialize the executor with launch defaults."""
         # Backend-aware interpreter: bypass uses a plain python3, magpie uses the Magpie-importable venv.
@@ -1700,8 +1699,6 @@ class BenchmarkRunExecutor:
         self.default_config_path = Path(default_config_path) if default_config_path else None
         self.session_dir = session_dir
         self.shared_state = shared_state
-        self.default_timeout_sec = default_timeout_sec
-        self.cwd = Path(cwd if cwd is not None else tempfile.gettempdir())
 
     def _resolve_default_config(self) -> Path:
         """Resolve the benchmark YAML the round runs when the task names none."""

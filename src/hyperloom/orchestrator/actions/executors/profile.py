@@ -10,7 +10,6 @@ import gzip
 import json
 import logging
 import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -983,6 +982,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
     """Benchmark round with the torch profiler on; extracts and certifies the trace_dir."""
 
     runs_accuracy_eval = False
+    default_timeout_sec = PROFILE_DEFAULT_TIMEOUT_SEC
 
     def __init__(
         self,
@@ -990,16 +990,12 @@ class ProfileExecutor(BenchmarkRunExecutor):
         magpie_python: str | None = None,
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
-        default_timeout_sec: int = PROFILE_DEFAULT_TIMEOUT_SEC,
-        cwd: Path | str | None = None,
     ):
         """Initialize the profile executor with profile-specific defaults."""
         super().__init__(
             magpie_python=magpie_python,
             default_config_path=default_config_path,
             session_dir=session_dir,
-            default_timeout_sec=default_timeout_sec,
-            cwd=cwd if cwd is not None else tempfile.gettempdir(),
         )
         # Set by ``_after_materialize_config`` once the probe is armed; read after the run to merge per-rank reports.
         self._host_probe_dir: str = ""
