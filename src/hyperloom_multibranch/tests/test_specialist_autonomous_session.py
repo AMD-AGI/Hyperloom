@@ -39,6 +39,7 @@ from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
 from hyperloom_multibranch.specialist.autonomous_session import (
     AGENT_DIR,
     MANIFEST_FILE,
+    STALL_SECONDS,
     AutonomousSession,
     AutonomousSetup,
     collection_margin,
@@ -59,8 +60,8 @@ ROOT = Recipe(
 )
 
 #: An agent that, every ``gap`` seconds, writes each of ``keeps`` to its workspace's config.py and to the config it
-#: runs with, commits it when ``commits`` is set, as Arbor does, and records the keep; it ends with ``exit`` after
-#: ``tail`` more seconds. With ``table`` it also writes that kernel table, for the keep, to its workspace's tuned.csv.
+#: runs with, commits it when ``commits`` is set, as Arbor does, and records and prints the keep; it ends with ``exit``
+#: after ``tail`` more seconds of silence. With ``table`` it also writes that kernel table, for the keep, to its workspace's tuned.csv.
 #: Before each keep it appends that keep's entries of ``ledger`` to its ledger, run/ledger.jsonl, as Arbor does.
 AGENT = """
 import json, pathlib, subprocess, sys, time
@@ -81,6 +82,7 @@ for step, seqs in enumerate(config["keeps"], start=1):
         for entry in config["ledger"][step - 1] if step <= len(config["ledger"]) else []:
             ledger.write(json.dumps(entry) + "\\n")
     state.write_text(json.dumps({"keeps": [{"decision": "KEEP"}] * step, "note": f"seqs {seqs}"}))
+    print(f"kept {seqs}", flush=True)
 time.sleep(config["tail"])
 sys.exit(config["exit"])
 """
@@ -287,6 +289,8 @@ async def _rig(
     clock=time.time,
     start: Recipe | None = None,
     deadline: float = 0.0,
+    stall: float = STALL_SECONDS,
+    spend: type[AgentSpend] = AgentSpend,
 ) -> Rig:
     """A session of the agent on :data:`BRANCH`, opened at the root, or at ``start`` committed onto it the way PRELUDE
     replays a Recipe KB champion."""
@@ -310,8 +314,8 @@ async def _rig(
 
     spec = AgentSpec("/models/m", "vllm", 1, "fp8", "mi355x", {}, "output_throughput", "", {}, "", (), 60.0, 31100)
 
-    def spend(roots: tuple[Path, ...], ledger: Path) -> AgentSpend:
-        return AgentSpend(tmp_path / "claude", roots, ledger, BRANCH, "claude-sonnet-5-5", sandbox.usage)
+    def spend_of(roots: tuple[Path, ...], ledger: Path) -> AgentSpend:
+        return spend(tmp_path / "claude", roots, ledger, BRANCH, "claude-sonnet-5-5", sandbox.usage)
 
     setup = AutonomousSetup(
         onboarding,
@@ -320,10 +324,11 @@ async def _rig(
         toolbox,
         rig.repo,
         "vllm",
-        spend,
+        spend_of,
         poll_seconds=poll,
         settle_seconds=0.3,
         cutoff_seconds=0.5,
+        stall_seconds=stall,
         clock=clock,
     )
     place = BranchPlace(worktree, rig.notebook, tmp_path / BRANCH / "session")
@@ -413,6 +418,37 @@ async def test_an_agent_that_exits_non_zero_is_a_crash_with_its_last_output(tmp_
     with pytest.raises(SessionCrashed, match="exited 3"):
         await asyncio.wait_for(rig.session.run(), 10)
     await rig.session.stop()
+
+
+async def test_an_agent_that_goes_silent_is_a_lost_session_once_it_wrote_nothing_for_the_stall_bound(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(256, 512, 768), gap=0.5, tail=30.0), stall=1.0)
+    await rig.session.preflight()
+    started = time.monotonic()
+
+    with pytest.raises(SessionCrashed, match="no output") as crashed:
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+
+    assert crashed.value.lost
+    assert time.monotonic() - started > 2.0
+
+
+class _HungSpend(AgentSpend):
+    async def record(self) -> None:
+        await asyncio.Event().wait()
+
+
+async def test_a_run_stuck_in_one_of_its_steps_is_a_lost_session_while_the_agent_still_writes(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=tuple(range(1, 30)), gap=0.1), stall=0.5, spend=_HungSpend)
+    await rig.session.preflight()
+
+    with pytest.raises(SessionCrashed, match="polled") as crashed:
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+
+    assert crashed.value.lost
 
 
 async def test_a_keep_waiting_at_a_crash_is_imported_by_the_resumed_run_with_the_docker_shim(tmp_path: Path) -> None:

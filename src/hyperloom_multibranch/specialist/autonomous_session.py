@@ -22,7 +22,9 @@ what the integration head holds does, through the notes (:mod:`agent_knowledge`)
 and the agent is given until its last import can still be judged in EXPLORE as its time budget. An agent
 that exits 0 finishes the run once what it kept last settled; one that exits otherwise is a crash the runtime restarts
 it from. A session never ends idle: what the agent keeps, or does not, is its own business, bounded by the session's
-stops.
+stops. A watch beside the run's poll makes the run a lost session when the running agent writes no output, or the poll
+does not come round, for :data:`STALL_SECONDS`: the runtime then kills the agent and resumes it, and gives the branch
+up after a few such losses in a row, so a hung agent does not hold its cards and its branch's slot.
 """
 
 from __future__ import annotations
@@ -92,6 +94,9 @@ SPEND_SECONDS = 60.0
 #: workload, after whatever test runs then (see :func:`collection_margin`).
 CUTOFF_SECONDS = 40 * 60.0
 SPEND_FILE = "agent-spend.json"
+#: How long the running agent may write no output, and the run's poll take to come round, before the run is lost. A
+#: working agent writes at each step of its CLI, and a Claude CLI ends a tool call or a model request within ten minutes.
+STALL_SECONDS = 1800.0
 #: What a run knows of the agent's keeps (:class:`KeepWatch`), so the run after a crash goes on from it.
 WATCH_FILE = "agent-watch.json"
 AGENT_DIR = "agent"
@@ -128,6 +133,7 @@ class AutonomousSetup:
     cutoff_seconds: float = CUTOFF_SECONDS
     upstream: Callable[[str], Upstream | None] = installed_component_upstream
     settle_seconds: float = SETTLE_SECONDS
+    stall_seconds: float = STALL_SECONDS
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     clock: Callable[[], float] = time.time
 
@@ -192,6 +198,8 @@ class AutonomousSession:
         self._unread = ""
         self._spend_unread = False
         self._spent_at = -math.inf
+        self._polled_at = self._heard_at = 0.0
+        self._heard = ""
         self._stopped = asyncio.Event()
 
     async def preflight(self) -> None:
@@ -237,21 +245,60 @@ class AutonomousSession:
         watch = KeepWatch.load(self._place.workspace / WATCH_FILE)
         self._root_commit = watch.root
         spend = self._setup.spend((self._place.workspace.parent, self._held().root), self._place.workspace / SPEND_FILE)
+        self._polled_at = self._heard_at = self._setup.clock()
+        poll = asyncio.ensure_future(self._poll(manifest, process, sandbox, watch, spend))
+        stall = asyncio.ensure_future(self._stall(process))
+        stalled = False
         try:
-            while not self._stopped.is_set():
-                ended = process.returncode is not None
-                await self._observe(manifest, watch)
-                await self._notes.refresh()
-                if said := sandbox.watched():
-                    await self._note(said)
-                await self._collect_before_the_end(manifest, watch)
-                await self._record_spend(spend, final=False)
-                if ended:
-                    await self._ended(manifest, process, watch)
-                await self._submit(manifest, watch)
-                await self._setup.sleep(self._setup.poll_seconds)
+            done, _ = await asyncio.wait((poll, stall), return_when=asyncio.FIRST_COMPLETED)
+            stalled = poll not in done
+            (stall if stalled else poll).result()
         finally:
-            await self._record_spend(spend, final=True)
+            poll.cancel()
+            stall.cancel()
+            await asyncio.gather(poll, stall, return_exceptions=True)
+            # The poll may be stuck on the spend read itself; the next run reads what this one did not.
+            if not stalled:
+                await self._record_spend(spend, final=True)
+
+    async def _poll(
+        self, manifest: AgentManifest, process: AgentProcess, sandbox: AgentSandbox, watch: KeepWatch, spend: AgentSpend
+    ) -> None:
+        while not self._stopped.is_set():
+            ended = process.returncode is not None
+            await self._listen(process)
+            await self._observe(manifest, watch)
+            await self._notes.refresh()
+            if said := sandbox.watched():
+                await self._note(said)
+            await self._collect_before_the_end(manifest, watch)
+            await self._record_spend(spend, final=False)
+            if ended:
+                await self._ended(manifest, process, watch)
+            await self._submit(manifest, watch)
+            await self._pause()
+
+    async def _pause(self) -> None:
+        self._polled_at = self._setup.clock()
+        await self._setup.sleep(self._setup.poll_seconds)
+
+    async def _listen(self, process: AgentProcess) -> None:
+        output = await process.output()
+        if output != self._heard:
+            self._heard, self._heard_at = output, self._setup.clock()
+
+    async def _stall(self, process: AgentProcess) -> None:
+        """Raise a lost :class:`SessionCrashed` once the poll has not come round, or the running agent has written
+        nothing, for :attr:`AutonomousSetup.stall_seconds`."""
+
+        bound = self._setup.stall_seconds
+        while True:
+            await self._setup.sleep(self._setup.poll_seconds)
+            now = self._setup.clock()
+            if now - self._polled_at > bound:
+                raise SessionCrashed(f"the run has not polled the agent for {bound:g} s", lost=True)
+            if process.returncode is None and now - self._heard_at > bound:
+                raise SessionCrashed(f"the agent wrote no output for {bound:g} s: {tail(self._heard)}", lost=True)
 
     async def _collect_before_the_end(self, manifest: AgentManifest, watch: KeepWatch) -> None:
         """Take, once, the workspace of an agent that signals no keep as its keep, :func:`collection_margin` before the
@@ -354,7 +401,7 @@ class AutonomousSession:
         await self._learn(manifest.ledger, watch)
         while not self._stopped.is_set() and (watch.pending is not None or await self._busy()):
             await self._submit(manifest, watch)
-            await self._setup.sleep(self._setup.poll_seconds)
+            await self._pause()
         await self._note("the agent finished its run")
         raise SessionFinished("the agent finished its run")
 
@@ -674,6 +721,7 @@ __all__ = [
     "collection_margin",
     "MANIFEST_FILE",
     "SETTLE_SECONDS",
+    "STALL_SECONDS",
     "WATCH_FILE",
     "AutonomousSession",
     "AutonomousSetup",

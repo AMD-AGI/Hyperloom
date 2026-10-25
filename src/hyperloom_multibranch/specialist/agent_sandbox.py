@@ -226,7 +226,7 @@ class LocalProcess:
         return self.popen.poll()
 
     async def output(self) -> str:
-        return read_tail(self.log)
+        return await asyncio.to_thread(read_tail, self.log)
 
     async def kill(self) -> None:
         """SIGTERM every process of the sandbox, SIGKILL what is left after :attr:`grace_seconds`; return once none
