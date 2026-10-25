@@ -75,7 +75,7 @@ from hyperloom.orchestrator.measurement.runtime_findings import (
     load_runtime_findings,
 )
 from ...bringup import load_boot_observation, observation_summary, verdict_of, write_boot_observation
-from ...delivery import file_digest
+from ...delivery import file_digest, parse_deliverable
 from ...delivery.ledger import append_record, load_prepared_records, load_records, mark_prepared, restore_records
 from ..stop_attribution import stopped_by_the_run_class
 from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
@@ -1972,9 +1972,12 @@ class _Deliverable:
         recorded = (done_payload or {}).get("config_changes")
         if not config_changes and isinstance(recorded, dict):
             config_changes = {str(key): str(value) for key, value in recorded.items()}
+        # The switches and args a patch needs are the specialist's declared deliverable; a delegate that leaves them
+        # out would bench the patch with its code path switched off.
+        declared = parse_deliverable(done_payload or {}, default_tree_id="")
         raw_envs = params.get("extra_envs")
         extra_envs, unsafe = filter_untrusted_env_mapping(
-            {**config_changes, **(raw_envs if isinstance(raw_envs, dict) else {})},
+            {**config_changes, **declared.envs, **(raw_envs if isinstance(raw_envs, dict) else {})},
             allow_predicate=is_allowed_variant_env_key,
         )
         dropped = sorted(unsafe)
@@ -1998,7 +2001,7 @@ class _Deliverable:
         return cls(
             patch_paths=patch_paths,
             config_changes=config_changes,
-            extra_server_args=(raw_args if isinstance(raw_args, str) and raw_args.strip() else ""),
+            extra_server_args=(raw_args if isinstance(raw_args, str) and raw_args.strip() else declared.server_args),
             extra_envs=extra_envs,
             dropped_env_overrides=dropped,
             switch_manifest=switch_manifest,
