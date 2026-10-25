@@ -40,6 +40,9 @@ MIN_NEIGHBOUR_SHARE: float = 0.9
 #: Candidates named per window class.
 TOP_N: int = 8
 
+#: Decimal places a share or a millisecond figure is reported to.
+_REPORTED_PLACES: int = 3
+
 
 def _kernels_in_class(events: list[dict[str, Any]], windows: list[StepWindow]) -> list[dict[str, Any]]:
     """Kernel events that started inside one window class, in launch order."""
@@ -65,7 +68,7 @@ def _dominant(counter: Counter, total: int) -> dict[str, Any] | None:
         return None
     name, hits = counter.most_common(1)[0]
     share = hits / total
-    return {"name": name, "share": round(share, 3)} if share >= MIN_NEIGHBOUR_SHARE else None
+    return {"name": name, "share": round(share, _REPORTED_PLACES)} if share >= MIN_NEIGHBOUR_SHARE else None
 
 
 def foldable_in_class(events: list[dict[str, Any]], windows: list[StepWindow]) -> list[dict[str, Any]]:
@@ -101,7 +104,10 @@ def foldable_in_class(events: list[dict[str, Any]], windows: list[StepWindow]) -
                 "category": categorize_kernel_name(name),
                 "launches_per_step": round(per_step, 1),
                 "us_per_call": round(mean_us, 2),
-                "ms_per_step": round(totals[name] / steps / 1000.0, 3),
+                "ms_per_step": round(totals[name] / steps / 1000.0, _REPORTED_PLACES),
+                # What comparing across classes needs: a prefill step outweighs a decode step, the capture's
+                # decode steps outnumber its prefill ones.
+                "ms_in_capture": round(totals[name] / 1000.0, _REPORTED_PLACES),
                 "pct_of_class": round(totals[name] / class_us * 100.0, 2),
                 "after": _dominant(before[name], launches),
                 "before": _dominant(after[name], launches),

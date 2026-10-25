@@ -99,6 +99,18 @@ def test_classes_are_counted_apart(tmp_path):
     assert [r["kernel"] for r in out["EXTEND bs=1"]] == ["prefill_glue"]
 
 
+def test_a_row_carries_its_cost_over_the_whole_capture_beside_its_cost_per_step(tmp_path):
+    """Per step compares kernels inside one class; over the capture compares them across classes."""
+    events = []
+    for i in range(4):
+        events += [step("step[VERIFY bs=3]", i * 1000.0, 900.0), *_chain(i * 1000.0 + 1.0, 20, ("a", "glue", "b"))]
+
+    (row,) = fl.foldable_launches(write_trace(tmp_path / "t.json", events))["VERIFY bs=3"]
+
+    assert row["ms_per_step"] == 0.08
+    assert row["ms_in_capture"] == 0.32
+
+
 def test_a_capture_without_steps_or_a_missing_one_reports_nothing(tmp_path):
     assert fl.foldable_launches(write_trace(tmp_path / "t.json", [kernel("k", 1.0, 4.0)])) == {}
     assert fl.foldable_launches("") == {}

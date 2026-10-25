@@ -145,6 +145,31 @@ def test_one_census_cannot_bury_the_others(tmp_path):
     assert len([g for g in gaps if g["provenance"] == "foldable_launch"]) <= 3
 
 
+def test_the_costliest_fold_is_raised_whichever_step_class_the_trace_opens_with(tmp_path):
+    """A prefill step opening the capture with four modest folds cannot take every slot from decode."""
+    events = [step("step[EXTEND bs=1 toks=900]", 0.0, 2000.0)]
+    ts = 1.0
+    for _ in range(60):
+        for name, dur in (("gemm_e", 14.0), ("glue_a", 5.0), ("glue_b", 5.0), ("glue_c", 5.0), ("glue_d", 5.0)):
+            events.append(kernel(name, ts, dur))
+            ts += dur
+    start = 3000.0
+    for _ in range(10):
+        events.append(step("step[VERIFY bs=3]", start, 2000.0))
+        ts = start + 1.0
+        for _ in range(50):
+            events.append(kernel("split_k", ts, 14.0))
+            events.append(kernel("reduce", ts + 14.0, 5.0))
+            ts += 30.0
+        start += 2500.0
+
+    gaps = reg.run_evidence_gaps(session_dir=tmp_path, trace_path=_trace(tmp_path, events), workspace="")
+
+    folds = [g["symptom"] for g in gaps if g["provenance"] == "foldable_launch"]
+    assert len(folds) == 3
+    assert folds[0].startswith("In VERIFY bs=3, reduce runs 50 times per step")
+
+
 def test_the_same_evidence_upserts_rather_than_multiplying(tmp_path):
     _jit_leak(tmp_path, "_fused_fp8_bmm_rope", 40)
 
