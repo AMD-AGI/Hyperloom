@@ -577,7 +577,7 @@ def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
     seen: dict[str, str] = {}
 
     def _fake_materialize(src, out_dir, **kw):
-        seen["materialize_gpu"] = kw.get("gpu_type")
+        seen["materialize_gpu"] = kw["target"].gpu_type
         out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
         out.write_text(Path(src).read_text())
         return out

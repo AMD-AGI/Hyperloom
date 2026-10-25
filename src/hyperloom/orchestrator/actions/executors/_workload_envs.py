@@ -24,6 +24,7 @@ import logging
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple
 
@@ -1526,13 +1527,69 @@ def _drop_benchmark_credentials(envs: dict[str, Any]) -> None:
         envs.update(filtered_envs)
 
 
-def prepare_grid_benchmark_config(config_path: Path, output_dir: Path, **overrides: Any) -> Path:
+@dataclass(frozen=True)
+class LaunchLayer:
+    """One layer of server-arg and env changes composed over a config's launch."""
+
+    extra_server_args: str = ""
+    extra_envs: dict[str, Any] | None = None
+    remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None
+    unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None
+    args_mode: str = "append"
+
+
+@dataclass(frozen=True)
+class BenchmarkTarget:
+    """The model, GPU type and benchmark script a rendered config is pinned to."""
+
+    model_path: str | None = None
+    gpu_type: str | None = None
+    benchmark_script: str | None = None
+
+
+@dataclass(frozen=True)
+class MaterializeOptions:
+    """Per-run choices for a materialized config beyond its launch layer and target."""
+
+    out_name: str = "baseline_config.with_envs.yaml"
+    establish_quality_ref: bool = False
+    drop_moe_runner_backend: bool = False
+    flydsl_source_dirs: bool = False
+    agentx_mode: bool | None = None
+    grading: Mapping[str, Any] | None = None
+
+
+def prepare_grid_benchmark_config(
+    config_path: Path,
+    output_dir: Path,
+    *,
+    launch: LaunchLayer = LaunchLayer(),
+    target: BenchmarkTarget = BenchmarkTarget(),
+    options: MaterializeOptions = MaterializeOptions(),
+) -> Path:
     """Keep the verified native baseline intact until the grid composes its candidate."""
     from .magpie_agentx import native_config
 
     if native_config(config_path):
         return config_path
-    return materialize_config_with_envs(config_path, output_dir, **overrides)
+    return materialize_config_with_envs(
+        config_path,
+        output_dir,
+        extra_server_args=launch.extra_server_args,
+        extra_envs=launch.extra_envs,
+        remove_args=launch.remove_args,
+        unset_envs=launch.unset_envs,
+        args_mode=launch.args_mode,
+        model_path=target.model_path,
+        gpu_type=target.gpu_type,
+        benchmark_script=target.benchmark_script,
+        out_name=options.out_name,
+        establish_quality_ref=options.establish_quality_ref,
+        drop_moe_runner_backend=options.drop_moe_runner_backend,
+        flydsl_source_dirs=options.flydsl_source_dirs,
+        agentx_mode=options.agentx_mode,
+        grading=options.grading,
+    )
 
 
 def materialize_benchmark_config(config_path: Path, output_dir: Path, **overrides: Any) -> Path:

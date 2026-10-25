@@ -21,6 +21,8 @@ from typing import Any
 from hyperloom.common.perf_metric import constraint_fields
 from ..actions.executors._grid_runner import GridVariant, run_grid
 from ..actions.executors._workload_envs import (
+    BenchmarkTarget,
+    MaterializeOptions,
     default_baseline_config,
 )
 
@@ -91,13 +93,16 @@ async def run_specialist_rebench(
     resolved_port = _resolve_port(server.port)
 
     base_config = Path(benchmark.config_path) if benchmark.config_path else Path(default_baseline_config())
-    materialized = prepare_grid_benchmark_config(
-        base_config,
-        out_root,
+    target = BenchmarkTarget(
         model_path=benchmark.model_path or None,
         gpu_type=benchmark.gpu_type or None,
         benchmark_script=benchmark.benchmark_script or None,
-        out_name="specialist_rebench.with_envs.yaml",
+    )
+    materialized = prepare_grid_benchmark_config(
+        base_config,
+        out_root,
+        target=target,
+        options=MaterializeOptions(out_name="specialist_rebench.with_envs.yaml"),
     )
 
     variant = GridVariant(

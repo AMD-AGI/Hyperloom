@@ -106,7 +106,9 @@ from ._server_lifecycle import (
     teardown_lifecycle_server,
 )
 from ._workload_envs import (
+    BenchmarkTarget,
     FrameworkScriptMismatchError,
+    MaterializeOptions,
     default_baseline_config,
 )
 
@@ -733,9 +735,12 @@ def _materialized_round_config(params: dict[str, Any], output_root: Path, build:
         return prepare_grid_benchmark_config(
             config_path,
             output_root,
-            out_name="explore_base.with_envs.yaml",
-            grading=grading,
-            **{key: value or None for key, value in build.items()},
+            target=BenchmarkTarget(
+                model_path=build["model_path"] or None,
+                gpu_type=build["gpu_type"] or None,
+                benchmark_script=build["benchmark_script"] or None,
+            ),
+            options=MaterializeOptions(out_name="explore_base.with_envs.yaml", grading=grading),
         )
     except FrameworkScriptMismatchError as exc:
         raise _RoundRefused("framework_script_mismatch", str(exc)) from exc

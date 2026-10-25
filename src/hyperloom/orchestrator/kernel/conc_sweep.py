@@ -56,7 +56,9 @@ from ..actions.stop_attribution import (
     StoppedByTheRun,
 )
 from ..actions.executors._workload_envs import (
+    BenchmarkTarget,
     FrameworkScriptMismatchError,
+    MaterializeOptions,
     default_baseline_config,
 )
 from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
@@ -1263,11 +1265,15 @@ async def run_conc_sweep(
         base_yaml_path = prepare_grid_benchmark_config(
             base_yaml_path,
             workspace,
-            model_path=resolved_model or None,
-            gpu_type=resolved_gpu or None,
-            benchmark_script=benchmark_script,
-            out_name="conc_sweep_base.with_envs.yaml",
-            grading=getattr(state, "grading", None),
+            target=BenchmarkTarget(
+                model_path=resolved_model or None,
+                gpu_type=resolved_gpu or None,
+                benchmark_script=benchmark_script,
+            ),
+            options=MaterializeOptions(
+                out_name="conc_sweep_base.with_envs.yaml",
+                grading=getattr(state, "grading", None),
+            ),
         )
     except FrameworkScriptMismatchError as exc:
         return _declined(

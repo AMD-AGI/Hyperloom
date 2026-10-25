@@ -36,7 +36,7 @@ from ._grid_variant_filter import (
 )
 from ._integrate_results import _PatchBench
 from ._patch_artifacts import _ArtifactSpec
-from ._workload_envs import default_baseline_config
+from ._workload_envs import BenchmarkTarget, LaunchLayer, MaterializeOptions, default_baseline_config
 
 
 class BenchStageMixin:
@@ -188,17 +188,20 @@ class BenchStageMixin:
         base_extra_args = str(params.get("base_extra_args") or "").strip()
         args_mode = str(params.get("base_args_mode") or "append")
         base_remove = to_str_list(params.get("base_remove_args"))
+        target = BenchmarkTarget(
+            model_path=model_path or None, gpu_type=gpu_type or None, benchmark_script=benchmark_script
+        )
         config_path = prepare_grid_benchmark_config(
             base_config,
             bench_leg.output_root,
-            model_path=model_path or None,
-            gpu_type=gpu_type or None,
-            benchmark_script=benchmark_script,
-            extra_envs=framework_run_eval_envs(params),
-            remove_args=params.get("base_remove_args"),
-            unset_envs=params.get("base_unset_envs"),
-            args_mode=args_mode,
-            out_name="integrate_patch.with_envs.yaml",
+            launch=LaunchLayer(
+                extra_envs=framework_run_eval_envs(params),
+                remove_args=params.get("base_remove_args"),
+                unset_envs=params.get("base_unset_envs"),
+                args_mode=args_mode,
+            ),
+            target=target,
+            options=MaterializeOptions(out_name="integrate_patch.with_envs.yaml"),
         )
 
         envs = dict(extra_envs_applied)
