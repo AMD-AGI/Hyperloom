@@ -80,6 +80,7 @@ from ._profile_setup import (
     _profiler_bound_holds,
     _profiler_flag_value,
     apply_atom_profile_caps,
+    fit_capture_to_speculative,
 )
 from hyperloom.inference_optimizer.model_config_utils import (
     _fp8_is_per_channel_per_token,
@@ -1477,6 +1478,8 @@ def _apply_caller_removals(
 def _restate_profile_capture(
     envs: dict[str, Any], framework_env: str, window: _RequestWindow, replace_args: bool
 ) -> None:
+    if window.profiling and window.serves_requests:
+        fit_capture_to_speculative(envs, framework_env)
     if window.vllm_profiler_flags and framework_env == "EXTRA_VLLM_ARGS":
         # The profile path's iteration bounds have to be the LAST word on this env,
         # because three separate steps above can drop them: a candidate carrying

@@ -35,6 +35,16 @@ _DEFAULT_PROFILE_MAX_STEPS = 128
 # Default profile OSL ceiling when --profile-osl / PROFILE_OSL is unset: the
 # profile reuses min(served OSL, this) so its trace stays light.
 _PROFILE_DEFAULT_OSL = 1024
+# Speculative-decoding flags: SGLang ``--speculative-*``, vLLM ``--speculative-config`` (JSON or dotted keys),
+# and the count each one bounds tokens per step by, as (pattern, added to the count).
+_SPECULATIVE_FLAG = re.compile(r"--speculative[-_.]|--num[-_]speculative[-_]tokens")
+_SPECULATIVE_BOUNDS = (
+    (re.compile(r"--speculative[-_]num[-_]steps[=\s]+(\d+)"), 1),
+    (re.compile(r"--speculative[-_]num[-_]draft[-_]tokens[=\s]+(\d+)"), 0),
+    (re.compile(r"num[-_]speculative[-_]tokens[\"']?\s*[:=\s]\s*(\d+)"), 1),
+)
+_SPECULATIVE_FALLBACK_TOKENS_PER_STEP = 8
+_VLLM_DELAY_FLAG = re.compile(r"(--profiler-config\.delay_iterations[=\s]+)\d+")
 
 # ``HYPERLOOM_PROFILE_DEGRADED_REASON`` value meaning the TraceLens runtime patch
 # was attempted and did not apply. Distinct from "never attempted": patching can
@@ -181,14 +191,19 @@ def _profile_steps_cap(policy_env: Mapping[str, Any]) -> int:
     return cap if cap > 0 else _DEFAULT_PROFILE_MAX_STEPS
 
 
+def _explicit_capture_window(policy_env: Mapping[str, Any]) -> int:
+    """The operator's ``HYPERLOOM_PROFILE_MAX_ITERS``, or 0 when the window is computed."""
+    override = str(policy_env.get("HYPERLOOM_PROFILE_MAX_ITERS") or "").strip()
+    return int(override) if override.isdigit() else 0
+
+
 def _profile_capture_window(
     policy_env: Mapping[str, Any], *, cap: int, delay_iters: int = 0, steady_floor: int | None = None
 ) -> tuple[int, int]:
     """Resolve the synthetic workload's capture steps and delay."""
-    override = str(policy_env.get("HYPERLOOM_PROFILE_MAX_ITERS") or "").strip()
-    if not override.isdigit() or int(override) <= 0:
+    max_iters = _explicit_capture_window(policy_env)
+    if max_iters <= 0:
         return delay_iters, cap
-    max_iters = int(override)
     try:
         delay_iters = max(0, int(policy_env.get("HYPERLOOM_PROFILE_DELAY_ITERS") or 8))
     except ValueError:
@@ -270,9 +285,66 @@ def _capture_plan(envs: dict[str, Any]) -> CapturePlan:
         delay_iters=max(0, int(osl_val * (ratio + 1) * 3 - cap / 2)),
         steady_floor=steady_floor,
     )
-    required_iters = delay_iters + max_iters
-    iters_to_prompts = max(1, (required_iters * safe_conc + safe_osl - 1) // safe_osl)
-    return CapturePlan(delay_iters, max_iters, osl_val, max(safe_conc, iters_to_prompts * 2))
+    return CapturePlan(
+        delay_iters, max_iters, osl_val, _prompts_for_steps(delay_iters + max_iters, safe_conc, safe_osl)
+    )
+
+
+def _prompts_for_steps(steps: int, conc: int, osl: int) -> int:
+    """Prompts whose one-token-per-step decode outlasts ``steps``, with the same margin again behind the window."""
+    steps_to_prompts = max(1, (steps * conc + osl - 1) // osl)
+    return max(conc, steps_to_prompts * 2)
+
+
+def speculative_tokens_per_step(server_args: str) -> int:
+    """The most tokens one decode forward step can emit under ``server_args``: 1 without speculative decoding.
+
+    SGLang accepts at most ``--speculative-num-steps`` + 1 tokens per step and verifies at most
+    ``--speculative-num-draft-tokens``; vLLM accepts at most ``num_speculative_tokens`` + 1. The largest
+    bound present wins, and a launch that enables speculation without stating a count gets a deliberately
+    high fallback, because overestimating only moves the window earlier while underestimating loses it.
+    """
+    if not _SPECULATIVE_FLAG.search(server_args):
+        return 1
+    bounds = [int(value) + extra for pattern, extra in _SPECULATIVE_BOUNDS for value in pattern.findall(server_args)]
+    return max(1, max(bounds, default=_SPECULATIVE_FALLBACK_TOKENS_PER_STEP))
+
+
+def fit_capture_to_speculative(envs: dict[str, Any], framework_env: str) -> None:
+    """Move a computed capture window to where a speculative-decoding server still reaches it.
+
+    The window is counted in engine forward steps and was sized as if each step emits one token. With
+    speculative decoding a step emits up to :func:`speculative_tokens_per_step` tokens, so the run ends in a
+    fraction of those steps and a start step sized for one token per step is never reached: SGLang answers
+    ``/start_profile`` and writes no trace. The delay is divided by that upper bound, and the prompt count is
+    raised so the run still outlasts the window even when every draft token is accepted. Runs after every
+    server-args merge, because the speculative flags usually arrive with the reference recipe or the candidate.
+    An operator-set window (``HYPERLOOM_PROFILE_MAX_ITERS``) is left as written.
+    """
+    server_args = str(envs.get(framework_env, ""))
+    tokens = speculative_tokens_per_step(server_args)
+    if tokens == 1 or _explicit_capture_window(os.environ) > 0:
+        return
+    body = _profile_extra_body(envs)
+    vllm_delay = _profiler_flag_value(server_args, "delay_iterations")
+    if isinstance(body.get("start_step"), int):
+        delay, steps = body["start_step"], int(body.get("num_steps") or 0)
+        body["start_step"] = delay // tokens
+        envs["PROFILE_EXTRA_BODY"] = json.dumps(body)
+    elif vllm_delay is not None and vllm_delay.isdigit():
+        delay, steps = int(vllm_delay), int(_profiler_flag_value(server_args, "max_iterations") or 0)
+        envs[framework_env] = _VLLM_DELAY_FLAG.sub(rf"\g<1>{delay // tokens}", server_args)
+    else:
+        return
+    conc, osl = max(int(envs.get("CONC") or DEFAULT_CONC), 1), max(int(envs.get("OSL") or DEFAULT_OSL), 1)
+    needed = _prompts_for_steps((delay // tokens + steps) * tokens, conc, osl)
+    envs["NUM_PROMPTS"] = max(int(envs.get("NUM_PROMPTS") or 0), needed)
+    log.info(
+        "speculative decoding emits up to %d tokens per step: profile start step %d -> %d",
+        tokens,
+        delay,
+        delay // tokens,
+    )
 
 
 def _fit_profile_osl(osl: int, *, cap: int, ratio: float, safe_conc: int, explicit: bool) -> int:
