@@ -158,7 +158,9 @@ The Coordinator validates the hint vocab and the next phase compute call
 routes the transition. Emitting this hint is the **correct, expected** move
 when FRAMEWORK_AGENT has no remaining actionable lever — it is strictly
 better than idling until the budget cap is reached, because it returns the
-unspent budget to later phases / macro-cycles. No other phase has an advance
+unspent budget to later phases / macro-cycles. Rounds still queued are levers
+not yet measured, and the advance cancels them unmeasured: a phase whose queue
+holds work is not exhausted. No other phase has an advance
 hint: each exits on the Coordinator gate its phase goal names, and a
 `skip_to_kernel` sent from one is refused. `skip_to_close` is **not** an advance either: it advances to no
 later phase, it ends the run. Emit it only once the objective is out of

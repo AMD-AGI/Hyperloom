@@ -1419,7 +1419,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # been spent: pricing against the raw clock calls a phase affordable
         # while its queue is oversubscribed. Zero at dispatch, where the queue
         # is what is being drained rather than added to.
-        return time_budget_denial(action, expected_min + already_committed_minutes, self.shared_state)
+        return time_budget_denial(action, expected_min, self.shared_state, queued_minutes=already_committed_minutes)
 
     def expected_cost_minutes_for(self, action_name: str, params: dict[str, Any] | None = None) -> float:
         """What one round of ``action_name`` is expected to cost, in minutes.

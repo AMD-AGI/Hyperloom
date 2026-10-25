@@ -428,6 +428,28 @@ class TestThePhaseBudgetGate:
         assert denied.rule == "phase_time_budget"
         assert "only 5 min" in str(denied)
 
+    def test_a_phase_booked_by_its_queue_says_so_rather_than_reading_as_spent(self, coord: Coordinator, monkeypatch):
+        """Read as a phase too short to fund an explore, a booked one was escalated out of, cancelling its queue."""
+        _set_budget(coord, minutes=24 * 60)
+        _set_phase_budget(coord, monkeypatch, phase="FRAMEWORK_AGENT", minutes_left=410)
+        queued = 410.0 - coord.dispatcher.expected_cost_minutes_for("explore") / 2
+
+        denied = coord.dispatcher.time_budget_denial_for_action("explore", already_committed_minutes=queued)
+
+        assert isinstance(denied, PolicyDenied)
+        assert denied.rule == "phase_time_budget"
+        assert f"after the ~{queued:.0f} min already queued" in str(denied) and "only 410 min" in str(denied)
+        assert "booked, not spent" in denied.hint and "cancels the queue unmeasured" in denied.hint
+
+    def test_a_queue_the_phase_cannot_fund_is_not_called_booked(self, coord: Coordinator, monkeypatch):
+        _set_budget(coord, minutes=24 * 60)
+        _set_phase_budget(coord, monkeypatch, phase="FRAMEWORK_AGENT", minutes_left=410)
+
+        denied = coord.dispatcher.time_budget_denial_for_action("explore", already_committed_minutes=500.0)
+
+        assert isinstance(denied, PolicyDenied)
+        assert "booked" not in denied.hint and "cannot fit this action" in denied.hint
+
     def test_a_phase_without_a_search_budget_answers_only_to_the_session(self, coord: Coordinator, monkeypatch):
         _set_budget(coord, minutes=600)
         _set_phase_budget(coord, monkeypatch, phase="PRELUDE", minutes_left=1)
