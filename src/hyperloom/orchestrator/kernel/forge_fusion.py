@@ -9,6 +9,7 @@ import ast
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -385,7 +386,10 @@ def _campaign_patches_on_disk(root: Path) -> list[dict[str, Any]]:
             published = _published_best_patch(Path(best_manifest)) if best_manifest else None
             if published is None:
                 continue
-            patch_file = published
+            # Exported as ``on_keep`` would have: the published copy sits in the workspace's own
+            # forge_experiments, which the next Forge campaign in that repository archives away before
+            # the queued integrate reads it.
+            shutil.copyfile(published, patch_file)
         target_file = _patch_target_file(patch_file)
         if not target_file:
             continue

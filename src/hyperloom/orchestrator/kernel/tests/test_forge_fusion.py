@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -1352,10 +1353,34 @@ def test_salvage_reads_the_published_best_when_the_campaign_never_returned(tmp_p
     assert result["kernel_repo"] == str(repo_root)
     outcome = parse_outcome(result)
     assert outcome.schema_error == ""
-    assert [p.patch_path for p in outcome.patches] == [
-        str(repo_root / "forge_experiments" / "best" / "iter_001" / "forge.patch")
-    ]
+    exported = output_dir / "fusion_llm_qkvgate_split_qknorm_rope.patch"
+    assert [p.patch_path for p in outcome.patches] == [str(exported)]
+    assert exported.read_text(encoding="utf-8") == (
+        repo_root / "forge_experiments" / "best" / "iter_001" / "forge.patch"
+    ).read_text(encoding="utf-8")
     assert [p.target_file for p in outcome.patches] == ["python/sglang/srt/models/qwen3_next.py"]
+
+
+def test_a_salvaged_patch_outlives_the_campaign_directory_it_was_published_in(tmp_path):
+    """The repository's forge_experiments is the next Forge campaign's to archive; the queued patch must not live there.
+
+    A GLM-5.3 fusion of the MoE gate cast and GEMM, 2.13x, was salvaged after its wrapper timed out and queued for
+    the e2e integrate with the published copy's path -- in the repository the rewrite controller borrowed next.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    repo_root = tmp_path / "sgl-workspace" / "sglang"
+    manifest = _published_best_manifest(repo_root, speedup=2.125, patch_body="diff --git a/glm4_moe.py b/glm4_moe.py\n")
+    loop = _campaign_loop_result(total_speedup=2.125)
+    loop["best_manifest"] = str(manifest)
+    (output_dir / "forge_loop_llm_moe_gate_cast_linear.json").write_text(json.dumps(loop), encoding="utf-8")
+    _campaign_driver(output_dir, "llm_moe_gate_cast_linear")
+
+    result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
+    shutil.rmtree(repo_root / "forge_experiments")
+
+    (queued,) = parse_outcome(result).patches
+    assert Path(queued.patch_path).read_text(encoding="utf-8") == "diff --git a/glm4_moe.py b/glm4_moe.py\n"
 
 
 def test_salvage_prefers_the_exported_patch_over_the_published_best(tmp_path):
