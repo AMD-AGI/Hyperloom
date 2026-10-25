@@ -354,17 +354,17 @@ async def _multi_node_restart_failure(
     if not is_multi_node():
         return None
     from ..actions.executors._multi_node_server_lifecycle import (
+        RoundServer,
         ServerRestartFailed,
         restart_server_for_round,
     )
 
     try:
         await restart_server_for_round(
-            extra_server_args=rebaseline.server_args,
-            framework=os.environ.get("FRAMEWORK") or None,
-            model_path=(str(payload.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None),
-            tp=int(os.environ.get("TP") or 0) or None,
-            ep=int(os.environ.get("EP") or 0) or None,
+            RoundServer.from_env(
+                rebaseline.server_args,
+                (str(payload.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None),
+            ),
             force_full_restart=True,
         )
     except ServerRestartFailed as exc:

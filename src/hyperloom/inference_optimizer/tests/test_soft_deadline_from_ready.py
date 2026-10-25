@@ -12,6 +12,7 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
+    RoundWatch,
     clear_server_ready_stamp,
     post_ready_runtime_sec,
     run_with_session_kill,
@@ -35,9 +36,7 @@ def test_from_ready_excludes_pre_ready_phase(tmp_path):
     start = time.monotonic()
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=30,
-        silence_timeout_sec=2.0,
-        server_log_path=str(log_path),
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=2.0),
     )
     elapsed = time.monotonic() - start
     # Post-ready (~1s) < 2.0s deadline -> not killed despite ~4s wall-clock.
@@ -59,9 +58,7 @@ def test_from_ready_fires_after_ready(tmp_path):
     start = time.monotonic()
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=60,
-        silence_timeout_sec=1.0,
-        server_log_path=str(log_path),
+        watch=RoundWatch(timeout=60, server_log_path=str(log_path), silence_timeout_sec=1.0),
     )
     elapsed = time.monotonic() - start
     assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
@@ -72,8 +69,7 @@ def test_from_ready_fires_after_ready(tmp_path):
 def test_scriptable_silence_is_disarmed():
     cp = run_with_session_kill(
         [sys.executable, "-c", "import time; time.sleep(.3)"],
-        timeout=5,
-        silence_timeout_sec=0.1,
+        watch=RoundWatch(timeout=5, silence_timeout_sec=0.1),
     )
     assert cp.returncode == 0
 
@@ -96,8 +92,7 @@ class TestARoundIsPricedByItsTwoParts:
         started_unix = time.time()
         cp = run_with_session_kill(
             [sys.executable, "-c", script, str(log_path)],
-            timeout=30,
-            server_log_path=str(log_path),
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
         )
         runtime_sec = time.time() - started_unix
         assert cp.returncode == 0
@@ -132,8 +127,7 @@ class TestARoundIsPricedByItsTwoParts:
         started_unix = time.time()
         cp = run_with_session_kill(
             [sys.executable, "-c", script, str(log_path)],
-            timeout=30,
-            server_log_path=str(log_path),
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
         )
         runtime_sec = time.time() - started_unix
         assert cp.returncode == 0
@@ -163,9 +157,7 @@ class TestARoundIsPricedByItsTwoParts:
         )
         cp = run_with_session_kill(
             [sys.executable, "-c", script, str(log_path)],
-            timeout=30,
-            server_log_path=str(log_path),
-            session_deadline_sec=time.monotonic() + 30.0,
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path), session_deadline_sec=time.monotonic() + 30.0),
         )
         assert cp.returncode == 0
         assert server_ready_unix(str(log_path)) is not None, (
@@ -187,8 +179,7 @@ class TestARoundIsPricedByItsTwoParts:
         started_unix = time.time()
         cp = run_with_session_kill(
             [sys.executable, "-c", script, str(log_path)],
-            timeout=30,
-            server_log_path=str(log_path),
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
         )
         runtime_sec = time.time() - started_unix
         assert cp.returncode == 0
@@ -220,8 +211,7 @@ class TestARoundIsPricedByItsTwoParts:
         started_unix = time.time()
         run_with_session_kill(
             [sys.executable, "-c", script, str(log_path)],
-            timeout=30,
-            server_log_path=str(log_path),
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
         )
         assert server_ready_unix(str(log_path)) is None
         assert (

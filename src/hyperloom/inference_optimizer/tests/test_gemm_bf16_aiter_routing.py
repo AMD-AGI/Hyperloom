@@ -310,7 +310,7 @@ class TestResolveVllmAiterRouting:
         flags = vllm_aiter_routing._resolve_vllm_aiter_routing(
             model_path=_model(tmp_path), server_log=_log(tmp_path, AITER_BF16_MISS), tp=1
         )
-        assert flags == {"aiter_bf16_dense": True, "aiter_fused_moe": False}
+        assert flags == vllm_aiter_routing.VllmAiterRouting(bf16_dense=True, fused_moe=False)
 
     def test_moe_model_on_aiter_fused_moe(self, tmp_path):
         flags = vllm_aiter_routing._resolve_vllm_aiter_routing(
@@ -318,9 +318,9 @@ class TestResolveVllmAiterRouting:
             server_log=_log(tmp_path, AITER_FUSED_MOE),
             tp=1,
         )
-        assert flags["aiter_fused_moe"] is True
+        assert flags.fused_moe is True
         # A MoE checkpoint's dense side rides along with its MoE routing.
-        assert flags["aiter_bf16_dense"] is False
+        assert flags.bf16_dense is False
 
     def test_moe_blocked_when_the_tuner_rejects_the_dtype_pair(self, tmp_path):
         flags = vllm_aiter_routing._resolve_vllm_aiter_routing(
@@ -328,7 +328,7 @@ class TestResolveVllmAiterRouting:
             server_log=_log(tmp_path, AITER_FUSED_MOE_BF16_FP4),
             tp=1,
         )
-        assert flags["aiter_fused_moe"] is False
+        assert flags.fused_moe is False
 
     def test_moe_blocked_when_ck_cannot_serve_the_shard(self, tmp_path):
         """moe_intermediate_size=1536 shards to 192 at tp=8, which CK rejects."""
@@ -337,13 +337,13 @@ class TestResolveVllmAiterRouting:
             server_log=_log(tmp_path, AITER_FUSED_MOE),
             tp=8,
         )
-        assert flags["aiter_fused_moe"] is False
+        assert flags.fused_moe is False
 
     def test_no_evidence_routes_nothing(self, tmp_path):
         flags = vllm_aiter_routing._resolve_vllm_aiter_routing(
             model_path=_model(tmp_path), server_log=_log(tmp_path, "INFO up\n"), tp=1
         )
-        assert flags == {"aiter_bf16_dense": False, "aiter_fused_moe": False}
+        assert flags == vllm_aiter_routing.VllmAiterRouting(bf16_dense=False, fused_moe=False)
 
 
 class TestForgeFrameworkRouting:
@@ -354,7 +354,7 @@ class TestForgeFrameworkRouting:
                 precision="bf16",
                 quant_type="none",
                 tunableop_input="",
-                aiter_bf16_dense=True,
+                aiter_routing=vllm_aiter_routing.VllmAiterRouting(bf16_dense=True),
             )
             == "vllm-aiter"
         )
@@ -366,7 +366,7 @@ class TestForgeFrameworkRouting:
                 precision="bf16",
                 quant_type="none",
                 tunableop_input="",
-                aiter_bf16_dense=False,
+                aiter_routing=vllm_aiter_routing.VllmAiterRouting(bf16_dense=False),
             )
             == "vllm"
         )
@@ -389,7 +389,7 @@ class TestForgeFrameworkRouting:
                 precision="bf16",
                 quant_type="none",
                 tunableop_input="/tmp/untuned.csv",
-                aiter_bf16_dense=True,
+                aiter_routing=vllm_aiter_routing.VllmAiterRouting(bf16_dense=True),
             )
             == "vllm"
         )
@@ -401,7 +401,7 @@ class TestForgeFrameworkRouting:
                 precision="bf16",
                 quant_type="none",
                 tunableop_input="",
-                aiter_bf16_dense=True,
+                aiter_routing=vllm_aiter_routing.VllmAiterRouting(bf16_dense=True),
             )
             == "sglang"
         )
@@ -413,7 +413,7 @@ class TestForgeFrameworkRouting:
                 precision="fp8",
                 quant_type="per_token",
                 tunableop_input="",
-                aiter_bf16_dense=False,
+                aiter_routing=vllm_aiter_routing.VllmAiterRouting(bf16_dense=False),
             )
             == "vllm"
         )
@@ -426,7 +426,7 @@ class TestForgeFrameworkRouting:
                     precision=precision,
                     quant_type="auto",
                     tunableop_input="",
-                    aiter_fused_moe=True,
+                    aiter_routing=vllm_aiter_routing.VllmAiterRouting(fused_moe=True),
                 )
                 == "vllm-aiter"
             ), precision
@@ -438,7 +438,7 @@ class TestForgeFrameworkRouting:
                 precision="mxfp4",
                 quant_type="auto",
                 tunableop_input="",
-                aiter_fused_moe=False,
+                aiter_routing=vllm_aiter_routing.VllmAiterRouting(fused_moe=False),
             )
             == "vllm"
         )
@@ -450,14 +450,12 @@ class TestTunableOpCaptureIsSkippedWhenRouted:
         assert not shape_capture._vllm_dense_shape_capture_required(
             framework="vllm-aiter",
             model_path=_model(tmp_path),
-            shapes_json="",
-            tunableop_input="",
+            supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
             dry_run=False,
         )
         assert shape_capture._vllm_dense_shape_capture_required(
             framework="vllm",
             model_path=_model(tmp_path),
-            shapes_json="",
-            tunableop_input="",
+            supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
             dry_run=False,
         )

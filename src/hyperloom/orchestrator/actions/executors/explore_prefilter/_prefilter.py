@@ -45,7 +45,8 @@ from ._projection import ProjectionRequest, projection_enabled, route_variants
 from ._remeasure import _is_noop_filter_exempt
 from ._screen import screen_enabled, screen_variants
 from .._grid_base import GridVariant
-from .._grid_runner import _build_variant_yaml
+from .._grid_runner import GridRecipe, _build_variant_yaml
+from .._workload_envs import BenchmarkTarget, LaunchLayer
 
 log = logging.getLogger(__name__)
 
@@ -107,15 +108,15 @@ def _without_pythonpath(envs: dict[str, Any]) -> dict[str, str]:
 class RoundContext:
     """What every launch in the round shares: how to materialize one and what identifies it.
 
-    ``build`` holds the ``model_path`` / ``gpu_type`` / ``benchmark_script``
-    the round materializes its configs with. ``decision_protocol`` is ``warm``
-    or ``cold``.
+    ``target`` is the model, GPU type and benchmark script the round
+    materializes its configs with. ``decision_protocol`` is ``warm`` or
+    ``cold``.
     """
 
     config_path: Path
     output_root: Path
     state: Any
-    build: dict[str, Any]
+    target: BenchmarkTarget
     inherited_args: str
     keep_threshold_pct: float
     decision_protocol: str
@@ -128,7 +129,7 @@ class RoundContext:
             config_path=explore_round.config_path,
             output_root=explore_round.output_root,
             state=explore_round.ss,
-            build=explore_round.build,
+            target=explore_round.target,
             inherited_args=explore_round.inherited_args,
             keep_threshold_pct=explore_round.keep_threshold_pct,
             decision_protocol="warm" if explore_round.use_warm_decision else "cold",
@@ -154,28 +155,25 @@ class RoundContext:
 
     @property
     def gpu(self) -> str:
-        return str(self.build.get("gpu_type") or getattr(self.state, "gpu_type", "") or "")
+        return str(self.target.gpu_type or getattr(self.state, "gpu_type", "") or "")
 
     @property
     def runtime(self) -> dict[str, str]:
         return reuse.runtime_identity(getattr(self.state, "stack_fingerprint_meta", None), self.framework)
 
     def materialize(self, gv: GridVariant, stack: Stack, subdir: Path) -> Path:
-        return _build_variant_yaml(
-            self.config_path,
-            stack.extra_args,
-            gv,
-            output_subdir=subdir,
-            base_args_mode=stack.args_mode,
-            base_extra_envs=dict(stack.extra_envs),
-            base_remove_args=list(stack.remove_args),
-            base_unset_envs=list(stack.unset_envs),
-            **self.build,
+        base = LaunchLayer(
+            extra_server_args=stack.extra_args,
+            extra_envs=dict(stack.extra_envs),
+            remove_args=list(stack.remove_args),
+            unset_envs=list(stack.unset_envs),
+            args_mode=stack.args_mode,
         )
+        return _build_variant_yaml(GridRecipe(self.config_path, base, self.target), gv, output_subdir=subdir)
 
     def _session_identity(self) -> dict[str, Any]:
         return {
-            "model": str(self.build.get("model_path") or ""),
+            "model": str(self.target.model_path or ""),
             "framework": self.framework,
             "gpu": self.gpu.lower(),
             "workload_signature": workload_signature(),

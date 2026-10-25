@@ -20,9 +20,9 @@ class _Tasks:
     async def running(self):
         return self._running
 
-    async def create_or_return_existing(self, **kwargs):
-        existing = any(c["idempotency_key"] == kwargs["idempotency_key"] for c in self.created)
-        self.created.append(kwargs)
+    async def create_or_return_existing(self, spec):
+        existing = any(c["idempotency_key"] == spec.idempotency_key for c in self.created)
+        self.created.append(vars(spec))
         return SimpleNamespace(task_id=f"t-{len(self.created)}"), existing
 
 

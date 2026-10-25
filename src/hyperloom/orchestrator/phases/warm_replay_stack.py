@@ -14,7 +14,7 @@ from ..actions.executors._git import _git_head_sha, _run_git_cp
 from ..actions.executors._nogit_patch import _is_git_tree
 from ..actions.executors._patch_snapshot import _git_commit_kept, _patch_touched_paths, _patch_touched_paths_split
 from ..enablement.runtime.adapters import get_adapter
-from ..source_snapshot import MANIFEST_NAME, snapshot_source_layer
+from ..source_snapshot import MANIFEST_NAME, SourceLayer, snapshot_source_layer
 
 log = logging.getLogger(__name__)
 
@@ -86,13 +86,15 @@ def warm_replay_source_layer(result: Mapping[str, Any], session_dir: str | Path,
     base_sha = _git_head_sha(root)
     try:
         snap = snapshot_source_layer(
-            framework_root=root,
-            base_sha=base_sha,
-            rel_paths=upserted + deleted,
+            SourceLayer(
+                framework_root=root,
+                base_sha=base_sha,
+                rel_paths=upserted + deleted,
+                declared_ops=declared_ops,
+                import_root=get_adapter(framework).source_import_root(root_text),
+            ),
             dest_dir=Path(session_dir) / "optimization_stack" / "src" / _SNAPSHOT_SLOT,
             provenance="replay_warm_recipe",
-            declared_ops=declared_ops,
-            import_root=get_adapter(framework).source_import_root(root_text),
         )
     except OSError:
         log.exception("warm replay: snapshotting the applied overlays under %s failed", root)

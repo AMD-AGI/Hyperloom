@@ -20,6 +20,7 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
 @pytest.fixture
@@ -69,9 +70,11 @@ async def _finished_revalidation(coord, tmp_path: Path):
     state.enablement.validation_pending = True
     state.enablement.revalidation_generation = 1
     task = await coord.tasks.create(
-        kind="baseline",
-        params={"source": "coordinator_internal", "reason": ENABLEMENT_REVALIDATION_REASON},
-        idempotency_key="enablement_revalidation:gen1",
+        TaskSpec(
+            kind="baseline",
+            params={"source": "coordinator_internal", "reason": ENABLEMENT_REVALIDATION_REASON},
+            idempotency_key="enablement_revalidation:gen1",
+        ),
     )
     state.enablement.revalidation_task_id = task.task_id
     await coord.tasks.transition(task.task_id, "running")
@@ -172,7 +175,7 @@ async def test_an_execution_outliving_its_cancelled_caller_still_owes_its_result
 
     coord.sub.register_executor("slow_action", slow)
     task, _ = await coord.tasks.create_or_return_existing(
-        kind="slow_action", params={}, idempotency_key="slow", requires_lanes=[]
+        TaskSpec(kind="slow_action", params={}, idempotency_key="slow", requires_lanes=[])
     )
     await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
     await asyncio.wait_for(entered.wait(), timeout=5)

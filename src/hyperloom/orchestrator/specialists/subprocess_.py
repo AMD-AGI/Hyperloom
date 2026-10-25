@@ -563,14 +563,18 @@ class SpecialistSubprocessDispatcher:
                     # unschedulable request into a structured task failure instead of an
                     # unbounded stall. The actor opens process.log inside its worker
                     # (same host on single-node), so the reaper below reads it directly.
+                    from hyperloom.orchestrator.actions.executors._ray_serving import ActorLaunch
+
                     try:
                         request.gpu_lease.start_async(
-                            cmd,
-                            env=env,
-                            cwd=str(request.worktree or request.workspace),
-                            log_path=str(process_log),
-                            env_mode="replace",
-                            stdin_path=str(prompt_file),
+                            ActorLaunch(
+                                cmd,
+                                env=env,
+                                cwd=str(request.worktree or request.workspace),
+                                log_path=str(process_log),
+                                env_mode="replace",
+                                stdin_path=str(prompt_file),
+                            )
                         )
                     except Exception as exc:  # noqa: BLE001 — surface a submit failure as a result
                         log.warning("specialist GPU actor submit failed: %s", exc)

@@ -407,7 +407,7 @@ def test_actor_creation_happens_under_the_startup_lock(monkeypatch, single_node,
     if lease_kind == "serving":
         rs.ServingLease(num_gpus=1, serving_slot=True).ensure()
     else:
-        rs.GpuSpecialistLease(num_gpus=1).start_async(["true"])
+        rs.GpuSpecialistLease(num_gpus=1).start_async(rs.ActorLaunch(["true"]))
     assert held == [True]
 
 
@@ -446,7 +446,7 @@ def test_head_this_process_already_submitted_an_actor_to_keeps_the_error(monkeyp
     """Actor creation is asynchronous: a just-submitted specialist may not show in the cluster's view yet."""
     _install(monkeypatch, _FakeRay(has_serving_slot=False))
     monkeypatch.setattr(rs, "make_gpu_specialist_actor", lambda *_a, **_kw: _StartableActor())
-    rs.GpuSpecialistLease(num_gpus=1).start_async(["true"])
+    rs.GpuSpecialistLease(num_gpus=1).start_async(rs.ActorLaunch(["true"]))
     backend = rb.get_ray_backend()
 
     with pytest.raises(rs.RayMissingServingSlotError, match="submitted 1 lease actor"):

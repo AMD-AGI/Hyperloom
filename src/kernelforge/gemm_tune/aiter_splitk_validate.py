@@ -8,7 +8,7 @@ unregistered op answers ``None`` (caller keeps its static cap). Answering with
 the wrong kernel's limit would license a splitK the real kernel rejects (crash)
 or tighten one it accepts (silent loss). ``a8w8_blockscale_bpreshuffle`` trials
 its asm kernel only: its ck/cktile wrappers take no ``splitK`` at all, and
-``_SPLITK_FORWARDING_LIBTYPES`` in ``tuners._aiter_dense_common`` caps those
+``_SPLITK_FORWARDING_LIBTYPES`` in ``tuners._serve_safe`` caps those
 rows to 0.
 
 The same module measures the relative-norm error of an asm split-K row through

@@ -28,6 +28,8 @@ from hyperloom.orchestrator.actions.executors.explore_prefilter._screen import (
     screen_variants,
 )
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
+from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, _build_variant_yaml
+from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer
 
 CONFIG = """
 benchmark:
@@ -206,11 +208,13 @@ def test_target_backend_is_read_from_the_deployments_own_flags(tmp_path, enabled
     assert _explore_screen._target_backend(bench, None) == "TRITON_ATTN"
 
 
-def test_the_screen_probes_the_stack_and_each_variant_on_it(config, enabled, session, monkeypatch, tmp_path):
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+def _on_the_stack(config):
+    return GridRecipe(config, LaunchLayer(extra_server_args="--stack-flag", extra_envs={"STACK_ENV": "1"}))
 
+
+def test_the_screen_probes_the_stack_and_each_variant_on_it(config, enabled, session, monkeypatch, tmp_path):
     def on_stack(gv, subdir):
-        return _build_variant_yaml(config, "--stack-flag", gv, output_subdir=subdir, base_extra_envs={"STACK_ENV": "1"})
+        return _build_variant_yaml(_on_the_stack(config), gv, output_subdir=subdir)
 
     probed: dict[str, dict] = {}
 
@@ -300,16 +304,12 @@ def test_dropped_records_carry_the_measurement(config, enabled, session, monkeyp
 def test_the_probe_launches_the_variant_on_the_stack(config, enabled, tmp_path):
     import yaml
 
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
-
     variant = GridVariant(
         name="aiter_off",
         extra_server_args="--max-num-seqs 512 --enable-chunked-prefill",
         extra_envs={"VLLM_ROCM_USE_AITER": "0"},
     )
-    path = _build_variant_yaml(
-        config, "--stack-flag", variant, output_subdir=tmp_path / "v", base_extra_envs={"STACK_ENV": "1"}
-    )
+    path = _build_variant_yaml(_on_the_stack(config), variant, output_subdir=tmp_path / "v")
     bench = yaml.safe_load(path.read_text())["benchmark"]
     cmd = _explore_screen._probe_command(bench, "/tmp/out.json", None)
     server_args = next(a for a in cmd if a.startswith("--server-args="))

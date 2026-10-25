@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from ._aiter_tuner_support import _aiter_ck_moe_tuner_supports
 from .serving_log_evidence import _aiter_serving_evidence
@@ -14,14 +15,21 @@ from ._shape_capture import _is_vllm_block_fp8
 log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class VllmAiterRouting:
+    """Which aiter kernel families a vLLM run's serving log routes to forge's aiter tuners."""
+
+    bf16_dense: bool = False
+    fused_moe: bool = False
+
+
 def _forge_framework_for_vllm(
     *,
     framework: str,
     precision: str,
     quant_type: str,
     tunableop_input: str,
-    aiter_bf16_dense: bool = False,
-    aiter_fused_moe: bool = False,
+    aiter_routing: VllmAiterRouting = VllmAiterRouting(),
 ) -> str:
     """Route vLLM runs served by aiter to Forge's AITER tuner family.
 
@@ -34,9 +42,9 @@ def _forge_framework_for_vllm(
         return framework
     if _is_vllm_block_fp8(precision, quant_type):
         return "vllm-aiter"
-    if aiter_bf16_dense and precision in ("bf16", "fp16"):
+    if aiter_routing.bf16_dense and precision in ("bf16", "fp16"):
         return "vllm-aiter"
-    if aiter_fused_moe:
+    if aiter_routing.fused_moe:
         return "vllm-aiter"
     return framework
 
@@ -46,24 +54,24 @@ def _resolve_vllm_aiter_routing(
     model_path: str,
     server_log: str,
     tp: int,
-) -> dict[str, bool]:
+) -> VllmAiterRouting:
     """Resolve the aiter-routing flags for a vLLM run from runtime evidence."""
-    flags = {"aiter_bf16_dense": False, "aiter_fused_moe": False}
     evidence = _aiter_serving_evidence(server_log)
     if not evidence:
-        return flags
+        return VllmAiterRouting()
 
     from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
 
     summary = summarize_model_config(model_path) or {}
     if not summary:
-        return flags
+        return VllmAiterRouting()
     is_moe = bool(summary.get("is_moe"))
 
     # Dense BF16 routing is for dense checkpoints; a MoE model's dense side
     # rides along with its MoE routing instead.
-    flags["aiter_bf16_dense"] = "bf16_dense" in evidence and not is_moe
+    bf16_dense = "bf16_dense" in evidence and not is_moe
 
+    fused_moe = False
     if "fused_moe" in evidence and is_moe and _aiter_ck_moe_tuner_supports(server_log):
         # Only route MoE when aiter's CK fused-MoE can actually serve this
         # checkpoint at this TP -- otherwise the tuner has no reachable target.
@@ -71,13 +79,14 @@ def _resolve_vllm_aiter_routing(
             model_supports_aiter_ck_fused_moe,
         )
 
-        flags["aiter_fused_moe"] = model_supports_aiter_ck_fused_moe(model_path, tp)
+        fused_moe = model_supports_aiter_ck_fused_moe(model_path, tp)
 
-    _warn_if_moe_routing_is_coarser_than_the_log(server_log, flags)
-    return flags
+    routing = VllmAiterRouting(bf16_dense=bf16_dense, fused_moe=fused_moe)
+    _warn_if_moe_routing_is_coarser_than_the_log(server_log, routing)
+    return routing
 
 
-def _warn_if_moe_routing_is_coarser_than_the_log(server_log: str, flags: dict[str, bool]) -> None:
+def _warn_if_moe_routing_is_coarser_than_the_log(server_log: str, routing: VllmAiterRouting) -> None:
     """Say so when one log shows both MoE backends and routing picks one.
 
     The decision above is a substring scan: seeing an aiter fused-MoE marker
@@ -93,7 +102,7 @@ def _warn_if_moe_routing_is_coarser_than_the_log(server_log: str, flags: dict[st
     ``fmoe_ck`` from the same evidence, so the gap this warns about is the
     Triton half.
     """
-    if not flags.get("aiter_fused_moe"):
+    if not routing.fused_moe:
         return
     try:
         from kernelforge.gemm_tune.evidence import parse_log_file
