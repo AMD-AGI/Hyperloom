@@ -567,42 +567,80 @@ def _round_post_ready_sec(
     )
 
 
-def _stopped_round_result(
+class _RoundEnd(NamedTuple):
+    """How far a round the run stopped got: its returncode, the stop detail and its wall-clock."""
+
+    returncode: int | None
+    error: str
+    runtime_sec: float
+
+
+def _round_stop_result(
     stopped: StoppedByTheRun,
+    end: _RoundEnd,
     *,
-    round_label: str,
-    returncode: int | None,
-    runtime_sec: float,
     output_dir: Path,
     capture_meta: dict[str, Any],
-    started: bool = True,
 ) -> dict[str, Any]:
-    """Build the result for a round the run itself stopped."""
-    detail = stopped.interrupted if started else stopped.never_started
-    if started:
-        log.warning(
-            "baseline_executor: %s reaped after %.1fs: %s; error_class=%s.",
-            round_label,
-            runtime_sec,
-            detail,
-            stopped.error_class,
-        )
-    else:
-        log.warning(
-            "baseline_executor: %s not launched: %s; error_class=%s.",
-            round_label,
-            detail,
-            stopped.error_class,
-        )
+    """Build the failed result of a round the run itself stopped."""
     return {
         "status": "failed",
         "error_class": stopped.error_class,
-        "returncode": returncode,
-        "error": detail,
-        "subprocess_runtime_sec": round(runtime_sec, 2),
+        "returncode": end.returncode,
+        "error": end.error,
+        "subprocess_runtime_sec": round(end.runtime_sec, 2),
         "output_dir": str(output_dir),
         **capture_meta,
     }
+
+
+def _stopped_round_result(
+    returncode: int | None,
+    *,
+    round_label: str,
+    runtime_sec: float,
+    output_dir: Path,
+    capture_meta: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build the result for a round the run itself stopped, or ``None`` when it did not."""
+    stopped = stopped_by_the_run(returncode)
+    if stopped is None:
+        return None
+    log.warning(
+        "baseline_executor: %s reaped after %.1fs: %s; error_class=%s.",
+        round_label,
+        runtime_sec,
+        stopped.interrupted,
+        stopped.error_class,
+    )
+    return _round_stop_result(
+        stopped,
+        _RoundEnd(returncode=returncode, error=stopped.interrupted, runtime_sec=runtime_sec),
+        output_dir=output_dir,
+        capture_meta=capture_meta,
+    )
+
+
+def _unlaunched_round_result(
+    stopped: StoppedByTheRun,
+    *,
+    round_label: str,
+    output_dir: Path,
+    capture_meta: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the result for a round the run stopped before launching it."""
+    log.warning(
+        "baseline_executor: %s not launched: %s; error_class=%s.",
+        round_label,
+        stopped.never_started,
+        stopped.error_class,
+    )
+    return _round_stop_result(
+        stopped,
+        _RoundEnd(returncode=None, error=stopped.never_started, runtime_sec=0.0),
+        output_dir=output_dir,
+        capture_meta=capture_meta,
+    )
 
 
 def _round_headroom_sec(state: Any, session_deadline_sec: float | None) -> tuple[float | None, dict[str, Any]]:
@@ -2567,17 +2605,14 @@ class BenchmarkRunExecutor:
         ignitable, evidence = self._round_affordable_before_ignition(double_run=double_run, ctx_extra=ctx_extra)
         if ignitable:
             return None
-        stopped_result = _stopped_round_result(
+        stopped_result = _unlaunched_round_result(
             STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
             round_label="baseline round",
-            returncode=None,
-            runtime_sec=0.0,
             output_dir=output_dir,
             capture_meta={
                 "materialized_config": str(common["materialized_config_path"]),
                 "run_eval_disabled": bool(common["run_eval_disabled"]),
             },
-            started=False,
         )
         stopped_result["budget_shortfall"] = evidence
         if evidence.get("one_more_measurement_sec"):
@@ -3038,14 +3073,11 @@ class BenchmarkRunExecutor:
                 evidence.get("affordable_sec", 0.0),
                 evidence.get("bound", ""),
             )
-            refused = _stopped_round_result(
+            refused = _unlaunched_round_result(
                 STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
                 round_label="multi-node round",
-                returncode=None,
-                runtime_sec=0.0,
                 output_dir=output_dir,
                 capture_meta=capture_meta,
-                started=False,
             )
             refused["budget_shortfall"] = evidence
             return refused
@@ -3088,17 +3120,13 @@ class BenchmarkRunExecutor:
         except Exception as exc:  # noqa: BLE001 - a warmup that fails on its own is best-effort
             log.warning("baseline_executor: MN warmup pass failed (ignored): %r", exc)
             round_warnings.append(_MN_WARMUP_DID_NOT_WARM_WARNING)
-        warm_stopped = stopped_by_the_run(warm_rc)
-        if warm_stopped is not None:
-            return _stopped_round_result(
-                warm_stopped,
-                round_label="multi-node warmup pass",
-                returncode=warm_rc,
-                runtime_sec=max(0.0, time.time() - started_unix),
-                output_dir=output_dir,
-                capture_meta=capture_meta,
-            )
-        return None
+        return _stopped_round_result(
+            warm_rc,
+            round_label="multi-node warmup pass",
+            runtime_sec=max(0.0, time.time() - started_unix),
+            output_dir=output_dir,
+            capture_meta=capture_meta,
+        )
 
     def _preflight_server_argv(
         self,
@@ -3386,16 +3414,15 @@ class BenchmarkRunExecutor:
         )
         boot_ref = round_.capture_meta["boot_observation_path"]
         finished = finished._replace(server_log_text=server_log_text, boot_observation_ref=boot_ref)
-        stopped = stopped_by_the_run(finished.returncode)
+        stopped = _stopped_round_result(
+            finished.returncode,
+            round_label="measured round",
+            runtime_sec=finished.runtime_sec,
+            output_dir=round_.output_dir,
+            capture_meta=round_.capture_meta,
+        )
         if stopped is not None:
-            return _stopped_round_result(
-                stopped,
-                round_label="measured round",
-                returncode=finished.returncode,
-                runtime_sec=finished.runtime_sec,
-                output_dir=round_.output_dir,
-                capture_meta=round_.capture_meta,
-            )
+            return stopped
         # Detokenizer-stall watchdog reap: the server came up healthy but went silent for the stall grace window
         # (hung engine / wedged detokenizer).
         if finished.returncode == DETOKENIZER_STALL_RETURNCODE:
