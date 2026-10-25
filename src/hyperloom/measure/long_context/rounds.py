@@ -70,7 +70,8 @@ def _too_short(plan: LongContextPlan, served: int | None) -> str:
         return ""
     return (
         f"served context too short: the launch serves {served} tokens, the check needs {plan.needed_context} "
-        f"({plan.length} for the prompt and {plan.needed_context - plan.length} for the answer)"
+        f"({plan.length} for the prompt and {plan.needed_context - plan.length} for the answer); build the set with "
+        f"--served-context {served}"
     )
 
 

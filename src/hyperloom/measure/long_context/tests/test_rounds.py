@@ -71,6 +71,7 @@ def test_a_launch_that_serves_less_than_the_prompt_and_its_answer_starts_no_serv
 
     assert host.started == 0, "refused before a server starts"
     assert found.stopped.startswith("served context too short: the launch serves 2175 tokens, the check needs 2176")
+    assert found.stopped.endswith("build the set with --served-context 2175")
     assert {e.status for e in found.prompts} == {PROMPT_NOT_RUN} and found.served_context == 2175
 
 

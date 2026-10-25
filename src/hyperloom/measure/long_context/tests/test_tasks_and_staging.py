@@ -13,7 +13,7 @@ import pytest
 from hyperloom.measure.docs import DocumentError
 from hyperloom.measure.long_context import build
 from hyperloom.measure.long_context.grade import passes
-from hyperloom.measure.long_context.plan import LongContextPlan
+from hyperloom.measure.long_context.plan import MAX_LENGTH, REPLY_HEADROOM, LongContextPlan
 from hyperloom.measure.long_context.prompts import PER_TASK, TASKS, PromptSetError, load_prompts, prompts_bytes
 from hyperloom.measure.long_context.resolve import staged_set
 from hyperloom.measure.long_context.staging import KEY_PREFIX, load_prompt_set, stage_entry
@@ -164,3 +164,42 @@ def test_the_builder_command_stages_the_set_and_prints_what_a_setup_names(tmp_pa
     assert (found.prompts_sha256, str(found.length)) == (printed["prompts_sha256"], printed["length"])
     assert build.main(["--model", str(model), "--cache", str(tmp_path / "cache"), "--length", "10"]) == 1
     assert "the length must be" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("model_limit", "served", "length"),
+    [
+        (32768, 8192, 8064),  # measured: a 32K model whose launch serves 8192 left a 32K set incomplete
+        (32768, None, 32640),
+        (4096, 8192, 3968),
+        (None, 8192, 8064),
+        (1 << 24, None, MAX_LENGTH),
+    ],
+)
+def test_the_set_is_built_at_the_context_the_launch_serves_within_the_models_limit_less_the_answer(
+    model_limit, served, length
+) -> None:
+    assert build.set_length(model_limit, served) == length
+
+
+def test_a_set_with_neither_a_model_limit_nor_a_served_context_is_refused() -> None:
+    with pytest.raises(PromptSetError, match="no context limit and no served context"):
+        build.set_length(None, None)
+
+
+def test_the_builder_builds_for_the_served_context_and_the_check_then_fits_the_launch(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "tokenizer.json").write_text("{}")
+    (model / "config.json").write_text(json.dumps({"max_position_embeddings": 32768}))
+    monkeypatch.setattr(build, "huggingface_encoder", lambda directory: encode)
+    served = LENGTH + REPLY_HEADROOM
+
+    assert build.main(["--model", str(model), "--cache", str(tmp_path / "cache"), "--served-context", str(served)]) == 0
+
+    printed = dict(line.split("=") for line in capsys.readouterr().out.split())
+    found = staged_set(printed["prompt_set"], {"HYPERLOOM_RUNNER_CACHE": str(tmp_path / "cache")})
+    assert found.length == int(printed["length"]) == LENGTH
+    assert LongContextPlan(found.prompt_set, found.prompts_sha256, found.length).needed_context == served
