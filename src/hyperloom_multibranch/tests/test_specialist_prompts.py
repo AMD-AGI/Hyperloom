@@ -133,7 +133,8 @@ def test_the_role_works_its_direction_first_and_then_moves_to_one_no_branch_cove
     assert "Your launch prompt names your branch's direction: work on it first." in prompt
     assert "dig deeper in it rather than switching to settings" in prompt
     assert "take another of the session's directions, preferring one no running branch covers" in prompt
-    assert "Fast path checks; GEMM tuning; Fusion; Server arguments and environment variables; ROCm code gaps" in prompt
+    assert "Server arguments and environment variables; MoE chain; Small-M GEMM kernels; ROCm code gaps" in prompt
+    assert "Existing PRs and patches; Communication." in prompt
 
 
 def test_the_role_carries_what_found_gains_on_rocm_with_examples():
@@ -472,13 +473,45 @@ def test_every_launch_shows_the_branch_s_direction_before_the_brief():
 
 
 def test_the_session_s_directions_are_distinct_and_lead_with_the_four_a_small_session_takes():
-    assert len(set(DIRECTIONS)) == len(DIRECTIONS) == 7
+    assert len(set(DIRECTIONS)) == len(DIRECTIONS) == 11
     assert [text.split(":")[0] for text in DIRECTIONS[:4]] == [
         "Fast path checks",
         "GEMM tuning",
         "Fusion",
         "Server arguments and environment variables",
     ]
+
+
+def test_the_kernel_chain_directions_go_past_tuned_tables_and_settings():
+    names = [text.split(":")[0] for text in DIRECTIONS]
+    moe, small_m, recurrent, communication = (
+        DIRECTIONS[names.index(name)]
+        for name in ("MoE chain", "Small-M GEMM kernels", "Recurrent decode chain", "Communication")
+    )
+
+    assert "router GEMV, the softmax and top-k, the sort and the expert GEMMs as one chain" in moe
+    assert "fold the sort into the router" in moe
+    assert "Swap the kernel family" in small_m
+    assert "merge sibling projections" in small_m
+    assert "fold a GEMV into the kernel that consumes its output" in small_m
+    assert "conv1d, the recurrent state update and the gated norm" in recurrent
+    assert "Routes already tried" in communication
+    assert "--enable-aiter-allreduce-fusion" in communication
+    assert "SGLANG_USE_1STAGE_ALLREDUCE" in communication
+
+
+def test_the_existing_prs_direction_vendors_a_pr_that_needs_a_newer_aiter_or_triton():
+    (direction,) = [text for text in DIRECTIONS if text.startswith("Existing PRs and patches:")]
+
+    assert "needs a newer aiter or Triton than the image is vendored, not ruled out" in direction
+    assert "copy its kernel into the patch" in direction
+
+
+def test_the_role_takes_a_bound_from_a_tool_s_number_not_a_hand_estimate():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "cites the bandwidth or roofline figure a tool reported for that operator" in prompt
+    assert "a hand estimate of its bytes is a hypothesis to measure, not a bound" in prompt
 
 
 def test_each_prompt_is_versioned_by_its_own_text(monkeypatch):

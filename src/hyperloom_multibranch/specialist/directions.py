@@ -5,7 +5,8 @@
 
 A branch started with no direction of its own and no repair takes the first one no branch of the session has held
 yet, so the first four are the ones a four-branch session works on; once each was held, the one the fewest branches
-held, then the one the fewest running branches hold, the earlier one in this order on a tie.
+held, then the one the fewest running branches hold, the earlier one in this order on a tie. A direction on an
+operator chain the model may lack (experts, a recurrent layer) sends a branch on a model without it to another.
 """
 
 from __future__ import annotations
@@ -61,6 +62,22 @@ DIRECTIONS = (
     "by the DP size is never reached. On a multi-turn workload, compare each follow-up turn's computed prefill tokens "
     "with its new tokens: the excess is a prefix the cache drops every turn (a trailing block a draft path discards, a "
     "block alignment, an eviction), and recovering it beats any prefill kernel.",
+    "MoE chain: on a model with experts, take the router GEMV, the softmax and top-k, the sort and the expert GEMMs as "
+    "one chain, past the tuned tables and environment switches: together they can hold half of a decode step, and "
+    "each launch between them is a boundary to remove. Write the fused kernel, Triton or HIP, that replaces several "
+    "of them (the router GEMV with the softmax and top-k, or the top-k with the sort), or fold the sort into the "
+    "router: one branch measured 3.2 to 3.9 us a layer saved by emitting the sorted ids from the router. Time the "
+    "expert GEMMs against the bytes of the experts the batch actually routes to, counted from the sort's output or "
+    "the routing ids, not from a guessed expert count: an fmoe left as at the HBM bound ran 53 us a layer, 80% of "
+    "the 6.26 TB/s a copy measured, so a new kernel still had about 6% of the step. A model without experts has no "
+    "such chain: take another of the session's directions.",
+    "Small-M GEMM kernels: for a decode GEMM far below its roofline (a GEMV-shaped router or a narrow projection, a "
+    "block-scale FP8 GEMM at M 32 to 64), tuning rows is done; change the kernel. One session's CK block-scale GEMMs "
+    "ran 7.7 to 8.5 us at N 2048 to 6144 whatever M, where their 4 to 13 MB of weights take 0.7 to 2 us at HBM "
+    "bandwidth, and a bf16 GEMV read 128 KB in 8.8 us. Swap the kernel family (aiter's Triton block-scale GEMM with "
+    "split-K, an asm kernel, a per-token FP8 GEMM on a requantized copy), merge sibling projections that read the "
+    "same input into one GEMM, or fold a GEMV into the kernel that consumes its output (a router into the top-k, a "
+    "gate projection into the conv or norm after it).",
     "ROCm code gaps: find the code paths where ROCm runs a slower or missing implementation where CUDA has a fast one "
     "(a fallback, a missing fused or tuned path), and port or align the CUDA implementation.",
     "Attention and decode kernels: speed up the hottest attention and decode kernels the profile shows, with a kernel "
@@ -75,13 +92,35 @@ DIRECTIONS = (
     "went from 7779-8105 to 8467-8646 tok/s at page 16). A kernel aiter ships is a starting "
     "point: one branch copied pa_decode_gluon into the framework tree and wrote the o_proj input's fp8 values and "
     "scales from its epilogue, +1.3 to 1.8%.",
+    "Recurrent decode chain: on a model with linear attention or a state-space layer (GDN, Mamba), take its decode "
+    "path as one chain: the input projection's split, the conv1d, the recurrent state update and the gated norm "
+    "with its quantize. Measure the state bytes each step reads and writes against the time: one session's GDN "
+    "recurrent kernel ran at 3.9 TB/s where a copy reached 6.26, and the chain held 12% of the step in three "
+    "kernels. Fuse the chain into one or two kernels, keeping the state in its layout and precision, and port an "
+    "upstream fused kernel first: sglang PR 39554 fuses it into aiter's fused_gdn_decode_qkvz, 830 to 279 us a "
+    "step and +8.6% at TP4. A "
+    "model without such a layer has no such chain: take another of the session's directions.",
     "Existing PRs and patches: scan the GitHub PRs of aiter and of this session's framework (sglang, vllm or atom), "
     "merged or open, for ones on this model's architecture, its hot operators or ROCm and gfx950; check each against "
     "the version installed in the image, which can predate a merged PR, and port the ones it lacks as a patch to test. "
     "Search with WebSearch, once per hot operator at least (the architecture, ROCm or gfx950 and the operator, on "
     "site:github.com/sgl-project/sglang or site:github.com/ROCm/aiter), read a PR's diff with WebFetch, tell from the "
     "installed version's commit whether the image has it, and record each PR's verdict with notebook_learn (in the "
-    "image, missing, or not for this model) so no branch searches it again.",
+    "image, missing, or not for this model) so no branch searches it again. A PR that needs a newer aiter or Triton "
+    "than the image is vendored, not ruled out: copy its kernel into the patch with the helpers it imports (a "
+    "Triton or gluon file, a ctypes launch of a .co), drop the version check that gates it and let the accuracy "
+    "gate catch a miscompile. One session ruled a fused GDN decode PR unportable three times for its aiter and "
+    "Triton versions, and a branch vendored it in minutes at the session's end.",
+    "Communication: on a tensor-parallel workload, the all-reduces after the attention and the MoE are one "
+    "operator. Time each at decode against its bytes: a message of a few hundred KB is latency-bound, so the "
+    "levers are fewer all-reduces, an all-reduce that does the next op's work, and overlap. Routes already tried on "
+    "one session (Qwen3-Next TP2, concurrency 64), each flat or 1.7 to 4.1% slower: --enable-aiter-allreduce-fusion "
+    "(decode-only too), SGLANG_USE_1STAGE_ALLREDUCE, aiter's old small all-reduce path, --enable-quant-communications "
+    "and --enable-fused-moe-sum-all-reduce (read only by the Triton MoE); a larger AITER_CUSTOM_AR_MAX_SIZE gained "
+    "+2.1%. What was left is source: fuse the all-reduce with the residual add, norm and FP8 quantize the head "
+    "already does after it, in one kernel that keeps that readout (sglang PR 44566 fuses the three); reduce the "
+    "shared and routed experts' outputs in one all-reduce; or overlap an all-reduce with work that does not read "
+    "its result.",
 )
 
 
