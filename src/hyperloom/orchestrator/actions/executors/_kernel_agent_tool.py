@@ -364,7 +364,7 @@ async def _run_subprocess(
             ray_gcs_address_from_state,
             infera_ssh_env_from_state,
         )
-        from ._subprocess_kill import run_with_session_kill
+        from ._subprocess_kill import RoundWatch, run_with_session_kill
 
         if is_multi_node():
             # Infera backend: route GEAK GPU work to a pod over SSH (no Ray).
@@ -385,8 +385,7 @@ async def _run_subprocess(
         cp = run_with_session_kill(
             cmd,
             env=child_env,
-            timeout=timeout_sec,
-            text=True,
+            watch=RoundWatch(timeout=timeout_sec),
             on_output=on_output,
         )
         return cp.returncode, cp.stdout or "", cp.stderr or ""

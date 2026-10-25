@@ -19,6 +19,7 @@ from typing import Any
 
 from hyperloom.common import llm_config
 from hyperloom.common.env import EnvValueError, env_bool
+from hyperloom.common.gpu_partition import PartitionModel
 from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
 from hyperloom.common.llm_headers import parse_custom_headers
 from .executors import (
@@ -1338,15 +1339,6 @@ class PartitionRequest:
     streams_per_partition: int | None = None
 
 
-@dataclass(frozen=True)
-class PartitionModel:
-    """The model a partition shape must fit: its path and precision, and the session state holding its identity."""
-
-    model_path: str | None = None
-    precision: str | None = None
-    shared_state: Any = None
-
-
 def _export_partition_shape(
     request: PartitionRequest,
     *,
@@ -1426,11 +1418,7 @@ def _export_partition_shape(
         declared_mode=mode,
         streams=streams,
         gpu_type=gpu_type,
-        params={
-            "model_path": str(model.model_path or ""),
-            "precision": str(model.precision or ""),
-        },
-        shared_state=model.shared_state,
+        model=model,
         # The footprint refusal is arithmetic about streams sharing a partition.
         fanout_expected=fanout or bool(mode) or streams_named,
     )

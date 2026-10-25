@@ -164,7 +164,6 @@ def materialize_agentx(
     output: Path,
     *,
     model_path: str | None = None,
-    inferencex_path: str | None = None,
 ) -> Path:
     """Keep the workload YAML intact while changing only the server candidate."""
     config = copy.deepcopy(config)
@@ -172,8 +171,6 @@ def materialize_agentx(
     envs = bench.setdefault("envs", {})
     if model_path and Path(model_path).is_dir():
         envs["MODEL_PATH"] = model_path
-    if inferencex_path:
-        bench["inferencex_path"] = inferencex_path
     envs["RUN_EVAL"] = "false"
     bench.pop("server_lifecycle", None)
     bench.pop("benchmark_script", None)

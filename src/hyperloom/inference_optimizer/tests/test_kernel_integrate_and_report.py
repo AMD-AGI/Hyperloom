@@ -34,7 +34,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
 )
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.message_bus import Message
@@ -269,7 +269,7 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(
         "accuracy_metric": "exact_match,strict-match",
     }
 
-    async def _measure(executor, *, config_path, output_dir, **_kwargs):
+    async def _measure(executor, _attempt, *, config_path, output_dir, **_kwargs):
         seen["shared_state"] = executor.shared_state
         seen["benchmark"] = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
         workspace = output_dir / "benchmark_sglang_e2e"
@@ -358,7 +358,7 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
     state.save(session_dir)
     benchmarks = []
 
-    async def _measure(executor, *, config_path, output_dir, **_kwargs):
+    async def _measure(executor, _attempt, *, config_path, output_dir, **_kwargs):
         benchmark = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
         benchmarks.append(benchmark)
         tput = 100.0 if benchmark["envs"].get("LEG") == "A" else 110.0
@@ -666,7 +666,7 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     rounds = []
     measured = {}
 
-    async def _benchmark(executor, *, config_path, output_dir, **_kwargs):
+    async def _benchmark(executor, _attempt, *, config_path, output_dir, **_kwargs):
         assert target.read_text(encoding="utf-8") == patch_file.read_text(encoding="utf-8")
         bench = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
         rounds.append((output_dir.name, bench))
@@ -2484,9 +2484,11 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
     sub.register_executor("report", ReportExecutor())
 
     task = await tr.create(
-        kind="report",
-        params={"session_dir": str(session_dir)},
-        idempotency_key="rep-1",
+        TaskSpec(
+            kind="report",
+            params={"session_dir": str(session_dir)},
+            idempotency_key="rep-1",
+        ),
     )
     res = await sub.run_task(task)
     db.close()
@@ -2530,9 +2532,11 @@ async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path, mo
     sub = SubAgentRunner(locks, tr)
     sub.register_executor("report", ReportExecutor())
     task = await tr.create(
-        kind="report",
-        params={},
-        idempotency_key="rep-fail-1",
+        TaskSpec(
+            kind="report",
+            params={},
+            idempotency_key="rep-fail-1",
+        ),
     )
     res = await sub.run_task(task)
     db.close()

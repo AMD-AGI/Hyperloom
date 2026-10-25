@@ -72,25 +72,18 @@ class _StubTaskRegistry:
     def __init__(self):
         self.calls: list[dict] = []
 
-    async def create_or_return_existing(
-        self,
-        *,
-        kind,
-        params,
-        idempotency_key,
-        **kwargs,
-    ):
+    async def create_or_return_existing(self, spec):
         self.calls.append(
             {
-                "kind": kind,
-                "params": dict(params),
-                "idempotency_key": idempotency_key,
+                "kind": spec.kind,
+                "params": dict(spec.params),
+                "idempotency_key": spec.idempotency_key,
             }
         )
         task = _StubTask(
-            task_id=f"task-{idempotency_key}",
-            kind=kind,
-            params=dict(params),
+            task_id=f"task-{spec.idempotency_key}",
+            kind=spec.kind,
+            params=dict(spec.params),
         )
         return task, False
 
@@ -2017,7 +2010,7 @@ async def test_enqueue_failure_rolls_back_prepared_kernel(tmp_path, monkeypatch)
             "snapshots": snapshots,
         }
 
-    async def _raise(**_kwargs):
+    async def _raise(_spec):
         raise RuntimeError("registry unavailable")
 
     rollbacks: list[tuple[list[dict], list[dict]]] = []
@@ -2058,7 +2051,7 @@ async def test_enqueue_failure_retains_pending_when_kernel_restore_fails(
             "snapshots": [{"target": "/tmp/kernel.py"}],
         }
 
-    async def _raise(**_kwargs):
+    async def _raise(_spec):
         raise RuntimeError("registry unavailable")
 
     coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]

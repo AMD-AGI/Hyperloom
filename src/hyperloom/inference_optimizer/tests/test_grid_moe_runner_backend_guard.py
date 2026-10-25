@@ -12,7 +12,8 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
-from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml, GridRecipe
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
 
 
 def _write_model_config(dir_path: Path, config: dict) -> str:
@@ -74,12 +75,13 @@ def _base_yaml(path: Path, model: str) -> Path:
 def _variant_args(tmp_path: Path, *, model: str, base_extra_args: str, variant_args: str = "") -> str:
     base = _base_yaml(tmp_path / "base.yaml", model)
     out = _build_variant_yaml(
-        base,
-        base_extra_args,
+        GridRecipe(
+            base_yaml_path=base,
+            base=LaunchLayer(extra_server_args=base_extra_args),
+            target=BenchmarkTarget(model_path=model, gpu_type="mi300x"),
+        ),
         GridVariant(name="v00", extra_server_args=variant_args, extra_envs={}),
         output_subdir=tmp_path / "v00",
-        model_path=model,
-        gpu_type="mi300x",
     )
     cfg = yaml.safe_load(out.read_text())
     return str(cfg["benchmark"]["envs"].get("EXTRA_SGLANG_ARGS", ""))

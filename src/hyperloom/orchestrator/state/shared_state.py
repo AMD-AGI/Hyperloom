@@ -29,6 +29,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
     GradedComparison,
+    GradingAnchor,
     VERDICT_KEEP,
     VERDICT_REVERT,
     axis_of,
@@ -116,15 +117,14 @@ def resolve_graded_comparison(
     *,
     against_baseline: bool = False,
     keep_threshold_pct: float = 0.0,
-    anchor_perf: Any = None,
-    anchor_tput: float | None = None,
+    anchor: GradingAnchor = GradingAnchor(),
 ) -> "GradedComparison":
     """Resolve what a KEEP decision grades: candidate and reference, on one axis, plus the verdict on that pair."""
     # AgentX KEEPs on median interactivity clearing its threshold with the slow tail and output throughput both
     # inside the noise band; anything short of all three is REVERT. A pair that cannot supply the axes degrades
     # together and ``degrade_reason`` says why -- promotion lanes read ``comparable`` and fail closed rather than
     # KEEPing on the diagnostic output figure. ``keep_threshold_pct`` applies to the output axis only.
-    # ``anchor_perf``/``anchor_tput`` default to the session anchor; explore passes its own because variants stack
+    # ``anchor`` defaults to the session anchor; explore passes its own because variants stack
     # within a round. Objective and band come from ``resolved_grading``, so both are what the session was seeded
     # with rather than whatever the calling process's environment holds.
     on_intvty, noise_pct = resolved_grading(state)
@@ -132,8 +132,8 @@ def resolve_graded_comparison(
     # it. A candidate that already lost carries no veto, so the ledger names the gate that actually refused it.
     degrade_reason = ""
     if on_intvty:
-        if anchor_perf is not None:
-            ref_perf, reason = anchor_perf, ""
+        if anchor.perf is not None:
+            ref_perf, reason = anchor.perf, ""
         elif against_baseline:
             ref_perf = perf_snapshot_from_mapping(getattr(state, "baseline_perf", None))
             reason = "" if ref_perf else "baseline_axes_missing"
@@ -164,8 +164,8 @@ def resolve_graded_comparison(
             )
         degrade_reason = reason or "candidate_axes_missing"
 
-    if anchor_tput is not None:
-        reference = float(anchor_tput)
+    if anchor.tput is not None:
+        reference = float(anchor.tput)
     elif against_baseline:
         reference = float(getattr(state, "baseline_tput", 0.0))
     else:
@@ -356,6 +356,17 @@ class KbInjection:
     prompt_block: str
     domain: str = ""
     gap_canonical_id: str = ""
+
+
+@dataclass(frozen=True)
+class ActionAttempt:
+    """One settled attempt of an audited action, as ``record_action_attempt`` ledgers it."""
+
+    task_id: str
+    status: str
+    decision: str
+    result: dict[str, Any] | None
+    extras: dict[str, Any] | None = None
 
 
 # roofline_snapshots history cap (record_trace_analyze).
@@ -1321,10 +1332,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         rule: str,
         hint: str,
         intent_type: str,
-        tick: int,
         intent_payload: dict[str, Any] | None = None,
     ) -> int:
-        """Append a PolicyGate denial row and bump the per-(action, rule) streak.
+        """Append a PolicyGate denial row, stamped with the current tick, and bump the per-(action, rule) streak.
 
         Records a capped rolling history entry and increments the
         consecutive-denial counter keyed by ``"<action_name>:<rule>"``.
@@ -1335,7 +1345,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             rule (str): The PolicyGate rule id that fired.
             hint (str): Human-readable remediation hint surfaced to the LLM.
             intent_type (str): The denied intent's type.
-            tick (int): The Coordinator tick at which the denial occurred.
             intent_payload (dict[str, Any] | None): Optional intent payload;
                 when present, its sorted keys are recorded for context.
 
@@ -1347,7 +1356,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         streak = int(self.policy_denial_streak.get(key, 0)) + 1
         self.policy_denial_streak[key] = streak
         entry = {
-            "tick": int(tick),
+            "tick": int(self.tick or 0),
             "action_name": action_name or "",
             "rule": rule,
             "hint": hint or "",
@@ -1643,6 +1652,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if not isinstance(entry, dict):
             return
         from hyperloom.inference_optimizer.breakdown.recorder import kernel_event
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import IntegrateVerdict
 
         last = (entry.get("attempts") or [{}])[-1]
         last = last if isinstance(last, dict) else {}
@@ -1651,26 +1661,28 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         integration_id = str(entry.get("integration_id") or "")
         kernel_event.record_integrate_verdict(
             macro_cycle=cycle,
-            integration_id=integration_id,
-            kernel_id=str(entry.get("kernel_id") or ""),
-            decision=str(entry.get("last_decision") or ""),
-            status=str(entry.get("last_status") or ""),
-            attempt_count=entry.get("attempt_count"),
-            fault_count=entry.get("fault_count"),
-            gain_pct=entry.get("best_gain_pct"),
-            accuracy_pass=last.get("accuracy_pass"),
-            validation_tier=str(last.get("validation_tier") or ""),
-            patch_path=str(entry.get("patch_path") or ""),
-            target_file=str(entry.get("target_file") or ""),
-            error_class=str(entry.get("last_error_class") or ""),
-            rejected_reason=str(rejected.get("reason") or "") if isinstance(rejected, dict) else "",
-            retryable=bool(entry.get("retryable")),
-            settled_at=str(entry.get("updated_at") or ""),
-            extra_server_args=str(entry.get("extra_server_args") or ""),
-            basis=str(entry.get("basis") or ""),
-            alignment_status=str(entry.get("alignment_status") or ""),
-            # Absent means attributable; a writer that cannot pin the gain on this kernel says so.
-            gain_attributed=bool(entry.get("validated", True)),
+            verdict=IntegrateVerdict(
+                integration_id=integration_id,
+                kernel_id=str(entry.get("kernel_id") or ""),
+                decision=str(entry.get("last_decision") or ""),
+                status=str(entry.get("last_status") or ""),
+                attempt_count=entry.get("attempt_count"),
+                fault_count=entry.get("fault_count"),
+                gain_pct=entry.get("best_gain_pct"),
+                accuracy_pass=last.get("accuracy_pass"),
+                validation_tier=str(last.get("validation_tier") or ""),
+                patch_path=str(entry.get("patch_path") or ""),
+                target_file=str(entry.get("target_file") or ""),
+                error_class=str(entry.get("last_error_class") or ""),
+                rejected_reason=str(rejected.get("reason") or "") if isinstance(rejected, dict) else "",
+                retryable=bool(entry.get("retryable")),
+                settled_at=str(entry.get("updated_at") or ""),
+                extra_server_args=str(entry.get("extra_server_args") or ""),
+                basis=str(entry.get("basis") or ""),
+                alignment_status=str(entry.get("alignment_status") or ""),
+                # Absent means attributable; a writer that cannot pin the gain on this kernel says so.
+                gain_attributed=bool(entry.get("validated", True)),
+            ),
         )
         kernel_event.record_integrate_axis(
             macro_cycle=cycle, integration_id=integration_id, graded_objective=str(last.get("graded_objective") or "")
@@ -1763,23 +1775,13 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             "failure_id": result.get("failure_id"),
         }
 
-    def record_action_attempt(
-        self,
-        action: str,
-        *,
-        task_id: str,
-        status: str,
-        decision: str,
-        result: dict[str, Any] | None,
-        extras: dict[str, Any] | None = None,
-        max_history: int = _DEFAULT_ATTEMPTS_HISTORY,
-    ) -> dict[str, Any] | None:
+    def record_action_attempt(self, action: str, attempt: ActionAttempt) -> dict[str, Any] | None:
         """Append one attempt to ``<action>_attempts`` and refresh ``last_<action>``. Entry schema {ts, task_id, status, decision, key_metric, key_metric_kind, workspace, error_class, error_excerpt, stderr_tail, stderr_log_path, raw_result_path, reported_success, variant_name, extras}. Returns the entry, or None when ``action`` not in the audit set (kernel_agent-owned actions use bespoke recorders). Does NOT call :meth:`save`."""
         if action not in _AUDIT_ACTIONS:
             return None
         attempts_attr = f"{action}_attempts"
         last_attr = f"last_{action}"
-        result = result or {}
+        result = attempt.result or {}
         metric_key, metric_kind = _KEY_METRIC_MAP.get(
             action,
             ("output_throughput", "output_throughput"),
@@ -1791,18 +1793,18 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             key_metric = None
         entry: dict[str, Any] = {
             "ts": now_iso(),
-            "task_id": str(task_id or ""),
-            "status": str(status or ""),
-            "decision": str(decision or ""),
+            "task_id": str(attempt.task_id or ""),
+            "status": str(attempt.status or ""),
+            "decision": str(attempt.decision or ""),
             "key_metric": key_metric,
             "key_metric_kind": metric_kind,
             **self._common_result_fields(result),
-            "extras": dict(extras or {}),
+            "extras": dict(attempt.extras or {}),
         }
         history: list[dict[str, Any]] = list(getattr(self, attempts_attr) or [])
         history.append(entry)
-        if len(history) > max_history:
-            history = history[-max_history:]
+        if len(history) > _DEFAULT_ATTEMPTS_HISTORY:
+            history = history[-_DEFAULT_ATTEMPTS_HISTORY:]
         setattr(self, attempts_attr, history)
         setattr(self, last_attr, dict(entry))
         if action == "baseline":

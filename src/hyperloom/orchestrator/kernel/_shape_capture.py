@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple
 
@@ -176,13 +177,20 @@ def _is_vllm_block_fp8(precision: str, quant_type: str) -> bool:
     }
 
 
+@dataclass(frozen=True)
+class SuppliedShapes:
+    """The GEMM shape inputs a forge run already holds, either of which makes a capture pass unnecessary."""
+
+    shapes_json: str
+    tunableop_input: str
+
+
 def _vllm_block_fp8_profile_capture_required(
     *,
     framework: str,
     precision: str,
     quant_type: str,
-    shapes_json: str,
-    tunableop_input: str,
+    supplied: SuppliedShapes,
     dry_run: bool,
 ) -> bool:
     """Return whether block-FP8 needs a profiled runtime-shape capture pass."""
@@ -190,8 +198,8 @@ def _vllm_block_fp8_profile_capture_required(
         framework != "vllm"
         or not _is_vllm_block_fp8(precision, quant_type)
         or dry_run
-        or shapes_json
-        or tunableop_input
+        or supplied.shapes_json
+        or supplied.tunableop_input
         or not env_bool("HYPERLOOM_GEMM_SHAPE_CAPTURE", True)
     ):
         return False
@@ -369,16 +377,15 @@ def _vllm_dense_shape_capture_required(
     *,
     framework: str,
     model_path: str,
-    shapes_json: str,
-    tunableop_input: str,
+    supplied: SuppliedShapes,
     dry_run: bool,
 ) -> bool:
     """Return whether Forge needs an automatic TunableOp recording pass."""
     if (
         framework != "vllm"
         or dry_run
-        or shapes_json
-        or tunableop_input
+        or supplied.shapes_json
+        or supplied.tunableop_input
         or not env_bool("HYPERLOOM_GEMM_SHAPE_CAPTURE", True)
     ):
         return False

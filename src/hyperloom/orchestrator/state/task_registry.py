@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from hyperloom.common.timeutil import now_iso
@@ -354,74 +354,27 @@ class TaskRegistry:
         self.db = db
         self._dispatch_origin_provider = dispatch_origin_provider
 
-    async def create_or_return_existing(
-        self,
-        *,
-        kind: str,
-        params: dict,
-        idempotency_key: str,
-        requires_lanes: list[str] | None = None,
-        side_effects: list[str] | None = None,
-        lease_ttl_sec: int = 0,
-        task_id: str | None = None,
-        dispatch_class: str | None = None,
-        dispatch_origin: Mapping[str, Any] | None = None,
-    ) -> tuple[Task, bool]:
+    async def create_or_return_existing(self, spec: TaskSpec) -> tuple[Task, bool]:
         """Insert a new task row OR return the existing one keyed by idempotency_key. Returns ``(task, was_existing)``."""
-        _validate_dispatch_class(dispatch_class)
-        existing = await self.db.fetchone("SELECT * FROM tasks WHERE idempotency_key=?", (idempotency_key,))
+        _validate_dispatch_class(spec.dispatch_class)
+        existing = await self.db.fetchone("SELECT * FROM tasks WHERE idempotency_key=?", (spec.idempotency_key,))
         if existing is not None:
             task = Task.from_row(existing)
-            _validate_dispatch_reuse(task, dispatch_class)
+            _validate_dispatch_reuse(task, spec.dispatch_class)
             return task, True
 
-        if dispatch_class is not None and dispatch_origin is None:
+        if spec.dispatch_class is not None and spec.dispatch_origin is None:
             if self._dispatch_origin_provider is None:
-                dispatch_class = None
+                spec = replace(spec, dispatch_class=None)
             else:
-                dispatch_origin = self._dispatch_origin_provider()
+                spec = replace(spec, dispatch_origin=self._dispatch_origin_provider())
         async with self.db.transaction() as cur:
-            task = _insert_queued_task(
-                cur,
-                TaskSpec(
-                    kind=kind,
-                    params=params,
-                    idempotency_key=idempotency_key,
-                    requires_lanes=requires_lanes,
-                    side_effects=side_effects,
-                    lease_ttl_sec=lease_ttl_sec,
-                    task_id=task_id,
-                    dispatch_class=dispatch_class,
-                    dispatch_origin=dispatch_origin,
-                ),
-            )
+            task = _insert_queued_task(cur, spec)
         return task, False
 
-    async def create(
-        self,
-        *,
-        kind: str,
-        params: dict,
-        idempotency_key: str,
-        requires_lanes: list[str] | None = None,
-        side_effects: list[str] | None = None,
-        lease_ttl_sec: int = 0,
-        task_id: str | None = None,
-        dispatch_class: str | None = None,
-        dispatch_origin: Mapping[str, Any] | None = None,
-    ) -> Task:
+    async def create(self, spec: TaskSpec) -> Task:
         """Thin wrapper around :meth:`create_or_return_existing` for callers that don't need ``was_existing``."""
-        task, _was_existing = await self.create_or_return_existing(
-            kind=kind,
-            params=params,
-            idempotency_key=idempotency_key,
-            requires_lanes=requires_lanes,
-            side_effects=side_effects,
-            lease_ttl_sec=lease_ttl_sec,
-            task_id=task_id,
-            dispatch_class=dispatch_class,
-            dispatch_origin=dispatch_origin,
-        )
+        task, _was_existing = await self.create_or_return_existing(spec)
         return task
 
     async def get(self, task_id: str) -> Task:
