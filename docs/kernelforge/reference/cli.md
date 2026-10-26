@@ -517,11 +517,12 @@ Writes the runs found under one or more directories as one JSON document,
 {doc}`Experience collection </reference/experience-kb-collect>`), and an empty
 `raw-logs-not-collected.log` beside it. A run is a plain `forge-loop` run's
 `forge_experiments/` directory, which holds `campaign_config.json` and
-`run_state.json`. Each candidate the run archived
+`run_state.json`. A directory that never wrote those two files is not a run
+this export reports. Each candidate the run archived
 (`candidates/iter_NNN/`) is one entry, so each lane of a fan-out round is an
-entry of its own; a run whose `campaign_config.json` or `run_state.json` is not
-the JSON KernelForge writes, or a candidate whose `meta.json` is missing or
-malformed, is one entry saying why, which collection skips with that reason.
+entry of its own. A record that exists but is not readable JSON, or a candidate
+whose `meta.json` is missing or malformed, is one entry saying why, which
+collection skips with that reason.
 
 An entry names the candidate's plan, the kernel KernelForge measured, and, when
 the candidate archived one, the diff of every file the commit touched
@@ -538,12 +539,15 @@ benchmark driver's SHA-256 from `campaign_config.json`. The run's
 `forge-loop.log` gives the record KernelForge's own experience KB filed a kept
 candidate under; the log is only read, and no entry names it or records its path.
 
-A log belongs to the run whose workspace path ends most like the kernel path
-it announces, which may differ in its leading directories, as for a run made in
-a container. The export stops with an error and writes nothing when it cannot
-list a directory under the log roots or read a file it needs, such as a JSON
-record, a plan, a lesson, or a log, naming that path, or when a log fits
-two runs equally well.
+A log belongs to the run whose `campaign_config.json` `kernel_path` the kernel
+line names, when only that run records it, including a run whose
+`forge_experiments` was moved out of that workspace. When several runs record
+that kernel, the log belongs to the run whose workspace path ends most like
+the kernel path it announces, which may differ in its leading directories, as
+for a run made in a container. The export stops with an error and writes
+nothing when it cannot list a directory under the log roots or read a file it
+needs, such as a JSON record, a plan, a lesson, or a log, naming that path, or
+when a log fits two runs equally well.
 
 The document names the empty file, relative to itself, as the raw log of every
 Experience collected from it, and no run log goes with an Experience: the

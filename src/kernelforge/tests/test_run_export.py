@@ -190,15 +190,16 @@ def _plain_run(
     return layout
 
 
-def _loop_log(path: Path, workspace: str, kb_record: str = KB_RECORD) -> Path:
+def _loop_log(path: Path, workspace: str, kb_record: str = KB_RECORD, *, kernel: str | None = None) -> Path:
     """A forge-loop stdout log of the fixture's three iterations; it names the kernel by the absolute path the run
     had, and the KB record written after the KEEP and rewritten after the loop."""
 
     written = kb_write_line({"written": True, "solution": kb_record, "speedup": 1.18})
+    kernel_file = kernel or f"/home/someone/kernelforge-runs/{workspace}/softmax_kernel.py"
     lines = (
         "  Agent profile: claude / Claude-Opus-5: available",
         LOOP_BANNER,
-        kernel_line(f"/home/someone/kernelforge-runs/{workspace}/softmax_kernel.py"),
+        kernel_line(kernel_file),
         iteration_header(1, 1.0, 110 * 60),
         "  [KEEP] mean case speedup=1.180000x — NEW BEST (+18.0% vs previous best)",
         written,
@@ -445,6 +446,45 @@ def test_runs_whose_workspaces_share_a_name_keep_their_own_logs(tmp_path: Path) 
 
     kept = [units[(f"campaign-{run}", 1)]["provenance"] for run in ("a", "b")]
     assert [provenance["kb_record"] for provenance in kept] == ["record-a", "record-b"]
+
+
+def test_an_archived_run_keeps_the_kb_record_its_kernel_path_names(tmp_path: Path) -> None:
+    """The controller moves forge_experiments out of the workspace, so the archive's parent shares no trailing
+    component with the path the log names. The kernel line still names that run's kernel_path."""
+
+    kernel = "/srv/containers/run-9/workspace/src/softmax_kernel.py"
+    layout = _plain_run(tmp_path / "kept-campaigns" / "op-42", name="bookkeeping")
+    config = json.loads(layout.campaign_config.read_text(encoding="utf-8"))
+    _write_json(layout.campaign_config, {**config, "kernel_path": "src/softmax_kernel.py"})
+    _loop_log(tmp_path / "forge-loop.log", "unused", kernel=kernel)
+
+    unit = _units(tmp_path)["bookkeeping/iteration-1"]
+
+    assert layout.root.parent.name != Path(kernel).parents[1].name
+    assert unit["provenance"]["kb_record"] == KB_RECORD
+    assert "forge-loop.log" not in json.dumps(unit)
+
+
+def test_two_archived_runs_with_the_same_kernel_path_stop_the_export(tmp_path: Path) -> None:
+    """Two runs that record one kernel, and whose archives share no trail with the path the log names, cannot be
+    given the log."""
+
+    kernel = "/srv/containers/run-9/workspace/src/softmax_kernel.py"
+    logs = tmp_path / "logs"
+    for run in ("a", "b"):
+        layout = _plain_run(logs / run, name=f"bookkeeping-{run}", campaign_id=f"campaign-{run}")
+        config = json.loads(layout.campaign_config.read_text(encoding="utf-8"))
+        _write_json(layout.campaign_config, {**config, "kernel_path": "src/softmax_kernel.py"})
+    log = _loop_log(logs / "forge-loop.log", "unused", kernel=kernel)
+    output = tmp_path / "runs.json"
+
+    result = CliRunner().invoke(main, ["export-runs", str(logs), "-o", str(output)])
+
+    assert result.exit_code == 1
+    assert f"Error: {log} names {kernel}" in result.output
+    assert "export them from separate log roots" in result.output
+    assert all(str(logs / run / f"bookkeeping-{run}") in result.output for run in ("a", "b"))
+    assert not output.exists()
 
 
 def test_only_a_kept_candidate_carries_the_kb_record_its_iteration_wrote(tmp_path: Path) -> None:

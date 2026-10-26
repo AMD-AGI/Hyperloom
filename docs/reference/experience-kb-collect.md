@@ -316,8 +316,14 @@ to a KB. No `forge-loop.log`, `events.jsonl`, or other archive file does;
 the scalar fields of `meta.json` go as `provenance.extra.meta`, and its plan,
 rationale, per-case times, and other benchmark measurements do not, and of the
 Analysis directory only the report's text goes. A `forge-loop.log` is only
-read, by the run whose workspace path ends most like the kernel path it
-announces; one that fits two runs equally well stops the export.
+read, by the one run whose `kernel_path` the kernel line names, including a
+run whose `forge_experiments` was moved out of that workspace. When several
+runs record that kernel, it is read by the run whose workspace path ends most
+like the path the line announces; one that fits two runs equally well stops
+the export. A `forge_experiments` directory that never wrote
+`campaign_config.json` or `run_state.json` is not a run the export reports.
+A record that exists but is not readable JSON, and a candidate whose
+`meta.json` is missing or malformed, is one entry saying why.
 
 A unit is skipped when its logs could not be read as a run, or when it has no
 reasoning, which is always the case for a merge of two archived candidates

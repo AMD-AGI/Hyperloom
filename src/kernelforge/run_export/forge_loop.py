@@ -4,15 +4,20 @@
 """A plain ``kernelforge forge-loop`` run: one unit per candidate Kernel Forge archived.
 
 The run is a workspace's ``forge_experiments/`` directory, recognized by its ``campaign_config.json`` and
-``run_state.json``. Every attempt that produced a diff is archived as ``candidates/iter_NNN/meta.json``, and each one
-is a unit: seq N, the candidate iteration N measured and Kernel Forge's decision on it, under the run's
-``campaign_id`` as ``run_id``. The forge-loop's stdout log has no timestamps, so a unit's times come from the run's
-``events.jsonl``, and the log is read only for the kernel it announces and the record of Kernel Forge's own
-experience KB each kept candidate was written as.
+``run_state.json``. A directory that never wrote those two files is not a run this export reports. A record that
+exists but is not readable JSON, and a candidate whose ``meta.json`` is missing or malformed, is one entry saying
+why. Every attempt that produced a diff is archived as ``candidates/iter_NNN/meta.json``, and each one is a unit:
+seq N, the candidate iteration N measured and Kernel Forge's decision on it, under the run's ``campaign_id`` as
+``run_id``. The forge-loop's stdout log has no timestamps, so a unit's times come from the run's ``events.jsonl``,
+and the log is read only for the kernel it announces and the record of Kernel Forge's own experience KB each kept
+candidate was written as.
 
-A log belongs to the run whose workspace path shares the most trailing components with the kernel path the log
-announces. That is the path the run had where it was made, so a run made in a container is still found, and a path two
-runs fit equally stops the export rather than giving both runs the log. A log is read for what it records, and a unit
+A log belongs to the run whose ``campaign_config.json`` ``kernel_path`` the kernel line names, when only that run
+records it: the same path, or an absolute line that ends with the relative path the config stores. That still finds
+a run whose ``forge_experiments`` was moved out of the workspace it was made in. When several runs record that
+kernel, the log belongs to the run whose workspace path shares the most trailing components with the path the line
+announces, so a run made in a container is still found when only the leading directories differ, and a path two runs
+fit equally stops the export rather than giving both runs the log. A log is read for what it records, and a unit
 does not name it: the only files a unit names are its plan, its kernel, and the diff of every file the commit touched.
 
 Kernel Forge writes naive local times, and the units carry them as it wrote them; collection reads a naive time as
@@ -66,6 +71,16 @@ class AmbiguousOwnership(Exception):
     """A log names a path that fits more than one run's workspace equally well."""
 
 
+def _refuse_ambiguous(evidence: Path, named: str, owners: list[Path]) -> None:
+    """Stop the export: ``named`` fits every run in ``owners`` and no trail separates them."""
+
+    workspaces = " and ".join(str(owner.parent) for owner in owners)
+    raise AmbiguousOwnership(
+        f"{evidence} names {named}, which fits the runs in {workspaces} equally well; "
+        "export them from separate log roots"
+    )
+
+
 def _shared_tail(named: tuple[str, ...], workspace: Path) -> int:
     """How many of ``workspace``'s trailing path components ``named`` ends with."""
 
@@ -88,25 +103,58 @@ def _owner(evidence: Path, named: str, candidates: dict[Path, tuple[str, ...]]) 
     best = max(scores.values(), default=0)
     owners = sorted(experiments for experiments, score in scores.items() if score == best) if best else []
     if len(owners) > 1:
-        workspaces = " and ".join(str(owner.parent) for owner in owners)
-        raise AmbiguousOwnership(
-            f"{evidence} names {named}, which fits the runs in {workspaces} equally well; "
-            "export them from separate log roots"
-        )
+        _refuse_ambiguous(evidence, named, owners)
     return owners[0] if owners else None
+
+
+def _names_kernel(announced: PurePosixPath, recorded: str) -> bool:
+    """Whether ``announced`` is the file ``recorded`` stores, as the same path or as its absolute form."""
+
+    kernel = PurePosixPath(recorded)
+    if announced == kernel:
+        return True
+    parts = kernel.parts
+    return len(announced.parts) > len(parts) and announced.parts[-len(parts) :] == parts
+
+
+def _owner_of_kernel(evidence: Path, named: str, kernel_paths: dict[Path, str]) -> Path | None:
+    """The run whose ``kernel_path`` ``named`` is.
+
+    One run that records that path owns the log even when its archive sits outside the workspace. Several runs that
+    record it are still separated by the workspace path the line announces.
+    """
+
+    announced = PurePosixPath(named)
+    exact = sorted(
+        experiments for experiments, path in kernel_paths.items() if path and PurePosixPath(path) == announced
+    )
+    if len(exact) > 1:
+        _refuse_ambiguous(evidence, named, exact)
+    if len(exact) == 1:
+        return exact[0]
+    matches = sorted(
+        experiments for experiments, path in kernel_paths.items() if path and _names_kernel(announced, path)
+    )
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) < 2:
+        return None
+    candidates = {
+        experiments: announced.parts[: -len(PurePosixPath(kernel_paths[experiments]).parts)]
+        for experiments in matches
+    }
+    owner = _owner(evidence, named, candidates)
+    if owner is None:
+        _refuse_ambiguous(evidence, named, matches)
+    return owner
 
 
 def _log_owners(log: _LoopLog, kernel_paths: dict[Path, str]) -> set[Path]:
     """The runs whose kernel ``log`` announces; ``kernel_paths`` holds each run's kernel path in its workspace."""
 
-    inners = {experiments: PurePosixPath(path).parts for experiments, path in kernel_paths.items() if path}
     owners: set[Path] = set()
     for kernel in log.kernels:
-        named = PurePosixPath(kernel.strip()).parts
-        candidates = {
-            experiments: named[: -len(inner)] for experiments, inner in inners.items() if named[-len(inner) :] == inner
-        }
-        owner = _owner(log.path, kernel.strip(), candidates)
+        owner = _owner_of_kernel(log.path, kernel.strip(), kernel_paths)
         if owner is not None:
             owners.add(owner)
     return owners
