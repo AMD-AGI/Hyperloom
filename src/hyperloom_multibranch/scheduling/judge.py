@@ -35,6 +35,7 @@ from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.intent import Intent
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, PendingCandidate, TestRecord
+from hyperloom_multibranch.contracts.toolbox import BuildStatus
 from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
 from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS
@@ -171,6 +172,8 @@ A branch's queued_intents are its explore tests requested and not measured yet, 
 intent it tests and waiting_seconds since it was requested. Stopping the branch does not withdraw them: they run to
 their end and their results are recorded, but no specialist of the branch acts on them any more, so weigh a stop
 against the tests the branch is about to report.
+A branch's waiting_builds are the native builds its tests wait for before they can run, each with its component and
+eta_seconds: a branch whose tests wait only on them is building, not stalled.
 Stop the session only when no branch is expected to gain anything worth the remaining time, and weigh that against
 explore_remaining_seconds: while hours of it are left and slots are free, a branch out of ideas is one to stop and
 replace, so refill the free slots rather than stop the session. Nothing measures convergence, so an early stop is
@@ -226,7 +229,9 @@ class JudgeView:
     K of to why, as :func:`held_branches` finds them when the view is built; it is what the prompt shows.
     ``frontier_policy`` is the policy the frontier scores rest on, with its label and evidence, and
     ``frontier_scorer`` the label of the scorer that scores now, ``frontier-v1`` once the chosen one fell back.
-    ``queued`` maps a branch to its explore tests not measured yet, as :func:`queued_intents` finds them.
+    ``queued`` maps a branch to its explore tests not measured yet, as :func:`queued_intents` finds them, and
+    ``building`` to the native builds not ready yet that its tests in flight wait for; a branch with none is not in
+    either.
     """
 
     now: float
@@ -259,6 +264,7 @@ class JudgeView:
     frontier_policy: PolicyChoice
     frontier_scorer: str
     queued: Mapping[str, tuple[QueuedIntent, ...]]
+    building: Mapping[str, tuple[BuildStatus, ...]]
 
 
 @dataclass(frozen=True)
@@ -424,6 +430,7 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None, view: Judge
         "k": entry.k,
         "similar_to": [asdict(item) for item in view.similar_to.get(entry.branch, ())],
         "queued_intents": [_queued_row(item, view.now) for item in view.queued.get(entry.branch, ())],
+        "waiting_builds": [_build_row(build) for build in view.building.get(entry.branch, ())],
     }
     if entry.branch == INTEGRATION_BRANCH:
         row["profile_running"] = view.profile_running
@@ -442,6 +449,10 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None, view: Judge
         row["specialist"] = asdict(specialist)
     row.update(_progress_row(progress))
     return row
+
+
+def _build_row(build: BuildStatus) -> dict[str, object]:
+    return {"component": build.component, "eta_seconds": round(build.eta_seconds)}
 
 
 def _queued_row(queued: QueuedIntent, now: float) -> dict[str, object]:

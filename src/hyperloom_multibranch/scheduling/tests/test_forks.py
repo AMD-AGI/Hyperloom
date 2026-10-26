@@ -64,7 +64,7 @@ async def test_an_accepted_fork_names_its_branch_and_waits_on_the_desk_until_rel
         "b01",
         2,
     )
-    assert "b02" not in roster.quota_policy(()).branch_k
+    assert "b02" not in roster.quota_policy((), {}).branch_k
     assert desk.waiting() == desk.waiting() == (AdmittedBranch("b02", "c1"),)
     desk.release("b02")
     assert desk.waiting() == ()

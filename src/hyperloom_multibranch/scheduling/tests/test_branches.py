@@ -550,6 +550,18 @@ async def test_a_session_end_stop_withdraws_the_branchs_tests(tmp_path: Path) ->
     assert "b01" not in bench.toolbox.policies[-1].branch_k
 
 
+async def test_the_quota_gives_each_listed_branch_the_deadline_it_was_started_with_and_none_once_it_drops_out(
+    tmp_path: Path,
+) -> None:
+    bench = await Bench(tmp_path).rooted()
+    await bench.control.open_branches(2, 1, BatchStart(BranchOrigin.FIRST_BATCH, bench.root, OPEN_BY))
+    assert dict(bench.toolbox.policies[-1].branch_deadline) == {"b01": OPEN_BY, "b02": OPEN_BY}
+
+    await bench.control.stop_branch("b02", BranchStop(StopCause.JUDGE, "flat", NOW))
+
+    assert dict(bench.toolbox.policies[-1].branch_deadline) == {"b01": OPEN_BY}
+
+
 async def test_k_orders_skip_stopped_branches_and_clamp(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).rooted()
     await bench.control.open_branches(2, 1, BatchStart(BranchOrigin.FIRST_BATCH, bench.root, OPEN_BY))

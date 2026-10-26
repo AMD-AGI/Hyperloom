@@ -573,6 +573,7 @@ class Session:
             self._events,
             self._lifecycle,
             self._frontier,
+            self._toolbox,
         )
         return Explorer(self._context, self._branches, self._integrator, steering)
 

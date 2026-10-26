@@ -27,8 +27,9 @@ runtime itself failed leaves nothing to stop. A call to a specialist gets
 of the stop still runs, and the session stop asks once more for every stop that was not confirmed. The commits a
 specialist already made stay in the notebook, so the integrator may still merge them. The roster entry is stopped
 first, so an admitted branch whose parent is being stopped is never started. The toolbox gets a branch's K
-before its specialist starts, so the first tests it submits already queue by it. A peer failure on one branch never
-ends the session: a branch that does not open, its specialist's start included, within
+before its specialist starts, so the first tests it submits already queue by it, together with the time its
+exploration ends, past which the toolbox refuses a test whose native builds would not leave it time to run. A peer
+failure on one branch never ends the session: a branch that does not open, its specialist's start included, within
 :data:`SPECIALIST_START_SECONDS` or by the deadline its caller gives, whichever comes first, is withdrawn like a
 stopped one.
 """
@@ -125,6 +126,7 @@ class BranchControl:
         self._desk = context.desk
         self._reserved = context.reserved
         self._specialists: set[str] = set()
+        self._deadlines: dict[str, float] = {}
 
     async def integration_head(self) -> str:
         return await self._repo.head(INTEGRATION_BRANCH)
@@ -356,7 +358,7 @@ class BranchControl:
         return failures
 
     async def push_quota(self) -> None:
-        await self._toolbox.set_policy(self._roster.quota_policy(await self._busy_branches()))
+        await self._toolbox.set_policy(self._roster.quota_policy(await self._busy_branches(), self._deadlines))
 
     async def _busy_branches(self) -> frozenset[str]:
         """The branches the toolbox holds a test of: waiting for its builds, queued or running."""
@@ -383,6 +385,7 @@ class BranchControl:
             )
             await self._notebook.record_lineage(opened)
             await self._repo.create_branch(entry.branch, start_commit)
+        self._deadlines[entry.branch] = deadline
         await self.push_quota()
         self._specialists.add(entry.branch)
         task = BranchTask(repair=launch.repair, direction=launch.direction, agent=launch.agent, deadline=deadline)

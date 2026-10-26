@@ -14,8 +14,9 @@ import pytest
 
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom.contracts.measurement import Purpose, TestKind, Validity
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, Validity
+from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom_multibranch.contracts.notebook.records import (
     BranchProgress,
     FrontierScore,
@@ -23,13 +24,15 @@ from hyperloom_multibranch.contracts.notebook.records import (
     TestRecord,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis, MergeOutcome
+from hyperloom_multibranch.contracts.toolbox import BuildStatus
 from hyperloom_multibranch.contracts.judgement import Verdict
-from hyperloom_multibranch.notebook import STALL_TESTS
+from hyperloom_multibranch.notebook import STALL_TESTS, LocalNotebook
 from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
 from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, SETTLED_TESTS, FrontierPolicy
 from hyperloom_multibranch.notebook.rsi.stranded import StrandedCommit, StrandedLead
 from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
 from hyperloom_multibranch.scheduling.branches import REPAIR_PROTECTED_SECONDS
+from hyperloom_multibranch.scheduling.build_waits import waiting_builds
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, EventKind, SessionEvent
 from hyperloom_multibranch.scheduling.judge import (
@@ -63,6 +66,8 @@ from hyperloom_multibranch.scheduling.roster import (
 )
 from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
+from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
+from hyperloom_multibranch.toolbox.fake_builds import FakeBuildDriver
 
 METRIC = "output_throughput"
 NOW = 1000.0
@@ -124,6 +129,7 @@ def _view(
     held: dict[str, HoldReason] | None = None,
     candidates: tuple[PendingCandidate, ...] = (),
     queued: dict[str, tuple[QueuedIntent, ...]] | None = None,
+    building: dict[str, tuple[BuildStatus, ...]] | None = None,
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
@@ -170,6 +176,7 @@ def _view(
         frontier_policy=CHOSEN,
         frontier_scorer=FRONTIER_V1_LABEL,
         queued=queued or {},
+        building=building or {},
     )
 
 
@@ -927,3 +934,27 @@ def test_a_branch_row_shows_its_explore_tests_not_measured_yet_with_their_intent
     assert "A branch's queued_intents are its explore tests requested and not measured yet, queued or running" in prose
     assert "Stopping the branch does not withdraw them: they run to their end and their results are recorded" in prose
     assert "weigh a stop against the tests the branch is about to report" in prose
+
+
+async def test_a_branch_waiting_on_a_native_build_shows_it_once_with_its_component_and_eta(tmp_path: Path) -> None:
+    driver = FakeBuildDriver(eta=412.6)
+    driver.gate.clear()
+    driver.need(lambda test: test.branch_id == "b01", "aiter", "fused-moe")
+    toolbox = FakeToolbox(
+        notebook=LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox")), wiring=FakeWiring(builds=driver)
+    )
+    for branch, args in (("b01", "--a"), ("b01", "--b"), ("b02", "--c")):
+        change = RecipeDelta(config=ConfigDelta(server_args=args))
+        await toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, branch, "c-root", delta=change))
+    snapshot = await LocalNotebook(tmp_path / "nb", Writer(Role.OBSERVER, "judge")).snapshot()
+
+    building = await waiting_builds(toolbox, snapshot.records)
+
+    assert {branch: [build.component for build in builds] for branch, builds in building.items()} == {"b01": ["aiter"]}
+    rows = {row["branch"]: row for row in _state(_view(building=building))["branches"]}
+    assert rows["b01"]["waiting_builds"] == [{"component": "aiter", "eta_seconds": 413}]
+    assert rows["b02"]["waiting_builds"] == []
+    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
+    assert "a branch whose tests wait only on them is building, not stalled" in prose
+    driver.gate.set()
+    await toolbox.close()

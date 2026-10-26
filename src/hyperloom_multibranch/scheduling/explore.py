@@ -24,7 +24,8 @@ events since its last call, how far each branch lies behind the integration head
 commits fail to merge, whether a profile of the integration head runs, the GPU hours and the LLM dollars the
 specialists and the scheduler itself spent so far, and what is known of each running branch's specialist (given up,
 stopped because its judging failed, its heartbeat lost
-again and again) and which explore tests each branch has queued, and decides what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed,
+again and again), which explore tests each branch has queued and which native builds its tests wait for, and decides
+what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed,
 and a branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background
 task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the
 integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and no merge
@@ -47,12 +48,14 @@ from dataclasses import dataclass
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle, SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, priced_usd
+from hyperloom_multibranch.contracts.toolbox import Toolbox
 from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierScoring
 from hyperloom_multibranch.notebook.rsi.session import judge_history
 from hyperloom_multibranch.notebook.rsi.stranded import stranded_leads
 from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR
 from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, BatchStart, BranchControl
+from hyperloom_multibranch.scheduling.build_waits import waiting_builds
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
@@ -133,7 +136,8 @@ class Steering:
     the archived sessions that progress holds, the dashboard rebuilt once the opening batch is open and after every
     later judge call, the signals of whether a branch opened now would still pay off, which running branches made
     much the same change, the events that have the judge asked at once, the specialist lifecycle, which reports
-    each running branch's specialist, and the frontier policy ``progress`` scores with and why it was chosen."""
+    each running branch's specialist, the frontier policy ``progress`` scores with and why it was chosen, and the
+    toolbox the native builds each branch's tests wait for are read from."""
 
     judge: Judge
     interval_seconds: float
@@ -144,6 +148,7 @@ class Steering:
     events: SessionEvents
     specialists: SpecialistLifecycle
     frontier_policy: PolicyChoice
+    toolbox: Toolbox
 
 
 def spent_gpu_seconds(progress: Iterable[BranchProgress]) -> float:
@@ -186,6 +191,7 @@ class Explorer:
         self._events = steering.events
         self._specialists = steering.specialists
         self._frontier_policy = steering.frontier_policy
+        self._toolbox = steering.toolbox
 
     async def run(self, window: ExploreWindow) -> SessionStopReason:
         """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns.
@@ -345,6 +351,7 @@ class Explorer:
             frontier_policy=self._frontier_policy,
             frontier_scorer=self._progress.guard.label,
             queued=queued_intents(snapshot.records, snapshot.intents),
+            building=await waiting_builds(self._toolbox, snapshot.records),
         )
         try:
             decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)
