@@ -30,6 +30,16 @@ REPO="${HL_REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/
 
 mkdir -p "$WORK"
 
+# The skill's version and the reviewer's model, which the card's Checked line names. The version is this directory's
+# tree hash at HEAD, so two cards that name the same one ran the same skill text; uncommitted edits to it add +dirty.
+SKILL_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SKILL_TREE=$(git -C "$SKILL_DIR" rev-parse --short=12 HEAD:./) \
+  || die "cannot name this skill's version: $SKILL_DIR is not in a git checkout"
+if [ -n "$(git -C "$SKILL_DIR" status --porcelain -- .)" ]; then
+  SKILL_TREE="$SKILL_TREE+dirty"
+fi
+printf 'skill: %s\nmodel: %s\n' "$SKILL_TREE" "${ANTHROPIC_MODEL:-${PR_REVIEW_MODEL:-unknown}}" > "$WORK/skill.txt"
+
 # GitHub computes mergeability lazily: the first read of a cold PR returns UNKNOWN and only
 # starts the background job. Queried once, meta.txt says UNKNOWN for every PR nobody looked at
 # recently, and the conflict check in SKILL.md Step 8 then never fires on a conflicting PR.
@@ -215,7 +225,7 @@ if [ "$LISTED_PRS" -lt "$OPEN_PRS" ]; then
 fi
 
 for artifact in meta.txt title.txt body.txt diff.txt files.txt numstat.txt commits.txt \
-  base.txt ci.txt comments.txt testfiles.txt docfiles.txt openprs.txt; do
+  base.txt ci.txt comments.txt testfiles.txt docfiles.txt openprs.txt skill.txt; do
   printf '%-16s %s line(s)\n' "$artifact" "$(wc -l < "$WORK/$artifact" | tr -d ' ')"
 done
 

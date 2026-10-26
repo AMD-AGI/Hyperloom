@@ -109,9 +109,15 @@ def _open_prs(total: int) -> list[dict[str, object]]:
 
 
 def _run(
-    tmp_path: Path, open_prs: list[dict[str, object]], count: Literal["answers", "null", "fails"] = "answers"
+    tmp_path: Path,
+    open_prs: list[dict[str, object]],
+    count: Literal["answers", "null", "fails"] = "answers",
+    *,
+    env: dict[str, str] | None = None,
+    fetch: Path = _FETCH,
 ) -> subprocess.CompletedProcess[str]:
-    """fetch.sh for the PR under review, into ``tmp_path / "work"``; ``count`` is how the open-PR count replies."""
+    """``fetch`` (the skill's fetch.sh by default) for the PR under review, into ``tmp_path / "work"``; ``count`` is
+    how the open-PR count replies, and ``env`` adds to fetch.sh's environment."""
     world = tmp_path / "world.json"
     world.write_text(
         json.dumps(
@@ -141,15 +147,16 @@ def _run(
     gh = stub_dir / "gh"
     gh.write_text(_STUB_GH.replace("{python}", sys.executable), encoding="utf-8")
     gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
-    env = {
+    run_env = {
         **os.environ,
         "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
         "HL_REPO": _REPO,
         "GH_STUB_WORLD": str(world),
+        **(env or {}),
     }
     return subprocess.run(
-        ["bash", str(_FETCH), str(_PR), str(tmp_path / "work")],
-        env=env,
+        ["bash", str(fetch), str(_PR), str(tmp_path / "work")],
+        env=run_env,
         capture_output=True,
         text=True,
         check=False,
@@ -191,3 +198,30 @@ def test_a_full_list_whose_open_total_cannot_be_read_stops_the_fetch(
     result = _run(tmp_path, _open_prs(150), count)
     assert result.returncode != 0
     assert not (tmp_path / "work" / "openprs.txt").exists()
+
+
+def test_skill_txt_names_the_model_and_the_skill_directory_tree_that_ran(tmp_path: Path) -> None:
+    result = _run(tmp_path, _open_prs(3), env={"ANTHROPIC_MODEL": "model-under-test"})
+    assert result.returncode == 0, result.stderr
+
+    skill, model = (tmp_path / "work" / "skill.txt").read_text(encoding="utf-8").splitlines()
+    tree = subprocess.run(
+        ["git", "-C", str(_ROOT), "rev-parse", "--short=12", "HEAD:.claude/skills/review-pr"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert skill in (f"skill: {tree}", f"skill: {tree}+dirty")
+    assert model == "model: model-under-test"
+
+
+def test_a_skill_directory_git_cannot_name_stops_the_fetch(tmp_path: Path) -> None:
+    copy = tmp_path / "skill" / "fetch.sh"
+    copy.parent.mkdir()
+    shutil.copy(_FETCH, copy)
+
+    result = _run(tmp_path, _open_prs(3), fetch=copy)
+
+    assert result.returncode != 0
+    assert "cannot name this skill's version" in result.stderr
+    assert not (tmp_path / "work" / "skill.txt").exists()

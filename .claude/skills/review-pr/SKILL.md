@@ -36,6 +36,9 @@ citation, and it goes.
 
 If there are no blocking issues, say so explicitly. Do not manufacture small ones to fill space.
 
+The card closes with its `Checked:` line: what the review read and ran, and the skill version and
+model that ran it.
+
 ## Links out, not restatement
 
 The authoring contract lives in the repo and is not copied here. Read and cite, do not restate:
@@ -79,6 +82,7 @@ Keep the `$WORK` it prints. Read `diff.txt` and `body.txt` before going on.
 | `testfiles.txt` | changed paths under a `tests/` directory |
 | `docfiles.txt` | changed docs, prompts and `.md`/`.rst` paths — empty beside a `src/` change is X3's shape |
 | `openprs.txt` | other open PRs touching the same files — conflicting in-flight work; a `# PARTIAL:` line names what was never compared, reported as `SKIPPED: V4` (rule V4) |
+| `skill.txt` | this skill's version (its directory's tree hash, `+dirty` with uncommitted edits) and the environment's model — the card's `Skill:` is the version, its `Model:` the model your system prompt names, else this one |
 
 ## Step 1b — Select the rules
 
@@ -257,7 +261,7 @@ Blocking issues: <N | none>
 
 deferred: <key> -- <reason>
 
-Checked: <paths and symbols read> | Ran: <commands> | Base: <merge-base sha> | Head: <head sha>
+Checked: <paths and symbols read> | Ran: <commands> | Skill: <skill> | Model: <model> | Base: <merge-base sha> | Head: <head sha>
 ```
 
 At most 5 findings, ranked most-severe first by (severity, then blast radius). A sixth that
@@ -283,16 +287,7 @@ cause" with no chain is not shippable.
 
 ### CI failure classification
 
-Read `ci.txt` before blaming the PR:
-
-- Which sha did each check run against? A success attached to an older head does not cover commits
-  pushed afterwards. A narrow subset of workflows reporting while the diff touches runtime logic
-  means the full matrix has not run.
-- Does the same job fail the same way on `main` in the same window? Then it is baseline, not a
-  regression introduced here.
-- Infra shapes — runner acquisition, artifact upload, dependency resolution, expired logs — are
-  flakes: ask for a rerun rather than quoting them as failures.
-- `mergeable: CONFLICTING` in `meta.txt` is blocking on its own; ask for the rebase.
+Before quoting `ci.txt` or `meta.txt`'s `mergeable`, read [`references/ci.md`](references/ci.md).
 
 ### SKIPPED protocol
 

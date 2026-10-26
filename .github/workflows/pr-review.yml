@@ -212,7 +212,8 @@ jobs:
             line is exactly \`Blocking issues: none\` or \`Blocking issues: N\` with N from 1 to 5.
           - Every finding is \`N. [KEY] summary [verified]\` followed by indented \`Problem:\`, \`Impact:\`
             and \`Action:\` lines. Never use Fix or Files fields and never report an inferred finding.
-            The final line is exactly \`Checked: ... | Ran: ... | Base: ... | Head: ${HEAD_SHA}\`.
+            The final line is exactly \`Checked: ... | Ran: ... | Skill: ... | Model: ... | Base: ... |
+            Head: ${HEAD_SHA}\` on one line, with Skill and Model exactly as skill.txt gives them.
           EOF
           )
           # shellcheck disable=SC2016  # $sub is a jq variable, not a shell one

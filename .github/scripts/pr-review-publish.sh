@@ -4,7 +4,8 @@
 #
 # Publish the review-pr card produced by pr-review.yml.
 #
-# The verdict is applied only when the card parses strictly and still describes the open PR head:
+# The verdict is applied only when the card parses strictly, names the skill version and the model this run recorded
+# in skill.txt, and still describes the open PR head:
 #   Blocking issues: N     -> request-changes review (blocks the merge)
 #   Blocking issues: none  -> dismiss this bot's CHANGES_REQUESTED reviews, then an LGTM comment
 # Anything else posts a note (with the card, if any) and exits 1. The bot never approves.
@@ -59,6 +60,15 @@ if [ "$verdict" = none ]; then
 fi
 grep -qE "^Checked: .+ \\| Ran: .+ \\| Base: [0-9a-f]{7,40} \\| Head: ${REVIEWED_SHA}$" "$CARD" \
   || note "the card has no well-formed verification-depth line for the reviewed head"
+[ -s "$WORK/skill.txt" ] || note "the review left no skill.txt"
+skill=$(sed -n 's/^skill: //p' "$WORK/skill.txt")
+model=$(sed -n 's/^model: //p' "$WORK/skill.txt")
+[[ "$skill" =~ ^[0-9a-f]{12}$ ]] || note "skill.txt names no clean skill version: '${skill}'"
+if [ -z "$model" ] || [ "$model" = unknown ]; then
+  note "skill.txt names no model"
+fi
+grep -qF " | Skill: ${skill} | Model: ${model} | " "$CARD" \
+  || note "the card's Checked line does not name this run's Skill: ${skill} and Model: ${model}"
 
 pr_now=$(gh pr view "$PR" --repo "$REPO" --json state,headRefOid --jq '"\(.state) \(.headRefOid)"') \
   || note "reading the PR state failed"
