@@ -20,12 +20,7 @@ from .remote_recipe._vendor.kb_store_client import (
     KBStoreError,
     KnowledgeSections,
 )
-from .remote_recipe.models import (
-    CONFIG_SECTION,
-    KERNEL_SECTION,
-    PATCH_SECTION,
-    RECIPE_SECTIONS,
-)
+from .remote_recipe.models import CONFIG_SECTION, KERNEL_SECTION, PATCH_SECTION
 from .remote_recipe.sanitize import HOST_ORIGIN_KEY
 
 log = logging.getLogger(__name__)
@@ -462,12 +457,7 @@ def _stack_index(value: Any) -> int:
 
 
 __all__ = [
-    "CONFIG_SECTION",
-    "KERNEL_SECTION",
-    "PATCH_SECTION",
-    "RECIPE_SECTIONS",
     "ConfigKB",
-    "DraftArtifactSink",
     "KernelAgentKB",
     "OverlayProvenance",
     "PatchKB",
