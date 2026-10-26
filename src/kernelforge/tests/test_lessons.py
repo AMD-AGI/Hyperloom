@@ -211,6 +211,7 @@ def test_prompt_stays_quiet_for_a_normal_session():
     [
         ("turn_cap", True),
         ("block_budget_exhausted", True),
+        ("timeout", True),
         ("converged", False),
         ("candidate_submitted", False),
         ("", False),

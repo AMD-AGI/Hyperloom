@@ -29,7 +29,7 @@ SUMMARY_WORD_BUDGET = 250
 SUMMARY_MIN_SECONDS = 120
 
 # Session end reasons that mean the implementer was cut off rather than finishing.
-_CUTOFF_END_REASONS = frozenset({"turn_cap", "block_budget_exhausted"})
+_CUTOFF_END_REASONS = frozenset({"turn_cap", "block_budget_exhausted", "timeout"})
 
 # Marker lines that carry a document's validity condition.
 SCOPE_PREFIX = "SCOPE:"

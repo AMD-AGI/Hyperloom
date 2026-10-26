@@ -866,6 +866,8 @@ def test_make_agent_fn_dispatches_codex_without_claude_model(
             "agent_stopped",
             "candidate_submitted",
         ),
+        # A submission the gate blocked stays in the transcript of a session the wall clock then cut off.
+        ("PLAN: submit, blocked, keep going\nSUBMIT_CANDIDATE", "timeout", "timeout"),
     ],
 )
 def test_final_integrity_verdict_survives_session_end_reason(

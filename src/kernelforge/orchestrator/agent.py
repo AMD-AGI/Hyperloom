@@ -25,7 +25,7 @@ from kernelforge.config import Config, resolve_agent_model
 from kernelforge.workspace.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.loop.insession_gate import GateMeasurement, GateScope, InSessionGate
-from kernelforge.loop.lessons import SessionEnd
+from kernelforge.loop.lessons import SessionEnd, is_cutoff
 from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,
@@ -292,15 +292,22 @@ def _parse_output_tag(text: str, tag: str, cap: int, *, last: bool = False) -> s
 def _session_end_reason(*, submitted: bool, gate, run_result, result_subtype: str) -> str:
     """Why this session ended, for per-iteration analysis.
 
-    The gate allowing a safe candidate handoff is ``candidate_submitted``;
-    otherwise the SDK ended the query -- a turn cap (the subtype mentions
-    ``max_turns``), another SDK error, or the agent voluntarily stopping
-    ("success").
+    A session a budget cut off -- the backend's wall clock or turn cap, or the
+    gate's block budget -- is named for the cut-off: every ``SUBMIT_CANDIDATE``
+    the gate blocked stays in the transcript, so that line alone does not mean
+    the session ended on a handoff. Otherwise the gate allowing a safe
+    candidate handoff is ``candidate_submitted``; else the SDK ended the query
+    -- a turn cap (the subtype mentions ``max_turns``), another SDK error, or
+    the agent voluntarily stopping ("success").
     """
+    gate_reason = gate.end_reason if gate is not None else ""
+    cutoff = next((reason for reason in (run_result.end_reason, gate_reason) if is_cutoff(reason)), "")
+    if cutoff:
+        return cutoff
     if submitted:
         return "candidate_submitted"
-    if gate is not None and gate.end_reason:
-        return gate.end_reason
+    if gate_reason:
+        return gate_reason
     if run_result.end_reason and run_result.end_reason != "agent_stopped":
         return run_result.end_reason
     if "max_turns" in result_subtype:
