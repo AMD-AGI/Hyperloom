@@ -362,6 +362,44 @@ usually telling you about the compiler rather than the model; a targeted
   path with a hand-bumped version constant — that is a correctness invariant resting on
   someone remembering.
 
+  **Caching the package buys you nothing here, so there is nothing to trade away.**
+  No two candidates share a module, so a `.pt2` cache cannot hit within a campaign —
+  the same fact that makes a stable path dangerous makes reuse worthless. And you are
+  not re-paying the compile by skipping it: `TORCHINDUCTOR_CACHE_DIR` is already
+  content-addressed and already shared across processes, so kernel compilation and
+  autotuning are reused a layer down, correctly. A hand-rolled package cache adds
+  aliasing risk on top of caching that already works.
+
+  This has been written the wrong way twice. One module keyed a shared path on a
+  hand-bumped `_ARTIFACT_VERSION`; two candidates in one campaign independently chose
+  `v1` and `v2` and landed in the same directory. Its comment claimed the shared path
+  avoided re-paying the compile, but it had no existence check, so it recompiled every
+  time anyway — paying full price *and* carrying the hazard.
+
+  A discriminator in the filename is not a fix. It has to enumerate every dimension
+  that changes the build — profiling flag, torch and ROCm version, GPU arch, dynamic
+  bounds, and above all the module source, which differs for every candidate. Miss one
+  and you get a silent wrong-artifact load. Per-process cannot alias on any dimension,
+  which is why it is the rule.
+
+- **Leave kernel profiling to the environment.** Whether the generated wrapper carries
+  profiling scopes is set by `TORCHINDUCTOR_CPP_ENABLE_KERNEL_PROFILE`, read from the
+  environment at import. Do not set it in the module, and do not pass `inductor_configs`
+  that pin `cpp.enable_kernel_profile` either way — the harness decides per run, and a
+  module that overrides it makes its own trace unreadable or its own benchmark
+  unrepresentative.
+
+  Worth knowing why it matters: without it, an AOTI trace loses roughly half its
+  kernels. Measured on SmolVLA/gfx1151 — 767 kernel events and 7.2 ms of captured GPU
+  time unprofiled, against 1466 and 13.1 ms profiled, with identical end-to-end
+  latency. The missing kernels are the Inductor-generated ones, so the blind spot is
+  precisely the exported region. The overhead is below measurement noise (under ~1.5%,
+  best estimate zero, n=3 per arm), so this is not a speed/visibility trade.
+
+  Note the profiled and unprofiled builds are different compilations of the same
+  module. That is another way a shared package path aliases, and another reason the
+  per-process rule above is not negotiable.
+
 - **The accuracy gate must run against the artifact**, never against the Python model
   that produced it. Export involves wrapper code, patched methods and custom ops, all
   of which can be wrong in ways tracing does not catch.

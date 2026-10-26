@@ -1136,6 +1136,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase, which covers both configuration search "
         "and source landing. Default: 0.38. "
+        "Raise it when optimization_scope.json declares aoti.enabled: the export gate makes the run depend entirely "
+        "on patch specialists, which have a 60-min floor, and the default share affords one at --max-hours 3. "
         "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(

@@ -1,8 +1,8 @@
 ---
 myst:
     html_meta:
-        "description": "How to optimize your own workload with Hyperloom using --framework custom. Covers the code checkout, the entrypoint contract, the mandatory quality gate, and pinning knobs with --extra-env."
-        "keywords": "Hyperloom, custom framework, scriptable workload, quality gate, AMD GPU, ROCm, framework rewrite, host probe, extra-env, optimization"
+        "description": "How to optimize your own workload with Hyperloom using --framework custom. Covers the code checkout, the entrypoint contract, the mandatory quality gate, pinning knobs with --extra-env, and declaring an ahead-of-time AOTInductor export."
+        "keywords": "Hyperloom, custom framework, scriptable workload, quality gate, AMD GPU, ROCm, framework rewrite, host probe, extra-env, optimization, AOTInductor, torch.export, ahead-of-time export"
 ---
 # Optimize your own Hyperloom workload
 
@@ -393,6 +393,74 @@ through the normal patch path. Coordinator and specialist prompts carry the same
 boundary. Existing custom workloads without this declaration retain their
 current behavior.
 
+### Ask for an ahead-of-time export
+
+Schema 2 adds an optional `aoti` block. Declaring it changes what the campaign is
+for: instead of source rewrites alone, the accepted module compiles the model with
+`torch.export` and `torch._inductor.aoti_compile_and_package`, and the deliverable
+is a module that produces that artifact.
+
+```json
+{
+  "schema_version": 2,
+  "file": "/absolute/workspace/optimization/hyperloom_optimize.py",
+  "aoti": {
+    "enabled": true,
+    "pin_all_others": true,
+    "dynamic_dims": [
+      {
+        "input": "observation.language.tokens",
+        "dim": 1,
+        "min": 8,
+        "max": 128,
+        "derivation": "tokenizer output over the deployed instruction set; longest observed 31, margin to 128"
+      }
+    ]
+  }
+}
+```
+
+| Field | |
+|---|---|
+| `enabled` | bool, default `false`. Everything below is inert without it. |
+| `pin_all_others` | bool, default `true`. Every dimension not listed is exported at its benchmark value. Keep it on: each dynamic dimension is another chance for the compiler to fail to prove something. |
+| `dynamic_dims[].input` | the observation key as your **driver** spells it, not the agent's wrapper argument. |
+| `dynamic_dims[].dim` | 0-indexed axis in that tensor's shape. |
+| `dynamic_dims[].min` / `max` | inclusive bounds, `min >= 1` and `min < max`. |
+| `dynamic_dims[].derivation` | required, free text: how the bound was measured. |
+
+The ranges are yours to set and the agent is forbidden from changing them. Each is
+baked into the artifact permanently, so an input outside it is a hard runtime
+failure in deployment, not a fallback. `derivation` is required because a measured
+bound and a guess are indistinguishable at review time without it; if a dimension
+does not vary in deployment, leave it out and let it be pinned.
+
+A stray `aoti` block under `schema_version: 1` is ignored rather than honoured, so
+bumping the version is what turns the feature on.
+
+**The export is gated.** Until a KEEP lands whose applied module exports,
+`explore`, `sweep`, `profile` and `roofline` are denied with `rule='export_gate'`.
+Those denials in the log are the design working, not a fault. The first export is
+kept on correctness even when it is slower than eager — recorded as
+`keep_reason: export_landed` — because an eager configuration is not a deliverable
+here; later candidates are then graded against that export rather than against
+eager.
+
+**Do not let the module fall back to eager.** The gate's evidence is a static check
+for `aoti_compile_and_package` / `aoti_load_package` in the applied module, which
+cannot tell an export that ran from one a `try/except` swallowed. A fallback
+therefore records a KEEP, and a latency, for a path the deployment will not take.
+
+**Budget for at least two patch specialists.** Under the gate the run depends
+entirely on them, and they have a 60-minute floor. The default
+`--phase-budget-framework-pct` of 0.38 affords one at `--max-hours 3` and none at
+the 2.0 default; preflight warns with the share that would fit two. Two is the
+minimum that allows one failure and one fix.
+
+If the run ends without an export, `stop_reason` is `export_never_landed` whatever
+else ended it, with the original preserved as `ungated_close_reason` and the number
+of attempts in `export_attempts`.
+
 Use filesystem isolation as well as the integration policy: mount the benchmark,
 weights and installed libraries read-only, with a read-only container root and
 no Docker socket. Git metadata, sessions, private candidate worktrees and compiler
@@ -407,6 +475,28 @@ itself -- only the one module ships. The file does not need to live in a git
 repository. Copy just the Python module beside the original script to use it in
 the original runtime; no Hyperloom installation is needed. Runtime validation
 remains the responsibility of that script.
+
+`deployment.json` always reports `"validation": "not_run"`. It is a placeholder,
+not a verdict -- export never executes the module, so nothing is run to validate
+at CLOSE, for any workload. What vouches for the artifact is upstream of it: the
+per-candidate quality gate that every KEEP had to pass, and the source snapshot
+the module is checked against. Do not read the field as a failed check, and do
+not expect it to change.
+
+A module that exports needs more than a copy, and `reports/deployment.json`
+records it under `runtime_requirements`:
+
+| Key | |
+|---|---|
+| `compiles_on_first_call` | export never runs during capture, so the package is built at the destination on the first call — minutes, not milliseconds. `accepted_performance.tput` describes steady state only; the `aoti_first_call_compiles` warning says the same. |
+| `writable_cache_dir` | `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` must point at writable local disk. |
+| `local_tmpdir` | `TMPDIR` must be local disk. On a network filesystem the build's cleanup fails and every load unpacks the whole package there. |
+| `rocm_devel_headers` | building needs the ROCm development package; loading does not. |
+| `pinned_toolchain` | the package is tied to the torch and ROCm build it compiled against. A platform upgrade forces a recompile and a fresh run of your accuracy gate. |
+
+The settings prelude deliberately does not carry the cache paths — they are
+absolute and would not be portable — so the module resolves them itself at the
+destination.
 
 ## Use the optimized model without Hyperloom
 
@@ -521,9 +611,17 @@ custom launch script fails explicitly instead of launching a serving framework.
 | Missing-path error at launch | `--framework-path` or `--benchmark-scripts-dir` not given; `custom` has no shipped entrypoint to fall back on |
 | Entrypoint not resolved | The directory has no `custom_<runner_type>.sh` and does not contain exactly one `.sh` |
 | Run completes but keeps no optimization | The report carries no `quality_gate`, so accuracy scores 0.0 and every candidate is rejected |
+| Log warns `RUN_EVAL is disabled: no per-variant accuracy gate` | Spurious here. `RUN_EVAL` governs the lm-eval harness, which does not apply to a custom workload; accuracy is graded from your own `quality_gate` instead. Check `benchmark_report.json` in a variant's workspace to confirm it ran |
 | Whole budget spent in `PRELUDE` | Credentials not exported from the launching shell; every orchestration turn returns 401 |
 | Specialist patches never land | `--framework-path` not given, so PolicyGate does not recognize the tree |
 | Baseline higher than expected | `--extra-env` pins optimization switches, so the search is incrementing on already-optimized code |
+| `rule='export_gate'` denials | `aoti.enabled` is declared and no export has landed; by design, the gate holds search back until it does |
+| *Every* action denied, reason "the optimization scope is unreadable" | `optimization_scope.json` does not parse, or its `file` does not resolve. The gate fails closed, so nothing runs until it does — check the JSON and the path before assuming Hyperloom is at fault |
+| `stop_reason: export_never_landed` | the run closed without an exporting KEEP; `ungated_close_reason` says what actually ended it, `export_attempts` how many rounds went by |
+| Export gate never opens, budget drains | `--phase-budget-framework-pct` affords fewer than two 60-min patch specialists; preflight warns with the share that fits |
+| `aoti` block appears to do nothing | it is ignored under `schema_version: 1`; bump to 2 |
+| A KEEP recorded at negative delta | the first export is kept on correctness (`keep_reason: export_landed`); later candidates grade against it, not eager |
+| Deployed module is slow on its first call, then fast | it compiles the AOTInductor package at the destination; see `runtime_requirements` |
 
 For failures unrelated to this path, see [Troubleshooting
 Hyperloom](../reference/troubleshooting.md).
