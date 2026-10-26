@@ -11,6 +11,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from hyperloom.orchestrator.actions.executors._git import _git_head_sha
+from hyperloom.orchestrator.actions.executors._patch_git import _git_reset_clean, _git_stash_if_dirty
+from hyperloom.orchestrator.specialists.subprocess_ import _setup_worktree
+
 _INSTALL = Path(__file__).resolve().parents[1] / "assets" / "install.sh"
 _FUNCTIONS = (
     "commit_image_baseline",
@@ -150,3 +154,25 @@ def test_untracked_content_over_the_limit_is_refused(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert _git(repo, "rev-parse", "HEAD") == head
+
+
+def test_a_candidate_reverts_to_the_served_tree(tmp_path: Path) -> None:
+    repo = _pinned(tmp_path)
+
+    assert _git_stash_if_dirty(repo) == ("clean", "")
+    _write(repo / "pkg" / "edited.py", "edited = candidate\n")
+    ok, error = _git_reset_clean(repo, _git_head_sha(repo))
+
+    assert ok, error
+    assert (repo / "pkg" / "edited.py").read_text() == "edited = 2\n"
+    assert (repo / "pkg" / "shipped.py").read_text() == "shipped = 1\n"
+
+
+def test_a_specialist_worktree_is_cut_from_the_served_tree(tmp_path: Path) -> None:
+    repo = _pinned(tmp_path)
+
+    worktree, error = _setup_worktree(repo, tmp_path / "specialist", "specialist/branch")
+
+    assert error == ""
+    assert (worktree / "pkg" / "edited.py").read_text() == "edited = 2\n"
+    assert (worktree / "pkg" / "shipped.py").read_text() == "shipped = 1\n"
