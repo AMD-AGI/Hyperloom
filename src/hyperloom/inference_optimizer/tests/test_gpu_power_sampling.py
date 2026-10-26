@@ -149,8 +149,8 @@ def test_a_node_held_at_its_npm_limit_is_reported_though_no_card_counts_it(monke
 @pytest.mark.parametrize(("power", "held"), [(2587.0, 1.0), (2573.0, 0.0)], ids=["99.5%", "99.0%-"])
 def test_a_sample_counts_as_held_from_99_percent_of_the_limit(monkeypatch, caplog, power, held):
     out = _node_summary(monkeypatch, lambda: (power, 2600.0))
-    assert out["node"]["limited_fraction"] == held
-    assert ("NPM power limit" in caplog.text) is bool(held)
+    warned = "NPM power limit" in caplog.text
+    assert (out["node"]["limited_fraction"], warned) == (held, held > 0)
 
 
 def test_a_limit_that_changed_during_the_phase_is_unread(monkeypatch):
