@@ -273,11 +273,18 @@ def _distinct(
     return kept
 
 
+def near_misses(records: Iterable[TestRecord]) -> int:
+    """How many of ``records`` are explores that kept accuracy and fell short of their bar after gaining more than
+    :data:`NEAR_BAR_SHARE` of it: near misses worth finishing."""
+
+    return sum(1 for record in records if _explore(record) and _near_bar(record))
+
+
 __all__ = [
     "MAX_UNFINISHED",
     "NEAR_BAR_SHARE",
     "STOP_RELEASE_SECONDS",
-    "hinted_gain",
+    "near_misses",
     "refused_replays",
     "unfinished_leads",
 ]

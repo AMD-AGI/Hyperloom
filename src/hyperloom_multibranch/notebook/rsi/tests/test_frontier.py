@@ -16,6 +16,7 @@ from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.peers import Purpose, TestKind, Validity, Verdict
 from hyperloom_multibranch.contracts.notebook.records import (
+    BranchProgress,
     LineageEvent,
     NotebookSnapshot,
     PendingCandidate,
@@ -27,13 +28,22 @@ from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver, Conclus
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeBranch, longest_root_test_seconds
 from hyperloom_multibranch.notebook.rsi.frontier import (
+    CANDIDATE_COMPONENT,
     FALLBACK_COMPONENT,
     FALLBACK_LIMIT,
     FRONTIER_LOG_FORMAT,
     FRONTIER_V1,
     FRONTIER_V1_LABEL,
+    MERGED_COMPONENT,
+    MERGED_GAIN_COMPONENT,
+    NEAR_BAR_COMPONENT,
     OBSERVATION_SECONDS,
+    PROBATION_COMPONENT,
+    PROBATION_SHARE,
     SETTLED_TESTS,
+    STALL_BAR_COMPONENT,
+    STALLED_COMPONENT,
+    STRANDED_COMPONENT,
     WINDOW_SECONDS,
     Estimate,
     FrontierPolicy,
@@ -42,15 +52,20 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     ScorerError,
     ScorerGuard,
     ScoringContext,
+    StallBar,
+    StopRule,
     checked_estimate,
+    drawn_for_probation,
     is_young,
     paced,
     remaining_prior,
     score_at,
     score_progress,
     score_with,
+    stall_evidence,
     trend_start,
 )
+from hyperloom_multibranch.notebook.rsi.history import DEFAULT_STALL_TESTS
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions, task_conditions, task_similarity
 from hyperloom_multibranch.notebook.rsi.tests.trees import branch, tree
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, judgement, profile, request, result
@@ -229,6 +244,80 @@ def test_the_trend_reaches_back_to_the_branchs_last_four_ended_explore_tests() -
     assert FRONTIER_V1.estimate(b09, 467 * minute, context, Readings()).components["trend_pct"] == pytest.approx(12.40)
     assert FRONTIER_V1.estimate(b03, 163 * minute, context, Readings()).components["trend_pct"] == 0.0
     assert trend_start(branch("old", []), 467 * minute, window.window_seconds) == 430 * minute
+
+
+def _row(snapshot: NotebookSnapshot, name: str = "s1") -> BranchProgress:
+    return next(row for row in snapshot.progress if row.branch == name)
+
+
+def test_each_scored_branch_carries_its_stall_evidence(snapshot: NotebookSnapshot) -> None:
+    s1 = _scores(snapshot)["s1"]
+
+    assert s1 is not None
+    components = s1.components
+    assert (components[STALLED_COMPONENT], components[STALL_BAR_COMPONENT]) == (1.0, float(DEFAULT_STALL_TESTS))
+    assert (components[MERGED_COMPONENT], components[MERGED_GAIN_COMPONENT]) == (1.0, pytest.approx(4.0))
+    assert (components[NEAR_BAR_COMPONENT], components[CANDIDATE_COMPONENT]) == (0.0, 0.0)
+    assert PROBATION_COMPONENT not in components and STRANDED_COMPONENT not in components
+
+
+def test_a_stalled_branch_is_a_stop_candidate_unless_a_candidate_or_its_grace_holds_it(
+    snapshot: NotebookSnapshot,
+) -> None:
+    row, never_drawn = _row(snapshot), StallBar(StopRule(probation_share=0.0), 1)
+    waiting = dataclasses.replace(row, pending=(PendingCandidate("r9", "r9c", "c1", METRIC, 1100.0, 5.0),))
+
+    assert stall_evidence(snapshot, row, METRIC, never_drawn, young=False)[CANDIDATE_COMPONENT] == 1.0
+    assert stall_evidence(snapshot, row, METRIC, never_drawn, young=True)[CANDIDATE_COMPONENT] == 0.0
+    assert stall_evidence(snapshot, waiting, METRIC, never_drawn, young=False)[CANDIDATE_COMPONENT] == 0.0
+    assert (
+        stall_evidence(snapshot, row, METRIC, StallBar(StopRule(probation_share=0.0), 2), young=False)[
+            CANDIDATE_COMPONENT
+        ]
+        == 0.0
+    )
+
+
+def test_a_stall_drawn_for_probation_runs_its_extra_tests_first_the_same_draw_every_round(
+    snapshot: NotebookSnapshot,
+) -> None:
+    row = _row(snapshot)
+    always, short = (
+        StallBar(StopRule(probation_share=1.0), 1),
+        StallBar(StopRule(probation_share=1.0, probation_tests=0), 1),
+    )
+    drawn = stall_evidence(snapshot, row, METRIC, always, young=False)
+
+    assert (drawn[PROBATION_COMPONENT], drawn[CANDIDATE_COMPONENT]) == (1.0, 0.0)
+    assert stall_evidence(snapshot, row, METRIC, short, young=False)[CANDIDATE_COMPONENT] == 1.0
+    stalls = [f"s{n}" for n in range(400)]
+    draws = [drawn_for_probation(snapshot, name, "c1", PROBATION_SHARE) for name in stalls]
+    assert draws == [drawn_for_probation(snapshot, name, "c1", PROBATION_SHARE) for name in stalls]
+    assert 60 < sum(draws) < 140
+    assert drawn_for_probation(snapshot, "s1", "c1", 1.0) and not drawn_for_probation(snapshot, "s1", "c1", 0.0)
+
+
+def test_a_commit_that_failed_to_merge_does_not_end_the_stall(snapshot: NotebookSnapshot) -> None:
+    failed = tuple(
+        dataclasses.replace(item, merged_into=None, first_failed_at=1.0) if item.commit_id == "c1" else item
+        for item in snapshot.committed
+    )
+    unmerged = dataclasses.replace(snapshot, committed=failed)
+    evidence = stall_evidence(unmerged, _row(unmerged), METRIC, StallBar(StopRule(), 6), young=False)
+
+    assert (evidence[STALLED_COMPONENT], evidence[MERGED_COMPONENT]) == (2.0, 0.0)
+
+
+def test_a_near_miss_among_the_last_tests_holds_the_branch(snapshot: NotebookSnapshot) -> None:
+    near = judgement(0.8, ("r4",), verdict=Verdict.FLAT, threshold_pct=1.0)
+    records = tuple(
+        dataclasses.replace(record, judgement=near) if record.request_id == "r4" else record
+        for record in snapshot.records
+    )
+    missed = dataclasses.replace(snapshot, records=records)
+    evidence = stall_evidence(missed, _row(missed), METRIC, StallBar(StopRule(probation_share=0.0), 1), young=False)
+
+    assert (evidence[NEAR_BAR_COMPONENT], evidence[CANDIDATE_COMPONENT]) == (1.0, 0.0)
 
 
 def test_an_archived_branch_without_judged_times_keeps_the_floor_for_one_window_only() -> None:

@@ -37,6 +37,15 @@ The formula is a prototype: what the score means is the scheduler's call (gongzh
 :func:`score_with` scores with any scorer and :func:`score_at` with ``frontier-v1``, on a branch as an archived tree
 has it, so the live scoring and the calibration score alike.
 
+Beside every score of a running branch the scoring writes its stall evidence (:func:`stall_evidence`), the facts the
+judge's stop rule turns on: ``stalled_tests``, its tests judged since its last commit that did not fail to merge,
+against the bar ``stall_bar`` (:class:`StopRule`, the stall odds of :mod:`rsi.history` by default);
+``merged_commits`` and ``merged_gain_pct``, what of it reached the integration branch; ``near_bar_tests`` and
+``stranded_lead_pct``, the leads it holds; and ``stop_candidate``, 1 when it has stalled past the bar with none of
+those, no candidate waiting for its confirm and its grace over. A ``probation_share`` of the candidates is drawn,
+once a stall, to run ``probation_tests`` more first, with ``probation`` 1 meanwhile: what such a branch does next is
+how the stop rule learns whether stopping it was right.
+
 Given a ``log`` path, the scoring appends one :data:`FRONTIER_LOG_FORMAT` line per round it scored anything: when, on
 the session clock too, the parameters the calibration varies, the scorer, and each scored branch's spend, head value
 and score. Checking the scores against the gains that followed is how they get calibrated.
@@ -44,6 +53,7 @@ and score. Checking the scores against the gains that followed is how they get c
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import re
@@ -61,11 +71,13 @@ from hyperloom_multibranch.contracts.notebook.records import (
     LineageView,
     NotebookSnapshot,
     OpShares,
+    TestRecord,
     amdahl_ceiling_pct,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, FrontierBasis
+from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, CommitOrigin, FrontierBasis
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.local.files import encode_json
+from hyperloom_multibranch.notebook.local.unfinished import near_misses
 from hyperloom_multibranch.notebook.rsi.archive import (
     SearchTree,
     TreeBranch,
@@ -74,7 +86,9 @@ from hyperloom_multibranch.notebook.rsi.archive import (
     similar_trees,
     tree_from_snapshot,
 )
+from hyperloom_multibranch.notebook.rsi.history import HORIZON_TESTS, stall_odds
 from hyperloom_multibranch.notebook.rsi.similarity import MIN_SIMILARITY, TaskConditions
+from hyperloom_multibranch.notebook.rsi.stranded import stranded_leads
 
 log = logging.getLogger(__name__)
 
@@ -105,10 +119,37 @@ HEADROOM_COMPONENT = "headroom_pct"
 AMDAHL_COMPONENT = "amdahl_ceiling_pct"
 #: Set to 1 in the components of a branch ``frontier-v1`` scored because the session's scorer failed on it.
 FALLBACK_COMPONENT = "scorer_fallback"
-#: The components the envelope and the guard write, which a scorer's estimate may not hold.
+STALLED_COMPONENT = "stalled_tests"
+STALL_BAR_COMPONENT = "stall_bar"
+MERGED_COMPONENT = "merged_commits"
+MERGED_GAIN_COMPONENT = "merged_gain_pct"
+NEAR_BAR_COMPONENT = "near_bar_tests"
+STRANDED_COMPONENT = "stranded_lead_pct"
+CANDIDATE_COMPONENT = "stop_candidate"
+PROBATION_COMPONENT = "probation"
+#: The stall evidence's components, written beside every score of a running branch.
+EVIDENCE_COMPONENTS = frozenset(
+    {
+        STALLED_COMPONENT,
+        STALL_BAR_COMPONENT,
+        MERGED_COMPONENT,
+        MERGED_GAIN_COMPONENT,
+        NEAR_BAR_COMPONENT,
+        STRANDED_COMPONENT,
+        CANDIDATE_COMPONENT,
+        PROBATION_COMPONENT,
+    }
+)
+#: The components the envelope, the guard and the stall evidence write, which a scorer's estimate may not hold.
 RESERVED_COMPONENTS = frozenset(
     {REPAIRING_COMPONENT, PENDING_COMPONENT, HEADROOM_COMPONENT, AMDAHL_COMPONENT, FALLBACK_COMPONENT}
+    | EVIDENCE_COMPONENTS
 )
+#: The share of stop candidates drawn for probation, once a stall.
+PROBATION_SHARE = 0.25
+#: How many judged tests past the bar a branch drawn for probation runs before it is a stop candidate: the horizon
+#: the stall odds read a commit within, so what it does then measures them.
+PROBATION_TESTS = HORIZON_TESTS
 #: How many failures of its scorer a session takes before ``frontier-v1`` scores the rest of it.
 FALLBACK_LIMIT = 3
 
@@ -458,11 +499,112 @@ class ScorerGuard:
             self._on_fallback(why)
 
 
+@dataclass(frozen=True)
+class StopRule:
+    """When a running branch is a stop candidate: ``stall_tests`` judged tests past its last commit that did not fail
+    to merge, ``None`` for the bar the stall odds set each round (:func:`~.history.stall_odds`, the session's own
+    branches counted in); a ``probation_share`` of the candidates, drawn once a stall, runs ``probation_tests`` more
+    before it is one."""
+
+    stall_tests: int | None = None
+    probation_share: float = PROBATION_SHARE
+    probation_tests: int = PROBATION_TESTS
+
+
+@dataclass(frozen=True)
+class StallBar:
+    """The stop rule as one round applies it: the ``rule``, and the ``bar`` it stands at this round."""
+
+    rule: StopRule
+    bar: int
+
+
+def _last_mergeable_commit(snapshot: NotebookSnapshot, branch: str) -> tuple[str, float]:
+    """The branch's last commit that did not fail to merge, and when it was made; ``("", -inf)`` before any."""
+
+    failed = {
+        item.commit_id for item in snapshot.committed if item.first_failed_at is not None and item.merged_into is None
+    }
+    made = [
+        node
+        for node in snapshot.lineage.commits
+        if node.branch == branch and node.origin is not CommitOrigin.ROOT and node.commit_id not in failed
+    ]
+    last = max(made, key=lambda node: node.at, default=None)
+    return (last.commit_id, last.at) if last is not None else ("", -math.inf)
+
+
+def _judged_since(snapshot: NotebookSnapshot, branch: str, since: float) -> list[TestRecord]:
+    judged = [
+        record
+        for record in snapshot.records
+        if record.request.branch == branch
+        and record.judged
+        and record.judged_at is not None
+        and record.judged_at > since
+    ]
+    return sorted(judged, key=lambda record: record.judged_at or 0.0)
+
+
+def drawn_for_probation(snapshot: NotebookSnapshot, branch: str, anchor: str, share: float) -> bool:
+    """Whether the stall of ``branch`` since its commit ``anchor`` (``""`` before any) is drawn for probation, with
+    chance ``share``: the same draw every round of the stall."""
+
+    session = snapshot.profile.session_id if snapshot.profile is not None else ""
+    digest = hashlib.sha256(f"{session}:{branch}:{anchor}".encode()).hexdigest()
+    return int(digest, 16) < share * 16 ** len(digest)
+
+
+def stall_evidence(
+    snapshot: NotebookSnapshot, row: BranchProgress, metric: str, stall: StallBar, young: bool
+) -> dict[str, float]:
+    """The stall evidence of the running branch ``row``, ``young`` while its grace lasts.
+
+    The stall counts the tests judged since the branch's last commit that did not fail to merge, or since it opened.
+    A branch holds a near-bar lead when one of its last ``stall.bar`` judged tests is a near miss
+    (:func:`~hyperloom_multibranch.notebook.local.unfinished.near_misses`), and a stranded one when its head leads
+    integration over the bar on commits that did not merge (:func:`~.stranded.stranded_leads`). A branch with either,
+    a candidate waiting for its confirm, or its grace, is no stop candidate however long it stalled.
+    """
+
+    anchor, since = _last_mergeable_commit(snapshot, row.branch)
+    judged = _judged_since(snapshot, row.branch, since)
+    recent = judged[-stall.bar :] if stall.bar > 0 else []
+    near = near_misses(recent)
+    merged = [item for item in snapshot.committed if item.branch == row.branch and item.merged_into is not None]
+    stranded = next((lead.lead_pct for lead in stranded_leads(snapshot, metric) if lead.branch == row.branch), None)
+    evidence = {
+        STALLED_COMPONENT: float(len(judged)),
+        STALL_BAR_COMPONENT: float(stall.bar),
+        MERGED_COMPONENT: float(len(merged)),
+        MERGED_GAIN_COMPONENT: sum(item.gain_pct for item in merged),
+        NEAR_BAR_COMPONENT: float(near),
+    }
+    if stranded is not None:
+        evidence[STRANDED_COMPONENT] = stranded
+    held = young or bool(row.pending) or near > 0 or stranded is not None
+    stalled = len(judged) >= stall.bar
+    probation = (
+        not held
+        and stalled
+        and len(judged) < stall.bar + stall.rule.probation_tests
+        and drawn_for_probation(snapshot, row.branch, anchor, stall.rule.probation_share)
+    )
+    evidence[CANDIDATE_COMPONENT] = float(stalled and not held and not probation)
+    if probation:
+        evidence[PROBATION_COMPONENT] = 1.0
+    return evidence
+
+
 def score_branch(
-    snapshot: NotebookSnapshot, row: BranchProgress, context: ScoringContext, guard: ScorerGuard | None = None
+    snapshot: NotebookSnapshot,
+    row: BranchProgress,
+    context: ScoringContext,
+    guard: ScorerGuard | None = None,
+    stall: StallBar | None = None,
 ) -> FrontierScore:
     """The frontier score of one running specialist branch of ``context.tree``, the session's own search tree, by
-    ``guard``'s scorer, ``frontier-v1`` without one."""
+    ``guard``'s scorer, ``frontier-v1`` without one; with ``stall``, its stall evidence beside it."""
 
     if context.tree is None:
         raise ValueError("a running branch is scored on its session's search tree")
@@ -476,7 +618,12 @@ def score_branch(
         pending_pct=_pending_pct(snapshot, row, policy.metric),
         repairing_pct=_repairing_pct(snapshot, row, policy.metric),
     )
-    return (guard or ScorerGuard()).score(branch, snapshot.taken_at - session_start(snapshot), context, readings)
+    t_s = snapshot.taken_at - session_start(snapshot)
+    score = (guard or ScorerGuard()).score(branch, t_s, context, readings)
+    if stall is None:
+        return score
+    evidence = stall_evidence(snapshot, row, policy.metric, stall, is_young(branch, t_s, policy))
+    return replace(score, components={**score.components, **evidence})
 
 
 def _over_head(snapshot: NotebookSnapshot, row: BranchProgress, metric: str, values: Sequence[float]) -> float | None:
@@ -512,9 +659,11 @@ def score_progress(
     history: tuple[SearchTree, ...],
     policy: FrontierPolicy,
     guard: ScorerGuard | None = None,
+    rule: StopRule | None = None,
 ) -> tuple[BranchProgress, ...]:
     """The notebook's progress, each running branch the judge steers scored by ``guard``'s scorer (``frontier-v1``
-    without one); unscored without a profile or a baseline."""
+    without one), with its stall evidence under ``rule`` (:class:`StopRule`'s defaults without one); unscored
+    without a profile or a baseline."""
 
     try:
         tree = tree_from_snapshot(snapshot, policy.metric)
@@ -522,9 +671,12 @@ def score_progress(
         return snapshot.progress
     context = ScoringContext(tree.task, history, paced(policy, tree.longest_root_test_seconds), tree)
     scoring = guard or ScorerGuard()
+    stop = rule or StopRule()
+    bar = stop.stall_tests if stop.stall_tests is not None else stall_odds(history, tree.task, session=tree).stall_tests
+    stall = StallBar(stop, bar)
     steered = {branch.name for branch in tree.branches if branch.steered}
     return tuple(
-        replace(row, frontier=score_branch(snapshot, row, context, scoring))
+        replace(row, frontier=score_branch(snapshot, row, context, scoring, stall))
         if row.running and row.branch in steered
         else row
         for row in snapshot.progress
@@ -574,10 +726,11 @@ class FrontierScoring(ProgressQuery):
     history: tuple[SearchTree, ...] = ()
     log: Path | None = None
     guard: ScorerGuard = field(default_factory=ScorerGuard)
+    stop_rule: StopRule = field(default_factory=StopRule)
 
     async def progress(self) -> tuple[BranchProgress, ...]:
         snapshot = await self.notebook.snapshot()
-        rows = score_progress(snapshot, self.history, self.policy, self.guard)
+        rows = score_progress(snapshot, self.history, self.policy, self.guard, self.stop_rule)
         if self.log is not None:
             policy = paced(self.policy, longest_root_test_seconds(snapshot))
             line = frontier_log_line(snapshot, rows, policy, self.guard.label)
@@ -601,23 +754,34 @@ class FrontierScoring(ProgressQuery):
 
 __all__ = [
     "AMDAHL_COMPONENT",
+    "CANDIDATE_COMPONENT",
     "CORE_BASES",
+    "EVIDENCE_COMPONENTS",
     "FALLBACK_COMPONENT",
     "FALLBACK_LIMIT",
     "FRONTIER_LOG_FORMAT",
     "FRONTIER_V1",
     "FRONTIER_V1_LABEL",
     "HEADROOM_COMPONENT",
+    "MERGED_COMPONENT",
+    "MERGED_GAIN_COMPONENT",
     "MIN_EFFECTIVE_SESSIONS",
+    "NEAR_BAR_COMPONENT",
     "NEW_BRANCH_FLOOR_PCT",
     "OBSERVATION_FLOOR_PCT",
     "OBSERVATION_SECONDS",
     "PENDING_COMPONENT",
+    "PROBATION_COMPONENT",
+    "PROBATION_SHARE",
+    "PROBATION_TESTS",
     "REFERENCE_BUDGET_SECONDS",
     "REPAIRING_COMPONENT",
     "RESERVED_COMPONENTS",
     "SCORER_LABEL",
     "SETTLED_TESTS",
+    "STALLED_COMPONENT",
+    "STALL_BAR_COMPONENT",
+    "STRANDED_COMPONENT",
     "WINDOW_SECONDS",
     "WINDOW_TESTS",
     "Estimate",
@@ -630,7 +794,10 @@ __all__ = [
     "ScorerError",
     "ScorerGuard",
     "ScoringContext",
+    "StallBar",
+    "StopRule",
     "checked_estimate",
+    "drawn_for_probation",
     "enveloped",
     "frontier_log_line",
     "headroom_pct",
@@ -642,5 +809,6 @@ __all__ = [
     "score_branch",
     "score_progress",
     "score_with",
+    "stall_evidence",
     "trend_start",
 ]

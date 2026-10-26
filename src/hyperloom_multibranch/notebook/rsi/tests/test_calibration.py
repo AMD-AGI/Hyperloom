@@ -34,6 +34,7 @@ from hyperloom_multibranch.notebook.rsi.calibration import (
     session_policy,
 )
 from hyperloom_multibranch.notebook.rsi.frontier import (
+    EVIDENCE_COMPONENTS,
     FRONTIER_V1,
     Estimate,
     FrontierPolicy,
@@ -79,7 +80,8 @@ def test_an_archived_branch_scores_as_the_live_scoring_scored_it(snapshot: Noteb
 
     assert live is not None and archived.basis is live.basis
     assert archived.expected_gain_pct == pytest.approx(live.expected_gain_pct)
-    assert archived.components == pytest.approx(live.components)
+    scored = {key: value for key, value in live.components.items() if key not in EVIDENCE_COMPONENTS}
+    assert archived.components == pytest.approx(scored)
 
 
 def test_a_variation_that_ranks_the_gains_better_is_recommended() -> None:
