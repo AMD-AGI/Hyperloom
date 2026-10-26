@@ -80,7 +80,7 @@ class ResultScope:
 
     op_name: str
     temporary_paths: list[str] = field(default_factory=list)
-    budget_policy: RewriteBudgetPolicy | None = None
+    budget_policy: RewriteBudgetPolicy = DEFAULT_REWRITE_BUDGET
 
 
 @dataclass(frozen=True)
@@ -93,8 +93,8 @@ class RewriteOutcome:
     optimize_result: dict
     applyback_result: dict | None = None
     applyback_required: bool = False
-    llm_usage: dict | None = None
-    kb_experience: dict | None = None
+    llm_usage: dict = field(default_factory=dict)
+    kb_experience: dict = field(default_factory=dict)
     failure_class: str = ""
     failure_detail: str = ""
 
@@ -111,8 +111,12 @@ def build_result(scope: ResultScope, outcome: RewriteOutcome) -> RewriteResult:
     flydsl_best_commit = str(optimize_result.get("best_commit") or "")
     # With apply-back required this key means the apply-back commit and nothing else; the standalone best is reported
     # only as flydsl_best_commit.
-    best_commit = str(applyback.get("best_commit") or "") or ("" if applyback_required else flydsl_best_commit)
+    best_commit = applyback.get("best_commit") or ("" if applyback_required else flydsl_best_commit)
     speedup = optimize_result.get("mean_case_speedup") if port_ok else None
+    # Only a published apply-back bundle carries an artifact kind; an interim or failed run must not name one.
+    artifact_kind, artifact_schema_version = (
+        (protocol.ARTIFACT_KIND_FRAMEWORK_APPLYBACK, protocol.ARTIFACT_SCHEMA_VERSION) if applyback_ok else ("", 0)
+    )
 
     return RewriteResult(
         logical_op_name=op_name,
@@ -128,9 +132,7 @@ def build_result(scope: ResultScope, outcome: RewriteOutcome) -> RewriteResult:
         flydsl_best_ms=flydsl_best_ms,
         speedup=speedup,
         experiment_id=optimize_result.get("experiment_id"),
-        llm_usage=dict(
-            outcome.llm_usage if outcome.llm_usage is not None else (optimize_result.get("llm_usage") or {})
-        ),
+        llm_usage=dict(outcome.llm_usage),
         port_attempts=outcome.port_attempts,
         success=bool(port_ok and (not applyback_required or applyback_ok)),
         baseline_ms=outcome.source_ms,
@@ -142,16 +144,15 @@ def build_result(scope: ResultScope, outcome: RewriteOutcome) -> RewriteResult:
         flydsl_best_commit=flydsl_best_commit,
         applyback_commit_ref=str(applyback.get("commit_ref") or ""),
         patch_path=str(applyback.get("patch_path") or ""),
-        artifacts=list(applyback.get("artifacts") or []),
-        # Only a published apply-back bundle carries an artifact kind; an interim or failed run must not name one.
-        artifact_kind=(protocol.ARTIFACT_KIND_FRAMEWORK_APPLYBACK if applyback_ok else ""),
-        artifact_schema_version=(protocol.ARTIFACT_SCHEMA_VERSION if applyback_ok else 0),
+        artifacts=list(applyback.get("artifacts", [])),
+        artifact_kind=artifact_kind,
+        artifact_schema_version=artifact_schema_version,
         canonical_manifest=str(applyback.get("manifest_path") or ""),
         canonical_patch_path=str(applyback.get("canonical_patch_path") or applyback.get("patch_path") or ""),
         canonical_files_root=str(applyback.get("canonical_files_root") or ""),
         canonical_result_path=str(applyback.get("canonical_result_path") or ""),
         forge_workspace=str(applyback.get("forge_workspace") or ""),
-        changed_files=list(applyback.get("changed_files") or []),
+        changed_files=list(applyback.get("changed_files", [])),
         applyback_required=applyback_required,
         applyback_ok=applyback_ok,
         applyback_error=str(applyback.get("error") or ""),
@@ -159,8 +160,8 @@ def build_result(scope: ResultScope, outcome: RewriteOutcome) -> RewriteResult:
         failure_class=outcome.failure_class,
         failure_detail=outcome.failure_detail,
         temporary_paths=list(scope.temporary_paths),
-        kb_experience=dict(outcome.kb_experience or {}),
-        budget_policy=(scope.budget_policy or DEFAULT_REWRITE_BUDGET).to_dict(),
+        kb_experience=dict(outcome.kb_experience),
+        budget_policy=scope.budget_policy.to_dict(),
     )
 
 
