@@ -481,6 +481,10 @@ class _RenderMixin:
             f"baseline_tput={self.baseline_tput}  baseline_acc={self.baseline_accuracy}",
             f"baseline_failure_streak={self.baseline_failure_streak}",
             f"current_best={self._format_current_best()}",
+            (
+                "current_best_launch_args(complete server args the current best ran with; "
+                f"extra_server_args above is only the optimizer's delta)={self._format_current_best_launch_args()}"
+            ),
             f"optimization_stack={self._format_optimization_stack()}",
             (
                 f"cumulative_gain_validated={self.cumulative_gain_validated}% "
@@ -668,6 +672,13 @@ class _RenderMixin:
         if not self.current_best:
             return "(none)"
         return str({k: v for k, v in self.current_best.items() if k not in ("optimization_stack", "measurement")})
+
+    def _format_current_best_launch_args(self) -> str:
+        """Render the server args ``current_best`` was launched with; ``(not recorded)`` keeps it from reading as bare."""
+        launched = self.current_best_launch_args
+        if launched is None:
+            return "(not recorded)"
+        return launched or "(none)"
 
     def _format_optimization_stack(self) -> str:
         """Render the optimization stack as ``action:variant`` parts."""

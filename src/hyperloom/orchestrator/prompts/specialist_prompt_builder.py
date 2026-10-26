@@ -982,6 +982,7 @@ class SpecialistPromptInputs:
     # Run-status snapshot for §0 MANDATE; 0/[] = absent (section renders gracefully).
     baseline_tput: float = 0.0
     current_tput: float = 0.0
+    current_launch_args: str = ""
     cumulative_gain_validated: float = 0.0
     keep_threshold_pct: float = 0.0
     applied_stack: list[dict[str, Any]] = field(default_factory=list)
@@ -1387,6 +1388,8 @@ def _mandate_run_status(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(f"- baseline: {format_primary_metric(inp.framework, inp.baseline_tput)}")
     if inp.current_tput > 0:
         rows.append(f"- current best: {format_primary_metric(inp.framework, inp.current_tput)}")
+    if inp.current_launch_args:
+        rows.append(f"- current best server args (complete launch, not a delta): {inp.current_launch_args}")
     if inp.cumulative_gain_validated != 0:
         rows.append(f"- validated cumulative gain: {inp.cumulative_gain_validated:+.2f}%")
     if inp.keep_threshold_pct > 0:

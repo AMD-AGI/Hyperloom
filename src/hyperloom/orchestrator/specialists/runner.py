@@ -720,6 +720,7 @@ class SpecialistRunner:
                 started_at_iso=datetime.now(timezone.utc).isoformat(),
                 baseline_tput=float(params.get("baseline_tput") or 0.0),
                 current_tput=float(params.get("current_tput") or 0.0),
+                current_launch_args=str(params.get("current_launch_args") or ""),
                 cumulative_gain_validated=float(params.get("cumulative_gain_validated") or 0.0),
                 keep_threshold_pct=float(params.get("keep_threshold_pct") or 0.0),
                 applied_stack=[e for e in (params.get("applied_stack") or []) if isinstance(e, dict)],

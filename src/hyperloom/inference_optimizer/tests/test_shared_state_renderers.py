@@ -139,6 +139,20 @@ def test_prompt_summary_renders_current_best_without_stack_or_measurement():
     assert "stacked" not in line and "launch_evidence" not in line
 
 
+def test_prompt_summary_renders_the_args_the_current_best_was_launched_with():
+    st = SharedState()
+    st.current_best = {"extra_server_args": "", "measurement": {}}
+
+    def launch_line() -> str:
+        return next(ln for ln in st.to_prompt_summary().splitlines() if ln.startswith("current_best_launch_args("))
+
+    assert launch_line().endswith("=(not recorded)")
+    st.current_best["measurement"] = {
+        "launch_evidence": {"requested_server_args": "--moe-backend aiter --max-num-seqs 128"}
+    }
+    assert launch_line().endswith("=--moe-backend aiter --max-num-seqs 128")
+
+
 def test_format_last_trace_analyze():
     st = SharedState()
     assert st._format_trace_analyze_blob(st.last_trace_analyze) == "(none)"
