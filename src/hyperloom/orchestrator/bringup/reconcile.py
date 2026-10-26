@@ -197,7 +197,7 @@ class Reconciler:
         ):
             try:
                 await rule(now_unix, report)
-            except Exception:
+            except Exception:  # isolation boundary: one reconcile rule of the pass
                 log.exception("reconcile: rule %s raised", rule.__name__)
                 report.failures.append(rule.__name__)
         self.last_report = report
