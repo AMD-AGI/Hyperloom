@@ -39,6 +39,7 @@ from hyperloom.orchestrator.state.task_registry import (
     IllegalTransition,
     Task,
     TaskRegistry,
+    TaskSpec,
 )
 from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
@@ -243,7 +244,7 @@ async def test_sub_agent_runner_succeeds(tmp_path):
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
     sub.register_executor("baseline", lambda ctx: _async_return({"tput": 1840}))
-    task = await tr.create(kind="baseline", params={}, idempotency_key="k-baseline-1")
+    task = await tr.create(TaskSpec(kind="baseline", params={}, idempotency_key="k-baseline-1"))
     res = await sub.run_task(task)
     assert res.state == "succeeded"
     assert res.result == {"tput": 1840}
@@ -262,7 +263,7 @@ async def test_sub_agent_runner_no_executor_fails(tmp_path):
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
-    task = await tr.create(kind="never_registered", params={}, idempotency_key="k-x")
+    task = await tr.create(TaskSpec(kind="never_registered", params={}, idempotency_key="k-x"))
     res = await sub.run_task(task)
     assert res.state == "failed"
     assert "no runner" in res.error
@@ -282,7 +283,7 @@ async def test_sub_agent_runner_executor_exception_sets_error_class(tmp_path):
         raise TimeoutError("benchmark server never came up")
 
     sub.register_executor("bench_runner", exe)
-    task = await tr.create(kind="bench_runner", params={}, idempotency_key="k-y")
+    task = await tr.create(TaskSpec(kind="bench_runner", params={}, idempotency_key="k-y"))
     res = await sub.run_task(task)
     assert res.state == "failed"
     assert res.error_class == "TimeoutError"
@@ -304,11 +305,13 @@ async def test_sub_agent_runner_hands_its_lease_to_the_executor_and_gives_it_bac
 
     sub.register_executor("bench_runner", exe)
     task = await tr.create(
-        kind="bench_runner",
-        params={},
-        idempotency_key="k-bench-1",
-        requires_lanes=["benchmark_lane"],
-        lease_ttl_sec=30,
+        TaskSpec(
+            kind="bench_runner",
+            params={},
+            idempotency_key="k-bench-1",
+            requires_lanes=["benchmark_lane"],
+            lease_ttl_sec=30,
+        ),
     )
     lease = await locks.acquire_many(
         ["benchmark_lane"],
@@ -341,11 +344,13 @@ async def test_sub_agent_runner_refuses_a_lane_holding_task_with_no_lease(tmp_pa
 
     sub.register_executor("bench_runner", exe)
     task = await tr.create(
-        kind="bench_runner",
-        params={},
-        idempotency_key="k-bench-nolease",
-        requires_lanes=["benchmark_lane"],
-        lease_ttl_sec=30,
+        TaskSpec(
+            kind="bench_runner",
+            params={},
+            idempotency_key="k-bench-nolease",
+            requires_lanes=["benchmark_lane"],
+            lease_ttl_sec=30,
+        ),
     )
 
     with pytest.raises(ValueError, match="without a lease"):
@@ -1039,8 +1044,8 @@ async def test_coordinator_prune_branch_cancels_family_and_records_advisory(sess
     try:
         # ``baseline`` flows through the normal Critic/pending-proposal path; the prune-advisory mechanism under test
         # is family-agnostic.
-        a = await c.tasks.create(kind="baseline", params={}, idempotency_key="ka")
-        b = await c.tasks.create(kind="baseline", params={}, idempotency_key="kb")
+        a = await c.tasks.create(TaskSpec(kind="baseline", params={}, idempotency_key="ka"))
+        b = await c.tasks.create(TaskSpec(kind="baseline", params={}, idempotency_key="kb"))
 
         await c.router.handle_intent(
             "orchestration",
@@ -1076,8 +1081,8 @@ async def test_coordinator_prune_branch_queued_scope_drains_without_retiring(ses
     """Orchestration can drain a backlog and still propose the family afterwards."""
     c = Coordinator(session_dir, backends=_build_backends({}))
     try:
-        a = await c.tasks.create(kind="baseline", params={}, idempotency_key="qa")
-        b = await c.tasks.create(kind="baseline", params={"tag": "x"}, idempotency_key="qb")
+        a = await c.tasks.create(TaskSpec(kind="baseline", params={}, idempotency_key="qa"))
+        b = await c.tasks.create(TaskSpec(kind="baseline", params={"tag": "x"}, idempotency_key="qb"))
 
         await c.router.handle_intent(
             "orchestration",
@@ -1838,9 +1843,11 @@ async def test_a_reaped_revalidation_leaves_the_window_open_for_a_resume(session
 async def _cancelled_revalidation_row(c: Coordinator, *, gen: int) -> Task:
     """A revalidation row for ``gen`` that the queue scan cancelled before dispatch."""
     task, _existing = await c.tasks.create_or_return_existing(
-        kind="baseline",
-        params={"reason": "enablement_eval_revalidation"},
-        idempotency_key=f"enablement_revalidation:gen{gen}",
+        TaskSpec(
+            kind="baseline",
+            params={"reason": "enablement_eval_revalidation"},
+            idempotency_key=f"enablement_revalidation:gen{gen}",
+        ),
     )
     await c.tasks.transition(task.task_id, "cancelled", evidence={"reason": "time_budget"})
     return task
@@ -1898,9 +1905,11 @@ async def test_resume_still_closes_a_revalidation_window_that_had_its_chance(ses
     try:
         st = c.shared_state
         task, _existing = await c.tasks.create_or_return_existing(
-            kind="baseline",
-            params={"reason": "enablement_eval_revalidation"},
-            idempotency_key="enablement_revalidation:gen0",
+            TaskSpec(
+                kind="baseline",
+                params={"reason": "enablement_eval_revalidation"},
+                idempotency_key="enablement_revalidation:gen0",
+            ),
         )
         await c.tasks.transition(task.task_id, "running")
         await c.tasks.transition(task.task_id, "succeeded")
@@ -2147,7 +2156,7 @@ async def test_a_phase_releases_the_initial_analysis_gate_when_its_task_ended_un
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        task = await c.tasks.create(kind="roofline", params={}, idempotency_key=f"initial-{phase}-{ending}")
+        task = await c.tasks.create(TaskSpec(kind="roofline", params={}, idempotency_key=f"initial-{phase}-{ending}"))
         await c.tasks.transition(task.task_id, "running")
         c.shared_state.phase = phase
         c.shared_state.baseline_tput = 1074.7
@@ -2397,11 +2406,13 @@ async def test_sub_agent_runner_hands_back_lanes_when_the_claim_is_rejected(
     sub.register_executor("explore", lambda _ctx: _immediately({}))
 
     task = await tr.create(
-        kind="explore",
-        params={},
-        idempotency_key="k-claim-rejected",
-        requires_lanes=["benchmark_lane"],
-        lease_ttl_sec=600,
+        TaskSpec(
+            kind="explore",
+            params={},
+            idempotency_key="k-claim-rejected",
+            requires_lanes=["benchmark_lane"],
+            lease_ttl_sec=600,
+        ),
     )
     lease = await locks.acquire_many(
         ["benchmark_lane"],
@@ -2444,11 +2455,13 @@ async def test_a_registered_run_leaves_a_row_queued_when_its_lanes_are_busy(
         ttl_sec=600,
     )
     task = await tr.create(
-        kind="profile",
-        params={},
-        idempotency_key="k-lane-busy",
-        requires_lanes=["profile_lane"],
-        lease_ttl_sec=600,
+        TaskSpec(
+            kind="profile",
+            params={},
+            idempotency_key="k-lane-busy",
+            requires_lanes=["profile_lane"],
+            lease_ttl_sec=600,
+        ),
     )
     disp = DispatcherCollaborator(SimpleNamespace(locks=locks, sub=sub))
 
@@ -2474,7 +2487,7 @@ async def test_a_registered_run_is_reachable_by_the_wall_clock_defences(tmp_path
         return {}
 
     sub.register_executor("roofline", runner)
-    task = await tr.create(kind="roofline", params={}, idempotency_key="k-registered")
+    task = await tr.create(TaskSpec(kind="roofline", params={}, idempotency_key="k-registered"))
 
     res = await disp.run_task_registered(task)
 
@@ -2501,7 +2514,7 @@ async def test_a_registered_run_labels_its_llm_calls_with_the_action(tmp_path):
         return {}
 
     sub.register_executor("conc_sweep", runner)
-    task = await tr.create(kind="conc_sweep", params={}, idempotency_key="k-labelled")
+    task = await tr.create(TaskSpec(kind="conc_sweep", params={}, idempotency_key="k-labelled"))
 
     await disp.run_task_registered(task)
 
@@ -2525,7 +2538,7 @@ async def test_sub_agent_runner_fails_a_row_whose_workspace_cannot_be_made(
         raise OSError(28, "No space left on device")
 
     sub._pre_mkdir_workspace = _no_space
-    task = await tr.create(kind="explore", params={}, idempotency_key="k-enospc")
+    task = await tr.create(TaskSpec(kind="explore", params={}, idempotency_key="k-enospc"))
 
     res = await sub.run_task(task)
 
@@ -2543,7 +2556,7 @@ async def test_sub_agent_runner_normal_path_still_records_transitions(
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
     sub.register_executor("baseline", lambda ctx: _async_return({"tput": 1.0}))
-    task = await tr.create(kind="baseline", params={}, idempotency_key="k-ok")
+    task = await tr.create(TaskSpec(kind="baseline", params={}, idempotency_key="k-ok"))
     res = await sub.run_task(task)
     assert res.state == "succeeded"
     after = await tr.get(task.task_id)
@@ -2565,9 +2578,11 @@ async def test_report_success_does_not_stop_run(session_dir):
     c.shared_state.save(session_dir)
     try:
         task = await c.tasks.create(
-            kind="report",
-            params={"session_dir": str(session_dir)},
-            idempotency_key="k-report-1",
+            TaskSpec(
+                kind="report",
+                params={"session_dir": str(session_dir)},
+                idempotency_key="k-report-1",
+            ),
         )
         await pump_until_settled(c.dispatcher)
         after = await c.tasks.get(task.task_id)
@@ -2587,9 +2602,11 @@ async def test_report_success_does_not_overwrite_prior_stop_reason(session_dir):
     c.shared_state.save(session_dir)
     try:
         task = await c.tasks.create(
-            kind="report",
-            params={"session_dir": str(session_dir)},
-            idempotency_key="k-report-pre-set",
+            TaskSpec(
+                kind="report",
+                params={"session_dir": str(session_dir)},
+                idempotency_key="k-report-pre-set",
+            ),
         )
         await pump_until_settled(c.dispatcher)
         after = await c.tasks.get(task.task_id)
@@ -2646,7 +2663,7 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
     # one unrelated executor first.
     c.sub.register_executor("report", _noop_executor)
     try:
-        await c.tasks.create(kind="long_running", params={}, idempotency_key="k-audit-dispatch-1")
+        await c.tasks.create(TaskSpec(kind="long_running", params={}, idempotency_key="k-audit-dispatch-1"))
         with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
             await pump_until_settled(c.dispatcher)
         assert any("dispatch audit" in r.getMessage() and "long_running" in r.getMessage() for r in caplog.records)
@@ -2768,7 +2785,7 @@ def test_a_failing_proposal_outcome_record_propagates(monkeypatch) -> None:
     from hyperloom.inference_optimizer.breakdown.recorder import phase_event
     from hyperloom.orchestrator.loop import proposals
 
-    def _boom(**_kwargs) -> None:
+    def _boom(_outcome) -> None:
         raise RuntimeError("proposal outcome bug")
 
     monkeypatch.setattr(phase_event, "record_proposal_outcome", _boom)

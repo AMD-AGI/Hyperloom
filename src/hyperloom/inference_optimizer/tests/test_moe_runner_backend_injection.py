@@ -24,7 +24,11 @@ from hyperloom.inference_optimizer import model_config_utils
 from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
-from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
+from hyperloom.orchestrator.actions.executors._workload_envs import (
+    materialize_config_with_envs,
+    LaunchLayer,
+    MaterializeOptions,
+)
 
 _AMD = "mi300x"
 
@@ -262,8 +266,8 @@ def _materialize_envs(
     materialized = materialize_config_with_envs(
         base,
         out,
-        extra_server_args=extra_server_args,
-        drop_moe_runner_backend=drop_moe_runner_backend,
+        launch=LaunchLayer(extra_server_args=extra_server_args),
+        options=MaterializeOptions(drop_moe_runner_backend=drop_moe_runner_backend),
     )
     return yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 

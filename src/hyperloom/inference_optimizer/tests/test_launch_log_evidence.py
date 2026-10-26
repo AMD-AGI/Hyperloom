@@ -241,7 +241,7 @@ def test_a_vllm_launch_reaches_the_evidence_through_the_production_entry_point(t
     through the production entry point, which is the only thing that fails when
     the branch is removed.
     """
-    from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+    from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 
     config, slot, log = _vllm_slot(
         tmp_path,
@@ -249,11 +249,9 @@ def test_a_vllm_launch_reaches_the_evidence_through_the_production_entry_point(t
         "{'model': '/models/m', 'tensor_parallel_size': 4, 'quantization': 'fp8'}\n",
     )
     evidence = build_launch_evidence(
-        config_path=config,
+        RequestedLaunch(config, "vllm", model_path="/models/m"),
         actual_server_log=log,
-        framework="vllm",
         slot=slot,
-        model_path="/models/m",
     )
     identity = evidence["observed_server_identity"]
     assert identity["tensor_parallel_size"] == 4
@@ -265,7 +263,7 @@ def test_a_quoted_marker_is_not_accepted_as_a_vllm_launch_through_the_entry_poin
     """User- or attacker-supplied text echoed into the log quotes the marker
     but carries no launch record; binding to it reports settings the server
     never ran with."""
-    from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+    from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 
     config, slot, log = _vllm_slot(
         tmp_path,
@@ -273,11 +271,9 @@ def test_a_quoted_marker_is_not_accepted_as_a_vllm_launch_through_the_entry_poin
         "\"non-default args: {'model': '/wanted', 'tensor_parallel_size': 4}\"\n",
     )
     evidence = build_launch_evidence(
-        config_path=config,
+        RequestedLaunch(config, "vllm", model_path="/wanted"),
         actual_server_log=log,
-        framework="vllm",
         slot=slot,
-        model_path="/wanted",
     )
     assert not evidence["observed_server_identity"]
 
@@ -285,7 +281,7 @@ def test_a_quoted_marker_is_not_accepted_as_a_vllm_launch_through_the_entry_poin
 def test_a_preceding_dict_does_not_displace_the_real_vllm_record(tmp_path):
     """Extraction anchored at the line's first brace reads an unrelated dict
     and ignores the actual record that follows it on the same line."""
-    from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+    from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 
     config, slot, log = _vllm_slot(
         tmp_path,
@@ -293,11 +289,9 @@ def test_a_preceding_dict_does_not_displace_the_real_vllm_record(tmp_path):
         "non-default args: {'model': '/actual', 'tensor_parallel_size': 2}\n",
     )
     evidence = build_launch_evidence(
-        config_path=config,
+        RequestedLaunch(config, "vllm", model_path="/actual"),
         actual_server_log=log,
-        framework="vllm",
         slot=slot,
-        model_path="/actual",
     )
     assert evidence["observed_server_identity"]["tensor_parallel_size"] == 2
 
@@ -305,18 +299,16 @@ def test_a_preceding_dict_does_not_displace_the_real_vllm_record(tmp_path):
 def test_a_brace_inside_a_vllm_model_path_does_not_truncate_the_record(tmp_path):
     """A ``}`` inside a string is not structure; ending the payload there drops
     every field after it, including the parallelism the decision compares."""
-    from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+    from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 
     config, slot, log = _vllm_slot(
         tmp_path,
         "INFO 09-14 07:00:00 [config.py:1] non-default args: {'model': '/models/m}', 'tensor_parallel_size': 4}\n",
     )
     evidence = build_launch_evidence(
-        config_path=config,
+        RequestedLaunch(config, "vllm", model_path="/models/m}"),
         actual_server_log=log,
-        framework="vllm",
         slot=slot,
-        model_path="/models/m}",
     )
     assert evidence["observed_server_identity"]["tensor_parallel_size"] == 4
 
@@ -334,8 +326,7 @@ def test_a_failing_server_log_reader_propagates_from_the_entry_point(tmp_path, m
 
     with pytest.raises(RuntimeError, match="log reader bug"):
         evidence_module.build_launch_evidence(
-            config_path=config,
+            evidence_module.RequestedLaunch(config, "vllm"),
             actual_server_log=log,
-            framework="vllm",
             slot=slot,
         )

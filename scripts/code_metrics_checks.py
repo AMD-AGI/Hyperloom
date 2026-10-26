@@ -148,8 +148,13 @@ def untracked_files(root: Path) -> str:
 
 
 def show(root: Path, ref: str, path: str) -> str | None:
-    """``path`` at ``ref`` as text, or None when it did not exist there."""
-    if git(root, "cat-file", "-e", f"{ref}:{path}", ok=(0, 1, 128)).returncode != 0:
+    """``path`` at ``ref`` as text, or None when it was not a file there.
+
+    A directory is a tree, for which ``git show`` prints a listing rather than failing. Callers
+    write what they get back as a file, so the type is checked rather than only the existence.
+    """
+    kind = git(root, "cat-file", "-t", f"{ref}:{path}", ok=(0, 1, 128))
+    if kind.returncode != 0 or kind.stdout.strip() != "blob":
         return None
     return git(root, "show", f"{ref}:{path}").stdout
 

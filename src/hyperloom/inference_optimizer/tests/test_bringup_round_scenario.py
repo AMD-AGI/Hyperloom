@@ -115,16 +115,18 @@ async def _bringup_attempt(session: Path, slot: Path, *, task_id: str) -> dict:
     config = session / "bench.yaml"
     config.write_text("benchmark:\n  framework: vllm\n  model: scripted/Model\n", encoding="utf-8")
     return await executor._run_single_benchmark(
+        bl.BenchmarkAttempt(
+            timeout_sec=1800,
+            override_result_dir=None,
+            resolved_model="scripted/Model",
+            materialized_config_path=config,
+            inferencex_path="",
+            effective_extra_server_args="",
+            params={"framework": "vllm"},
+            ctx=_ctx(task_id),
+        ),
         config_path=config,
         output_dir=slot,
-        timeout_sec=1800,
-        override_result_dir=None,
-        resolved_model="scripted/Model",
-        materialized_config_path=config,
-        inferencex_path="",
-        effective_extra_server_args="",
-        params={"framework": "vllm"},
-        ctx=_ctx(task_id),
     )
 
 

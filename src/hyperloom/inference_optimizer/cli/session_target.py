@@ -37,5 +37,5 @@ def add_session_dir_argument(opt: argparse.ArgumentParser) -> None:
         metavar="DIR",
         help="Create the new session in exactly this directory (absolute, below $USER_DATA_PATH) instead of "
         "<workspace>/<model>/<timestamp>-<random>. Used by a launcher that must find the session again; "
-        "ignored by --resume-from, which names the directory it resumes.",
+        "cannot be combined with --resume-from (exit 2), which names the directory it resumes.",
     )

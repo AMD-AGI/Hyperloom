@@ -42,15 +42,8 @@ class _StubTaskRegistry:
         self._tasks: dict[str, Any] = {}
         self._by_idem: dict[str, Any] = {}
 
-    async def create_or_return_existing(
-        self,
-        *,
-        kind: str,
-        params: dict,
-        idempotency_key: str,
-        **_extras: Any,
-    ):
-        existing = self._by_idem.get(idempotency_key)
+    async def create_or_return_existing(self, spec):
+        existing = self._by_idem.get(spec.idempotency_key)
         if existing is not None:
             return existing, True
         import uuid as _uuid
@@ -58,13 +51,13 @@ class _StubTaskRegistry:
 
         task = Task(
             task_id=_uuid.uuid4().hex,
-            kind=kind,
+            kind=spec.kind,
             state="queued",
-            params=dict(params),
-            idempotency_key=idempotency_key,
+            params=dict(spec.params),
+            idempotency_key=spec.idempotency_key,
         )
         self._tasks[task.task_id] = task  # type: ignore[assignment]
-        self._by_idem[idempotency_key] = task  # type: ignore[assignment]
+        self._by_idem[spec.idempotency_key] = task  # type: ignore[assignment]
         return task, False
 
     async def get(self, task_id: str):

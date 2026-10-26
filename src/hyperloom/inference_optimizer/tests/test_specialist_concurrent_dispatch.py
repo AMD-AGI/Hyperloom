@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
 async def _build_coord_with_capacity(
@@ -206,14 +207,16 @@ async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path, lat
 
     for i in range(4):
         await coord.tasks.create_or_return_existing(
-            kind="specialist",
-            params={
-                "domain": "serving_specialist",
-                "gap_canonical_id": f"gap.test.{i}",
-                "max_turns": 2,
-            },
-            idempotency_key=f"concurrent-t-{i}",
-            requires_lanes=["research_lane"],
+            TaskSpec(
+                kind="specialist",
+                params={
+                    "domain": "serving_specialist",
+                    "gap_canonical_id": f"gap.test.{i}",
+                    "max_turns": 2,
+                },
+                idempotency_key=f"concurrent-t-{i}",
+                requires_lanes=["research_lane"],
+            ),
         )
 
     await _pump_until_drained(coord)
@@ -238,14 +241,16 @@ async def test_dispatcher_caps_concurrency_at_capacity_when_more_queued(
 
     for i in range(4):
         await coord.tasks.create_or_return_existing(
-            kind="specialist",
-            params={
-                "domain": "serving_specialist",
-                "gap_canonical_id": f"gap.test.{i}",
-                "max_turns": 2,
-            },
-            idempotency_key=f"capped-t-{i}",
-            requires_lanes=["research_lane"],
+            TaskSpec(
+                kind="specialist",
+                params={
+                    "domain": "serving_specialist",
+                    "gap_canonical_id": f"gap.test.{i}",
+                    "max_turns": 2,
+                },
+                idempotency_key=f"capped-t-{i}",
+                requires_lanes=["research_lane"],
+            ),
         )
 
     await _pump_until_drained(coord)
@@ -268,14 +273,16 @@ async def test_dispatcher_capacity_one_serialises(tmp_path: Path):
 
     for i in range(3):
         await coord.tasks.create_or_return_existing(
-            kind="specialist",
-            params={
-                "domain": "serving_specialist",
-                "gap_canonical_id": f"gap.test.{i}",
-                "max_turns": 2,
-            },
-            idempotency_key=f"serial-t-{i}",
-            requires_lanes=["research_lane"],
+            TaskSpec(
+                kind="specialist",
+                params={
+                    "domain": "serving_specialist",
+                    "gap_canonical_id": f"gap.test.{i}",
+                    "max_turns": 2,
+                },
+                idempotency_key=f"serial-t-{i}",
+                requires_lanes=["research_lane"],
+            ),
         )
 
     await _pump_until_drained(coord)
@@ -302,16 +309,18 @@ async def test_gpu_specialist_pool_limits_concurrency_even_when_research_lane_fr
 
     for i in range(2):
         await coord.tasks.create_or_return_existing(
-            kind="specialist",
-            params={
-                "domain": "serving_specialist",
-                "gap_canonical_id": f"gap.gpu.{i}",
-                "max_turns": 2,
-                "needs_gpu": True,
-                "gpu_count": 1,
-            },
-            idempotency_key=f"gpu-t-{i}",
-            requires_lanes=["research_lane"],
+            TaskSpec(
+                kind="specialist",
+                params={
+                    "domain": "serving_specialist",
+                    "gap_canonical_id": f"gap.gpu.{i}",
+                    "max_turns": 2,
+                    "needs_gpu": True,
+                    "gpu_count": 1,
+                },
+                idempotency_key=f"gpu-t-{i}",
+                requires_lanes=["research_lane"],
+            ),
         )
 
     await _pump_until_drained(coord)
@@ -356,17 +365,19 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
     coord.gpu_specialist_pool.try_acquire = _spy_try_acquire  # type: ignore[method-assign]
 
     await coord.tasks.create_or_return_existing(
-        kind="specialist",
-        params={
-            "domain": "serving_specialist",
-            "gap_canonical_id": "gap.gpu.ttl",
-            "max_turns": 4,
-            "needs_gpu": True,
-            "gpu_count": 1,
-        },
-        idempotency_key="gpu-ttl",
-        requires_lanes=["research_lane"],
-        lease_ttl_sec=5,
+        TaskSpec(
+            kind="specialist",
+            params={
+                "domain": "serving_specialist",
+                "gap_canonical_id": "gap.gpu.ttl",
+                "max_turns": 4,
+                "needs_gpu": True,
+                "gpu_count": 1,
+            },
+            idempotency_key="gpu-ttl",
+            requires_lanes=["research_lane"],
+            lease_ttl_sec=5,
+        ),
     )
 
     await _pump_until_drained(coord)

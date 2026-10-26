@@ -52,12 +52,12 @@ class _TasksStub:
     async def running(self) -> list[Any]:
         return list(self._running)
 
-    async def create_or_return_existing(self, **kwargs: Any) -> Any:
-        self.created.append(kwargs)
+    async def create_or_return_existing(self, spec) -> Any:
+        self.created.append(vars(spec))
         t = SimpleNamespace(
-            kind=kwargs.get("kind"),
+            kind=spec.kind,
             task_id=f"t-{len(self.created)}",
-            params=kwargs.get("params") or {},
+            params=spec.params or {},
             state="queued",
         )
         self._queued.append(t)
@@ -522,11 +522,11 @@ async def test_enqueue_authoring_stamps_recovery_failed_when_unrecoverable(tmp_p
         "batch_id": "b0",
     }
 
-    async def _create_or_return_existing(**kwargs: Any) -> Any:
+    async def _create_or_return_existing(spec) -> Any:
         terminal = SimpleNamespace(
-            kind=kwargs.get("kind"),
+            kind=spec.kind,
             task_id="specialist-terminal",
-            params=kwargs.get("params") or {},
+            params=spec.params or {},
             state="succeeded",
         )
         return terminal, True

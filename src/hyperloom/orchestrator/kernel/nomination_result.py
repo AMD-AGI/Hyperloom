@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 #: Dropping an entry is a contract problem worth surfacing, so every drop
 #: carries one of these instead of vanishing into a log line.
@@ -62,6 +65,25 @@ class NominationOutcome:
     def is_empty(self) -> bool:
         """No usable patch. A valid outcome, and not the same as a failure."""
         return not self.patches
+
+
+def summarize_dropped_patches(dropped: Any) -> dict[str, int]:
+    """Count dropped patch entries by reason, logging each one as it is counted.
+
+    ``parse_outcome`` names why every unusable entry was refused, but a reason
+    nobody reports is indistinguishable from forge never having offered the
+    entry at all.
+    """
+    counts: dict[str, int] = {}
+    for entry in dropped or ():
+        reason = str(getattr(entry, "reason", "") or "unknown")
+        counts[reason] = counts.get(reason, 0) + 1
+        log.warning(
+            "nomination landing: refused patch kernel=%s reason=%s",
+            str(getattr(entry, "kernel_name", "") or "<unnamed>"),
+            reason,
+        )
+    return counts
 
 
 def parse_outcome(payload: Any) -> NominationOutcome:
