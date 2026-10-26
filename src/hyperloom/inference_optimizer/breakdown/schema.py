@@ -483,7 +483,6 @@ class V6KBWriteBackExt(TypedDict, total=False):
     optimized_throughput: float | None
     validated_gain_pct: float | None
     attempts: list[dict[str, Any]]
-    queue: dict[str, Any]
     failure: dict[str, Any]
 
 

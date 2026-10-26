@@ -1617,78 +1617,20 @@ def _emit_preflight_diagnostics(
     print(f"  pr_monitor_status   = {pr_status}")
     print(f"  kb_degraded_reason  = {kb_reason}")
     print(f"  pr_degraded_reason  = {pr_reason}")
-
-    # Surface Recipe KB offline-queue state; dead-letter pile-up signals a cold start.
-    queue_status: dict[str, Any]
-    diagnostics_status = "applied"
-    diagnostics_message: str | None = None
-    try:
-        queue_status = _print_recipe_kb_queue_status()
-    except (OSError, ValueError) as exc:
-        print(f"  recipe_kb_queue     = <probe_failed: {exc!r}>")
-        queue_status = {
-            "pending": None,
-            "dead_letter": None,
-            "flushed": None,
-            "root": None,
-        }
-        diagnostics_status = "warned"
-        diagnostics_message = f"recipe KB queue probe failed: {exc!r}"
     return {
-        "status": diagnostics_status,
+        "status": "applied",
         "skip_reason": None,
-        "message": diagnostics_message,
+        "message": None,
         "detail": {
             "asset_root": str(asset_root()),
             "session_dir": str(_session_dir_resolve()),
             "magpie_python": magpie_python,
             "inferencex_path": os.environ.get("INFERENCEX_PATH") or None,
             "aiter_jit_cache": dict(probe),
-            "recipe_kb_queue": queue_status,
             "benchmark_timeout_sec": hard_timeout,
             "benchmark_silence_timeout_sec": silence_timeout,
             "anthropic_base_url": anthropic_base_url,
         },
-    }
-
-
-def _print_recipe_kb_queue_status() -> dict[str, Any]:
-    """Emit a one-line summary of the Recipe KB offline NDJSON queue (dead-letter = permanent-reject signal)."""
-    from ..session.session_paths import (
-        recipe_kb_dead_letter_ndjson,
-        recipe_kb_flushed_ndjson,
-        recipe_kb_pending_ndjson,
-    )
-
-    sd = _session_dir_resolve()
-    pending = recipe_kb_pending_ndjson(sd)
-    dead = recipe_kb_dead_letter_ndjson(sd)
-    flushed = recipe_kb_flushed_ndjson(sd)
-
-    def _count(p: Path) -> int:
-        """Count non-blank lines (NDJSON rows) in a queue file."""
-        if not p.exists():
-            return 0
-        try:
-            with p.open("r", encoding="utf-8") as f:
-                return sum(1 for line in f if line.strip())
-        except OSError:
-            return 0
-
-    p_n, d_n, f_n = _count(pending), _count(dead), _count(flushed)
-    print(f"  recipe_kb_queue     = pending={p_n} dead_letter={d_n} flushed={f_n} (root={pending.parent})")
-    if d_n > 0:
-        print(
-            f"                        ⚠ {d_n} dead-letter row(s) — "
-            f"prior KB writes permanently rejected (4xx schema). "
-            f"Specialists for affected anchors will start cold "
-            f"(no priors). See {dead}."
-        )
-    return {
-        "pending": p_n,
-        "dead_letter": d_n,
-        "flushed": f_n,
-        "root": str(pending.parent),
     }
 
 

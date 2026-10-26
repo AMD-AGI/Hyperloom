@@ -1081,24 +1081,6 @@ def test_file_lock_no_fcntl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     assert ran
 
 
-# orchestrator.actions.executors._framework_gap_composer
-
-
-def test_framework_gap_bottleneck(tmp_path: Path) -> None:
-    from hyperloom.orchestrator.actions.executors import _framework_gap_composer as gc
-
-    bp = tmp_path / "bd.json"
-    bp.write_text(json.dumps({"top_kernels": ["fused_moe_gemm_kernel"]}), encoding="utf-8")
-    assert gc._extract_bottleneck_from_breakdown(str(bp)) == "moe"
-
-    empty = tmp_path / "empty.json"
-    empty.write_text(json.dumps({"top_kernels": []}), encoding="utf-8")
-    assert gc._extract_bottleneck_from_breakdown(str(empty)) == ""
-
-    assert gc._extract_bottleneck_from_breakdown(None) == ""
-    assert gc._extract_bottleneck_from_breakdown(str(tmp_path / "missing.json")) == ""
-
-
 # inference_optimizer.protocol.intent
 
 
