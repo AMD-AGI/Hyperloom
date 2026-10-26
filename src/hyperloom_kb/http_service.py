@@ -1150,7 +1150,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             shutil.copyfileobj(stream, self.wfile)
         self._answered = (int(HTTPStatus.OK), size)
 
-    def _dispatch_sync(self, app: ExperienceHTTPService, path: str) -> bool:
+    def _dispatch_transfer(self, app: ExperienceHTTPService, path: str) -> bool:
         """Serve push, pull, rebind and the file routes they move files over; ``False`` for any other path."""
 
         if self.command == _POST and path == _FILES_MISSING:
@@ -1238,7 +1238,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 ),
             )
             return
-        if self._dispatch_state(app, parsed.path, query) or self._dispatch_sync(app, parsed.path):
+        if self._dispatch_state(app, parsed.path, query) or self._dispatch_transfer(app, parsed.path):
             return
         if self.command == _POST and parsed.path == "/v1/read":
             self._write(HTTPStatus.OK, app.read(_read_query(self._body())))
