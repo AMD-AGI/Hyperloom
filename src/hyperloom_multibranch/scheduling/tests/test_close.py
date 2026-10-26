@@ -15,8 +15,10 @@ import asyncio
 import json
 import os
 import time
+from collections.abc import Collection
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -25,7 +27,7 @@ from hyperloom.common.outside_facts.image_check import FactResult, ImageCheckMod
 from hyperloom.common.outside_facts.image_check_eval import Status
 from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
-from hyperloom.contracts.recipe import Recipe
+from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
@@ -43,7 +45,9 @@ from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, ARCHIVED, SK
 from hyperloom_multibranch.notebook.rsi.authoring import AUTHORING_SYSTEM_PROMPT
 from hyperloom_multibranch.notebook.rsi.lesson_curation import NO_LESSONS
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
-from hyperloom_multibranch.notebook.rsi.session import DISABLED, WRITTEN
+from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay, WarmLead
+from hyperloom_multibranch.notebook.rsi.session import DISABLED, WRITTEN, KnowledgeClose, close_knowledge
+from hyperloom_multibranch.scheduling import mb_fakes
 from hyperloom_multibranch.notebook.tests.factories import FakeClock
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, scripted_session
 from hyperloom_multibranch.scheduling.close import CloseReport, Closer, ended_before_final, report_document
@@ -221,9 +225,11 @@ def _closer(
     author: ScriptedCompletion | None = None,
     curator: ScriptedCompletion | None = None,
     image_check: ImageCheckReport | None = None,
+    warm_leads: tuple[WarmLead, ...] = (),
 ) -> Closer:
     """CLOSE with ``recipe`` committed as :data:`CHOSEN`, its files in the session's blob store and not in the
-    repository; ``curator`` curates the lesson pool; ``image_check`` is what the session's image check found."""
+    repository; ``curator`` curates the lesson pool; ``image_check`` is what the session's image check found, and
+    ``warm_leads`` PRELUDE's leads."""
 
     author = author or ScriptedCompletion()
     curator = curator or ScriptedCompletion()
@@ -235,7 +241,7 @@ def _closer(
     ):
         blobs.put((recipe.files_root / path).read_bytes())
     dashboard = SessionDashboard(notebook, progress, AfterStopToolbox(), METRIC, layout.dashboard)  # type: ignore[arg-type]
-    sources = ExportSources(notebook, ChosenRepo(recipe), blobs, dashboard, image_check)
+    sources = ExportSources(notebook, ChosenRepo(recipe), blobs, dashboard, image_check, warm_leads)
     services = ExportServices(kb_client, ScorerAuthoring(author, AUTHOR_MODEL), ScorerAuthoring(curator, AUTHOR_MODEL))
     exports = SessionExports(layout, sources, METRIC, BUDGET_SECONDS, services)  # type: ignore[arg-type]
     return Closer(layout, stopper, exports, CLOCK)  # type: ignore[arg-type]
@@ -408,6 +414,32 @@ async def test_close_counts_how_the_merges_went_and_met_conflicting_patches_from
             "lost": {"unresolved": 2, "truncated": 1, "resolver_unreached": 1},
         },
     }
+
+
+def _lead(canonical_id: str, source_image: str | None) -> WarmLead:
+    """A warm lead whose launch-only replay was built on ``source_image``; none prepared when ``None``."""
+
+    replay = (
+        None if source_image is None else PreparedReplay(canonical_id, None, LaunchConfig(), source_image=source_image)
+    )
+    return WarmLead(canonical_id, "earlier", {}, 5.0, None, "", {}, True, replay=replay)
+
+
+async def test_close_marks_the_replays_of_the_champions_prelude_prepared_from_another_image(
+    layout: SessionLayout, notebook: LocalNotebook, final: FinalRecipe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    closed: list[Collection[str]] = []
+
+    def spied(*args: Any, cross_image: Collection[str], **kwargs: Any) -> KnowledgeClose:
+        closed.append(cross_image)
+        return close_knowledge(*args, cross_image=cross_image, **kwargs)
+
+    monkeypatch.setattr(mb_fakes, "close_knowledge", spied)
+    leads = (_lead("inference:other", "sha256:" + "b" * 64), _lead("inference:same", ""), _lead("inference:none", None))
+
+    await _closer(layout, notebook, _clean(), final, None, warm_leads=leads).close(REASON, CHOICE, "", HARD_STOP)
+
+    assert closed == [frozenset({"inference:other"})]
 
 
 async def test_an_unreachable_kb_is_recorded_and_close_carries_on(

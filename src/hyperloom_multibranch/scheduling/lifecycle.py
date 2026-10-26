@@ -580,7 +580,9 @@ class Session:
 
     def _closer(self) -> Closer:
         dashboard = self._dashboard(self._scoring())
-        sources = ExportSources(self._notebook, self._repo, self._blobs, dashboard, self._image_check)
+        sources = ExportSources(
+            self._notebook, self._repo, self._blobs, dashboard, self._image_check, self._briefs.warm
+        )
         services = ExportServices(self._recipe_kb, self._scorers, self._curator)
         closing = SessionExports(self._layout, sources, self._metric, self._budget_seconds, services)
         return Closer(self._layout, self._stopper, closing, self._clock)
