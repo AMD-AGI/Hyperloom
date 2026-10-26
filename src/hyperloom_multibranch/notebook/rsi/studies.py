@@ -13,7 +13,8 @@
 * ``scheduling --archive DIR [--archive DIR ...] [--runs N] [--beyond optimistic|pessimistic]``: the scheduling
   playbooks of :func:`rsi.replay.variants` replayed on every archived session beside the archive (:mod:`rsi.replay`),
   the playbook's offline evaluation; ``replay-check`` with the same archives checks that replay
-  (:func:`rsi.replay.check`);
+  (:func:`rsi.replay.check`), and ``playbook-generations --model M [--count 5]`` lets that model change the
+  playbook offline, a generation at a time, and replays the result held out (:mod:`rsi.generations`);
 * ``learnings --notebook DIR --log learnings.jsonl [--archive DIR]``: one session's learnings retrieval
   (:mod:`rsi.learning_eval`), and with an archive what it missed of the lesson pool beside it;
 * ``dispersion --shadow consistency.jsonl [--labels FILE] [--archive DIR] --model M --tp N --gpu G [--agentx]``: the
@@ -31,12 +32,14 @@ import json
 import logging
 import math
 import sys
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.jsonio import read_jsonl
+from hyperloom.common.llm_config import AnthropicCompletionRequest, aanthropic_completion
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeArchive
 from hyperloom_multibranch.notebook.rsi.bandit import bandit_baselines
@@ -48,6 +51,8 @@ from hyperloom_multibranch.notebook.rsi.calibration import (
     scorer_baseline,
 )
 from hyperloom_multibranch.notebook.rsi.expression import ExpressionError, ExpressionScorer
+from hyperloom_multibranch.notebook.rsi.generations import GENERATION_RUNS, GENERATIONS, generations
+from hyperloom_multibranch.notebook.rsi.ladder import Complete
 from hyperloom_multibranch.notebook.rsi.learning_eval import read_session
 from hyperloom_multibranch.notebook.rsi.priors import HOSTED, DispersionPrior, DispersionTask, dispersion_prior
 from hyperloom_multibranch.notebook.rsi.replay import OPTIMISTIC, PESSIMISTIC, REPLAY_RUNS, check, compare, variants
@@ -60,6 +65,10 @@ log = logging.getLogger(__name__)
 
 _ARCHIVE = "--archive"
 _RUNS = "--runs"
+#: The component an LLM call of these studies is tagged with, and the length and time a reply may take.
+STUDIES = "notebook-studies"
+COMPLETION_TOKENS = 4096
+COMPLETION_SECONDS = 300.0
 
 
 @dataclass(frozen=True)
@@ -156,6 +165,27 @@ def _replay_check(args: argparse.Namespace) -> Any:
     return check(_replayable(args), runs=args.runs)
 
 
+def _completion(model: str) -> Complete:
+    """One Anthropic completion of ``model`` a prompt, over the transport the environment's credential allows."""
+
+    async def complete(system: str, prompt: str) -> str:
+        messages = [{"role": "user", "content": prompt}]
+        request = AnthropicCompletionRequest(
+            model=model, messages=messages, max_tokens=COMPLETION_TOKENS, system=system, timeout_s=COMPLETION_SECONDS
+        )
+        result = await aanthropic_completion(request=request, component=STUDIES, operation="playbook_generations")
+        return result.text
+
+    return complete
+
+
+def _generations(args: argparse.Namespace) -> Any:
+    trees = _replayable(args)
+    pool = args.pool if args.pool is not None else Path(tempfile.mkdtemp(prefix="playbook-generations-"))
+    run = generations(trees, _completion(args.model), pool, model=args.model, count=args.count, runs=args.runs)
+    return asyncio.run(run)
+
+
 def _archives(command: argparse.ArgumentParser) -> None:
     """``--archive``, given once for each archive a study reads."""
 
@@ -184,6 +214,12 @@ def _parser() -> argparse.ArgumentParser:
     checked = command("replay-check", _replay_check, "check the scheduling replay against the archived sessions")
     _archives(checked)
     checked.add_argument(_RUNS, type=int, default=REPLAY_RUNS)
+    evolved = command("playbook-generations", _generations, "evolve the playbook offline and test it held out")
+    _archives(evolved)
+    evolved.add_argument("--model", required=True, help="the Anthropic model that writes each generation")
+    evolved.add_argument("--count", type=int, default=GENERATIONS)
+    evolved.add_argument(_RUNS, type=int, default=GENERATION_RUNS)
+    evolved.add_argument("--pool", type=Path, default=None, help="where the generations' pool goes; a temporary one")
     learnt = command("learnings", _learnings, "evaluate one session's learnings retrieval")
     learnt.add_argument("--notebook", type=Path, required=True)
     learnt.add_argument("--log", type=Path, required=True)
