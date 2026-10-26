@@ -362,13 +362,13 @@ class RealToolbox:
         """Withdraw every queued and running test of a stopped branch; returns how many."""
 
         tests = await self._withdraw_tests(lambda entry: entry.branch == branch_id, reason)
-        return len(tests) + self._cancel_tool_jobs(branch_id)
+        return len(tests) + self.cancel_tool_jobs(branch_id)
 
     async def withdraw_branch(self, branch_id: str, reason: str = "branch stopped") -> tuple[str, ...]:
         """Like :meth:`cancel_branch`, returning the request ids of the tests it withdrew."""
 
         tests = await self._withdraw_tests(lambda entry: entry.branch == branch_id, reason)
-        self._cancel_tool_jobs(branch_id)
+        self.cancel_tool_jobs(branch_id)
         return tests
 
     async def withdraw_all(self, reason: str = "session stopped") -> tuple[str, ...]:
@@ -376,7 +376,7 @@ class RealToolbox:
 
         tests = await self._withdraw_tests(lambda entry: True, reason)
         for branch in list(self._tool_jobs):
-            self._cancel_tool_jobs(branch)
+            self.cancel_tool_jobs(branch)
         return tests
 
     async def _withdraw_tests(self, wanted: Callable[[LogEntry], bool], reason: str) -> tuple[str, ...]:
@@ -385,7 +385,10 @@ class RealToolbox:
             await self._withdraw(entry, reason)
         return tuple(entry.request_id for entry in pending)
 
-    def _cancel_tool_jobs(self, branch_id: str) -> int:
+    def cancel_tool_jobs(self, branch_id: str) -> int:
+        """Cancel the tool jobs (profile, roofline, build, kernel_tune, ...) ``branch_id`` started and that have not
+        ended; its queued and running tests are left as they are. Returns how many were cancelled."""
+
         if self._tools is None:
             return 0
         return sum(self._tools.cancel(job) for job in self._tool_jobs.pop(branch_id, []))

@@ -17,6 +17,8 @@ from hyperloom_multibranch.notebook.tests.factories import TTL, intent
 from hyperloom_multibranch.toolbox.attempts import TestJob
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.toolbox import RealToolbox
+from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolRequest
+from hyperloom_multibranch.toolbox.tools.tests.sinks import ScriptedTool
 from hyperloom_multibranch.toolbox.tests.helpers import (
     PARENT,
     ScriptedExecutor,
@@ -388,6 +390,33 @@ async def test_a_stopped_branch_has_every_queued_and_running_test_withdrawn(tmp_
     for request_id in stopped:
         assert (await _record(rig, request_id)).withdrawn_at is not None
     assert (await _record(rig, other)).result is not None
+
+
+async def test_cancelling_a_branchs_tool_jobs_leaves_its_tests_queued_and_running(tmp_path: Path) -> None:
+    tool = ScriptedTool("roofline")
+    tool.block = asyncio.Event()
+    executor, jobs = _gated(), []
+
+    def tools(notebook):
+        jobs.append(ToolJobs([tool], notebook, tmp_path / "results"))
+        return jobs[0]
+
+    rig = build(tmp_path, executor=executor, policy=K1, tools=tools)
+    running, queued = [await rig.toolbox.submit_test(req("b1", server_args=f"--{n}")) for n in "ab"]
+    job = rig.toolbox.submit_tool(ToolRequest("roofline", "b1", {}))
+    other = rig.toolbox.submit_tool(ToolRequest("roofline", "b2", {}))
+    await tool.started.wait()
+    assert rig.toolbox.cancel_tool_jobs("b1") == 1
+    assert rig.toolbox.cancel_tool_jobs("b1") == 0, "a branch's cancelled jobs are not counted again"
+    assert await jobs[0].wait(job) is JobStatus.CANCELLED
+    assert rig.toolbox.tool_status(other) is JobStatus.RUNNING
+    assert (await rig.toolbox.progress(running)).state == "running"  # type: ignore[union-attr]
+    assert (await rig.toolbox.progress(queued)).state == "queued"  # type: ignore[union-attr]
+    executor.gate.set()  # type: ignore[union-attr]
+    tool.block.set()
+    await rig.toolbox.drain()
+    assert all([(await _record(rig, rid)).result is not None for rid in (running, queued)])
+    await rig.toolbox.close()
 
 
 # --- re-verifying a recorded result (L26) -----------------------------------------------------------------------
