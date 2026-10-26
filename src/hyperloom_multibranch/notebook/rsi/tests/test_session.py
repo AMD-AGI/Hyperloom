@@ -21,7 +21,14 @@ from hyperloom_multibranch.notebook.knowledge import experience, learnings
 from hyperloom_multibranch.notebook.knowledge.breakdown import CloseOutcome, build_breakdown
 from hyperloom_multibranch.notebook.knowledge.tests.kb_service import experience_service
 from hyperloom_multibranch.notebook.rsi import session
-from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, ARCHIVED, NO_ARCHIVE, SKIPPED, TreeArchive
+from hyperloom_multibranch.notebook.rsi.archive import (
+    ARCHIVE_ENV,
+    ARCHIVED,
+    NO_ARCHIVE,
+    SKIPPED,
+    TreeArchive,
+    archive_session,
+)
 from hyperloom_multibranch.notebook.rsi.authoring import session_challenger
 from hyperloom_multibranch.notebook.rsi.bandit import BANDIT_LABEL, BanditScorer
 from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
@@ -31,6 +38,7 @@ from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, Retrie
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_stall_odds
 from hyperloom_multibranch.notebook.rsi.decisions import decision_calls
 from hyperloom_multibranch.notebook.rsi.ladder import standings, trials
+from hyperloom_multibranch.notebook.rsi.menu import MENU_LOG, MenuLog
 from hyperloom_multibranch.notebook.rsi.outcomes import OUTCOMES_REPORT, OutcomePool
 from hyperloom_multibranch.notebook.rsi.playbook import FALLBACK_KEY, H0, PLAYBOOK_KEY, PlaybookPool
 from hyperloom_multibranch.notebook.rsi.lessons import (
@@ -55,6 +63,7 @@ from hyperloom_multibranch.notebook.rsi.session import (
     NO_PLAYBOOK_PLAYED,
     NO_RETRIEVAL_LOG,
     NO_TRANSCRIPT,
+    NO_TREES,
     SCHEDULING_REPLAY_REPORT,
     STOP_AUDIT_REPORT,
     WRITTEN,
@@ -66,6 +75,7 @@ from hyperloom_multibranch.notebook.rsi.session import (
     named_frontier_choice,
     session_frontier_policy,
     session_frontier_scorer,
+    session_menus,
 )
 from hyperloom_multibranch.notebook.rsi.scorers import (
     ChampionRecord,
@@ -252,6 +262,53 @@ def test_close_counts_the_specialists_outcomes_beside_the_receipts_and_keeps_the
     assert (reports / OUTCOMES_REPORT).read_text(encoding="utf-8").startswith("# Specialist outcomes of sess-1")
     assert [item.session_id for item in OutcomePool.beside(archive).sessions()] == ["sess-1"]
     assert close_knowledge(snapshot, METRIC).specialist_outcomes == CloseStep(SKIPPED, NO_REPORTS)
+
+
+@pytest.mark.usefixtures("unconfigured")
+def test_each_rsi_step_of_close_says_why_it_kept_nothing_and_close_goes_on(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    played = dataclasses.replace(snapshot.fingerprints[-1], policy_versions={PLAYBOOK_KEY: H0.label})
+    session = dataclasses.replace(snapshot, fingerprints=(*snapshot.fingerprints[:-1], played))
+    transcript = tmp_path / "MB-judge.jsonl"
+    transcript.write_text(json.dumps({"at": START, "prompt": "view", "reply": "{}", "error": ""}) + "\n")
+    blocked = tmp_path / "blocked"
+    blocked.write_text("a file where a folder should be\n")
+
+    def closed(state: NotebookSnapshot, targets: CloseTargets) -> KnowledgeClose:
+        return close_knowledge(state, METRIC, targets=targets, judge_transcript=transcript)
+
+    bare = closed(session, CloseTargets())
+    unprofiled = closed(
+        dataclasses.replace(session, profile=None),
+        CloseTargets(archive=TreeArchive(tmp_path / "archive"), receipts=tmp_path / "reports"),
+    )
+    no_archive = closed(session, CloseTargets(archive=TreeArchive(blocked), receipts=tmp_path / "reports"))
+    no_receipts = closed(session, CloseTargets(archive=TreeArchive(tmp_path / "written"), receipts=blocked))
+
+    assert (bare.playbook_trial, bare.judge_decisions) == (CloseStep(SKIPPED, NO_ARCHIVE),) * 2
+    assert (unprofiled.playbook_trial, unprofiled.scheduling_replay, unprofiled.judge_decisions) == (
+        CloseStep(SKIPPED, NO_PROFILE),
+    ) * 3
+    assert no_archive.scheduling_replay == CloseStep(SKIPPED, NO_TREES)
+    assert [step.status for step in (no_archive.playbook_trial, no_archive.judge_decisions)] == [FAILED] * 2
+    assert no_archive.specialist_outcomes.status == FAILED
+    assert [step.status for step in (no_receipts.stop_audit, no_receipts.scheduling_replay)] == [FAILED] * 2
+    assert no_receipts.specialist_outcomes.status == FAILED and no_receipts.playbook_trial.status == WRITTEN
+
+
+def test_the_sessions_menus_read_the_archive_and_log_each_menu_beside_the_reports(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    archive, reports = TreeArchive(tmp_path / "archive"), tmp_path / "reports"
+    assert archive_session(snapshot, METRIC, archive).status == ARCHIVED
+
+    menus = session_menus(METRIC, reports, archive)
+    menus.menu(snapshot, "s1", "c1")
+
+    assert [tree.session_id for tree in menus.trees] == ["sess-1"]
+    assert [(logged.branch, logged.commit) for logged in MenuLog(reports / MENU_LOG).menus()] == [("s1", "c1")]
+    assert session_menus(METRIC, None, archive).log is None
 
 
 @pytest.mark.usefixtures("unconfigured")
