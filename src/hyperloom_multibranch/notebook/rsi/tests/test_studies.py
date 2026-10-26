@@ -11,7 +11,10 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_multibranch.notebook.rsi import studies
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeArchive
+from hyperloom_multibranch.notebook.rsi.decisions import archive_decisions
+from hyperloom_multibranch.notebook.rsi.ladder import JUDGE_SYSTEM_PROMPT
 from hyperloom_multibranch.notebook.rsi.replay import ARCHIVE, OLD_RULE
 from hyperloom_multibranch.notebook.rsi.studies import main
 from hyperloom_multibranch.notebook.rsi.tests.trees import branch, tree
@@ -78,6 +81,34 @@ def test_the_command_reads_the_stall_odds_and_every_sessions_stops_off_one_archi
     assert [audit["session_id"] for audit in study["audits"]] == ["a", "b"]
     assert main(["families", "--archive", str(archive)]) == 0
     assert capsys.readouterr().out.startswith("Over 0 archived tests, 0 of them committing")
+
+
+def test_the_command_evolves_the_playbook_asking_the_judge_at_the_decisions_the_archives_kept(
+    archive: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    more = tmp_path / "more"
+    for session_id in ("c", "d"):
+        TreeArchive(more).put(_wide(session_id))
+    transcript = tmp_path / "MB-judge.jsonl"
+    stop = json.dumps({"stop": [{"branch": "s1", "reason": "lowest"}]})
+    transcript.write_text(json.dumps({"at": 2700.0, "prompt": "view", "reply": stop}) + "\n", encoding="utf-8")
+    for session_id in ("a", "b", "c", "d"):
+        archive_decisions(transcript, TreeArchive(more), session_id)
+    rule = {"add_rule": {"governs": "stop", "text": "Stop the later of two alike branches."}}
+
+    async def complete(system: str, prompt: str) -> str:
+        if system == JUDGE_SYSTEM_PROMPT:
+            return '{"stop": []}'
+        return json.dumps({"label": "alike", "change": rule, "hypothesis": "h", "measure": "early_stops"})
+
+    monkeypatch.setattr(studies, "_completion", lambda model: complete)
+    argv = ["--archive", str(archive), "--archive", str(more), "--model", "m", "--count", "1", "--runs", "2"]
+
+    assert main(["playbook-generations", *argv, "--pool", str(tmp_path / "pool")]) == 0
+
+    # Each evolution session's stop of s1, one test past its commit, should go; a judge that stops nothing gets it
+    # right under either playbook.
+    assert "R2 right on 2 of 2 points, h0 on 2" in capsys.readouterr().out
 
 
 def test_a_study_that_cannot_run_says_why(archive: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
