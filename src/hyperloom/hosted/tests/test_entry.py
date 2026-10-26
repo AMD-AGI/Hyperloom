@@ -188,15 +188,34 @@ def test_a_hosted_run_starts_the_events_implementation_from_the_host_inputs(run,
     assert Var.EVENTS_DIR not in os.environ
 
 
-def test_outside_a_hosted_run_the_hosted_events_implementation_has_no_host_inputs(run, monkeypatch):
+def test_outside_a_hosted_run_the_hosted_events_implementation_has_no_host_inputs(run):
+    import argparse
+
+    from hyperloom.inference_optimizer.cli import bootstrap
     from hyperloom.plugs.errors import PlugError
 
-    context.clear()
-    set_hosted_plug_inputs(None)
-    probe = _start_plug_host("hosted-gpu")
-    monkeypatch.setattr(context, "current", lambda: type("R", (), {"session_dir": run.work})())
-    with pytest.raises(PlugError, match="needs host inputs"):
-        probe([])
+    manifest = bootstrap.resolve_plug_manifest(argparse.Namespace(plug_profile="hosted-gpu"))
+    host = bootstrap.open_plug_host(manifest, run.work)
+    with pytest.raises(PlugError, match="needs host inputs"), bootstrap.running_plug_host(host):
+        pass
+
+
+def test_the_plug_inputs_do_not_outlive_the_run(run, monkeypatch):
+    from hyperloom.inference_optimizer.cli import bootstrap
+
+    seen = []
+    monkeypatch.setattr(entry, "_optimize_main", lambda argv: seen.append(bootstrap._hosted_inputs) or 0)
+    entry.main(["run"])
+    assert seen[0] is not None and bootstrap._hosted_inputs is None
+
+    def crash(argv):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(entry, "_optimize_main", crash)
+    run.restart()
+    with pytest.raises(RuntimeError):
+        entry.main(["run"])
+    assert bootstrap._hosted_inputs is None
 
 
 # -- the lock follows the profile --------------------------------------------------------------------------------
