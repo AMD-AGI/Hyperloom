@@ -20,6 +20,7 @@ from hyperloom.common.coerce import to_float
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import agentx_active
 from hyperloom.orchestrator.knowledge.recipe_kb import (
+    LocalRecipeStoreError,
     RecipeKB,
     RecipeUpsert,
     cid_to_path_components,
@@ -273,9 +274,11 @@ def _select_remote_candidate(kb: Any, row: Mapping[str, Any]) -> bool:
     select = getattr(kb, "select_candidate", None)
     if not callable(select):
         return True
+    from .remote_recipe import KBStoreError
+
     try:
         return bool(select(row))
-    except Exception as exc:  # noqa: BLE001 — reject and continue cascade
+    except (KBStoreError, OSError, TypeError, ValueError) as exc:
         log.warning(
             "warm-start candidate materialization failed for %s: %s",
             row.get("canonical_id"),
@@ -605,15 +608,11 @@ def _search_warm_candidates(
     labels: dict[str, str],
     hardware_in: list[str] | None = None,
 ) -> list[Mapping[str, Any]]:
-    """Run exact identity search and fail soft on backend errors."""
+    """Run exact identity search, keeping only mapping rows."""
     kwargs: dict[str, Any] = {"label_match": labels, "limit": 100}
     if hardware_in is not None and getattr(kb, "mode", "") == "remote":
         kwargs["hardware_in"] = hardware_in
-    try:
-        rows = kb.search(**kwargs)
-    except Exception as exc:  # noqa: BLE001
-        log.info("warm-start exact candidate search failed: %s", exc)
-        return []
+    rows = kb.search(**kwargs)
     return [row for row in (rows or []) if isinstance(row, Mapping)]
 
 
@@ -686,14 +685,10 @@ def _cascade_warm_start_search(
 ) -> WarmMatch:
     """Resolve exact plus cumulative four-tier seven-tuple fallbacks."""
     exact_history: Mapping[str, Any] | None = None
-    try:
-        exact = kb.get_recipe(
-            canonical_id=cid,
-            prefer=warm_prefer or None,
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.info("warm-start exact get non-fatal failure: %s", exc)
-        exact = None
+    exact = kb.get_recipe(
+        canonical_id=cid,
+        prefer=warm_prefer or None,
+    )
     if isinstance(exact, Mapping) and exact and str(exact.get("canonical_id") or "") == cid:
         if _recipe_is_actionable(exact):
             return WarmMatch(dict(exact), "exact", 1.0)
@@ -820,11 +815,7 @@ def _stamp_local_authority_row(
         return
     # Read-modify-write the selected store's exact authority row so the stamp does not clobber fields or trigger a
     # broad remote warm-start scan.
-    try:
-        live = kb.get_authoritative_recipe(canonical_id=identity["canonical_id"]) or {}
-    except Exception as exc:  # noqa: BLE001 — defensive
-        log.info("T0 anchor authority get_recipe non-fatal failure: %s", exc)
-        live = {}
+    live = kb.get_authoritative_recipe(canonical_id=identity["canonical_id"]) or {}
     # Stack fingerprint — preserve prior values not stamped this round.
     sfp_payload: dict[str, str] = dict(live.get("stack_fingerprint") or {})
     for stored, probed in (("vllm_version", "vllm"), ("aiter_commit", "aiter"), ("rocm_version", "rocm")):
@@ -862,7 +853,7 @@ def _stamp_local_authority_row(
             },
         )
         kb.put_recipe(upsert)
-    except Exception:
+    except (LocalRecipeStoreError, OSError, TypeError, ValueError):
         log.exception("T0 anchor put_recipe raised unexpectedly")
 
 
@@ -1024,7 +1015,7 @@ def run_t0_anchor(
         )
     try:
         shared_state.save(sd)
-    except Exception:
+    except OSError:
         log.exception("Recipe KB T0: SharedState.save failed (sid=%s, workload=%s)", sid, identity["model"])
 
 

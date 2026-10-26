@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdenti
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     RecipeUpsert,
     LocalRecipeStore,
+    LocalRecipeStoreError,
     RecipeKB,
     recipe_canonical_id,
 )
@@ -504,18 +505,20 @@ _ACTIONABLE = {
 class _FakeKB:
     """Minimal KB double exposing only get_recipe + search."""
 
-    def __init__(self, *, get_result=None, search_by_labels=None, get_raises=False):
+    def __init__(self, *, get_result=None, search_by_labels=None, raises=""):
         self._get_result = get_result
         self._search = search_by_labels or []
-        self._get_raises = get_raises
+        self._raises = raises
         self.search_calls: list[dict] = []
 
     def get_recipe(self, *, canonical_id, prefer=None):
-        if self._get_raises:
-            raise RuntimeError("boom")
+        if self._raises == "get_recipe":
+            raise LocalRecipeStoreError("failed to read recipe.json")
         return self._get_result
 
     def search(self, *, label_match, limit=5):
+        if self._raises == "search":
+            raise LocalRecipeStoreError("failed to read recipe.json")
         self.search_calls.append(dict(label_match))
         # Pop the next queued result list per search invocation.
         if self._search:
@@ -541,12 +544,12 @@ def _cascade(kb, cid="CID:target"):
     )
 
 
-def test_cascade_l1_get_recipe_exception_is_swallowed():
-    # A raising get_recipe degrades to search-based tiers, not a crash.
-    kb = _FakeKB(get_raises=True, search_by_labels=[[{"canonical_id": "CID:l2", **_ACTIONABLE}]])
-    point, tier, conf = _cascade(kb)
-    assert tier == "same_arch_class"
-    assert conf == 0.95
+@pytest.mark.parametrize("failing", ["get_recipe", "search"])
+def test_cascade_kb_read_failure_is_not_a_warm_start_miss(failing: str) -> None:
+    # A KB that cannot be read must not read as a miss or fall through to a weaker tier's donor.
+    kb = _FakeKB(raises=failing, search_by_labels=[[{"canonical_id": "CID:l2", **_ACTIONABLE}]])
+    with pytest.raises(LocalRecipeStoreError, match="failed to read recipe.json"):
+        _cascade(kb)
 
 
 def test_cascade_l2_skips_same_cid_and_nonactionable():
@@ -733,3 +736,30 @@ def test_spx_is_not_a_different_machine_from_an_unrecorded_mode(
     assert state.warm_start_recipe["hw"] == "MI300X"
     assert state.warm_start_recipe["tier"] == "exact"
     assert state.warm_start_recipe["confidence"] == 1.0
+
+
+def test_t0_anchor_failed_authority_read_leaves_the_live_row_unchanged(
+    kb: RecipeKB,
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stamp replaces the whole row, so a read it could not make must not be written back as an empty row."""
+    state = _FakeSharedState()
+    cid = _expected_cid(state, "M", "MI300X")
+    _seed_actionable_row(kb, cid)
+    monkeypatch.delenv("HYPERLOOM_PARTITION_MODE", raising=False)
+    before = kb.local.get_recipe(canonical_id=cid)
+
+    def _unreadable(**_kwargs: Any) -> None:
+        raise LocalRecipeStoreError("failed to read recipe.json")
+
+    monkeypatch.setattr(kb, "get_authoritative_recipe", _unreadable)
+    with pytest.raises(LocalRecipeStoreError, match="failed to read recipe.json"):
+        run_t0_anchor(
+            kb,
+            state,
+            T0AnchorRequest(workload="M", hw="MI300X", extra_attrs={"framework_name": "sglang"}),
+            session_dir=session_dir,
+        )
+
+    assert kb.local.get_recipe(canonical_id=cid) == before

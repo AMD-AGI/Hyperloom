@@ -178,7 +178,7 @@ class MachinePhase(CoordinatorCollaborator):
                 T0AnchorRequest(workload=workload, hw=hw, extra_attrs=extra_attrs),
                 session_dir=self.session_dir,
             )
-        except Exception:
+        except Exception:  # isolation boundary: the SDK-path T0 anchor, which leaves warm start empty
             log.exception(
                 "Coordinator T0 fallback: run_t0_anchor raised (workload=%s, hw=%s); warm_start stays empty",
                 workload,
@@ -311,7 +311,7 @@ class MachinePhase(CoordinatorCollaborator):
                 reason=move.reason,
                 evidence=move.evidence,
             )
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: the entered phase's hook, kept apart from the transition
             log.exception("Coordinator: _on_phase_entered hook failed")
             # This hook is also what closes the left phase's event, so a raise here is the case where that event never
             # got its exit evidence.
