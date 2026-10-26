@@ -106,9 +106,11 @@ doc is the authority on where that boundary lives.
 - **New framework or platform?** Work bring-up through the owning components before
   integration code lands — see [`CONTRIBUTING.md`](CONTRIBUTING.md) § *Proposing a new
   framework or platform*.
-- **Don't grow the debt.** No new broad `except Exception` / bare `except` — catch the
-  specific error or let it raise. No new feature flag or env toggle to route around a
-  design problem; a flag is a decision deferred.
+- **Don't grow the debt.** A new broad `except Exception` / bare `except` must re-raise,
+  or be the outermost handler on its path, or the boundary that isolates one item, and log
+  the error with its traceback, naming that boundary on its `# noqa: BLE001` line;
+  otherwise catch the specific error or let it raise (review-pr rule S8). No new feature
+  flag or env toggle to route around a design problem; a flag is a decision deferred.
 - **Trust the caller.** Validate at the system boundary, then trust internal callers. The
   agents driving this system are capable, so redundant re-checks, layered fallbacks, and
   belt-and-braces defaults buy nothing — they hide the failure they were added to survive
