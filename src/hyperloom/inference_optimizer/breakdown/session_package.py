@@ -24,7 +24,7 @@ from hyperloom.common.env import env_flag
 from hyperloom.common.env_safety import redact_secret_env_values
 
 from ..session.optimization_journal import JOURNAL_FILENAME
-from ..session.paths import is_path_within
+from ..session.paths import PRIVATE_SESSION_SUBDIRS, is_path_within
 from ..session.session_paths import BRINGUP_SEGMENT, ENABLEMENT_SEGMENT
 
 log = logging.getLogger(__name__)
@@ -211,7 +211,9 @@ def _is_packageable(path: Path, session_dir: Path) -> bool:
 def _iter_session_files(session_dir: Path) -> list[Path]:
     """All files under session_dir (one walk), so glob matching is a single pass instead of N globs each re-walking the tree."""
     out: list[Path] = []
-    for dp, _dn, fn in os.walk(session_dir):
+    for dp, dn, fn in os.walk(session_dir):
+        if Path(dp) == session_dir:
+            dn[:] = [d for d in dn if d not in PRIVATE_SESSION_SUBDIRS]
         for f in fn:
             out.append(Path(dp) / f)
     return out

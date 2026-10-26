@@ -129,11 +129,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 
 from ..session.lock import SessionAlreadyRunning, SessionLock, SessionLockPathError
-from ..session.paths import (
-    ENV_USER_DATA_PATH,
-    asset_system_prompts_dir,
-    make_session_dir,
-)
+from ..session.paths import ENV_USER_DATA_PATH, asset_system_prompts_dir, make_session_dir
 
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
@@ -1891,6 +1887,9 @@ def _open_resumed_session(args: argparse.Namespace) -> _SessionStart:
 
     ws = workspace_root()
     session_dir = Path(args.resume_from).expanduser().resolve()
+    if getattr(args, "session_dir", None):
+        print("ERROR: --session-dir names a new session; it cannot be combined with --resume-from.", file=sys.stderr)
+        sys.exit(2)
     if not is_path_within(session_dir, ws):
         print(
             f"ERROR: --resume-from {session_dir!r} is not under $USER_DATA_PATH={ws}. Move USER_DATA_PATH to the "
@@ -2068,8 +2067,9 @@ def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
 
 def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_resolved: int) -> _SessionStart:
     """Create and lock the session directory, then write its manifest, launch info and seeded state."""
-    # session_dir defaults to <workspace_root>/<model>/<UTC ts>-<rand8>/.
-    session_dir = make_session_dir(model_name=resolve_model_display_name(args))
+    session_dir = make_session_dir(
+        model_name=resolve_model_display_name(args), target=getattr(args, "session_dir", None)
+    )
     # Single-optimizer guard: take the lock so the contract holds uniformly and the owner pid is published for the
     # session diagnostics.
     session_lock = _acquire_session_lock_or_exit(session_dir)

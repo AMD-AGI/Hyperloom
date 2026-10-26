@@ -217,7 +217,7 @@ function-lines src/hyperloom/inference_optimizer/cli/kb.py::_bootstrap_recipe_kb
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_context_window 116
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_model_config_compat 71
 function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_prepare_multi_node_state 75
-function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 907
+function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 891
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_emit_preflight_diagnostics 65
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_inferencex 51
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_lm_eval_dep 62
