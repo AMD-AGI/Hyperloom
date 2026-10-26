@@ -659,11 +659,39 @@ async def test_escalate_skip_to_kernel_outside_framework_agent_is_dropped(coord:
     assert coord.shared_state.pending_escalate_hint == ""
 
 
+def _three_hour_session(coord: Coordinator, *, baseline_tput: float, spent_sec: float) -> None:
+    """A 180-minute FRAMEWORK_AGENT session, whose cycle floor is 5400s, with ``spent_sec`` charged."""
+    state = coord.shared_state
+    state.phase = "FRAMEWORK_AGENT"
+    state.max_minutes = 180
+    state.leg_anchor_unix = 0.0
+    state.elapsed_charged_sec = spent_sec
+    state.baseline_tput = baseline_tput
+
+
 @pytest.mark.asyncio
-async def test_escalate_skip_to_close_sets_pending_hint(coord: Coordinator) -> None:
-    """skip_to_close reaches pending_escalate_hint (no suppression guard any more)."""
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.shared_state.baseline_tput = 1234.0
+async def test_escalate_skip_to_close_with_baseline_and_budget_is_denied(coord: Coordinator) -> None:
+    """A measured baseline and budget for another cycle contradict abandoning the run."""
+    _three_hour_session(coord, baseline_tput=1078.29, spent_sec=1800.0)
+    await coord.router._handle_escalate_strategy_change(
+        "orchestration",
+        _escalate("skip_to_close"),
+    )
+    assert coord.shared_state.pending_escalate_hint == ""
+    assert coord.shared_state.policy_denial_history[-1]["rule"] == "skip_to_close_contradicted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("baseline_tput", "spent_sec"),
+    [(0.0, 1800.0), (1078.29, 10200.0)],
+    ids=["no_baseline", "budget_below_cycle_floor"],
+)
+async def test_escalate_skip_to_close_the_facts_admit_is_deferred(
+    coord: Coordinator, baseline_tput: float, spent_sec: float
+) -> None:
+    """Without a baseline, or without budget for another cycle, the close is still the agent's to request."""
+    _three_hour_session(coord, baseline_tput=baseline_tput, spent_sec=spent_sec)
     await coord.router._handle_escalate_strategy_change(
         "orchestration",
         _escalate("skip_to_close"),
