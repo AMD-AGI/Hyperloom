@@ -21,13 +21,19 @@ import math
 import os
 import re
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
 from hyperloom_multibranch.contracts.notebook.peers import Intent, IntentLayer, Purpose, SandboxFacts, TestKind
-from hyperloom_multibranch.contracts.notebook.records import BranchNode, LineageView, NotebookSnapshot, TestRecord
+from hyperloom_multibranch.contracts.notebook.records import (
+    REPLAY_TARGET,
+    BranchNode,
+    LineageView,
+    NotebookSnapshot,
+    TestRecord,
+)
 from hyperloom_multibranch.contracts.notebook.vocab import (
     COMMITTING,
     BranchDriver,
@@ -58,7 +64,8 @@ class TreeCommit:
 @dataclass(frozen=True)
 class TreeDirection:
     """One intent a branch tested: how many tests it took, how many committed, and the best gain any of them was judged
-    at over its parent, among those that kept accuracy; ``None`` when none was."""
+    at over its parent, among those that kept accuracy; ``None`` when none was. ``cross_image`` when it replayed a
+    Recipe KB champion built on another image, so later sessions learn how often such a replay pays."""
 
     target: str
     mechanism: str
@@ -66,6 +73,7 @@ class TreeDirection:
     tests: int
     commits: int = 0
     best_gain_pct: float | None = None
+    cross_image: bool = False
 
 
 @dataclass(frozen=True)
@@ -307,7 +315,9 @@ def _kept_gain(record: TestRecord) -> float | None:
     return judged.gain_pct
 
 
-def _directions(records: Sequence[TestRecord], intents: Mapping[str, Intent]) -> tuple[TreeDirection, ...]:
+def _directions(
+    records: Sequence[TestRecord], intents: Mapping[str, Intent], cross_image: Collection[str] = ()
+) -> tuple[TreeDirection, ...]:
     tried: dict[str, list[TestRecord]] = {}
     for record in sorted(records, key=lambda item: item.requested_at):
         if record.withdrawn_at is None and record.request.intent_fingerprint in intents:
@@ -324,6 +334,7 @@ def _directions(records: Sequence[TestRecord], intents: Mapping[str, Intent]) ->
                 tests=len(tests),
                 commits=sum(1 for record in tests if record.conclusion in COMMITTING),
                 best_gain_pct=max(gains) if gains else None,
+                cross_image=intent.target == REPLAY_TARGET and intent.mechanism in cross_image,
             )
         )
     return tuple(directions)
@@ -332,7 +343,8 @@ def _directions(records: Sequence[TestRecord], intents: Mapping[str, Intent]) ->
 @dataclass(frozen=True)
 class _TreeReading:
     """What every branch of one session's search tree is read against: its gains off ``metric`` from the baseline
-    value ``anchor``, its times from ``start``, each branch's tests, and the intents that change a kernel."""
+    value ``anchor``, its times from ``start``, each branch's tests, the intents that change a kernel, and the Recipe
+    KB champions built on another image whose replays it tested."""
 
     snapshot: NotebookSnapshot
     metric: str
@@ -340,6 +352,7 @@ class _TreeReading:
     start: float
     tests: Mapping[str, Sequence[TestRecord]]
     kernel: frozenset[str]
+    cross_image: frozenset[str] = frozenset()
 
     def gain(self, commit_id: str) -> float:
         value = self.snapshot.value_of(commit_id).get(self.metric)
@@ -362,7 +375,9 @@ class _TreeReading:
             ),
             test_times=tuple(sorted(record.requested_at - start for record in tests)),
             stop_reason=node.stop_reason or "",
-            directions=() if node.branch == INTEGRATION_BRANCH else _directions(tests, self.snapshot.intents),
+            directions=(
+                () if node.branch == INTEGRATION_BRANCH else _directions(tests, self.snapshot.intents, self.cross_image)
+            ),
             kernel_test_times=tuple(
                 sorted(
                     record.requested_at - start for record in tests if record.request.intent_fingerprint in self.kernel
@@ -386,8 +401,10 @@ def tree_from_snapshot(
     *,
     budget_seconds: float | None = None,
     bottlenecks: Mapping[str, float] | None = None,
+    cross_image: Collection[str] = (),
 ) -> SearchTree:
-    """The session's search tree, its gains read off ``metric``; the budget defaults to the time the notebook spans."""
+    """The session's search tree, its gains read off ``metric``; the budget defaults to the time the notebook spans.
+    ``cross_image`` names the Recipe KB champions built on another image than the session's, by canonical id."""
 
     profile, baseline = snapshot.profile, snapshot.baseline
     if profile is None or baseline is None:
@@ -400,7 +417,7 @@ def tree_from_snapshot(
     for record in snapshot.records:
         tests[record.request.branch].append(record)
     kernel = frozenset(fp for fp, intent in snapshot.intents.items() if intent.layer is IntentLayer.KERNEL)
-    reading = _TreeReading(snapshot, metric, anchor, start, tests, kernel)
+    reading = _TreeReading(snapshot, metric, anchor, start, tests, kernel, cross_image=frozenset(cross_image))
     ceiling = profile.roofline_ceiling.get(metric)
     return SearchTree(
         session_id=profile.session_id,
@@ -502,11 +519,13 @@ def archive_session(
     *,
     budget_seconds: float | None = None,
     bottlenecks: Mapping[str, float] | None = None,
+    cross_image: Collection[str] = (),
 ) -> ArchiveResult:
     """CLOSE: archive the session's search tree in ``archive``, by default the one :data:`ARCHIVE_ENV` names.
 
     ``budget_seconds`` is the session's configured budget; later sessions compare their progress with this one's at
-    the same fraction of its budget, so it beats the default, the time the notebook spans. Nothing is archived, and the
+    the same fraction of its budget, so it beats the default, the time the notebook spans. ``cross_image`` names the
+    Recipe KB champions PRELUDE prepared from another image, whose replays the tree marks. Nothing is archived, and the
     result says why, when no archive is configured, the session lacks its profile or baseline, its id cannot name a
     file, the archive already holds another tree for it, or the archive cannot be written.
     """
@@ -515,7 +534,9 @@ def archive_session(
     if target is None:
         return ArchiveResult(SKIPPED, NO_ARCHIVE)
     try:
-        tree = tree_from_snapshot(snapshot, metric, budget_seconds=budget_seconds, bottlenecks=bottlenecks)
+        tree = tree_from_snapshot(
+            snapshot, metric, budget_seconds=budget_seconds, bottlenecks=bottlenecks, cross_image=cross_image
+        )
     except NotRecorded:
         return ArchiveResult(SKIPPED, "no_profile_or_baseline")
     except ValueError:

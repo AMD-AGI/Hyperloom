@@ -25,7 +25,7 @@ from hyperloom.contracts.recipe import (
     Recipe,
     apply,
 )
-from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.measure.compile import BlobError, LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError, RemoteRecipeClient
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RecipeScope
 from hyperloom.orchestrator.knowledge.remote_recipe.values import (
@@ -41,7 +41,9 @@ from hyperloom_multibranch.contracts.notebook.records import REPLAY_TOOL
 from hyperloom_multibranch.notebook.knowledge import warm_start
 from hyperloom_multibranch.notebook.knowledge.warm_start import (
     IDENTITY_LABELS,
+    LAUNCH_ONLY_REASON,
     PreparedReplay,
+    ReplayReference,
     ReplayRefusal,
     ReplayTarget,
     WarmLead,
@@ -384,7 +386,6 @@ def test_a_replay_keeps_the_heads_context_length_and_watchdog_and_drops_the_cham
 @pytest.mark.parametrize(
     ("spoil", "reason"),
     [
-        ("another image", "built on another image"),
         ("no image", "names no base image"),
         ("tampered file", "the record pins"),
         ("fusion kernel", "measurement loads no fusion kernel artifacts yet"),
@@ -397,9 +398,7 @@ def test_a_champion_whose_recipe_cannot_come_along_replays_its_launch_config_onl
     fused = replace(CHAMPION, kernels=(replace(TUNED, kind=KernelKind.FUSION),))
     downloads = _downloads(snapshot, tmp_path, fused if spoil == "fusion kernel" else CHAMPION)
     provenance = downloads.view["knowledge"]["provenance"]
-    if spoil == "another image":
-        provenance["base_image_digest"] = "sha256:" + "b" * 64
-    elif spoil == "no image":
+    if spoil == "no image":
         provenance.pop("base_image_digest")
     elif spoil == "tampered file":
         downloads.files[TUNED.ref] = b"tampered"
@@ -413,6 +412,70 @@ def test_a_champion_whose_recipe_cannot_come_along_replays_its_launch_config_onl
     made = apply(ROOT, on_root.delta)
     assert (made.launch, made.components) == (LaunchConfig(LEAD.server_args, LEAD.envs), ROOT.components)
     assert "its launch config only" in found.describe()
+
+
+OTHER_IMAGE = "sha256:" + "b" * 64
+GATE_PATCH_BYTES = b'--- a/vllm/moe.py\n+++ b/vllm/moe.py\n@@ -1 +1,2 @@\n+FUSED = os.environ.get("VLLM_FUSED_GATE")\n'
+GATE_PATCH = PatchRef("patch/vllm/0002-gate.patch", hashlib.sha256(GATE_PATCH_BYTES).hexdigest())
+GATED = replace(
+    CHAMPION,
+    launch=LaunchConfig("--max-num-seqs 256", {"VLLM_USE_AITER": "1", "VLLM_FUSED_GATE": "1"}),
+    components=(ComponentPatches("vllm", VLLM, VLLM_AT, (GATE_PATCH,)),),
+)
+GATED_LEAD = replace(LEAD, envs=GATED.launch.envs)
+
+
+def _elsewhere(snapshot: NotebookSnapshot, tmp_path: Path, champion: Recipe = CHAMPION) -> _Downloads:
+    """The champion's downloads, recorded as built on another image than the session's."""
+
+    downloads = _downloads(snapshot, tmp_path, champion)
+    downloads.view["knowledge"]["provenance"]["base_image_digest"] = OTHER_IMAGE
+    if champion is GATED:
+        downloads.files = {overlay_ref(0, 0, GATE_PATCH.path): GATE_PATCH_BYTES, TUNED.ref: TUNED_BYTES}
+    return downloads
+
+
+def test_a_champion_built_on_another_image_replays_its_patches_but_not_its_kernels(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    target = _target(tmp_path)
+    tuned_head = replace(ROOT, kernels=(replace(TUNED, ref="kernel/gemm/head.csv", sha256="c" * 64),))
+
+    found = replay(_elsewhere(snapshot, tmp_path), LEAD, SCOPE, target)
+
+    assert found is not None and found.recipe is not None and found.source_image == OTHER_IMAGE
+    assert found.references == (ReplayReference(TUNED.kind.value, TUNED.ref, TUNED.sha256, OTHER_IMAGE),)
+    assert target.blobs.get(PATCH.sha256) == PATCH_BYTES
+    with pytest.raises(BlobError):
+        target.blobs.get(TUNED.sha256)
+    for head in (ROOT, tuned_head):
+        on_head = found.on(head, "c0")
+        assert on_head is not None and (on_head.layer, on_head.source_image) == (IntentLayer.SOURCE, OTHER_IMAGE)
+        made = apply(head, on_head.delta)
+        assert (made.launch, made.components, made.kernels) == (CHAMPION.launch, CHAMPION.components, head.kernels)
+        assert on_head.references == (found.references[0].describe(),)
+    assert f"built on {OTHER_IMAGE[:19]}, so its gain was measured there" in found.describe()
+    assert f"left out: gemm {TUNED.ref} (blob {TUNED.sha256[:12]}, built on {OTHER_IMAGE[:19]})" in found.describe()
+
+
+def test_launch_only_replays_the_launch_config_without_what_the_patches_read_listing_them(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    found = replay(_elsewhere(snapshot, tmp_path, GATED), GATED_LEAD, SCOPE, _target(tmp_path))
+    assert found is not None and found.patch_envs == ("VLLM_FUSED_GATE",)
+
+    launched = found.launch_only()
+    on_root = launched.on(ROOT, "c0")
+
+    assert (launched.recipe, launched.reason, launched.source_image) == (None, LAUNCH_ONLY_REASON, OTHER_IMAGE)
+    assert [(item.kind, item.ref) for item in launched.references] == [("patch", GATE_PATCH.path), ("gemm", TUNED.ref)]
+    assert launched.references[0] == ReplayReference(
+        "patch", GATE_PATCH.path, GATE_PATCH.sha256, OTHER_IMAGE, "vllm", VLLM_AT
+    )
+    assert on_root is not None and on_root.layer is IntentLayer.CONFIG
+    assert apply(ROOT, on_root.delta).launch == LaunchConfig("--max-num-seqs 256", {"VLLM_USE_AITER": "1"})
+    assert apply(ROOT, on_root.delta).components == ROOT.components
+    assert launched.launch_only() is launched and found.launch_only("stack refused").reason == "stack refused"
 
 
 def test_only_the_best_leads_get_a_replay_and_one_that_changes_nothing_gets_none(

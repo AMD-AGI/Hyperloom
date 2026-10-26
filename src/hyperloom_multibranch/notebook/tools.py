@@ -293,11 +293,16 @@ def _claim_and_change(source: str, parent_commit: str, layer: IntentLayer, delta
 
 
 def render_replay(replay: WarmReplay) -> str:
-    """How to test a champion's replay: the intent to claim, then the change to submit on the branch's head."""
+    """How to test a champion's replay: where its gain was measured when that was another image, the files it leaves
+    out, then the intent to claim and the change to submit on the branch's head."""
 
     what = "the whole recipe" if not replay.reason else f"its launch config only: {replay.reason}"
+    lines = [f"replay of {replay.canonical_id} on your head {replay.parent_commit}, {what}"]
+    if replay.source_image:
+        lines.append(f"its gain was measured on image {replay.source_image}, not this session's; expect it to differ")
+    lines.extend(f"left out: {reference}" for reference in replay.references)
     found = _claim_and_change(replay.canonical_id, replay.parent_commit, replay.layer, replay.delta)
-    return "\n".join((f"replay of {replay.canonical_id} on your head {replay.parent_commit}, {what}", *found))
+    return "\n".join((*lines, *found))
 
 
 def render_peer_replay(replay: PeerReplay) -> str:

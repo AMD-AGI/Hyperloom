@@ -21,9 +21,12 @@ PRELUDE reads the KB once per session, and the KB Store answers a server error n
 again after a server error or a dropped connection, waiting :data:`KB_RETRY_SECONDS`; a refusal is not asked again.
 
 :func:`replay_leads` gives the first leads a :class:`PreparedReplay`: the champion's recipe, patches and kernel
-artifacts too, their files downloaded from the KB into the session's blob store. A champion built on another image, or
-one whose files the KB does not hold, replays its launch config only. The specialist's ``notebook_replay`` makes the
-change for its own branch head, since a gain lands only on the head it was measured against.
+artifacts too, their files downloaded from the KB into the session's blob store. A champion built on another image
+replays its launch config and patches, each component on the head's upstream as a merge takes it, but not its kernel
+artifacts, tuned against the other image's libraries: they are listed as references, and its gain is said to be
+measured there. One whose files the KB does not hold replays its launch config only. The specialist's
+``notebook_replay`` makes the change for its own branch head, since a gain lands only on the head it was measured
+against.
 
 A replay leaves the flags of :data:`HEAD_FLAGS` to the head it is made for: the champion's context length and
 scheduler watchdog are dropped, and the head's, if it sets them, kept. A record can carry the ones the launcher set for
@@ -33,7 +36,10 @@ as ``context_below_eval``. A lead's launch arguments are listed without them for
 
 PRELUDE checks each replay against the toolbox's acceptance on the root. A replay acceptance refuses keeps its lead, its
 :class:`ReplayRefusal` named in place of the replay, so no specialist spends a submit on it; one acceptance did not
-answer for in PRELUDE's time stays offered, its lead saying it was not checked.
+answer for in PRELUDE's time stays offered, its lead saying it was not checked. A cross-image replay whose patches
+acceptance refuses, as a stack that does not apply in order on this image, is checked again as
+:meth:`PreparedReplay.launch_only`: its launch config without the environment its patches read, the patches listed
+as references.
 """
 
 from __future__ import annotations
@@ -42,7 +48,7 @@ import logging
 import re
 import time
 import urllib.error
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -86,6 +92,14 @@ REPLAY_LEADS = 3
 KB_RETRY_SECONDS = (2.0, 5.0, 15.0)
 #: How much of an acceptance refusal's reason a lead's line keeps.
 REFUSAL_CHARS = 160
+#: Why a cross-image replay fell back to its launch config, by default.
+LAUNCH_ONLY_REASON = "acceptance refused its patches on this session's image"
+#: The kind a patch is listed under among a replay's references; a kernel artifact is listed under its own kind.
+PATCH_REFERENCE = "patch"
+#: How much of an image digest a lead's line shows.
+IMAGE_CHARS = 19
+#: How much of a blob's sha256 or an upstream commit a lead's line shows.
+SHORT_REF = 12
 MODEL_LABEL = "model"
 #: The one label a lead may differ in and still be read: a recipe measured on another framework release.
 FRAMEWORK_VERSION_LABEL = "framework_version"
@@ -162,17 +176,61 @@ class ReplayTarget:
 
 
 @dataclass(frozen=True)
+class ReplayReference:
+    """A file of a champion's its replay leaves out: its ``kind`` (:data:`PATCH_REFERENCE` or a kernel artifact's
+    kind), the path or ref and the sha256 the recipe pins, the blob it is in the session's store under, the image the
+    champion was built on, and for a patch the component and the upstream commit it was made on."""
+
+    kind: str
+    ref: str
+    sha256: str
+    image: str
+    component: str = ""
+    upstream_ref: str = ""
+
+    def describe(self) -> str:
+        made = f" on {self.component} {self.upstream_ref[:SHORT_REF]}" if self.component else ""
+        return f"{self.kind} {self.ref} (blob {self.sha256[:SHORT_REF]}{made}, built on {self.image[:IMAGE_CHARS]})"
+
+
+@dataclass(frozen=True)
 class PreparedReplay:
     """A champion's recipe ready to replay on any head of the session.
 
     ``recipe`` is its whole recipe, its patch and kernel files already in the session's blob store; ``None`` when only
-    its launch config ``launch`` replays, ``reason`` saying why.
+    its launch config ``launch`` replays, ``reason`` saying why. ``source_image`` is the image the champion was built
+    on when it is not the session's: its kernel artifacts stay out, each head keeping its own, and its gain was
+    measured there. ``references`` are the files the replay leaves out, and ``patch_envs`` the variables of the
+    launch environment its patches read.
     """
 
     canonical_id: str
     recipe: Recipe | None
     launch: LaunchConfig
     reason: str = ""
+    references: tuple[ReplayReference, ...] = ()
+    source_image: str = ""
+    patch_envs: tuple[str, ...] = ()
+
+    def launch_only(self, reason: str = LAUNCH_ONLY_REASON) -> PreparedReplay:
+        """The champion's launch config alone, for ``reason``: without the variables its patches read, which mean
+        nothing without them, and with every patch and kernel artifact of the recipe among the references."""
+
+        if self.recipe is None:
+            return self
+        image = self.source_image or self.recipe.base_image_digest
+        envs = {name: value for name, value in self.launch.envs.items() if name not in self.patch_envs}
+        return replace(
+            self,
+            recipe=None,
+            launch=replace(self.launch, envs=envs),
+            reason=reason,
+            references=(
+                *_patch_references(self.recipe, image),
+                *self.references,
+                *_kernel_references(self.recipe, image),
+            ),
+        )
 
     def on(self, head: Recipe, parent_commit: str, stack_slot: StackSlot | None = None) -> WarmReplay | None:
         """The change that makes ``head``, the recipe of ``parent_commit``, into the champion's; ``None`` when ``head``
@@ -190,7 +248,9 @@ class PreparedReplay:
         delta, _replaces = stack_added_kernels(delta, head, stack_slot)
         if apply(head, delta) == head:
             return None
-        return WarmReplay(self.canonical_id, parent_commit, delta, delta_layer(delta), self.reason)
+        references = tuple(item.describe() for item in self.references)
+        layer = delta_layer(delta)
+        return WarmReplay(self.canonical_id, parent_commit, delta, layer, self.reason, self.source_image, references)
 
     def is_on(self, recipe: Recipe) -> bool:
         """Whether ``recipe`` is the champion's already (:func:`same_recipe`), its flags of :data:`HEAD_FLAGS` aside."""
@@ -199,12 +259,45 @@ class PreparedReplay:
 
     def describe(self) -> str:
         what = "the whole recipe" if self.recipe is not None else f"its launch config only, {self.reason}"
+        if self.source_image:
+            what += (
+                f"; built on {self.source_image[:IMAGE_CHARS]}, so its gain was measured there, not on this session's "
+                "image"
+            )
+        if self.references:
+            what += f"; left out: {', '.join(item.describe() for item in self.references)}"
         return f"replay on your head with {REPLAY_TOOL}: {what}"
 
     def _wanted(self, head: Recipe) -> Recipe:
         champion = self.recipe if self.recipe is not None else replace(head, launch=self.launch)
+        if self.source_image:
+            champion = replace(champion, kernels=head.kernels)
         args = _with_head_flags(champion.launch.server_args, head.launch.server_args)
         return replace(_on_head_upstreams(champion, head), launch=replace(champion.launch, server_args=args))
+
+
+def _patch_references(recipe: Recipe, image: str) -> tuple[ReplayReference, ...]:
+    return tuple(
+        ReplayReference(PATCH_REFERENCE, patch.path, patch.sha256, image, component.component, component.upstream_ref)
+        for component in recipe.components
+        for patch in component.patches
+    )
+
+
+def _kernel_references(recipe: Recipe, image: str) -> tuple[ReplayReference, ...]:
+    return tuple(ReplayReference(item.kind.value, item.ref, item.sha256, image) for item in recipe.kernels)
+
+
+def _read_envs(patches: Sequence[bytes], envs: Iterable[str]) -> tuple[str, ...]:
+    """The variables of ``envs`` a line ``patches`` add names: environment the patched code reads."""
+
+    added = [
+        line
+        for text in patches
+        for line in text.decode("utf-8", "replace").splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    ]
+    return tuple(name for name in envs if any(re.search(rf"\b{re.escape(name)}\b", line) for line in added))
 
 
 def _head_args(server_args: str) -> tuple[str, ...]:
@@ -418,10 +511,10 @@ def warm_leads(reader: RecipeReader, profile: SessionProfile, *, limit: int = MA
 def replay(client: RecipeDownloader, lead: WarmLead, scope: RecipeScope, target: ReplayTarget) -> PreparedReplay | None:
     """``lead``'s champion ready to replay on any head of the session; ``None`` when it changes nothing on the root.
 
-    The whole recipe needs the record's files, a base image and runtime snapshot the same as the root's, kernel
-    artifacts of kinds measurement loads, and components the root takes from the same upstream repositories. Its files
-    go into the session's blob store, each checked against the hash the recipe pins. Otherwise only the launch config
-    replays, and the replay says why.
+    The whole recipe needs the record's files, kernel artifacts of kinds measurement loads, and components the root
+    takes from the same upstream repositories. Its files go into the session's blob store, each checked against the
+    hash the recipe pins. A champion built on another image than the root's replays without its kernel artifacts.
+    Otherwise only the launch config replays, and the replay says why.
     """
 
     try:
@@ -432,7 +525,7 @@ def replay(client: RecipeDownloader, lead: WarmLead, scope: RecipeScope, target:
     config_only = PreparedReplay(lead.canonical_id, None, launch, "the record holds no patch or kernel files")
     if lead.replayable:
         try:
-            whole = PreparedReplay(lead.canonical_id, _champion(client, lead, scope, target), launch)
+            whole = replace(_champion(client, lead, scope, target), launch=launch)
             return whole if whole.on(target.root, "") is not None else None
         except _REPLAY_ERRORS as exc:
             log.warning("Recipe KB champion %s replays its launch config only: %s", lead.canonical_id, exc)
@@ -460,31 +553,42 @@ def replay_leads(
     )
 
 
-def _champion(client: RecipeDownloader, lead: WarmLead, scope: RecipeScope, target: ReplayTarget) -> Recipe:
-    """The champion's recipe on this session's image, its files put into the session's blob store."""
+def _champion(client: RecipeDownloader, lead: WarmLead, scope: RecipeScope, target: ReplayTarget) -> PreparedReplay:
+    """The champion's whole replay, its files put into the session's blob store: on another image than this
+    session's, without its kernel artifacts, which it lists as references."""
 
     envelope = _asked(partial(client.get_view, lead.canonical_id, scope))
     if envelope is None:
         raise RecipeError("the record is gone")
     champion = _recorded_recipe(envelope)
+    source, references = "", ()
     if (champion.base_image_digest, champion.runtime_snapshot) != (
         target.root.base_image_digest,
         target.root.runtime_snapshot,
     ):
         log.info("Recipe KB champion %s was built on %s", lead.canonical_id, champion.base_image_digest)
-        raise RecipeError("it was built on another image than this session's")
+        source, references = champion.base_image_digest, _kernel_references(champion, champion.base_image_digest)
+        champion = replace(champion, kernels=())
     unloadable = sorted({item.kind.value for item in champion.kernels if item.kind not in LOADABLE_KERNEL_KINDS})
     if unloadable:
         raise RecipeError(f"measurement loads no {', '.join(unloadable)} kernel artifacts yet")
     destination = target.workdir / _UNSAFE_NAME.sub("-", lead.canonical_id)
     _asked(partial(client.read, lead.canonical_id, destination, scope=scope, envelope=envelope))
     files = destination / "files"
+    patches = []
     for stack, component in enumerate(champion.components):
         for member, patch in enumerate(component.patches):
-            _keep(target.blobs, files / overlay_ref(stack, member, patch.path), patch.sha256)
+            patches.append(_keep(target.blobs, files / overlay_ref(stack, member, patch.path), patch.sha256))
     for artifact in champion.kernels:
         _keep(target.blobs, files / artifact.ref, artifact.sha256)
-    return champion
+    return PreparedReplay(
+        lead.canonical_id,
+        champion,
+        champion.launch,
+        references=references,
+        source_image=source,
+        patch_envs=_read_envs(patches, lead.envs),
+    )
 
 
 def _recorded_recipe(envelope: Mapping[str, Any]) -> Recipe:
@@ -502,10 +606,14 @@ def _object(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _keep(blobs: BlobStore, path: Path, sha256: str) -> None:
-    found = blobs.put(path.read_bytes())
+def _keep(blobs: BlobStore, path: Path, sha256: str) -> bytes:
+    """The file at ``path``, put into ``blobs``; raises ``RecipeError`` unless its sha256 is ``sha256``."""
+
+    data = path.read_bytes()
+    found = blobs.put(data)
     if found != sha256:
         raise RecipeError(f"{path.name} has sha256 {found}; the record pins {sha256}")
+    return data
 
 
 def delta_layer(delta: RecipeDelta) -> IntentLayer:
@@ -520,13 +628,18 @@ __all__ = [
     "FRAMEWORK_VERSION_LABEL",
     "HEAD_FLAGS",
     "IDENTITY_LABELS",
+    "IMAGE_CHARS",
     "KB_RETRY_SECONDS",
+    "LAUNCH_ONLY_REASON",
     "MAX_CANDIDATES",
     "MODEL_LABEL",
+    "PATCH_REFERENCE",
     "REPLAY_LEADS",
+    "SHORT_REF",
     "PreparedReplay",
     "RecipeDownloader",
     "RecipeReader",
+    "ReplayReference",
     "ReplayRefusal",
     "ReplayTarget",
     "WarmLead",

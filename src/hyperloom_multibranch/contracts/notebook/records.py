@@ -582,7 +582,9 @@ class WarmReplay:
 
     A gain lands only on the head it was measured against, so the change is made for the caller's head, not the root.
     It replays the whole recipe when ``reason`` is empty, else the launch config only, ``reason`` saying why. ``layer``
-    is the deepest layer the change reaches, the one its intent claims.
+    is the deepest layer the change reaches, the one its intent claims. ``source_image`` is the image the champion was
+    built on when it is not this session's, where its gain was measured; ``references`` describe the files of its
+    recipe the change leaves out, each with the blob it is in the session's store under.
     """
 
     canonical_id: str
@@ -590,6 +592,8 @@ class WarmReplay:
     delta: RecipeDelta
     layer: IntentLayer
     reason: str = ""
+    source_image: str = ""
+    references: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

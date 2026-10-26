@@ -13,7 +13,7 @@ import pytest
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
-from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, TestRecord
+from hyperloom_multibranch.contracts.notebook.records import REPLAY_TARGET, NotebookSnapshot, TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver, CommitOrigin, LineageKind
 from hyperloom_multibranch.notebook.rsi.archive import (
     ARCHIVE_ENV,
@@ -134,6 +134,24 @@ def test_each_branch_keeps_why_it_stopped_and_the_directions_it_tried(snapshot: 
         TreeDirection("kv cache", "fp8 kv cache", IntentLayer.CONFIG, 1, 0, None),
     )
     assert branches[INTEGRATION_BRANCH].directions == ()
+
+
+def test_a_replay_of_a_champion_built_on_another_image_is_marked_in_the_tree(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    fingerprint, intent = next(
+        (key, item) for key, item in snapshot.intents.items() if item.mechanism == "tuned kernel"
+    )
+    replayed = dataclasses.replace(intent, target=REPLAY_TARGET, mechanism="inference:older")
+    renamed = dataclasses.replace(snapshot, intents={**snapshot.intents, fingerprint: replayed})
+    archive = TreeArchive(tmp_path)
+
+    archive_session(renamed, METRIC, archive, cross_image={"inference:older"})
+    (marked,) = (branch for branch in archive.load()[0].branches if branch.name == "s1")
+    (plain,) = (branch for branch in tree_from_snapshot(renamed, METRIC).branches if branch.name == "s1")
+
+    assert [(item.mechanism, item.cross_image) for item in marked.directions] == [("inference:older", True)]
+    assert [item.cross_image for item in plain.directions] == [False]
 
 
 def test_a_tree_written_before_stop_reasons_and_directions_still_reads(snapshot: NotebookSnapshot) -> None:

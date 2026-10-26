@@ -45,6 +45,7 @@ from hyperloom_multibranch.notebook.tools import (
     render_answer,
     render_brief,
     render_ceiling,
+    render_replay,
 )
 
 GEMM_ON_C0 = {"parent_commit": "c0", "target": "moe gemm", "mechanism": "tuned kernel", "layer": "kernel"}
@@ -90,6 +91,19 @@ async def test_the_replay_tool_names_the_intent_to_claim_and_the_change_on_the_b
     assert REPLAY_TOOL in tools
     assert (await _call(tools, "replay", canonical_id="inference:none")).startswith(ERROR)
     assert (await _call(tools_of("s1"), "replay", canonical_id="inference:older")).startswith(ERROR)
+
+
+def test_a_replay_from_another_image_says_where_its_gain_was_measured_and_what_it_leaves_out() -> None:
+    delta = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))
+    elsewhere = WarmReplay(
+        "inference:older", "c3", delta, IntentLayer.CONFIG, "acceptance refused", "sha256:bbbb", ("patch p (blob b)",)
+    )
+
+    first, measured, left, claim, _change = render_replay(elsewhere).splitlines()
+
+    assert first == "replay of inference:older on your head c3, its launch config only: acceptance refused"
+    assert measured.startswith("its gain was measured on image sha256:bbbb, not this session's")
+    assert left == "left out: patch p (blob b)" and claim.startswith("claim with parent_commit")
 
 
 async def test_the_replay_tool_replays_another_branchs_test_by_its_request_id_on_the_branch_head(

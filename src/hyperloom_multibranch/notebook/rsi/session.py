@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -174,9 +174,12 @@ def _archived(
     *,
     budget_seconds: float | None,
     bottlenecks: Mapping[str, float] | None,
+    cross_image: Collection[str] = (),
 ) -> CloseStep:
     try:
-        result = archive_session(snapshot, metric, archive, budget_seconds=budget_seconds, bottlenecks=bottlenecks)
+        result = archive_session(
+            snapshot, metric, archive, budget_seconds=budget_seconds, bottlenecks=bottlenecks, cross_image=cross_image
+        )
     except STEP_ERRORS as exc:
         return _failed("archive the search tree", exc)
     return CloseStep(result.status, result.reason)
@@ -240,12 +243,15 @@ def close_knowledge(
     budget_seconds: float | None = None,
     targets: CloseTargets = CloseTargets(),
     bottlenecks: Mapping[str, float] | None = None,
+    cross_image: Collection[str] = (),
 ) -> KnowledgeClose:
     """CLOSE, after the Recipe KB write-back: what the session leaves the sessions after it.
 
     ``metric`` is the recorded-value throughput metric. ``budget_seconds`` is the session's configured budget, which
     later sessions compare the archived tree at shares of; without it the archive uses the time the notebook spans.
-    ``targets`` says where each step writes, the environment's KB and archive by default.
+    ``targets`` says where each step writes, the environment's KB and archive by default. ``cross_image`` names, by
+    canonical id, the Recipe KB champions PRELUDE prepared from another image than the session's, whose replays the
+    archived tree marks.
     """
 
     return KnowledgeClose(
@@ -263,7 +269,14 @@ def close_knowledge(
             "publish the learnings",
             partial(publish_learnings, snapshot, kb=targets.learning_kb, receipt=targets.receipt(LEARNING_RECEIPT)),
         ),
-        archive=_archived(snapshot, metric, targets.archive, budget_seconds=budget_seconds, bottlenecks=bottlenecks),
+        archive=_archived(
+            snapshot,
+            metric,
+            targets.archive,
+            budget_seconds=budget_seconds,
+            bottlenecks=bottlenecks,
+            cross_image=cross_image,
+        ),
         multibranch_experiences=_published(
             "publish the Experiences under the notebook's own declaration",
             partial(
