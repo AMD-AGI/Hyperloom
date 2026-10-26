@@ -43,7 +43,7 @@ from typing import TypeVar
 from hyperloom_multibranch.contracts.notebook.vocab import CommitOrigin, LineageKind
 from hyperloom_multibranch.notebook.codec import decode, encode
 from hyperloom_multibranch.notebook.local.files import encode_json, publish_once
-from hyperloom_multibranch.notebook.rsi.archive import SearchTree
+from hyperloom_multibranch.notebook.rsi.archive import SearchTree, written_by
 from hyperloom_multibranch.notebook.rsi.history import judged_tests
 from hyperloom_multibranch.notebook.rsi.playbook import Crowned, Playbook, PlaybookPool, Retired, changes, problems
 from hyperloom_multibranch.notebook.rsi.replay import (
@@ -352,7 +352,11 @@ def record_trial(pool: PlaybookPool, trial: Trial) -> bool:
 
 
 def trials(pool: PlaybookPool) -> tuple[Trial, ...]:
-    return tuple(_kept(pool.root / _TRIALS, Trial, TRIAL_FORMAT))
+    """The trials kept beside ``pool``, of the sessions that started by the time it is read as of."""
+
+    return tuple(
+        item for item in _kept(pool.root / _TRIALS, Trial, TRIAL_FORMAT) if written_by(pool.as_of, item.started_at)
+    )
 
 
 def pairs(candidate: str, champion: str, kept: Sequence[Trial]) -> tuple[Pair, ...]:
@@ -536,9 +540,12 @@ def record_standing(pool: PlaybookPool, standing: ReplayStanding) -> bool:
 
 
 def standings(pool: PlaybookPool) -> tuple[ReplayStanding, ...]:
-    """The standings kept beside ``pool``, the earliest first."""
+    """The standings kept beside ``pool`` by the time it is read as of, the earliest first."""
 
-    return tuple(sorted(_kept(pool.root / _REPLAYS, ReplayStanding, STANDING_FORMAT), key=lambda item: item.at))
+    kept = (
+        item for item in _kept(pool.root / _REPLAYS, ReplayStanding, STANDING_FORMAT) if written_by(pool.as_of, item.at)
+    )
+    return tuple(sorted(kept, key=lambda item: item.at))
 
 
 def moved(previous: ReplayStanding | None, current: ReplayStanding) -> tuple[str, ...]:

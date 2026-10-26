@@ -48,7 +48,7 @@ from hyperloom_multibranch.notebook.codec import decode, encode
 from hyperloom_multibranch.notebook.learning_search import words
 from hyperloom_multibranch.notebook.local.files import encode_json, publish_once
 from hyperloom_multibranch.notebook.local.notebook import LEARNING_MAX_CHARS, LEARNING_MIN_CHARS
-from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, TreeArchive
+from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, TreeArchive, written_by
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions
 
 log = logging.getLogger(__name__)
@@ -240,14 +240,18 @@ def _lesson(lesson_id: str, revisions: Sequence[LessonRevision], retired: Lesson
 
 
 class LessonPool:
-    """The lesson pool: ``<root>/lessons``, beside an archive's trees under ``<root>/trees``."""
+    """The lesson pool: ``<root>/lessons``, beside an archive's trees under ``<root>/trees``; with ``as_of``, read as
+    it stood then, the revisions, retirements and standings written by then."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, as_of: float | None = None) -> None:
         self.root = Path(root) / LESSONS
+        self.as_of = as_of
 
     @classmethod
     def beside(cls, archive: TreeArchive) -> LessonPool:
-        return cls(archive.root.parent)
+        """The pool beside ``archive``, read as of the time it is."""
+
+        return cls(archive.root.parent, archive.as_of)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> LessonPool | None:
@@ -261,7 +265,8 @@ class LessonPool:
         """Every readable revision, the earliest written first."""
 
         found = _documents(self.root / _REVISIONS, LessonRevision, REVISION_FORMAT)
-        return tuple(sorted(found, key=lambda item: (item.written_at, item.revision_id)))
+        held = (item for item in found if written_by(self.as_of, item.written_at))
+        return tuple(sorted(held, key=lambda item: (item.written_at, item.revision_id)))
 
     def revision(self, revision_id: str) -> LessonRevision | None:
         path = self.root / _REVISIONS / f"{revision_id}{_SUFFIX}"
@@ -269,7 +274,8 @@ class LessonPool:
 
     def retirements(self) -> tuple[LessonRetirement, ...]:
         found = _documents(self.root / _RETIRED, LessonRetirement, RETIREMENT_FORMAT)
-        return tuple(sorted(found, key=lambda item: item.retired_at))
+        held = (item for item in found if written_by(self.as_of, item.retired_at))
+        return tuple(sorted(held, key=lambda item: item.retired_at))
 
     def purges(self) -> tuple[LessonPurge, ...]:
         found = _documents(self.root / _PURGED, LessonPurge, PURGE_FORMAT)
@@ -341,7 +347,8 @@ class LessonPool:
         """Every session's standings, the earliest written first."""
 
         found = _documents(self.root / _STANDINGS, SessionStandings, STANDINGS_FORMAT)
-        return tuple(sorted(found, key=lambda item: item.written_at))
+        held = (item for item in found if written_by(self.as_of, item.written_at))
+        return tuple(sorted(held, key=lambda item: item.written_at))
 
     def digest(self) -> str:
         """A digest of every record the pool holds: each is written once under its own name and only a purge deletes,

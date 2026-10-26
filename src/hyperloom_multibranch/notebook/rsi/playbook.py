@@ -37,7 +37,7 @@ from pathlib import Path
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.notebook.codec import decode, encode
 from hyperloom_multibranch.notebook.local.files import encode_json, publish_once
-from hyperloom_multibranch.notebook.rsi.archive import TreeArchive
+from hyperloom_multibranch.notebook.rsi.archive import TreeArchive, written_by
 from hyperloom_multibranch.notebook.rsi.frontier import (
     NEAR_BAR_COMPONENT,
     PROBATION_COMPONENT,
@@ -274,14 +274,17 @@ def _read(path: Path, kind: type, fmt: str) -> object:
 
 class PlaybookPool:
     """The playbooks written for sessions like the archive's: ``<root>/playbooks``, beside its trees under
-    ``<root>/trees``."""
+    ``<root>/trees``; with ``as_of``, read as it stood then, the playbooks registered, crowned and retired by then."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, as_of: float | None = None) -> None:
         self.root = Path(root) / _PLAYBOOKS
+        self.as_of = as_of
 
     @classmethod
     def beside(cls, archive: TreeArchive) -> PlaybookPool:
-        return cls(archive.root.parent)
+        """The pool beside ``archive``, read as of the time it is."""
+
+        return cls(archive.root.parent, archive.as_of)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> PlaybookPool | None:
@@ -302,7 +305,11 @@ class PlaybookPool:
     def playbooks(self) -> tuple[Playbook, ...]:
         """Every readable playbook, the earliest registered first."""
 
-        found = [item for item in self._ledger(".", Playbook, PLAYBOOK_FORMAT) if isinstance(item, Playbook)]
+        found = [
+            item
+            for item in self._ledger(".", Playbook, PLAYBOOK_FORMAT)
+            if isinstance(item, Playbook) and written_by(self.as_of, item.registered_at)
+        ]
         return tuple(sorted(found, key=lambda item: item.registered_at))
 
     def register(self, playbook: Playbook) -> Playbook:
@@ -325,11 +332,19 @@ class PlaybookPool:
         return next((item for item in self.playbooks() if item.label == label), None)
 
     def crowned(self) -> tuple[Crowned, ...]:
-        found = [item for item in self._ledger(_CROWNED, Crowned, CROWNED_FORMAT) if isinstance(item, Crowned)]
+        found = [
+            item
+            for item in self._ledger(_CROWNED, Crowned, CROWNED_FORMAT)
+            if isinstance(item, Crowned) and written_by(self.as_of, item.crowned_at)
+        ]
         return tuple(sorted(found, key=lambda item: item.crowned_at))
 
     def retired(self) -> tuple[Retired, ...]:
-        found = [item for item in self._ledger(_RETIRED, Retired, RETIRED_FORMAT) if isinstance(item, Retired)]
+        found = [
+            item
+            for item in self._ledger(_RETIRED, Retired, RETIRED_FORMAT)
+            if isinstance(item, Retired) and written_by(self.as_of, item.retired_at)
+        ]
         return tuple(sorted(found, key=lambda item: item.retired_at))
 
     def champion(self) -> Playbook:

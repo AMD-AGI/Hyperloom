@@ -24,6 +24,7 @@ import re
 from collections import defaultdict
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
@@ -59,6 +60,9 @@ log = logging.getLogger(__name__)
 TREE_FORMAT = "multibranch.search-tree.v1"
 SOURCE_NOTEBOOK = "multibranch-notebook"
 ARCHIVE_ENV = "HYPERLOOM_RSI_ARCHIVE"
+#: The time the archive is read as of, so that sessions run as repeats or as pairs start from one state: what was
+#: written after it, trees, lessons and playbooks alike, is not read.
+AS_OF_ENV = "HYPERLOOM_RSI_AS_OF"
 SINGLE_HOST = "local"
 _FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}")
 
@@ -524,18 +528,42 @@ class TreeConflict(FileExistsError):
     """The archive already holds another tree under the session's id."""
 
 
-class TreeArchive:
-    """The shared folder of archived search trees."""
+def written_by(as_of: float | None, written_at: float | None) -> bool:
+    """Whether a record written at ``written_at`` is read by an archive read as of ``as_of``: always without
+    ``as_of``, or for a record that has no time."""
 
-    def __init__(self, root: Path) -> None:
+    return as_of is None or written_at is None or written_at <= as_of
+
+
+def as_of_from_env(env: Mapping[str, str] | None = None) -> float | None:
+    """The time :data:`AS_OF_ENV` pins the archive's reads at, in seconds since the epoch, given as such or as an ISO
+    8601 time; ``None`` when it names none. Raises ``ValueError`` for anything else."""
+
+    raw = str((os.environ if env is None else env).get(AS_OF_ENV) or "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return datetime.fromisoformat(raw).timestamp()
+
+
+class TreeArchive:
+    """The shared folder of archived search trees; with ``as_of``, read as it stood then: only the trees of sessions
+    whose budget ran out by then. Every archive beside it, the lesson pool and the playbook pool, is read as of then too.
+    """
+
+    def __init__(self, root: Path, as_of: float | None = None) -> None:
         self.root = Path(root) / "trees"
+        self.as_of = as_of
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> TreeArchive | None:
-        """The archive :data:`ARCHIVE_ENV` names, or ``None`` when it names none."""
+        """The archive :data:`ARCHIVE_ENV` names, read as of the time :data:`AS_OF_ENV` names; ``None`` when it names
+        none."""
 
         root = str((os.environ if env is None else env).get(ARCHIVE_ENV) or "").strip()
-        return cls(Path(root)) if root else None
+        return cls(Path(root), as_of_from_env(env)) if root else None
 
     def put(self, tree: SearchTree) -> None:
         """Archive ``tree`` once; archiving it again is a no-op, another tree under its session id is an error.
@@ -553,14 +581,18 @@ class TreeArchive:
             raise TreeConflict(f"{path} already holds another tree for session {tree.session_id}")
 
     def load(self) -> list[SearchTree]:
-        """Every readable archived tree; one this version cannot read is skipped with a warning."""
+        """Every readable archived tree, as of ``as_of``; one this version cannot read is skipped with a warning."""
 
         trees = []
         for path in sorted(self.root.glob("*.json")):
             try:
-                trees.append(tree_from_document(json.loads(path.read_text(encoding="utf-8"))))
+                tree = tree_from_document(json.loads(path.read_text(encoding="utf-8")))
             except (OSError, KeyError, TypeError, ValueError) as exc:
                 log.warning("skipping unreadable search tree %s: %s", path, exc)
+                continue
+            ended = tree.started_at + tree.budget_seconds if tree.started_at is not None else None
+            if written_by(self.as_of, ended):
+                trees.append(tree)
         return trees
 
 
@@ -622,6 +654,7 @@ def archive_session(
 
 __all__ = [
     "ARCHIVED",
+    "AS_OF_ENV",
     "NO_ARCHIVE",
     "ARCHIVE_ENV",
     "SINGLE_HOST",
@@ -639,10 +672,12 @@ __all__ = [
     "TreeProbation",
     "WeightedTree",
     "archive_session",
+    "as_of_from_env",
     "longest_root_test_seconds",
     "session_start",
     "similar_trees",
     "tree_document",
     "tree_from_document",
     "tree_from_snapshot",
+    "written_by",
 ]
