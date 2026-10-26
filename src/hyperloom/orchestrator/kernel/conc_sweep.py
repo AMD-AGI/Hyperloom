@@ -622,6 +622,22 @@ class _SweepRun:
             self.recorder.record_arm_refused(arm.name, reason=reason, remaining_sec=remaining_sec)
         return True
 
+    def skip_rest(self, arm_name: str, rest: list[GridVariant]) -> bool:
+        """Record ``rest`` as never run when the sweep is cancelled or the session is closing; return whether it did."""
+        if self.observe_cancel():
+            skipped = [_deadline_skip_result(v, _CANCEL_STOP) for v in rest]
+            note = _RungNote(stage=STAGE_BUDGET_SKIP)
+        elif self.session_closing():
+            self.budget.spend_on_session_reserve()
+            skipped = [_budget_skip_result(v) for v in rest]
+            note = _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0)
+        else:
+            return False
+        for skip_r in skipped:
+            self.results.append(skip_r)
+            self.record_rung(arm_name, skip_r, note)
+        return True
+
     def commit_failed_boots(self, arm_name: str, boots: list[VariantResult]) -> None:
         """Publish the boot attempts a lower rung's outcome has settled as part of the curve."""
         for failed in boots:
@@ -1018,19 +1034,8 @@ async def _sweep_by_reuse(run: _SweepRun, server: _ArmServer, reuse_grid: list[G
     arm_name = server.arm_name
     for r_idx, variant in enumerate(reuse_grid):
         _reuse_remaining = session_deadline_to_remaining_sec(run.session_deadline_sec)
-        if run.observe_cancel():
-            for v in reuse_grid[r_idx:]:
-                skip_r = _deadline_skip_result(v, _CANCEL_STOP)
-                run.results.append(skip_r)
-                run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP))
-            break
-        # Check session deadline before each reuse point.
-        if run.session_closing():
-            run.budget.spend_on_session_reserve()
-            for v in reuse_grid[r_idx:]:
-                skip_r = _budget_skip_result(v)
-                run.results.append(skip_r)
-                run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0))
+        # Check cancel and session deadline before each reuse point.
+        if run.skip_rest(arm_name, reuse_grid[r_idx:]):
             break
 
         is_last = r_idx == len(reuse_grid) - 1
@@ -1087,16 +1092,7 @@ async def _sweep_arm_option_b(run: _SweepRun, server: _ArmServer, grid: list[Gri
     try:
         for variant in grid:
             _ob_rem = session_deadline_to_remaining_sec(run.session_deadline_sec)
-            if run.observe_cancel():
-                skip_r = _deadline_skip_result(variant, _CANCEL_STOP)
-                run.results.append(skip_r)
-                run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP))
-                continue
-            if run.session_closing():
-                run.budget.spend_on_session_reserve()
-                skip_r = _budget_skip_result(variant)
-                run.results.append(skip_r)
-                run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0))
+            if run.skip_rest(arm_name, [variant]):
                 continue
             rung_started_iso = now_iso("seconds")
             rung_started_at = time.time()
