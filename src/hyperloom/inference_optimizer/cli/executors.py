@@ -243,7 +243,7 @@ def _register_executors(
     )
 
     # targeted_build: off-loop compiled-component builds.  Coordinator-internal
-    # only (in INTERNAL_ONLY_ACTION_NAMES); dispatched by the enablement phase,
+    # only (in COORDINATOR_INTERNAL_ACTIONS); dispatched by the enablement phase,
     # not proposed by LLM agents.  The executor runs via run_task_registered so
     # cancel_inflight_actions can stop it at shutdown or on a spent budget.
     coordinator.sub.register_executor(

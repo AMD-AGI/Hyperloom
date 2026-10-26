@@ -50,16 +50,14 @@ from ..bus.message_bus import MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
 from ..policy.custom_specialist import skips_reactor_turn
 from ..policy.gate import PolicyGate
+from ..policy.projection import serving_tp_for_policy
 from ..state.round_store import RoundStore
 from ..bus.gpu_pool import (
     SpecialistGpuPool,
     resolve_gpu_specialist_devices,
     resolve_whole_machine_devices,
 )
-from ..bus.resource_lock import (
-    ResourceLockManager,
-    SqliteLeaseBackend,
-)
+from ..bus.resource_lock import SqliteLeaseBackend
 from ..state.shared_state import SharedState, effective_closing_grace_sec, timed_teardown_step
 from .signals import SignalDrain
 from .intent_router import IntentRouter
@@ -241,7 +239,7 @@ class Coordinator:
         self.db = SqliteConnection(db_path, journal_mode=resolve_journal_mode())
 
         self.bus = MessageBus(self.db)
-        self.locks = ResourceLockManager(SqliteLeaseBackend(self.db))
+        self.locks = SqliteLeaseBackend(self.db)
         self.tasks = TaskRegistry(
             self.db,
             dispatch_origin_provider=lambda: task_dispatch_origin(self.shared_state),
@@ -263,7 +261,7 @@ class Coordinator:
             self.db,
             gpu_ids=resolve_gpu_specialist_devices(
                 int(self.shared_state.gpu_specialist_capacity or 0),
-                serving_tp=self.dispatcher.resolve_serving_tp(),
+                serving_tp=serving_tp_for_policy(self.shared_state),
             ),
         )
         # Whole-node pool for enablement and bench specialists.

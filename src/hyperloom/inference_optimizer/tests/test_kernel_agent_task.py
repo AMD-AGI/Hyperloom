@@ -516,7 +516,7 @@ async def test_a_covered_step_runs_inside_the_lanes_its_caller_holds(coord):
     """A reprofile under the kernel_agent lease needs no profile_lane and leaves no row for the pump."""
     c = coord
     agent = await _create_kernel_agent(c)
-    lease = await c.locks.try_acquire_many(
+    lease = await c.locks.acquire_many(
         list(_KERNEL_AGENT_LANES),
         holder_id=agent.task_id,
         task_id=agent.task_id,
@@ -578,7 +578,9 @@ async def test_phase_transition_drops_queued_work_the_next_phase_does_not_allow(
     _skip_phase_entry_effects(c, monkeypatch)
     st = c.shared_state
     _arm_kernel_phase(st)
-    roofline = await c.tasks.create(TaskSpec(kind="roofline", params={}, idempotency_key="left-behind-roofline"))
+    roofline, _ = await c.tasks.create_or_return_existing(
+        TaskSpec(kind="roofline", params={}, idempotency_key="left-behind-roofline")
+    )
 
     await c.phase_machine.advance_phase_if_needed()
 

@@ -27,7 +27,7 @@ from hyperloom.inference_optimizer.framework_paths import (
 from hyperloom.common.env import env_bool
 from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.visible_devices import detect_gpu_count
-from hyperloom.inference_optimizer.protocol.intent import EXTEND_LEASE_MAX_SEC, Intent, IntentType
+from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS, EXTEND_LEASE_MAX_SEC, Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
@@ -168,17 +168,6 @@ REQUEST_ROUTING: dict[str, frozenset[str]] = {
 
 # Critic-only: REVIEW_VERDICT
 REVIEW_VERDICT_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"critic"})
-
-# Verdict vocabulary for review_verdict
-REVIEW_VERDICTS: frozenset[str] = frozenset(
-    {
-        "approve",
-        "reject",
-        "redirect",
-        "advise",
-        "needs_review",
-    }
-)
 
 
 # prune_branch scopes. ``family`` retires the action for the rest of the run;
@@ -624,7 +613,7 @@ class PolicyGate:
         ``target_proposal_msg_id`` is present, and that exactly one of the
         single ``verdict`` field or the per-variant ``verdict_map`` is
         supplied. Every verdict string (single or per-variant) must belong
-        to the closed :data:`REVIEW_VERDICTS` vocabulary.
+        to the closed :data:`ALLOWED_VERDICTS` vocabulary.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -638,7 +627,7 @@ class PolicyGate:
         Raises:
             PolicyDenied: if the role is not a Critic, the target id is
                 missing, neither/both verdict forms are present, or a
-                verdict string is outside ``REVIEW_VERDICTS``.
+                verdict string is outside ``ALLOWED_VERDICTS``.
         """
         if role.name not in REVIEW_VERDICT_SOURCE_ALLOWLIST:
             raise PolicyDenied(
@@ -669,23 +658,23 @@ class PolicyGate:
             )
         if has_single:
             verdict = str(payload.get("verdict", "")).strip()
-            if verdict not in REVIEW_VERDICTS:
+            if verdict not in ALLOWED_VERDICTS:
                 raise PolicyDenied(
-                    f"review_verdict.verdict={verdict!r} not in allowed set {sorted(REVIEW_VERDICTS)!r}",
+                    f"review_verdict.verdict={verdict!r} not in allowed set {sorted(ALLOWED_VERDICTS)!r}",
                     rule="payload",
-                    hint="use one of approve/reject/redirect/advise/needs_review",
+                    hint=f"use one of {'/'.join(sorted(ALLOWED_VERDICTS))}",
                 )
             return
         # verdict_map path — every entry's verdict must be in the closed vocab.
         for vname, entry in verdict_map.items():
             v = str((entry or {}).get("verdict") or "").strip()
-            if v not in REVIEW_VERDICTS:
+            if v not in ALLOWED_VERDICTS:
                 raise PolicyDenied(
                     f"review_verdict.verdict_map[{vname!r}].verdict="
                     f"{v!r} not in allowed set "
-                    f"{sorted(REVIEW_VERDICTS)!r}",
+                    f"{sorted(ALLOWED_VERDICTS)!r}",
                     rule="payload",
-                    hint=("every per-variant verdict must be one of approve/reject/redirect/advise/needs_review"),
+                    hint=f"every per-variant verdict must be one of {'/'.join(sorted(ALLOWED_VERDICTS))}",
                 )
 
     # GEMM tuning ownership
@@ -1569,7 +1558,6 @@ __all__ = [
     "validate_freeform_wave_task",
     "validate_specialist_max_turns_raw",
     "REQUEST_ROUTING",
-    "REVIEW_VERDICTS",
     "REVIEW_VERDICT_SOURCE_ALLOWLIST",
     "TRACE_PATH_LIKE_FIELDS",
     "SOURCE_LIKE_FIELDS",
