@@ -216,11 +216,11 @@ class LifecycleMark:
 
     step: str
     status: str
-    phase: str | None
-    label: str | None
-    artifacts: dict[str, str] | None
-    detail: str
-    duration_s: float | None
+    phase: str | None = None
+    label: str | None = None
+    artifacts: dict[str, str] | None = None
+    detail: str = ""
+    duration_s: float | None = None
 
 
 def make_lifecycle_event(mark: LifecycleMark, *, seq: int, ts: str) -> dict[str, Any]:

@@ -37,6 +37,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     STEP_PROPOSED,
     STEP_REAUTHORED,
     STEP_REVIEWED,
+    CriticReview,
     GateVerdict,
     make_framework_recorder,
     producer_for_provenance,
@@ -134,7 +135,7 @@ def test_authoring_run_is_both_a_step_and_a_run(_bound_session):
         source_ref="vllm#4821",
     )
     recorder.record_proposal_step("cand-7", step=STEP_PROPOSED)
-    recorder.record_proposal_review("cand-7", verdict="approved")
+    recorder.record_proposal_review("cand-7", CriticReview(verdict="approved"))
     recorder.record_proposal_step("cand-7", step=STEP_REVIEWED, outcome="approved")
     recorder.record_run("r-auth-1", role=ROLE_AUTHORING, arm=ARM_SOURCE, status="succeeded")
     recorder.record_proposal_step("cand-7", step=STEP_AUTHORED, run_ref="r-auth-1", outcome="patch_ready")
@@ -410,7 +411,7 @@ def test_attempt_refs_are_derived_from_the_attempts(_bound_session):
 def test_dropped_proposal_keeps_its_reason(_bound_session):
     recorder = make_framework_recorder(macro_cycle=0)
     recorder.record_proposal("cand-3", arm=ARM_SOURCE, producer=PRODUCER_SPECIALIST)
-    recorder.record_proposal_review("cand-3", verdict="denied", reason="touches the serving loop")
+    recorder.record_proposal_review("cand-3", CriticReview(verdict="denied", reason="touches the serving loop"))
     recorder.settle_proposal("cand-3", disposition=DISPOSITION_DROPPED, reason="critic_denied")
     recorder.finish(exit_reason="both_arms_plateaued")
 
@@ -549,7 +550,7 @@ def test_provenance_labels_map_onto_producers(label, producer, ref):
 def test_a_proposal_review_carries_exactly_the_recorded_keys(_bound_session):
     recorder = make_framework_recorder(macro_cycle=0)
     recorder.record_proposal("cand-5", arm=ARM_SOURCE, producer=PRODUCER_SPECIALIST)
-    recorder.record_proposal_review("cand-5", verdict="approved")
+    recorder.record_proposal_review("cand-5", CriticReview(verdict="approved"))
     recorder.finish(exit_reason="budget")
 
     review = _ext(_bound_session)["proposals"][0]["critic_review"]

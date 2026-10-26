@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.deepseek_session import DEEPSEEK_PROVIDER_ROUTE, DeepSeekSessionUnavailableError, gateway_env
+from hyperloom.common.fs_utils import write_text_nofollow
 from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
 from hyperloom.inference_optimizer.trace.parse_dsh_session import parse_dsh_session_trace
 
@@ -219,10 +220,7 @@ def _render_patch(*, model: str, instruction_bytes: int, mcp_rows: list[str]) ->
 
 def _write_private_text(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` readable by the owner only."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _PRIVATE_FILE_MODE)
-    with os.fdopen(fd, "w", encoding=_ENCODING) as handle:
-        handle.write(text)
-    path.chmod(_PRIVATE_FILE_MODE)
+    write_text_nofollow(path.parent, (path.name,), text, mode=_PRIVATE_FILE_MODE)
 
 
 def _prepare_home(home: Path, *, instructions: str, patch: str) -> Path:
@@ -230,7 +228,12 @@ def _prepare_home(home: Path, *, instructions: str, patch: str) -> Path:
     patch_path = home / "specialist_patch.yml"
     try:
         home.mkdir(parents=True, mode=_PRIVATE_DIR_MODE, exist_ok=True)
-        home.chmod(_PRIVATE_DIR_MODE)
+        # A previous run's account could have replaced the directory with a link.
+        dir_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            os.fchmod(dir_fd, _PRIVATE_DIR_MODE)
+        finally:
+            os.close(dir_fd)
         # The harvest reads every session under DSH_HOME; a rerun of this task id must not count the last one.
         shutil.rmtree(home / "sessions", ignore_errors=True)
         _write_private_text(home / "AGENTS.md", instructions)
@@ -300,4 +303,6 @@ def harvest_dsh_trace(workspace: Path) -> AgentTrace:
 
 def remove_dsh_profiles(workspace: Path) -> None:
     """Remove the megabytes of profile modules dsh materializes per ``DSH_HOME``; a finished task never boots it again."""
-    shutil.rmtree(dsh_home(workspace) / "profiles", ignore_errors=True)
+    home = dsh_home(workspace)
+    if not home.is_symlink():  # a link left by the task's account must not send the removal elsewhere
+        shutil.rmtree(home / "profiles", ignore_errors=True)

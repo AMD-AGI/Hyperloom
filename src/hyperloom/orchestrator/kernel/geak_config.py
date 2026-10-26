@@ -100,13 +100,17 @@ def _accepted_config_controls(cfg: Any, *, inherited_remove_args: Any = None) ->
     return controls
 
 
+# Minimum over-baseline gain a same-harness revalidation must show to count as "engaged"; detects a collapse back to
+# ~baseline.
+_MIN_KERNEL_ENGAGED_GAIN_PCT: float = 2.0
+
+
 def _geak_revalidation_decision(
     *,
     measured: Any,
     baseline: Any,
     got_hash: str,
     expected_hash: str,
-    min_engaged_gain_pct: float,
     current_best: Any = None,
 ) -> str:
     """Decide a geak same-harness (2b) rebench outcome."""
@@ -115,7 +119,7 @@ def _geak_revalidation_decision(
     if not (measured_ok and baseline_ok):
         return "fallback"
     cfg_ok = (not expected_hash) or (str(got_hash or "") == str(expected_hash))
-    engaged = float(measured) >= float(baseline) * (1.0 + float(min_engaged_gain_pct) / 100.0)
+    engaged = float(measured) >= float(baseline) * (1.0 + float(_MIN_KERNEL_ENGAGED_GAIN_PCT) / 100.0)
     if not (cfg_ok and engaged):
         return "fallback"
     if isinstance(current_best, (int, float)) and current_best > 0 and float(measured) <= float(current_best):

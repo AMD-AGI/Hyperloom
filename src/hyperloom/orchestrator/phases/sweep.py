@@ -6,7 +6,7 @@
 from __future__ import annotations
 import logging as _logging
 from typing import TYPE_CHECKING, Any
-from ..state.task_registry import TERMINAL_STATES, Task
+from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec
 from ..state.orchestration_memory import CYCLE_DIRECTIVE_REQUEST, build_cycle_memory
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
@@ -225,12 +225,14 @@ class SweepPhase(CoordinatorCollaborator):
         attempt = 0
         while True:
             task, was_existing = await self.tasks.create_or_return_existing(
-                kind="conc_sweep",
-                params=params,
-                requires_lanes=lanes,
-                idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
-                lease_ttl_sec=_conc_sweep_lease_ttl_sec(budget),
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind="conc_sweep",
+                    params=params,
+                    requires_lanes=lanes,
+                    idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
+                    lease_ttl_sec=_conc_sweep_lease_ttl_sec(budget),
+                    dispatch_class="coordinator",
+                )
             )
             if not (was_existing and task.state in TERMINAL_STATES):
                 return task, was_existing

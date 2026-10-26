@@ -10,6 +10,7 @@ from typing import Any, Mapping, NamedTuple
 
 from hyperloom.common.env import env_int
 from hyperloom.common.perf_metric import GradedComparison
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GeakRebenchAttempt
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
 from ..actions.executors._accuracy_gate import EVAL_KIND_ACCURACY_UNAVAILABLE, accuracy_passed
@@ -28,15 +29,10 @@ from ..kernel.geak_config import (
     geak_overlay_is_loadable,
     geak_spec_name,
 )
-from ..state.shared_state import resolve_graded_comparison, stack_base_params
+from ..state.shared_state import ActionAttempt, resolve_graded_comparison, stack_base_params
 from ..state.task_registry import Task
 
 log = _logging.getLogger(__name__)
-
-
-# Minimum over-baseline gain a same-harness revalidation must show to count as "engaged"; detects a collapse back to
-# ~baseline.
-_MIN_KERNEL_ENGAGED_GAIN_PCT: float = 2.0
 
 
 class _GeakRebench(NamedTuple):
@@ -234,7 +230,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         *,
         reason: str,
     ) -> dict[str, Any]:
-        from ..actions.executors._proposal_identity import effective_fingerprint
+        from ..actions.executors._proposal_identity import BaseControls, effective_fingerprint
 
         overlay = product.overlay
         if overlay and not geak_overlay_is_loadable(overlay):
@@ -260,9 +256,7 @@ class GeakRevalidation(CoordinatorCollaborator):
                 product.flags,
                 product.envs,
                 controls=product.controls,
-                base_remove_args=base_params.get("base_remove_args"),
-                base_unset_envs=base_params.get("base_unset_envs"),
-                base_args_mode=base_params.get("base_args_mode"),
+                base=BaseControls.of_params(base_params),
             ),
             "expected_overlay": overlay,
             "expected_overlay_digest": _geak_overlay_digest(overlay),
@@ -382,11 +376,13 @@ class GeakRevalidation(CoordinatorCollaborator):
         )
         self.shared_state.record_action_attempt(
             action="explore",
-            task_id=task.task_id,
-            status=str(result.get("status") or "succeeded"),
-            decision="promoted" if promoted else "no_promote" if decision == "no_promote" else "discarded",
-            result=result,
-            extras={"revalidation_decision": decision, "output_throughput": rebench.measured},
+            attempt=ActionAttempt(
+                task_id=task.task_id,
+                status=str(result.get("status") or "succeeded"),
+                decision="promoted" if promoted else "no_promote" if decision == "no_promote" else "discarded",
+                result=result,
+                extras={"revalidation_decision": decision, "output_throughput": rebench.measured},
+            ),
         )
         return Verdict.ADOPTED if promoted else Verdict.REFUSED
 
@@ -466,7 +462,6 @@ class GeakRevalidation(CoordinatorCollaborator):
             baseline=baseline_grade.reference,
             got_hash=got_hash,
             expected_hash=expected_hash,
-            min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
             current_best=current_grade.reference,
         )
         if not _grades_can_rule(result, measured, baseline_grade, current_grade):
@@ -563,25 +558,27 @@ class GeakRevalidation(CoordinatorCollaborator):
             return
         params = task.params or {}
         recorder.record_geak_rebench_attempt(
-            attempt_id=str(task.idempotency_key or task.task_id or ""),
-            source_ref=None,
-            idempotency_key=str(task.idempotency_key or ""),
-            task_id=str(task.task_id or ""),
-            dispatched_at=None,
-            settled_at=None,
-            base_tput=params.get("base_tput"),
-            measured_tput=measured,
-            decision=decision,
-            decision_reason=str(params.get("reason") or ""),
-            status=pending_status,
-            engagement={
-                "config_matched": engagement.config_matched,
-                "overlay_loaded": engagement.overlay_loaded,
-                "expected_cfg_hash": params.get("expected_cfg_hash"),
-                "observed_cfg_hash": engagement.observed_cfg_hash,
-                "expected_overlay_digest": params.get("expected_overlay_digest"),
-                "observed_overlay_digest": engagement.observed_overlay_digest,
-            },
+            GeakRebenchAttempt(
+                attempt_id=str(task.idempotency_key or task.task_id or ""),
+                source_ref=None,
+                idempotency_key=str(task.idempotency_key or ""),
+                task_id=str(task.task_id or ""),
+                dispatched_at=None,
+                settled_at=None,
+                base_tput=params.get("base_tput"),
+                measured_tput=measured,
+                decision=decision,
+                decision_reason=str(params.get("reason") or ""),
+                status=pending_status,
+                engagement={
+                    "config_matched": engagement.config_matched,
+                    "overlay_loaded": engagement.overlay_loaded,
+                    "expected_cfg_hash": params.get("expected_cfg_hash"),
+                    "observed_cfg_hash": engagement.observed_cfg_hash,
+                    "expected_overlay_digest": params.get("expected_overlay_digest"),
+                    "observed_overlay_digest": engagement.observed_overlay_digest,
+                },
+            )
         )
 
     def _close_failed_geak_revalidation(self, result_payload: Mapping[str, Any]) -> None:
@@ -664,7 +661,7 @@ class GeakRevalidation(CoordinatorCollaborator):
     async def _replay_through_geak(self, accepted: Mapping[str, Any], mode: str) -> dict[str, Any]:
         from hyperloom.common.jsonio import read_json
         from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
-        from ..actions.executors._geak_sweep import sweep_via_geak
+        from ..actions.executors._geak_sweep import GeakSweepSpec, sweep_via_geak
         from ..actions.executors._workload_envs import geak_metric_axis
 
         regime = _replay_regime(accepted)
@@ -672,19 +669,21 @@ class GeakRevalidation(CoordinatorCollaborator):
             result=accepted,
             handoff=read_json(self.session_dir / "geak" / "handoff.json", default={}, require_dict=True),
             env_spec=self.build_env_spec(),
-            conc_values=[regime.conc],
-            isl_osl_configs=[f"{regime.isl}:{regime.osl}"],
             # A kernel-lane re-benchmark, not a dispatched action: it borrows the
             # ``integrate`` workspace namespace under a task id that names it,
             # as the stack re-validation and the GEAK integrate rebench do.
             output_root=unique_runs_dir(self.session_dir, "integrate", "revalidate_geak"),
-            variant_timeout_sec=env_int("SWEEP_VARIANT_TIMEOUT_SEC", default=2400),
-            repeats=3,
-            # Single-point validated replay pins the headline protocol (num_prompts
-            # etc.) so it is protocol-identical to the reported result.
-            pin_num_prompts=True,
-            # The axis the handoff sent GEAK, so the replay measures what GEAK accepted on.
-            metric_axis=geak_metric_axis(benchmark_mode=mode, grading=self.shared_state.grading or None),
+            spec=GeakSweepSpec(
+                conc_values=[regime.conc],
+                isl_osl_configs=[f"{regime.isl}:{regime.osl}"],
+                variant_timeout_sec=env_int("SWEEP_VARIANT_TIMEOUT_SEC", default=2400),
+                repeats=3,
+                # Single-point validated replay pins the headline protocol (num_prompts
+                # etc.) so it is protocol-identical to the reported result.
+                pin_num_prompts=True,
+                # The axis the handoff sent GEAK, so the replay measures what GEAK accepted on.
+                metric_axis=geak_metric_axis(benchmark_mode=mode, grading=self.shared_state.grading or None),
+            ),
         )
 
     def _replay_accuracy_failure(self, measurement: Mapping[str, Any]) -> str:

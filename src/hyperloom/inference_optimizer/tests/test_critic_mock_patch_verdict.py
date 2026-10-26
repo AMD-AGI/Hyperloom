@@ -13,7 +13,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
-from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 
 SPECIALIST_ID = "spec-patch-1"
 _FREEFORM_PATCH = {"scope": "freeform", "mode": "patch", "task_description": "fix the scheduler crash"}
@@ -99,7 +99,7 @@ async def test_the_integrate_route_accepts_the_specialist_it_owned(session_dir: 
     try:
         params = dict(_FREEFORM_PATCH)
         coord.router._stamp_specialist_owner(params)
-        task = await coord.tasks.create(kind="specialist", params=params, idempotency_key="spec-1")
+        task = await coord.tasks.create(TaskSpec(kind="specialist", params=params, idempotency_key="spec-1"))
 
         integrate_params = {"specialist_task_id": task.task_id}
         assert await coord.router._stamp_integrate_patch_owner(integrate_params) == "FRAMEWORK_AGENT"
