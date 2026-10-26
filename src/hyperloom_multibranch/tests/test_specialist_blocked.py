@@ -10,7 +10,7 @@ import pytest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom.hosted.mcp_server import ToolError, ToolForbidden
 from hyperloom_multibranch.contracts.fork import AdmissionStatus
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import ClaimKey, Learning
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion, LearningKind
@@ -26,8 +26,8 @@ DIAGNOSIS = "per-tensor KV scales lose the outlier heads; scale per head"
 LESSON = "fp8 KV cache on qwen3-8b drops the eval score by 0.08 whatever the scales: the model is sensitive to it"
 
 
-def _blocked(*request_ids: str, accuracy_ok: bool = False) -> Judgement:
-    return Judgement(Verdict.BLOCKED, 3.0, 2.0, request_ids, {"output_throughput": 1030.0}, accuracy_ok)
+def _blocked(*request_ids: str, accuracy: AccuracyVerdict = AccuracyVerdict.FAILED) -> Judgement:
+    return Judgement(Verdict.BLOCKED, 3.0, 2.0, request_ids, {"output_throughput": 1030.0}, accuracy)
 
 
 class _Scheduler(RecordingScheduler):
@@ -162,7 +162,7 @@ async def test_a_decline_waits_for_a_learning_of_its_branch_that_cites_the_candi
 
 async def test_a_blocked_gain_a_guard_held_back_is_declined_as_recorded_only(rig):
     await rig.measure("r2", change=delta("--max-num-seqs 2"))
-    await rig.block("r2", accuracy_ok=True)
+    await rig.block("r2", accuracy=AccuracyVerdict.PASSED)
     await rig.learn("r2")
 
     answer = await rig.server.call("decline_repair", request_id="r2")
@@ -180,7 +180,7 @@ async def test_another_branch_s_candidate_is_not_the_caller_s_to_conclude(rig):
 async def test_only_a_candidate_waiting_for_its_diagnosis_is_concluded(rig):
     await rig.measure("r2", change=delta("--max-num-seqs 2"))
     await rig.measure("r3", change=delta("--max-num-seqs 3"))
-    flat = Judgement(Verdict.FLAT, 0.1, 2.0, ("r3",), {"output_throughput": 1001.0}, True)
+    flat = Judgement(Verdict.FLAT, 0.1, 2.0, ("r3",), {"output_throughput": 1001.0}, AccuracyVerdict.PASSED)
     await rig.gate.settle((await rig.reader.record("r3")).request, flat)
 
     for request_id, refusal in [("r9", "no test r9"), ("r2", "r2 is not judged"), ("r3", "r3 is flat, not blocked")]:

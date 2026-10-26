@@ -49,7 +49,7 @@ from hyperloom_multibranch.contracts.fork import (
 )
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import SnapshotQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo, RepoMerge
@@ -716,7 +716,7 @@ class FakeRegressionCheck:
 
 
 def judged(verdict: Verdict, gain_pct: float, request_id: str, value: float) -> Judgement:
-    return Judgement(verdict, gain_pct, 1.0, (request_id,), {GRADED_OUTPUT: value}, accuracy_ok=True)
+    return Judgement(verdict, gain_pct, 1.0, (request_id,), {GRADED_OUTPUT: value}, accuracy=AccuracyVerdict.PASSED)
 
 
 @dataclass

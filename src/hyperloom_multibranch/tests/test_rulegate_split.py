@@ -18,7 +18,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, apply
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ReservedBranches
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent, RegressionCase
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
@@ -31,8 +31,16 @@ from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, 
 
 BASELINE = Recipe("rocm/vllm@sha256:" + "c" * 64, LaunchConfig(server_args="--max-num-seqs 128"))
 BRANCH, ROOT, FORK = "s1", "c0", "fork-1"
-FIX = Judgement(Verdict.REGRESSED, -2.0, 2.0, ("r1", "r1b"), {"output_throughput": 980.0}, True, fixes_correctness=True)
-BLOCKED = Judgement(Verdict.BLOCKED, 3.0, 2.0, ("r1", "r1b"), {"output_throughput": 1030.0}, False)
+FIX = Judgement(
+    Verdict.REGRESSED,
+    -2.0,
+    2.0,
+    ("r1", "r1b"),
+    {"output_throughput": 980.0},
+    AccuracyVerdict.PASSED,
+    fixes_correctness=True,
+)
+BLOCKED = Judgement(Verdict.BLOCKED, 3.0, 2.0, ("r1", "r1b"), {"output_throughput": 1030.0}, AccuracyVerdict.FAILED)
 GATE_LOG = "hyperloom_multibranch.rulegate.gate"
 CASE = AttachmentRef(FIX_CASE_ID, "dir", "a" * 64)
 PROOF = FixProof(ReproRun("p0", REPRODUCED), ReproRun("p1", NOT_REPRODUCED), ReproRun("p0", REPRODUCED))

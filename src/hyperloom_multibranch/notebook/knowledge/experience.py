@@ -36,6 +36,7 @@ from pathlib import Path
 
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_kb.collect import CollectionTarget, CollectReport, collect
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
 from hyperloom_multibranch.contracts.notebook.peers import BranchLogType, HypothesisStatus, Intent, TestKind, Validity
 from hyperloom_multibranch.contracts.notebook.records import (
@@ -162,7 +163,9 @@ def _accuracy(record: TestRecord) -> dict[str, object] | None:
     if not (record.request.accuracy or scores or record.conclusion is Conclusion.ACCURACY_FAILED):
         return None
     judged = record.judgement
-    passed = record.conclusion is not Conclusion.ACCURACY_FAILED and (judged is None or judged.accuracy_ok)
+    passed = record.conclusion is not Conclusion.ACCURACY_FAILED and (
+        judged is None or judged.accuracy is AccuracyVerdict.PASSED
+    )
     return {"required": True, "passed": passed, "value": next(iter(scores), None)}
 
 

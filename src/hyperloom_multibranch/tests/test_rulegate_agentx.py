@@ -10,7 +10,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
 )
-from hyperloom_multibranch.contracts.judgement import Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Verdict
 from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD, compare, confirm
 from hyperloom_multibranch.rulegate.readings import (
     GRADED_REQUESTS_TOTAL,
@@ -60,7 +60,7 @@ def test_a_measurement_against_its_parent(changes, verdict, refused_by):
 def test_the_error_rate_bar_blocks_a_gain_and_fails_the_accuracy_gate():
     judgement = compare({**PARENT, GRADED_INTVTY_P50: 104.0, GRADED_ERROR_RATE: 12.0}, PARENT, "r1")
     assert judgement.verdict is Verdict.NEEDS_CONFIRM
-    assert judgement.accuracy_ok is False
+    assert judgement.accuracy is AccuracyVerdict.FAILED
 
 
 @pytest.mark.parametrize(

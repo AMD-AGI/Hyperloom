@@ -25,6 +25,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
 from hyperloom_multibranch.contracts.notebook.peers import Intent, IntentLayer, Purpose, SandboxFacts, TestKind
 from hyperloom_multibranch.contracts.notebook.records import (
@@ -310,7 +311,11 @@ def _environment(snapshot: NotebookSnapshot) -> str:
 
 def _kept_gain(record: TestRecord) -> float | None:
     judged = record.judgement
-    if judged is None or not judged.accuracy_ok or record.conclusion is Conclusion.ACCURACY_FAILED:
+    if (
+        judged is None
+        or judged.accuracy is not AccuracyVerdict.PASSED
+        or record.conclusion is Conclusion.ACCURACY_FAILED
+    ):
         return None
     return judged.gain_pct
 

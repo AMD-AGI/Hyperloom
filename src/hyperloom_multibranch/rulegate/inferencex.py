@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from hyperloom.common.accuracy import finite_score
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import GRADED_OUTPUT
-from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.rulegate.accuracy import inferencex_accuracy_ok
 
 # With the retest, at a 1% spread and three baselines (simulated): about 6% of no-op candidates get committed and about
@@ -117,13 +117,13 @@ def compare(
     measurement that dropped requests is regressed, so a correctness fix measured on it forks rather than landing."""
     gain = _gain(reading.throughput, parent)
     bar = baseline.bar_pct
-    accuracy_ok = inferencex_accuracy_ok(baseline.accuracy, reading.accuracy)
+    accuracy = AccuracyVerdict.measured(inferencex_accuracy_ok(baseline.accuracy, reading.accuracy))
     recorded = _recorded(reading.throughput, reading.accuracy)
     if gain > bar:
-        return Judgement(Verdict.NEEDS_CONFIRM, gain, bar, (request_id,), recorded, accuracy_ok, reading.defects)
+        return Judgement(Verdict.NEEDS_CONFIRM, gain, bar, (request_id,), recorded, accuracy, reading.defects)
     verdict = Verdict.REGRESSED if gain < -bar or reading.defects else Verdict.FLAT
     refused_by = (*reading.defects, GAIN_BELOW_THRESHOLD)
-    return Judgement(verdict, gain, bar, (request_id,), recorded, accuracy_ok, refused_by)
+    return Judgement(verdict, gain, bar, (request_id,), recorded, accuracy, refused_by)
 
 
 def confirm(
@@ -133,36 +133,37 @@ def confirm(
     parent: Mapping[str, float],
     request_id: str,
 ) -> Judgement:
-    """Settles a provisional gain with a retest on another sandbox; the record is the mean of both measurements, their
-    eval scores included.
+    """Settles a provisional gain with a retest on another sandbox; the record is the mean of both measurements, and its
+    eval score the mean of those that ran their eval.
 
     A gain holds when the mean of both measurements clears the bar and the retest is still a gain; one that holds is
     improved when neither showed a defect (a failed accuracy gate, dropped requests), blocked when both showed the same
     one, and inconclusive otherwise. A blocked judgement names the
-    performance defects both showed; the accuracy gate is in ``accuracy_ok``.
+    performance defects both showed; the accuracy gate is in ``accuracy``.
     """
     if first.verdict is not Verdict.NEEDS_CONFIRM:
         raise ValueError(f"only a provisional judgement is retested, not a {first.verdict.value} one")
     bar = baseline.bar_pct
-    recorded = _recorded(
-        (first.recorded_value[GRADED_OUTPUT] + reading.throughput) / 2.0,
-        (first.recorded_value[ACCURACY_SCORE] + reading.accuracy) / 2.0,
-    )
+    scores = (reading.accuracy,)
+    if first.accuracy is not AccuracyVerdict.NOT_MEASURED:
+        scores = (first.recorded_value[ACCURACY_SCORE], *scores)
+    recorded = _recorded((first.recorded_value[GRADED_OUTPUT] + reading.throughput) / 2.0, sum(scores) / len(scores))
     gain = _gain(recorded[GRADED_OUTPUT], parent)
     request_ids = (*first.request_ids, request_id)
     accuracy_ok = inferencex_accuracy_ok(baseline.accuracy, reading.accuracy)
-    both_ok = first.accuracy_ok and accuracy_ok
+    first_failed = first.accuracy is AccuracyVerdict.FAILED
+    accuracy = AccuracyVerdict.measured(accuracy_ok and not first_failed)
     seen = tuple(dict.fromkeys((*first.refused_by, *reading.defects)))
     if gain > bar and _gain(reading.throughput, parent) > 0:
-        before = {*first.refused_by, *(() if first.accuracy_ok else (_ACCURACY,))}
+        before = {*first.refused_by, *((_ACCURACY,) if first_failed else ())}
         after = {*reading.defects, *(() if accuracy_ok else (_ACCURACY,))}
         if before & after:
             shared = tuple(defect for defect in seen if defect in after)
-            return Judgement(Verdict.BLOCKED, gain, bar, request_ids, recorded, both_ok, shared)
+            return Judgement(Verdict.BLOCKED, gain, bar, request_ids, recorded, accuracy, shared)
         verdict = Verdict.INCONCLUSIVE if before or after else Verdict.IMPROVED
-        return Judgement(verdict, gain, bar, request_ids, recorded, both_ok, seen)
+        return Judgement(verdict, gain, bar, request_ids, recorded, accuracy, seen)
     verdict = Verdict.REGRESSED if gain < -bar or seen else Verdict.FLAT
-    return Judgement(verdict, gain, bar, request_ids, recorded, both_ok, (*seen, GAIN_NOT_CONFIRMED))
+    return Judgement(verdict, gain, bar, request_ids, recorded, accuracy, (*seen, GAIN_NOT_CONFIRMED))
 
 
 __all__ = [

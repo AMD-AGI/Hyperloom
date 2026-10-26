@@ -9,6 +9,7 @@ from collections.abc import Mapping
 
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom.contracts.measurement import AttachmentRef
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict
 from hyperloom_multibranch.contracts.notebook.peers import (
     FailureClass,
     Intent,
@@ -139,7 +140,7 @@ def judgement(
         threshold_pct=threshold_pct,
         request_ids=request_ids,
         recorded_value=dict(recorded or {"output_tps_pct": gain_pct}),
-        accuracy_ok=True,
+        accuracy=AccuracyVerdict.PASSED,
         fixes_correctness=fixes_correctness,
         foundation_fix=foundation_fix,
     )

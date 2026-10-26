@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
@@ -31,7 +31,9 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import tagged
 
 CLOCK = Clock(now=lambda: 1_700_000_000.0)
 FIX = ForkRequest("b01", "c1", "fp8 fix regresses")
-BLOCKED = Judgement(Verdict.BLOCKED, 6.0, 2.0, ("r1", "r2"), {"output_throughput": 1060.0}, accuracy_ok=False)
+BLOCKED = Judgement(
+    Verdict.BLOCKED, 6.0, 2.0, ("r1", "r2"), {"output_throughput": 1060.0}, accuracy=AccuracyVerdict.FAILED
+)
 
 
 def _repair(

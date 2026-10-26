@@ -18,7 +18,7 @@ from hyperloom.contracts.measurement import (
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, apply
 from hyperloom_multibranch.contracts.fork import AdmissionStatus
 from hyperloom_multibranch.contracts.gate import ResultUnverified
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import RegressionCase
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion
@@ -34,14 +34,16 @@ GEMM = intent("s1", "c0")
 OVERFLOW = (AttachmentRef("fp8_overflow", "dir", "b" * 64),)
 
 
-def _judged(verdict: Verdict, *, accuracy_ok: bool = True, fixes_correctness: bool = False) -> Judgement:
+def _judged(
+    verdict: Verdict, *, accuracy: AccuracyVerdict = AccuracyVerdict.PASSED, fixes_correctness: bool = False
+) -> Judgement:
     return Judgement(
         verdict,
         3.0,
         2.0,
         ("r1", "r1b"),
         {"output_throughput": 1030.0},
-        accuracy_ok,
+        accuracy,
         fixes_correctness=fixes_correctness,
     )
 
@@ -78,8 +80,12 @@ async def test_an_improvement_lands_on_its_branch_and_in_the_notebook(setup):
     ("judgement", "conclusion"),
     [
         (_judged(Verdict.REGRESSED), Conclusion.RECORDED_ONLY),
-        (_judged(Verdict.FLAT, accuracy_ok=False, fixes_correctness=True), Conclusion.ACCURACY_FAILED),
-        (_judged(Verdict.INCONCLUSIVE, accuracy_ok=False), Conclusion.RECORDED_ONLY),
+        (_judged(Verdict.FLAT, accuracy=AccuracyVerdict.FAILED, fixes_correctness=True), Conclusion.ACCURACY_FAILED),
+        (_judged(Verdict.INCONCLUSIVE, accuracy=AccuracyVerdict.FAILED), Conclusion.RECORDED_ONLY),
+        (
+            _judged(Verdict.FLAT, accuracy=AccuracyVerdict.NOT_MEASURED, fixes_correctness=True),
+            Conclusion.RECORDED_ONLY,
+        ),
     ],
 )
 async def test_a_candidate_only_recorded_leaves_its_branch_alone(setup, judgement, conclusion):
@@ -98,7 +104,7 @@ async def test_a_retest_is_the_callers_next_step(setup):
     notebook, repo, measured = setup
     gate = RuleGate(notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED), RecordingVerifier())
 
-    assert await gate.settle(measured, _judged(Verdict.NEEDS_CONFIRM, accuracy_ok=False)) is Action.RETEST
+    assert await gate.settle(measured, _judged(Verdict.NEEDS_CONFIRM, accuracy=AccuracyVerdict.FAILED)) is Action.RETEST
 
     assert (await notebook.record("r1")).judgement is None
 
@@ -106,7 +112,7 @@ async def test_a_retest_is_the_callers_next_step(setup):
 async def test_a_blocked_gain_is_held_for_its_specialist_s_diagnosis(setup):
     notebook, repo, measured = setup
     gate = RuleGate(notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED), RecordingVerifier())
-    blocked = _judged(Verdict.BLOCKED, accuracy_ok=False)
+    blocked = _judged(Verdict.BLOCKED, accuracy=AccuracyVerdict.FAILED)
 
     assert await gate.settle(measured, blocked) is Action.DIAGNOSE
 
@@ -127,7 +133,7 @@ async def test_a_blocked_gain_goes_to_the_scheduler_for_a_repair(setup, status, 
     notebook, repo, measured = setup
     scheduler = RecordingScheduler(status)
     gate = RuleGate(notebook, repo, scheduler, RecordingVerifier())
-    blocked = _judged(Verdict.BLOCKED, accuracy_ok=False)
+    blocked = _judged(Verdict.BLOCKED, accuracy=AccuracyVerdict.FAILED)
 
     assert (await gate.repair(measured, blocked, GEMM, "per-tensor KV scales; scale per head")).status is status
 
@@ -191,7 +197,7 @@ async def test_a_fork_or_a_repair_resting_on_an_unverified_result_is_not_asked_f
     with pytest.raises(ResultUnverified):
         await gate.fork(measured, _judged(Verdict.REGRESSED, fixes_correctness=True), "oob at 8k", fix=fix)
     with pytest.raises(ResultUnverified):
-        await gate.repair(measured, _judged(Verdict.BLOCKED, accuracy_ok=False), GEMM, "scale per head")
+        await gate.repair(measured, _judged(Verdict.BLOCKED, accuracy=AccuracyVerdict.FAILED), GEMM, "scale per head")
 
     assert (scheduler.forks, scheduler.repairs) == ([], [])
     assert (await notebook.record("r1")).conclusion is Conclusion.UNVERIFIED

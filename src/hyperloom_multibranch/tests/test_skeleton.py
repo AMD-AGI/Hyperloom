@@ -49,7 +49,7 @@ from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerCo
 from hyperloom.measure.versions import socket_versions
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
@@ -434,7 +434,13 @@ class Stage:
         await toolbox.write_request(clean)
         await toolbox.write_result(TestResult(case, Validity.SUCCEEDED, repro_verdict=NOT_REPRODUCED))
         regressed = Judgement(
-            Verdict.REGRESSED, -2.0, 2.0, (candidate.request_id,), {GRADED_OUTPUT: 980.0}, True, fixes_correctness=True
+            Verdict.REGRESSED,
+            -2.0,
+            2.0,
+            (candidate.request_id,),
+            {GRADED_OUTPUT: 980.0},
+            AccuracyVerdict.PASSED,
+            fixes_correctness=True,
         )
         on_parent = ReproRun(f"{candidate.request_id}-parent", REPRODUCED)
         proof = FixProof(on_parent, ReproRun(case, NOT_REPRODUCED), on_parent)
@@ -1225,7 +1231,9 @@ async def test_the_fix_critic_s_llm_dollars_count_against_the_llm_budget_as_the_
         )
 
     stage.critic = lambda usage: LlmCritic(critic_model, usage)
-    fixed = Judgement(Verdict.REGRESSED, -2.0, 2.0, ("fix-1",), {GRADED_OUTPUT: 980.0}, True, fixes_correctness=True)
+    fixed = Judgement(
+        Verdict.REGRESSED, -2.0, 2.0, ("fix-1",), {GRADED_OUTPUT: 980.0}, AccuracyVerdict.PASSED, fixes_correctness=True
+    )
     review = FixReview(
         delta(), {}, FixCase("exit 0\n", "a defect"), "the workload", fixed, ReproVerdicts(REPRODUCED, NOT_REPRODUCED)
     )
@@ -1952,7 +1960,9 @@ def _repair(branch: str, parent_commit: str, mechanism: str = "fp8 kv cache") ->
     """A repair of the blocked change ``mechanism`` names, one change per mechanism."""
 
     intent = Intent(branch, parent_commit, "attention", mechanism, IntentLayer.CONFIG)
-    blocked = Judgement(Verdict.BLOCKED, 6.0, 2.0, ("r1", "r2"), {GRADED_OUTPUT: 1060.0}, accuracy_ok=False)
+    blocked = Judgement(
+        Verdict.BLOCKED, 6.0, 2.0, ("r1", "r2"), {GRADED_OUTPUT: 1060.0}, accuracy=AccuracyVerdict.FAILED
+    )
     change = tagged(mechanism.replace(" ", "-"))
     return RepairRequest(intent, change, blocked, "per-tensor KV scales; scale per head")
 

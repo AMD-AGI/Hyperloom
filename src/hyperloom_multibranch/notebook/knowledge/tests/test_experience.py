@@ -23,6 +23,7 @@ from hyperloom.contracts.recipe import (
     RecipeDelta,
 )
 from hyperloom.contracts.measurement import AttachmentRef
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict
 from hyperloom_multibranch.contracts.notebook import NotRecorded
 from hyperloom_multibranch.contracts.notebook.peers import BranchLogEntry, BranchLogType, TestKind, Validity
 from hyperloom_multibranch.contracts.notebook.records import (
@@ -30,6 +31,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     Learning,
     LearningRecord,
     NotebookSnapshot,
+    TestRecord,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LearningKind
 from hyperloom_multibranch.notebook.knowledge.experience import (
@@ -339,16 +341,29 @@ def test_the_experience_service_stores_each_experience_once_with_its_identity(
     assert (tmp_path / "receipt.json").is_file()
 
 
+def test_a_test_whose_eval_did_not_run_exports_its_accuracy_as_not_passed(snapshot: NotebookSnapshot) -> None:
+    def unmeasured(record: TestRecord) -> TestRecord:
+        if record.request.request_id != "r1":
+            return record
+        judged = dataclasses.replace(record.judgement, accuracy=AccuracyVerdict.NOT_MEASURED)
+        return dataclasses.replace(record, request=dataclasses.replace(record.request, accuracy=True), judgement=judged)
+
+    rows = _rows(dataclasses.replace(snapshot, records=tuple(map(unmeasured, snapshot.records))))
+
+    assert rows["r1"]["accuracy"] == {"required": True, "passed": False, "value": None}
+
+
 def test_a_blocked_gain_sent_for_repair_exports_the_accuracy_it_failed() -> None:
     import dataclasses
 
     from hyperloom_multibranch.contracts.notebook.peers import AccuracyValue, Verdict
-    from hyperloom_multibranch.contracts.notebook.records import TestRecord
     from hyperloom_multibranch.contracts.notebook.vocab import Conclusion
     from hyperloom_multibranch.notebook.knowledge import experience
     from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
 
-    blocked = dataclasses.replace(judgement(5.0, ("r9", "r9b"), verdict=Verdict.BLOCKED), accuracy_ok=False)
+    blocked = dataclasses.replace(
+        judgement(5.0, ("r9", "r9b"), verdict=Verdict.BLOCKED), accuracy=AccuracyVerdict.FAILED
+    )
     measured = dataclasses.replace(result("r9"), accuracy=(AccuracyValue("gsm8k", "exact_match", 0.61),))
     record = TestRecord(request("r9", intent("s1", "c0")), measured, blocked, Conclusion.REPAIR_REQUESTED)
 

@@ -17,7 +17,7 @@ from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, RepairRequest
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
@@ -298,7 +298,9 @@ async def test_each_user_branchs_specialist_runs_on_its_own_direction_in_every_l
 
 def _repair_of(parent_commit: str) -> RepairRequest:
     intent = Intent("b01", parent_commit, "attention", "fp8 kv cache", IntentLayer.CONFIG)
-    blocked = Judgement(Verdict.BLOCKED, 6.0, 2.0, ("r1", "r2"), {"output_throughput": 1060.0}, accuracy_ok=False)
+    blocked = Judgement(
+        Verdict.BLOCKED, 6.0, 2.0, ("r1", "r2"), {"output_throughput": 1060.0}, accuracy=AccuracyVerdict.FAILED
+    )
     return RepairRequest(intent, tagged("fp8-kv"), blocked, "per-tensor KV scales; scale per head")
 
 

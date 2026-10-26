@@ -11,7 +11,7 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_S
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.fork import RepairRequest
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord, InboxItem
 from hyperloom_multibranch.contracts.notebook.vocab import InboxKind
@@ -493,7 +493,9 @@ def test_a_launch_opens_with_the_brief_then_says_where_the_branch_stands():
 
 
 def test_every_launch_of_a_repair_branch_opens_with_the_candidate_s_change_and_its_diagnosis():
-    blocked = Judgement(Verdict.BLOCKED, 3.25, 2.0, ("s0-4", "s0-5"), {"output_throughput": 1030.0}, False)
+    blocked = Judgement(
+        Verdict.BLOCKED, 3.25, 2.0, ("s0-4", "s0-5"), {"output_throughput": 1030.0}, AccuracyVerdict.FAILED
+    )
     kv = Intent("s0", "c3", "kv cache", "fp8 kv cache", IntentLayer.CONFIG)
     change = RecipeDelta(config=ConfigDelta(server_args="--kv-cache-dtype fp8"))
     repair = RepairRequest(kv, change, blocked, "per-tensor KV scales; scale per head\n")

@@ -7,7 +7,7 @@ from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, RepairRequest
 from hyperloom_multibranch.contracts.gate import NotMeasured, ResultUnverified, ResultVerifier
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 
 
 def _intent(**overrides) -> Intent:
@@ -56,7 +56,7 @@ def test_a_target_share_that_is_not_a_percentage_is_refused(share):
 
 
 def _judgement(verdict: Verdict) -> Judgement:
-    return Judgement(verdict, 8.0, 2.0, ("r1", "r2"), {"output_throughput": 1080.0}, accuracy_ok=False)
+    return Judgement(verdict, 8.0, 2.0, ("r1", "r2"), {"output_throughput": 1080.0}, accuracy=AccuracyVerdict.FAILED)
 
 
 def test_only_a_blocked_gain_is_sent_for_repair():

@@ -10,7 +10,7 @@ import pytest
 from hyperloom.common import llm_config
 from hyperloom.contracts.measurement import NOT_REPRODUCED, REPRODUCED
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
 from hyperloom_multibranch.contracts.notebook.records import LlmUsage
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
@@ -40,7 +40,9 @@ ANTHROPIC_USAGE = {"input_tokens": 900, "output_tokens": 60, "cache_read_input_t
 
 
 def _review(root: str = "") -> FixReview:
-    slower = Judgement(Verdict.REGRESSED, -2.5, 2.0, ("r3", "r3b"), {"output_throughput": 975.0}, True)
+    slower = Judgement(
+        Verdict.REGRESSED, -2.5, 2.0, ("r3", "r3b"), {"output_throughput": 975.0}, AccuracyVerdict.PASSED
+    )
     repro = ReproVerdicts(parent=REPRODUCED, candidate=NOT_REPRODUCED, root=root)
     return FixReview(CHANGE, {"patches/vllm/fp8.patch": PATCH}, CASE, WORKLOAD, slower, repro)
 

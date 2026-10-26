@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import REPLAY_TARGET, NotebookSnapshot, TestRecord
@@ -152,6 +153,20 @@ def test_a_replay_of_a_champion_built_on_another_image_is_marked_in_the_tree(
 
     assert [(item.mechanism, item.cross_image) for item in marked.directions] == [("inference:older", True)]
     assert [item.cross_image for item in plain.directions] == [False]
+
+
+def test_a_gain_judged_without_its_eval_is_not_the_best_gain_of_its_direction(snapshot: NotebookSnapshot) -> None:
+    def unmeasured(record: TestRecord) -> TestRecord:
+        if record.judgement is None:
+            return record
+        return dataclasses.replace(
+            record, judgement=dataclasses.replace(record.judgement, accuracy=AccuracyVerdict.NOT_MEASURED)
+        )
+
+    unjudged = dataclasses.replace(snapshot, records=tuple(map(unmeasured, snapshot.records)))
+    branches = tree_from_snapshot(unjudged, METRIC).branches
+
+    assert [direction.best_gain_pct for branch in branches for direction in branch.directions] == [None] * 4
 
 
 def test_a_tree_written_before_stop_reasons_and_directions_still_reads(snapshot: NotebookSnapshot) -> None:

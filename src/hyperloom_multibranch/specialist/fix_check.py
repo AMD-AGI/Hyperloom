@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 
 from hyperloom.contracts.measurement import AttachmentRef, TestRequest
 from hyperloom.measure.compile import BlobError, BlobStore
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery
 from hyperloom_multibranch.rulegate.critic import FixReview, FixReviewer, ReproVerdicts
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, CaseError, case_of, read_case
@@ -53,7 +53,7 @@ def declares_fix(request: TestRequest, judgement: Judgement) -> bool:
     """Whether the candidate carries a case, or an attachment under the case's id, and its judgement is one a fix is
     checked on."""
     declared = any(attachment.id == FIX_CASE_ID for attachment in request.attachments)
-    return declared and judgement.verdict in CHECKED and judgement.accuracy_ok
+    return declared and judgement.verdict in CHECKED and judgement.accuracy is AccuracyVerdict.PASSED
 
 
 async def check_fix(

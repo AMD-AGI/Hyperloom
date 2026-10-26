@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import pytest
 
 from hyperloom.contracts.recipe import ComponentChange, ConfigDelta, PatchRef, RecipeDelta
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict
 from hyperloom_multibranch.contracts.notebook import peers, records
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, Conclusion, LineageKind, MergeOutcome
 from hyperloom_multibranch.notebook import codec
@@ -40,7 +42,9 @@ def _record() -> records.TestRecord:
         manifest_sha256="a" * 64,
         gpu_seconds=1200.0,
     )
-    judgement = peers.Judgement(peers.Verdict.IMPROVED, 4.5, 1.1, ("r1", "r2"), {"output_tps": 1.045}, True)
+    judgement = peers.Judgement(
+        peers.Verdict.IMPROVED, 4.5, 1.1, ("r1", "r2"), {"output_tps": 1.045}, AccuracyVerdict.PASSED
+    )
     return records.TestRecord(request, result, judgement, Conclusion.COMMITTED, "c1")
 
 
@@ -52,6 +56,37 @@ def test_a_test_record_survives_json_with_its_recipe_delta_enums_and_mappings() 
     assert codec.decode(records.TestRecord, stored) == record
     assert stored["request"]["delta"]["config"]["extra_server_args"] == "--max-num-seqs 256"
     assert stored["result"]["rounds"][0]["phase"] == "measure"
+
+
+@pytest.mark.parametrize(("accuracy_ok", "accuracy"), [(True, AccuracyVerdict.PASSED), (False, AccuracyVerdict.FAILED)])
+def test_a_judgement_stored_with_its_accuracy_flag_reads_as_passed_or_failed(accuracy_ok, accuracy) -> None:
+    stored = json.loads(json.dumps(codec.encode(_record())))
+    del stored["judgement"]["accuracy"]
+    stored["judgement"]["accuracy_ok"] = accuracy_ok
+
+    decoded = codec.decode(records.TestRecord, stored)
+
+    assert decoded.judgement is not None and decoded.judgement.accuracy is accuracy
+
+
+def test_a_judgement_whose_accuracy_flag_is_not_a_bool_is_refused() -> None:
+    stored = json.loads(json.dumps(codec.encode(_record())))
+    del stored["judgement"]["accuracy"]
+    stored["judgement"]["accuracy_ok"] = "yes"
+
+    with pytest.raises(TypeError):
+        codec.decode(records.TestRecord, stored)
+
+
+def test_a_judgement_on_throughput_alone_survives_json_as_not_measured() -> None:
+    record = _record()
+    judgement = dataclasses.replace(record.judgement, accuracy=AccuracyVerdict.NOT_MEASURED)
+    unmeasured = dataclasses.replace(record, judgement=judgement)
+
+    stored = json.loads(json.dumps(codec.encode(unmeasured)))
+
+    assert stored["judgement"]["accuracy"] == "not_measured"
+    assert codec.decode(records.TestRecord, stored) == unmeasured
 
 
 def test_numbers_come_back_as_the_type_their_field_declares() -> None:

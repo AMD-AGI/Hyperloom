@@ -60,7 +60,7 @@ from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import ComponentPatches, RecipeDelta, RecipeError, ValueChange, apply
 from hyperloom.measure.compile import BlobError
 from hyperloom_multibranch.contracts.gate import NotMeasured
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
 from hyperloom_multibranch.contracts.notebook.records import CommittedCommit, MergeAttempt, WarmReplay
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, MergeOutcome
@@ -342,17 +342,21 @@ def not_stackable_reason(judgement: Judgement, *, foundation_fix: bool) -> str:
     """Why a merge test judged ``judgement`` keeps its candidate off the integration branch; empty when it may be
     merged once the regression set passes.
 
-    Only a confirmed gain that passed the accuracy gate is ``IMPROVED``. A foundation fix needs no gain: it may be
-    merged on any settled verdict once it passed the accuracy gate, as long as nothing but the missing gain refused it.
+    A confirmed gain merges only once it passed the accuracy gate; a merge test judged without its eval does not. A
+    foundation fix needs no gain: it may be merged on any settled verdict once it passed the accuracy gate, as long as
+    nothing but the missing gain refused it.
     """
 
-    if foundation_fix and judgement.accuracy_ok and judgement.verdict in FOUNDATION_FIX_VERDICTS:
+    passed = judgement.accuracy is AccuracyVerdict.PASSED
+    if foundation_fix and passed and judgement.verdict in FOUNDATION_FIX_VERDICTS:
         defects = defects_beyond_gain(judgement)
         if not defects:
             return ""
         return f"a foundation fix, {judgement.verdict.value} on the integration head, refused by {', '.join(defects)}"
     if judgement.verdict is not Verdict.IMPROVED:
         return _verdict_on_head(judgement)
+    if not passed:
+        return f"improved on the integration head with its accuracy {judgement.accuracy.value}"
     return ""
 
 

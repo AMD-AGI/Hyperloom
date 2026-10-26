@@ -92,7 +92,9 @@ async def test_a_round_of_two_branches_with_real_measurements(monkeypatch: pytes
         _probe(
             "round",
             baseline_output_throughput=out.baseline,
-            verdicts={key: (j.verdict.value, round(j.gain_pct, 2), j.accuracy_ok) for key, j in out.judgements.items()},
+            verdicts={
+                key: (j.verdict.value, round(j.gain_pct, 2), j.accuracy.value) for key, j in out.judgements.items()
+            },
             actions={key: action.value for key, action in out.actions.items()},
             max_running_s1=out.max_running_s1,
         )

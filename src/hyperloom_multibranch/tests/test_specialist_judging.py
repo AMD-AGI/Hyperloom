@@ -20,12 +20,12 @@ from hyperloom.contracts.measurement import (
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.fork import AdmissionStatus
-from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, Verdict
+from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, AccuracyVerdict, Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import delta
+from hyperloom_multibranch.notebook.tests.factories import delta, intent, judgement, request
 from hyperloom_multibranch.rulegate.baseline import write_inferencex_baseline
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.inferencex import DROPPED_REQUESTS, GAIN_NOT_CONFIRMED
@@ -34,7 +34,7 @@ from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, pack_case
 from hyperloom_multibranch.rulegate.regression import ReproRunner
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.rulegate.service import Polling
-from hyperloom_multibranch.specialist.fix_check import FixChecking
+from hyperloom_multibranch.specialist.fix_check import FixChecking, declares_fix
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, Judging
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, RecordingVerifier, ReproToolbox
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
@@ -449,3 +449,15 @@ def test_only_a_notice_that_no_judgement_follows_closes_a_candidate():
     assert left_unjudged(f"{NOTICE} r1 was not committed: a result behind it did not re-verify")
     assert not left_unjudged(f"{NOTICE} r1 is judged on its performance alone: the case is not available")
     assert not left_unjudged(f"{NOTICE} r1 held its gain on the retest and is held back by the accuracy gate")
+
+
+@pytest.mark.parametrize(
+    ("accuracy", "declared"),
+    [(AccuracyVerdict.PASSED, True), (AccuracyVerdict.FAILED, False), (AccuracyVerdict.NOT_MEASURED, False)],
+)
+def test_a_fix_is_declared_only_on_a_judgement_whose_eval_passed(accuracy, declared):
+    case = AttachmentRef(FIX_CASE_ID, "dir", "a" * 64)
+    candidate = request("r1", intent("s1", ROOT), attachments=(case,))
+    judged = replace(judgement(0.0, ("r1",), verdict=Verdict.FLAT), accuracy=accuracy)
+
+    assert declares_fix(candidate, judged) is declared

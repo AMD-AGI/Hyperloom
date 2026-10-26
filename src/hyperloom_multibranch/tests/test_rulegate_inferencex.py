@@ -6,7 +6,7 @@ import math
 import pytest
 
 from hyperloom.common.perf_metric import GRADED_OUTPUT
-from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, Verdict
+from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.rulegate.inferencex import (
     DROPPED_REQUESTS,
     FLOOR_PCT,
@@ -63,7 +63,7 @@ def test_a_first_measurement_against_its_parent(throughput, accuracy_ok, verdict
     judgement = compare(_reading(throughput, accuracy_ok), BASELINE, PARENT, "r1")
     assert judgement.verdict is verdict
     assert judgement.refused_by == refused_by
-    assert judgement.accuracy_ok is accuracy_ok
+    assert judgement.accuracy is AccuracyVerdict.measured(accuracy_ok)
     assert judgement.threshold_pct == pytest.approx(2.0)
     assert judgement.recorded_value == {GRADED_OUTPUT: throughput, ACCURACY_SCORE: SCORES[accuracy_ok]}
     assert judgement.request_ids == ("r1",)
@@ -74,7 +74,7 @@ def test_the_eval_score_is_held_to_the_baseline_score(baseline_accuracy, accurac
     judgement = compare(
         InferenceXReading(1030.0, 0.90), InferenceXBaseline(NORMAL.threshold_pct, baseline_accuracy), PARENT, "r1"
     )
-    assert judgement.accuracy_ok is accuracy_ok
+    assert judgement.accuracy is AccuracyVerdict.measured(accuracy_ok)
 
 
 @pytest.mark.parametrize(
@@ -94,7 +94,7 @@ def test_a_retest_settles_the_gain_and_the_accuracy_gate(first_ok, retest, retes
     judgement = confirm(first, _reading(retest, retest_ok), BASELINE, PARENT, "r2")
     assert judgement.verdict is verdict
     assert judgement.refused_by == refused_by
-    assert judgement.accuracy_ok is (first_ok and retest_ok)
+    assert judgement.accuracy is AccuracyVerdict.measured(first_ok and retest_ok)
     assert judgement.recorded_value == {
         GRADED_OUTPUT: (1030.0 + retest) / 2,
         ACCURACY_SCORE: pytest.approx((SCORES[first_ok] + SCORES[retest_ok]) / 2),
@@ -111,7 +111,11 @@ def test_a_retest_settles_the_gain_and_the_accuracy_gate(first_ok, retest, retes
 )
 def test_a_measurement_that_dropped_requests_is_a_defect_whatever_the_parent_dropped(throughput, verdict, refused_by):
     judgement = compare(InferenceXReading(throughput, SCORES[True], dropped=3), BASELINE, PARENT, "r1")
-    assert (judgement.verdict, judgement.refused_by, judgement.accuracy_ok) == (verdict, refused_by, True)
+    assert (judgement.verdict, judgement.refused_by, judgement.accuracy) == (
+        verdict,
+        refused_by,
+        AccuracyVerdict.PASSED,
+    )
 
 
 @pytest.mark.parametrize(
@@ -130,6 +134,16 @@ def test_a_gain_is_blocked_only_by_a_defect_both_measurements_show(first, retest
     reading = InferenceXReading(1025.0, SCORES[retest[0]], dropped=retest[1])
     judgement = confirm(provisional, reading, BASELINE, PARENT, "r2")
     assert (judgement.verdict, judgement.refused_by) == (verdict, refused_by)
+
+
+@pytest.mark.parametrize(("retest_ok", "verdict"), [(True, Verdict.IMPROVED), (False, Verdict.INCONCLUSIVE)])
+def test_a_first_measurement_without_its_eval_leaves_the_accuracy_to_the_retest(retest_ok, verdict):
+    first = Judgement(
+        Verdict.NEEDS_CONFIRM, 5.0, BASELINE.bar_pct, ("r1",), {GRADED_OUTPUT: 1050.0}, AccuracyVerdict.NOT_MEASURED
+    )
+    judgement = confirm(first, _reading(1030.0, retest_ok), BASELINE, PARENT, "r2")
+    assert (judgement.verdict, judgement.accuracy) == (verdict, AccuracyVerdict.measured(retest_ok))
+    assert judgement.recorded_value == {GRADED_OUTPUT: 1040.0, ACCURACY_SCORE: SCORES[retest_ok]}
 
 
 def test_a_retest_that_loses_the_gain_does_not_confirm_it_whatever_the_mean():

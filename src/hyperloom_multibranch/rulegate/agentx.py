@@ -20,7 +20,7 @@ from hyperloom.common.perf_metric import (
     holds_within_band,
     incomparability_reason,
 )
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok
 from hyperloom_multibranch.rulegate.readings import (
     GRADED_REQUESTS_TOTAL,
@@ -118,7 +118,7 @@ def compare(candidate: Mapping[str, float], parent: Mapping[str, float], request
         AGENTX_KEEP_P50_THRESHOLD_PCT,
         (request_id,),
         _recorded(candidate),
-        reading.accuracy_ok,
+        AccuracyVerdict.measured(reading.accuracy_ok),
         reading.refused_by,
     )
 
@@ -140,7 +140,7 @@ def confirm(first: Judgement, retest: Mapping[str, float], parent: Mapping[str, 
         AGENTX_KEEP_P50_THRESHOLD_PCT,
         (*first.request_ids, request_id),
         recorded,
-        first.accuracy_ok and reading.accuracy_ok,
+        AccuracyVerdict.measured(first.accuracy is not AccuracyVerdict.FAILED and reading.accuracy_ok),
         tuple(dict.fromkeys((*first.refused_by, *reading.refused_by))),
     )
 

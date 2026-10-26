@@ -24,7 +24,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
@@ -193,7 +193,7 @@ class DroppingRequestsGate(GateService):
     double, not a placeholder."""
 
     async def compare(self, request_id: str) -> Judgement:
-        return Judgement(Verdict.BLOCKED, 0.0, 1.0, (request_id,), {}, True, (DROPPED_REQUESTS,))
+        return Judgement(Verdict.BLOCKED, 0.0, 1.0, (request_id,), {}, AccuracyVerdict.PASSED, (DROPPED_REQUESTS,))
 
 
 class Bench:

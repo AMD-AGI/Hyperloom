@@ -43,7 +43,7 @@ from hyperloom.contracts.recipe import (
     apply,
 )
 from hyperloom.measure.compile import LocalBlobStore, PackageBase
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, MergeOutcome
@@ -550,19 +550,29 @@ async def test_a_foundation_fix_that_carries_a_parent_never_merged_is_judged_lik
 
 @pytest.mark.parametrize("verdict", [Verdict.NEEDS_CONFIRM, Verdict.BLOCKED, Verdict.INCONCLUSIVE])
 def test_a_foundation_fix_on_an_unsettled_or_refused_verdict_is_not_stackable(verdict: Verdict) -> None:
-    judged = Judgement(verdict, 5.0, 1.0, ("r1",), {}, accuracy_ok=True)
+    judged = Judgement(verdict, 5.0, 1.0, ("r1",), {}, accuracy=AccuracyVerdict.PASSED)
 
     assert not_stackable_reason(judged, foundation_fix=True) == f"{verdict.value} +5.00% on the integration head"
 
 
 @pytest.mark.parametrize("verdict", [Verdict.FLAT, Verdict.REGRESSED])
 def test_a_foundation_fix_without_a_gain_may_be_merged_only_once_it_passed_the_accuracy_gate(verdict: Verdict) -> None:
-    judged = Judgement(verdict, -2.0, 1.0, ("r1",), {}, accuracy_ok=True)
+    judged = Judgement(verdict, -2.0, 1.0, ("r1",), {}, accuracy=AccuracyVerdict.PASSED)
 
     assert verdict in FOUNDATION_FIX_VERDICTS
     assert not_stackable_reason(judged, foundation_fix=True) == ""
     assert not_stackable_reason(judged, foundation_fix=False) == f"{verdict.value} -2.00% on the integration head"
-    assert not_stackable_reason(replace(judged, accuracy_ok=False), foundation_fix=True)
+    assert not_stackable_reason(replace(judged, accuracy=AccuracyVerdict.FAILED), foundation_fix=True)
+    assert not_stackable_reason(replace(judged, accuracy=AccuracyVerdict.NOT_MEASURED), foundation_fix=True)
+
+
+def test_an_improvement_judged_without_its_eval_is_not_stackable() -> None:
+    judged = Judgement(Verdict.IMPROVED, 5.0, 1.0, ("r1",), {}, accuracy=AccuracyVerdict.NOT_MEASURED)
+
+    reason = not_stackable_reason(judged, foundation_fix=False)
+
+    assert reason == "improved on the integration head with its accuracy not_measured"
+    assert not_stackable_reason(replace(judged, accuracy=AccuracyVerdict.PASSED), foundation_fix=False) == ""
 
 
 AGENTX_PARENT = {
@@ -577,14 +587,14 @@ AGENTX_PARENT = {
 def test_an_agentx_foundation_fix_whose_p50_falls_with_its_guards_intact_may_be_merged() -> None:
     judged = agentx.compare({**AGENTX_PARENT, GRADED_INTVTY_P50: 50.0}, AGENTX_PARENT, "r1")
 
-    assert judged.verdict is Verdict.REGRESSED and judged.accuracy_ok
+    assert judged.verdict is Verdict.REGRESSED and judged.accuracy is AccuracyVerdict.PASSED
     assert not_stackable_reason(judged, foundation_fix=True) == ""
 
 
 def test_an_agentx_foundation_fix_that_breaks_a_guard_is_not_stackable() -> None:
     judged = agentx.compare({**AGENTX_PARENT, GRADED_OUTPUT: 500.0}, AGENTX_PARENT, "r1")
 
-    assert judged.verdict is Verdict.REGRESSED and judged.accuracy_ok
+    assert judged.verdict is Verdict.REGRESSED and judged.accuracy is AccuracyVerdict.PASSED
     reason = not_stackable_reason(judged, foundation_fix=True)
     assert reason == "a foundation fix, regressed on the integration head, refused by output_regressed"
 

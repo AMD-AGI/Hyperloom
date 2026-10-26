@@ -22,7 +22,7 @@ from hyperloom_multibranch.contracts.fork import (
 )
 from hyperloom_multibranch.contracts.gate import ResultUnverified, ResultVerifier
 from hyperloom_multibranch.contracts.intent import Intent
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook.interfaces import JudgementSink, LineageSink
 from hyperloom_multibranch.contracts.notebook.peers import TestRequest
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent, TestRecord
@@ -51,7 +51,7 @@ class _Reserved:
 
 def _recorded_as(judgement: Judgement) -> Conclusion:
     """An inconclusive retest is not an accuracy failure, even when one of its measurements failed the gate."""
-    if not judgement.accuracy_ok and judgement.verdict is not Verdict.INCONCLUSIVE:
+    if judgement.accuracy is AccuracyVerdict.FAILED and judgement.verdict is not Verdict.INCONCLUSIVE:
         return Conclusion.ACCURACY_FAILED
     return Conclusion.RECORDED_ONLY
 

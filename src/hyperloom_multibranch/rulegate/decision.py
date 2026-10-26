@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 
 
 class Action(Enum):
@@ -45,7 +45,8 @@ def decide(judgement: Judgement) -> Action:
     ``fixes_correctness`` means the repro case fails on the parent and passes on the candidate, and review found its
     trigger reachable under the target workload; it counts only when the accuracy gate passed.
     """
-    return _COMMIT_TABLE[judgement.verdict, judgement.fixes_correctness and judgement.accuracy_ok]
+    passed = judgement.accuracy is AccuracyVerdict.PASSED
+    return _COMMIT_TABLE[judgement.verdict, judgement.fixes_correctness and passed]
 
 
 __all__ = ["Action", "decide"]

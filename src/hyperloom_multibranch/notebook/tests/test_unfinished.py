@@ -6,12 +6,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
 
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer, Purpose, Verdict
 from hyperloom_multibranch.contracts.notebook.records import (
@@ -118,6 +119,19 @@ async def test_a_near_miss_gained_more_than_half_its_bar_so_a_lower_bar_does_not
 
     near = [(item.request_id, item.detail) for item in brief.unfinished if item.reason is UnfinishedReason.NEAR_BAR]
     assert near == [("n1", "bar 1.00%"), ("q1", "bar 0.60%")]
+
+
+async def test_a_near_miss_judged_without_its_eval_is_no_lead(tmp_path: Path) -> None:
+    root, clock = tmp_path / "notebook", FakeClock()
+    observer = await _leftovers(root, clock)
+    w = Writers(root, clock)
+    await w.measure("s4", "q1", intent("s4", "c0", "moe", "fused moe"), delta("--q1"))
+    unmeasured = replace(judgement(0.8, ("q1",), verdict=Verdict.FLAT), accuracy=AccuracyVerdict.NOT_MEASURED)
+    await w.as_role(Role.GATE).write_judgement("q1", unmeasured, Conclusion.RECORDED_ONLY)
+
+    brief = await observer.startup_brief("i1")
+
+    assert [item.request_id for item in brief.unfinished if item.reason is UnfinishedReason.NEAR_BAR] == ["n1"]
 
 
 async def test_a_lead_another_branch_replayed_drops_out_and_a_withdrawn_replay_of_a_measured_change_is_none(

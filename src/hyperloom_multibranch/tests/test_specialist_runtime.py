@@ -13,7 +13,7 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, RepairRequest
-from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
@@ -194,7 +194,9 @@ async def test_a_started_branch_runs_its_specialist_with_the_k_it_is_given(sessi
 async def test_a_crashed_specialist_is_restarted_with_its_task_and_a_notice_each_time(session):
     runs = _Runs(crashes=2)
     runtime = session.runtime(runs)
-    blocked = Judgement(Verdict.BLOCKED, 3.0, 2.0, ("s0-4", "s0-5"), {"output_throughput": 1030.0}, False)
+    blocked = Judgement(
+        Verdict.BLOCKED, 3.0, 2.0, ("s0-4", "s0-5"), {"output_throughput": 1030.0}, AccuracyVerdict.FAILED
+    )
     repair = RepairRequest(intent("s0", "c0"), delta(), blocked, "per-tensor KV scales; scale per head")
     task = BranchTask("leads: fp8 kv cache", repair, "try a larger max_num_seqs first")
 
@@ -211,7 +213,9 @@ async def test_branches_started_with_no_direction_take_the_session_s_directions_
     runs = _Runs()
     runtime = session.runtime(runs)
     head = await session.repo.head(BRANCH)
-    blocked = Judgement(Verdict.BLOCKED, 3.0, 2.0, ("s0-4", "s0-5"), {"output_throughput": 1030.0}, False)
+    blocked = Judgement(
+        Verdict.BLOCKED, 3.0, 2.0, ("s0-4", "s0-5"), {"output_throughput": 1030.0}, AccuracyVerdict.FAILED
+    )
     repair = RepairRequest(intent("s0", "c0"), delta(), blocked, "per-tensor KV scales; scale per head")
     handed = [f"b{index}" for index in range(len(DIRECTIONS) + 1)]
 
@@ -476,7 +480,9 @@ def _idle(tested: bool = False, resumable: bool = False) -> SessionIdle:
 
 @pytest.mark.parametrize("kind", ["", "direction", "repair"])
 async def test_two_idle_sessions_in_a_row_end_the_specialist_after_one_fresh_session_and_no_crash(session, kind):
-    blocked = Judgement(Verdict.BLOCKED, 3.0, 2.0, ("s0-4", "s0-5"), {"output_throughput": 1030.0}, False)
+    blocked = Judgement(
+        Verdict.BLOCKED, 3.0, 2.0, ("s0-4", "s0-5"), {"output_throughput": 1030.0}, AccuracyVerdict.FAILED
+    )
     repair = RepairRequest(intent("s0", "c0"), delta(), blocked, "per-tensor KV scales; scale per head")
     tasks = {"": BranchTask(), "direction": BranchTask(direction="the user's own"), "repair": BranchTask(repair=repair)}
     runs = _Runs(errors=(_idle(), _idle()))

@@ -30,6 +30,7 @@ from __future__ import annotations
 from collections.abc import Collection, Iterable, Mapping, Sequence
 
 from hyperloom.contracts.recipe import RecipeDelta
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict
 from hyperloom_multibranch.contracts.notebook.peers import Purpose, TestKind
 from hyperloom_multibranch.contracts.notebook.records import (
     REPLAY_TARGET,
@@ -86,7 +87,7 @@ def _near_bar(record: TestRecord) -> bool:
     return (
         judgement is not None
         and record.conclusion is Conclusion.RECORDED_ONLY
-        and judgement.accuracy_ok
+        and judgement.accuracy is AccuracyVerdict.PASSED
         and judgement.threshold_pct * NEAR_BAR_SHARE < judgement.gain_pct < judgement.threshold_pct
     )
 

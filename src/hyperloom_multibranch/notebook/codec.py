@@ -4,7 +4,8 @@
 """JSON for the notebook's frozen dataclasses: fields by name, enums by value, tuples and sets as lists.
 
 A type that defines ``to_document`` and ``from_document`` (the recipe and its delta) travels in its own document form.
-A field missing from a stored object takes its default, so a field added later reads older rows.
+A field missing from a stored object takes its default, so a field added later reads older rows. A judgement stored
+before its accuracy verdict carries ``accuracy_ok`` instead, and reads as passed when it held and failed when not.
 """
 
 from __future__ import annotations
@@ -16,11 +17,14 @@ import typing
 from collections.abc import Mapping
 from enum import Enum
 
+from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement
+
 T = typing.TypeVar("T")
 
 _SCALARS = (str, int, bool)
 _SEQUENCES = (tuple, list, frozenset, set)
 _MAPPINGS = (dict, Mapping)
+_ACCURACY_OK = "accuracy_ok"
 
 
 def encode(value: object) -> object:
@@ -93,13 +97,20 @@ def _decode_class(kind: type, data: object) -> object:
     if issubclass(kind, Enum):
         return kind(data)
     if dataclasses.is_dataclass(kind):
-        stored = _object(data)
+        stored = _with_accuracy_verdict(kind, _object(data))
         return kind(**{name: _decode(hint, stored[name]) for name, hint in _fields(kind).items() if name in stored})
     if kind is float and isinstance(data, (int, float)) and not isinstance(data, bool):
         return float(data)
     if kind in _SCALARS and type(data) is kind:
         return data
     raise TypeError(f"expected {kind.__name__}, got {data!r}")
+
+
+def _with_accuracy_verdict(kind: type, stored: Mapping[str, object]) -> Mapping[str, object]:
+    if kind is not Judgement or _ACCURACY_OK not in stored:
+        return stored
+    passed = _decode_class(bool, stored[_ACCURACY_OK])
+    return {**stored, "accuracy": AccuracyVerdict.measured(typing.cast(bool, passed)).value}
 
 
 def _list(data: object) -> list[object]:
