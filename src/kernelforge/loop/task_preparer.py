@@ -809,7 +809,7 @@ async def prepare_task(
             if last_pf.ok:
                 return _finish_prepared_task(last_pf, attempts, layout, provided_harness=canonical_harness is not None)
             if status == "timeout":
-                retry_note = _timeout_retry_note(
+                retry_note = _timeout_retry_prompt(
                     last_pf,
                     driver_rel=driver_rel,
                     driver_edited=driver_edited,
@@ -817,7 +817,7 @@ async def prepare_task(
                     progress_log=progress_log,
                 )
             else:
-                retry_note = _preflight_retry_note(last_pf, driver_rel=driver_rel, driver_edited=driver_edited)
+                retry_note = _preflight_retry_prompt(last_pf, driver_rel=driver_rel, driver_edited=driver_edited)
     except ScaffoldRetirementError as exc:
         scaffold_error = str(exc)
     finally:
@@ -1311,7 +1311,7 @@ def _jit_timeout_hint(pf: PreflightResult) -> str:
     )
 
 
-def _timeout_retry_note(
+def _timeout_retry_prompt(
     pf: PreflightResult,
     *,
     driver_rel: str,
@@ -1338,7 +1338,7 @@ def _timeout_retry_note(
     )
 
 
-def _preflight_retry_note(pf: PreflightResult, *, driver_rel: str, driver_edited: bool) -> RetryNote:
+def _preflight_retry_prompt(pf: PreflightResult, *, driver_rel: str, driver_edited: bool) -> RetryNote:
     """What the next attempt is told after this one finished but left a driver that does not conform."""
     if driver_edited:
         return RetryNote("Deterministic preflight after your edit:\n" + pf.detail_report() + _jit_timeout_hint(pf))

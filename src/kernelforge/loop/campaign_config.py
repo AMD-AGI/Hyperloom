@@ -362,7 +362,6 @@ def resolve_kernel_backend_override(kernel_backend: str) -> str:
 
 # Source-text markers in precedence order, each naming the backend whose sources carry them.
 _BACKEND_TEXT_MARKERS = (
-    ("flydsl", ("flydsl", "cutlass.cute", "from cutlass import cute")),
     # Before Triton, and matching an import or a decorator rather than the word: Gluon IS Triton's low-level
     # dialect, so a Gluon file imports triton and routinely keeps a `@triton.jit` sibling kernel as its fallback
     # -- aiter's paged-MQA-logits ships exactly that shape, in a file under `aiter/ops/triton/`, so neither the
@@ -392,6 +391,8 @@ def infer_kernel_backend(source_paths: list[Path]) -> str:
             return "hipblaslt"
         if "/aiter/" in path_text or "import aiter" in text:
             return "aiter"
+        if "flydsl" in text or "cutlass.cute" in text or "from cutlass import cute" in text:
+            return "flydsl"
         for backend, markers in _BACKEND_TEXT_MARKERS:
             if any(marker in text for marker in markers):
                 return backend
