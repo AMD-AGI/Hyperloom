@@ -243,8 +243,8 @@ async def _run_outer_gate_turns(gate, backend, run_spec: AgentRunSpec, run_resul
                 feedback,
                 usage=usage,
             )
-        except Exception as exc:  # noqa: BLE001 - SDK errors are unbounded; the outer gate stays final
-            log.warning("outer-gate resume failed: %s", exc)
+        except Exception as exc:  # isolation boundary: one continuation turn; the outer gate stays final
+            log.warning("outer-gate resume failed: %s", exc, exc_info=True)
             if getattr(exc, "agent_safety_rejection", False):
                 integrity_error = exc
             gate.end_reason = "resume_error"

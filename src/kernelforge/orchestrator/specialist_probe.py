@@ -204,8 +204,8 @@ def probe_primitive_status() -> tuple[Any, str]:
     """Return the callable probe primitive, or None and why it is unusable."""
     try:
         primitive = resolve_probe_primitive()
-    except Exception as error:  # noqa: BLE001 - an unimportable seam is reported
-        log.warning("probe primitive %s could not be imported: %s", PRIMITIVE_PATH, error)
+    except Exception as error:  # isolation boundary: the optional probe primitive; callers report it unusable
+        log.warning("probe primitive %s could not be imported: %s", PRIMITIVE_PATH, error, exc_info=True)
         return None, (
             f"the measurement primitive {PRIMITIVE_PATH} could not be imported: {type(error).__name__}: {error}"
         )
