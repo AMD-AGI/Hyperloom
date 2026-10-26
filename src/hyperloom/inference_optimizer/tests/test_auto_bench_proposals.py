@@ -157,7 +157,7 @@ def _awaiting_screen(state, switch: str, patch: str) -> None:
 
 
 async def test_levers_awaiting_the_screen_are_batched_one_arm_per_patch():
-    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM, CYCLE_BAND_PCT
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
     from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_BATCH_REASON
 
     fp = _phase()
@@ -170,7 +170,7 @@ async def test_levers_awaiting_the_screen_are_batched_one_arm_per_patch():
 
     (batch,) = _explores(fp)
     assert batch["params"]["reason"] == CYCLE_BATCH_REASON
-    assert batch["params"]["band_pct"] == CYCLE_BAND_PCT
+    assert "band_pct" not in batch["params"]
     assert batch["params"][CYCLE_ARMS_PARAM] == [
         {"name": "t-1", "envs": {"HL_A": "1", "HL_B": "1"}},
         {"name": "t-2", "envs": {"HL_C": "1"}},

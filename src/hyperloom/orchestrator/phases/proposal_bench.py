@@ -132,7 +132,6 @@ class ProposalBench(CoordinatorCollaborator):
             "source": "coordinator_internal",
             "reason": cba.CYCLE_BATCH_REASON,
             cba.CYCLE_ARMS_PARAM: arms,
-            "band_pct": cba.CYCLE_BAND_PCT,
         }
         task = await self._enqueue_coordinator_explore(
             params, idempotency_key=f"cycle-batch-c{int(self.shared_state.macro_cycle or 0)}-{names}"
