@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.common.coerce import dict_rows, to_mapping
+
 from .collectors._common import (
     _AUTHORING_TASK_KINDS,
     _FRAMEWORK_PHASES,
-    _dict_rows,
     _first,
-    _mapping,
     _optional_bool,
     _safe_get as _nested,
     _string_list,
@@ -27,7 +27,7 @@ _ACTION_ROUTES = {
 
 def _candidate_id(payload: dict[str, Any], params: dict[str, Any]) -> str:
     """The candidate a proposal names: its Framework Agent id, else the candidate's own reference."""
-    candidate = _mapping(_first(payload.get("candidate"), params.get("candidate")))
+    candidate = to_mapping(_first(payload.get("candidate"), params.get("candidate")))
     return str(
         _first(
             payload.get("framework_agent_candidate_id"),
@@ -75,7 +75,7 @@ def _ruling(verdict: dict[str, Any], effective: dict[str, Any]) -> dict[str, Any
                 "severity": str(risk.get("severity") or ""),
                 "risk": str(_first(risk.get("risk"), risk.get("summary"), risk.get("reason")) or ""),
             }
-            for risk in _dict_rows(verdict.get("risks"))
+            for risk in dict_rows(verdict.get("risks"))
         ],
         "advice_text": _first(verdict.get("advice_text"), effective.get("advice_text")),
         "alternative_action": _first(verdict.get("alternative_action")),
@@ -92,29 +92,29 @@ def normalize_framework_reviews(
     review_path: str | None,
 ) -> list[dict[str, Any]]:
     """Return compact V6 Framework review rows from one Critic iteration."""
-    judge = _mapping(judge_bundle)
+    judge = to_mapping(judge_bundle)
     normalized_review_path = str(review_path or "").replace("\\", "/") or None
     phase = _first(judge.get("phase"), _nested(request, "context", "phase"), _nested(judge, "merged_context", "phase"))
     review_phase = str(phase or "").strip().upper()
     if review_phase and review_phase not in _FRAMEWORK_PHASES:
         return []
 
-    proposals = {str(row["msg_id"]): row for row in _dict_rows(judge.get("proposals")) if row.get("msg_id")}
+    proposals = {str(row["msg_id"]): row for row in dict_rows(judge.get("proposals")) if row.get("msg_id")}
     effective: dict[str, dict[str, Any]] = {}
-    for intent in _dict_rows(_nested(emit, "intent_envelope", "intents")):
+    for intent in dict_rows(_nested(emit, "intent_envelope", "intents")):
         if str(intent.get("intent_type") or "") != "review_verdict":
             continue
-        payload = _mapping(intent.get("payload"))
+        payload = to_mapping(intent.get("payload"))
         target = str(payload.get("target_proposal_msg_id") or "")
         if target:
             effective[target] = payload
 
     rows: list[dict[str, Any]] = []
-    for verdict_row in _dict_rows(review.get("review_verdicts")):
+    for verdict_row in dict_rows(review.get("review_verdicts")):
         proposal_id = str(verdict_row.get("target_proposal_msg_id") or "")
         proposal = proposals.get(proposal_id, {})
-        payload = _mapping(proposal.get("payload"))
-        params = _mapping(payload.get("params"))
+        payload = to_mapping(proposal.get("payload"))
+        params = to_mapping(payload.get("params"))
         action = str(_first(proposal.get("action_name"), payload.get("action_name"), payload.get("kind")) or "").lower()
         candidate_id = _candidate_id(payload, params)
         if action == "specialist":

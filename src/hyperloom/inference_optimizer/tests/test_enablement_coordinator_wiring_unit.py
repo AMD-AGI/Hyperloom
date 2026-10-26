@@ -26,7 +26,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import AGENTX_PRE
 from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.proposals import PendingProposal
-from hyperloom.orchestrator.loop.writeback import _authorable_launch_log
+from hyperloom.orchestrator.loop._baseline_failures import _authorable_launch_log
 from hyperloom.orchestrator.enablement.lane import bind_integrate_to_lane
 from hyperloom.orchestrator.enablement.params import EnablementParams
 
@@ -460,22 +460,12 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     """
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
-    from hyperloom.orchestrator.bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
-    from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
-
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-stuck", holder_state="succeeded")
-    reconciler = Reconciler(
-        ReconcileStores(
-            rounds=fake.rounds, tasks=fake.tasks, locks=ResourceLockManager(SqliteLeaseBackend(fake.rounds.db))
-        ),
-        fake.shared_state,
-        links=ReconcileLinks(proposals=lambda: fake.state.pending_proposals),
-    )
 
-    await reconciler.run(time.time() + 3600.0)
+    await fake.reconciler.run(time.time() + 3600.0)
 
     settled = await fake.rounds.get("enablement-spec-stuck")
     assert settled.state == "settled"
@@ -980,6 +970,29 @@ def test_an_integrate_executing_in_enablement_is_graded_as_the_round(tmp_path):
     assert params["enablement_setup_commands"] == ["pip install deep_gemm==2.1"]
     assert FailureSignature.from_dict(params["enablement_failure_signature"]).kind == "missing_model_arch"
     assert params["extra_envs"] == {"SGLANG_X": "1"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("origin", "ends_lane"), [("", True), ("eval", False)], ids=["boot", "eval"])
+async def test_an_anchor_reached_by_another_route_ends_a_boot_lane(monkeypatch, tmp_path, origin, ends_lane):
+    """A boot lane left open after the combo booted adopted a perf patch and revalidated its gain into the anchor."""
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+    _stub_enumerate(monkeypatch, [])
+    fake = _enqueue_self(tmp_path, enablement_origin=origin)
+    assert await fake.enablement_lane._maybe_enqueue_enablement_specialist()
+
+    await fake.writeback.promote_to_shared_state(
+        "baseline",
+        {"output_throughput": 2245.0, "materialized_config": str(tmp_path / "baseline.with_envs.yaml")},
+        task=None,
+    )
+
+    assert fake.shared_state.baseline_tput == 2245.0
+    assert fake.shared_state.enablement.succeeded is ends_lane
+    assert (await fake.rounds.held() is None) is ends_lane
+    assert ("enablement" in _bind(fake, specialist_task_id="spec-perf")) is not ends_lane
 
 
 def test_the_lanes_own_integrate_keeps_the_context_its_specialist_carried(tmp_path):

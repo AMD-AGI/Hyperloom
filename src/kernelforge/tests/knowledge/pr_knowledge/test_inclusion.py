@@ -17,7 +17,7 @@ import pytest
 
 from kernelforge.knowledge.pr_knowledge import inclusion
 from kernelforge.knowledge.pr_knowledge.inclusion import Inclusion, InclusionMethod, main, probe_inclusion
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 from kernelforge.knowledge.pr_knowledge import mcp_server as server
 
 _MODULE = "kernelforge.knowledge.pr_knowledge.inclusion"

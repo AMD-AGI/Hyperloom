@@ -285,7 +285,7 @@ async def test_request_response_visible_in_next_prompt(session_dir, monkeypatch)
     c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(intents=[request])))
     try:
         await c.reactor_pass("orchestration")
-        assert "trace_analyze_done" in await c.conversation.compose_prompt("orchestration")
+        assert "trace_analyze_done" in (await c.conversation.compose_prompt("orchestration")).text
     finally:
         await c.stop()
 
@@ -301,7 +301,7 @@ async def test_no_intent_turn_advances_cursor(session_dir):
 
         cur = await c.cursors.load("orchestration")
         assert cur.last_processed_seq >= alert.seq
-        assert "stall_warning" not in await c.conversation.compose_prompt("orchestration")
+        assert "stall_warning" not in (await c.conversation.compose_prompt("orchestration")).text
     finally:
         await c.stop()
 
@@ -329,7 +329,7 @@ async def test_backend_error_turn_does_not_advance_cursor(session_dir):
 
         cur = await c.cursors.load("orchestration")
         assert cur.last_processed_seq == 0
-        assert "stall_warning" in await c.conversation.compose_prompt("orchestration")
+        assert "stall_warning" in (await c.conversation.compose_prompt("orchestration")).text
     finally:
         await c.stop()
 
@@ -368,7 +368,7 @@ async def test_turn_consumes_only_the_inbox_page_it_rendered(session_dir, monkey
 
         cur = await c.cursors.load("orchestration")
         assert alerts[0].seq <= cur.last_processed_seq < alerts[-1].seq
-        next_prompt = await c.conversation.compose_prompt("orchestration")
+        next_prompt = (await c.conversation.compose_prompt("orchestration")).text
         assert "stall_0" not in next_prompt
         assert "stall_3" in next_prompt
     finally:
@@ -403,7 +403,7 @@ async def test_integrate_deferred_when_lanes_busy(session_dir, monkeypatch):
     try:
         # Hold the integrate lanes with an external holder.
         lanes = list(ACTION_CATALOGUE["integrate"].requires_lanes)
-        held = await c.locks.try_acquire_many(
+        held = await c.locks.acquire_many(
             lanes,
             holder_id="blocker",
             task_id="blocker",

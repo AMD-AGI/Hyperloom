@@ -18,10 +18,9 @@ def _conn() -> sqlite3.Connection:
 
 def test_ensure_schema_creates_and_reports_version():
     conn = _conn()
-    version = schema.ensure_schema(conn)
-    assert version == schema.SCHEMA_VERSION
-    # idempotent second call
-    assert schema.ensure_schema(conn) == schema.SCHEMA_VERSION
+    schema.ensure_schema(conn)
+    schema.ensure_schema(conn)
+    assert conn.execute("SELECT version FROM schema_version").fetchall() == [(schema.SCHEMA_VERSION,)]
     conn.close()
 
 

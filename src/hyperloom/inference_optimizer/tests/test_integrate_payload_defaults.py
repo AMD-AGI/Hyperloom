@@ -15,6 +15,8 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 from .conftest import seed_kernel_keep
+from hyperloom.orchestrator.kernel import _integrate_payload as integrate_payload
+from hyperloom.orchestrator.kernel import request_handlers
 
 
 @pytest.fixture
@@ -54,7 +56,7 @@ class TestFillIntegrateDefaultsFromState:
             current_best_args="--page-size 16",
         )
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc"},
             session_dir=session_dir,
         )
@@ -69,7 +71,7 @@ class TestFillIntegrateDefaultsFromState:
     def test_payload_base_tput_wins(self, session_dir):
         _seed_state(session_dir, baseline_tput=800.0)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc", "base_tput": 999.0},
             session_dir=session_dir,
         )
@@ -83,7 +85,7 @@ class TestFillIntegrateDefaultsFromState:
             baseline_config_path="/tmp/state.yaml",
         )
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc", "config_path": "/tmp/explicit.yaml"},
             session_dir=session_dir,
         )
@@ -93,7 +95,7 @@ class TestFillIntegrateDefaultsFromState:
     def test_payload_extra_args_wins(self, session_dir):
         _seed_state(session_dir, current_best_args="--from-state")
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc", "extra_server_args": "--from-payload"},
             session_dir=session_dir,
         )
@@ -109,7 +111,7 @@ class TestFillIntegrateDefaultsFromState:
             },
         )
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {
                 "kernel_id": "k_abc",
                 "extra_envs": {
@@ -140,7 +142,7 @@ class TestFillIntegrateDefaultsFromState:
         state.save(session_dir)
         payload = {"kernel_id": "k_recipe"}
 
-        out = krh._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+        out = integrate_payload._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
         assert out["remove_args"] == ["--disable-cuda-graph"]
         assert out["unset_envs"] == ["YAML_DROP"]
@@ -167,7 +169,7 @@ class TestFillIntegrateDefaultsFromState:
         state.save(session_dir)
         payload = {"kernel_id": "k_recipe", **requested}
 
-        out = krh._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+        out = integrate_payload._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
         assert {key: out[key] for key in requested} == requested
         assert payload == {"kernel_id": "k_recipe", **requested}
@@ -182,7 +184,7 @@ class TestFillIntegrateDefaultsFromState:
         if explicit_unset:
             payload["unset_envs"] = [" CURRENT_ONLY ", "REENABLE"]
 
-        out = krh._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+        out = integrate_payload._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
         assert out["extra_envs"] == ({} if explicit_unset else {"REENABLE": "candidate"})
         assert out["unset_envs"] == (["CURRENT_ONLY", "REENABLE"] if explicit_unset else ["CURRENT_ONLY"])
@@ -205,7 +207,7 @@ class TestFillIntegrateDefaultsFromState:
             "args_mode": "",
         }
 
-        out = krh._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+        out = integrate_payload._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
         assert out == {**payload, "base_tput": 800.0}
 
@@ -227,7 +229,7 @@ class TestFillIntegrateDefaultsFromState:
         )
         state.save(session_dir)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "fuse_a", "integration_id": record["integration_id"]},
             session_dir=session_dir,
         )
@@ -242,7 +244,7 @@ class TestFillIntegrateDefaultsFromState:
         """The fusion folding is opt-in on ``source='forge_fusion'``."""
         _seed_state(session_dir, baseline_tput=800.0)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc"},
             session_dir=session_dir,
         )
@@ -253,7 +255,7 @@ class TestFillIntegrateDefaultsFromState:
     def test_empty_state_no_op(self, session_dir):
         _seed_state(session_dir)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc"},
             session_dir=session_dir,
         )
@@ -266,7 +268,7 @@ class TestFillIntegrateDefaultsFromState:
         _seed_state(session_dir, baseline_tput=800.0)
 
         payload = {"kernel_id": "k_abc"}
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             payload,
             session_dir=session_dir,
         )
@@ -277,7 +279,7 @@ class TestFillIntegrateDefaultsFromState:
     def test_zero_base_tput_in_payload_triggers_fallback(self, session_dir):
         _seed_state(session_dir, baseline_tput=800.0)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc", "base_tput": 0.0},
             session_dir=session_dir,
         )
@@ -287,7 +289,7 @@ class TestFillIntegrateDefaultsFromState:
     def test_zero_state_does_not_overwrite_explicit_payload(self, session_dir):
         _seed_state(session_dir, baseline_tput=0.0)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc", "base_tput": 750.0},
             session_dir=session_dir,
         )
@@ -302,7 +304,7 @@ class TestFillIntegrateDefaultsFromState:
             current_best_args="--page-size 16",  # _seed_state sets current_best.tput=900
         )
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc"},
             session_dir=session_dir,
         )
@@ -313,7 +315,7 @@ class TestFillIntegrateDefaultsFromState:
         # No current_best recorded yet (early kernel phase) -> baseline is the only reference available.
         _seed_state(session_dir, baseline_tput=800.0)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc"},
             session_dir=session_dir,
         )
@@ -355,13 +357,13 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
     def test_ambiguous_bare_kernel_id_is_refused_by_name(self, session_dir):
         ids = self._seed_two_siblings(session_dir)
 
-        with pytest.raises(krh.AmbiguousIntegrationTarget) as excinfo:
-            krh._fill_integrate_defaults_from_state(
+        with pytest.raises(integrate_payload.AmbiguousIntegrationTarget) as excinfo:
+            integrate_payload._fill_integrate_defaults_from_state(
                 {"kernel_id": "fuse_a"},
                 session_dir=session_dir,
             )
 
-        assert type(excinfo.value) is krh.AmbiguousIntegrationTarget
+        assert type(excinfo.value) is integrate_payload.AmbiguousIntegrationTarget
         assert str(excinfo.value) == (
             "integrate refused: kernel_id='fuse_a' matches 2 pending integration "
             "records; an explicit integration_id is required to bind the "
@@ -372,8 +374,8 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
         """A named id that matches nothing is not a licence to fall back."""
         ids = self._seed_two_siblings(session_dir)
 
-        with pytest.raises(krh.AmbiguousIntegrationTarget) as excinfo:
-            krh._fill_integrate_defaults_from_state(
+        with pytest.raises(integrate_payload.AmbiguousIntegrationTarget) as excinfo:
+            integrate_payload._fill_integrate_defaults_from_state(
                 {"kernel_id": "fuse_a", "integration_id": "kernel-integration:gone"},
                 session_dir=session_dir,
             )
@@ -383,7 +385,7 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
     def test_an_explicit_integration_id_still_binds_its_own_sibling(self, session_dir):
         ids = self._seed_two_siblings(session_dir)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "fuse_a", "integration_id": ids[1]},
             session_dir=session_dir,
         )
@@ -396,7 +398,7 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
         only = self._enqueue(state, kernel_name="fuse_a", target_file="/repo/a.py", micro_speedup=1.9)
         state.save(session_dir)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "fuse_a"},
             session_dir=session_dir,
         )
@@ -408,7 +410,7 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
     def test_a_kernel_id_with_no_pending_record_is_unaffected(self, session_dir):
         self._seed_two_siblings(session_dir)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "gemm_tune_fmoe_ck"},
             session_dir=session_dir,
         )
@@ -420,13 +422,13 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
     async def test_integrate_handler_refuses_before_applying_anything(self, session_dir):
         self._seed_two_siblings(session_dir)
 
-        with pytest.raises(krh.AmbiguousIntegrationTarget) as excinfo:
+        with pytest.raises(integrate_payload.AmbiguousIntegrationTarget) as excinfo:
             await krh.integrate_handler(
                 {"kernel_id": "fuse_a"},
                 session_dir=session_dir,
             )
 
-        assert type(excinfo.value) is krh.AmbiguousIntegrationTarget
+        assert type(excinfo.value) is integrate_payload.AmbiguousIntegrationTarget
         assert "an explicit integration_id is required" in str(excinfo.value)
 
 
@@ -494,7 +496,6 @@ class TestIntegrateHandlerHonoursStateDefault:
                 "base_tput": 1000.0,
                 "config_path": "/tmp/base.yaml",
                 "extra_envs": {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"},
-                "budget_minutes": 1,
             },
             session_dir=session_dir,
         )
@@ -524,8 +525,8 @@ async def test_control_only_integrate_measures_without_resolving_historical_patc
     seed_kernel_keep(state, "gemm_controls_only", source_file="/tmp/unrelated.py", artifact="/tmp/unrelated.patch")
     state.save(session_dir)
     captured = {}
-    resolve = Mock(wraps=krh._resolve_integrate_payload)
-    monkeypatch.setattr(krh, "_resolve_integrate_payload", resolve)
+    resolve = Mock(wraps=integrate_payload._resolve_integrate_payload)
+    monkeypatch.setattr(request_handlers, "_resolve_integrate_payload", resolve)
 
     class FakeBaselineExecutor:
         default_timeout_sec = 7800
@@ -575,8 +576,8 @@ async def test_bare_kernel_id_with_inherited_controls_still_resolves_and_applies
     seed_kernel_keep(state, "k_patch", source_file=str(target), artifact=str(artifact))
     state.save(session_dir)
     captured = {}
-    resolve = Mock(wraps=krh._resolve_integrate_payload)
-    monkeypatch.setattr(krh, "_resolve_integrate_payload", resolve)
+    resolve = Mock(wraps=integrate_payload._resolve_integrate_payload)
+    monkeypatch.setattr(request_handlers, "_resolve_integrate_payload", resolve)
 
     class FakeBaselineExecutor:
         default_timeout_sec = 7800
@@ -616,8 +617,8 @@ class TestApplybackProvenanceSurvivesAKernelIdOnlyIntegrate:
         state.save(session_dir)
 
     def _resolve(self, payload: dict, session_dir: Path) -> tuple[dict, dict | None]:
-        filled = krh._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
-        return krh._resolve_integrate_payload(filled, session_dir=session_dir)
+        filled = integrate_payload._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+        return integrate_payload._resolve_integrate_payload(filled, session_dir=session_dir)
 
     def test_the_queued_record_carries_provenance(self, session_dir):
         self._seed_queued_applyback(session_dir)

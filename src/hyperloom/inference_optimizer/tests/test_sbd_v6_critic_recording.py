@@ -20,8 +20,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.critic_out import CriticIt
 def _emit(topic: str, body: str) -> dict:
     """An emitted envelope shaped as the agent writes ``emit.json``."""
     return {
-        "kind": "coordinator_inbox",
-        "kb_writes": [{"kind": "point"}],
         "intent_envelope": {"intents": [{"intent_type": "send_message", "payload": {"topic": topic, "body_md": body}}]},
     }
 
@@ -63,8 +61,7 @@ def test_an_iteration_carries_its_verdict_and_its_artifacts(tmp_path: Path) -> N
     assert row["summary"] == "the flag pays for itself"
     assert row["phase"] == "FRAMEWORK"
     assert row["macro_cycle"] == 3
-    assert row["review_path"].endswith("review.json")
-    assert row["kb_writes"] == [{"kind": "point"}]
+    assert row["review_path"] == "critic-workdir/000001/review.json"
     assert row["ts"]
 
 

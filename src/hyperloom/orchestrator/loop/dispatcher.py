@@ -41,6 +41,7 @@ from ..policy.gate import (
     PolicyDenied,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
+from ..policy.projection import serving_tp_for_policy
 from ..policy.specialist_in_flight import specialist_in_flight_denial
 from ..bus.gpu_pool import (
     GPU_LEASE_TTL_GRACE,
@@ -51,7 +52,7 @@ from ..bus.resource_lock import (
 )
 from .sub_agent_runner import SubAgentResult
 from ..specialists.wall_budget import limit_wall_budget_extension
-from ..state.task_registry import IllegalTransition, Task, TaskNotFound
+from ..state.task_registry import IllegalTransition, Task, TaskNotFound, TaskSpec
 from .time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     expected_action_cost_minutes,
@@ -530,12 +531,14 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             for attempt in range(1, 6):
                 new_key = f"{child_key_prefix}{attempt}"
                 new_task, was_existing = await self.tasks.create_or_return_existing(
-                    kind=task.kind,
-                    params=params,
-                    idempotency_key=new_key,
-                    requires_lanes=list(task.requires_lanes or []),
-                    lease_ttl_sec=int(task.lease_ttl_sec or 0),
-                    dispatch_class="coordinator",
+                    TaskSpec(
+                        kind=task.kind,
+                        params=params,
+                        idempotency_key=new_key,
+                        requires_lanes=list(task.requires_lanes or []),
+                        lease_ttl_sec=int(task.lease_ttl_sec or 0),
+                        dispatch_class="coordinator",
+                    )
                 )
                 if not was_existing:
                     created.append(new_task.task_id)
@@ -569,7 +572,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         if not self._lanes_fit(expanded, holders, capacities):
             return None
         # ``None`` here is a race: another holder grabbed the lane; leave queued.
-        lease = await self.locks.try_acquire_many(
+        lease = await self.locks.acquire_many(
             lanes_needed,
             holder_id=task.task_id,
             task_id=task.task_id,
@@ -602,7 +605,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         if ray_serving_priority_enabled() and serving_slot_busy():
             # Serving is active — keep the task queued rather than piling onto the contended GPU.
             return None
-        serving_tp = self.resolve_serving_tp()
+        serving_tp = serving_tp_for_policy(self.shared_state)
         gpu_pool = self.framework_gpu_pool
         if not uses_whole_machine_gpu_lane(params):
             gpu_pool = self.gpu_specialist_pool
@@ -622,11 +625,6 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 serving_tp,
             )
             gpu_count = serving_tp
-        # Timed from the same deadline carried down to the reaper.
-        gpu_ttl_sec = self.gpu_lease_ttl_sec(
-            task.lease_ttl_sec,
-            deadline=extra_context["specialist_deadline"],
-        )
         # Under single-node Ray the physical GPU mutex is Ray's ``num_gpus``, not this SQLite pool, so
         # admission there is a count-based pending limit and several specialists may share one GPU.
         if ray_gpu_specialist_exec_enabled():
@@ -634,14 +632,12 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 holder_id=task.task_id,
                 task_id=task.task_id,
                 pending_limit=ray_gpu_pending_limit(),
-                ttl_sec=gpu_ttl_sec,
             )
         else:
             gpu_lease = await gpu_pool.try_acquire(
                 count=gpu_count,
                 holder_id=task.task_id,
                 task_id=task.task_id,
-                ttl_sec=gpu_ttl_sec,
             )
         if gpu_lease is None:
             return None
@@ -655,7 +651,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         )
         if gpu_specialist_lease is not None:
             # Ray assigns and masks the physical cards, so the specialist sees a logical 0..N-1
-            # view and the SQLite ids are capacity/TTL accounting only. ``None`` off the Ray path
+            # view and the SQLite ids are capacity accounting only. ``None`` off the Ray path
             # (multi-node / RAY_EXEC off / tests) keeps the SQLite-gpu-id device path.
             extra_context["gpu_ids"] = list(range(gpu_count))
             extra_context["gpu_specialist_lease"] = gpu_specialist_lease
@@ -802,7 +798,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         """
         lease = held.prebound_lease
         if lease is None and task.requires_lanes:
-            lease = await self.locks.try_acquire_many(
+            lease = await self.locks.acquire_many(
                 list(task.requires_lanes),
                 holder_id=task.task_id,
                 task_id=task.task_id,
@@ -976,47 +972,29 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             context.update(specialist_deadline=stop, specialist_progress_cb=self._specialist_progress_publisher(task))
         return context
 
-    def resolve_serving_tp(self) -> int:
-        """Resolve the live serving process's TP size (cards it holds).
-
-        Used for the serving-disjoint specialist pool (B1) and as the default
-        ``gpu_count`` for TP-coupled GPU specialists (B2). Reads the
-        resume-safe ``shared_state.tp``. Returns ``0`` when unset (the
-        legacy whole-pool / single-card behaviour).
-
-        Returns:
-            int: The serving TP size, or ``0`` when unknown.
-        """
-        return int(self.shared_state.tp or 0)
-
     def gpu_lease_ttl_sec(
         self,
         floor_ttl_sec: int = 0,
         *,
         params: dict[str, Any] | None = None,
-        deadline: Deadline | None = None,
     ) -> int:
-        """Single source for the GPU-specialist lease / ``gpu_research_lane`` TTL.
+        """Single source for the ``gpu_research_lane`` TTL.
 
         Nothing releases a lease when this TTL passes; the reaper stops the
         specialist at its deadline. The lane expiry feeds the in-flight
         ``lease_expires_in_sec`` countdown and ``recover --confirm-scope-gone``'s
         liveness check, so covering the deadline keeps both from calling a lease
-        lapsed while its specialist can still run. A caller that has already
-        anchored the deadline passes it in, so the kill and the lease are timed
-        from one reading of the clock.
+        lapsed while its specialist can still run.
 
         Args:
             floor_ttl_sec: A lower bound (e.g. the registry / existing
                 ``lease_ttl_sec``) the computed TTL is raised to.
-            params: Specialist dispatch parameters, used to derive the deadline
-                when the caller has none to hand over.
-            deadline: The instant the reaper will kill on.
+            params: Specialist dispatch parameters, used to derive the deadline.
 
         Returns:
             int: ``max(floor_ttl_sec, time_to_deadline × (1 + grace))``.
         """
-        stop_at = deadline if deadline is not None else self._specialist_deadline(params=params)
+        stop_at = self._specialist_deadline(params=params)
         return max(
             int(floor_ttl_sec or 0),
             math.ceil(max(0.0, stop_at.remaining()) * (1.0 + GPU_LEASE_TTL_GRACE)),
@@ -1048,14 +1026,13 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 task = await self.tasks.get(task_id)
             except TaskNotFound:
                 continue
+            error = f"lease holder process died before reporting a result; task reclaimed by {reason}"
             await self._coord.writeback.handle_unpromotable_result(
                 task,
-                {
-                    "status": "failed",
-                    "error_class": "dead_holder_reaped",
-                    "error": (f"lease holder process died before reporting a result; task reclaimed by {reason}"),
-                },
+                {"status": "failed", "error_class": "dead_holder_reaped", "error": error},
             )
+            if task.kind == "specialist" and not self.owes_result(task_id):
+                await self._record_specialist_settlement(task, SubAgentResult(task_id, "failed", {}, error=error))
             log.warning(
                 "dispatcher: counted dead-holder death of task=%s kind=%s as an action failure",
                 task_id,
@@ -1143,7 +1120,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             await gap_refresh.refresh_gaps(reason="explore_round", workload_id=workload_id)
 
     async def _record_specialist_settlement(self, task: Task, result: SubAgentResult) -> None:
-        """Record a finished specialist's done payload; always runs, to keep the ledgers coherent."""
+        """Record an ended specialist round once; the FRAMEWORK pump keys its next discovery round on this settle."""
         done_payload = result.result.get("specialist_done") or {}
         run_error = str(result.error or "")
         await self._coord.specialist_dispatch.record_specialist_result(
@@ -1192,7 +1169,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         holders: dict[str, int],
         capacities: dict[str, int],
     ) -> bool:
-        """Local-view headroom hint for the concurrent dispatcher (authoritative gate is try_acquire_many).
+        """Local-view headroom hint for the concurrent dispatcher (authoritative gate is acquire_many).
 
         Args:
             expanded_lanes: The fully-expanded lanes the task requires.
@@ -1250,9 +1227,6 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         sequence_actions = {
             "target_analysis",
             "baseline",
-            "profile",
-            "roofline",
-            "sweep",
             "report",
             "integrate",
             "explore",

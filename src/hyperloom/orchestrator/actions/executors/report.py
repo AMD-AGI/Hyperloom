@@ -237,10 +237,8 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "source is at fault: correct the offending flag or value in --server-args / the recipe, then re-run."
     ),
     "environment_fault": (
-        "This host cannot run the combination as installed - the framework is missing from the serving "
-        "interpreter, a compiled extension has no build for this platform, the checkpoint path resolves "
-        "to nothing, or the port is already held. No patch to the model or the framework source repairs "
-        "any of those, so the run stopped instead of spending rounds authoring against the machine."
+        "The checkpoint path this run serves resolves to nothing on this host. No patch to the model or the "
+        "framework source repairs that, so the run stopped instead of spending rounds authoring against the machine."
     ),
     # PRELUDE-phase early exits (before optimization begins).
     "prelude_baseline_failed": "PRELUDE baseline failed before optimization could start; see the baseline failure summary.",

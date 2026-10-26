@@ -451,7 +451,7 @@ async def _measure_on_device(
     except asyncio.TimeoutError:
         failure = f"probe exceeded its {timeout_sec}s ceiling"
         return {"status": FAILED, "detail": failure, "duration_sec": monotonic_clock() - started}
-    except Exception as error:  # noqa: BLE001 - a broken probe is a reported probe
+    except (OSError, ValueError) as error:
         return {
             "status": FAILED,
             "detail": f"{type(error).__name__}: {error}",

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .models import FusionArtifacts
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 
 log = logging.getLogger("forge_fusion")
 

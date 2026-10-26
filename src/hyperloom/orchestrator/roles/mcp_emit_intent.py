@@ -11,6 +11,7 @@ import logging
 from typing import Any, Callable, Iterable
 
 from hyperloom.inference_optimizer.protocol.intent import (
+    ALLOWED_VERDICTS,
     EXTEND_LEASE_MAX_SEC,
     IntentType,
     IntentValidationError,
@@ -31,7 +32,7 @@ EMIT_INTENT_TOOL_QUALIFIED = f"mcp__{MCP_SERVER_NAME}__{EMIT_INTENT_TOOL_NAME}"
 # Vocabulary a required-field name cannot carry on its own: closed value sets, numeric bounds, and the optional dials
 # each type honours.
 _PAYLOAD_FIELD_NOTES: dict[IntentType, tuple[str, ...]] = {
-    IntentType.REVIEW_VERDICT: ("verdict ∈ approve|reject|redirect|advise|needs_review",),
+    IntentType.REVIEW_VERDICT: (f"verdict ∈ {'|'.join(sorted(ALLOWED_VERDICTS))}",),
     IntentType.EXTEND_LEASE: (
         f"extra_sec ≤ {EXTEND_LEASE_MAX_SEC} per call, repeatable while the task runs",
         "reason is optional",

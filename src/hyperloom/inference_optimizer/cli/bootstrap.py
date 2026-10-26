@@ -12,16 +12,27 @@ import os
 import shlex
 import sys
 import time
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, Mapping
 
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
-from hyperloom.common.gpu_power_settings import DeclaredPowerSettings
+from hyperloom.common.gpu_power_settings import SCLK_MAX_MHZ, DeclaredPowerSettings
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import now_iso
+from hyperloom.plugs import (
+    ManifestSources,
+    PlugError,
+    PlugHost,
+    ResolvedManifest,
+    activated,
+    builtin_registry,
+    resolve_manifest,
+)
+from hyperloom.plugs.resolved import read_resolved, write_resolved
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
 )
@@ -40,6 +51,95 @@ from .model_gate import _load_model_arch, _load_model_config_tags
 from ..model_config_utils import summarize_model_config
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class HostedPlugInputs:
+    """What a hosted run gives the plug host: the lock layer and the host inputs."""
+
+    lock: Mapping[str, Mapping[str, str]]
+    host_info: object
+
+
+_hosted_inputs: HostedPlugInputs | None = None
+
+
+def set_hosted_plug_inputs(inputs: HostedPlugInputs | None) -> None:
+    """Called by the hosted entry before ``optimize`` starts; ``None`` clears it.  Unset, plug resolution is unchanged."""
+    global _hosted_inputs
+    _hosted_inputs = inputs
+
+
+def resolve_plug_manifest(args: argparse.Namespace) -> ResolvedManifest:
+    """Resolve the plug manifest for this run and check it can start; exit 2 on a configuration error.
+
+    Reads and writes nothing in a session: it runs before the session is opened or seeded, so a refused flag leaves
+    nothing behind. On a resume, the ``plugs.resolved.json`` of the ``--resume-from`` directory is read back
+    before any flag is applied.
+    """
+    resume_from = getattr(args, "resume_from", None)
+    registry = builtin_registry()
+    hosted = _hosted_inputs
+    try:
+        sources = ManifestSources(
+            profile=getattr(args, "plug_profile", None),
+            manifest_path=getattr(args, "plug_manifest", None) or os.environ.get("HYPERLOOM_MANIFEST") or None,
+            overrides_path=os.environ.get("HYPERLOOM_MANIFEST_OVERRIDES") or None,
+            cli_plugs=tuple(getattr(args, "plug", None) or ()),
+            cli_configs=tuple(getattr(args, "plug_config", None) or ()),
+            resumed=read_resolved(Path(resume_from).expanduser().resolve()) if resume_from else None,
+            locked=hosted.lock if hosted else {},
+        )
+        manifest = resolve_manifest(registry, sources)
+        PlugHost(manifest, registry, session_dir=None).plan()
+    except PlugError as exc:
+        print(f"ERROR: plug configuration refused: {exc}", file=sys.stderr)
+        sys.exit(2)
+    return manifest
+
+
+def open_plug_host(manifest: ResolvedManifest, session_dir: Path) -> PlugHost:
+    """Bind a resolved ``manifest`` to the opened session.
+
+    A run that selects nothing (the built-in local profile) writes nothing to the session and prints nothing. A run
+    that selects something records the outcome in ``plugs.resolved.json`` and prints the ``Plugs`` line.
+    """
+    hosted = _hosted_inputs
+    host = PlugHost(
+        manifest,
+        builtin_registry(),
+        session_dir=session_dir,
+        host_info=hosted.host_info if hosted else None,
+    )
+    host.plan()
+    if not manifest.is_builtin_default:
+        write_resolved(session_dir, manifest, host.fingerprint())
+        print(f"Plugs           : profile={manifest.profile} fingerprint={host.fingerprint()}")
+    return host
+
+
+@contextmanager
+def running_plug_host(host: PlugHost) -> Iterator[PlugHost]:
+    """Start ``host``, make it the process's current host, and close it on the way out."""
+    with activated(host):
+        try:
+            host.start()
+            yield host
+        finally:
+            host.close()
+
+
+def warn_without_target_gpu(args: argparse.Namespace) -> None:
+    """Say on stderr that no target GPU was given, so the target analysis writes only its marker file."""
+    if (getattr(args, "compare_against_gpu", None) or "").strip():
+        return
+    print(
+        "[target_analysis] no --compare-against-gpu set; will write a "
+        "marker JSON at $SESSION_DIR/target_analysis/target_baseline.json "
+        "(reason=no_target_gpu_configured) — set --compare-against-gpu "
+        "to fetch real InferenceX reference data.",
+        file=sys.stderr,
+    )
 
 
 def parse_operator_extra_env(args: argparse.Namespace) -> dict[str, str]:
@@ -279,8 +379,10 @@ _MAX_PER_GPU_POWER_W = "max_per_gpu_power_w"
 _NODES = "nodes"
 _GPU_POWER_CAP_W = "gpu_power_cap_w"
 _GPU_PERF_LEVEL = "gpu_perf_level"
+_GPU_SCLK_MAX_MHZ = "gpu_sclk_max_mhz"
 _NODE_POWER_MANAGEMENT = "node_power_management"
 _NODE_POWER_LIMIT_W = "node_power_limit_w"
+_ALLOW_SHARED_NPM_NODE = "allow_shared_npm_node"
 _DECLARED = "declared"
 
 
@@ -309,11 +411,12 @@ def constraint_budget_resume_conflict(args: Any, state: Any) -> str:
 
 
 def _established_gpu_power_settings(
-    declared: Any, *, nodes: int, apply: bool, owner: str
+    declared: Any, *, nodes: int, apply: bool, owner: str, allow_shared_npm_node: bool
 ) -> tuple[dict[str, Any], str]:
     """Apply the declared settings when permitted, then check and record them; ``(record, error)``.
 
     The check after applying is the one an operator-set value gets, so a set that did not take is caught the same way.
+    With NPM enabled the session must also have every card on the node, unless it is allowed to share it.
     """
     from hyperloom.common.gpu_power_settings import GpuPowerSettingsError
 
@@ -330,7 +433,36 @@ def _established_gpu_power_settings(
     record, error = resolve_gpu_power_settings(declared, nodes=nodes, just_applied=bool(applied))
     if applied:
         record["applied"] = applied
+    outside, shared = _shared_npm_node(record.get("node"))
+    if shared and allow_shared_npm_node:
+        record["shared_npm_node"] = outside
+    elif shared:
+        refusal = (
+            f"{shared}: firmware shares one power budget across every card on the node, so work on the others moves "
+            "this session's measurements; give the session every GPU on the node, or pass --allow-shared-npm-node "
+            "(on every launch and resume) to measure anyway"
+        )
+        error = f"{error}; {refusal}" if error else refusal
     return record, error
+
+
+def _shared_npm_node(node: dict[str, Any] | None) -> tuple[list[int] | None, str]:
+    """The cards an NPM-enabled node has outside this session and why it is shared, or ``([], "")`` when NPM is off or
+    the session has every card; the cards are ``None`` when the session's own cannot be named."""
+    from hyperloom.common.gpu_power_settings import NPM, NPM_ENABLED, GpuPowerSettingsError, gpus_outside_session
+
+    if not node or node.get(NPM) != NPM_ENABLED:
+        return [], ""
+    try:
+        outside = gpus_outside_session()
+    except GpuPowerSettingsError as exc:
+        return None, f"node power management is enabled and the cards this session uses cannot be named ({exc})"
+    if not outside:
+        return [], ""
+    return (
+        outside,
+        f"node power management is enabled and GPU(s) {', '.join(map(str, outside))} are outside this session",
+    )
 
 
 def _per_gpu_launch_error(args: Any, available_gpus: set[int] | None) -> str:
@@ -366,12 +498,14 @@ def resolve_launch_gpu_power(args: Any, *, nodes: int, owner: str) -> dict[str, 
             DeclaredPowerSettings(
                 power_cap_w=getattr(args, _GPU_POWER_CAP_W, None),
                 perf_level=getattr(args, _GPU_PERF_LEVEL, None) or "",
+                sclk_max_mhz=getattr(args, _GPU_SCLK_MAX_MHZ, None),
                 npm=getattr(args, _NODE_POWER_MANAGEMENT, None) or "",
                 node_power_limit_w=getattr(args, _NODE_POWER_LIMIT_W, None),
             ),
             nodes=nodes,
             apply=bool(getattr(args, "apply_gpu_power_settings", False)),
             owner=owner,
+            allow_shared_npm_node=bool(getattr(args, _ALLOW_SHARED_NPM_NODE, False)),
         )
     if not error and mask is None:
         # No mask, so the cards amd-smi reported are the ones the session may use; only known after reading them.
@@ -394,12 +528,14 @@ def resume_gpu_power_settings(args: Any, state: Any) -> tuple[dict[str, Any], st
         DeclaredPowerSettings(
             power_cap_w=getattr(args, _GPU_POWER_CAP_W, None) or declared.get("power_cap_w"),
             perf_level=getattr(args, _GPU_PERF_LEVEL, None) or declared.get("perf_level") or "",
+            sclk_max_mhz=getattr(args, _GPU_SCLK_MAX_MHZ, None) or declared.get(SCLK_MAX_MHZ),
             npm=getattr(args, _NODE_POWER_MANAGEMENT, None) or declared.get("npm") or "",
             node_power_limit_w=getattr(args, _NODE_POWER_LIMIT_W, None) or declared.get("node_power_limit_w"),
         ),
         nodes=max(int(getattr(args, _NODES, 1) or 1), int(getattr(state, _NODES, 1) or 1)),
         apply=apply,
         owner=str(getattr(state, "session_id", "") or ""),
+        allow_shared_npm_node=bool(getattr(args, _ALLOW_SHARED_NPM_NODE, False)),
     )
     if error and archived.get("applied") and not apply:
         error += (
@@ -443,13 +579,12 @@ def resolve_gpu_power_settings(
 
     ``record`` is what the session stores and the platform fingerprint shows: the declared values, what each card
     reported and, where amd-smi reports it, the node's NPM state and limit. ``error`` is non-empty when a declared value
-    does not hold, or cannot be checked, and the launch must stop. Nothing is set here: the operator sets the cap and
-    perf level with ``amd-smi set`` before launch, or ``--apply-gpu-power-settings`` set them just before this check;
-    NPM is set on the BMC.
+    does not hold, or cannot be checked, and the launch must stop. Nothing is set here: the operator sets the cap, perf
+    level and sclk limit with ``amd-smi set`` before launch, or ``--apply-gpu-power-settings`` set the cap and level
+    just before this check; NPM is set on the BMC.
     """
     from hyperloom.common.gpu_power_settings import (
         GpuPowerSettingsError,
-        declared_setting_problems,
         read_gpu_power_settings,
         visible_gpu_indices,
     )
@@ -458,13 +593,13 @@ def resolve_gpu_power_settings(
     if nodes >= 2:
         if declared:
             return {}, (
-                "--gpu-power-cap-w / --gpu-perf-level / --node-power-management / --node-power-limit-w cannot be "
-                "checked on a multi-node session: they describe the benchmark nodes' cards, which this process cannot "
-                "read, and an unverifiable assertion is not a satisfied one"
+                "--gpu-power-cap-w / --gpu-perf-level / --gpu-sclk-max-mhz / --node-power-management / "
+                "--node-power-limit-w cannot be checked on a multi-node session: they describe the benchmark nodes' "
+                "cards, which this process cannot read, and an unverifiable assertion is not a satisfied one"
             )
         return {}, ""
     # The node's settings need neither the cards' reading nor the mask, so only a card declaration refuses without them.
-    cards_declared = any(declared_settings.as_row().values())
+    cards_declared = any(declared_settings.card_row().values())
     try:
         observed = (read or read_gpu_power_settings)()
     except GpuPowerSettingsError as exc:
@@ -484,22 +619,30 @@ def resolve_gpu_power_settings(
         _DECLARED: declared,
         "observed": {str(gpu): row for gpu, row in sorted(observed.items()) if gpus is None or gpu in gpus},
     }
-    problems = declared_setting_problems(
-        observed,
-        power_cap_w=declared.get("power_cap_w"),
-        perf_level=declared.get("perf_level"),
-        gpus=gpus,
-    )
     node, node_error = _node_power_settings(declared_settings)
     if node is not None:
         record["node"] = node
-    why = (
-        "the GPUs did not take the power settings just applied"
-        if just_applied
-        else "the GPUs are not at the declared power settings (set them with amd-smi before launch)"
-    )
-    errors = [f"{why}: " + "; ".join(problems)] if problems else []
+    errors = _card_errors(observed, declared_settings, gpus=gpus, just_applied=just_applied)
     return record, "; ".join(errors + [node_error] if node_error else errors)
+
+
+def _card_errors(
+    observed: dict[int, dict[str, Any]], declared: DeclaredPowerSettings, *, gpus: set[int] | None, just_applied: bool
+) -> list[str]:
+    """Why the cards are not at the declared settings, worded for who sets each: the clock limit is never applied."""
+    from hyperloom.common.gpu_power_settings import declared_setting_problems
+
+    unset = "the GPUs are not at the declared power settings (set them with amd-smi before launch)"
+    if not just_applied:
+        problems = declared_setting_problems(observed, declared, gpus=gpus)
+        return [f"{unset}: " + "; ".join(problems)] if problems else []
+    not_taken = declared_setting_problems(observed, replace(declared, sclk_max_mhz=None), gpus=gpus)
+    asserted = declared_setting_problems(observed, DeclaredPowerSettings(sclk_max_mhz=declared.sclk_max_mhz), gpus=gpus)
+    return [
+        f"{why}: " + "; ".join(problems)
+        for why, problems in (("the GPUs did not take the power settings just applied", not_taken), (unset, asserted))
+        if problems
+    ]
 
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
@@ -817,8 +960,11 @@ def _begin_resume_leg(state: SharedState) -> str:
     transition in ``phase_history`` as a previous leg's and stops the phase
     clock charging the gap between the two legs to the phase it stopped in.
     Clears the previous leg's terminal bookkeeping: a stale ``stop_reason``
-    makes Orchestration heartbeats think the work is done, and a stale closing
-    flag resumes straight into a wind-down already finished.
+    makes Orchestration heartbeats think the work is done, a stale closing
+    flag resumes straight into a wind-down already finished, and a stale
+    ``target_reached_at`` sends the leg to SWEEP against an objective the
+    resume may have raised. The Coordinator stamps it again on the first tick
+    the restored objective holds.
 
     The wall-clock budget is untouched. Elapsed time is summed forward across
     legs, so this leg starts from whatever the session has already spent;
@@ -839,6 +985,7 @@ def _begin_resume_leg(state: SharedState) -> str:
     state.closing_started_unix = 0.0
     state.closing_report_task_id = ""
     state.close_sequence_done = False
+    state.target_reached_at = ""
     state.crash_count = 0
     state.teardown_timings_sec = {}
     state.begin_leg()

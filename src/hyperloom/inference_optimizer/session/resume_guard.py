@@ -69,8 +69,6 @@ def _terminal_uncertainty(state: str, history_json: str) -> str:
             return "unreadable terminal execution evidence"
         if evidence.get("reason") == "cancelled_in_flight":
             return "cancelled_in_flight is not proof of execution exit"
-        if "lease_ttl_sec" in evidence and "dead_pid" not in evidence:
-            return "lease timeout is not proof of execution exit"
         return ""
     return "no recorded terminal execution transition"
 
@@ -312,7 +310,6 @@ def _entry_contradicts_confirmation(entry: object, *, index: int, manual_index: 
         (index > manual_index and "outcome" in evidence)
         or evidence.get("cleanup_confirmed") is False
         or evidence.get("reason") == "cancelled_in_flight"
-        or ("lease_ttl_sec" in evidence and "dead_pid" not in evidence)
     ):
         return "later evidence contradicts the prior operator confirmation"
     transition = entry.get("to")

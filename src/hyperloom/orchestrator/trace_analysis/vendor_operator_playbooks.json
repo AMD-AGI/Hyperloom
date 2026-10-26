@@ -9,7 +9,7 @@
     "example') for the design rationale and the measured A/B evidence behind",
     "the mori entry below.",
     "",
-    "classify_patchability() in tracelens_analysis.py checks this registry",
+    "classify_patchability() in _kernel_classification.py checks this registry",
     "before the vendor_binary rejection; a match marks the candidate",
     "reusable_native_kernel=True with patch_strategy='vendor_playbook'.",
     "The dispatch side then copies task_bundle (resolved inside the packaged",

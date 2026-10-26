@@ -13,6 +13,7 @@ import pytest
 
 from hyperloom.inference_optimizer import multi_node
 from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as life
+from hyperloom.orchestrator.actions.executors._multi_node_restart_settings import RestartSettings
 
 
 @pytest.fixture
@@ -60,11 +61,11 @@ def _profile() -> None:
 
 
 def _workers() -> None:
-    asyncio.run(life._wait_for_workers_ready_async(timeout_s=600, poll_every_s=1))
+    asyncio.run(life._wait_for_workers_ready_async(RestartSettings.from_env(), timeout_s=600))
 
 
 def _health() -> None:
-    asyncio.run(life._wait_for_server_health_async(timeout_s=600, poll_every_s=1))
+    asyncio.run(life._wait_for_server_health_async(RestartSettings.from_env(), timeout_s=600))
 
 
 # site -> (state, routes, call, endpoints requested when its first request fails once)
@@ -153,22 +154,27 @@ def test_log_sweep_lets_an_unexpected_ssh_failure_propagate(collect) -> None:
         collect(_SSH_STATE, _ssh_answering("10.0.0.1", RuntimeError("ssh bug")))
 
 
-def test_invalid_health_poll_collects_logs_and_retries_the_started_server(monkeypatch) -> None:
+@pytest.mark.parametrize("name", ["HYPERLOOM_MN_POLL_TIMEOUT_S", "HYPERLOOM_MN_HEALTH_POLL_S"])
+def test_an_invalid_restart_setting_fails_before_the_cluster_is_touched(monkeypatch, tmp_path, name) -> None:
     from hyperloom.inference_optimizer.multi_node import cli
     from hyperloom.inference_optimizer.multi_node._internal import external_state
+    from hyperloom.orchestrator.actions.executors import _server_patcher
 
     calls: list[str] = []
     monkeypatch.setattr(life, "is_multi_node", lambda: True)
     monkeypatch.setattr(life, "_read_state", dict)
     monkeypatch.setattr(external_state, "external_service_url", lambda: "")
-    monkeypatch.setenv("HYPERLOOM_MN_HEALTH_POLL_S", "invalid")
+    monkeypatch.setenv(name, "invalid")
     monkeypatch.setenv("HYPERLOOM_MN_RESTART_RECLAIM_RETRY", "1")
-    monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+    monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path))
+    monkeypatch.delenv("HYPERLOOM_ENABLE_PATCH", raising=False)
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_patch_set", lambda: "roofline")
+    monkeypatch.setattr(cli, "cmd_apply_tracelens_patch", lambda _ns: calls.append("patch") or 0)
     monkeypatch.setattr(cli, "cmd_restart_server", lambda _ns: calls.append("restart") or 0)
     monkeypatch.setattr(cli, "kill_inference_for_kernel_agent_best_effort", lambda: calls.append("reclaim"))
     monkeypatch.setattr(life, "_collect_worker_server_logs", lambda _state, _why: calls.append("logs"))
 
-    with pytest.raises(life.ServerRestartFailed, match="HYPERLOOM_MN_HEALTH_POLL_S"):
-        asyncio.run(life.restart_server_for_round(framework="vllm", model_path="/model", tp=1, ep=1))
+    with pytest.raises(life.ServerRestartFailed, match=f"invalid multi-node restart setting: {name}='invalid'"):
+        asyncio.run(life.restart_server_for_round(life.RoundServer(framework="vllm", model_path="/model", tp=1, ep=1)))
 
-    assert calls == ["restart", "logs", "reclaim", "restart", "logs"]
+    assert calls == []

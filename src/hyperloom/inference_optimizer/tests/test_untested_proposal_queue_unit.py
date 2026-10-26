@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.orchestrator.actions.executors._proposal_identity import (
+    BaseControls,
     controls_of,
     effective_fingerprint,
     normalize_proposal,
@@ -52,9 +53,9 @@ def _ledger_row(proposal) -> dict:
     }
 
 
-def _fingerprint(proposal, **base) -> str:
+def _fingerprint(proposal, base: BaseControls = BaseControls()) -> str:
     fields = normalize_proposal(proposal)
-    return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields), **base)
+    return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields), base=base)
 
 
 def _round(proposals, *, cycle: int = 0, domain: str = "serving_specialist", gap: str = "") -> dict:
@@ -101,7 +102,7 @@ def test_a_keep_that_changes_the_stack_does_not_resurrect_benched_proposals():
     """The ledger key is stack-relative; matching on it would miss after a KEEP."""
     proposal = {"name": "with-removal", "extra_args": "--a 1", "remove_args": ["--v"]}
     round_start = _fingerprint(proposal)
-    after_keep = _fingerprint(proposal, base_remove_args=["--b"], base_args_mode="replace")
+    after_keep = _fingerprint(proposal, BaseControls(remove_args=["--b"], args_mode="replace"))
     assert round_start != after_keep
 
     state = _state(
@@ -207,7 +208,7 @@ async def test_the_block_is_injected_only_in_the_optimisation_phase(coord, phase
     coord.shared_state.phase = phase
     coord.shared_state.macro_cycle = 0
     coord.shared_state.specialist_rounds = [_round([{"name": "queued", "extra_args": "--a 1"}])]
-    out = await coord.conversation.compose_prompt("orchestration")
+    out = (await coord.conversation.compose_prompt("orchestration")).text
     assert ("=== Untested proposals (current cycle) ===" in out) is expected
 
 
@@ -218,8 +219,8 @@ async def test_the_block_is_repeated_on_every_turn(coord):
     coord.shared_state.macro_cycle = 0
     coord.shared_state.specialist_rounds = [_round([{"name": "queued", "extra_args": "--a 1"}])]
 
-    first = await coord.conversation.compose_prompt("orchestration")
-    second = await coord.conversation.compose_prompt("orchestration")
+    first = (await coord.conversation.compose_prompt("orchestration")).text
+    second = (await coord.conversation.compose_prompt("orchestration")).text
 
     for out in (first, second):
         assert "=== Shared session state ===" in out

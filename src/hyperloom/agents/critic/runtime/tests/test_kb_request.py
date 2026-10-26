@@ -12,8 +12,6 @@ from hyperloom.agents.critic.runtime.kb_client import KBListQuery
 from hyperloom.agents.critic.runtime.in_memory_kb_client import (
     InMemoryKBClient,
     _deep_merge,
-    _matches_metadata,
-    _normalise_value,
 )
 from hyperloom.agents.critic.runtime.request_models import (
     _optional_list,
@@ -21,19 +19,12 @@ from hyperloom.agents.critic.runtime.request_models import (
     _require_str,
     parse_request,
 )
+from hyperloom.agents.critic.runtime.scope_builder import normalise_scope_value
 
 
-def test_normalise_value_none() -> None:
-    assert _normalise_value(None) == ""
-    assert _normalise_value("  HeLLo ") == "hello"
-
-
-def test_matches_metadata_branches() -> None:
-    assert _matches_metadata({"k": "x"}, {"k": {"a": 1}}) is False
-    assert _matches_metadata({"k": {"a": 2}}, {"k": {"a": 1}}) is False
-    assert _matches_metadata({"k": "x"}, {"k": [1]}) is False
-    assert _matches_metadata({"k": "x"}, {"k": "y"}) is False
-    assert _matches_metadata({"k": [1, 2, 3]}, {"k": [1, 2]}) is True
+def test_normalise_scope_value_none() -> None:
+    assert normalise_scope_value(None) == ""
+    assert normalise_scope_value("  HeLLo ") == "hello"
 
 
 def test_deep_merge_nested() -> None:
@@ -76,26 +67,6 @@ def test_upsert_normalization_warning_and_merge() -> None:
     assert "importance_protected" in res3["warnings"]
 
 
-def test_batch_insert_conflict_modes() -> None:
-    kb = InMemoryKBClient(time_fn=lambda: 1.0)
-    with pytest.raises(KBValidationError):
-        kb.batch_insert([], on_conflict="bogus")
-
-    item = {"scope": {"model": "m"}, "kind": "technique", "slug": "slug-aaaa", "importance": 0.5}
-    kb.batch_insert([item], on_conflict="error")
-    with pytest.raises(KBValidationError):
-        kb.batch_insert([item], on_conflict="error")
-
-
-def test_add_edges_branches() -> None:
-    kb = InMemoryKBClient(time_fn=lambda: 1.0)
-    with pytest.raises(KBValidationError):
-        kb.add_edges([{"kind": "relates_to"}])
-
-    out = kb.add_edges([{"kind": "relates_to", "from_id": "missing", "to_id": "x"}])
-    assert out["mirror_skipped"][0]["reason"] == "src_missing"
-
-
 def test_require_and_optional_validators() -> None:
     with pytest.raises(RequestValidationError):
         _require_str({"k": 5}, "k", where="t")
@@ -114,7 +85,6 @@ def test_parse_request_errors() -> None:
     with pytest.raises(RequestValidationError):
         parse_request(
             {
-                "kind": "coordinator_inbox",
                 "session_id": "s1",
                 "raw_prompt": "do something",
                 "proposals": ["not-an-object"],

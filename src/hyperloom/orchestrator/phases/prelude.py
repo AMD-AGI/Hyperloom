@@ -10,7 +10,7 @@ from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
 from hyperloom.common.coerce import to_float
-from hyperloom.common.perf_metric import VERDICT_KEEP, constraint_fields, graded_axes_of
+from hyperloom.common.perf_metric import VERDICT_KEEP, GradingAnchor, constraint_fields, graded_axes_of
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     GATE_ACCURACY,
@@ -31,11 +31,15 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     SKIP_RECIPE_READ_FAILED,
     SKIP_RESTATES_BASELINE,
     SKIP_WORKLOAD_CONFIG_INCOMPATIBLE,
+    WarmReplayApplyItem,
+    WarmReplayMeasurement,
+    WarmReplayRequest,
 )
 
 from . import machine_state as _phase_state
-from hyperloom.inference_optimizer.grid_server_args import merge_cumulative_extra_server_args
+from hyperloom.inference_optimizer.grid_server_args import compose_server_args, merge_cumulative_extra_server_args
 from hyperloom.inference_optimizer.inferencex_checkout import pick_tree
+from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_OTHER,
     derive_journal_outcome,
@@ -43,15 +47,23 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     Verdict,
 )
 from ..actions.executors._launch_restatement import config_launch_restated_by
-from ..actions.executors.baseline import _revert_warm_patch_state, revert_warm_kernel_patches
+from ..actions.executors.baseline import revert_warm_kernel_patches
 from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
 from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
-from ..state.task_registry import Task
+from ..state.task_registry import Task, TaskSpec
 from ..loop.time_budget import (
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,
 )
 from ..collaborator import CoordinatorCollaborator
+from .warm_replay_stack import (
+    commit_warm_replay_overlays,
+    committing_overlays,
+    replayed_patch_refs as _replayed_patch_refs,
+    restore_recipe_trees,
+    warm_patch_trees as _warm_patch_trees,
+    warm_replay_source_layer,
+)
 from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
 
 log = _logging.getLogger(__name__)
@@ -153,43 +165,6 @@ def _warm_recipe_history_rows(warm: Any, key: str) -> list[Any]:
         attrs = exact_history
     rows = attrs.get(key)
     return rows if isinstance(rows, list) else []
-
-
-# A unified-diff overlay that landed. ``applied_nogit`` is what a nogit apply reports when it writes; on a
-# pip-installed framework it is the only status an overlay can land under.
-_LANDED_PATCH_STATUSES = frozenset({"applied", "applied_3way", "applied_nogit", "present_in_dirty_worktree"})
-
-
-def _replayed_patch_refs(result: Mapping[str, Any], params: Mapping[str, Any]) -> list[str]:
-    required = params.get("required_patch_timeline")
-    refs: list[str] = []
-    for item in result.get("warm_patches_applied") or []:
-        if not isinstance(item, dict):
-            continue
-        if required and item.get("status") not in _LANDED_PATCH_STATUSES:
-            continue
-        ref = str(item.get("patch_file") or "")
-        if ref:
-            refs.append(ref)
-    return refs
-
-
-def _warm_patch_trees(result: Mapping[str, Any], pending: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    trees = [
-        tree
-        for tree in result.get("warm_patch_trees") or pending.get("recipe_patch_trees") or []
-        if isinstance(tree, Mapping)
-    ]
-    # A round that predates the list reports only its primary tree.
-    return trees or [
-        {
-            "root": result.get("warm_patch_target") or pending.get("recipe_patch_target"),
-            "pre_sha": result.get("warm_patch_pre_sha") or pending.get("recipe_patch_pre_sha"),
-            "snapshot_manifest": (
-                result.get("warm_patch_snapshot_manifest") or pending.get("recipe_patch_snapshot_manifest")
-            ),
-        }
-    ]
 
 
 def _recorded_apply_roots(provenance: Any) -> dict[str, str]:
@@ -553,17 +528,11 @@ class PreludePhase(CoordinatorCollaborator):
                 "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in kernel_id)[:96] or "warm_kernel"
             )
             snapshot_dir = Path(self.session_dir) / "runtime" / "warm_kernel_materialized" / safe_kernel_id
-            try:
-                materialized = materialize_unified_patch_snapshot(
-                    patch_path=patch_path,
-                    repo_root=repo_root,
-                    snapshot_dir=snapshot_dir,
-                )
-            except Exception as exc:  # noqa: BLE001
-                return {
-                    "status": "failed",
-                    "error": (f"warm replay unified diff materialization failed: {type(exc).__name__}: {exc}"),
-                }
+            materialized = materialize_unified_patch_snapshot(
+                patch_path=patch_path,
+                repo_root=repo_root,
+                snapshot_dir=snapshot_dir,
+            )
             payload["snapshot_dir"] = materialized
             payload["kernel_repo"] = str(repo_root)
 
@@ -770,12 +739,7 @@ class PreludePhase(CoordinatorCollaborator):
             "kernel_apply_results": [],
             "kernel_snapshots": [],
         }
-        try:
-            state.save(self.session_dir)
-        except Exception as exc:  # noqa: BLE001
-            return self._set_warm_kernel_outcome(
-                {"status": "error", "reason": f"kernel_pending_state_persist_failed:{type(exc).__name__}"}
-            )
+        state.save(self.session_dir)
         for index, entry in enumerate(plan):
             if not (entry.get("source_paths") or entry.get("patch_path")):
                 entry["decision"] = "DEFERRED"
@@ -1072,7 +1036,7 @@ class PreludePhase(CoordinatorCollaborator):
             return None
         try:
             sdk_replay = self._read_current_recipe_replay()
-        except Exception as exc:  # noqa: BLE001 — current replay fails closed
+        except (OSError, ValueError, RuntimeError, AttributeError, TypeError) as exc:  # current replay fails closed
             self._skip_warm_replay(
                 code=SKIP_RECIPE_READ_FAILED,
                 outcome={
@@ -1408,12 +1372,14 @@ class PreludePhase(CoordinatorCollaborator):
         try:
             lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("replay_warm_recipe")
             task, was_existing = await self.tasks.create_or_return_existing(
-                kind="replay_warm_recipe",
-                params=params,
-                idempotency_key="warm-replay-prelude",
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind="replay_warm_recipe",
+                    params=params,
+                    idempotency_key="warm-replay-prelude",
+                    requires_lanes=lanes,
+                    lease_ttl_sec=ttl,
+                    dispatch_class="coordinator",
+                )
             )
         except Exception as exc:
             rollback = self._unwind_warm_kernel_half(overlay)
@@ -1511,34 +1477,17 @@ class PreludePhase(CoordinatorCollaborator):
                     "target_repo": str(target_path),
                 }
             promoted.append(str(target_path))
+        self.shared_state.warm_replay_pending = committing_overlays(self.shared_state.warm_replay_pending or {})
+        self.shared_state.save(self.session_dir)
+        if failed := commit_warm_replay_overlays(result):
+            failure = "the replayed overlays cannot be committed to the framework tree: " + "; ".join(failed)
+            return False, {"status": "failed", "failure": failure}
         return True, {"status": "promoted", "target_repo": promoted[0], "target_repos": promoted}
 
     def rollback_combined_warm(self, result: dict[str, Any], task: "Task | None") -> dict[str, Any]:
         """Restore both Recipe and Kernel halves of a combined replay."""
-        restores: list[dict[str, Any]] = []
         pending = self.shared_state.warm_replay_pending
-        for tree in _warm_patch_trees(result, pending):
-            target = str(tree.get("root") or "")
-            if not target:
-                continue
-            recipe_manifest = tree.get("snapshot_manifest")
-            backups = list(tree.get("nogit_backups") or [])
-            if not bool(tree.get("mutated", True)):
-                # An overlay the tree already carried applies as a no-op, writing
-                # nothing and so owing nothing. A record predating the flag reads as
-                # written-to, and still has to answer with a channel below.
-                continue
-            if not recipe_manifest and not backups:
-                restores.append({"ok": False, "errors": [f"recipe:{target}:missing_snapshot_manifest"]})
-                continue
-            restores.append(
-                _revert_warm_patch_state(
-                    target,
-                    pre_sha=str(tree.get("pre_sha") or ""),
-                    snapshot_manifest=recipe_manifest,
-                    nogit_backups=backups,
-                )
-            )
+        restores = restore_recipe_trees(result, pending)
         params = task.params if task is not None else {}
 
         def _kernel_rows(key: str, pending_key: str) -> list[Any]:
@@ -1760,16 +1709,18 @@ class PreludePhase(CoordinatorCollaborator):
         recorder = make_warm_replay_recorder(
             phase=_WARM_REPLAY_EVENT_PHASE,
             macro_cycle=int(self.shared_state.macro_cycle or 0),
-            task_id=str(getattr(task, "task_id", "") or ""),
-            tier=str(params.get("warm_recipe_tier") or ""),
-            config_source=str(params.get("config_source") or ""),
-            config_donor_tier=str(params.get("config_donor_tier") or ""),
-            donor=self._warm_replay_donor(dict(self.shared_state.warm_replay_outcome or {})) or None,
-            expected_gain_pct=params.get("warm_expected_gain_pct"),
-            confidence=params.get("warm_recipe_conf"),
-            session_baseline_tput=session_baseline_tput,
-            kernel_count=len(list(params.get("warm_kernel_plan") or [])),
-            recipe_suppressed=not str(params.get("config_source") or ""),
+            request=WarmReplayRequest(
+                task_id=str(getattr(task, "task_id", "") or ""),
+                tier=str(params.get("warm_recipe_tier") or ""),
+                config_source=str(params.get("config_source") or ""),
+                config_donor_tier=str(params.get("config_donor_tier") or ""),
+                donor=self._warm_replay_donor(dict(self.shared_state.warm_replay_outcome or {})) or None,
+                expected_gain_pct=params.get("warm_expected_gain_pct"),
+                confidence=params.get("warm_recipe_conf"),
+                session_baseline_tput=session_baseline_tput,
+                kernel_count=len(list(params.get("warm_kernel_plan") or [])),
+                recipe_suppressed=not str(params.get("config_source") or ""),
+            ),
         )
         if recorder is not None:
             self._record_warm_kernel_apply_items(recorder)
@@ -1794,18 +1745,20 @@ class PreludePhase(CoordinatorCollaborator):
             outcome = entry.get("apply_result") if isinstance(entry.get("apply_result"), Mapping) else {}
             sources = entry.get("source_paths") or []
             recorder.record_apply_item(
-                str(entry.get("patch_path") or (sources[0] if sources else "")),
-                kind=APPLY_KERNEL,
-                position=position,
-                applied=str(entry.get("decision") or "") == "PENDING",
-                reason=str(
-                    outcome.get("reason")
-                    or outcome.get("error")
-                    or outcome.get("exception")
-                    or entry.get("resolution_error")
-                    or ""
-                ),
-                target=str(entry.get("apply_root") or ""),
+                WarmReplayApplyItem(
+                    str(entry.get("patch_path") or (sources[0] if sources else "")),
+                    kind=APPLY_KERNEL,
+                    position=position,
+                    applied=str(entry.get("decision") or "") == "PENDING",
+                    reason=str(
+                        outcome.get("reason")
+                        or outcome.get("error")
+                        or outcome.get("exception")
+                        or entry.get("resolution_error")
+                        or ""
+                    ),
+                    target=str(entry.get("apply_root") or ""),
+                )
             )
 
     def _record_warm_patch_apply_items(self, recorder: Any, result: Mapping[str, Any]) -> None:
@@ -1825,12 +1778,14 @@ class PreludePhase(CoordinatorCollaborator):
             if not isinstance(row, Mapping):
                 continue
             recorder.record_apply_item(
-                str(row.get("patch_ref") or ""),
-                kind=APPLY_PATCH,
-                position=row.get("timeline_index", position),
-                applied=str(row.get("status") or "") != "failed",
-                reason=str(row.get("reason") or row.get("detail") or ""),
-                target=str(row.get("target_repo") or ""),
+                WarmReplayApplyItem(
+                    str(row.get("patch_ref") or ""),
+                    kind=APPLY_PATCH,
+                    position=row.get("timeline_index", position),
+                    applied=str(row.get("status") or "") != "failed",
+                    reason=str(row.get("reason") or row.get("detail") or ""),
+                    target=str(row.get("target_repo") or ""),
+                )
             )
 
     def _warm_replay_timeline(self, task: "Task | None" = None):
@@ -1848,15 +1803,17 @@ class PreludePhase(CoordinatorCollaborator):
         return make_warm_replay_recorder(
             phase=_WARM_REPLAY_EVENT_PHASE,
             macro_cycle=int(self.shared_state.macro_cycle or 0),
-            task_id=str(getattr(task, "task_id", "") or outcome.get("replay_task_id") or ""),
-            tier=str(params.get("warm_recipe_tier") or outcome.get("warm_recipe_tier") or ""),
-            config_source=str(params.get("config_source") or outcome.get("config_source") or ""),
-            config_donor_tier=str(params.get("config_donor_tier") or outcome.get("config_donor_tier") or ""),
-            donor=self._warm_replay_donor(outcome) or None,
-            expected_gain_pct=params.get("warm_expected_gain_pct", outcome.get("expected_gain_pct")),
-            confidence=params.get("warm_recipe_conf", outcome.get("warm_recipe_conf")),
-            session_baseline_tput=self.shared_state.baseline_tput or None,
-            kernel_count=len(list(params.get("warm_kernel_plan") or [])),
+            request=WarmReplayRequest(
+                task_id=str(getattr(task, "task_id", "") or outcome.get("replay_task_id") or ""),
+                tier=str(params.get("warm_recipe_tier") or outcome.get("warm_recipe_tier") or ""),
+                config_source=str(params.get("config_source") or outcome.get("config_source") or ""),
+                config_donor_tier=str(params.get("config_donor_tier") or outcome.get("config_donor_tier") or ""),
+                donor=self._warm_replay_donor(outcome) or None,
+                expected_gain_pct=params.get("warm_expected_gain_pct", outcome.get("expected_gain_pct")),
+                confidence=params.get("warm_recipe_conf", outcome.get("warm_recipe_conf")),
+                session_baseline_tput=self.shared_state.baseline_tput or None,
+                kernel_count=len(list(params.get("warm_kernel_plan") or [])),
+            ),
             # Rebinding, not opening: the enqueue seam already put this event
             # on the timeline, and opening it twice would restate its start.
             open_event_on_timeline=False,
@@ -1933,12 +1890,14 @@ class PreludePhase(CoordinatorCollaborator):
         recorder = make_warm_replay_recorder(
             phase=_WARM_REPLAY_EVENT_PHASE,
             macro_cycle=int(self.shared_state.macro_cycle or 0),
-            tier=str(outcome.get("warm_recipe_tier") or ""),
-            config_source=str(outcome.get("config_source") or ""),
-            config_donor_tier=str(outcome.get("config_donor_tier") or ""),
-            donor=self._warm_replay_donor(outcome) or None,
-            expected_gain_pct=outcome.get("expected_gain_pct"),
-            confidence=outcome.get("warm_recipe_conf"),
+            request=WarmReplayRequest(
+                tier=str(outcome.get("warm_recipe_tier") or ""),
+                config_source=str(outcome.get("config_source") or ""),
+                config_donor_tier=str(outcome.get("config_donor_tier") or ""),
+                donor=self._warm_replay_donor(outcome) or None,
+                expected_gain_pct=outcome.get("expected_gain_pct"),
+                confidence=outcome.get("warm_recipe_conf"),
+            ),
         )
         if recorder is None:
             return
@@ -2092,14 +2051,16 @@ class PreludePhase(CoordinatorCollaborator):
 
     def _record_replay_measurement(self, recorder: Any, result: dict, outcome: dict, baseline_tput: float) -> None:
         recorder.record_measurement(
-            before_tput=baseline_tput,
-            after_tput=outcome["throughput_after"],
-            gain_pct=_gain_pct(outcome["throughput_after"], baseline_tput),
-            hot_tput=outcome["throughput_after"],
-            cold_tput=to_float(result.get("warmup_round_tput"), 0.0) or None,
-            accuracy=outcome.get("replay_accuracy"),
-            baseline_accuracy=outcome.get("baseline_accuracy"),
-            eval_ran=outcome.get("eval_ran"),
+            WarmReplayMeasurement(
+                before_tput=baseline_tput,
+                after_tput=outcome["throughput_after"],
+                gain_pct=_gain_pct(outcome["throughput_after"], baseline_tput),
+                hot_tput=outcome["throughput_after"],
+                cold_tput=to_float(result.get("warmup_round_tput"), 0.0) or None,
+                accuracy=outcome.get("replay_accuracy"),
+                baseline_accuracy=outcome.get("baseline_accuracy"),
+                eval_ran=outcome.get("eval_ran"),
+            )
         )
 
     def _rule_on_warm_replay_keep(
@@ -2122,7 +2083,9 @@ class PreludePhase(CoordinatorCollaborator):
             )
             self._record_warm_patch_apply_items(recorder, result)
         keep_threshold = _phase_state.resolve_keep_threshold(state)
-        graded = resolve_graded_comparison(state, result, keep_threshold_pct=keep_threshold, anchor_tput=baseline_tput)
+        graded = resolve_graded_comparison(
+            state, result, keep_threshold_pct=keep_threshold, anchor=GradingAnchor(tput=baseline_tput)
+        )
         outcome["keep_threshold_pct"] = keep_threshold
         if graded.veto_reason:
             # The grading applies the session's constraints (latency, power), so the drift branch below rolls the
@@ -2228,7 +2191,7 @@ class PreludePhase(CoordinatorCollaborator):
             entry_extra["recipe_patch_statuses"] = list(patch_result.get("patches") or [])
         if replayed_patch_refs:
             entry_extra["replayed_patch_refs"] = replayed_patch_refs
-        return entry_extra
+        return {**entry_extra, **warm_replay_source_layer(result, self.session_dir, self.shared_state.framework)}
 
     def _warm_replay_candidate(self, result: dict, task: "Task | None", params: Mapping[str, Any]) -> dict[str, Any]:
         warm_args = str(params.get("extra_server_args") or "").strip()
@@ -2453,15 +2416,17 @@ class PreludePhase(CoordinatorCollaborator):
         kind = self.internal_analysis_kind()
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(kind)
         task, was_existing = await self.tasks.create_or_return_existing(
-            kind=kind,
-            params=params,
-            idempotency_key=(
-                f"internal-analysis-{reason}{idem_scope}"
-                f"{self._coord.dispatcher.cycle_idem_suffix()}{self._analysis_attempt_suffix(kind)}"
-            ),
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind=kind,
+                params=params,
+                idempotency_key=(
+                    f"internal-analysis-{reason}{idem_scope}"
+                    f"{self._coord.dispatcher.cycle_idem_suffix()}{self._analysis_attempt_suffix(kind)}"
+                ),
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
+            )
         )
         if was_existing:
             log.info(
@@ -2507,23 +2472,22 @@ class PreludePhase(CoordinatorCollaborator):
         params: dict[str, Any] = {"source": "coordinator_internal", "reason": str(reason), RECIPE_PARAM: recipe}
         if inline_event:
             params[INLINE_EVENT_PARAM] = str(inline_event)
+        bl_args = read_baseline_server_args(state).strip()
         if reason != "prelude_initial":
+            # The profiler boots from the benchmark config, so the stack delta is layered over the baseline's own args.
             inject_stack_base_params(params, state)
+            params["base_extra_args"] = compose_server_args(
+                inherited_args=bl_args,
+                base_extra_args=str(params.get("base_extra_args") or ""),
+                remove_args=params.get("base_remove_args"),
+                args_mode=str(params.get("base_args_mode") or "append"),
+            )
         else:
             # PRELUDE roofline profiles the baseline arm: inject baseline's own server args (never current_best's) so
             # a later warm-replay can't swap in flags that skew the baseline ceiling.
             params.update(self._coord.enablement_revalidation.baseline_launch_params())
-            try:
-                from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
-
-                bl_args = read_baseline_server_args(state).strip()
-            except Exception:  # noqa: BLE001 — best-effort; empty falls through
-                bl_args = ""
             if bl_args:
                 params["base_extra_args"] = bl_args
-        last_bl = state.last_baseline or {}
-        if isinstance(last_bl, dict):
-            bs = str(last_bl.get("benchmark_script") or "").strip()
-            if bs:
-                params["benchmark_script"] = bs
+        if benchmark_script := state.accepted_baseline_script():
+            params["benchmark_script"] = benchmark_script
         return params

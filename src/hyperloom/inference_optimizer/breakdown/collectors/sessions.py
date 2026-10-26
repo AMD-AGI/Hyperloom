@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,39 +19,6 @@ from ..session_facts import recovery_block
 
 
 log = logging.getLogger(__name__)
-
-
-def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
-    """Resolve the container image for ``collect_session``."""
-    manifest_image = manifest.get("image") if isinstance(manifest, dict) else None
-    if isinstance(manifest_image, str) and manifest_image.strip():
-        return manifest_image.strip()
-    for var in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
-        val = (os.environ.get(var) or "").strip()
-        if val:
-            return val
-    for marker in ("/etc/podinfo/image", "/etc/hyperloom-image"):
-        try:
-            p = Path(marker)
-            if p.exists():
-                txt = p.read_text(encoding="utf-8", errors="replace").strip()
-                if txt:
-                    return txt
-        except OSError:
-            continue
-    try:
-        cgroup = Path("/proc/1/cgroup")
-        if cgroup.exists():
-            for line in cgroup.read_text(encoding="utf-8", errors="replace").splitlines():
-                if "docker" not in line and "containerd" not in line:
-                    continue
-                m = re.search(r"([0-9a-f]{12,64})", line)
-                if m:
-                    return f"unknown@{m.group(1)[:12]}"
-    except OSError as exc:
-        # /proc/1/cgroup may be unreadable; fall through to None.
-        log.debug("cgroup-based image detection failed: %r", exc)
-    return None
 
 
 def _leg_start_ts(state: dict[str, Any], start_ts: str) -> str:
@@ -76,8 +42,8 @@ def _close_phase_stop_reason(state: dict[str, Any], *, leg_start_ts: str) -> tup
             continue
         if str(row.get("to_phase") or "").strip().upper() != "CLOSE":
             continue
-        reason = str(row.get("reason") or row.get("stop_reason") or row.get("exit_reason") or "").strip()
-        ts = str(row.get("ts") or row.get("entered_ts") or "").strip()
+        reason = str(row.get("reason") or "").strip()
+        ts = str(row.get("ts") or "").strip()
         closed_at = to_unix(ts)
         if leg_start is not None and closed_at is not None and closed_at < leg_start:
             continue
@@ -131,11 +97,6 @@ def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> b
 
 
 # Session metadata
-def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
-    """Project SharedState's crash / interruption / resume signals."""
-    return recovery_block(state)
-
-
 def collect_session(
     session_dir: Path,
     state: dict[str, Any],
@@ -153,9 +114,9 @@ def collect_session(
         # ``stop_ts`` is stamped once, when the reason is written, so a re-export of a finished session keeps
         # reporting the same end.
         ended_at_utc = _first_recorded_end(state.get("stop_ts"), close_ts) or now_iso(timespec="seconds")
-    image = _detect_image_for_session(manifest)
+    image = str(manifest.get("image") or "").strip() or None
     if image is None:
-        warnings.append("image: not configured (set HYPERLOOM_IMAGE env var)")
+        warnings.append("image: manifest.json records no image")
     section = {
         "session_id": str(state.get("session_id") or manifest.get("session_id") or ""),
         "claw_session_id": manifest.get("claw_session_id") or state.get("claw_session_id"),
@@ -177,18 +138,14 @@ def collect_session(
         ),
         "tick_count": int(state.get("tick") or 0),
         # Crash / interruption / resume history.
-        "recovery": _collect_recovery(state),
+        "recovery": recovery_block(state),
     }
     section["elapsed_minutes"] = session_elapsed_minutes(section)
     return section
 
 
 # Workload
-def collect_workload(
-    state: dict[str, Any],
-    manifest: dict[str, Any],
-    warnings: list[str],
-) -> dict[str, Any]:
+def collect_workload(state: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
     """Collect the workload-description section."""
     wl = manifest.get("workload") or {}
     return {
@@ -209,10 +166,7 @@ def collect_workload(
 
 
 # Model basics
-def collect_model_info(
-    state: dict[str, Any],
-    warnings: list[str],
-) -> dict[str, Any]:
+def collect_model_info(state: dict[str, Any]) -> dict[str, Any]:
     """Collect the ``model_info`` section (state.model_info passthrough)."""
     info = state.get("model_info")
     return dict(info) if isinstance(info, dict) else {}

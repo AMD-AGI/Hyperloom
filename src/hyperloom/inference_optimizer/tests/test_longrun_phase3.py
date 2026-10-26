@@ -12,7 +12,7 @@ import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 
@@ -32,7 +32,9 @@ def conn(tmp_path):
 @pytest.mark.parametrize("ttl", [0, 60, 600])
 async def test_old_running_rows_without_death_evidence_are_retained(conn, ttl):
     reg = TaskRegistry(conn)
-    task = await reg.create(kind="bench", params={}, idempotency_key="old", lease_ttl_sec=ttl)
+    task, _ = await reg.create_or_return_existing(
+        TaskSpec(kind="bench", params={}, idempotency_key="old", lease_ttl_sec=ttl)
+    )
     await reg.transition(task.task_id, "running")
     await conn.execute("UPDATE tasks SET updated_at='2020-01-01T00:00:00+00:00'")
     assert await reg.reclaim_dead_running() == []
@@ -178,10 +180,12 @@ async def test_phase_transition_cancels_queued_specialist(cyclic_coordinator):
     await _noop_phase_side_effects(c)
     _arm_explore_to_sweep(c.shared_state)
 
-    queued = await c.tasks.create(
-        kind="specialist",
-        params={"needs_gpu": True},
-        idempotency_key="queued-specialist",
+    queued, _ = await c.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="specialist",
+            params={"needs_gpu": True},
+            idempotency_key="queued-specialist",
+        ),
     )
 
     await c.phase_machine.advance_phase_if_needed()
@@ -198,10 +202,12 @@ async def test_phase_transition_waits_for_a_running_specialist(cyclic_coordinato
     await _noop_phase_side_effects(c)
     _arm_explore_to_sweep(c.shared_state)
 
-    running = await c.tasks.create(
-        kind="specialist",
-        params={"needs_gpu": True},
-        idempotency_key="running-specialist",
+    running, _ = await c.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="specialist",
+            params={"needs_gpu": True},
+            idempotency_key="running-specialist",
+        ),
     )
     await c.tasks.transition(running.task_id, "running")
 
@@ -219,10 +225,12 @@ async def test_phase_transition_preserves_target_phase_queued_task(cyclic_coordi
     await _noop_phase_side_effects(c)
     _arm_explore_to_sweep(c.shared_state)
 
-    queued = await c.tasks.create(
-        kind="conc_sweep",
-        params={},
-        idempotency_key="queued-conc-sweep",
+    queued, _ = await c.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="conc_sweep",
+            params={},
+            idempotency_key="queued-conc-sweep",
+        ),
     )
 
     await c.phase_machine.advance_phase_if_needed()
@@ -238,10 +246,12 @@ async def test_phase_transition_preserves_close_report_task(cyclic_coordinator):
     c.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
     c.shared_state.set_stop_reason("target_reached")
 
-    queued = await c.tasks.create(
-        kind="report",
-        params={},
-        idempotency_key="queued-report",
+    queued, _ = await c.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="report",
+            params={},
+            idempotency_key="queued-report",
+        ),
     )
 
     await c.phase_machine.advance_phase_if_needed()
@@ -300,11 +310,13 @@ async def test_pump_reclaims_expired_running_task(tmp_path: Path, monkeypatch):
     coord = await _build_minimal_coord(tmp_path, monkeypatch)
 
     # Orphaned task: TTL expired via backdated updated_at.
-    orphan = await coord.tasks.create(
-        kind="integrate_patch",
-        params={},
-        idempotency_key="zombie-orphan",
-        lease_ttl_sec=60,
+    orphan, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params={},
+            idempotency_key="zombie-orphan",
+            lease_ttl_sec=60,
+        ),
     )
     await coord.tasks.transition(orphan.task_id, "running")
     stale_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
@@ -314,20 +326,24 @@ async def test_pump_reclaims_expired_running_task(tmp_path: Path, monkeypatch):
     )
 
     # In-window task: age < ttl.
-    live = await coord.tasks.create(
-        kind="integrate_patch",
-        params={},
-        idempotency_key="live-running",
-        lease_ttl_sec=3600,
+    live, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params={},
+            idempotency_key="live-running",
+            lease_ttl_sec=3600,
+        ),
     )
     await coord.tasks.transition(live.task_id, "running")
 
     # No-TTL task: never reclaimed.
-    no_ttl = await coord.tasks.create(
-        kind="sweep",
-        params={},
-        idempotency_key="no-ttl-running",
-        lease_ttl_sec=0,
+    no_ttl, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="sweep",
+            params={},
+            idempotency_key="no-ttl-running",
+            lease_ttl_sec=0,
+        ),
     )
     await coord.tasks.transition(no_ttl.task_id, "running")
 
@@ -343,11 +359,13 @@ async def test_pump_reclaim_idempotent(tmp_path: Path, monkeypatch):
     """Running the pump twice on an already-failed task is a no-op (idempotent)."""
     coord = await _build_minimal_coord(tmp_path, monkeypatch)
 
-    orphan = await coord.tasks.create(
-        kind="integrate_patch",
-        params={},
-        idempotency_key="zombie-idem",
-        lease_ttl_sec=60,
+    orphan, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params={},
+            idempotency_key="zombie-idem",
+            lease_ttl_sec=60,
+        ),
     )
     await coord.tasks.transition(orphan.task_id, "running")
     stale_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()

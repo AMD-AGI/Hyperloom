@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import pytest
 
 import kernelforge.agent_backends.codex as codex_backend
+import hyperloom.common.entry_points as entry_points
 import kernelforge.agent_backends.registry as registry
 from kernelforge.agent_backends import (
     AgentCapabilities,
@@ -233,13 +234,66 @@ def test_broken_entry_point_is_isolated(monkeypatch) -> None:
                 return [_EntryPoint()]
             return []
 
-    monkeypatch.setattr(registry.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(entry_points.metadata, "entry_points", _EntryPoints)
     monkeypatch.setattr(registry, "_plugins_loaded", False)
     monkeypatch.setattr(registry, "_plugin_errors", {})
     registry.discover_agent_providers(force=True)
     assert "brokencli" in registry._plugin_errors
     with pytest.raises(ValueError, match="plugin error"):
         get_agent_provider("brokencli")
+
+
+def test_a_broken_entry_point_is_logged_once(monkeypatch, caplog) -> None:
+    """The shared helper logs the load failure; the registry must not log it a second time."""
+
+    class _EntryPoint:
+        name = "brokencli"
+
+        @staticmethod
+        def load():
+            raise RuntimeError("boom")
+
+    class _EntryPoints:
+        @staticmethod
+        def select(*, group):
+            return [_EntryPoint()] if group == registry.PROVIDER_ENTRY_POINT_GROUP else []
+
+    monkeypatch.setattr(entry_points.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(registry, "_plugins_loaded", False)
+    monkeypatch.setattr(registry, "_plugin_errors", {})
+    with caplog.at_level("WARNING"):
+        registry.discover_agent_providers(force=True)
+    assert [r.getMessage() for r in caplog.records if "brokencli" in r.getMessage()] == [
+        f"failed to load entry point brokencli of group {registry.PROVIDER_ENTRY_POINT_GROUP}: boom"
+    ]
+
+
+def test_two_entry_points_with_one_name_record_the_second_as_a_plugin_error(monkeypatch) -> None:
+    """The helper yields both; the registry keeps the first and records the duplicate."""
+    first, second = (AgentProvider(name="dupcli", factory=lambda _runtime: None, default_model="m") for _ in range(2))
+
+    def _entry(provider):
+        class _EntryPoint:
+            name = "dupcli"
+
+            @staticmethod
+            def load():
+                return lambda: provider
+
+        return _EntryPoint()
+
+    class _EntryPoints:
+        @staticmethod
+        def select(*, group):
+            return [_entry(first), _entry(second)] if group == registry.PROVIDER_ENTRY_POINT_GROUP else []
+
+    monkeypatch.setattr(entry_points.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(registry, "_plugins_loaded", False)
+    monkeypatch.setattr(registry, "_plugin_errors", {})
+    monkeypatch.setattr(registry, "_providers", {})
+    registry.discover_agent_providers(force=True)
+    assert registry._providers["dupcli"] is first
+    assert "already registered" in registry._plugin_errors["dupcli"]
 
 
 def test_select_prefers_model_owning_provider() -> None:
@@ -316,7 +370,7 @@ def test_entry_point_discovery_failure_is_recorded(monkeypatch) -> None:
         def select(*, group):
             raise OSError("metadata unreadable")
 
-    monkeypatch.setattr(registry.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(entry_points.metadata, "entry_points", _EntryPoints)
     monkeypatch.setattr(registry, "_plugins_loaded", False)
     monkeypatch.setattr(registry, "_plugin_errors", {})
     registry.discover_agent_providers(force=True)
@@ -395,7 +449,7 @@ def test_external_entry_point_provider_is_discovered(monkeypatch) -> None:
             assert group == registry.PROVIDER_ENTRY_POINT_GROUP
             return [_EntryPoint()]
 
-    monkeypatch.setattr(registry.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(entry_points.metadata, "entry_points", _EntryPoints)
     monkeypatch.setattr(registry, "_plugins_loaded", False)
 
     assert get_agent_provider("externalcli") is provider

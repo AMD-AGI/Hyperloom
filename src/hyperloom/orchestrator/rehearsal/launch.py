@@ -14,6 +14,7 @@ from typing import Any, Callable, NamedTuple
 
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    RoundWatch,
     stamp_server_ready,
 )
 from hyperloom.orchestrator.rehearsal.clock import VirtualClock
@@ -105,9 +106,7 @@ class ScriptedLaunchBackend:
         cmd: Sequence[str],
         *,
         cwd: str | None = None,
-        server_log_path: str | None = None,
-        timeout: int | float | None = None,
-        session_deadline_sec: float | None = None,
+        watch: RoundWatch = RoundWatch(),
         on_output: Callable[[], None] | None = None,
         **_ignored: Any,
     ) -> subprocess.CompletedProcess:
@@ -116,11 +115,9 @@ class ScriptedLaunchBackend:
         Args:
             cmd: The command the caller would have run.
             cwd: Working directory; the round slot when no server log is named.
-            server_log_path: Where the attempt writes the server's own log. Its
-                parent is the round slot the artifacts are materialised into.
-            timeout: Hard timeout; a hanging attempt is reaped on it.
-            session_deadline_sec: Absolute instant the session budget expires,
-                read off ``time.monotonic()``.
+            watch: The round's gates. ``server_log_path`` is where the attempt writes the server's own log, its
+                parent the round slot; a hanging attempt is reaped on ``timeout``; ``session_deadline_sec`` is
+                the absolute instant the session budget expires, read off ``time.monotonic()``.
             on_output: Liveness callback, driven across the attempt's duration.
             **_ignored: The rest of the launch surface, which a scripted attempt
                 has no process to apply.
@@ -137,8 +134,10 @@ class ScriptedLaunchBackend:
             subprocess.TimeoutExpired: When a hanging attempt hits ``timeout``
                 with budget to spare.
         """
-        request = _LaunchRequest(cmd, cwd, server_log_path, timeout, session_deadline_sec)
-        budget_left = self._budget_left(session_deadline_sec)
+        server_log_path = watch.server_log_path
+        timeout = watch.timeout
+        request = _LaunchRequest(cmd, cwd, server_log_path, timeout, watch.session_deadline_sec)
+        budget_left = self._budget_left(watch.session_deadline_sec)
         attempt = self._next_attempt()
         started = self.clock.elapsed
         if server_log_path:

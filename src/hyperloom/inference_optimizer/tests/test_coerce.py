@@ -9,10 +9,13 @@ import time
 import pytest
 
 from hyperloom.common.coerce import (
+    dict_rows,
     first_float,
     first_int,
     first_str,
     optional_positive_int,
+    recorded_float,
+    text_or_none,
     to_float,
     to_int,
     to_list,
@@ -67,6 +70,36 @@ class TestToFloat:
     def test_custom_default(self):
         assert to_float("nope", default=0.0) == 0.0
         assert to_float(None, default=-1.0) == -1.0
+
+
+class TestRecordedFloat:
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            (1, 1.0),
+            (1.5, 1.5),
+            ("2.5", 2.5),
+            (-4, -4.0),
+        ],
+    )
+    def test_parses(self, value, expected):
+        assert recorded_float(value) == expected
+
+    @pytest.mark.parametrize("value", [None, "", "abc", object(), [1]])
+    def test_absent_or_unparseable_reads_as_the_default(self, value):
+        assert recorded_float(value) == 0.0
+        assert recorded_float(value, -1.0) == -1.0
+
+    def test_infinity_survives_so_a_degenerate_measurement_stays_visible(self):
+        assert recorded_float(float("inf")) == math.inf
+        assert recorded_float("Infinity") == math.inf
+        assert math.isnan(recorded_float(float("nan")))
+
+    @pytest.mark.parametrize("value", [float("inf"), float("nan"), True])
+    def test_keeps_what_to_float_rejects(self, value):
+        """The three inputs on which the two coercions disagree, so a swap is never silent."""
+        assert to_float(value, 0.0) == 0.0
+        assert recorded_float(value) != 0.0 or math.isnan(recorded_float(value))
 
 
 class TestToInt:
@@ -216,3 +249,27 @@ class TestToList:
     def test_non_sequence_is_empty(self):
         for value in (None, {}, 42, object()):
             assert to_list(value) == []
+
+
+class TestTextOrNone:
+    def test_none_stays_none(self):
+        assert text_or_none(None) is None
+
+    def test_blank_reads_as_none(self):
+        assert text_or_none("   ") is None
+
+    def test_stripped(self):
+        assert text_or_none("  hi  ") == "hi"
+
+    def test_scalar_coerced(self):
+        assert text_or_none(42) == "42"
+
+
+class TestDictRows:
+    def test_keeps_only_dict_entries_in_order(self):
+        first, second = {"a": 1}, {"b": 2}
+        assert dict_rows([first, "x", None, second]) == [first, second]
+
+    def test_non_list_is_empty(self):
+        for value in (None, {"a": 1}, ({"a": 1},), "ab"):
+            assert dict_rows(value) == []

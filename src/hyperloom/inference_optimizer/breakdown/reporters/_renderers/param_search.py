@@ -13,7 +13,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import RenderedSection, as_dict, fmt_pct, md_table, register_renderer
+
+from hyperloom.common.coerce import to_mapping
+
+from ..base import RenderedSection, fmt_pct, md_table, register_renderer
 from ._framework import config_attempts, config_tally
 
 #: How many measured variants the table lists before it stops. Ordered by gain,
@@ -56,7 +59,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     rows = []
     for attempt, _proposal in config_attempts(breakdown):
-        measurement = as_dict(attempt.get("measurement"))
+        measurement = to_mapping(attempt.get("measurement"))
         rows.append(
             [
                 str(attempt.get("variant_name") or attempt.get("fingerprint") or ""),

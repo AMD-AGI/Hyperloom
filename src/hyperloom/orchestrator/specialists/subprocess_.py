@@ -53,7 +53,13 @@ from hyperloom.common.llm_config import (
 from hyperloom.common.env_safety import (
     redact_file_in_place,
 )
-from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+from hyperloom.common.fs_utils import (
+    create_nofollow,
+    read_text_nofollow,
+    regular_files_nofollow,
+    write_text_nofollow,
+)
+from hyperloom.common.env_safety import RunAs, RunAsError
 from hyperloom.common.proctree import collect_tree, kill_tree
 
 from .agent_cli_config import (
@@ -63,19 +69,18 @@ from .agent_cli_config import (
     _codex_provider_resolver_overlay,
     _write_private_codex_config,
 )
+from .launch_env import apply_gpu_env, prepare_demote, resolve_launch_user, stage_mcp_config
 from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles, resolve_dsh_executable
+from .reap_watch import PROCESS_LOG_NAME, ReapWatch, newest_activity, specialist_activity_paths
 from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
-from ..bringup.trees import head_commit
+from hyperloom.common.git_safety import app_git, worktree_head
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 from .wall_budget import clear_wall_budget_extension, wall_budget_extension
 from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
 
 
 log = logging.getLogger(__name__)
-
-_PROCESS_LOG_NAME = "process.log"
-
 
 #: How long the reaper waits on a specialist nobody bounded, matching the
 #: largest deadline the dispatcher hands down.
@@ -143,10 +148,10 @@ class SpecialistSubprocessConfig:
     """How often the reaper polls done.json / process exit / heartbeat."""
 
     heartbeat_stale_seconds: float = 300.0
-    """Liveness window for heartbeat.json or process.log activity.
+    """Liveness window for activity in any of :func:`specialist_activity_paths`.
 
-    A process that never creates either file is reaped after this window.
-    After either file has appeared, its mtime can refresh the liveness clock
+    A process that never creates any of them is reaped after this window.
+    After one has appeared, its mtime can refresh the liveness clock
     for one window before the subsequent stale window expires, yielding about
     two windows of silence before reap.
     """
@@ -259,6 +264,9 @@ def _setup_worktree(
             text=True,
             timeout=60.0,
             check=False,
+            # The ref, gitfile and admin dir git makes here must stay readable by a demoted specialist,
+            # whatever umask a launch set on the app.
+            umask=0o022,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return None, f"git worktree add failed to spawn: {exc!r}"
@@ -407,31 +415,6 @@ class SpecialistSpawn:
     progress_cb: Any = None
 
 
-@dataclass(frozen=True)
-class ReapWatch:
-    """What the reaper polls while a specialist subprocess runs.
-
-    Attributes:
-        workspace: Task workspace; supplies the ``process.log`` whose mtime is
-            the second liveness signal.
-        done_files: Candidate done-file paths to poll.
-        heartbeat_file: Heartbeat file whose mtime is one of the two activity
-            signals ORed together for the liveness check.
-        partial_files: Candidate partial-checkpoint paths polled for live
-            progress; never an exit signal.
-        progress_cb: Optional async callback for each new checkpoint.
-        task_id: Task identifier used to pick up live ``extend_lease``
-            wall-budget extensions each poll.
-    """
-
-    workspace: Path
-    done_files: tuple[Path, ...]
-    heartbeat_file: Path
-    partial_files: tuple[Path, ...] = ()
-    progress_cb: Any = None
-    task_id: str = ""
-
-
 # Dispatcher
 class SpecialistSubprocessDispatcher:
     """Spawn + reap one agent-CLI subprocess for a specialist task.
@@ -472,28 +455,25 @@ class SpecialistSubprocessDispatcher:
         clear_wall_budget_extension(request.task_id)
         # The pre-image the harvest diffs against, so it must be read before
         # the specialist can commit anything.
-        worktree_base_commit = (
-            head_commit(request.worktree)
-            if request.worktree is not None and (request.worktree / ".git").exists()
-            else ""
-        )
+        worktree_base_commit = worktree_head(request.worktree)
         request.workspace.mkdir(parents=True, exist_ok=True)
         prompt_file = request.workspace / "prompt.md"
-        prompt_file.write_text(request.user_prompt, encoding="utf-8")
-        prompt_file.chmod(0o600)
-        process_log = request.workspace / _PROCESS_LOG_NAME
-        # Poll worktree first (prompt-advertised path), then workspace as fallback.
-        done_candidates: list[Path] = []
-        if request.worktree is not None:
-            done_candidates.append(request.worktree / "specialist_done.json")
-        done_candidates.append(request.workspace / "specialist_done.json")
-        # Incremental checkpoint recovered as best-so-far on a budget kill; does
-        # NOT trigger reap. Same worktree-first / workspace-fallback order.
-        partial_candidates: list[Path] = []
-        if request.worktree is not None:
-            partial_candidates.append(request.worktree / "specialist_done.partial.json")
-        partial_candidates.append(request.workspace / "specialist_done.partial.json")
-        heartbeat_file = request.workspace / "heartbeat.json"
+        # A reused workspace may hold a link the previous run's account planted at this name.
+        write_text_nofollow(request.workspace, (prompt_file.name,), request.user_prompt)
+        process_log = request.workspace / PROCESS_LOG_NAME
+
+        # A requested demote that cannot be honoured fails the task: running the
+        # specialist as the app user would defeat the point of asking.
+        try:
+            run_as = resolve_launch_user(request.gpu_lease)
+        except RunAsError as exc:
+            return SpecialistSubprocessResult(
+                done_payload=None,
+                exit_code=None,
+                elapsed_seconds=0.0,
+                process_log_path=str(process_log),
+                error=f"specialist user refused: {exc}",
+            )
 
         # Compose a minimal env. Provider credentials are inherited by default
         # for compatibility with deployments that authenticate the agent CLI
@@ -513,7 +493,8 @@ class SpecialistSubprocessDispatcher:
         backend = ""
         try:
             backend = self._agent_backend()
-            cmd = self._build_launch(backend, request, env)
+            cmd = self._build_launch(backend, request, env, run_as)
+            watch = self._reap_watch(request)
         except SpecialistAgentUnavailableError as exc:
             # No runtime for this deployment's credential shape. Report it as the
             # task's failure rather than degrading to a CLI that cannot auth.
@@ -525,31 +506,7 @@ class SpecialistSubprocessDispatcher:
                 error=f"specialist agent runtime unavailable (backend={backend or 'unresolved'}): {exc}",
             )
 
-        if request.gpu_lease is not None:
-            # Ray-managed GPU execution: Ray sets *_VISIBLE_DEVICES in
-            # the actor's worker; never let the caller env pin them (that would
-            # override Ray's card assignment). ``gpu_ids`` here is the logical
-            # 0..N-1 view the specialist sees under Ray's mask — kept only as the
-            # informational count env for specialist tooling.
-            for var in GPU_MASK_ENV_NAMES:
-                env.pop(var, None)
-            if request.gpu_ids:
-                env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = ",".join(str(g) for g in request.gpu_ids)
-        elif request.gpu_ids:
-            visible = ",".join(str(g) for g in request.gpu_ids)
-            env["HIP_VISIBLE_DEVICES"] = visible
-            env["CUDA_VISIBLE_DEVICES"] = visible
-            env["ROCR_VISIBLE_DEVICES"] = visible
-            env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = visible
-        else:
-            # CPU specialists: hide all GPUs and use workspace-local compiler caches.
-            for var in GPU_MASK_ENV_NAMES:
-                env[var] = ""
-            cache_root = request.workspace / ".cache"
-            env["TRITON_CACHE_DIR"] = str(cache_root / "triton")
-            env["TORCHINDUCTOR_CACHE_DIR"] = str(cache_root / "torchinductor")
-            env["AITER_JIT_DIR"] = str(cache_root / "aiter_jit")
-            env["INFERENCE_OPTIMIZER_AITER_JIT_DIR"] = str(cache_root / "aiter_jit")
+        apply_gpu_env(env, request.workspace, request.gpu_ids, request.gpu_lease)
 
         with cancel_scope_listener() as scope:
             log_fh: Any = None
@@ -568,14 +525,18 @@ class SpecialistSubprocessDispatcher:
                     # unschedulable request into a structured task failure instead of an
                     # unbounded stall. The actor opens process.log inside its worker
                     # (same host on single-node), so the reaper below reads it directly.
+                    from hyperloom.orchestrator.actions.executors._ray_serving import ActorLaunch
+
                     try:
                         request.gpu_lease.start_async(
-                            cmd,
-                            env=env,
-                            cwd=str(request.worktree or request.workspace),
-                            log_path=str(process_log),
-                            env_mode="replace",
-                            stdin_path=str(prompt_file),
+                            ActorLaunch(
+                                cmd,
+                                env=env,
+                                cwd=str(request.worktree or request.workspace),
+                                log_path=str(process_log),
+                                env_mode="replace",
+                                stdin_path=str(prompt_file),
+                            )
                         )
                     except Exception as exc:  # noqa: BLE001 — surface a submit failure as a result
                         log.warning("specialist GPU actor submit failed: %s", exc)
@@ -628,24 +589,23 @@ class SpecialistSubprocessDispatcher:
                     proc_started = time.monotonic()
                 else:
                     proc_started = time.monotonic()
-                    log_fh = process_log.open("w", encoding="utf-8")
-                    try:
-                        process_log.chmod(0o600)
-                    except OSError:
-                        # Tightening the mode is advisory; the run continues on filesystems
-                        # that reject chmod.
-                        pass
+                    # Created fresh, never through a name the previous run's account planted; owner-only.
+                    log_fh = create_nofollow(request.workspace, (process_log.name,))
                     stdin_fh: Any = None
                     try:
+                        demote = await asyncio.to_thread(
+                            prepare_demote, run_as, request.workspace, request.worktree, env, (prompt_file, process_log)
+                        )
                         stdin_fh = prompt_file.open("rb")
                         proc = subprocess.Popen(
-                            cmd,
+                            cmd if run_as is None else run_as.command(cmd),
                             stdin=stdin_fh,
                             stdout=log_fh,
                             stderr=subprocess.STDOUT,
                             env=env,
                             cwd=str(request.worktree or request.workspace),
                             start_new_session=True,
+                            **demote,
                         )
                     except (FileNotFoundError, OSError) as exc:
                         log_fh.close()
@@ -666,19 +626,7 @@ class SpecialistSubprocessDispatcher:
                                 log.warning("failed to close specialist prompt stdin", exc_info=True)
 
                 # Reap loop — poll done-file / exit / heartbeat staleness / deadline.
-                outcome = await self._reap_loop(
-                    proc,
-                    ReapWatch(
-                        workspace=request.workspace,
-                        done_files=tuple(done_candidates),
-                        heartbeat_file=heartbeat_file,
-                        partial_files=tuple(partial_candidates),
-                        progress_cb=request.progress_cb,
-                        task_id=request.task_id,
-                    ),
-                    deadline=request.deadline,
-                    started=proc_started,
-                )
+                outcome = await self._reap_loop(proc, watch, deadline=request.deadline, started=proc_started)
             except (CancelledError, asyncio.CancelledError):
                 try:
                     if request.gpu_lease is not None:
@@ -704,7 +652,7 @@ class SpecialistSubprocessDispatcher:
 
         # Parse done.json (best-effort) — first existing candidate.
         done_payload = None
-        for cand in done_candidates:
+        for cand in watch.done_files:
             if cand.exists():
                 done_payload = self._read_done(cand)
                 if done_payload is not None:
@@ -713,7 +661,7 @@ class SpecialistSubprocessDispatcher:
         # No final done.json — fall back to the most recent incremental partial
         # so a killed-but-productive specialist still surfaces its findings.
         if done_payload is None:
-            for cand in partial_candidates:
+            for cand in watch.partial_files:
                 if cand.exists():
                     partial = self._read_done(cand)
                     if partial is not None:
@@ -752,7 +700,9 @@ class SpecialistSubprocessDispatcher:
         )
 
     # Internals
-    def _build_launch(self, backend: str, request: SpecialistSpawn, env: dict[str, str]) -> list[str]:
+    def _build_launch(
+        self, backend: str, request: SpecialistSpawn, env: dict[str, str], run_as: RunAs | None
+    ) -> list[str]:
         """Build the CLI argv for ``backend``; child-only values go into ``env``."""
         if backend == AGENT_BACKEND_DEEPSEEK:
             dsh_request = DshLaunchRequest(
@@ -782,12 +732,27 @@ class SpecialistSubprocessDispatcher:
             # binaries under /tmp and would run without its PATH aliases.
             env["CODEX_HOME"] = str(request.workspace / ".codex")
             return cmd
-        return self._build_claude_cmd(
+        cmd = self._build_claude_cmd(
             system_prompt_file=request.workspace / "system_prompt.md",
             system_prompt=request.system_prompt,
             workspace=request.workspace,
             worktree=request.worktree,
             disallowed_tools=frozenset(request.disallowed_tools),
+        )
+        stage_mcp_config(run_as, request.workspace, cmd)
+        return cmd
+
+    @staticmethod
+    def _reap_watch(request: SpecialistSpawn) -> ReapWatch:
+        """What the reaper polls for ``request``: each file in the worktree first (the prompt-advertised path)."""
+        roots = (request.worktree, request.workspace) if request.worktree is not None else (request.workspace,)
+        return ReapWatch(
+            workspace=request.workspace,
+            done_files=tuple(root / "specialist_done.json" for root in roots),
+            # Recovered as best-so-far on a budget kill; never a reap signal.
+            partial_files=tuple(root / "specialist_done.partial.json" for root in roots),
+            progress_cb=request.progress_cb,
+            task_id=request.task_id,
         )
 
     @staticmethod
@@ -963,17 +928,7 @@ class SpecialistSubprocessDispatcher:
         Returns:
             list[str]: The full command argv to spawn.
         """
-        fd = os.open(system_prompt_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(system_prompt)
-        except BaseException:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            raise
-        system_prompt_file.chmod(0o600)
+        write_text_nofollow(system_prompt_file.parent, (system_prompt_file.name,), system_prompt, mode=0o600)
 
         cfg = self.config
         cmd: list[str] = [
@@ -1059,7 +1014,8 @@ class SpecialistSubprocessDispatcher:
 
         Each tick checks (in order): a done-file at any candidate path
         (graceful exit with a short grace window), natural process exit,
-        activity staleness (heartbeat.json OR process.log), and the hard
+        activity staleness (heartbeat.json, process.log, or the dsh session
+        log; see :func:`specialist_activity_paths`), and the hard
         wall-clock cap. Stale / timed-out
         runs are killed via :meth:`_kill`. Partial checkpoints written along
         the way are forwarded to ``progress_cb`` as they change.
@@ -1089,9 +1045,6 @@ class SpecialistSubprocessDispatcher:
         # An unbounded caller still gets a finite instant.
         hard_stop = deadline if deadline is not None else Deadline.after(UNBOUNDED_REAP_CAP_SEC, now=started)
         last_heartbeat_seen: float = started
-        # process.log mtime is a reliable "still working" signal even when the
-        # agent never self-writes heartbeat.json.
-        process_log = watch.workspace / _PROCESS_LOG_NAME
         last_partial_mtime: float = 0.0
         scope = current_cancel_scope()
 
@@ -1136,19 +1089,12 @@ class SpecialistSubprocessDispatcher:
                     progress_cb=watch.progress_cb,
                 )
 
-            # Liveness check: alive if EITHER heartbeat.json was refreshed OR
-            # process.log is still growing. The hard wall-clock cap below still
-            # bounds genuinely hung subprocesses.
-            for activity_file in (watch.heartbeat_file, process_log):
-                try:
-                    if not activity_file.exists():
-                        continue
-                    a_mtime = activity_file.stat().st_mtime
-                except OSError:
-                    continue
-                if max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds:
-                    last_heartbeat_seen = now
-                    break
+            # Liveness check: alive if any activity signal changed within the
+            # window. The hard wall-clock cap below still bounds genuinely hung
+            # subprocesses.
+            a_mtime = newest_activity(specialist_activity_paths(watch.workspace))
+            if a_mtime is not None and max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds:
+                last_heartbeat_seen = now
 
             if (now - last_heartbeat_seen) > cfg.heartbeat_stale_seconds:
                 outcome["stale_heartbeat"] = True
@@ -1245,13 +1191,7 @@ class SpecialistSubprocessDispatcher:
 
         def _git(*args: str) -> subprocess.CompletedProcess[str] | None:
             try:
-                return subprocess.run(
-                    ["git", "-C", str(worktree), *args],
-                    capture_output=True,
-                    text=True,
-                    timeout=120.0,
-                    check=False,
-                )
+                return app_git(worktree, *args)
             except (OSError, subprocess.SubprocessError) as exc:
                 log.warning("specialist: git %s in %s failed: %r", args[0], worktree, exc)
                 return None
@@ -1260,7 +1200,7 @@ class SpecialistSubprocessDispatcher:
 
         pathspec = SpecialistSubprocessDispatcher._harvest_pathspec(targets)
         _git("add", "-A", "-N", "--", *pathspec)
-        diff = _git("diff", base, "--", *pathspec)
+        diff = _git("diff", "--no-ext-diff", "--no-textconv", base, "--", *pathspec)
         if diff is None or diff.returncode != 0 or not diff.stdout.strip():
             return ""
         if patch_is_annotation_only(diff.stdout, worktree, reverse=True):
@@ -1307,22 +1247,21 @@ class SpecialistSubprocessDispatcher:
                 targets=targets,
             )
             if harvested_diff:
-                harvested = worktree / "patches" / "_worktree_diff.patch"
-                harvested.parent.mkdir(exist_ok=True)
-                harvested.write_text(harvested_diff, encoding="utf-8")
-                return [str(harvested)], {str(harvested): str(worktree_base or worktree)}
+                try:
+                    harvested = write_text_nofollow(worktree, ("patches", "_worktree_diff.patch"), harvested_diff)
+                except OSError as exc:
+                    log.warning("specialist: refusing to write the harvested patch under %s: %r", worktree, exc)
+                else:
+                    return [str(harvested)], {str(harvested): str(worktree_base or worktree)}
 
         out: list[str] = []
         for base in (worktree, workspace):
             if base is None:
                 continue
-            patches_dir = base / "patches"
-            if not patches_dir.is_dir():
-                continue
-            for ext in ("*.patch", "*.diff"):
-                for p in sorted(patches_dir.glob(ext)):
-                    if p.name != "_worktree_diff.patch":
-                        out.append(str(p))
+            for ext in (".patch", ".diff"):
+                out.extend(
+                    str(p) for p in regular_files_nofollow(base, "patches", (ext,)) if p.name != "_worktree_diff.patch"
+                )
         return out, {}
 
     @staticmethod
@@ -1344,7 +1283,7 @@ class SpecialistSubprocessDispatcher:
         if not done_file.exists():
             return None
         try:
-            data = json.loads(done_file.read_text(encoding="utf-8"))
+            data = json.loads(read_text_nofollow(done_file))
         except (OSError, json.JSONDecodeError) as exc:
             log.warning(
                 "specialist_done.json parse failed at %s: %r",

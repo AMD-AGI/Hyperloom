@@ -20,6 +20,26 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **Bump validated SGLang stack to 0.5.22 (ROCm 10 docker).** Updates
+  `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
+  `lmsysorg/sglang-rocm:v0.5.22-rocm10-*` image tags, `models.tsv`, and the
+  quick-start `Dockerfile`. **Upgrade note:** move from
+  `v0.5.21-rocm10-mi30x|mi35x-20261008` to
+  `v0.5.22-rocm10-mi30x|mi35x-20261022` (or match `SGLANG_REF` on bare metal).
+
+- **`optimize --session-dir DIR` creates the new session in the directory you
+  name.** The directory must be absolute and below `$USER_DATA_PATH`, and the
+  flag cannot be combined with `--resume-from`. Without it the session
+  directory is generated as before. A hosted run uses it to find its session
+  again after a restart. The same change adds the campaign spec
+  (`hyperloom.campaign-spec/v1`) a hosted run is given, with its JSON Schema
+  and a field-by-field validator, and keeps a hosted session's
+  `<session dir>/archive/` out of the session package.
+- **`hyperloom hosted run` runs the legacy `optimize` flow for a hosting platform.** It reads the campaign spec and the host's
+  inputs, runs `optimize` in a session directory derived from the run (a restart resumes it), and records how it ended in
+  `$HYPERLOOM_STATE_DIR/exit.json`; the host restarts the run only when `final` is not true. Host-only inputs, including the
+  new `HYPERLOOM_GRANT_LIMITS`, are removed from the environment before `optimize` starts. `src/hyperloom/hosted/app_bootstrap.sh`
+  builds the wheel of a commit once and installs its hash-pinned `requirements/app.lock` into a venv.
 - **The accuracy eval can no longer be turned off.** `--no-eval`, the
   `RUN_EVAL` process-environment override and the `disable_run_eval` task
   param are removed, and a baseline whose eval fails stops the run instead of

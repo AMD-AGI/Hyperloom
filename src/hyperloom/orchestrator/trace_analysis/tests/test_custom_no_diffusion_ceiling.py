@@ -15,7 +15,8 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.trace_analysis import bypass_trace_analysis as bta
-from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tl
+from hyperloom.orchestrator.trace_analysis import _analysis_reports as analysis_reports
+from hyperloom.orchestrator.trace_analysis import _trace_inputs as trace_inputs
 
 from hyperloom.inference_optimizer import framework_registry as fr
 
@@ -68,12 +69,12 @@ def _write_reports_for(tmp_path, framework):
         target_platform="MI300X",
         dry_run=False,
     )
-    return tl.write_reports(
+    return analysis_reports.write_reports(
         run_dir,
-        tl.TraceInputs(input_type="file", files=[trace]),
+        trace_inputs.TraceInputs(input_type="file", files=[trace]),
         candidates=[],
         args=args,
-        outcome=tl.OrchestratorOutcome(report_path=analysis_md),
+        outcome=analysis_reports.OrchestratorOutcome(report_path=analysis_md),
     )
 
 

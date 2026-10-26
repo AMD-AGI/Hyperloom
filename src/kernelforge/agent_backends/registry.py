@@ -10,9 +10,9 @@ import os
 import re
 import threading
 from dataclasses import dataclass, replace
-from importlib import metadata
 from typing import Callable, Mapping
 
+from hyperloom.common.entry_points import iter_entry_point_objects
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_DEEPSEEK_HARNESS_MODEL
 from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT
 from kernelforge.agent_backends.base import (
@@ -25,9 +25,9 @@ from kernelforge.agent_backends.base import (
 
 log = logging.getLogger(__name__)
 
-# Keeps a package-style prefix even though this module now lives in ``kernelforge.llm``: the group name is the
-# published contract third-party providers register against, and renaming it would drop every existing plugin without
-# a word -- a plugin that fails to load is recorded as one log line, not raised.
+# Keeps a package-style prefix: the group name is the published contract third-party providers register against, and
+# renaming it would drop every existing plugin without a word -- a plugin that fails to load is recorded as one log
+# line, not raised.
 PROVIDER_ENTRY_POINT_GROUP = "kernelforge.agent_providers"
 _PROVIDER_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
 
@@ -110,32 +110,24 @@ def discover_agent_providers(*, force: bool = False) -> None:
         if _plugins_loaded and not force:
             return
         _plugins_loaded = True
-        try:
-            entries = list(metadata.entry_points().select(group=PROVIDER_ENTRY_POINT_GROUP))
-        except Exception as exc:  # noqa: BLE001 - plugin discovery is optional
-            _plugin_errors["<discovery>"] = f"{type(exc).__name__}: {exc}"
-            log.warning("agent provider entry-point discovery failed: %s", exc)
-            return
-
-        for entry in entries:
+        for found in iter_entry_point_objects(PROVIDER_ENTRY_POINT_GROUP):
+            if found.error is not None:
+                _plugin_errors[found.name] = found.error
+                # The shared helper has already logged why it could not be loaded.
+                continue
             try:
-                loaded = entry.load()
-                provider = loaded() if callable(loaded) else loaded
+                provider = found.value
                 if not isinstance(provider, AgentProvider):
                     raise TypeError(
                         "entry point must resolve to AgentProvider or a zero-argument factory returning AgentProvider"
                     )
-                entry_name = normalize_provider_name(entry.name)
+                entry_name = normalize_provider_name(found.name)
                 if provider.name != entry_name:
                     raise ValueError(f"entry-point name {entry_name!r} does not match provider name {provider.name!r}")
                 register_agent_provider(provider)
-            except Exception as exc:  # noqa: BLE001 - isolate broken third-party plugins
-                _plugin_errors[entry.name] = f"{type(exc).__name__}: {exc}"
-                log.warning(
-                    "failed to load Agent provider entry point %s: %s",
-                    entry.name,
-                    exc,
-                )
+            except (TypeError, ValueError) as exc:
+                _plugin_errors[found.name] = f"{type(exc).__name__}: {exc}"
+                log.warning("failed to load Agent provider entry point %s: %s", found.name, exc)
 
 
 def get_agent_provider(name: str) -> AgentProvider:
