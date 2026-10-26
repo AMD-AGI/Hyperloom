@@ -267,10 +267,7 @@ def record_geak_attempts(*, event: str, journey: dict[str, Any] | None) -> None:
     parsed = _as_dict(journey)
     prior = {
         row.get("kernel_id"): _as_dict(row.get("e2e"))
-        for row in rows_for_event(
-            event_parts((SECTION_GEAK_ATTEMPT,), event=event).get(SECTION_GEAK_ATTEMPT) or [],
-            event,
-        )
+        for row in rows_for_event(event_parts((SECTION_GEAK_ATTEMPT,), event=event)[SECTION_GEAK_ATTEMPT], event)
     }
     for ordinal, run in enumerate(_as_list(parsed.get("discovery_runs"))):
         row = _as_dict(run)
@@ -294,73 +291,75 @@ def record_geak_attempts(*, event: str, journey: dict[str, Any] | None) -> None:
         kernel_id = _text(row.get("kernel_id"))
         if not kernel_id:
             continue
-        dispatch = _as_dict(row.get("dispatch"))
-        backend = _as_dict(row.get("backend_result"))
         e2e = _as_dict(row.get("e2e"))
         # Re-reading the producer's file cannot undo the coordinator's verdict.
         if prior.get(kernel_id, {}).get("rejection_reason") and not e2e.get("rejection_reason"):
             e2e = prior[kernel_id]
-        verification = _as_dict(backend.get("verification"))
         sink.record(
             SECTION_GEAK_ATTEMPT,
-            {
-                "ordinal": ordinal,
-                "kernel_id": kernel_id,
-                "name": _text(row.get("name")) or kernel_id,
-                # The journey states the op kind in whichever block resolved
-                # it, so all three are read rather than only the kernel's.
-                "op_kind": _text(row.get("op_kind")) or _text(dispatch.get("op_kind")) or _text(e2e.get("op_kind")),
-                # Share of GPU time the kernel held in the profile that
-                # nominated it -- what makes an attempt worth its cost.
-                "gpu_pct": _float_or_none(row.get("gpu_pct")),
-                # The isolated speedup, which the journey states on the
-                # kernel or leaves to the backend's verification block.
-                "micro_speedup": _float_or_none(row.get("micro_speedup"))
-                if row.get("micro_speedup") is not None
-                else _float_or_none(verification.get("micro_speedup")),
-                "dispatched": bool(dispatch.get("dispatched", True)),
-                "backends": [str(item) for item in _as_list(dispatch.get("backends"))],
-                "skip_reason": _text(dispatch.get("skip_reason")),
-                "task_group": _text(dispatch.get("task_group")),
-                # Without these a GEAK campaign cannot be replayed in order:
-                # the forge lanes state them and the journey has them, they
-                # were simply never read across.
-                "started_at": _text(row.get("started_at") or dispatch.get("started_at")),
-                "ended_at": _text(row.get("ended_at") or backend.get("ended_at")),
-                "duration_sec": _float_or_none(row.get("duration_sec") or backend.get("duration_sec")),
-                "backend_result": {
-                    "backend": _text(backend.get("backend")),
-                    "status": _text(backend.get("status")),
-                    "speedup": _float_or_none(backend.get("speedup")),
-                    "baseline_us": _float_or_none(backend.get("baseline_us")),
-                    "candidate_us": _float_or_none(backend.get("candidate_us")),
-                    "compile_status": _text(backend.get("compile_status")),
-                    "correctness": backend.get("correctness") if isinstance(backend.get("correctness"), bool) else None,
-                    "artifact_path": _text(backend.get("artifact_path")),
-                    "error_class": _text(backend.get("error_class")),
-                }
-                if backend
-                else None,
-                "e2e": {
-                    "integrated": bool(e2e.get("integrated")),
-                    "e2e_gain_pct": None,
-                    "validated": e2e.get("validated") if isinstance(e2e.get("validated"), bool) else None,
-                    "decision": _text(e2e.get("decision")),
-                    "self_reported_e2e_gain_pct": claimed_gain(e2e),
-                    "rejection_reason": _text(e2e.get("rejection_reason")),
-                    "revalidation_measured_tput": _float_or_none(e2e.get("revalidation_measured_tput")),
-                    "revalidation_current_best_tput": _float_or_none(e2e.get("revalidation_current_best_tput")),
-                    "revalidation_provenance": _text(e2e.get("revalidation_provenance")),
-                    "patch_path": _text(e2e.get("patch_path")),
-                    "target_file": _text(e2e.get("target_file")),
-                }
-                if e2e
-                else None,
-            },
+            _geak_attempt_row(ordinal, kernel_id, row, e2e),
             row_type=ROW_GEAK_ATTEMPT,
             natural_ids=kernel_id,
         )
     _republish_closed_event(event)
+
+
+def _geak_attempt_row(ordinal: int, kernel_id: str, row: Mapping[str, Any], e2e: Mapping[str, Any]) -> dict[str, Any]:
+    """The attempt row one journey kernel is recorded as, its verdict block ``e2e`` already settled."""
+    dispatch = _as_dict(row.get("dispatch"))
+    backend = _as_dict(row.get("backend_result"))
+    verification = _as_dict(backend.get("verification"))
+    return {
+        "ordinal": ordinal,
+        "kernel_id": kernel_id,
+        "name": _text(row.get("name")) or kernel_id,
+        # The journey states the op kind in whichever block resolved
+        # it, so all three are read rather than only the kernel's.
+        "op_kind": _text(row.get("op_kind")) or _text(dispatch.get("op_kind")) or _text(e2e.get("op_kind")),
+        # Share of GPU time the kernel held in the profile that nominated it -- what makes an attempt worth its cost.
+        "gpu_pct": _float_or_none(row.get("gpu_pct")),
+        # The isolated speedup, which the journey states on the kernel or leaves to the backend's verification block.
+        "micro_speedup": _float_or_none(row.get("micro_speedup"))
+        if row.get("micro_speedup") is not None
+        else _float_or_none(verification.get("micro_speedup")),
+        "dispatched": bool(dispatch.get("dispatched", True)),
+        "backends": [str(item) for item in _as_list(dispatch.get("backends"))],
+        "skip_reason": _text(dispatch.get("skip_reason")),
+        "task_group": _text(dispatch.get("task_group")),
+        # Without these a GEAK campaign cannot be replayed in order: the forge lanes state them
+        # and the journey has them, they were simply never read across.
+        "started_at": _text(row.get("started_at") or dispatch.get("started_at")),
+        "ended_at": _text(row.get("ended_at") or backend.get("ended_at")),
+        "duration_sec": _float_or_none(row.get("duration_sec") or backend.get("duration_sec")),
+        "backend_result": {
+            "backend": _text(backend.get("backend")),
+            "status": _text(backend.get("status")),
+            "speedup": _float_or_none(backend.get("speedup")),
+            "baseline_us": _float_or_none(backend.get("baseline_us")),
+            "candidate_us": _float_or_none(backend.get("candidate_us")),
+            "compile_status": _text(backend.get("compile_status")),
+            "correctness": backend.get("correctness") if isinstance(backend.get("correctness"), bool) else None,
+            "artifact_path": _text(backend.get("artifact_path")),
+            "error_class": _text(backend.get("error_class")),
+        }
+        if backend
+        else None,
+        "e2e": {
+            "integrated": bool(e2e.get("integrated")),
+            "e2e_gain_pct": None,
+            "validated": e2e.get("validated") if isinstance(e2e.get("validated"), bool) else None,
+            "decision": _text(e2e.get("decision")),
+            "self_reported_e2e_gain_pct": claimed_gain(e2e),
+            "rejection_reason": _text(e2e.get("rejection_reason")),
+            "revalidation_measured_tput": _float_or_none(e2e.get("revalidation_measured_tput")),
+            "revalidation_current_best_tput": _float_or_none(e2e.get("revalidation_current_best_tput")),
+            "revalidation_provenance": _text(e2e.get("revalidation_provenance")),
+            "patch_path": _text(e2e.get("patch_path")),
+            "target_file": _text(e2e.get("target_file")),
+        }
+        if e2e
+        else None,
+    }
 
 
 def reject_geak_attempts(
