@@ -161,7 +161,6 @@ def _backend(tmp_path: Path) -> CodexBackend:
         allowed_intents=_ORCHESTRATION_INTENTS,
         model="gpt-5.6-sol",
         cwd=tmp_path / "orchestration",
-        sandbox_mode="workspace-write",
     )
 
 
