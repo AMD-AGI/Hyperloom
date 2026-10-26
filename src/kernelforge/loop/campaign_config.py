@@ -360,6 +360,19 @@ def resolve_kernel_backend_override(kernel_backend: str) -> str:
     return name
 
 
+# Source-text markers in precedence order, each naming the backend whose sources carry them.
+_BACKEND_TEXT_MARKERS = (
+    ("flydsl", ("flydsl", "cutlass.cute", "from cutlass import cute")),
+    # Before Triton, and matching an import or a decorator rather than the word: Gluon IS Triton's low-level
+    # dialect, so a Gluon file imports triton and routinely keeps a `@triton.jit` sibling kernel as its fallback
+    # -- aiter's paged-MQA-logits ships exactly that shape, in a file under `aiter/ops/triton/`, so neither the
+    # path nor the presence of Triton markers distinguishes the two.
+    ("gluon", ("triton.experimental.gluon", "@gluon.jit", "gluon.language")),
+    ("triton", ("@triton.jit", "triton.language")),
+    ("ck", ("composable_kernel", "ck::")),
+)
+
+
 def infer_kernel_backend(source_paths: list[Path]) -> str:
     """Infer the backend expertise prompt from configuration or source files."""
     override = env_backend_override()
@@ -379,18 +392,9 @@ def infer_kernel_backend(source_paths: list[Path]) -> str:
             return "hipblaslt"
         if "/aiter/" in path_text or "import aiter" in text:
             return "aiter"
-        if "flydsl" in text or "cutlass.cute" in text or "from cutlass import cute" in text:
-            return "flydsl"
-        # Before Triton, and matching an import or a decorator rather than the word: Gluon IS Triton's low-level
-        # dialect, so a Gluon file imports triton and routinely keeps a `@triton.jit` sibling kernel as its fallback
-        # -- aiter's paged-MQA-logits ships exactly that shape, in a file under `aiter/ops/triton/`, so neither the
-        # path nor the presence of Triton markers distinguishes the two.
-        if "triton.experimental.gluon" in text or "@gluon.jit" in text or "gluon.language" in text:
-            return "gluon"
-        if "@triton.jit" in text or "triton.language" in text:
-            return "triton"
-        if "composable_kernel" in text or "ck::" in text:
-            return "ck"
+        for backend, markers in _BACKEND_TEXT_MARKERS:
+            if any(marker in text for marker in markers):
+                return backend
         if suffix in {".hip", ".cu", ".cuh", ".cpp", ".cc", ".cxx"}:
             return "hip"
     raise ValueError(f"could not infer the kernel backend; set {_ENV_OVERRIDE} to a known backend")
@@ -505,7 +509,7 @@ def create_campaign_config(
     resolved_base_commit = (base_commit or "").strip() or _git_value(workspace, "rev-parse", "HEAD")
     raw_source_paths = _campaign_source_paths(workspace, kernel_path, normalized_sources)
     pristine_sources = _read_pristine_sources(workspace, raw_source_paths, base_commit=resolved_base_commit)
-    backend_override = (inputs.kernel_backend or "").strip()
+    backend_override = inputs.kernel_backend.strip()
     resolved_kernel_backend = (
         resolve_kernel_backend_override(backend_override)
         if backend_override
@@ -525,7 +529,7 @@ def create_campaign_config(
             source_contents=pristine_sources,
         ),
         target_functions=resolved_targets,
-        framework_override=(inputs.framework or "").strip(),
+        framework_override=inputs.framework.strip(),
     )
     pristine_signature, pristine_identity = implementation_signature(
         workspace=str(workspace),
@@ -536,7 +540,7 @@ def create_campaign_config(
     )
     # Settled once, from the pristine sources, because it is part of the address the campaign's experience is filed
     # under.
-    resolved_operator = (inputs.operator_name or "").strip() or resolve_operation(
+    resolved_operator = inputs.operator_name.strip() or resolve_operation(
         pristine_sources.get(kernel_absolute, ""),
         kernel_absolute,
         target_functions=resolved_targets,
@@ -553,20 +557,20 @@ def create_campaign_config(
         program_md_path="forge_experiments/program.md" if inputs.program_md_file else "",
         program_md_sha256=program_md_sha256,
         snr_threshold=resolved_snr_threshold,
-        gpu_target=(inputs.gpu_target or "").strip() or detect_gpu_target(),
+        gpu_target=inputs.gpu_target.strip() or detect_gpu_target(),
         gpu_type=(inputs.gpu_type if inputs.gpu_type is not None else "mi355x").strip().lower(),
         kernel_backend=resolved_kernel_backend,
-        task_type=(inputs.task_type or "").strip() or ("repository" if len(normalized_sources) > 1 else ""),
+        task_type=inputs.task_type.strip() or ("repository" if len(normalized_sources) > 1 else ""),
         target_functions=resolved_targets,
-        git_branch=(inputs.git_branch or "").strip() or branch,
+        git_branch=inputs.git_branch.strip() or branch,
         base_commit=resolved_base_commit,
         framework=resolved_framework,
         operator_name=resolved_operator,
-        producer=str(inputs.producer or "").strip().lower(),
+        producer=inputs.producer.strip().lower(),
         implementation_signature=pristine_signature,
         implementation_identity=pristine_identity,
-        nproc_per_node=max(1, int(inputs.nproc_per_node or 1)),
-        bench_repeat=max(1, int(inputs.bench_repeat or 1)),
+        nproc_per_node=max(1, int(inputs.nproc_per_node)),
+        bench_repeat=max(1, int(inputs.bench_repeat)),
         commit_new_paths=normalize_commit_new_paths(list(inputs.commit_new_paths)),
         agent_relay=inputs.agent_relay,
     )
