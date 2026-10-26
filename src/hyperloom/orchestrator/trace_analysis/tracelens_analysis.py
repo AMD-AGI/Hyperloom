@@ -167,6 +167,8 @@ def _gpu_arch_json(
 
 
 class _TraceLensCheckout(NamedTuple):
+    """A validated TraceLens checkout: its root, the internal-extension root and the orchestrator skill."""
+
     root: Path
     internal_root: Path | None
     skill: Path
