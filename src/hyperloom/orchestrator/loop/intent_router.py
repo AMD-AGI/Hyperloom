@@ -487,7 +487,7 @@ class IntentRouter(CoordinatorCollaborator):
                 )
         except (asyncio.CancelledError, KeyboardInterrupt):
             raise
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one routed intent
             log.exception("intent handler for %s raised", source)
             self._coord.record_exception(
                 stage="handle_intent",
@@ -760,7 +760,7 @@ class IntentRouter(CoordinatorCollaborator):
                     patch_verdict,
                 )
                 self.shared_state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.exception(
                     "failed to mirror critic verdict for specialist task=%s",
                     sid_candidate,
@@ -812,15 +812,9 @@ class IntentRouter(CoordinatorCollaborator):
         elif verdict == "reject" and is_upstream_pr_prescreen(pending.action_name, pending.payload):
             await self._coord.phase_framework.record_critic_denial(pending, ruling.reasoning)
         elif verdict == "reject" and pending.action_name == "integrate_patch" and bool(pa_params.get("enablement")):
-            try:
-                await self._coord.enablement_lane.maybe_rearm_enablement(
-                    {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
-                )
-            except Exception:
-                log.exception(
-                    "enablement rearm on critic-reject failed for task=%s",
-                    sid_candidate,
-                )
+            await self._coord.enablement_lane.maybe_rearm_enablement(
+                {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
+            )
         elif verdict == "needs_review":
             await self._coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, ruling.advisory)
 
@@ -1197,20 +1191,12 @@ class IntentRouter(CoordinatorCollaborator):
         remaining_sec = max(1, int(extra_sec), int(new_ttl - running_sec))
         lanes = await self.locks.heartbeat_by_task(task_id, ttl_sec=remaining_sec)
         # Move the live subprocess's kill instant too, within the room its dispatch left before the phase end.
-        wall_budget_error = ""
-        granted_sec = 0.0
-        try:
-            granted_sec = grant_wall_budget_extension(task_id, extra_sec)
-        except Exception as exc:
-            log.exception("extend_lease: wall-budget extension failed for task=%s", task_id)
-            wall_budget_error = repr(exc)[:200]
-        # A swallowed wall-budget failure leaves the lane extended while the subprocess wall-clock cap can still
-        # interrupt the work — report the partial extension as degraded.
+        granted_sec = grant_wall_budget_extension(task_id, extra_sec)
         await self.bus.record_observation(
             "coordinator",
             "observation",
             {
-                "kind": "extend_lease_degraded" if wall_budget_error else "extend_lease",
+                "kind": "extend_lease",
                 "task_id": task_id,
                 "source": source,
                 "extra_sec": extra_sec,
@@ -1218,7 +1204,6 @@ class IntentRouter(CoordinatorCollaborator):
                 "lease_expires_in_sec": remaining_sec,
                 "lanes": lanes,
                 "wall_budget_extension_sec": granted_sec,
-                **({"wall_budget_extension_error": wall_budget_error} if wall_budget_error else {}),
                 "reason": str(intent.payload.get("reason") or "")[:200],
             },
         )
