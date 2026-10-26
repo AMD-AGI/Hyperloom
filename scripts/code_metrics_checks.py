@@ -95,7 +95,7 @@ _BROAD_TYPES = frozenset({"Exception", "BaseException"})
 _RECORD_CALLS = frozenset({"debug", "info", "warning", "warn", "error", "exception", "critical", "log", "print", "err"})
 _RECORD_MODULES = frozenset({"traceback", "warnings"})
 #: A helper named for logging (``_log``, ``append_log``, ``logger``) or for raising (``_raise_failure``).
-_RECORD_NAME, _RAISE_NAME = re.compile(r"(?:^|_)log(?:_|ger|$)"), re.compile(r"_*raise(?:_|$)")
+_RECORD_NAME, _RAISE_NAME = re.compile(r"(?:^|_)log(?:_|ger|$)"), re.compile(r"_*raise(?:_(?!for_|if_)|$)")
 _OWN_SCOPE_STOP = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 #: What makes a module test code: a ``tests`` package on its path, or a ``test_`` file name.
 _TESTS, _TEST_PREFIX, _CONFTEST = "tests", "test_", "conftest"
@@ -300,11 +300,16 @@ def broad_unrecorded_problems(path: str, text: str, added: set[int], removed: It
     if is_test_path(path):
         return []
     lines, moved = text.splitlines(), {_without_comment(line) for line in removed}
+    tree = ast.parse(text)
+    owner = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
     problems = []
-    for node in ast.walk(ast.parse(text)):
+    for node in ast.walk(tree):
         if not isinstance(node, ast.ExceptHandler) or node.lineno not in added or not _is_broad(node):
             continue
-        if _without_comment(lines[node.lineno - 1]) in moved or _reraises_or_records(node):
+        body_added = any(row in added for row in range(node.body[0].lineno, (node.end_lineno or node.lineno) + 1))
+        if _without_comment(lines[node.lineno - 1]) in moved and not body_added:
+            continue
+        if _reraises_or_records(node, _raised_names(node, owner)):
             continue
         problems.append(Problem(BROAD_UNRECORDED, path, node.lineno, "broad `except` neither re-raises nor records"))
     return sorted(problems, key=lambda p: p.line)
@@ -321,17 +326,32 @@ def _is_broad(handler: ast.ExceptHandler) -> bool:
     return caught is None or any(isinstance(n, ast.Name) and n.id in _BROAD_TYPES for n in names)
 
 
-def _reraises_or_records(handler: ast.ExceptHandler) -> bool:
-    """Whether the handler's own body (nested defs aside) raises, keeps the error to raise later, or records it."""
+def _raised_names(handler: ast.ExceptHandler, owner: dict[ast.AST, ast.AST]) -> set[str]:
+    """Names the function enclosing ``handler`` raises with ``raise <name>``."""
+    scope: ast.AST = handler
+    while scope in owner and not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        scope = owner[scope]
+    return {n.exc.id for n in ast.walk(scope) if isinstance(n, ast.Raise) and isinstance(n.exc, ast.Name)}
+
+
+def _reraises_or_records(handler: ast.ExceptHandler, raised: set[str]) -> bool:
+    """Whether the handler's own body (nested defs aside) raises, keeps the error for a later ``raise``, or records it."""
     pending: list[ast.AST] = [node for node in handler.body if not isinstance(node, _OWN_SCOPE_STOP)]
     while pending:
         node = pending.pop()
         if isinstance(node, ast.Raise) or (isinstance(node, ast.Call) and _records_or_raises(node.func)):
             return True
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name) and node.value.id == handler.name:
+        if _keeps_for_raise(node, handler.name, raised):
             return True
         pending += [child for child in ast.iter_child_nodes(node) if not isinstance(child, _OWN_SCOPE_STOP)]
     return False
+
+
+def _keeps_for_raise(node: ast.AST, error: str | None, raised: set[str]) -> bool:
+    """``<name> = <error>`` where the enclosing function later raises ``<name>``."""
+    if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name) or node.value.id != error:
+        return False
+    return all(isinstance(target, ast.Name) and target.id in raised for target in node.targets)
 
 
 def _records_or_raises(func: ast.expr) -> bool:

@@ -220,21 +220,37 @@ def converted_by_name():
         f()
     except Exception as exc:
         return _raised(exc), catalog_entry()
+def kept_but_never_raised():
+    try:
+        f()
+    except Exception as exc:
+        last = exc
+    return last
+def status_check_is_not_a_raise():
+    try:
+        f()
+    except Exception:
+        response.raise_for_status()
 """
-_EXCEPT_ROWS = {4, 9, 14, 20, 25, 30, 35, 42, 47, 55}
+_EXCEPT_ROWS = {4, 9, 14, 20, 25, 30, 35, 42, 47, 55, 60, 66}
 
 
 def test_an_added_broad_handler_must_reraise_or_record() -> None:
     got = [(p.check, p.line) for p in checks.broad_unrecorded_problems("m.py", BROAD_UNRECORDED, _EXCEPT_ROWS)]
-    unrecorded = [(checks.BROAD_UNRECORDED, row) for row in (4, 20, 35, 55)]
+    unrecorded = [(checks.BROAD_UNRECORDED, row) for row in (4, 20, 35, 55, 60, 66)]
     assert got == unrecorded
 
 
-def test_a_broad_handler_the_change_did_not_add_or_only_moved_is_not_judged() -> None:
+def test_a_broad_handler_whose_body_the_change_did_not_touch_is_not_judged() -> None:
     assert checks.broad_unrecorded_problems("m.py", BROAD_UNRECORDED, {3, 5, 21}) == []
-    assert checks.broad_unrecorded_problems("m.py", BROAD_UNRECORDED, {4}, {"except Exception:"}) == []
-    # Only the comment on the line changed: the handler's code is not added.
+    # Only the comment on the except line changed: its code was removed as it is, the body is untouched.
     assert checks.broad_unrecorded_problems("m.py", BROAD_UNRECORDED, {4}, {"except Exception:  # old note"}) == []
+
+
+def test_an_added_handler_is_judged_even_when_the_change_removed_the_same_except_line_elsewhere() -> None:
+    removed = {"except Exception:  # noqa: BLE001 - another file", "pass"}
+    got = checks.broad_unrecorded_problems("m.py", BROAD_UNRECORDED, {4, 5}, removed)
+    assert [(p.check, p.line) for p in got] == [(checks.BROAD_UNRECORDED, 4)]
     assert checks.broad_unrecorded_problems("src/tests/test_m.py", BROAD_UNRECORDED, _EXCEPT_ROWS) == []
 
 
