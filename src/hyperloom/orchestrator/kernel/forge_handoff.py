@@ -51,8 +51,23 @@ def _workload_context(state: Any) -> dict[str, Any]:
 
 
 def build_workload_md(state: Any) -> str:
-    """Render the active workload without deriving optimization candidates."""
+    """Render the active workload without deriving optimization candidates.
+
+    An agentic replay's request shape comes from its corpus, so its measured distribution replaces the ISL/OSL in
+    state, which are placeholders there.
+    """
+    from hyperloom.orchestrator.prompts.agentx_context import corpus_lines
+
     context = _workload_context(state)
+    corpus = corpus_lines(getattr(state, "agentx_corpus_shape", None))
+    lengths = (
+        ()
+        if corpus
+        else (
+            ("Input sequence length", context.get("isl") or getattr(state, "isl", 0)),
+            ("Output sequence length", context.get("osl") or getattr(state, "osl", 0)),
+        )
+    )
     fields = (
         ("Model name", getattr(state, "model_name", "")),
         ("Model path", context.get("model_path") or getattr(state, "model_path", "")),
@@ -60,13 +75,14 @@ def build_workload_md(state: Any) -> str:
         ("Precision", context.get("precision") or getattr(state, "precision", "")),
         ("Tensor parallelism", context.get("tp") or getattr(state, "tp", 0)),
         ("Expert parallelism", getattr(state, "ep", 0)),
-        ("Input sequence length", context.get("isl") or getattr(state, "isl", 0)),
-        ("Output sequence length", context.get("osl") or getattr(state, "osl", 0)),
+        *lengths,
         ("Concurrency", context.get("conc") or getattr(state, "conc", 0)),
         ("Maximum model length", context.get("max_model_len") or getattr(state, "max_model_len", 0)),
     )
     lines = ["# Workload", ""]
     lines.extend(f"- **{label}:** `{_display(value)}`" for label, value in fields)
+    if corpus:
+        lines += ["", *corpus]
     return "\n".join(lines) + "\n"
 
 

@@ -118,6 +118,23 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
     assert not (handoff_dir / raw_trace.name).exists()
 
 
+def test_an_agentic_workload_states_the_corpus_shape_not_the_placeholder_lengths() -> None:
+    from hyperloom.orchestrator.kernel.forge_handoff import build_workload_md
+
+    shape = {
+        "corpus_loader": "semianalysis_cc_traces_weka_062126",
+        "isl": {"p50": 108000, "p90": 361000, "p99": 600000},
+        "osl": {"p50": 520, "p90": 1500, "p99": 4000},
+    }
+    workload = build_workload_md(_state(agentx_corpus_shape=shape))
+
+    assert "Input sequence length" not in workload
+    assert "Output sequence length" not in workload
+    assert "- input/req : p50 108,000   p90 361,000   p99 600,000" in workload
+    assert "- output/req: p50 520   p90 1,500   p99 4,000" in workload
+    assert "1024" not in workload
+
+
 def test_trace_evidence_resolution_filename_has_one_owner(tmp_path: Path) -> None:
     """The handoff derives the artifact name from the single contract constant, not a literal."""
     from hyperloom.common.kernel_source_contract import SOURCE_RESOLUTION_FILENAME
