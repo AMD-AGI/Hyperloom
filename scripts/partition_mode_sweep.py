@@ -700,7 +700,7 @@ def render(results: Sequence[ModeResult], *, entry_mode: str) -> list[str]:
     lines = ["", "=" * 78, "Compute-partition sweep", "=" * 78, ""]
     measured = [r for r in results if r.measured and r.total() is not None]
     baseline = next((r for r in measured if r.mode == entry_mode), None)
-    best = max(measured, key=lambda r: r.total() or 0.0, default=None)
+    best = max(measured, key=lambda r: r.total(), default=None)
 
     lines.append(f"{'mode':<6} {'parts':>5} {'CU':>5} {'throughput':>13} {'vs entry':>9} {'worst lat':>11}")
     lines.append("-" * 78)
@@ -710,14 +710,14 @@ def render(results: Sequence[ModeResult], *, entry_mode: str) -> list[str]:
             lines.append(f"{result.mode:<6} {'-':>5} {'-':>5} {'-':>13} {'-':>9} {'-':>11}   {why}")
             continue
         layout = result.layout
-        total = result.total() or 0.0
+        total = result.total()
         rel = ""
-        if baseline is not None and (baseline.total() or 0.0) > 0:
-            rel = f"{total / (baseline.total() or 1.0):.2f}x"
+        if baseline is not None and baseline.total() > 0:
+            rel = f"{total / baseline.total():.2f}x"
         latency = result.worst_latency_ms()
         lines.append(
-            f"{result.mode:<6} {layout.partitions if layout else '-':>5} "
-            f"{layout.cu_per_partition if layout else '-':>5} "
+            f"{result.mode:<6} {layout.partitions:>5} "
+            f"{layout.cu_per_partition:>5} "
             f"{total:>13.1f} {rel:>9} {(f'{latency:.1f} ms' if latency else '-'):>11}"
         )
     lines.append("")
@@ -729,7 +729,7 @@ def render(results: Sequence[ModeResult], *, entry_mode: str) -> list[str]:
 
     lines.append(f"Fastest measured mode: {best.mode} at {best.total():.1f} aggregate throughput.")
     if baseline is not None and best.mode != baseline.mode:
-        gain = (best.total() or 0.0) / (baseline.total() or 1.0)
+        gain = best.total() / (baseline.total() or 1.0)
         best_lat = best.worst_latency_ms()
         base_lat = baseline.worst_latency_ms()
         lines.append(
