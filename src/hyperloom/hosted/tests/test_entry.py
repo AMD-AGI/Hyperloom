@@ -414,3 +414,143 @@ def test_multibranch_is_still_refused_when_the_shared_part_of_the_spec_is_wrong(
     monkeypatch.setattr(entry.os, "execvp", lambda file, argv: pytest.fail("must not exec"))
     assert entry.main(["run"]) == 2
     assert _exit(run)["final"] is True
+
+
+# -- the MCP service ---------------------------------------------------------------------------------------------
+def _free_port() -> int:
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _status_call(port: int, token: str) -> dict:
+    import http.client
+
+    body = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "get_status", "arguments": {}}}
+    )
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    connection.request("POST", "/mcp", body=body, headers={"X-Hyperloom-Token": token})
+    reply = json.loads(connection.getresponse().read())
+    connection.close()
+    return json.loads(reply["result"]["content"][0]["text"])
+
+
+def test_the_host_tools_are_served_while_optimize_runs_and_stopped_after(run, monkeypatch):
+    port = _free_port()
+    monkeypatch.setenv(Var.MCP_PORT, str(port))
+    monkeypatch.setenv(Var.MCP_HOST, "127.0.0.1")
+    answers = []
+
+    def during(argv):
+        session = Path(next(a for a in argv if a.startswith("--session-dir=")).partition("=")[2])
+        (session / "state.json").write_text(json.dumps({"session_id": "s", "phase": "PRELUDE", "stop_reason": ""}))
+        answers.append(_status_call(port, _SECRETS[Var.MCP_TOKEN]))
+
+    FakeOptimize(monkeypatch, effect=during)
+    assert entry.main(["run"]) == 0
+    assert answers[0]["phase"] == "PRELUDE" and answers[0]["session_id"] == "s"
+    with pytest.raises(OSError):
+        _status_call(port, _SECRETS[Var.MCP_TOKEN])  # the server went down with the run
+
+
+def test_no_port_means_no_server(run, monkeypatch):
+    monkeypatch.delenv(Var.MCP_PORT)
+    started = []
+    monkeypatch.setattr(entry.McpServer, "start", lambda self: started.append(1))
+    FakeOptimize(monkeypatch)
+    assert entry.main(["run"]) == 0 and started == []
+
+
+def test_a_port_that_cannot_be_bound_refuses_the_run(run, monkeypatch):
+    import socket
+
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        monkeypatch.setenv(Var.MCP_PORT, str(taken.getsockname()[1]))
+        monkeypatch.setenv(Var.MCP_HOST, "127.0.0.1")
+        fake = FakeOptimize(monkeypatch)
+        assert entry.main(["run"]) == entry.RETURNCODE_REFUSED
+    assert fake.calls == [] and _exit(run)["final"] is True and "MCP server cannot start" in _exit(run)["error"]
+
+
+# -- stop requests and the host token ---------------------------------------------------------------------------
+def _stop_call(port: int, token: str, reason: str = "operator asked") -> None:
+    import http.client
+
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "request_stop", "arguments": {"reason": reason}},
+        }
+    )
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    connection.request("POST", "/mcp", body=body, headers={"X-Hyperloom-Token": token})
+    assert json.loads(connection.getresponse().read())["result"]["isError"] is False
+    connection.close()
+
+
+def test_a_stop_requested_while_no_coordinator_runs_neither_kills_the_run_nor_is_lost(run, monkeypatch):
+    """request_stop with the real SIGTERM, before any SignalDrain exists: the process survives, and the restart ends."""
+    port = _free_port()
+    monkeypatch.setenv(Var.MCP_PORT, str(port))
+    monkeypatch.setenv(Var.MCP_HOST, "127.0.0.1")
+    first = FakeOptimize(
+        monkeypatch,
+        returncode=1,
+        stop_reason="supervisor_restart_requested",
+        effect=lambda argv: _stop_call(port, _SECRETS[Var.MCP_TOKEN]),
+    )
+    entry.main(["run"])
+    session = Path(_session_json(run))
+    assert json.loads((session / "hosted" / "control" / "stop.json").read_text())["reason"] == "operator asked"
+    assert _exit(run)["final"] is False  # this leg ended as a watchdog leg: the host would restart it
+    run.restart()
+    second = FakeOptimize(monkeypatch)
+    assert entry.main(["run"]) == 0
+    assert second.calls == [] and len(first.calls) == 1  # the restart does not start optimize again
+    assert _exit(run) == {"final": True, "returncode": 0, "stop_reason": "signal"}
+
+
+def test_a_sigterm_without_a_stop_request_keeps_its_default_meaning(tmp_path):
+    import signal
+    import subprocess
+    import sys
+
+    code = (
+        "import os, signal, sys; from pathlib import Path; from hyperloom.hosted.entry import _stop_request_guard\n"
+        f"with _stop_request_guard(Path({str(tmp_path)!r})):\n"
+        "    os.kill(os.getpid(), signal.SIGTERM)\n"
+        "    sys.exit(0)\n"
+    )
+    done = subprocess.run([sys.executable, "-c", code], check=False, timeout=60)
+    assert done.returncode == -signal.SIGTERM
+
+
+def test_the_coordinator_reads_the_stop_request_file(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+
+    stand_in = SimpleNamespace(_stop=asyncio.Event(), session_dir=tmp_path, _signals=None)
+    assert Coordinator.stop_requested(stand_in) is False
+    (tmp_path / "hosted" / "control").mkdir(parents=True)
+    (tmp_path / "hosted" / "control" / "stop.json").write_text("{}")
+    assert Coordinator.stop_requested(stand_in) is True
+
+
+def test_a_host_token_shorter_than_the_server_minimum_refuses_the_run(run, monkeypatch):
+    from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH
+
+    assert host_info.MIN_MCP_TOKEN_LENGTH == MIN_TOKEN_LENGTH
+    monkeypatch.setenv(Var.MCP_TOKEN, "x" * (MIN_TOKEN_LENGTH - 1))
+    fake = FakeOptimize(monkeypatch)
+    assert entry.main(["run"]) == entry.RETURNCODE_REFUSED
+    assert fake.calls == [] and _exit(run)["final"] is True
+    assert Var.MCP_TOKEN in _exit(run)["error"] and "x" * MIN_TOKEN_LENGTH not in _exit(run)["error"]
