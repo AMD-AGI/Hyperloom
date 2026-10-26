@@ -71,7 +71,9 @@ __all__ = [
     "read_listed",
 ]
 
-#: The directory the kernel's list is under, and ``/proc``; tests point both at a tree of their own.
+#: The directory the kernel's list is under, and ``/proc``. :func:`read_holders` and :func:`read_listed` read these names
+#: when they are called, not when they are defined, so a test points both at a tree of its own for every reader of the
+#: machine at once (a test of the toolbox must not see the cards of the host it runs on).
 KFD_PATH = Path(KFD_ROOT)
 PROC_PATH = Path("/proc")
 #: The environment variable every process of a sandbox carries, whatever it did to its parentage since.
@@ -459,13 +461,16 @@ def _live(procfs: Path, pid: int) -> bool:
     return stat is not None and stat[0] != _ZOMBIE
 
 
-def read_holders(cards: Sequence[int], *, kfd: Path = KFD_PATH, procfs: Path = PROC_PATH) -> CardReading:
-    """The processes that hold any of ``cards``, or why that cannot be said.
+def read_holders(cards: Sequence[int], *, kfd: Path | None = None, procfs: Path | None = None) -> CardReading:
+    """The processes that hold any of ``cards``, or why that cannot be said; ``kfd`` and ``procfs`` are
+    :data:`KFD_PATH` and :data:`PROC_PATH` unless given.
 
     ``cards`` are numbered the way ``ROCR_VISIBLE_DEVICES`` numbers them. A card the kernel does not list as a GPU makes
     the whole reading unavailable: a card that is not there is not a card nobody holds. In a pid namespace of its own the
     holders are counted, not named (see the module's description).
     """
+    kfd = KFD_PATH if kfd is None else kfd
+    procfs = PROC_PATH if procfs is None else procfs
     absent = _driver_absent(kfd)
     if absent is not None:
         return CardReading(unavailable=absent)
@@ -492,11 +497,12 @@ def read_holders(cards: Sequence[int], *, kfd: Path = KFD_PATH, procfs: Path = P
         return CardReading(unavailable=f"the kernel's list cannot be read ({type(exc).__name__}: {exc.strerror})")
 
 
-def read_listed(cards: Sequence[int], *, kfd: Path = KFD_PATH) -> CardReading:
+def read_listed(cards: Sequence[int], *, kfd: Path | None = None) -> CardReading:
     """Every process the kernel lists with memory or a queue on any of ``cards``, running or ended, or why that cannot be
     said. A process that ended stays listed with its memory until the driver has freed it, and a card is free for the next
     holder only once nothing is listed on it. The holders are not named: ``pid`` is the kernel's id and the reading's
-    ``method`` is :data:`METHOD_CENSUS`."""
+    ``method`` is :data:`METHOD_CENSUS`. ``kfd`` is :data:`KFD_PATH` unless given."""
+    kfd = KFD_PATH if kfd is None else kfd
     absent = _driver_absent(kfd)
     if absent is not None:
         return CardReading(unavailable=absent)

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.sandbox import card_occupancy
 from hyperloom.sandbox.card_occupancy import (
     COMMAND_CHARS,
     METHOD_CENSUS_FDINFO,
@@ -341,3 +342,17 @@ def test_a_process_enforces_unless_its_environment_says_to_observe(
 def test_a_guard_that_is_not_one_is_refused_and_not_read_as_either(named: str) -> None:
     with pytest.raises(ValueError, match=rf"HYPERLOOM_CARD_GUARD is {named!r}, not one of \['observe', 'enforce'\]"):
         card_guard({"HYPERLOOM_CARD_GUARD": named})
+
+
+def test_the_readers_of_the_machine_read_the_kernel_list_named_when_they_are_called(
+    tree: KernelTree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree.process(100)
+    tree.holds(100, 1, vram=200 << 30)
+    monkeypatch.setattr(card_occupancy, "KFD_PATH", tree.kfd)
+    monkeypatch.setattr(card_occupancy, "PROC_PATH", tree.procfs)
+
+    assert [(h.card, h.pid) for h in card_occupancy.read_holders([0, 1]).holders] == [(1, 100)]
+    assert [(h.card, h.vram) for h in card_occupancy.read_listed([1]).holders] == [(1, 200 << 30)]
+    idle = card_occupancy.read_listed([0])
+    assert (idle.holders, idle.unavailable) == ((), None), "a card nothing is listed on reads free, from that list"
