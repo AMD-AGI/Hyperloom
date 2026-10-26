@@ -93,7 +93,7 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
 # TraceLens SHA.
-TRACELENS_REF="2a77507a29d3a2d10853bfa4316a28a70956e2bb"
+TRACELENS_REF="b80472133406b3d62a4bd0dfd55dfab39e872cf7"
 # Operator override iff TRACELENS_ROOT is not a TraceLens@<sha> checkout in the
 # cache root. Installs re-export that path (kernel-agent env, .env), so a
 # presence-only check would freeze a rerun on the old checkout instead of
