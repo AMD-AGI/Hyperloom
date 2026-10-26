@@ -108,7 +108,7 @@ doc is the authority on where that boundary lives.
   framework or platform*.
 - **Don't grow the debt.** A new broad `except Exception` / bare `except` must re-raise,
   or be the outermost handler on its path, or the boundary that isolates one item, and log
-  the error with its traceback, naming that boundary on its `# noqa: BLE001` line;
+  the error with its traceback, naming that boundary in a comment on the `except` line;
   otherwise catch the specific error or let it raise (review-pr rule S8). No new feature
   flag or env toggle to route around a design problem; a flag is a decision deferred.
 - **Trust the caller.** Validate at the system boundary, then trust internal callers. The
