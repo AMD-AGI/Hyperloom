@@ -235,14 +235,8 @@ def detect_gpu_count() -> int:
     """
     for env_name in COUNTING_VISIBLE_DEVICE_VARS:
         raw = os.environ.get(env_name)
-        if raw is None:
-            continue
-        raw = raw.strip()
-        if raw == "":
-            return 0
-        ids = [tok for tok in raw.split(",") if tok.strip() != ""]
-        if ids:
-            return len(ids)
+        if raw is not None:
+            return len(effective_mask_tokens(raw))
     import subprocess
 
     try:
