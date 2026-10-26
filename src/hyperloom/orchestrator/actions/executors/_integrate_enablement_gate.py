@@ -17,6 +17,7 @@ from hyperloom.inference_optimizer import framework_paths
 from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 
 from ...bringup import load_boot_observation, observation_summary, verdict_of
+from ...bringup.persist import LoadedObservation
 from ...enablement.recipe import keep_probe, keep_records
 from ...enablement.recipe.projections import project_launch_evidence
 from ._accuracy_gate import enablement_correctness
@@ -32,6 +33,15 @@ from ._server_argv import ConfigUnreadable
 from ._workload_envs import FrameworkScriptMismatchError
 
 log = logging.getLogger(__name__)
+
+
+def _observation_evidence(half: str, loaded: LoadedObservation) -> dict[str, Any]:
+    """The ``<half>_observation`` summary, path and degraded reason of one loaded boot observation."""
+    return {
+        f"{half}_observation": observation_summary(loaded.observation) if loaded.observation is not None else None,
+        f"{half}_observation_path": loaded.path,
+        f"{half}_observation_degraded": loaded.degraded,
+    }
 
 
 class EnablementGateMixin:
@@ -174,16 +184,8 @@ class EnablementGateMixin:
         after_loaded = load_boot_observation(bench_result.get("boot_observation_path"))
         before_loaded = load_boot_observation(params.get("enablement_before_observation_path"))
         evidence = {
-            "before_observation": (
-                observation_summary(before_loaded.observation) if before_loaded.observation is not None else None
-            ),
-            "before_observation_path": before_loaded.path,
-            "before_observation_degraded": before_loaded.degraded,
-            "after_observation": (
-                observation_summary(after_loaded.observation) if after_loaded.observation is not None else None
-            ),
-            "after_observation_path": after_loaded.path,
-            "after_observation_degraded": after_loaded.degraded,
+            **_observation_evidence("before", before_loaded),
+            **_observation_evidence("after", after_loaded),
             **eval_provenance,
         }
 

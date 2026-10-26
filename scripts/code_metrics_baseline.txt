@@ -262,7 +262,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_grid_variant_filter
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_apply.py::ApplyStageMixin._stage_apply 109
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_bench.py::BenchStageMixin._bench_patch 102
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_enablement_gate.py::EnablementGateMixin._enablement_keep_records 86
-function-lines src/hyperloom/orchestrator/actions/executors/_integrate_enablement_gate.py::EnablementGateMixin._gate_enablement 148
+function-lines src/hyperloom/orchestrator/actions/executors/_integrate_enablement_gate.py::EnablementGateMixin._gate_enablement 140
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_enablement_gate.py::EnablementGateMixin._stage_gate 52
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_perf_gate.py::PerfGateMixin._capture_source_layer 65
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_perf_gate.py::PerfGateMixin._gate_perf 121
