@@ -1920,6 +1920,58 @@ _write_specialist_secret_env_opt_in() {
   fi
 }
 
+# Runtime caches a framework checkout writes into itself without ignoring them.
+IMAGE_BASELINE_RUNTIME_CACHES=("aiter/jit/flydsl_cache/")
+IMAGE_BASELINE_UNTRACKED_LIMIT_BYTES=$((256 * 1024 * 1024))
+
+_image_baseline_exclude_runtime_caches() {
+  local top="$1" relative entry exclude
+  exclude="$(git -C "$top" rev-parse --path-format=absolute --git-path info/exclude)"
+  mkdir -p "$(dirname "$exclude")"
+  for relative in "${IMAGE_BASELINE_RUNTIME_CACHES[@]}"; do
+    entry="/${relative}"
+    [ ! -d "$top/$relative" ] || grep -qxF "$entry" "$exclude" 2>/dev/null || printf '%s\n' "$entry" >> "$exclude"
+  done
+}
+
+# Commit a checkout's served state, uncommitted changes included, so HEAD is the code the baseline runs.
+pin_image_baseline() {
+  local top="$1" head index_tmp bytes
+  if git -C "$top" rev-parse --verify --quiet refs/hyperloom/image-baseline >/dev/null; then
+    log "image baseline already pinned: ${top}"; return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
+    log "would pin the image baseline of ${top}"; return 0
+  fi
+  _image_baseline_exclude_runtime_caches "$top"
+  [ -n "$(git -C "$top" status --porcelain --ignore-submodules=dirty)" ] || return 0
+  [ -z "$(git -C "$top" ls-files --unmerged)" ] ||
+    { die "cannot pin the image baseline of ${top}: it has unmerged paths"; return 1; }
+  bytes="$(git -C "$top" ls-files --others --exclude-standard -z |
+    (cd "$top" && xargs -0 -r stat -c '%s') | awk '{ total += $1 } END { print total + 0 }')"
+  [ "$bytes" -le "$IMAGE_BASELINE_UNTRACKED_LIMIT_BYTES" ] ||
+    { die "cannot pin the image baseline of ${top}: ${bytes} bytes untracked; exclude the build products"; return 1; }
+  head="$(git -C "$top" rev-parse HEAD)"
+  index_tmp="$(mktemp)"
+  if ! GIT_INDEX_FILE="$index_tmp" git -C "$top" read-tree "$head" ||
+     ! GIT_INDEX_FILE="$index_tmp" git -C "$top" add -A -- .; then
+    rm -f "$index_tmp"; die "failed to capture the served state of ${top}"; return 1
+  fi
+  commit_image_baseline "$top" "$head" "$index_tmp" "Hyperloom image baseline" || return 1
+  log "pinned the image baseline of ${top} at ${IMAGE_BASELINE_SHA}"
+}
+
+pin_framework_image_baselines() {
+  local root top
+  while IFS= read -r root; do
+    [ -d "$root" ] || continue
+    top="$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" || continue
+    pin_image_baseline "$top" || return 1
+  done < <(printf '%s\n' "$FRAMEWORK_SOURCE_ROOTS" | tr ':' '\n')
+}
+
+FRAMEWORK_SOURCE_ROOTS=""
+
 _probe_framework_source_roots() {
   log "probing framework source roots for INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"
   local roots
@@ -1933,6 +1985,7 @@ PY
     return 0
   fi
   log "discovered framework roots: $roots"
+  FRAMEWORK_SOURCE_ROOTS="$roots"
   # Emit a framework-bucketed one-liner so operators (and the
   # preflight grep) can tell at a glance whether atom was picked up.
   local roots_summary
@@ -1963,6 +2016,7 @@ PY
 
 _write_specialist_secret_env_opt_in
 _probe_framework_source_roots
+pin_framework_image_baselines
 
 _prune_dep_cache "InferenceX" "Magpie"
 log "install complete"
