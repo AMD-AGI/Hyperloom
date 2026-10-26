@@ -34,7 +34,6 @@ from hyperloom.common.llm_config import (
     DEFAULT_CODEX_MODEL,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
-from kernelforge.workflows.gemm_tune.evidence import MOE_KEY_FIELDS
 from hyperloom.orchestrator.kernel import _aiter_tuner_support as aiter_tuner_support
 from hyperloom.orchestrator.kernel import _forge_fusion_run as forge_fusion_run
 from hyperloom.orchestrator.kernel import _forge_gemm_probe as forge_gemm_probe
@@ -164,25 +163,18 @@ class TestForgeGemmHelperCoverage:
 
         assert serving_log_evidence.resolve_forge_server_log(state, tmp_path) == str(log)
 
-    def test_resolve_forge_precision_payload_override(self):
-        state = SharedState(precision="bf16")
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(
-            state,
-            {"precision": "fp8", "quant_type": "blockscale"},
-        ) == ("fp8", "blockscale")
-
     def test_resolve_forge_precision_from_runtime_fp4(self):
         state = SharedState(precision="bf16")
         state.current_best = {"extra_server_args": "--quantization fp4", "extra_envs": {}}
 
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state, {}) == ("fp4", "fp4")
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp4", "fp4")
 
     def test_resolve_forge_precision_per_token_from_reference_env(self):
         state = SharedState(precision="bf16")
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
         state.reference_envs = {"SGLANG_USE_AITER_FP8_PER_TOKEN": "true"}
 
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state, {}) == ("fp8", "per_token")
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp8", "per_token")
 
     @staticmethod
     def _write_cfg(model_dir: Path, cfg: dict) -> str:
@@ -225,7 +217,7 @@ class TestForgeGemmHelperCoverage:
         model = self._write_cfg(tmp_path / "plain", {"hidden_size": 2048})
         state = SharedState(precision="bf16", model_path=model)
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state, {}) == ("fp8", "per_token")
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp8", "per_token")
 
     def test_resolve_forge_precision_fp8_block_model_routes_blockscale(self, tmp_path):
         model = self._write_cfg(
@@ -234,13 +226,13 @@ class TestForgeGemmHelperCoverage:
         )
         state = SharedState(precision="bf16", model_path=model)
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state, {}) == ("fp8", "blockscale")
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp8", "blockscale")
 
     def test_resolve_forge_precision_fp8_unreadable_config_keeps_auto(self):
         # No readable config: do not force a tuner; let forge sniff the log.
         state = SharedState(precision="bf16", model_path="/models/does-not-exist")
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state, {}) == ("fp8", "auto")
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp8", "auto")
 
     _QUARK_MXFP4 = {
         "quant_method": "quark",
@@ -261,13 +253,13 @@ class TestForgeGemmHelperCoverage:
         model = self._write_cfg(tmp_path / "m", {"hidden_size": 6144, "quantization_config": quant_cfg})
         state = SharedState(precision=session_precision, model_path=model)
         state.current_best = {"extra_server_args": "", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state, {}) == ("auto", "auto")
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("auto", "auto")
 
     def test_resolve_forge_precision_keeps_an_operator_precision_the_checkpoint_does_not_nest(self, tmp_path):
         model = self._write_cfg(tmp_path / "m", {"hidden_size": 6144, "quantization_config": self._QUARK_MXFP4})
         state = SharedState(precision="bf16", model_path=model)
         state.current_best = {"extra_server_args": "", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state, {}) == ("bf16", "auto")
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("bf16", "auto")
 
     def test_resolve_aiter_root_from_editable_source_layout(self, tmp_path, monkeypatch):
         monkeypatch.delenv("AITER_ROOT_DIR", raising=False)
@@ -365,7 +357,7 @@ class TestForgeGemmHelperCoverage:
         # Empty session precision + no fp8/fp4 quantization -> bf16/auto default.
         state = SharedState(precision="")
         state.current_best = {"extra_server_args": "", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state, {}) == ("bf16", "auto")
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("bf16", "auto")
 
     def test_resolve_forge_server_log_uses_baseline_when_no_current_best(self, tmp_path):
         state = SharedState()
@@ -506,54 +498,6 @@ class TestForgeGemmHelperCoverage:
         assert forge_gemm_probe._derive_gemm_skip_reason(skipped) == "a8w8_blockscale: needs csv"
         assert forge_gemm_probe._derive_gemm_skip_reason(None) == ""
         assert forge_gemm_probe._derive_gemm_skip_reason([]) == ""
-
-    def test_path_is_existing_file_handles_too_long(self):
-        # An inline JSON list handed in as a "path".
-        inline = "[{'M': 64, 'N': 16384, 'K': 3072, 'dtype': 'bf16'}]" * 6
-        assert len(inline) > 255
-        assert forge_shapes._path_is_existing_file(inline) is False  # must not raise OSError(36)
-
-    def test_path_is_existing_file_true(self, tmp_path):
-        f = tmp_path / "real.csv"
-        f.write_text("M,N,K\n", encoding="utf-8")
-        assert forge_shapes._path_is_existing_file(str(f)) is True
-
-    def test_normalize_forge_shapes_json_existing_path(self, tmp_path):
-        f = tmp_path / "shapes.json"
-        f.write_text('[{"M":1,"N":2,"K":3}]', encoding="utf-8")
-        assert forge_shapes._normalize_forge_shapes_json(str(f), tmp_path) == str(f)
-
-    def test_normalize_forge_shapes_json_inline_string(self, tmp_path):
-        # A Python-repr list (single quotes).
-        inline = "[{'M': 64, 'N': 16384, 'K': 3072, 'dtype': 'bf16'}]"
-        out = forge_shapes._normalize_forge_shapes_json(inline, tmp_path)
-        assert out == str(tmp_path / "forge_shapes.json")
-        data = json.loads(Path(out).read_text())
-        assert data[0]["M"] == 64
-
-    def test_normalize_forge_shapes_json_inline_list(self, tmp_path):
-        out = forge_shapes._normalize_forge_shapes_json([{"M": 1, "N": 2, "K": 3}], tmp_path)
-        assert Path(out).is_file()
-        assert json.loads(Path(out).read_text())[0]["N"] == 2
-
-    def test_normalize_forge_shapes_json_empty_and_garbage(self, tmp_path):
-        assert forge_shapes._normalize_forge_shapes_json("", tmp_path) == ""
-        assert forge_shapes._normalize_forge_shapes_json(None, tmp_path) == ""
-        # Non-JSON, non-existent path string -> unusable.
-        assert forge_shapes._normalize_forge_shapes_json("not_a_real_file.json", tmp_path) == ""
-
-    def test_normalize_tokens_list_and_bracketed_string(self):
-        # Tokens passed as a list or its string form.
-        assert forge_shapes._normalize_tokens([4, 8, 64]) == "4,8,64"
-        assert forge_shapes._normalize_tokens("[4, 8, 64]") == "4,8,64"
-        assert forge_shapes._normalize_tokens("[64]") == "64"
-        assert forge_shapes._normalize_tokens("4,8,64") == "4,8,64"
-
-    def test_normalize_tokens_empty_and_garbage(self):
-        assert forge_shapes._normalize_tokens(None) == ""
-        assert forge_shapes._normalize_tokens("") == ""
-        assert forge_shapes._normalize_tokens([]) == ""
-        assert forge_shapes._normalize_tokens("[abc, 16]") == "16"
 
     def test_resolve_forge_shapes_returns_empty_for_non_dict_trace(self):
         state = SharedState()
@@ -1382,7 +1326,7 @@ class TestForgeGemmHelperCoverage:
 
         result = await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
 
-        workspace = forge_lane_budget._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        workspace = forge_lane_budget._gemm_tuning_workspace(payload["task_id"], session_dir=tmp_path)
         written = _FORGE_GEMM_PAYLOADS[-1]
         assert written["model_path"] == str(snapshot)
         assert subprocess_cmd[:2] == ["env", "AITER_ROOT_DIR=/opt/aiter"]
@@ -1390,7 +1334,7 @@ class TestForgeGemmHelperCoverage:
         assert result["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
         assert durable["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
 
-    async def _gemm_input_payload(self, tmp_path, monkeypatch, *, max_minutes, payload=None):
+    async def _gemm_input_payload(self, tmp_path, monkeypatch, *, max_minutes):
         """Run the gemm lane against a faked subprocess and return its input JSON."""
         model = tmp_path / "model"
         model.mkdir()
@@ -1414,9 +1358,9 @@ class TestForgeGemmHelperCoverage:
             return 0, f"FORGE_GEMM_TUNE_RESULT_BEGIN\n{body}\nFORGE_GEMM_TUNE_RESULT_END\n", ""
 
         monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _fake_subprocess)
-        request = {"task_id": "gemm_ceiling", **(payload or {})}
+        request = {"task_id": "gemm_ceiling"}
         await forge_gemm_tuning._run_forge_gemm_tuning(request, session_dir=tmp_path)
-        workspace = forge_lane_budget._gemm_tuning_workspace(request, session_dir=tmp_path)
+        workspace = forge_lane_budget._gemm_tuning_workspace(request["task_id"], session_dir=tmp_path)
         return _FORGE_GEMM_PAYLOADS[-1]
 
     @pytest.mark.asyncio
@@ -1432,36 +1376,6 @@ class TestForgeGemmHelperCoverage:
         payload = await self._gemm_input_payload(tmp_path, monkeypatch, max_minutes=0)
 
         assert "max_tuners" not in payload
-
-    @pytest.mark.asyncio
-    async def test_a_named_gemm_tuner_needs_no_ceiling(self, tmp_path, monkeypatch):
-        """An explicit tuner has already narrowed the routed set to one."""
-        payload = await self._gemm_input_payload(
-            tmp_path,
-            monkeypatch,
-            max_minutes=600,
-            payload={"tuner": "a8w8"},
-        )
-
-        assert payload["tuner"] == "a8w8"
-        assert "max_tuners" not in payload
-
-    @pytest.mark.asyncio
-    async def test_an_explicit_gemm_ceiling_outranks_the_lane_share(self, tmp_path, monkeypatch):
-        """An operator/test value stays an escape hatch over the derived share."""
-        monkeypatch.setattr(
-            forge_lane_budget,
-            "_lane_budget",
-            lambda _state, _lane=None, **_k: lane_budget.LaneAllocation(budget_sec=7140, max_targets=4),
-        )
-        payload = await self._gemm_input_payload(
-            tmp_path,
-            monkeypatch,
-            max_minutes=600,
-            payload={"max_tuners": 1},
-        )
-
-        assert payload["max_tuners"] == 1
 
     @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_rejects_uncached_hf_repo(
@@ -1782,27 +1696,25 @@ class TestForgeGemmHelperCoverage:
             + "\nFORGE_GEMM_TUNE_RESULT_END\n"
         )
 
-    @pytest.mark.asyncio
-    async def test_moe_key_travels_from_the_log_into_the_forge_payload(self, tmp_path, monkeypatch):
-        """The values must come from the log, not from the config: a config-derived key is what aiter would never look up."""
+    async def _run_on_moe_log(self, tmp_path, monkeypatch, task_id: str) -> dict:
+        """Run the gemm lane on a serving log that dispatched one MoE GEMM and return its input JSON."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
         log = tmp_path / "server.log"
         log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
 
-        argv: dict[str, list[str]] = {}
-
         async def _fake_subprocess(cmd, *, timeout_sec, **_kwargs):
-            argv["cmd"] = list(cmd)
             return 0, self._sentinel(), ""
 
         monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _fake_subprocess)
-        payload = {"task_id": "moe-key", "kernel_signature_log": str(log)}
+        monkeypatch.setattr(forge_gemm_tuning, "resolve_forge_server_log", lambda *_a: str(log))
+        await forge_gemm_tuning._run_forge_gemm_tuning({"task_id": task_id}, session_dir=tmp_path)
+        return _FORGE_GEMM_PAYLOADS[-1]
 
-        await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
-
-        workspace = forge_lane_budget._gemm_tuning_workspace(payload, session_dir=tmp_path)
-        written = _FORGE_GEMM_PAYLOADS[-1]
+    @pytest.mark.asyncio
+    async def test_moe_key_travels_from_the_log_into_the_forge_payload(self, tmp_path, monkeypatch):
+        """The values must come from the log, not from the config: a config-derived key is what aiter would never look up."""
+        written = await self._run_on_moe_log(tmp_path, monkeypatch, "moe-key")
         csv_path = Path(written["moe_untuned_csv"])
         assert csv_path.is_file(), "the payload must name a CSV that exists"
 
@@ -1841,77 +1753,11 @@ class TestForgeGemmHelperCoverage:
     @pytest.mark.asyncio
     async def test_the_moe_csv_reaches_the_forge_argv(self, tmp_path, monkeypatch):
         """Deriving the CSV is useless if the option never reaches forge."""
-        self._moe_state(tmp_path)
-        monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
-        log = tmp_path / "server.log"
-        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
-
-        argv: dict[str, list[str]] = {}
-
-        async def _fake_subprocess(cmd, *, timeout_sec, **_kwargs):
-            argv["cmd"] = list(cmd)
-            return 0, self._sentinel(), ""
-
-        monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _fake_subprocess)
-        payload = {"task_id": "moe-argv", "kernel_signature_log": str(log)}
-
-        await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
-
+        written = await self._run_on_moe_log(tmp_path, monkeypatch, "moe-argv")
         # The handler hands the tool an input JSON; the tool builds forge's argv from it.
-        workspace = forge_lane_budget._gemm_tuning_workspace(payload, session_dir=tmp_path)
-        written = _FORGE_GEMM_PAYLOADS[-1]
+        workspace = forge_lane_budget._gemm_tuning_workspace("moe-argv", session_dir=tmp_path)
         assert written["moe_untuned_csv"].endswith("untuned_fmoe_from_runtime.csv")
         assert str(workspace) in written["moe_untuned_csv"]
-
-    @pytest.mark.asyncio
-    async def test_a_caller_supplied_moe_csv_wins(self, tmp_path, monkeypatch):
-        self._moe_state(tmp_path)
-        monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
-        log = tmp_path / "server.log"
-        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
-        supplied = tmp_path / "operator_moe.csv"
-        supplied.write_text(",".join(MOE_KEY_FIELDS) + "\n", encoding="utf-8")
-
-        async def _fake_subprocess(cmd, *, timeout_sec, **_kwargs):
-            return 0, self._sentinel(), ""
-
-        monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _fake_subprocess)
-        payload = {
-            "task_id": "moe-supplied",
-            "kernel_signature_log": str(log),
-            "moe_untuned_csv": str(supplied),
-        }
-
-        await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
-
-        workspace = forge_lane_budget._gemm_tuning_workspace(payload, session_dir=tmp_path)
-        written = _FORGE_GEMM_PAYLOADS[-1]
-        assert written["moe_untuned_csv"] == str(supplied)
-
-    @pytest.mark.asyncio
-    async def test_a_stale_moe_csv_path_falls_back_to_the_log(self, tmp_path, monkeypatch):
-        """A path that no longer exists must not be forwarded to forge."""
-        self._moe_state(tmp_path)
-        monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
-        log = tmp_path / "server.log"
-        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
-
-        async def _fake_subprocess(cmd, *, timeout_sec, **_kwargs):
-            return 0, self._sentinel(), ""
-
-        monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _fake_subprocess)
-        payload = {
-            "task_id": "moe-stale",
-            "kernel_signature_log": str(log),
-            "moe_untuned_csv": str(tmp_path / "gone.csv"),
-        }
-
-        await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
-
-        workspace = forge_lane_budget._gemm_tuning_workspace(payload, session_dir=tmp_path)
-        written = _FORGE_GEMM_PAYLOADS[-1]
-        assert written["moe_untuned_csv"] != str(tmp_path / "gone.csv")
-        assert Path(written["moe_untuned_csv"]).is_file()
 
     @pytest.mark.asyncio
     async def test_vllm_block_fp8_prefers_traced_shapes_over_profile_capture(self, tmp_path, monkeypatch):
@@ -1935,6 +1781,9 @@ class TestForgeGemmHelperCoverage:
         )
         model_dir = tmp_path / "qwen"
         model_dir.mkdir()
+        (model_dir / "config.json").write_text(
+            json.dumps({"quantization_config": {"weight_block_size": [128, 128]}}), encoding="utf-8"
+        )
         state = SharedState(
             precision="fp8",
             framework="vllm",
@@ -1943,6 +1792,7 @@ class TestForgeGemmHelperCoverage:
             tp=1,
             conc=64,
             last_trace_analyze={"candidates_path": str(candidates)},
+            current_best={"extra_server_args": "--quantization fp8", "extra_envs": {}},
         )
         state.save(tmp_path)
         monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
@@ -1963,11 +1813,11 @@ class TestForgeGemmHelperCoverage:
 
         # task_id keeps the workspace deterministic (it otherwise falls back to a wall-clock suffix, which the
         # assertion below could not re-derive).
-        payload = {"precision": "fp8", "quant_type": "blockscale", "task_id": "gemm-1"}
+        payload = {"task_id": "gemm-1"}
         await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
 
         assert captured["ran"] is False, "profile capture ran despite traced shapes"
-        workspace = forge_lane_budget._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        workspace = forge_lane_budget._gemm_tuning_workspace(payload["task_id"], session_dir=tmp_path)
         written = _FORGE_GEMM_PAYLOADS[-1]
         shapes = json.loads(Path(written["shapes_json"]).read_text(encoding="utf-8"))
         # Traced shapes are re-keyed onto aiter's power-of-two lookup ladder.
@@ -2050,7 +1900,7 @@ class TestForgeGemmHelperCoverage:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "source",
-        ["fresh_profile", "explicit_benchmark", "stale_profile"],
+        ["fresh_profile", "stale_profile"],
     )
     async def test_sglang_shape_source_priority(
         self,
@@ -2107,10 +1957,9 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _fake_subprocess)
 
-        payload = {"untuned_csv": str(specialist_csv)} if source == "explicit_benchmark" else {}
-        await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+        await forge_gemm_tuning._run_forge_gemm_tuning({}, session_dir=tmp_path)
 
-        if source in {"explicit_benchmark", "stale_profile"}:
+        if source == "stale_profile":
             assert captured["untuned_csv"] == str(specialist_csv)
             assert captured["shapes_json"] == ""
         else:
@@ -2380,7 +2229,6 @@ class TestRunGemmTuningHandler:
             shape_capture._capture_vllm_tunableop_shapes(
                 state=state,
                 session_dir=tmp_path,
-                payload={"task_id": "capture", "tp": 2},
                 workspace=tmp_path / "runs" / "gemm_tuning" / "capture",
             )
         )
@@ -2401,7 +2249,7 @@ class TestRunGemmTuningHandler:
         assert task.params["extra_envs"]["PYTORCH_TUNABLEOP_RECORD_UNTUNED"] == "1"
         assert task.params["extra_envs"]["HL_TUNABLEOP_MODE"] == ""
         assert task.params["extra_envs"]["PORT"] == "19001"
-        assert task.params["extra_envs"]["TP"] == "2"
+        assert task.params["extra_envs"]["TP"] == "1"
         assert task.params["extra_envs"]["CONC"] == "128"
         assert task.params["extra_envs"]["ISL"] == "1024"
         assert task.params["extra_envs"]["OSL"] == "512"
@@ -2502,10 +2350,7 @@ class TestRunGemmTuningHandler:
             shape_capture._capture_vllm_tunableop_shapes(
                 state=state,
                 session_dir=tmp_path,
-                payload={
-                    "task_id": "capture",
-                    "_shape_capture_mode": "block_fp8_profile",
-                },
+                capture_mode=shape_capture.BLOCK_FP8_PROFILE_CAPTURE,
                 workspace=tmp_path / "runs" / "gemm_tuning" / "capture",
             )
         )
@@ -2587,10 +2432,7 @@ class TestRunGemmTuningHandler:
             shape_capture._capture_vllm_tunableop_shapes(
                 state=state,
                 session_dir=tmp_path,
-                payload={
-                    "task_id": "capture",
-                    "_shape_capture_mode": "block_fp8_profile",
-                },
+                capture_mode=shape_capture.BLOCK_FP8_PROFILE_CAPTURE,
                 workspace=tmp_path / "runs" / "gemm_tuning" / "capture",
             )
         )
@@ -2671,10 +2513,7 @@ class TestRunGemmTuningHandler:
             shape_capture._capture_vllm_tunableop_shapes(
                 state=state,
                 session_dir=tmp_path,
-                payload={
-                    "task_id": "capture",
-                    "_shape_capture_mode": "block_fp8_profile",
-                },
+                capture_mode=shape_capture.BLOCK_FP8_PROFILE_CAPTURE,
                 workspace=tmp_path / "runs" / "gemm_tuning" / "capture",
             )
         )
@@ -2749,10 +2588,7 @@ class TestRunGemmTuningHandler:
             shape_capture._capture_vllm_tunableop_shapes(
                 state=state,
                 session_dir=session_dir,
-                payload={
-                    "task_id": "capture",
-                    "_shape_capture_mode": "block_fp8_profile",
-                },
+                capture_mode=shape_capture.BLOCK_FP8_PROFILE_CAPTURE,
                 workspace=session_dir / "runs" / "gemm_tuning" / "capture",
             )
         )
@@ -2773,7 +2609,6 @@ class TestRunGemmTuningHandler:
                 precision="fp8",
                 quant_type="blockscale",
                 supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
-                dry_run=False,
             )
             is False
         )
@@ -2789,7 +2624,6 @@ class TestRunGemmTuningHandler:
                 framework="vllm",
                 model_path=str(model),
                 supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
-                dry_run=False,
             )
             is False
         )
@@ -2799,15 +2633,9 @@ class TestRunGemmTuningHandler:
                 precision="fp8",
                 quant_type="blockscale",
                 supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
-                dry_run=False,
             )
             is False
         )
-
-    @pytest.mark.parametrize("port", [0, -1, 8888, 65536, "bad"])
-    def test_shape_capture_rejects_unsafe_explicit_port(self, port):
-        with pytest.raises(ValueError):
-            shape_capture._resolve_shape_capture_port(port)
 
     def test_vllm_shape_capture_empty_output_is_explicit_failure(self, tmp_path, monkeypatch):
         from hyperloom.orchestrator.actions.executors import baseline as baseline_module
@@ -2833,7 +2661,6 @@ class TestRunGemmTuningHandler:
             shape_capture._capture_vllm_tunableop_shapes(
                 state=state,
                 session_dir=tmp_path,
-                payload={"task_id": "capture"},
                 workspace=tmp_path / "runs" / "gemm_tuning" / "capture",
             )
         )
@@ -2843,12 +2670,11 @@ class TestRunGemmTuningHandler:
         assert result["shape_count"] == 0
 
     @pytest.mark.parametrize(
-        ("framework", "shapes_json", "tunableop_input", "dry_run"),
+        ("framework", "shapes_json", "tunableop_input"),
         [
-            ("sglang", "", "", False),
-            ("vllm", "present", "", False),
-            ("vllm", "", "/tmp/tunableop.csv", False),
-            ("vllm", "", "", True),
+            ("sglang", "", ""),
+            ("vllm", "present", ""),
+            ("vllm", "", "/tmp/tunableop.csv"),
         ],
     )
     def test_vllm_shape_capture_does_not_change_existing_input_paths(
@@ -2857,7 +2683,6 @@ class TestRunGemmTuningHandler:
         framework,
         shapes_json,
         tunableop_input,
-        dry_run,
     ):
         model = tmp_path / "model"
         model.mkdir()
@@ -2872,7 +2697,6 @@ class TestRunGemmTuningHandler:
                 framework=framework,
                 model_path=str(model),
                 supplied=shape_capture.SuppliedShapes(shapes_json=shapes_json, tunableop_input=tunableop_input),
-                dry_run=dry_run,
             )
             is False
         )
@@ -2890,7 +2714,6 @@ class TestRunGemmTuningHandler:
                 framework="vllm",
                 model_path=str(model),
                 supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
-                dry_run=False,
             )
             is False
         )
@@ -2913,54 +2736,9 @@ class TestRunGemmTuningHandler:
                 framework="vllm",
                 model_path=str(model),
                 supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
-                dry_run=False,
             )
             is False
         )
-
-    def test_explicit_tunableop_input_bypasses_vllm_shape_capture(self, tmp_path, monkeypatch):
-        model = tmp_path / "model"
-        model.mkdir()
-        (model / "config.json").write_text(json.dumps({"hidden_size": 5120, "intermediate_size": 17408}))
-        explicit_input = tmp_path / "operator-provided.csv"
-        explicit_input.write_text("GemmTunableOp_BFloat16_NN,nn_5120_64_5120_ld_5120_5120_5120\n")
-        SharedState(
-            precision="fp8",
-            framework="vllm",
-            model_path=str(model),
-            gpu_type="mi300x",
-        ).save(tmp_path)
-        captured_input: dict = {}
-
-        async def fail_capture(**kwargs):
-            raise AssertionError("explicit tunableop_input must bypass automatic capture")
-
-        async def fake_run(cmd: list[str], *, timeout_sec: int, **_kwargs):
-            captured_input.update(_FORGE_GEMM_PAYLOADS[-1])
-            return (
-                0,
-                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
-                + json.dumps({"status": "ok", "micro_decision": "no_improvement"})
-                + "\nFORGE_GEMM_TUNE_RESULT_END\n",
-                "",
-            )
-
-        monkeypatch.setattr(forge_gemm_tuning, "_capture_vllm_tunableop_shapes", fail_capture)
-        monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
-        monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", fake_run)
-
-        result = asyncio.run(
-            krh.run_gemm_tuning_handler(
-                {
-                    "task_id": "explicit",
-                    "tunableop_input": str(explicit_input),
-                },
-                session_dir=tmp_path,
-            )
-        )
-
-        assert captured_input["tunableop_input"] == str(explicit_input)
-        assert result["status"] == "ok"
 
     def test_vllm_dense_without_shapes_captures_tunableop_input(self, tmp_path, monkeypatch):
         model = tmp_path / "model"
@@ -2988,13 +2766,13 @@ class TestRunGemmTuningHandler:
         capture_calls: list[dict] = []
         captured_input: dict = {}
 
-        async def fake_capture(*, state, session_dir, payload, workspace):
+        async def fake_capture(*, state, session_dir, workspace, capture_mode=""):
             capture_calls.append(
                 {
                     "state": state,
                     "session_dir": session_dir,
-                    "payload": payload,
                     "workspace": workspace,
+                    "capture_mode": capture_mode,
                 }
             )
             path = tmp_path / "tunableop_untuned.csv"
@@ -3571,7 +3349,7 @@ class TestRunGemmTuningHandler:
         stale_untuned.write_text("M,N,K\n1,5120,5120\n")
         captured_input: dict = {}
 
-        async def fake_capture(*, state, session_dir, payload, workspace):
+        async def fake_capture(*, state, session_dir, workspace, capture_mode=""):
             return {
                 "status": "ok",
                 "shapes_json": str(shapes_path),
@@ -4539,7 +4317,7 @@ class TestTheGemmLaneBudgetReachesTheInputJson:
 
     async def _written(self, tmp_path, payload):
         await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
-        workspace = forge_lane_budget._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        workspace = forge_lane_budget._gemm_tuning_workspace(payload["task_id"], session_dir=tmp_path)
         return _FORGE_GEMM_PAYLOADS[-1]
 
     @pytest.mark.asyncio
@@ -4554,7 +4332,6 @@ class TestTheGemmLaneBudgetReachesTheInputJson:
         )
         written = await self._written(tmp_path, {"task_id": "cap-one"})
         assert written["max_tuners"] == 1
-        assert written["tuner"] == ""
         assert written["global_timeout"] == 7140
         assert written["timeout"] == forge_gemm_tuning.gemm_per_tuner_timeout_sec(7140)
 
@@ -4568,7 +4345,6 @@ class TestTheGemmLaneBudgetReachesTheInputJson:
         )
         written = await self._written(tmp_path, {"task_id": "cap-none"})
         assert written["max_tuners"] == 2
-        assert written["tuner"] == ""
         assert written["global_timeout"] == 7140
 
     @pytest.mark.asyncio
@@ -4581,24 +4357,12 @@ class TestTheGemmLaneBudgetReachesTheInputJson:
             targets=(("fmoe_ck", 3600), ("a8w8", 3600)),
         )
         written = await self._written(tmp_path, {"task_id": "cap-unbounded"})
-        assert written["tuner"] == ""
         assert written["global_timeout"] == 18000
-
-    @pytest.mark.asyncio
-    async def test_an_explicit_tuner_survives_the_ceiling(self, tmp_path, monkeypatch):
-        self._prepare(
-            tmp_path,
-            monkeypatch,
-            remaining_minutes=600.0,
-            targets=(("fmoe_ck", 3600), ("a8w8", 3600)),
-        )
-        written = await self._written(tmp_path, {"task_id": "cap-explicit", "tuner": "a8w8"})
-        assert written["tuner"] == "a8w8"
 
 
 @pytest.mark.asyncio
 async def test_a_bounded_phase_that_cannot_fund_a_lane_skips_it_without_launching(tmp_path, monkeypatch):
-    """Under the 5 min phase reserve no lane funds a target; an explicit timeout sizes a run, it does not start one."""
+    """Under the 5 min phase reserve no lane funds a target, so neither lane starts."""
     model_dir = tmp_path / "model"
     model_dir.mkdir()
     trace = tmp_path / "decode.trace.json.gz"
@@ -4626,9 +4390,7 @@ async def test_a_bounded_phase_that_cannot_fund_a_lane_skips_it_without_launchin
     monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _launch)
     monkeypatch.setattr(forge_fusion_run.forge_fusion, "run_forge_fusion", _launch)
 
-    gemm = await forge_gemm_tuning._run_forge_gemm_tuning(
-        {"task_id": "gemm", "timeout_sec": 7200}, session_dir=tmp_path
-    )
+    gemm = await forge_gemm_tuning._run_forge_gemm_tuning({"task_id": "gemm"}, session_dir=tmp_path)
     fusion = await forge_fusion_run.run_fusion_handler({"task_id": "fusion"}, session_dir=tmp_path)
 
     for result in (gemm, fusion):

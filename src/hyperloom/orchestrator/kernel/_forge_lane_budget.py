@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 
 # Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners) when there is
 # no lane share to take, as in an unbounded session; sized for large models with many
-# GEMM shapes. Override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).
+# GEMM shapes. Override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC.
 _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 5 * 60 * 60
 
 
@@ -70,18 +70,14 @@ def _lane_remaining_minutes(state: Any) -> float | None:
     return min(float(session), float(phase_sec) / 60.0)
 
 
-def _gemm_tuning_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
+def _gemm_tuning_timeout_sec(*, lane_budget_sec: int = 0) -> int:
     """Resolve the GEMM-tuning subprocess timeout in seconds.
 
-    Reads ``payload['timeout_sec']`` then the
-    ``HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC`` env var -- both operator inputs, so both
-    outrank a derived budget -- then the lane's share of the phase, then the module
-    default; the result is floored at 60 seconds.
+    Reads the ``HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC`` env var -- an operator input,
+    so it outranks a derived budget -- then the lane's share of the phase, then the
+    module default; the result is floored at 60 seconds.
     """
-    raw = payload.get("timeout_sec") or os.environ.get(
-        "HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC",
-        "",
-    )
+    raw = os.environ.get("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", "")
     try:
         value = int(float(raw))
     except (TypeError, ValueError):
@@ -188,17 +184,11 @@ def _fusion_session_serve_args(state: object, *, framework: str, model_path: str
     return args
 
 
-def _gemm_tuning_workspace(payload: dict, *, session_dir: Path) -> Path:
+def _gemm_tuning_workspace(task_id: str, *, session_dir: Path) -> Path:
     """Resolve the workspace directory for a GEMM-tuning run.
 
-    Honors an explicit ``payload['workspace_path']``; otherwise builds a path
-    under ``<session_dir>/runs/gemm_tuning/`` keyed by ``task_id`` /
-    ``request_id`` (or a timestamped fallback).
+    Builds a path under ``<session_dir>/runs/gemm_tuning/`` keyed by ``task_id``
+    (or a timestamped fallback).
     """
-    raw = payload.get("workspace_path")
-    if raw:
-        return Path(raw)
-    suffix = str(payload.get("task_id") or payload.get("request_id") or "").strip()
-    if not suffix:
-        suffix = f"request_{int(time.time())}"
+    suffix = str(task_id or "").strip() or f"request_{int(time.time())}"
     return Path(session_dir) / "runs" / "gemm_tuning" / suffix

@@ -340,9 +340,9 @@ def _normalize_precision(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-def _requested_framework(payload: dict, state: Any, fallback: str = "") -> str:
-    return _requested_setting(payload, state, "framework", fallback).lower()
+def _state_framework(state: Any, fallback: str = "") -> str:
+    return _state_setting(state, "framework", fallback).lower()
 
 
-def _requested_setting(payload: dict, state: Any, key: str, fallback: str = "") -> str:
-    return str(payload.get(key) or getattr(state, key, "") or fallback).strip()
+def _state_setting(state: Any, key: str, fallback: str = "") -> str:
+    return str(getattr(state, key, "") or fallback).strip()

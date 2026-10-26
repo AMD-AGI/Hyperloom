@@ -23,14 +23,12 @@ def _payload() -> dict:
         "output_dir": "/tmp/out",
         "timeout": 123,
         "global_timeout": 456,
-        "tuner": "fmoe_ck",
         "untuned_csv": "/tmp/in.csv",
         "moe_untuned_csv": "/tmp/untuned_fmoe_from_runtime.csv",
         "shapes_json": "/tmp/shapes.json",
         "tunableop_input": "/tmp/tunable.txt",
         "kernel_signature_log": "/tmp/server.log",
         "tokens": "64,128",
-        "skip_gpu_check": True,
         "thorough": True,
     }
 
@@ -44,7 +42,6 @@ def test_build_cmd_maps_all_options():
     assert cmd[cmd.index("--precision") + 1] == "bf16"
     assert cmd[cmd.index("--quant-type") + 1] == "auto"
     assert cmd[cmd.index("--mp") + 1] == "8"
-    assert cmd[cmd.index("--tuner") + 1] == "fmoe_ck"
     assert cmd[cmd.index("--untuned-csv") + 1] == "/tmp/in.csv"
     assert cmd[cmd.index("--kernel-signature-log") + 1] == "/tmp/server.log"
     assert cmd[cmd.index("--tp") + 1] == "1"
@@ -86,7 +83,6 @@ def test_build_cmd_asserts_every_option_it_can_emit():
         "--output-dir",
         "--timeout",
         "--global-timeout",
-        "--tuner",
         "--untuned-csv",
         "--moe-untuned-csv",
         "--shapes-json",

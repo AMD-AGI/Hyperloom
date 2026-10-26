@@ -11,11 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-<<<<<<< HEAD
-from kernelforge.workflows.rewrite_controller.paths import operator_directory_name
-=======
 from kernelforge.workflows.rewrite_controller.paths import ControllerLayout, operator_directory_name
->>>>>>> 076e98dbf (refactor(kernel): delete unreachable fusion/controller/stack knobs and duplicated kernel-lane helpers)
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
