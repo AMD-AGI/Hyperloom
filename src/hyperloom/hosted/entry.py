@@ -32,6 +32,8 @@ from typing import Any
 
 from hyperloom.hosted.campaign import FLOW_MULTIBRANCH, CampaignError, CampaignSpec, optimize_args, parse_campaign
 from hyperloom.hosted.host_info import HostInfo, HostInfoError, Var, read_host_info, take_host_info
+from hyperloom.hosted.mcp_host_tools import register_host_tools
+from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 from hyperloom.inference_optimizer.session.paths import (
     ENV_USER_DATA_PATH,
@@ -46,6 +48,7 @@ EXIT_FILE = "exit.json"
 SESSION_FILE = "session.json"
 MULTIBRANCH_COMMAND = "hyperloom-multibranch"
 ENV_IMAGE = "HYPERLOOM_IMAGE"
+DEFAULT_MCP_HOST = "127.0.0.1"
 RETURNCODE_REFUSED = 2
 ENCODING = "utf-8"
 _USAGE = "usage: hyperloom hosted run"
@@ -86,8 +89,29 @@ def _run() -> int:
     ensure_archive_root(session_dir)
     os.environ[ENV_IMAGE] = spec.framework_image
     _announce_grant(info)
-    with _plug_inputs(lock, info):
+    with _plug_inputs(lock, info), _mcp_service(info, session_dir):
         return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
+
+
+@contextmanager
+def _mcp_service(info: HostInfo, session_dir: Path) -> Iterator[None]:
+    """Serve the host tools for the length of ``optimize`` when the host gave a port and a token; otherwise serve nothing."""
+    if info.mcp_port is None or info.mcp_token is None:
+        yield
+        return
+    server = McpServer(
+        McpServerConfig(host=info.mcp_host or DEFAULT_MCP_HOST, port=info.mcp_port, host_token=info.mcp_token.reveal()),
+        campaign=info.run_id,
+    )
+    register_host_tools(server, session_dir, info.events_dir)
+    try:
+        server.start()
+    except (OSError, ValueError) as exc:
+        raise Refused(f"the MCP server cannot start: {type(exc).__name__}") from None
+    try:
+        yield
+    finally:
+        server.stop()
 
 
 @contextmanager
@@ -114,7 +138,9 @@ def _state_dir_from_environment() -> Path | None:
 
 def _read_inputs() -> HostInfo:
     try:
-        return read_host_info(os.environ, require=())  # the MCP server is not hosted by this entry yet
+        return read_host_info(
+            os.environ, require=()
+        )  # the MCP group is optional: the server runs only when the host gives a port and a token
     except HostInfoError as exc:
         raise Refused(str(exc)) from None
 

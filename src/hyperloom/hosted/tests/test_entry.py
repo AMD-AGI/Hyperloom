@@ -414,3 +414,64 @@ def test_multibranch_is_still_refused_when_the_shared_part_of_the_spec_is_wrong(
     monkeypatch.setattr(entry.os, "execvp", lambda file, argv: pytest.fail("must not exec"))
     assert entry.main(["run"]) == 2
     assert _exit(run)["final"] is True
+
+
+# -- the MCP service ---------------------------------------------------------------------------------------------
+def _free_port() -> int:
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _status_call(port: int, token: str) -> dict:
+    import http.client
+
+    body = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "get_status", "arguments": {}}}
+    )
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    connection.request("POST", "/mcp", body=body, headers={"X-Hyperloom-Token": token})
+    reply = json.loads(connection.getresponse().read())
+    connection.close()
+    return json.loads(reply["result"]["content"][0]["text"])
+
+
+def test_the_host_tools_are_served_while_optimize_runs_and_stopped_after(run, monkeypatch):
+    port = _free_port()
+    monkeypatch.setenv(Var.MCP_PORT, str(port))
+    monkeypatch.setenv(Var.MCP_HOST, "127.0.0.1")
+    answers = []
+
+    def during(argv):
+        session = Path(next(a for a in argv if a.startswith("--session-dir=")).partition("=")[2])
+        (session / "state.json").write_text(json.dumps({"session_id": "s", "phase": "PRELUDE", "stop_reason": ""}))
+        answers.append(_status_call(port, _SECRETS[Var.MCP_TOKEN]))
+
+    FakeOptimize(monkeypatch, effect=during)
+    assert entry.main(["run"]) == 0
+    assert answers[0]["phase"] == "PRELUDE" and answers[0]["session_id"] == "s"
+    with pytest.raises(OSError):
+        _status_call(port, _SECRETS[Var.MCP_TOKEN])  # the server went down with the run
+
+
+def test_no_port_means_no_server(run, monkeypatch):
+    monkeypatch.delenv(Var.MCP_PORT)
+    started = []
+    monkeypatch.setattr(entry.McpServer, "start", lambda self: started.append(1))
+    FakeOptimize(monkeypatch)
+    assert entry.main(["run"]) == 0 and started == []
+
+
+def test_a_port_that_cannot_be_bound_refuses_the_run(run, monkeypatch):
+    import socket
+
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        monkeypatch.setenv(Var.MCP_PORT, str(taken.getsockname()[1]))
+        monkeypatch.setenv(Var.MCP_HOST, "127.0.0.1")
+        fake = FakeOptimize(monkeypatch)
+        assert entry.main(["run"]) == entry.RETURNCODE_REFUSED
+    assert fake.calls == [] and _exit(run)["final"] is True and "MCP server cannot start" in _exit(run)["error"]

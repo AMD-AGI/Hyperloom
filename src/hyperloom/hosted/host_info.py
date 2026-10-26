@@ -44,6 +44,7 @@ class Var:
     RUN_CREATED_AT = "HYPERLOOM_RUN_CREATED_AT"
     STATE_DIR = "HYPERLOOM_STATE_DIR"
     EVENTS_DIR = "HYPERLOOM_EVENTS_DIR"
+    MCP_HOST = "HYPERLOOM_MCP_HOST"
     MCP_PORT = "HYPERLOOM_MCP_PORT"
     MCP_TOKEN = "HYPERLOOM_MCP_TOKEN"
     MCP_PUBLIC_URL = "HYPERLOOM_MCP_PUBLIC_URL"
@@ -207,6 +208,7 @@ class HostInfo:
     run_created_at: datetime
     state_dir: Path
     events_dir: Path
+    mcp_host: str | None
     mcp_port: int | None
     mcp_token: Secret | None
     mcp_public_url: str | None
@@ -456,6 +458,7 @@ def _build(reader: _Reader) -> HostInfo:
         run_created_at=reader.timestamp(Var.RUN_CREATED_AT),  # type: ignore[arg-type]
         state_dir=state_dir,  # type: ignore[arg-type]
         events_dir=events_dir or (state_dir / "events" if state_dir else None),  # type: ignore[arg-type]
+        mcp_host=reader.text(Var.MCP_HOST),
         mcp_port=reader.port(Var.MCP_PORT),
         mcp_token=reader.secret(Var.MCP_TOKEN),
         mcp_public_url=reader.url(Var.MCP_PUBLIC_URL),
