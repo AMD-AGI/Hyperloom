@@ -64,6 +64,7 @@ from ._accuracy_gate import (
 )
 from . import _framework_switch_manifest as _switch_manifest
 from . import cycle_bench_arm as _cycle_bench
+from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
 from ._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import BaseControls, effective_fingerprint, normalize_proposal
@@ -1928,7 +1929,7 @@ def _screen_cycle_batch(params: dict[str, Any], state: Any, output_root: Path) -
         )
     except (OSError, KeyError, ValueError) as exc:
         return {"status": "failed", "error_class": "cycle_bench_unavailable", "error": str(exc)}
-    return {"status": "cycle_screened", _cycle_bench.CYCLE_ARMS_PARAM: arms, **_cycle_bench.run_batch(spec)}
+    return {"status": STATUS_SCREENED, _cycle_bench.CYCLE_ARMS_PARAM: arms, **_cycle_bench.run_batch(spec)}
 
 
 def _safe(name: str) -> str:

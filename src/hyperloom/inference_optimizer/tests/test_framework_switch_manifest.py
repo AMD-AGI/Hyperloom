@@ -1216,3 +1216,68 @@ async def test_a_screened_admission_registers_its_levers_pending_and_enqueues_no
         ("HL_CACHE", None, ATTRIBUTION_CYCLE_PENDING),
     ]
     assert bundles == []
+
+
+@pytest.mark.parametrize(
+    ("valid", "verdicts", "rows"),
+    [
+        (
+            True,
+            {"a": {"verdict": "pass", "gain_pct": 0.8}, "b": {"verdict": "regress", "gain_pct": -3.1}},
+            [("HL_A", 0.8, "cycle_bench"), ("HL_B", -3.1, "cycle_bench"), ("HL_C", None, "cycle_bench_pending")],
+        ),
+        (
+            True,
+            {
+                "a": {"verdict": "broken", "error": "server did not become ready"},
+                "b": {"verdict": "neutral", "gain_pct": -0.2},
+            },
+            [
+                ("HL_A", None, "cycle_bench_broken"),
+                ("HL_B", -0.2, "cycle_bench"),
+                ("HL_C", None, "cycle_bench_pending"),
+            ],
+        ),
+        (
+            False,
+            {},
+            [
+                ("HL_A", None, "cycle_bench_inconclusive"),
+                ("HL_B", None, "cycle_bench_inconclusive"),
+                ("HL_C", None, "cycle_bench_pending"),
+            ],
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_cycle_batch_writes_its_verdicts_onto_the_levers_its_arms_switched_on(tmp_path, valid, verdicts, rows):
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
+    from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
+    from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
+
+    from .conftest import make_coordinator
+
+    state = _state()
+    state.baseline_tput = 100.0
+    state.save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    for i, name in enumerate(("HL_A", "HL_B", "HL_C")):
+        coord.shared_state.record_authored_framework_levers(
+            [_entry_parsed(name)], default_on=False, specialist_task_id=f"t{i}"
+        )
+        coord.shared_state.record_framework_lever_attribution(name, gain_pct=None, source=ATTRIBUTION_CYCLE_PENDING)
+    result = {
+        "status": STATUS_SCREENED,
+        "cycle_arms": [{"name": "a", "envs": {"HL_A": "1"}}, {"name": "b", "envs": {"HL_B": "1"}}],
+        "valid": valid,
+        "verdicts": verdicts,
+    }
+    outcome = _PromoteOutcome(verdict=Verdict.RECORDED)
+
+    await coord.writeback._promote_explore(result, None, outcome)
+
+    levers = coord.shared_state.authored_framework_levers
+    assert [(r["switch"], r["attributed_gain_pct"], r["attribution_source"]) for r in levers] == rows
+    assert (outcome.verdict, outcome.audit_decision) == (Verdict.RECORDED, None)
+    assert coord.shared_state.gain_gated_action_count == 0

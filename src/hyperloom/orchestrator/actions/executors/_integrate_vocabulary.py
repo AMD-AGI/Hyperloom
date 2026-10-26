@@ -30,6 +30,11 @@ SCREEN_CYCLE = "cycle"
 #: Attribution source of a lever admitted for the cycle screen and not measured yet.
 ATTRIBUTION_CYCLE_PENDING = "cycle_bench_pending"
 
+#: Attribution sources a cycle batch writes: a graded gain, an arm whose server failed, a batch whose bases disagreed.
+ATTRIBUTION_CYCLE_BENCH = "cycle_bench"
+ATTRIBUTION_CYCLE_BROKEN = "cycle_bench_broken"
+ATTRIBUTION_CYCLE_INCONCLUSIVE = "cycle_bench_inconclusive"
+
 #: Where the patches this action applies came from. Every source lands through
 #: the same apply / vet / bench / KEEP-REVERT pipeline below; they differ only
 #: in how the diff is obtained and, for ``upstream_pr``, in which gate admitted

@@ -25,6 +25,9 @@ VERDICT_REGRESS = "regress"
 #: The arm produced no cycle to grade: its server did not come up, or never reached steady decode.
 VERDICT_BROKEN = "broken"
 
+#: Status of an explore result that ran a cycle-bench batch rather than a replay round.
+STATUS_SCREENED = "cycle_screened"
+
 #: Server flags that bring up the host KV cache; the bench serves from device memory only.
 _HICACHE_FLAGS = ("--enable-hierarchical-cache",)
 _HICACHE_VALUE_PREFIX = "--hicache-"
@@ -121,6 +124,7 @@ def screen_verdict(gain_pct: float, *, band_pct: float) -> str:
 
 __all__ = [
     "DECODE_LINE",
+    "STATUS_SCREENED",
     "VERDICT_BROKEN",
     "VERDICT_NEUTRAL",
     "VERDICT_PASS",

@@ -10,11 +10,27 @@ from typing import Any, Mapping, NamedTuple
 
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
+from ..actions.executors._integrate_vocabulary import (
+    ATTRIBUTION_CYCLE_BENCH,
+    ATTRIBUTION_CYCLE_BROKEN,
+    ATTRIBUTION_CYCLE_INCONCLUSIVE,
+)
+from ..actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
 from ..actions.executors.explore import STACK_REVALIDATE_SOURCE, is_stack_revalidation
+from ..measurement.cycle_bench import STATUS_SCREENED, VERDICT_BROKEN
 from ._promote_outcome import _PromoteOutcome
 from ..state.task_registry import Task
 
 log = logging.getLogger(__name__)
+
+
+def _cycle_attribution(valid: bool, verdict: Mapping[str, Any]) -> tuple[float | None, str]:
+    """The ``(gain, source)`` a cycle verdict records; a void batch and a broken arm fall back to replay attribution."""
+    if not valid:
+        return None, ATTRIBUTION_CYCLE_INCONCLUSIVE
+    if verdict.get("verdict") == VERDICT_BROKEN or "gain_pct" not in verdict:
+        return None, ATTRIBUTION_CYCLE_BROKEN
+    return float(verdict["gain_pct"]), ATTRIBUTION_CYCLE_BENCH
 
 
 class _ExploreLift(NamedTuple):
@@ -52,6 +68,11 @@ class ExplorePromotionMixin:
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote an explore result: ledger increment, winners, current_best lift, resume revalidation."""
+        if result.get("status") == STATUS_SCREENED:
+            # A cycle batch grades levers for a later bundle; it measured no replay and lifts nothing.
+            self._record_cycle_batch(result)
+            outcome.changed = True
+            return
         changed = False
         # The Coordinator is single-writer for explore_search.accepted,
         # current_best and optimization_stack.
@@ -107,6 +128,14 @@ class ExplorePromotionMixin:
             outcome.verdict = Verdict.RECORDED if is_revalidation_task else Verdict.REVERTED
         outcome.changed = changed
         outcome.audit_extras = _explore_audit_extras(result)
+
+    def _record_cycle_batch(self, result: Mapping[str, Any]) -> None:
+        """Write a cycle batch's verdict onto every lever its arms switched on."""
+        verdicts = result.get("verdicts") or {}
+        for arm in result.get(CYCLE_ARMS_PARAM) or []:
+            gain, source = _cycle_attribution(bool(result.get("valid")), verdicts.get(str(arm.get("name") or "")) or {})
+            for switch in arm.get("envs") or {}:
+                self.shared_state.record_framework_lever_attribution(str(switch), gain_pct=gain, source=source)
 
     def _record_framework_lever_attributions(self, result: Mapping[str, Any]) -> bool:
         recorded = False
