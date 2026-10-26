@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.framework_paths import (
     resolve_session_framework_root,
     resolved_within,
 )
+from hyperloom.common.coerce import first_text
 from hyperloom.common.env import env_bool
 from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.visible_devices import detect_gpu_count
@@ -1034,7 +1035,7 @@ class PolicyGate:
 
         # Build the anchor candidate set the gap's domain_hint may name.
         candidates: set[str] = set()
-        domain_key = str(params.get("domain") or "").strip()
+        domain_key = first_text(params.get("domain"))
         if domain_key:
             candidates.add(domain_key.lower())
             d = get_domain(domain_key)
@@ -1056,15 +1057,15 @@ class PolicyGate:
             g
             for g in gaps
             if isinstance(g, dict)
-            and str(g.get("canonical_id") or "").strip()
-            and str(g.get("domain_hint") or "").strip().lower() in candidates
+            and first_text(g.get("canonical_id"))
+            and first_text(g.get("domain_hint")).lower() in candidates
         ]
         if not matches:
             return ""
         matches.sort(key=gap_actionability_key)
-        chosen = str(matches[0].get("canonical_id") or "").strip()
-        if chosen:
-            params["gap_canonical_id"] = chosen
+        # Every match carries a non-empty canonical id.
+        chosen = first_text(matches[0].get("canonical_id"))
+        params["gap_canonical_id"] = chosen
         return chosen
 
     def _validate_freeform_specialist_dispatch(

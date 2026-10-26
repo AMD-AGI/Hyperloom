@@ -69,6 +69,35 @@ def _relative_path(value: Any, field_name: str) -> str:
     return path.as_posix()
 
 
+def _read_publication_metadata(publication_path: Path) -> dict[str, Any]:
+    """Read ``publication.json`` and refuse a schema this reader does not know or a patch not micro-validated."""
+    try:
+        payload = json.loads(publication_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ControllerPublicationError(f"could not read publication metadata: {error}") from error
+    if not isinstance(payload, dict):
+        raise ControllerPublicationError("publication metadata must be a JSON object")
+    if payload.get("schema_version") != PUBLICATION_SCHEMA_VERSION:
+        raise ControllerPublicationError(f"unsupported publication schema {payload.get('schema_version')!r}")
+    if payload.get("micro_validated") is not True:
+        raise ControllerPublicationError("publication is not micro-validated")
+    return payload
+
+
+def _publication_identity(payload: dict[str, Any]) -> dict[str, str]:
+    """The six canonical identity dimensions, in ``_IDENTITY_FIELDS`` order."""
+    identity_raw = payload.get("identity")
+    if not isinstance(identity_raw, dict) or set(identity_raw) != set(_IDENTITY_FIELDS):
+        raise ControllerPublicationError("publication identity must contain the six canonical dimensions")
+    identity: dict[str, str] = {}
+    for field in _IDENTITY_FIELDS:
+        value = identity_raw.get(field)
+        if not isinstance(value, str) or not value:
+            raise ControllerPublicationError(f"identity.{field} must be a non-empty string")
+        identity[field] = value
+    return identity
+
+
 def load_controller_publication(patch_dir: str | Path) -> ControllerPatchPublication:
     """Validate one publication directory and return its integration contract."""
     root = Path(patch_dir).expanduser()
@@ -80,28 +109,11 @@ def load_controller_publication(patch_dir: str | Path) -> ControllerPatchPublica
     for path in (patch_path, report_path, publication_path):
         if not path.is_file() or path.is_symlink():
             raise ControllerPublicationError(f"publication artifact must be a regular file: {path}")
-    try:
-        payload = json.loads(publication_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ControllerPublicationError(f"could not read publication metadata: {error}") from error
-    if not isinstance(payload, dict):
-        raise ControllerPublicationError("publication metadata must be a JSON object")
-    if payload.get("schema_version") != PUBLICATION_SCHEMA_VERSION:
-        raise ControllerPublicationError(f"unsupported publication schema {payload.get('schema_version')!r}")
-    if payload.get("micro_validated") is not True:
-        raise ControllerPublicationError("publication is not micro-validated")
+    payload = _read_publication_metadata(publication_path)
 
-    identity_raw = payload.get("identity")
-    if not isinstance(identity_raw, dict) or set(identity_raw) != set(_IDENTITY_FIELDS):
-        raise ControllerPublicationError("publication identity must contain the six canonical dimensions")
-    identity: dict[str, str] = {}
-    for field in _IDENTITY_FIELDS:
-        value = identity_raw.get(field)
-        if not isinstance(value, str) or not value:
-            raise ControllerPublicationError(f"identity.{field} must be a non-empty string")
-        identity[field] = value
+    identity = _publication_identity(payload)
     operator_id = str(payload.get("operator_id") or "")
-    expected_id = ":".join(["kernel", *(identity[field] for field in _IDENTITY_FIELDS)])
+    expected_id = ":".join(["kernel", *identity.values()])
     if operator_id != expected_id or root.name != operator_directory_name(operator_id):
         raise ControllerPublicationError("operator_id does not match identity or directory name")
 

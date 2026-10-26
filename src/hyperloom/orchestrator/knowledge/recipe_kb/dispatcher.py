@@ -129,8 +129,8 @@ class RecipeKB:
         provenance = provenance if isinstance(provenance, dict) else {}
         details = provenance.get("details")
         details = details if isinstance(details, dict) else {}
-        counts = result.get("counts") if isinstance(result.get("counts"), dict) else {}
-        prior = result.get("prior_counts") if isinstance(result.get("prior_counts"), dict) else {}
+        counts = result["counts"]
+        prior = result["prior_counts"]
         self._emit_audit(
             {
                 "op": "write",
@@ -152,15 +152,15 @@ class RecipeKB:
                     "precision": str(upsert.precision or ""),
                 },
                 "result": {
-                    "canonical_id": str(result.get("canonical_id") or canonical_id),
-                    "version": int(result.get("version") or 0),
-                    "created": bool(result.get("created")),
-                    "best_throughput": float(upsert.best_throughput or 0.0),
+                    "canonical_id": result["canonical_id"],
+                    "version": result["version"],
+                    "created": result["created"],
+                    "best_throughput": float(upsert.best_throughput),
                     "best_config_nonempty": bool(upsert.best_config),
                     "write_safety": {},
                 },
                 "counts": {key: int(value) for key, value in counts.items()},
-                "delta": {key: int(value) - int(prior.get(key, 0) or 0) for key, value in counts.items()},
+                "delta": {key: int(value) - prior[key] for key, value in counts.items()},
                 "provenance": {
                     "component": "recipe_kb",
                     "generator": str(provenance.get("generator") or ""),

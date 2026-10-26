@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.coerce import first_text
 from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.common.fs_utils import read_bytes_nofollow, regular_files_nofollow
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
@@ -105,7 +106,7 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> RoundArchive
         resolves to nothing. Patches the round never applied are recorded under
         :data:`ROLE_PATCH_EVIDENCE`, never :data:`ROLE_PATCH`.
     """
-    task_id = str(res.get("specialist_task_id") or "").strip()
+    task_id = first_text(res.get("specialist_task_id"))
     root = Path(session_dir)
     archive = RoundArchive(root)
     if not task_id:
@@ -139,21 +140,21 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> RoundArchive
     artifacts_dir = round_dir / "artifacts"
     for idx, art in enumerate(res.get("artifacts_applied") or []):
         name = _artifact_archive_name(idx, str(art.get("target") or ""))
-        source = str(art.get("source") or "").strip()
-        backup = str(art.get("backup") or "").strip()
+        source = first_text(art.get("source"))
+        backup = first_text(art.get("backup"))
         if source:
             _archive_copy(archive, ROLE_ARTIFACT_SOURCE, Path(source), artifacts_dir / name)
         if backup:
             _archive_copy(archive, ROLE_ARTIFACT_PREIMAGE, Path(backup), artifacts_dir / f"{name}.orig")
 
-    accepted_config = str(res.get("enablement_accepted_config_path") or "").strip()
+    accepted_config = first_text(res.get("enablement_accepted_config_path"))
     if accepted_config:
         _archive_copy(archive, ROLE_LAUNCH_CONFIG, Path(accepted_config), round_dir / "launch_config.yaml")
 
     # Only a round that reached a bench has one: a rejected patch or a broken build never started a server, so an
     # absent log is normal.
     bench = res.get("bench_result")
-    server_log = str(bench.get("server_log_path") or "").strip() if isinstance(bench, dict) else ""
+    server_log = first_text(bench.get("server_log_path")) if isinstance(bench, dict) else ""
     if server_log and _copy_log_tail(Path(server_log), round_dir / "server.log"):
         archive.record(ROLE_SERVER_LOG, round_dir / "server.log")
 

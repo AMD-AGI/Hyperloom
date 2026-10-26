@@ -631,14 +631,10 @@ extend-select = [
 # the builtin ``aiter`` (async iterator) is never used in this tree.
 ignorelist = ["aiter"]
 
-# C901 (mccabe) is the complexity trigger in the style guide's "Size and
-# complexity" table. It stays off rather than on-and-ignored: the tree carries a
-# backlog above the default max of 10, so selecting it would red the tree instead
-# of gating new code. The code-metrics gate above measures it at 20 on the files a
-# change touches. Measure on demand -- no config edit needed:
-#   ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
-# [tool.ruff.lint.mccabe]
-# max-complexity = 10
+# C901 (mccabe) stays off: the style guide's complexity trigger (10) and the
+# code-metrics gate's ceiling (20) are counted with radon, which also counts every
+# and / or, ternary, comprehension and assert. Measure on demand:
+#   radon cc -s -n C src/hyperloom src/kernelforge
 
 [tool.ruff.lint.per-file-ignores]
 # Tests re-import inside function bodies (E402), redefine fixtures (F811), and

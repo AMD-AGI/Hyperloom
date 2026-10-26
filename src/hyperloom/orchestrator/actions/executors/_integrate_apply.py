@@ -109,54 +109,9 @@ class ApplyStageMixin:
                 return None
             return _no_patches_result(attempt, deliverable, params)
 
-        # An acquired runtime is what the boot resolves, so the shared framework
-        # tree is not what the server imports and the root the specialist authored
-        # against does not describe the tree this round's patches land in.
-        patch_paths = deliverable.patch_paths
-        runtime_source_root = attempt.runtime_source_root
-        explicit_root = runtime_source_root or str(params.get("framework_source_root") or "").strip() or None
-        framework_root = (
-            resolved_explicit_root(runtime_source_root)
-            if runtime_source_root
-            # Off the loop: settling a tie between matching trees runs git once per patch.
-            else await asyncio.to_thread(
-                _resolve_framework_root,
-                explicit_root,
-                patch_paths=patch_paths,
-                recorded_root=_sole_patch_root(
-                    attempt.done_payload, patch_paths, specialist_workspace=attempt.specialist_workspace
-                ),
-            )
-        )
-        if patch_paths and framework_root is None:
-            unresolved = _apply_failed(
-                attempt,
-                **_unresolved_root_rejection(explicit_root, patch_paths),
-                **_reauthor_fields(params, patch_paths),
-            )
-            # A set spanning two trees is exactly what fails root resolution here,
-            # so this is the result that has to carry the reason onward.
-            if (attempt.done_payload or {}).get("patches_span_multiple_roots"):
-                unresolved["patches_span_multiple_roots"] = True
-            return unresolved
-        if patch_paths:
-            missing_records = _preflight_missing_targets(framework_root, patch_paths)
-            if missing_records:
-                return await self._refuse_apply(
-                    attempt,
-                    params,
-                    extra,
-                    "patch_target_missing",
-                    missing_records,
-                    **_reauthor_fields(
-                        params,
-                        patch_paths,
-                        advisory="patch target file(s) absent from framework_source_root "
-                        f"{framework_root}; author patches only against files that "
-                        "exist in the installed framework tree (inspect it with "
-                        "Glob/Grep before writing the diff).",
-                    ),
-                )
+        framework_root, root_refusal = await self._resolve_apply_root(attempt, params, extra, deliverable.patch_paths)
+        if root_refusal is not None:
+            return root_refusal
 
         stash_refusal = self._begin_mutation(attempt, deliverable, params, extra, framework_root=framework_root)
         if stash_refusal is not None:
@@ -197,7 +152,7 @@ class ApplyStageMixin:
         series = _apply_patch_series(
             attempt,
             patch_paths,
-            git_head=str(recovery.get("git_head") or ""),
+            git_head=recovery["git_head"],
             backup_root=recovery_root / "patch_backups",
         )
         ended = await self._end_patch_series(attempt, params, extra, deliverable, series)
@@ -241,6 +196,63 @@ class ApplyStageMixin:
                 "workspace": str(attempt.output_root),
             }
         return None
+
+    async def _resolve_apply_root(
+        self,
+        attempt: IntegrateAttempt,
+        params: dict[str, Any],
+        extra: dict[str, Any],
+        patch_paths: list[Path],
+    ) -> tuple[Path | None, dict[str, Any] | None]:
+        """The framework root the patches land in, or the refusal when no single root holds every patch target."""
+        # An acquired runtime is what the boot resolves, so the shared framework
+        # tree is not what the server imports and the root the specialist authored
+        # against does not describe the tree this round's patches land in.
+        runtime_source_root = attempt.runtime_source_root
+        explicit_root = runtime_source_root or str(params.get("framework_source_root") or "").strip() or None
+        framework_root = (
+            resolved_explicit_root(runtime_source_root)
+            if runtime_source_root
+            # Off the loop: settling a tie between matching trees runs git once per patch.
+            else await asyncio.to_thread(
+                _resolve_framework_root,
+                explicit_root,
+                patch_paths=patch_paths,
+                recorded_root=_sole_patch_root(
+                    attempt.done_payload, patch_paths, specialist_workspace=attempt.specialist_workspace
+                ),
+            )
+        )
+        if patch_paths and framework_root is None:
+            unresolved = _apply_failed(
+                attempt,
+                **_unresolved_root_rejection(explicit_root, patch_paths),
+                **_reauthor_fields(params, patch_paths),
+            )
+            # A set spanning two trees is exactly what fails root resolution here,
+            # so this is the result that has to carry the reason onward.
+            if (attempt.done_payload or {}).get("patches_span_multiple_roots"):
+                unresolved["patches_span_multiple_roots"] = True
+            return None, unresolved
+        if patch_paths:
+            missing_records = _preflight_missing_targets(framework_root, patch_paths)
+            if missing_records:
+                return framework_root, await self._refuse_apply(
+                    attempt,
+                    params,
+                    extra,
+                    "patch_target_missing",
+                    missing_records,
+                    **_reauthor_fields(
+                        params,
+                        patch_paths,
+                        advisory="patch target file(s) absent from framework_source_root "
+                        f"{framework_root}; author patches only against files that "
+                        "exist in the installed framework tree (inspect it with "
+                        "Glob/Grep before writing the diff).",
+                    ),
+                )
+        return framework_root, None
 
     def _begin_mutation(
         self,
