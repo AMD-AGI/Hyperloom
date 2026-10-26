@@ -3911,7 +3911,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 **self._handoff_agent_provenance(session_sink),
             )
             return self.handoff_store.write(handoff)
-        except Exception as error:
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
             self.persistence_degraded = True
             self.persistence_errors.append(f"persist handoff iteration {iteration}: {error}")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -4022,7 +4022,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     print(
                         f"  [lesson] no summary ({outcome.reason}) — falling back to machine-observed session progress"
                     )
-            except Exception as error:
+            except Exception as error:  # isolation boundary: one iteration's lesson summarizer step
                 summary_failure = f"{type(error).__name__}: {str(error)[:200]}"
                 log.debug("lessons: summarizer step failed", exc_info=True)
                 print(f"  [lesson] summarizer step failed ({type(error).__name__}: {error}) — falling back")
@@ -4085,7 +4085,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     f"  [lesson] scope not recorded for iter {iteration}: "
                     f"the document renders unscoped and closes nothing"
                 )
-        except Exception:
+        except Exception:  # isolation boundary: one iteration's scope line; the outcome line still records
             log.debug("lessons: scope append failed", exc_info=True)
 
         turns, failure = (None, "") if has_narrative else (result.turns, summary_failure)
@@ -4803,7 +4803,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                         iteration=iteration,
                         evidence_context=evidence_context,
                     )
-                except Exception as e:  # noqa: BLE001 - supervisor memo is optional
+                except Exception as e:  # isolation boundary: one stall-triggered supervisor review
+                    log.warning("supervisor review failed at iteration %s", iteration, exc_info=True)
                     print(f"  [supervisor] failed ({e}); continuing without a memo")
                 finally:
                     self._checkpoint_llm_usage()
@@ -4936,7 +4937,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 )
                 if keep_checkpoint_finalized and archived_path is None:
                     raise RuntimeError("candidate archive returned no published path")
-            except Exception as e:  # noqa: BLE001
+            except (OSError, RuntimeError, ValueError) as e:
                 if keep_checkpoint_finalized:
                     self.persistence_degraded = True
                     self.persistence_errors.append(f"archive derived KEEP view iteration {iteration}: {e}")
@@ -5747,7 +5748,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     **extra_kwargs,
                 )
                 print(f"  [agent] Rationale: {rationale[:200]}")
-            except Exception as e:  # noqa: BLE001 - agent backend failure is not enumerable
+            except Exception as e:  # isolation boundary: one implementer agent session
+                log.warning("implementer agent session failed at iteration %s", iteration, exc_info=True)
                 agent_error = e
                 print(f"  [agent] ERROR: {e}")
                 rationale = f"agent session ended with error after edits: {e}"
@@ -6333,9 +6335,10 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     plan=frame.session_sink.get("plan", ""),
                     **({"benchmark_measurement": reusable_benchmark} if reusable_benchmark is not None else {}),
                 )
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # isolation boundary: one iteration's measurement
                 # Turn the crash into a FAILED result (crashed=True) and let it flow through the same
                 # verdict/ledger/archive path.
+                log.warning("iteration %s crashed during run", frame.iteration, exc_info=True)
                 print(f"  [CRASH] iteration {frame.iteration} crashed during run: {e}")
                 result = IterationResult(
                     iteration=frame.iteration,
