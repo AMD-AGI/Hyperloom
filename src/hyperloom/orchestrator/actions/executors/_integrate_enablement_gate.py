@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_float, to_str_list
+from hyperloom.common.coerce import first_text, to_float, to_str_list
 from hyperloom.inference_optimizer import framework_paths
 from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 
@@ -233,12 +233,10 @@ class EnablementGateMixin:
             await self._maybe_write_framework_kb_record(
                 _KbLesson("integrated", 0.0), done_payload=done_payload, params=params, extra=extra
             )
-            wall = None
-            signature = None
-            if after_loaded.observation is not None:
-                wall = after_loaded.observation.stage_failed
-                verdict = verdict_of(after_loaded.observation)
-                signature = verdict.signature if verdict is not None else None
+            # round_advanced is only true for a recorded after-observation.
+            assert after_loaded.observation is not None
+            wall = after_loaded.observation.stage_failed
+            signature = verdict_of(after_loaded.observation).signature
             return {
                 "status": "advanced",
                 "specialist_task_id": specialist_task_id,
@@ -269,7 +267,7 @@ class EnablementGateMixin:
                     f"to a new gap ({wall.name if wall is not None else 'no wall recorded'})"
                 ),
                 "setup_commands_applied": attempt.setup_commands_applied,
-                "after_signature": signature.to_dict() if signature is not None else {},
+                "after_signature": signature.to_dict(),
                 "enablement_launch_log": str(bench_result.get("error") or ""),
                 # The wall this round advanced to, for the next round's before half.
                 "enablement_observation_path": after_loaded.path,
@@ -609,15 +607,15 @@ class EnablementGateMixin:
         # Never the payload's: a payload-level ``fa_pr_*`` belongs to whichever
         # proposal put it there, so standing it in for one this proposal omits
         # would file the lesson under another patch's PR.
-        pr_url = str(proposal.get("fa_pr_url") or "").strip()
-        pr_sha = str(proposal.get("fa_pr_sha") or "").strip()
+        pr_url = first_text(proposal.get("fa_pr_url"))
+        pr_sha = first_text(proposal.get("fa_pr_sha"))
         if not pr_url and not pr_sha:
             log.warning("integrate_patch: framework proposal lacks both fa_pr_url and fa_pr_sha; KB writeback skipped")
             return
         # The ``if v`` filter is what makes the merge mean "the proposal's value,
         # or the payload's where the proposal left it empty".
         fields = {**(done_payload or {}), **{k: v for k, v in proposal.items() if v}}
-        shared_state = extra.get("shared_state") or extra.get("state")
+        shared_state = extra.get("shared_state")
         patches_written = to_str_list(proposal.get("patches_written"))
         accuracy_delta_pct = lesson.accuracy_delta_pct
         if accuracy_delta_pct is None:
@@ -633,18 +631,18 @@ class EnablementGateMixin:
                     outcome=lesson.outcome,
                     tps_delta_pct=float(lesson.tps_delta_pct),
                     session_id=str(getattr(shared_state, "recipe_kb_session_id", "") or ""),
-                    framework=str(fields.get("framework") or "").strip().lower(),
-                    gap_canonical_id=str(fields.get("gap_canonical_id") or "").strip(),
+                    framework=first_text(fields.get("framework")).lower(),
+                    gap_canonical_id=first_text(fields.get("gap_canonical_id")),
                     gap_keywords=[keyword.lower() for keyword in to_str_list(fields.get("gap_keywords"))],
-                    model_class=str(getattr(shared_state, "model_class", "") or "").strip(),
-                    gpu_type=str(getattr(shared_state, "gpu_type", "") or "").strip(),
-                    precision=str(getattr(shared_state, "precision", "") or "").strip(),
-                    applicability=lesson.config_fingerprint or str(fields.get("applicability") or "").strip(),
-                    provenance=str(fields.get("provenance") or "").strip(),
+                    model_class=first_text(getattr(shared_state, "model_class", "")),
+                    gpu_type=first_text(getattr(shared_state, "gpu_type", "")),
+                    precision=first_text(getattr(shared_state, "precision", "")),
+                    applicability=lesson.config_fingerprint or first_text(fields.get("applicability")),
+                    provenance=first_text(fields.get("provenance")),
                     accuracy_delta_pct=accuracy_delta_pct,
                     changed_files=to_str_list(fields.get("changed_files")),
-                    source_framework=str(fields.get("source_framework") or "").strip().lower(),
-                    target_framework=str(fields.get("target_framework") or "").strip().lower(),
+                    source_framework=first_text(fields.get("source_framework")).lower(),
+                    target_framework=first_text(fields.get("target_framework")).lower(),
                 )
             )
         except (OSError, ValueError, TypeError) as exc:
