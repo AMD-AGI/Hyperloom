@@ -11,7 +11,7 @@ already has one, so the emergency ``final-only`` run carries the dead session's 
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -25,7 +25,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
 #: Names how :meth:`Roster.quota_policy` hands out K; recorded in the manifest fingerprint.
-QUOTA_POLICY_VERSION = "mb1-quota-4"
+QUOTA_POLICY_VERSION = "mb1-quota-5"
 
 
 class BranchKind(str, Enum):
@@ -276,10 +276,10 @@ class Roster:
             return entry
         return self._update(entry, stop=stop)
 
-    def quota_policy(self, busy: Collection[str]) -> QueuePolicy:
+    def quota_policy(self, busy: Collection[str], deadlines: Mapping[str, float]) -> QueuePolicy:
         """The toolbox's queue policy under the global cap on running tests: the K of every running branch, and of
         every stopped branch whose stop lets its tests finish while ``busy``, the branches the toolbox holds a test of,
-        names it.
+        names it; each of them with its entry of ``deadlines``, the clock time its exploration ends, when it has one.
 
         Only the branches listed may submit, so the toolbox refuses a test of a branch that is not started or is
         stopped, except while a stopped branch's tests last: those run under the K they were queued under rather than
@@ -291,7 +291,12 @@ class Roster:
             for entry in self._entries.values()
             if entry.status is BranchStatus.RUNNING or (entry.finishes_tests and entry.branch in busy)
         }
-        return QueuePolicy(global_concurrency=self.caps.max_parallel_tests, branch_k=ks, listed_branches_only=True)
+        return QueuePolicy(
+            global_concurrency=self.caps.max_parallel_tests,
+            branch_k=ks,
+            listed_branches_only=True,
+            branch_deadline={branch: deadlines[branch] for branch in ks if branch in deadlines},
+        )
 
     def _live(self, branch: str) -> BranchEntry:
         entry = self._entries[branch]

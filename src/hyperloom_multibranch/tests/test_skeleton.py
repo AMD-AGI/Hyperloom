@@ -651,8 +651,9 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     [rooted] = [row for row in _decisions(stage) if row["reason"] == "root committed"]
     prelude_hours = round(rooted["detail"]["child_gpu_seconds_upper_bound"] / MB_SECONDS_PER_HOUR, 3)
     assert all(spend["prelude_gpu_hours_upper_bound"] == prelude_hours for spend in spends)
-    # Each judge call's view and the dashboard rebuild after it read the queue, and so do the stop and every quota push.
-    assert judge_calls >= 2 and stage.toolbox.queue_reads == 2 * judge_calls + 1 + len(stage.toolbox.policies)
+    # Each judge call's view reads the queue twice, for its widening signals and the builds a branch waits for, and the
+    # dashboard rebuild after it once; so do the stop and every quota push.
+    assert judge_calls >= 2 and stage.toolbox.queue_reads == 3 * judge_calls + 1 + len(stage.toolbox.policies)
     assert await stage.processes.leftovers() == ()
     for path in (
         stage.layout.manifest,
