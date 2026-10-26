@@ -17,7 +17,7 @@ import pytest
 from kernelforge.loop import candidate_measurement as measurement_module
 from kernelforge.loop import runner as runner_module
 from kernelforge.loop.runner import IterationConfig, LoopAgents
-from kernelforge.loop.tree.model import AttemptOutcome, Round, Slot, SlotType
+from kernelforge.loop.tree.model import AttemptOutcome, NodeSource, Round, Slot, SlotType
 from kernelforge.loop.tree.refs import pinned_nodes
 from kernelforge.loop.tree.search_loop import TreeSearchLoop
 from kernelforge.loop.tree.store import SearchTreeStore
@@ -104,7 +104,9 @@ class _Planning:
 
 def _lane_factory(_lane_dir, _serialized_driver):
     async def session(kernel_path, prompt):
-        Path(kernel_path).write_text(f"VALUE = {_VALUE.search(prompt).group(1)}\n")
+        # A PORT plan names no constant: carrying the published route's tuning onto this structure lands at 3.
+        value = "3" if "# Port plan" in prompt else _VALUE.search(prompt).group(1)
+        Path(kernel_path).write_text(f"VALUE = {value}\n")
         return "edited the constant"
 
     return session
@@ -122,6 +124,16 @@ class _Selector:
         tree = self.loop._tree
         if len(tree.nodes) == 1:
             slots = [{"type": "BRANCH", "start": tree.root.commit, "reason": f"open route {i}"} for i in (1, 2)]
+        elif len(tree.nodes) == 5:
+            slots = [
+                {
+                    "type": "PORT",
+                    "start": tree.direction_best("d002").commit,
+                    "source": tree.published_best,
+                    "gains": "the constant tuning",
+                    "reason": "the structural route lacks the tuning",
+                }
+            ]
         else:
             slots = [
                 {"type": "DEEPEN", "start": tree.direction_best(d).commit, "direction": d, "reason": f"continue {d}"}
@@ -193,6 +205,19 @@ def test_the_next_round_deepens_both_routes_from_their_own_code(tmp_path, monkey
     assert measured[-3:] == [4, 11, 4] or measured[-3:] == [11, 4, 4]
     assert "structural route" in selector.facts[1]
     assert len([event for event in loop.state_store.recent_events(50) if event["type"] == "iteration_result"]) == 2
+
+
+def test_a_port_carries_gains_onto_another_route_and_can_publish_it(tmp_path, monkeypatch):
+    loop, workspace, _selector, _measured = _run_campaign(tmp_path, monkeypatch, rounds=3)
+    tree = SearchTreeStore(workspace / "forge_experiments").load()
+    ported = tree.nodes[-1]
+
+    assert ported.source is NodeSource.PORT and ported.slot_type is SlotType.PORT
+    assert ported.direction == "d002" and tree.node(ported.parent).direction == "d002"
+    assert tree.published_best == ported.commit
+    plan = next((workspace / "forge_experiments" / "tree_rounds" / "iter_003").glob("start_*/slot_01.md")).read_text()
+    assert "# Port plan" in plan and "the constant tuning" in plan
+    assert (workspace / "kernel.py").read_text() == "VALUE = 3\n"
 
 
 def test_a_resume_records_the_round_a_killed_session_left_open_and_carries_on(tmp_path, monkeypatch):

@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, NoReturn, Sequence
 import click
 
 from kernelforge.cli.lanes import LaneBinding
+from kernelforge.cli.loop_shape import LOOP_SHAPE_OPTIONS, LoopShape, campaign_loop_inputs, loop_class_for
+from kernelforge.loop.campaign_config import SearchStrategy
 from kernelforge.cli.options import (
     AgentRuntimeOptions,
     CeilingSwitch,
@@ -1071,17 +1073,6 @@ class AgentRoleOptions:
 
 
 @dataclass(frozen=True)
-class LoopShape:
-    """How the loop measures and how many candidates each round explores."""
-
-    nproc_per_node: int
-    lanes: int
-    merge_stacking: bool
-    bench_repeat: int
-    commit_new_paths: tuple[str, ...]
-
-
-@dataclass(frozen=True)
 class TaskIdentity:
     """The task type and the names that identify the optimized operator."""
 
@@ -1267,69 +1258,7 @@ class ForgeLoopRequest:
             "--no-profiling disables collection for every duration.",
         ),
     ),
-    option_group(
-        "loop_shape",
-        LoopShape,
-        click.option(
-            "--nproc-per-node",
-            default=1,
-            type=click.IntRange(min=1),
-            help="Ranks the driver self-launches via torchrun (collective tasks "
-            "such as all-reduce). >1 profiles EVERY rank in its own "
-            "rocprofv3 session, because wrapping the driver would only "
-            "profile the launcher process, which runs no kernel. Default 1 "
-            "(single-GPU, unchanged behavior).",
-        ),
-        click.option(
-            "--lanes",
-            default=3,
-            type=click.IntRange(min=1, max=8),
-            help="Implementer lanes per round. Above 1 the round's analysis is "
-            "partitioned into that many non-overlapping plans, each run "
-            "concurrently in its own workspace copy, and each candidate is "
-            "measured on its own. Default 3: the lanes of a round run "
-            "concurrently, so a lane costs a session rather than a share "
-            "of the round's wall clock, and three is what the three "
-            "specialist analyses can be divided into. The partition "
-            "returns fewer when the evidence supports fewer. Above 1 "
-            "needs a provider that declares session_env and is refused on "
-            "one that does not; a provider without stop_hooks runs and is "
-            "warned, because it can waste a round but not misreport one.",
-        ),
-        click.option(
-            "--merge-stacking/--no-merge-stacking",
-            default=True,
-            help="Once consecutive iterations stop producing a new best, spend "
-            "one iteration measuring two archived rejected gains applied "
-            "together, chosen for winning on different cases. Costs a "
-            "measurement but no Implementer session. Default on; this "
-            "applies at every --lanes setting, so turn it off to compare "
-            "against a run that predates it.",
-        ),
-        click.option(
-            "--bench-repeat",
-            default=1,
-            type=click.IntRange(min=1),
-            help="How many times each bench repeats its measurement in-process, "
-            "reporting the per-case median. Default 1 (single shot). >1 "
-            "shrinks run-to-run spread. Requires a driver that accepts "
-            "--repeat; the flag is omitted entirely when this is 1.",
-        ),
-        click.option(
-            "--commit-new-path",
-            "commit_new_paths",
-            multiple=True,
-            help="Workspace-relative path or glob naming a file the agent may "
-            "CREATE and still have committed with a KEEP (repeatable, e.g. "
-            "--commit-new-path configs/*.json). Untracked files are "
-            "otherwise never staged and never removed by a REVERT. A '*' "
-            "does not cross a directory separator and '**' is rejected; "
-            "name each level instead. Protected measurement paths are "
-            "never admitted however they are spelled. Immutable per "
-            "campaign: it is snapshotted into campaign_config.json and "
-            "read back on --resume.",
-        ),
-    ),
+    LOOP_SHAPE_OPTIONS,
     _roofline_ceiling_option(
         "Estimate the per-shape theoretical achievable latency the campaign "
         "measures its attainment against. 'off' (default) skips it. 'on' estimates "
@@ -1576,9 +1505,7 @@ def forge_loop(request: ForgeLoopRequest):
                 gpu_type=request.gpu.gpu_type,
                 task_type=request.identity.task_type or "",
                 framework=request.identity.framework or "",
-                nproc_per_node=request.loop_shape.nproc_per_node,
-                bench_repeat=request.loop_shape.bench_repeat,
-                commit_new_paths=tuple(request.loop_shape.commit_new_paths),
+                **campaign_loop_inputs(request.loop_shape),
                 agent_relay=requested_relay_policy,
             ),
             resume=resume,
@@ -1678,7 +1605,7 @@ def forge_loop(request: ForgeLoopRequest):
             f" from {seed_stats['src'] or 'n/a'}"
         )
 
-    from kernelforge.loop.runner import IterationLoop, LoopAgents, LoopCallbacks
+    from kernelforge.loop.runner import LoopAgents, LoopCallbacks
     from kernelforge.loop.runner import IterationConfig
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.loop.gate_settings import GateMeasurement
@@ -1800,7 +1727,7 @@ def forge_loop(request: ForgeLoopRequest):
 
     # Construct the loop only after task preparation has resolved the profiling contract; IterationLoop snapshots that
     # readiness in its runtime state.
-    loop_runner = IterationLoop(
+    loop_runner = loop_class_for(request.loop_shape, campaign)(
         iter_config,
         tracker,
         config,
@@ -1892,6 +1819,7 @@ def forge_loop(request: ForgeLoopRequest):
         setup=implementer_setup,
         lane_binding=LaneBinding(iter_config.workspace_dir, driver, source_files_list),
         lanes=request.loop_shape.lanes,
+        search_strategy=SearchStrategy(campaign.search_strategy),
         program_md=program_md,
         specialist_definitions=specialist_definitions,
         critic_enabled=critic_enabled,

@@ -172,6 +172,49 @@ hands it to another Agent profile (see *Model relay* below), or the supervisor
 injects fresh directions when no other profile is available, rather than
 self-terminating on plateau.
 
+## Tree search
+
+`--search-strategy tree` (with `--lanes 2` or more) keeps every candidate that
+measures correct -- faster than what it was built on or not -- as a node of a
+search tree, and lets each iteration expand several nodes at once. One
+iteration is one round:
+
+1. A read-only slot selector, on the active Agent profile, reads the tree's
+   facts: every node with its score, parent and per-case wins and losses
+   against the published best beyond noise; every direction (a named route
+   opened at a node) with its hypothesis, expected ceiling and attempts; the
+   time left; and its own earlier rounds. It may inspect nodes with read-only
+   git. It names up to `--lanes` slots: `DEEPEN` continues a direction from one
+   of its nodes, `BRANCH` opens a new direction at a node (the planners there
+   choose it; a hint from the selector must be adopted or refuted with
+   evidence), and `PORT` carries gains measured on one node onto another. It
+   may also ask for nodes to be re-measured and close or reopen directions.
+   Only the legal part of its answer is kept; an answer with nothing legal in
+   it continues the published best's own direction.
+2. Every start node is planned in a detached worktree of its own commit, beside
+   the workspace in `<workspace>.tree-starts/`, all starts side by side: the
+   specialists probe that node's code, and the Plan Critic reviews that node's
+   plans. A start with a `BRANCH` slot is planned with every specialist role. A
+   `PORT` slot is planned by the framework from the two nodes' diff.
+3. One Implementer lane per slot runs on a copy of its start's worktree.
+4. Each candidate is validated and benchmarked, one at a time on the shared
+   device, in its start's worktree. A correct one is committed there and kept
+   as a node under `refs/forge/nodes/`; each direction has a branch
+   `<git_branch>-dNNN` at its best node. New nodes that win cases the
+   published best loses are stacked onto it and measured too.
+5. The round's best node that cleared the published best's KEEP bar is staged
+   in the campaign workspace and measured there once more; a KEEP commits it on
+   the campaign branch, which is therefore the chain of published bests.
+
+The tree is `forge_experiments/search_tree.json`; each round's selection is
+`forge_experiments/tree_selection/iter_NNN.md`, and its plans, diffs,
+measurements and Implementer reports are under
+`forge_experiments/tree_rounds/iter_NNN/`. A tree campaign has no Supervisor
+and runs no merge stacking of archived candidates. It refuses a workspace with
+untracked, unignored files a worktree would not see. On `--resume`, the slots
+of a round a killed session left open are recorded as lost and the campaign
+continues.
+
 ## Round admission
 
 A round is what the loop buys when it plans: orchestration, the lane sessions it

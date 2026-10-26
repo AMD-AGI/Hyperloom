@@ -84,9 +84,7 @@ def test_pr_context_is_wired_only_to_the_implementer():
     # Each Agent profile builds its own planning chain and supervisor; only its implementer receives the setup.
     actor_source = inspect.getsource(SearchActorBuildContext.build)
     orchestration = actor_source[
-        actor_source.index("orchestration = make_orchestration_service(") : actor_source.index(
-            "supervisor = make_supervisor_fn("
-        )
+        actor_source.index("make_planning = partial(") : actor_source.index("supervisor = make_supervisor_fn(")
     ]
     supervisor = actor_source[actor_source.index("supervisor = make_supervisor_fn(") :]
 

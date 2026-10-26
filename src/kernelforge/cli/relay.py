@@ -32,6 +32,7 @@ from kernelforge.loop.agent_relay import (
     StartPreference,
     select_start_profile,
 )
+from kernelforge.loop.campaign_config import SearchStrategy
 from kernelforge.loop.search_actors import SearchActorBundle, SearchActorPool
 from kernelforge.orchestrator.agent import ImplementerSetup
 
@@ -46,6 +47,7 @@ class SearchActorBuildContext:
     setup: ImplementerSetup
     lane_binding: LaneBinding
     lanes: int
+    search_strategy: SearchStrategy
     program_md: str
     specialist_definitions: dict
     critic_enabled: bool
@@ -99,7 +101,18 @@ class SearchActorBuildContext:
             lane_factory,
             supervisor,
             orchestration_factory=partial(make_planning, preflight=False),
+            slot_selector=self._slot_selector(actor_config),
         )
+
+    def _slot_selector(self, actor_config: Config):
+        """The read-only agent that names a tree round's slots, on the profile's own provider and model."""
+        if self.search_strategy is not SearchStrategy.TREE:
+            return None
+        from kernelforge.agent_backends.registry import create_registered_backend
+        from kernelforge.orchestrator.slot_selector import SlotSelector
+
+        backend = create_registered_backend(actor_config.agent_runtime(), preflight=False, usage=self.usage)
+        return SlotSelector(backend=backend, timeout_sec=backend.runtime.timeout_sec, max_turns=actor_config.max_turns)
 
     def _profile_config(self, profile: AgentProfile) -> Config:
         return config_for_profile(self.config, profile, primary_provider=self.relay.primary_profile.provider)

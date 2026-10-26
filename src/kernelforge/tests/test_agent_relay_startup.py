@@ -26,6 +26,7 @@ from kernelforge.loop.agent_relay import (
     StartPreference,
     select_start_profile,
 )
+from kernelforge.loop.campaign_config import SearchStrategy
 from kernelforge.loop.search_actors import SearchActorBundle
 
 
@@ -227,6 +228,7 @@ def test_supervisor_backend_flag_is_honoured(monkeypatch, tmp_path, relay, super
         setup=_Setup(),
         lane_binding=None,
         lanes=1,
+        search_strategy=SearchStrategy.LINEAR,
         program_md="",
         specialist_definitions={},
         critic_enabled=False,

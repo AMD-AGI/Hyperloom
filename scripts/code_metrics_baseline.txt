@@ -112,7 +112,7 @@ cyclomatic-complexity src/kernelforge/knowledge/pr_knowledge/search.py::discover
 cyclomatic-complexity src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._render_analysis_evidence_for_implementer 29
 cyclomatic-complexity src/kernelforge/loop/analysis_refresh_policy.py::decide_analysis_refresh 25
 cyclomatic-complexity src/kernelforge/loop/archive.py::CandidateArchive._reconcile_storage 23
-cyclomatic-complexity src/kernelforge/loop/campaign_config.py::create_campaign_config 24
+cyclomatic-complexity src/kernelforge/loop/campaign_config.py::create_campaign_config 22
 cyclomatic-complexity src/kernelforge/loop/campaign_config.py::infer_kernel_backend 21
 cyclomatic-complexity src/kernelforge/loop/campaign_setup.py::resolve_campaign 26
 cyclomatic-complexity src/kernelforge/loop/external_artifacts.py::ExternalArtifactTransaction._sync_tree 22
@@ -582,7 +582,7 @@ function-lines src/kernelforge/cli/forge_loop_command.py::_RunReporter.build_res
 function-lines src/kernelforge/cli/forge_loop_command.py::_collect_pr_kb_context 52
 function-lines src/kernelforge/cli/forge_loop_command.py::_prepare_measurement_driver 58
 function-lines src/kernelforge/cli/forge_loop_command.py::_read_kb_warm_start 61
-function-lines src/kernelforge/cli/forge_loop_command.py::forge_loop 421
+function-lines src/kernelforge/cli/forge_loop_command.py::forge_loop 420
 function-lines src/kernelforge/cli/forge_rewrite_command.py::forge_rewrite 59
 function-lines src/kernelforge/config.py::Config.from_env 67
 function-lines src/kernelforge/evaluation/benchmark/baseline.py::check_baseline_against_reference 62
@@ -674,8 +674,7 @@ function-lines src/kernelforge/loop/analysis_runtime.py::AnalysisRuntimeMixin._r
 function-lines src/kernelforge/loop/archive.py::CandidateArchive._reconcile_storage 55
 function-lines src/kernelforge/loop/archive.py::CandidateArchive.record 60
 function-lines src/kernelforge/loop/archive.py::CandidateArchive.render_digest 66
-function-lines src/kernelforge/loop/campaign_config.py::CampaignConfig.from_dict 53
-function-lines src/kernelforge/loop/campaign_config.py::create_campaign_config 71
+function-lines src/kernelforge/loop/campaign_config.py::create_campaign_config 70
 function-lines src/kernelforge/loop/campaign_setup.py::resolve_campaign 55
 function-lines src/kernelforge/loop/external_artifacts.py::ExternalArtifactTransaction.__init__ 64
 function-lines src/kernelforge/loop/external_artifacts.py::ExternalArtifactTransaction.publish 59
