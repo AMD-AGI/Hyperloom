@@ -142,9 +142,6 @@ def resolve_anchor(trace_path: str | Path, anchor: KernelAnchor) -> AnchorReport
         raise AnchorResolutionError(f"no GPU kernel events in {trace_path}: nothing to anchor on")
 
     wanted = collapse_whitespace(anchor.name)
-    if not wanted:
-        raise AnchorResolutionError("empty kernel name")
-
     sites: list[tuple[tuple[Any, Any], int]] = []
     for key, ordered in streams.items():
         for index, event in enumerate(ordered):
