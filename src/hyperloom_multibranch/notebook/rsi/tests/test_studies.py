@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The MB2 studies: the branch cap replay (Q7), and the command that runs every study on what MB1 left."""
+"""The command that runs every study on what past sessions left."""
 
 from __future__ import annotations
 
@@ -12,8 +12,9 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeArchive
-from hyperloom_multibranch.notebook.rsi.studies import CAPS, branch_cap_study, main
-from hyperloom_multibranch.notebook.rsi.tests.trees import TASK, branch, tree
+from hyperloom_multibranch.notebook.rsi.replay import ARCHIVE, OLD_RULE
+from hyperloom_multibranch.notebook.rsi.studies import main
+from hyperloom_multibranch.notebook.rsi.tests.trees import branch, tree
 from hyperloom_multibranch.notebook.tests.factories import FakeClock
 from hyperloom_multibranch.notebook.tests.sessions import scripted_session
 
@@ -21,38 +22,12 @@ from hyperloom_multibranch.notebook.tests.sessions import scripted_session
 def _wide(session_id: str) -> SearchTree:
     """Four branches opened at once, two of which ever commit."""
 
-    paying = (branch("s1", [(1800.0, 5.0)]), branch("s2", [(1800.0, 3.0)]))
-    return tree(session_id, *paying, branch("s3", []), branch("s4", []))
-
-
-def test_the_cap_that_replays_best_is_recommended() -> None:
-    study = branch_cap_study([_wide("a"), _wide("b")], TASK, caps=(2, 3, 4))
-    utilities = {row.policy.branch_cap: row.utility for row in study.rows}
-
-    # A cap of 2 keeps both paying branches and saves the GPU time of the other two.
-    assert utilities[2] == pytest.approx(5.0 + 0.5 * 5.0 / 8.0 * 8.0)
-    assert utilities[2] > utilities[3] > utilities[4] == pytest.approx(5.0)
-    assert study.recommended == 2 and study.note.startswith("Consider a branch cap of 2")
-
-
-def test_of_caps_that_replay_alike_the_smaller_is_recommended() -> None:
-    narrow = [tree("a", branch("s1", [(1800.0, 5.0)])), tree("b", branch("s1", [(1800.0, 4.0)]))]
-
-    assert branch_cap_study(narrow, TASK, caps=(4, 2)).recommended == 2
-
-
-def test_too_few_similar_sessions_give_no_advice() -> None:
-    study = branch_cap_study([_wide("a")], TASK)
-
-    assert study.recommended is None and study.note.startswith("Too little evidence")
-    assert [row.policy.branch_cap for row in study.rows] == list(CAPS)
-
-
-def test_the_study_renders_a_table_and_the_advice() -> None:
-    text = branch_cap_study([_wide("a"), _wide("b")], TASK, caps=(2,)).render()
-
-    assert "| branch cap | utility | similar sessions' worth |" in text
-    assert "| 2 | 7.50 | 2.0 |" in text and text.endswith("Advice only; the cap is the scheduler's (Q7).")
+    tested = (900.0, 1800.0, 2700.0)
+    paying = (
+        branch("s1", [(1800.0, 5.0)], judged_times=tested),
+        branch("s2", [(1800.0, 3.0)], judged_times=tested),
+    )
+    return tree(session_id, *paying, branch("s3", [], judged_times=tested), branch("s4", [], judged_times=tested))
 
 
 @pytest.fixture
@@ -63,7 +38,7 @@ def archive(tmp_path: Path) -> Path:
     return root
 
 
-def test_the_command_runs_the_calibration_and_the_branch_cap_study_on_an_archive(
+def test_the_command_runs_the_calibration_and_the_scheduling_replay_on_an_archive(
     archive: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     log = tmp_path / "frontier.jsonl"
@@ -71,13 +46,17 @@ def test_the_command_runs_the_calibration_and_the_branch_cap_study_on_an_archive
 
     assert main(["frontier", "--archive", str(archive), "--log", f"a={log}"]) == 0
     calibrated = capsys.readouterr().out
-    assert main(["--json", "branch-cap", "--archive", str(archive), "--like", "a", "--caps", "2,4"]) == 0
-    study = json.loads(capsys.readouterr().out)
+    assert main(["--json", "scheduling", "--archive", str(archive), "--runs", "2", "--beyond", "pessimistic"]) == 0
+    replayed = json.loads(capsys.readouterr().out)
+    assert main(["scheduling", "--archive", str(archive), "--runs", "1"]) == 0
+    table = capsys.readouterr().out
 
     assert calibrated.startswith("Frontier calibration") and "Too little evidence" in calibrated
     assert "| bandit-rv |" in calibrated and "| bandit UCB, C=1.4 |" in calibrated
-    assert study["recommended"] == 2 and [row["policy"]["branch_cap"] for row in study["rows"]] == [2, 4]
-    assert study["rows"][0]["policy"]["stop_pct"] is None
+    assert [row["label"] for row in replayed["rows"]][:4] == [ARCHIVE, "h0", OLD_RULE, "stall-4"]
+    assert replayed["baseline"] == "h0"
+    assert (replayed["runs"], replayed["beyond"], replayed["sessions"]) == (2, "pessimistic", ["a", "b"])
+    assert table.startswith("Scheduling replay over 2 sessions, 1 runs each") and "| cap-6 |" in table
 
 
 def test_the_command_reads_the_stall_odds_and_every_sessions_stops_off_one_archive_or_more(
@@ -97,13 +76,13 @@ def test_the_command_reads_the_stall_odds_and_every_sessions_stops_off_one_archi
     assert [audit["session_id"] for audit in study["audits"]] == ["a", "b"]
 
 
-def test_a_study_that_cannot_run_says_why(archive: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["branch-cap", "--archive", str(archive), "--like", "nowhere"]) == 2
-    assert "holds no session 'nowhere'" in capsys.readouterr().err
+def test_a_study_that_cannot_run_says_why(archive: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["scheduling", "--archive", str(tmp_path / "empty")]) == 2
+    assert "the archives hold no session to replay" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         main(["frontier", "--archive", str(archive), "--log", "no-separator"])
     with pytest.raises(SystemExit):
-        main(["branch-cap", "--archive", str(archive), "--like", "a", "--caps", "two"])
+        main(["scheduling", "--archive", str(archive), "--beyond", "anywhere"])
 
 
 def test_the_command_evaluates_a_sessions_learnings_and_the_dispersion_prior(
