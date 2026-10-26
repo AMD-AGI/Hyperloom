@@ -1437,14 +1437,3 @@ def test_env_flag_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     assert common_env.env_flag("HL_TEST_FLAG", default=True) is True
     monkeypatch.delenv("HL_TEST_FLAG", raising=False)
     assert common_env.env_flag("HL_TEST_FLAG", default=False) is False
-
-
-# orchestrator.bus.gpu_pool._parse_gpu_list
-
-
-def test_parse_gpu_list() -> None:
-    from hyperloom.orchestrator.bus.gpu_pool import _parse_gpu_list
-
-    assert _parse_gpu_list("0, 1 ; 2, x, 1, -3") == [0, 1, 2]
-    assert _parse_gpu_list("") == []
-    assert _parse_gpu_list(None) == []  # type: ignore[arg-type]

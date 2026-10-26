@@ -403,7 +403,7 @@ async def test_integrate_deferred_when_lanes_busy(session_dir, monkeypatch):
     try:
         # Hold the integrate lanes with an external holder.
         lanes = list(ACTION_CATALOGUE["integrate"].requires_lanes)
-        held = await c.locks.try_acquire_many(
+        held = await c.locks.acquire_many(
             lanes,
             holder_id="blocker",
             task_id="blocker",
