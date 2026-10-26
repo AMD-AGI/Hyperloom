@@ -314,7 +314,7 @@ def predictor_budget(state: SessionView) -> PhaseBudget:
     )
 
 
-def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any) -> None:
+def _record_run(coord: Any, task: "Task | str", *, role: str, status: str, **fields: Any) -> None:
     """Record one specialist dispatch, or its completion.
 
     ``role`` is one of ``discovery``, ``authoring`` or ``config`` -- not
@@ -333,7 +333,7 @@ def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any)
         ROLE_CONFIG,
     )
 
-    task_id = str(task if isinstance(task, str) else getattr(task, "task_id", "") or "")
+    task_id = task if isinstance(task, str) else task.task_id
     if not task_id:
         return
     fields.setdefault("dispatched_at" if status == "dispatched" else "completed_at", now_iso("seconds"))
@@ -2593,7 +2593,7 @@ class FrameworkPhase(ProposalBench):
         }
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
-        task = await self.tasks.create_or_return_existing(
+        task, existing = await self.tasks.create_or_return_existing(
             TaskSpec(
                 kind="specialist",
                 params=params,
@@ -2605,16 +2605,18 @@ class FrameworkPhase(ProposalBench):
                 dispatch_class="coordinator",
             ),
         )
-        _record_run(
-            self,
-            task,
-            role="discovery",
-            status="dispatched",
-            domain=str(params.get("domain") or ""),
-            gap_canonical_id=str(params.get("gap_canonical_id") or ""),
-            reason=reason,
-            parallelism=len(lanes or ()),
-        )
+        if not existing:
+            # A row the key already names was recorded when it was dispatched; recording it again would reopen it.
+            _record_run(
+                self,
+                task,
+                role="discovery",
+                status="dispatched",
+                domain=str(params.get("domain") or ""),
+                gap_canonical_id=str(params.get("gap_canonical_id") or ""),
+                reason=reason,
+                parallelism=len(lanes or ()),
+            )
         log.info("FRAMEWORK: dispatched candidate discovery (reason=%s)", reason)
         return True
 
