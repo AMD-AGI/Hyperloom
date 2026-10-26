@@ -158,11 +158,17 @@ def _decision(record: TestRecord) -> str:
     return "keep" if record.conclusion in COMMITTING else "revert"
 
 
-def _accuracy(record: TestRecord) -> dict[str, object] | None:
-    scores = [value.score for value in record.result.accuracy] if record.result is not None else []
-    if not (record.request.accuracy or scores or record.conclusion is Conclusion.ACCURACY_FAILED):
-        return None
+def _accuracy(record: TestRecord, others: Sequence[TestRecord] = ()) -> dict[str, object] | None:
+    """The accuracy of the tests ``record``'s judgement rests on, its own reading first, the rest found among
+    ``others``: a confirm's eval stands for an explore that skipped its own."""
+
     judged = record.judgement
+    behind = set(judged.request_ids) - {record.request_id} if judged is not None else set()
+    readings = [record, *(other for other in others if other.request_id in behind)]
+    scores = [value.score for reading in readings if reading.result is not None for value in reading.result.accuracy]
+    asked = any(reading.request.accuracy for reading in readings)
+    if not (asked or scores or record.conclusion is Conclusion.ACCURACY_FAILED):
+        return None
     passed = record.conclusion is not Conclusion.ACCURACY_FAILED and (
         judged is None or judged.accuracy is AccuracyVerdict.PASSED
     )
@@ -230,7 +236,7 @@ def candidate_row(
         "conclusion": record.conclusion.value if record.conclusion is not None else "",
         "baseline_value": snapshot.value_of(request.parent_commit).get(metric),
         **_measured(record, metric),
-        "accuracy": _accuracy(record),
+        "accuracy": _accuracy(record, snapshot.records),
         "error_class": (result.failure_reason or "") if failed else "",
         "gpu_seconds": result.gpu_seconds,
     }

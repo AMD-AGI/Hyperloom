@@ -25,7 +25,13 @@ from hyperloom.contracts.recipe import (
 from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict
 from hyperloom_multibranch.contracts.notebook import NotRecorded
-from hyperloom_multibranch.contracts.notebook.peers import BranchLogEntry, BranchLogType, TestKind, Validity
+from hyperloom_multibranch.contracts.notebook.peers import (
+    AccuracyValue,
+    BranchLogEntry,
+    BranchLogType,
+    TestKind,
+    Validity,
+)
 from hyperloom_multibranch.contracts.notebook.records import (
     BranchLogRecord,
     Learning,
@@ -351,6 +357,29 @@ def test_a_test_whose_eval_did_not_run_exports_its_accuracy_as_not_passed(snapsh
     rows = _rows(dataclasses.replace(snapshot, records=tuple(map(unmeasured, snapshot.records))))
 
     assert rows["r1"]["accuracy"] == {"required": True, "passed": False, "value": None}
+
+
+def test_a_commit_whose_explore_skipped_its_eval_exports_the_accuracy_its_confirm_measured(
+    snapshot: NotebookSnapshot,
+) -> None:
+    (explore,) = [record for record in snapshot.records if record.request_id == "r1"]
+    assert explore.judgement is not None
+    confirm = TestRecord(
+        dataclasses.replace(explore.request, request_id="r1c", accuracy=True),
+        dataclasses.replace(result("r1c"), accuracy=(AccuracyValue("gsm8k", "exact_match", 0.93),)),
+        None,
+        None,
+    )
+    judged = dataclasses.replace(explore.judgement, request_ids=("r1", "r1c"), accuracy=AccuracyVerdict.PASSED)
+    skipped = dataclasses.replace(
+        explore, request=dataclasses.replace(explore.request, accuracy=False), judgement=judged
+    )
+    records = (*(skipped if record.request_id == "r1" else record for record in snapshot.records), confirm)
+
+    rows = _rows(dataclasses.replace(snapshot, records=records))
+
+    assert rows["r1"]["accuracy"] == {"required": True, "passed": True, "value": 0.93}
+    assert "r1c" not in rows
 
 
 def test_a_blocked_gain_sent_for_repair_exports_the_accuracy_it_failed() -> None:
