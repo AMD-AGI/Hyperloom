@@ -176,28 +176,35 @@ def _coerce_per_conc(raw: Any) -> dict[str, Any] | None:
     return row
 
 
+def _normalize_competitor_target(raw: Any) -> dict[str, Any] | None:
+    """The competitor target keeping only sourced per-conc rows; ``None`` when malformed or sourceless."""
+    if not isinstance(raw, dict):
+        return None
+    per_conc_in = raw.get("per_conc") or []
+    if not isinstance(per_conc_in, list):
+        return None
+    per_conc = [r for r in (_coerce_per_conc(x) for x in per_conc_in) if r]
+    if not per_conc:
+        return None
+    return {
+        "gpu": str(raw.get("gpu") or "").strip(),
+        "model": str(raw.get("model") or "").strip(),
+        "framework": str(raw.get("framework") or "").strip(),
+        "precision": str(raw.get("precision") or "").strip(),
+        "per_conc": per_conc,
+        "notes": str(raw.get("notes") or "").strip(),
+        **{key: raw[key] for key in ("benchmark_mode", "throughput_basis") if raw.get(key)},
+    }
+
+
 def write_competitor_target(
     session_dir: Path,
     target: Any,
 ) -> bool:
     """Persist ``competitor_target.json`` after dropping sourceless rows; ``True`` when ≥1 sourced row was written."""
-    if not isinstance(target, dict):
+    out = _normalize_competitor_target(target)
+    if out is None:
         return False
-    per_conc_in = target.get("per_conc") or []
-    if not isinstance(per_conc_in, list):
-        per_conc_in = []
-    per_conc = [r for r in (_coerce_per_conc(x) for x in per_conc_in) if r]
-    if not per_conc:
-        return False
-    out = {
-        "gpu": str(target.get("gpu") or "").strip(),
-        "model": str(target.get("model") or "").strip(),
-        "framework": str(target.get("framework") or "").strip(),
-        "precision": str(target.get("precision") or "").strip(),
-        "per_conc": per_conc,
-        "notes": str(target.get("notes") or "").strip(),
-        **{key: target[key] for key in ("benchmark_mode", "throughput_basis") if target.get(key)},
-    }
     try:
         _common_io.atomic_write_text(
             session_paths.competitor_target_json(session_dir),
@@ -219,23 +226,7 @@ def load_competitor_target(session_dir: Path) -> dict[str, Any] | None:
     except (OSError, ValueError):
         log.warning("competitor_target: failed to read %s", path)
         return None
-    if not isinstance(data, dict):
-        return None
-    per_conc_in = data.get("per_conc") or []
-    if not isinstance(per_conc_in, list):
-        return None
-    per_conc = [r for r in (_coerce_per_conc(x) for x in per_conc_in) if r]
-    if not per_conc:
-        return None
-    return {
-        "gpu": str(data.get("gpu") or "").strip(),
-        "model": str(data.get("model") or "").strip(),
-        "framework": str(data.get("framework") or "").strip(),
-        "precision": str(data.get("precision") or "").strip(),
-        "per_conc": per_conc,
-        "notes": str(data.get("notes") or "").strip(),
-        **{key: data[key] for key in ("benchmark_mode", "throughput_basis") if data.get(key)},
-    }
+    return _normalize_competitor_target(data)
 
 
 def _match_target_row(
@@ -371,11 +362,11 @@ def gap_for_state(target: dict[str, Any] | None, state: Any) -> dict[str, Any] |
     )
 
 
-def full_gap_summary(
-    gap: dict[str, Any] | None,
-    *,
-    tpot_ratio_threshold: float = 1.3,
-) -> str:
+# TPOT ratio (ours/target) above which TPOT is called out as the dominant gap.
+_TPOT_PRIORITY_RATIO = 1.3
+
+
+def full_gap_summary(gap: dict[str, Any] | None) -> str:
     """Render an advisory \"External target gap\" block (empty when no gap; advisory only, never gates)."""
     if not gap:
         return ""
@@ -402,7 +393,7 @@ def full_gap_summary(
             lines.append(f"- TPOT ratio (ours/target): {tr:.2f}x")
     if gap.get("source"):
         lines.append(f"- target source: {gap['source']}")
-    if tr is not None and tr > tpot_ratio_threshold:
+    if tr is not None and tr > _TPOT_PRIORITY_RATIO:
         lines.append(
             "- Priority: TPOT is the dominant gap — favor decode-kernel, "
             "comm-overlap, MTP, and quantized-allreduce directions to cut "
@@ -421,9 +412,6 @@ _LATENCY_DIRECTION_KEYWORDS: tuple[str, ...] = (
     "comm",
     "overlap",
     "allreduce",
-    "all_reduce",
-    "quantized_allreduce",
-    "cuda_graph",
     "cudagraph",
     "fused",
     "fuse",
@@ -511,13 +499,15 @@ def match_variants_to_priors(
     return out
 
 
+_PRIORS_MAX_ROWS = 12
+_PRIORS_MAX_HINTS_PER_ROW = 3
+
+
 def priors_match_summary(
     variants: list[dict[str, Any]],
     hints: list[dict[str, Any]],
     *,
     primary_gap: str | None = None,
-    max_rows: int = 12,
-    max_hints_per_row: int = 3,
 ) -> str:
     """Render an advisory block flagging variants that match priors (empty when none; advisory ordering only).
 
@@ -535,26 +525,25 @@ def priors_match_summary(
         + "dominant external gap. Treat as a reason to TRY THESE EARLIER — "
         + "advisory ordering only, NOT a score, NOT a gate.",
     ]
-    for name in sorted(matches)[:max_rows]:
+    for name in sorted(matches)[:_PRIORS_MAX_ROWS]:
         info = matches[name]
         tags: list[str] = []
         if info.get("latency_aligned"):
             tags.append("aligns-with-latency-gap")
         hints = info.get("hints") or []
-        for what in hints[:max_hints_per_row]:
+        for what in hints[:_PRIORS_MAX_HINTS_PER_ROW]:
             short = what if len(what) <= 60 else what[:57] + "..."
             tags.append(f"hint:{short}")
-        if len(hints) > max_hints_per_row:
-            tags.append(f"+{len(hints) - max_hints_per_row} more")
+        if len(hints) > _PRIORS_MAX_HINTS_PER_ROW:
+            tags.append(f"+{len(hints) - _PRIORS_MAX_HINTS_PER_ROW} more")
         lines.append(f"- {name}: " + "; ".join(tags))
     return "\n".join(lines)
 
 
-def summarise_for_prompt(
-    session_dir: Path,
-    *,
-    max_entries: int = 8,
-) -> str:
+_PROMPT_MAX_HINTS = 8
+
+
+def summarise_for_prompt(session_dir: Path) -> str:
     """Compact advisory block of proven priors for the orchestration prompt (empty when none; advisory only)."""
     hints = load_hints(session_dir)
     if not hints:
@@ -563,11 +552,11 @@ def summarise_for_prompt(
         "Proven priors collected by the research scout. Treat as advisory "
         + "hints to try earlier — each carries a source.",
     ]
-    for h in hints[:max_entries]:
+    for h in hints[:_PROMPT_MAX_HINTS]:
         impact = h["expected_impact"] or "?"
         risk = h["accuracy_risk"] or "?"
         lines.append(f"- {h['what']} (impact={impact}, accuracy_risk={risk}, source={h['source']})")
-    extra = len(hints) - max_entries
+    extra = len(hints) - _PROMPT_MAX_HINTS
     if extra > 0:
         lines.append(f"... and {extra} more in research_hints.md.")
     return "\n".join(lines)
