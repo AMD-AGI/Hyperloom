@@ -510,7 +510,7 @@ def main() -> int:
     for short_id, ref in refs:
         try:
             out[short_id] = ray.get(ref, timeout=get_timeout)
-        except Exception as exc:  # noqa: BLE001
+        except (ray.exceptions.RayError, OSError) as exc:
             _log(f"node {short_id}: kill FAILED: {type(exc).__name__}: {exc}")
             out[short_id] = {"error": str(exc)}
 
