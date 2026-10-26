@@ -620,10 +620,11 @@ def _escalate(hint: str) -> Intent:
 
 
 @pytest.mark.asyncio
-async def test_escalate_invalid_hint_broadcasts_only(coord: Coordinator) -> None:
-    await coord.router._handle_escalate_strategy_change("orchestration", _escalate("bogus"))
-    # A bogus hint must not be pending (it was neither consumed nor stored).
-    assert coord.shared_state.pending_escalate_hint != "bogus"
+@pytest.mark.parametrize("hint", ["bogus", "skip_to_close"])
+async def test_escalate_hint_outside_the_vocab_is_denied(coord: Coordinator, hint: str) -> None:
+    await coord.router._handle_escalate_strategy_change("orchestration", _escalate(hint))
+    assert coord.shared_state.pending_escalate_hint == ""
+    assert coord.shared_state.policy_denial_history[-1]["rule"] == "escalate_hint_not_in_vocab"
 
 
 @pytest.mark.asyncio
@@ -657,46 +658,6 @@ async def test_escalate_skip_to_kernel_outside_framework_agent_is_dropped(coord:
         _escalate("skip_to_kernel"),
     )
     assert coord.shared_state.pending_escalate_hint == ""
-
-
-def _three_hour_session(coord: Coordinator, *, baseline_tput: float, spent_sec: float) -> None:
-    """A 180-minute FRAMEWORK_AGENT session, whose cycle floor is 5400s, with ``spent_sec`` charged."""
-    state = coord.shared_state
-    state.phase = "FRAMEWORK_AGENT"
-    state.max_minutes = 180
-    state.leg_anchor_unix = 0.0
-    state.elapsed_charged_sec = spent_sec
-    state.baseline_tput = baseline_tput
-
-
-@pytest.mark.asyncio
-async def test_escalate_skip_to_close_with_baseline_and_budget_is_denied(coord: Coordinator) -> None:
-    """A measured baseline and budget for another cycle contradict abandoning the run."""
-    _three_hour_session(coord, baseline_tput=1078.29, spent_sec=1800.0)
-    await coord.router._handle_escalate_strategy_change(
-        "orchestration",
-        _escalate("skip_to_close"),
-    )
-    assert coord.shared_state.pending_escalate_hint == ""
-    assert coord.shared_state.policy_denial_history[-1]["rule"] == "skip_to_close_contradicted"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("baseline_tput", "spent_sec"),
-    [(0.0, 1800.0), (1078.29, 10200.0)],
-    ids=["no_baseline", "budget_below_cycle_floor"],
-)
-async def test_escalate_skip_to_close_the_facts_admit_is_deferred(
-    coord: Coordinator, baseline_tput: float, spent_sec: float
-) -> None:
-    """Without a baseline, or without budget for another cycle, the close is still the agent's to request."""
-    _three_hour_session(coord, baseline_tput=baseline_tput, spent_sec=spent_sec)
-    await coord.router._handle_escalate_strategy_change(
-        "orchestration",
-        _escalate("skip_to_close"),
-    )
-    assert coord.shared_state.pending_escalate_hint == "skip_to_close"
 
 
 # -- maybe_autosubmit_specialist_patches ----------------------------------

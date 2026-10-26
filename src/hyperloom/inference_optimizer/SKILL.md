@@ -422,9 +422,8 @@ brief:
   other lever. **Both arms dry advances the phase** via
   `optimize_no_more_leverage`. The LLM may also emit
   `escalate_strategy_change{hint='skip_to_kernel'}` when it judges
-  further effort unproductive. `skip_to_close` is not a phase advance: it abandons
-  the remaining budget, so it is denied (`skip_to_close_contradicted`) once a
-  baseline is measured and the remaining budget still funds another cycle.
+  further effort unproductive. No hint ends the run; a hint outside the closed
+  vocabulary is denied (`escalate_hint_not_in_vocab`).
 
 ### FRAMEWORK_AGENT phase — the optimisation phase
 

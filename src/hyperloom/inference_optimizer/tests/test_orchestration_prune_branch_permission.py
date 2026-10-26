@@ -102,7 +102,7 @@ def test_kernel_cannot_emit_escalate_strategy_change(gate):
             "kernel_agent",
             Intent(
                 type=IntentType.ESCALATE_STRATEGY_CHANGE,
-                payload={"next_action_hint": "skip_to_close"},
+                payload={"next_action_hint": "skip_to_kernel"},
             ),
         )
     assert exc.value.rule == "role"

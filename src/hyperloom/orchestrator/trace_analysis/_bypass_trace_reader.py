@@ -681,6 +681,15 @@ class _TraceBuffers:
             self.corr_to_launch_geom[corr] = (grid, block)
         self.k_events.append((name, dur, corr, ts, end))
 
+    def in_window(
+        self, window: tuple[float, float] | None
+    ) -> tuple[list[tuple[str, float, Any, float, float]], list[tuple[float, float, float]]]:
+        """Return the kernel and memcpy/memset events that start inside ``window``; all of them when it is None."""
+        if window is None:
+            return self.k_events, self.m_events
+        ws, we = window
+        return [e for e in self.k_events if ws <= e[3] < we], [e for e in self.m_events if ws <= e[1] < we]
+
     def launching_op(self, corr: Any) -> tuple[str, dict[str, Any]]:
         """Return the name and meta of the cpu_op that launched correlation ``corr``, both empty when unlinked."""
         extid = self.corr_to_extid.get(corr)
@@ -738,18 +747,16 @@ def _finalize(
     emit_launches: bool = False,
 ) -> dict[str, Any]:
     """Build timeline + op/kernel aggregates from buffered device events."""
-    k_events, m_events = buffers.k_events, buffers.m_events
+    k_events, m_events = buffers.in_window(window)
     total_ms = 0.0
+    kernel_intervals = _clipped([(e[3], e[4]) for e in k_events], window)
+    memcpy_intervals = _clipped([(e[1], e[2]) for e in m_events], window)
     if window is not None:
         ws, we = window
-        k_events = [e for e in k_events if ws <= e[3] < we]
-        m_events = [e for e in m_events if ws <= e[1] < we]
         # Steady scope: total is the representative step's wall span, so idle% reflects gaps within the step rather
         # than the active-kernel envelope.
         total_ms = max(0.0, (we - ws) / 1000.0)
-    kernel_intervals = _clipped([(e[3], e[4]) for e in k_events], window)
-    memcpy_intervals = _clipped([(e[1], e[2]) for e in m_events], window)
-    if window is None and (envelope := kernel_intervals + memcpy_intervals):
+    elif envelope := kernel_intervals + memcpy_intervals:
         total_ms = (max(end for _, end in envelope) - min(start for start, _ in envelope)) / 1000.0
     kernel_union_ms = _union_ms(kernel_intervals)
     busy_ms = _union_ms(kernel_intervals + memcpy_intervals)

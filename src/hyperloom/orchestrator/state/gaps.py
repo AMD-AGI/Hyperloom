@@ -11,6 +11,7 @@ from hashlib import sha1
 from typing import TYPE_CHECKING, Any
 
 from ..collaborator import CoordinatorCollaborator
+from hyperloom.common.coerce import first_text
 from hyperloom.common.timeutil import now_iso
 
 from ._shared_state import gap_rows
@@ -199,15 +200,21 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         for row in state.last_action_failures or []:
             if not isinstance(row, dict):
                 continue
-            action = str(row.get("action") or "").strip() or "unknown"
-            err = str(row.get("error_class") or "").strip() or "unknown_error"
-            variant = str(row.get("variant_name") or "").strip()
-            # Variant discriminator keeps distinct crash causes in distinct gaps.
-            key = f"{action}::{err}::{variant}" if variant else f"{action}::{err}"
+            action = first_text(row.get("action")) or "unknown"
+            err = first_text(row.get("error_class")) or "unknown_error"
+            variant = first_text(row.get("variant_name"))
             layer, domain = self._gap_layer_for_action(action, str(getattr(self.shared_state, "framework", "") or ""))
             excerpt = str(row.get("error_excerpt") or "")
             detail = next((ln.strip() for ln in excerpt.splitlines() if ln.strip()), err)[:200]
-            symptom = f"{action}/{variant} fails: {detail}" if variant else f"{action} repeatedly fails with {detail}"
+            # Variant discriminator keeps distinct crash causes in distinct gaps.
+            if variant:
+                key = f"{action}::{err}::{variant}"
+                symptom = f"{action}/{variant} fails: {detail}"
+                cid_variant = f":{variant}"
+            else:
+                key = f"{action}::{err}"
+                symptom = f"{action} repeatedly fails with {detail}"
+                cid_variant = ""
             attempt = {
                 "action": action,
                 "variant_name": variant,
@@ -218,7 +225,6 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             if key in seen_failures:
                 seen_failures[key]["attempts"].append(attempt)
             else:
-                cid_variant = f":{variant}" if variant else ""
                 seen_failures[key] = {
                     "canonical_id": f"{workload_id}#fail:{action}:{err}{cid_variant}",
                     "symptom": symptom,
@@ -229,27 +235,30 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
                     "attempts": [attempt],
                 }
         gaps.extend(seen_failures.values())
+        gaps.extend(self._explore_plateau_gaps(workload_id))
+        return gaps
 
+    def _explore_plateau_gaps(self, workload_id: str) -> list[dict[str, Any]]:
+        """The explore-plateau gap when grid rounds stopped promoting, else none."""
+        state = self.shared_state
         no_promote = int(state.params_no_promote_streak or 0)
-        explore_search = state.explore_search or {}
-        winners_hist = []
-        if isinstance(explore_search, dict):
-            winners_hist = list(explore_search.get("winners_history") or [])
+        # Every writer of explore_search stores a dict, and a loaded state rebuilds it as one.
+        winners_hist = list(state.explore_search.get("winners_history") or [])
         recent_promotions = sum(
             1 for w in winners_hist[-5:] if isinstance(w, dict) and float(w.get("gain_pct") or 0.0) > 0.0
         )
-        if no_promote >= 3 and recent_promotions == 0:
-            gaps.append(
-                {
-                    "canonical_id": f"{workload_id}#explore_plateau",
-                    "symptom": (f"{no_promote} consecutive grid rounds without a new current_best"),
-                    "layer": "framework",
-                    "severity": "high" if no_promote >= 6 else "medium",
-                    "domain_hint": self._framework_authoring_domain(),
-                    "source": "attempts",
-                }
-            )
-        return gaps
+        if no_promote < 3 or recent_promotions != 0:
+            return []
+        return [
+            {
+                "canonical_id": f"{workload_id}#explore_plateau",
+                "symptom": (f"{no_promote} consecutive grid rounds without a new current_best"),
+                "layer": "framework",
+                "severity": "high" if no_promote >= 6 else "medium",
+                "domain_hint": self._framework_authoring_domain(),
+                "source": "attempts",
+            }
+        ]
 
     def seed_gaps_from_research_hints(self) -> None:
         """Inject research hints as advisory gaps[] seeds (idempotent)."""

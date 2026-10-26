@@ -14,7 +14,6 @@ from typing import Any
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
-from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
 from ..collaborator import CoordinatorCollaborator
 from hyperloom.plugs import progress as _progress
 
@@ -227,12 +226,6 @@ class MachinePhase(CoordinatorCollaborator):
         """Consume or discard the pending escalate hint, according to what drove this transition."""
         state = self.shared_state
         if "hint" in move.evidence:
-            state.consume_pending_escalate_hint()
-        elif (
-            move.from_phase.strip().upper() == _phase_state.PHASE_SWEEP
-            and str(state.pending_escalate_hint or "").strip() == ESCALATE_HINT_SKIP_TO_CLOSE
-        ):
-            # SWEEP already had an honest closeout, so skip_to_close was suppressed in _global_terminal.
             state.consume_pending_escalate_hint()
         elif state.pending_escalate_hint:
             # A hint speaks for the phase it was emitted in; carried across a transition it did not drive, it would

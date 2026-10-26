@@ -122,8 +122,8 @@ UNCLASSIFIED_FAILURE: OutcomeId = OutcomeId.unclassified_failure  # #30 sentinel
 SUCCESS_TAGS: frozenset[OutcomeId | None] = frozenset({None, OutcomeId.eval_gap_accepted})
 
 
-# Ask-class IDs that participate in Python-driven retry (the only outcomes that increment
-# ``requantize_attempts.txt``).
+# Ask-class IDs that participate in Python-driven retry (the only outcomes that use up one of a run's
+# ``max_requantize_attempts``).
 ASK_RETRYABLE: frozenset[OutcomeId] = frozenset(
     {
         OutcomeId.exec_oom,  # #3

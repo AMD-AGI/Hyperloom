@@ -191,12 +191,11 @@ def sanitize_publish_server_args(value: str) -> str:
             skip_value = not separator
             continue
         path_operand = operand if separator else token
-        if _is_absolute_path_text(path_operand):
-            if not separator and safe and safe[-1].startswith("-") and "=" not in safe[-1]:
-                safe.pop()
-            continue
-        redacted = redact_secret_values(token)
-        if redacted != token or "[LOCAL_PATH]" in _redact_embedded_paths(token):
+        if (
+            _is_absolute_path_text(path_operand)
+            or redact_secret_values(token) != token
+            or "[LOCAL_PATH]" in _redact_embedded_paths(token)
+        ):
             if not separator and safe and safe[-1].startswith("-") and "=" not in safe[-1]:
                 safe.pop()
             continue
