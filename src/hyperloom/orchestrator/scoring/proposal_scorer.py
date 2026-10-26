@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
+from hyperloom.common.jsonio import extract_last_json_with_key
 from hyperloom.common.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     LLMConfigError,
@@ -62,13 +63,6 @@ Rules:
 - "reason" MUST be <= 15 words. Keep it terse to keep the reply short.
 - Do not add keys other than "score" and "reason".
 """.strip()
-
-
-def _extract_scores_json(text: str) -> dict[str, Any] | None:
-    """Pull the last valid ``{"scores": {...}}`` object out of a reply."""
-    from hyperloom.common.jsonio import extract_last_json_with_key
-
-    return extract_last_json_with_key(text, "scores")
 
 
 @dataclass(frozen=True)
@@ -285,7 +279,7 @@ class ProposalScorer:
         self._trace_scorer_llm_call(model, usage, keys, latency_ms=latency_ms, call_id=call_id)
         # Persist the full (redacted) prompt + reply alongside the token row.
         self._record_scorer_conversation(model, full_prompt, text, keys, call_id=call_id)
-        parsed = _extract_scores_json(text)
+        parsed = extract_last_json_with_key(text, "scores")
         if parsed is None:
             raise RuntimeError(f"no parseable scores JSON (reply_chars={len(text)})")
         return _normalise_model_scores(parsed, scoring_entries=scoring_entries)
@@ -439,4 +433,4 @@ class ProposalScorer:
         return {"scale": "0-10", "models": models_out, "errors": errors}
 
 
-__all__ = ["ProposalScorer", "DEFAULT_SCORER_MODELS", "_extract_scores_json"]
+__all__ = ["ProposalScorer", "DEFAULT_SCORER_MODELS"]

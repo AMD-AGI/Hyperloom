@@ -128,6 +128,17 @@ class TestExtractLastJsonMatching:
 
 
 class TestExtractLastJson:
+    def test_no_match_returns_none(self):
+        assert extract_last_json_with_key("", "scores") is None
+        assert extract_last_json_with_key("no json here", "scores") is None
+        assert extract_last_json_with_key('{"foo": 1, "scores_x": 2}', "scores") is None
+
+    def test_fenced_and_bare_with_trailing_prose(self):
+        fenced = '```json\n{"scores": {"proposal_0": {"score": 1}}}\n```'
+        assert extract_last_json_with_key(fenced, "scores") == {"scores": {"proposal_0": {"score": 1}}}
+        bare = 'here {"scores": {"proposal_0": {"score": 2}}} thanks'
+        assert extract_last_json_with_key(bare, "scores") == {"scores": {"proposal_0": {"score": 2}}}
+
     def test_meta_prefix_scores(self):
         text = '{"meta": "draft", "scores": {"proposal_0": {"score": 9, "reason": "ok"}}}'
         out = extract_last_json_with_key(text, "scores")
