@@ -50,6 +50,7 @@ from hyperloom_multibranch.toolbox.leased_toolbox import (
     with_short_prompts,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
+from hyperloom_multibranch.toolbox.native_builds import native_builds, with_native_plan
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, environment_short_prompts
 from hyperloom_multibranch.toolbox.tools import AsyncTool, tracelens_tool
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, ToolboxTuning
@@ -343,6 +344,8 @@ def build_hosted_toolbox(
 
     directory = Path(inputs.session_dir)
     acceptance = _acceptance_with_prompts(acceptance, options, os.environ, spec.model_dir)
+    native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest)
+    acceptance = with_native_plan(acceptance, native)
     grant = inputs.grant()
     parallel = _parallel_tests(grant, inputs.tp)
     config = HostedConfig(
@@ -351,7 +354,7 @@ def build_hosted_toolbox(
         spec=spec,
         runner_templates={inputs.tp: _runner_template(inputs)},
         rule_pack_digest=rule_pack_identity()["digest"],
-        create_envs=inputs.create_envs(),
+        create_envs={**inputs.create_envs(), **(native.runner_envs if native else {})},
         archive=session_archive(options.archive, directory),
         max_parallel_tests=parallel,
         poll_interval_sec=options.poll_interval_sec,
@@ -363,7 +366,7 @@ def build_hosted_toolbox(
         backend, directory, timeout_sec=options.timeout_sec, workload_kind=acceptance.workload_kind
     )
     toolbox = HostedToolbox(
-        session_stores(notebook, directory, inputs.run_id),
+        session_stores(notebook, directory, inputs.run_id, native.driver if native else None),
         executor,
         acceptance,
         tools=session_tools(options.tools if options.tools is not None else (tracelens_tool(),), notebook, directory),

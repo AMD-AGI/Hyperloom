@@ -22,7 +22,7 @@ import asyncio
 import logging
 import statistics
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from hyperloom.contracts.measurement import (
@@ -34,7 +34,10 @@ from hyperloom.contracts.measurement import (
     TestResult,
     Validity,
 )
+from hyperloom.measure.jit.native.needs import BuildNeed as CompiledBuildNeed
+from hyperloom.measure.jit.native.needs import BuildRef
 from hyperloom.measure.jit.native.key import BuildInputs
+from hyperloom.measure.jit.native.laying import manifest_sha256
 from hyperloom.measure.jit.native.record import READY, BuildRecord
 from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.measure.jit.native.trust import BuildRefused
@@ -197,6 +200,25 @@ class PendingBuilds:
 
     def charges(self, request_id: str) -> tuple[BuildCharge, ...]:
         return tuple(self._charges.get(request_id, {}).values())
+
+    def resolved(self, environment: object) -> object:
+        """``environment`` (what acceptance prepared) with the ready build of each ``runtime`` root named by the manifest
+        the store holds now, which the sheet carries; as it is when it needs no build.
+
+        Raises:
+            BuildInfraError: A build it needs is not ready in the store (it was when the test was queued).
+        """
+        compiled = getattr(environment, "environment", None)
+        needs: tuple[CompiledBuildNeed, ...] = getattr(compiled, "builds", ())
+        if not needs:
+            return environment
+        refs = []
+        for need in needs:
+            record = self._driver.lookup(need.inputs) if self._driver is not None else None
+            if record is None or record.status != READY:
+                raise BuildInfraError(f"the {need.inputs.component} build {need.inputs.key} is not ready in the store")
+            refs.append(BuildRef(need.root_id, need.inputs.key, manifest_sha256(record)))
+        return replace(environment, environment=compiled.with_builds(tuple(refs)))  # type: ignore[union-attr,type-var]
 
     def forget(self, request_id: str) -> None:
         """The test ran, ended or was taken back: it waits for nothing and its charges are written or dropped."""

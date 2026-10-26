@@ -19,6 +19,7 @@ from hyperloom.common.outside_facts import AITER_LOG_TUNED_CONFIG_ENV
 from hyperloom.contracts.measurement import TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError
 from hyperloom.measure.compile import CompiledEnvironment, EnvironmentCompiler
+from hyperloom.measure.jit.native.needs import NativePlan
 from hyperloom.measure.points import AcceptedMeasurement, CanonicalMeasurement, accept_measurement
 
 #: What every measured point sets ``AITER_LOG_TUNED_CONFIG`` to. aiter reads the variable as an integer and logs the hits
@@ -41,6 +42,10 @@ class _HitLogging:
     def __init__(self, compiler: EnvironmentCompiler) -> None:
         self._compiler = compiler
 
+    @property
+    def compiler(self) -> EnvironmentCompiler:
+        return self._compiler
+
     def compile(self, recipe: Recipe, action: RecipeDelta) -> CompiledEnvironment:
         environment = self._compiler.compile(recipe, action)
         own = environment.recipe.launch.envs.get(AITER_LOG_TUNED_CONFIG_ENV)
@@ -62,6 +67,11 @@ class HostedPlanner:
         self._compiler = _HitLogging(compiler)
         self._canonical = canonical
         self._root = points_root
+
+    def with_native(self, plan: NativePlan) -> HostedPlanner:
+        """This planner compiling with ``plan``, so a stack that changes native sources needs a build instead of being
+        refused; the compile cache starts empty, since a native stack compiles differently."""
+        return HostedPlanner(replace(self._compiler.compiler, native=plan), self._canonical, self._root)
 
     def plan(self, request: TestRequest, parent: Recipe) -> AcceptedMeasurement:
         out_dir = self._root / uuid.uuid4().hex

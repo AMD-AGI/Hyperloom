@@ -22,6 +22,7 @@ from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.sandbox.socket import SandboxProvider
 from hyperloom_multibranch.contracts.toolbox import BranchLease, MeasurementCapacity
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.toolbox.pending_builds import BuildDriver
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.long_context import LongContextSetup
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup
@@ -157,14 +158,18 @@ def session_archive(archive: ResultArchive | None, directory: Path) -> ResultArc
     return archive or DirResultArchive(directory / _ARCHIVE)
 
 
-def session_stores(notebook: LocalNotebook, directory: Path, run_id: str) -> ToolboxStores:
-    """The submit log below the session directory and the notebook as every port the toolbox writes to."""
+def session_stores(
+    notebook: LocalNotebook, directory: Path, run_id: str, builds: BuildDriver | None = None
+) -> ToolboxStores:
+    """The submit log below the session directory and the notebook as every port the toolbox writes to; ``builds`` drives
+    the native build store when the host configured one (without it no test waits for a build)."""
     return ToolboxStores(
         log=SubmissionLog(directory / _SUBMISSIONS, run_id),
         sink=notebook,  # type: ignore[arg-type]
         health=notebook,  # type: ignore[arg-type]
         claims=notebook,  # type: ignore[arg-type]
         records=notebook,  # type: ignore[arg-type]
+        builds=builds,
     )
 
 

@@ -32,7 +32,7 @@ import subprocess
 import tempfile
 import uuid
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Literal, NamedTuple, Protocol, TypeVar
 
@@ -54,6 +54,14 @@ from hyperloom.contracts.recipe import (
     RecipeError,
     apply,
 )
+from hyperloom.measure.jit.native.needs import (
+    BuildNeed,
+    BuildNotReady,
+    BuildRef,
+    NativePlan,
+    NativeStack,
+    check_runtime_sources,
+)
 from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.jit.modules import (
     CONFIG_FILE,
@@ -69,6 +77,7 @@ from hyperloom.measure.jit.modules import (
 )
 from hyperloom.measure.framework.table_modules import named_table_modules
 from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
+
 
 ATTACH_PLACEHOLDER = "${HL_ATTACH:%s}"
 #: ``KernelArtifact.metadata["load"] = {"via": ..., ...}`` says how the service picks an artifact up. Only one form is supported:
@@ -290,7 +299,7 @@ class EnvRoot:
     dist_name: str | None
     dist_version: str | None
     entries: tuple[EnvEntry, ...]
-    kind: Literal["package"] = "package"
+    kind: Literal["package", "runtime"] = "package"
 
     def to_document(self) -> dict[str, object]:
         return {
@@ -314,8 +323,8 @@ class CompiledEnvironment:
 
     ``envs`` are the variables the test YAML must carry so the service loads the kernel artifacts; their values are
     attachment placeholders. ``recipe`` is the recipe after the change, whose ``launch`` the measurement point
-    carries. ``runtime`` roots are not produced yet: how the recipe's snapshot image relates to a runtime snapshot is
-    still open.
+    carries. A ``runtime`` root is a package root whose native outputs come from a build: ``builds`` names the build of
+    each, and the sheet names it only once it is ready (:meth:`with_builds`), by the manifest it was built to.
     """
 
     recipe: Recipe
@@ -324,13 +333,27 @@ class CompiledEnvironment:
     attachments: tuple[AttachmentRef, ...]
     envs: Mapping[str, str]
     blob_root: Path
+    builds: tuple[BuildNeed, ...] = ()
+    build_refs: tuple[BuildRef, ...] = ()
+
+    def with_builds(self, refs: tuple[BuildRef, ...]) -> CompiledEnvironment:
+        """This environment with the ready builds ``refs``, which must be exactly the builds it needs."""
+        wanted = {(need.root_id, need.inputs.key) for need in self.builds}
+        if {(ref.root_id, ref.key) for ref in refs} != wanted or len(refs) != len(wanted):
+            raise BuildNotReady(f"the builds {sorted(wanted)} are not the ready ones {[ref.key for ref in refs]}")
+        return replace(self, build_refs=refs)
 
     def to_document(self) -> dict[str, object]:
-        return {
+        document: dict[str, object] = {
             "roots": [root.to_document() for root in self.roots],
             "runtime": None,
             "blob_root": str(self.blob_root),
         }
+        if self.builds:
+            if len(self.build_refs) != len(self.builds):
+                raise BuildNotReady(f"{len(self.builds)} builds are needed and {len(self.build_refs)} are ready")
+            document["builds"] = [ref.to_document() for ref in self.build_refs]
+        return document
 
     @property
     def is_base(self) -> bool:
@@ -350,12 +373,17 @@ def _image_digest(image: str) -> str:
 
 
 def check_base_image(recipe: Recipe, active_image_digest: str) -> None:
-    """Refuse a recipe built on another image: its patches and kernels were made for different bits."""
+    """Refuse a recipe built on another image: its patches and kernels were made for different bits.
+
+    Only the base image is compared: the runtime is the base image plus signed native builds, which no image digest
+    names, so a ``runtime_snapshot`` is not an image to compare (:func:`check_runtime_sources` refuses it beside native
+    builds)."""
 
     active = _image_digest(active_image_digest)
-    for what, image in (("base image", recipe.base_image_digest), ("runtime snapshot", recipe.runtime_snapshot)):
-        if image is not None and _image_digest(image) != active:
-            raise BaseImageMismatchError(f"the recipe's {what} {image} is not the active framework image {active}")
+    if _image_digest(recipe.base_image_digest) != active:
+        raise BaseImageMismatchError(
+            f"the recipe's base image {recipe.base_image_digest} is not the active framework image {active}"
+        )
 
 
 # --- patches ---------------------------------------------------------------------------------------------------------
@@ -700,6 +728,8 @@ class EnvironmentCompiler:
     active_image_digest: str
     locator: PackageLocator = locate_installed_package
     layouts: Mapping[str, ComponentLayout] = field(default_factory=lambda: COMPONENT_LAYOUTS)
+    #: The native builds a stack needs; without one a stack that changes a native source is refused by its layout.
+    native: NativePlan | None = None
     _cache: dict[tuple[str, str], CompiledEnvironment] = field(default_factory=dict, init=False, repr=False)
 
     def compile(self, recipe: Recipe, action: RecipeDelta) -> CompiledEnvironment:
@@ -717,16 +747,39 @@ class EnvironmentCompiler:
             for name, value in {**target.launch.envs, **envs}.items()
             if name.startswith(AITER_VARIABLE_PREFIX) and str(value).strip()
         )
-        roots = tuple(
-            root for component in target.components if component.patches for root in self._roots(component, tables)
-        )
+        roots: list[EnvRoot] = []
+        builds: list[BuildNeed] = []
+        for component in (component for component in target.components if component.patches):
+            native = self.native(component) if self.native is not None else None
+            if native is None:
+                roots.extend(self._roots(component, tables))
+            else:
+                roots.append(self._runtime_root(component, native))
+                builds.append(BuildNeed(component.component, native.inputs))
+        check_runtime_sources(target, tuple(builds))
         return CompiledEnvironment(
             recipe=target,
             base_image_digest=target.base_image_digest,
-            roots=roots,
+            roots=tuple(roots),
             attachments=attachments,
             envs=envs,
             blob_root=self.blobs.root,
+            builds=tuple(builds),
+        )
+
+    def _runtime_root(self, component: ComponentPatches, native: NativeStack) -> EnvRoot:
+        """The package root of a native stack: the stack's own package files, its native outputs to come from a build."""
+        layout = self.layouts.get(component.component)
+        if layout is None:
+            raise UnsupportedComponentError(f"{component.component} has no package layout; its build cannot be laid")
+        package = self.locator(layout)
+        return EnvRoot(
+            component.component,
+            package.import_name,
+            package.dist_name,
+            package.dist_version,
+            native.entries,
+            kind="runtime",
         )
 
     def _roots(self, component: ComponentPatches, table_variables: Collection[str] = ()) -> tuple[EnvRoot, ...]:

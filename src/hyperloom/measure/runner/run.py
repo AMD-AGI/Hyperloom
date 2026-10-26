@@ -11,7 +11,7 @@ import importlib.metadata
 import os
 import subprocess
 import time
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from typing import Any
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +45,8 @@ from hyperloom.measure.phases import (
     manifest_document,
 )
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
+from hyperloom.measure.jit.native.config import store_from_environment
+from hyperloom.measure.jit.native.laying import NamedBuild, NativeLayError, SheetBuilds, sheet_builds
 from hyperloom.measure.jit.session import JitCacheSession
 from hyperloom.measure.runner import hardware
 from hyperloom.measure.runner.card_watch import BEFORE_TEST, CardWatch
@@ -54,6 +56,7 @@ from hyperloom.measure.farm import (
     Farm,
     FarmError,
     build_farm,
+    built_roots,
     inherited_environment,
     patched_configs,
     server_environment,
@@ -255,7 +258,7 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
         placed = place_attachments(spec.attachments, ctx.work / "attach", ctx.read_blob)
         python = server_python(yaml.safe_load(spec.config[0].yaml) or {}, default="python3")
         farm = build_farm(
-            spec.environment.roots,
+            built_roots(spec.environment.roots, _sheet_builds(spec, ctx.environ)),
             ctx.work / "farm",
             python=python,
             read_blob=ctx.read_blob,
@@ -277,9 +280,15 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
         if farm is not None:
             for point in points:
                 verify_farm(farm, server_environment(yaml.safe_load(point.read_text())), python=python, cwd=ctx.work)
-    except (AttachmentError, FarmError, ValueError) as exc:
+    except (AttachmentError, FarmError, NativeLayError, ValueError) as exc:
         raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
     return points, inferencex, farm
+
+
+def _sheet_builds(spec: MeasurementSpec, environ: Mapping[str, str]) -> SheetBuilds | None:
+    """The native builds the sheet names, read from the store this runner's environment names."""
+    named = tuple(NamedBuild(b.root_id, b.key, b.manifest_sha256) for b in spec.environment.builds)
+    return sheet_builds(named, store_from_environment(environ) if named else None, spec.image.digest)
 
 
 def _patch_replay_client(ctx: _Context, points: list[Path], inferencex: Path) -> None:

@@ -622,8 +622,9 @@ class RealToolbox:
             self._pump()
 
     async def _execute(self, item: QueuedTest) -> TestResult:
-        job = TestJob(item.request, 1, (), item.priority, sandbox_priority(item.priority), item.environment)
         try:
+            environment = self._builds.resolved(item.environment)
+            job = TestJob(item.request, 1, (), item.priority, sandbox_priority(item.priority), environment)
             result = await self._runner.run(job)
         except Exception as error:
             logger.exception("test %s failed in the executor", item.request_id)

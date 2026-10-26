@@ -44,7 +44,17 @@ from hyperloom.measure.runner.native.service import Staged
 from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.orchestrator.enablement.runtime.build_utils import run_argv
 
-__all__ = ["BuildMachine", "BuildRequest", "compile_tree", "plan", "tree_dir"]
+__all__ = [
+    "COMPILE_ERROR",
+    "BuildMachine",
+    "BuildRequest",
+    "LaidTree",
+    "compile_laid",
+    "compile_tree",
+    "lay_tree",
+    "plan",
+    "tree_dir",
+]
 
 COMPILE_ERROR = "compile_error"
 _TREE = "tree"
@@ -111,44 +121,69 @@ def tree_dir(scratch: Path) -> Path:
     return Path(scratch) / _TREE
 
 
+@dataclass(frozen=True)
+class LaidTree:
+    """A tree laid for one compile (:func:`lay_tree`): what :func:`compile_laid` needs, and nothing of the stack's.
+
+    ``tracked`` is the upstream build directory (a ``.hip`` it holds is a source, not hipify's output), ``laid`` the
+    paths the stack wrote over it."""
+
+    recipe: NativeRecipe
+    machine: BuildMachine
+    tracked: Path
+    image_root: Path
+    laid: frozenset[str]
+
+
+def lay_tree(request: BuildRequest, root: EnvRoot, blobs: BlobStore, scratch: Path) -> LaidTree:
+    """Copy the upstream build directory below ``scratch`` and lay ``root`` over it; nothing of the candidate runs."""
+    recipe = request.recipe
+    tracked = Path(request.upstream) / recipe.source_dir
+    shutil.copytree(tracked, tree_dir(scratch), symlinks=True)
+    _lay(tree_dir(scratch), root, blobs)
+    laid = frozenset(entry.path for entry in root.entries if entry.op == "upsert")
+    return LaidTree(recipe, request.machine, tracked, Path(request.image_root), laid)
+
+
 def compile_tree(
     request: BuildRequest, root: EnvRoot, blobs: BlobStore, scratch: Path, *, against_image: bool = True
 ) -> Staged:
-    """Compile the upstream build directory with ``root`` laid over it, and harvest its outputs.
+    """Compile the upstream build directory with ``root`` laid over it, and harvest its outputs (:func:`lay_tree`, then
+    :func:`compile_laid`)."""
+    return compile_laid(lay_tree(request, root, blobs, scratch), scratch, against_image=against_image)
+
+
+def compile_laid(laid: LaidTree, scratch: Path, *, against_image: bool = True) -> Staged:
+    """Compile the tree :func:`lay_tree` laid below ``scratch``, and harvest its outputs. This runs the candidate's code.
 
     With ``against_image`` false every output is kept, not only those that differ from the image's.
 
     Raises:
         BuildInfraError: When the preflight fails, the compile times out or is killed by a signal.
     """
-    recipe = request.recipe
-    tree = tree_dir(scratch)
-    shutil.copytree(Path(request.upstream) / recipe.source_dir, tree, symlinks=True)
-    _lay(tree, root, blobs)
-    checked = recipe.preflight(Path(scratch), request.machine.gfx_arch)
+    recipe, machine, tree = laid.recipe, laid.machine, tree_dir(scratch)
+    checked = recipe.preflight(Path(scratch), machine.gfx_arch)
     if checked.problem is not None:
         raise BuildInfraError(f"the builder failed its preflight: {checked.problem}")
-    toolchain = {**checked.toolchain, "gfx": request.machine.gfx_arch, "max_jobs": str(recipe.max_jobs)}
+    toolchain = {**checked.toolchain, "gfx": machine.gfx_arch, "max_jobs": str(recipe.max_jobs)}
     started, cpu_before = time.monotonic(), _children_cpu_seconds()
     errors: list[str] = []
     result = run_argv(
-        recipe.argv(request.machine.python),
+        recipe.argv(machine.python),
         cwd=tree,
-        env=recipe.environment(request.machine.gfx_arch, Path(scratch)),
+        env=recipe.environment(machine.gfx_arch, Path(scratch)),
         timeout_sec=recipe.budget_sec,
         run=_keeping_errors(errors, f"{tree}{os.sep}"),
     )
     timing = (_children_cpu_seconds() - cpu_before, time.monotonic() - started)
-    tracked = Path(request.upstream) / recipe.source_dir
-    laid = {entry.path for entry in root.entries if entry.op == "upsert"}
-    errors = [_named_for_the_source(error, tree, tracked, laid) for error in errors]
+    errors = [_named_for_the_source(error, tree, laid.tracked, set(laid.laid)) for error in errors]
     log = "\n".join([*errors, result.stdout_tail, result.stderr_tail])
     if result.timed_out or result.returncode < 0:
         raise BuildInfraError(f"the compile of {recipe.component} timed out or was killed (rc={result.returncode})")
     if result.returncode != 0:
         exited = f"{COMPILE_ERROR}: the compile exited {result.returncode}"
         return _failed(f"{exited}: {errors[0]}" if errors else exited, toolchain, timing, log, scratch)
-    image = Path(request.image_root) if against_image else None
+    image = laid.image_root if against_image else None
     try:
         outputs = harvest(tree / recipe.package_dir, recipe.outputs, image, recipe.max_output_bytes, Path(scratch))
     except HarvestError as exc:

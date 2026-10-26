@@ -39,6 +39,8 @@ SPEC_SCHEMA = "hyperloom.measurement-spec/v1"
 _KIND = "kind"
 _UPSERT = "upsert"
 _RUNTIME = "runtime"
+_BUILDS = "builds"
+_MANIFEST_SHA256 = "manifest_sha256"
 _ACCURACY = "accuracy"
 _SHORT_PROMPTS = "short_prompts"
 _LONG_CONTEXT = "long_context"
@@ -197,13 +199,13 @@ class Attachment:
             id=r.text("id", pattern=_ID_RE) or "",
             kind=r.choice(_KIND, ("file", "dir")) or "",
             blob=r.text("blob", pattern=PREFIXED_SHA256_RE) or "",
-            manifest_sha256=r.text("manifest_sha256", pattern=SHA256_RE) or "",
+            manifest_sha256=r.text(_MANIFEST_SHA256, pattern=SHA256_RE) or "",
         )
         r.done()
         return attachment
 
     def to_document(self) -> dict[str, Any]:
-        return {"id": self.id, _KIND: self.kind, "blob": self.blob, "manifest_sha256": self.manifest_sha256}
+        return {"id": self.id, _KIND: self.kind, "blob": self.blob, _MANIFEST_SHA256: self.manifest_sha256}
 
 
 @dataclass(frozen=True)
@@ -311,44 +313,85 @@ class RuntimeSnapshot:
     def parse(cls, value: Any, path: str) -> "RuntimeSnapshot":
         r = Reader(value, path)
         runtime = cls(
-            snapshot=r.text("snapshot") or "", manifest_sha256=r.text("manifest_sha256", pattern=SHA256_RE) or ""
+            snapshot=r.text("snapshot") or "", manifest_sha256=r.text(_MANIFEST_SHA256, pattern=SHA256_RE) or ""
         )
         r.done()
         return runtime
 
     def to_document(self) -> dict[str, Any]:
-        return {"snapshot": self.snapshot, "manifest_sha256": self.manifest_sha256}
+        return {"snapshot": self.snapshot, _MANIFEST_SHA256: self.manifest_sha256}
+
+
+@dataclass(frozen=True)
+class BuildRef:
+    """The ready native build a ``runtime`` root's outputs come from: its key in the build store and the SHA-256 of the
+    signed manifest it was built to."""
+
+    root_id: str
+    key: str
+    manifest_sha256: str
+
+    @classmethod
+    def parse(cls, value: Any, path: str) -> "BuildRef":
+        r = Reader(value, path)
+        ref = cls(
+            root_id=r.text("root_id", pattern=_ID_RE) or "",
+            key=r.text("key", pattern=SHA256_RE) or "",
+            manifest_sha256=r.text(_MANIFEST_SHA256, pattern=SHA256_RE) or "",
+        )
+        r.done()
+        return ref
+
+    def to_document(self) -> dict[str, Any]:
+        return {"root_id": self.root_id, "key": self.key, _MANIFEST_SHA256: self.manifest_sha256}
 
 
 @dataclass(frozen=True)
 class Environment:
+    """The overlay a runner rebuilds. ``builds`` name the ready native build of each ``runtime`` root, one each; a sheet
+    with none leaves the key out, so a runner that does not know it reads every other sheet as before and refuses one
+    that has builds."""
+
     roots: tuple[EnvRoot, ...] = ()
     runtime: RuntimeSnapshot | None = None
     blob_root: str = ""
+    builds: tuple[BuildRef, ...] = ()
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "Environment":
         r = Reader(value, path)
         runtime_raw = r.optional(_RUNTIME)
+        builds_raw = r.optional(_BUILDS)
         environment = cls(
             roots=r.sequence("roots", EnvRoot.parse),
             runtime=None if runtime_raw is None else RuntimeSnapshot.parse(runtime_raw, r.at(_RUNTIME)),
             blob_root=r.text("blob_root") or "",
+            builds=() if builds_raw is None else r.sequence(_BUILDS, BuildRef.parse),
         )
         r.done()
+        if builds_raw is not None and not environment.builds:
+            raise DocumentError(f"{path}.builds: an empty list; a sheet with no build leaves the key out")
         ids = [root.id for root in environment.roots]
         if len(set(ids)) != len(ids):
             raise DocumentError(f"{path}.roots: an id appears twice")
-        if environment.runtime is None and any(root.kind == _RUNTIME for root in environment.roots):
-            raise DocumentError(f"{path}.runtime: a runtime root needs a runtime snapshot")
+        runtime_ids = sorted(root.id for root in environment.roots if root.kind == _RUNTIME)
+        built = [ref.root_id for ref in environment.builds]
+        if sorted(built) != runtime_ids:
+            raise DocumentError(
+                f"{path}.builds: each runtime root needs exactly one build and each build a runtime root "
+                f"(runtime roots {runtime_ids}, builds {built})"
+            )
         return environment
 
     def to_document(self) -> dict[str, Any]:
-        return {
+        document: dict[str, Any] = {
             "roots": [root.to_document() for root in self.roots],
             _RUNTIME: None if self.runtime is None else self.runtime.to_document(),
             "blob_root": self.blob_root,
         }
+        if self.builds:
+            document[_BUILDS] = [ref.to_document() for ref in self.builds]
+        return document
 
 
 def _short_prompts(value: Any, path: str) -> ShortPromptPlan | None:

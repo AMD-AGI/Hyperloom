@@ -75,6 +75,7 @@ from hyperloom_multibranch.toolbox.leased_toolbox import (
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.long_context import LongContextSetup, staged_long_context
+from hyperloom_multibranch.toolbox.native_builds import native_builds, with_native_plan
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, staged_short_prompts
 from hyperloom_multibranch.toolbox.tools import (
     AsyncTool,
@@ -405,6 +406,8 @@ def build_local_toolbox(
     parallel = max_parallel_tests(len(cards), tp)
     jit_root = jit_store_root(options)
     acceptance = _acceptance_with_prompts(acceptance, options, os.environ, spec.model_dir)
+    native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest)
+    acceptance = with_native_plan(acceptance, native)
     config = HostedConfig(
         session_dir=directory,
         run_id=session.run_id,
@@ -418,7 +421,7 @@ def build_local_toolbox(
     )
     template = _runner_template(session, options)
     eval_sets = acceptance.short_prompts is not None or acceptance.long_context is not None
-    shared_dirs = _shared_dirs(jit_root, eval_sets, os.environ)
+    shared_dirs = {**_shared_dirs(jit_root, eval_sets, os.environ), **(native.runner_envs if native else {})}
     provider = _provider(session, cards, template, options, shared_dirs)
     backend = started_backend(provider, config)
     leases = BranchLeases(provider, directory / _BRANCH_SANDBOXES, tp, template.envs, CardDrain(options.card_memory))
@@ -430,7 +433,7 @@ def build_local_toolbox(
         workload_kind=acceptance.workload_kind,
     )
     toolbox = LocalHostedToolbox(
-        session_stores(notebook, directory, session.run_id),
+        session_stores(notebook, directory, session.run_id, native.driver if native else None),
         executor,
         _accepting_local_kinds(acceptance),
         tools=session_tools(_local_tools(leases, options), notebook, directory),

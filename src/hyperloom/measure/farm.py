@@ -31,7 +31,7 @@ import shutil
 import subprocess
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -39,14 +39,19 @@ import yaml
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_MARKER_DIR, AITER_META_WHEEL_DIR
 from hyperloom.measure.jit.key import AITER_PACKAGE
+from hyperloom.measure.jit.native.laying import NativeLayError, SheetBuilds
+from hyperloom.measure.jit.native.record import BuildRecord
 from hyperloom.measure.jit.modules import image_aiter_meta
 from hyperloom.measure.spec import EnvEntry, EnvRoot
 from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
 
 __all__ = [
+    "BuiltRoot",
     "Farm",
     "FarmError",
+    "NativeModule",
     "build_farm",
+    "built_roots",
     "image_aiter_meta",
     "inherited_environment",
     "locate_package",
@@ -68,6 +73,9 @@ _PROBE_TIMEOUT_SEC = 120
 _AGENTX_DEFAULT_PYTHON = "python3"
 _UTF8 = "utf-8"
 _CONFIGS_DIR = "configs"
+_RUNTIME_KIND = "runtime"
+_DELETE = "delete"
+_IMPORT_FILE = "import importlib, sys\nprint(importlib.import_module(sys.argv[1]).__file__)\n"
 
 #: How the farm lays a directory a package writes into at run time. ``linked``: real, its files links (a writer that
 #: renames a new file over a name replaces the link, not the image's file). ``empty``: real and empty. ``linked_tree``:
@@ -91,6 +99,14 @@ class FarmError(Exception):
 
 
 @dataclass(frozen=True)
+class NativeModule:
+    """A native module a build laid in the farm: its dotted name and the file the server must load it from."""
+
+    name: str
+    path: Path
+
+
+@dataclass(frozen=True)
 class Farm:
     """The directory to put first on ``PYTHONPATH``, the packages rebuilt in it and, when aiter is one of them and the
     server inherits no meta directory of its own, the image's, which the server is told to read aiter's sources from.
@@ -103,6 +119,7 @@ class Farm:
     roots: tuple[EnvRoot, ...] = ()
     aiter_meta: Path | None = None
     meta_patched: bool = False
+    native: tuple[NativeModule, ...] = ()
 
 
 def locate_package(import_name: str, python: str, cwd: Path) -> Path:
@@ -200,11 +217,13 @@ def _build_root(
     *,
     left_out: frozenset[str] = frozenset(),
 ) -> None:
-    deletes = {entry.path for entry in root.entries if entry.op == "delete"}
+    """Mirror ``base`` into ``target`` with ``root``'s entries laid; ``left_out`` paths are absent (their directories
+    real), for a build's outputs to be copied in."""
+    deletes = {entry.path for entry in root.entries if entry.op == _DELETE}
     for path in deletes:
         if not (base / path).is_file():
             raise FarmError(f"{root.id}: {path} is to be deleted but the installed {root.import_name} has no such file")
-    touched = _touched_directories(root.entries)
+    touched = _touched_directories(root.entries) | _touched_directories(EnvEntry(path, _DELETE) for path in left_out)
     skip = deletes | {e.path for e in root.entries if e.op == "upsert"} | left_out
     _lay(_Mirror(base, target, touched, skip, _RUNTIME_WRITTEN.get(root.import_name, {})), "", None)
     for entry in root.entries:
@@ -212,8 +231,45 @@ def _build_root(
             _write_upsert(entry, target / entry.path, read_blob)
 
 
+@dataclass(frozen=True)
+class BuiltRoot:
+    """A ``runtime`` root bound to the proven record of its build and the store its outputs are copied from."""
+
+    root: EnvRoot
+    record: BuildRecord
+    builds: SheetBuilds
+
+    @property
+    def import_name(self) -> str:
+        return self.root.import_name
+
+
+def built_roots(roots: Iterable[EnvRoot], builds: SheetBuilds | None) -> list[EnvRoot | BuiltRoot]:
+    """``roots`` with each ``runtime`` root bound to the build the sheet names for it (``builds``), proven first.
+
+    Raises:
+        FarmError: A runtime root and no build store, or its build is missing or not the one the sheet names.
+    """
+    found: list[EnvRoot | BuiltRoot] = []
+    for root in roots:
+        if root.kind != _RUNTIME_KIND:
+            found.append(root)
+            continue
+        if builds is None:
+            raise FarmError(f"{root.id}: a runtime root needs the native build store, which this runner is not given")
+        try:
+            found.append(BuiltRoot(root, builds.record(root.id, root.import_name), builds))
+        except NativeLayError as exc:
+            raise FarmError(str(exc)) from None
+    return found
+
+
+def _plain(root: EnvRoot | BuiltRoot) -> EnvRoot:
+    return root.root if isinstance(root, BuiltRoot) else root
+
+
 def build_farm(
-    roots: Iterable[EnvRoot],
+    roots: Iterable[EnvRoot | BuiltRoot],
     farm_dir: Path,
     *,
     python: str,
@@ -224,25 +280,51 @@ def build_farm(
 
     ``read_blob`` returns the bytes of a ``sha256:<hex>`` address and raises when it is not there. ``inherited`` is what the
     server's process inherits (:func:`inherited_environment`), this process's environment when not given: a rebuilt aiter
-    gets the farm's mirror of the image's meta directory only when it inherits none.
+    gets the farm's mirror of the image's meta directory only when it inherits none. A ``runtime`` root is laid like a
+    package root once :func:`built_roots` bound it to its proven build, whose native outputs are copied onto local disk.
     """
     site = farm_dir / "site"
     roots = list(roots)
     meta_root = next((root for root in roots if root.import_name == AITER_META_WHEEL_DIR), None)
     packages = [root for root in roots if root is not meta_root]
-    for root in roots:
-        if root.kind != "package":
-            raise FarmError(f"{root.id}: a runtime root is not supported by this runner yet")
+    native: list[NativeModule] = []
     for root in packages:
-        _build_root(root, locate_package(root.import_name, python, farm_dir.parent), site / root.import_name, read_blob)
+        base = locate_package(root.import_name, python, farm_dir.parent)
+        if isinstance(root, BuiltRoot):
+            native += _build_runtime_root(root, base, site, read_blob)
+        elif root.kind == _RUNTIME_KIND:
+            raise FarmError(f"{root.id}: a runtime root needs its build, which this runner is not given")
+        else:
+            _build_root(root, base, site / root.import_name, read_blob)
     meta = None
     if meta_root is not None or any(root.import_name == AITER_PACKAGE for root in packages):
         aiter = locate_package(AITER_PACKAGE, python, farm_dir.parent)
         meta = _build_meta_root(meta_root, aiter, site, os.environ if inherited is None else inherited, read_blob)
-    rebuilt = tuple(packages) + (() if meta_root is None else (meta_root,))
+    rebuilt = tuple(_plain(root) for root in packages) + (() if meta_root is None else (_plain(meta_root),))
     if not rebuilt:
         return None
-    return Farm(site, tuple(root.import_name for root in packages), rebuilt, meta, meta_patched=meta_root is not None)
+    names = tuple(root.import_name for root in packages)
+    return Farm(site, names, rebuilt, meta, meta_patched=meta_root is not None, native=tuple(native))
+
+
+def _build_runtime_root(
+    built: BuiltRoot, base: Path, site: Path, read_blob: Callable[[str], bytes]
+) -> list[NativeModule]:
+    """Lay a ``runtime`` root: its package files like a package root's, its build's outputs copied in."""
+    record, root = built.record, built.root
+    relative = frozenset(str(PurePosixPath(*PurePosixPath(o.path).parts[1:])) for o in record.outputs)
+    _build_root(root, base, site / root.import_name, read_blob, left_out=relative)
+    try:
+        built.builds.fetch(record, site)
+    except NativeLayError as exc:
+        raise FarmError(str(exc)) from None
+    return [NativeModule(_module_name(output.path), site / output.path) for output in record.outputs]
+
+
+def _module_name(path: str) -> str:
+    """``sgl_kernel/common_ops.cpython-310-x86_64-linux-gnu.so`` is ``sgl_kernel.common_ops``."""
+    parts = PurePosixPath(path).parts
+    return ".".join((*parts[:-1], parts[-1].split(".", 1)[0]))
 
 
 def _build_meta_root(
@@ -360,7 +442,7 @@ def patched_configs(farm: Farm | None) -> dict[str, Path | None]:
         for entry in root.entries:
             relative = entry.path.removeprefix(f"{_CONFIGS_DIR}/")
             if relative != entry.path:
-                patched[relative] = None if entry.op == "delete" else package / entry.path
+                patched[relative] = None if entry.op == _DELETE else package / entry.path
     return patched
 
 
@@ -406,8 +488,26 @@ def verify_farm(farm: Farm, envs: Mapping[str, Any], *, python: str, cwd: Path) 
         expected = str(farm.site / name)
         if done.returncode != 0 or not found or found[0] != expected:
             raise FarmError(f"{name} would be imported from {found[:1] or done.stderr.strip()[-200:]}, not {expected}")
+    for module in farm.native:
+        _verify_native(module, environment, python=python, cwd=cwd)
     if AITER_PACKAGE in farm.packages or farm.meta_patched:
         _verify_aiter_meta(farm, envs)
+
+
+def _verify_native(module: NativeModule, environment: Mapping[str, str], *, python: str, cwd: Path) -> None:
+    """Import a native module the farm laid, as the server would, and require its ``__file__`` to be the farm's copy."""
+    done = subprocess.run(
+        [python, "-c", _IMPORT_FILE, module.name],
+        capture_output=True,
+        text=True,
+        timeout=_PROBE_TIMEOUT_SEC,
+        cwd=cwd,
+        env=dict(environment),
+    )
+    loaded = done.stdout.strip().splitlines()[-1:] if done.returncode == 0 else []
+    if not loaded or os.path.realpath(loaded[0]) != os.path.realpath(module.path):
+        found = loaded[0] if loaded else done.stderr.strip()[-300:]
+        raise FarmError(f"the native module {module.name} would be loaded from {found}, not {module.path}")
 
 
 def _verify_aiter_meta(farm: Farm, envs: Mapping[str, Any]) -> None:

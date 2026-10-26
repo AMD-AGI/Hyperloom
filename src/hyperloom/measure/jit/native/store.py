@@ -59,7 +59,11 @@ class BuildStore:
         self._trust = trust
 
     def entry_dir(self, inputs: BuildInputs) -> Path:
-        return self._root / BUILDS_DIR / inputs.component / inputs.key
+        return self.entry_dir_of(inputs.component, inputs.key)
+
+    def entry_dir_of(self, component: str, key: str) -> Path:
+        """The entry of ``key``, for a reader that knows only the component and the key (a sheet's build)."""
+        return self._root / BUILDS_DIR / component / key
 
     def holds(self, sha256: str) -> bool:
         return (self._root / BLOBS_DIR / sha256[:2] / sha256).is_file()

@@ -428,6 +428,34 @@
         "blob_root": {
           "type": "string",
           "minLength": 1
+        },
+        "builds": {
+          "type": "array",
+          "description": "The ready native build of each runtime root, one each; absent from a sheet with no runtime root.",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "root_id",
+              "key",
+              "manifest_sha256"
+            ],
+            "properties": {
+              "root_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+              },
+              "key": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "manifest_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
         }
       }
     },

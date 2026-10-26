@@ -164,16 +164,15 @@ def test_blobs_are_written_once_and_read_only(blobs):
     assert (blobs.root / address).stat().st_mode & 0o222 == 0
 
 
-@pytest.mark.parametrize(
-    "recipe",
-    [
-        Recipe(base_image_digest="sha256:" + "d" * 64),
-        Recipe(base_image_digest=IMAGE, runtime_snapshot="sha256:" + "d" * 64),
-    ],
-)
-def test_other_base_image_is_refused(blobs, base, recipe):
-    with pytest.raises(BaseImageMismatchError, match="is not the active framework image"):
-        compile_with(recipe, RecipeDelta(), blobs, base)
+def test_other_base_image_is_refused(blobs, base):
+    with pytest.raises(BaseImageMismatchError, match="base image .* is not the active framework image"):
+        compile_with(Recipe(base_image_digest="sha256:" + "d" * 64), RecipeDelta(), blobs, base)
+
+
+def test_only_the_base_image_is_compared_a_runtime_snapshot_names_no_image(blobs, base):
+    recipe = Recipe(base_image_digest=IMAGE, runtime_snapshot="sha256:" + "d" * 64)
+
+    assert compile_with(recipe, RecipeDelta(), blobs, base).is_base
 
 
 def test_digest_with_repository_name_matches_the_active_image(blobs, base):

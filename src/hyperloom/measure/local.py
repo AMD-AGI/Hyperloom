@@ -46,11 +46,14 @@ from hyperloom.measure.accuracy import read_accuracy
 from hyperloom.measure import log_causes
 from hyperloom.measure.boot_watch import BOOT_CANCEL_REASON, BootGuard, boot_limit_sec
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
+from hyperloom.measure.jit.native.config import store_from_environment
+from hyperloom.measure.jit.native.laying import NamedBuild, NativeLayError, SheetBuilds, sheet_builds
 from hyperloom.measure.eval_context import eval_context, served_context
 from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure, decides_test
 from hyperloom.measure.farm import (
     FarmError,
     build_farm,
+    built_roots,
     inherited_environment,
     patches_aiter_sources,
     place_farm,
@@ -444,6 +447,7 @@ def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path
         python = server_python(_point_config(call.points[0]), default=sys.executable)
         roots = [SpecEnvRoot.parse(root.to_document(), "environment.roots") for root in environment.roots]
         inherited = inherited_environment(os.environ, call.env_overrides, call.unset_envs)
+        roots = built_roots(roots, _builds(environment))
         farm = build_farm(roots, work / "farm", python=python, read_blob=read_blob, inherited=inherited)
         points = []
         for index, point in enumerate(call.points):
@@ -453,9 +457,16 @@ def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path
             if farm is not None:
                 verify_farm(farm, place_farm(target, farm), python=python, cwd=work)
             points.append(target)
-    except (AttachmentError, FarmError, OSError, ValueError) as exc:
+    except (AttachmentError, FarmError, NativeLayError, OSError, ValueError) as exc:
         raise TestCallRefused(f"the compiled environment cannot be rebuilt here: {exc}") from exc
     return tuple(points)
+
+
+def _builds(environment: CompiledEnvironment) -> SheetBuilds | None:
+    """The ready builds of the environment's runtime roots, read from the store this process's environment names."""
+    named = tuple(NamedBuild(r.root_id, r.key, r.manifest_sha256) for r in environment.build_refs)
+    image = environment.base_image_digest.rsplit("@", 1)[-1]
+    return sheet_builds(named, store_from_environment(os.environ) if named else None, image)
 
 
 # --- the process environment --------------------------------------------------------------------------------------

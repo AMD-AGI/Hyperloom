@@ -103,13 +103,56 @@ def test_a_config_whose_hash_does_not_match_its_text_is_refused() -> None:
         MeasurementSpec.from_document(document)
 
 
-def test_a_runtime_root_needs_a_runtime_snapshot() -> None:
-    def change(d: dict[str, Any]) -> None:
-        d["environment"]["roots"][0]["kind"] = "runtime"
-        d["environment"]["runtime"] = None
+_KEY, _MANIFEST = "1" * 64, "2" * 64
 
-    with pytest.raises(DocumentError, match="runtime snapshot"):
-        MeasurementSpec.from_document(_edit(change))
+
+def _built(d: dict[str, Any]) -> None:
+    d["environment"]["roots"][0]["kind"] = "runtime"
+    d["environment"]["runtime"] = None
+    d["environment"]["builds"] = [
+        {"root_id": d["environment"]["roots"][0]["id"], "key": _KEY, "manifest_sha256": _MANIFEST}
+    ]
+
+
+def test_a_runtime_root_names_its_ready_build_and_the_build_is_in_the_fingerprint() -> None:
+    document = _edit(_built)
+    spec = MeasurementSpec.from_document(document)
+
+    assert [(b.key, b.manifest_sha256) for b in spec.environment.builds] == [(_KEY, _MANIFEST)]
+    assert MeasurementSpec.from_bytes(spec.to_bytes()) == spec
+    assert list(VALIDATOR.iter_errors(document)) == []
+    other = _edit(lambda d: (_built(d), d["environment"]["builds"][0].update(manifest_sha256="3" * 64)))
+    assert _fp(document) != _fp(other), "another manifest is another measurement"
+    assert canonical_for_fingerprint(spec)["environment"]["builds"][0]["key"] == _KEY
+
+
+def test_a_sheet_with_no_build_leaves_the_key_out_so_its_bytes_and_fingerprint_are_unchanged() -> None:
+    spec = MeasurementSpec.from_document(spec_document())
+
+    assert "builds" not in spec.to_document()["environment"]
+    assert spec.to_document()["environment"] == spec_document()["environment"]
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (lambda d: (_built(d), d["environment"].pop("builds")), "each runtime root needs exactly one build"),
+        (lambda d: (_built(d), d["environment"]["roots"][0].update(kind="package")), "each build a runtime root"),
+        (
+            lambda d: (_built(d), d["environment"]["builds"].append(dict(d["environment"]["builds"][0]))),
+            "each runtime root needs exactly one build",
+        ),
+        (lambda d: (_built(d), d["environment"]["builds"][0].update(key="k")), "builds"),
+        (lambda d: d["environment"].update(builds=[]), "an empty list"),
+        (lambda d: (_built(d), d["environment"]["builds"][0].update(extra=1)), "extra"),
+    ],
+    ids=["runtime-root-without-build", "build-without-runtime-root", "two-builds", "bad-key", "empty", "unknown-field"],
+)
+def test_a_build_that_does_not_name_exactly_one_runtime_root_is_refused(change: Any, reason: str) -> None:
+    document = _edit(change)
+
+    with pytest.raises(DocumentError, match=reason):
+        MeasurementSpec.from_document(document)
 
 
 def test_duplicate_json_keys_and_non_finite_numbers_are_refused() -> None:
