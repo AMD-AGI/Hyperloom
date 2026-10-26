@@ -5,7 +5,10 @@
 is gone, and kills a process of a sandbox that set a device mask reaching beyond the sandbox's cards.
 
 A sandbox's processes carry :data:`MARKER`, set to the sandbox's root, whichever session or process group they moved
-to, so the marker is what the watch and every kill select by. The session's process registers each sandbox's root and
+to, so the marker is what the watch and every kill select by. Each command runs under a launcher
+(:mod:`hyperloom.sandbox.launcher`), a child subreaper that outlives its command, so a process that dropped the marker
+with its environment and detached by a double fork is still the launcher's descendant, and every kill takes the
+launchers' trees as well (:func:`sandbox_pids`). The session's process registers each sandbox's root and
 cards in a directory of its own (:func:`watch`) and starts the watch with the first; the watch outlives a SIGKILL of
 the session, which is how an agent kept running for an hour after its session died. The session's own kill terminates
 the watch with its other children and SIGKILLs it seconds later, so a terminated watch ends the sandboxes at once. A
@@ -36,6 +39,7 @@ from pathlib import Path
 
 from hyperloom.common.proctree import TERM_GRACE_SEC
 from hyperloom.common.visible_devices import ROCR_LEVEL_VARS, effective_mask_tokens
+from hyperloom.sandbox.launcher import LAUNCHER_SOURCE
 
 #: The environment variable every process of a sandbox carries, set to the sandbox's root.
 MARKER = "HYPERLOOM_AGENT_SANDBOX"
@@ -53,6 +57,7 @@ REGISTRY_PREFIX = "hyperloom-agent-watch-"
 #: The file of the registry the watch's stderr goes to.
 WATCH_ERR = "watch.err"
 _ENCODING = "utf-8"
+_ZOMBIE = "Z"
 
 _watches: dict[int, tuple[subprocess.Popen[bytes], Path]] = {}
 #: Every sandbox a process registered, by the process, so a watch started again watches them all.
@@ -116,25 +121,71 @@ def marked_pids(value: str) -> list[int]:
     return [pid for pid, environ in _marked() if environ[MARKER] == value]
 
 
+def sandbox_pids(marker: str) -> tuple[set[int], set[int]]:
+    """The live processes of the sandbox whose processes carry ``marker``: those carrying it and every descendant of
+    its launchers, marked or not; and its launchers, which are the marked processes running the launcher's source."""
+
+    parents: dict[int, list[int]] = {}
+    marked: set[int] = set()
+    for pid in _pids():
+        try:
+            state, ppid = _stat(pid)
+            if state == _ZOMBIE:
+                continue
+            parents.setdefault(ppid, []).append(pid)
+            if f"{MARKER}={marker}".encode() in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):
+                marked.add(pid)
+        except (OSError, ValueError, IndexError):
+            continue
+    launchers = {pid for pid in marked if _is_launcher(pid)}
+    found, stack = marked - launchers, list(launchers)
+    while stack:
+        for child in parents.get(stack.pop(), ()):
+            if child not in found:
+                found.add(child)
+                stack.append(child)
+    return found - launchers, launchers
+
+
 async def kill_marked(
     marker: str, grace_seconds: float, poll_seconds: float, reap: Callable[[], object] = lambda: None
 ) -> None:
-    """SIGTERM every process carrying ``marker``, SIGKILL what is left after ``grace_seconds``; return once none is
-    left. ``reap`` collects a child of this process that ended, which would otherwise linger as a zombie."""
+    """SIGTERM every process of the sandbox whose processes carry ``marker`` (:func:`sandbox_pids`), SIGKILL what is
+    left after ``grace_seconds``, then the launchers; return once none is left. ``reap`` collects a child of this
+    process that ended, which would otherwise linger as a zombie."""
 
     until = time.monotonic() + grace_seconds
     termed: set[int] = set()
     while True:
         reap()
-        pids = marked_pids(marker)
-        if not pids:
+        pids, launchers = sandbox_pids(marker)
+        if not pids and not launchers:
             return
-        if time.monotonic() >= until:
+        if not pids:
+            # Killed last: a launcher gone first would leave what it still holds to init.
+            _signal(launchers, signal.SIGKILL)
+        elif time.monotonic() >= until:
             _signal(pids, signal.SIGKILL)
         else:
-            _signal(set(pids) - termed, signal.SIGTERM)
+            _signal(pids - termed, signal.SIGTERM)
             termed.update(pids)
         await asyncio.sleep(poll_seconds)
+
+
+def _pids() -> Iterator[int]:
+    return (int(entry.name) for entry in Path("/proc").iterdir() if entry.name.isdigit())
+
+
+def _stat(pid: int) -> tuple[str, int]:
+    fields = Path(f"/proc/{pid}/stat").read_text(encoding=_ENCODING, errors="replace").rsplit(")", 1)[1].split()
+    return fields[0], int(fields[1])
+
+
+def _is_launcher(pid: int) -> bool:
+    try:
+        return LAUNCHER_SOURCE.encode() in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return False
 
 
 def _marked() -> Iterator[tuple[int, dict[str, str]]]:
@@ -290,5 +341,6 @@ __all__ = [
     "kill_marked",
     "marked_pids",
     "revive",
+    "sandbox_pids",
     "watch",
 ]

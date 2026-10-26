@@ -4,15 +4,17 @@
 """A local stand-in for an autonomous branch's sandbox lease: commands run on this host, on the leased cards only.
 
 Every command runs with :data:`~hyperloom_multibranch.specialist.agent_watch.MARKER` in its environment, which every
-process it starts inherits, and that marker is the sandbox's whole extent: :meth:`LocalProcess.kill` ends every process
-that carries it, whichever session or process group a process moved to (a Claude CLI runs each of its shell commands in
-a session of its own, and an agent's model starts its servers through one), and so does the session's watch
-(:mod:`agent_watch`) once the session's process is gone. The pod forbids a PID namespace, so an agent's ``pkill``,
-``pgrep`` and ``killall`` would otherwise reach the whole host; Arbor stops its server with ``docker exec C pkill -TERM
--f sglang.launch_server``, which through the docker shim would stop MB's measurement servers too. The sandbox puts
-wrappers for them first on ``PATH`` that match only the processes carrying the caller's marker and never the caller or
-its ancestors, as a ``docker exec`` from outside a container would not: a shell that waits with ``until ! pgrep -f X``
-carries ``X`` in its own command line. ``killall NAME`` is ``pkill -x`` on the name's first 15 characters, all the
+process it starts inherits, and under a launcher that is a child subreaper (:mod:`hyperloom.sandbox.launcher`), so the
+marker and the launchers' trees are the sandbox's whole extent: :meth:`LocalProcess.kill` ends every process that
+carries the marker or descends from a launcher, whichever session or process group it moved to and whatever it did to
+its environment (a Claude CLI runs each of its shell commands in a session of its own, and an agent's model starts its
+servers through one), and so does the session's watch (:mod:`agent_watch`) once the session's process is gone. The pod
+forbids a PID namespace, so an agent's ``pkill``, ``pgrep`` and ``killall`` would otherwise reach the whole host; Arbor
+stops its server with ``docker exec C pkill -TERM -f sglang.launch_server``, which through the docker shim would stop
+MB's measurement servers too. The sandbox puts wrappers for them first on ``PATH`` that match only the processes
+carrying the caller's marker and never the caller or its ancestors, as a ``docker exec`` from outside a container would
+not: a shell that waits with ``until ! pgrep -f X`` carries ``X`` in its own command line. Nor do they match a launcher,
+which would leave what it holds to init. ``killall NAME`` is ``pkill -x`` on the name's first 15 characters, all the
 kernel keeps of a name, and takes no option but a signal and ``-q``: its others select by user, age or regex, which an
 agent confined to its own processes has no use for.
 
@@ -32,16 +34,20 @@ import itertools
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
+from hyperloom.common.proctree import descendants, running
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+from hyperloom.sandbox.launcher import LAUNCHER_SOURCE, StatusPipe, launcher_argv
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult
 from hyperloom_multibranch.specialist.agent_session import Processes
 from hyperloom_multibranch.specialist.agent_watch import (
@@ -49,8 +55,8 @@ from hyperloom_multibranch.specialist.agent_watch import (
     MARKER,
     POLL_SECONDS,
     kill_marked,
-    marked_pids,
     revive,
+    sandbox_pids,
     watch,
 )
 
@@ -66,12 +72,15 @@ TAIL_BYTES = 64 * 1024
 #: The exit code a run that timed out reports, as ``timeout(1)`` does.
 TIMED_OUT = 124
 CONFINED = ("pkill", "pgrep", "killall")
+#: The launchers this process started, by the root of their sandbox, so a kill reaps every one of them.
+_launched: dict[str, list[subprocess.Popen[bytes]]] = {}
 
 CONFINE_SCRIPT = """#!{python} -I
 # pkill, pgrep and killall confined to the processes of the caller's sandbox, the caller and its ancestors spared.
 import os, re, signal, subprocess, sys
 
 PGREP = {pgrep!r}
+LAUNCHER = {launcher!r}.encode()
 VALUED = set("dgGOPrstuUF")
 SELECTING = set("gGPtuUF")
 VALUED_LONG = {{"--delimiter", "--pgroup", "--group", "--parent", "--session", "--terminal", "--euid", "--uid",
@@ -131,10 +140,11 @@ def has_criteria(args):
     return False
 
 
+# A launcher holds what its command left behind; killed, it would leave that to init.
 def ours(pid):
     try:
-        with open(f"/proc/{{pid}}/environ", "rb") as environ:
-            return MARK in environ.read().split(b"\\0")
+        with open(f"/proc/{{pid}}/environ", "rb") as environ, open(f"/proc/{{pid}}/cmdline", "rb") as cmdline:
+            return MARK in environ.read().split(b"\\0") and LAUNCHER not in cmdline.read().split(b"\\0")
     except OSError:
         return False
 
@@ -213,17 +223,40 @@ sys.exit(1 if missed else 0)
 
 @dataclass
 class LocalProcess:
-    """A command started in a :class:`LocalAgentSandbox` whose processes carry ``marker``; its output is in ``log``."""
+    """A command started in a :class:`LocalAgentSandbox` whose processes carry ``marker``, run by the launcher
+    ``popen``, which says on ``status`` how the command ended; its output is in ``log``."""
 
     popen: subprocess.Popen[bytes]
     log: Path
     marker: str
     grace_seconds: float = GRACE_SECONDS
     poll_seconds: float = POLL_SECONDS
+    status: StatusPipe | None = None
+    _code: int | None = field(default=None, init=False, repr=False)
 
     @property
     def returncode(self) -> int | None:
-        return self.popen.poll()
+        """The command's exit code, or the launcher's when it ended without saying; the launcher outlives the command
+        while anything it started runs."""
+
+        if self._code is not None or self.status is None:
+            return self._code if self._code is not None else self.popen.poll()
+        try:
+            self._code = self.status.wait_exit(self.popen, 0)
+        except TimeoutError:
+            return None
+        self.status = None
+        return self._code if self._code is not None else self.popen.poll()
+
+    def retire(self) -> None:
+        """End the launcher of a command that ended and left nothing running, which it would otherwise wait for until
+        the sandbox stops."""
+
+        if self.returncode is None or any(running(pid) for pid, _ in descendants(self.popen.pid)):
+            return
+        if self.popen.poll() is None:
+            self.popen.send_signal(signal.SIGKILL)
+            self.popen.wait()
 
     async def output(self) -> str:
         return await asyncio.to_thread(read_tail, self.log)
@@ -232,7 +265,10 @@ class LocalProcess:
         """SIGTERM every process of the sandbox, SIGKILL what is left after :attr:`grace_seconds`; return once none
         is left."""
 
-        await kill_marked(self.marker, self.grace_seconds, self.poll_seconds, self.popen.poll)
+        await kill_marked(self.marker, self.grace_seconds, self.poll_seconds, partial(_reap, self.marker))
+        if self.returncode is None and self.status is not None:
+            self.status.close()
+            self.status = None
 
 
 @dataclass
@@ -259,7 +295,7 @@ class LocalAgentSandbox:
         start = max((int(log.name.split("-", 1)[0]) for log in (self.root / LOG_DIR).glob("*-*.log")), default=0)
         self._numbers = itertools.count(start + 1)
         pgrep = shutil.which("pgrep", path=self._base().get("PATH")) or "/usr/bin/pgrep"
-        script = CONFINE_SCRIPT.format(python=sys.executable, pgrep=pgrep, marker=MARKER)
+        script = CONFINE_SCRIPT.format(python=sys.executable, pgrep=pgrep, marker=MARKER, launcher=LAUNCHER_SOURCE)
         for tool in CONFINED:
             wrapper = self.root / BIN_DIR / tool
             wrapper.write_text(script, encoding="utf-8")
@@ -303,14 +339,15 @@ class LocalAgentSandbox:
         if process.returncode is None:
             await process.kill()
             return CommandResult(TIMED_OUT, f"{read_tail(process.log)}\n`{command}` timed out after {timeout:g} s")
+        process.retire()
         return CommandResult(process.returncode, read_tail(process.log))
 
     async def start(self, command: str, cwd: Path, env: Mapping[str, str]) -> LocalProcess:
         return self._spawn("start", command, cwd, env)
 
     def alive(self) -> bool:
-        """Whether any process of the sandbox is left."""
-        return bool(marked_pids(str(self.root)))
+        """Whether any process of the sandbox is left, its launchers aside."""
+        return bool(sandbox_pids(str(self.root))[0])
 
     def watched(self) -> str:
         """Start the session's watch again when it ended, which left the sandbox unconfined since; what to say of it,
@@ -321,7 +358,7 @@ class LocalAgentSandbox:
 
     async def stop(self) -> None:
         """Kill every process of the sandbox, as :meth:`LocalProcess.kill` does."""
-        await kill_marked(str(self.root), self.grace_seconds, self.poll_seconds)
+        await kill_marked(str(self.root), self.grace_seconds, self.poll_seconds, partial(_reap, str(self.root)))
 
     def _spawn(self, kind: str, command: str, cwd: Path, env: Mapping[str, str]) -> LocalProcess:
         log = self.root / LOG_DIR / f"{next(self._numbers):04d}-{kind}.log"
@@ -331,25 +368,40 @@ class LocalAgentSandbox:
         argv = ["bash", "-c", command]
         if self.niceness:
             argv = ["nice", "-n", str(self.niceness), *argv]
-        with log.open("ab") as out:
-            popen = subprocess.Popen(
-                argv,
-                cwd=cwd,
-                env=self.env(env),
-                stdin=subprocess.DEVNULL,
-                stdout=out,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
+        read_fd, write_fd = os.pipe()
+        try:
+            with log.open("ab") as out:
+                popen = subprocess.Popen(
+                    launcher_argv(sys.executable, write_fd, argv),
+                    cwd=cwd,
+                    env=self.env(env),
+                    stdin=subprocess.DEVNULL,
+                    stdout=out,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    pass_fds=(write_fd,),
+                )
+        except BaseException:
+            os.close(read_fd)
+            raise
+        finally:
+            os.close(write_fd)
+        _launched.setdefault(str(self.root), []).append(popen)
         if self.processes is not None:
             try:
                 self.processes.adopt(popen.pid, branch=self.branch, argv=argv)
             except ValueError:
                 logger.warning("`%s` of %s ended before the process registry took it over", command, self.branch)
-        return LocalProcess(popen, log, str(self.root), self.grace_seconds, self.poll_seconds)
+        return LocalProcess(popen, log, str(self.root), self.grace_seconds, self.poll_seconds, StatusPipe(read_fd))
 
     def _base(self) -> Mapping[str, str]:
         return os.environ if self.base_env is None else self.base_env
+
+
+def _reap(root: str) -> None:
+    """Collect the launchers of the sandbox at ``root`` that ended, which would otherwise linger as zombies."""
+
+    _launched[root] = [popen for popen in _launched.get(root, []) if popen.poll() is None]
 
 
 def _restarted(ended: tuple[int, Path]) -> str:

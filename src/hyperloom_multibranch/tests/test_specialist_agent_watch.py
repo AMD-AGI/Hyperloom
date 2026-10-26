@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -131,7 +132,35 @@ def test_the_agent_s_whole_tree_ends_when_its_owner_is_killed(tmp_path: Path) ->
     owner.wait()
 
     _until(lambda: not any(_alive(pid) for pid in agent))
-    assert marked_pids(str(tmp_path / "sandbox")) == []
+    # The launchers go last, once what they hold has ended.
+    _until(lambda: marked_pids(str(tmp_path / "sandbox")) == [])
+
+
+#: Leaves the agent's tree by a double fork and setsid() and drops the marker with its environment.
+ESCAPE = (
+    "import os, sys\n"
+    "if os.fork(): os._exit(0)\n"
+    "os.setsid()\n"
+    "if os.fork(): os._exit(0)\n"
+    "open(sys.argv[1], 'a').write(f'{os.getpid()}\\n')\n"
+    "os.execve('/bin/sleep', ['sleep', '60'], {})\n"
+)
+
+
+def test_an_unmarked_process_that_left_the_agent_s_tree_ends_when_its_owner_is_killed(tmp_path: Path) -> None:
+    script = tmp_path / "escape.py"
+    script.write_text(ESCAPE)
+    owner, pids = _owner(tmp_path, f"{shlex.quote(sys.executable)} {script} {{pids}}; " + AGENT, started=3)
+    escaped = _pids(pids)
+    try:
+        assert all(_alive(pid) for pid in escaped)
+
+        owner.send_signal(signal.SIGKILL)
+        owner.wait()
+
+        _until(lambda: not any(_alive(pid) for pid in escaped))
+    finally:
+        _kill(escaped)
 
 
 def test_a_terminated_watch_ends_a_deaf_agent_within_the_kill_all_grace_and_removes_its_registry(
@@ -139,7 +168,7 @@ def test_a_terminated_watch_ends_a_deaf_agent_within_the_kill_all_grace_and_remo
 ) -> None:
     owner, pids = _owner(tmp_path, DEAF_AGENT)
     agent = _pids(pids)
-    [watch] = [pid for pid in _children(owner.pid) if pid not in agent]
+    [watch] = _watches_of(owner.pid)
     try:
         _until(lambda: _takes_sigterm(watch))
         # What Processes.kill_all does to the session's children it did not register: SIGTERM, SIGKILL after a grace.

@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.specialist.agent_sandbox import TIMED_OUT, LocalAgentSandbox
-from hyperloom_multibranch.specialist.agent_watch import marked_pids
+from hyperloom_multibranch.specialist.agent_watch import MARKER, marked_pids
 
 BASE = {
     "PATH": os.environ["PATH"],
@@ -94,7 +94,7 @@ def test_env_drops_masks_and_pins_cards_paths_and_tmpdir(tmp_path: Path) -> None
 def test_run_sees_the_env_in_its_own_session(tmp_path: Path) -> None:
     done = asyncio.run(
         _sandbox(tmp_path).run(
-            'echo "$ROCR_VISIBLE_DEVICES/$HIP_VISIBLE_DEVICES $(command -v pkill)"; ps -o sess= -p $$; echo $$',
+            'echo "$ROCR_VISIBLE_DEVICES/$HIP_VISIBLE_DEVICES $(command -v pkill)"; ps -o sess= -p $$; echo $PPID',
             tmp_path,
             {},
             5,
@@ -288,3 +288,98 @@ def test_pgrep_does_not_find_itself_so_a_wait_for_a_process_to_end_ends(tmp_path
     done = asyncio.run(_sandbox(tmp_path).run(script, tmp_path, {}, 20))
 
     assert "ended" in done.output and "rc 1" in done.output
+
+
+#: Leaves the caller's tree by a double fork and setsid() and drops the sandbox's marker with its environment, as
+#: `env -i` or a daemonizing server does; appends its pid to argv[1] and sleeps.
+ESCAPE = """
+import os, sys
+if os.fork():
+    os._exit(0)
+os.setsid()
+if os.fork():
+    os._exit(0)
+with open(sys.argv[1], "a") as pids:
+    pids.write(f"{os.getpid()}\\n")
+os.execve("/bin/sleep", ["sleep", "60"], {})
+"""
+
+
+def _escape(tmp_path: Path) -> tuple[str, Path]:
+    script, pids = tmp_path / "escape.py", tmp_path / "pids"
+    script.write_text(ESCAPE)
+    return f"{shlex.quote(sys.executable)} {script} {pids}", pids
+
+
+def _end(pids: Path) -> None:
+    for line in pids.read_text().split() if pids.exists() else []:
+        try:
+            os.kill(int(line), 9)
+        except ProcessLookupError:
+            continue
+
+
+def test_kill_ends_an_unmarked_grandchild_that_double_forked_and_left_the_session(tmp_path: Path) -> None:
+    escape, pids = _escape(tmp_path)
+
+    async def scenario() -> tuple[int, int, int]:
+        process = await _sandbox(tmp_path).start(f"{escape}; sleep 60", tmp_path, {})
+        await _until(lambda: pids.exists() and pids.read_text().strip())
+        escaped = int(pids.read_text())
+        await _until(lambda: f"{MARKER}=".encode() not in Path(f"/proc/{escaped}/environ").read_bytes())
+        parent = int(Path(f"/proc/{escaped}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        await process.kill()
+        return escaped, parent, process.popen.pid
+
+    try:
+        escaped, parent, launcher = asyncio.run(scenario())
+        assert not _alive(escaped)
+        assert parent == launcher
+    finally:
+        _end(pids)
+
+
+def test_stop_ends_what_a_finished_run_left_behind_outside_the_marker(tmp_path: Path) -> None:
+    escape, pids = _escape(tmp_path)
+
+    async def scenario() -> tuple[int, int, bool]:
+        sandbox = _sandbox(tmp_path)
+        done = await sandbox.run(escape, tmp_path, {}, 10)
+        await _until(lambda: pids.exists() and pids.read_text().strip())
+        escaped = int(pids.read_text())
+        alive = _alive(escaped)
+        await sandbox.stop()
+        return done.returncode, escaped, alive
+
+    try:
+        returncode, escaped, alive = asyncio.run(scenario())
+        assert returncode == 0 and alive
+        assert not _alive(escaped)
+    finally:
+        _end(pids)
+
+
+def test_a_finished_run_leaves_no_process_behind(tmp_path: Path) -> None:
+    sandbox = _sandbox(tmp_path)
+
+    done = asyncio.run(sandbox.run("exit 3", tmp_path, {}, 5))
+
+    assert done.returncode == 3
+    assert marked_pids(str(tmp_path / "sandbox")) == []
+
+
+def test_pkill_never_selects_the_sandbox_s_launchers(tmp_path: Path) -> None:
+    async def scenario() -> tuple[object, int | None]:
+        sandbox = _sandbox(tmp_path)
+        agent = await sandbox.start("sleep 60", tmp_path, {})
+        try:
+            stopped = await sandbox.run("pkill -f -- '-I -c'; echo rc=$?", tmp_path, {}, 5)
+            await asyncio.sleep(0.3)
+            return stopped, agent.returncode
+        finally:
+            await agent.kill()
+
+    stopped, returncode = asyncio.run(scenario())
+
+    assert "rc=1" in stopped.output, stopped.output
+    assert returncode is None
