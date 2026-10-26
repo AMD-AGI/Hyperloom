@@ -83,18 +83,25 @@ def _run() -> int:
     # From here on the host-only inputs live in ``info`` only: no child process may inherit them.
     info = take_host_info(os.environ, require=())
     session_dir = _prepare_session_dir(spec, info)
-    install(
-        HostedRun(
-            spec=spec,
-            host_info=info,
-            plug_lock=lock,
-            session_dir=session_dir,
-            archive_root=ensure_archive_root(session_dir),
-        )
+    run = HostedRun(
+        spec=spec,
+        host_info=info,
+        plug_lock=lock,
+        session_dir=session_dir,
+        archive_root=ensure_archive_root(session_dir),
     )
+    install(run)
+    _hand_to_plug_host(run)
     os.environ[ENV_IMAGE] = spec.framework_image
     _announce_grant(info)
     return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
+
+
+def _hand_to_plug_host(run: HostedRun) -> None:
+    """Give plug resolution the lock and the host inputs; ``optimize`` cannot import this package (it would be a cycle)."""
+    from hyperloom.inference_optimizer.cli.bootstrap import HostedPlugInputs, set_hosted_plug_inputs
+
+    set_hosted_plug_inputs(HostedPlugInputs(lock=run.plug_lock, host_info=run.host_info))
 
 
 def _state_dir_from_environment() -> Path | None:
