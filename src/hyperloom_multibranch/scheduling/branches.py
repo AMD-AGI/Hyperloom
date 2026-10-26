@@ -14,14 +14,15 @@ fork is cut by the rule gate at that same commit, which lands the fix on it firs
 ``SPLIT`` lineage, so it gets no ``OPEN``: it is opened at its head once the gate has landed it, and a fork the gate
 does not land is stopped as not started. A repair's specialist starts on the request it was admitted for,
 and a repair branch is stopped :data:`REPAIR_BRANCH_SECONDS` after its entry into the roster. Stopping a branch
-withdraws everything of it: its specialist, its queued and running tests and tool jobs, the processes the scheduler
-registered for it, its claims, and the forks and repairs of it that are queued, or admitted but not started yet, as
-the fork desk admits nothing for a stopped branch. Every fork and repair voided that way, stopped before it started,
-or whose start failed is handed to the rule gate, which records its candidate as only recorded unless it already
-landed the fork; the notebook
-gets the ``STOP`` lineage of a branch that started, the integration branch included, which only the end of the session
-stops. A specialist counts as possibly running from the moment its start is asked for until the runtime confirms its
-stop; only a start the runtime itself failed leaves nothing to stop. A call to a specialist gets
+withdraws its specialist, its tool jobs, the processes the scheduler registered for it, its claims, and the forks and
+repairs of it that are queued, or admitted but not started yet, as the fork desk admits nothing for a stopped branch.
+Its queued and running tests run to their end under the K it had, and their results are recorded, unless the session's
+end stopped it, which withdraws them too; the end of EXPLORE withdraws every test a stopped branch still has. Every
+fork and repair voided that way, stopped before it started, or whose start failed is handed to the rule gate, which
+records its candidate as only recorded unless it already landed the fork; the notebook gets the ``STOP`` lineage of a
+branch that started, the integration branch included, which only the end of the session stops. A specialist counts
+as possibly running from the moment its start is asked for until the runtime confirms its stop; only a start the
+runtime itself failed leaves nothing to stop. A call to a specialist gets
 :data:`SPECIALIST_CALL_SECONDS`; a stop or a new K that overruns them, or fails, is recorded as a failed step, the rest
 of the stop still runs, and the session stop asks once more for every stop that was not confirmed. The commits a
 specialist already made stay in the notebook, so the integrator may still merge them. The roster entry is stopped
@@ -271,11 +272,11 @@ class BranchControl:
         return tuple(stopped)
 
     async def stop_branch(self, branch: str, stop: BranchStop) -> tuple[BaseException, ...]:
-        """Withdraw everything of ``branch`` and return the steps that failed; stopping it again does nothing.
+        """Withdraw what of ``branch`` its stop ends and return the steps that failed; stopping it again does nothing.
 
-        Every step runs even when an earlier one fails, so the tests, processes and claims of the branch are always
-        withdrawn and, once the branch is in the lineage, its ``STOP`` recorded; the ``STOP`` decision names each
-        failure, and the caller decides what one means to it.
+        Every step runs even when an earlier one fails, so the tool jobs, processes and claims of the branch, and its
+        tests when the stop does not let them finish, are always withdrawn and, once the branch is in the lineage, its
+        ``STOP`` recorded; the ``STOP`` decision names each failure, and the caller decides what one means to it.
         """
 
         entry = self._roster.entry(branch)
@@ -292,7 +293,7 @@ class BranchControl:
         steps.append(await settled(self.push_quota()))
         if branch in self._specialists:
             steps.append(await self._stop_specialist(branch))
-        withdrawn = await settled(self._toolbox.cancel_branch(branch, stop.summary))
+        withdrawn = await settled(self._withdraw(branch, stop))
         steps.append(await settled(self._processes.kill_branch(branch)))
         released = await settled(self._notebook.release_branch(branch))
         if entry.start_commit:
@@ -306,6 +307,22 @@ class BranchControl:
         }
         self._decisions.record(Decision(DecisionKind.STOP, stop.summary, branch, detail))
         return (*raised, *forks)
+
+    async def _withdraw(self, branch: str, stop: BranchStop) -> int:
+        """Cancel the tool jobs of ``branch``, and withdraw its tests unless ``stop`` lets them finish; how many."""
+
+        if stop.cause.lets_tests_finish:
+            return self._toolbox.cancel_tool_jobs(branch)
+        return await self._toolbox.cancel_branch(branch, stop.summary)
+
+    async def withdraw_finishing_tests(self, reason: str) -> None:
+        """Withdraw every test a stopped branch was left to finish, as EXPLORE ends for ``reason``, so that none
+        competes with FINAL's measurements, and take those branches out of the quota."""
+
+        for entry in self._roster.entries():
+            if entry.finishes_tests:
+                await self._toolbox.cancel_branch(entry.branch, reason)
+        await self.push_quota()
 
     async def void_queued(self, reason: str) -> list[BaseException]:
         """Void every fork and repair still queued, as the session stops for ``reason``, and have the gate record
@@ -339,7 +356,13 @@ class BranchControl:
         return failures
 
     async def push_quota(self) -> None:
-        await self._toolbox.set_policy(self._roster.quota_policy())
+        await self._toolbox.set_policy(self._roster.quota_policy(await self._busy_branches()))
+
+    async def _busy_branches(self) -> frozenset[str]:
+        """The branches the toolbox holds a test of: waiting for its builds, queued or running."""
+
+        state = await self._toolbox.queue_state()
+        return frozenset({*state.pending_build_by_branch, *state.queued_by_branch, *state.running_by_branch})
 
     async def _launch(self, entry: BranchEntry, start_commit: str, deadline: float, launch: Launch) -> None:
         """Start the specialist unbriefed, as the runtime briefs each launch itself; a ``launch.focus`` is the one the

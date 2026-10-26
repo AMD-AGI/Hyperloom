@@ -129,7 +129,7 @@ def test_quota_lists_only_started_live_branches_and_the_toolbox_refuses_the_rest
     roster.stop(stopped, _judge_stop())
     fork = roster.next_branch_id()
     roster.open(fork, origin=BranchOrigin.FORK, start_commit="", k=1, from_branch=running)
-    policy = roster.quota_policy()
+    policy = roster.quota_policy(())
     assert policy.global_concurrency == 8
     assert dict(policy.branch_k) == {INTEGRATION_BRANCH: 1, running: 2}
     queue = WorkQueue(policy)
@@ -139,7 +139,17 @@ def test_quota_lists_only_started_live_branches_and_the_toolbox_refuses_the_rest
             _submitted_by(queue, refused)
         assert rejection.value.code == BRANCH_STOPPED
     assert roster.started(fork, "fix").status is BranchStatus.RUNNING
-    assert roster.quota_policy().k_for(fork) == 1
+    assert roster.quota_policy(()).k_for(fork) == 1
+
+
+def test_a_stopped_branch_keeps_its_k_while_the_toolbox_holds_tests_its_stop_let_finish(tmp_path: Path) -> None:
+    roster = _roster(tmp_path, max_branches=3)
+    judged, ended, idle = _open(roster, k=3), _open(roster, k=3), _open(roster, k=3)
+    roster.stop(judged, _judge_stop())
+    roster.stop(ended, BranchStop(StopCause.SESSION_END, "time_exhausted", 0.0))
+    roster.stop(idle, _judge_stop())
+
+    assert dict(roster.quota_policy({judged, ended}).branch_k) == {judged: 3}
 
 
 def test_every_k_of_the_quota_is_at_least_one_and_under_the_caps(tmp_path: Path) -> None:
@@ -147,7 +157,7 @@ def test_every_k_of_the_quota_is_at_least_one_and_under_the_caps(tmp_path: Path)
     roster.add_integration(ROOT, k=0)
     _open(roster, k=-4)
     _open(roster, k=MAX_K + 5)
-    policy = roster.quota_policy()
+    policy = roster.quota_policy(())
     assert policy.per_branch_k >= 1 and policy.global_concurrency >= 1
     assert sorted(policy.branch_k.values()) == [1, 1, MAX_K]
 

@@ -168,8 +168,9 @@ judging failed. Otherwise weigh the slot it holds as given.
 A branch's pending_candidates are its measured candidates that beat its head by at least the bar while their confirm
 runs, each with its gain_over_head_pct.
 A branch's queued_intents are its explore tests requested and not measured yet, queued or running, each with the
-intent it tests and waiting_seconds since it was requested. Stopping the branch withdraws them and loses what they
-would have measured: weigh a stop against the tests the branch is about to report.
+intent it tests and waiting_seconds since it was requested. Stopping the branch does not withdraw them: they run to
+their end and their results are recorded, but no specialist of the branch acts on them any more, so weigh a stop
+against the tests the branch is about to report.
 Stop the session only when no branch is expected to gain anything worth the remaining time, and weigh that against
 explore_remaining_seconds: while hours of it are left and slots are free, a branch out of ideas is one to stop and
 replace, so refill the free slots rather than stop the session. Nothing measures convergence, so an early stop is

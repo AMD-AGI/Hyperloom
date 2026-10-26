@@ -184,6 +184,21 @@ async def test_end_exploration_stops_open_specialists_and_keeps_integration(tmp_
         session.roster.open("b04", origin=BranchOrigin.FORK, start_commit="", k=1)
 
 
+async def test_the_end_of_explore_withdraws_the_tests_a_stopped_branch_was_left_to_finish(tmp_path: Path) -> None:
+    session = await Stage(tmp_path).opened()
+    session.toolbox.executor.gate.clear()
+    left = await session.toolbox.submit_test(
+        TestRequest(TestKind.TEST, Purpose.EXPLORE, "b01", session.root, delta=_CHANGE)
+    )
+    await session.branches.stop_branch("b01", JUDGE_STOP)
+    assert session.toolbox.withdrawn == {} and "b01" in session.toolbox.policies[-1].branch_k
+
+    await session.stopper.end_exploration(SessionStopReason.TIME_EXHAUSTED)
+
+    assert session.toolbox.withdrawn == {left: SessionStopReason.TIME_EXHAUSTED.value}
+    assert dict(session.toolbox.policies[-1].branch_k) == {INTEGRATION_BRANCH: 1}
+
+
 @pytest.mark.parametrize("reason", [SessionStopReason.TIME_EXHAUSTED, SessionStopReason.SIGNAL])
 async def test_a_session_stop_voids_every_fork_queued_for_a_slot(tmp_path: Path, reason: SessionStopReason) -> None:
     session = await Stage(tmp_path).opened()
@@ -213,7 +228,7 @@ async def test_a_failed_branch_stop_does_not_hold_up_the_end_of_exploration(tmp_
     ended = _ended(SessionStopReason.JUDGE_STOPPED)
     fork = _ended_with_b01(SessionStopReason.JUDGE_STOPPED)
     assert (session.stops()["b01"], session.stops()["b03"]) == (ended, fork)
-    assert sorted(session.toolbox.cancelled) == ["b01", "b03"]
+    assert sorted(session.toolbox.cancelled) == ["b01", "b02", "b03"]
 
 
 async def test_stop_everything_withdraws_every_branch_closes_the_toolbox_and_leaves_no_process(tmp_path: Path) -> None:
