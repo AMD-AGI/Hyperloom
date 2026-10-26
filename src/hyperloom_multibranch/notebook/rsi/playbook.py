@@ -48,6 +48,8 @@ from hyperloom_multibranch.notebook.rsi.history import MAX_STALL_TESTS, MIN_STAL
 log = logging.getLogger(__name__)
 
 PLAYBOOK_FORMAT = "multibranch.scheduling-playbook"
+#: The key of the playbook a session played in its policy versions, as the scheduler records it.
+PLAYBOOK_KEY = "playbook"
 CROWNED_FORMAT = "multibranch.scheduling-playbook-crowned"
 RETIRED_FORMAT = "multibranch.scheduling-playbook-retired"
 #: A playbook's label: lower-case letters, digits and ``.``, ``_``, ``-``.
@@ -389,6 +391,7 @@ __all__ = [
     "H0_LABEL",
     "MAX_RULES",
     "PLAYBOOK_FORMAT",
+    "PLAYBOOK_KEY",
     "PLAYBOOK_LABEL",
     "RETIRED_FORMAT",
     "RULE_CHARS",

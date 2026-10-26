@@ -9,9 +9,10 @@
   to the RSI lesson pool beside the archive too, revising and retiring the past sessions' lessons they name, and the
   pooled lessons the session showed get their standing from what its branches did next (:mod:`rsi.lesson_close`).
   Beside the receipts go the frontier calibration over the archived sessions like this one, and the stop audit of
-  this session's stops and probations against the stall odds the judge read (:mod:`rsi.stops`). A step that cannot
-  be done says why and never stops CLOSE; :meth:`KnowledgeClose.document` is what the breakdown records of the steps
-  (``CloseOutcome.knowledge`` of ``build_breakdown``).
+  this session's stops and probations against the stall odds the judge read (:mod:`rsi.stops`). A session that
+  played a scheduling playbook is kept as its trial beside the playbook pool, which may crown or retire a playbook
+  (:mod:`rsi.ladder`). A step that cannot be done says why and never stops CLOSE; :meth:`KnowledgeClose.document` is
+  what the breakdown records of the steps (``CloseOutcome.knowledge`` of ``build_breakdown``).
 * :func:`session_frontier_policy` chooses its policy once the session has a profile: the calibration's recommendation
   for sessions like it, or the defaults; :func:`session_frontier_scorer` chooses the same way among the scorers of
   :mod:`rsi.scorers` too, crowning a challenger that passes the promotion gate (a 1-in-4 exploration session's pick,
@@ -74,6 +75,8 @@ from hyperloom_multibranch.notebook.rsi.scorers import (
     registered_scorers,
     scorer_named,
 )
+from hyperloom_multibranch.notebook.rsi.ladder import record_trial, settle, trial_of
+from hyperloom_multibranch.notebook.rsi.playbook import PLAYBOOK_KEY, PlaybookPool
 from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
 from hyperloom_multibranch.notebook.rsi.stops import stop_audit
 
@@ -98,6 +101,7 @@ NO_PROFILE_EVIDENCE = f"{DEFAULT_POLICY}: the session has no profile yet"
 NO_RETRIEVAL_LOG = "no_retrieval_log"
 NO_LESSON_SHOWN = "no_pooled_lesson_shown"
 ALREADY_RECORDED = "already_recorded"
+NO_PLAYBOOK_PLAYED = "no_playbook_played"
 #: What a step raises when its target or its input lets it down; CLOSE records it and goes on.
 STEP_ERRORS = (LookupError, OSError, RuntimeError, ValueError)
 
@@ -130,6 +134,7 @@ class KnowledgeClose:
     lessons: CloseStep = CloseStep(SKIPPED, NO_ARCHIVE)
     lesson_standings: CloseStep = CloseStep(SKIPPED, NO_ARCHIVE)
     stop_audit: CloseStep = CloseStep(SKIPPED, NO_REPORTS)
+    playbook_trial: CloseStep = CloseStep(SKIPPED, NO_PLAYBOOK_PLAYED)
 
     def steps(self) -> dict[str, CloseStep]:
         """The steps by their names in the breakdown's ``close.knowledge``."""
@@ -143,6 +148,7 @@ class KnowledgeClose:
             "lessons": self.lessons,
             "lesson_standings": self.lesson_standings,
             "stop_audit": self.stop_audit,
+            "playbook_trial": self.playbook_trial,
         }
 
     def document(self) -> dict[str, object]:
@@ -210,6 +216,33 @@ def _calibrated(
     except STEP_ERRORS as exc:
         return _failed("write the frontier calibration", exc)
     return CloseStep(WRITTEN, report.note)
+
+
+def _trialled(
+    snapshot: NotebookSnapshot, metric: str, archive: TreeArchive | None, bottlenecks: Mapping[str, float] | None
+) -> CloseStep:
+    """The session kept as a trial of the playbook it played, beside the pool, and what that settles: a playbook
+    crowned or retired (:func:`~hyperloom_multibranch.notebook.rsi.ladder.settle`)."""
+
+    versions = snapshot.fingerprints[-1].policy_versions if snapshot.fingerprints else {}
+    played = versions.get(PLAYBOOK_KEY)
+    if not played:
+        return CloseStep(SKIPPED, NO_PLAYBOOK_PLAYED)
+    target = archive if archive is not None else TreeArchive.from_env()
+    if target is None:
+        return CloseStep(SKIPPED, NO_ARCHIVE)
+    try:
+        tree = tree_from_snapshot(snapshot, metric, bottlenecks=bottlenecks)
+        pool = PlaybookPool.beside(target)
+        audit = stop_audit(tree, stall_odds(archived_history(target), tree.task, session=tree))
+        written = record_trial(pool, trial_of(tree, audit, played, pool.champion().label))
+        settled = settle(pool, snapshot.taken_at)
+    except NotRecorded:
+        return CloseStep(SKIPPED, NO_PROFILE)
+    except STEP_ERRORS as exc:
+        return _failed("keep the playbook trial", exc)
+    reason = "; ".join(settled) or ("" if written else ALREADY_RECORDED)
+    return CloseStep(WRITTEN if written else SKIPPED, reason, {"trials": int(written), "settled": len(settled)})
 
 
 def _audited(
@@ -323,6 +356,7 @@ def close_knowledge(
         lessons=_lessons(snapshot, targets.lesson_pool()),
         lesson_standings=_standings(snapshot, targets.lesson_pool(), targets.receipt(LEARNINGS_LOG)),
         stop_audit=_audited(snapshot, metric, targets.archive, targets.receipt(STOP_AUDIT_REPORT), bottlenecks),
+        playbook_trial=_trialled(snapshot, metric, targets.archive, bottlenecks),
     )
 
 
@@ -469,6 +503,7 @@ __all__ = [
     "NO_KB",
     "ALREADY_RECORDED",
     "NO_LESSON_SHOWN",
+    "NO_PLAYBOOK_PLAYED",
     "NO_PROFILE",
     "NO_REPORTS",
     "NO_RETRIEVAL_LOG",

@@ -29,6 +29,8 @@ from hyperloom_multibranch.notebook.rsi.expression import ExpressionScorer
 from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1, FRONTIER_V1_LABEL, FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, Retrieval, RetrievalLog, RetrievalSource
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_stall_odds
+from hyperloom_multibranch.notebook.rsi.ladder import trials
+from hyperloom_multibranch.notebook.rsi.playbook import H0, PLAYBOOK_KEY, PlaybookPool
 from hyperloom_multibranch.notebook.rsi.lessons import (
     LessonPool,
     LessonRevision,
@@ -48,6 +50,7 @@ from hyperloom_multibranch.notebook.rsi.session import (
     NO_KB,
     NO_PROFILE,
     NO_REPORTS,
+    NO_PLAYBOOK_PLAYED,
     NO_RETRIEVAL_LOG,
     STOP_AUDIT_REPORT,
     WRITTEN,
@@ -147,6 +150,27 @@ def test_close_writes_the_frontier_calibration_over_the_archived_sessions_like_t
     assert done.archive.status == ARCHIVED
     assert done.calibration.status == WRITTEN and done.calibration.reason.startswith("Too little evidence")
     assert (reports / CALIBRATION_REPORT).read_text(encoding="utf-8").startswith("Frontier calibration")
+
+
+@pytest.mark.usefixtures("unconfigured")
+def test_close_keeps_a_session_that_played_a_playbook_as_its_trial_once(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    archive = TreeArchive(tmp_path)
+    played = dataclasses.replace(snapshot.fingerprints[-1], policy_versions={PLAYBOOK_KEY: H0.label})
+    session = dataclasses.replace(snapshot, fingerprints=(*snapshot.fingerprints[:-1], played))
+
+    done = close_knowledge(session, METRIC, targets=CloseTargets(archive=archive))
+    again = close_knowledge(session, METRIC, targets=CloseTargets(archive=archive))
+
+    (kept,) = trials(PlaybookPool.beside(archive))
+    assert done.playbook_trial == CloseStep(WRITTEN, "", {"trials": 1, "settled": 0})
+    assert again.playbook_trial == CloseStep(SKIPPED, ALREADY_RECORDED, {"trials": 0, "settled": 0})
+    assert (kept.session_id, kept.played, kept.champion) == ("sess-1", H0.label, H0.label)
+    assert "early_stops" in kept.measures
+    assert close_knowledge(snapshot, METRIC, targets=CloseTargets(archive=archive)).playbook_trial == CloseStep(
+        SKIPPED, NO_PLAYBOOK_PLAYED
+    )
 
 
 @pytest.mark.usefixtures("unconfigured")
@@ -289,6 +313,7 @@ def test_the_breakdown_records_the_knowledge_steps_only_when_given(snapshot: Not
         "lessons": {"status": SKIPPED, "reason": NO_ARCHIVE, "counts": {}},
         "lesson_standings": {"status": SKIPPED, "reason": NO_ARCHIVE, "counts": {}},
         "stop_audit": {"status": SKIPPED, "reason": NO_REPORTS, "counts": {}},
+        "playbook_trial": {"status": SKIPPED, "reason": NO_PLAYBOOK_PLAYED, "counts": {}},
     }
     assert json.loads(json.dumps(close["knowledge"])) == close["knowledge"]
     assert "knowledge" not in build_breakdown(snapshot)["close"]

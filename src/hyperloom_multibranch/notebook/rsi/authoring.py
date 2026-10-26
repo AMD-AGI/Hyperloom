@@ -93,6 +93,7 @@ from hyperloom_multibranch.notebook.rsi.history import stall_odds
 from hyperloom_multibranch.notebook.rsi.playbook import (
     BOUNDS,
     MAX_RULES,
+    PLAYBOOK_KEY,
     Governs,
     Playbook,
     PlaybookNumbers,
@@ -668,8 +669,6 @@ async def author_scorers(
 #: stops' worth by the stall odds, a new branch's minutes to its first commit, the share of new branches that
 #: committed.
 MEASURES = ("early_stops", "probation_commits", "stop_value", "first_commit_minutes", "opened_committed")
-#: The key of the playbook a session played in its policy versions, as the scheduler records it.
-PLAYBOOK_KEY = "playbook"
 NO_CHANGE = "the LLM proposed no change"
 #: The numbers that are whole though their default is ``None``.
 _WHOLE = frozenset({"stall_tests", "max_open"})
