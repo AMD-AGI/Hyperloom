@@ -67,16 +67,18 @@ def test_the_weighted_gain_is_the_share_of_cycle_the_candidate_saves():
     assert cb.weighted_gain_pct(base, cand, weights) == pytest.approx(5.0)
 
 
-def test_a_batch_is_valid_only_when_its_two_bases_agree_within_the_band():
+def test_a_batch_is_valid_only_when_its_bases_agree_on_the_weighted_cycle_and_at_every_size():
     weights = {1: 0.5, 2: 0.5}
+    bands = cb.Bands(batch_pct=1.0, per_bs_pct=3.0, regress_pct=1.5)
 
-    assert cb.batch_valid({1: 10.0, 2: 20.0}, {1: 10.1, 2: 20.1}, weights, band_pct=1.0)
-    assert not cb.batch_valid({1: 10.0, 2: 20.0}, {1: 10.4, 2: 20.6}, weights, band_pct=1.0)
+    assert cb.batch_valid({1: 10.0, 2: 20.0}, {1: 10.1, 2: 20.1}, weights, bands=bands)
+    assert not cb.batch_valid({1: 10.0, 2: 20.0}, {1: 10.15, 2: 20.3}, weights, bands=bands)
+    assert not cb.batch_valid({1: 10.0, 2: 20.0}, {1: 10.4, 2: 19.6}, weights, bands=bands)
 
 
 @pytest.mark.parametrize(
     ("gain", "verdict"),
-    [(0.4, cb.VERDICT_PASS), (0.0, cb.VERDICT_NEUTRAL), (-1.5, cb.VERDICT_NEUTRAL), (-2.5, cb.VERDICT_REGRESS)],
+    [(0.4, cb.VERDICT_PASS), (0.0, cb.VERDICT_NEUTRAL), (-1.4, cb.VERDICT_NEUTRAL), (-1.6, cb.VERDICT_REGRESS)],
 )
 def test_any_positive_estimate_enters_the_pool_and_only_a_slowdown_past_the_band_is_rejected(gain, verdict):
-    assert cb.screen_verdict(gain, band_pct=2.0) == verdict
+    assert cb.screen_verdict(gain, regress_pct=1.5) == verdict

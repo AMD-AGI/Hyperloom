@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 
 VERDICT_PASS = "pass"
 VERDICT_NEUTRAL = "neutral"
@@ -108,21 +109,34 @@ def weighted_gain_pct(base: Mapping[int, float], cand: Mapping[int, float], weig
     return sum(weights[bs] * (base[bs] - cand[bs]) / base[bs] for bs in shared) / total * 100.0
 
 
+@dataclass(frozen=True)
+class Bands:
+    """How far two bases may differ on the weighted cycle and at each size, and how slow a candidate regresses."""
+
+    batch_pct: float
+    per_bs_pct: float
+    regress_pct: float
+
+
 def batch_valid(
-    base: Mapping[int, float], base2: Mapping[int, float], weights: Mapping[int, float], *, band_pct: float
+    base: Mapping[int, float], base2: Mapping[int, float], weights: Mapping[int, float], *, bands: Bands
 ) -> bool:
-    """Whether the two bases of a batch agree within *band_pct* on the weighted cycle."""
-    return abs(weighted_gain_pct(base, base2, weights)) <= band_pct
+    """Whether the two bases of a batch agree on the weighted cycle and at every weighted batch size."""
+    if abs(weighted_gain_pct(base, base2, weights)) > bands.batch_pct:
+        return False
+    sizes = [bs for bs, weight in weights.items() if weight > 0 and bs in base and bs in base2 and base[bs] > 0]
+    return all(abs(base2[bs] - base[bs]) / base[bs] * 100.0 <= bands.per_bs_pct for bs in sizes)
 
 
-def screen_verdict(gain_pct: float, *, band_pct: float) -> str:
-    """``regress`` past the band, ``pass`` for any positive estimate, else ``neutral``."""
-    if gain_pct < -band_pct:
+def screen_verdict(gain_pct: float, *, regress_pct: float) -> str:
+    """``regress`` past *regress_pct* slower, ``pass`` for any positive estimate, else ``neutral``."""
+    if gain_pct < -regress_pct:
         return VERDICT_REGRESS
     return VERDICT_PASS if gain_pct > 0 else VERDICT_NEUTRAL
 
 
 __all__ = [
+    "Bands",
     "DECODE_LINE",
     "STATUS_SCREENED",
     "VERDICT_BROKEN",

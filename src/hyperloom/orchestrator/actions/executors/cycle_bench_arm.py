@@ -33,9 +33,8 @@ CYCLE_ARMS_PARAM = "cycle_arms"
 #: Batch sizes the bench drives; the baseline replay's running counts are weighted onto them.
 BATCH_GRID: tuple[int, ...] = (1, 2, 4)
 
-#: Weighted cycle band two bases of a batch must agree within, and a candidate must fall past to regress. Fixed-mode
-#: boots on GLM-5.3 differed by a two-boot stdev of about 0.5-1.3% per batch size.
-CYCLE_BAND_PCT = 2.0
+#: About 2x / 3x the two-boot stdev of fixed-mode boots on GLM-5.3 (ROCm 10): 0.5% weighted, up to 1.3% at one size.
+CYCLE_BANDS = cb.Bands(batch_pct=1.0, per_bs_pct=3.0, regress_pct=1.5)
 
 #: Admission price of one arm: a warm boot without the host KV cache plus one log window per batch size.
 CYCLE_ARM_MINUTES = 8.0
@@ -59,7 +58,7 @@ class BatchSpec:
     port: int
     prompt_tokens: int
     vocab_size: int
-    band_pct: float
+    bands: cb.Bands
 
 
 def cycle_arms(levers: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -72,9 +71,7 @@ def cycle_arms(levers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{"name": name, "envs": envs} for name, envs in arms.items()]
 
 
-def session_batch(
-    state: Any, candidates: list[tuple[str, dict[str, str]]], *, out_dir: Path, band_pct: float, port: int
-) -> BatchSpec:
+def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, out_dir: Path, port: int) -> BatchSpec:
     """A batch on the session baseline's own launch, weighted by where its replay ran and fed its corpus length."""
     root = str(getattr(state, "baseline_workspace", "") or "")
     if not root:
@@ -98,7 +95,7 @@ def session_batch(
         port=port,
         prompt_tokens=int(isl["p50"]),
         vocab_size=int(config["vocab_size"]),
-        band_pct=band_pct,
+        bands=CYCLE_BANDS,
     )
 
 
@@ -120,21 +117,21 @@ def run_batch(spec: BatchSpec) -> dict[str, Any]:
         )
         if name == _BASES[0] and arms[name].error:
             break
-    summary = summarize_batch(arms, [name for name, _ in spec.candidates], spec.weights, band_pct=spec.band_pct)
+    summary = summarize_batch(arms, [name for name, _ in spec.candidates], spec.weights, bands=spec.bands)
     return {**summary, "arms": {name: arm.__dict__ for name, arm in arms.items()}, "weights": spec.weights}
 
 
 def summarize_batch(
-    arms: dict[str, ArmResult], candidates: list[str], weights: dict[int, float], *, band_pct: float
+    arms: dict[str, ArmResult], candidates: list[str], weights: dict[int, float], *, bands: cb.Bands
 ) -> dict[str, Any]:
-    """Grade each candidate against the mean of the two bases, once the bases agree within *band_pct*."""
+    """Grade each candidate against the mean of the two bases, once the bases agree within *bands*."""
     base, base2 = arms.get(_BASES[0]), arms.get(_BASES[1])
     if base is None or base2 is None or base.error or base2.error:
         return {"valid": False, "reason": "a base arm produced no cycle", "verdicts": {}}
     if not {bs for bs, w in weights.items() if w > 0} & set(base.cycle_ms) & set(base2.cycle_ms):
         return {"valid": False, "reason": "no weighted batch size was measured by both bases", "verdicts": {}}
     gap = cb.weighted_gain_pct(base.cycle_ms, base2.cycle_ms, weights)
-    if not cb.batch_valid(base.cycle_ms, base2.cycle_ms, weights, band_pct=band_pct):
+    if not cb.batch_valid(base.cycle_ms, base2.cycle_ms, weights, bands=bands):
         return {"valid": False, "reason": f"bases disagree by {gap:+.2f}%", "verdicts": {}}
     mean = {bs: (base.cycle_ms[bs] + base2.cycle_ms[bs]) / 2 for bs in base.cycle_ms if bs in base2.cycle_ms}
     verdicts: dict[str, dict[str, Any]] = {}
@@ -144,7 +141,7 @@ def summarize_batch(
             verdicts[name] = {"verdict": cb.VERDICT_BROKEN, "error": arm.error if arm else "arm did not run"}
             continue
         gain = cb.weighted_gain_pct(mean, arm.cycle_ms, weights)
-        verdict = cb.screen_verdict(gain, band_pct=band_pct)
+        verdict = cb.screen_verdict(gain, regress_pct=bands.regress_pct)
         verdicts[name] = {"verdict": verdict, "gain_pct": round(gain, 3), "accept_len": arm.accept_len}
     return {"valid": True, "base_gap_pct": round(gap, 3), "verdicts": verdicts}
 

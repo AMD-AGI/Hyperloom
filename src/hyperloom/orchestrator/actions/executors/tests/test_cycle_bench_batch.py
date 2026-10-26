@@ -15,6 +15,7 @@ from hyperloom.orchestrator.actions.executors import cycle_bench_arm as cba
 from hyperloom.orchestrator.measurement import cycle_bench as cb
 
 _WEIGHTS = {1: 0.5, 2: 0.5}
+_BANDS = cb.Bands(batch_pct=1.0, per_bs_pct=3.0, regress_pct=1.5)
 
 
 def _arm(c1: float, c2: float, error: str = "") -> cba.ArmResult:
@@ -24,7 +25,7 @@ def _arm(c1: float, c2: float, error: str = "") -> cba.ArmResult:
 def test_candidates_are_graded_against_the_mean_of_two_agreeing_bases():
     arms = {"base": _arm(10.0, 20.0), "faster": _arm(9.5, 19.0), "slower": _arm(10.4, 20.8), "base2": _arm(10.0, 20.0)}
 
-    summary = cba.summarize_batch(arms, ["faster", "slower"], _WEIGHTS, band_pct=2.0)
+    summary = cba.summarize_batch(arms, ["faster", "slower"], _WEIGHTS, bands=_BANDS)
 
     assert summary["valid"] is True
     assert {name: v["verdict"] for name, v in summary["verdicts"].items()} == {
@@ -37,7 +38,7 @@ def test_candidates_are_graded_against_the_mean_of_two_agreeing_bases():
 def test_bases_that_disagree_void_the_batch_and_grade_nothing():
     arms = {"base": _arm(10.0, 20.0), "c": _arm(9.0, 18.0), "base2": _arm(10.5, 21.0)}
 
-    summary = cba.summarize_batch(arms, ["c"], _WEIGHTS, band_pct=2.0)
+    summary = cba.summarize_batch(arms, ["c"], _WEIGHTS, bands=_BANDS)
 
     assert (summary["valid"], summary["verdicts"]) == (False, {})
 
@@ -49,7 +50,7 @@ def test_a_candidate_whose_server_failed_is_broken_not_graded():
         "base2": _arm(10.0, 20.0),
     }
 
-    summary = cba.summarize_batch(arms, ["c"], _WEIGHTS, band_pct=2.0)
+    summary = cba.summarize_batch(arms, ["c"], _WEIGHTS, bands=_BANDS)
 
     assert summary["verdicts"] == {"c": {"verdict": cb.VERDICT_BROKEN, "error": "server did not become ready"}}
 
@@ -64,7 +65,7 @@ def _batch(tmp_path: Path) -> cba.BatchSpec:
         port=9100,
         prompt_tokens=1000,
         vocab_size=50000,
-        band_pct=2.0,
+        bands=_BANDS,
     )
 
 
@@ -121,7 +122,7 @@ def test_the_session_batch_reads_the_baselines_launch_log_corpus_and_vocabulary(
         agentx_corpus_shape={"isl": {"p50": 108000}},
     )
 
-    spec = cba.session_batch(state, [("lever-a", {"HL_A": "1"})], out_dir=tmp_path / "out", band_pct=2.0, port=9100)
+    spec = cba.session_batch(state, [("lever-a", {"HL_A": "1"})], out_dir=tmp_path / "out", port=9100)
 
     assert (spec.argv, spec.env) == (launch["effective_argv"], {"X": "1"})
     assert (spec.weights, spec.prompt_tokens, spec.vocab_size) == ({1: 0.75, 2: 0.25, 4: 0.0}, 108000, 154880)
@@ -134,8 +135,8 @@ async def test_an_explore_task_carrying_cycle_arms_runs_the_batch_instead_of_a_r
 
     seen: dict[str, object] = {}
 
-    def _session_batch(state, candidates, *, out_dir, band_pct, port):
-        seen.update(candidates=candidates, band_pct=band_pct, state=state)
+    def _session_batch(state, candidates, *, out_dir, port):
+        seen.update(candidates=candidates, state=state)
         return "spec"
 
     monkeypatch.setattr(cba, "session_batch", _session_batch)
@@ -145,7 +146,7 @@ async def test_an_explore_task_carrying_cycle_arms_runs_the_batch_instead_of_a_r
     ctx = SimpleNamespace(
         task=SimpleNamespace(
             task_id="t-cycle",
-            params={cba.CYCLE_ARMS_PARAM: [{"name": "lever-a", "envs": {"HL_A": "1"}}], "band_pct": 2.0},
+            params={cba.CYCLE_ARMS_PARAM: [{"name": "lever-a", "envs": {"HL_A": "1"}}]},
         ),
         extra={"shared_state": state, "workspace": str(tmp_path)},
     )
@@ -158,7 +159,7 @@ async def test_an_explore_task_carrying_cycle_arms_runs_the_batch_instead_of_a_r
         "valid": True,
         "verdicts": {"lever-a": {"verdict": "pass"}},
     }
-    assert seen == {"candidates": [("lever-a", {"HL_A": "1"})], "band_pct": 2.0, "state": state}
+    assert seen == {"candidates": [("lever-a", {"HL_A": "1"})], "state": state}
 
 
 @pytest.mark.asyncio
@@ -170,9 +171,7 @@ async def test_a_cycle_batch_without_a_baseline_launch_fails_named(tmp_path, mon
 
     monkeypatch.setattr(cba, "session_batch", _missing)
     ctx = SimpleNamespace(
-        task=SimpleNamespace(
-            task_id="t-cycle", params={cba.CYCLE_ARMS_PARAM: [{"name": "a", "envs": {}}], "band_pct": 2.0}
-        ),
+        task=SimpleNamespace(task_id="t-cycle", params={cba.CYCLE_ARMS_PARAM: [{"name": "a", "envs": {}}]}),
         extra={"shared_state": SimpleNamespace(), "workspace": str(tmp_path)},
     )
 
@@ -184,7 +183,7 @@ async def test_a_cycle_batch_without_a_baseline_launch_fails_named(tmp_path, mon
 def test_a_batch_with_no_weighted_batch_size_grades_nothing():
     arms = {"base": _arm(10.0, 20.0), "c": _arm(5.0, 10.0), "base2": _arm(12.0, 24.0)}
 
-    summary = cba.summarize_batch(arms, ["c"], {}, band_pct=2.0)
+    summary = cba.summarize_batch(arms, ["c"], {}, bands=_BANDS)
 
     assert (summary["valid"], summary["verdicts"]) == (False, {})
 
@@ -206,7 +205,7 @@ def test_a_session_batch_refuses_a_baseline_log_with_no_decode_line(tmp_path):
     state = _workspace(tmp_path, "[2026] Decode batch, unparseable", {"effective_argv": ["x"]})
 
     with pytest.raises(ValueError, match="no decode line"):
-        cba.session_batch(state, [], out_dir=tmp_path / "o", band_pct=2.0, port=1)
+        cba.session_batch(state, [], out_dir=tmp_path / "o", port=1)
 
 
 @pytest.mark.parametrize("state", [None, SimpleNamespace(baseline_workspace="", model_path="/m")])
@@ -216,7 +215,7 @@ def test_a_session_batch_refuses_a_session_without_a_baseline_workspace(tmp_path
     (tmp_path / "stray" / "agentx_server_launch.json").write_text("{}", encoding="utf-8")
 
     with pytest.raises(FileNotFoundError, match="no baseline workspace"):
-        cba.session_batch(state, [], out_dir=tmp_path / "o", band_pct=2.0, port=1)
+        cba.session_batch(state, [], out_dir=tmp_path / "o", port=1)
 
 
 def test_a_session_batch_runs_the_launchs_effective_env_over_its_runtime_env(tmp_path):
@@ -228,6 +227,6 @@ def test_a_session_batch_runs_the_launchs_effective_env_over_its_runtime_env(tmp
     }
     state = _workspace(tmp_path, decode, launch)
 
-    spec = cba.session_batch(state, [], out_dir=tmp_path / "o", band_pct=2.0, port=1)
+    spec = cba.session_batch(state, [], out_dir=tmp_path / "o", port=1)
 
     assert spec.env == {"A": "1", "B": "2", "C": "3"}

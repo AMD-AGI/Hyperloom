@@ -1925,9 +1925,7 @@ def _screen_cycle_batch(params: dict[str, Any], state: Any, output_root: Path) -
     arms = list(params[_cycle_bench.CYCLE_ARMS_PARAM])
     candidates = [(str(arm["name"]), {str(k): str(v) for k, v in (arm.get("envs") or {}).items()}) for arm in arms]
     try:
-        spec = _cycle_bench.session_batch(
-            state, candidates, out_dir=output_root, band_pct=float(params["band_pct"]), port=pick_server_port()
-        )
+        spec = _cycle_bench.session_batch(state, candidates, out_dir=output_root, port=pick_server_port())
     except (OSError, KeyError, ValueError) as exc:
         return {"status": "failed", "error_class": "cycle_bench_unavailable", "error": str(exc)}
     return {"status": STATUS_SCREENED, _cycle_bench.CYCLE_ARMS_PARAM: arms, **_cycle_bench.run_batch(spec)}
