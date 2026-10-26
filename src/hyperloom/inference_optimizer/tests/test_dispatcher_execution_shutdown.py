@@ -315,7 +315,9 @@ def test_unconfirmed_physical_cleanup_prevents_database_close(tmp_path, monkeypa
                 task, HeldLeases(gpu_specialist_lease=SimpleNamespace(close=lambda: False))
             )
         await _close(dispatcher)
-        assert await dispatcher.locks.lane_holders()
+        # The lane goes back with the terminal row; the database is what an
+        # unconfirmed worker may still write through, so that is what is kept.
+        assert not await dispatcher.locks.lane_holders()
         assert dispatcher.db.fetchone_sync("SELECT 1")[0] == 1
 
     try:
@@ -417,10 +419,13 @@ def test_cleanup_unconfirmed_preserves_outcome_without_completion(tmp_path, clea
         assert evidence["cleanup_confirmed"] is False
         assert evidence["cleanup_error"]
         assert completed.await_count == 0
-        assert dispatcher.gpu_specialist_pool.release.await_count == 0
         assert dispatcher._coord.writeback.promote_to_shared_state.await_count == 0
         assert dispatcher._coord.recipe_journal.fact_write_hook.await_count == 0
-        assert await dispatcher.locks.lane_holders() == {"research_lane": 1}
+        # The row is terminal, so the capacity it was admitted on goes back --
+        # the unconfirmed cleanup is the evidence above and the raise, not a
+        # lane and a card held against a task that is over.
+        assert dispatcher.gpu_specialist_pool.release.await_count == 1
+        assert await dispatcher.locks.lane_holders() == {}
         assert not await dispatcher.bus.tail(topic="delegated_result")
         await _close(dispatcher)
         assert dispatcher.db.fetchone_sync("SELECT 1")[0] == 1
@@ -431,7 +436,7 @@ def test_cleanup_unconfirmed_preserves_outcome_without_completion(tmp_path, clea
         dispatcher.db.close()
 
 
-def test_executor_cleanup_unconfirmed_keeps_result_and_ownership(tmp_path):
+def test_executor_cleanup_unconfirmed_keeps_result_and_frees_lanes(tmp_path):
     from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed, SubAgentResult
 
     dispatcher = _dispatcher(tmp_path)
@@ -452,7 +457,7 @@ def test_executor_cleanup_unconfirmed_keeps_result_and_ownership(tmp_path):
             await dispatcher.sub.run_task(task, prebound_lease=lease, release_resources=close)
         assert caught.value.result is result
         assert close.await_count == 0
-        assert await dispatcher.locks.lane_holders() == {"research_lane": 1}
+        assert await dispatcher.locks.lane_holders() == {}
         stored = await dispatcher.tasks.get(task.task_id)
         assert stored.history[-1]["evidence"]["outcome"] == asdict(result)
         assert stored.history[-1]["evidence"]["cleanup_confirmed"] is False
@@ -465,13 +470,12 @@ def test_executor_cleanup_unconfirmed_keeps_result_and_ownership(tmp_path):
 
 @pytest.mark.parametrize("named_tree", [True, False])
 def test_an_unconfirmed_cleanup_records_the_group_for_the_operator(tmp_path, named_tree):
-    """The lead an operator gets for a retained lane: the group, as a number, not prose.
+    """The lead an operator gets for work left running: the group, as a number, not prose.
 
-    The lane stays held here on purpose, so the one thing that can ever release
-    it is an observation that nothing of the execution is left -- and this row
-    is the only durable place its process group survives the process that saw
-    it. A raise site with no local group to name records none, and that lane is
-    then held for good.
+    The lanes go back with the terminal row, so nothing in the system is still
+    looking for this process: the row is the only durable place its group
+    survives the process that saw it, and the only way a human learns where to
+    look. A raise site with no local group to name records none.
     """
     from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed, SubAgentResult
 
@@ -497,7 +501,7 @@ def test_an_unconfirmed_cleanup_records_the_group_for_the_operator(tmp_path, nam
         )
         with pytest.raises(ExecutionCleanupUnconfirmed):
             await dispatcher.sub.run_task(task, prebound_lease=lease, release_resources=AsyncMock(return_value=True))
-        assert await dispatcher.locks.lane_holders() == {"research_lane": 1}
+        assert await dispatcher.locks.lane_holders() == {}
         evidence = (await dispatcher.tasks.get(task.task_id)).history[-1]["evidence"]
         assert evidence["cleanup_confirmed"] is False
         assert evidence.get("cleanup_tree_pgid") == (4242 if named_tree else None)

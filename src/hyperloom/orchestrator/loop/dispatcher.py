@@ -174,8 +174,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
     async def close_db_after_executions(self) -> None:
         """Drain physical cleanup and completion before the entry-point loop exits.
 
-        An unconfirmed execution retains its database and capacity. In particular,
-        cancelling an asyncio task cannot establish that its worker thread stopped.
+        An execution that has not settled keeps its database: it may still write
+        through it. In particular, cancelling an asyncio task cannot establish
+        that its worker thread stopped.
         """
         for entry in self._inflight_actions.values():
             entry.scope.cancel(reason="dispatcher_shutdown")
@@ -316,8 +317,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         -- the channel the blocking side polls -- and work that is listening on
         it is given :data:`_COOPERATIVE_CANCEL_GRACE_SEC` to stop itself and
         return through its own ``finally`` blocks. Past that bound only the
-        caller is cancelled; shielded execution retains capacity until cleanup
-        actually returns.
+        caller is cancelled; the shielded execution runs on and keeps its
+        capacity until it settles a terminal row of its own.
 
         Every scope is cancelled before the first await, so a caller that is
         itself being cancelled still leaves no action running unattended: the
@@ -793,14 +794,27 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 self._inflight_actions[task.task_id] = _InflightAction(task.kind, handle, cancel_scope)
 
         async def release_resources() -> bool:
-            if held.gpu_specialist_lease is not None:
-                closed = await asyncio.to_thread(held.gpu_specialist_lease.close)
-                if closed is not True:
-                    log.warning("dispatcher: task=%s GPU cleanup unconfirmed; retaining capacity", task.task_id)
-                    return False
-            if held.gpu_lease is not None:
-                await self.gpu_specialist_pool.release(held.gpu_lease)
-            return True
+            """Return the execution's GPU slot, and report whether its worker confirmed.
+
+            The answer is evidence for the terminal row, not an admission
+            decision: the task it belongs to is over either way, so the slot
+            goes back even when the specialist's close cannot confirm it --
+            or raises, which is why the pool release sits in a ``finally``.
+            """
+            confirmed = True
+            try:
+                if held.gpu_specialist_lease is not None:
+                    closed = await asyncio.to_thread(held.gpu_specialist_lease.close)
+                    if closed is not True:
+                        log.warning(
+                            "dispatcher: task=%s GPU cleanup unconfirmed; returning the slot and recording it",
+                            task.task_id,
+                        )
+                        confirmed = False
+            finally:
+                if held.gpu_lease is not None:
+                    await self.gpu_specialist_pool.release(held.gpu_lease)
+            return confirmed
 
         # Fresh tasks carry the phase coordinates frozen when their row was
         # authored. Legacy rows have no record and remain legacy on resume.
@@ -826,8 +840,12 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 if not recorded:
                     raise RuntimeError("dispatch evidence was not durably recorded")
             except Exception as exc:
-                cleanup_confirmed = await release_resources()
-                if cleanup_confirmed and lease is not None:
+                # Nothing ran under this lease and the row stays queued, so its
+                # lanes go back whatever cleanup says: holding them would make
+                # the task's own next dispatch find them busy, for good.
+                if not await release_resources():
+                    log.warning("dispatcher: task=%s refused with cleanup unconfirmed", task.task_id)
+                if lease is not None:
                     await self.locks.release(lease)
                 self._inflight_actions.pop(task.task_id, None)
                 raise RuntimeError(f"refusing to start task {task.task_id!r}: dispatch evidence write failed") from exc

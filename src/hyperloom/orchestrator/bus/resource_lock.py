@@ -185,7 +185,9 @@ UNVERIFIABLE_FOREIGN_SCOPE = "the row was acquired in another boot, PID namespac
 #: review (terminal state, an empty spawn process group, no pidfile naming a
 #: live server) turned out to be a proxy a real process slips out of, because a
 #: served process is setsid'd by design and its pidfile appears only after it
-#: answers. The lane stays held and an operator decides.
+#: answers. The lane itself is not held for it -- a terminal task's lanes go
+#: back when its row is written -- so what is left to do is tell an operator,
+#: who decides what that task may still be running.
 UNVERIFIABLE_CLEANUP_UNCONFIRMED = "the holder ended without confirming its cleanup"
 #: The odd one: cleanup WAS confirmed, which means the release ran -- so this
 #: row should not exist. It is reported rather than reclaimed because nothing
@@ -351,10 +353,11 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
         # its pidfile is written only after the server answers, so the whole
         # model-load window has a live server nothing names; and matching a
         # cmdline is the same kind of guess as matching a group. Each candidate
-        # proof turned out to be a proxy with a way around it, and releasing a
-        # lane wrongly lets two rounds onto the same cards -- silent corruption,
-        # against a deadlock an operator clears in 90 seconds. So the lane is
-        # kept and the operator is told; that asymmetry is the design.
+        # proof turned out to be a proxy with a way around it, and announcing a
+        # process stopped when it had not lets two rounds onto the same cards.
+        # So nothing is decided here and the operator is told: by the time a row
+        # reaches this pass its task is terminal, and what is worth a human is
+        # the work that task may have left running, not the row.
         row["reason"] = UNVERIFIABLE_CLEANUP_UNCONFIRMED
         stuck.append(row)
     return stuck
@@ -368,10 +371,9 @@ def _report_unverifiable(rows: list[dict], *, db_path: str = "") -> None:
     ``py-spy`` and sqlite spelunking to work that out on 2026-09-21; it should
     take reading one log line now.
 
-    The caution is not decoration. Reclamation is deliberately refused here
-    exactly because nothing could prove the task's processes stopped, so an
-    operator deleting the row without checking is doing the one thing the
-    retention exists to prevent.
+    The caution is not decoration. Nothing here could prove the task's
+    processes stopped, so an operator who deletes the row without checking may
+    be putting conflicting work on cards something is still using.
 
     Args:
         rows: What :func:`_unverifiable_holders` returned.
@@ -386,8 +388,8 @@ def _report_unverifiable(rows: list[dict], *, db_path: str = "") -> None:
         _DIAGNOSED.add(key)
         log.warning(
             "resource_lock: lane %s is held by ended task %s (holder %s) and cannot be verified free: %s. "
-            "It is retained on purpose -- nothing observable proves that task's processes stopped, and "
-            "releasing it would let conflicting work onto the machine. To release it by hand, FIRST confirm "
+            "Nothing observable proves that task's processes stopped, so work it left may still be on the "
+            "machine. To release the row by hand, FIRST confirm "
             "no process of task %s is still running%s, then run: "
             'sqlite3 "%s" '
             "\"DELETE FROM leases WHERE lane='%s' AND holder_id='%s';\"",
@@ -607,6 +609,11 @@ class SqliteLeaseBackend:
           ``gpu_leases`` exemption does not apply here: the 2026-09-21 wedge
           was exactly a terminal holder that kept both its lanes and a
           ``gpu_leases`` row because release failed mid-teardown.
+
+        A live coordinator now hands the lanes back as it writes the terminal
+        row, so the rows this pass finds are the ones nobody is left to release:
+        a coordinator that died in the window between that write and the
+        release. This is the only path that clears them.
         """
         reaped: list[dict] = []
         async with self.db.transaction() as cur:
