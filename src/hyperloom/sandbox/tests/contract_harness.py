@@ -27,7 +27,7 @@ import os
 import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -62,6 +62,9 @@ FAKE_RUNNER = (
 SERVICE_URL_ENV = "HYPERLOOM_E2B_CONTRACT_API_URL"
 _SERVICE_SANDBOX_URL_ENV = "HYPERLOOM_E2B_CONTRACT_SANDBOX_URL"
 _SERVICE_TEMPLATES_ENV = "HYPERLOOM_E2B_CONTRACT_TEMPLATES"
+# A real service starts a sandbox on a scheduled pod, which takes minutes where the stand-in takes a second.
+_SERVICE_WAIT_ENV = "HYPERLOOM_E2B_CONTRACT_WAIT_SEC"
+_SERVICE_WAIT_SEC = 600.0
 
 
 @dataclass(frozen=True)
@@ -88,8 +91,9 @@ class Harness:
 class _KillsWhatItMade:
     """A provider that remembers the sandboxes it created, so a run against a shared service ends exactly those."""
 
-    def __init__(self, provider: SandboxProvider) -> None:
+    def __init__(self, provider: SandboxProvider, min_wait_sec: float = 0.0) -> None:
         self._provider = provider
+        self._min_wait_sec = min_wait_sec
         self.name = provider.name
         self._made: list[Sandbox] = []
 
@@ -102,6 +106,8 @@ class _KillsWhatItMade:
         metadata: Mapping[str, str],
         options: CreateOptions = CreateOptions(),
     ) -> Sandbox:
+        if options.wait_sec < self._min_wait_sec:
+            options = replace(options, wait_sec=self._min_wait_sec)
         sandbox = self._provider.create(
             template, role=role, timeout_sec=timeout_sec, metadata=metadata, options=options
         )
@@ -178,7 +184,8 @@ def claw_service_harness() -> Iterator[Harness]:
         "E2B_SANDBOX_URL": os.environ.get(_SERVICE_SANDBOX_URL_ENV, os.environ[SERVICE_URL_ENV]),
     }
     sealed, dev, subrun = os.environ[_SERVICE_TEMPLATES_ENV].split(",")
-    provider = _KillsWhatItMade(E2BSandboxProvider.from_environ(environ))
+    wait_sec = float(os.environ.get(_SERVICE_WAIT_ENV, _SERVICE_WAIT_SEC))
+    provider = _KillsWhatItMade(E2BSandboxProvider.from_environ(environ), min_wait_sec=wait_sec)
     try:
         yield Harness(provider, sealed, dev, subrun)
     finally:
