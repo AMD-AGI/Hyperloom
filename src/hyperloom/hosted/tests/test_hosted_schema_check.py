@@ -51,3 +51,22 @@ def test_a_fitting_value_has_no_problem() -> None:
 )
 def test_each_violation_is_named(value: dict[str, Any], needle: str) -> None:
     assert needle in (first_problem(value, SCHEMA) or "")
+
+
+@pytest.mark.parametrize(
+    ("value", "options", "fits"),
+    [
+        (True, [1], False),
+        (False, [0], False),
+        (1, [True], False),
+        ([True], [[1]], False),
+        ({"on": 1}, [{"on": True}], False),
+        (True, [True], True),
+        (1, [1], True),
+        (1.0, [1], True),
+        ([1, "a"], [[1, "a"]], True),
+        ({"on": True}, [{"on": True}], True),
+    ],
+)
+def test_enum_compares_as_json_so_a_boolean_is_not_a_number(value: Any, options: list[Any], fits: bool) -> None:
+    assert (first_problem(value, {"enum": options}) is None) is fits
