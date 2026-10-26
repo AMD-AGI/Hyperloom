@@ -33,7 +33,7 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.long_context import LongContextSetup
 from hyperloom_multibranch.toolbox.long_context import decide as decide_long_context
-from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, decide
+from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, blob_patch_files, decide, no_patch_files
 
 
 #: PyTorch tunes a GEMM shape the first time a server runs it when TunableOp is switched on (the value ``1``, nothing else
@@ -146,7 +146,8 @@ class MeasurementPlanner(Protocol):
     Raises ``RecipeError`` when it cannot: a ``SurfaceViolation`` means the measurement surface differs, a
     ``BaseImageMismatchError`` a recipe on another image, an ``EvalContextError`` a launch whose context the accuracy
     evaluation cannot run in, any other error a delta or patch that does not build.
-    The returned object is handed to the executor with every attempt.
+    The returned object is handed to the executor with every attempt. A planner that compiles from a blob store names it
+    as ``blobs``; the short-prompt check reads from it the files a recipe's patch changes.
     """
 
     def plan(self, request: TestRequest, parent: Recipe) -> object: ...
@@ -210,6 +211,8 @@ class Acceptance:
         self._live_profile = live_profile
         self._workload = setup.workload_kind
         self._short_prompts = setup.short_prompts
+        blobs = getattr(setup.planner, "blobs", None)  # a planner that compiles reads the patches from its blob store
+        self._patch_files = no_patch_files if blobs is None else blob_patch_files(blobs)
         self._long_context = setup.long_context
         self._explore_accuracy = setup.explore_accuracy
 
@@ -253,7 +256,7 @@ class Acceptance:
 
     def _with_short_prompts(self, accepted: object, parent: Recipe, candidate: Recipe, request: TestRequest) -> object:
         """``accepted`` with the consistency check this request runs, when it runs one and ``accepted`` can carry it."""
-        plan = decide(request, parent, candidate, self._short_prompts)
+        plan = decide(request, parent, candidate, self._short_prompts, self._patch_files)
         return (
             replace(accepted, short_prompts=plan)
             if plan is not None and isinstance(accepted, AcceptedMeasurement)

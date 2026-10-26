@@ -737,19 +737,26 @@ facts:
       the toolbox renders the change from the parent recipe to the candidate as lines and the check runs when any line
       matches. A line is "arg <flag> <value>" for a server argument that differs ("(unset)" where a side lacks it), "env
       <name>=<value>" for a launch variable, "ref <component> <parent ref>-><candidate ref>" for a component moved to
-      another upstream commit, "patch <component> <path>" and "kernel <kind> <target>" for a patch or kernel artifact
-      added or removed, "image changed", and, because a change the toolbox cannot read must count as touching, "unexpressed
-      <entry>". Which flags, variables, components and paths touch attention is the project's
-      to say, so they are here and not in code.
+      another upstream commit, "patch <component> <path>" for a patch added or removed (its path is named by its hash, so
+      it says nothing of what the patch changes) followed by "patch-file <component> <file>" for each file the patch
+      changes, read from the patch itself, "kernel <kind> <target>" for a kernel artifact added or removed, "image
+      changed", and, because a change the toolbox cannot read must count as touching, "unexpressed <entry>" (a patch whose
+      files cannot be read is one). A launch variable touches when it names attention, the KV cache or prefill, selects
+      aiter as the attention backend (the framework's switch that turns aiter on also makes it the attention backend), or
+      sets the vectorized_5d KV layout; aiter's other variables (custom all-reduce, the tuned GEMM tables, MoE sorting)
+      leave attention as it is. Which flags, variables, components and files touch attention is the project's to say, so
+      they are here and not in code.
     pattern: |-
       (?ix) ^ (?:
           arg \s+ --(?: [a-z-]*attention-backend | kv-cache-dtype | page-size | block-size | chunked-prefill-size
                        | max-prefill-tokens | max-num-batched-tokens | enable-prefix-caching | disable-radix-cache
                        | enable-chunked-prefill | num-continuous-decode-steps ) \b
-        | env \s+ \S*? (?: ATTN | ATTENTION | AITER | FLASH | MHA | MLA | KV | PREFILL | RADIX ) \S*? =
+        | env \s+ \S*? (?: ATTN | ATTENTION | FLASH | MHA | MLA | KV | PREFILL | RADIX ) \S*? =
+        | env \s+ (?: SGLANG_USE_AITER | VLLM_ROCM_USE_AITER | VLLM_USE_AITER ) =
+        | (?: arg | env ) \s .* vectorized_5d
         | ref \s+ (?: aiter | sglang | vllm | flash-attention | flash_attn | triton ) \b
         | patch \s+ aiter \b
-        | patch \s+ \S+ \s+ \S* (?: attn | attention | mha | mla | prefill | kv | flash | radix )
+        | patch-file \s+ \S+ \s+ \S* (?: attn | attention | mha | mla | prefill | kv | flash | radix | mem_cache )
         | kernel \s+ (?: fusion | rewrite ) \s+ \S* (?: attn | attention | mha | mla | prefill | kv | flash )
         | image \s+ changed
         | unexpressed \s
@@ -760,18 +767,34 @@ facts:
         - "arg --prefill-attention-backend (unset)"
         - "arg --kv-cache-dtype fp8_e4m3"
         - "env SGLANG_USE_AITER_ATTN=1"
+        - "env SGLANG_USE_AITER=1"
+        - "env VLLM_ROCM_USE_AITER=(unset)"
         - "env AITER_ENABLE_PREFILL_VSKIP=(unset)"
+        - "env SGLANG_AITER_MLA_PERSIST=1"
+        - "env LAYOUT=vectorized_5d"
+        - "arg --layout vectorized_5d"
         - "ref aiter 0123456789abcdef0123456789abcdef01234567->89abcdef0123456789abcdef0123456789abcdef"
-        - "patch aiter patch/aiter/0001-tune-gemm.patch"
-        - "patch sglang patch/sglang/0002-radix-cache-eviction.patch"
+        - "patch aiter patch/aiter/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.patch"
+        - "patch-file sglang python/sglang/srt/layers/attention/aiter_backend.py"
+        - "patch-file sglang python/sglang/srt/layers/radix_attention.py"
+        - "patch-file sglang python/sglang/srt/mem_cache/memory_pool.py"
         - "kernel rewrite mha_batch_prefill_short"
         - "image changed"
         - "unexpressed launch envs set outside the recipe"
+        - "unexpressed patch patch/sglang/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.patch: its files cannot be read (BlobError: blob 0123 is not in the blob store)"
       no_match:
         - "arg --max-running-requests 128"
         - "arg --tensor-parallel-size 8"
         - "env HIP_FORCE_DEV_KERNARG=1"
-        - "patch sglang patch/sglang/0003-logging-tweak.patch"
+        - "env AITER_CUSTOM_AR_MAX_SIZE=16777216"
+        - "env SGLANG_USE_AITER_AR=1"
+        - "env AITER_USE_CK_MOE_SORTING=1"
+        - "env AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE=/configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
+        - "env AITER_CONFIG_GEMM_BF16=/configs/bf16_tuned_gemm.csv"
+        - "env AITER_CONFIG_FMOE=/configs/tuned_fmoe.csv"
+        - "patch sglang patch/sglang/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.patch"
+        - "patch-file sglang python/sglang/srt/layers/moe/fused_moe_triton/layer.py"
+        - "patch-file sglang python/sglang/srt/distributed/device_communicators/custom_all_reduce.py"
         - "kernel gemm bf16_gemm_M16_N4096_K4096"
         - "ref transformers 0123456789abcdef0123456789abcdef01234567->89abcdef0123456789abcdef0123456789abcdef"
 

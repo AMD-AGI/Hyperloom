@@ -66,10 +66,12 @@ _SHORT_PROMPT_TOUCH = r"""(?ix) ^ (?:
     arg \s+ --(?: [a-z-]*attention-backend | kv-cache-dtype | page-size | block-size | chunked-prefill-size
                  | max-prefill-tokens | max-num-batched-tokens | enable-prefix-caching | disable-radix-cache
                  | enable-chunked-prefill | num-continuous-decode-steps ) \b
-  | env \s+ \S*? (?: ATTN | ATTENTION | AITER | FLASH | MHA | MLA | KV | PREFILL | RADIX ) \S*? =
+  | env \s+ \S*? (?: ATTN | ATTENTION | FLASH | MHA | MLA | KV | PREFILL | RADIX ) \S*? =
+  | env \s+ (?: SGLANG_USE_AITER | VLLM_ROCM_USE_AITER | VLLM_USE_AITER ) =
+  | (?: arg | env ) \s .* vectorized_5d
   | ref \s+ (?: aiter | sglang | vllm | flash-attention | flash_attn | triton ) \b
   | patch \s+ aiter \b
-  | patch \s+ \S+ \s+ \S* (?: attn | attention | mha | mla | prefill | kv | flash | radix )
+  | patch-file \s+ \S+ \s+ \S* (?: attn | attention | mha | mla | prefill | kv | flash | radix | mem_cache )
   | kernel \s+ (?: fusion | rewrite ) \s+ \S* (?: attn | attention | mha | mla | prefill | kv | flash )
   | image \s+ changed
   | unexpressed \s

@@ -61,10 +61,16 @@ def _patch(path: str, digest: str = "2" * 64) -> PatchRef:
 
 
 PARENT = _recipe("--max-running-requests 128")
+#: A patch's path in a recipe: named by its hash, it says nothing of what the patch changes.
+_HASHED = f"patch/sglang/{'6' * 64}.patch"
 
 
-def _plan(request, candidate: Recipe, parent: Recipe = PARENT) -> ShortPromptPlan | None:
-    return decide(request, parent, candidate, SETUP)
+def _no_files(patch: PatchRef) -> tuple[str, ...]:
+    return ()
+
+
+def _plan(request, candidate: Recipe, parent: Recipe = PARENT, files=_no_files) -> ShortPromptPlan | None:
+    return decide(request, parent, candidate, SETUP, files)
 
 
 # --- which tests run it ---------------------------------------------------------------------------------------------
@@ -112,25 +118,23 @@ def test_an_explore_whose_change_touches_none_of_them_runs_no_check(candidate):
     assert _plan(req(), candidate) is None
 
 
-def test_a_patch_to_a_component_the_pack_does_not_tie_to_attention_runs_no_check_unless_its_path_does():
+def test_a_patch_to_a_component_the_pack_does_not_tie_to_attention_runs_no_check_unless_a_file_it_changes_does():
     sglang = ("sglang", "https://example.invalid/sglang", "4" * 40)
     parent = _recipe("--max-running-requests 128", components=(ComponentPatches(*sglang),))
+    candidate = _recipe("--max-running-requests 128", components=(ComponentPatches(*sglang, (_patch(_HASHED),)),))
 
-    def patched(path: str) -> Recipe:
-        return _recipe("--max-running-requests 128", components=(ComponentPatches(*sglang, (_patch(path),)),))
-
-    assert _plan(req(), patched("patch/sglang/0002-log-tweak.patch"), parent) is None
-    plan = _plan(req(), patched("patch/sglang/0003-radix-cache-eviction.patch"), parent)
-    assert plan is not None and plan.trigger == ("patch sglang patch/sglang/0003-radix-cache-eviction.patch",)
+    assert _plan(req(), candidate, parent, lambda patch: ("python/sglang/srt/utils.py",)) is None
+    plan = _plan(req(), candidate, parent, lambda patch: ("python/sglang/srt/layers/radix_attention.py",))
+    assert plan is not None and plan.trigger == ("patch-file sglang python/sglang/srt/layers/radix_attention.py",)
 
 
 def test_a_removed_attention_flag_or_variable_touches_attention_as_much_as_an_added_one():
-    parent = _recipe("--attention-backend aiter", envs={"AITER_ENABLE_X": "1"})
+    parent = _recipe("--attention-backend aiter", envs={"AITER_ENABLE_PREFILL_X": "1"})
 
     plan = _plan(req(), _recipe(""), parent)
 
     assert plan is not None
-    assert "arg --attention-backend (unset)" in plan.trigger and "env AITER_ENABLE_X=(unset)" in plan.trigger
+    assert "arg --attention-backend (unset)" in plan.trigger and "env AITER_ENABLE_PREFILL_X=(unset)" in plan.trigger
 
 
 def test_dropping_a_patch_or_a_kernel_the_parent_had_touches_attention_as_much_as_adding_one():
@@ -263,11 +267,13 @@ def test_touch_lines_render_each_kind_of_change_one_line_each():
         components=_aiter(_patch("patch/aiter/x.patch")),
     )
 
-    assert touch_lines(PARENT, candidate) == [
+    assert touch_lines(PARENT, candidate, lambda patch: ("csrc/a.cu", "aiter/b.py")) == [
         "arg --kv-cache-dtype fp8",
         "env A=1",
         f"ref aiter (unset)->{'1' * 40}",
         "patch aiter patch/aiter/x.patch",
+        "patch-file aiter csrc/a.cu",
+        "patch-file aiter aiter/b.py",
     ]
 
 

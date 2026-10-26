@@ -4,7 +4,9 @@
 """The toolbox's side of the short-prompt consistency check: when a test runs it, what it is compared with, what is recorded.
 
 *When.* Acceptance renders the change from the parent recipe to the candidate as lines (``touch_lines``) and the rule pack's
-``short_prompt_touch`` pattern says which of them touch attention, the KV cache or prefill; a test also runs the check when
+``short_prompt_touch`` pattern says which of them touch attention, the KV cache or prefill. A patch is rendered with the
+files it changes, read from the patch itself in the blob store (its path in the recipe is only its hash), and a patch whose
+files cannot be read counts as touching. A test also runs the check when
 its purpose is one of the pack's ``always_purposes`` (a baseline, which gives its descendants their reference outputs, and a
 final candidate) or when the request sets ``consistency_check`` (scheduling does on a reverse merge). A caller can add the
 check, never remove one the rule demands. A toolbox given no :class:`ShortPromptSetup` runs no check and refuses nothing.
@@ -33,7 +35,7 @@ import logging
 import os
 import re
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -50,7 +52,8 @@ from hyperloom.contracts.consistency import (
     ShortPromptReference,
 )
 from hyperloom.contracts.measurement import TestKind, TestRequest
-from hyperloom.contracts.recipe import Recipe, diff
+from hyperloom.contracts.recipe import PatchRef, Recipe, diff
+from hyperloom.measure.compile import BlobStore, CompileError, patch_targets
 from hyperloom.measure.short_prompts.compare import Comparison, Difference, Side, compare_outputs
 from hyperloom.measure.short_prompts.outputs import (
     FAILED,
@@ -72,6 +75,8 @@ from hyperloom.measure.short_prompts.staging import EVALSETS_DIR, StagedEntry, c
 
 __all__ = [
     "MODEL_PATH_ENV",
+    "PatchFiles",
+    "PatchFilesUnreadable",
     "SHORT_PROMPTS_ENV",
     "SHORT_PROMPTS_OFF",
     "ReferenceAbsent",
@@ -81,8 +86,10 @@ __all__ = [
     "ShortPromptsNotStaged",
     "consistency_of",
     "decide",
+    "blob_patch_files",
     "default_short_prompts",
     "environment_short_prompts",
+    "no_patch_files",
     "record_reference",
     "rederive",
     "short_prompt_rules",
@@ -240,30 +247,64 @@ def _shown(value: str | None) -> str:
     return _UNSET if value is None else value
 
 
-def _patch_lines(recipe: Recipe, hashes: frozenset[str]) -> list[str]:
-    return [
-        f"patch {component.component} {patch.path}"
-        for component in recipe.components
-        for patch in component.patches
-        if patch.sha256 in hashes
-    ]
+class PatchFilesUnreadable(Exception):
+    """The files a patch changes cannot be read; the message says why."""
+
+
+#: The files a patch changes, repository-relative, read from the patch itself.
+PatchFiles = Callable[[PatchRef], Sequence[str]]
+
+
+def blob_patch_files(blobs: BlobStore) -> PatchFiles:
+    """The files each patch changes, read from its blob in ``blobs`` (the paths of its ``diff --git`` headers)."""
+
+    def files(patch: PatchRef) -> Sequence[str]:
+        try:
+            return patch_targets(blobs.get(patch.sha256).decode(_UTF8), "", patch.path)
+        except (CompileError, OSError, ValueError) as exc:
+            raise PatchFilesUnreadable(f"{type(exc).__name__}: {exc}") from exc
+
+    return files
+
+
+def no_patch_files(patch: PatchRef) -> Sequence[str]:
+    """For an acceptance with no blob store: no patch's files can be read, so every patch counts as touching."""
+    raise PatchFilesUnreadable("this toolbox has no blob store to read it from")
+
+
+def _patch_lines(recipe: Recipe, hashes: frozenset[str], files: PatchFiles) -> list[str]:
+    """``patch <component> <path>`` for each patch among ``hashes``, then ``patch-file <component> <file>`` for each file
+    it changes, or ``unexpressed patch <path> ...`` when those cannot be read (a change that cannot be read touches)."""
+    lines = []
+    for component in recipe.components:
+        for patch in component.patches:
+            if patch.sha256 not in hashes:
+                continue
+            lines.append(f"patch {component.component} {patch.path}")
+            try:
+                lines += [f"patch-file {component.component} {path}" for path in files(patch)]
+            except PatchFilesUnreadable as exc:
+                lines.append(f"unexpressed patch {patch.path}: its files cannot be read ({exc})")
+    return lines
 
 
 def _kernel_lines(recipe: Recipe, hashes: frozenset[str]) -> list[str]:
     return [f"kernel {kernel.kind.value} {kernel.target}" for kernel in recipe.kernels if kernel.sha256 in hashes]
 
 
-def touch_lines(parent: Recipe, candidate: Recipe) -> list[str]:
-    """The change from ``parent`` to ``candidate`` as the lines the rule pack's pattern reads.
+def touch_lines(parent: Recipe, candidate: Recipe, files: PatchFiles = no_patch_files) -> list[str]:
+    """The change from ``parent`` to ``candidate`` as the lines the rule pack's pattern reads; ``files`` reads the files a
+    patch changes.
 
     A change the toolbox cannot read counts as touching, so it is rendered as a line the pattern matches: an entry the
-    recipe names as unexpressed.
+    recipe names as unexpressed, or a patch whose files cannot be read.
     """
     change = diff(parent, candidate)
     lines = [f"arg {c.name} {_shown(c.after)}".rstrip() for c in change.args]
     lines += [f"env {c.name}={_shown(c.after)}" for c in change.envs]
     lines += [f"ref {r.component} {_shown(r.before)}->{_shown(r.after)}" for r in change.refs]
-    lines += _patch_lines(candidate, change.patches_only_in_second) + _patch_lines(parent, change.patches_only_in_first)
+    lines += _patch_lines(candidate, change.patches_only_in_second, files)
+    lines += _patch_lines(parent, change.patches_only_in_first, files)
     lines += _kernel_lines(candidate, change.kernels_only_in_second) + _kernel_lines(
         parent, change.kernels_only_in_first
     )
@@ -285,10 +326,15 @@ def _bounded(reasons: list[str]) -> tuple[str, ...]:
 
 
 def decide(
-    request: TestRequest, parent: Recipe, candidate: Recipe, setup: ShortPromptSetup | None
+    request: TestRequest,
+    parent: Recipe,
+    candidate: Recipe,
+    setup: ShortPromptSetup | None,
+    files: PatchFiles = no_patch_files,
 ) -> ShortPromptPlan | None:
     """The check ``request`` runs, or ``None``: its purpose is one the pack always checks, the caller forces it, or the
-    change from ``parent`` to ``candidate`` touches what the pack says affects attention, the KV cache or prefill."""
+    change from ``parent`` to ``candidate`` touches what the pack says affects attention, the KV cache or prefill
+    (``files`` reads the files a patch changes)."""
     if setup is None or request.kind not in _CHECKED_KINDS:
         return None
     rules = short_prompt_rules()
@@ -297,7 +343,7 @@ def decide(
         reasons.append(f"purpose {request.purpose.value}")
     if request.forces_consistency_check:
         reasons.append("request consistency_check")
-    reasons += [line for line in touch_lines(parent, candidate) if rules.touch.search(line)]
+    reasons += [line for line in touch_lines(parent, candidate, files) if rules.touch.search(line)]
     if not reasons:
         return None
     return ShortPromptPlan(
