@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.hosted.campaign import CampaignSpec
-from hyperloom.hosted.host_info import HostInfo
+from hyperloom.hosted.host_info import HostInfo, Var
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,10 @@ class HostedRun:
     plug_lock: Mapping[str, Mapping[str, str]]
     session_dir: Path
     archive_root: Path
+
+    def plug_env(self) -> dict[str, str]:
+        """The variables a profile's ``${...}`` may name, for the host inputs the entry removed from ``os.environ``."""
+        return {Var.EVENTS_DIR: str(self.host_info.events_dir)}
 
 
 class _Slot:
