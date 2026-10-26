@@ -774,7 +774,7 @@ class FuseRequest:
             "llm_model",
             default=None,
             help="Agent model. Explicit value wins; otherwise uses provider-specific "
-            "$CODEX_MODEL/$CLAUDE_MODEL, then the registered provider default.",
+            "$CODEX_MODEL/$CLAUDE_MODEL/$DSH_MODEL, then the registered provider default.",
         ),
         click.option("--max-turns", default=100, type=int, help="Max authoring turns."),
     ),

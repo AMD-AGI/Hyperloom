@@ -263,72 +263,67 @@ def _maybe_build_shape_manifest(
     flag = os.environ.get(_SHAPE_MANIFEST_ENV, "1").strip().lower()
     if flag in _SHAPE_MANIFEST_OFF_VALUES:
         return {"status": "disabled"}
+    main_trace = analyze.get("trace_file", "") or ""
+    main_hash = _sha256_file(main_trace) if main_trace else ""
+    shards = _discover_capture_shards(args.trace_input, args.capture_folder or "")
     try:
-        main_trace = analyze.get("trace_file", "") or ""
-        main_hash = _sha256_file(main_trace) if main_trace else ""
-        shards = _discover_capture_shards(args.trace_input, args.capture_folder or "")
-        try:
-            raw_caps = os.environ.get(_MAX_CAPTURES_ENV, "")
-            max_caps = int(raw_caps) if str(raw_caps).strip() else _DEFAULT_MAX_CAPTURES
-        except ValueError:
-            max_caps = _DEFAULT_MAX_CAPTURES
-        shards.sort(key=_shard_order_key)
-        if max_caps > 0 and len(shards) > max_caps:
-            print(
-                f"[trace_shape_manifest] capping capture files {len(shards)}->{max_caps} "
-                f"(set {_MAX_CAPTURES_ENV}=0 to index all)",
-                file=sys.stderr,
-            )
-            # Evenly spaced over the batch-sorted list, not the first N.
-            last = len(shards) - 1
-            if max_caps == 1:
-                shards = [shards[last]]
-            else:
-                shards = [shards[round(i * last / (max_caps - 1))] for i in range(max_caps)]
-        capture_variants: list[_tsm.CaptureShard] = []
-        for path, label, mode in shards:
-            shard_an = _reader.analyze_trace(
-                path, _reader.TraceAnalysisOptions(top_k=0, steady_state=False, emit_launches=True)
-            )
-            if shard_an.get("status") != "ok" or shard_an.get("truncated"):
-                continue
-            bs_m = re.search(r"bs_(\d+)", label)
-            capture_variants.append(
-                _tsm.CaptureShard(
-                    label=label,
-                    analysis=shard_an,
-                    trace_hash=_sha256_file(path),
-                    meta={"batch_size": bs_m.group(1) if bs_m else None, "mode": mode, "file": path.name},
-                )
-            )
-
-        # phase hint from the analysis mode the coordinator forwards.
-        phase_hint = (args.analysis_mode or "mixed").lower() or "mixed"
-        manifest = _tsm.build_shape_manifest(
-            analyze,
-            capture_variants,
-            _tsm.ManifestOrigin(main_trace_hash=main_hash, generated_at=generated_at),
-            provenance=_build_manifest_provenance(args),
-            phase_hint=phase_hint,
-        )
-        out_path = bypass_dir / "trace_shape_manifest.json"
-        atomic_write_json(out_path, manifest, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
+        raw_caps = os.environ.get(_MAX_CAPTURES_ENV, "")
+        max_caps = int(raw_caps) if str(raw_caps).strip() else _DEFAULT_MAX_CAPTURES
+    except ValueError:
+        max_caps = _DEFAULT_MAX_CAPTURES
+    shards.sort(key=_shard_order_key)
+    if max_caps > 0 and len(shards) > max_caps:
         print(
-            f"[trace_shape_manifest] variants={len(capture_variants) or 'eager'} "
-            f"rows={len(manifest.get('rows', []))} path={out_path}",
+            f"[trace_shape_manifest] capping capture files {len(shards)}->{max_caps} "
+            f"(set {_MAX_CAPTURES_ENV}=0 to index all)",
             file=sys.stderr,
         )
-        return {
-            "status": "ok",
-            "path": str(out_path),
-            "variant_count": len(capture_variants),
-            "row_count": len(manifest.get("rows", [])),
-            "warnings": manifest.get("warnings", []),
-        }
-    except Exception as exc:  # noqa: BLE001 — manifest must never break bypass
-        msg = f"error: {type(exc).__name__}: {exc}"
-        print(f"[trace_shape_manifest] skipped: {msg}", file=sys.stderr)
-        return {"status": msg}
+        # Evenly spaced over the batch-sorted list, not the first N.
+        last = len(shards) - 1
+        if max_caps == 1:
+            shards = [shards[last]]
+        else:
+            shards = [shards[round(i * last / (max_caps - 1))] for i in range(max_caps)]
+    capture_variants: list[_tsm.CaptureShard] = []
+    for path, label, mode in shards:
+        shard_an = _reader.analyze_trace(
+            path, _reader.TraceAnalysisOptions(top_k=0, steady_state=False, emit_launches=True)
+        )
+        if shard_an.get("status") != "ok" or shard_an.get("truncated"):
+            continue
+        bs_m = re.search(r"bs_(\d+)", label)
+        capture_variants.append(
+            _tsm.CaptureShard(
+                label=label,
+                analysis=shard_an,
+                trace_hash=_sha256_file(path),
+                meta={"batch_size": bs_m.group(1) if bs_m else None, "mode": mode, "file": path.name},
+            )
+        )
+
+    # phase hint from the analysis mode the coordinator forwards.
+    phase_hint = (args.analysis_mode or "mixed").lower() or "mixed"
+    manifest = _tsm.build_shape_manifest(
+        analyze,
+        capture_variants,
+        _tsm.ManifestOrigin(main_trace_hash=main_hash, generated_at=generated_at),
+        provenance=_build_manifest_provenance(args),
+        phase_hint=phase_hint,
+    )
+    out_path = bypass_dir / "trace_shape_manifest.json"
+    atomic_write_json(out_path, manifest, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
+    print(
+        f"[trace_shape_manifest] variants={len(capture_variants) or 'eager'} "
+        f"rows={len(manifest.get('rows', []))} path={out_path}",
+        file=sys.stderr,
+    )
+    return {
+        "status": "ok",
+        "path": str(out_path),
+        "variant_count": len(capture_variants),
+        "row_count": len(manifest.get("rows", [])),
+        "warnings": manifest.get("warnings", []),
+    }
 
 
 def _main_trace_options(args: argparse.Namespace, *, steady_state: bool) -> _reader.TraceAnalysisOptions:

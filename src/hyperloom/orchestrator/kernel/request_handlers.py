@@ -179,7 +179,8 @@ async def integrate_handler(
                 workspace=rebaseline.workspace,
                 reason=f"integrate {payload.get('kernel_id') or 'anonymous'} rebaseline",
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
+            log.warning("integrate_handler: rebaseline failed: %s", exc, exc_info=True)
             return _integrate_failure(
                 payload, apply_result, error_class="rebaseline_exception", error=repr(exc), decision="REVERT"
             )

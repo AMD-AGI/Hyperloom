@@ -687,5 +687,6 @@ class KernelStackPhase(CoordinatorCollaborator):
                 apply_results=apply_results,
             )
             return _stack_validation_record(stack, run, grade, settlement)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
+            log.warning("kernel stack %s validation failed: %s", stack.stack_id, exc, exc_info=True)
             return _abandoned_stack_record(stack, apply_results, exc)

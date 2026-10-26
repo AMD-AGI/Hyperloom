@@ -77,7 +77,7 @@ def warm_replay_source_layer(result: Mapping[str, Any], session_dir: str | Path,
     if not landed:
         return {}
     root_text = next(iter(landed))
-    handles: dict[str, Any] = {"scope": "source_patch", "framework_root": root_text}
+    handles: dict[str, Any] = {"scope": "source_patch", "framework_root": root_text, "source_layer_landed": True}
     # A stack entry names one framework root, so a replay that patched several is recorded as not reproducible.
     if len(landed) > 1:
         return handles

@@ -16,6 +16,7 @@ from ..bus.message_bus import Message
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
 from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
 from ..collaborator import CoordinatorCollaborator
+from hyperloom.plugs import progress as _progress
 
 log = _logging.getLogger(__name__)
 
@@ -350,6 +351,10 @@ class MachinePhase(CoordinatorCollaborator):
             state.save(self.session_dir)
         except OSError as exc:
             save_error = exc
+            _progress.warn(
+                "state_save_failed", f"state.json could not be written at the {move.to_phase} boundary: {exc}"
+            )
+        _progress.phase_changed(move.from_phase, move.to_phase, state.macro_cycle)
         log.info(
             "Coordinator.phase: %s → %s (reason=%s)",
             move.from_phase or "<unset>",

@@ -236,7 +236,7 @@ def _probe_vllm_aiter_shared_expert_unsupported() -> str | None:
         )
         lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
         payload = json.loads(lines[-1]) if lines else {}
-    except Exception:  # noqa: BLE001
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
     status = payload.get("status")
     if status == "ok":
@@ -539,7 +539,7 @@ def _num_gpus_for_config(config_path: Path) -> float:
             cfg = yaml.safe_load(fp) or {}
         envs = (cfg.get("benchmark") or {}).get("envs") or {}
         return float(int(envs.get("TP", 1) or 1))
-    except Exception:  # noqa: BLE001 — best-effort; default to 1 GPU
+    except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):  # best-effort; default to 1 GPU
         return 1.0
 
 
@@ -576,15 +576,12 @@ def _resolve_mn_effective_server_args(
             cfg_path,
             exc_info=True,
         )
-        try:
-            with base_yaml_path.open(encoding="utf-8") as _f:
-                _base_cfg = yaml.safe_load(_f) or {}
-            _base_bench = _base_cfg.get("benchmark") or {}
-            _base_envs = _base_bench.get("envs") or {}
-            _base_framework_env = server_args_env_name(_base_bench.get("framework"))
-            _fallback_inherited_args = str(_base_envs.get(_base_framework_env) or "")
-        except Exception:  # noqa: BLE001 - best-effort parity fallback
-            _fallback_inherited_args = ""
+        with base_yaml_path.open(encoding="utf-8") as _f:
+            _base_cfg = yaml.safe_load(_f) or {}
+        _base_bench = _base_cfg.get("benchmark") or {}
+        _base_envs = _base_bench.get("envs") or {}
+        _base_framework_env = server_args_env_name(_base_bench.get("framework"))
+        _fallback_inherited_args = str(_base_envs.get(_base_framework_env) or "")
         return shell_safe_dedupe(
             compose_server_args(
                 inherited_args="" if str(base_args_mode).strip().lower() == "replace" else _fallback_inherited_args,
