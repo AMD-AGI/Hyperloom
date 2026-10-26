@@ -71,7 +71,6 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     FRONTIER_V1,
     FRONTIER_V1_LABEL,
     HOUR,
-    MIN_EFFECTIVE_SESSIONS,
     OBSERVATION_FLOOR_PCT,
     SCORER_LABEL,
     FrontierPolicy,
@@ -122,12 +121,8 @@ REFINEMENT_HEADINGS = (
     "sessions",
     "verdict",
 )
-#: ``frontier-v1`` under the default policy as an expression; the envelope's new-branch floor, which lifts an
-#: expression's score, never lifts one ``frontier-v1`` took from the prior.
-FRONTIER_V1_EXPRESSION = (
-    f"max(prior_remaining_pct if prior_effective_sessions >= {MIN_EFFECTIVE_SESSIONS} else trend_pct, "
-    f"{OBSERVATION_FLOOR_PCT} * observing)"
-)
+#: ``frontier-v1`` under the default policy as an expression.
+FRONTIER_V1_EXPRESSION = f"max(trend_pct, {OBSERVATION_FLOOR_PCT} * observing)"
 NOT_ARCHIVED = "the session's search tree is not in the archive"
 NO_CANDIDATES = "the LLM wrote no candidate"
 _MINUTE = 60.0

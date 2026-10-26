@@ -123,31 +123,27 @@ def test_a_branch_an_autonomous_agent_drives_is_not_scored_and_is_no_evidence_fo
     assert remaining_prior((with_agent,), TASK, 2) == remaining_prior((PAYS_LATE,), TASK, 2)
 
 
-def test_the_history_prior_replaces_the_trend_once_enough_similar_sessions_back_it(snapshot: NotebookSnapshot) -> None:
-    backed = _scores(snapshot, PAYS_LATE, PAYS_SOON)["s1"]
-    alone = _scores(snapshot, PAYS_LATE)["s1"]
-
-    assert backed is not None and backed.expected_gain_pct == pytest.approx(3.5)
-    assert backed.basis is FrontierBasis.PRIOR
-    assert backed.components["prior_effective_sessions"] == pytest.approx(2.0)
-    assert alone is not None and alone.expected_gain_pct == pytest.approx(4.0)
-    assert alone.basis is FrontierBasis.TREND
-
-
-def test_a_prior_needs_sessions_at_least_half_similar_that_add_up_to_one_and_a_half(
+def test_the_built_in_reads_the_trend_however_many_similar_sessions_the_archive_holds(
     snapshot: NotebookSnapshot,
 ) -> None:
+    backed = _scores(snapshot, PAYS_LATE, PAYS_SOON)["s1"]
+    prior = remaining_prior((PAYS_LATE, PAYS_SOON), TASK, 2)
+
+    assert prior is not None and prior.remaining_pct == pytest.approx(3.5)
+    assert prior.effective_sessions == pytest.approx(2.0)
+    assert backed is not None and backed.expected_gain_pct == pytest.approx(4.0)
+    assert backed.basis is FrontierBasis.TREND and "prior_remaining_pct" not in backed.components
+
+
+def test_a_prior_counts_sessions_at_least_half_similar_each_by_its_similarity() -> None:
     two, three = remaining_prior(_sessions(SAME_GPU, 2), TASK, 2), remaining_prior(_sessions(SAME_GPU, 3), TASK, 2)
-    short = _scores(snapshot, *_sessions(SAME_GPU, 2))["s1"]
-    backed = _scores(snapshot, *_sessions(SAME_GPU, 3))["s1"]
 
     assert task_similarity(TASK, SAME_GPU) == pytest.approx(0.6)
     assert task_similarity(TASK, ONLY_THE_GPU) == pytest.approx(3 / 7)
     assert remaining_prior(_sessions(ONLY_THE_GPU, 5), TASK, 2) is None
     assert two is not None and two.effective_sessions == pytest.approx(1.2)
     assert three is not None and three.effective_sessions == pytest.approx(1.8)
-    assert short is not None and short.basis is FrontierBasis.TREND
-    assert backed is not None and backed.basis is FrontierBasis.PRIOR and backed.expected_gain_pct == pytest.approx(3.0)
+    assert three.remaining_pct == pytest.approx(3.0)
 
 
 async def test_a_new_branch_without_a_commit_keeps_a_floor_until_its_tests_settle(tmp_path: Path) -> None:
@@ -474,7 +470,7 @@ async def test_the_scoring_is_the_notebooks_progress_query(tmp_path: Path) -> No
 
     rows = {row.branch: row for row in await scoring.progress()}
 
-    assert rows["s1"].frontier is not None and rows["s1"].frontier.expected_gain_pct == pytest.approx(3.5)
+    assert rows["s1"].frontier is not None and rows["s1"].frontier.expected_gain_pct == pytest.approx(4.0)
     assert (await scoring.lineage()) == (await notebook.lineage())
 
 

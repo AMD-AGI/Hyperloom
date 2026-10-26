@@ -57,7 +57,7 @@ def _pooled(label: str, text: str, *, at: float = WRITTEN_AT, refines: tuple[str
     return PoolRecord(label, ScorerSource.EXPRESSION, at, text, "why", {"model": "claude"}, refines)
 
 
-# On the races: the older branch first leads frontier-v1 by 1.00, the younger first trails it by as much.
+# On the races: the older branch first leads frontier-v1 by 1.125, the younger first trails it by 0.875.
 OLDER = _pooled("older-v1", "age_s")
 YOUNGER = _pooled("younger-v1", "1000000 - age_s")
 LATE = _pooled("late-v1", "since_last_commit_s", at=START + HOUR)
@@ -139,8 +139,8 @@ def test_the_survey_sets_each_expression_beside_the_champion_on_the_sessions_aft
 
     assert (found.champion, found.pooled, found.retired) == (FRONTIER_V1_LABEL, (OLDER, YOUNGER, LATE), ())
     older = standings["older-v1"]
-    assert (older.difference_low, older.difference_high, older.rounds, older.sessions) == (1.0, 1.0, 32, 4)
-    assert standings["younger-v1"].difference_high == pytest.approx(-1.0) and standings["late-v1"].rounds == 0
+    assert (older.difference_low, older.difference_high, older.rounds, older.sessions) == (1.125, 1.125, 32, 4)
+    assert standings["younger-v1"].difference_high == pytest.approx(-0.875) and standings["late-v1"].rounds == 0
     assert any(row.label == "late-v1" and row.rank_correlation is not None for row in found.hindsight.rows)
     assert [row.label for row in found.hindsight.rows] == ["current", "older-v1", "younger-v1", "late-v1"]
     assert parents(found) == (FRONTIER_V1_LABEL, "older-v1")
@@ -198,7 +198,7 @@ def test_the_feedback_says_whether_each_refinement_helped_and_where_each_parent_
     compared = {(item.compared.label, item.parent): item.compared for item in feedback.refinements}
     assert list(compared) == [("older-v2", FRONTIER_V1_LABEL), ("younger-v2", "older-v1"), ("late-v2", "older-v1")]
     better, worse, waiting = compared.values()
-    assert (better.difference_low, better.difference_high, better.rounds, better.sessions) == (1.0, 1.0, 32, 4)
+    assert (better.difference_low, better.difference_high, better.rounds, better.sessions) == (1.125, 1.125, 32, 4)
     assert worse.difference_high == pytest.approx(-2.0) and waiting.rounds == 0
     assert parents(found) == ("younger-v2", "older-v1", "older-v2")
     assert [
@@ -218,7 +218,7 @@ def test_the_prompt_holds_the_feedback_before_the_parents(tmp_path: Path) -> Non
 
     prompt = authoring_prompt(searched, found, feedback_for(RACES, pool, found))
 
-    assert "| older-v2 | frontier-v1 | 1.00 | 0.00 | 1.00 to 1.00 | 32 | 4 | better |" in prompt
+    assert "| older-v2 | frontier-v1 | 1.00 | -0.12 | 1.12 to 1.12 | 32 | 4 | better |" in prompt
     assert "| younger-v2 | older-v1 | -1.00 | 1.00 | -2.00 to -2.00 | 32 | 4 | worse |" in prompt
     assert "Too new to tell, no session like this one started after them: late-v2." in prompt
     assert (
@@ -294,7 +294,7 @@ async def test_close_refuses_a_duplicate_and_retires_what_is_clearly_worse_than_
         snapshot.taken_at,
         YOUNGER.expression,
     )
-    assert retired.evidence.startswith("behind frontier-v1 by -1.00 to ")
+    assert retired.evidence.startswith("behind frontier-v1 by -0.88 to ")
 
 
 async def test_close_writes_no_scorer_without_a_profile_an_archived_tree_or_an_answer(

@@ -22,17 +22,15 @@ failures the whole session.
   branch's :data:`WINDOW_TESTS`-th last ended explore test when that is earlier (:func:`trend_start`), so a long
   profile or a wait for a slot does not empty it;
 * ``tests`` and ``gpu_hours``: what the branch has spent, its tests counted once measured;
-* ``prior_remaining_pct``: what similar archived branches still gained after spending as many tests, weighted by task
-  similarity, with ``prior_effective_sessions``, the sessions behind it each counted by its similarity; a session less
-  than half similar does not count, and the prior is left out while they add up to less than 1.5;
 * ``observing``: 1 while a kernel-layer direction the branch tested lately may still be paying off;
 * ``headroom_pct``: how far the head's recorded value is from the roofline bound PRELUDE recorded for the metric;
 * ``amdahl_ceiling_pct``: the most that speeding up the head's largest op could gain, when the head was profiled;
 * ``repairing_pct``: the gain of the blocked candidate a young repair branch repairs, in points over the baseline;
 * ``pending_pct``: the gain of the branch's best candidate waiting for its confirm, in points over the baseline.
 
-``frontier-v1`` expects the prior where there is one, else the trend, and a branch under observation keeps at least
-``observation_floor_pct``. ``basis`` names which part of either layer the score rests on, and ``scorer`` the scorer.
+``frontier-v1`` expects the trend, and a branch under observation keeps at least ``observation_floor_pct``. A scorer
+of the pool may also read what similar archived branches still gained after as many tests (:func:`remaining_prior`).
+``basis`` names which part of either layer the score rests on, and ``scorer`` the scorer.
 The formula is a prototype: what the score means is the scheduler's call (gongzheng's), and it stays here until then.
 :func:`score_with` scores with any scorer and :func:`score_at` with ``frontier-v1``, on a branch as an archived tree
 has it, so the live scoring and the calibration score alike.
@@ -376,12 +374,6 @@ class FrontierV1:
             "observing": float(readings.observing),
         }
         expected, basis = trend, FrontierBasis.TREND
-        prior = remaining_prior(context.history, context.task, tests, min_similarity=policy.min_similarity)
-        if prior is not None and prior.effective_sessions >= policy.min_effective_sessions:
-            components.update(
-                prior_remaining_pct=prior.remaining_pct, prior_effective_sessions=prior.effective_sessions
-            )
-            expected, basis = prior.remaining_pct, FrontierBasis.PRIOR
         if readings.observing and expected < policy.observation_floor_pct:
             expected, basis = policy.observation_floor_pct, FrontierBasis.OBSERVING
         return Estimate(expected, components, basis)
