@@ -75,6 +75,7 @@ from .reap_watch import PROCESS_LOG_NAME, ReapWatch, newest_activity, specialist
 from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import CancelScope, cancel_scope_listener, current_cancel_scope
 from hyperloom.common.git_safety import app_git, worktree_head
+from ..delivery.deliverable import declared_targets
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 from .wall_budget import clear_wall_budget_extension, wall_budget_extension
 from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
@@ -207,15 +208,6 @@ class SpecialistSubprocessResult:
 #: Directories a specialist writes for its own use inside the worktree, never
 #: part of a deliverable.
 _SPECIALIST_SCRATCH_DIRS: tuple[str, ...] = ("patches", "artifacts", ".hyperloom")
-
-
-def _declared_targets(done_payload: Mapping[str, Any] | None) -> tuple[str, ...]:
-    """Return the worktree-relative paths the round declared it would touch."""
-    from ..delivery.deliverable import parse_deliverable
-
-    if not done_payload:
-        return ()
-    return parse_deliverable(done_payload, default_tree_id="").targets
 
 
 # Worktree management
@@ -678,7 +670,7 @@ class SpecialistSubprocessDispatcher:
             request.workspace,
             request.worktree_base,
             worktree_base_commit=worktree_base_commit,
-            targets=_declared_targets(done_payload),
+            targets=declared_targets(done_payload),
         )
 
         trace = harvest_agent_trace(backend, request.workspace, process_log)

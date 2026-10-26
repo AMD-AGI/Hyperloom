@@ -656,7 +656,7 @@ def _make_params_fake(**kw):
     fake.build_enablement_specialist_params = types.MethodType(
         EnablementParams.build_enablement_specialist_params, fake
     )
-    fake._discover_enablement_candidate_refs = lambda req, plan, *, deadline=None: []
+    fake._discover_enablement_candidate_refs = lambda plan, *, deadline: []
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
     return fake
@@ -674,8 +674,7 @@ def test_build_params_injects_last_build_failure_into_notes():
     assert params is not None
     notes = params.get("notes", "")
     assert "PREVIOUS TARGETED-BUILD" in notes
-    assert "timeout" in notes
-    assert params.get("enablement_last_build_failure", {}).get("failure_class") == "timeout"
+    assert "failure_class='timeout'; AITER ran out of time" in notes
 
 
 def test_build_params_no_injection_when_no_build_failure():
@@ -685,7 +684,6 @@ def test_build_params_no_injection_when_no_build_failure():
     assert params is not None
     notes = params.get("notes", "")
     assert "PREVIOUS TARGETED-BUILD" not in notes
-    assert "enablement_last_build_failure" not in params
 
 
 def test_build_params_failure_class_distinguishes_timeout_vs_defect():
@@ -699,8 +697,8 @@ def test_build_params_failure_class_distinguishes_timeout_vs_defect():
     # Both should mention the build failure
     assert "timeout" in notes_timeout
     assert "compile_error" in notes_defect
-    # The timeout note steers toward more time/smaller scope
-    assert "budget" in notes_timeout.lower() or "time" in notes_timeout.lower()
+    # The timeout note steers toward a smaller scope
+    assert "smaller component scope" in notes_timeout
 
 
 # maybe_escalate_to_targeted_build: discovery-driven ref selection
@@ -776,6 +774,29 @@ async def test_escalate_skips_candidate_with_wrong_component_repo(coord, monkeyp
     # Falls back to empty ref (tag autoselect) since no matching candidate
     assert action.ref == ""
     assert action.source_pr_url == ""
+
+
+@pytest.mark.asyncio
+async def test_escalate_moves_past_a_candidate_whose_org_alone_names_the_component(coord, monkeypatch):
+    """The component is matched on the repo name, so an org-only hit is skipped, not escalated and then aborted."""
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    coord.shared_state.framework = "vllm"
+    coord.shared_state.gpu_type = "mi300x"
+    coord.shared_state.enablement.candidate_refs = [
+        "https://github.com/aiter-fans/vllm/pull/5",
+        "https://github.com/ROCm/aiter/pull/77",
+    ]
+
+    await coord.enablement_build.maybe_escalate_to_targeted_build("hipErrorNoBinaryForGpu")
+
+    queued = [t for t in await coord.tasks.queued() if t.kind == "targeted_build"]
+    assert len(queued) == 1
+    action = TargetedBuildAction.from_state(queued[0].params)
+    assert action.ref == "PR:77"
+    assert action.repo_url == "https://github.com/ROCm/aiter"
 
 
 @pytest.mark.asyncio
