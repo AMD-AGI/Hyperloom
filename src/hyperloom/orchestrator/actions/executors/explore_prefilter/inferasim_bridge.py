@@ -704,6 +704,23 @@ def _des_mean(stats: Any) -> float:
     return float((stats or {}).get("mean") or 0.0) if isinstance(stats, dict) else 0.0
 
 
+def _provenance(mode: str, point: Any, anchor: AnchorChoice | None) -> dict[str, Any]:
+    """How a projection was made: its mode, its estimator and the warmup anchor that calibrated it, if any."""
+    out: dict[str, Any] = {
+        "projection_mode": mode,
+        "estimator": ESTIMATOR_DES if point is not None else ESTIMATOR_ANALYTICAL,
+    }
+    if anchor is not None:
+        # Provenance so a session can audit which warmup anchor served this
+        # candidate and whether it stayed inside the anchor's regime.
+        out["anchor_path"] = anchor.path
+        out["anchor_regime_distance"] = anchor.regime_distance
+        out["anchor_needs_warmup"] = anchor.needs_warmup
+        out["anchor_real_weights"] = anchor.real_weights
+        out["anchor_served"] = anchor.served
+    return out
+
+
 def _metrics_from_results(
     spec: ServingSpec, results: dict[str, Any], anchor: AnchorChoice | None = None, mode: str = MODE_SIMULATE
 ) -> ProjMetrics:
@@ -726,8 +743,8 @@ def _metrics_from_results(
         e2el_ms = _des_mean(getattr(point, "e2e", None)) or e2el_ms
     osl = max(1, spec.osl)
     isl = max(1, spec.isl)
-    request_tps = output_tps / osl if osl else 0.0
-    total_tps = output_tps * (isl + osl) / osl if osl else output_tps
+    request_tps = output_tps / osl
+    total_tps = output_tps * (isl + osl) / osl
 
     mem_gb = 0.0
     if mem is not None:
@@ -735,16 +752,7 @@ def _metrics_from_results(
         mem_gb = total_bytes / (1024.0**3)
     extras = dict(getattr(perf, "extras", {}) or {})
     max_conc = int(extras.get("concurrency_used", 0) or extras.get("concurrency", 0) or spec.conc)
-    extras["projection_mode"] = mode
-    extras["estimator"] = ESTIMATOR_DES if point is not None else ESTIMATOR_ANALYTICAL
-    if anchor is not None:
-        # Provenance so a session can audit which warmup anchor served this
-        # candidate and whether it stayed inside the anchor's regime.
-        extras["anchor_path"] = anchor.path
-        extras["anchor_regime_distance"] = anchor.regime_distance
-        extras["anchor_needs_warmup"] = anchor.needs_warmup
-        extras["anchor_real_weights"] = anchor.real_weights
-        extras["anchor_served"] = anchor.served
+    extras.update(_provenance(mode, point, anchor))
 
     replica_gpus = int(getattr(perf, "replica_gpus", 0) or 0)
     extras["extrapolation"] = extrapolation_notes(spec, replica_gpus, bool(extras.get("benchmark_calibrated", 0.0)))
