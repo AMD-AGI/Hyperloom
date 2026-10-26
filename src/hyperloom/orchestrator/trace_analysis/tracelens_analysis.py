@@ -642,7 +642,6 @@ def main() -> int:
     agent_candidates: list[dict[str, Any]] | None = None
     agent_report_path: Path | None = None
     orchestrator_mode = "inline"
-    orchestrator_error = ""
     # Structured trace-health findings surfaced to the Coordinator.
     trace_health_warnings: list[dict[str, Any]] = []
     # What this run saw and decided, returned to the caller instead of only
@@ -961,71 +960,62 @@ def main() -> int:
                     analysis_mode=tracelens_analysis_mode(args.framework),
                     capture_folder=capture_folder,
                 )
-                try:
-                    with _trajectory_scope(args):
-                        skill_result = asyncio.run(
-                            run_tracelens_skill(
-                                TraceLensSkillRequest(
-                                    skill_path=skill,
-                                    output_dir=tracelens_dir,
-                                    tracelens_root=tl_root,
-                                    tracelens_internal_root=tl_internal_root,
-                                    capture_folder=capture_folder,
-                                ),
-                                budget_minutes=args.budget_minutes,
-                                model=_resolve_tracelens_model(),
-                                log=lambda msg: append_log(log_path, msg),
-                            )
+                with _trajectory_scope(args):
+                    skill_result = asyncio.run(
+                        run_tracelens_skill(
+                            TraceLensSkillRequest(
+                                skill_path=skill,
+                                output_dir=tracelens_dir,
+                                tracelens_root=tl_root,
+                                tracelens_internal_root=tl_internal_root,
+                                capture_folder=capture_folder,
+                            ),
+                            budget_minutes=args.budget_minutes,
+                            model=_resolve_tracelens_model(),
+                            log=lambda msg: append_log(log_path, msg),
                         )
-                    artifacts.update(skill_result.artifact_paths)
-                    agent_report_path = skill_result.report_path
-                    orchestrator_mode = skill_result.runner
+                    )
+                artifacts.update(skill_result.artifact_paths)
+                agent_report_path = skill_result.report_path
+                orchestrator_mode = skill_result.runner
 
-                    gates = _evaluate_report_gates(
-                        skill_result.report_path, raw_trace_path, trace_health_warnings, log_path
+                gates = _evaluate_report_gates(
+                    skill_result.report_path, raw_trace_path, trace_health_warnings, log_path
+                )
+                if gates.suppressed:
+                    agent_candidates = []
+                    _record_gate_suppression(gates, trace_health_warnings, log_path)
+                else:
+                    raw_agent_candidates, report_source = _report_json_candidates(
+                        skill_result, args.framework, trace_health_warnings, log_path
                     )
-                    if gates.suppressed:
-                        agent_candidates = []
-                        _record_gate_suppression(gates, trace_health_warnings, log_path)
-                    else:
-                        raw_agent_candidates, report_source = _report_json_candidates(
-                            skill_result, args.framework, trace_health_warnings, log_path
+                    if raw_agent_candidates:
+                        agent_candidates = _finalize_candidates(
+                            raw_agent_candidates,
+                            perf_report_csv_dir=(skill_result.output_dir / "perf_report_csvs"),
                         )
-                        if raw_agent_candidates:
-                            agent_candidates = _finalize_candidates(
-                                raw_agent_candidates,
-                                perf_report_csv_dir=(skill_result.output_dir / "perf_report_csvs"),
-                            )
-                            write_source_resolution_artifact(
-                                agent_candidates,
-                                run_dir / _KSC.SOURCE_RESOLUTION_FILENAME,
-                                framework=args.framework,
-                                model_name=args.model_name,
-                                log_path=log_path,
-                            )
-                            append_log(
-                                log_path,
-                                f"TraceLens SDK orchestrator produced "
-                                f"{len(agent_candidates)} hot kernels "
-                                f"(source={report_source})",
-                            )
-                        else:
-                            agent_candidates = []
-                            append_log(
-                                log_path,
-                                "TraceLens analysis.json had no compute "
-                                "optimization tasks. Producing empty "
-                                "hot_kernels[] — downstream Coordinator will "
-                                "route to params/backends.",
-                            )
-                except Exception as exc:  # noqa: BLE001
-                    orchestrator_error = f"{type(exc).__name__}: {exc}"
-                    append_log(
-                        log_path,
-                        f"WARNING: TraceLens SDK orchestrator failed; "
-                        f"not falling back to intermediate/CSV candidate "
-                        f"parsers: {type(exc).__name__}: {exc}",
-                    )
+                        write_source_resolution_artifact(
+                            agent_candidates,
+                            run_dir / _KSC.SOURCE_RESOLUTION_FILENAME,
+                            framework=args.framework,
+                            model_name=args.model_name,
+                            log_path=log_path,
+                        )
+                        append_log(
+                            log_path,
+                            f"TraceLens SDK orchestrator produced "
+                            f"{len(agent_candidates)} hot kernels "
+                            f"(source={report_source})",
+                        )
+                    else:
+                        agent_candidates = []
+                        append_log(
+                            log_path,
+                            "TraceLens analysis.json had no compute "
+                            "optimization tasks. Producing empty "
+                            "hot_kernels[] — downstream Coordinator will "
+                            "route to params/backends.",
+                        )
 
             if agent_candidates is None:
                 raise RuntimeError(
@@ -1104,7 +1094,6 @@ def main() -> int:
             "status_path": str(status_path),
             "artifact_paths": artifacts,
             "orchestrator_mode": orchestrator_mode,
-            "orchestrator_error": orchestrator_error,
             # Trace-quality findings surfaced to the Coordinator (empty = nothing wrong).
             "trace_health_warnings": trace_health_warnings,
             # What this run saw and decided, for the caller's timeline event.
