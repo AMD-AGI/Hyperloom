@@ -124,6 +124,13 @@ class Family:
         layer = self.layer.value if self.layer is not None else "any layer"
         return f"{self.target} · {self.mechanism.value} · {layer}"
 
+    def covers(self, other: Family) -> bool:
+        """Whether ``other`` is of this family where this one says anything: its target, its mechanism unless this
+        one's is :attr:`Mechanism.OTHER`, and its layer unless this one names none."""
+
+        same_mechanism = self.mechanism in (Mechanism.OTHER, other.mechanism)
+        return self.target == other.target and same_mechanism and self.layer in (None, other.layer)
+
 
 def _matched(patterns: Iterable[tuple[_Named, str]], text: str) -> _Named | None:
     lowered = text.lower()
@@ -191,6 +198,18 @@ def family_of(target: str, mechanism: str, layer: IntentLayer | None, delta: Rec
     return Family(acted, _mechanism(f"{settings} {mechanism}", layer, kinds), layer)
 
 
+def note_family(target: str, mechanism: str, layer: IntentLayer | None, content: str = "") -> Family | None:
+    """The family a note is about: of the direction it names, else of what its words name; ``None`` when neither
+    names a target."""
+
+    for named_target, named_mechanism in ((target, mechanism), ("", content)):
+        if named_target or named_mechanism:
+            found = family_of(named_target, named_mechanism, layer)
+            if found.target != OTHER_TARGET:
+                return found
+    return None
+
+
 __all__ = [
     "COMPONENTS",
     "MECHANISMS",
@@ -200,5 +219,6 @@ __all__ = [
     "Family",
     "Mechanism",
     "family_of",
+    "note_family",
     "op_family",
 ]

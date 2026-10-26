@@ -9,8 +9,8 @@ returns each entry once however the writers' clocks interleave.
 Given :class:`BriefTriggers`, the inbox also holds ``brief`` items, pointing at the branch's head and asking its
 specialist to read its brief again before the next claim. They are derived from the entries as the other items are,
 so a poll returns each once: when a judgement brings the branch's tests judged since its last commit to
-``stall_tests``, once a stall, and when another branch's pitfall learning names a direction the branch holds a claim
-on.
+``stall_tests``, once a stall, and when another branch's pitfall learning is about the direction family of a claim the
+branch holds, or, where either names no family, names its direction.
 
 A branch whose claim was refused because another branch was testing the same intent gets a ``peer_outcome`` item when
 that test ends, judged, withdrawn or not measured, pointing at the test so its change can be replayed. The refused claim
@@ -24,10 +24,10 @@ over an entry's kind, branch, actor, summary and stored detail.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 
-from hyperloom_multibranch.contracts.notebook.peers import TestKind, TestResult, Validity
+from hyperloom_multibranch.contracts.notebook.peers import Intent, TestKind, TestResult, Validity
 from hyperloom_multibranch.contracts.notebook.records import (
     Claim,
     InboxItem,
@@ -40,7 +40,8 @@ from hyperloom_multibranch.contracts.notebook.records import (
     Withdrawal,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import DedupStatus, InboxKind, LearningKind
-from hyperloom_multibranch.notebook.learning_search import names
+from hyperloom_multibranch.notebook.families import note_family
+from hyperloom_multibranch.notebook.learning_search import SAME_FAMILY, family_of_learning, kinship, names
 from hyperloom_multibranch.notebook.local.segments import Entry, EntryKind
 from hyperloom_multibranch.notebook.local.state import ClaimDecision, JudgementWrite, NotebookState
 from hyperloom_multibranch.notebook.local.views import judged_since_commit, lineage_view
@@ -70,10 +71,21 @@ class _Briefing:
     held: tuple[Claim, ...]
     records: tuple[TestRecord, ...]
     view: LineageView
+    intents: Mapping[str, Intent] = field(default_factory=dict)
 
     def head(self, branch: str) -> str:
         node = next((item for item in self.view.branches if item.branch == branch), None)
         return node.head_commit if node is not None else ""
+
+    def falls_in(self, learning: Learning, intent: Intent) -> bool:
+        """Whether ``learning`` is about the family of the direction ``intent`` claims; where either names no family,
+        whether it names the direction."""
+
+        about = family_of_learning(learning, self.records, self.intents)
+        claimed = note_family(intent.target, intent.mechanism, intent.layer)
+        if about is None or claimed is None:
+            return names(learning, intent)
+        return kinship(claimed, about) == SAME_FAMILY
 
 
 _INBOX_KINDS = {
@@ -111,7 +123,9 @@ def poll(
 
     seen = _read_cursor(cursor)
     briefing = (
-        _Briefing(triggers, tuple(held), tuple(state.records()), lineage_view(state)) if triggers is not None else None
+        _Briefing(triggers, tuple(held), tuple(state.records()), lineage_view(state), dict(state.intents))
+        if triggers is not None
+        else None
     )
     refusals = _refusals(state, branch)
     items = tuple(
@@ -153,7 +167,7 @@ def _brief_item(entry: Entry, value: object, branch: str, briefing: _Briefing) -
         and isinstance(value, Learning)
         and value.kind is LearningKind.PITFALL
         and value.branch != branch
-        and any(names(value, claim.intent) for claim in briefing.held)
+        and any(briefing.falls_in(value, claim.intent) for claim in briefing.held)
     ):
         summary = f"pitfall: {value.branch} learnt, in a direction this branch holds: {value.content}; {reread}"
         return InboxItem(InboxKind.BRIEF, branch, head, summary, entry.at)

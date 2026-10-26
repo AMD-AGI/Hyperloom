@@ -304,7 +304,7 @@ def test_close_pools_the_learnings_beside_the_archive_and_records_the_shown_less
 
     assert done.lessons == CloseStep(WRITTEN, counts={"new": 2})
     assert done.lesson_standings.status == WRITTEN and done.lesson_standings.counts["lessons"] == 1
-    assert [standing.lessons for standing in pool.standings()] == [{earlier.lesson_id: LessonStanding(1, ignored=1)}]
+    assert [standing.lessons for standing in pool.standings()] == [{earlier.lesson_id: LessonStanding(1, borne_out=1)}]
     assert again.lessons == CloseStep(SKIPPED, counts={"duplicate": 2})
     assert again.lesson_standings.status == SKIPPED and again.lesson_standings.reason == ALREADY_RECORDED
 

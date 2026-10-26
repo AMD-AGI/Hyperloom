@@ -3,10 +3,13 @@
 
 """This session's learnings, matched to what a branch is about to decide; what the notebook tools find on their own.
 
-A query matches a learning no later one superseded by the words they share, a word of the direction the learning is
-about counting double; among equals the newer comes first. A word is lower-cased, and a compound one, such as a
-server flag, also counts as each of its parts, so ``--cuda-graph-max-bs`` matches a query for "cuda graph"; a number
-under four digits, the batch size or concurrency nearly every learning mentions, does not count.
+A learning is about a direction family (:mod:`notebook.families`): that of the first test it cites, else of the
+direction or the words it gives (:func:`learning_family`). A query matches a learning no later one superseded by its
+family first, the same family before the same target (:func:`kinship`), then by the words they share, a word of the
+direction the learning is about counting double; among equals the newer comes first. A word is lower-cased, and a
+compound one, such as a server flag, also counts as each of its parts, so ``--cuda-graph-max-bs`` matches a query for
+"cuda graph"; a number under four digits, the batch size or concurrency nearly every learning mentions, does not count.
+A granted claim lists :data:`NOTES` notes about its direction, this session's and past sessions' in one list.
 :class:`LearningFinder` is what the tools ask for learnings: :class:`SessionLearnings` answers from this session
 alone, the knowledge package's ``LearningRecall`` adds past sessions' from the Experience KB, and RSI's
 ``LessonRecall`` past sessions' lessons from the lesson pool, which a learning of this session may revise or retire.
@@ -20,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -30,6 +33,7 @@ from hyperloom.common.io import append_jsonl
 from hyperloom_multibranch.contracts.notebook.peers import Intent, Validity
 from hyperloom_multibranch.contracts.notebook.records import Learning, LearningRecord, NotebookSnapshot, TestRecord
 from hyperloom_multibranch.notebook.codec import key_sorted
+from hyperloom_multibranch.notebook.families import Family, family_of, note_family
 
 log = logging.getLogger(__name__)
 
@@ -41,10 +45,12 @@ _STOPWORDS = frozenset(
     {"a", "an", "and", "at", "by", "for", "in", "is", "it", "no", "not", "of", "on", "or", "the", "this", "to", "with"}
 )
 SESSION_HEADING = "This session's learnings:"
-#: How a granted claim heads this session's learnings about its direction.
-CLAIM_HEADING = "This session's learnings about it:"
-#: How many of this session's learnings a granted claim lists.
-CLAIM_LEARNINGS = 3
+#: How a granted claim heads the notes about its direction.
+NOTES_HEADING = "Notes about it, the most relevant first:"
+#: How many notes a granted claim and a brief list, this session's and past sessions' together.
+NOTES = 5
+#: The :func:`kinship` of two notes about one family.
+SAME_FAMILY = 2
 LEARNINGS_LOG_FORMAT = "multibranch.learnings-log.v1"
 #: The retrieval log's usual name in the session's reports folder.
 LEARNINGS_LOG = "learnings.jsonl"
@@ -115,16 +121,26 @@ class RetrievalLog:
 
 class LearningFinder(Protocol):
     def here(
-        self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str, source: RetrievalSource
+        self,
+        snapshot: NotebookSnapshot,
+        query: str,
+        *,
+        limit: int,
+        branch: str,
+        source: RetrievalSource,
+        family: Family | None = None,
     ) -> tuple[LearningRecord, ...]:
-        """This session's learnings that bear on ``query``, best first, without waiting on any knowledge base."""
+        """This session's learnings that bear on ``query``, about ``family`` first, best first, without waiting on any
+        knowledge base."""
 
     async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str = "") -> list[str]:
         """The learnings that bear on ``query`` for ``branch``, as headed lines; empty when none does."""
 
-    async def about(self, snapshot: NotebookSnapshot, query: str, *, branch: str) -> list[str]:
-        """What ``branch``'s granted claim lists about its direction ``query``: this session's learnings, then what
-        the finder adds, as headed lines, logged as one retrieval; empty when nothing bears on it."""
+    async def about(
+        self, snapshot: NotebookSnapshot, query: str, *, branch: str, family: Family | None = None
+    ) -> list[str]:
+        """What ``branch``'s granted claim lists about its direction ``query`` of ``family``: :data:`NOTES` notes in
+        one list under :data:`NOTES_HEADING`, logged as one retrieval; empty when nothing bears on it."""
 
     def knows(self, lesson_id: str) -> bool:
         """Whether ``lesson_id`` names a past session's lesson, live, that a learning of this session may revise or
@@ -187,19 +203,84 @@ def word_overlap(mine: set[str], theirs: set[str]) -> float:
     return len(mine & theirs) / max(1, min(len(mine), len(theirs)))
 
 
-def session_matches(snapshot: NotebookSnapshot, query: str, *, limit: int) -> tuple[LearningRecord, ...]:
-    """This session's current learnings that share a word with ``query``, best first."""
+def kinship(wanted: Family | None, note: Family | None) -> int:
+    """How close a note's family is to the one ``wanted``: :data:`SAME_FAMILY` when it covers it
+    (:meth:`~hyperloom_multibranch.notebook.families.Family.covers`), 1 for the same target, 0 otherwise or without
+    either."""
+
+    if wanted is None or note is None:
+        return 0
+    return SAME_FAMILY if note.covers(wanted) else int(note.target == wanted.target)
+
+
+def query_family(query: str) -> Family | None:
+    """The family a query's words name; ``None`` when they name no target."""
+
+    return note_family("", query, None)
+
+
+def family_of_learning(
+    learning: Learning, records: Iterable[TestRecord], intents: Mapping[str, Intent]
+) -> Family | None:
+    """The family ``learning`` is about: that of the first test of ``records`` it cites whose intent ``intents``
+    holds, else of the direction or the words it gives."""
+
+    tests = {test.request_id: test for test in records if test.request_id in learning.request_ids}
+    for request_id in learning.request_ids:
+        test = tests.get(request_id)
+        intent = intents.get(test.request.intent_fingerprint or "") if test is not None else None
+        if test is not None and intent is not None:
+            return family_of(intent.target, intent.mechanism, intent.layer, test.request.delta)
+    return note_family(learning.target, learning.mechanism, learning.layer, learning.content)
+
+
+def learning_family(record: LearningRecord, snapshot: NotebookSnapshot) -> Family | None:
+    """The family one of the session's learnings is about (:func:`family_of_learning`)."""
+
+    return family_of_learning(record.learning, snapshot.records, snapshot.intents)
+
+
+def note_score(wanted: set[str], content: str, target: str, mechanism: str) -> int:
+    """The words ``wanted`` a note shares with its text, and twice those it shares with the direction it names."""
+
+    return len(wanted & words(content)) + 2 * len(wanted & words(f"{target} {mechanism}"))
+
+
+@dataclass(frozen=True)
+class Match:
+    """How a note bears on a query: its :func:`kinship` with the family asked about, its :func:`note_score`, and when
+    it was written."""
+
+    kin: int
+    score: float
+    at: float
+
+
+def session_scored(
+    snapshot: NotebookSnapshot, query: str, family: Family | None = None
+) -> list[tuple[Match, LearningRecord]]:
+    """This session's current learnings that bear on ``query`` or are about ``family``, each with its match."""
 
     wanted = words(query)
-    scored = []
+    found = []
     for record in current_learnings(snapshot):
         learning = record.learning
-        about = words(f"{learning.target} {learning.mechanism}")
-        score = len(wanted & words(learning.content)) + 2 * len(wanted & about)
-        if score:
-            scored.append((score, record.at, record))
-    scored.sort(key=lambda item: (-item[0], -item[1]))
-    return tuple(record for _, _, record in scored[:limit])
+        score = note_score(wanted, learning.content, learning.target, learning.mechanism)
+        kin = kinship(family, learning_family(record, snapshot)) if family is not None else 0
+        if kin or score:
+            found.append((Match(kin, score, record.at), record))
+    return found
+
+
+def session_matches(
+    snapshot: NotebookSnapshot, query: str, *, limit: int, family: Family | None = None
+) -> tuple[LearningRecord, ...]:
+    """This session's current learnings that bear on ``query``, about ``family`` first, best first."""
+
+    scored = sorted(
+        session_scored(snapshot, query, family), key=lambda item: (-item[0].kin, -item[0].score, -item[0].at)
+    )
+    return tuple(record for _, record in scored[:limit])
 
 
 def render_session_learning(record: LearningRecord, snapshot: NotebookSnapshot) -> str:
@@ -233,27 +314,38 @@ class SessionLearnings:
         self.log = log
 
     def here(
-        self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str, source: RetrievalSource
+        self,
+        snapshot: NotebookSnapshot,
+        query: str,
+        *,
+        limit: int,
+        branch: str,
+        source: RetrievalSource,
+        family: Family | None = None,
     ) -> tuple[LearningRecord, ...]:
         """This session's matches, best first, logged as one retrieval by ``branch`` through ``source``."""
 
-        found = session_matches(snapshot, query, limit=limit)
+        found = session_matches(snapshot, query, limit=limit, family=family)
         if self.log is not None:
             self.log.record(snapshot, Retrieval(branch, source, query), found)
         return found
 
     async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str = "") -> list[str]:
-        """This session's matches under their heading; empty when none matched."""
+        """This session's matches, the family the query names first, under their heading; empty when none matched."""
 
-        found = self.here(snapshot, query, limit=limit, branch=branch, source=RetrievalSource.TOOL)
+        found = self.here(
+            snapshot, query, limit=limit, branch=branch, source=RetrievalSource.TOOL, family=query_family(query)
+        )
         rendered = [render_session_learning(record, snapshot) for record in found]
         return [SESSION_HEADING, *rendered] if rendered else []
 
-    async def about(self, snapshot: NotebookSnapshot, query: str, *, branch: str) -> list[str]:
-        """This session's :data:`CLAIM_LEARNINGS` best matches under :data:`CLAIM_HEADING`; empty when none matched."""
+    async def about(
+        self, snapshot: NotebookSnapshot, query: str, *, branch: str, family: Family | None = None
+    ) -> list[str]:
+        """This session's :data:`NOTES` best matches under :data:`NOTES_HEADING`; empty when none matched."""
 
-        found = self.here(snapshot, query, limit=CLAIM_LEARNINGS, branch=branch, source=RetrievalSource.CLAIM)
-        return claim_lines(found, snapshot)
+        found = self.here(snapshot, query, limit=NOTES, branch=branch, source=RetrievalSource.CLAIM, family=family)
+        return note_lines([render_session_learning(record, snapshot) for record in found])
 
     def knows(self, lesson_id: str) -> bool:
         """``False``: this finder holds no past session's lesson."""
@@ -261,32 +353,39 @@ class SessionLearnings:
         return False
 
 
-def claim_lines(found: Sequence[LearningRecord], snapshot: NotebookSnapshot) -> list[str]:
-    """``found``, this session's learnings about a claimed direction, under :data:`CLAIM_HEADING`; empty for none."""
+def note_lines(rendered: Sequence[str]) -> list[str]:
+    """``rendered``, the notes about a claimed direction, under :data:`NOTES_HEADING`; empty for none."""
 
-    rendered = [render_session_learning(record, snapshot) for record in found]
-    return [CLAIM_HEADING, *rendered] if rendered else []
+    return [NOTES_HEADING, *rendered] if rendered else []
 
 
 __all__ = [
-    "CLAIM_HEADING",
-    "CLAIM_LEARNINGS",
     "LEARNINGS_LOG",
     "LEARNINGS_LOG_FORMAT",
+    "NOTES",
+    "NOTES_HEADING",
+    "SAME_FAMILY",
     "SESSION_HEADING",
     "LearningFinder",
+    "Match",
     "Retrieval",
     "RetrievalLog",
     "RetrievalSource",
     "SessionLearnings",
     "ShownLead",
-    "claim_lines",
     "current_learnings",
+    "family_of_learning",
     "fit_lines",
+    "kinship",
+    "learning_family",
     "names",
+    "note_lines",
+    "note_score",
     "outcome_of",
+    "query_family",
     "render_session_learning",
     "session_matches",
+    "session_scored",
     "word_overlap",
     "words",
 ]

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 
 import pytest
@@ -13,10 +14,14 @@ import pytest
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom_multibranch.contracts.notebook.peers import Intent, IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
-from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
+from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LearningKind
 from hyperloom_multibranch.notebook.families import Family, Mechanism
-from hyperloom_multibranch.notebook.rsi.briefing import CrossSessionBriefing
+from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
+from hyperloom_multibranch.notebook.rsi.briefing import MENU_NOTE, CrossSessionBriefing
 from hyperloom_multibranch.notebook.rsi.family_stats import FamilyStat
+from hyperloom_multibranch.notebook.rsi.lesson_recall import LessonRecall
+from hyperloom_multibranch.notebook.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
+from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
 from hyperloom_multibranch.notebook.rsi.menu import (
     MENU_ITEMS,
     MENU_LOG,
@@ -28,7 +33,7 @@ from hyperloom_multibranch.notebook.rsi.menu import (
     direction_menu,
     in_control,
 )
-from hyperloom_multibranch.notebook.tests.factories import FakeClock
+from hyperloom_multibranch.notebook.tests.factories import START, FakeClock, profile
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, scripted_session
 from hyperloom_multibranch.notebook.tools import MENU_TITLE, render_brief
 
@@ -101,6 +106,42 @@ def test_a_claims_note_says_its_familys_odds_and_its_tests_on_the_claimed_commit
         "your direction is KV cache · quantization precision · config: commit odds 0.10 over 1.0 tests, "
         "no commit yet; tests of it on this commit: 1"
     )
+
+
+async def test_a_menu_line_carries_its_familys_best_note_and_the_brief_logs_it_as_shown(tmp_path: Path) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    snapshot = await notebook.snapshot()
+    pool = LessonPool(tmp_path / "pool")
+    text = "fp8 kv cache needs its scales computed or the accuracy gate fails"
+    pool.write(
+        LessonRevision(
+            revision_id_for("kv"),
+            lesson_id_for("kv"),
+            LearningKind.PITFALL,
+            text,
+            task_conditions(profile()),
+            "x",
+            START - 60.0,
+            session_id="past-1",
+            target="kv cache",
+            mechanism="fp8 kv cache",
+            layer=CONFIG,
+        )
+    )
+    log = tmp_path / LEARNINGS_LOG
+    recall = LessonRecall(pool=pool, log=RetrievalLog(log))
+    menus = DirectionMenus(metric=METRIC)
+    briefing = CrossSessionBriefing(notebook, metric=METRIC, branch=_shown(snapshot), menus=menus, learnings=recall)
+
+    brief = await briefing.startup_brief("c1")
+
+    kv = next(index for index, line in enumerate(brief.menu) if line.startswith(FP8_KV.label))
+    assert brief.menu[kv + 1] == f"{MENU_NOTE}[past-1, same conditions, unmeasured] {text} [{lesson_id_for('kv')}]"
+    assert f"{MENU_TITLE}\n- {brief.menu[0]}" in render_brief(brief) and f"\n{brief.menu[kv + 1]}" in render_brief(
+        brief
+    )
+    (logged,) = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert lesson_id_for("kv") in logged["past"]
 
 
 async def test_a_brief_shows_its_branchs_menu_and_a_claims_note_comes_from_the_briefing(tmp_path: Path) -> None:

@@ -86,14 +86,18 @@ async def test_another_branchs_pitfall_briefs_a_branch_holding_a_claim_in_that_d
     await s1.append_learning(
         Learning("s1", LearningKind.PITFALL, "fp8 kv cache needs scales on this model", "kv cache")
     )
+    unnamed = "a kv cache held in fp8 loses accuracy without its scales"
+    await s2.append_learning(Learning("s2", LearningKind.PITFALL, unnamed))
 
     page = await s1.poll("s1")
     unheld = await _briefed(root, clock, "s2", BriefTriggers()).poll("s2")
     quiet = await _briefed(root, clock, "s1", BriefTriggers(pitfalls=False)).poll("s1")
 
-    (brief,) = [item for item in page.items if item.kind is InboxKind.BRIEF]
-    assert brief.pointer == "c0"
-    assert brief.summary.startswith(f"pitfall: s2 learnt, in a direction this branch holds: {FP8_PITFALL};")
+    # The second names no direction, but its words are about the family s1 holds a claim in: the KV cache's precision.
+    named, worded = [item for item in page.items if item.kind is InboxKind.BRIEF]
+    assert named.pointer == "c0"
+    assert named.summary.startswith(f"pitfall: s2 learnt, in a direction this branch holds: {FP8_PITFALL};")
+    assert worded.summary.startswith(f"pitfall: s2 learnt, in a direction this branch holds: {unnamed};")
     assert _briefs(unheld.items) == [] and _briefs(quiet.items) == []
 
 

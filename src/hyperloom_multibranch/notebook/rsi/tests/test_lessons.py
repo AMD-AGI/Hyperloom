@@ -6,6 +6,7 @@ the sessions did after it was shown."""
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from pathlib import Path
 
@@ -184,7 +185,7 @@ def test_standings_are_written_once_a_session_and_weigh_a_lesson_by_what_bore_it
             "s1", START, {contradicted: LessonStanding(shown=2, contradicted=1), borne: LessonStanding(1)}
         ),
         SessionStandings("s2", START + 1, {contradicted: LessonStanding(shown=1, contradicted=2)}),
-        SessionStandings("s3", START + 2, {borne: LessonStanding(shown=3, heeded=1, ignored=1, contradicted=1)}),
+        SessionStandings("s3", START + 2, {borne: LessonStanding(shown=3, borne_out=1, contradicted=1)}),
         SessionStandings("s4", START + 3, {borne: LessonStanding(shown=1, contradicted=1)}),
     ]
     for item in sessions:
@@ -197,7 +198,7 @@ def test_standings_are_written_once_a_session_and_weigh_a_lesson_by_what_bore_it
     total = standing_of(pool.standings(), borne)
 
     assert not pool.record_standings(sessions[0]) and pool.standings() == tuple(sessions)
-    assert total == LessonStanding(shown=5, heeded=1, ignored=1, contradicted=2)
+    assert total == LessonStanding(shown=5, borne_out=1, contradicted=2) and total.confirmations == 1
     assert standing_factor(LessonStanding()) == 1.0 and standing_factor(total) == pytest.approx(2 / 5)
     assert retirement_proposals(pool.lessons(), pool.standings()) == (contradicted,)
     with pytest.raises(ValueError):
@@ -231,3 +232,24 @@ def test_a_person_lists_shows_revises_retires_and_purges_lessons_from_the_comman
     assert [head.author for head in pool.lessons()[other].heads] == ["x"] and pool.lessons()[other].retired is not None
     assert LESSON not in pool.lessons() and [item.author for item in pool.purges()] == [human_author("siliang")]
     assert main(["list"]) == 2
+
+
+def test_a_person_merges_lessons_that_say_the_same_into_one_and_retires_the_rest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pool = LessonPool.beside(TreeArchive(tmp_path))
+    kept, said = revision("kept", START), revision("said", START)
+    said = dataclasses.replace(said, lesson_id=lesson_id_for("said"), evidence=(LessonEvidence("s9", "r9", "flat"),))
+    pool.write(kept)
+    pool.write(said)
+    archive = ["--archive", str(tmp_path)]
+
+    merged = main([*archive, "merge", LESSON, said.lesson_id, "--author", "siliang", "--content", FIXED])
+    again = main([*archive, "merge", LESSON, said.lesson_id, "--author", "siliang", "--content", FIXED])
+
+    (head,) = pool.lessons()[LESSON].heads
+    retired = pool.lessons()[said.lesson_id].retired
+    assert (merged, again) == (0, 1) and capsys.readouterr().out.startswith(f"merged {said.lesson_id} into {LESSON}")
+    assert (head.content, head.supersedes) == (FIXED, (kept.revision_id,))
+    assert head.evidence == (*kept.evidence, *said.evidence)
+    assert retired is not None and retired.reason == f"merged into {LESSON}"

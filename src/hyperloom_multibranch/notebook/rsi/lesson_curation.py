@@ -145,8 +145,8 @@ def _lesson_lines(lesson: Lesson, found: _Offer) -> list[str]:
     about = f" about {head.target} / {head.mechanism}" if head.target or head.mechanism else ""
     retirable = "; retirable" if lesson.lesson_id in found.retirable else ""
     record = (
-        f"shown to {standing.shown} branches: heeded {standing.heeded}, ignored and failed {standing.ignored}, "
-        f"contradicted {standing.contradicted}, paid {standing.paid}, written again unshown {standing.rediscovered}"
+        f"shown to {standing.shown} branches: borne out by their tests of its family {standing.borne_out}, "
+        f"contradicted {standing.contradicted}, written again unshown {standing.rediscovered}"
     )
     lines = [f"- {lesson.lesson_id} [{head.kind.value}{about}] {record}{retirable}"]
     for one in lesson.heads:

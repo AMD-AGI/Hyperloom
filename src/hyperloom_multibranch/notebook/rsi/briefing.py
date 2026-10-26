@@ -7,15 +7,16 @@
 Its brief has three parts:
 
 * tried: what specialists tried on the start commit and on every state it builds on, from the notebook;
-* lessons: this session's repeated failures in one direction on those states (from the lineage analysis), then what
-  this session's specialists learnt about ``focus``, then Experiences recalled from other sessions, labelled
-  ``prior`` when measured under this session's conditions and ``to re-verify`` otherwise, then what specialists of
-  past sessions learnt about it, then the pitfalls and failures the warm-start records list;
+* lessons: this session's repeated failures in one direction on those states (from the lineage analysis), then the
+  notes about ``focus``, this session's learnings and past sessions' lessons in one list, its family first, then
+  Experiences recalled from other sessions, labelled ``prior`` when measured under this session's conditions and ``to
+  re-verify`` otherwise, then the pitfalls and failures the warm-start records list;
 * leads: the Recipe KB champions the warm start read, and recalled priors with a positive gain, taking turns by the
   layer they change (configuration, source), so that one kind of change does not fill them all. The Experience KB's
   schema has no kernel family, so no recalled lead is a kernel change;
-* the menu: the direction families ranked for the branch on its start commit (:mod:`rsi.menu`), none for a branch of
-  the menu's control. A claim's reply says the same of the claimed direction's family (:meth:`direction_note`).
+* the menu: the direction families ranked for the branch on its start commit (:mod:`rsi.menu`), each with its best note
+  under it, none for a branch of the menu's control. A claim's reply says the same of the claimed direction's family
+  (:meth:`direction_note`).
 
 A champion the start commit is already, or builds on, is no lead: the lessons name it first, as :data:`ON_HEAD`, and
 ``notebook_replay`` refuses to replay it, since its change would undo what the head did since.
@@ -49,14 +50,13 @@ from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError, apply
 from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, StartupBriefProvider
 from hyperloom_multibranch.contracts.notebook.peers import Intent, IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import (
-    LearningRecord,
     NotebookSnapshot,
     PeerReplay,
     StartupBrief,
     UnfinishedLead,
     WarmReplay,
 )
-from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall, PastLearnings
+from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall, Notes
 from hyperloom_multibranch.notebook.knowledge.replay_tables import StackSlot, stack_added_kernels
 from hyperloom_multibranch.notebook.knowledge.lessons import MAX_ITEMS, clipped, listed
 from hyperloom_multibranch.notebook.knowledge.recall import (
@@ -74,6 +74,7 @@ from hyperloom_multibranch.notebook.learning_search import (
     Retrieval,
     RetrievalSource,
     ShownLead,
+    query_family,
     render_session_learning,
     session_matches,
 )
@@ -85,8 +86,10 @@ log = logging.getLogger(__name__)
 
 DEFAULT_MAX_CHARS = 4000
 KEPT = "keep"
-#: How many learnings of this session, and how many of past sessions, a brief lists at most.
+#: How many notes a brief lists about its focus at most, this session's and past sessions' in one list.
 LEARNINGS = 5
+#: How a family's note sits under its line of the menu.
+MENU_NOTE = "  note "
 #: What a brief says, before the champion, of one its start commit is already or builds on.
 ON_HEAD = "already on your head, nothing to replay"
 
@@ -377,14 +380,33 @@ class CrossSessionBriefing(StartupBriefProvider):
             self.recalls.keep(key, recall)
         return recall
 
-    async def _learnt(self, snapshot: NotebookSnapshot) -> tuple[tuple[LearningRecord, ...], PastLearnings | None]:
-        """This session's learnings about ``focus``, and the read of past sessions' when there is a recall."""
+    async def _learnt(self, snapshot: NotebookSnapshot) -> Notes:
+        """The notes about ``focus`` in one list of :data:`LEARNINGS`: this session's learnings, and with a recall
+        past sessions' too."""
 
-        here = session_matches(snapshot, self.focus, limit=LEARNINGS)
-        past = None
+        family = query_family(self.focus)
         if self.learnings is not None:
-            past = await asyncio.to_thread(self.learnings.past_for, snapshot, self.focus, limit=LEARNINGS)
-        return tuple(here), past
+            return await asyncio.to_thread(self.learnings.notes, snapshot, self.focus, limit=LEARNINGS, family=family)
+        here = session_matches(snapshot, self.focus, limit=LEARNINGS, family=family)
+        lines = tuple(render_session_learning(record, snapshot) for record in here)
+        return Notes(lines, here, (), (True,) * len(here))
+
+    async def _menu(self, snapshot: NotebookSnapshot, start_commit: str) -> tuple[tuple[str, ...], Notes]:
+        """The branch's menu, each family's best note under its line, and those notes; none without menus or for a
+        branch of the menu's control."""
+
+        menu = self.menus.menu(snapshot, self.branch, start_commit) if self.menus is not None and self.branch else None
+        if menu is None or menu.control:
+            return (), Notes()
+        lines: list[str] = []
+        shown = Notes()
+        for item in menu.items:
+            found = Notes()
+            if self.learnings is not None:
+                found = await asyncio.to_thread(self.learnings.family_note, snapshot, item.family)
+            lines += [item.render(), *(f"{MENU_NOTE}{line[2:]}" for line in found.lines)]
+            shown += found
+        return tuple(lines), shown
 
     async def startup_brief(self, start_commit: str) -> StartupBrief:
         """The brief from ``start_commit``; the recall logs the learnings and the leads it shows."""
@@ -398,34 +420,37 @@ class CrossSessionBriefing(StartupBriefProvider):
             for direction, count in repeated_failures(on_line)
         ]
         recalled = _recalled(await self._recall(snapshot))
-        here, past = await self._learnt(snapshot)
-        learnt_before = [f"learnt before: {item.render()[2:]}" for item in (past.items if past is not None else ())]
+        notes = await self._learnt(snapshot)
+        learnt = [
+            f"{'learnt here' if mine else 'learnt before'}: {line[2:]}" for line, mine in zip(notes.lines, notes.mine)
+        ]
         kb_lessons = [
             f"{lead.canonical_id}: {text}" for lead in self.warm for text in (*lead.pitfalls, *lead.what_failed)
         ]
         ordered = [
             *(_Item(True, f"{ON_HEAD}: recipe {lead.summary()}") for lead in self.warm if lead.canonical_id in on_head),
             *(_Item(True, text) for text in listed(repeated)),
-            *(_Item(True, f"learnt here: {render_session_learning(record, snapshot)[2:]}") for record in here),
+            *(_Item(True, text) for text in learnt),
             *(_recipe(lead) for lead in self.warm if lead.canonical_id not in on_head),
             *(_Item(False, f"reference: {lead.describe()}") for lead in self.references),
             *_listed(recalled.leads),
-            *(_Item(True, text) for text in listed([*recalled.lessons, *learnt_before, *kb_lessons])),
+            *(_Item(True, text) for text in listed([*recalled.lessons, *kb_lessons])),
         ]
         kept = _fit(ordered, self.max_chars)
+        menu, noted = await self._menu(snapshot, start_commit)
         if self.learnings is not None:
             shown = tuple(item.lead for item in kept if item.lead is not None)
+            logged = notes + noted
             self.learnings.record(
-                snapshot, Retrieval(self.branch, RetrievalSource.BRIEF, self.focus, shown), here, past
+                snapshot, Retrieval(self.branch, RetrievalSource.BRIEF, self.focus, shown), logged.here, logged.logged()
             )
-        menu = self.menus.menu(snapshot, self.branch, start_commit) if self.menus is not None and self.branch else None
         return replace(
             tried,
             lessons=tuple(item.text for item in kept if item.lesson),
             leads=tuple(item.text for item in kept if not item.lesson),
             unfinished=self._unrefused(tried.unfinished, snapshot, start_commit),
             focus=self.focus,
-            menu=menu.lines() if menu is not None else (),
+            menu=menu,
         )
 
     async def direction_note(self, intent: Intent, delta: RecipeDelta) -> str:

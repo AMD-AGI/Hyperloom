@@ -31,7 +31,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, Conclusi
 from hyperloom_multibranch.notebook.changes import NO_CHANGE
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.contracts.notebook.records import REPLAY_TOOL, PeerReplay, WarmReplay
-from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog, SessionLearnings
+from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, NOTES_HEADING, RetrievalLog, SessionLearnings
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, request, result
 from hyperloom_multibranch.notebook.tests.sessions import scripted_session
 from hyperloom_multibranch.notebook.tools import (
@@ -430,7 +430,7 @@ async def test_a_granted_claim_lists_this_sessions_learnings_about_its_direction
         change={"config": {"extra_server_args": "--enable-sampler-fusion"}},
     )
 
-    assert len(claimed) == 4 and claimed[2] == "This session's learnings about it:"
+    assert len(claimed) == 4 and claimed[2] == NOTES_HEADING
     assert claimed[3].startswith(f"- [s2, pitfall about flash decode / block size] {pitfall} [")
     assert len(plain.splitlines()) == 2 and plain.startswith("claimed sampler / top-k fusion on c1")
 

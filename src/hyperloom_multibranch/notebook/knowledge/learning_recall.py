@@ -28,7 +28,9 @@ from hyperloom_multibranch.contracts.notebook.records import LearningRecord, Not
 from hyperloom_multibranch.notebook.knowledge.experience import experience_identity
 from hyperloom_multibranch.notebook.knowledge.learnings import MAPPING_PATH
 from hyperloom_multibranch.notebook.knowledge.recall import WORKLOAD_KEYS, ExperienceReader, IdentityIndex, classify
+from hyperloom_multibranch.notebook.families import Family
 from hyperloom_multibranch.notebook.learning_search import (
+    SAME_FAMILY,
     SESSION_HEADING,
     Retrieval,
     RetrievalLog,
@@ -36,6 +38,7 @@ from hyperloom_multibranch.notebook.learning_search import (
     SessionLearnings,
     render_session_learning,
     session_matches,
+    session_scored,
     words,
 )
 
@@ -51,7 +54,8 @@ INFERENCEX_SESSION = "InferenceX"
 
 @dataclass(frozen=True)
 class PastLearning:
-    """A past session's learning; ``workload`` names its kind of session when that is not this session's."""
+    """A past session's learning; ``workload`` names its kind of session when that is not this session's, and
+    ``confirmations`` how often later sessions bore it out."""
 
     experience_id: str
     content: str
@@ -59,13 +63,16 @@ class PastLearning:
     source_run_id: str
     differing: tuple[str, ...]
     workload: str = ""
+    confirmations: int = 0
 
     def render(self) -> str:
         where = [f"{', '.join(self.differing)} differ"] if self.differing else []
         if self.workload:
             where.append(f"learnt in an {self.workload} session")
         backed = MEASURED if self.measured else "unmeasured"
-        return f"- [{self.source_run_id}, {', '.join(where) or 'same conditions'}, {backed}] {self.content} [{self.experience_id}]"
+        borne = f", borne out {self.confirmations} times" if self.confirmations else ""
+        said = f"{', '.join(where) or 'same conditions'}, {backed}{borne}"
+        return f"- [{self.source_run_id}, {said}] {self.content} [{self.experience_id}]"
 
 
 def _session_kind(identity: Mapping[str, Any]) -> str:
@@ -146,6 +153,27 @@ def read_past_learnings(
     )
 
 
+@dataclass(frozen=True)
+class Notes:
+    """The notes that bear on a query in one list, best first, as ``lines``, each ``mine`` when it is this session's;
+    which of them are this session's learnings (``here``) and which past sessions' (``past``)."""
+
+    lines: tuple[str, ...] = ()
+    here: tuple[LearningRecord, ...] = ()
+    past: tuple[PastLearning, ...] = ()
+    mine: tuple[bool, ...] = ()
+
+    def logged(self) -> PastLearnings | None:
+        """The past sessions' notes as a read the retrieval log records; ``None`` for none."""
+
+        return PastLearnings(ReadStatus.COMPLETED.value, items=self.past) if self.past else None
+
+    def __add__(self, other: Notes) -> Notes:
+        return Notes(
+            (*self.lines, *other.lines), (*self.here, *other.here), (*self.past, *other.past), (*self.mine, *other.mine)
+        )
+
+
 class LearningRecall(SessionLearnings):
     """One session's retrieval over the learnings, shared by every branch's tools and briefs.
 
@@ -221,6 +249,25 @@ class LearningRecall(SessionLearnings):
                     self._read.popitem(last=False)
         return found
 
+    def notes(self, snapshot: NotebookSnapshot, query: str, *, limit: int, family: Family | None = None) -> Notes:
+        """The ``limit`` notes that bear on ``query``, about ``family`` first: this session's learnings, then the
+        Experience KB's past learnings, which name no family. It reads the KB, so call it off the event loop."""
+
+        here = session_matches(snapshot, query, limit=limit, family=family)
+        read = self.past_for(snapshot, query, limit=limit)
+        past = tuple(read.items[: limit - len(here)]) if read is not None and read.available else ()
+        rendered = (*(render_session_learning(record, snapshot) for record in here), *(item.render() for item in past))
+        return Notes(rendered, here, past, (True,) * len(here) + (False,) * len(past))
+
+    def family_note(self, snapshot: NotebookSnapshot, family: Family) -> Notes:
+        """This session's newest learning about ``family`` itself, for its menu line; past learnings name no family."""
+
+        same = [record for match, record in session_scored(snapshot, "", family) if match.kin == SAME_FAMILY]
+        newest = max(same, key=lambda record: record.at, default=None)
+        if newest is None:
+            return Notes()
+        return Notes((render_session_learning(newest, snapshot),), (newest,), (), (True,))
+
     async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str = "") -> list[str]:
         """This session's matches, then past sessions', each under its heading; empty when nothing matched."""
 
@@ -249,6 +296,7 @@ __all__ = [
     "LEARNING_OBJECTIVE",
     "PAST_HEADING",
     "LearningRecall",
+    "Notes",
     "PastLearning",
     "PastLearnings",
     "learning_conditions",

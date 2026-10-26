@@ -14,7 +14,9 @@ from hyperloom_multibranch.contracts.notebook import NotRecorded
 from hyperloom_multibranch.contracts.notebook.records import Learning, LearningRecord, NotebookSnapshot
 from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
 from hyperloom_multibranch.notebook.rsi.lesson_close import (
+    CAPPED,
     DUPLICATE,
+    MAX_NEW_LESSONS,
     NEW,
     RETIRED,
     REVISED,
@@ -127,15 +129,16 @@ def test_a_revision_of_a_lesson_no_longer_live_begins_a_lesson_of_its_own(
         publish_lessons(dataclasses.replace(snapshot, profile=None), pool)
 
 
-def test_the_standing_of_a_shown_lesson_is_what_the_branchs_tests_in_its_direction_did_next(
+def test_the_standing_of_a_shown_lesson_is_what_the_branchs_tests_of_its_family_did_next(
     snapshot: NotebookSnapshot, tmp_path: Path
 ) -> None:
     pool = LessonPool(tmp_path)
-    ignored = pooled(pool, "p1", "attention split kv regresses on this model", target="attention", mechanism="split kv")
-    contradicted = pooled(pool, "p2", "a tuned moe gemm never pays here", target="moe gemm", mechanism="tuned kernel")
-    heeded = pooled(pool, "p3", "fp8 kv cache breaks accuracy here", target="kv cache", mechanism="fp8 kv cache")
+    # s2's split kv test r2 failed; s1's --max-num-seqs tests are scheduling changes, r1 committed and r4 did not.
+    borne = pooled(pool, "p1", "attention split kv regresses on this model", target="attention", mechanism="split kv")
+    wrong = pooled(pool, "p2", "raising --max-num-seqs never pays here", target="scheduler", mechanism="--max-num-seqs")
+    untested = pooled(pool, "p3", "fp8 kv cache breaks accuracy here", target="kv cache", mechanism="fp8 kv cache")
     paid = pooled(
-        pool, "p4", "tune the moe gemm first", LearningKind.INSIGHT, target="moe gemm", mechanism="tuned kernel"
+        pool, "p4", "raise --max-num-seqs first", LearningKind.INSIGHT, target="scheduler", mechanism="--max-num-seqs"
     )
     undirected = pooled(pool, "p5", "the profiler needs record shapes on this image", LearningKind.TOOLING)
     found_again = pooled(pool, "p6", "chunked prefill makes the server exit during warmup on this image")
@@ -144,15 +147,8 @@ def test_the_standing_of_a_shown_lesson_is_what_the_branchs_tests_in_its_directi
         learnings=(learnt("s2:1", LearningKind.PITFALL, "the server exits during warmup with chunked prefill"),),
     )
     log = [
-        {"at": START - 1.0, "branch": "s2", "source": "brief", "query": "x", "here": [], "past": [ignored, undirected]},
-        {
-            "at": START - 1.0,
-            "branch": "s1",
-            "source": "claim",
-            "query": "y",
-            "here": [],
-            "past": [contradicted, heeded],
-        },
+        {"at": START - 1.0, "branch": "s2", "source": "brief", "query": "x", "here": [], "past": [borne, undirected]},
+        {"at": START - 1.0, "branch": "s1", "source": "claim", "query": "y", "here": [], "past": [wrong, untested]},
         {"at": START - 1.0, "branch": "s1", "source": "tool", "query": "z", "here": [], "past": [paid, "exp-kb-1"]},
     ]
 
@@ -160,10 +156,26 @@ def test_the_standing_of_a_shown_lesson_is_what_the_branchs_tests_in_its_directi
 
     assert (standings.session_id, standings.written_at) == ("sess-1", snapshot.taken_at)
     assert standings.lessons == {
-        ignored: LessonStanding(shown=1, ignored=1),
+        borne: LessonStanding(shown=1, borne_out=1),
         undirected: LessonStanding(shown=1),
-        contradicted: LessonStanding(shown=1, contradicted=1),
-        heeded: LessonStanding(shown=1, heeded=1),
-        paid: LessonStanding(shown=1, paid=1),
+        wrong: LessonStanding(shown=1, contradicted=1),
+        untested: LessonStanding(shown=1),
+        paid: LessonStanding(shown=1, borne_out=1),
         found_again: LessonStanding(rediscovered=1),
     }
+
+
+def test_a_session_starts_at_most_so_many_lessons_and_skips_what_one_already_says_in_other_words(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    pool = LessonPool(tmp_path)
+    pooled(pool, "x", "fp8 kv cache breaks the accuracy gate on this model")
+    near = learnt("s2:1", LearningKind.PITFALL, "on this model fp8 kv cache breaks the accuracy gate badly")
+    many = [
+        learnt(f"s1:{n}", LearningKind.INSIGHT, f"knob{n}a sets alpha{n}b beta{n}c gamma{n}d for decode")
+        for n in range(1, MAX_NEW_LESSONS + 3)
+    ]
+
+    published = publish_lessons(dataclasses.replace(snapshot, learnings=(near, *many)), pool)
+
+    assert published.counts == {DUPLICATE: 1, NEW: MAX_NEW_LESSONS, CAPPED: 2}

@@ -3,17 +3,18 @@
 
 """Past sessions' lessons, from the RSI lesson pool, for a branch's next decision (RSI).
 
-:class:`LessonRecall` is the session's one learnings finder with a lesson pool: this session's learnings first, as
-:class:`~hyperloom_multibranch.notebook.knowledge.learning_recall.LearningRecall` gives them, then the pool's live
-lessons that bear on the query, after any the Experience KB gives when one is configured. A lesson bears on a query by
-the words they share, a word of the direction it is about counting double, times how similar the session it was learnt
-in is to this one (none below
-:data:`~hyperloom_multibranch.notebook.rsi.similarity.MIN_SIMILARITY`), times its standing
-(:func:`~hyperloom_multibranch.notebook.rsi.lessons.standing_factor`); among equals the newer comes first. A lesson this
-session revised or retired is no longer shown here; the learning that did it is, among this session's. Each lesson
-shows its id, which a learning of this session may revise or retire it by, the conditions it differs in and whether a
-test measured it. A granted claim lists :data:`CLAIM_LESSONS` of them after this session's learnings about its
-direction. The pool is read once, when first asked.
+:class:`LessonRecall` is the session's one learnings finder with a lesson pool. This session's learnings and the
+pool's live lessons that bear on a query come in one list (:meth:`LessonRecall.notes`): the family asked about first,
+the same family before the same target (:func:`~hyperloom_multibranch.notebook.learning_search.kinship`), then by the
+words they share, a word of the direction counting double, a lesson's weighed by how similar the session it was
+learnt in is to this one (none below :data:`~hyperloom_multibranch.notebook.rsi.similarity.MIN_SIMILARITY`) and by its
+standing (:func:`~hyperloom_multibranch.notebook.rsi.lessons.standing_factor`); among equals this session's comes
+first, then the newer. A lesson's family is that of the direction it names, else of its words. A lesson this session
+revised or retired is no longer shown; the learning that did it is, among this session's. Each lesson shows its id,
+which a learning of this session may revise or retire it by, the conditions it differs in, whether a test measured it
+and how often sessions bore it out. A granted claim, the learnings tool and a brief list
+:data:`~hyperloom_multibranch.notebook.learning_search.NOTES` of them; a menu line of a brief, its family's best note
+(:meth:`LessonRecall.family_note`). The pool is read once, when first asked.
 """
 
 from __future__ import annotations
@@ -22,16 +23,23 @@ import asyncio
 from dataclasses import dataclass
 
 from hyperloom_kb import ReadStatus
-from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, is_lesson_id
-from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall, PastLearning, PastLearnings
+from hyperloom_multibranch.contracts.notebook.records import LearningRecord, NotebookSnapshot, is_lesson_id
+from hyperloom_multibranch.notebook.families import Family, note_family
+from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall, Notes, PastLearning, PastLearnings
 from hyperloom_multibranch.notebook.knowledge.recall import ExperienceReader
 from hyperloom_multibranch.notebook.learning_search import (
-    CLAIM_LEARNINGS,
+    NOTES,
+    SAME_FAMILY,
+    Match,
     Retrieval,
     RetrievalLog,
     RetrievalSource,
-    claim_lines,
-    session_matches,
+    kinship,
+    note_lines,
+    note_score,
+    query_family,
+    render_session_learning,
+    session_scored,
     words,
 )
 from hyperloom_multibranch.notebook.rsi.lessons import (
@@ -49,9 +57,8 @@ from hyperloom_multibranch.notebook.rsi.similarity import (
     task_similarity,
 )
 
-#: How many past sessions' lessons a granted claim lists.
-CLAIM_LESSONS = 2
-CLAIM_LESSONS_HEADING = "Past sessions' lessons about it:"
+#: A family's notes a menu line of a brief shows.
+FAMILY_NOTES = 1
 
 
 @dataclass(frozen=True)
@@ -59,6 +66,7 @@ class _Loaded:
     lessons: dict[str, Lesson]
     heads: tuple[LessonRevision, ...]
     factors: dict[str, float]
+    confirmations: dict[str, int]
     revision: str = ""
 
 
@@ -69,11 +77,31 @@ def edited_lessons(snapshot: NotebookSnapshot) -> frozenset[str]:
     return frozenset(lesson for lesson in named if is_lesson_id(lesson))
 
 
-def _item(head: LessonRevision, task: TaskConditions) -> PastLearning:
+def _item(head: LessonRevision, task: TaskConditions, confirmations: int) -> PastLearning:
     source = head.session_id or head.author
-    return PastLearning(
-        head.lesson_id, head.content, head.measured, source, differing_conditions(task, head.conditions)
+    differing = differing_conditions(task, head.conditions)
+    return PastLearning(head.lesson_id, head.content, head.measured, source, differing, confirmations=confirmations)
+
+
+def _ranked(
+    here: list[tuple[Match, LearningRecord]], past: list[tuple[Match, PastLearning]], limit: int
+) -> list[LearningRecord | PastLearning]:
+    """``here`` and ``past`` in one list, best first, this session's first among equals."""
+
+    merged: list[tuple[Match, int, LearningRecord | PastLearning]] = [(match, 0, item) for match, item in here]
+    merged += [(match, 1, item) for match, item in past]
+    merged.sort(key=lambda entry: (-entry[0].kin, -entry[0].score, entry[1], -entry[0].at))
+    return [item for _, _, item in merged[:limit]]
+
+
+def _notes(chosen: list[LearningRecord | PastLearning], snapshot: NotebookSnapshot) -> Notes:
+    lines = tuple(
+        render_session_learning(item, snapshot) if isinstance(item, LearningRecord) else item.render()
+        for item in chosen
     )
+    here = tuple(item for item in chosen if isinstance(item, LearningRecord))
+    past = tuple(item for item in chosen if isinstance(item, PastLearning))
+    return Notes(lines, here, past, tuple(isinstance(item, LearningRecord) for item in chosen))
 
 
 class LessonRecall(LearningRecall):
@@ -93,9 +121,11 @@ class LessonRecall(LearningRecall):
                 lessons = self._pool.lessons() if self._pool is not None else {}
                 standings = self._pool.standings() if self._pool is not None else ()
                 heads = tuple(head for lesson in lessons.values() if lesson.retired is None for head in lesson.heads)
-                factors = {key: standing_factor(standing_of(standings, key)) for key in lessons}
+                found = {key: standing_of(standings, key) for key in lessons}
+                factors = {key: standing_factor(standing) for key, standing in found.items()}
+                confirmations = {key: standing.confirmations for key, standing in found.items()}
                 revision = self._pool.digest() if self._pool is not None else ""
-                self._loaded = _Loaded(lessons, heads, factors, revision)
+                self._loaded = _Loaded(lessons, heads, factors, confirmations, revision)
             return self._loaded
 
     def past_revision(self) -> str:
@@ -109,26 +139,39 @@ class LessonRecall(LearningRecall):
         lesson = self._load().lessons.get(lesson_id)
         return lesson is not None and lesson.retired is None
 
-    def pooled(self, snapshot: NotebookSnapshot, query: str, *, limit: int) -> tuple[PastLearning, ...]:
-        """The pool's live lessons that bear on ``query`` for ``snapshot``'s session, the best ``limit`` first; none
-        before its profile."""
+    def _scored(
+        self, snapshot: NotebookSnapshot, query: str, family: Family | None
+    ) -> list[tuple[Match, PastLearning]]:
+        """The pool's live lessons that bear on ``query`` or are about ``family``, each with its match; none before
+        the session's profile."""
 
         if snapshot.profile is None or self._pool is None:
-            return ()
+            return []
         loaded = self._load()
         task = task_conditions(snapshot.profile)
         hidden = edited_lessons(snapshot)
         wanted = words(query)
-        scored = []
+        found = []
         for head in loaded.heads:
             if head.lesson_id in hidden or head.session_id == snapshot.profile.session_id:
                 continue
             similarity = task_similarity(task, head.conditions)
-            overlap = len(wanted & words(head.content)) + 2 * len(wanted & words(f"{head.target} {head.mechanism}"))
-            if overlap and similarity >= MIN_SIMILARITY:
-                scored.append((overlap * similarity * loaded.factors.get(head.lesson_id, 1.0), head.written_at, head))
-        scored.sort(key=lambda item: (-item[0], -item[1]))
-        return tuple(_item(head, task) for _, _, head in scored[:limit])
+            if similarity < MIN_SIMILARITY:
+                continue
+            kin = kinship(family, note_family(head.target, head.mechanism, head.layer, head.content))
+            overlap = note_score(wanted, head.content, head.target, head.mechanism)
+            if kin or overlap:
+                weight = similarity * loaded.factors.get(head.lesson_id, 1.0)
+                item = _item(head, task, loaded.confirmations.get(head.lesson_id, 0))
+                found.append((Match(kin, overlap * weight, head.written_at), item))
+        return found
+
+    def pooled(
+        self, snapshot: NotebookSnapshot, query: str, *, limit: int, family: Family | None = None
+    ) -> tuple[PastLearning, ...]:
+        """The pool's live lessons that bear on ``query``, about ``family`` first, the best ``limit`` first."""
+
+        return tuple(_ranked([], self._scored(snapshot, query, family), limit))
 
     def past_for(self, snapshot: NotebookSnapshot, query: str, *, limit: int) -> PastLearnings | None:
         """The pool's lessons for ``query``, after the Experience KB's when one is configured; ``None`` before the
@@ -142,16 +185,37 @@ class LessonRecall(LearningRecall):
         warnings = read.warnings if read is not None else ()
         return PastLearnings(ReadStatus.COMPLETED.value, read.read_id if read is not None else "", items, warnings)
 
-    async def about(self, snapshot: NotebookSnapshot, query: str, *, branch: str) -> list[str]:
-        """This session's learnings about a claimed direction, then :data:`CLAIM_LESSONS` past sessions' lessons, as
-        one retrieval of the log."""
+    def notes(self, snapshot: NotebookSnapshot, query: str, *, limit: int, family: Family | None = None) -> Notes:
+        """This session's learnings and the pool's lessons that bear on ``query``, in one list of ``limit``."""
 
-        here = session_matches(snapshot, query, limit=CLAIM_LEARNINGS)
-        lessons = await asyncio.to_thread(self.pooled, snapshot, query, limit=CLAIM_LESSONS)
-        past = PastLearnings(ReadStatus.COMPLETED.value, items=lessons) if lessons else None
-        self.record(snapshot, Retrieval(branch, RetrievalSource.CLAIM, query), here, past)
-        listed = [CLAIM_LESSONS_HEADING, *(item.render() for item in lessons)] if lessons else []
-        return [*claim_lines(here, snapshot), *listed]
+        chosen = _ranked(session_scored(snapshot, query, family), self._scored(snapshot, query, family), limit)
+        return _notes(chosen, snapshot)
+
+    def family_note(self, snapshot: NotebookSnapshot, family: Family) -> Notes:
+        """The best of this session's learnings and the pool's lessons about ``family`` itself, for its menu line."""
+
+        same = [(match, record) for match, record in session_scored(snapshot, "", family) if match.kin == SAME_FAMILY]
+        pooled = [(match, item) for match, item in self._scored(snapshot, "", family) if match.kin == SAME_FAMILY]
+        return _notes(_ranked(same, pooled, FAMILY_NOTES), snapshot)
+
+    def _logged(self, snapshot: NotebookSnapshot, retrieval: Retrieval, found: Notes) -> list[str]:
+        self.record(snapshot, retrieval, found.here, found.logged())
+        return note_lines(found.lines)
+
+    async def about(
+        self, snapshot: NotebookSnapshot, query: str, *, branch: str, family: Family | None = None
+    ) -> list[str]:
+        """The :data:`~hyperloom_multibranch.notebook.learning_search.NOTES` notes about a claimed direction, in one
+        list, as one retrieval of the log."""
+
+        found = await asyncio.to_thread(self.notes, snapshot, query, limit=NOTES, family=family)
+        return self._logged(snapshot, Retrieval(branch, RetrievalSource.CLAIM, query), found)
+
+    async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str = "") -> list[str]:
+        """The ``limit`` notes that bear on ``query``, the family it names first, in one list."""
+
+        found = await asyncio.to_thread(self.notes, snapshot, query, limit=limit, family=query_family(query))
+        return self._logged(snapshot, Retrieval(branch, RetrievalSource.TOOL, query), found)
 
 
-__all__ = ["CLAIM_LESSONS", "CLAIM_LESSONS_HEADING", "LessonRecall", "edited_lessons"]
+__all__ = ["FAMILY_NOTES", "LessonRecall", "edited_lessons"]

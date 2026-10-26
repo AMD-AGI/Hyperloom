@@ -8,14 +8,17 @@ lesson was shown to them.
 supersedes a past session's lesson, directly or through an earlier learning of its branch that did, a revision of that
 lesson that replaces its heads. A revision of a lesson that is no longer live begins a lesson of its own. A learning
 that ``retires`` a live lesson retires it, even when a later learning of its branch replaced its text: a retirement is
-a step the branch took, not a statement. A learning that says what a live lesson says, once case and spacing are set
-aside, adds nothing. Every id comes from the session and the notebook entry, so a CLOSE run again writes nothing
-twice.
+a step the branch took, not a statement. A learning that says what a live lesson or an earlier learning of the session
+says, once case and spacing are set aside or :data:`NEAR_DUPLICATE` of their words are shared, adds nothing. A session
+starts at most :data:`MAX_NEW_LESSONS` lessons, those that cite tests first; a revision of a live lesson is never
+held back. Every id comes from the session and the notebook entry, so a CLOSE run again writes nothing twice.
 
 :func:`session_standings` reads the session's retrieval log beside its notebook. For each pooled lesson a branch was
-shown, from the first showing on, it sets down what the branch's tests in the lesson's direction did
-(:class:`~hyperloom_multibranch.notebook.rsi.lessons.LessonStanding`); a lesson that names no direction counts as
-shown only. A branch that wrote a live lesson again without having been shown it rediscovered it.
+shown, from the first showing on, it sets down what the branch's explore tests of the lesson's direction family did
+(:class:`~hyperloom_multibranch.notebook.rsi.lessons.LessonStanding`): borne out when they came out as the lesson says,
+none committing after a pitfall, one after an insight or a hypothesis, contradicted when they came out the other way.
+A branch that tested none of the family, or a lesson that names no family or says nothing of how a direction comes
+out, counts as shown only. A branch that wrote a live lesson again without having been shown it rediscovered it.
 """
 
 from __future__ import annotations
@@ -31,12 +34,14 @@ from hyperloom_multibranch.contracts.notebook.records import (
     LearningRecord,
     NotebookSnapshot,
     SessionProfile,
+    TestRecord,
     is_lesson_id,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
+from hyperloom_multibranch.notebook.families import note_family
 from hyperloom_multibranch.notebook.knowledge.learnings import measures
-from hyperloom_multibranch.notebook.learning_search import current_learnings, names, outcome_of
-from hyperloom_multibranch.notebook.rsi.learning_eval import PAST, BranchTest, branch_tests, first_shown, rediscoveries
+from hyperloom_multibranch.notebook.learning_search import current_learnings, outcome_of, word_overlap, words
+from hyperloom_multibranch.notebook.rsi.learning_eval import PAST, first_shown, rediscoveries
 from hyperloom_multibranch.notebook.rsi.lessons import (
     Lesson,
     LessonEvidence,
@@ -49,24 +54,24 @@ from hyperloom_multibranch.notebook.rsi.lessons import (
     revision_id_for,
     specialist_author,
 )
+from hyperloom_multibranch.notebook.rsi.menu import explored, record_family
 from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
 
-NEW, REVISED, RETIRED, DUPLICATE, FAILED = "new", "revised", "retired", "duplicate", "failed"
-_TAKEN_UP = frozenset({LearningKind.INSIGHT, LearningKind.HYPOTHESIS})
-_HEEDED, _IGNORED, _CONTRADICTED, _PAID, _SHOWN, _REDISCOVERED = (
-    "heeded",
-    "ignored",
-    "contradicted",
-    "paid",
-    "shown",
-    "rediscovered",
-)
+NEW, REVISED, RETIRED, DUPLICATE, CAPPED, FAILED = "new", "revised", "retired", "duplicate", "capped", "failed"
+#: The share of its words a learning shares with a live lesson or an earlier learning that makes it say the same.
+NEAR_DUPLICATE = 0.8
+#: How many lessons a session starts at most.
+MAX_NEW_LESSONS = 12
+#: The kinds of learning that say a direction pays; a pitfall says it fails.
+_SAYS_IT_PAYS = frozenset({LearningKind.INSIGHT, LearningKind.HYPOTHESIS})
+_BORNE_OUT, _CONTRADICTED, _SHOWN, _REDISCOVERED = "borne_out", "contradicted", "shown", "rediscovered"
 
 
 @dataclass(frozen=True)
 class LessonPublication:
     """What :func:`publish_lessons` did, by outcome: ``new`` lessons, ``revised`` and ``retired`` ones, ``duplicate``
-    learnings a live lesson already says, and writes that ``failed``, each failure's reason in ``reasons``."""
+    learnings a live lesson or an earlier learning already says, ``capped`` ones past :data:`MAX_NEW_LESSONS`, and
+    writes that ``failed``, each failure's reason in ``reasons``."""
 
     counts: Mapping[str, int] = field(default_factory=dict)
     reasons: tuple[str, ...] = ()
@@ -111,8 +116,15 @@ class _Publication:
         self._by_id = {record.entry_id: record for record in snapshot.learnings}
         self._lessons = pool.lessons()
         self._said = {_normal(head.content) for head in self._live_heads()}
+        self._worded = [words(head.content) for head in self._live_heads()]
         self.counts: Counter[str] = Counter()
         self.reasons: list[str] = []
+
+    def _says_again(self, text: str) -> bool:
+        mine = words(text)
+        return _normal(text) in self._said or any(
+            word_overlap(mine, theirs) >= NEAR_DUPLICATE for theirs in self._worded
+        )
 
     def _live_heads(self) -> list[LessonRevision]:
         return [head for lesson in self._lessons.values() if lesson.retired is None for head in lesson.heads]
@@ -145,11 +157,13 @@ class _Publication:
 
     def publish(self, record: LearningRecord) -> None:
         learning = record.learning
-        text = _normal(learning.content)
-        if text in self._said:
+        if self._says_again(learning.content):
             self.counts[DUPLICATE] += 1
             return
         lesson = self._live(_revised_lesson(record, self._by_id))
+        if lesson is None and self.counts[NEW] >= MAX_NEW_LESSONS:
+            self.counts[CAPPED] += 1
+            return
         revision = LessonRevision(
             revision_id_for(self._session, record.entry_id),
             lesson.lesson_id if lesson is not None else lesson_id_for(self._session, record.entry_id),
@@ -166,7 +180,8 @@ class _Publication:
             evidence=self._evidence(learning),
         )
         self._write(REVISED if lesson is not None else NEW, lambda: self._pool.write(revision))
-        self._said.add(text)
+        self._said.add(_normal(learning.content))
+        self._worded.append(words(learning.content))
 
 
 def publish_lessons(snapshot: NotebookSnapshot, pool: LessonPool) -> LessonPublication:
@@ -176,31 +191,25 @@ def publish_lessons(snapshot: NotebookSnapshot, pool: LessonPool) -> LessonPubli
     for record in snapshot.learnings:
         if record.learning.retires is not None:
             publication.retire(record)
-    for record in current_learnings(snapshot):
+    cited_first = sorted(current_learnings(snapshot), key=lambda record: (not record.learning.request_ids, record.at))
+    for record in cited_first:
         if record.learning.retires is None:
             publication.publish(record)
     return LessonPublication(dict(publication.counts), tuple(publication.reasons))
 
 
-def _pitfall_outcome(probe: Learning, later: Sequence[BranchTest]) -> str:
-    tried = [test for test in later if names(probe, test.intent)]
-    if not tried:
-        return _HEEDED
-    if any(test.committed for test in tried):
-        return _CONTRADICTED
-    return _IGNORED if any(test.ended for test in tried) else ""
+def _outcome(head: LessonRevision, later: Sequence[TestRecord], snapshot: NotebookSnapshot) -> str:
+    """What a branch's explore tests ``later`` than its showing of ``head`` say of the lesson, by those of its family;
+    empty when they say nothing."""
 
-
-def _outcome(head: LessonRevision, later: Sequence[BranchTest]) -> str:
-    """What a branch's tests after it was shown ``head`` say of the lesson; empty when they say nothing."""
-
-    if not (head.target or head.mechanism):
+    family = note_family(head.target, head.mechanism, head.layer, head.content)
+    if family is None or (head.kind is not LearningKind.PITFALL and head.kind not in _SAYS_IT_PAYS):
         return ""
-    probe = Learning("", head.kind, head.content, head.target, head.mechanism)
-    if head.kind is LearningKind.PITFALL:
-        return _pitfall_outcome(probe, later)
-    paid = head.kind in _TAKEN_UP and bool(later) and names(probe, later[0].intent) and later[0].committed
-    return _PAID if paid else ""
+    tried = [record for record in later if (found := record_family(snapshot, record)) and family.covers(found)]
+    if not tried:
+        return ""
+    committed = any(record.commit_id is not None for record in tried)
+    return _CONTRADICTED if committed == (head.kind is LearningKind.PITFALL) else _BORNE_OUT
 
 
 def session_standings(
@@ -218,11 +227,15 @@ def session_standings(
     }
     live = {lesson_id: head for lesson_id, head in latest.items() if lessons[lesson_id].retired is None}
     shown = {pair: at for pair, at in first_shown(log, PAST).items() if pair[1] in latest}
-    tests = branch_tests(snapshot)
+    tests: dict[str, list[TestRecord]] = defaultdict(list)
+    for record in snapshot.records:
+        if explored(record):
+            tests[record.request.branch].append(record)
     counts: dict[str, Counter[str]] = defaultdict(Counter)
     for (branch, lesson_id), at in shown.items():
         counts[lesson_id][_SHOWN] += 1
-        outcome = _outcome(latest[lesson_id], [test for test in tests.get(branch, ()) if test.at > at])
+        later = [record for record in tests.get(branch, ()) if record.requested_at > at]
+        outcome = _outcome(latest[lesson_id], later, snapshot)
         if outcome:
             counts[lesson_id][outcome] += 1
     texts = {lesson_id: (head.session_id, head.content) for lesson_id, head in live.items()}
@@ -233,8 +246,11 @@ def session_standings(
 
 
 __all__ = [
+    "CAPPED",
     "DUPLICATE",
     "FAILED",
+    "MAX_NEW_LESSONS",
+    "NEAR_DUPLICATE",
     "NEW",
     "RETIRED",
     "REVISED",

@@ -12,11 +12,13 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import Learning, LearningRecord, NotebookSnapshot
 from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
-from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
+from hyperloom_multibranch.notebook.families import Family, Mechanism
+from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, NOTES_HEADING, RetrievalLog
 from hyperloom_multibranch.notebook.rsi.briefing import CrossSessionBriefing
-from hyperloom_multibranch.notebook.rsi.lesson_recall import CLAIM_LESSONS_HEADING, LessonRecall, edited_lessons
+from hyperloom_multibranch.notebook.rsi.lesson_recall import LessonRecall, edited_lessons
 from hyperloom_multibranch.notebook.rsi.lessons import (
     LessonEvidence,
     LessonPool,
@@ -35,6 +37,7 @@ from hyperloom_multibranch.notebook.tests.sessions import scripted_session
 SAME = task_conditions(profile())
 CORRECTION = "the bare --cuda-graph-max-bs is ambiguous; --cuda-graph-max-bs-decode sets the decode graph size"
 MEASURED = (LessonEvidence("past-1", "42cc8632", "the candidate failed (no_known_signature)", measured=True),)
+FP8_KV = Family("KV cache", Mechanism.PRECISION, IntentLayer.CONFIG)
 
 
 def lesson(
@@ -44,7 +47,9 @@ def lesson(
     conditions: TaskConditions = SAME,
     session: str = "past-1",
     evidence: tuple[LessonEvidence, ...] = (),
+    direction: tuple[str, str, IntentLayer | None] = ("", "", None),
 ) -> str:
+    target, mechanism, layer = direction
     revision = LessonRevision(
         revision_id_for(name),
         lesson_id_for(name),
@@ -54,6 +59,9 @@ def lesson(
         "x",
         START - 60.0,
         session_id=session,
+        target=target,
+        mechanism=mechanism,
+        layer=layer,
         evidence=evidence,
     )
     pool.write(revision)
@@ -120,6 +128,33 @@ def test_a_lesson_this_session_revised_or_retired_is_shown_no_more_and_the_stand
     assert found is not None and [item.experience_id for item in found.items] == [trusted, doubted]
 
 
+def test_one_list_puts_the_familys_notes_first_and_this_sessions_first_among_equals(
+    snapshot: NotebookSnapshot, pool: LessonPool
+) -> None:
+    kv = "fp8 kv cache needs a matching attention backend here"
+    same = lesson(pool, "kv", kv, direction=("kv cache", "fp8 kv cache", IntentLayer.CONFIG))
+    other = lesson(pool, "split", "kv cache splits hurt at conc 64", direction=("attention", "split kv", None))
+    mine = Learning(
+        "s2",
+        LearningKind.PITFALL,
+        "fp8 kv cache costs accuracy on this model",
+        "kv cache",
+        "fp8 kv cache",
+        IntentLayer.CONFIG,
+        request_ids=("r5",),
+    )
+    learnt = dataclasses.replace(snapshot, learnings=(LearningRecord("s2:1", START, mine),))
+    recall = LessonRecall(pool=pool)
+
+    found = recall.notes(learnt, "kv cache", limit=5, family=FP8_KV)
+    noted = recall.family_note(learnt, FP8_KV)
+
+    assert found.mine == (True, False, False) and [item.experience_id for item in found.past] == [same, other]
+    assert found.lines[0].startswith("- [s2, pitfall about kv cache / fp8 kv cache] fp8 kv cache costs accuracy")
+    assert noted.lines == found.lines[:1]
+    assert recall.family_note(snapshot, FP8_KV).past[0].experience_id == same
+
+
 async def test_a_claim_lists_this_sessions_learnings_then_past_lessons_and_logs_both_at_once(
     tmp_path: Path, pool: LessonPool
 ) -> None:
@@ -133,8 +168,8 @@ async def test_a_claim_lists_this_sessions_learnings_then_past_lessons_and_logs_
     told = await recall.lines(snapshot, "cuda graph", limit=5, branch="s1")
     (claimed, asked) = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
 
-    assert listed == [CLAIM_LESSONS_HEADING, f"- [past-1, same conditions, measured] {CORRECTION} [{graph}]"]
-    assert told == ["Past sessions' learnings:", f"- [past-1, same conditions, measured] {CORRECTION} [{graph}]"]
+    assert listed == [NOTES_HEADING, f"- [past-1, same conditions, measured] {CORRECTION} [{graph}]"]
+    assert told == [NOTES_HEADING, f"- [past-1, same conditions, measured] {CORRECTION} [{graph}]"]
     assert (claimed["source"], claimed["here"], claimed["past"], claimed["past_status"]) == (
         "claim",
         [],

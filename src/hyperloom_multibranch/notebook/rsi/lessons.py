@@ -20,7 +20,8 @@ and ``scorers/``, holds files each written once:
 Three kinds of editor write here, each named in what it writes (:func:`specialist_author`, :func:`curator_author`,
 :func:`human_author`): a session's specialists, whose learnings CLOSE publishes (:mod:`rsi.lesson_close`); the
 scheduler's LLM, curating at CLOSE (:mod:`rsi.lesson_curation`); and a person, through
-``python -m hyperloom_multibranch.notebook.rsi.lessons list|show|revise|retire|purge``.
+``python -m hyperloom_multibranch.notebook.rsi.lessons list|show|revise|merge|retire|purge``, where ``merge`` gives
+live lessons that say the same one text and retires the others into the first.
 """
 
 from __future__ import annotations
@@ -63,6 +64,8 @@ CONTRADICTING_SESSIONS = 2
 _REVISIONS, _RETIRED, _PURGED, _STANDINGS = "revisions", "retired", "purged", "standings"
 _JSON, _SUFFIX, _ENCODING, _FORMAT, _RECORD = "*.json", ".json", "utf-8", "format", "record"
 _SESSION_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}")
+#: The command line's argument naming the lesson a command acts on.
+_LESSON_ARGUMENT = "lesson"
 #: Fixed, so the lessons a session leaves get the same ids however often its CLOSE runs.
 _NAMESPACE = uuid.UUID("6f1d3a52-9c4e-4b8a-a7d2-0e5c9b1f3a64")
 Kept = TypeVar("Kept")
@@ -154,24 +157,22 @@ class LessonPurge:
 class LessonStanding:
     """What the branches of a session did after a lesson was shown to them.
 
-    ``shown`` counts the branches it was shown to. A pitfall ``heeded`` kept a branch off its direction; one
-    ``ignored`` saw a branch test the direction anyway and fail as it said; one ``contradicted`` saw such a test
-    commit. An insight or a hypothesis ``paid`` when the branch's next test, in its direction, committed.
-    ``rediscovered`` counts the branches that wrote it again without having been shown it.
+    ``shown`` counts the branches it was shown to. A branch that then tested the lesson's direction family bore it out
+    when its tests came out as the lesson says, none committing after a pitfall and one after an insight or a
+    hypothesis, and ``contradicted`` it when they came out the other way; a branch that tested none of the family says
+    nothing of it. ``rediscovered`` counts the branches that wrote it again without having been shown it.
     """
 
     shown: int = 0
-    heeded: int = 0
-    ignored: int = 0
+    borne_out: int = 0
     contradicted: int = 0
-    paid: int = 0
     rediscovered: int = 0
 
     @property
-    def borne_out(self) -> int:
-        """The outcomes that bore it out: a failure it foretold, a direction it pointed to that paid, a rediscovery."""
+    def confirmations(self) -> int:
+        """How often the lesson held: the tests that bore it out, and the branches that found it again unshown."""
 
-        return self.ignored + self.paid + self.rediscovered
+        return self.borne_out + self.rediscovered
 
 
 @dataclass(frozen=True)
@@ -364,10 +365,10 @@ def standing_of(standings: Iterable[SessionStandings], lesson_id: str) -> Lesson
 
 
 def standing_factor(standing: LessonStanding) -> float:
-    """How a lesson's record weighs it in retrieval: one more than what bore it out, over one more than twice what
+    """How a lesson's record weighs it in retrieval: one more than its confirmations, over one more than twice what
     contradicted it; 1 for a lesson no session has tried."""
 
-    return (1 + standing.borne_out) / (1 + 2 * standing.contradicted)
+    return (1 + standing.confirmations) / (1 + 2 * standing.contradicted)
 
 
 def retirement_proposals(lessons: Mapping[str, Lesson], standings: Sequence[SessionStandings]) -> tuple[str, ...]:
@@ -380,7 +381,7 @@ def retirement_proposals(lessons: Mapping[str, Lesson], standings: Sequence[Sess
         if (
             lesson.retired is None
             and contradicting >= CONTRADICTING_SESSIONS
-            and not any(item.borne_out for item in mine)
+            and not any(item.confirmations for item in mine)
         ):
             proposed.append(lesson_id)
     return tuple(sorted(proposed))
@@ -432,27 +433,52 @@ def _show(pool: LessonPool, args: argparse.Namespace) -> int:
     return 0
 
 
-def _revise(pool: LessonPool, args: argparse.Namespace) -> int:
-    lesson = _live(pool, args.lesson)
-    if lesson is None:
-        return 1
+def _human_revision(lesson: Lesson, author: str, content: str, merged: Sequence[Lesson] = ()) -> LessonRevision:
+    """A person's new text for ``lesson``, replacing its heads, with the evidence of the lessons ``merged`` into it."""
+
     head, now = max(lesson.heads, key=lambda item: item.written_at), time.time()
-    revision = LessonRevision(
-        revision_id_for("human", args.author, lesson.lesson_id, f"{now:.6f}"),
+    evidence = tuple(dict.fromkeys(item for one in (lesson, *merged) for kept in one.heads for item in kept.evidence))
+    return LessonRevision(
+        revision_id_for("human", author, lesson.lesson_id, f"{now:.6f}"),
         lesson.lesson_id,
         head.kind,
-        _clean(args.content),
+        _clean(content),
         head.conditions,
-        human_author(args.author),
+        human_author(author),
         now,
         target=head.target,
         mechanism=head.mechanism,
         layer=head.layer,
         supersedes=tuple(item.revision_id for item in lesson.heads),
-        evidence=head.evidence,
+        evidence=evidence,
     )
+
+
+def _revise(pool: LessonPool, args: argparse.Namespace) -> int:
+    lesson = _live(pool, args.lesson)
+    if lesson is None:
+        return 1
+    revision = _human_revision(lesson, args.author, args.content)
     pool.write(revision)
     print(f"revised {lesson.lesson_id} as {revision.revision_id}")
+    return 0
+
+
+def _merge(pool: LessonPool, args: argparse.Namespace) -> int:
+    kept = _live(pool, args.lesson)
+    others = [_live(pool, other) for other in args.others]
+    merged = [other for other in others if other is not None and other.lesson_id != args.lesson]
+    if kept is None or len(merged) != len(args.others):
+        return 1
+    revision = _human_revision(kept, args.author, args.content, merged)
+    pool.write(revision)
+    for other in merged:
+        pool.retire(
+            LessonRetirement(
+                other.lesson_id, human_author(args.author), revision.written_at, f"merged into {kept.lesson_id}"
+            )
+        )
+    print(f"merged {', '.join(args.others)} into {kept.lesson_id} as {revision.revision_id}")
     return 0
 
 
@@ -485,7 +511,7 @@ def _parser() -> argparse.ArgumentParser:
     listed.add_argument("--query", default="", help="only those sharing a word with it")
     listed.set_defaults(run=_list)
     shown = commands.add_parser("show", help="one lesson's revisions, retirement and standing")
-    shown.add_argument("lesson")
+    shown.add_argument(_LESSON_ARGUMENT)
     shown.set_defaults(run=_show)
     for name, run, text, says in (
         ("revise", _revise, "a new text for a live lesson, replacing its heads", "--content"),
@@ -493,12 +519,18 @@ def _parser() -> argparse.ArgumentParser:
         ("purge", _purge, "delete a lesson's revisions, for a text that must not exist", "--reason"),
     ):
         command = commands.add_parser(name, help=text)
-        command.add_argument("lesson")
+        command.add_argument(_LESSON_ARGUMENT)
         command.add_argument("--author", required=True, help="who you are, named in what is written")
         command.add_argument(says, required=True)
         command.set_defaults(run=run)
     purge = commands.choices["purge"]
     purge.add_argument("--yes", action="store_true", help="confirm the deletion")
+    merge = commands.add_parser("merge", help="one text for live lessons that say the same, the others retired into it")
+    merge.add_argument(_LESSON_ARGUMENT, help="the lesson that keeps the text")
+    merge.add_argument("others", nargs="+", help="the lessons retired into it")
+    merge.add_argument("--author", required=True, help="who you are, named in what is written")
+    merge.add_argument("--content", required=True)
+    merge.set_defaults(run=_merge)
     return parser
 
 

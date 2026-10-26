@@ -68,6 +68,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import DedupStatus, LearningKind, UnfinishedReason
 from hyperloom_multibranch.notebook.changes import NO_CHANGE
+from hyperloom_multibranch.notebook.families import family_of
 from hyperloom_multibranch.notebook.learning_search import LearningFinder, SessionLearnings, fit_lines
 from hyperloom_multibranch.notebook.local.notebook import LEARNING_MAX_CHARS, LEARNING_MIN_CHARS
 
@@ -267,7 +268,7 @@ def render_brief(brief: StartupBrief) -> str:
         ("Ceilings (largest ops; claim with target_share_pct):", _ceilings(brief.op_shares)),
         ("Tried:", [_tried(item) for item in brief.tried]),
         (UNFINISHED_TITLE, [_unfinished(item) for item in brief.unfinished]),
-        (MENU_TITLE, [f"- {text}" for text in brief.menu]),
+        (MENU_TITLE, [text if text.startswith(" ") else f"- {text}" for text in brief.menu]),
         ("Lessons:", [f"- {text}" for text in brief.lessons]),
         ("Leads:", [f"- {text}" for text in brief.leads]),
     ):
@@ -389,7 +390,8 @@ class _SpecialistTools:
         snapshot = await self.notebook.snapshot()
         change = RecipeDelta.from_document(arguments.get("change") or {})
         note = await self.briefing.direction_note(intent, change) if isinstance(self.briefing, DirectionNotes) else ""
-        learnt = await self.finder.about(snapshot, f"{target} {mechanism}", branch=self.branch)
+        family = family_of(target, mechanism, layer, change)
+        learnt = await self.finder.about(snapshot, f"{target} {mechanism}", branch=self.branch, family=family)
         return "\n".join([render_claim(held), *([bounded] if bounded else []), *([note] if note else []), *learnt])
 
     async def release(self, arguments: Arguments) -> str:
@@ -592,9 +594,11 @@ _SPECS = (
     ),
     _Spec(
         "learn",
-        "Write down what this branch learnt, for the next decision of every branch, now and in later sessions: a "
-        "pitfall, an insight, how a tool or setting behaves, what a hypothesis came to. Name the direction and cite "
-        "the tests behind it. supersedes names this branch's learning it replaces, or a past session's lesson "
+        "Write down what this branch learnt that the tests' counts cannot say, for the next decision of every branch, "
+        "now and in later sessions: how to do a change and why it works or fails, under which conditions; how a tool, "
+        "a setting or the environment behaves; where the workload spends its time and what a hypothesis came to. A "
+        "test's outcome alone is counted already. Name the direction and cite the tests behind it. "
+        "supersedes names this branch's learning it replaces, or a past session's lesson "
         "(lsn-...) it corrects; retires names a past session's lesson this session's tests show wrong or outdated "
         "here, content saying why. Correcting or retiring a past lesson cites those tests in request_ids: one with no "
         "test of this session there, or naming a lesson that is not live, is refused.",
