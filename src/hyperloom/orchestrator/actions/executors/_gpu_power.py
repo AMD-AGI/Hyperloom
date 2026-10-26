@@ -169,7 +169,8 @@ def _read_node_power() -> tuple[float, float] | None:
         except FileNotFoundError:
             continue
         if status != "enabled":
-            return None
+            # Without an XGMI hive every card publishes its own copy; one reading disabled says nothing of the others.
+            continue
         return float(_read_board(board, "node_power")), float(_read_board(board, "cur_node_power_limit"))
     return None
 
@@ -184,7 +185,7 @@ def _node_fields(samples: list[tuple[float, float]]) -> dict[str, Any] | None:
         return None
     powers = [power for power, _ in samples]
     limits = {limit for _, limit in samples}
-    held = sum(1 for power, limit in samples if power >= limit * _NODE_AT_LIMIT_FRACTION)
+    held = sum(1 for power, limit in samples if limit > 0 and power >= limit * _NODE_AT_LIMIT_FRACTION)
     return {
         "limit_w": limits.pop() if len(limits) == 1 else None,
         "avg_power_w": round(sum(powers) / len(powers), 2),

@@ -111,7 +111,10 @@ def test_the_node_power_is_read_from_the_npm_master_cards_board(tmp_path, monkey
     enabled = _read_node_power()
     (tmp_path / "card57" / "device" / "board" / "npm_status").write_text("disabled\n")
     disabled = _read_node_power()
+    _board(tmp_path, 9, npm_status="enabled\n", node_power="5200\n", cur_node_power_limit="8000\n")
+    behind_a_disabled_copy = _read_node_power()
     assert (no_boards, enabled, disabled) == (None, (3492.0, 2600.0), None)
+    assert behind_a_disabled_copy == (5200.0, 8000.0)
 
 
 def _node_summary(tmp_path, read_node) -> dict:
@@ -137,6 +140,18 @@ def test_a_node_below_its_npm_limit_is_not_held(tmp_path, caplog):
     out = _node_summary(tmp_path, lambda: (5200.0, 8000.0))
     assert out["node"]["limited_fraction"] == 0.0
     assert "NPM power limit" not in caplog.text
+
+
+def test_a_limit_that_changed_during_the_phase_is_unread(tmp_path, caplog):
+    readings = iter([(2600.0, 2600.0), (2600.0, 8000.0)] * 8)
+    out = _node_summary(tmp_path, lambda: next(readings))
+    assert out["node"]["limit_w"] is None
+    assert "held at its NPM power limit (changing W)" in caplog.text
+
+
+def test_a_zero_limit_holds_nothing(tmp_path):
+    out = _node_summary(tmp_path, lambda: (900.0, 0.0))
+    assert out["node"]["limited_fraction"] == 0.0
 
 
 def test_a_node_without_npm_has_no_node_reading(tmp_path):
