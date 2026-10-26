@@ -136,7 +136,7 @@ def test_a_gain_is_blocked_only_by_a_defect_both_measurements_show(first, retest
     assert (judgement.verdict, judgement.refused_by) == (verdict, refused_by)
 
 
-@pytest.mark.parametrize(("retest_ok", "verdict"), [(True, Verdict.IMPROVED), (False, Verdict.INCONCLUSIVE)])
+@pytest.mark.parametrize(("retest_ok", "verdict"), [(True, Verdict.IMPROVED), (False, Verdict.BLOCKED)])
 def test_a_first_measurement_without_its_eval_leaves_the_accuracy_to_the_retest(retest_ok, verdict):
     first = Judgement(
         Verdict.NEEDS_CONFIRM, 5.0, BASELINE.bar_pct, ("r1",), {GRADED_OUTPUT: 1050.0}, AccuracyVerdict.NOT_MEASURED
@@ -188,3 +188,41 @@ def test_a_baseline_needs_a_positive_bar_and_a_finite_score(bar, accuracy):
 def test_a_parent_without_a_usable_record_is_not_compared():
     with pytest.raises(ValueError, match="cannot compare"):
         compare(_reading(1000.0), BASELINE, {GRADED_OUTPUT: 0.0}, "r1")
+
+
+@pytest.mark.parametrize(
+    ("throughput", "verdict"),
+    [(1030.0, Verdict.NEEDS_CONFIRM), (1010.0, Verdict.FLAT), (970.0, Verdict.REGRESSED)],
+)
+def test_a_measurement_without_an_eval_is_judged_on_throughput_and_records_no_score(throughput, verdict):
+    judgement = compare(InferenceXReading(throughput, None), BASELINE, PARENT, "r1")
+    assert (judgement.verdict, judgement.accuracy) == (verdict, AccuracyVerdict.NOT_MEASURED)
+    assert judgement.recorded_value == {GRADED_OUTPUT: throughput}
+
+
+@pytest.mark.parametrize(
+    ("first_dropped", "retest", "verdict", "refused_by"),
+    [
+        (0, (True, 0), Verdict.IMPROVED, ()),
+        (0, (False, 0), Verdict.BLOCKED, ()),
+        (2, (False, 1), Verdict.BLOCKED, (DROPPED_REQUESTS,)),
+        (2, (False, 0), Verdict.BLOCKED, ()),
+        (2, (True, 0), Verdict.INCONCLUSIVE, (DROPPED_REQUESTS,)),
+    ],
+    ids=["passed", "failed", "failed-and-dropped-twice", "failed-dropped-first", "dropped-first"],
+)
+def test_the_retest_alone_settles_the_accuracy_of_a_gain_first_measured_without_an_eval(
+    first_dropped, retest, verdict, refused_by
+):
+    first = compare(InferenceXReading(1030.0, None, dropped=first_dropped), BASELINE, PARENT, "r1")
+    reading = InferenceXReading(1025.0, SCORES[retest[0]], dropped=retest[1])
+    judgement = confirm(first, reading, BASELINE, PARENT, "r2")
+    assert (judgement.verdict, judgement.refused_by) == (verdict, refused_by)
+    assert judgement.accuracy is AccuracyVerdict.measured(retest[0])
+    assert judgement.recorded_value == {GRADED_OUTPUT: 1027.5, ACCURACY_SCORE: SCORES[retest[0]]}
+
+
+def test_a_retest_without_an_eval_does_not_settle_a_gain():
+    first = compare(_reading(1030.0), BASELINE, PARENT, "r1")
+    with pytest.raises(ValueError, match="eval"):
+        confirm(first, InferenceXReading(1025.0, None), BASELINE, PARENT, "r2")

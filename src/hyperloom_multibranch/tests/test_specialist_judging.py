@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
+import functools
 from dataclasses import replace
 
 import pytest
@@ -37,6 +38,8 @@ from hyperloom_multibranch.rulegate.service import Polling
 from hyperloom_multibranch.specialist.fix_check import FixChecking, declares_fix
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, Judging
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, RecordingVerifier, ReproToolbox
+from hyperloom_multibranch.toolbox import fake as fake_toolbox
+from hyperloom_multibranch.toolbox.acceptance import AcceptanceSetup
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig, NoiseModel
 
@@ -461,3 +464,58 @@ def test_a_fix_is_declared_only_on_a_judgement_whose_eval_passed(accuracy, decla
     judged = replace(judgement(0.0, ("r1",), verdict=Verdict.FLAT), accuracy=accuracy)
 
     assert declares_fix(candidate, judged) is declared
+
+
+@pytest.fixture
+async def skipping(tmp_path, monkeypatch):
+    """A session whose toolbox leaves the eval out of a plain explore."""
+    monkeypatch.setattr(fake_toolbox, "AcceptanceSetup", functools.partial(AcceptanceSetup, explore_accuracy=False))
+    session = _Session(tmp_path / "notebook")
+    await session.prelude()
+    return session
+
+
+async def test_a_gain_first_measured_without_an_eval_lands_on_a_retest_that_passes_the_accuracy_gate(skipping):
+    first = await skipping.explore(FAST)
+    assert (await skipping.runtime.record(first)).request.accuracy is False
+    await skipping.step()
+    (retest,) = skipping.retests()
+    assert retest.accuracy is True
+    await skipping.step()
+
+    record = await skipping.runtime.record(first)
+    assert (record.judgement.verdict, record.conclusion) == (Verdict.IMPROVED, Conclusion.COMMITTED)
+    assert record.judgement.accuracy is AccuracyVerdict.PASSED
+    assert record.judgement.recorded_value[ACCURACY_SCORE] == pytest.approx(0.93, abs=0.01)
+
+
+async def test_a_gain_first_measured_without_an_eval_is_held_for_diagnosis_when_its_retest_fails_the_eval(skipping):
+    first = await skipping.explore(WRONG)
+    await skipping.step()
+    await skipping.step()
+
+    record = await skipping.runtime.record(first)
+    assert (record.judgement.verdict, record.conclusion) == (Verdict.BLOCKED, Conclusion.DIAGNOSIS_PENDING)
+    assert record.judgement.accuracy is AccuracyVerdict.FAILED
+    assert any("held back by the accuracy gate" in notice for notice in await skipping.notices())
+
+
+@pytest.mark.parametrize("change", [FLAT, SLOW], ids=["flat", "regressed"])
+async def test_a_candidate_measured_without_an_eval_below_the_bar_is_recorded_with_no_accuracy(skipping, change):
+    first = await skipping.explore(change)
+    await skipping.step()
+
+    record = await skipping.runtime.record(first)
+    assert record.conclusion is Conclusion.RECORDED_ONLY
+    assert record.judgement.accuracy is AccuracyVerdict.NOT_MEASURED
+    assert set(record.judgement.recorded_value) == {GRADED_OUTPUT}
+    assert skipping.retests() == []
+
+
+async def test_a_flat_fix_measured_without_an_eval_is_not_checked_as_a_fix(skipping, tmp_path):
+    first = await skipping.declare(FLAT, skipping.check_fixes(tmp_path, _Critic()))
+    await skipping.step()
+
+    record = await skipping.runtime.record(first)
+    assert (record.conclusion, record.judgement.fixes_correctness) == (Conclusion.RECORDED_ONLY, False)
+    assert await skipping.repo.head(BRANCH) == ROOT

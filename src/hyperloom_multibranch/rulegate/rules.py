@@ -31,6 +31,7 @@ from hyperloom_multibranch.rulegate.readings import (
     dropped_requests,
     eval_score,
     inferencex_reading,
+    unscored_reading,
 )
 
 
@@ -56,7 +57,11 @@ class Rule(Protocol):
 @dataclass(frozen=True)
 class InferenceXRule(Rule):
     """Throughput at the graded concurrency against the PRELUDE bar, the eval score against the baseline's, and no
-    request the graded rounds sent left uncompleted."""
+    request the graded rounds sent left uncompleted.
+
+    Only an explore whose accepted request records that the eval was skipped is judged without a score; any other test
+    without one is unreadable.
+    """
 
     notebook: CommitQuery
     concurrency: int
@@ -83,7 +88,9 @@ class InferenceXRule(Rule):
     def _candidate(self, record: TestRecord) -> inferencex.InferenceXReading:
         result = _result(record)
         dropped = dropped_requests(result, self.concurrency)
-        return replace(inferencex_reading(result, self.concurrency), dropped=dropped)
+        skipped = record.request.purpose is Purpose.EXPLORE and not ran_accuracy(record.request, self)
+        read = unscored_reading if skipped else inferencex_reading
+        return replace(read(result, self.concurrency), dropped=dropped)
 
 
 class AgentXRule(Rule):
@@ -109,9 +116,15 @@ class AgentXRule(Rule):
         return agentx_accuracy_ok(agentx_reading(_result(record)).get(GRADED_ERROR_RATE))
 
 
+def ran_accuracy(request: TestRequest, rule: Rule) -> bool:
+    """Whether the test ran the eval the rule reads; an InferenceX explore may skip it, recorded as ``accuracy=False``
+    on its accepted request."""
+    return request.accuracy == rule.accuracy_round
+
+
 def repeats(retest: TestRecord, first: TestRecord, rule: Rule) -> bool:
     """Only a retest of the same change and files on the same parent, with the rule's eval round, settles a gain."""
-    return _candidate(retest.request) == _candidate(first.request) and retest.request.accuracy == rule.accuracy_round
+    return _candidate(retest.request) == _candidate(first.request) and ran_accuracy(retest.request, rule)
 
 
 def retest_request(first: TestRecord, rule: Rule) -> TestRequest:
@@ -142,4 +155,4 @@ def _result(record: TestRecord) -> TestResult:
     return record.result
 
 
-__all__ = ["AgentXRule", "InferenceXRule", "Rule", "repeats", "retest_request"]
+__all__ = ["AgentXRule", "InferenceXRule", "Rule", "ran_accuracy", "repeats", "retest_request"]

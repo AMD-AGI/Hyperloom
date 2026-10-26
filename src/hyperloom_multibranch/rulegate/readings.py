@@ -27,15 +27,12 @@ class UnreadableResult(ValueError):
 
 def inferencex_reading(result: TestResult, concurrency: int) -> InferenceXReading:
     """The mean graded throughput of the measure-phase rounds at ``concurrency``, and the test's eval score."""
-    rounds = _graded(result, concurrency)
-    missing = [r for r in rounds if GRADED_OUTPUT not in r.metrics]
-    if missing:
-        raise UnreadableResult(f"{result.request_id} reports no {GRADED_OUTPUT} in {len(missing)} of its rounds")
-    score = eval_score(result)
-    try:
-        return InferenceXReading(statistics.fmean(r.metrics[GRADED_OUTPUT] for r in rounds), score)
-    except ValueError as error:
-        raise UnreadableResult(f"{result.request_id}: {error}") from error
+    return _inferencex(result, _graded_throughput(result, concurrency), eval_score(result))
+
+
+def unscored_reading(result: TestResult, concurrency: int) -> InferenceXReading:
+    """The mean graded throughput of a test that ran no eval, with no score."""
+    return _inferencex(result, _graded_throughput(result, concurrency), None)
 
 
 def dropped_requests(result: TestResult, concurrency: int) -> int:
@@ -93,6 +90,21 @@ def _request_classes(classes: tuple[RequestClasses, ...], measured: int) -> dict
     return counts
 
 
+def _graded_throughput(result: TestResult, concurrency: int) -> float:
+    rounds = _graded(result, concurrency)
+    missing = [r for r in rounds if GRADED_OUTPUT not in r.metrics]
+    if missing:
+        raise UnreadableResult(f"{result.request_id} reports no {GRADED_OUTPUT} in {len(missing)} of its rounds")
+    return statistics.fmean(r.metrics[GRADED_OUTPUT] for r in rounds)
+
+
+def _inferencex(result: TestResult, throughput: float, score: float | None) -> InferenceXReading:
+    try:
+        return InferenceXReading(throughput, score)
+    except ValueError as error:
+        raise UnreadableResult(f"{result.request_id}: {error}") from error
+
+
 def _measured(result: TestResult) -> list[RoundValue]:
     _require_measurement(result)
     return [r for r in result.rounds if r.phase == _MEASURE]
@@ -119,4 +131,5 @@ __all__ = [
     "dropped_requests",
     "eval_score",
     "inferencex_reading",
+    "unscored_reading",
 ]

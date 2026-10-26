@@ -74,16 +74,16 @@ class DispersionThreshold:
 
 @dataclass(frozen=True)
 class InferenceXReading:
-    """One bench-eval-bench test: its graded throughput, the eval score measured in the same sandbox, and the requests
-    its graded rounds sent but did not complete."""
+    """One bench-eval-bench test: its graded throughput, the eval score measured in the same sandbox (``None`` for an
+    explore that skipped the eval), and the requests its graded rounds sent but did not complete."""
 
     throughput: float
-    accuracy: float
+    accuracy: float | None
     dropped: int = 0
 
     def __post_init__(self) -> None:
         _checked(self.throughput)
-        if finite_score(self.accuracy) is None:
+        if self.accuracy is not None and finite_score(self.accuracy) is None:
             raise ValueError(f"an eval score must be a finite number, got {self.accuracy!r}")
         if self.dropped < 0:
             raise ValueError(f"a count of dropped requests is at least 0, got {self.dropped!r}")
@@ -105,8 +105,8 @@ class InferenceXBaseline:
             raise ValueError(f"a baseline needs a positive bar and a finite eval score, got {self!r}")
 
 
-def _recorded(throughput: float, accuracy: float) -> dict[str, float]:
-    return {GRADED_OUTPUT: throughput, ACCURACY_SCORE: accuracy}
+def _recorded(throughput: float, accuracy: float | None) -> dict[str, float]:
+    return {GRADED_OUTPUT: throughput} if accuracy is None else {GRADED_OUTPUT: throughput, ACCURACY_SCORE: accuracy}
 
 
 def compare(
@@ -114,10 +114,14 @@ def compare(
 ) -> Judgement:
     """The first measurement against the parent's record: past the bar it waits for a retest whatever its accuracy and
     dropped requests, since the retest settles both whether the gain holds and whether a defect is real. Below it, a
-    measurement that dropped requests is regressed, so a correctness fix measured on it forks rather than landing."""
+    measurement that dropped requests is regressed, so a correctness fix measured on it forks rather than landing. A
+    measurement that skipped its eval is judged on throughput alone, its accuracy ``NOT_MEASURED``."""
     gain = _gain(reading.throughput, parent)
     bar = baseline.bar_pct
-    accuracy = AccuracyVerdict.measured(inferencex_accuracy_ok(baseline.accuracy, reading.accuracy))
+    if reading.accuracy is None:
+        accuracy = AccuracyVerdict.NOT_MEASURED
+    else:
+        accuracy = AccuracyVerdict.measured(inferencex_accuracy_ok(baseline.accuracy, reading.accuracy))
     recorded = _recorded(reading.throughput, reading.accuracy)
     if gain > bar:
         return Judgement(Verdict.NEEDS_CONFIRM, gain, bar, (request_id,), recorded, accuracy, reading.defects)
@@ -138,24 +142,28 @@ def confirm(
 
     A gain holds when the mean of both measurements clears the bar and the retest is still a gain; one that holds is
     improved when neither showed a defect (a failed accuracy gate, dropped requests), blocked when both showed the same
-    one, and inconclusive otherwise. A blocked judgement names the
-    performance defects both showed; the accuracy gate is in ``accuracy``.
+    one, and inconclusive otherwise. After a first measurement that skipped its eval, the retest's eval is the only one,
+    so its failure blocks the gain. A blocked judgement names the performance defects both showed; the accuracy gate is
+    in ``accuracy``.
     """
     if first.verdict is not Verdict.NEEDS_CONFIRM:
         raise ValueError(f"only a provisional judgement is retested, not a {first.verdict.value} one")
+    if reading.accuracy is None:
+        raise ValueError(f"the retest {request_id} ran no eval, which settling a gain needs")
     bar = baseline.bar_pct
+    unmeasured = first.accuracy is AccuracyVerdict.NOT_MEASURED
     scores = (reading.accuracy,)
-    if first.accuracy is not AccuracyVerdict.NOT_MEASURED:
+    if not unmeasured:
         scores = (first.recorded_value[ACCURACY_SCORE], *scores)
     recorded = _recorded((first.recorded_value[GRADED_OUTPUT] + reading.throughput) / 2.0, sum(scores) / len(scores))
     gain = _gain(recorded[GRADED_OUTPUT], parent)
     request_ids = (*first.request_ids, request_id)
     accuracy_ok = inferencex_accuracy_ok(baseline.accuracy, reading.accuracy)
-    first_failed = first.accuracy is AccuracyVerdict.FAILED
-    accuracy = AccuracyVerdict.measured(accuracy_ok and not first_failed)
+    first_ok = accuracy_ok if unmeasured else first.accuracy is AccuracyVerdict.PASSED
+    accuracy = AccuracyVerdict.measured(accuracy_ok and first_ok)
     seen = tuple(dict.fromkeys((*first.refused_by, *reading.defects)))
     if gain > bar and _gain(reading.throughput, parent) > 0:
-        before = {*first.refused_by, *((_ACCURACY,) if first_failed else ())}
+        before = {*first.refused_by, *(() if first_ok else (_ACCURACY,))}
         after = {*reading.defects, *(() if accuracy_ok else (_ACCURACY,))}
         if before & after:
             shared = tuple(defect for defect in seen if defect in after)
