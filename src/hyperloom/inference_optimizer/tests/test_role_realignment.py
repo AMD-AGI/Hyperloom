@@ -543,7 +543,9 @@ async def test_running_tasks_reader_counts_a_dsh_session_log_like_the_reaper(
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(TaskSpec(kind="specialist", params={}, idempotency_key="k-dsh-heartbeat"))
+        task, _ = await c.tasks.create_or_return_existing(
+            TaskSpec(kind="specialist", params={}, idempotency_key="k-dsh-heartbeat")
+        )
         await c.tasks.transition(task.task_id, "running")
         ws = runs_dir(c.session_dir, "specialist", task.task_id)
         session_log = ws / ".dsh" / "sessions" / "ws" / "session-0" / "session.v3.jsonl"
