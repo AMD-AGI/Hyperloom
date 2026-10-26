@@ -10,6 +10,7 @@ The arithmetic -- the bench-shaped argv and env, reading cycles off the log, wei
 from __future__ import annotations
 
 import json
+import os
 import random
 import statistics
 import threading
@@ -19,10 +20,104 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.orchestrator.measurement import cycle_bench as cb
 from hyperloom.orchestrator.measurement.cycle_bench import DECODE_LINE, decode_cycles_ms
 
 from .bypass_engine import wait_for_server_ready
 from .bypass_runner import _launch_server, _terminate_server
+
+#: Explore task param carrying a cycle-bench batch: ``[{"name": ..., "envs": {...}}]`` per candidate.
+CYCLE_ARMS_PARAM = "cycle_arms"
+
+#: Batch sizes the bench drives; the baseline replay's running counts are weighted onto them.
+BATCH_GRID: tuple[int, ...] = (1, 2, 4)
+_BASES = ("base", "base2")
+_ENCODING = "utf-8"
+
+
+@dataclass(frozen=True)
+class BatchSpec:
+    """One cycle-bench batch: the baseline's launch, the weights, the candidates' switch envs, and where it runs."""
+
+    argv: list[str]
+    env: dict[str, str]
+    weights: dict[int, float]
+    candidates: list[tuple[str, dict[str, str]]]
+    out_dir: Path
+    port: int
+    prompt_tokens: int
+    vocab_size: int
+    band_pct: float
+
+
+def session_batch(
+    state: Any, candidates: list[tuple[str, dict[str, str]]], *, out_dir: Path, band_pct: float, port: int
+) -> BatchSpec:
+    """A batch on the session baseline's own launch, weighted by where its replay ran and fed its corpus length."""
+    workspace = Path(str(getattr(state, "baseline_workspace", "") or ""))
+    launch_file = next(iter(sorted(workspace.rglob("agentx_server_launch.json"))), None)
+    if launch_file is None:
+        raise FileNotFoundError(f"no agentx_server_launch.json under the baseline workspace {workspace}")
+    launch = json.loads(launch_file.read_text(encoding=_ENCODING))
+    log = (launch_file.parent / "server.log").read_text(encoding=_ENCODING, errors="ignore").splitlines()
+    config = json.loads((Path(str(state.model_path)) / "config.json").read_text(encoding=_ENCODING))
+    isl = (getattr(state, "agentx_corpus_shape", None) or {}).get("isl") or {}
+    return BatchSpec(
+        argv=list(launch["effective_argv"]),
+        env=dict(launch.get("runtime_environment") or {}),
+        weights=cb.batch_weights(log, grid=BATCH_GRID),
+        candidates=list(candidates),
+        out_dir=out_dir,
+        port=port,
+        prompt_tokens=int(isl["p50"]),
+        vocab_size=int(config["vocab_size"]),
+        band_pct=band_pct,
+    )
+
+
+def run_batch(spec: BatchSpec) -> dict[str, Any]:
+    """Run ``base``, each candidate, then ``base2``, one server boot each, and grade the candidates."""
+    arms: dict[str, ArmResult] = {}
+    plan = [(_BASES[0], {}), *spec.candidates, (_BASES[1], {})]
+    for name, switches in plan:
+        arms[name] = run_arm(
+            ArmSpec(
+                argv=cb.bench_argv(spec.argv, port=spec.port),
+                env=cb.bench_env({**os.environ, **spec.env, **switches}),
+                out_dir=spec.out_dir / name,
+                port=spec.port,
+                batch_sizes=tuple(bs for bs in BATCH_GRID if spec.weights.get(bs, 0) > 0) or BATCH_GRID,
+                prompt_tokens=spec.prompt_tokens,
+                vocab_size=spec.vocab_size,
+            )
+        )
+        if name == _BASES[0] and arms[name].error:
+            break
+    summary = summarize_batch(arms, [name for name, _ in spec.candidates], spec.weights, band_pct=spec.band_pct)
+    return {**summary, "arms": {name: arm.__dict__ for name, arm in arms.items()}, "weights": spec.weights}
+
+
+def summarize_batch(
+    arms: dict[str, ArmResult], candidates: list[str], weights: dict[int, float], *, band_pct: float
+) -> dict[str, Any]:
+    """Grade each candidate against the mean of the two bases, once the bases agree within *band_pct*."""
+    base, base2 = arms.get(_BASES[0]), arms.get(_BASES[1])
+    if base is None or base2 is None or base.error or base2.error:
+        return {"valid": False, "reason": "a base arm produced no cycle", "verdicts": {}}
+    gap = cb.weighted_gain_pct(base.cycle_ms, base2.cycle_ms, weights)
+    if not cb.batch_valid(base.cycle_ms, base2.cycle_ms, weights, band_pct=band_pct):
+        return {"valid": False, "reason": f"bases disagree by {gap:+.2f}%", "verdicts": {}}
+    mean = {bs: (base.cycle_ms[bs] + base2.cycle_ms[bs]) / 2 for bs in base.cycle_ms if bs in base2.cycle_ms}
+    verdicts: dict[str, dict[str, Any]] = {}
+    for name in candidates:
+        arm = arms.get(name)
+        if arm is None or arm.error:
+            verdicts[name] = {"verdict": cb.VERDICT_BROKEN, "error": arm.error if arm else "arm did not run"}
+            continue
+        gain = cb.weighted_gain_pct(mean, arm.cycle_ms, weights)
+        verdict = cb.screen_verdict(gain, band_pct=band_pct)
+        verdicts[name] = {"verdict": verdict, "gain_pct": round(gain, 3), "accept_len": arm.accept_len}
+    return {"valid": True, "base_gap_pct": round(gap, 3), "verdicts": verdicts}
 
 
 @dataclass(frozen=True)
@@ -81,7 +176,7 @@ def run_arm(spec: ArmSpec) -> ArmResult:
         return result
     finally:
         _terminate_server(proc)
-        (spec.out_dir / "arm.json").write_text(json.dumps(result.__dict__, default=str, indent=1), encoding="utf-8")
+        (spec.out_dir / "arm.json").write_text(json.dumps(result.__dict__, default=str, indent=1), encoding=_ENCODING)
 
 
 def _hold_steady_decode(url: str, log_path: Path, prompts: list[list[int]], spec: ArmSpec) -> list[str] | None:
@@ -134,7 +229,7 @@ def _mean_accept(lines: list[str], bs: int) -> float:
 
 def _read_lines(path: Path) -> list[str]:
     try:
-        return path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        return path.read_text(encoding=_ENCODING, errors="ignore").splitlines()
     except OSError:
         return []
 
@@ -143,4 +238,13 @@ def _line_count(path: Path) -> int:
     return len(_read_lines(path))
 
 
-__all__ = ["ArmResult", "ArmSpec", "run_arm"]
+__all__ = [
+    "BATCH_GRID",
+    "ArmResult",
+    "ArmSpec",
+    "BatchSpec",
+    "run_arm",
+    "run_batch",
+    "session_batch",
+    "summarize_batch",
+]

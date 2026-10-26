@@ -6,6 +6,7 @@
 from __future__ import annotations
 from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
 from hyperloom.common.benchmark_config import is_magpie_agentx
+import asyncio
 import functools
 import logging
 import os
@@ -62,6 +63,7 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from . import _framework_switch_manifest as _switch_manifest
+from . import cycle_bench_arm as _cycle_bench
 from ._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import BaseControls, effective_fingerprint, normalize_proposal
@@ -1906,10 +1908,27 @@ class ExploreExecutor:
             or runs_dir(self.session_dir, "explore", ctx.task.task_id)
         )
         output_root.mkdir(parents=True, exist_ok=True)
+        if params.get(_cycle_bench.CYCLE_ARMS_PARAM):
+            return await asyncio.to_thread(_screen_cycle_batch, params, extra.get("shared_state"), output_root)
         try:
             return await _ExploreRound(ctx, params, output_root).run()
         except _RoundRefused as refusal:
             return refusal.result
+
+
+def _screen_cycle_batch(params: dict[str, Any], state: Any, output_root: Path) -> dict[str, Any]:
+    """Run one cycle-bench batch of the task's arms on the session baseline's launch; no replay, no grading round."""
+    from hyperloom.common.ports import pick_server_port
+
+    arms = list(params[_cycle_bench.CYCLE_ARMS_PARAM])
+    candidates = [(str(arm["name"]), {str(k): str(v) for k, v in (arm.get("envs") or {}).items()}) for arm in arms]
+    try:
+        spec = _cycle_bench.session_batch(
+            state, candidates, out_dir=output_root, band_pct=float(params["band_pct"]), port=pick_server_port()
+        )
+    except (OSError, KeyError, ValueError) as exc:
+        return {"status": "failed", "error_class": "cycle_bench_unavailable", "error": str(exc)}
+    return {"status": "cycle_screened", _cycle_bench.CYCLE_ARMS_PARAM: arms, **_cycle_bench.run_batch(spec)}
 
 
 def _safe(name: str) -> str:

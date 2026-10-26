@@ -22,6 +22,8 @@ from collections.abc import Iterable, Mapping, Sequence
 VERDICT_PASS = "pass"
 VERDICT_NEUTRAL = "neutral"
 VERDICT_REGRESS = "regress"
+#: The arm produced no cycle to grade: its server did not come up, or never reached steady decode.
+VERDICT_BROKEN = "broken"
 
 #: Server flags that bring up the host KV cache; the bench serves from device memory only.
 _HICACHE_FLAGS = ("--enable-hierarchical-cache",)
@@ -119,6 +121,7 @@ def screen_verdict(gain_pct: float, *, band_pct: float) -> str:
 
 __all__ = [
     "DECODE_LINE",
+    "VERDICT_BROKEN",
     "VERDICT_NEUTRAL",
     "VERDICT_PASS",
     "VERDICT_REGRESS",
