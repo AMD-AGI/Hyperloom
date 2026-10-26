@@ -387,8 +387,8 @@ class _RunReporter:
                 ),
                 usage=self.run.usage,
             )
-        except Exception as e:  # noqa: BLE001 - checkpoint publish must never break the loop
-            log.warning("experience KB publication failed for %s: %s", commit, e)
+        except Exception as e:  # isolation boundary: one checkpoint's experience publication
+            log.warning("experience KB publication failed for %s: %s", commit, e, exc_info=True)
             status = {"written": False, "reason": f"error:{e!r}"}
         _record_remote_publication_result(
             self.remote_publication,
