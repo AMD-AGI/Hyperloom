@@ -17,6 +17,16 @@ def now_iso(timespec: str = "microseconds", *, z_suffix: bool = False) -> str:
     return ts
 
 
+def epoch_iso(epoch_s: float) -> str:
+    """Unix seconds as a UTC microsecond ISO-8601 string, the ledger ``ts`` format ``now_iso`` also produces."""
+    return datetime.fromtimestamp(epoch_s, timezone.utc).isoformat(timespec="microseconds")
+
+
+def elapsed_ms(start: float, end: float | None) -> int | None:
+    """Whole milliseconds from *start* to *end* (seconds), clamped at zero; ``None`` while *end* is unset."""
+    return None if end is None else max(0, int((end - start) * 1000))
+
+
 def utc_now_compact() -> str:
     """Current UTC time as a compact ``YYYYMMDDTHHMMSSZ`` id timestamp."""
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -47,4 +57,4 @@ def format_exc_brief(exc: "BaseException", limit: "int | None" = None) -> str:
     return f"{type(exc).__name__}: {msg}"
 
 
-__all__ = ["now_iso", "utc_now_compact", "iso_z", "format_exc_brief"]
+__all__ = ["now_iso", "epoch_iso", "elapsed_ms", "utc_now_compact", "iso_z", "format_exc_brief"]

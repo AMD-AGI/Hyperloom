@@ -15,9 +15,9 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
 
+from hyperloom.common.timeutil import elapsed_ms, epoch_iso
 from hyperloom.common.token_usage import TOKEN_KEYS
 from hyperloom.inference_optimizer.trace.context_events import COMPACT_BOUNDARY, compaction_attributes
 from hyperloom.inference_optimizer.trace.tool_events import ToolCall, tool_attributes, tool_status
@@ -46,14 +46,6 @@ def _usage_counts(usage: Any) -> dict[str, int]:
 
 def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
-
-
-def _iso(epoch_s: float) -> str:
-    return datetime.fromtimestamp(epoch_s, timezone.utc).isoformat(timespec="microseconds")
-
-
-def _elapsed_ms(start: float, end: float | None) -> int | None:
-    return None if end is None else max(0, int((end - start) * 1000))
 
 
 @dataclass
@@ -211,8 +203,8 @@ class ClaudeRequestTracker:
                     "complete": request.end is not None,
                     "start": request.start,
                     "end": request.end,
-                    "latency_ms": _elapsed_ms(request.start, request.end),
-                    "ttft_ms": _elapsed_ms(request.start, request.first_token),
+                    "latency_ms": elapsed_ms(request.start, request.end),
+                    "ttft_ms": elapsed_ms(request.start, request.first_token),
                     "stop_reason": request.stop_reason,
                     **request.usage,
                 }
@@ -232,7 +224,7 @@ class ClaudeRequestTracker:
                 EVENT_LLM_REQUEST,
                 status=STATUS_COMPLETED if record["complete"] else STATUS_FAILED,
                 span_id=request.span_id,
-                window=EventWindow(start_ts=_iso(start), ts=_iso(end if end is not None else now)),
+                window=EventWindow(start_ts=epoch_iso(start), ts=epoch_iso(end if end is not None else now)),
                 attributes={**record, "name": model, "model": model, "attempt": attempt},
             )
         for tool in self._tools.values():
@@ -240,7 +232,9 @@ class ClaudeRequestTracker:
             record_event(
                 EVENT_TOOL,
                 status=tool_status(result_seen=tool.end is not None, is_error=tool.is_error),
-                window=EventWindow(start_ts=_iso(tool.start), ts=_iso(tool.end if tool.end is not None else now)),
+                window=EventWindow(
+                    start_ts=epoch_iso(tool.start), ts=epoch_iso(tool.end if tool.end is not None else now)
+                ),
                 attributes=tool_attributes(
                     ToolCall(
                         name=tool.name,
@@ -251,7 +245,7 @@ class ClaudeRequestTracker:
                         is_error=tool.is_error,
                     ),
                     parent_tool_use_id=tool.parent_tool_use_id,
-                    latency_ms=_elapsed_ms(tool.start, tool.end),
+                    latency_ms=elapsed_ms(tool.start, tool.end),
                     attempt=attempt,
                 ),
                 **context,
@@ -259,7 +253,7 @@ class ClaudeRequestTracker:
         for at, data in self._compactions:
             record_event(
                 EVENT_CONTEXT_COMPACTION,
-                window=EventWindow(ts=_iso(at)),
+                window=EventWindow(ts=epoch_iso(at)),
                 attributes={**compaction_attributes(data), "attempt": attempt},
             )
 

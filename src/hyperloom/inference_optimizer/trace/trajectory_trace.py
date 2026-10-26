@@ -22,14 +22,13 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import text_or_none, to_int
 from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.common.llm_request_hooks import LLMRequestRecord, add_llm_request_observer
-from hyperloom.common.timeutil import now_iso
+from hyperloom.common.timeutil import elapsed_ms, epoch_iso, now_iso
 from hyperloom.inference_optimizer.session.session_paths import trajectory_dir
 from .llm_trace import VALID_COMPONENTS as _LLM_COMPONENTS
 
@@ -410,14 +409,6 @@ TIMING_HTTP_RESPONSE = "http_response"
 TIMING_HTTP_STREAM = "http_stream"
 
 
-def _epoch_iso(epoch_s: float) -> str:
-    return datetime.fromtimestamp(epoch_s, timezone.utc).isoformat(timespec="microseconds")
-
-
-def _elapsed_ms(start: float, end: float | None) -> int | None:
-    return None if end is None else max(0, int((end - start) * 1000))
-
-
 def record_gateway_request(record: LLMRequestRecord) -> None:
     """Put one ``llm_config`` HTTP request on the ledger as an ``llm.request`` under the ambient scope.
 
@@ -436,8 +427,8 @@ def record_gateway_request(record: LLMRequestRecord) -> None:
         "operation": record.operation or None,
         "timing_source": TIMING_HTTP_STREAM if record.streamed else TIMING_HTTP_RESPONSE,
         "complete": not failed,
-        "latency_ms": _elapsed_ms(record.start, record.end),
-        "ttft_ms": _elapsed_ms(record.start, record.first_token),
+        "latency_ms": elapsed_ms(record.start, record.end),
+        "ttft_ms": elapsed_ms(record.start, record.first_token),
         "stop_reason": record.stop_reason,
         **record.usage,
     }
@@ -447,7 +438,7 @@ def record_gateway_request(record: LLMRequestRecord) -> None:
     record_event(
         EVENT_LLM_REQUEST,
         status=STATUS_FAILED if failed else STATUS_COMPLETED,
-        window=EventWindow(start_ts=_epoch_iso(record.start), ts=_epoch_iso(record.end)),
+        window=EventWindow(start_ts=epoch_iso(record.start), ts=epoch_iso(record.end)),
         attributes=attributes,
         **context,
     )

@@ -77,7 +77,7 @@ def _json_objects(lines: Iterable[str]) -> Iterator[dict[str, Any]]:
             yield obj
 
 
-def _iter_json_events(log_path: str | Path, kind: str) -> Iterator[dict[str, Any]]:
+def iter_json_events(log_path: str | Path, kind: str) -> Iterator[dict[str, Any]]:
     """Yield each JSON object of a line-delimited ``kind`` log, in stream order."""
     path = Path(log_path)
     try:
@@ -95,7 +95,7 @@ def parse_claude_stream_json_usage(
     """Extract the final ``usage`` (plus the serving ``model``, when named) from a Claude CLI ``stream-json`` log."""
     last_usage: dict[str, Any] | None = None
     model: str | None = None
-    for obj in _iter_json_events(log_path, "stream-json"):
+    for obj in iter_json_events(log_path, "stream-json"):
         model = _claude_stream_model(obj) or model
         usage = obj.get("usage")
         if isinstance(usage, dict) and usage:
@@ -114,7 +114,7 @@ def parse_claude_stream_json_response(
     """Recover the assistant's full reply text from a Claude CLI stream-json log."""
     result_text: str | None = None
     assistant_chunks: list[str] = []
-    for obj in _iter_json_events(log_path, "stream-json"):
+    for obj in iter_json_events(log_path, "stream-json"):
         obj_type = obj.get("type")
         if obj_type == "result":
             res = obj.get("result")
@@ -190,7 +190,7 @@ def parse_claude_stream_json_turn_usages(
     saw_message_id = False
     session_output: int | None = None
     session_input = 0
-    for obj in _iter_json_events(log_path, "stream-json"):
+    for obj in iter_json_events(log_path, "stream-json"):
         if obj.get("type") == "result":
             recovered = _claude_result_output_tokens(obj)
             if recovered is not None:
@@ -235,7 +235,7 @@ def parse_claude_stream_json_tool_calls(
 ) -> list[dict[str, Any]]:
     """Recover the intel/tool calls a specialist made from its stream-json log."""
     calls: list[dict[str, Any]] = []
-    for obj in _iter_json_events(log_path, "stream-json"):
+    for obj in iter_json_events(log_path, "stream-json"):
         if obj.get("type") != "assistant":
             continue
         message = obj.get("message")
@@ -350,7 +350,7 @@ def parse_codex_jsonl_error(log_path: str | Path) -> str | None:
     """Recover the most authoritative actionable Codex failure message."""
     best_authority = 0
     best_message: str | None = None
-    for event in _iter_json_events(log_path, "codex jsonl"):
+    for event in iter_json_events(log_path, "codex jsonl"):
         event_type = event.get("type")
         authority = 0
         payload: Any = None
@@ -397,7 +397,7 @@ def parse_codex_jsonl_usage(
 ) -> dict[str, int | None] | None:
     """Extract the session token usage from a ``codex exec --json`` log."""
     totals: dict[str, int] = {}
-    for event in _iter_json_events(log_path, "codex jsonl"):
+    for event in iter_json_events(log_path, "codex jsonl"):
         if event.get("type") != "turn.completed":
             continue
         usage = event.get("usage")
@@ -415,7 +415,7 @@ def parse_codex_jsonl_response(
 ) -> str | None:
     """Recover the agent's reply text from a ``codex exec --json`` log."""
     chunks: list[str] = []
-    for event in _iter_json_events(log_path, "codex jsonl"):
+    for event in iter_json_events(log_path, "codex jsonl"):
         if event.get("type") != "item.completed":
             continue
         item = event.get("item")
@@ -432,7 +432,7 @@ def parse_codex_jsonl_turn_usages(
 ) -> list[dict[str, int | None]]:
     """Recover per-turn usage from a ``codex exec --json`` log."""
     usages: list[dict[str, int | None]] = []
-    for event in _iter_json_events(log_path, "codex jsonl"):
+    for event in iter_json_events(log_path, "codex jsonl"):
         if event.get("type") != "turn.completed":
             continue
         normalized = _codex_usage_to_canonical(event.get("usage"))
@@ -463,7 +463,7 @@ def parse_codex_jsonl_tool_calls(
     calls: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     unknown_types: set[str] = set()
-    for event in _iter_json_events(log_path, "codex jsonl"):
+    for event in iter_json_events(log_path, "codex jsonl"):
         if event.get("type") not in _CODEX_ITEM_EVENTS:
             continue
         item = event.get("item")
@@ -493,6 +493,7 @@ def parse_codex_jsonl_tool_calls(
 
 
 __all__ = [
+    "iter_json_events",
     "normalize_usage",
     "parse_claude_stream_json_response",
     "parse_claude_stream_json_tool_calls",
