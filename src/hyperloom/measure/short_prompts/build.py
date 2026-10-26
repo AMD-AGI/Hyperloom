@@ -18,7 +18,7 @@ from pathlib import Path
 from hyperloom.measure.short_prompts.prompts import PromptSetError, build_prompts
 from hyperloom.measure.short_prompts.staging import StagedEntry, stage_entry
 
-__all__ = ["build_entry", "huggingface_encoder", "main", "tokenizer_hashes"]
+__all__ = ["DEFAULT_SEED", "build_entry", "huggingface_encoder", "main", "tokenizer_hashes"]
 
 #: The files that make a tokenizer what it is, when the model directory has them.
 _TOKENIZER_FILES = (
@@ -30,6 +30,8 @@ _TOKENIZER_FILES = (
     "special_tokens_map.json",
 )
 _DEFAULT_SEED = 20261024
+#: The seed a set is built with when none is given: the set a host finds for a model without being told its key.
+DEFAULT_SEED = _DEFAULT_SEED
 _CHUNK = 1 << 20
 
 

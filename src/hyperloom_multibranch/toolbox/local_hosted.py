@@ -12,8 +12,9 @@ The shared compiled-code cache (design 4.21) is off unless a directory is named:
 builds the toolbox with the default options is switched on by exporting it). Tests then read the directory's verified snapshots before their
 server starts, and what an accepted test compiled is published to it by this host.
 
-The short-prompt consistency check is off the same way: ``LocalOptions.short_prompts``, or the key named by
-``HYPERLOOM_SHORT_PROMPTS`` in the host environment when the option is not given. The set is read in the runner cache of
+The short-prompt consistency check is on by default: ``LocalOptions.short_prompts``, or the key named by
+``HYPERLOOM_SHORT_PROMPTS`` in the host environment when the option is not given (``off`` turns it off), else the set
+staged for the session model's tokenizer when there is one (``short_prompts.default_short_prompts``). The set is read in the runner cache of
 this host (``HYPERLOOM_RUNNER_CACHE``, where ``python -m hyperloom.measure.short_prompts.build`` staged it) before the
 toolbox is built, and the runners are told that directory; one that is not staged there refuses the build.
 
@@ -243,9 +244,10 @@ class LocalOptions:
     setting. ``card_holders`` says who holds some cards, which the pool asks before it hands a card out: the kernel's list
     of the machine unless a test of this module says otherwise. ``short_prompts`` is the staged prompt set of the
     short-prompt consistency check (``acceptance.short_prompts`` of a builder that names it there says the same and must
-    not differ); ``None`` takes the key in ``HYPERLOOM_SHORT_PROMPTS`` of the host environment, and without either no
-    check runs. It is read in this host's runner cache (``HYPERLOOM_RUNNER_CACHE``, ``/runner-cache`` when unset) and
-    the build refuses one that is not staged there; the runners read the same directory (``HYPERLOOM_RUNNER_CACHE`` in
+    not differ); ``None`` takes the key in ``HYPERLOOM_SHORT_PROMPTS`` of the host environment (``off`` for no check),
+    and without either the set staged for the session model's tokenizer, when it is staged. It is read in this host's
+    runner cache (``HYPERLOOM_RUNNER_CACHE``, ``/runner-cache`` when unset) and the build refuses one that is not staged
+    there; the runners read the same directory (``HYPERLOOM_RUNNER_CACHE`` in
     their template, which therefore wins over the same name in ``runner_envs``), the branches' sandboxes are not told.
     ``long_context`` is the staged prompt set of the long-context check, named and read the same way (``None`` takes the
     key in ``HYPERLOOM_LONG_CONTEXT``); a request that sets ``long_context_check`` runs the check with it.
@@ -344,7 +346,7 @@ def _accepting_local_kinds(acceptance: AcceptanceSetup) -> AcceptanceSetup:
 
 
 def _acceptance_with_prompts(
-    acceptance: AcceptanceSetup, options: LocalOptions, environ: Mapping[str, str]
+    acceptance: AcceptanceSetup, options: LocalOptions, environ: Mapping[str, str], model_dir: Path | None
 ) -> AcceptanceSetup:
     """``acceptance`` with the short-prompt set the options (else the acceptance setup, else ``HYPERLOOM_SHORT_PROMPTS``)
     name, read in this host's runner cache: the runners read the same files.
@@ -357,7 +359,7 @@ def _acceptance_with_prompts(
     long_named = with_long_context(acceptance, options.long_context).long_context
     return replace(
         acceptance,
-        short_prompts=staged_short_prompts(named, environ),
+        short_prompts=staged_short_prompts(named, environ, model_dir),
         long_context=staged_long_context(long_named, environ),
     )
 
@@ -392,7 +394,7 @@ def build_local_toolbox(
     directory, cards, tp = Path(session.session_dir), tuple(session.cards), session.tp
     parallel = max_parallel_tests(len(cards), tp)
     jit_root = jit_store_root(options)
-    acceptance = _acceptance_with_prompts(acceptance, options, os.environ)
+    acceptance = _acceptance_with_prompts(acceptance, options, os.environ, spec.model_dir)
     config = HostedConfig(
         session_dir=directory,
         run_id=session.run_id,

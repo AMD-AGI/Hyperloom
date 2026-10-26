@@ -9,10 +9,13 @@ its purpose is one of the pack's ``always_purposes`` (a baseline, which gives it
 final candidate) or when the request sets ``consistency_check`` (scheduling does on a reverse merge). A caller can add the
 check, never remove one the rule demands. A toolbox given no :class:`ShortPromptSetup` runs no check and refuses nothing.
 
-*Switched on.* A builder gives the toolbox the setup: from its options, or from the host environment's
-``HYPERLOOM_SHORT_PROMPTS`` (the key of the staged entry; :func:`environment_short_prompts`) when it names none. A builder
-whose runners read this host's runner cache reads what it is given there first (:func:`staged_short_prompts`); a set that
-is asked for and not staged is refused, never run without.
+*Switched on.* The check is on by default: the triggers above bound its cost (six fresh processes, about 9 to 11
+minutes, on a test that runs it). A builder gives the toolbox the setup: from its options, or from the host environment's
+``HYPERLOOM_SHORT_PROMPTS`` (the key of the staged entry; ``off`` turns the check off) when it names none, and without
+either the set ``measure.short_prompts.build`` stages for the session model's tokenizer with its default seed, when it is
+staged (:func:`default_short_prompts`; the set depends on the tokenizer, so a host that cannot find it runs no check and
+logs why). A builder whose runners read this host's runner cache reads what it is given there first
+(:func:`staged_short_prompts`); a set that is asked for, or found and not readable, is refused, never run without.
 
 *What against.* The outputs of the test's own fresh server processes are compared with each other and with the parent's
 outputs from the parent's own run, which :class:`ReferenceStore` keeps by recipe digest. A parent with no stored outputs is
@@ -26,6 +29,7 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import os
 import re
 import tempfile
@@ -61,12 +65,15 @@ from hyperloom.measure.short_prompts.plan import (
     ShortPromptPlan,
     miss_probability,
 )
+from hyperloom.measure.short_prompts.build import DEFAULT_SEED, tokenizer_hashes
 from hyperloom.measure.short_prompts.prompts import PromptSetError
 from hyperloom.measure.short_prompts.resolve import staged_entry, verified_entry
-from hyperloom.measure.short_prompts.staging import StagedEntry
+from hyperloom.measure.short_prompts.staging import EVALSETS_DIR, StagedEntry, cache_root, entry_key
 
 __all__ = [
+    "MODEL_PATH_ENV",
     "SHORT_PROMPTS_ENV",
+    "SHORT_PROMPTS_OFF",
     "ReferenceAbsent",
     "ReferenceStore",
     "ShortPromptRules",
@@ -74,6 +81,7 @@ __all__ = [
     "ShortPromptsNotStaged",
     "consistency_of",
     "decide",
+    "default_short_prompts",
     "environment_short_prompts",
     "record_reference",
     "rederive",
@@ -84,6 +92,12 @@ __all__ = [
 
 #: The host environment variable that names the staged prompt set (its key) when a builder is given no setup.
 SHORT_PROMPTS_ENV = "HYPERLOOM_SHORT_PROMPTS"
+#: The value of ``HYPERLOOM_SHORT_PROMPTS`` that turns the check off where it would be on by default.
+SHORT_PROMPTS_OFF = "off"
+#: The host environment variable a session exports the directory its model is served from in.
+MODEL_PATH_ENV = "MODEL_PATH"
+
+_LOG = logging.getLogger(__name__)
 
 _UNSET = "(unset)"
 _MAX_LINE_CHARS = 200
@@ -127,32 +141,65 @@ def _setup_of(asked: str, read: Callable[[], StagedEntry]) -> ShortPromptSetup:
     return ShortPromptSetup(entry.key, entry.prompts_sha256)
 
 
-def environment_short_prompts(environ: Mapping[str, str]) -> ShortPromptSetup | None:
-    """The setup ``HYPERLOOM_SHORT_PROMPTS`` names in ``environ``, or ``None`` when it names none (a blank value names none).
+def default_short_prompts(model_dir: Path | None, environ: Mapping[str, str]) -> ShortPromptSetup | None:
+    """The set ``measure.short_prompts.build`` stages for the tokenizer in ``model_dir`` (else the directory
+    ``MODEL_PATH`` in ``environ`` names) with its default seed, read in the runner cache ``environ`` names; ``None``, and
+    a warning that says why, when there is no model directory, it holds no tokenizer or that set is not staged.
+
+    Raises:
+        ShortPromptsNotStaged: The set is there and unfinished, or is not what its manifest recorded: a set that was found
+            and cannot be read is not a check that is off.
+    """
+    directory = model_dir or (Path(environ[MODEL_PATH_ENV]) if environ.get(MODEL_PATH_ENV) else None)
+    if directory is None:
+        _LOG.warning("short-prompt consistency check off: no model directory to find its prompt set by")
+        return None
+    try:
+        key = entry_key({"seed": DEFAULT_SEED, "tokenizer": tokenizer_hashes(directory)})
+    except (PromptSetError, OSError) as exc:
+        _LOG.warning("short-prompt consistency check off: the model's tokenizer cannot be read: %s", exc)
+        return None
+    if not (cache_root(environ) / EVALSETS_DIR / key).exists():
+        _LOG.warning(
+            "short-prompt consistency check off: the model's prompt set %s is not staged in the runner cache", key
+        )
+        return None
+    return _setup_of(f"the model's prompt set {key}", lambda: staged_entry(key, environ))
+
+
+def environment_short_prompts(environ: Mapping[str, str], model_dir: Path | None = None) -> ShortPromptSetup | None:
+    """The setup ``HYPERLOOM_SHORT_PROMPTS`` names in ``environ``: none for ``off``, the model's own set
+    (:func:`default_short_prompts`) when it names none (a blank value names none).
 
     The variable is the key of an entry in the runner cache ``environ`` names; the entry's own manifest says its hash, and
     the entry is read as a runner reads it before it is accepted.
 
     Raises:
         ShortPromptsNotStaged: A key is named and its entry is not staged there, is unfinished or is not what its manifest
-            recorded.
+            recorded; or the model's own set is there and cannot be read.
     """
     key = environ.get(SHORT_PROMPTS_ENV, "").strip()
-    return _setup_of(f"{SHORT_PROMPTS_ENV}={key}", lambda: staged_entry(key, environ)) if key else None
+    if key == SHORT_PROMPTS_OFF:
+        return None
+    if not key:
+        return default_short_prompts(model_dir, environ)
+    return _setup_of(f"{SHORT_PROMPTS_ENV}={key}", lambda: staged_entry(key, environ))
 
 
-def staged_short_prompts(named: ShortPromptSetup | None, environ: Mapping[str, str]) -> ShortPromptSetup | None:
+def staged_short_prompts(
+    named: ShortPromptSetup | None, environ: Mapping[str, str], model_dir: Path | None = None
+) -> ShortPromptSetup | None:
     """The setup a toolbox whose runners read the runner cache ``environ`` names runs the check with, or ``None`` for none.
 
     ``named`` is the setup the builder was given, read in that cache as a runner reads it before it is accepted; without
-    one, the environment's (:func:`environment_short_prompts`). Asking for the check never ends as a toolbox that quietly
-    runs none.
+    one, the environment's (:func:`environment_short_prompts`, with the session's ``model_dir``). Asking for the check
+    never ends as a toolbox that quietly runs none.
 
     Raises:
         ShortPromptsNotStaged: The set is asked for and is not staged there, is unfinished or is not the one named.
     """
     if named is None:
-        return environment_short_prompts(environ)
+        return environment_short_prompts(environ, model_dir)
     return _setup_of(
         f"prompt set {named.prompt_set}", lambda: verified_entry(named.prompt_set, named.prompts_sha256, environ)
     )

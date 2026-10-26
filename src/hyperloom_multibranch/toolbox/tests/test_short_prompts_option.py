@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The short-prompt consistency check is an opt-in of both toolbox builders: off unless a staged prompt set is named.
+"""The short-prompt consistency check is on by default in both toolbox builders: with the set a host names, else the set
+staged for the session model's tokenizer; ``off`` turns it off.
 
 What is proved here is the wiring: which set the acceptance step carries, where the runners are told to read it, and that a
 set that is asked for and not staged refuses the build. That the check then runs and what it says is proved by the
@@ -17,6 +18,7 @@ from typing import Any
 import pytest
 
 from hyperloom.contracts.measurement import Purpose
+from hyperloom.measure.short_prompts.build import DEFAULT_SEED, tokenizer_hashes
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.short_prompts.staging import CACHE_ENV, EVALSETS_DIR, MANIFEST_NAME, stage_entry
 from hyperloom.measure.short_prompts.tests.support import prompt_set, staged_plan
@@ -36,9 +38,12 @@ from hyperloom_multibranch.toolbox.local_hosted import (
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.short_prompts import (
+    MODEL_PATH_ENV,
     SHORT_PROMPTS_ENV,
+    SHORT_PROMPTS_OFF,
     ShortPromptSetup,
     ShortPromptsNotStaged,
+    default_short_prompts,
     staged_short_prompts,
 )
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
@@ -57,6 +62,7 @@ def _no_ambient_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Whatever the machine running the suite exports must not decide whether the check is on."""
     monkeypatch.delenv(SHORT_PROMPTS_ENV, raising=False)
     monkeypatch.delenv(CACHE_ENV, raising=False)
+    monkeypatch.delenv(MODEL_PATH_ENV, raising=False)
 
 
 @pytest.fixture
@@ -81,6 +87,19 @@ def _other_setup(cache: Path) -> ShortPromptSetup:
     return ShortPromptSetup(entry.key, entry.prompts_sha256)
 
 
+def _model(tmp_path: Path, tokenizer: bytes = b'{"model": "fake"}') -> Path:
+    model = tmp_path / "model"
+    model.mkdir(parents=True, exist_ok=True)
+    (model / "tokenizer.json").write_bytes(tokenizer)
+    return model
+
+
+def _model_set(model: Path, cache: Path) -> ShortPromptSetup:
+    """The set ``measure.short_prompts.build`` stages for ``model``'s tokenizer with its default seed."""
+    entry = stage_entry(cache, prompt_set(), {"seed": DEFAULT_SEED, "tokenizer": tokenizer_hashes(model)})
+    return ShortPromptSetup(entry.key, entry.prompts_sha256)
+
+
 # --- the setup and the environment ----------------------------------------------------------------------------------
 
 
@@ -90,9 +109,56 @@ def test_a_setup_no_sheet_could_carry_is_refused_when_it_is_made(key: str, sha: 
         ShortPromptSetup(key, sha)
 
 
-def test_nothing_named_means_no_check_and_a_blank_variable_names_nothing(tmp_path: Path) -> None:
+def test_nothing_named_and_no_model_means_no_check_and_a_blank_variable_names_nothing(tmp_path: Path) -> None:
     assert staged_short_prompts(None, {CACHE_ENV: str(tmp_path)}) is None
     assert staged_short_prompts(None, {CACHE_ENV: str(tmp_path), SHORT_PROMPTS_ENV: "  "}) is None
+
+
+@pytest.mark.parametrize("by_variable", [False, True], ids=["spec-model-dir", "MODEL_PATH"])
+def test_nothing_named_turns_the_check_on_with_the_set_staged_for_the_models_tokenizer(
+    tmp_path: Path, by_variable: bool
+) -> None:
+    model, cache = _model(tmp_path), tmp_path / "cache"
+    setup = _model_set(model, cache)
+    _other_setup(cache)  # another tokenizer's set beside it is not taken
+    environ = {CACHE_ENV: str(cache), **({MODEL_PATH_ENV: str(model)} if by_variable else {})}
+
+    assert staged_short_prompts(None, environ, None if by_variable else model) == setup
+
+
+def test_off_turns_the_check_off_though_the_models_set_is_staged(tmp_path: Path) -> None:
+    model, cache = _model(tmp_path), tmp_path / "cache"
+    _model_set(model, cache)
+
+    assert staged_short_prompts(None, {CACHE_ENV: str(cache), SHORT_PROMPTS_ENV: SHORT_PROMPTS_OFF}, model) is None
+
+
+def test_another_tokenizers_set_is_not_the_models_and_leaves_the_check_off_saying_so(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    cache = tmp_path / "cache"
+    _model_set(_model(tmp_path / "a", b'{"model": "a"}'), cache)
+
+    assert default_short_prompts(_model(tmp_path / "b", b'{"model": "b"}'), {CACHE_ENV: str(cache)}) is None
+    assert "is not staged in the runner cache" in caplog.text
+
+
+def test_a_model_directory_with_no_tokenizer_leaves_the_check_off_saying_so(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    (tmp_path / "model").mkdir()
+
+    assert default_short_prompts(tmp_path / "model", {CACHE_ENV: str(tmp_path)}) is None
+    assert "the model's tokenizer cannot be read" in caplog.text
+
+
+def test_the_models_set_found_unfinished_refuses_rather_than_turning_the_check_off(tmp_path: Path) -> None:
+    model, cache = _model(tmp_path), tmp_path / "cache"
+    setup = _model_set(model, cache)
+    _unfinished(cache, setup)
+
+    with pytest.raises(ShortPromptsNotStaged, match=f"the model's prompt set {setup.prompt_set}.*unfinished"):
+        default_short_prompts(model, {CACHE_ENV: str(cache)})
 
 
 def test_a_key_in_the_environment_takes_its_hash_from_the_staged_manifest(tmp_path: Path) -> None:
@@ -441,6 +507,29 @@ async def test_a_hosted_acceptance_setup_that_names_a_set_is_not_replaced_by_the
     toolbox = _hosted(tmp_path, acceptance)
 
     assert toolbox._acceptance._short_prompts == named
+
+
+async def test_both_builders_with_no_options_run_the_check_with_the_session_models_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The peers build both toolboxes with default options and export the model's directory as ``MODEL_PATH``."""
+    model, cache = _model(tmp_path), tmp_path / "cache"
+    setup = _model_set(model, cache)
+    monkeypatch.setenv(CACHE_ENV, str(cache))
+    monkeypatch.setenv(MODEL_PATH_ENV, str(model))
+
+    for name in ("local", "hosted", "off"):
+        (tmp_path / name).mkdir()
+    local, _ = await _built(tmp_path / "local")
+    hosted = _hosted(tmp_path / "hosted")
+
+    for toolbox in (local, hosted):
+        assert toolbox._acceptance._short_prompts == setup
+        plan = await _planned(toolbox, purpose=Purpose.FINAL)
+        assert plan is not None and plan.prompt_set == setup.prompt_set and plan.processes == 6
+        assert await _planned(toolbox, **_QUIET) is None, "on by default, still only under the triggers"
+    monkeypatch.setenv(SHORT_PROMPTS_ENV, SHORT_PROMPTS_OFF)
+    assert _hosted(tmp_path / "off")._acceptance._short_prompts is None
 
 
 def test_a_hosted_option_and_an_acceptance_setup_that_name_different_sets_refuse_the_build(tmp_path: Path) -> None:

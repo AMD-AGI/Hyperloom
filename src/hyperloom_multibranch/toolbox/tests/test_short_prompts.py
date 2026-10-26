@@ -207,6 +207,42 @@ def test_only_a_test_and_a_sweep_run_the_check(kind):
     assert _plan(other, PARENT) is None
 
 
+#: Every purpose but the two the pack always checks; ``confirm`` needs the test it confirms.
+_UNCHECKED_PURPOSES = [p for p in Purpose if p not in (Purpose.BASELINE, Purpose.FINAL)]
+_BENIGN = _recipe("--max-running-requests 256")
+_TOUCHING = _recipe("--max-running-requests 128 --attention-backend aiter")
+
+
+def _purposed(purpose: Purpose, **fields: object):
+    return req(purpose=purpose, retest_of="r1" if purpose is Purpose.CONFIRM else None, **fields)
+
+
+@pytest.mark.parametrize(
+    ("purpose", "fields", "candidate", "trigger"),
+    [
+        (Purpose.BASELINE, {}, PARENT, "purpose baseline"),
+        (Purpose.FINAL, {}, _BENIGN, "purpose final"),
+        (Purpose.INTEGRATION, {"consistency_check": True}, _BENIGN, "request consistency_check"),
+        (Purpose.EXPLORE, {}, _TOUCHING, "arg --attention-backend aiter"),
+        (Purpose.INTEGRATION, {}, _TOUCHING, "arg --attention-backend aiter"),
+    ],
+    ids=["baseline", "final", "lead-adoption", "diff-list-explore", "diff-list-integration"],
+)
+def test_each_decided_trigger_runs_the_check_six_times_and_names_itself(purpose, fields, candidate, trigger):
+    plan = _plan(_purposed(purpose, **fields), candidate)
+
+    assert plan is not None and plan.trigger == (trigger,)
+    assert plan.processes == 6
+
+
+@pytest.mark.parametrize("consistency_check", [None, False])
+@pytest.mark.parametrize("purpose", _UNCHECKED_PURPOSES, ids=lambda p: p.value)
+def test_no_other_test_runs_it_an_integration_test_that_is_not_an_adoption_included(purpose, consistency_check):
+    candidate = PARENT if purpose is Purpose.HEALTH else _BENIGN
+
+    assert _plan(_purposed(purpose, consistency_check=consistency_check), candidate) is None
+
+
 def test_a_toolbox_given_no_prompt_set_runs_no_check_and_refuses_nothing():
     assert decide(req(purpose=Purpose.FINAL), PARENT, PARENT, None) is None
 

@@ -187,7 +187,9 @@ class HostedOptions:
     option is carried as given (a key or hash that is not well formed is refused) and a runner that does not find that set
     refuses the test, saying so, before it starts a server. ``None`` takes the key in ``HYPERLOOM_SHORT_PROMPTS`` of the
     host environment, whose hash is read from the manifest of the entry in this host's own view of the runner cache
-    (``HYPERLOOM_RUNNER_CACHE``) and which refuses the build when it is not staged there; without either no check runs.
+    (``HYPERLOOM_RUNNER_CACHE``) and which refuses the build when it is not staged there; ``off`` there runs no check.
+    Without either the check is on with the session model's own set when this host finds it staged
+    (``short_prompts.default_short_prompts``), and off, logged, when it does not.
     """
 
     policy: QueuePolicy | None = None
@@ -287,7 +289,7 @@ def _parallel_tests(grant: GrantLimits | None, tp: int) -> int:
 
 
 def _acceptance_with_prompts(
-    acceptance: AcceptanceSetup, options: HostedOptions, environ: Mapping[str, str]
+    acceptance: AcceptanceSetup, options: HostedOptions, environ: Mapping[str, str], model_dir: Path | None
 ) -> AcceptanceSetup:
     """``acceptance`` with the short-prompt set the options (else the acceptance setup, else ``HYPERLOOM_SHORT_PROMPTS``)
     name.
@@ -299,7 +301,7 @@ def _acceptance_with_prompts(
     named = with_short_prompts(acceptance, options.short_prompts)
     if named.short_prompts is not None:
         return named
-    return with_short_prompts(named, environment_short_prompts(environ))
+    return with_short_prompts(named, environment_short_prompts(environ, model_dir))
 
 
 def build_hosted_toolbox(
@@ -340,7 +342,7 @@ def build_hosted_toolbox(
     """
 
     directory = Path(inputs.session_dir)
-    acceptance = _acceptance_with_prompts(acceptance, options, os.environ)
+    acceptance = _acceptance_with_prompts(acceptance, options, os.environ, spec.model_dir)
     grant = inputs.grant()
     parallel = _parallel_tests(grant, inputs.tp)
     config = HostedConfig(
