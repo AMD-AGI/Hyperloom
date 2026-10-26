@@ -59,7 +59,9 @@ _PATCH_FIELDS = (
     "tput",
     "ts",
 )
-_NO_ARGS = {"type": "object", "properties": {}, "additionalProperties": False}
+_OBJECT = "object"
+_STRING = "string"
+_NO_ARGS = {"type": _OBJECT, "properties": {}, "additionalProperties": False}
 
 Stopper = Callable[[], None]
 
@@ -361,22 +363,22 @@ class HostTools:
 
 
 _LIST_SCHEMA = {
-    "type": "object",
+    "type": _OBJECT,
     "properties": {
         "limit": {"type": "integer", "minimum": 1, "maximum": MAX_CANDIDATE_LIMIT},
-        "phase": {"type": "string"},
+        "phase": {"type": _STRING},
     },
     "additionalProperties": False,
 }
 _MEASUREMENT_SCHEMA = {
-    "type": "object",
-    "properties": {"request_id": {"type": "string", "minLength": 1}},
+    "type": _OBJECT,
+    "properties": {"request_id": {"type": _STRING, "minLength": 1}},
     "required": ["request_id"],
     "additionalProperties": False,
 }
 _STOP_SCHEMA = {
-    "type": "object",
-    "properties": {"reason": {"type": "string", "minLength": 1}},
+    "type": _OBJECT,
+    "properties": {"reason": {"type": _STRING, "minLength": 1}},
     "required": ["reason"],
     "additionalProperties": False,
 }
