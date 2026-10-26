@@ -31,7 +31,7 @@ from hyperloom_multibranch.contracts.notebook.interfaces import (
 )
 from hyperloom_multibranch.contracts.notebook.records import TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import InboxKind
-from hyperloom_multibranch.contracts.toolbox import Toolbox
+from hyperloom_multibranch.contracts.toolbox import RequestRejected, Toolbox
 from hyperloom_multibranch.rulegate.decision import Action, decide
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
@@ -71,21 +71,30 @@ class BranchJudge:
         self._notebook = notebook
         self._gate, self._toolbox, self._rule = judging.gate, judging.toolbox, judging.rule
         self._fixes = judging.fixes
+        self._finishing = False
+        self._finished = False
+        self._submitted = False
 
     async def run(self, poll_seconds: float, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
-        """Judge what waits, then again whenever the inbox brings a result, until cancelled; ``sleep`` waits between
-        two polls."""
+        """Judge what waits, then again whenever the inbox brings a result, until cancelled or, once :meth:`finish`
+        was called, until no test of the branch is left in flight; ``sleep`` waits between two polls."""
         cursor = (await self._notebook.poll(self._branch)).cursor
         await self.reconcile()
-        while True:
+        while not self._finished:
             await sleep(poll_seconds)
             page = await self._notebook.poll(self._branch, cursor)
             cursor = page.cursor
-            if any(item.kind is InboxKind.RESULT for item in page.items):
+            if self._finishing or any(item.kind is InboxKind.RESULT for item in page.items):
                 await self.reconcile()
+
+    def finish(self) -> None:
+        """The branch's specialist is gone: judge only the tests it left in flight, and the retests they bring."""
+        self._finishing = True
 
     async def reconcile(self) -> None:
         """Take the runtime's next step for every candidate of the branch still waiting for one."""
+        # Only a snapshot read after finish() can show that nothing of the branch is left to arrive.
+        finishing, self._submitted = self._finishing, False
         snapshot = await self._notebook.snapshot()
         records = [record for record in snapshot.records if record.request.branch_id == self._branch]
         logged = {record.entry for record in snapshot.branch_logs.get(self._branch, ())}
@@ -96,6 +105,8 @@ class BranchJudge:
         for record in records:
             if _awaits_judgement(record):
                 await self._judge(record, retests.get(record.request_id, []), logged)
+        if finishing and not self._submitted and not any(record.in_flight for record in records):
+            self._finished = True
 
     async def _judge(self, first: TestRecord, retests: Sequence[TestRecord], logged: set[BranchLogEntry]) -> None:
         retests = [retest for retest in retests if repeats(retest, first, self._rule)]
@@ -153,7 +164,13 @@ class BranchJudge:
                 landed = f"{landed} with its repro case, which now guards every later commit"
             await self._notice(logged, f"{landed}; your next candidates go on the new head", *judgement.request_ids)
         elif action is Action.RETEST:
-            await self._toolbox.submit_test(retest_request(first, self._rule))
+            try:
+                await self._toolbox.submit_test(retest_request(first, self._rule))
+            except RequestRejected as error:
+                content = f"the retest of {first.request_id} was refused ({error}); {_NOTHING_JUDGED}"
+                await self._notice(logged, content, first.request_id)
+                return
+            self._submitted = True
         elif action is Action.RECORD_ONLY and decide(judgement) is Action.COMMIT:
             moved = f"{first.request_id} improved on {first.request.parent_commit}, but the branch has moved on"
             await self._notice(logged, f"{moved}; submit it again on the head as a new test", *judgement.request_ids)

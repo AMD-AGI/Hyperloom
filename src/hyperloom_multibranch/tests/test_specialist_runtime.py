@@ -8,6 +8,8 @@ import json
 
 import pytest
 
+from hyperloom.common.accuracy import ACCURACY_METRICS
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, RepairRequest
@@ -15,9 +17,11 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, ClaimStatus, LineageKind
+from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, ClaimStatus, Conclusion, LineageKind
+from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import delta, intent
+from hyperloom_multibranch.rulegate.baseline import write_inferencex_baseline
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
@@ -40,7 +44,7 @@ from hyperloom_multibranch.specialist.runtime import (
 from hyperloom_multibranch.specialist.scripted import ScriptedSession, ScriptedSetup
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, RecordingVerifier
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
-from hyperloom_multibranch.toolbox.fake_model import FakeToolboxConfig
+from hyperloom_multibranch.toolbox.fake_model import FakeToolboxConfig, NoiseModel
 
 BRANCH = "s1"
 RECIPE = Recipe("rocm/vllm@sha256:" + "c" * 64, LaunchConfig(server_args="--max-num-seqs 128"))
@@ -731,3 +735,104 @@ async def test_the_notices_of_a_restart_are_told_apart_from_the_branch_s_other_n
     restarts = [notice for notice in notices if "is restarted" in notice or "the branch" in notice]
     assert len(restarts) == 3 and all(restart_notice(notice) for notice in restarts)
     assert [restart_notice(notice) for notice in notices if notice not in restarts] == [False]
+
+
+FAST = delta("--max-num-seqs 256")
+
+
+class _Judged(_Session):
+    """``_Session`` with its baseline measured and a quiet toolbox on which ``FAST`` gains 5%."""
+
+    def __init__(self, root) -> None:
+        super().__init__(root)
+        quiet = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
+        config = FakeToolboxConfig(noise=quiet, accuracy_metric=ACCURACY_METRICS[0], effects={FAST.fingerprint(): 0.05})
+        self.toolbox = FakeToolbox(config, notebook=LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox")), autorun=False)
+
+    async def open(self) -> str:
+        start = await super().open()
+        baseline = TestRequest(
+            kind=TestKind.TEST, purpose=Purpose.BASELINE, branch_id=INTEGRATION_BRANCH, parent_commit=start
+        )
+        ids = [await self.toolbox.submit_test(baseline) for _ in range(3)]
+        await self.toolbox.drain()
+        gate = LocalNotebook(self.root, Writer(Role.GATE, "gate"))
+        await write_inferencex_baseline(gate, start, [await gate.record(request_id) for request_id in ids], 64)
+        return start
+
+    async def explore(self, change) -> str:
+        request = TestRequest(
+            kind=TestKind.TEST,
+            purpose=Purpose.EXPLORE,
+            branch_id=BRANCH,
+            parent_commit=await self.repo.head(BRANCH),
+            delta=change,
+        )
+        return await self.toolbox.submit_test(request)
+
+
+@pytest.fixture
+async def judged(tmp_path):
+    session = _Judged(tmp_path / "notebook")
+    await session.open()
+    yield session
+    await session.toolbox.close()
+
+
+def _judges() -> list[asyncio.Task]:
+    return [task for task in asyncio.all_tasks() if task.get_name() == f"judge of {BRANCH}" and not task.done()]
+
+
+async def test_a_branch_stopped_to_finish_its_tests_still_commits_the_one_that_wins_then_stops_judging(judged):
+    runs = _Runs()
+    runtime = judged.runtime(runs)
+    start = await judged.repo.head(BRANCH)
+    await runtime.start(BRANCH, start)
+    first = await judged.explore(FAST)
+
+    await runtime.stop(BRANCH, finish_tests=True)
+    assert runs.started[0].stopped.is_set() and runs.released == [BRANCH]
+    assert await runtime.status(BRANCH) is None
+    with pytest.raises(ValueError, match="already has a specialist"):
+        await runtime.start(BRANCH, start)
+    await judged.toolbox.drain()
+    await _until(lambda: _true(not _judges()), "the judge to end once no test of the branch is in flight")
+
+    record = await judged.reader.record(first)
+    assert (record.conclusion, record.commit_id) == (Conclusion.COMMITTED, await judged.repo.head(BRANCH))
+    assert record.commit_id != start and len(record.judgement.request_ids) == 2
+
+
+async def test_a_plain_stop_ends_the_judge_at_once_and_ends_one_left_finishing_tests(judged):
+    runtime = judged.runtime(_Runs())
+    start = await judged.repo.head(BRANCH)
+    await runtime.start(BRANCH, start)
+    first = await judged.explore(FAST)
+    await runtime.stop(BRANCH)
+    assert not _judges()
+
+    await runtime.start("s2", start)
+    await runtime.stop("s2", finish_tests=True)
+    await runtime.stop("s2")
+    assert not [task for task in asyncio.all_tasks() if task.get_name() == "judge of s2" and not task.done()]
+
+    await judged.toolbox.drain()
+    await asyncio.sleep(0.1)
+    assert (await judged.reader.record(first)).judgement is None
+
+
+async def test_a_refused_retest_of_a_finishing_branch_is_noted_and_its_judge_ends_without_failing(judged):
+    runtime = judged.runtime(_Runs())
+    await runtime.start(BRANCH, await judged.repo.head(BRANCH))
+    first = await judged.explore(FAST)
+    stopped = RequestRejected(f"branch {BRANCH!r} has no quota", code="branch_stopped")
+    judged.toolbox.reject_if(lambda request: stopped if request.purpose is Purpose.CONFIRM else None)
+
+    await runtime.stop(BRANCH, finish_tests=True)
+    await judged.toolbox.drain()
+    await _until(lambda: _true(not _judges()), "the judge to end")
+
+    assert (await judged.reader.record(first)).judgement is None
+    notices = await judged.notices()
+    assert f"{NOTICE} the retest of {first} was refused ({stopped}); nothing was judged" in notices
+    assert not any("judging this branch failed" in notice for notice in notices)

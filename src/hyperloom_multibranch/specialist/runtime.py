@@ -25,9 +25,11 @@ A session that finished, a third-party agent that ended its run and whose last k
 same way. Past any of these the branch keeps its judge, which settles what was already measured, and the scheduler stops
 it once nothing of it waits for a confirm; ``status`` tells it. A judge that fails is a defect of this code, not of the
 specialist: it is not restarted, and the branch's session is stopped so no candidate is measured that nothing would
-judge. Both leave a notice in the branch log. While the specialist writes a change, the runtime renews the claims it
-holds, so a claim does not lapse while a model thinks; once a test carries a claim, the toolbox renews it. When the
-scheduler stops a branch, its last session gives back what the branch's runs held across them.
+judge. Both leave a notice in the branch log. A branch stopped with ``finish_tests`` keeps its judge, without its
+specialist, until no test of the branch is left in flight, so a test that wins after the stop still commits and is
+offered to the integrator; a plain stop ends that judge too. While the specialist writes a change, the runtime
+renews the claims it holds, so a claim does not lapse while a model thinks; once a test carries a claim, the toolbox
+renews it. When the scheduler stops a branch, its last session gives back what the branch's runs held across them.
 """
 
 from __future__ import annotations
@@ -177,6 +179,7 @@ class _Branch:
     lost: int = 0
     gave_up: bool = False
     judge_failed: bool = False
+    judge: BranchJudge | None = None
 
 
 @dataclass
@@ -220,9 +223,10 @@ class SpecialistRuntime:
         self._branches: dict[str, _Branch] = {}
         self._held: Counter[str] = Counter()
         self._closed: set[tuple[str, str]] = set()
+        self._finishing: dict[str, asyncio.Task[None]] = {}
 
     async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
-        if branch in self._branches:
+        if branch in self._branches or branch in self._finishing:
             raise ValueError(f"branch {branch!r} already has a specialist")
         if not task.direction.strip() and task.repair is None and not task.agent:
             for state in self._branches.values():
@@ -232,10 +236,10 @@ class SpecialistRuntime:
             self._held[task.direction] += 1
         state = _Branch(branch, start_commit, task, self._notebook_for(branch))
         self._branches[branch] = state
-        judge = BranchJudge(branch, state.notebook, self._judging)
+        state.judge = BranchJudge(branch, state.notebook, self._judging)
         state.tasks = [
             asyncio.create_task(self._supervise(state), name=f"specialist of {branch}"),
-            asyncio.create_task(self._judge(state, judge), name=f"judge of {branch}"),
+            asyncio.create_task(self._judge(state, state.judge), name=f"judge of {branch}"),
             asyncio.create_task(self._renew(state), name=f"claim renewal of {branch}"),
         ]
         for task in state.tasks:
@@ -259,38 +263,51 @@ class SpecialistRuntime:
         running = not state.tasks[0].done()
         return SpecialistStatus(running, state.crashes, state.lost, state.gave_up, state.judge_failed)
 
-    async def stop(self, branch: str) -> None:
+    async def stop(self, branch: str, *, finish_tests: bool = False) -> None:
         """Stop the branch's specialist, at most once whoever asks; a branch already stopped is left alone.
 
-        The stop runs in a task of its own that a caller who stops waiting does not cancel, as a cancelled stop would
-        leave the branch's run and what it holds behind: the next call waits for that same stop, and one that failed
-        is run again."""
+        With ``finish_tests`` the branch's judge goes on until no test of the branch is left in flight; without it the
+        judge ends with the stop, and so does one an earlier stop left finishing. The first stop decides for the
+        specialist. The stop runs in a task of its own that a caller who stops waiting does not cancel, as a cancelled
+        stop would leave the branch's run and what it holds behind: the next call waits for that same stop, and one
+        that failed is run again."""
 
         state = self._branches.get(branch)
-        if state is None:
-            return
-        if state.stopping is None:
-            state.stopping = asyncio.create_task(self._stopped(state), name=f"stop of {branch}")
-        await asyncio.shield(state.stopping)
+        if state is not None:
+            if state.stopping is None:
+                state.stopping = asyncio.create_task(self._stopped(state, finish_tests), name=f"stop of {branch}")
+            await asyncio.shield(state.stopping)
+        if not finish_tests:
+            finishing = self._finishing.pop(branch, None)
+            if finishing is not None:
+                finishing.cancel()
+                await asyncio.gather(finishing, return_exceptions=True)
 
-    async def _stopped(self, state: _Branch) -> None:
+    async def _stopped(self, state: _Branch, finish_tests: bool) -> None:
         try:
-            await self._stop_steps(state)
+            await self._stop_steps(state, finish_tests)
         except BaseException:
             state.stopping = None
             raise
         self._branches.pop(state.name, None)
 
-    async def _stop_steps(self, state: _Branch) -> None:
+    async def _stop_steps(self, state: _Branch, finish_tests: bool) -> None:
         timed = _StepTimes()
-        supervisor, *others = state.tasks
+        supervisor, judge, renewal = state.tasks
         supervisor.cancel()
         await timed("supervisor", asyncio.gather(supervisor, return_exceptions=True))
         if state.session is not None:
             await timed("session stop", state.session.stop())
-        for task in others:
+        ending = [renewal]
+        if finish_tests and not judge.done() and state.judge is not None:
+            state.judge.finish()
+            self._finishing[state.name] = judge
+            judge.add_done_callback(lambda _: self._finishing.pop(state.name, None))
+        else:
+            ending.append(judge)
+        for task in ending:
             task.cancel()
-        await timed("judge and claims", asyncio.gather(*others, return_exceptions=True))
+        await timed("judge and claims", asyncio.gather(*ending, return_exceptions=True))
         if state.last is not None:
             await timed("release", state.last.release())
         await timed("learn", self._learn_exhausted(state))
@@ -402,13 +419,16 @@ class SpecialistRuntime:
             await judge.run(self._pacing.poll_seconds, self._pacing.sleep)
         except Exception as error:
             logger.exception("judging %s failed", state.name)
+            state.judge_failed = True
+            if state.stopping is not None:
+                await _notice(state, f"judging this stopped branch's last tests failed ({error!r})")
+                return
             supervisor, _, renewal = state.tasks
             supervisor.cancel()
             renewal.cancel()
             await asyncio.gather(supervisor, renewal, return_exceptions=True)
             if state.session is not None:
                 await state.session.stop()
-            state.judge_failed = True
             await _notice(state, f"judging this branch failed ({error!r}); its specialist is stopped")
 
     async def _renew(self, state: _Branch) -> None:
