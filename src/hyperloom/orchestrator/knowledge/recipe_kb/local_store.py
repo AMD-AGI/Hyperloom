@@ -299,15 +299,15 @@ class LocalRecipeStore:
                 "best_throughput": float(upsert.best_throughput),
                 # No projection: these rows are stored as the Coordinator wrote them, so a field it adds arrives
                 # without a schema here to teach. ``Recipe.from_dict`` rejects an unusable ``extra_envs`` / ``gain_pct``.
-                "what_worked": list(upsert.what_worked or []),
-                "what_failed": list(upsert.what_failed or []),
-                "remaining_gaps": list(upsert.remaining_gaps or []),
-                "pitfalls": list(upsert.pitfalls or []),
-                "lessons": list(upsert.lessons or []),
+                "what_worked": upsert.what_worked,
+                "what_failed": upsert.what_failed,
+                "remaining_gaps": upsert.remaining_gaps,
+                "pitfalls": upsert.pitfalls,
+                "lessons": upsert.lessons,
                 "last_profiled": upsert.last_profiled
                 or (str(live.get("last_profiled") or "") if isinstance(live, dict) else ""),
                 "stack_fingerprint": dict(upsert.stack_fingerprint or {}),
-                "sessions": list(upsert.sessions or []),
+                "sessions": upsert.sessions,
                 "authority": upsert.authority,
                 "confidence": float(upsert.confidence),
                 "evidence_refs": list(upsert.evidence_refs or []),
