@@ -26,7 +26,14 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
-from hyperloom_multibranch.contracts.notebook.peers import Intent, IntentLayer, Purpose, SandboxFacts, TestKind
+from hyperloom_multibranch.contracts.notebook.peers import (
+    Intent,
+    IntentLayer,
+    Purpose,
+    SandboxFacts,
+    TestKind,
+    Validity,
+)
 from hyperloom_multibranch.contracts.notebook.records import (
     REPLAY_TARGET,
     BranchNode,
@@ -83,10 +90,11 @@ class TreeBranch:
     ``stop_reason`` is the reason the scheduler gave when it stopped the branch; ``directions`` are the intents its tests
     tried, in the order it first tried them; ``kernel_test_times`` when its kernel-layer tests were requested, which the
     frontier calibration reads the observation period off. ``measured_times`` and ``judged_times`` are when its tests
-    were measured and judged, and ``ended_times`` when its explore tests got a result of any validity, as the judge's
-    grace counts them; each ``None`` in a tree archived before it was kept. ``driver`` is who drove the branch; a tree
-    archived before it was kept reads as all specialist. ``agent`` is the manifest of the third-party agent that drove
-    an autonomous branch, as the notebook kept it, credentials dropped; ``None`` when none was recorded.
+    were measured and judged, ``ended_times`` when its explore tests got a result of any validity, and
+    ``settled_times`` when its explore tests that succeeded were judged, as the judge's grace counts them; each
+    ``None`` in a tree archived before it was kept. ``driver`` is who drove the branch; a tree archived before it was
+    kept reads as all specialist. ``agent`` is the manifest of the third-party agent that drove an autonomous branch,
+    as the notebook kept it, credentials dropped; ``None`` when none was recorded.
     """
 
     name: str
@@ -106,6 +114,7 @@ class TreeBranch:
     ended_times: tuple[float, ...] | None = None
     driver: BranchDriver = BranchDriver.SPECIALIST
     agent: Mapping[str, object] | None = None
+    settled_times: tuple[float, ...] | None = None
 
     @property
     def steered(self) -> bool:
@@ -130,6 +139,12 @@ class TreeBranch:
         kept."""
 
         return None if self.ended_times is None else sum(1 for when in self.ended_times if when <= t_s)
+
+    def settled_by(self, t_s: float) -> int | None:
+        """How many of the branch's explore tests had succeeded and been judged by ``t_s``; ``None`` in a tree
+        archived before that was kept."""
+
+        return None if self.settled_times is None else sum(1 for when in self.settled_times if when <= t_s)
 
     def gain_at(self, t_s: float) -> float:
         """The cumulative gain of the branch's latest commit at ``t_s``, or the gain it forked at."""
@@ -163,6 +178,7 @@ class TreeBranch:
             measured_times=_by(self.measured_times, t_s),
             judged_times=_by(self.judged_times, t_s),
             ended_times=_by(self.ended_times, t_s),
+            settled_times=_by(self.settled_times, t_s),
         )
 
 
@@ -280,6 +296,23 @@ def _ended_times(records: Sequence[TestRecord], start: float) -> tuple[float, ..
     )
 
 
+def _settled_times(records: Sequence[TestRecord], start: float) -> tuple[float, ...]:
+    """When the explore tests that succeeded were judged: what the judge's grace counts, a failed test and one whose
+    verdict is still to come left out."""
+
+    return tuple(
+        sorted(
+            item.judged_at - start
+            for item in records
+            if item.request.purpose is Purpose.EXPLORE
+            and item.judged
+            and item.judged_at is not None
+            and item.result is not None
+            and item.result.validity is Validity.SUCCEEDED
+        )
+    )
+
+
 def _parent_branch(node: BranchNode, view: LineageView) -> str:
     if node.origin is LineageKind.ROOT:
         return ""
@@ -381,6 +414,7 @@ class _TreeReading:
             ended_times=_ended_times(tests, start),
             driver=node.driver,
             agent=self.agent(node.branch),
+            settled_times=_settled_times(tests, start),
         )
 
     def agent(self, branch: str) -> Mapping[str, object] | None:

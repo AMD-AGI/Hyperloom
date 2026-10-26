@@ -8,8 +8,8 @@
 :class:`FrontierScorer` gives the core :class:`Estimate`: :data:`FRONTIER_V1`, the formula below, by default, and the
 fallback of every other (:mod:`rsi.scorers` says where the others come from and how to write one). The envelope,
 :func:`enveloped`, then holds every scorer to the same guarantees: a branch scored on its own short record keeps
-``new_branch_floor_pct`` until :data:`SETTLED_TESTS` of its explore tests have ended, as the judge's grace counts them,
-so a flat start does not stop it before it has tried a few directions; a repair branch that young scores at least the
+``new_branch_floor_pct`` until :data:`SETTLED_TESTS` of its explore tests succeeded and were judged, as the judge's
+grace counts them, so a flat start does not stop it before it has tried a few directions; a repair branch that young scores at least the
 gain of the blocked candidate it repairs; a candidate waiting for its confirm raises the score to its own gain; the
 headroom and the Amdahl ceiling cap it; and it is never negative. :class:`ScorerGuard` keeps a
 session scored when its scorer fails: ``frontier-v1`` scores the branch it failed on, and after :data:`FALLBACK_LIMIT`
@@ -290,17 +290,16 @@ def checked_estimate(label: str, estimate: object) -> Estimate:
 
 
 def is_young(branch: TreeBranch, t_s: float, policy: FrontierPolicy) -> bool:
-    """Too new to have a trend: fewer than :data:`SETTLED_TESTS` explore tests ended, counted as the judge's grace
-    counts them, so the floor and the grace end at the same test. A tree archived before ended tests were kept counts
-    its judged tests; one archived before judgements were kept, too, is young while open less than a window and
-    without a commit."""
+    """Too new to have a trend: fewer than :data:`SETTLED_TESTS` explore tests succeeded and were judged, as the
+    judge's grace counts them, so the floor and the grace end at the same test, and a branch whose tests failed keeps
+    its floor. A tree archived before that was kept counts its ended explore tests, then its judged tests; one
+    archived before judgements were kept, too, is young while open less than a window and without a commit."""
 
-    settled = branch.ended_by(t_s)
-    if settled is None:
-        settled = branch.judged_by(t_s)
-    if settled is None:
-        return t_s - branch.opened_s < policy.window_seconds and not branch.commits
-    return settled < SETTLED_TESTS
+    for counted in (branch.settled_by, branch.ended_by, branch.judged_by):
+        settled = counted(t_s)
+        if settled is not None:
+            return settled < SETTLED_TESTS
+    return t_s - branch.opened_s < policy.window_seconds and not branch.commits
 
 
 @dataclass(frozen=True)

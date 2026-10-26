@@ -42,6 +42,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     ScorerGuard,
     ScoringContext,
     checked_estimate,
+    is_young,
     paced,
     remaining_prior,
     score_at,
@@ -164,14 +165,14 @@ async def test_a_new_branch_without_a_commit_keeps_a_floor_until_its_tests_settl
     assert SETTLED_TESTS == 5
 
 
-async def test_the_floor_ends_with_the_judges_grace_at_the_settled_explore_tests_failed_ones_included(
+async def test_the_floor_ends_with_the_judges_grace_at_the_explore_tests_that_succeeded_and_were_judged(
     tmp_path: Path,
 ) -> None:
     clock = FakeClock()
     root = tmp_path / "notebook"
     observer = await scripted_session(root, clock)
     scheduler = LocalNotebook(root, Writer(Role.SCHEDULER, "scheduler"), clock=clock)
-    toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"), clock=clock)
+    toolbox, gate = (LocalNotebook(root, Writer(role, role.value), clock=clock) for role in (Role.TOOLBOX, Role.GATE))
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s3", from_commit="c1", reason="fill"))
     clock.advance(WINDOW_SECONDS)
 
@@ -184,12 +185,29 @@ async def test_the_floor_ends_with_the_judges_grace_at_the_settled_explore_tests
     await ended("p1", Validity.SUCCEEDED, kind=TestKind.PROFILE, purpose=Purpose.PROFILE)
     await toolbox.write_request(request("w1", intent("s3", "c1", target="w1")))
     await toolbox.write_withdrawal(Withdrawal("w1", "branch stopped"))
-    unsettled = _scores(await observer.snapshot())["s3"]
-    await ended("last", Validity.MEASUREMENT_FAILED)
+    await ended("mf1", Validity.MEASUREMENT_FAILED)
+    failed = _scores(await observer.snapshot())["s3"]
+    for n in range(SETTLED_TESTS - 1):
+        await ended(f"j{n}", Validity.SUCCEEDED)
+        await gate.write_judgement(f"j{n}", judgement(0.1, (f"j{n}",), verdict=Verdict.FLAT), Conclusion.RECORDED_ONLY)
+    await ended("unjudged", Validity.SUCCEEDED)
+    unjudged = _scores(await observer.snapshot())["s3"]
+    await gate.write_judgement(
+        "unjudged", judgement(0.1, ("unjudged",), verdict=Verdict.FLAT), Conclusion.RECORDED_ONLY
+    )
     settled = _scores(await observer.snapshot())["s3"]
 
-    assert unsettled is not None and unsettled.basis is FrontierBasis.NEW
+    assert failed is not None and failed.basis is FrontierBasis.NEW
+    assert unjudged is not None and unjudged.basis is FrontierBasis.NEW
     assert settled is not None and settled.basis is FrontierBasis.TREND
+
+
+def test_a_tree_kept_before_settled_tests_counts_its_ended_tests_for_the_floor() -> None:
+    failing = branch("s9", [], ended_times=(0.0,) * SETTLED_TESTS, settled_times=(0.0,))
+    older = branch("s9", [], ended_times=(0.0,) * SETTLED_TESTS)
+
+    assert is_young(failing, 60.0, POLICY)
+    assert not is_young(older, 60.0, POLICY)
 
 
 def test_an_archived_branch_without_judged_times_keeps_the_floor_for_one_window_only() -> None:
