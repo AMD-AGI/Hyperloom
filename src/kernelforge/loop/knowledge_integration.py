@@ -930,7 +930,7 @@ def _try_apply_candidate(sol: dict, trial: _CandidateField, *, pre_untracked) ->
         pristine_ms = pristine_bench.get("median_ms")
     except WarmStartRestoreError:
         raise
-    except Exception as exc:  # scoring is third-party; worktree is discarded
+    except Exception as exc:  # isolation boundary: one KB warm-start candidate; worktree is discarded
         log.warning("warm-start candidate probe failed: %s", exc, exc_info=True)
         _git_discard_worktree(
             workspace_dir,
@@ -1324,7 +1324,7 @@ def kb_warmstart(
         return attempt.final_result()
     except WarmStartRestoreError:
         raise
-    except Exception as e:  # noqa: BLE001 - warm-start must never break the run
+    except Exception as e:  # noqa: BLE001 - isolation boundary: the run's KB warm-start; it cold-starts instead
         from kernelforge.knowledge.kb_store.errors import (
             kb_store_secrets,
             sanitize_read_error,

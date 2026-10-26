@@ -274,18 +274,13 @@ def _normalize_summary(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def summarize_run(config, workspace: str, prompt: str, usage=None) -> dict[str, Any]:
-    """Summarize a run with one LLM call on ``prompt``; returns normalized fields (never raises)."""
-    defaults = _normalize_summary({})
-    try:
-        reply = asyncio.run(
-            asyncio.wait_for(
-                _query_llm(config, workspace, prompt, usage=usage),
-                timeout=_LLM_TIMEOUT_SEC,
-            )
+    """Summarize a run with one LLM call on ``prompt``; returns normalized fields."""
+    reply = asyncio.run(
+        asyncio.wait_for(
+            _query_llm(config, workspace, prompt, usage=usage),
+            timeout=_LLM_TIMEOUT_SEC,
         )
-    except Exception as exc:  # noqa: BLE001 - best-effort; keep defaults
-        log.warning("experience summarize LLM failed: %r", exc)
-        return defaults
+    )
     parsed = _normalize_summary(_extract_json(reply))
     log.info("experience summarize: category=%s strategy=%r", parsed["category"], parsed["strategy"][:60])
     return parsed
@@ -381,8 +376,9 @@ def write_run_experience(
             summary_override=summary_override,
             usage=usage,
         )
-    except Exception as exc:  # noqa: BLE001 - a KB write must never break the loop
+    except Exception as exc:  # noqa: BLE001 - isolation boundary: one experience publication
         reason = sanitize_read_error(exc, secrets=kb_store_secrets(config))
+        # Sanitized message only: a raw traceback would carry the KB store credentials.
         log.warning("experience write failed (skipped): %s", reason)
         return {"written": False, "reason": reason}
 
