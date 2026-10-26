@@ -270,7 +270,9 @@ def test_a_branch_row_lists_its_similar_branches_and_the_prompt_says_which_twin_
     assert rows["b01"]["similar_to"] == [{"branch": "b02", "score": 1.0, "identical": True}]
     assert rows[INTEGRATION_BRANCH]["similar_to"] == []
     assert "similar_to" in JUDGE_SYSTEM_PROMPT and "identical" in JUDGE_SYSTEM_PROMPT
-    assert "stop the one of the pair with the lower expected_gain_pct" in " ".join(JUDGE_SYSTEM_PROMPT.split())
+    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
+    assert "stop the one of the pair with the lower expected_gain_pct" in prose
+    assert "their start commit or the integration commit they were re-rooted onto" in prose
 
 
 def test_the_prompt_shows_and_explains_the_events_and_how_far_each_branch_lies_behind() -> None:

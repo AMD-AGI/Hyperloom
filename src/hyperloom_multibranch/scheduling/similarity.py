@@ -3,12 +3,15 @@
 
 """How alike the running specialist branches are, for the judge to weigh: their own changes, compared pair by pair.
 
-A branch's own change is what ``hyperloom.contracts.recipe.diff`` finds from the recipe of its start commit to that of
-its head: each server argument and environment variable at its new value, each patch and kernel added or dropped by
-content hash, each component's new upstream ref, each item newly or no longer unexpressed, and a changed image. It is
-read from the branch's own start, not the root, because two branches started from the same integration head share
-every integration change they inherited, and from the root they would look alike for it. A branch without a commit of
-its own has no change and is not compared, nor is the integration branch.
+A branch's own change is what ``hyperloom.contracts.recipe.diff`` finds from the recipe of the commit it last followed
+to that of its head: each server argument and environment variable at its new value, each patch and kernel added or
+dropped by content hash, each component's new upstream ref, each item newly or no longer unexpressed, and a changed
+image. Both commits are read off the notebook's lineage: the head is the branch's head there, and the commit it
+followed is the first one, walking back from that head through parents, that is not the branch's own commit -- its
+start commit, or the integration commit a re-root moved it onto. It is not read from the root, because two branches
+that follow the same integration commit share every integration change they inherited, and from the root they would
+look alike for it. A branch whose head is not a commit of its own, one just re-rooted included, has no change and is
+not compared, nor is the integration branch.
 
 Two branches are listed as similar when the Jaccard index of their changes reaches :data:`MB_SIMILARITY_THRESHOLD`,
 and as identical, with a score of 1.0, when their heads hold the same recipe. Nothing here stops a branch: the judge
@@ -22,6 +25,7 @@ from dataclasses import dataclass
 from itertools import combinations
 
 from hyperloom.contracts.recipe import Recipe, ValueChange, diff
+from hyperloom_multibranch.contracts.notebook.records import LineageView
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.scheduling.roster import BranchKind, BranchStatus, Roster
 
@@ -93,6 +97,15 @@ def similar_pairs(branches: Sequence[BranchChange]) -> dict[str, tuple[SimilarBr
     return {branch: tuple(similar) for branch, similar in found.items()}
 
 
+def followed_commit(lineage: LineageView, branch: str, head: str) -> str:
+    """The commit ``branch`` last followed: the first one back from ``head`` through parents not of its own."""
+
+    current = head
+    while (node := lineage.commit(current)) is not None and node.branch == branch:
+        current = node.parent_commit
+    return current
+
+
 class BranchSimilarity:
     """Reads the running specialist branches off the roster and their recipes out of the experiment repository."""
 
@@ -100,17 +113,21 @@ class BranchSimilarity:
         self._repo = repo
         self._roster = roster
 
-    async def similar_to(self) -> Mapping[str, tuple[SimilarBranch, ...]]:
-        """Each running specialist branch's similar branches; a branch with no commit of its own is in no pair."""
+    async def similar_to(self, lineage: LineageView) -> Mapping[str, tuple[SimilarBranch, ...]]:
+        """Each running specialist branch's similar branches, its head and the commit it followed read off
+        ``lineage``; a branch whose head is no commit of its own, or that ``lineage`` does not hold yet, is in no
+        pair."""
 
+        heads = {node.branch: node.head_commit for node in lineage.branches}
         changed = []
         for entry in self._roster.entries():
             if entry.kind is not BranchKind.SPECIALIST or entry.status is not BranchStatus.RUNNING:
                 continue
-            head = await self._repo.head(entry.branch)
-            if head == entry.start_commit:
+            head = heads.get(entry.branch)
+            followed = followed_commit(lineage, entry.branch, head) if head is not None else None
+            if followed is None or followed == head:
                 continue
-            start, recipe = await self._repo.read_recipe(entry.start_commit), await self._repo.read_recipe(head)
+            start, recipe = await self._repo.read_recipe(followed), await self._repo.read_recipe(head)
             changed.append(BranchChange(entry.branch, recipe.digest(), own_change(start, recipe)))
         return similar_pairs(changed)
 
@@ -120,6 +137,7 @@ __all__ = [
     "BranchChange",
     "BranchSimilarity",
     "SimilarBranch",
+    "followed_commit",
     "own_change",
     "similar_pairs",
 ]

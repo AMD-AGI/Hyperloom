@@ -326,7 +326,7 @@ class Explorer:
             pending=self._desk.pending(),
             history=judge_history(snapshot, self._progress.history, self._metric, budget_seconds=window.budget_seconds),
             widening=await self._widening.signals(),
-            similar_to=await self._similarity.similar_to(),
+            similar_to=await self._similarity.similar_to(snapshot.lineage),
             events=self._events.hand_over(),
             behind_integration_pct=behind_integration_pct(progress, integration_value, root.values, self._metric),
             stranded_leads=stranded_leads(snapshot, self._metric),

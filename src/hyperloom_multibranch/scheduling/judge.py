@@ -94,9 +94,10 @@ which falls back to frontier-v1 for the rest of the session once it has failed t
 A branch's judged_since_commit counts its tests judged since its last commit (since it opened, before any). When it
 reaches {STALL_TESTS}, its specialist is asked to read its brief again and reconsider its direction: a branch whose
 count runs well past that is stalling, a candidate to stop or to lower K unless its frontier still expects a gain.
-A branch's similar_to lists the other running branches whose own change since their start commit is much the same as
-its own, with score the share of the two changes they have in common. identical is true when both heads hold the same
-recipe: two branches marked identical spend twice the budget on one result, so stop the one of the pair with the
+A branch's similar_to lists the other running branches whose own change since the commit they last followed, their
+start commit or the integration commit they were re-rooted onto, is much the same as its own, with score the share of
+the two changes they have in common; a branch with no commit of its own since then is in no pair. identical is true
+when both heads hold the same recipe: two branches marked identical spend twice the budget on one result, so stop the one of the pair with the
 lower expected_gain_pct. A similar pair that is not identical is yours to weigh.
 events lists what happened since your last call that changes what the running branches are worth; you are asked at
 once when one happens. integration_moved: a merge moved the integration head by gain_pct, at least {MB_BIG_GAIN_BARS}
