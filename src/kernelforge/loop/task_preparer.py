@@ -762,6 +762,7 @@ async def prepare_task(
                     usage=usage,
                     progress_log=progress_log,
                 )
+                audit.text(f"{attempt_dir}/agent_output.txt", agent_output)
             except asyncio.TimeoutError:
                 status = "timeout"
             except Exception as exc:  # noqa: BLE001
@@ -769,9 +770,7 @@ async def prepare_task(
                 status = "error"
                 exception_detail = {"exception_type": type(exc).__name__, "exception": str(exc)}
                 retry_note = RetryNote(f"Agent invocation error: {type(exc).__name__}: {exc}")
-            else:
-                audit.text(f"{attempt_dir}/agent_output.txt", agent_output)
-                audit.text(f"{attempt_dir}/agent_progress.txt", "\n".join(progress_log))
+            audit.text(f"{attempt_dir}/agent_progress.txt", "\n".join(progress_log))
             agent_snapshot, judged_snapshot = _ATTEMPT_SNAPSHOTS[status]
             audit.driver(f"{attempt_dir}/{agent_snapshot}")
             elapsed_s = round(time.monotonic() - agent_started, 3)
@@ -787,8 +786,6 @@ async def prepare_task(
                     "driver_edited": driver_edited,
                 },
             )
-            if status != "completed":
-                audit.text(f"{attempt_dir}/agent_progress.txt", "\n".join(progress_log))
 
             # (1) Source protection: whatever the agent did, restore source (and the provided harness) to pristine
             # before we judge the driver.
