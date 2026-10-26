@@ -149,6 +149,7 @@ class TestFmoeCoverageGate:
         assert report is not None
         assert report["artifact_applied"] is False
         assert report["not_applied_reason"] == "runtime_default_config"
+        assert report["conclusive"] is True
 
     def test_glm_descriptor_parses_but_bare_candidate_mismatch_blocks(self, tmp_path):
         _integrate_log(tmp_path, GLM_KERNEL_DESCRIPTOR)
@@ -199,6 +200,7 @@ class TestFmoeCoverageGate:
         assert report is not None
         assert report["artifact_applied"] is False
         assert report.get("not_applied_reason") == "no_fused_moe_dispatch"
+        assert report["conclusive"] is True
 
     def test_missing_server_log_stays_inconclusive(self, tmp_path):
         csv_path = _candidate_csv(tmp_path)
