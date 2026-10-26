@@ -129,6 +129,8 @@ def _deepen(reading: _Reading, slot: Slot, direction_id: str) -> tuple[str, Slot
 
 
 def _port(reading: _Reading, slot: Slot, raw: dict) -> tuple[str, Slot]:
+    if reading.tree.require_node(slot.start).is_root:
+        return "PORT slot onto the root has no direction to carry gains into; BRANCH there instead", slot
     source = reading.tree.resolve(str(raw.get("source") or ""))
     if not source or source == slot.start:
         return f"PORT slot from {slot.start[:12]} names no other node as its source", slot

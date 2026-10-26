@@ -149,6 +149,8 @@ class SearchTree:
     root_branch: str
     nodes: list[TreeNode]
     published_best: str
+    # The campaign-branch commit that publishes ``published_best``: the same tree, committed on the published line.
+    published_head: str
     directions: list[Direction] = field(default_factory=list)
     attempts: list[Attempt] = field(default_factory=list)
     round: Round | None = None
@@ -159,7 +161,7 @@ class SearchTree:
         """A tree holding only the node the campaign starts from, which is also what it publishes."""
         if not root.is_root:
             raise ValueError(f"the root node {root.commit} names a parent")
-        return cls(root_branch=root_branch, nodes=[root], published_best=root.commit)
+        return cls(root_branch=root_branch, nodes=[root], published_best=root.commit, published_head=root.commit)
 
     @property
     def root(self) -> TreeNode:
@@ -280,9 +282,11 @@ class SearchTree:
             for item in self.directions
         ]
 
-    def publish(self, commit: str) -> None:
+    def publish(self, commit: str, *, head: str) -> None:
+        """Record ``commit`` as the published best, published on the campaign branch as ``head``."""
         self.require_node(commit)
         self.published_best = commit
+        self.published_head = head
 
     def open_round(self, round_: Round) -> None:
         if self.round is not None:

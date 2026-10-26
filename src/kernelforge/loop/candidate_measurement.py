@@ -52,16 +52,17 @@ class MeasurementSite:
         """The same task paths inside another checkout of the same repository."""
         return MeasurementSite(
             workspace_dir=str(workspace_dir),
-            driver_script=self._rebase(self.driver_script, workspace_dir),
-            build_dir=self._rebase(self.build_dir, workspace_dir) if self.build_dir else None,
-            declared_sources=tuple(self._rebase(path, workspace_dir) for path in self.declared_sources),
+            driver_script=self.relocate(self.driver_script, workspace_dir),
+            build_dir=self.relocate(self.build_dir, workspace_dir) if self.build_dir else None,
+            declared_sources=tuple(self.relocate(path, workspace_dir) for path in self.declared_sources),
         )
 
     def jit_sources(self) -> list[str]:
         """Declared hints plus actual tracked edits that may require recompilation."""
         return list(dict.fromkeys([*self.declared_sources, *tracked_source_changes(self.workspace_dir)]))
 
-    def _rebase(self, path: str, workspace_dir: str) -> str:
+    def relocate(self, path: str, workspace_dir: str) -> str:
+        """The path ``path`` of this site names inside another checkout ``workspace_dir``."""
         root = Path(self.workspace_dir).resolve()
         candidate = Path(path)
         absolute = (candidate if candidate.is_absolute() else root / candidate).resolve()

@@ -52,7 +52,7 @@ def _tree():
     tree.add_node(_node(N2, N1, "d001", 1.10, case_times={"small": 0.8, "big": 4.0}, iteration=2))
     tree.allocate_direction(PROPOSAL, origin=ROOT, iteration=2)
     tree.add_node(_node(N3, ROOT, "d002", 0.98, case_times={"small": 1.2, "big": 3.0}, iteration=2))
-    tree.publish(N2)
+    tree.publish(N2, head="c" * 40)
     return tree
 
 

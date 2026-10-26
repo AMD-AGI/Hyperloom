@@ -60,6 +60,7 @@ def tree_from_dict(payload: object) -> SearchTree:
         root_branch=str(data["root_branch"]),
         nodes=[_node(item) for item in _list(data["nodes"], "nodes")],
         published_best=str(data["published_best"]),
+        published_head=str(data["published_head"]),
         directions=[_direction(item) for item in _list(data["directions"], "directions")],
         attempts=[_attempt(item) for item in _list(data["attempts"], "attempts")],
         round=None if data["round"] is None else _round(data["round"]),

@@ -534,6 +534,9 @@ class LoopAgents:
     supervisor_fn: Any = None
     # Every relay profile's search actor; when set, the loop selects among them and the four above are its start actor.
     search_actors: SearchActorPool | None = None
+    # What a tree round adds: a builder of further planning services, and the agent that names the round's slots.
+    orchestration_factory: Any = None
+    slot_selector: Any = None
 
 
 @dataclass(frozen=True)
@@ -555,6 +558,8 @@ def _with_search_actor(agents: LoopAgents, bundle) -> LoopAgents:
         agent_factory=bundle.agent_factory,
         orchestration_service=bundle.orchestration_service,
         supervisor_fn=bundle.supervisor_fn,
+        orchestration_factory=bundle.orchestration_factory,
+        slot_selector=bundle.slot_selector,
     )
 
 

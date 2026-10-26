@@ -24,7 +24,8 @@ class RoundOutlook:
 
     lanes: int
     remaining_sec: float
-    rounds_left: int
+    # None until a round of this campaign has finished and given its cost.
+    rounds_left: int | None
 
 
 @dataclass(frozen=True)
@@ -67,9 +68,9 @@ def _one_line(text: str, limit: int = _PLAN_CHARS) -> str:
 def _sources(sources: FactSources) -> list[str]:
     return [
         "## Where the detail lives",
-        f"- {sources.archive_dir}/iter_NNN/: an attempt's kernel, change.diff, meta.json (per-case measurements).",
-        f"- {sources.lessons_dir}/iter_NNN.md: what that attempt's Implementer session tried and measured, including "
-        "its section of locally validated results.",
+        f"- {sources.archive_dir}/iter_NNN/slot_KK/: one slot's change.diff, measurement.json (per-case timings of "
+        "every run) and session.md (what its Implementer reported); start_<commit>/slot_KK.md is the plan it ran.",
+        f"- {sources.lessons_dir}/iter_NNN.md: the lesson recorded for an iteration.",
         f"- {sources.selections_dir}/iter_NNN.md: what you were shown and answered in an earlier round.",
         "- Every node is a commit: `git show <commit>`, `git diff <parent> <commit>`, `git log --oneline <branch>`.",
         "",
@@ -79,12 +80,16 @@ def _sources(sources: FactSources) -> list[str]:
 def _standing(tree: SearchTree, outlook: RoundOutlook) -> list[str]:
     published = tree.require_node(tree.published_best)
     measured = tree.best_measured()
+    rounds = (
+        f"about {outlook.rounds_left} round(s) at the cost rounds have had so far"
+        if outlook.rounds_left is not None
+        else "no round has finished yet to price the rest from"
+    )
     return [
         "## Standing",
         f"- Published best: {published.commit}, score {published.score:.6f}x over {len(published.samples)} samples.",
         f"- Highest measured node: {measured.commit}, score {measured.score:.6f}x.",
-        f"- Lanes this round: {outlook.lanes}. Campaign time left: {outlook.remaining_sec / 60:.0f} min, "
-        f"about {outlook.rounds_left} round(s) at the cost rounds have had so far.",
+        f"- Lanes this round: {outlook.lanes}. Campaign time left: {outlook.remaining_sec / 60:.0f} min, {rounds}.",
         f"- {len(tree.nodes)} node(s), {len(tree.directions)} direction(s), {len(tree.attempts)} finished attempt(s).",
         "",
     ]
