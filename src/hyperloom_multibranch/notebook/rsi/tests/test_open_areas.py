@@ -13,6 +13,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
 from hyperloom_multibranch.notebook.rsi.open_areas import OpenOp, open_areas
 from hyperloom_multibranch.notebook.rsi.playbook import H0, replaced
 from hyperloom_multibranch.notebook.rsi.session import judge_open_areas
+from hyperloom_multibranch.notebook.rsi.tests.trees import branch, tree
 from hyperloom_multibranch.notebook.tests.sessions import METRIC
 
 HOUR = 3600.0
@@ -87,9 +88,11 @@ def test_without_a_profile_the_open_areas_say_so_and_the_judge_reads_them_once_t
     snapshot: NotebookSnapshot,
 ) -> None:
     bare = open_areas(snapshot, budget_seconds=4 * HOUR, first_commit_minutes=None)
+    past = (tree("past", branch("s1", [(1800.0, 3.0)])),)
 
     assert bare.render().startswith("Open areas for a new branch: neither the integration head nor a commit")
-    assert judge_open_areas(_worked(snapshot), (), METRIC, budget_seconds=4 * HOUR).startswith(
+    assert judge_open_areas(_worked(snapshot), past, METRIC, budget_seconds=4 * HOUR).startswith(
         "Open areas for a new branch, from the profile of i1:"
     )
-    assert judge_open_areas(dataclasses.replace(snapshot, profile=None), (), METRIC, budget_seconds=HOUR) == ""
+    assert judge_open_areas(_worked(snapshot), (), METRIC, budget_seconds=4 * HOUR) == ""
+    assert judge_open_areas(dataclasses.replace(snapshot, profile=None), past, METRIC, budget_seconds=HOUR) == ""

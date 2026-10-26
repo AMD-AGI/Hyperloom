@@ -598,13 +598,16 @@ def judge_history(
     max_chars: int = MAX_CHARS,
 ) -> str:
     """The stall odds the stop rule rests on, for the judge this round, in at most ``max_chars``: from the archived
-    sessions and this one's own branches so far; empty before the session has a profile and a baseline.
+    sessions and this one's own branches so far; empty before the session has a profile and a baseline, and without
+    archived sessions, so a session that reads no archive is judged as one without the RSI.
 
     Pass the scoring's own history, so the archive is read once a session. ``budget_seconds`` is kept for the
     scheduler's call; the odds count judged tests, not shares of the budget.
     """
 
     del budget_seconds
+    if not history:
+        return ""
     odds = session_stall_odds(snapshot, history, metric)
     return odds.render(max_chars) if odds is not None else ""
 
@@ -618,10 +621,10 @@ def judge_open_areas(
     playbook: Playbook = H0,
 ) -> str:
     """Where a new branch could open this round, for the judge (:mod:`rsi.open_areas`), and whether one should open
-    at all under ``playbook``, the session's; empty before the session has a profile and a baseline. Pass the
-    scoring's own history, as to :func:`judge_history`."""
+    at all under ``playbook``, the session's; empty when :func:`judge_history` is. Pass the scoring's own history, as
+    to :func:`judge_history`."""
 
-    odds = session_stall_odds(snapshot, history, metric)
+    odds = session_stall_odds(snapshot, history, metric) if history else None
     if odds is None:
         return ""
     found = open_areas(

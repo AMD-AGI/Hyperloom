@@ -536,5 +536,6 @@ def test_the_judge_reads_the_stall_odds_of_the_archive_and_of_the_session_itself
     assert odds is not None and alone is not None
     assert (odds.sessions, alone.sessions) == (1, 0)
     assert judge_history(snapshot, (PAST,), METRIC, budget_seconds=BUDGET) == odds.render(MAX_CHARS)
+    assert judge_history(snapshot, (), METRIC, budget_seconds=BUDGET) == ""
     assert judge_history(dataclasses.replace(snapshot, profile=None), (PAST,), METRIC, budget_seconds=BUDGET) == ""
     assert len(judge_history(snapshot, (PAST,), METRIC, budget_seconds=BUDGET, max_chars=80)) <= 80
