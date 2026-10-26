@@ -190,13 +190,6 @@ def _row(**over):
     return base
 
 
-def test_coerce_optional_str_variants():
-    assert ru.coerce_optional_str(None) is None
-    assert ru.coerce_optional_str("   ") is None  # empty after strip
-    assert ru.coerce_optional_str("  hi  ") == "hi"
-    assert ru.coerce_optional_str(42) == "42"
-
-
 def test_coerce_optional_int_variants():
     assert ru.coerce_optional_int(None) is None
     assert ru.coerce_optional_int("7") == 7

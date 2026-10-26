@@ -25,15 +25,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .event_fields import (
-    as_dict as _as_dict,
-    as_list as _as_list,
-    clip as _clip,
-    failure_row as _failure_row,
-    float_or_none as _float_or_none,
-    now_iso_seconds as _now,
+from hyperloom.common.coerce import (
     text_or_none as _text_or_none,
+    to_float as _float_or_none,
+    to_mapping as _as_dict,
+    to_list as _as_list,
 )
+
+from .event_fields import clip as _clip, failure_row as _failure_row, now_iso_seconds as _now
 from ..round_archive import ROLE_LAUNCH_CONFIG
 
 from .event_ids import event_id

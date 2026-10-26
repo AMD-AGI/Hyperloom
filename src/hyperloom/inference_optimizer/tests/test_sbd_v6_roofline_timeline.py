@@ -754,7 +754,8 @@ def test_the_table_is_recorded_once_however_the_action_unwinds(tmp_path: Path) -
 
 
 def test_an_inline_action_leaves_no_roofline_event(tmp_path: Path) -> None:
-    from hyperloom.inference_optimizer.breakdown.recorder.assembler import roofline_event_parts
+    from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+    from hyperloom.inference_optimizer.breakdown.recorder.sections import ROOFLINE_EVENT_SECTIONS
     from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
     from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import assemble_roofline_action
 
@@ -769,7 +770,7 @@ def test_an_inline_action_leaves_no_roofline_event(tmp_path: Path) -> None:
     _succeed(recorder)
 
     assert _roofline_events(tmp_path) == []
-    action = assemble_roofline_action(roofline_event_parts(), event=event, task_id="t-reprofile")
+    action = assemble_roofline_action(event_parts(ROOFLINE_EVENT_SECTIONS), event=event, task_id="t-reprofile")
     assert action is not None
     assert action["status"] == "succeeded"
     assert action["request"]["reason"] == "kernel_entry_g0_abc"

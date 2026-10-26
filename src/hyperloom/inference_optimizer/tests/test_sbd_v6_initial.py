@@ -201,7 +201,7 @@ def test_the_exported_launch_env_masks_a_generic_custom_headers_env(tmp_path):
 
 
 def test_a_re_export_masks_a_credential_a_legacy_fragment_recorded_in_plaintext(tmp_path):
-    from hyperloom.inference_optimizer.breakdown.recorder import recorder_for
+    from hyperloom.inference_optimizer.breakdown.recorder.recorder import recorder_for
 
     _write_json(
         tmp_path / "state.json",

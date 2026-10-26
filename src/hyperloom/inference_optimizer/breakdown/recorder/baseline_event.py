@@ -11,15 +11,18 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.coerce import (
+    to_float as _float_or_none,
+    to_int as _int_or_none,
+    to_mapping as _as_dict,
+    to_list as _as_list,
+)
+
 from .event_fields import (
-    as_dict as _as_dict,
-    as_list as _as_list,
     bool_or_none as _bool_or_none,
     clip as _clip,
     failure_row as _failure_row,
-    float_or_none as _float_or_none,
     graded_axes as _graded_axes,
-    int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
     worst_status as _worst_status,
 )
@@ -28,6 +31,7 @@ from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink
 from .event_timeline import EventHeader, finish_event, open_event
+from .sections import BASELINE_EVENT_SECTIONS
 
 log = logging.getLogger(__name__)
 
@@ -189,7 +193,7 @@ def _event_header(parts: Mapping[str, list[dict[str, Any]]], *, event: str) -> d
 
 def _republish_closed_event(event: str) -> None:
     """Re-assemble a closed event so a fragment written after it is published."""
-    from .assembler import baseline_event_parts
+    from .assembler import event_parts
     from .construct import republish_closed_event
     from .event_rows import rows_for_event
 
@@ -203,7 +207,7 @@ def _republish_closed_event(event: str) -> None:
     republish_closed_event(
         EventHeader(EVENT_TYPE, event, EVENT_KIND),
         section=SECTION_EVENT,
-        load_parts=lambda: baseline_event_parts(event),
+        load_parts=lambda: event_parts(BASELINE_EVENT_SECTIONS, event=event),
         assemble=assemble_baseline_ext,
         end_time=_end_time,
     )
@@ -756,11 +760,11 @@ class BaselineEventRecorder:
         )
         if not self._owns_event:
             return
-        from .assembler import baseline_event_parts
+        from .assembler import event_parts
         from .recorder_warnings import RECORDING_ERRORS, note_failure
 
         try:
-            parts = baseline_event_parts(self.event_id)
+            parts = event_parts(BASELINE_EVENT_SECTIONS, event=self.event_id)
             ext, derived = assemble_baseline_ext(parts, event=self.event_id)
             # This action's own start only dates the event when the shell write
             # failed, leaving this close as the first thing to put it on the

@@ -107,12 +107,10 @@ def build(session_dir: Path | str) -> dict[str, Any]:
     )
     # Task configuration, read from the launch inputs rather than recorded:
     # both are authored before the recorder exists.
-    workload = _safe_collect("workload", lambda: collectors.collect_workload(state, manifest, warnings), warnings)
+    workload = _safe_collect("workload", lambda: collectors.collect_workload(state, manifest), warnings)
     # Model basics -- verbatim mirror of ``state.model_info``. Empty {} on
     # non-transformers models.
-    model_info = _safe_collect(
-        "model_info", lambda: collectors.collect_model_info(state, warnings), warnings, default={}
-    )
+    model_info = _safe_collect("model_info", lambda: collectors.collect_model_info(state), warnings, default={})
     # Live-Langfuse push receipt (opt-in second sink). Prefers the post-flush
     # ``langfuse_receipt.json``; falls back to a live emitter read. Authored by
     # the emitter, so it is read here rather than derived.
@@ -183,7 +181,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
                 recorded=assembled.get("metadata"),
             ),
             exported_at_utc=exported_at,
-            warnings=warnings,
         ),
         warnings,
         default={},

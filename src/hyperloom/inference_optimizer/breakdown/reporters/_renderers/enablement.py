@@ -12,7 +12,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import RenderedSection, as_dict, md_kv_list, md_table, register_renderer
+
+from hyperloom.common.coerce import to_mapping
+
+from ..base import RenderedSection, md_kv_list, md_table, register_renderer
 
 _ATTEMPT_COLUMNS = ("attempt", "status", "failure_kind", "reason")
 _BUILD_COLUMNS = ("component", "ref", "gpu_arch", "ok", "failure_class")
@@ -28,18 +31,18 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     """Render the enablement section from the lane's timeline event."""
     events = [
         event
-        for event in as_dict(breakdown).get("timeline") or []
+        for event in to_mapping(breakdown).get("timeline") or []
         if isinstance(event, dict) and str(event.get("type") or "") == "enablement"
     ]
     if not events:
         return RenderedSection(section_id="enablement", title="Enablement", skipped=True)
 
     event = events[0]
-    ext = as_dict(event.get("ext"))
-    attempts = as_dict(ext.get("attempts"))
-    builds = as_dict(ext.get("builds"))
-    revalidations = as_dict(ext.get("revalidations"))
-    result = as_dict(ext.get("result"))
+    ext = to_mapping(event.get("ext"))
+    attempts = to_mapping(ext.get("attempts"))
+    builds = to_mapping(ext.get("builds"))
+    revalidations = to_mapping(ext.get("revalidations"))
+    result = to_mapping(ext.get("result"))
     status = str(event.get("status") or "")
 
     facts = [
@@ -73,7 +76,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 ("builds_failed", builds.get("failed")),
                 ("revalidations", revalidations.get("count")),
                 ("revalidations_promoted", revalidations.get("promoted")),
-                ("human_review", as_dict(ext.get("human_review")).get("count")),
+                ("human_review", to_mapping(ext.get("human_review")).get("count")),
             ]
         )
     ]

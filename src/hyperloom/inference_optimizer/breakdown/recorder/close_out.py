@@ -22,9 +22,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_float, to_int
+from hyperloom.common.fs_utils import relative_posix
 from hyperloom.common.gain_math import gain_pct_or_zero
 from hyperloom.common.timeutil import now_iso
 
+from ..workflow_contract import workflow_contract
 from .recorder import recorder_for
 from .recorder_warnings import RECORDING_ERRORS, note_failure
 from .trace import trace_skip
@@ -34,6 +36,7 @@ STEP_SECTION = "close_step"
 WRITE_BACK_SECTION = "close_write_back"
 WRITE_BACK_ATTEMPT_SECTION = "close_write_back_attempt"
 PRODUCER = "coordinator"
+_SEQUENCE_SCHEMA_VERSION = workflow_contract()["close_sequence"]["sequence_schema_version"]
 
 #: Stable ``result_type`` codes for the Recipe KB publication, set by the
 #: publisher at each exit so no reader substring-matches a free-text reason.
@@ -97,7 +100,7 @@ def record_close_opened(session_dir: Path | str | None, *, ts: str = "") -> None
     _write(
         session_dir,
         {
-            "sequence_schema_version": "hyperloom.close.v1",
+            "sequence_schema_version": _SEQUENCE_SCHEMA_VERSION,
             "source": "normal_close",
             "status": "running",
             "start_time": _stamp(ts),
@@ -119,7 +122,7 @@ def record_close_safety_net(session_dir: Path | str | None) -> None:
     except RECORDING_ERRORS as exc:
         note_failure(section=SECTION, error=exc, detail="safety-net source readback failed")
         return
-    _write(session_dir, {"source": "safety_net", "sequence_schema_version": "hyperloom.close.v1"})
+    _write(session_dir, {"source": "safety_net", "sequence_schema_version": _SEQUENCE_SCHEMA_VERSION})
 
 
 @dataclass(frozen=True)
@@ -195,7 +198,7 @@ def record_close_artifacts(
         ("artifact_package_path", artifact_package_path),
     ):
         if value is not None:
-            artifacts[key] = _rel(Path(value), root)
+            artifacts[key] = relative_posix(Path(value), root)
     if not artifacts:
         trace_skip(reason="empty payload", section=SECTION)
         return
@@ -603,14 +606,6 @@ def _any_step_failed(session_dir: Path | str) -> bool | None:
     except RECORDING_ERRORS as exc:
         note_failure(section="close", error=exc, detail="close verdict: step readback failed")
         return None
-
-
-def _rel(path: Path, session_dir: Path) -> str:
-    """Express ``path`` relative to the session, or absolute when outside it."""
-    try:
-        return path.resolve().relative_to(session_dir.resolve()).as_posix()
-    except (ValueError, OSError):
-        return str(path)
 
 
 __all__ = [

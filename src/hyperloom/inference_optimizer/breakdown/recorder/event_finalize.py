@@ -22,7 +22,9 @@ from . import (
     warm_replay_event,
     warm_start_event,
 )
-from .assembler import (
+from .assembler import event_parts
+from .event_timeline import EVENT_STATUS_INTERRUPTED, EventHeader, finish_event, residual_events
+from .sections import (
     BASELINE_EVENT_SECTIONS,
     CONC_SWEEP_EVENT_SECTIONS,
     ENABLEMENT_EVENT_SECTIONS,
@@ -33,9 +35,7 @@ from .assembler import (
     STACK_EVENT_SECTIONS,
     WARM_REPLAY_EVENT_SECTIONS,
     WARM_START_EVENT_SECTIONS,
-    event_parts,
 )
-from .event_timeline import EVENT_STATUS_INTERRUPTED, EventHeader, finish_event, residual_events
 
 __all__ = ["finalize_events"]
 

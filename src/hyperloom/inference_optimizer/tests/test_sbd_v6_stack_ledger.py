@@ -18,7 +18,8 @@ import pytest
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
 from hyperloom.inference_optimizer.breakdown.collectors.v6 import OutcomeSources, collect_v6_outcome
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import stack_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import STACK_EVENT_SECTIONS
 from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -35,12 +36,14 @@ def _bound_session(tmp_path):
 
 def _ext() -> dict[str, Any]:
     """The ledger's assembled ``ext``, whether or not it has closed."""
-    ext, _status = stack_event.assemble_stack_ext(stack_event_parts(), event=stack_event.stack_event_id())
+    ext, _status = stack_event.assemble_stack_ext(event_parts(STACK_EVENT_SECTIONS), event=stack_event.stack_event_id())
     return ext
 
 
 def _status() -> str:
-    _ext_, status = stack_event.assemble_stack_ext(stack_event_parts(), event=stack_event.stack_event_id())
+    _ext_, status = stack_event.assemble_stack_ext(
+        event_parts(STACK_EVENT_SECTIONS), event=stack_event.stack_event_id()
+    )
     return status
 
 

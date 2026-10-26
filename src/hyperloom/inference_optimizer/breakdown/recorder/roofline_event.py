@@ -13,22 +13,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import (
+    text_or_none as _text_or_none,
+    to_float as _float_or_none,
+    to_int as _int_or_none,
+    to_mapping as _as_dict,
+    to_list as _as_list,
+)
+
 from .event_fields import (
     analysis_detail as _analysis_detail,
-    as_dict as _as_dict,
-    as_list as _as_list,
     clip as _clip,
     failure_row as _failure_row,
-    float_or_none as _float_or_none,
-    int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
-    text_or_none as _text_or_none,
     worst_status as _worst_status,
 )
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink
 from .event_timeline import EventHeader, finish_event, open_event
+from .sections import ROOFLINE_EVENT_SECTIONS
 
 log = logging.getLogger(__name__)
 
@@ -828,11 +832,13 @@ class RooflineEventRecorder:
         )
         if not self._owns_event:
             return
-        from .assembler import roofline_event_parts
+        from .assembler import event_parts
         from .recorder_warnings import RECORDING_ERRORS, note_failure
 
         try:
-            ext, derived = assemble_roofline_ext(roofline_event_parts(self.event_id), event=self.event_id)
+            ext, derived = assemble_roofline_ext(
+                event_parts(ROOFLINE_EVENT_SECTIONS, event=self.event_id), event=self.event_id
+            )
             finish_event(
                 EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
