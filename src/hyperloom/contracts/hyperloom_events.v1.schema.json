@@ -1,0 +1,326 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hyperloom_events.v1.schema.json",
+  "title": "Hyperloom progress events v1: the `data` of each CloudEvent type",
+  "description": "Each key of `events` is a CloudEvents `type`; its value is the JSON Schema of that event's `data`. A reader needs only the CloudEvents attributes and the increasing `id`. An event whose content would pass 16 KiB is written with data {oversized: true, bytes, keys} instead; readers must not rely on `data`.",
+  "x-contract-version": 1,
+  "events": {
+    "hyperloom.campaign_started": {
+      "type": "object",
+      "required": [
+        "session_dir",
+        "profile",
+        "plugs_fingerprint"
+      ],
+      "properties": {
+        "session_dir": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "plugs_fingerprint": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "hyperloom.plugs_lock_mismatch": {
+      "type": "object",
+      "required": [
+        "socket",
+        "file_impl",
+        "locked_impl"
+      ],
+      "properties": {
+        "socket": {
+          "type": "string"
+        },
+        "file_impl": {
+          "type": "string"
+        },
+        "locked_impl": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "hyperloom.phase_changed": {
+      "type": "object",
+      "required": [
+        "from",
+        "to",
+        "macro_cycle"
+      ],
+      "properties": {
+        "from": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "to": {
+          "type": "string"
+        },
+        "macro_cycle": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "hyperloom.measurement_started": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "purpose",
+        "role",
+        "sandbox_id"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "sandbox_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "hyperloom.measurement_finished": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "purpose",
+        "role",
+        "sandbox_id",
+        "returncode",
+        "failure_class",
+        "duration_sec"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "sandbox_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "returncode": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "failure_class": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "duration_sec": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "hyperloom.node_quarantined": {
+      "type": "object",
+      "required": [
+        "node_name",
+        "reason",
+        "request_ids"
+      ],
+      "properties": {
+        "node_name": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "request_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "hyperloom.candidate_settled": {
+      "type": "object",
+      "required": [
+        "task_id",
+        "action",
+        "decision",
+        "gain_pct"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string"
+        },
+        "action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "decision": {
+          "type": "string"
+        },
+        "gain_pct": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "hyperloom.best_updated": {
+      "type": "object",
+      "required": [
+        "metric",
+        "value",
+        "gain_pct",
+        "patch_count",
+        "request_id"
+      ],
+      "properties": {
+        "metric": {
+          "type": "string"
+        },
+        "value": {
+          "type": "number"
+        },
+        "gain_pct": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "patch_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "request_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "hyperloom.budget": {
+      "type": "object",
+      "required": [
+        "elapsed_min",
+        "max_min",
+        "tokens",
+        "gpu_sec"
+      ],
+      "properties": {
+        "elapsed_min": {
+          "type": "number",
+          "minimum": 0
+        },
+        "max_min": {
+          "type": "number",
+          "minimum": 0
+        },
+        "tokens": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "gpu_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "hyperloom.warning": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "hyperloom.campaign_finished": {
+      "type": "object",
+      "required": [
+        "stop_reason",
+        "best",
+        "report_path"
+      ],
+      "properties": {
+        "stop_reason": {
+          "type": "string"
+        },
+        "best": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "report_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "hyperloom.campaign_failed": {
+      "type": "object",
+      "required": [
+        "error"
+      ],
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "stop_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

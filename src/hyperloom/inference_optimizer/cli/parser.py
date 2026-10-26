@@ -16,7 +16,8 @@ from .. import framework_registry
 from .constraint_args import add_constraint_arguments
 from .gpu_power_args import add_gpu_power_arguments
 from .backends import CRITIC_PROTOCOL_CHOICES
-from .recover import RECOVER_DESCRIPTION, RECOVER_HELP, add_cleanup_confirmation_arguments
+from .recover import add_recover_subparser
+from .session_target import add_session_dir_argument
 from hyperloom.common import predictor_config
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
@@ -1165,23 +1166,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
 
-    rec = sub.add_parser(
-        "recover",
-        parents=[common],
-        help=RECOVER_HELP,
-        description=RECOVER_DESCRIPTION,
-    )
-    rec.add_argument(
-        "--session-dir",
-        type=Path,
-        required=True,
-        help="Session directory of the crashed run (contains state.json / reports/trace/ and the recorder fragments).",
-    )
-    rec.add_argument(
-        "--force",
-        action="store_true",
-        help="Re-run even when the session already looks complete (close_sequence_done / breakdown already recorded).",
-    )
-    add_cleanup_confirmation_arguments(rec)
+    add_session_dir_argument(opt)
+    add_recover_subparser(sub, common)
 
     return p
