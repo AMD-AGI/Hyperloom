@@ -644,6 +644,46 @@ def _custom_specialist_fields(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _research_lane_capacity(args: argparse.Namespace) -> int:
+    """The session's research_lane capacity, locked for the session and clamped to [0, ceiling]."""
+    from hyperloom.orchestrator.policy.gate import research_lane_ceiling
+
+    research_lane_capacity = int(getattr(args, "research_lane_capacity", 1) or 1)
+    return max(0, min(research_lane_ceiling(), research_lane_capacity))
+
+
+def _gpu_specialist_capacity(args: argparse.Namespace) -> int:
+    """The session's GPU specialist capacity: the requested one, else the visible GPU count."""
+    from hyperloom.common.visible_devices import detect_gpu_count
+
+    requested = getattr(args, "gpu_specialist_capacity", None)
+    try:
+        return max(0, int(requested) if requested is not None else detect_gpu_count())
+    except (TypeError, ValueError):
+        return detect_gpu_count()
+
+
+def _plateau_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    """The plateau threshold overrides the operator passed; absent keys use defaults at compute time."""
+    plateau_overrides: dict[str, Any] = {}
+    if getattr(args, "plateau_explore_keep_gain", None) is not None:
+        plateau_overrides["explore_keep_gain_pct"] = float(args.plateau_explore_keep_gain)
+    if getattr(args, "plateau_explore_empty_streak", None) is not None:
+        plateau_overrides["explore_empty_streak"] = int(args.plateau_explore_empty_streak)
+    if getattr(args, "plateau_explore_lookback", None) is not None:
+        plateau_overrides["explore_lookback"] = int(args.plateau_explore_lookback)
+    return plateau_overrides
+
+
+def _agentx_backend_seed() -> str:
+    """The AgentX backend a fresh session records; "" when AgentX is off."""
+    if not _agentx_enabled():
+        return ""
+    from hyperloom.common.agentx_workload import agentic_backend
+
+    return agentic_backend()
+
+
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
@@ -653,35 +693,9 @@ def _seed_shared_state(
     gpu_power_settings: dict[str, Any] | None = None,
 ) -> SharedState:
     """Construct and persist the initial :class:`SharedState` for a run."""
-    # research_lane capacity is locked for the session; clamp to [0, ceiling].
-    from hyperloom.common.visible_devices import detect_gpu_count
-    from hyperloom.orchestrator.policy.gate import research_lane_ceiling
-
-    research_lane_capacity = int(getattr(args, "research_lane_capacity", 1) or 1)
-    research_lane_capacity = max(
-        0,
-        min(research_lane_ceiling(), research_lane_capacity),
-    )
-    gpu_specialist_capacity_raw = getattr(
-        args,
-        "gpu_specialist_capacity",
-        None,
-    )
-    try:
-        gpu_specialist_capacity = max(
-            0,
-            int(gpu_specialist_capacity_raw) if gpu_specialist_capacity_raw is not None else detect_gpu_count(),
-        )
-    except (TypeError, ValueError):
-        gpu_specialist_capacity = detect_gpu_count()
-    # Collect plateau threshold overrides; absent keys use defaults at compute time.
-    plateau_overrides: dict[str, Any] = {}
-    if getattr(args, "plateau_explore_keep_gain", None) is not None:
-        plateau_overrides["explore_keep_gain_pct"] = float(args.plateau_explore_keep_gain)
-    if getattr(args, "plateau_explore_empty_streak", None) is not None:
-        plateau_overrides["explore_empty_streak"] = int(args.plateau_explore_empty_streak)
-    if getattr(args, "plateau_explore_lookback", None) is not None:
-        plateau_overrides["explore_lookback"] = int(args.plateau_explore_lookback)
+    research_lane_capacity = _research_lane_capacity(args)
+    gpu_specialist_capacity = _gpu_specialist_capacity(args)
+    plateau_overrides = _plateau_overrides(args)
 
     # Resolve int workload knobs from the CLI arg, applying the shared fallback default when unset.
     def _int_arg(arg_name: str, default: int) -> int:
@@ -707,16 +721,11 @@ def _seed_shared_state(
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
     benchmark_mode = "agentx" if _agentx_enabled() else "synthetic"
-    if _agentx_enabled():
-        from hyperloom.common.agentx_workload import agentic_backend
-
-        agentx_backend = agentic_backend()
-    else:
-        agentx_backend = ""
+    agentx_backend = _agentx_backend_seed()
     state = SharedState(
         session_id=session_id,
-        claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
-        sandbox_user_id=(os.environ.get("SANDBOX_USER_ID") or "").strip(),
+        claw_session_id=os.environ.get("CLAW_SESSION_ID", "").strip(),
+        sandbox_user_id=os.environ.get("SANDBOX_USER_ID", "").strip(),
         model_name=_model_identity,
         model_path=str(args.model),
         model_class=args.model_class or "",

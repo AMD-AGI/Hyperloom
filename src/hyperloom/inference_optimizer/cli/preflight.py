@@ -623,41 +623,46 @@ def _ray_smoke(python_exe: str, ray_version: str = "", click_max_version: str = 
     )
 
 
+def _pip_install_ray(python_exe: str, pip_extra: list[str], specs: tuple[str, ...]) -> subprocess.CompletedProcess:
+    """Quietly pip-install ``specs`` into ``python_exe``, capturing pip's output."""
+    return subprocess.run(
+        [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs], capture_output=True, text=True
+    )
+
+
+def _ray_outcome(status: str, python_exe: str, spec: str, version_after: str, message: str | None) -> dict[str, Any]:
+    """The ``ensure_ray`` install-step outcome."""
+    return {
+        "status": status,
+        "skip_reason": None,
+        "target": "ray",
+        "interpreter": python_exe,
+        "spec": spec,
+        "version_after": version_after,
+        "message": message,
+    }
+
+
 def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     """Probe-then-install Ray using the interpreter that will import it."""
-    ray_version = os.environ.get("RAY_VERSION") or ""
-    click_override = os.environ.get("RAY_CLI_CLICK_MAX_VERSION") or ""
-    ray_spec = f"ray[default]=={ray_version or _RAY_MIN_VERSION}"
+    ray_version = os.environ.get("RAY_VERSION", "")
+    click_override = os.environ.get("RAY_CLI_CLICK_MAX_VERSION", "")
+    ray_pin = ray_version or _RAY_MIN_VERSION
+    ray_spec = f"ray[default]=={ray_pin}"
     click_spec = f"click<{click_override or _RAY_CLI_CLICK_MAX_VERSION}"
     check = _ray_smoke(python_exe, ray_version, click_override)
     if check.returncode == 0:
         print("Preflight: ray OK")
-        return {
-            "status": "already_present",
-            "skip_reason": None,
-            "target": "ray",
-            "interpreter": python_exe,
-            "spec": ray_spec,
-            "version_after": (check.stdout or "").strip() or ray_version or _RAY_MIN_VERSION,
-            "message": None,
-        }
+        return _ray_outcome("already_present", python_exe, ray_spec, (check.stdout or "").strip() or ray_pin, None)
     reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip().splitlines()[-1]
     print(f"Preflight: ray/click invalid ({reason}), installing {ray_spec} + {click_spec} ...")
     specs: tuple[str, ...] = (ray_spec, click_spec)
-    install = subprocess.run(
-        [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
-        capture_output=True,
-        text=True,
-    )
+    install = _pip_install_ray(python_exe, pip_extra, specs)
     if install.returncode != 0 and not ray_version:
         # Preserve an explicit Click ceiling; the default only guards 2.44.1.
         specs = (f"ray[default]>={_RAY_MIN_VERSION}",) + ((click_spec,) if click_override else ())
         print(f"Preflight: {ray_spec} does not resolve for {python_exe}; retrying with {' '.join(specs)}")
-        install = subprocess.run(
-            [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
-            capture_output=True,
-            text=True,
-        )
+        install = _pip_install_ray(python_exe, pip_extra, specs)
     if install.returncode != 0:
         detail = (install.stderr or install.stdout or "no pip output").strip()
         raise RuntimeError(f"Ray install failed for {' '.join(specs)}: {detail}")
@@ -665,17 +670,9 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     if check.returncode != 0:
         reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip()
         raise RuntimeError(f"Ray install completed but smoke test still failed: {reason}")
-    version_after = (check.stdout or "").strip() or ray_version or _RAY_MIN_VERSION
+    version_after = (check.stdout or "").strip() or ray_pin
     print(f"Preflight: ray installed OK ({version_after})")
-    return {
-        "status": "applied",
-        "skip_reason": None,
-        "target": "ray",
-        "interpreter": python_exe,
-        "spec": " ".join(specs),
-        "version_after": version_after,
-        "message": reason,
-    }
+    return _ray_outcome("applied", python_exe, " ".join(specs), version_after, reason)
 
 
 # InferenceX benchmark_serving client-side deps.
