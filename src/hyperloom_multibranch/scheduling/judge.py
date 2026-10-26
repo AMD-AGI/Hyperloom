@@ -102,9 +102,10 @@ events lists what happened since your last call that changes what the running br
 once when one happens. integration_moved: a merge moved the integration head by gain_pct, at least {MB_BIG_GAIN_BARS}
 times the bar threshold_pct it was judged against, or merged a foundation fix (foundation_fix true), which merges
 whatever its gain because the other branches build on what it fixes. A branch's behind_integration_pct is how far its
-head's recorded value lies below the integration head's, in percent of the root's value: a branch far behind gains
-little even once merged, so it is a candidate to stop, and a branch you open now starts from the new integration
-head.
+head's recorded value lies below the integration head's, in percent of the root's value. A branch far behind whose
+judged_since_commit has reached {STALL_TESTS} gains little even once merged, so it is a candidate to stop. A branch
+whose judged_since_commit is below {STALL_TESTS} is not stalling: lying behind is no reason to stop it, as the commits it
+goes on making are what the integrator merges. A branch you open now starts from the new integration head.
 stranded_leads lists, the largest lead first, each branch whose head leads the integration head by more than the bar
 on the metric while commits of its own failed to merge: skipped as a conflict, or tested and not stackable. Each line
 names those commits with their gain, why their last merge failed and how many merges they took part in. While a lead

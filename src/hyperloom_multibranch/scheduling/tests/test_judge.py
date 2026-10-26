@@ -293,6 +293,20 @@ def test_the_prompt_shows_and_explains_the_events_and_how_far_each_branch_lies_b
     assert "or merged a foundation fix (foundation_fix true), which merges whatever its gain" in prompt
 
 
+def test_the_prompt_makes_a_branch_behind_integration_a_stop_candidate_only_once_it_stalls() -> None:
+    prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
+
+    assert (
+        f"A branch far behind whose judged_since_commit has reached {STALL_TESTS} gains little even once merged, so "
+        "it is a candidate to stop."
+    ) in prompt
+    assert (
+        f"A branch whose judged_since_commit is below {STALL_TESTS} is not stalling: lying behind is no reason to "
+        "stop it"
+    ) in prompt
+    assert "a branch far behind gains little even once merged, so it is a candidate to stop" not in prompt
+
+
 def _lead(branch: str, lead_pct: float, commit: StrandedCommit) -> StrandedLead:
     value = 100.0 * (1.0 + lead_pct / 100.0)
     return StrandedLead(branch, True, f"c-{branch}", METRIC, value, 100.0, lead_pct, 1.6, (commit,))
