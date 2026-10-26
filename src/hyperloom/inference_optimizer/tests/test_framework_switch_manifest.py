@@ -1125,3 +1125,40 @@ async def test_an_inert_lever_carries_the_change_its_round_measured(tmp_path, mo
         ("HL_HOIST", gain_pct(106.65, 108.97)),
         ("HL_CACHE", gain_pct(106.65, 108.97)),
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_switched_patch_marked_for_the_cycle_screen_is_committed_dormant_without_a_bench(tmp_path, monkeypatch):
+    """The cycle bench screens its levers later, so admission spends no replay and writes no lesson."""
+    import subprocess
+
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import SCREEN_CYCLE, SCREEN_PARAM
+
+    result, repo, _, legs = await _run_rewrite_integrate(
+        tmp_path, monkeypatch, delta_pct=0.2, extra_params={SCREEN_PARAM: SCREEN_CYCLE}
+    )
+
+    assert legs == []
+    assert result["status"] == "kept_inert"
+    assert result[SCREEN_PARAM] == SCREEN_CYCLE
+    assert result["framework_lever_outcome"] == "registered_off"
+    assert [row["switch"] for row in result["framework_levers"]] == ["HL_HOIST", "HL_CACHE"]
+    assert result["extra_envs_applied"] == {}
+    assert result["switch_off_parity"]["ran"] is False
+    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True)
+    assert status.stdout.strip() == ""
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_an_unswitched_patch_marked_for_the_cycle_screen_is_still_benched(tmp_path, monkeypatch):
+    """Without switches there is no dormant state to admit, so the round benches and grades as before."""
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import SCREEN_CYCLE, SCREEN_PARAM
+
+    result, repo, _, legs = await _run_rewrite_integrate(
+        tmp_path, monkeypatch, delta_pct=0.2, switches=[], extra_params={SCREEN_PARAM: SCREEN_CYCLE}
+    )
+
+    assert len(legs) == 1
+    assert result["status"] == "reverted"
+    assert (repo / "src.py").read_text().endswith("return 1\n")

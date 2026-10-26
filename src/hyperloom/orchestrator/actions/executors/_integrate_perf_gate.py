@@ -37,6 +37,7 @@ from ._integrate_results import (
     _perf_revert,
     _revert_status,
 )
+from ._integrate_vocabulary import SCREEN_CYCLE, SCREEN_PARAM
 from ._patch_git import _uncommitted_revert
 from ._patch_sources import _done_field
 
@@ -50,6 +51,9 @@ _AGENTIC_PARITY_NOT_BENCHED = (
     "switch-off parity not benched under an agentic replay: one leg is a full replay hour and the replay's run-to-run "
     "drift is wider than the parity band, so the leg could only revert on noise"
 )
+
+
+_PARITY_DEFERRED_TO_CYCLE_BASE = "switch-off parity deferred to the next cycle batch, whose base runs this tree"
 
 
 def _graded_change(graded: Any, delta_pct: float | None) -> float | None:
@@ -506,6 +510,26 @@ class PerfGateMixin:
             "reason": f"switch-off parity within +/-{band_pct:.2f}% ({delta_pct:+.2f}%)",
         }
 
+    async def _admit_dormant(self, attempt: IntegrateAttempt, params: dict[str, Any], extra: dict[str, Any]) -> dict:
+        """Commit an applied switched patch dormant without a bench, for the cycle bench to screen its levers.
+
+        Inertness with every switch unset is shown by the next cycle batch, whose base runs this tree.
+        """
+        measured = _PatchMeasurement(
+            bench_result={},
+            new_tput=None,
+            delta_pct=None,
+            base_tput=float(params.get("base_tput") or 0.0),
+            keep_threshold_pct=float(params.get("keep_threshold_pct", self.keep_threshold_pct)),
+            accuracy_pass=None,
+            acc_delta_pct=None,
+            cfg_fingerprint=canonical_fingerprint(params.get("extra_server_args"), params.get("extra_envs")),
+            measured_against={},
+        )
+        parity = {"ran": False, "ok": True, "reason": _PARITY_DEFERRED_TO_CYCLE_BASE}
+        result = await self._keep_inert_switches(attempt, measured, params=params, extra=extra, parity=parity)
+        return {**result, SCREEN_PARAM: SCREEN_CYCLE}
+
     async def _keep_inert_switches(
         self,
         attempt: IntegrateAttempt,
@@ -559,12 +583,13 @@ class PerfGateMixin:
         from ...knowledge import kb_writeback as _kb
 
         enablers = [entry["switch"] for entry in switch_manifest if entry.get("enabler")]
-        await self._maybe_write_framework_kb_record(
-            measured.lesson(_kb.OUTCOME_KEPT_INERT),
-            done_payload=attempt.done_payload,
-            params=params,
-            extra=extra,
-        )
+        if measured.new_tput is not None:
+            await self._maybe_write_framework_kb_record(
+                measured.lesson(_kb.OUTCOME_KEPT_INERT),
+                done_payload=attempt.done_payload,
+                params=params,
+                extra=extra,
+            )
         log.info(
             "integrate_patch: KEEP_INERT task=%s delta=%s threshold=%.2f%% levers=%d enablers=%d",
             attempt.specialist_task_id,
