@@ -25,7 +25,6 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from hyperloom_multibranch.contracts.judgement import AccuracyVerdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
 from hyperloom_multibranch.contracts.notebook.peers import Intent, IntentLayer, Purpose, SandboxFacts, TestKind
 from hyperloom_multibranch.contracts.notebook.records import (
@@ -39,11 +38,11 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     COMMITTING,
     BranchDriver,
     CommitOrigin,
-    Conclusion,
     LineageKind,
 )
 from hyperloom_multibranch.notebook.codec import decode, encode
 from hyperloom_multibranch.notebook.local.files import encode_json, publish_once
+from hyperloom_multibranch.notebook.local.unfinished import hinted_gain
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions, task_conditions, task_similarity
 
 log = logging.getLogger(__name__)
@@ -309,17 +308,6 @@ def _environment(snapshot: NotebookSnapshot) -> str:
     return "+".join(sorted({_backend(record) for record in sampled}))
 
 
-def _kept_gain(record: TestRecord) -> float | None:
-    judged = record.judgement
-    if (
-        judged is None
-        or judged.accuracy is not AccuracyVerdict.PASSED
-        or record.conclusion is Conclusion.ACCURACY_FAILED
-    ):
-        return None
-    return judged.gain_pct
-
-
 def _directions(
     records: Sequence[TestRecord], intents: Mapping[str, Intent], cross_image: Collection[str] = ()
 ) -> tuple[TreeDirection, ...]:
@@ -330,7 +318,7 @@ def _directions(
     directions = []
     for fingerprint, tests in tried.items():
         intent = intents[fingerprint]
-        gains = [gain for gain in map(_kept_gain, tests) if gain is not None]
+        gains = [gain for gain in map(hinted_gain, tests) if gain is not None]
         directions.append(
             TreeDirection(
                 target=intent.target,

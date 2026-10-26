@@ -155,7 +155,9 @@ def test_a_replay_of_a_champion_built_on_another_image_is_marked_in_the_tree(
     assert [item.cross_image for item in plain.directions] == [False]
 
 
-def test_a_gain_judged_without_its_eval_is_not_the_best_gain_of_its_direction(snapshot: NotebookSnapshot) -> None:
+def test_a_gain_judged_without_its_eval_is_its_directions_best_gain_only_below_its_bar(
+    snapshot: NotebookSnapshot,
+) -> None:
     def unmeasured(record: TestRecord) -> TestRecord:
         if record.judgement is None:
             return record
@@ -165,8 +167,14 @@ def test_a_gain_judged_without_its_eval_is_not_the_best_gain_of_its_direction(sn
 
     unjudged = dataclasses.replace(snapshot, records=tuple(map(unmeasured, snapshot.records)))
     branches = tree_from_snapshot(unjudged, METRIC).branches
+    best = {(branch.name, item.target): item.best_gain_pct for branch in branches for item in branch.directions}
 
-    assert [direction.best_gain_pct for branch in branches for direction in branch.directions] == [None] * 4
+    assert best == {
+        ("s1", "moe gemm"): 0.3,
+        ("s2", "attention"): -2.0,
+        ("s2", "scheduler"): None,
+        ("s2", "kv cache"): None,
+    }
 
 
 def test_a_tree_written_before_stop_reasons_and_directions_still_reads(snapshot: NotebookSnapshot) -> None:

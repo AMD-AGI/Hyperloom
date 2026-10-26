@@ -82,13 +82,27 @@ def _explore(record: TestRecord) -> bool:
     return request.kind is TestKind.TEST and request.purpose is Purpose.EXPLORE and request.branch != INTEGRATION_BRANCH
 
 
-def _near_bar(record: TestRecord) -> bool:
+def hinted_gain(record: TestRecord) -> float | None:
+    """The gain ``record``'s judgement lets a hint rank by, a near-bar lead or a direction's best gain: one whose
+    accuracy passed, or one below its bar whose eval did not run, since an explore short of its bar skips it; above
+    the bar only the confirm's passed eval counts, so a fast but wrong change ranks nothing. ``None`` otherwise."""
+
     judgement = record.judgement
+    if judgement is None or record.conclusion is Conclusion.ACCURACY_FAILED:
+        return None
+    if judgement.accuracy is AccuracyVerdict.PASSED:
+        return judgement.gain_pct
+    below = judgement.accuracy is AccuracyVerdict.NOT_MEASURED and judgement.gain_pct < judgement.threshold_pct
+    return judgement.gain_pct if below else None
+
+
+def _near_bar(record: TestRecord) -> bool:
+    judgement, gain = record.judgement, hinted_gain(record)
     return (
         judgement is not None
+        and gain is not None
         and record.conclusion is Conclusion.RECORDED_ONLY
-        and judgement.accuracy is AccuracyVerdict.PASSED
-        and judgement.threshold_pct * NEAR_BAR_SHARE < judgement.gain_pct < judgement.threshold_pct
+        and judgement.threshold_pct * NEAR_BAR_SHARE < gain < judgement.threshold_pct
     )
 
 
@@ -259,4 +273,11 @@ def _distinct(
     return kept
 
 
-__all__ = ["MAX_UNFINISHED", "NEAR_BAR_SHARE", "STOP_RELEASE_SECONDS", "refused_replays", "unfinished_leads"]
+__all__ = [
+    "MAX_UNFINISHED",
+    "NEAR_BAR_SHARE",
+    "STOP_RELEASE_SECONDS",
+    "hinted_gain",
+    "refused_replays",
+    "unfinished_leads",
+]
