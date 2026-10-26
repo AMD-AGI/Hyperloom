@@ -8,7 +8,8 @@ Every fresh session starts at the branch head, with the worktree synced to it an
 rebuilt at that head when the setup can, and the branch log. A Claude CLI keeps its stdin open and lives across turns:
 when a turn ends, the session waits, keeping its heartbeat, until something arrives for the branch (an inbox item or a
 runtime notice) and sends it to the CLI as the next message, so the model goes on with its whole conversation. A turn
-that ends with no test of the branch running waits a patience for something to arrive, and is nudged when nothing did;
+that ends with no test of the branch in flight (one waiting on its native builds is) waits a patience for something to
+arrive, and is nudged when nothing did;
 ``IDLE_TURNS`` such turns in a row end the session with :class:`SessionIdle`, which is no crash. A turn that called
 tools counts half: a model reading, writing a patch or having a claim refused is working, yet one that never submits
 still ends.

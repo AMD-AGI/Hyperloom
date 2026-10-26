@@ -6,11 +6,13 @@ import json
 import os
 import sys
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.contracts.measurement import Purpose, TestKind
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
+from hyperloom.hosted.mcp_server import McpPrincipal, ReplyCall
 from hyperloom.contracts.recipe import ComponentPatches, ConfigDelta, LaunchConfig, Recipe, RecipeDelta, apply
 from hyperloom.orchestrator.specialists.agent_runner import AgentEnded, AgentHandle, AgentStatus, LocalAgentRunner
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
@@ -39,6 +41,9 @@ from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart, restart_notice
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 from hyperloom_multibranch.tests.following_rig import diverged
+from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
+from hyperloom_multibranch.toolbox.fake_builds import FakeBuild, FakeBuildDriver, FakeBuildEnd
+from hyperloom_multibranch.toolbox.mcp_tools import REPLY_INBOX_HEADER, reply_inbox
 
 BRANCH, TOKEN_ENV, FIRST_PID = "s1", "HYPERLOOM_SPECIALIST_MCP_TOKEN", 4000
 ROOT = Recipe(
@@ -435,6 +440,80 @@ async def test_what_arrives_within_the_patience_wakes_the_model_instead_of_a_nud
     await asyncio.wait_for(running, 1)
 
     assert "3 tests running at once" in rig.runner.sent[0] and "nothing new" not in rig.runner.sent[0]
+
+
+def _building(rig) -> tuple[FakeToolbox, FakeBuildDriver]:
+    """A fake toolbox writing to the rig's notebook whose every test needs a held sgl_kernel build."""
+    driver = FakeBuildDriver()
+    driver.need(lambda request: True, "sgl_kernel")
+    driver.gate.clear()
+    box = FakeToolbox(notebook=rig.toolbox_notebook, autorun=False, wiring=FakeWiring(builds=driver))
+    return box, driver
+
+
+def _native_test(rig) -> TestRequest:
+    return replace(request("n1", intent(BRANCH, rig.root)), request_id=None, intent_fingerprint=None)
+
+
+async def test_a_test_waiting_on_its_build_keeps_the_turn_from_counting_idle_and_the_build_wakes_it(rig):
+    box, driver = _building(rig)
+    session = rig.session(nudge_waits_s=NO_WAITS)
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+    request_id = await box.submit_test(_native_test(rig))
+    assert (await box.queue_state()).pending_build_by_branch == {BRANCH: 1}
+
+    _end_turn(rig)
+    beats = rig.runner.beats
+    await _until(lambda: rig.runner.beats > beats + 20, "the turn's wait, beating")
+    assert rig.runner.sent == [] and not running.done()
+    driver.gate.set()
+    await _until(lambda: len(rig.runner.sent) == 1, "the build to wake the CLI")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+    await box.close()
+
+    assert f"- build {request_id}: build sgl_kernel " in rig.runner.sent[0]
+    assert f" ready for {request_id}\n" in rig.runner.sent[0]
+
+
+async def test_a_build_the_machine_failed_wakes_the_cli_with_its_detail(rig):
+    box, driver = _building(rig)
+    driver.script("sgl_kernel", FakeBuild(FakeBuildEnd.INFRA, "the build runner was lost"))
+    session = rig.session(nudge_waits_s=NO_WAITS)
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+    request_id = await box.submit_test(_native_test(rig))
+
+    _end_turn(rig)
+    driver.gate.set()
+    await _until(lambda: len(rig.runner.sent) == 1, "the build's failure to wake the CLI")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+    await box.close()
+
+    assert f" failed for {request_id}: BuildInfraError: the build" in rig.runner.sent[0]
+
+
+async def test_a_build_item_reaches_the_next_tool_reply_unless_that_reply_carries_its_test(rig):
+    box, driver = _building(rig)
+    request_id = await box.submit_test(_native_test(rig))
+    annotate = reply_inbox(lambda branch: rig.notebook)
+    principal = McpPrincipal("specialist", BRANCH, BRANCH)
+
+    def call(tool: str, **arguments) -> ReplyCall:
+        return ReplyCall(principal, tool, arguments, is_error=False)
+
+    start = (await annotate(call("notebook_brief"), None)).cursor
+    driver.gate.set()
+    await box.drain()
+    shown = await annotate(call("notebook_brief"), start)
+    hidden = await annotate(call("wait_test", request_id=request_id), start)
+    await box.close()
+
+    assert shown.text.splitlines()[0] == REPLY_INBOX_HEADER
+    assert shown.text.splitlines()[1].startswith(f"build {request_id}: build sgl_kernel ")
+    assert hidden.text == "" and hidden.cursor == shown.cursor
 
 
 async def test_each_turn_records_the_tokens_it_added(rig):

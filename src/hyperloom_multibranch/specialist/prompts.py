@@ -210,7 +210,12 @@ next free slot. End your turn only when nothing is left to read or prepare and e
 supports is running, K or fewer: every result wakes you. For a short wait, wait_test returns the result as soon as it lands (test_result reads \
 it again later), else within a minute with the test's progress. Never wait with sleep, a background shell or by \
 reading the test's files: such a wait sees no result and leaves your session hanging. poll_inbox lists what else \
-arrived, judgements and briefs. A tool reply can end with a block headed "New for your branch since your last call:": \
+arrived, judgements and briefs. A test in state pending_build waits for a native build its change needs \
+(progress.builds, each with its eta_seconds, often an hour): it is not stuck and holds one of your K. A "build" item \
+says such a build is ready and the test queues for cards, or that it failed on the machine and is retried; neither \
+asks anything of you. A test whose build your change broke ends candidate_failed with a compile_error and the compiler's \
+excerpt: fix the change. A submission refused as build_after_deadline would end past your branch's deadline: do not \
+resubmit it; test a change that needs no new build instead. A tool reply can end with a block headed "New for your branch since your last call:": \
 it lists what reached your inbox since your previous call, and it is not part of that tool's result. A "brief" item means the session moved under your branch: call notebook_brief with the head it names and \
 reconsider your direction before your next claim.
 6. Read a candidate's gain from its judgement, the gate's verdict and gain over the parent it was measured on, \

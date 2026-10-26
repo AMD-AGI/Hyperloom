@@ -236,6 +236,16 @@ def test_the_role_keeps_working_after_submit_test_and_ends_the_turn_only_with_k_
     assert "Never wait with sleep, a background shell or by reading the test's files" in prompt
 
 
+def test_the_role_says_what_a_pending_build_its_build_item_and_its_refusals_mean():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "A test in state pending_build waits for a native build its change needs" in prompt
+    assert "it is not stuck and holds one of your K" in prompt
+    assert 'A "build" item says such a build is ready and the test queues for cards, or that it failed on ' in prompt
+    assert "A test whose build your change broke ends candidate_failed with a compile_error" in prompt
+    assert "build_after_deadline would end past your branch's deadline" in prompt
+
+
 def test_the_role_says_the_inbox_block_a_tool_reply_ends_with_is_not_the_tool_s_result():
     prompt = role_prompt(WORKLOAD)
 
