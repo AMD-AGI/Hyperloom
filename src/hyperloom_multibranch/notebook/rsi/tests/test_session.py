@@ -28,7 +28,7 @@ from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, Polic
 from hyperloom_multibranch.notebook.rsi.expression import ExpressionScorer
 from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1, FRONTIER_V1_LABEL, FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, Retrieval, RetrievalLog, RetrievalSource
-from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_history
+from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_stall_odds
 from hyperloom_multibranch.notebook.rsi.lessons import (
     LessonPool,
     LessonRevision,
@@ -395,11 +395,14 @@ def test_a_challenger_session_picks_the_best_pooled_scorer_without_crowning(
     assert none_yet is None and none_empty is None
 
 
-def test_the_judge_reads_the_digest_of_the_archived_sessions_and_nothing_without_any(
+def test_the_judge_reads_the_stall_odds_of_the_archive_and_of_the_session_itself(
     snapshot: NotebookSnapshot,
 ) -> None:
-    digest = session_history(snapshot, (PAST,), METRIC, budget_seconds=BUDGET)
+    odds = session_stall_odds(snapshot, (PAST,), METRIC)
+    alone = session_stall_odds(snapshot, (), METRIC)
 
-    assert judge_history(snapshot, (), METRIC, budget_seconds=BUDGET) == ""
-    assert judge_history(snapshot, (PAST,), METRIC, budget_seconds=BUDGET) == digest.render(MAX_CHARS)
+    assert odds is not None and alone is not None
+    assert (odds.sessions, alone.sessions) == (1, 0)
+    assert judge_history(snapshot, (PAST,), METRIC, budget_seconds=BUDGET) == odds.render(MAX_CHARS)
+    assert judge_history(dataclasses.replace(snapshot, profile=None), (PAST,), METRIC, budget_seconds=BUDGET) == ""
     assert len(judge_history(snapshot, (PAST,), METRIC, budget_seconds=BUDGET, max_chars=80)) <= 80

@@ -18,7 +18,8 @@
   :func:`named_frontier_choice` is the choice a label names, as a manifest records it or ``--frontier-scorer`` asks
   for it. The scheduler holds the chosen scorer in one ``ScorerGuard`` a session, which stands ``frontier-v1`` in
   where it fails.
-* :func:`judge_history` is the history digest the judge reads every round, as text; empty while nothing is archived.
+* :func:`judge_history` is the stall odds the judge reads every round, as text (:mod:`rsi.history`): how often a
+  stalled branch and a new one went on to commit, here and in the archived sessions, and the stop bar they set.
 
 Passed no KB or archive, each step uses the environment's: the Experience KB ``HYPERLOOM_KB_URL`` names, and the
 archive ``HYPERLOOM_RSI_ARCHIVE`` names.
@@ -61,7 +62,7 @@ from hyperloom_multibranch.notebook.rsi.calibration import (
 )
 from hyperloom_multibranch.notebook.rsi.expression import ExpressionError
 from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, FrontierPolicy
-from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_history
+from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_stall_odds
 from hyperloom_multibranch.notebook.rsi.lesson_close import publish_lessons, session_standings
 from hyperloom_multibranch.notebook.rsi.lessons import LessonPool
 from hyperloom_multibranch.notebook.rsi.scorers import (
@@ -414,14 +415,16 @@ def judge_history(
     budget_seconds: float,
     max_chars: int = MAX_CHARS,
 ) -> str:
-    """How similar archived sessions went, for the judge this round, in at most ``max_chars``; empty without any.
+    """The stall odds the stop rule rests on, for the judge this round, in at most ``max_chars``: from the archived
+    sessions and this one's own branches so far; empty before the session has a profile and a baseline.
 
-    Pass the scoring's own history, so the archive is read once a session.
+    Pass the scoring's own history, so the archive is read once a session. ``budget_seconds`` is kept for the
+    scheduler's call; the odds count judged tests, not shares of the budget.
     """
 
-    if not history:
-        return ""
-    return session_history(snapshot, history, metric, budget_seconds=budget_seconds).render(max_chars)
+    del budget_seconds
+    odds = session_stall_odds(snapshot, history, metric)
+    return odds.render(max_chars) if odds is not None else ""
 
 
 __all__ = [

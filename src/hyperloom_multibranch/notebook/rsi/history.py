@@ -1,409 +1,369 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A digest of the archived sessions like this one, for the scheduler's judge to weigh beside the frontier scores.
+"""How branches like this session's went on, for the scheduler's judge and the stop rule it applies.
 
-The frontier prior folds history into one number per branch; the judge also decides how many branches to open, what
-K to give them and when the session has done what such sessions do. :func:`history_digest` answers that from the
-archive: how many similar sessions there are and where they came from; how much of their final gain they had by a
-quarter, half and three quarters of their budget, sessions being compared on the fraction of their own budget; their
-final gain, median and p90; from multi-branch sessions only (a backfilled session has one line of work), how many
-branches they opened, how many of those committed, at which test the first commit came, how many branches still
-without a commit after 4 and after 8 tests committed later, and why branches were stopped; the directions that paid
-off most; and, given where this session stands, the median similar session at the same fraction of its budget.
+The judge stops a branch on its stall: the judged tests it has run past its last commit. Stopping trades the
+branch's next tests for a new branch's, so :func:`stall_odds` reads two curves off the archived search trees, one
+observation for every judged test:
 
-Every statistic weighs a session by its similarity, and only sessions at least half similar count; with fewer than
-1.5 sessions' worth, the digest says history is too thin rather than draw from it. The judge, and gongzheng, decide
-what to make of it. :func:`session_history` digests the history for a running session from its own snapshot.
+* ``h(j)``, how often a branch's ``j``-th judged test past its last commit committed;
+* ``g(i)``, how often a new branch's ``i``-th judged test committed while it had not committed yet.
+
+From them, ``p(k)``, the odds that a branch stalled ``k`` tests commits within its next :data:`HORIZON_TESTS`, is
+``1 - (1 - h(k+1)) ... (1 - h(k+HORIZON_TESTS))``, and ``q``, the odds a new branch commits within its first
+:data:`HORIZON_TESTS`, the same product over ``g``. Counting each test once, rather than whole windows, keeps a branch
+the judge stopped early as evidence for the tests it did run. The stop bar, :attr:`StallOdds.stall_tests`, is the
+first ``k`` from :data:`MIN_STALL_TESTS` on whose ``p(k)`` falls below ``q``. Where too few branches ran that far to
+read ``p(k)``, the bar is that ``k``, and :data:`DEFAULT_STALL_TESTS` at least: the archive cannot show keeping such a
+branch is worse, so it is kept until probation shows more. The odds also give the median time from a branch's opening
+to its first commit, which tells the judge when a branch opened late has no time left to commit.
+
+A session of the same model type weighs 1 and any other :data:`OTHER_MODEL_WEIGHT`; sessions of another workload do
+not count. The archive's weight at each test is capped at :data:`PRIOR_TESTS` observations, so the running session's
+own branches, which count in full, move the odds as it goes. :func:`session_stall_odds` reads them for a running
+session from its own snapshot.
 """
 
 from __future__ import annotations
 
-from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from hyperloom_multibranch.contracts.notebook import NotRecorded
-from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
 from hyperloom_multibranch.contracts.notebook.vocab import CommitOrigin, LineageKind
-from hyperloom_multibranch.notebook.rsi.archive import (
-    SOURCE_NOTEBOOK,
-    SearchTree,
-    TreeBranch,
-    WeightedTree,
-    session_start,
-    similar_trees,
-    tree_from_snapshot,
-)
-from hyperloom_multibranch.notebook.rsi.similarity import MIN_SIMILARITY, TaskConditions
+from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeBranch, tree_from_snapshot
+from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions
 
-PACE_FRACTIONS = (0.25, 0.5, 0.75)
-MEDIAN, P90 = 0.5, 0.9
-NO_COMMIT_AFTER = (4, 8)
-MIN_SESSIONS = 1.5
+#: How many judged tests past a stall, or into a new branch, the odds look for a commit in.
+HORIZON_TESTS = 4
+MIN_STALL_TESTS = 4
+MAX_STALL_TESTS = 10
+DEFAULT_STALL_TESTS = 6
+#: The last test position the curves tell apart; later tests count at this one.
+MAX_POSITION = MAX_STALL_TESTS + HORIZON_TESTS
+#: How much a session of another model type weighs beside one of the same, which weighs 1.
+OTHER_MODEL_WEIGHT = 0.5
+#: The most observations the archive weighs at one test position, so the running session's own move it.
+PRIOR_TESTS = 20.0
+#: The fewest observations, weighted, a test position needs to be read.
+MIN_SEEN = 5.0
 MAX_CHARS = 1500
-TOP_DIRECTIONS = 5
-TOP_STOP_REASONS = 3
+MODEL_TYPE_LABEL = "model_type"
+WORKLOAD_LABEL = "workload"
+DEFAULT_WORKLOAD = "inferencex"
+_SECONDS_PER_MINUTE = 60.0
 
 
 @dataclass(frozen=True)
-class BranchHistory:
-    """What the branches of the similar multi-branch sessions did.
+class Odds:
+    """How often a test committed: ``hits`` of ``seen`` observations, both weighted."""
 
-    ``late_commits`` maps N to (branches that committed later, branches without a commit after N tests).
+    hits: float = 0.0
+    seen: float = 0.0
+
+    @property
+    def rate(self) -> float | None:
+        """``hits`` over ``seen``; ``None`` below :data:`MIN_SEEN` observations."""
+
+        return self.hits / self.seen if self.seen >= MIN_SEEN else None
+
+    def plus(self, other: Odds) -> Odds:
+        return Odds(self.hits + other.hits, self.seen + other.seen)
+
+    def capped(self, cap: float) -> Odds:
+        """These odds worth at most ``cap`` observations, the rate kept."""
+
+        return self if self.seen <= cap else Odds(self.hits * cap / self.seen, cap)
+
+
+def within(curve: Mapping[int, Odds], first: int, tests: int = HORIZON_TESTS) -> float | None:
+    """The odds of a commit within ``tests`` tests from position ``first`` on ``curve``; ``None`` when one of those
+    positions cannot be read."""
+
+    missed = 1.0
+    for position in range(first, first + tests):
+        rate = curve.get(min(position, MAX_POSITION), Odds()).rate
+        if rate is None:
+            return None
+        missed *= 1.0 - rate
+    return 1.0 - missed
+
+
+@dataclass(frozen=True)
+class StallOdds:
+    """The odds a session's stop rule rests on.
+
+    ``hazard`` maps a test position past the last commit to ``h``'s odds, ``new_branch`` a new branch's test position
+    to ``g``'s, ``first_commit_minutes`` is the weighted median time from a branch's opening to its first commit, and
+    ``stall_tests`` the stop bar; ``sessions`` and ``same_model`` say how many archived sessions counted, and how many
+    of this model type, and ``session_tests`` how many judged tests of the running session.
     """
 
     sessions: int
-    mean_opened: float
-    committed_share: float
-    median_first_commit_test: float | None
-    late_commits: dict[int, tuple[int, int]] = field(default_factory=dict)
-    stop_reasons: tuple[tuple[str, int], ...] = ()
+    same_model: int
+    hazard: Mapping[int, Odds] = field(default_factory=dict)
+    new_branch: Mapping[int, Odds] = field(default_factory=dict)
+    first_commit_minutes: float | None = None
+    stall_tests: int = DEFAULT_STALL_TESTS
+    session_tests: int = 0
 
+    def after_stall(self, stall: int) -> float | None:
+        """``p(stall)``: the odds of a commit within :data:`HORIZON_TESTS` more tests after ``stall`` without one."""
 
-@dataclass(frozen=True)
-class DirectionHistory:
-    """One direction across the similar sessions: in how many it was tried, its tests, commits and best gain."""
+        return within(self.hazard, stall + 1)
 
-    target: str
-    mechanism: str
-    layer: IntentLayer | None
-    sessions: int
-    tests: int
-    commits: int
-    best_gain_pct: float | None
+    @property
+    def new_branch_odds(self) -> float | None:
+        """``q``: the odds of a new branch committing within its first :data:`HORIZON_TESTS` tests."""
 
-
-@dataclass(frozen=True)
-class SoFar:
-    """How far this session has come: ``fraction`` of its budget spent (0 to 1), its best gain over its baseline."""
-
-    fraction: float
-    gain_pct: float
-
-
-@dataclass(frozen=True)
-class Standing:
-    """This session's best gain at ``fraction`` of its budget, beside the median similar session's at that fraction."""
-
-    fraction: float
-    gain_pct: float
-    typical_gain_pct: float
-
-
-@dataclass(frozen=True)
-class HistoryDigest:
-    """The digest; ``enough`` is false when the similar sessions are worth fewer than :data:`MIN_SESSIONS`.
-
-    ``pace`` maps a fraction of the budget to the median share of their final gain similar sessions had by then.
-    ``note`` says why a digest is empty when there was nothing to digest from.
-    """
-
-    enough: bool
-    sessions: int
-    effective_sessions: float
-    top_similarities: tuple[float, ...] = ()
-    multi_branch: int = 0
-    backfilled: int = 0
-    pace: dict[float, float] = field(default_factory=dict)
-    median_final_gain_pct: float | None = None
-    p90_final_gain_pct: float | None = None
-    branches: BranchHistory | None = None
-    directions: tuple[DirectionHistory, ...] = ()
-    standing: Standing | None = None
-    note: str = ""
+        return within(self.new_branch, 1)
 
     def render(self, max_chars: int = MAX_CHARS) -> str:
-        """The digest as prompt text of at most ``max_chars``; a line that does not fit is left out, never cut, and
-        a heading is left out with the last of its lines."""
+        """The odds as prompt text of at most ``max_chars``; a line that does not fit is left out, never cut."""
 
         kept: list[str] = []
         used = 0
-        for heading, lines in _sections(self):
-            room = max_chars - used - (len(heading) + 1 if heading else 0)
-            fitting = []
-            for line in lines:
-                if len(line) + 1 <= room:
-                    fitting.append(line)
-                    room -= len(line) + 1
-            if fitting:
-                section = [heading, *fitting] if heading else fitting
-                kept.extend(section)
-                used += sum(len(line) + 1 for line in section)
+        for line in _lines(self):
+            if used + len(line) + 1 <= max_chars:
+                kept.append(line)
+                used += len(line) + 1
         return "\n".join(kept)
+
+
+def _judged(branch: TreeBranch) -> list[float]:
+    """When the branch's tests were judged: their result times, or request times, in a tree archived before that."""
+
+    times = branch.judged_times
+    if times is None:
+        times = branch.ended_times if branch.ended_times is not None else branch.test_times
+    return sorted(times)
+
+
+def _committing(branch: TreeBranch, judged: Sequence[float]) -> set[int]:
+    """The positions in ``judged`` of the tests behind the branch's own commits: the last judged before each."""
+
+    found = set()
+    for commit in branch.commits:
+        if commit.origin is not CommitOrigin.COMMIT:
+            continue
+        before = [index for index, when in enumerate(judged) if when <= commit.t_s]
+        if before:
+            found.add(before[-1])
+    return found
+
+
+def hazard_observations(branch: TreeBranch) -> Iterator[tuple[int, bool]]:
+    """Each judged test of ``branch``, as (its position past the branch's last commit, 1 for the first, whether it
+    committed)."""
+
+    judged = _judged(branch)
+    committing = _committing(branch, judged)
+    position = 0
+    for index in range(len(judged)):
+        position += 1
+        committed = index in committing
+        yield position, committed
+        if committed:
+            position = 0
+
+
+def new_branch_observations(branch: TreeBranch) -> Iterator[tuple[int, bool]]:
+    """The judged tests of ``branch``, opened after the session's root, up to its first commit: (the test's position
+    in the branch, whether it committed); none for the root's branch."""
+
+    if branch.origin is LineageKind.ROOT:
+        return
+    for position, committed in hazard_observations(branch):
+        yield position, committed
+        if committed:
+            return
+
+
+def _first_commit_minutes(branch: TreeBranch) -> float | None:
+    own = [commit.t_s for commit in branch.commits if commit.origin is CommitOrigin.COMMIT]
+    return (min(own) - branch.opened_s) / _SECONDS_PER_MINUTE if own else None
+
+
+def _added(curve: Mapping[int, Odds], position: int, odds: Odds) -> dict[int, Odds]:
+    key = min(position, MAX_POSITION)
+    return {**curve, key: curve.get(key, Odds()).plus(odds)}
 
 
 @dataclass
 class _Tally:
-    sessions: int = 0
-    tests: int = 0
-    commits: int = 0
-    best_gain_pct: float | None = None
+    hazard: dict[int, Odds] = field(default_factory=dict)
+    new_branch: dict[int, Odds] = field(default_factory=dict)
+    first_commits: list[tuple[float, float]] = field(default_factory=list)
+
+    def add(self, tree: SearchTree, weight: float) -> None:
+        for branch in tree.branches:
+            if not branch.steered:
+                continue
+            for position, committed in hazard_observations(branch):
+                self.hazard = _added(self.hazard, position, Odds(weight * committed, weight))
+            for position, committed in new_branch_observations(branch):
+                self.new_branch = _added(self.new_branch, position, Odds(weight * committed, weight))
+            minutes = _first_commit_minutes(branch)
+            if minutes is not None and branch.origin is not LineageKind.ROOT:
+                self.first_commits.append((minutes, weight))
+
+    def capped(self) -> _Tally:
+        return _Tally(
+            {position: odds.capped(PRIOR_TESTS) for position, odds in self.hazard.items()},
+            {position: odds.capped(PRIOR_TESTS) for position, odds in self.new_branch.items()},
+            list(self.first_commits),
+        )
+
+    def plus(self, other: _Tally) -> _Tally:
+        return _Tally(
+            _sum(self.hazard, other.hazard),
+            _sum(self.new_branch, other.new_branch),
+            [
+                *self.first_commits,
+                *other.first_commits,
+            ],
+        )
 
 
-def _quantile(pairs: Sequence[tuple[float, float]], q: float) -> float | None:
-    """The weighted ``q``-quantile of ``(value, weight)`` pairs: the smallest value whose weight reaches ``q``."""
+def _sum(first: Mapping[int, Odds], second: Mapping[int, Odds]) -> dict[int, Odds]:
+    return {key: first.get(key, Odds()).plus(second.get(key, Odds())) for key in sorted({*first, *second})}
 
+
+def _weighted_median(pairs: Sequence[tuple[float, float]]) -> float | None:
     kept = sorted((value, weight) for value, weight in pairs if weight > 0)
     total = sum(weight for _, weight in kept)
     running = 0.0
     for value, weight in kept:
         running += weight
-        if running >= q * total * (1 - 1e-9):
+        if running >= total / 2:
             return value
     return None
 
 
-def _specialists(tree: SearchTree) -> list[TreeBranch]:
-    return [b for b in tree.branches if b.steered and b.origin is not LineageKind.ROOT]
+def stall_bar(hazard: Mapping[int, Odds], new_branch: Mapping[int, Odds]) -> int:
+    """The stop bar the curves set: the first ``k`` from :data:`MIN_STALL_TESTS` whose ``p(k)`` is below ``q``; where
+    ``p(k)`` cannot be read, that ``k`` and :data:`DEFAULT_STALL_TESTS` at least; :data:`DEFAULT_STALL_TESTS` without
+    ``q``."""
+
+    q = within(new_branch, 1)
+    if q is None:
+        return DEFAULT_STALL_TESTS
+    for stall in range(MIN_STALL_TESTS, MAX_STALL_TESTS + 1):
+        p = within(hazard, stall + 1)
+        if p is None:
+            return min(MAX_STALL_TESTS, max(stall, DEFAULT_STALL_TESTS))
+        if p < q:
+            return stall
+    return MAX_STALL_TESTS
 
 
-def _best_by(tree: SearchTree, t_s: float) -> float:
-    return max((c.gain_pct for b in tree.branches for c in b.commits if c.t_s <= t_s), default=0.0)
+def _workload(task: TaskConditions) -> str:
+    return task.labels.get(WORKLOAD_LABEL, DEFAULT_WORKLOAD)
 
 
-def _own_commits(branch: TreeBranch) -> list[float]:
-    return sorted(c.t_s for c in branch.commits if c.origin in (CommitOrigin.COMMIT, CommitOrigin.SPLIT))
+def stall_odds(history: Sequence[SearchTree], task: TaskConditions, *, session: SearchTree | None = None) -> StallOdds:
+    """The odds for a session on ``task`` from the archived ``history``, with the running ``session``'s own tree in
+    full when given; an archived tree of the session itself is left out."""
 
-
-def _pace(similar: Sequence[WeightedTree]) -> dict[float, float]:
-    pace = {}
-    for fraction in PACE_FRACTIONS:
-        shares = [
-            (_best_by(item.tree, fraction * item.tree.budget_seconds) / item.tree.final_gain_pct, item.weight)
-            for item in similar
-            if item.tree.final_gain_pct > 0 and item.tree.budget_seconds > 0
-        ]
-        share = _quantile(shares, MEDIAN)
-        if share is not None:
-            pace[fraction] = share
-    return pace
-
-
-def _branch_history(similar: Sequence[WeightedTree]) -> BranchHistory | None:
-    multi = [item for item in similar if item.tree.source == SOURCE_NOTEBOOK and _specialists(item.tree)]
-    if not multi:
-        return None
-    opened, committed, first_tests = [], [], []
-    late = {n: [0, 0] for n in NO_COMMIT_AFTER}
-    reasons: Counter[str] = Counter()
-    for item in multi:
-        branches = _specialists(item.tree)
-        opened.append((float(len(branches)), item.weight))
-        committed.append((sum(1 for b in branches if _own_commits(b)) / len(branches), item.weight))
-        for branch in branches:
-            commits, tests = _own_commits(branch), sorted(branch.test_times)
-            if commits:
-                first_tests.append((float(branch.tests_by(commits[0])), item.weight))
-            for n in NO_COMMIT_AFTER:
-                if len(tests) >= n and not any(t <= tests[n - 1] for t in commits):
-                    late[n][1] += 1
-                    late[n][0] += bool(commits)
-            if branch.stop_reason:
-                reasons[branch.stop_reason] += 1
-    total = sum(item.weight for item in multi)
-    return BranchHistory(
-        sessions=len(multi),
-        mean_opened=sum(count * weight for count, weight in opened) / total,
-        committed_share=sum(share * weight for share, weight in committed) / total,
-        median_first_commit_test=_quantile(first_tests, MEDIAN),
-        late_commits={n: (later, of) for n, (later, of) in late.items() if of},
-        stop_reasons=tuple(reasons.most_common(TOP_STOP_REASONS)),
+    model_type = task.labels.get(MODEL_TYPE_LABEL)
+    archived = _Tally()
+    sessions = same_model = 0
+    for tree in history:
+        if (session is not None and tree.session_id == session.session_id) or _workload(tree.task) != _workload(task):
+            continue
+        same = model_type is not None and tree.task.labels.get(MODEL_TYPE_LABEL) == model_type
+        archived.add(tree, 1.0 if same else OTHER_MODEL_WEIGHT)
+        sessions += 1
+        same_model += same
+    tally = archived.capped()
+    own = _Tally()
+    if session is not None:
+        own.add(session, 1.0)
+        tally = tally.plus(own)
+    return StallOdds(
+        sessions=sessions,
+        same_model=same_model,
+        hazard=dict(sorted(tally.hazard.items())),
+        new_branch=dict(sorted(tally.new_branch.items())),
+        first_commit_minutes=_weighted_median(tally.first_commits),
+        stall_tests=stall_bar(tally.hazard, tally.new_branch),
+        session_tests=round(sum(odds.seen for odds in own.hazard.values())),
     )
 
 
-def _directions(similar: Sequence[WeightedTree]) -> tuple[DirectionHistory, ...]:
-    tallies: dict[tuple[str, str, IntentLayer | None], _Tally] = {}
-    for item in similar:
-        seen = set()
-        for branch in _specialists(item.tree):
-            for direction in branch.directions:
-                key = (direction.target.strip().lower(), direction.mechanism.strip().lower(), direction.layer)
-                tally = tallies.setdefault(key, _Tally())
-                tally.tests += direction.tests
-                tally.commits += direction.commits
-                gain = direction.best_gain_pct
-                if gain is not None:
-                    tally.best_gain_pct = gain if tally.best_gain_pct is None else max(tally.best_gain_pct, gain)
-                if key not in seen:
-                    seen.add(key)
-                    tally.sessions += 1
-    ranked = sorted(
-        (
-            DirectionHistory(target, mechanism, layer, t.sessions, t.tests, t.commits, t.best_gain_pct)
-            for (target, mechanism, layer), t in tallies.items()
-        ),
-        key=lambda d: (-d.commits, -(d.best_gain_pct if d.best_gain_pct is not None else -1e9), -d.sessions),
-    )
-    return tuple(ranked[:TOP_DIRECTIONS])
-
-
-def history_digest(
-    history: Sequence[SearchTree],
-    task: TaskConditions,
-    *,
-    so_far: SoFar | None = None,
-    min_similarity: float = MIN_SIMILARITY,
-    min_sessions: float = MIN_SESSIONS,
-) -> HistoryDigest:
-    """Digest the archived ``history`` for a session on ``task``.
-
-    With ``so_far``, how far this session has come, the digest also stands it beside the similar ones.
-    """
-
-    similar = similar_trees(history, task, minimum=min_similarity)
-    worth = sum(item.weight for item in similar)
-    if worth < min_sessions:
-        return HistoryDigest(enough=False, sessions=len(similar), effective_sessions=worth)
-    finals = [(item.tree.final_gain_pct, item.weight) for item in similar]
-    standing = None
-    if so_far is not None:
-        then = [
-            (_best_by(item.tree, so_far.fraction * item.tree.budget_seconds), item.weight)
-            for item in similar
-            if item.tree.budget_seconds > 0
-        ]
-        typical = _quantile(then, MEDIAN)
-        if typical is not None:
-            standing = Standing(so_far.fraction, so_far.gain_pct, typical)
-    multi_branch = sum(1 for item in similar if item.tree.source == SOURCE_NOTEBOOK)
-    return HistoryDigest(
-        enough=True,
-        sessions=len(similar),
-        effective_sessions=worth,
-        top_similarities=tuple(item.weight for item in similar[:3]),
-        multi_branch=multi_branch,
-        backfilled=len(similar) - multi_branch,
-        pace=_pace(similar),
-        median_final_gain_pct=_quantile(finals, MEDIAN),
-        p90_final_gain_pct=_quantile(finals, P90),
-        branches=_branch_history(similar),
-        directions=_directions(similar),
-        standing=standing,
-    )
-
-
-def session_history(
-    snapshot: NotebookSnapshot, history: Sequence[SearchTree], metric: str, *, budget_seconds: float
-) -> HistoryDigest:
-    """The digest for the session ``snapshot`` shows, standing it at the share of ``budget_seconds`` it has spent."""
+def session_stall_odds(snapshot: NotebookSnapshot, history: Sequence[SearchTree], metric: str) -> StallOdds | None:
+    """The odds for the session ``snapshot`` shows, its own branches counted in; ``None`` before its profile and
+    baseline."""
 
     try:
-        tree = tree_from_snapshot(snapshot, metric, budget_seconds=budget_seconds)
-    except (NotRecorded, ValueError) as exc:
-        return HistoryDigest(enough=False, sessions=0, effective_sessions=0.0, note=f"no digest yet: {exc}")
-    spent = (snapshot.taken_at - session_start(snapshot)) / budget_seconds if budget_seconds > 0 else None
-    fraction = None if spent is None else min(1.0, max(0.0, spent))
-    so_far = None if fraction is None else SoFar(fraction, tree.final_gain_pct)
-    return history_digest(history, tree.task, so_far=so_far)
+        tree = tree_from_snapshot(snapshot, metric)
+    except (NotRecorded, ValueError):
+        return None
+    return stall_odds(history, tree.task, session=tree)
 
 
-def _pct(value: float) -> str:
-    return f"{value:+.1f}%"
+def _share(rate: float | None) -> str:
+    return "too few" if rate is None else f"{rate * 100:.0f}%"
 
 
-def _count(n: int, noun: str) -> str:
-    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
-
-
-def _share(value: float) -> str:
-    return f"{value * 100:.0f}%"
-
-
-def _outcome_lines(digest: HistoryDigest) -> list[str]:
-    lines = []
-    if digest.median_final_gain_pct is not None and digest.p90_final_gain_pct is not None:
-        lines.append(
-            f"Final gain over baseline: median {_pct(digest.median_final_gain_pct)}, "
-            f"p90 {_pct(digest.p90_final_gain_pct)}."
+def _bar_reason(odds: StallOdds) -> str:
+    kept, new = odds.after_stall(odds.stall_tests), odds.new_branch_odds
+    if kept is None or new is None:
+        return (
+            f"where the archive cannot tell yet ({DEFAULT_STALL_TESTS} at least); what branches drawn for probation do "
+            "past it will tell"
         )
-    if digest.pace:
-        reached = ", ".join(f"{_share(share)} by {_share(fraction)}" for fraction, share in digest.pace.items())
-        lines.append(f"Share of their final gain reached, by share of their budget: {reached}.")
-    standing = digest.standing
-    if standing is not None:
-        gap = standing.gain_pct - standing.typical_gain_pct
-        side = "ahead of" if gap > 0 else "behind" if gap < 0 else "level with"
-        lines.append(
-            f"This session: {_pct(standing.gain_pct)} at {_share(standing.fraction)} of its budget; the median "
-            f"similar session had {_pct(standing.typical_gain_pct)} by then ({side} it by {abs(gap):.1f} points)."
-        )
+    if kept < new:
+        return f"the first stall from {MIN_STALL_TESTS} at which a kept branch is less likely to commit than a new one"
+    return "the most the rule allows, a kept branch staying likelier to commit than a new one"
+
+
+def _lines(odds: StallOdds) -> list[str]:
+    source = f"{odds.sessions} archived sessions ({odds.same_model} of this model type)"
+    if odds.session_tests:
+        source += f" and this session's {odds.session_tests} judged tests"
+    hazard = [
+        f"{position}{'+' if position == MAX_POSITION else ''}: {_share(item.rate)} of {item.seen:.0f}"
+        for position, item in odds.hazard.items()
+        if item.rate is not None
+    ]
+    stalls = {stall: odds.after_stall(stall) for stall in range(MAX_STALL_TESTS + 1)}
+    known = [f"k={stall} {_share(kept)}" for stall, kept in stalls.items() if kept is not None]
+    rest = "; too few tests to tell at the other k" if len(known) < len(stalls) else ""
+    lines = [
+        f"Stall odds, from {source}. How often a branch's j-th judged test past its last commit committed: "
+        f"{', '.join(hazard) or 'too few tests yet'}.",
+        f"So a branch stalled k tests commits within its next {HORIZON_TESTS}: {', '.join(known) or 'too few tests yet'}"
+        f"{rest}.",
+        f"A new branch commits within its first {HORIZON_TESTS} judged tests: {_share(odds.new_branch_odds)}.",
+    ]
+    if odds.first_commit_minutes is not None:
+        lines.append(f"A new branch's first commit came {odds.first_commit_minutes:.0f} min after it opened (median).")
+    lines.append(
+        f"Stop bar: {odds.stall_tests} judged tests past a branch's last commit that did not fail to merge, "
+        f"{_bar_reason(odds)}."
+    )
     return lines
 
 
-def _branch_lines(branches: BranchHistory | None) -> list[str]:
-    if branches is None:
-        return []
-    first = (
-        f" the first commit came at test {branches.median_first_commit_test:.0f} (median)."
-        if branches.median_first_commit_test is not None
-        else " none committed."
-    )
-    return [
-        f"Branches, from {_count(branches.sessions, 'multi-branch session')}: {branches.mean_opened:.1f} opened "
-        f"on average; {_share(branches.committed_share)} of them committed at least once;{first}",
-        *(
-            f"Branches without a commit after {n} tests: {later} of {of} committed later."
-            for n, (later, of) in branches.late_commits.items()
-        ),
-    ]
-
-
-def _stop_lines(branches: BranchHistory | None) -> list[str]:
-    if branches is None or not branches.stop_reasons:
-        return []
-    return [f"Stopped for: {', '.join(f'{reason} ({count})' for reason, count in branches.stop_reasons)}."]
-
-
-def _direction_line(direction: DirectionHistory) -> str:
-    layer = f" [{direction.layer.value}]" if direction.layer is not None else ""
-    best = f", best {_pct(direction.best_gain_pct)}" if direction.best_gain_pct is not None else ""
-    return (
-        f"- {direction.target} / {direction.mechanism}{layer}: {_count(direction.sessions, 'session')}, "
-        f"{_count(direction.tests, 'test')}, {_count(direction.commits, 'commit')}{best}"
-    )
-
-
-def _sections(digest: HistoryDigest) -> list[tuple[str, list[str]]]:
-    """The digest's lines, each under its heading or none; the verbatim stop reasons come last, after the directions,
-    so a tight budget leaves them out first."""
-
-    if digest.note:
-        return [("", [f"History: {digest.note}"])]
-    if not digest.enough:
-        return [
-            (
-                "",
-                [
-                    f"History: too thin to go by ({_count(digest.sessions, 'similar session')}, worth "
-                    f"{digest.effective_sessions:.1f}; {MIN_SESSIONS} needed)."
-                ],
-            )
-        ]
-    head = (
-        f"History: {_count(digest.sessions, 'similar session')} (worth {digest.effective_sessions:.1f}, similarity "
-        f"up to {digest.top_similarities[0]:.2f}): {digest.multi_branch} multi-branch, {digest.backfilled} "
-        "backfilled single-lineage."
-    )
-    plain = [head, *_outcome_lines(digest), *_branch_lines(digest.branches)]
-    return [
-        *(("", [line]) for line in plain),
-        ("Directions tried, most commits first:", [_direction_line(direction) for direction in digest.directions]),
-        *(("", [line]) for line in _stop_lines(digest.branches)),
-    ]
-
-
 __all__ = [
+    "DEFAULT_STALL_TESTS",
+    "HORIZON_TESTS",
     "MAX_CHARS",
-    "MIN_SESSIONS",
-    "NO_COMMIT_AFTER",
-    "PACE_FRACTIONS",
-    "BranchHistory",
-    "DirectionHistory",
-    "HistoryDigest",
-    "SoFar",
-    "Standing",
-    "history_digest",
-    "session_history",
+    "MAX_POSITION",
+    "MAX_STALL_TESTS",
+    "MIN_SEEN",
+    "MIN_STALL_TESTS",
+    "OTHER_MODEL_WEIGHT",
+    "PRIOR_TESTS",
+    "Odds",
+    "StallOdds",
+    "hazard_observations",
+    "new_branch_observations",
+    "session_stall_odds",
+    "stall_bar",
+    "stall_odds",
+    "within",
 ]
