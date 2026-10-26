@@ -317,9 +317,32 @@ print(f"{version}\t{match.group(1)}\t{Path(dist.locate_file('vllm')).resolve()}"
 PY
 }
 
+# Commit the tree staged in ``index_tmp`` on ``parent`` with a fixed identity and date, then pin HEAD to it.
+commit_image_baseline() {
+  local root="$1" parent="$2" index_tmp="$3" subject="$4"
+  local git_dir tree commit_date
+  tree="$(GIT_INDEX_FILE="$index_tmp" git -C "$root" write-tree)" ||
+    { rm -f "$index_tmp"; die "failed to write the image baseline tree in ${root}"; return 1; }
+  commit_date="$(git -C "$root" show -s --format=%cI "$parent")"
+  IMAGE_BASELINE_SHA="$(
+    printf '%s\n' "$subject" |
+      GIT_AUTHOR_NAME=Hyperloom GIT_AUTHOR_EMAIL=hyperloom@amd.com GIT_AUTHOR_DATE="$commit_date" \
+      GIT_COMMITTER_NAME=Hyperloom GIT_COMMITTER_EMAIL=hyperloom@amd.com GIT_COMMITTER_DATE="$commit_date" \
+      git -C "$root" commit-tree "$tree" -p "$parent"
+  )" || { rm -f "$index_tmp"; die "failed to commit the image baseline tree in ${root}"; return 1; }
+  git_dir="$(git -C "$root" rev-parse --absolute-git-dir)"
+  mv "$index_tmp" "$git_dir/index"
+  git -C "$root" update-ref refs/hyperloom/upstream "$parent" &&
+    git -C "$root" update-ref refs/hyperloom/image-baseline "$IMAGE_BASELINE_SHA" &&
+    git -C "$root" update-ref --no-deref HEAD "$IMAGE_BASELINE_SHA" ||
+    { die "failed to pin the image baseline in ${root}"; return 1; }
+  git -C "$root" diff-index --quiet --ignore-submodules=dirty "$IMAGE_BASELINE_SHA" -- ||
+    { die "the image baseline in ${root} changed after pinning"; return 1; }
+}
+
 prepare_vllm_image_git_tree() {
   local root="$1" origin="" head="" parent="" subject="" baseline_ref="" upstream_ref=""
-  local index_tmp git_dir tree baseline commit_date
+  local index_tmp
   [[ "$VLLM_IMAGE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
     { die "VLLM image source commit must be a full SHA"; return 1; }
   if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
@@ -363,25 +386,10 @@ prepare_vllm_image_git_tree() {
      ! GIT_INDEX_FILE="$index_tmp" git -C "$root" add -u -- .; then
     rm -f "$index_tmp"; die "failed to capture vLLM image tracked deltas"; return 1
   fi
-  tree="$(GIT_INDEX_FILE="$index_tmp" git -C "$root" write-tree)" ||
-    { rm -f "$index_tmp"; die "failed to write vLLM image baseline tree"; return 1; }
-  commit_date="$(git -C "$root" show -s --format=%cI "$VLLM_IMAGE_SOURCE_COMMIT")"
-  baseline="$(
-    printf '%s\n' "Hyperloom prebuilt vLLM image baseline" |
-      GIT_AUTHOR_NAME=Hyperloom GIT_AUTHOR_EMAIL=hyperloom@amd.com GIT_AUTHOR_DATE="$commit_date" \
-      GIT_COMMITTER_NAME=Hyperloom GIT_COMMITTER_EMAIL=hyperloom@amd.com GIT_COMMITTER_DATE="$commit_date" \
-      git -C "$root" commit-tree "$tree" -p "$VLLM_IMAGE_SOURCE_COMMIT"
-  )" || { rm -f "$index_tmp"; die "failed to commit vLLM image baseline tree"; return 1; }
-  git_dir="$(git -C "$root" rev-parse --absolute-git-dir)"
-  mv "$index_tmp" "$git_dir/index"
-  git -C "$root" update-ref refs/hyperloom/upstream "$VLLM_IMAGE_SOURCE_COMMIT" &&
-    git -C "$root" update-ref refs/hyperloom/image-baseline "$baseline" &&
-    git -C "$root" update-ref --no-deref HEAD "$baseline" ||
-    { die "failed to pin vLLM image source HEAD"; return 1; }
-  git -C "$root" diff-index --quiet "$baseline" -- ||
-    { die "vLLM image source verification changed after pinning"; return 1; }
+  commit_image_baseline "$root" "$VLLM_IMAGE_SOURCE_COMMIT" "$index_tmp" "Hyperloom prebuilt vLLM image baseline" ||
+    return 1
   export VLLM_IMAGE_UPSTREAM_SHA="$VLLM_IMAGE_SOURCE_COMMIT"
-  export VLLM_IMAGE_BASELINE_SHA="$baseline"
+  export VLLM_IMAGE_BASELINE_SHA="$IMAGE_BASELINE_SHA"
 }
 
 copy_missing_vllm_wheel_artifacts() {
