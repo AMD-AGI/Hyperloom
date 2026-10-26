@@ -2442,22 +2442,24 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         *,
         task_id: str,
         patch_name: str,
-        files: list[str],
-        line_keys: list[str],
+        identity: dict[str, list[str]],
         outcome: str,
+        landed: bool = False,
     ) -> None:
-        """Record that a benchmark round was spent on the patch these lines describe."""
+        """Record that a round measured the patch *identity* (``files``, ``line_keys``) describes, and if it stayed."""
         from ..framework.patch_overlap import MAX_MEASURED
 
+        line_keys = list(identity.get("line_keys") or [])
         if not line_keys:
             return
         self.measured_patch_sets.append(
             {
                 "task_id": task_id,
                 "patch_name": patch_name,
-                "files": files,
+                "files": list(identity.get("files") or []),
                 "line_keys": line_keys,
                 "outcome": outcome,
+                "landed": landed,
                 "ts": now_iso(),
             }
         )

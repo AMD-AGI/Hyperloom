@@ -47,6 +47,15 @@ def test_two_ports_of_one_change_overlap_despite_different_names_and_paths():
     assert po.overlap_ratio(a, b) >= 0.5
 
 
+def test_the_same_code_line_under_different_comments_is_one_change():
+    # Three GLM-5.3 specialists wrote this one-line fix, each with its own explanatory comment.
+    first = '+++ b/m.py\n+    # the draft arch is rewritten\n+    fused = "NextN"\n'
+    second = '+++ b/m.py\n+    // NextN draft fusion gate\n+    /* compare against\n+     * the rewritten name */\n+    fused = "NextN"\n'
+
+    assert po.changed_line_keys([first]) == po.changed_line_keys([second])
+    assert po.overlap_ratio(po.changed_line_keys([first]), po.changed_line_keys([second])) == 1.0
+
+
 def test_a_follow_up_to_the_same_file_does_not_look_like_a_repeat():
     measured = po.changed_line_keys([_PORT_A])
     follow_up = po.changed_line_keys([_FOLLOW_UP])
@@ -95,12 +104,14 @@ def test_patch_set_identity_reads_the_files_and_skips_unreadable_ones(tmp_path):
 def test_the_ledger_keeps_the_newest_entries_and_drops_empty_ones():
     state = SharedState(session_id="s")
 
-    state.record_measured_patch_set(task_id="t0", patch_name="empty", files=[], line_keys=[], outcome="reverted")
+    state.record_measured_patch_set(
+        task_id="t0", patch_name="empty", identity={"files": [], "line_keys": []}, outcome="reverted"
+    )
     assert state.measured_patch_sets == []
 
     for i in range(po.MAX_MEASURED + 3):
         state.record_measured_patch_set(
-            task_id=f"t{i}", patch_name="p", files=["f"], line_keys=[f"k{i}"], outcome="adopted"
+            task_id=f"t{i}", patch_name="p", identity={"files": ["f"], "line_keys": [f"k{i}"]}, outcome="adopted"
         )
 
     assert len(state.measured_patch_sets) == po.MAX_MEASURED
@@ -111,7 +122,10 @@ def test_the_ledger_keeps_the_newest_entries_and_drops_empty_ones():
 def test_the_ledger_survives_a_state_round_trip():
     state = SharedState(session_id="s")
     state.record_measured_patch_set(
-        task_id="t1", patch_name="p", files=["f"], line_keys=po.changed_line_keys([_PORT_A]), outcome="adopted"
+        task_id="t1",
+        patch_name="p",
+        identity={"files": ["f"], "line_keys": po.changed_line_keys([_PORT_A])},
+        outcome="adopted",
     )
 
     reloaded = SharedState.from_dict(state.to_dict())

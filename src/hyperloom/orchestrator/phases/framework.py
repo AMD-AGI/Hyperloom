@@ -218,9 +218,16 @@ def _critic_feedback_lines(critic_feedback: Mapping[str, Any] | None) -> list[st
     return lines
 
 
-def _patches_on_disk(patch: Path, resolve_bases: list[Path]) -> bool:
-    """True when a specialist's claimed patch path resolves to a real file under one of its worktree roots."""
-    return (patch.is_absolute() and patch.is_file()) or any((base / patch).is_file() for base in resolve_bases)
+def _resolved_patch_paths(patches: list[Any], resolve_bases: list[Path]) -> list[str]:
+    """The claimed patch paths that resolve to a real file, absolute or under one of the specialist's worktree roots."""
+    resolved: list[str] = []
+    for raw in patches:
+        patch = Path(str(raw))
+        candidates = [patch] if patch.is_absolute() else [base / patch for base in resolve_bases]
+        hit = next((c for c in candidates if c.is_file()), None)
+        if hit is not None:
+            resolved.append(str(hit))
+    return resolved
 
 
 def _resolvable_artifacts_from_done(
@@ -884,36 +891,58 @@ class FrameworkPhase(ProposalBench):
         """Record an authored patch's settled outcome, then re-arm or drain the authored lane."""
         if (task.params or {}).get("framework_agent_authoring"):
             self._record_framework_agent_authored_outcome(task=task, result=result, adopted=verdict is Verdict.ADOPTED)
-        self._record_measured_patch_set(task, verdict)
+        self._record_measured_patch_set(task, result, verdict)
         await self._maybe_rearm_authored_lane(result.result)
         await self._drain_apply_fail_retry_pending()
 
-    def _record_measured_patch_set(self, task: "Task", verdict: Verdict) -> None:
-        """Note the lines this round's patch changed, so a later proposal can be told it repeats them."""
-        from ..framework.patch_overlap import patch_set_identity
+    def _record_measured_patch_set(self, task: "Task", result: Any, verdict: Verdict) -> None:
+        """Note the lines this round's patch changed and whether it stayed, so a later proposal can be told it repeats them."""
+        from ..actions.executors._integrate_vocabulary import KEEP_STATUSES
 
         params = task.params or {}
-        files, line_keys = patch_set_identity(params.get("patches"))
-        if not line_keys:
-            return
+        identity = params.get("patch_identity") if isinstance(params.get("patch_identity"), dict) else {}
+        status = str((getattr(result, "result", None) or {}).get("status") or "")
         self.shared_state.record_measured_patch_set(
             task_id=str(task.task_id or ""),
             patch_name=str(params.get("patch_name") or ""),
-            files=files,
-            line_keys=line_keys,
+            identity=identity,
             outcome=verdict.name.lower(),
+            landed=status in KEEP_STATUSES,
         )
 
-    def _measured_patch_overlaps(self, patch_paths: Any) -> list[dict[str, Any]]:
-        """Measured rounds whose patch changed much the same lines as *patch_paths*."""
-        from ..framework.patch_overlap import overlapping_measured, patch_set_identity
+    def _measured_patch_overlaps(self, line_keys: list[str]) -> list[dict[str, Any]]:
+        """Measured rounds whose patch changed much the same lines as *line_keys*."""
+        from ..framework.patch_overlap import overlapping_measured
 
-        _files, line_keys = patch_set_identity(patch_paths)
         return overlapping_measured(
             line_keys,
             self.shared_state.measured_patch_sets,
             min_ratio=_PATCH_OVERLAP_MIN_RATIO,
         )
+
+    async def _identity_unless_repeat(
+        self, sid: str, spec_params: dict[str, Any], patch_paths: list[str]
+    ) -> dict[str, Any] | None:
+        """The patch's identity, or ``None`` when it repeats a patch already queued for review or measurement, or one
+        that stayed in the tree. An authoring round's repeat still goes to review: its lane owns a terminal row."""
+        from ..framework.patch_overlap import overlapping_measured, patch_set_identity, queued_identities
+
+        files, line_keys = patch_set_identity(patch_paths)
+        identity = {"files": files, "line_keys": line_keys}
+        if not line_keys or spec_params.get("framework_agent_authoring"):
+            return identity
+        tasks = [*await self.tasks.queued(), *await self.tasks.running()]
+        queued = queued_identities(self.state.pending_proposals.values(), tasks)
+        landed = [row for row in self.shared_state.measured_patch_sets if row.get("landed")]
+        hits = overlapping_measured(line_keys, [*queued, *landed], min_ratio=_PATCH_OVERLAP_MIN_RATIO)
+        if not hits:
+            return identity
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {"kind": "specialist_patch_repeat_not_measured", "specialist_task_id": sid, "repeats": hits[0]},
+        )
+        return None
 
     def record_unpromoted_candidate(self, task: "Task", result_payload: dict[str, Any]) -> None:
         """Stamp ``no_result_failed`` for an upstream-PR candidate task that settled without a promotable result."""
@@ -2931,7 +2960,7 @@ class FrameworkPhase(ProposalBench):
         if self.session_dir is not None:
             spec_root = _runs_dir(Path(self.session_dir), "specialist", sid)
             resolve_bases = [spec_root / "worktree", spec_root]
-        existing_patches = [str(p) for p in patches if _patches_on_disk(Path(str(p)), resolve_bases)]
+        existing_patches = _resolved_patch_paths(patches, resolve_bases)
         # A non-diff tuned artifact is also a routable deliverable; route it like a patch.
         routable_artifacts = _resolvable_artifacts_from_done(done_payload, resolve_bases)
         if not existing_patches and not routable_artifacts:
@@ -2947,6 +2976,9 @@ class FrameworkPhase(ProposalBench):
                 )
             return
         spec_params = to_mapping(getattr(task, "params", None))
+        identity = await self._identity_unless_repeat(sid, spec_params, existing_patches)
+        if identity is None:
+            return
         # The lane, not the deliverable's own ``atomic`` flag, decides whether a companion lever rides with the patch.
         is_enablement_round = bool(spec_params.get("enablement"))
         companion_levers = _framework_config_levers_from_done(
@@ -2971,6 +3003,8 @@ class FrameworkPhase(ProposalBench):
             deliverable["extra_envs"] = round_envs
         if spec_params.get("framework_agent_authoring"):
             deliverable["framework_agent_authoring"] = True
+        if identity["line_keys"]:
+            deliverable["patch_identity"] = identity
         await self._submit_integrate_review(
             sid,
             spec_params,
@@ -2987,7 +3021,7 @@ class FrameworkPhase(ProposalBench):
                         if isinstance(a, dict)
                     ][:8],
                 },
-                overlaps_measured=self._measured_patch_overlaps(patches),
+                overlaps_measured=self._measured_patch_overlaps(identity["line_keys"]),
             ),
         )
 
