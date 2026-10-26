@@ -166,10 +166,9 @@ def _build_orchestration_backend(models: ModelRouting, *, session_dir: Path) -> 
         )
     # Orchestration is stateless: every tick opens a fresh session and
     # carries the full state projection, so it needs the agentic turn
-    # budget and the orchestration effort tier.
+    # budget.
     return ClaudeBackend(
         model=models.claude_model,
-        effort_role=_ORCHESTRATION_ROLE,
         capture_turn_diagnostics=True,
         allowed_intents=allowed_intents,
     )

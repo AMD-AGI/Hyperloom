@@ -45,7 +45,7 @@ def _backend() -> ClaudeBackend:
         sdk_query_factory=_q,
         sdk_options_cls=_Opts,
         api_key_env="UNSET_KEY_ENV_FOR_TEST",
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
     )
 
 

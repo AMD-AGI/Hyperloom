@@ -102,7 +102,7 @@ async def test_stream_api_error_is_marked_as_llm_call_failed():
     backend = ClaudeBackend(
         sdk_query_factory=_make_raising_query_factory(RuntimeError("litellm.BadRequestError: AnthropicException")),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
         retry_policy=RetryPolicy(max_attempts=1),
     )
     with pytest.raises(LLMCallFailed, match="Claude backend call failed"):
@@ -115,7 +115,7 @@ async def test_cancellation_is_not_marked_as_an_llm_failure():
     backend = ClaudeBackend(
         sdk_query_factory=_make_raising_query_factory(asyncio.CancelledError()),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
         retry_policy=RetryPolicy(max_attempts=1),
     )
     with pytest.raises(asyncio.CancelledError):
@@ -358,7 +358,7 @@ def test_claude_backend_raises_without_sdk_or_seams(monkeypatch):
             sdk_query_factory=None,
             sdk_options_cls=None,
             sdk_module=None,
-            enable_mcp_emit_intent=False,
+            mcp_server_factory=lambda *a, **k: None,
         )
 
 
@@ -366,7 +366,7 @@ def test_claude_backend_with_seams_constructs(monkeypatch):
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([]),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
     )
     assert backend.sdk_query_factory is not None
 
@@ -376,7 +376,7 @@ def test_claude_backend_warns_on_missing_api_key(monkeypatch):
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([]),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
     )
     assert any("ANTHROPIC_API_KEY" in str(c) for c in backend.calls)
 
@@ -385,32 +385,17 @@ def _clear_effort_env(monkeypatch):
     for k in (
         "INFERENCE_OPTIMIZER_CLAUDE_EFFORT",
         "INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT",
-        "INFERENCE_OPTIMIZER_CLAUDE_KERNEL_EFFORT",
         "INFERENCE_OPTIMIZER_CLAUDE_THINKING",
     ):
         monkeypatch.delenv(k, raising=False)
 
 
-def test_build_options_effort_defaults_by_role(monkeypatch):
+def test_build_options_effort_defaults_to_medium(monkeypatch):
     _clear_effort_env(monkeypatch)
-    orch = ClaudeBackend(
-        model="m", effort_role="orchestration", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions
-    )
-    o = orch._build_options(tools=[], max_turns=4, system_prompt="sp")
+    backend = ClaudeBackend(model="m", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions)
+    o = backend._build_options(tools=[], max_turns=4, system_prompt="sp")
     assert o.kwargs["effort"] == "medium"
     assert o.kwargs["thinking"] == {"type": "adaptive"}
-
-    kernel = ClaudeBackend(
-        model="m", effort_role="kernel", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions
-    )
-    k = kernel._build_options(tools=[], max_turns=4, system_prompt="sp")
-    assert k.kwargs["effort"] == "low"
-
-    # An unrecognised role falls back to the kernel tier, never to no effort.
-    other = ClaudeBackend(
-        model="m", effort_role="nope", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions
-    )
-    assert other._build_options(tools=[], max_turns=4, system_prompt="sp").kwargs["effort"] == "low"
 
 
 def test_build_options_runs_the_cli_the_subprocess_specialists_spawn(monkeypatch, tmp_path):
@@ -428,9 +413,7 @@ def test_build_options_effort_env_override_and_thinking_off(monkeypatch):
     _clear_effort_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT", "high")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_THINKING", "off")
-    b = ClaudeBackend(
-        model="m", effort_role="orchestration", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions
-    )
+    b = ClaudeBackend(model="m", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions)
     o = b._build_options(tools=[], max_turns=4, system_prompt="sp")
     assert o.kwargs["effort"] == "high"
     assert "thinking" not in o.kwargs
@@ -442,10 +425,9 @@ def test_real_sdk_options_accept_hyperloom_kwargs(monkeypatch):
     sdk = pytest.importorskip("claude_agent_sdk")
     b = ClaudeBackend(
         model="m",
-        effort_role="orchestration",
         sdk_query_factory=_make_query_factory([]),
         sdk_options_cls=sdk.ClaudeAgentOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
     )
     # Must not raise: effort + thinking both accepted by ClaudeAgentOptions.
     b._build_options(tools=[], max_turns=4, system_prompt="sp")
@@ -467,7 +449,7 @@ async def test_run_extracts_single_emit_intent_tool_use():
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
     )
     res = await backend.run("hello", system_prompt="sys", tools=["Read"])
     assert len(res.intents) == 1
@@ -499,7 +481,7 @@ async def test_run_extracts_multiple_emit_intent_tool_uses():
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
     )
     res = await backend.run("p")
     assert len(res.intents) == 2
@@ -524,7 +506,7 @@ async def test_run_accepts_short_tool_name_too():
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
     )
     res = await backend.run("p")
     assert res.intents and res.intents[0].type == IntentType.ALERT
@@ -547,7 +529,7 @@ async def test_run_ignores_other_tool_uses():
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
     )
     res = await backend.run("p")
     assert len(res.intents) == 1
@@ -571,7 +553,7 @@ async def test_run_text_blocks_collected_into_raw_text():
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
     )
     res = await backend.run("p")
     assert "thinking..." in res.raw_text
@@ -589,7 +571,7 @@ async def test_run_without_an_emit_intent_call_returns_no_intents():
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
     )
     result = await backend.run("p")
     assert result.intents == []
@@ -617,7 +599,7 @@ async def test_mcp_setup_diagnostic_reports_what_the_cli_offered(offered_tools, 
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([init, FakeAssistantMessage(content=[TextBlock(text="hi")])]),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
     )
     assert backend.get_mcp_setup_diagnostic()["emit_intent"]["offered"] is None
     await backend.run("p")
@@ -632,7 +614,7 @@ def test_mcp_setup_diagnostic_hashes_the_role_scoped_schema():
     """The recorded schema hash identifies the schema this role registers, not the full intent contract."""
     import hashlib
 
-    backend = ClaudeBackend(enable_mcp_emit_intent=False, allowed_intents=_ORCHESTRATION_INTENTS)
+    backend = ClaudeBackend(mcp_server_factory=lambda *a, **k: None, allowed_intents=_ORCHESTRATION_INTENTS)
     expected = json.dumps(
         build_emit_intent_tool_input_schema(_ORCHESTRATION_INTENTS), sort_keys=True, separators=(",", ":")
     )
@@ -668,7 +650,7 @@ async def test_run_invalid_tool_use_input_drops_block_silently():
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
     )
     res = await backend.run("p")
     # 2 tool_blocks counted, but only 1 valid intent
@@ -696,7 +678,7 @@ async def test_unparsed_tool_wrapper_retries_dedupe_to_one_intent(tool_name):
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
         capture_turn_diagnostics=True,
     )
     res = await backend.run("p")
@@ -730,7 +712,7 @@ async def test_string_wrapped_fallback_retries_dedupe_to_one_intent(tool_name):
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
         capture_turn_diagnostics=True,
     )
     res = await backend.run("p")
@@ -761,7 +743,7 @@ async def test_empty_string_tool_input_reports_decode_error(tool_name):
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
         capture_turn_diagnostics=True,
     )
     res = await backend.run("p")
@@ -786,7 +768,7 @@ async def test_identical_native_tool_inputs_are_not_deduped(tool_name):
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
     )
     res = await backend.run("p")
     assert res.metadata["tool_blocks"] == 2
@@ -809,7 +791,7 @@ async def test_wrapper_then_native_same_intent_keeps_both(tool_name):
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
     )
     res = await backend.run("p")
     assert res.metadata["tool_blocks"] == 2
@@ -817,25 +799,7 @@ async def test_wrapper_then_native_same_intent_keeps_both(tool_name):
 
 
 @pytest.mark.asyncio
-async def test_raw_completion_returns_raw_text_without_intent():
-    """raw_completion mode: a text-only reply yields raw_text and does NOT raise NoIntentEmitted."""
-    action = '{"tool": "read_source", "args": {"path": "/x"}}'
-    msgs = [
-        FakeAssistantMessage(content=[TextBlock(text=action)]),
-        FakeResultMessage(result=action),
-    ]
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory(msgs),
-        sdk_options_cls=FakeOptions,
-        raw_completion=True,
-    )
-    res = await backend.run("p")
-    assert res.intents == []
-    assert res.raw_text == action  # not duplicated
-
-
-@pytest.mark.asyncio
-async def test_raw_completion_prefers_result_no_duplication():
+async def test_raw_text_prefers_result_no_duplication():
     """The streamed TextBlock and ResultMessage.result share content; raw_text must not concatenate both."""
     text = '{"tool": "emit_proposal", "args": {}}'
     msgs = [
@@ -845,7 +809,7 @@ async def test_raw_completion_prefers_result_no_duplication():
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory(msgs),
         sdk_options_cls=FakeOptions,
-        raw_completion=True,
+        mcp_server_factory=lambda *a, **k: None,
     )
     res = await backend.run("p")
     assert res.raw_text == text
@@ -853,7 +817,7 @@ async def test_raw_completion_prefers_result_no_duplication():
 
 
 @pytest.mark.asyncio
-async def test_raw_completion_falls_back_to_text_blocks_without_result():
+async def test_raw_text_falls_back_to_text_blocks_without_result():
     """When no ResultMessage is emitted, raw_text is the joined TextBlocks."""
     msgs = [
         FakeAssistantMessage(
@@ -866,46 +830,10 @@ async def test_raw_completion_falls_back_to_text_blocks_without_result():
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory(msgs),
         sdk_options_cls=FakeOptions,
-        raw_completion=True,
+        mcp_server_factory=lambda *a, **k: None,
     )
     res = await backend.run("p")
     assert res.raw_text == "part-a part-b"
-
-
-@pytest.mark.asyncio
-async def test_raw_completion_options_disable_tools_and_skip_suffix():
-    """raw_completion options: tools disallowed, no MCP server, no OUTPUT FORMAT suffix, max_turns bumped."""
-    captured: dict[str, Any] = {}
-
-    async def q(*, prompt, options):
-        captured["kwargs"] = options.kwargs
-        captured["prompt"] = prompt
-        yield FakeResultMessage(result="ok")
-
-    backend = ClaudeBackend(
-        sdk_query_factory=q,
-        sdk_options_cls=FakeOptions,
-        raw_completion=True,
-    )
-    await backend.run("the prompt", system_prompt="sys", max_turns=1)
-    kw = captured["kwargs"]
-    assert kw["allowed_tools"] == []
-    assert kw["disallowed_tools"]  # built-ins blocked
-    assert "mcp_servers" not in kw
-    assert kw["max_turns"] >= 8
-    assert "OUTPUT FORMAT" not in captured["prompt"]
-    assert captured["prompt"] == "the prompt"
-
-
-def test_raw_completion_disables_emit_intent_mcp():
-    """Constructing with raw_completion=True must not register the emit_intent MCP server."""
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory([]),
-        sdk_options_cls=FakeOptions,
-        raw_completion=True,
-    )
-    assert backend.mcp_server_config is None
-    assert backend.mcp_tool_name is None
 
 
 @pytest.mark.asyncio
@@ -922,11 +850,11 @@ async def test_options_includes_system_prompt_and_max_turns():
     backend = ClaudeBackend(
         sdk_query_factory=q,
         sdk_options_cls=FakeOptions,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
         max_turns_default=7,
     )
     await backend.run("the prompt", system_prompt="sys", tools=["Read"], max_turns=3)
-    # max_turns is floored to _RAW_COMPLETION_MIN_MAX_TURNS (8) for every mode: Claude Code counts its own messages as
+    # max_turns is floored to _MIN_MAX_TURNS (8): Claude Code counts its own messages as
     # turns, so a literal max_turns=3 would trip before the model can emit an intent.
     assert captured["options_kwargs"]["max_turns"] == 8
     assert captured["options_kwargs"]["system_prompt"]["type"] == "file"
@@ -960,10 +888,8 @@ async def test_options_includes_mcp_server_when_emit_intent_enabled():
         sdk_options_cls=FakeOptions,
         mcp_tool_factory=fake_tool,
         mcp_server_factory=fake_server,
-        enable_mcp_emit_intent=True,
     )
     assert backend.mcp_server_config is not None
-    assert backend.mcp_tool_name == EMIT_INTENT_TOOL_QUALIFIED
     await backend.run("p", tools=["Read", "emit_intent", "get_failure"])
     kw = captured["options_kwargs"]
     assert "mcp_servers" in kw

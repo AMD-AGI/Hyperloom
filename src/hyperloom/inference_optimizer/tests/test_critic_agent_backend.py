@@ -2223,7 +2223,7 @@ def test_anthropic_protocol_builds_no_review_client(
 
 
 @pytest.mark.asyncio
-async def test_raw_completion_max_turns_is_floored_by_the_real_backend(monkeypatch):
+async def test_max_turns_is_floored_by_the_real_backend(monkeypatch):
     """ClaudeBackend raises a literal max_turns=1 to its floor — Claude Code counts the model's own message as a turn, so 1 trips before any output."""
     from hyperloom.orchestrator.roles import claude as claude_mod
 
@@ -2234,11 +2234,11 @@ async def test_raw_completion_max_turns_is_floored_by_the_real_backend(monkeypat
         raise RuntimeError("stop after options")
 
     monkeypatch.setattr(claude_mod.ClaudeBackend, "_build_options", fake_build_options)
-    backend = claude_mod.ClaudeBackend(model="claude-opus-4-8", raw_completion=True)
+    backend = claude_mod.ClaudeBackend(model="claude-opus-4-8")
     with pytest.raises(Exception):
         await backend.run("prompt", system_prompt="critic system", tools=[], max_turns=1)
 
-    assert seen["max_turns"] == claude_mod._RAW_COMPLETION_MIN_MAX_TURNS
+    assert seen["max_turns"] == claude_mod._MIN_MAX_TURNS
     assert seen["max_turns"] > 1
 
 

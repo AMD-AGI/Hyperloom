@@ -61,13 +61,10 @@ def _backend(**over: Any) -> ClaudeBackend:
     return ClaudeBackend(**kwargs)
 
 
-def test_compose_prompt_raw_vs_normal() -> None:
-    raw = _backend(raw_completion=True)
-    assert raw._compose_prompt("hello") == "hello"
-    normal = _backend(raw_completion=False)
-    out = normal._compose_prompt("hello")
+def test_compose_prompt_appends_output_instructions() -> None:
+    out = _backend()._compose_prompt("hello")
     assert out.startswith("hello")
-    assert len(out) > len("hello")  # suffix appended
+    assert len(out) > len("hello")
 
 
 def test_set_context_provider_none_clears() -> None:

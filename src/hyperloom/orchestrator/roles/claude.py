@@ -107,9 +107,9 @@ what changed. Match length to substance.
 """.strip()
 
 
-# Global floor, applied by ``run()`` to every mode: Claude Code counts the
-# model's own text message as a turn, so a low max_turns trips before any output.
-_RAW_COMPLETION_MIN_MAX_TURNS: int = 8
+# Floor applied by ``run()``: Claude Code counts the model's own text message as a turn, so a low max_turns trips
+# before any output.
+_MIN_MAX_TURNS: int = 8
 
 # Retried timeouts get a progressively larger idle budget so a genuinely slow gateway is not re-killed at the same
 # wall.
@@ -276,36 +276,10 @@ class _StreamedTurn:
             self.usages.append(dict(usage))
 
 
-# Built-in tools disallowed in raw_completion mode so the model produces exactly one text turn (no agentic tool loop).
-_RAW_COMPLETION_DISALLOWED_TOOLS: tuple[str, ...] = (
-    "Bash",
-    "BashOutput",
-    "KillShell",
-    "Read",
-    "Write",
-    "Edit",
-    "NotebookEdit",
-    "Glob",
-    "Grep",
-    "Task",
-    "WebFetch",
-    "WebSearch",
-    "TodoWrite",
-    "ExitPlanMode",
-    "SlashCommand",
-)
-
 # Env-driven reasoning effort / extended thinking.
 _EFFORT_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_EFFORT"
 _EFFORT_ENV_ORCH: str = "INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT"
-_EFFORT_ENV_KERNEL: str = "INFERENCE_OPTIMIZER_CLAUDE_KERNEL_EFFORT"
 _THINKING_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_THINKING"
-
-# Per-role (env override, default effort) for :attr:`ClaudeBackend.effort_role`.
-_EFFORT_ROLES: dict[str, tuple[str, str]] = {
-    "orchestration": (_EFFORT_ENV_ORCH, "medium"),
-    "kernel": (_EFFORT_ENV_KERNEL, "low"),
-}
 
 
 def _import_sdk() -> tuple[Any, Any, Any]:
@@ -325,15 +299,9 @@ class ClaudeBackend:
 
     model: str | None = None
     api_key_env: str = "ANTHROPIC_API_KEY"
-    # Nominal budget only: run() floors every mode at _RAW_COMPLETION_MIN_MAX_TURNS
-    # (8), so values below 8 have no effect.
+    # Nominal budget only: run() floors it at _MIN_MAX_TURNS (8), so values below 8 have no effect.
     max_turns_default: int = 12
-    effort_role: str = "kernel"
-    enable_mcp_emit_intent: bool = True
     capture_turn_diagnostics: bool = False
-    # Raw single-shot completion mode: skips the emit_intent server + suffix, disallows all tools, and returns
-    # ``raw_text`` without an emitted intent.
-    raw_completion: bool = False
     # Role's allowed intent set for the emit_intent tool and the output-format suffix. None = all IntentType values.
     allowed_intents: frozenset[IntentType] | None = None
     # Idle timeout for one ``run()`` call: max wall-clock gap allowed BETWEEN streamed SDK messages before the turn is
@@ -365,7 +333,6 @@ class ClaudeBackend:
     system_prompt_cached = True
     calls: list[dict[str, Any]] = field(default_factory=list)
     mcp_server_config: Any | None = field(default=None, init=False)
-    mcp_tool_name: str | None = field(default=None, init=False)
     # Read-only context-pull MCP server config, set via
     # ``set_context_provider`` and merged into the SDK options.
     _context_server_config: Any | None = field(default=None, init=False)
@@ -386,38 +353,26 @@ class ClaudeBackend:
     def __post_init__(self) -> None:
         """Resolve the SDK and optionally register the ``emit_intent`` tool."""
         if self.sdk_query_factory is None or self.sdk_options_cls is None:
-            try:
-                query, opts_cls, mod = _import_sdk()
-            except BackendError:
-                if self.sdk_query_factory is None or self.sdk_options_cls is None:
-                    raise
-            else:
-                if self.sdk_query_factory is None:
-                    self.sdk_query_factory = query
-                if self.sdk_options_cls is None:
-                    self.sdk_options_cls = opts_cls
-                if self.sdk_module is None:
-                    self.sdk_module = mod
+            query, opts_cls, mod = _import_sdk()
+            if self.sdk_query_factory is None:
+                self.sdk_query_factory = query
+            if self.sdk_options_cls is None:
+                self.sdk_options_cls = opts_cls
+            if self.sdk_module is None:
+                self.sdk_module = mod
         if not os.environ.get(self.api_key_env):
             self.calls.append({"warn": f"{self.api_key_env} not set in env"})
-        if self.raw_completion:
-            self.enable_mcp_emit_intent = False
-        if self.enable_mcp_emit_intent:
-            try:
-                cfg = build_emit_intent_server(
-                    sdk_module=self.sdk_module,
-                    tool_factory=self.mcp_tool_factory,
-                    server_factory=self.mcp_server_factory,
-                    allowed_intents=self._offered_intents,
-                )
-            except Exception as exc:  # isolation boundary: the emit_intent MCP server, recorded as setup_error
-                log.warning("emit_intent MCP setup failed: %s", exc, exc_info=True)
-                self.calls.append({"warn": f"emit_intent MCP setup failed: {exc!r}"})
-                self._mcp_setup_error = f"{type(exc).__name__}: {exc}"
-                cfg = None
-            if cfg is not None:
-                self.mcp_server_config = cfg
-                self.mcp_tool_name = EMIT_INTENT_TOOL_QUALIFIED
+        try:
+            self.mcp_server_config = build_emit_intent_server(
+                sdk_module=self.sdk_module,
+                tool_factory=self.mcp_tool_factory,
+                server_factory=self.mcp_server_factory,
+                allowed_intents=self._offered_intents,
+            )
+        except Exception as exc:  # isolation boundary: the emit_intent MCP server, recorded as setup_error
+            log.warning("emit_intent MCP setup failed: %s", exc, exc_info=True)
+            self.calls.append({"warn": f"emit_intent MCP setup failed: {exc!r}"})
+            self._mcp_setup_error = f"{type(exc).__name__}: {exc}"
 
     # Backend protocol
     async def run(
@@ -426,7 +381,6 @@ class ClaudeBackend:
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
         """Run a single backend turn against Claude and parse the result."""
@@ -440,13 +394,12 @@ class ClaudeBackend:
         # Claude Code counts the model's own text/tool messages as turns, so a literal max_turns=1 trips ("Reached
         # maximum number of turns (1)") before the model can emit any tool call or intent — newer bundled CLI builds
         # raise this as an error rather than returning a partial result.
-        max_turns_use = max(max_turns_use, _RAW_COMPLETION_MIN_MAX_TURNS)
+        max_turns_use = max(max_turns_use, _MIN_MAX_TURNS)
         turn_marker = uuid.uuid4().hex
         turn_stop = _TurnStop()
         try:
             options = self._build_options(
                 tools=tools or [],
-                disallowed_tools=disallowed_tools or [],
                 max_turns=max_turns_use,
                 system_prompt=system_prompt,
                 turn_marker=turn_marker,
@@ -556,7 +509,7 @@ class ClaudeBackend:
                 "output_tokens": output_tokens,
             }
         )
-        self._finish_turn_diagnostic(outcome="succeeded" if collected.intents or self.raw_completion else "no_intent")
+        self._finish_turn_diagnostic(outcome="succeeded" if collected.intents else "no_intent")
         return BackendTurnResult(
             intents=collected.intents,
             raw_text=raw_text,
@@ -588,9 +541,7 @@ class ClaudeBackend:
         return self.allowed_intents if self.allowed_intents is not None else frozenset(IntentType)
 
     def _compose_prompt(self, prompt: str) -> str:
-        """Append the emit_intent output-format suffix unless in raw mode."""
-        if self.raw_completion:
-            return prompt
+        """Append the emit_intent output-format suffix."""
         return f"{prompt}\n\n{_build_output_instructions(self._offered_intents)}"
 
     def set_context_provider(self, provider: ContextProvider | None) -> None:
@@ -633,7 +584,7 @@ class ClaudeBackend:
             "mcp_tools": mcp_tools,
             "emit_intent": {
                 "qualified_name": EMIT_INTENT_TOOL_QUALIFIED,
-                "registered": bool(self.mcp_server_config is not None and self.mcp_tool_name),
+                "registered": self.mcp_server_config is not None,
                 "offered": None if mcp_tools is None else EMIT_INTENT_TOOL_QUALIFIED in mcp_tools,
                 "schema_sha256": hashlib.sha256(schema.encode("utf-8")).hexdigest(),
                 "setup_error": self._mcp_setup_error,
@@ -667,7 +618,7 @@ class ClaudeBackend:
             "system_prompt": system_prompt or "",
             "allowed_tools": list(tools),
             "mcp_servers": [],
-            "emit_intent_registered": bool(self.mcp_server_config is not None and self.mcp_tool_name),
+            "emit_intent_registered": self.mcp_server_config is not None,
             "messages": [],
             "result": "",
             "raw_text": "",
@@ -688,20 +639,16 @@ class ClaudeBackend:
         allowed = kwargs.get("allowed_tools", getattr(options, "allowed_tools", diag["allowed_tools"]))
         servers = kwargs.get("mcp_servers", getattr(options, "mcp_servers", {}))
         if not kwargs:
-            if self.raw_completion:
-                allowed = []
-                servers = {}
-            else:
-                allowed = [tool for tool in diag["allowed_tools"] if tool != EMIT_INTENT_TOOL_NAME]
-                if self.mcp_tool_name and self.mcp_tool_name not in allowed:
-                    allowed.append(self.mcp_tool_name)
-                if self._context_server_config is not None:
-                    allowed.extend(tool for tool in CONTEXT_TOOL_QUALIFIED_NAMES if tool not in allowed)
-                servers = {}
-                if self.mcp_server_config is not None:
-                    servers[MCP_SERVER_NAME] = self.mcp_server_config
-                if self._context_server_config is not None:
-                    servers[CONTEXT_MCP_SERVER_NAME] = self._context_server_config
+            allowed = [tool for tool in diag["allowed_tools"] if tool != EMIT_INTENT_TOOL_NAME]
+            if self.mcp_server_config is not None and EMIT_INTENT_TOOL_QUALIFIED not in allowed:
+                allowed.append(EMIT_INTENT_TOOL_QUALIFIED)
+            if self._context_server_config is not None:
+                allowed.extend(tool for tool in CONTEXT_TOOL_QUALIFIED_NAMES if tool not in allowed)
+            servers = {}
+            if self.mcp_server_config is not None:
+                servers[MCP_SERVER_NAME] = self.mcp_server_config
+            if self._context_server_config is not None:
+                servers[CONTEXT_MCP_SERVER_NAME] = self._context_server_config
         diag["max_turns"] = max_turns
         diag["allowed_tools"] = [str(tool) for tool in allowed or []]
         diag["mcp_servers"] = sorted(str(name) for name in (servers or {}))
@@ -741,7 +688,6 @@ class ClaudeBackend:
         self,
         *,
         tools: list[str],
-        disallowed_tools: list[str] | None = None,
         max_turns: int,
         system_prompt: str | None,
         turn_marker: str | None = None,
@@ -752,10 +698,7 @@ class ClaudeBackend:
             system_prompt=system_prompt,
             turn_marker=turn_marker,
         )
-        if self.raw_completion:
-            kwargs.update(self._raw_completion_option_kwargs(disallowed_tools))
-        else:
-            kwargs.update(self._tool_palette_option_kwargs(tools, disallowed_tools))
+        kwargs.update(self._tool_palette_option_kwargs(tools))
         # Capture CLI stderr so failures are diagnosable.
         kwargs["stderr"] = self._stderr_sink
         return self._instantiate_options(kwargs)
@@ -793,20 +736,12 @@ class ClaudeBackend:
             path.write_text(system_prompt, encoding="utf-8")
         return {"type": "file", "path": str(path)}
 
-    @staticmethod
-    def _raw_completion_option_kwargs(disallowed_tools: list[str] | None) -> dict[str, Any]:
-        """The options for a single text turn: no MCP tools, all built-ins disallowed."""
-        deny = list(_RAW_COMPLETION_DISALLOWED_TOOLS)
-        if disallowed_tools:
-            deny = list(dict.fromkeys(deny + disallowed_tools))
-        return {"allowed_tools": [], "disallowed_tools": deny}
-
-    def _tool_palette_option_kwargs(self, tools: list[str], disallowed_tools: list[str] | None) -> dict[str, Any]:
+    def _tool_palette_option_kwargs(self, tools: list[str]) -> dict[str, Any]:
         """The options naming this turn's tool palette and the MCP servers that serve it."""
         # Drop the bare "emit_intent" name; the MCP-qualified form wires into the SDK tool registry.
         allowed = [t for t in tools if t != EMIT_INTENT_TOOL_NAME]
-        if self.mcp_tool_name and self.mcp_tool_name not in allowed:
-            allowed.append(self.mcp_tool_name)
+        if self.mcp_server_config is not None and EMIT_INTENT_TOOL_QUALIFIED not in allowed:
+            allowed.append(EMIT_INTENT_TOOL_QUALIFIED)
         # Allow-list the context-pull tools' qualified names.
         if self._context_server_config is not None:
             for qname in CONTEXT_TOOL_QUALIFIED_NAMES:
@@ -816,8 +751,6 @@ class ClaudeBackend:
         if allowed:
             kwargs["allowed_tools"] = allowed
         kwargs["tools"] = [t for t in allowed if t not in CONTEXT_TOOL_NAMES and not t.startswith("mcp__")]
-        if disallowed_tools:
-            kwargs["disallowed_tools"] = disallowed_tools
         mcp_servers: dict[str, Any] = {}
         if self.mcp_server_config is not None:
             mcp_servers[MCP_SERVER_NAME] = self.mcp_server_config
@@ -838,14 +771,8 @@ class ClaudeBackend:
         )
 
     def _resolve_effort(self) -> str:
-        """Reasoning-effort tier for this backend's role.
-
-        Returns:
-            The role's env override, else the shared override, else the role
-            default from :data:`_EFFORT_ROLES`.
-        """
-        role_env, default = _EFFORT_ROLES.get(self.effort_role, _EFFORT_ROLES["kernel"])
-        return (os.environ.get(role_env) or os.environ.get(_EFFORT_ENV) or default).strip().lower()
+        """Reasoning-effort tier: the orchestration override, else the shared override, else ``medium``."""
+        return (os.environ.get(_EFFORT_ENV_ORCH) or os.environ.get(_EFFORT_ENV) or "medium").strip().lower()
 
     def _apply_effort_options(self, kwargs: dict[str, Any]) -> None:
         """Add env-driven reasoning effort + adaptive thinking to the options."""
@@ -868,9 +795,7 @@ class ClaudeBackend:
             if self._active_turn_diagnostic is not None:
                 self._active_stderr.append(text)
 
-    async def _within_turn_bound(
-        self, coro: Awaitable[Any], *, turn_marker: str, turn_stop: _TurnStop | None = None
-    ) -> Any:
+    async def _within_turn_bound(self, coro: Awaitable[Any], *, turn_marker: str, turn_stop: _TurnStop) -> Any:
         """Await ``coro`` for at most :attr:`turn_timeout_s`; past it, stop the call and kill its CLI.
 
         The SDK call runs in its own task so that a close which never finishes cannot hold the caller: the task is
@@ -881,13 +806,12 @@ class ClaudeBackend:
         Raises:
             LLMCallFailed: The bound elapsed before ``coro`` finished.
         """
-        stop = turn_stop if turn_stop is not None else _TurnStop()
         task = asyncio.ensure_future(coro)
         try:
             done, _ = await asyncio.wait({task}, timeout=self.turn_timeout_s)
         except BaseException:
             # The caller itself was cancelled: take the SDK call and its CLI down without holding the caller.
-            stopper = asyncio.ensure_future(self._stop_turn(task, stop, turn_marker))
+            stopper = asyncio.ensure_future(self._stop_turn(task, turn_stop, turn_marker))
             self._turn_stoppers.add(stopper)
             stopper.add_done_callback(self._turn_stoppers.discard)
             stopper.add_done_callback(lambda t: t.cancelled() or t.exception())
@@ -901,7 +825,7 @@ class ClaudeBackend:
                 if killed:
                     log.warning("claude SDK call failed; killed %d leftover CLI process(es)", len(killed))
                 raise
-        closed, elapsed, killed = await self._stop_turn(task, stop, turn_marker)
+        closed, elapsed, killed = await self._stop_turn(task, turn_stop, turn_marker)
         if closed:
             cleanup = f"SDK closed the CLI in {elapsed:.1f}s"
         else:
@@ -949,9 +873,9 @@ class ClaudeBackend:
         prompt: str,
         options: Any,
         *,
-        idle_timeout_s: float | None = None,
-        attempt: int = 1,
-        turn_stop: _TurnStop | None = None,
+        idle_timeout_s: float,
+        attempt: int,
+        turn_stop: _TurnStop,
     ) -> _StreamedTurn:
         """Stream the SDK's messages for one attempt and collect what they carry.
 
@@ -960,7 +884,6 @@ class ClaudeBackend:
         """
         requests = ClaudeRequestTracker()
         collected = _StreamedTurn()
-        turn_stop = turn_stop or _TurnStop()
         stream = self.sdk_query_factory(prompt=prompt, options=options)
         try:
             stream_iter = stream.__aiter__()
@@ -968,10 +891,7 @@ class ClaudeBackend:
                 # Idle timeout: bound only the wait for the NEXT message; a fully silent gateway trips
                 # ``asyncio.TimeoutError``.
                 try:
-                    if idle_timeout_s is not None:
-                        message = await asyncio.wait_for(stream_iter.__anext__(), timeout=idle_timeout_s)
-                    else:
-                        message = await stream_iter.__anext__()
+                    message = await asyncio.wait_for(stream_iter.__anext__(), timeout=idle_timeout_s)
                 except StopAsyncIteration:
                     break
                 # A stop whose cancellation was lost in the wait above (see ``_TurnStop``) is raised here.

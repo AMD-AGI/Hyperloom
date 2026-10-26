@@ -108,7 +108,6 @@ def test_post_init_emit_intent_setup_failure(monkeypatch):
     monkeypatch.setattr(cl, "build_emit_intent_server", lambda **k: (_ for _ in ()).throw(RuntimeError("boom")))
     b = _backend()
     assert b.mcp_server_config is None
-    assert b.mcp_tool_name is None
     assert any("emit_intent MCP setup failed" in c.get("warn", "") for c in b.calls)
 
 
@@ -135,13 +134,6 @@ def test_build_options_model_and_system_prompt():
     assert opts.kwargs["model"] == "claude-x"
     assert Path(opts.kwargs["system_prompt"]["path"]).read_text(encoding="utf-8") == "sys"
     assert "resume" not in opts.kwargs
-
-
-def test_build_options_raw_completion():
-    b = _backend(raw_completion=True)
-    opts = b._build_options(tools=["Read"], max_turns=8, system_prompt=None)
-    assert opts.kwargs["allowed_tools"] == []
-    assert "Bash" in opts.kwargs["disallowed_tools"]
 
 
 def test_build_options_with_context_tools(monkeypatch):
@@ -273,16 +265,6 @@ async def test_invoke_other_exception_reraises():
     b.sdk_query_factory = _query([], raise_exc=RuntimeError("real failure"))
     with pytest.raises(RuntimeError, match="real failure"):
         await b.run("hi")
-
-
-async def test_run_raw_completion_headroom():
-    msg = _Msg(content=[TextBlock("the answer")], result="the answer")
-    b = _backend(raw_completion=True)
-    b.sdk_query_factory = _query([msg])
-    res = await b.run("hi", max_turns=1)
-    # raw mode bumps max_turns to >= 8 and returns text without an intent
-    assert res.raw_text == "the answer"
-    assert b.calls[-1]["max_turns"] >= 8
 
 
 # ---- per-request context water level -------------------------------------
