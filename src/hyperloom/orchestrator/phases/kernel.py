@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from . import geak_rebench as _geak_rebench, machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec, rebench_round_sec
+from hyperloom.common.coerce import first_str
 from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.common.io import WriteOptions, atomic_write_json
 from hyperloom.common.jsonio import read_json
@@ -161,6 +162,36 @@ def _first_text(mapping: Mapping[str, Any], *keys: str, default: str = "") -> st
         if text:
             return text
     return default
+
+
+def _served_replay_result(path: str, root: Path) -> dict[str, Any] | None:
+    """The orchestrator's own replay result at ``path``, or ``None`` when it is not a served measurement."""
+    # GEAK's own results are not the orchestrator's baseline, and the
+    # overlay probe is not a served measurement. Match path COMPONENTS
+    # below the runs root, never the whole string: a substring test
+    # excludes every result the moment an ancestor directory happens
+    # to contain "geak" (a campaign rooted at .../hlgeak_24h_run/ hits
+    # this), which silently degrades the shape to the 1024 default
+    # this method exists to replace.
+    try:
+        rel_parts = Path(path).relative_to(root).parts
+    except ValueError:
+        return None
+    if "geak" in rel_parts or "_baseline_source_overlay" in rel_parts:
+        return None
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    completed = int(raw.get("completed") or 0)
+    tin = int(raw.get("total_input_tokens") or 0)
+    tout = int(raw.get("total_output_tokens") or 0)
+    tput = float(raw.get("output_throughput") or 0.0)
+    if completed <= 0 or tin <= 0 or tout <= 0 or tput <= 0:
+        return None
+    return raw
 
 
 def _read_dispatch_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
@@ -773,10 +804,10 @@ class KernelPhase(CoordinatorCollaborator):
         for index, row in enumerate(rows):
             if not isinstance(row, dict):
                 continue
-            kernel_id = str(row.get("operator_id") or "")
+            kernel_id = first_str(row.get("operator_id"))
             if not kernel_id:
                 continue
-            status = str(row.get("status") or "unknown").lower()
+            status = first_str(row.get("status"), "unknown").lower()
             if status == "kept":
                 decision = "KEEP"
             elif status.startswith("reverted"):
@@ -797,7 +828,7 @@ class KernelPhase(CoordinatorCollaborator):
                 {
                     "kernel_id": kernel_id,
                     "kernel_name": kernel_id.split(":")[2] if len(kernel_id.split(":")) > 2 else "",
-                    "run_id": str(result.get("run_id") or f"controller-c{cycle}"),
+                    "run_id": first_str(result.get("run_id"), f"controller-c{cycle}"),
                     "status": status,
                     "attempts": [
                         {
@@ -815,7 +846,7 @@ class KernelPhase(CoordinatorCollaborator):
                             # a reader asking why a candidate did not land had
                             # one field that was empty only for forge.
                             "error_class": "" if status == "kept" else status,
-                            "error": str(row.get("reason") or ""),
+                            "error": first_str(row.get("reason")),
                         }
                     ],
                     "verification": {
@@ -912,27 +943,25 @@ class KernelPhase(CoordinatorCollaborator):
         recorder.record_fusion_run(
             FusionRun(
                 lane=LaneRunFields(
-                    run_id=str(result.get("fusion_run_id") or ""),
-                    status=str(result.get("status") or "unknown"),
-                    micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
-                    integrate_ref=str(result.get("integration_id") or ""),
-                    started_at=str(result.get("started_at") or ""),
-                    ended_at=str(result.get("ended_at") or result.get("ts") or ""),
+                    run_id=first_str(result.get("fusion_run_id")),
+                    status=first_str(result.get("status"), "unknown"),
+                    micro_decision=first_str(result.get("micro_decision"), result.get("decision")),
+                    integrate_ref=first_str(result.get("integration_id")),
+                    started_at=first_str(result.get("started_at")),
+                    ended_at=first_str(result.get("ended_at"), result.get("ts")),
                     duration_sec=result.get("duration_sec"),
-                    error_class=str(result.get("error_class") or ""),
-                    failure_reason=str(
-                        result.get("error") or result.get("skip_reason") or result.get("error_class") or ""
-                    ),
+                    error_class=first_str(result.get("error_class")),
+                    failure_reason=first_str(result.get("error"), result.get("skip_reason"), result.get("error_class")),
                 ),
-                pattern=str(result.get("pattern") or result.get("fusion_pattern") or ""),
-                target_module=str(result.get("target_module") or result.get("kernel_name") or ""),
+                pattern=first_str(result.get("pattern"), result.get("fusion_pattern")),
+                target_module=first_str(result.get("target_module"), result.get("kernel_name")),
                 applied=bool(result.get("kept")),
                 gain_pct=result.get("gain_pct"),
-                patch_path=str(result.get("patch_path") or result.get("source_patch") or ""),
+                patch_path=first_str(result.get("patch_path"), result.get("source_patch")),
             )
         )
         tool_versions.record_tool_version(self.session_dir, tool="forge")
-        agent_backend = str(result.get("agent_backend") or "").lower()
+        agent_backend = first_str(result.get("agent_backend")).lower()
         if agent_backend:
             tool_versions.record_tool_version(self.session_dir, tool=agent_backend)
 
@@ -1212,35 +1241,12 @@ class KernelPhase(CoordinatorCollaborator):
             from hyperloom.inference_optimizer.session.session_paths import runs_root
 
             root = runs_root(self.session_dir)
-            if not Path(root).is_dir():
-                return {}
             best: tuple[float, dict[str, Any], str] | None = None
             for rp in _glob.glob(str(Path(root) / "**" / "inferencex_result.json"), recursive=True):
-                # GEAK's own results are not the orchestrator's baseline, and the
-                # overlay probe is not a served measurement. Match path COMPONENTS
-                # below the runs root, never the whole string: a substring test
-                # excludes every result the moment an ancestor directory happens
-                # to contain "geak" (a campaign rooted at .../hlgeak_24h_run/ hits
-                # this), which silently degrades the shape to the 1024 default
-                # this method exists to replace.
-                try:
-                    rel_parts = Path(rp).relative_to(root).parts
-                except ValueError:
+                raw = _served_replay_result(rp, root)
+                if raw is None:
                     continue
-                if "geak" in rel_parts or "_baseline_source_overlay" in rel_parts:
-                    continue
-                try:
-                    raw = json.loads(Path(rp).read_text(encoding="utf-8")) or {}
-                except (OSError, json.JSONDecodeError, TypeError, ValueError):
-                    continue
-                if not isinstance(raw, dict):
-                    continue
-                completed = int(raw.get("completed") or 0)
-                tin = int(raw.get("total_input_tokens") or 0)
-                tout = int(raw.get("total_output_tokens") or 0)
-                tput = float(raw.get("output_throughput") or 0.0)
-                if completed <= 0 or tin <= 0 or tout <= 0 or tput <= 0:
-                    continue
+                tput = float(raw["output_throughput"])
                 # Prefer the result whose throughput IS the baseline we handed
                 # over, so the shape describes the same measurement.
                 err = abs(tput - target_tput) / target_tput if target_tput > 0 else 1.0
@@ -2215,8 +2221,9 @@ class KernelPhase(CoordinatorCollaborator):
                 continue
             stated = raw.get("e2e_delta_pct")
             try:
-                delta = None if stated is None or stated == "" else float(stated)
+                delta = float(stated)
             except (TypeError, ValueError):
+                # An absent (None) or empty ("") delta lands here too.
                 delta = None
             name = geak_spec_name(raw)
             if not name:
@@ -2547,13 +2554,7 @@ class KernelPhase(CoordinatorCollaborator):
         specs = _geak_accepted_kernel_specs(result)
         if not specs:
             return
-        rows = [
-            {
-                "kernel_id": str(k.get("short_name") or k.get("kernel_id") or k.get("cand_tag") or "").strip(),
-                "spec": k,
-            }
-            for k in specs
-        ]
+        rows = [{"kernel_id": geak_spec_name(k), "spec": k} for k in specs]
 
         rebench_gain: float | None = None
         if baseline_tput > 0 and measured_tput > 0:
@@ -2567,13 +2568,14 @@ class KernelPhase(CoordinatorCollaborator):
         ledger = self.shared_state.kernel_integrate_attempts
         if not isinstance(ledger, dict):
             return
+        cycle = int(self.shared_state.macro_cycle or 0)
         measurement = AdoptionMeasurement(
             measured_tput=measured_tput,
             rebench_gain=rebench_gain,
             attributable=attributable,
             provenance=provenance,
             ts=ts,
-            cycle=int(self.shared_state.macro_cycle or 0),
+            cycle=cycle,
             overlay_loaded=overlay_loaded,
             basis=basis,
             alignment_status=alignment_status,
@@ -2595,7 +2597,7 @@ class KernelPhase(CoordinatorCollaborator):
             _record_geak_integration(
                 entry,
                 kernel_id=kid,
-                macro_cycle=int(self.shared_state.macro_cycle or 0),
+                macro_cycle=cycle,
             )
         self.shared_state.kernel_integrate_attempts = ledger
         log.info(
@@ -2629,7 +2631,8 @@ class KernelPhase(CoordinatorCollaborator):
         recovered_from_disk: bool = False,
     ) -> None:
         """Record the delegated GEAK runner's terminal state."""
-        absent = geak_absent_backends(str(result.get("eval_dir") or handoff.get("eval_dir") or ""))
+        eval_dir = str(result.get("eval_dir") or handoff.get("eval_dir") or "")
+        absent = geak_absent_backends(eval_dir)
         if absent:
             result["absent_backends"] = absent
             log.warning(
@@ -2643,12 +2646,12 @@ class KernelPhase(CoordinatorCollaborator):
         versions = versions if isinstance(versions, dict) else {}
         recorder.record_geak_delegation(
             GeakDelegation(
-                runner_status=str(result.get("status") or "unknown"),
-                started_at=facts.started_at or str(result.get("started_at") or ""),
+                runner_status=first_str(result.get("status"), "unknown"),
+                started_at=facts.started_at or first_str(result.get("started_at")),
                 ended_at=str(result.get("ended_at") or datetime.now(timezone.utc).isoformat()),
                 duration_sec=facts.duration_sec if facts.duration_sec is not None else result.get("duration_sec"),
-                error_class=str(result.get("error_class") or ""),
-                error=str(result.get("error") or ""),
+                error_class=first_str(result.get("error_class")),
+                error=first_str(result.get("error")),
                 returncode=result.get("returncode"),
                 runner_timeout_sec=(
                     facts.runner_timeout_sec if facts.runner_timeout_sec is not None else result.get("runner_timeout_s")
@@ -2657,8 +2660,8 @@ class KernelPhase(CoordinatorCollaborator):
                     facts.kill_timeout_sec if facts.kill_timeout_sec is not None else result.get("kill_timeout_s")
                 ),
                 exp_root=str(result.get("exp_root") or handoff.get("exp_root") or ""),
-                eval_dir=str(result.get("eval_dir") or handoff.get("eval_dir") or ""),
-                report_path=str(result.get("report_path") or ""),
+                eval_dir=eval_dir,
+                report_path=first_str(result.get("report_path")),
                 versions=versions,
                 recovered_from_disk=recovered_from_disk,
                 stages_reached=result.get("stages_reached"),
@@ -3997,7 +4000,7 @@ class KernelPhase(CoordinatorCollaborator):
 
     async def _handle_fusion_result(self, result: dict) -> None:
         """Record the forge-fusion result + surface it on the bus."""
-        status = str(result.get("status") or "unknown") if isinstance(result, dict) else "failed"
+        status = first_str(result.get("status"), "unknown") if isinstance(result, dict) else "failed"
         if isinstance(result, dict) and result.get("kept") and result.get("requires_e2e_validation"):
             from ..kernel.nomination_result import parse_outcome
 
@@ -4020,7 +4023,7 @@ class KernelPhase(CoordinatorCollaborator):
             # Counted on the session for the same reason as the aborts above.
             withheld_spent = _as_int(self.shared_state.fusion_withheld_retries)
             self.shared_state.fusion_withheld_retries = withheld_spent + 1
-        if isinstance(result, dict) and not str(result.get("fusion_run_id") or "").strip():
+        if isinstance(result, dict) and not first_str(result.get("fusion_run_id")).strip():
             cycle = int(self.shared_state.macro_cycle or 0)
             result["fusion_run_id"] = f"fusion-c{cycle}-{time.time_ns():x}"
         self.shared_state.last_fusion = result if isinstance(result, dict) else {"status": status}
