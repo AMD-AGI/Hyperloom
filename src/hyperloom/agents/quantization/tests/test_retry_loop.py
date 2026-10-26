@@ -11,7 +11,6 @@ from hyperloom.agents.quantization.driver.outcomes import OutcomeId
 from hyperloom.agents.quantization.driver.retry import (
     QuantSkillRunResult,
     _decide_next_step,
-    _read_counter,
     _resolve_interactive,
     quantize_via_prompt,
 )
@@ -466,25 +465,48 @@ async def test_a_rerun_on_the_same_workspace_is_judged_on_its_own_end(tmp_path, 
     assert "export_crashed" in (ws / "blocked.md.attempt_2").read_text(encoding="utf-8")
 
 
-@pytest.mark.asyncio
-async def test_counter_persists_and_caps_retries(tmp_path, quark_root, build_workspace):
-    """Even with hypothesis present, counter ≥ max → no retry."""
-
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    # Pre-seed the counter at the max.
-    (ws / "requantize_attempts.txt").write_text("1", encoding="utf-8")
-
+def _fail_with_hypothesis(build_workspace):
     def fail(workspace: Path, attempt: int) -> str | None:
-        build_workspace(
-            workspace=workspace,
-            include_weights=False,
-            include_validation_report=False,
-        )
-        (workspace / "fix_hypothesis_attempt_2.md").write_text("x", encoding="utf-8")
+        build_workspace(workspace=workspace, include_weights=False, include_validation_report=False)
+        (workspace / f"fix_hypothesis_attempt_{attempt + 1}.md").write_text("x", encoding="utf-8")
         return None
 
-    runner = _StubRunner([fail])
+    return fail
+
+
+@pytest.mark.asyncio
+async def test_retries_are_capped_per_run_and_a_rerun_gets_its_own(tmp_path, quark_root, build_workspace):
+    """The --quantize prelude reruns a model on the same workspace; the earlier run's retries are not this run's."""
+
+    ws = tmp_path / "ws"
+    fail = _fail_with_hypothesis(build_workspace)
+    for _ in range(2):
+        runner = _StubRunner([fail, fail, fail])
+        result = await quantize_via_prompt(
+            "fp8 it",
+            workspace=ws,
+            quark_root=quark_root,
+            runner_fn=runner,
+            interactive=False,
+            max_requantize_attempts=1,
+        )
+        assert len(runner.calls) == 2
+        assert any("max_attempts_exhausted:counter=1/1" in n for n in result.assessment.notes)
+
+
+@pytest.mark.asyncio
+async def test_a_rerun_does_not_retry_on_a_hypothesis_an_earlier_run_wrote(tmp_path, quark_root, build_workspace):
+    ws = tmp_path / "ws"
+    fail = _fail_with_hypothesis(build_workspace)
+
+    def fail_without_hypothesis(workspace: Path, attempt: int) -> str | None:
+        build_workspace(workspace=workspace, include_weights=False, include_validation_report=False)
+        return None
+
+    await quantize_via_prompt(
+        "fp8 it", workspace=ws, quark_root=quark_root, runner_fn=_StubRunner([fail]), interactive=False
+    )
+    runner = _StubRunner([fail_without_hypothesis, fail])
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=ws,
@@ -493,10 +515,10 @@ async def test_counter_persists_and_caps_retries(tmp_path, quark_root, build_wor
         interactive=False,
         max_requantize_attempts=1,
     )
+
     assert len(runner.calls) == 1
-    assert any("max_attempts_exhausted" in n for n in result.assessment.notes)
-    # Counter should still be 1 (no bump beyond the cap).
-    assert _read_counter(ws) == 1
+    assert any("no_fix_hypothesis" in n for n in result.assessment.notes)
+    assert not (ws / "fix_hypothesis_attempt_2.md").exists()
 
 
 @pytest.mark.asyncio
