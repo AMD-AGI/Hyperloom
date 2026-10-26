@@ -359,6 +359,15 @@ def _execute(call: TestCall):
         raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
 
 
+def _execute_watched(ctx: _Context, call: TestCall):
+    """Run the test while the card watch looks at its cards; enforcing, the watch ends it at the first look that finds a
+    process outside it, through the cancellation the test is handed."""
+    end = CancelScope()
+    call = dataclasses.replace(call, cancel=end)
+    with own_tmpdir(call, ctx.environ), ctx.cards.watching(lambda: end.cancel(reason=FOREIGN_PROCESS_ON_CARD)):
+        return _execute(call)
+
+
 def _verdict_of(outcome) -> FailureClassification:
     """The backend's verdict when it gave a failure class, else a classification of the outcome's stderr.
 
@@ -519,10 +528,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     ctx.cards.enforce_guard()
     progress.phase("running")
     started = time.time()
-    end = CancelScope()
-    call = dataclasses.replace(call, cancel=end)
-    with own_tmpdir(call, ctx.environ), ctx.cards.watching(lambda: end.cancel(reason=FOREIGN_PROCESS_ON_CARD)):
-        outcome, timed_out = _execute(call)
+    outcome, timed_out = _execute_watched(ctx, call)
     ctx.cards.enforce_guard()
     observed = ctx.cards.observation()
     if observed is not None:

@@ -459,9 +459,11 @@ async def test_a_lease_under_a_guard_that_only_observes_takes_a_card_a_process_h
     ]
 
 
-async def test_a_lease_with_no_guard_named_observes(local: Make) -> None:
+async def test_a_lease_with_no_guard_named_enforces(local: Make, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HYPERLOOM_CARD_GUARD", raising=False)
     holders = CardList()
     holders.holders = tuple(Holder(card=card, pid=4242 + card, command="x") for card in range(3))
     box = await local(cards=3, card_holders=holders)
 
-    assert (await box.lease_branch_sandbox("agent", 1, wait_sec=0)).gpu_ids == (0,)
+    with pytest.raises(SandboxUnavailable, match=r"card 0 by pid 4242 \(x\); card 1 by pid 4243"):
+        await box.lease_branch_sandbox("agent", 1, wait_sec=0)
