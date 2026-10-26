@@ -401,6 +401,20 @@ async def test_inactive_without_record(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_raising_section_open_is_not_read_as_an_unavailable_section(tmp_path: Path) -> None:
+    # Opening the section handles its own store and file errors, so anything else is a fault, not a cold start.
+    stub = _StubPrelude(tmp_path)
+
+    def _broken_open() -> None:
+        raise AttributeError("'NoneType' object has no attribute 'files_dir'")
+
+    stub._open_warm_kernel_section = _broken_open
+
+    with pytest.raises(AttributeError, match="has no attribute 'files_dir'"):
+        await stub._prepare_warm_kernel_kb()
+
+
+@pytest.mark.asyncio
 async def test_one_shot_save_failure_stops_before_kernel_apply(
     tmp_path: Path,
 ) -> None:
