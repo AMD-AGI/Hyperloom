@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""review-pr's fetch.sh names every cut in openprs.txt instead of reading it as no overlap.
+"""What review-pr's fetch.sh writes: openprs.txt names every cut instead of reading it as no
+overlap, skill.txt names what reviewed, and comments.txt heads each entry with its author and time.
 
 fetch.sh runs against a stub ``gh`` that answers from a fake repository: the PR under
 review with a one-file diff, its open PRs, which ``gh pr list`` serves newest first and
-stops at ``--limit`` the way the real one does, and closed PRs that only a GraphQL count
-without the open-state filter would include.
+stops at ``--limit`` the way the real one does, closed PRs that only a GraphQL count
+without the open-state filter would include, and the reviews and comments it lists.
 """
 
 from __future__ import annotations
@@ -78,7 +79,7 @@ elif endpoint == "graphql":
 elif "-H" in options:
     sys.stdout.write(world["diff"])
 elif "--slurp" in args:
-    emit([[]])
+    emit([world.get("lists", {}).get(endpoint, [])])
 elif endpoint.endswith("/check-runs"):
     emit({"check_runs": []})
 elif endpoint.endswith("/status"):
@@ -113,11 +114,13 @@ def _run(
     open_prs: list[dict[str, object]],
     count: Literal["answers", "null", "fails"] = "answers",
     *,
+    lists: dict[str, list[dict[str, object]]] | None = None,
     env: dict[str, str] | None = None,
     fetch: Path = _FETCH,
 ) -> subprocess.CompletedProcess[str]:
     """``fetch`` (the skill's fetch.sh by default) for the PR under review, into ``tmp_path / "work"``; ``count`` is
-    how the open-PR count replies, and ``env`` adds to fetch.sh's environment."""
+    how the open-PR count replies, ``lists`` what the paginated endpoints it names list, and ``env`` adds to
+    fetch.sh's environment."""
     world = tmp_path / "world.json"
     world.write_text(
         json.dumps(
@@ -138,6 +141,7 @@ def _run(
                 "open_prs": open_prs,
                 "closed_prs": 40,
                 "count": count,
+                "lists": lists or {},
             }
         ),
         encoding="utf-8",
@@ -225,3 +229,37 @@ def test_a_skill_directory_git_cannot_name_stops_the_fetch(tmp_path: Path) -> No
     assert result.returncode != 0
     assert "cannot name this skill's version" in result.stderr
     assert not (tmp_path / "work" / "skill.txt").exists()
+
+
+def test_comments_txt_heads_each_entry_with_its_author_and_time(tmp_path: Path) -> None:
+    lists: dict[str, list[dict[str, object]]] = {
+        f"repos/{_REPO}/pulls/{_PR}/reviews": [
+            {
+                "user": {"login": "alice"},
+                "state": "COMMENTED",
+                "body": "a review",
+                "submitted_at": "2026-10-24T02:00:00Z",
+            }
+        ],
+        f"repos/{_REPO}/pulls/{_PR}/comments": [
+            {
+                "user": {"login": "alice"},
+                "path": _CHANGED,
+                "line": 1,
+                "body": "a note",
+                "created_at": "2026-10-24T03:00:00Z",
+            }
+        ],
+        f"repos/{_REPO}/issues/{_PR}/comments": [
+            {"user": {"login": "github-actions[bot]"}, "body": "a card", "created_at": "2026-10-24T04:00:00Z"}
+        ],
+    }
+
+    result = _run(tmp_path, _open_prs(3), lists=lists)
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "work" / "comments.txt").read_text(encoding="utf-8") == (
+        "[REVIEW alice COMMENTED 2026-10-24T02:00:00Z]\na review\n\n"
+        f"[INLINE alice 2026-10-24T03:00:00Z] {_CHANGED}:1\na note\n\n"
+        "[COMMENT github-actions[bot] 2026-10-24T04:00:00Z]\na card\n\n"
+    )

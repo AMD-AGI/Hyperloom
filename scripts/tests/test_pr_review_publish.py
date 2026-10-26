@@ -59,40 +59,63 @@ class Published:
     stderr: str
 
     @property
+    def comments(self) -> list[str]:
+        return [call[call.index("--body") + 1] for call in self.calls if call[:2] == ["pr", "comment"]]
+
+    @property
     def note(self) -> str:
         """The first line of the note the script posted instead of a verdict, or empty."""
-        bodies = [call[call.index("--body") + 1] for call in self.calls if call[:2] == ["pr", "comment"]]
-        return bodies[0].split("\n", 1)[0] if bodies else ""
+        notes = [body for body in self.comments if body.startswith("Automated review: no verdict applied")]
+        return notes[0].split("\n", 1)[0] if notes else ""
 
     @property
     def reviewed(self) -> bool:
+        """Whether a request-changes review was submitted."""
         return any(call[:2] == ["pr", "review"] for call in self.calls)
 
+    @property
+    def lgtm(self) -> bool:
+        return any(body.endswith("\n\nLGTM") for body in self.comments)
 
-def _card(*, blocking: bool = True, skill: str = _SKILL, model: str = _MODEL) -> str:
+
+def _card(
+    *, blocking: bool = True, skill: str = _SKILL, model: str = _MODEL, prior: str | None = None, head: str = _HEAD
+) -> str:
     verdict = (
         "1\n\n1. [C1] x is still 1 [verified]\n   Problem: x is 1 at src/pkg/mod.py:1\n   Impact: x is wrong\n"
         "   Action: set x to 2\n"
         if blocking
         else "none\n"
     )
+    fields = f"Skill: {skill} | Model: {model}" + (f" | Prior: {prior}" if prior is not None else "")
     return (
         f"## PR #{_PR} -- fix: change mod\n\nWhat it does: changes mod.\n\nBlocking issues: {verdict}\n"
-        f"Checked: src/pkg/mod.py | Ran: none | Skill: {skill} | Model: {model} | Base: {_BASE} | Head: {_HEAD}\n"
+        f"Checked: src/pkg/mod.py | Ran: none | {fields} | Base: {_BASE} | Head: {head}\n"
     )
 
 
+#: comments.txt holding a card an earlier review posted on an earlier head.
+_EARLIER = f"[REVIEW bob CHANGES_REQUESTED 2026-10-24T02:00:00Z]\n{_card(head='c' * 40)}\n"
+
+
 def _publish(
-    tmp_path: Path, card: str, *, skill_txt: str | None = _SKILL_TXT, files: dict[str, str] | None = None
+    tmp_path: Path,
+    card: str,
+    *,
+    skill_txt: str | None = _SKILL_TXT,
+    comments: str | None = "",
+    files: dict[str, str] | None = None,
 ) -> Published:
-    """pr-review-publish.sh on ``card``, beside every artifact a review leaves, ``skill_txt`` unless it is None, and
-    ``files``."""
+    """pr-review-publish.sh on ``card``, beside every artifact a review leaves, ``skill_txt`` and ``comments`` as
+    skill.txt and comments.txt unless they are None, and ``files``."""
     work = tmp_path / "work"
     work.mkdir()
     for name in _ARTIFACTS:
         (work / name).write_text("x\n", encoding="utf-8")
     if skill_txt is not None:
         (work / "skill.txt").write_text(skill_txt, encoding="utf-8")
+    if comments is not None:
+        (work / "comments.txt").write_text(comments, encoding="utf-8")
     for name, text in (files or {}).items():
         (work / name).write_text(text, encoding="utf-8")
     (work / "card.md").write_text(card, encoding="utf-8")
@@ -119,8 +142,9 @@ def _publish(
     return Published(result.returncode, calls, result.stderr)
 
 
-def test_a_card_naming_the_skill_and_model_of_this_run_gets_its_verdict(tmp_path: Path) -> None:
-    run = _publish(tmp_path, _card())
+@pytest.mark.parametrize("skill", [_SKILL, "0123456789abc"], ids=["twelve", "longer-when-ambiguous"])
+def test_a_card_naming_the_skill_and_model_of_this_run_gets_its_verdict(tmp_path: Path, skill: str) -> None:
+    run = _publish(tmp_path, _card(skill=skill), skill_txt=f"skill: {skill}\nmodel: {_MODEL}\n")
 
     assert run.returncode == 0, run.stderr
     assert run.reviewed
@@ -153,3 +177,94 @@ def test_a_card_that_does_not_name_the_skill_and_model_of_this_run_gets_no_verdi
     assert run.returncode == 1
     assert reason in run.note
     assert not run.reviewed
+
+
+@pytest.mark.parametrize("blocking", [True, False], ids=["blocking", "clean"])
+def test_a_first_review_gets_its_verdict_beside_another_prs_card(tmp_path: Path, blocking: bool) -> None:
+    other = f"[COMMENT bob 2026-10-24T02:00:00Z]\n{_card().replace(f'#{_PR} ', f'#{_PR}1 ')}\n"
+
+    run = _publish(tmp_path, _card(blocking=blocking), comments=other)
+
+    assert run.returncode == 0, run.stderr
+    assert (run.reviewed, run.lgtm) == (blocking, not blocking)
+    assert run.note == ""
+
+
+@pytest.mark.parametrize(
+    ("verdicts", "prior", "blocking"),
+    [
+        pytest.param("C1 FIXED -- src/pkg/mod.py:1 now sets x to 2\n", "C1 fixed", False, id="fixed"),
+        pytest.param(
+            "C1 HOLDS -- src/pkg/mod.py:1 still sets x to 1\nT2 FIXED -- tests/test_mod.py:4 fails on the base\n",
+            "C1 holds, T2 fixed",
+            True,
+            id="holds-and-fixed",
+        ),
+        pytest.param("C1 MOVED -- src/pkg/other.py:3 still sets x to 1\n", "C1 moved", True, id="moved-on-the-card"),
+        pytest.param("none -- the latest card reported no finding\n", "none", False, id="none"),
+    ],
+)
+def test_a_re_review_that_settles_the_earlier_card_gets_its_verdict(
+    tmp_path: Path, verdicts: str, prior: str, blocking: bool
+) -> None:
+    run = _publish(
+        tmp_path, _card(blocking=blocking, prior=prior), comments=_EARLIER, files={"prior_verdicts.txt": verdicts}
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert (run.reviewed, run.lgtm) == (blocking, not blocking)
+
+
+@pytest.mark.parametrize(
+    ("verdicts", "prior", "reason"),
+    [
+        pytest.param(None, "C1 fixed", "produced no prior_verdicts.txt", id="no-verdicts"),
+        pytest.param("C1 is fixed now\n", "C1 fixed", "prior_verdicts.txt is neither", id="malformed-line"),
+        pytest.param(
+            "none -- nothing\nC1 FIXED -- src/pkg/mod.py:1\n",
+            "none, C1 fixed",
+            "prior_verdicts.txt is neither",
+            id="none-and-more",
+        ),
+        pytest.param("C1 FIXED -- src/pkg/mod.py:1\n", "C1 holds", "expected 'Prior: C1 fixed'", id="prior-disagrees"),
+        pytest.param("C1 FIXED -- src/pkg/mod.py:1\n", None, "expected 'Prior: C1 fixed'", id="no-prior"),
+        pytest.param(
+            "C1 HOLDS -- src/pkg/mod.py:1 still sets x to 1\n",
+            "C1 holds",
+            "still holds but the card does not list it",
+            id="holds-dropped",
+        ),
+        pytest.param(
+            "C1 MOVED -- src/pkg/other.py:3 still sets x to 1\n",
+            "C1 moved",
+            "still holds but the card does not list it",
+            id="moved-dropped",
+        ),
+    ],
+)
+def test_a_re_review_that_does_not_settle_the_earlier_card_gets_no_verdict(
+    tmp_path: Path, verdicts: str | None, prior: str | None, reason: str
+) -> None:
+    files = {"prior_verdicts.txt": verdicts} if verdicts is not None else {}
+    # A dropped HOLDS/MOVED key is refused even on a clean card; the other cases keep the default blocking card.
+    card = _card(blocking=False, prior=prior) if reason.startswith("still holds") else _card(prior=prior)
+
+    run = _publish(tmp_path, card, comments=_EARLIER, files=files)
+
+    assert run.returncode == 1
+    assert reason in run.note
+    assert not run.reviewed
+
+
+def test_a_card_naming_a_prior_on_a_pr_with_no_earlier_card_gets_no_verdict(tmp_path: Path) -> None:
+    run = _publish(tmp_path, _card(prior="none"), files={"prior_verdicts.txt": "none -- invented\n"})
+
+    assert run.returncode == 1
+    assert "names a Prior but the PR has no earlier card" in run.note
+
+
+def test_a_review_that_left_no_comments_txt_gets_no_verdict(tmp_path: Path) -> None:
+    run = _publish(tmp_path, _card(), comments=None)
+
+    assert run.returncode == 1
+    assert "left no comments.txt" in run.note

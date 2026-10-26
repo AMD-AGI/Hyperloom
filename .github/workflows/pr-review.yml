@@ -204,7 +204,8 @@ jobs:
           - Step 7's independent reader is a Task sub-agent given only card.md, diff.txt and base.txt.
           - Complete every skill step before writing card.md. The following non-empty artifacts are
             mandatory: rules.txt, answers.txt, core_files.txt, verdicts.txt, ai_diagnostic.txt,
-            refutations.txt and independent.txt. Never substitute a shorter review format.
+            refutations.txt and independent.txt, and prior_verdicts.txt when comments.txt holds an
+            earlier card for this PR. Never substitute a shorter review format.
           - The skill's Publishing section is disabled. Never call a GitHub write API. Your final action
             is writing the card to ${WORK}/card.md; the workflow publishes it.
           - card.md is exactly the skill's card contract in English, with no LGTM line. Its first line is
@@ -212,8 +213,9 @@ jobs:
             line is exactly \`Blocking issues: none\` or \`Blocking issues: N\` with N from 1 to 5.
           - Every finding is \`N. [KEY] summary [verified]\` followed by indented \`Problem:\`, \`Impact:\`
             and \`Action:\` lines. Never use Fix or Files fields and never report an inferred finding.
-            The final line is exactly \`Checked: ... | Ran: ... | Skill: ... | Model: ... | Base: ... |
-            Head: ${HEAD_SHA}\` on one line, with Skill and Model exactly as skill.txt gives them.
+            The final line is exactly \`Checked: ... | Ran: ... | Skill: ... | Model: ... | Prior: ... |
+            Base: ... | Head: ${HEAD_SHA}\` on one line, with Skill and Model exactly as skill.txt gives
+            them and Prior only on a re-review (references/re-review.md).
           EOF
           )
           # shellcheck disable=SC2016  # $sub is a jq variable, not a shell one

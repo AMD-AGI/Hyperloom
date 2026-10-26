@@ -148,7 +148,8 @@ gh api --paginate "repos/$REPO/commits/$HEAD_SHA/status" \
   --jq '.statuses[] | [.context, .state, (.target_url // "")] | @tsv' >> "$WORK/ci.txt"
 
 # Only the author, users with write access and this bot reach comments.txt, so an outside comment
-# cannot steer the review.
+# cannot steer the review. Each entry names its time: the three lists are written one after another,
+# so their order does not tell a re-review which card came last (references/re-review.md).
 raw=$(mktemp -d)
 trap 'rm -rf "$raw"' EXIT
 gh api --paginate --slurp "repos/$REPO/pulls/$PR/reviews" | jq -s '[.[][][]]' > "$raw/reviews.json"
@@ -168,9 +169,11 @@ done | jq -Rsc 'split("\n") | map(select(length > 0))' > "$raw/trusted.json"
 
 jq -nr --slurpfile t "$raw/trusted.json" '
   def trusted: select(.user.login | IN($t[0][]));
-  (input[] | trusted | select((.body // "") != "") | "[REVIEW \(.user.login) \(.state)]\n\(.body)\n"),
-  (input[] | trusted | "[INLINE \(.user.login)] \(.path):\(.line // .original_line // 0)\n\(.body)\n"),
-  (input[] | trusted | "[COMMENT \(.user.login)]\n\(.body)\n")' \
+  (input[] | trusted | select((.body // "") != "")
+    | "[REVIEW \(.user.login) \(.state) \(.submitted_at // "pending")]\n\(.body)\n"),
+  (input[] | trusted
+    | "[INLINE \(.user.login) \(.created_at)] \(.path):\(.line // .original_line // 0)\n\(.body)\n"),
+  (input[] | trusted | "[COMMENT \(.user.login) \(.created_at)]\n\(.body)\n")' \
   "$raw"/{reviews,inline,issue}.json > "$WORK/comments.txt"
 
 # Other open PRs whose changed paths intersect this one's (rule V4). One query: gh

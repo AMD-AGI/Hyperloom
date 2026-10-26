@@ -36,8 +36,8 @@ citation, and it goes.
 
 If there are no blocking issues, say so explicitly. Do not manufacture small ones to fill space.
 
-The card closes with its `Checked:` line: what the review read and ran, and the skill version and
-model that ran it.
+The card closes with its `Checked:` line: what the review read and ran, the skill version and model
+that ran it, and on a re-review what became of the earlier card's findings.
 
 ## Links out, not restatement
 
@@ -65,22 +65,22 @@ usually accompanies a diff nobody traced end to end.
 bash .claude/skills/review-pr/fetch.sh <PR>
 ```
 
-Keep the `$WORK` it prints. Read `diff.txt` and `body.txt` before going on.
+Keep the `$WORK` it prints. Read `diff.txt`, `body.txt` and `comments.txt` before going on. When
+`comments.txt` holds an earlier card for this PR, settle its findings first and still review the whole
+diff: follow [`references/re-review.md`](references/re-review.md) beside the steps below.
 
 | file | what it is for |
 |---|---|
 | `meta.txt` | number, title, author, state, head sha, base ref, url, mergeable |
-| `title.txt` | the title, one line — rule X2 checks it against the diff |
-| `body.txt` | the description, checked the same way |
+| `title.txt`, `body.txt` | the title, one line, and the description — rule X2 checks both against the diff |
 | `diff.txt` | the full diff against the merge base |
 | `files.txt` | changed paths, one per line — the input to rule selection |
 | `numstat.txt` | added, deleted, path — size and shape of the change |
 | `commits.txt` | commit subjects, oldest first; a late commit is where a description goes stale |
 | `base.txt` | merge-base sha — every "is this pre-existing" question is answered against it |
 | `ci.txt` | check runs at the current head: name, conclusion, url |
-| `comments.txt` | existing review and issue comments — do not repeat a point already made (Step 7) |
-| `testfiles.txt` | changed paths under a `tests/` directory |
-| `docfiles.txt` | changed docs, prompts and `.md`/`.rst` paths — empty beside a `src/` change is X3's shape |
+| `comments.txt` | existing review and issue comments, each headed by its author and time — an earlier card is settled as [`references/re-review.md`](references/re-review.md) says; any other point already made is not repeated (Step 7) |
+| `testfiles.txt`, `docfiles.txt` | changed paths under a `tests/` directory, and changed docs, prompts and `.md`/`.rst` paths — an empty `docfiles.txt` beside a `src/` change is X3's shape |
 | `openprs.txt` | other open PRs touching the same files — conflicting in-flight work; a `# PARTIAL:` line names what was never compared, reported as `SKIPPED: V4` (rule V4) |
 | `skill.txt` | this skill's version (its directory's tree hash, `+dirty` with uncommitted edits) and the environment's model — the card's `Skill:` is the version, its `Model:` the model your system prompt names, else this one |
 
@@ -90,7 +90,8 @@ Open the index at the top of [`rules.md`](rules.md) and take every row whose tri
 `files.txt` and a skim of `diff.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
 per line, then read only those bodies. **Never read `rules.md` whole** — it holds 75 rules across 10
 families, and a reviewer told to attend to all of them attends to none. Match rows generously: a row
-you are unsure about is taken, never dropped. V1-V8 and X2 are on every list.
+you are unsure about is taken, never dropped. V1-V8 and X2 are on every list. On a re-review, so are
+the rules of the earlier findings that still hold.
 
 ## Step 2 — Semantic understanding
 
@@ -226,8 +227,8 @@ step.
 Attack in this order: is the line added by this PR or pre-existing context around an added line
 (compare against `base.txt`); does the symbol resolve somewhere the diff did not show; is the
 trigger reachable in a real configuration; is the point already made in `comments.txt` by anything
-other than an earlier review-pr card. A finding on an earlier card is not "already made": re-verify
-it at the current head, keep it if it still holds, drop it if it was fixed.
+other than an earlier review-pr card. A finding on an earlier card is not "already made": it is
+settled in `prior_verdicts.txt`, kept if it still holds and dropped if it was fixed.
 
 Then hand `card.md`, the diff and `base.txt` to a reader who has not seen your reasoning — a second
 agent or a person — with every finding false until defended. `$WORK/independent.txt` takes the same
@@ -261,12 +262,16 @@ Blocking issues: <N | none>
 
 deferred: <key> -- <reason>
 
-Checked: <paths and symbols read> | Ran: <commands> | Skill: <skill> | Model: <model> | Base: <merge-base sha> | Head: <head sha>
+Checked: <paths and symbols read> | Ran: <commands> | Skill: <skill> | Model: <model> | Prior: <KEY status, ...> | Base: <merge-base sha> | Head: <head sha>
 ```
 
 At most 5 findings, ranked most-severe first by (severity, then blast radius). A sixth that
 survived both refutation passes is not dropped in silence — it goes on a `deferred:` line, which is
 the only thing that may stand in place of reporting it.
+
+A finding names one shape. Where the diff has it in several places, `Problem:` lists every
+`path:line` and `Action:` covers them all. `Prior` is written only on a re-review, as
+[`references/re-review.md`](references/re-review.md) says.
 
 Use `free:<slug>` as the key for a Step 6 free-form finding; it is held to the same two refutation
 passes as a rule finding.

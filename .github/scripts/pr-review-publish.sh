@@ -5,7 +5,7 @@
 # Publish the review-pr card produced by pr-review.yml.
 #
 # The verdict is applied only when the card parses strictly, names the skill version and the model this run recorded
-# in skill.txt, and still describes the open PR head:
+# in skill.txt, settles the PR's earlier card when comments.txt holds one, and still describes the open PR head:
 #   Blocking issues: N     -> request-changes review (blocks the merge)
 #   Blocking issues: none  -> dismiss this bot's CHANGES_REQUESTED reviews, then an LGTM comment
 # Anything else posts a note (with the card, if any) and exits 1. The bot never approves.
@@ -34,6 +34,29 @@ required=(rules.txt answers.txt core_files.txt verdicts.txt ai_diagnostic.txt re
 for artifact in "${required[@]}"; do
   [ -s "$WORK/$artifact" ] || note "the review did not produce non-empty ${artifact}"
 done
+# Any heading for this PR counts as an earlier card (.claude/skills/review-pr/references/re-review.md): earlier cards
+# include ones people posted from local runs, and a match stricter than theirs would turn this check off unseen.
+[ -f "$WORK/comments.txt" ] || note "the review left no comments.txt"
+if grep -qE "^## PR #${PR}([^0-9]|$)" "$WORK/comments.txt"; then
+  verdicts="$WORK/prior_verdicts.txt"
+  [ -s "$verdicts" ] || note "the PR has an earlier card but the review produced no prior_verdicts.txt"
+  if grep -qvE '^([^ ]+ (FIXED|HOLDS|MOVED)|none) -- .+$' "$verdicts" \
+    || { grep -q '^none -- ' "$verdicts" && [ "$(grep -c '' "$verdicts")" -gt 1 ]; }; then
+    note "prior_verdicts.txt is neither one '<KEY> FIXED|HOLDS|MOVED -- <evidence>' line per finding nor one 'none --' line"
+  fi
+  prior=$(sed -E -e 's/^([^ ]+) FIXED -- .*/\1 fixed/' -e 's/^([^ ]+) HOLDS -- .*/\1 holds/' \
+    -e 's/^([^ ]+) MOVED -- .*/\1 moved/' -e 's/^none -- .*/none/' "$verdicts" | paste -sd , - | sed 's/,/, /g')
+  grep -qF " | Prior: ${prior} | Base: " "$CARD" \
+    || note "the card's Prior does not list prior_verdicts.txt: expected 'Prior: ${prior}'"
+  # A HOLDS or MOVED finding must be back on the card (references/re-review.md); otherwise a clean card would dismiss
+  # the bot's earlier request-changes review while Prior itself says the defect is still there.
+  while read -r key; do
+    grep -qE "^[0-9]+\\. \\[${key}\\] " "$CARD" \
+      || note "prior_verdicts.txt says ${key} still holds but the card does not list it"
+  done < <(sed -nE 's/^([^ ]+) (HOLDS|MOVED) -- .*/\1/p' "$verdicts")
+elif grep -qF ' | Prior: ' "$CARD"; then
+  note "the card names a Prior but the PR has no earlier card"
+fi
 
 first=$(head -1 "$CARD")
 [[ "$first" =~ ^##\ PR\ \#$PR\ --\ .+ ]] || note "the card has no well-formed PR heading"
@@ -63,7 +86,7 @@ grep -qE "^Checked: .+ \\| Ran: .+ \\| Base: [0-9a-f]{7,40} \\| Head: ${REVIEWED
 [ -s "$WORK/skill.txt" ] || note "the review left no skill.txt"
 skill=$(sed -n 's/^skill: //p' "$WORK/skill.txt")
 model=$(sed -n 's/^model: //p' "$WORK/skill.txt")
-[[ "$skill" =~ ^[0-9a-f]{12}$ ]] || note "skill.txt names no clean skill version: '${skill}'"
+[[ "$skill" =~ ^[0-9a-f]{12,40}$ ]] || note "skill.txt names no clean skill version: '${skill}'"
 if [ -z "$model" ] || [ "$model" = unknown ]; then
   note "skill.txt names no model"
 fi
