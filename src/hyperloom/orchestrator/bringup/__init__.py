@@ -15,7 +15,6 @@ from hyperloom.orchestrator.bringup.env_preflight import (
     ENV_FAULT,
     EnvVerdict,
     check_environment,
-    is_env_fault,
 )
 from hyperloom.orchestrator.bringup.ladder import observation_summary
 from hyperloom.orchestrator.bringup.observe import (
@@ -43,7 +42,6 @@ __all__ = [
     "check_environment",
     "check_server_argv",
     "is_argv_invalid",
-    "is_env_fault",
     "load_boot_observation",
     "observation_summary",
     "observe_bringup",

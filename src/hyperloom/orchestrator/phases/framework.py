@@ -991,10 +991,6 @@ class FrameworkPhase(ProposalBench):
             summary=f"{len(rows)} config row(s)" + (f", source-change mandate {mandate}" if mandate else ""),
         )
 
-    async def _pump_predictor(self) -> None:
-        """Step the PrimaTune predictor; a no-op unless an endpoint is configured."""
-        await self._predictor_pump().step(self.shared_state)
-
     def _authoring_inflight_candidate_ids(self, queued: list[Any], running: list[Any]) -> set[str]:
         """Candidate ids with a live specialist / integrate_patch task or a review proposal awaiting its verdict."""
         in_flight = {
@@ -1049,7 +1045,7 @@ class FrameworkPhase(ProposalBench):
             state.save(self.session_dir)
             return
         source_dry = _phase_state.per_lever_dryness(state)[1]["source_arm_plateaued"]
-        if self._framework_local_explore_arm_enabled() and not source_dry:
+        if self.shared_state.framework_local_explore_enabled and not source_dry:
             gap, keywords = self._compose_framework_local_explore_gap()
             title = (
                 f"local source exploration ({gap})"
@@ -1232,7 +1228,6 @@ class FrameworkPhase(ProposalBench):
                 params=params,
                 idempotency_key=idem,
                 requires_lanes=lanes,
-                side_effects=["writes_results", "writes_patches"],
                 lease_ttl_sec=ttl,
                 dispatch_class="coordinator",
             )
@@ -1406,7 +1401,6 @@ class FrameworkPhase(ProposalBench):
                 params=params,
                 idempotency_key=idem,
                 requires_lanes=lanes,
-                side_effects=["writes_results", "writes_patches"],
                 lease_ttl_sec=ttl,
                 dispatch_class="coordinator",
             )
@@ -1551,10 +1545,6 @@ class FrameworkPhase(ProposalBench):
             )
         return "No host-side rewrite evidence has been collected yet for this session. " + read_the_source
 
-    def _framework_local_explore_arm_enabled(self) -> bool:
-        """True when the candidate-free local-exploration arm may run."""
-        return self.shared_state.framework_local_explore_enabled
-
     def _compose_framework_local_explore_gap(self) -> tuple[str, list[str]]:
         """Compose the ``(gap, keywords)`` steering the local-exploration arm."""
         state = self.shared_state
@@ -1607,7 +1597,6 @@ class FrameworkPhase(ProposalBench):
                     params=params,
                     idempotency_key=idem,
                     requires_lanes=lanes,
-                    side_effects=["writes_results", "writes_patches"],
                     lease_ttl_sec=ttl,
                     dispatch_class="coordinator",
                 )
@@ -2284,7 +2273,7 @@ class FrameworkPhase(ProposalBench):
             self._record_advisory_plateau()
             # Last, as at entry, so a predictor fault is filed here after the phase's own work has run.
             stage = "framework_predictor"
-            await self._pump_predictor()
+            await self._predictor_pump().step(self.shared_state)
         except Exception as exc:
             log.exception("FRAMEWORK pump failed at %s", stage)
             self._coord.record_exception(stage=stage, exc=exc)
@@ -2613,7 +2602,6 @@ class FrameworkPhase(ProposalBench):
                 idempotency_key=f"candidate-discovery:{reason}{self._coord.dispatcher.cycle_idem_suffix()}:r{empties + failures}",
                 requires_lanes=lanes,
                 lease_ttl_sec=ttl,
-                side_effects=["writes_results"],
                 dispatch_class="coordinator",
             ),
         )

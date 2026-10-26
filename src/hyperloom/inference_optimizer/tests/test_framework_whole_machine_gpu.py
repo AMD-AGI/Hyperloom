@@ -179,7 +179,7 @@ async def test_enablement_leases_whole_machine_when_capacity_zero(tmp_path, monk
 async def test_gpu_research_lane_mutexes_serving_lanes(tmp_path, monkeypatch):
     """While a framework GPU task holds gpu_research_lane, the serving lanes (benchmark / profile / server_lifecycle) cannot be acquired."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
-    held = await coord.locks.try_acquire_many(
+    held = await coord.locks.acquire_many(
         ["gpu_research_lane"],
         holder_id="framework-holder",
         task_id="framework-holder",
@@ -189,7 +189,7 @@ async def test_gpu_research_lane_mutexes_serving_lanes(tmp_path, monkeypatch):
     assert held is not None
     try:
         for serving_lane in ("benchmark_lane", "profile_lane", "server_lifecycle"):
-            blocked = await coord.locks.try_acquire_many(
+            blocked = await coord.locks.acquire_many(
                 [serving_lane],
                 holder_id="serving-holder",
                 task_id="serving-holder",
@@ -198,7 +198,7 @@ async def test_gpu_research_lane_mutexes_serving_lanes(tmp_path, monkeypatch):
             )
             assert blocked is None, f"{serving_lane} was acquirable while gpu_research_lane held"
         # A second GPU task is also blocked (cap-1 / strictly serial).
-        second = await coord.locks.try_acquire_many(
+        second = await coord.locks.acquire_many(
             ["gpu_research_lane"],
             holder_id="framework-holder-2",
             task_id="framework-holder-2",
