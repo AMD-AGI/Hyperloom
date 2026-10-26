@@ -7,12 +7,39 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
 
 import pytest
 
 from hyperloom.orchestrator.deployment.export import export_custom_inference
 from hyperloom.orchestrator.framework.optimization_scope import check_patch_scope, optimization_file
+
+
+def accept_source(session, hook, stack_entry_id="accepted0"):
+    """Record ``hook``'s current bytes as an accepted stack snapshot.
+
+    Mirrors what the integrate_patch executor writes on a KEEP. Export verifies the
+    tree against these, so a workload with no snapshot has nothing proving what it
+    benchmarked -- which is why the fixture writes one rather than relying on a git
+    checkout to stand in for it.
+    """
+    snapshot = session / "optimization_stack" / "src" / stack_entry_id
+    (snapshot / "files").mkdir(parents=True, exist_ok=True)
+    (snapshot / "files" / hook.name).write_bytes(hook.read_bytes())
+    (snapshot / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "complete": True,
+                "files": [{"rel": hook.name, "op": "upsert"}],
+            }
+        )
+    )
+    return {
+        "stack_entry_id": stack_entry_id,
+        "source_snapshot": str(snapshot),
+        "source_snapshot_complete": True,
+        "target_files": [hook.name],
+    }
 
 
 @pytest.fixture
@@ -25,17 +52,12 @@ def workload(tmp_path, monkeypatch):
     (bench / "optimization_scope.json").write_text(json.dumps({"schema_version": 1, "file": str(hook)}))
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(bench))
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(root))
-    for args in (
-        ["init", "-q"],
-        ["add", hook.name],
-        ["-c", "user.name=test", "-c", "user.email=test@local", "commit", "-qm", "baseline"],
-    ):
-        subprocess.run(["git", "-C", str(root), *args], check=True)
     state = {
         "framework": "custom",
         "framework_repo_path": str(root),
         "bypass_scripts_dir": str(bench),
         "current_best": {"tput": 100},
+        "optimization_stack": [accept_source(session, hook)],
     }
     return root, hook, session, state
 
@@ -218,3 +240,47 @@ def test_specialist_inherits_scope_and_writable_cli_config(workload, monkeypatch
     worker_env = safe_runtime_env()["env_vars"]
     assert worker_env["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == state["bypass_scripts_dir"]
     assert worker_env["CLAUDE_CONFIG_DIR"] == "/scratch/run/claude"
+
+
+def test_export_refuses_when_no_snapshot_covers_the_hook(workload):
+    """A config-only KEEP records no snapshot; exporting then would verify nothing."""
+    _, hook, session, state = workload
+    state["optimization_stack"] = [{"stack_entry_id": "env0", "source_snapshot": ""}]
+    hook.write_text("def hyperloom_optimize(model):\n    return None  # never benchmarked\n")
+
+    result = export_custom_inference(session, state)
+
+    assert result["status"] == "incomplete"
+    assert "nothing proves what was benchmarked" in result["reasons"][0]
+    assert not (session / "deployment" / hook.name).exists()
+
+
+def test_export_refuses_a_hook_importing_a_sibling(workload):
+    """Only the hook ships, so a sibling import would deploy broken."""
+    root, hook, session, state = workload
+    (root / "_kernels.py").write_text("X = 1\n")
+    hook.write_text("import _kernels\n\n\ndef hyperloom_optimize(model):\n    return model\n")
+    state["optimization_stack"] = [accept_source(session, hook, "accepted1")]
+
+    result = export_custom_inference(session, state)
+
+    assert result["status"] == "incomplete"
+    assert "imports '_kernels' from beside itself" in result["reasons"][0]
+
+
+def test_export_refuses_a_relative_import(workload):
+    root, hook, session, state = workload
+    hook.write_text("from . import helpers\n\n\ndef hyperloom_optimize(model):\n    return model\n")
+    state["optimization_stack"] = [accept_source(session, hook, "accepted1")]
+
+    assert export_custom_inference(session, state)["status"] == "incomplete"
+
+
+def test_export_allows_stdlib_and_unrelated_scratch_files(workload):
+    """Scratch files nothing imports are harmless; the old git check rejected them."""
+    root, hook, session, state = workload
+    (root / "scratch_probe.py").write_text("# left behind by a specialist\n")
+    hook.write_text("import json\nimport torch\n\n\ndef hyperloom_optimize(model):\n    return model\n")
+    state["optimization_stack"] = [accept_source(session, hook, "accepted1")]
+
+    assert export_custom_inference(session, state)["status"] == "exported"
