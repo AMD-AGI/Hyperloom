@@ -192,7 +192,11 @@ flat or worse, check the test's server.log shows that line before you call the i
 measured nothing. Submit the delta worktree_patch returns as it is: for a component new on your head it names the \
 upstream commit already, and you set them only when its reply carries a note saying so; never set upstream_ref or \
 upstream_repo on a component your head already has, which the toolbox refuses as upstream_label_unsupported. A replayable champion in the brief that the integration head does not hold: get its delta with notebook_replay and test it on your head before other \
-directions. A champion the brief lists as "already on your head, nothing to replay" is in your head already: build on \
+directions. A lead whose gain the brief or notebook_replay says was measured on another image is \
+trusted only once your own test on your head measures it. Each "left out: patch" entry is a patch that did not come \
+with it: first check your synced worktree, built from this image's upstream, for its change already; if missing, port \
+its intent to your head with worktree_patch and test it. Any other "left out:" entry is a kernel artifact built for \
+another image: never replay it as is, tune your own on your head. A champion the brief lists as "already on your head, nothing to replay" is in your head already: build on \
 it, do not test it again. A lead under "Unfinished in this session" in the brief is a change another branch measured \
 but left unfinished: finish one in your direction the same way before starting a new idea. A lead the integrator \
 measured not stackable on the integration head is retried only with a stated reason it would now stack, written to \

@@ -30,8 +30,10 @@ from hyperloom_multibranch.specialist.prompts import (
 )
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionStart
+from hyperloom_multibranch.contracts.notebook.records import WarmReplay
+from hyperloom_multibranch.notebook.knowledge.warm_start import PATCH_REFERENCE, ReplayReference
 from hyperloom_multibranch.notebook.rsi.briefing import ON_HEAD
-from hyperloom_multibranch.notebook.tools import FOCUS_LINE, UNFINISHED_TITLE
+from hyperloom_multibranch.notebook.tools import FOCUS_LINE, UNFINISHED_TITLE, render_replay
 from hyperloom_multibranch.toolbox.mcp_tools import REPLY_INBOX_HEADER
 
 WORKLOAD = "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64, InferenceX"
@@ -286,6 +288,19 @@ def test_the_role_follows_the_integration_head_with_a_reroot_entry_and_never_rep
     assert "with no candidate test of yours in flight" in prompt
     assert "one whose merge conflicted is yours to port" in prompt
     assert "Keep your head instead while your next candidate builds on a commit of yours not merged yet" in prompt
+
+
+def test_the_role_says_a_cross_image_lead_is_measured_here_and_its_left_out_files_are_ported_not_replayed():
+    patch = ReplayReference(PATCH_REFERENCE, "fused.patch", "a" * 64, "sha256:old", "sglang", "b" * 40)
+    replay = WarmReplay("kb:c1", "c7", RecipeDelta(), IntentLayer.CONFIG, "", "sha256:old", (patch.describe(),))
+    shown = render_replay(replay)
+    prompt = role_prompt(WORKLOAD)
+
+    assert "its gain was measured on image sha256:old" in shown and "left out: patch fused.patch" in shown
+    assert "whose gain the brief or notebook_replay says was measured on another image" in prompt
+    assert 'Each "left out: patch" entry' in prompt
+    assert "first check your synced worktree" in prompt and "port its intent to your head" in prompt
+    assert "never replay it as is" in prompt
 
 
 def test_a_resumed_cli_hears_why_it_stopped_its_worktree_and_what_arrived_meanwhile():
