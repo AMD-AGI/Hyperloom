@@ -91,7 +91,7 @@ ALREADY_ON_HEAD = "its change is already on the integration head"
 ADOPTING_LEAD = "adopting the lead of {}"
 #: A patch the three-way rebase could not settle and the resolver's answer did not resolve either.
 CONFLICT_UNRESOLVED = "unresolved patch conflict"
-#: The same conflict, lost before any answer: the resolver could not be reached. Counted apart from
+#: The same conflict, lost before any answer: no call about it reached the resolver. Counted apart from
 #: :data:`CONFLICT_UNRESOLVED`, because a timed-out call says nothing about whether the patches can be combined.
 RESOLVER_UNREACHED = "the patch resolver could not be asked"
 #: The same conflict, lost to an answer the output token cap cut off: a longer cap, not another model, would settle it.
@@ -100,6 +100,9 @@ CONFLICT_TRUNCATED = "the patch resolver's answer was cut off at its output cap"
 PATCH_KEY = "patch"
 #: The resolver's answers per conflicting patch: a rewrite that does not apply is asked for once more, with why.
 RESOLVER_ATTEMPTS = 2
+#: The calls per conflicting patch that may fail to reach the model and be made again before the merge is lost under
+#: :data:`RESOLVER_UNREACHED`. Such a call gave no answer, so it counts towards no :data:`RESOLVER_ATTEMPTS`.
+RESOLVER_UNREACHED_RETRIES = 1
 NO_PATCH = "the answer carried no patch"
 #: What the second prompt adds after the first, followed by why the first answer gave no rewrite that applies.
 RETRY_FEEDBACK = "Your last rewrite failed to apply: "
@@ -255,8 +258,9 @@ class LlmPatchResolver:
         which patch each replaces and how it was written; :class:`PatchUnresolved` when one stays unresolved. Each
         rewrite applies on top of the rewrites before it.
 
-        A call that fails raises :class:`CompletionFailed`: a model that could not be asked is a different loss from
-        a model that answered, and the merge log names them apart.
+        A call that fails is made again up to :data:`RESOLVER_UNREACHED_RETRIES` times per conflicting patch, and
+        then raises :class:`CompletionFailed`: a model that could not be asked is a different loss from a model that
+        answered, and the merge log names them apart.
         """
 
         merged = apply(await self._repo.read_recipe(merge.onto), merge.delta)
@@ -276,11 +280,21 @@ class LlmPatchResolver:
 
     async def _rewrite(self, conflict: PatchConflict, stack: ComponentPatches, prompt: str) -> _Rewrite:
         """The model's rewrite of ``conflict`` that applies on top of ``stack``; an answer that gave none is asked again
-        with why, up to :data:`RESOLVER_ATTEMPTS` answers in all."""
+        with why, up to :data:`RESOLVER_ATTEMPTS` answers in all, and a call that reached no model is made again as
+        it was, up to :data:`RESOLVER_UNREACHED_RETRIES` times."""
 
         asked, error = prompt, NO_PATCH
-        for attempt in range(1, RESOLVER_ATTEMPTS + 1):
-            text = _rewritten(conflict, await self._completion(RESOLVER_SYSTEM_PROMPT, asked))
+        attempt, retries = 0, RESOLVER_UNREACHED_RETRIES
+        while attempt < RESOLVER_ATTEMPTS:
+            try:
+                reply = await self._completion(RESOLVER_SYSTEM_PROMPT, asked)
+            except CompletionFailed:
+                if not retries:
+                    raise
+                retries -= 1
+                continue
+            attempt += 1
+            text = _rewritten(conflict, reply)
             error = NO_PATCH if text is None else await self._repo.apply_error(stack, text)
             if text is not None and error is None:
                 return _Rewrite(text, attempt)
@@ -722,6 +736,7 @@ __all__ = [
     "GAIN_ONLY_REFUSALS",
     "RESOLVER_ATTEMPTS",
     "RESOLVER_UNREACHED",
+    "RESOLVER_UNREACHED_RETRIES",
     "Integrator",
     "LlmPatchResolver",
     "MergeRecords",
