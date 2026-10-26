@@ -61,7 +61,9 @@ async def test_long_work_is_booked_without_a_supervisor_stamp(tmp_path, monkeypa
         return {"status": "ok"}
 
     coord.sub.register_executor("profile", execute)
-    task = await coord.tasks.create(TaskSpec(kind="profile", params={}, idempotency_key="long-profile"))
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="profile", params={}, idempotency_key="long-profile")
+    )
     try:
         await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), 5)
         await asyncio.wait_for(entered.wait(), 5)

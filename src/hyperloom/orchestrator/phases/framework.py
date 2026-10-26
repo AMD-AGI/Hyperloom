@@ -314,7 +314,7 @@ def predictor_budget(state: SessionView) -> PhaseBudget:
     )
 
 
-def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any) -> None:
+def _record_run(coord: Any, task: "Task | str", *, role: str, status: str, **fields: Any) -> None:
     """Record one specialist dispatch, or its completion.
 
     ``role`` is one of ``discovery``, ``authoring`` or ``config`` -- not
@@ -333,7 +333,7 @@ def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any)
         ROLE_CONFIG,
     )
 
-    task_id = str(task if isinstance(task, str) else getattr(task, "task_id", "") or "")
+    task_id = task if isinstance(task, str) else task.task_id
     if not task_id:
         return
     fields.setdefault("dispatched_at" if status == "dispatched" else "completed_at", now_iso("seconds"))
@@ -992,10 +992,6 @@ class FrameworkPhase(ProposalBench):
             summary=f"{len(rows)} config row(s)" + (f", source-change mandate {mandate}" if mandate else ""),
         )
 
-    async def _pump_predictor(self) -> None:
-        """Step the PrimaTune predictor; a no-op unless an endpoint is configured."""
-        await self._predictor_pump().step(self.shared_state)
-
     def _authoring_inflight_candidate_ids(self, queued: list[Any], running: list[Any]) -> set[str]:
         """Candidate ids with a live specialist / integrate_patch task or a review proposal awaiting its verdict."""
         in_flight = {
@@ -1050,7 +1046,7 @@ class FrameworkPhase(ProposalBench):
             state.save(self.session_dir)
             return
         source_dry = _phase_state.per_lever_dryness(state)[1]["source_arm_plateaued"]
-        if self._framework_local_explore_arm_enabled() and not source_dry:
+        if self.shared_state.framework_local_explore_enabled and not source_dry:
             gap, keywords = self._compose_framework_local_explore_gap()
             title = (
                 f"local source exploration ({gap})"
@@ -1233,7 +1229,6 @@ class FrameworkPhase(ProposalBench):
                 params=params,
                 idempotency_key=idem,
                 requires_lanes=lanes,
-                side_effects=["writes_results", "writes_patches"],
                 lease_ttl_sec=ttl,
                 dispatch_class="coordinator",
             )
@@ -1407,7 +1402,6 @@ class FrameworkPhase(ProposalBench):
                 params=params,
                 idempotency_key=idem,
                 requires_lanes=lanes,
-                side_effects=["writes_results", "writes_patches"],
                 lease_ttl_sec=ttl,
                 dispatch_class="coordinator",
             )
@@ -1552,10 +1546,6 @@ class FrameworkPhase(ProposalBench):
             )
         return "No host-side rewrite evidence has been collected yet for this session. " + read_the_source
 
-    def _framework_local_explore_arm_enabled(self) -> bool:
-        """True when the candidate-free local-exploration arm may run."""
-        return self.shared_state.framework_local_explore_enabled
-
     def _compose_framework_local_explore_gap(self) -> tuple[str, list[str]]:
         """Compose the ``(gap, keywords)`` steering the local-exploration arm."""
         state = self.shared_state
@@ -1608,7 +1598,6 @@ class FrameworkPhase(ProposalBench):
                     params=params,
                     idempotency_key=idem,
                     requires_lanes=lanes,
-                    side_effects=["writes_results", "writes_patches"],
                     lease_ttl_sec=ttl,
                     dispatch_class="coordinator",
                 )
@@ -2283,7 +2272,7 @@ class FrameworkPhase(ProposalBench):
             self._record_advisory_plateau()
             # Last, as at entry, so a predictor fault is filed here after the phase's own work has run.
             stage = "framework_predictor"
-            await self._pump_predictor()
+            await self._predictor_pump().step(self.shared_state)
         except Exception as exc:
             log.exception("FRAMEWORK pump failed at %s", stage)
             self._coord.record_exception(stage=stage, exc=exc)
@@ -2603,7 +2592,7 @@ class FrameworkPhase(ProposalBench):
         }
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
-        task = await self.tasks.create_or_return_existing(
+        task, existing = await self.tasks.create_or_return_existing(
             TaskSpec(
                 kind="specialist",
                 params=params,
@@ -2612,20 +2601,21 @@ class FrameworkPhase(ProposalBench):
                 idempotency_key=f"candidate-discovery:{reason}{self._coord.dispatcher.cycle_idem_suffix()}:r{empties + failures}",
                 requires_lanes=lanes,
                 lease_ttl_sec=ttl,
-                side_effects=["writes_results"],
                 dispatch_class="coordinator",
             ),
         )
-        _record_run(
-            self,
-            task,
-            role="discovery",
-            status="dispatched",
-            domain=str(params.get("domain") or ""),
-            gap_canonical_id=str(params.get("gap_canonical_id") or ""),
-            reason=reason,
-            parallelism=len(lanes or ()),
-        )
+        if not existing:
+            # A row the key already names was recorded when it was dispatched; recording it again would reopen it.
+            _record_run(
+                self,
+                task,
+                role="discovery",
+                status="dispatched",
+                domain=str(params.get("domain") or ""),
+                gap_canonical_id=str(params.get("gap_canonical_id") or ""),
+                reason=reason,
+                parallelism=len(lanes or ()),
+            )
         log.info("FRAMEWORK: dispatched candidate discovery (reason=%s)", reason)
         return True
 

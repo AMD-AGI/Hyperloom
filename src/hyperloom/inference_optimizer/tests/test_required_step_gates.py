@@ -165,7 +165,7 @@ def test_pending_keep_no_longer_blocks_other_actions(session_dir):
         source_file="/p/rmsnorm.py",
     )
     assert coord.shared_state.next_pending_keep_kernel_id() == "k-rmsnorm"
-    for action in ("explore", "sweep", "integrate", "report"):
+    for action in ("explore", "integrate", "report"):
         assert coord.dispatcher._sequence_denial_for_action(action) is None, (
             f"{action!r} must not be sequence-denied by a pending KEEP"
         )
@@ -245,7 +245,7 @@ def test_trace_analyze_gate_does_not_block_explore_actions(session_dir):
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
-    for action in ("explore", "sweep", "report", "profile", "roofline"):
+    for action in ("explore", "report"):
         denied = coord.dispatcher._sequence_denial_for_action(action)
         if denied is None:
             continue

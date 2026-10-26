@@ -53,7 +53,7 @@ The intent envelope shape is:
 | Field | Values | Source |
 |---|---|---|
 | `intent_type` (Critic) | `review_verdict`, `send_message`, `alert` | `hyperloom.orchestrator.roles.agent_role._CRITIC_INTENTS` |
-| `verdict` | `approve`, `reject`, `redirect`, `advise`, `needs_review` | `policy.REVIEW_VERDICTS` |
+| `verdict` | `approve`, `reject`, `redirect`, `advise`, `needs_review` | `protocol.intent.ALLOWED_VERDICTS` |
 | `source` | `critic`, `mock`, `timeout`, `critic_unavailable` | `references/verdict_schema.md` |
 
 ## Source mapping

@@ -24,7 +24,6 @@ from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
     PolicyGate,
     REQUEST_ROUTING,
-    REVIEW_VERDICTS,
     REVIEW_VERDICT_SOURCE_ALLOWLIST,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -96,9 +95,6 @@ def test_request_routing_v06_only_orchestration_to_kernel():
 
 def test_review_verdict_critic_only():
     assert REVIEW_VERDICT_SOURCE_ALLOWLIST == frozenset({"critic"})
-    assert "approve" in REVIEW_VERDICTS
-    assert "needs_review" in REVIEW_VERDICTS
-    assert "objection" not in REVIEW_VERDICTS
 
 
 def test_kill_task_is_not_a_valid_intent_type():

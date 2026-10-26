@@ -143,14 +143,23 @@ def test_coordinator_source_has_no_scoreboard_callers():
 
 def test_pruned_family_advisory_observation_has_no_scoreboard_vocab():
     """The pruned-family advisory string must not mention "Action scores"."""
-    from hyperloom.orchestrator.loop import intent_router as _c
+    import asyncio
+    from types import SimpleNamespace
 
-    src = Path(_c.__file__).read_text(encoding="utf-8")
-    advisory_idx = src.find('"delegate_pruned_advisory"')
-    assert advisory_idx >= 0
-    window = src[advisory_idx : advisory_idx + 800]
-    assert "Action scores" not in window
-    assert "phase-allowed action" in window
+    from hyperloom.orchestrator.loop.intent_router import IntentRouter
+
+    observed: list[dict] = []
+
+    async def _record(_source, _type, payload):
+        observed.append(payload)
+
+    router = SimpleNamespace(bus=SimpleNamespace(record_observation=_record))
+    asyncio.run(IntentRouter._note_pruned_advisory(router, "orchestration", "explore", "delegate_pruned_advisory"))
+
+    (payload,) = observed
+    assert payload["kind"] == "delegate_pruned_advisory"
+    assert "Action scores" not in payload["hint"]
+    assert "phase-allowed action" in payload["hint"]
 
 
 def test_orchestration_prompt_has_no_scoreboard_block():

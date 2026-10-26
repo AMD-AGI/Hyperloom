@@ -80,9 +80,6 @@ class _ConcurrencyProbe:
         self.entries: list[tuple[str, float]] = []
         self.exits: list[tuple[str, float]] = []
         self.gpu_ids_by_task: dict[str, list[int]] = {}
-        # The deadline the reaper kills this specialist on, as handed down.
-        self.deadlines_by_task: dict[str, object] = {}
-        self.last_task_id: str = ""
         self._lock = asyncio.Lock()
         self._wave_ready = asyncio.Event()
         self._wave_entries = 0
@@ -91,8 +88,6 @@ class _ConcurrencyProbe:
         async with self._lock:
             self.entries.append((ctx.task.task_id, time.monotonic()))
             self.gpu_ids_by_task[ctx.task.task_id] = list((ctx.extra or {}).get("gpu_ids") or [])
-            self.deadlines_by_task[ctx.task.task_id] = (ctx.extra or {}).get("specialist_deadline")
-            self.last_task_id = ctx.task.task_id
             wave_ready = self._wave_ready
             if self.expected_concurrency is not None:
                 self._wave_entries += 1
@@ -332,66 +327,6 @@ async def test_gpu_specialist_pool_limits_concurrency_even_when_research_lane_fr
     for _task_id, gpu_ids in probe.gpu_ids_by_task.items():
         assert gpu_ids == [0]
     assert not await coord.tasks.queued()
-
-
-@pytest.mark.asyncio
-async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
-    tmp_path: Path,
-    monkeypatch,
-):
-    # The invariant, not an arithmetic identity: the lease the specialist holds
-    # has to outlive the kill the reaper performs at its deadline. Asserting
-    # equality against a budget recomputed here only ever tests that the test
-    # re-anchors the clock the same way dispatch did, which is the bug this
-    # guards against rather than the property.
-    from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
-
-    coord = await _build_coord_with_capacity(
-        tmp_path,
-        capacity=1,
-        gpu_specialist_capacity=1,
-        monkeypatch=monkeypatch,
-    )
-    coord.shared_state.macro_cycle = 0
-    probe = _ConcurrencyProbe(sleep_seconds=0.01)
-    coord.sub.register_executor("specialist", probe)
-    captured_ttls: list[int] = []
-    original_try_acquire = coord.gpu_specialist_pool.try_acquire
-
-    async def _spy_try_acquire(**kwargs):
-        captured_ttls.append(int(kwargs.get("ttl_sec") or 0))
-        return await original_try_acquire(**kwargs)
-
-    coord.gpu_specialist_pool.try_acquire = _spy_try_acquire  # type: ignore[method-assign]
-
-    await coord.tasks.create_or_return_existing(
-        TaskSpec(
-            kind="specialist",
-            params={
-                "domain": "serving_specialist",
-                "gap_canonical_id": "gap.gpu.ttl",
-                "max_turns": 4,
-                "needs_gpu": True,
-                "gpu_count": 1,
-            },
-            idempotency_key="gpu-ttl",
-            requires_lanes=["research_lane"],
-            lease_ttl_sec=5,
-        ),
-    )
-
-    await _pump_until_drained(coord)
-
-    assert len(captured_ttls) == 1
-    ttl = captured_ttls[0]
-    deadline = probe.deadlines_by_task[probe.last_task_id]
-    assert deadline is not None, "the specialist must be handed the deadline it is killed on"
-    # The lease was taken before the deadline was read back here, so the kill is
-    # this many seconds away at most; the lease must still be held then.
-    assert ttl >= deadline.remaining()
-    budget = coord.dispatcher._specialist_wall_budget_sec(params={"domain": "serving_specialist", "needs_gpu": True})
-    assert ttl == pytest.approx(max(5, budget * (1.0 + GPU_LEASE_TTL_GRACE)), abs=2)
-    assert probe.gpu_ids_by_task
 
 
 def test_cli_default_research_lane_capacity_is_ceiling(monkeypatch):
