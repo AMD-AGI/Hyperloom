@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, cast
 
 if TYPE_CHECKING:
     from hyperloom.orchestrator.bus.message_bus import MessageBus
-    from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager
+    from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
     from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
@@ -73,8 +73,8 @@ class CoordinatorCollaborator:
         return cast("MessageBus", self._coord.bus)
 
     @property
-    def locks(self) -> "ResourceLockManager":
-        return cast("ResourceLockManager", self._coord.locks)
+    def locks(self) -> "SqliteLeaseBackend":
+        return cast("SqliteLeaseBackend", self._coord.locks)
 
     @property
     def db(self) -> "SqliteConnection":

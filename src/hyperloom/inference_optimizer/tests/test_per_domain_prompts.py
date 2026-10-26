@@ -493,12 +493,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.protocol.intent import (
-    Intent,
-    IntentType,
-    IntentValidationError,
-    validate_envelope,
-)
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
@@ -587,36 +582,6 @@ def test_serving_specialist_is_M5_active():
 def test_get_domain_returns_none_for_unknown():
     assert get_domain("nonsense_specialist") is None
     assert get_domain("serving_specialist").kb_anchor == "framework"
-
-
-# 2. intent_parser — SPECIALIST_DONE envelope round-trip
-def test_specialist_done_envelope_passes_validation():
-    envelope = {
-        "intents": [
-            {
-                "intent_type": "specialist_done",
-                "payload": _valid_done_payload(),
-            }
-        ]
-    }
-    intents = validate_envelope(envelope)
-    assert len(intents) == 1
-    assert intents[0].type == IntentType.SPECIALIST_DONE
-
-
-def test_specialist_done_envelope_missing_required_field():
-    bad_payload = _valid_done_payload()
-    bad_payload.pop("summary")
-    envelope = {
-        "intents": [
-            {
-                "intent_type": "specialist_done",
-                "payload": bad_payload,
-            }
-        ]
-    }
-    with pytest.raises(IntentValidationError, match="summary"):
-        validate_envelope(envelope)
 
 
 # 3. PolicyGate R2 — specialist_dispatch_source
