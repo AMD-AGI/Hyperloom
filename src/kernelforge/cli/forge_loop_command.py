@@ -1076,6 +1076,7 @@ class TimeBudget:
     """The campaign's runtime budget and its absolute deadline."""
 
     max_hours: float
+    max_rounds: int
     session_timeout_sec: int | None
     deadline_unix: float
 
@@ -1230,6 +1231,15 @@ class ForgeLoopRequest:
             help="Max runtime hours (default: 1.0, minimum 1.0). Budgets "
             ">2 hours enable Analysis profiling and, for single-lane "
             "rounds, Plan Critic review.",
+        ),
+        click.option(
+            "--max-rounds",
+            default=0,
+            type=click.IntRange(min=0),
+            help="Stop once the campaign has run this many rounds (iterations, "
+            "one judged candidate each), numbered across every session of it, "
+            "resumes included (default: 0, no cap). --max-hours still applies: "
+            "give it room for the rounds.",
         ),
         click.option(
             "--session-timeout-sec",
@@ -1837,6 +1847,7 @@ def forge_loop(request: ForgeLoopRequest):
         snr_threshold=snr_threshold,
         max_time_hours=max(0.05, max_hours),
         deadline_unix=deadline_unix - finalize_reserve_sec,
+        max_rounds=request.budget.max_rounds,
         git_branch=git_branch,
         workspace_dir=workspace_dir,
         experiment_id=request.artifacts.experiment_id or "",

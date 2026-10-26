@@ -275,7 +275,9 @@ def _loop(tmp_path: Path, **overrides) -> SimpleNamespace:
     events: list[dict] = []
     ledger = DirectionLedger(root)
     values = dict(
-        ic=SimpleNamespace(workspace_dir=str(tmp_path), early_stop=EarlyStopPolicy(enabled=True), program_md=""),
+        ic=SimpleNamespace(
+            workspace_dir=str(tmp_path), early_stop=EarlyStopPolicy(enabled=True), program_md="", max_rounds=0
+        ),
         state_store=SimpleNamespace(root=root, append_event=events.append, read_events=lambda: list(events)),
         run_state=SimpleNamespace(search_start_mean_case_speedup=1.0),
         _ledger=lambda: ledger,

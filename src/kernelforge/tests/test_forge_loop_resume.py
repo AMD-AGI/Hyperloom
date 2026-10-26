@@ -806,6 +806,7 @@ def test_forge_loop_defaults_to_fresh_and_workspace_campaign_root(tmp_path, monk
     assert loop.resume is False
     assert not hasattr(loop.ic, "max_iterations")
     assert loop.ic.max_time_hours == 1.0
+    assert loop.ic.max_rounds == 0
     assert loop.ic.git_branch == "feature/test-cli"
     assert loop.tracker.dir == workspace / "forge_experiments"
     assert len(captured["warmstarts"]) == 1
@@ -1838,3 +1839,12 @@ def test_resume_preflight_accepts_the_edits_of_a_round_a_lost_process_never_judg
     store.append_event(make_event("iteration_result", 1, decision="REVERT_PERF"))
     with pytest.raises(ValueError, match="uncommitted tracked changes"):
         loop.validate_resume_preflight()
+
+
+def test_forge_loop_hands_the_round_cap_to_the_loop(tmp_path, monkeypatch):
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, _workspace = _invoke_forge_loop(tmp_path, ["--max-rounds", "5"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["loops"][0].ic.max_rounds == 5

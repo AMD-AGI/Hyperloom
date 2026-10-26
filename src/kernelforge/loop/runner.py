@@ -506,6 +506,8 @@ class IterationConfig:
     # Budget
     max_time_hours: float = 8.0  # overnight budget
     deadline_unix: float | None = None
+    # Iterations the whole campaign may open, numbered across resumes; 0 sets no cap. The time budget still applies.
+    max_rounds: int = 0
     # Held back for finalization: the loop will not START another Agent session once what remains falls below it
     # (``_is_budget_exhausted``).
     budget_reserve_sec: int = 1800
@@ -5626,6 +5628,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             f"(finalize reserve: {self.ic.budget_reserve_sec / 60:.0f} min; "
             "a round is admitted only when what remains also covers its "
             "estimated cost)"
+            + (f"; at most {self.ic.max_rounds} rounds over the campaign" if self.ic.max_rounds else "")
         )
         # The finalize reserve is an absolute admission guard; on a SHORT budget it can swallow most of the window
         # (e.g. a 30-min reserve on a 1h run leaves only 30 min for iterations).
@@ -5717,6 +5720,10 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         if self._is_budget_exhausted():
             self.termination_reason = "budget_exhausted"
             print(f"\nBUDGET EXHAUSTED after {len(self.results)} iterations in this session")
+            return True, None
+        if self.ic.max_rounds and iteration > self.ic.max_rounds:
+            self.termination_reason = "round_cap_reached"
+            print(f"\nROUND CAP REACHED: the campaign has run its {self.ic.max_rounds} rounds")
             return True, None
         if self._is_force_stopped():
             self.termination_reason = "force_stop"

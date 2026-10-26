@@ -8400,3 +8400,18 @@ def test_the_budget_ends_at_the_absolute_deadline_when_that_comes_first(monkeypa
     loop.start_time = now - 600
     loop.ic = SimpleNamespace(max_time_hours=2.0, deadline_unix=None if deadline_in is None else now + deadline_in)
     assert IterationLoop._time_remaining(loop) == pytest.approx(expected)
+
+
+def test_a_round_cap_stops_the_campaign_after_that_many_rounds(tmp_path, monkeypatch):
+    """--max-rounds stops the loop before it opens a round past the cap, with time to spare, and a resume counts
+    the rounds the campaign already ran."""
+    first, workspace = _make_loop(tmp_path, monkeypatch)
+    first.ic.max_rounds = 2
+    monkeypatch.setattr(first, "_time_remaining", lambda: _AMPLE_BUDGET_SEC if len(first.results) < 5 else 0.0)
+    assert [r.iteration for r in asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent)))] == [1, 2]
+    assert LoopStateStore(str(workspace)).load().termination_reason == "round_cap_reached"
+
+    resumed = IterationLoop(first.ic, first.tracker, config=object(), resume=True)
+    resumed.ic.max_rounds = 3
+    monkeypatch.setattr(resumed, "_time_remaining", lambda: _AMPLE_BUDGET_SEC if len(resumed.results) < 5 else 0.0)
+    assert [r.iteration for r in asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=_no_change_agent)))] == [3]
