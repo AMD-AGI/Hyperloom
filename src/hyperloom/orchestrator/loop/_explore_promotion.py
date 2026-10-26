@@ -137,6 +137,14 @@ class ExplorePromotionMixin:
             for switch in arm.get("envs") or {}:
                 self.shared_state.record_framework_lever_attribution(str(switch), gain_pct=gain, source=source)
 
+    def _release_unscreened_levers(self, params: Mapping[str, Any] | None) -> None:
+        """Hand a cycle batch's levers back to replay attribution when the batch ended without verdicts."""
+        for arm in (params or {}).get(CYCLE_ARMS_PARAM) or []:
+            for switch in arm.get("envs") or {}:
+                self.shared_state.record_framework_lever_attribution(
+                    str(switch), gain_pct=None, source=ATTRIBUTION_CYCLE_INCONCLUSIVE
+                )
+
     def _record_framework_lever_attributions(self, result: Mapping[str, Any]) -> bool:
         recorded = False
         for attribution in result.get("framework_lever_attributions") or []:

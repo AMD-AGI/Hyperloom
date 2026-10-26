@@ -207,3 +207,17 @@ def test_a_cycle_batch_is_priced_per_arm_and_its_two_bases():
 
     arms = [{"name": "a"}, {"name": "b"}, {"name": "c"}]
     assert explore_admission_minutes(78.0, {"cycle_arms": arms}) == 5 * CYCLE_ARM_MINUTES
+
+
+async def test_a_phase_on_its_way_out_hands_unscreened_levers_back_to_replay_attribution():
+    fp = _phase(frozen=True)
+    state = fp._coord.shared_state
+    state.record_authored_framework_levers([{"switch": "HL_DONE"}], default_on=False, specialist_task_id="t-0")
+    for switch, patch in (("HL_A", "t-1"), ("HL_C", "t-2")):
+        _awaiting_screen(state, switch, patch)
+
+    assert await fp.enqueue_cycle_batch() is False
+
+    rows = [(r["switch"], r["attribution_source"]) for r in state.authored_framework_levers]
+    assert rows == [("HL_DONE", ""), ("HL_A", "cycle_bench_inconclusive"), ("HL_C", "cycle_bench_inconclusive")]
+    assert _explores(fp) == []

@@ -298,6 +298,8 @@ class BaselineFailureMixin:
             result_payload["status"] = "failed"
         if task.kind == "explore" and bool((task.params or {}).get("geak_fallback")):
             self._close_failed_geak_revalidation(result_payload)
+        if task.kind == "explore":
+            self._release_unscreened_levers(task.params)
         # Per-action audit (failed attempt) for the in-scope kinds.
         if task.kind in _AUDIT_ACTIONS:
             audit_extras: dict[str, Any] = {}

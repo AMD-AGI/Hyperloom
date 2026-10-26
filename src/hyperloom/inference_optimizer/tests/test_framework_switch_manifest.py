@@ -1281,3 +1281,34 @@ async def test_a_cycle_batch_writes_its_verdicts_onto_the_levers_its_arms_switch
     assert [(r["switch"], r["attributed_gain_pct"], r["attribution_source"]) for r in levers] == rows
     assert (outcome.verdict, outcome.audit_decision) == (Verdict.RECORDED, None)
     assert coord.shared_state.gain_gated_action_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_cycle_batch_that_failed_hands_its_levers_back_to_replay_attribution(tmp_path):
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    from .conftest import make_coordinator
+
+    state = _state()
+    state.baseline_tput = 100.0
+    state.save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    for i, name in enumerate(("HL_A", "HL_B", "HL_C")):
+        coord.shared_state.record_authored_framework_levers(
+            [_entry_parsed(name)], default_on=False, specialist_task_id=f"t{i}"
+        )
+        coord.shared_state.record_framework_lever_attribution(name, gain_pct=None, source=ATTRIBUTION_CYCLE_PENDING)
+    arms = [{"name": "t0", "envs": {"HL_A": "1"}}, {"name": "t1", "envs": {"HL_B": "1"}}]
+    task = Task(task_id="cb", kind="explore", state="failed", params={"cycle_arms": arms}, idempotency_key="cb")
+
+    await coord.writeback.handle_unpromotable_result(
+        task, {"status": "failed", "error_class": "cycle_bench_unavailable"}
+    )
+
+    rows = [(r["switch"], r["attribution_source"]) for r in coord.shared_state.authored_framework_levers]
+    assert rows == [
+        ("HL_A", "cycle_bench_inconclusive"),
+        ("HL_B", "cycle_bench_inconclusive"),
+        ("HL_C", "cycle_bench_pending"),
+    ]
