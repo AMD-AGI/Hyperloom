@@ -24,14 +24,12 @@ def collect_langfuse(
     session-end ``flush_session``, so the on-disk receipt may not exist yet):
 
     1. ``reports/trace/langfuse_receipt.json`` if present -- the post-flush
-       receipt with final counts (``receipt_source="receipt_file"``).
-    2. Otherwise a live read of the per-session emitter singleton -- reports
-       the gating + redacted config + in-process running counts
-       (``receipt_source="live_emitter"``, ``counts_final=False``).
+       receipt with final counts.
+    2. Otherwise a live read of the per-session emitter singleton -- the gating
+       and the in-process running counts.
 
-    Either way credentials are redacted to host + presence booleans. Never
-    raises: any failure degrades to a minimal ``config_only`` view so the
-    breakdown still records whether the feature was even on.
+    Never raises: any failure degrades to a disabled view carrying only the
+    session id.
 
     Args:
         session_dir (Path): Absolute session root.
@@ -40,9 +38,7 @@ def collect_langfuse(
             / emitter read failures).
 
     Returns:
-        dict[str, Any]: The ``langfuse`` section, tagged with a
-        ``receipt_source`` of ``receipt_file`` / ``live_emitter`` /
-        ``config_only`` depending on which tier resolved.
+        dict[str, Any]: The ``langfuse`` section.
     """
     from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
@@ -53,38 +49,16 @@ def collect_langfuse(
         warnings.append(f"langfuse: read_receipt failed: {type(exc).__name__}: {exc}")
         receipt = None
     if receipt is not None:
-        receipt["receipt_source"] = "receipt_file"
         return receipt
 
     # Tier 2: live read of the emitter singleton (pre-flush / in-process).
     try:
-        section = lfe.get_emitter(session_dir).receipt()
-        section["receipt_source"] = "live_emitter"
-        return section
+        return lfe.get_emitter(session_dir).receipt()
     except (OSError, ValueError) as exc:
         warnings.append(f"langfuse: live receipt failed: {type(exc).__name__}: {exc}")
 
-    # Tier 3 fallback: config-only view straight from env + manifest, so the
-    # breakdown still records whether the feature was configured at all.
-    from hyperloom.inference_optimizer.trace import trace_env as tenv
-
-    creds = tenv.langfuse_credentials()
     return {
         "enabled": False,
         "disabled_reason": "unknown",
-        "config": {
-            "enable_flag": tenv.langfuse_live_enabled(),
-            "host": creds.get(tenv.ENV_LANGFUSE_HOST),
-            "public_key_set": tenv.ENV_LANGFUSE_PUBLIC_KEY in creds,
-            "secret_key_set": tenv.ENV_LANGFUSE_SECRET_KEY in creds,
-            "sdk_available": None,
-        },
-        "trace_id": None,
         "session_id": str(manifest.get("claw_session_id") or manifest.get("session_id") or ""),
-        "correlated_on": (
-            "claw_session_id" if str(manifest.get("claw_session_id") or "").strip() else "internal_session_id"
-        ),
-        "counts": {},
-        "counts_final": False,
-        "receipt_source": "config_only",
     }

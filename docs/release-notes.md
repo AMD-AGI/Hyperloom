@@ -20,6 +20,13 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **Bump validated SGLang stack to 0.5.22 (ROCm 10 docker).** Updates
+  `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
+  `lmsysorg/sglang-rocm:v0.5.22-rocm10-*` image tags, `models.tsv`, and the
+  quick-start `Dockerfile`. **Upgrade note:** move from
+  `v0.5.21-rocm10-mi30x|mi35x-20261008` to
+  `v0.5.22-rocm10-mi30x|mi35x-20261022` (or match `SGLANG_REF` on bare metal).
+
 - **`optimize --session-dir DIR` creates the new session in the directory you
   name.** The directory must be absolute and below `$USER_DATA_PATH`, and the
   flag cannot be combined with `--resume-from`. Without it the session

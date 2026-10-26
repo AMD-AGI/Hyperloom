@@ -14,7 +14,8 @@ import pytest
 from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import stack_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import STACK_EVENT_SECTIONS
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.actions.executors._patch_snapshot import _git_commit_kept
@@ -1333,7 +1334,7 @@ async def test_synthetic_controller_keep_updates_state_and_stack_ledger(tmp_path
             validator=_validate,
         )
         ledger, _status = stack_event.assemble_stack_ext(
-            stack_event_parts(),
+            event_parts(STACK_EVENT_SECTIONS),
             event=stack_event.stack_event_id(),
         )
 

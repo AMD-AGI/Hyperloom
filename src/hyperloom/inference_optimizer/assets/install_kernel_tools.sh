@@ -94,13 +94,12 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
 # TraceLens SHA.
 TRACELENS_REF="614c597bc0c66cabf6a15152037324acc7386090"
-# Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
-# The persistent kernel-agent env re-exports the resolved default path, so a
-# presence-only check (${VAR:+1}) would misclassify it as an override and skip
-# the managed clone/realign, leaving a missing/stale default un-self-healed
-# across reruns (#722). Compare against the default path, not env presence.
+# Operator override iff TRACELENS_ROOT is not a TraceLens@<sha> checkout in the
+# cache root. Installs re-export that path (kernel-agent env, .env), so a
+# presence-only check would freeze a rerun on the old checkout instead of
+# cloning/realigning to the current TRACELENS_REF (#722).
 # Canonicalize a path (resolve symlinks/.. , strip trailing slash) so the
-# default-vs-override comparison matches the Python side's Path.resolve();
+# override comparison matches the Python side's Path.resolve();
 # unresolvable paths fall back to the trimmed literal so a not-yet-cloned
 # default still compares correctly (#722 / PR#789).
 # Keep in lockstep with Python-side path canonicalization helpers.
@@ -129,11 +128,15 @@ _home_dir() {
   printf '%s' "${h:-/}"
 }
 _TRACELENS_SHA="$(_resolve_ref_sha "$TRACELENS_REPO" "$TRACELENS_REF")"
-_tracelens_default_root="$(_canonicalize_path "${_open_source_root}/TraceLens@${_TRACELENS_SHA}")"
 _tracelens_root_was_set=""
-if [ -n "${TRACELENS_ROOT:-}" ] \
-   && [ "$(_canonicalize_path "${TRACELENS_ROOT}")" != "${_tracelens_default_root}" ]; then
-  _tracelens_root_was_set=1
+if [ -n "${TRACELENS_ROOT:-}" ]; then
+  _tracelens_root_canonical="$(_canonicalize_path "${TRACELENS_ROOT}")"
+  if [ "$(dirname "${_tracelens_root_canonical}")" = "$(_canonicalize_path "${_open_source_root}")" ] \
+     && [[ "$(basename "${_tracelens_root_canonical}")" == TraceLens@* ]]; then
+    TRACELENS_ROOT=""
+  else
+    _tracelens_root_was_set=1
+  fi
 fi
 TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens@${_TRACELENS_SHA}}"
 TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
@@ -966,10 +969,11 @@ write_env_file() {
   [ -n "${USER_DATA_PATH:-}" ] && upsert_dotenv_var USER_DATA_PATH "$USER_DATA_PATH"
   [ -n "${HYPERLOOM_RUNTIME_DIR:-}" ] && upsert_dotenv_var HYPERLOOM_RUNTIME_DIR "$HYPERLOOM_RUNTIME_DIR"
   [ -n "${KERNEL_AGENT_ENV:-}" ] && upsert_dotenv_var KERNEL_AGENT_ENV "$KERNEL_AGENT_ENV"
-  [ -n "${MAGPIE_PATH:-}" ] && upsert_dotenv_var MAGPIE_PATH "$MAGPIE_PATH"
+  # Derived from the MAGPIE_REF / INFERENCEX_REF pins; a .env copy would read back as an override that skips them.
+  remove_dotenv_var MAGPIE_PATH
   [ -n "${MAGPIE_PYTHON:-}" ] && upsert_dotenv_var MAGPIE_PYTHON "$MAGPIE_PYTHON"
   [ -n "${PYTHONPATH:-}" ] && upsert_dotenv_var PYTHONPATH "$PYTHONPATH"
-  [ -n "${INFERENCEX_PATH:-}" ] && upsert_dotenv_var INFERENCEX_PATH "$INFERENCEX_PATH"
+  remove_dotenv_var INFERENCEX_PATH
   # Persist each provider's own canonical vars (write when present, clear when
   # absent) so an operator's .env creds survive a re-install. Never cross-write
   # and never persist gateway aliases, so the two providers stay separated.

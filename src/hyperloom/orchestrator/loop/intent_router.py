@@ -37,6 +37,7 @@ from ..policy.gate import (
 )
 from ..specialists.wall_budget import grant_wall_budget_extension
 from ..state.shared_state import (
+    ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
     inject_stack_base_params,
     is_valid_escalate_hint,
@@ -1268,7 +1269,7 @@ class IntentRouter(CoordinatorCollaborator):
         )
 
     async def _handle_escalate_strategy_change(self, source: str, intent: Intent) -> None:
-        """Process ``escalate_strategy_change``: broadcast strategy_change, act on closed-vocab hints, drop unknown hints."""
+        """Broadcast strategy_change, then defer a closed-vocab hint the session's facts admit; drop or deny the rest."""
         payload = dict(intent.payload or {})
         # Always emit the broadcast first.
         await self.bus.append_and_seq(
@@ -1282,12 +1283,21 @@ class IntentRouter(CoordinatorCollaborator):
         hint = str(payload.get("next_action_hint") or "").strip()
         if not hint or not is_valid_escalate_hint(hint):
             return
-        from ..phases.machine_state import PHASE_FRAMEWORK_AGENT
+        from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, skip_to_close_contradiction
 
         phase = str(self.shared_state.phase or "").strip().upper()
         if hint == ESCALATE_HINT_SKIP_TO_KERNEL and phase != PHASE_FRAMEWORK_AGENT:
             # Only the FRAMEWORK_AGENT exit reads it; left pending, it would end that phase on arrival.
             log.info("escalate_strategy_change: dropped %r emitted in phase %s", hint, phase or "<none>")
+            return
+        contradiction = skip_to_close_contradiction(self.shared_state) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None
+        if contradiction is not None:
+            denied = PolicyDenied(
+                f"skip_to_close refused: {contradiction}",
+                rule="skip_to_close_contradicted",
+                hint="Keep driving this phase; the run closes itself when the budget runs out or the sweep fails.",
+            )
+            await self.record_policy_denied(source, intent, denied)
             return
         # skip_to_kernel / skip_to_close are deferred; next compute_next_phase picks them up.
         self.shared_state.set_pending_escalate_hint(hint)

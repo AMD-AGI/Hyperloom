@@ -29,14 +29,7 @@ _HOSTED = (
     "hyperloom_multibranch",
 )
 # Packages that exist only on the multibranch development branch; main must stay self-contained.
-_DEV_ONLY = ("hyperloom.measure", "hyperloom.sandbox", "hyperloom.hosted", "hyperloom_multibranch")
-# Modules of the dev-only packages that main itself carries; they stay subjects of rule 2.
-_ON_MAIN = (
-    "hyperloom.hosted.__init__",
-    "hyperloom.hosted.campaign",
-    "hyperloom.hosted.entry",
-    "hyperloom.hosted.host_info",
-)
+_DEV_ONLY = ("hyperloom.measure", "hyperloom.sandbox", "hyperloom_multibranch")
 _E2B_OWNER = "hyperloom/sandbox/e2b.py"
 
 
@@ -84,18 +77,8 @@ def _plugs_modules() -> list[Path]:
     return [p for p in _PLUGS.rglob("*.py") if "tests" not in p.relative_to(_PLUGS).parts]
 
 
-def _dotted(path: Path) -> str:
-    return ".".join(path.relative_to(_SRC).with_suffix("").parts)
-
-
 def _main_modules() -> list[Path]:
-    return [
-        p
-        for p in _SRC.rglob("*.py")
-        if "tests" not in p.relative_to(_SRC).parts
-        and ".venv" not in p.parts
-        and not (_under(_dotted(p), _DEV_ONLY) and not _under(_dotted(p), _ON_MAIN))
-    ]
+    return [p for p in _SRC.rglob("*.py") if "tests" not in p.relative_to(_SRC).parts and ".venv" not in p.parts]
 
 
 def test_rule_1_plugs_import_only_the_standard_library_and_entry_points() -> None:
@@ -132,7 +115,7 @@ def test_rule_2_main_imports_no_package_that_exists_only_on_the_dev_branch() -> 
     offenders = []
     for path in _main_modules():
         for line, module in _imports(ast.parse(path.read_text())):
-            if _under(module, _DEV_ONLY) and not _under(module, _ON_MAIN):
+            if _under(module, _DEV_ONLY):
                 offenders.append(f"{path.relative_to(_SRC)}:{line}: {module}")
     assert offenders == []
 

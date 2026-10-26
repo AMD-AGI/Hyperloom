@@ -11,12 +11,12 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import text_or_none
 from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
 from ._row_utils import (
     call_key_fields,
     coerce_optional_int as _coerce_optional_int,
-    coerce_optional_str as _coerce_optional_str,
     validate_closed_row,
 )
 
@@ -125,8 +125,8 @@ class LLMCallRecord:
             "latency_ms": _coerce_optional_int(self.latency_ms),
             "reviewed_msg_ids": _coerce_optional_str_list(self.reviewed_msg_ids),
             "status": str(self.status),
-            "error_type": _coerce_optional_str(self.error_type),
-            "error_message": _coerce_optional_str(self.error_message),
+            "error_type": text_or_none(self.error_type),
+            "error_message": text_or_none(self.error_message),
         }
 
     @classmethod
