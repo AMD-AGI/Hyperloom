@@ -2,7 +2,7 @@
 # one per line as "<metric> <path>::<unit> <value>" ("<metric> <path> <value>" for a module).
 # Entries may only be lowered or removed, never added or raised: python scripts/code_metrics.py --update-baseline
 # A file is judged only when a change touches it; the label baseline-raise waives growth.
-cognitive-complexity scripts/platform_audit_bmc.py::main 44
+cognitive-complexity scripts/platform_audit_bmc.py::main 34
 cognitive-complexity src/hyperloom/inference_optimizer/baseline_comparison/inferencex_client.py::fetch_agentic_interactivity 31
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::_merge_acceptances 31
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_geak_attempts 31
@@ -165,8 +165,8 @@ function-args src/hyperloom_kb/retrieval_policy.py::RetrievalConfiguration.creat
 function-args src/kernelforge/evaluation/benchmark/runner.py::sweep_case 7
 function-lines scripts/partition_mode_sweep.py::render 52
 function-lines scripts/partition_mode_sweep.py::run_mode 57
-function-lines scripts/platform_audit_bmc.py::main 113
-function-lines src/hyperloom/agents/critic/runtime/decision_reviewer.py::DecisionReviewer._commit_coordinator_inbox 57
+function-lines scripts/platform_audit_bmc.py::main 88
+function-lines src/hyperloom/agents/critic/runtime/decision_reviewer.py::DecisionReviewer._commit_coordinator_inbox 56
 function-lines src/hyperloom/agents/critic/runtime/kb_writer.py::KBWriter.write_verdict 54
 function-lines src/hyperloom/agents/framework/sources/__init__.py::_run_pr_monitor 51
 function-lines src/hyperloom/agents/quantization/cli.py::_parse_args 52
@@ -502,18 +502,17 @@ function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py::run_tracelens_skill 60
 function-lines src/hyperloom_kb/cli.py::add_commands 63
 function-lines src/hyperloom_kb/collect/engine.py::collect 59
-function-lines src/hyperloom_kb/collect/expressions.py::_compile_call 57
 function-lines src/hyperloom_kb/collect/mapping.py::compile_mapping 65
 function-lines src/hyperloom_kb/http_service.py::ExperienceHTTPService.read 92
 function-lines src/hyperloom_kb/http_service.py::ExperienceHTTPService.write 66
-function-lines src/hyperloom_kb/http_service.py::RequestHandler._dispatch 71
+function-lines src/hyperloom_kb/http_service.py::RequestHandler._dispatch 58
 function-lines src/hyperloom_kb/http_service.py::main 67
 function-lines src/hyperloom_kb/knowledge_read.py::AnthropicPlannerBackend.complete 63
 function-lines src/hyperloom_kb/knowledge_read.py::QueryExecutor._rank_groups 58
 function-lines src/hyperloom_kb/knowledge_read.py::QueryExecutor.execute 103
 function-lines src/hyperloom_kb/query_view.py::QueryViewBuilder.build 51
 function-lines src/hyperloom_kb/retrieval_policy.py::LexicalFuzzyProvider.recall 54
-function-lines src/hyperloom_kb/sync.py::GlobalSync.pull 68
+function-lines src/hyperloom_kb/sync.py::GlobalSync.pull 54
 function-lines src/kernelforge/agent_backends/claude.py::ClaudeBackend._query_once 89
 function-lines src/kernelforge/agent_backends/codex.py::CodexBackend._execute 90
 function-lines src/kernelforge/agent_backends/codex.py::CodexBackend.probe 70
@@ -710,7 +709,7 @@ function-lines src/kernelforge/rewrite_by_flydsl/runner.py::_Rewrite.finish 61
 function-lines src/kernelforge/tools/aiter_cache.py::prune_aiter_cache_shards 68
 module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 1784
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2681
-module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2727
+module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2723
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1759
 module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2523
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1802
