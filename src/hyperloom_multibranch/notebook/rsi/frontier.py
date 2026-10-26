@@ -18,7 +18,9 @@ failures the whole session.
 ``frontier-v1``'s components, and the envelope's:
 
 * ``trend_pct``: the cumulative gain the branch reached over the last window, in points over the baseline; the window
-  spans at least :data:`WINDOW_TESTS` of the session's longest root tests (:func:`paced`);
+  spans at least :data:`WINDOW_TESTS` of the session's longest root tests (:func:`paced`), and reaches back to the
+  branch's :data:`WINDOW_TESTS`-th last ended explore test when that is earlier (:func:`trend_start`), so a long
+  profile or a wait for a slot does not empty it;
 * ``tests`` and ``gpu_hours``: what the branch has spent, its tests counted once measured;
 * ``prior_remaining_pct``: what similar archived branches still gained after spending as many tests, weighted by task
   similarity, with ``prior_effective_sessions``, the sessions behind it each counted by its similarity; a session less
@@ -302,6 +304,16 @@ def is_young(branch: TreeBranch, t_s: float, policy: FrontierPolicy) -> bool:
     return t_s - branch.opened_s < policy.window_seconds and not branch.commits
 
 
+def trend_start(branch: TreeBranch, t_s: float, window_seconds: float) -> float:
+    """Where the trend window starts: ``window_seconds`` back, or earlier, at the branch's :data:`WINDOW_TESTS`-th
+    last explore test that ended by ``t_s``, so a long profile or a wait for a slot cannot empty the window; a tree
+    archived before ended tests were kept, or a branch with fewer, keeps the wall-clock window."""
+
+    start = t_s - window_seconds
+    ended = sorted(when for when in branch.ended_times or () if when <= t_s)
+    return min(start, ended[-WINDOW_TESTS]) if len(ended) >= WINDOW_TESTS else start
+
+
 @dataclass(frozen=True)
 class FrontierV1:
     """Today's formula, the default scorer and the fallback of every other: the prior where similar archived sessions
@@ -314,7 +326,7 @@ class FrontierV1:
 
     def estimate(self, branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings) -> Estimate:
         policy = context.policy
-        trend = branch.gain_at(t_s) - branch.gain_at(t_s - policy.window_seconds)
+        trend = branch.gain_at(t_s) - branch.gain_at(trend_start(branch, t_s, policy.window_seconds))
         tests = len(branch.spent_times)
         components = {
             "trend_pct": trend,
@@ -630,4 +642,5 @@ __all__ = [
     "score_branch",
     "score_progress",
     "score_with",
+    "trend_start",
 ]

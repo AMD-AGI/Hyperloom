@@ -93,10 +93,11 @@ def test_bandit_rv_may_be_advice_and_the_ucb_rows_never_are() -> None:
     (compared,) = report.comparisons
 
     assert (decayed.label, upper.label) == (BANDIT_LABEL, "bandit UCB, C=0")
-    # The trend tells the branches apart in the two rounds after the early commit, and ties them in the other eight.
-    assert (current.rank_correlation, current.compared_rounds) == (pytest.approx(1.0), 6)
+    # The trend reaches back over the branches' last four ended tests, so it tells them apart in the three rounds
+    # after the early commit, and ties them in the other seven.
+    assert (current.rank_correlation, current.compared_rounds) == (pytest.approx(1.0), 9)
     assert (compared.label, compared.rounds, compared.sessions) == (BANDIT_LABEL, 30, 3)
-    assert compared.rank_correlation == pytest.approx(1.0) and compared.current_correlation == pytest.approx(0.2)
+    assert compared.rank_correlation == pytest.approx(1.0) and compared.current_correlation == pytest.approx(0.3)
     assert report.recommended == decayed and report.note.startswith(f"Consider '{BANDIT_LABEL}'")
 
 

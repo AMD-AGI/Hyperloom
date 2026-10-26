@@ -30,6 +30,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     FALLBACK_COMPONENT,
     FALLBACK_LIMIT,
     FRONTIER_LOG_FORMAT,
+    FRONTIER_V1,
     FRONTIER_V1_LABEL,
     OBSERVATION_SECONDS,
     SETTLED_TESTS,
@@ -48,6 +49,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     score_at,
     score_progress,
     score_with,
+    trend_start,
 )
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions, task_conditions, task_similarity
 from hyperloom_multibranch.notebook.rsi.tests.trees import branch, tree
@@ -202,12 +204,23 @@ async def test_the_floor_ends_with_the_judges_grace_at_the_explore_tests_that_su
     assert settled is not None and settled.basis is FrontierBasis.TREND
 
 
-def test_a_tree_kept_before_settled_tests_counts_its_ended_tests_for_the_floor() -> None:
-    failing = branch("s9", [], ended_times=(0.0,) * SETTLED_TESTS, settled_times=(0.0,))
-    older = branch("s9", [], ended_times=(0.0,) * SETTLED_TESTS)
+def test_the_trend_reaches_back_to_the_branchs_last_four_ended_explore_tests() -> None:
+    # c8927ba5's b09 at its stop: a long profile left one explore result in the 37-minute window.
+    minute = 60.0
+    b09 = branch(
+        "b09",
+        [(312 * minute, 41.49), (370 * minute, 43.83), (395 * minute, 49.59), (419 * minute, 53.89)],
+        ended_times=tuple(when * minute for when in (300, 361, 385, 405, 430)),
+    )
+    # b03 kept testing and stalled: its last four results all fall inside the window.
+    b03 = branch("b03", [(61 * minute, 1.11)], ended_times=tuple(when * minute for when in (137, 144, 153, 159)))
+    window = FrontierPolicy(METRIC, window_seconds=37 * minute)
+    context = ScoringContext(TASK, (), window)
 
-    assert is_young(failing, 60.0, POLICY)
-    assert not is_young(older, 60.0, POLICY)
+    assert trend_start(b09, 467 * minute, window.window_seconds) == 361 * minute
+    assert FRONTIER_V1.estimate(b09, 467 * minute, context, Readings()).components["trend_pct"] == pytest.approx(12.40)
+    assert FRONTIER_V1.estimate(b03, 163 * minute, context, Readings()).components["trend_pct"] == 0.0
+    assert trend_start(branch("old", []), 467 * minute, window.window_seconds) == 430 * minute
 
 
 def test_an_archived_branch_without_judged_times_keeps_the_floor_for_one_window_only() -> None:
