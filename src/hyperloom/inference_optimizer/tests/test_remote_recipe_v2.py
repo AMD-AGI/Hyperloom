@@ -592,6 +592,15 @@ def test_publish_sanitizer_allows_only_safe_replay_envs_and_args() -> None:
     )
 
 
+def test_a_shared_recipe_drops_the_flags_the_launch_guards_add_for_their_run() -> None:
+    args = "--context-length 6144 --watchdog-timeout=1800 --kv-cache-dtype fp8_e4m3 --fp8-gemm-backend aiter"
+
+    assert sanitize_publish_server_args(args) == "--kv-cache-dtype fp8_e4m3 --fp8-gemm-backend aiter"
+    assert sanitize_shared_knowledge({"value": {"config": {"extra_server_args": args}}})["value"]["config"] == {
+        "extra_server_args": "--kv-cache-dtype fp8_e4m3 --fp8-gemm-backend aiter"
+    }
+
+
 def test_shared_knowledge_sanitizer_scrubs_nested_columns_and_paths() -> None:
     sanitized = sanitize_shared_knowledge(
         {
