@@ -28,7 +28,7 @@ from hyperloom_multibranch.contracts.notebook.interfaces import (
     RecordSearch,
     UnknownRequest,
 )
-from hyperloom_multibranch.contracts.notebook.records import ClaimKey, Withdrawal
+from hyperloom_multibranch.contracts.notebook.records import BuildNotice, ClaimKey, Withdrawal
 from hyperloom_multibranch.contracts.toolbox import (
     BranchLease,
     CancelOutcome,
@@ -55,6 +55,15 @@ from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup
 from hyperloom_multibranch.toolbox.attachments import store_attachment
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
 from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables
+from hyperloom_multibranch.toolbox.pending_builds import (
+    BuildDriver,
+    BuildEnd,
+    BuildHooks,
+    BuildNeed,
+    PendingBuilds,
+    build_failure_result,
+    median_test_seconds,
+)
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
 from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, State, WorkQueue, sandbox_priority
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
@@ -64,6 +73,8 @@ logger = logging.getLogger(__name__)
 
 CLAIM_TTL_SECONDS = 600.0
 WRITE_RETRIES = 3
+#: How long a native build that failed for the machine waits before it is tried again.
+BUILD_RETRY_SECONDS = 30.0
 
 
 def _same_commit_and_delta(entry: LogEntry, request: TestRequest) -> bool:
@@ -80,6 +91,7 @@ class ToolboxStores:
 
     ``sink`` takes the requests, results and withdrawals, ``health`` holds the quarantine list, ``claims`` hands the
     claim of a request over, ``records`` is searched when a restart recovers unfinished tests (both may be ``None``).
+    ``builds`` drives the native build store; without one no test waits for a build.
     """
 
     log: SubmissionLog
@@ -87,16 +99,19 @@ class ToolboxStores:
     health: NodeHealth
     claims: ClaimService | None = None
     records: RecordSearch | None = None
+    builds: BuildDriver | None = None
 
 
 @dataclass(frozen=True)
 class ToolboxTuning:
-    """The queue policy, the infrastructure retries, the claim lifetime and the clock; the defaults are the real ones."""
+    """The queue policy, the infrastructure retries (of tests and of native builds), the claim lifetime and the clock;
+    the defaults are the real ones."""
 
     policy: QueuePolicy | None = None
     max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
     claim_ttl_seconds: float = CLAIM_TTL_SECONDS
     clock: Callable[[], float] = time.time
+    build_retry_seconds: float = BUILD_RETRY_SECONDS
 
 
 class RealToolbox:
@@ -139,6 +154,10 @@ class RealToolbox:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._outcome_events: dict[str, asyncio.Event] = {}
         self._renewer: asyncio.Task[None] | None = None
+        hooks = BuildHooks(ready=self._builds_ready, ended=self._builds_ended, notify=self._notify_build)
+        self._builds = PendingBuilds(
+            stores.builds, hooks, max_infra_retries=tuning.max_infra_retries, retry_seconds=tuning.build_retry_seconds
+        )
 
     # --- lifecycle ---------------------------------------------------------------------------------------------
 
@@ -160,17 +179,20 @@ class RealToolbox:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await self._builds.close()
         self._tasks.clear()
         self._renewer = None
         if self._tools is not None:
             await self._tools.close()
 
     async def drain(self) -> None:
-        """Wait until nothing is queued or running (for tests and orderly shutdown)."""
+        """Wait until nothing is building, queued or running (for tests and orderly shutdown)."""
 
-        while self._tasks or any(item.state.value == "queued" for item in self._queue.items()):
+        while self._tasks or self._builds.busy or any(item.state is not State.RUNNING for item in self._queue.items()):
             if self._tasks:
                 await asyncio.gather(*list(self._tasks.values()), return_exceptions=True)
+            elif self._builds.busy:
+                await self._builds.settle()
             else:
                 await asyncio.sleep(0)
                 self._pump()
@@ -184,6 +206,9 @@ class RealToolbox:
             prepared = await self._acceptance.prepare(request)
             self._queue.check_branch_listed(request)
             self._queue.check_backpressure(request)
+            needs = self._builds.plan(request, prepared.environment)
+            if needs:
+                self._check_build_deadline(request, needs)
             priority = self._queue.policy.priority_of(request)
             sequence = self._log.next_sequence(request.branch_id)
             accepted = request.accepted(self._log.request_id(request.branch_id, sequence))
@@ -198,9 +223,15 @@ class RealToolbox:
             )
             self._log.accept(entry)
             await self._publish(entry, accepted)
-            self._enqueue(entry, accepted, prepared.environment)
+            self._enqueue(entry, accepted, prepared.environment, needs)
         self._pump()
         return entry.request_id
+
+    def _check_build_deadline(self, request: TestRequest, needs: tuple[BuildNeed, ...]) -> None:
+        deadline = self._queue.policy.branch_deadline.get(request.branch_id, 0.0)
+        if deadline:
+            test_seconds = median_test_seconds(self._log.entries(), request.kind)
+            self._builds.check_deadline(needs, deadline, test_seconds, self._clock())
 
     async def cancel(self, request_id: str) -> CancelOutcome:
         entry = self._log.get(request_id)
@@ -212,12 +243,14 @@ class RealToolbox:
         return CancelOutcome.WITHDRAWN
 
     async def queue_state(self) -> QueueState:
-        return self._queue.state()
+        return replace(self._queue.state(), builds=self._builds.ledger())
 
     async def progress(self, request_id: str) -> TestProgress | None:
         item = self._queue.get(request_id)
         if item is None:
             return None
+        if item.state is State.PENDING_BUILD:
+            return TestProgress("pending_build", builds=self._builds.statuses(request_id))
         if item.state is State.QUEUED:
             return TestProgress("queued", queued_ahead=self._queue.queued_ahead(request_id))
         running = None if item.started_at is None else max(0.0, self._clock() - item.started_at)
@@ -531,8 +564,11 @@ class RealToolbox:
             self._log.abort(entry.request_id)
             raise
 
-    def _enqueue(self, entry: LogEntry, request: TestRequest, environment: object) -> None:
-        self._queue.push(QueuedTest(request, entry.priority, 0, environment, entry.queued_at))
+    def _enqueue(
+        self, entry: LogEntry, request: TestRequest, environment: object, needs: tuple[BuildNeed, ...]
+    ) -> None:
+        state = State.PENDING_BUILD if self._builds.wait(entry.request_id, needs) else State.QUEUED
+        self._queue.push(QueuedTest(request, entry.priority, 0, environment, entry.queued_at, state))
 
     async def _already_final(self, entry: LogEntry) -> bool:
         if self._records is None:
@@ -551,7 +587,7 @@ class RealToolbox:
         except RequestRejected as error:
             await self._record_and_write(entry, {"withdrawal": f"not recoverable: {error}"})
             return
-        self._enqueue(entry, request, prepared.environment)
+        self._enqueue(entry, request, prepared.environment, self._builds.plan(request, prepared.environment))
 
     # --- running -------------------------------------------------------------------------------------------------
 
@@ -578,6 +614,7 @@ class RealToolbox:
             await self._housekeeping()
         finally:
             self._queue.remove(item.request_id)
+            self._builds.forget(item.request_id)
             self._tasks.pop(item.request_id, None)
             self._pump()
 
@@ -593,11 +630,34 @@ class RealToolbox:
                 failure_class=FailureClass.INFRA,
                 failure_reason=f"executor error: {error!r}",
                 queued_at=item.queued_at,
+                builds=self._builds.charges(item.request_id),
             )
-        return replace(result, request_id=item.request_id, queued_at=item.queued_at)
+        builds = self._builds.charges(item.request_id)
+        return replace(result, request_id=item.request_id, queued_at=item.queued_at, builds=builds)
+
+    # --- native builds -------------------------------------------------------------------------------------------
+
+    async def _builds_ready(self, request_id: str) -> None:
+        if self._queue.release(request_id, self._clock()):
+            self._pump()
+
+    async def _builds_ended(self, request_id: str, end: BuildEnd) -> None:
+        """A test its builds ended before it ran: the candidate's compile error, or the build's machine retries spent."""
+
+        self._queue.remove(request_id)
+        entry = self._log.get(request_id)
+        if entry is not None and entry.waiting:
+            result = build_failure_result(request_id, end, self._builds.charges(request_id))
+            await self._record_and_write(entry, {"result": result.to_document()})
+        self._builds.forget(request_id)
+        self._pump()
+
+    async def _notify_build(self, notice: BuildNotice) -> None:
+        await self._sink.notify_build(notice)
 
     async def _withdraw(self, entry: LogEntry, reason: str) -> None:
         self._queue.remove(entry.request_id)
+        self._builds.forget(entry.request_id)
         task = self._tasks.pop(entry.request_id, None)
         if task is not None:
             self._executor.withdraw(entry.request_id)  # the task's cancel cannot reach the thread that measures

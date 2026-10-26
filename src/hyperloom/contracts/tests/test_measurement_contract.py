@@ -12,6 +12,8 @@ from hyperloom.contracts.measurement import (
     AccuracyValue,
     AttachmentRef,
     Attempt,
+    BuildCharge,
+    BuildPayment,
     FailureClass,
     MeasurementError,
     NOT_REPRODUCED,
@@ -719,3 +721,38 @@ def test_request_classes_must_be_a_tuple_of_request_classes(bad: object) -> None
         _result(request_classes=bad)
     with pytest.raises(MeasurementError, match="request_classes must be a list"):
         TestResult.from_document({**_result().to_document(), "request_classes": "oops"})
+
+
+# --- result: native build charges ---------------------------------------------------------------------------------
+
+PAID = BuildCharge("k" * 64, "sgl_kernel", 812.5, BuildPayment.PAID)
+REUSED = BuildCharge("j" * 64, "vllm", 0.0, BuildPayment.REUSED)
+
+
+def test_build_charges_round_trip_and_a_result_without_builds_writes_none() -> None:
+    again = _roundtrip(_result(builds=(PAID, REUSED)))
+    assert again.builds == (PAID, REUSED)
+    assert again.to_document()["builds"][0] == {
+        "key": "k" * 64,
+        "component": "sgl_kernel",
+        "build_seconds": 812.5,
+        "payment": "paid",
+    }
+    assert "builds" not in _result().to_document()
+
+
+def test_a_document_written_before_builds_loads_with_none() -> None:
+    document = _result().to_document()
+    document.pop("builds", None)
+    assert TestResult.from_document(document).builds == ()
+
+
+def test_a_reused_build_is_charged_no_seconds_and_no_build_is_charged_negative_seconds() -> None:
+    with pytest.raises(MeasurementError, match="a reused build is charged no build_seconds, got 3.0"):
+        BuildCharge("k", "sgl_kernel", 3.0, BuildPayment.REUSED)
+    with pytest.raises(MeasurementError, match="build_seconds cannot be negative"):
+        BuildCharge("k", "sgl_kernel", -1.0, BuildPayment.PAID)
+    with pytest.raises(MeasurementError, match="payment must be one of"):
+        BuildCharge.from_document({"key": "k", "component": "c", "build_seconds": 0.0, "payment": "free"})
+    with pytest.raises(MeasurementError, match="builds must be a tuple of BuildCharge"):
+        _result(builds=[PAID])

@@ -30,7 +30,7 @@ from urllib.parse import quote
 from hyperloom.common.io import atomic_write_json
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors import COOPERATIVE_REAP_BUDGET_SEC
-from hyperloom_multibranch.contracts.notebook.records import ToolResultPointer
+from hyperloom_multibranch.contracts.notebook.records import BuildNotice, ToolResultPointer
 
 log = logging.getLogger(__name__)
 
@@ -91,9 +91,11 @@ class AsyncTool(Protocol):
 
 
 class ToolResultSink(Protocol):
-    """The inbox push; the notebook's ``TestRecordSink`` satisfies it."""
+    """The inbox pushes; the notebook's ``TestRecordSink`` satisfies it."""
 
     async def notify_tool_result(self, pointer: ToolResultPointer) -> None: ...
+
+    async def notify_build(self, notice: BuildNotice) -> None: ...
 
 
 @dataclass

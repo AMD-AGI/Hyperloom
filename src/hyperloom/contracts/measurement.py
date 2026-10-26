@@ -796,6 +796,55 @@ class PhaseTiming:
         )
 
 
+class BuildPayment(str, Enum):
+    """Who pays a native build: the request whose submission started it, or one that reused it."""
+
+    PAID = "paid"
+    REUSED = "reused"
+
+
+@dataclass(frozen=True)
+class BuildCharge:
+    """One native build a test needed, as the notebook sums build time: by its ``key`` and ``component``.
+
+    ``build_seconds`` is the build's CPU seconds on :attr:`BuildPayment.PAID` (the request that started it) and ``0.0``
+    on :attr:`BuildPayment.REUSED`, so summing over every result counts each build once.
+    """
+
+    key: str
+    component: str
+    build_seconds: float
+    payment: BuildPayment
+
+    def __post_init__(self) -> None:
+        _text(self.key, "a build's key")
+        _text(self.component, "a build's component")
+        _enum(BuildPayment, self.payment, "a build's payment")
+        seconds = _number(self.build_seconds, "a build's build_seconds")
+        if seconds < 0:
+            raise MeasurementError(f"a build's build_seconds cannot be negative, got {seconds}")
+        if self.payment is BuildPayment.REUSED and seconds:
+            raise MeasurementError(f"a reused build is charged no build_seconds, got {seconds}")
+
+    def to_document(self) -> dict[str, object]:
+        return {
+            "key": self.key,
+            "component": self.component,
+            "build_seconds": self.build_seconds,
+            "payment": self.payment.value,
+        }
+
+    @classmethod
+    def from_document(cls, document: object) -> BuildCharge:
+        f = _mapping(document, "a build charge")
+        return cls(
+            key=f.get("key"),
+            component=f.get("component"),
+            build_seconds=f.get("build_seconds"),
+            payment=_enum(BuildPayment, f.get("payment"), "a build's payment"),
+        )
+
+
 def _check_phases(phases: object, unaccounted: object) -> None:
     if not isinstance(phases, tuple) or not all(isinstance(phase, PhaseTiming) for phase in phases):
         raise MeasurementError(f"phases must be a tuple of PhaseTiming, got {phases!r}")
@@ -832,6 +881,8 @@ class TestResult:
     ``long_context`` is the check of a test the toolbox asked it for (``None`` for any other test): a frozen set of long
     synthetic prompts answered by the candidate's own server and graded by substring match, as per-task and total scores,
     per-prompt outcomes and, when it did not answer every prompt, the reason it is ``incomplete``.
+    ``builds`` has one charge for each native build the test's stack needed (none for a stack that needs none, and none in
+    a document written before builds existed); ``gpu_seconds`` and ``queued_at`` never include build time.
     A document written while the greedy decode pass existed may carry ``decode_outputs`` and ``decode_identity``; they
     mean nothing now and ``from_document`` leaves them out, so such a document still loads.
     """
@@ -866,6 +917,7 @@ class TestResult:
     unaccounted_seconds: float | None = None
     short_prompt_consistency: ShortPromptConsistency | None = None
     long_context: LongContextResult | None = None
+    builds: tuple[BuildCharge, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.request_id, "request_id")
@@ -902,6 +954,8 @@ class TestResult:
             raise MeasurementError(f"short_prompt_consistency must be a ShortPromptConsistency, got {consistency!r}")
         if self.long_context is not None and not isinstance(self.long_context, LongContextResult):
             raise MeasurementError(f"long_context must be a LongContextResult, got {self.long_context!r}")
+        if not isinstance(self.builds, tuple) or not all(isinstance(b, BuildCharge) for b in self.builds):
+            raise MeasurementError(f"builds must be a tuple of BuildCharge, got {self.builds!r}")
 
     def _check_repro_verdict(self) -> None:
         if self.repro_verdict not in ("", *REPRO_VERDICTS):
@@ -960,6 +1014,8 @@ class TestResult:
             document["short_prompt_consistency"] = self.short_prompt_consistency.to_document()
         if self.long_context is not None:
             document["long_context"] = self.long_context.to_document()
+        if self.builds:
+            document["builds"] = [value.to_document() for value in self.builds]
         return document
 
     @classmethod
@@ -998,6 +1054,7 @@ class TestResult:
             unaccounted_seconds=f.get("unaccounted_seconds"),
             short_prompt_consistency=None if consistency is None else ShortPromptConsistency.from_document(consistency),
             long_context=None if long_context is None else LongContextResult.from_document(long_context),
+            builds=tuple(map(BuildCharge.from_document, _items(f.get("builds", ()), "builds"))),
         )
 
 
@@ -1032,6 +1089,8 @@ __all__ = [
     "AccuracyValue",
     "AttachmentRef",
     "Attempt",
+    "BuildCharge",
+    "BuildPayment",
     "FailureClass",
     "LongContextPrompt",
     "LongContextResult",

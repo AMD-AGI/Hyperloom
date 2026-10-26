@@ -8,15 +8,16 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from hyperloom_multibranch.contracts.notebook.records import ToolResultPointer
+from hyperloom_multibranch.contracts.notebook.records import BuildNotice, ToolResultPointer
 from hyperloom_multibranch.toolbox.tools.base import ToolOutput, ToolRequest
 
 
 class RecordingSink:
-    """Keeps every pointer it is given; refuses the first ``refuse`` pushes."""
+    """Keeps every pointer and build notice it is given; refuses the first ``refuse`` pointer pushes."""
 
     def __init__(self, refuse: int = 0) -> None:
         self.pointers: list[ToolResultPointer] = []
+        self.builds: list[BuildNotice] = []
         self.refuse = refuse
         self.calls = 0
 
@@ -25,6 +26,9 @@ class RecordingSink:
         if self.calls <= self.refuse:
             raise ConnectionError("inbox unavailable")
         self.pointers.append(pointer)
+
+    async def notify_build(self, notice: BuildNotice) -> None:
+        self.builds.append(notice)
 
 
 class ScriptedTool:

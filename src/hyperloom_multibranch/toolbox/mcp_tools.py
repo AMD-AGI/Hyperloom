@@ -518,7 +518,7 @@ def _waiting_document(request_id: str, waited: float, progress: TestProgress | N
     """What ``wait_test`` answers for a test that is not over: its state and the toolbox's progress, in seconds.
 
     A test the toolbox neither queues nor runs (its outcome is logged but not yet in the notebook) is ``in_flight``
-    with no progress.
+    with no progress. A ``pending_build`` test's progress lists its native builds: key, component, state and eta.
     """
     document: dict[str, Any] = {
         "request_id": request_id,
@@ -529,8 +529,13 @@ def _waiting_document(request_id: str, waited: float, progress: TestProgress | N
         document["progress"] = {
             name: round(value) if isinstance(value, float) else value
             for name, value in jsonable(progress).items()
-            if name != "state" and value is not None
+            if name not in ("state", "builds") and value is not None
         }
+        if progress.builds:
+            document["progress"]["builds"] = [
+                {"key": b.key, "component": b.component, "state": b.state.value, "eta_seconds": round(b.eta_seconds)}
+                for b in progress.builds
+            ]
     return document
 
 
@@ -796,7 +801,9 @@ def _register_test_queries(
         "wait_test",
         description=(
             "How to wait for a test of this branch, or for any branch's profile test: returns as soon as its result "
-            "lands, else after wait_seconds with the test's progress; call it again to keep waiting."
+            "lands, else after wait_seconds with the test's progress; call it again to keep waiting. A test in state "
+            "pending_build is waiting for the native builds its change needs (progress.builds, each with its "
+            "eta_seconds), not stuck."
         ),
         schema=_WAIT_TEST,
         handler=_wait_test(toolbox, notebooks, home, options.wait_poll_seconds),

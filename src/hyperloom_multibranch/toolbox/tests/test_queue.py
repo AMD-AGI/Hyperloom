@@ -8,7 +8,14 @@ import pytest
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom_multibranch.contracts.toolbox import Backpressure
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, WorkQueue, exempt_from_k, sandbox_priority
+from hyperloom_multibranch.toolbox.queue import (
+    QueuedTest,
+    QueuePolicy,
+    State,
+    WorkQueue,
+    exempt_from_k,
+    sandbox_priority,
+)
 from hyperloom_multibranch.toolbox.tests.helpers import req
 
 
@@ -197,3 +204,48 @@ def test_a_listed_only_policy_refuses_a_branch_that_has_no_quota() -> None:
 
 def test_without_the_listed_only_flag_an_unlisted_branch_runs_at_the_default_k() -> None:
     _queue(branch_k={"b1": 2}).check_branch_listed(req("b2"))
+
+
+def _pending(name: str, branch: str = "b1", **fields: object) -> QueuedTest:
+    item = _item(name, branch, **fields)
+    item.state = State.PENDING_BUILD
+    return item
+
+
+def test_a_test_pending_its_builds_counts_for_backpressure_but_is_never_taken_and_is_neither_queued_nor_running() -> (
+    None
+):
+    queue = _queue(per_branch_k=1, max_queued_per_branch=2)
+    queue.push(_pending("built"))
+    queue.push(_item("plain"))
+    assert queue.queued_counted("b1") == 2
+    with pytest.raises(Backpressure):
+        queue.check_backpressure(req("b1"))
+    assert queue.take().request_id == "plain"  # type: ignore[union-attr]
+    assert queue.take() is None, "the pending test holds no card and is not handed out"
+    state = queue.state()
+    assert (state.queued, state.running, state.queued_by_branch) == (0, 1, {})
+    assert state.pending_build_by_branch == {"b1": 1}
+
+
+def test_release_moves_a_pending_test_to_queued_with_its_queue_time_starting_then() -> None:
+    queue = _queue(per_branch_k=1)
+    queue.push(_pending("built"))
+    assert queue.release("built", 500.0) is True
+    item = queue.get("built")
+    assert (item.state, item.queued_at) == (State.QUEUED, 500.0)  # type: ignore[union-attr]
+    assert queue.release("built", 600.0) is False, "a queued test is not pending any more"
+    assert queue.release("unknown", 600.0) is False
+    assert queue.take().request_id == "built"  # type: ignore[union-attr]
+
+
+def test_a_running_test_cannot_be_pushed() -> None:
+    item = _item("a")
+    item.state = State.RUNNING
+    with pytest.raises(ValueError, match="enters the queue waiting, not running"):
+        _queue().push(item)
+
+
+def test_the_branch_deadline_defaults_to_none() -> None:
+    assert QueuePolicy().branch_deadline == {}
+    assert QueuePolicy(branch_deadline={"b1": 1.0}).branch_deadline["b1"] == 1.0

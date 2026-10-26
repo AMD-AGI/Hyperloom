@@ -28,7 +28,7 @@ from hyperloom.contracts.measurement import TestKind, TestRequest, TestResult, V
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, RecordSearch
-from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent, Withdrawal
+from hyperloom_multibranch.contracts.notebook.records import BuildNotice, QuarantineEvent, Withdrawal
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import (
     CancelOutcome,
@@ -46,6 +46,7 @@ from hyperloom_multibranch.toolbox.fake_model import (
     Fate,
     classes_of_rounds,
 )
+from hyperloom_multibranch.toolbox.pending_builds import BuildDriver
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox, ToolboxStores, ToolboxTuning
@@ -59,6 +60,8 @@ class ToolboxNotebook(Protocol):
     async def write_result(self, result: object) -> object: ...
 
     async def write_withdrawal(self, withdrawal: Withdrawal) -> object: ...
+
+    async def notify_build(self, notice: BuildNotice) -> None: ...
 
     async def record_quarantine(self, event: QuarantineEvent) -> None: ...
 
@@ -79,6 +82,9 @@ class MemoryNotebook:
 
     async def write_withdrawal(self, withdrawal: Withdrawal) -> None:
         self.log.append(("withdrawal", withdrawal))
+
+    async def notify_build(self, notice: BuildNotice) -> None:
+        self.log.append(("build", notice))
 
     async def record_quarantine(self, event: QuarantineEvent) -> None:
         self.log.append(("quarantine", event))
@@ -230,7 +236,8 @@ class FakeWiring:
     recipes must sit on ``FakeToolboxConfig.image_digest``, the active image. Without one a parent's recipe is the
     empty one, so a delta must give a component's upstream repository and commit. ``parent_exists`` answers whether a
     parent commit is known, ``log_path`` places the submit log, ``claims`` and ``records`` are the notebook's claim and
-    record ports and ``workload_kind`` is the campaign's workload.
+    record ports and ``workload_kind`` is the campaign's workload. ``builds`` drives the native builds a test waits
+    for (a :class:`~hyperloom_multibranch.toolbox.fake_builds.FakeBuildDriver`); without one no test needs any.
     """
 
     parent_exists: Callable[[str], bool] | None = None
@@ -239,6 +246,7 @@ class FakeWiring:
     records: RecordSearch | None = None
     workload_kind: WorkloadKind = WorkloadKind.INFERENCEX
     repo: ExperimentRepo | None = None
+    builds: BuildDriver | None = None
 
 
 class FakeToolbox(RealToolbox):
@@ -274,6 +282,7 @@ class FakeToolbox(RealToolbox):
             health=self.notebook,  # type: ignore[arg-type]
             claims=wiring.claims,
             records=wiring.records,
+            builds=wiring.builds,
         )
         acceptance = AcceptanceSetup(
             _Repo(self.config.image_digest, wiring.parent_exists, wiring.repo),
@@ -285,6 +294,7 @@ class FakeToolbox(RealToolbox):
             policy=self._policy(self.config.default_k),
             max_infra_retries=self.config.max_infra_retries,
             clock=lambda: self.executor.now,
+            build_retry_seconds=0.0,
         )
         super().__init__(stores, self.executor, acceptance, tuning=tuning)
 

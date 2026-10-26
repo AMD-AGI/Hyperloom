@@ -25,6 +25,8 @@ from hyperloom_multibranch.contracts.notebook.records import InboxItem, InboxPag
 from hyperloom_multibranch.contracts.toolbox import (
     SCOPE_SPECIALIST,
     Backpressure,
+    BuildState,
+    BuildStatus,
     CancelOutcome,
     QueueState,
     RequestRejected,
@@ -324,6 +326,22 @@ def test_wait_test_reports_how_long_a_running_test_ran_and_what_it_wrote_last(wa
     assert body["progress"] == {"running_seconds": 125, "last_output_seconds_ago": 3, "last_line": "decode batch 8"}
 
 
+def test_wait_test_of_a_test_waiting_for_its_builds_is_pending_build_with_each_build_and_its_eta(wait_rig: Rig) -> None:
+    builds = (
+        BuildStatus("k1", "sgl_kernel", BuildState.BUILDING, 34.4, 0.0),
+        BuildStatus("k2", "vllm", BuildState.READY, 0.0, 812.0),
+    )
+    wait_rig.toolbox.progress_of["r9"] = TestProgress("pending_build", builds=builds)
+    body = _wait(wait_rig, request_id="r9", wait_seconds=1)
+    assert (body["state"], body["waited_seconds"]) == ("pending_build", 1)
+    assert body["progress"] == {
+        "builds": [
+            {"key": "k1", "component": "sgl_kernel", "state": "building", "eta_seconds": 34},
+            {"key": "k2", "component": "vllm", "state": "ready", "eta_seconds": 0},
+        ]
+    }
+
+
 def test_wait_test_of_a_test_the_toolbox_no_longer_holds_is_in_flight_with_no_progress(wait_rig: Rig) -> None:
     assert _wait(wait_rig, request_id="r9", wait_seconds=1) == {
         "request_id": "r9",
@@ -446,12 +464,19 @@ def test_a_token_cannot_be_issued_with_host_scope_or_no_scope(rig: Rig) -> None:
 
 
 def test_jsonable_turns_contract_objects_into_json_data() -> None:
-    state = QueueState(queued_by_priority={0: 1}, running_by_branch={"s1": 2})
+    build = BuildStatus("k1", "sgl_kernel", BuildState.BUILDING, 34.0)
+    state = QueueState(
+        queued_by_priority={0: 1}, running_by_branch={"s1": 2}, pending_build_by_branch={"s2": 1}, builds=(build,)
+    )
     assert json.loads(json.dumps(jsonable(state))) == {
         "queued_by_priority": {"0": 1},
         "running_by_branch": {"s1": 2},
         "queued_by_branch": {},
         "cold_start_seconds": None,
+        "pending_build_by_branch": {"s2": 1},
+        "builds": [
+            {"key": "k1", "component": "sgl_kernel", "state": "building", "eta_seconds": 34.0, "build_seconds": 0.0}
+        ],
     }
 
 

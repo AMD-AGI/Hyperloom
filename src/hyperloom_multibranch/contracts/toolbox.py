@@ -100,6 +100,7 @@ REJECTION_CODES = (
     "target_required",  # ``put_kernel_artifact``: no target given and the variable is bound to none yet in this session
     "lease_leaves_no_measurement",  # ``lease_branch_sandbox``, ``start_analysis kernel_tune``: leasing would leave fewer cards than one test needs
     "lease_exists",  # ``lease_branch_sandbox``: the branch already holds a lease
+    "build_after_deadline",  # the native builds the stack still needs and one test of its kind would end past the branch's deadline
 )
 
 
@@ -115,6 +116,31 @@ class CancelOutcome(str, Enum):
     FINISHED = "finished"  # the result was already written; nothing was changed
 
 
+class BuildState(str, Enum):
+    """Where one native build a waiting test needs stands."""
+
+    QUEUED = "queued"
+    BUILDING = "building"
+    READY = "ready"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class BuildStatus:
+    """One native build by its store ``key`` and ``component``.
+
+    ``eta_seconds`` is always set while the build is not over: the median wall time of earlier builds of that component
+    on that image, else the recipe's budget; it is 0 once the build is ``ready`` or ``failed``. ``build_seconds`` is the
+    CPU time of a finished build (0 before it finishes).
+    """
+
+    key: str
+    component: str
+    state: BuildState
+    eta_seconds: float
+    build_seconds: float = 0.0
+
+
 @dataclass(frozen=True)
 class QueueState:
     """What the scheduler and the dashboard read: queue lengths by priority, running tests by branch, cold start time.
@@ -122,12 +148,17 @@ class QueueState:
     ``queued_by_priority`` has a key for every priority of 0 to 4, ``running_by_branch`` only for branches with a test
     running. ``queued_by_branch`` counts what each branch has waiting, the number the backpressure limit applies to.
     ``cold_start_seconds`` is the recent sandbox cold start (``None`` before the first one).
+    ``pending_build_by_branch`` counts each branch's tests that wait for native builds; they hold no card and are in
+    neither ``queued`` nor ``running``, but they count against the branch's K for backpressure. ``builds`` is the
+    session's ledger of the builds this toolbox ran: queued, building and done, each with its ``build_seconds``.
     """
 
     queued_by_priority: Mapping[int, int] = field(default_factory=lambda: dict.fromkeys(_PRIORITIES, 0))
     running_by_branch: Mapping[str, int] = field(default_factory=dict)
     queued_by_branch: Mapping[str, int] = field(default_factory=dict)
     cold_start_seconds: float | None = None
+    pending_build_by_branch: Mapping[str, int] = field(default_factory=dict)
+    builds: tuple[BuildStatus, ...] = ()
 
     @property
     def queued(self) -> int:
@@ -148,16 +179,19 @@ class TestProgress:
     A ``queued`` test has ``queued_ahead``, the waiting tests the queue prefers to it by priority and arrival (a test of
     a branch at its K is counted, though it may not start first). A ``running`` test has ``running_seconds`` since it
     left the queue and, when its live output can be read, ``last_output_seconds_ago`` (since its newest server or
-    benchmark log was written) and ``last_line`` (that log's last non-empty line, cleaned and shortened).
+    benchmark log was written) and ``last_line`` (that log's last non-empty line, cleaned and shortened). A
+    ``pending_build`` test waits for the native builds its stack needs and holds no card; ``builds`` has one status per
+    build, and is empty in any other state.
     """
 
     __test__ = False
 
-    state: Literal["queued", "running"]
+    state: Literal["pending_build", "queued", "running"]
     queued_ahead: int | None = None
     running_seconds: float | None = None
     last_output_seconds_ago: float | None = None
     last_line: str | None = None
+    builds: tuple[BuildStatus, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -304,6 +338,8 @@ __all__ = [
     "REJECTION_CODES",
     "Backpressure",
     "BranchLease",
+    "BuildState",
+    "BuildStatus",
     "CancelOutcome",
     "MeasurementCapacity",
     "NodeHealth",

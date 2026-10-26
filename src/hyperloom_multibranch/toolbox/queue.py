@@ -55,6 +55,10 @@ class QueuePolicy:
     priority_override maps a purpose's value to a priority and applies to requests that name none.
     max_queued_per_branch is the backpressure limit; None means DEFAULT_QUEUE_FACTOR times K.
 
+    ``branch_deadline`` is the Unix time (the toolbox clock's base) each branch's exploration ends, as scheduling gives
+    ``BranchTask.deadline``; a test whose native builds and one run of its kind would end past it is refused as
+    ``build_after_deadline``. No entry, or 0, means no check.
+
     ``listed_branches_only`` makes ``branch_k`` the list of branches that may submit at all: a request of a branch
     not in it is refused as ``branch_stopped`` (the scheduler gives every running branch a K and takes it away when it
     stops the branch). The default False keeps ``per_branch_k`` as the K of every branch not listed.
@@ -66,6 +70,7 @@ class QueuePolicy:
     max_queued_per_branch: int | None = None
     branch_k: Mapping[str, int] = field(default_factory=dict)
     listed_branches_only: bool = False
+    branch_deadline: Mapping[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if isinstance(self.per_branch_k, Mapping):
@@ -119,8 +124,15 @@ def exempt_from_k(request: TestRequest) -> bool:
 
 
 class State(str, Enum):
+    """``PENDING_BUILD``: accepted, waiting for its native builds; it holds no card but takes a slot of K's backlog."""
+
+    PENDING_BUILD = "pending_build"
     QUEUED = "queued"
     RUNNING = "running"
+
+
+#: The states of a test that has not started: both count against its branch's backlog.
+WAITING_STATES = frozenset({State.PENDING_BUILD, State.QUEUED})
 
 
 @dataclass
@@ -166,12 +178,12 @@ class WorkQueue:
         return list(self._items.values())
 
     def queued_counted(self, branch: str) -> int:
-        """Tests of ``branch`` waiting that count against K; the backpressure number."""
+        """Tests of ``branch`` waiting, for their builds or for a card, that count against K; the backpressure number."""
 
         return sum(
             1
             for item in self._items.values()
-            if item.state is State.QUEUED and item.branch == branch and not exempt_from_k(item.request)
+            if item.state in WAITING_STATES and item.branch == branch and not exempt_from_k(item.request)
         )
 
     def check_branch_listed(self, request: TestRequest) -> None:
@@ -186,10 +198,23 @@ class WorkQueue:
             raise Backpressure(request.branch_id, queued, limit)
 
     def push(self, item: QueuedTest) -> None:
+        """Add an accepted test in the state it was made in: ``QUEUED``, or ``PENDING_BUILD`` until :meth:`release`."""
+
+        if item.state not in WAITING_STATES:
+            raise ValueError(f"a test enters the queue waiting, not {item.state.value}")
         self._arrivals += 1
         item.seq = self._arrivals
-        item.state = State.QUEUED
         self._items[item.request_id] = item
+
+    def release(self, request_id: str, now: float) -> bool:
+        """Move a test whose builds are all ready to ``QUEUED``; its queue time starts ``now``. False when it is not
+        waiting for builds (taken back meanwhile)."""
+
+        item = self._items.get(request_id)
+        if item is None or item.state is not State.PENDING_BUILD:
+            return False
+        item.state, item.queued_at = State.QUEUED, now
+        return True
 
     def _running_counted(self, branch: str) -> int:
         return sum(
@@ -237,17 +262,21 @@ class WorkQueue:
         """Apply a changed policy to queued tests whose request named no priority."""
 
         for item in self._items.values():
-            if item.state is State.QUEUED and item.request.priority is None:
+            if item.state in WAITING_STATES and item.request.priority is None:
                 item.priority = self.policy.priority_of(item.request)
 
     def state(self) -> QueueState:
         by_priority = dict.fromkeys(range(PRIORITY_HIGHEST, PRIORITY_LOWEST + 1), 0)
-        running: dict[str, int] = {}
-        queued: dict[str, int] = {}
+        counts: dict[State, dict[str, int]] = {state: {} for state in State}
         for item in self._items.values():
             if item.state is State.QUEUED:
                 by_priority[item.priority] += 1
-                queued[item.branch] = queued.get(item.branch, 0) + 1
-            else:
-                running[item.branch] = running.get(item.branch, 0) + 1
-        return QueueState(by_priority, running, queued, self.cold_start_seconds)
+            per_branch = counts[item.state]
+            per_branch[item.branch] = per_branch.get(item.branch, 0) + 1
+        return QueueState(
+            by_priority,
+            counts[State.RUNNING],
+            counts[State.QUEUED],
+            self.cold_start_seconds,
+            pending_build_by_branch=counts[State.PENDING_BUILD],
+        )
