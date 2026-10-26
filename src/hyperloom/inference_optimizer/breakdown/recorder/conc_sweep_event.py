@@ -994,12 +994,17 @@ def assemble_conc_sweep_ext(
         ext["superseded_sweeps"] = [_text(other.get("task_id")) for other in action_rows[:-1] if other is not row]
     ext["arms"][ARM_BASELINE]["arm"] = ARM_BASELINE
     ext["arms"][ARM_OPTIMIZED]["arm"] = ARM_OPTIMIZED
-    status = _text(row.get("status")) or "running"
+    return ext, _sweep_status(_text(row.get("status")), ext)
+
+
+def _sweep_status(declared: str, ext: Mapping[str, Any]) -> str:
+    """The timeline status of a sweep that recorded ``declared``, read against its assembled ``ext``."""
+    status = declared or "running"
     if status == "cancelled":
         # The timeline has no word for a sweep stopped from outside. It ran and fell short of its ladder without
         # anything failing, which is what degraded says; ``result.status`` keeps the sweep's own word.
         status = "degraded"
-    if status == "succeeded" and result.get("budget_exhausted"):
+    if status == "succeeded" and ext["result"].get("budget_exhausted"):
         # A curve cut short by the time budget still produced usable pairs,
         # but not the ladder that was asked for.
         status = "degraded"
@@ -1009,7 +1014,7 @@ def assemble_conc_sweep_ext(
         # the sweep cannot read as whole while an arm under it does not. An arm
         # with no row never ran, which is not the same as falling short.
         status = "degraded"
-    return ext, status
+    return status
 
 
 def make_conc_sweep_recorder(

@@ -672,25 +672,13 @@ def assemble_enablement_ext(
     leaves the caller's own reading standing.
     """
     header = _header(rows_for_event(parts.get(SECTION_EVENT) or [], event))
-    attempts = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_ATTEMPT) or [], event), keys=("attempt", "dispatched_at")),
-        drop=("event_id",),
-    )
-    builds = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_BUILD) or [], event), keys=("recorded_at", "task_id")),
-        drop=("event_id",),
-    )
-    revalidations = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_REVALIDATION) or [], event), keys=("generation",)),
-        drop=("event_id",),
-    )
+    attempts = _section_rows(parts, SECTION_ATTEMPT, event, ("attempt", "dispatched_at"))
+    builds = _section_rows(parts, SECTION_BUILD, event, ("recorded_at", "task_id"))
+    revalidations = _section_rows(parts, SECTION_REVALIDATION, event, ("generation",))
     paired = pair_keep_rounds(
         attempts, revalidations, str(header.get(VALIDATING_KEEP_FIELD) or ""), kept_status=ROUND_KEPT
     )
-    human_review = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_HUMAN_REVIEW) or [], event), keys=("recorded_at", "digest")),
-        drop=("event_id",),
-    )
+    human_review = _section_rows(parts, SECTION_HUMAN_REVIEW, event, ("recorded_at", "digest"))
     result = _as_dict(header.get("result"))
     failure = _as_dict(header.get("failure")) or None
     ext: dict[str, Any] = {
@@ -724,12 +712,27 @@ def assemble_enablement_ext(
         # always carries a verdict, including an explicitly insufficient one.
         "recipe": _as_dict(header.get("recipe")) or None,
     }
-    status = _status_for(str(result.get("outcome") or ""), attempts=len(attempts)) if result else ""
+    return ext, _event_status(result, failure, attempts=len(attempts))
+
+
+def _section_rows(
+    parts: Mapping[str, list[dict[str, Any]]],
+    section: str,
+    event: str,
+    keys: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """``event``'s rows of one section, ordered by ``keys`` and stripped of the event id."""
+    return wire_rows(sort_rows(rows_for_event(parts.get(section) or [], event), keys=keys), drop=("event_id",))
+
+
+def _event_status(result: Mapping[str, Any], failure: Mapping[str, Any] | None, *, attempts: int) -> str:
+    """The status an assembled event reports, empty while no write has closed it."""
+    status = _status_for(str(result.get("outcome") or ""), attempts=attempts) if result else ""
     # A fault the lane survived outranks a clean terminal: the exception is
     # what says the outcome was not come by cleanly, matching KERNEL/FRAMEWORK.
     if failure:
         status = STATUS_FAILED
-    return ext, status
+    return status
 
 
 def _keep_counts(attempts: Sequence[Mapping[str, Any]], paired: Sequence[Mapping[str, Any]] | None) -> dict[str, int]:

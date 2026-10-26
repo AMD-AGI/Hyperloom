@@ -443,53 +443,28 @@ def assemble_phase_ext(
     """Assemble a phase event's ``ext``, and the status it reports, out of the
     sections read back from the spool."""
     header = _header(rows_for_event(parts.get(SECTION_EVENT) or [], event))
-    segments = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_SEGMENT) or [], event), keys=("sequence",)),
-        drop=("event_id",),
-    )
+    segments = _section_rows(parts, SECTION_SEGMENT, event, ("sequence",))
     actions = [
         # Measured here because the settle cannot see the dispatch that opened
         # the row.
         dict(row, duration_sec=_span(row.get("dispatched_unix"), row.get("settled_unix")))
-        for row in wire_rows(
-            sort_rows(
-                rows_for_event(parts.get(SECTION_ACTION) or [], event),
-                keys=("dispatched_at", "task_id"),
-            ),
-            drop=("event_id",),
-        )
+        for row in _section_rows(parts, SECTION_ACTION, event, ("dispatched_at", "task_id"))
     ]
-    markers = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_MARKER) or [], event), keys=("sequence", "ts")),
-        drop=("event_id",),
-    )
-    proposals = wire_rows(
-        sort_rows(
-            rows_for_event(parts.get(SECTION_PROPOSAL) or [], event),
-            keys=("proposed_at", "proposal_msg_id"),
-        ),
-        drop=("event_id",),
-    )
-    denials = wire_rows(
-        sort_rows(
-            rows_for_event(parts.get(SECTION_DENIAL) or [], event),
-            keys=("denied_at", "proposal_msg_id", "action"),
-        ),
-        drop=("event_id",),
-    )
-    # Summed over the entries, not measured first to last: a phase re-entered
-    # inside one cycle did not own the time the run spent elsewhere in between.
-    measured = [row.get("duration_sec") for row in segments if isinstance(row.get("duration_sec"), (int, float))]
+    markers = _section_rows(parts, SECTION_MARKER, event, ("sequence", "ts"))
+    proposals = _section_rows(parts, SECTION_PROPOSAL, event, ("proposed_at", "proposal_msg_id"))
+    denials = _section_rows(parts, SECTION_DENIAL, event, ("denied_at", "proposal_msg_id", "action"))
+    first = segments[0] if segments else {}
+    last = segments[-1] if segments else {}
     ext: dict[str, Any] = {
         "phase": str(header.get("phase") or ""),
         "macro_cycle": int(header.get("macro_cycle") or 0),
-        "entered_at": str((segments[0] or {}).get("entered_at") or "") if segments else "",
-        "exited_at": str((segments[-1] or {}).get("exited_at") or "") if segments else "",
-        "exit_reason": str((segments[-1] or {}).get("exit_reason") or "") if segments else "",
+        "entered_at": str(first.get("entered_at") or ""),
+        "exited_at": str(last.get("exited_at") or ""),
+        "exit_reason": str(last.get("exit_reason") or ""),
         "entries": len(segments),
-        "duration_sec": round(sum(float(d) for d in measured), 6) if measured else None,
+        "duration_sec": _summed_duration(segments),
         # An entry with no exit is the segment the run was in when it stopped.
-        "open": any(not row.get("exited_at") for row in segments),
+        "open": _still_open(segments),
         "segments": segments,
         "actions": {
             "count": len(actions),
@@ -512,6 +487,29 @@ def assemble_phase_ext(
     return ext, _status_for(segments, actions)
 
 
+def _section_rows(
+    parts: Mapping[str, list[dict[str, Any]]],
+    section: str,
+    event: str,
+    keys: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """``event``'s rows of one section, ordered by ``keys`` and stripped of the event id."""
+    return wire_rows(sort_rows(rows_for_event(parts.get(section) or [], event), keys=keys), drop=("event_id",))
+
+
+def _summed_duration(segments: Sequence[Mapping[str, Any]]) -> float | None:
+    """The seconds a phase owned across its entries, ``None`` when no entry was measured."""
+    # Summed over the entries, not measured first to last: a phase re-entered
+    # inside one cycle did not own the time the run spent elsewhere in between.
+    measured = [row.get("duration_sec") for row in segments if isinstance(row.get("duration_sec"), (int, float))]
+    return round(sum(float(d) for d in measured), 6) if measured else None
+
+
+def _still_open(segments: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether one of a phase's entries has no exit yet."""
+    return any(not row.get("exited_at") for row in segments)
+
+
 def _status_for(
     segments: Sequence[Mapping[str, Any]],
     actions: Sequence[Mapping[str, Any]],
@@ -519,7 +517,7 @@ def _status_for(
     """The status a phase event reports: a phase the run left cleanly succeeded
     whatever the actions inside it decided, one still open at assembly is
     ``interrupted``, and one whose every dispatch failed is degraded."""
-    if not segments or any(not row.get("exited_at") for row in segments):
+    if not segments or _still_open(segments):
         return STATUS_INTERRUPTED
     settled = [row for row in actions if row.get("status")]
     if settled and all(str(row.get("status") or "") == STATUS_FAILED for row in settled):

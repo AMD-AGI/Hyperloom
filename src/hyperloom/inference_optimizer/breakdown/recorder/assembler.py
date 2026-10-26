@@ -138,18 +138,23 @@ def assemble_parts(
             f"{sorted(set(producers))} were dropped whole"
         )
 
+    out = _section_payloads(items, singletons)
+    _compose_versions(out)
+    _compose_critic(out)
+    _compose_close(out)
+    if not keep_event_rows:
+        _drop_event_rows(out)
+    return out
+
+
+def _section_payloads(items: dict[str, list[dict[str, Any]]], singletons: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """``{section: payload}``: item payloads ordered by ``seq`` then ``ts``, then each kept singleton's payload."""
     out: dict[str, Any] = {}
     for section, recs in items.items():
         recs.sort(key=lambda r: (int(r.get("seq") or 0), str(r.get("ts") or "")))
         out[section] = [r.get("payload") for r in recs]
     for section, rec in singletons.items():
         out[section] = rec.get("payload")
-
-    _compose_versions(out)
-    _compose_critic(out)
-    _compose_close(out)
-    if not keep_event_rows:
-        _drop_event_rows(out)
     return out
 
 

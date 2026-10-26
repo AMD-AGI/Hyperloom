@@ -31,6 +31,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from .construct import event_header
 from .event_fields import (
     as_dict as _as_dict,
     bool_or_none as _bool_or_none,
@@ -310,6 +311,22 @@ class CriticReview:
     variants: Iterable[Mapping[str, Any]] | None = None
 
 
+def _variant_rulings(variants: Iterable[Mapping[str, Any]] | None) -> list[dict[str, str]]:
+    """The rulings of a grid reviewed by ``verdict_map``, one per named variant."""
+    return [
+        {
+            "variant_name": str(row.get("variant_name") or ""),
+            "verdict": str(row.get("verdict") or ""),
+            "effective_verdict": str(row.get("effective_verdict") or "") or str(row.get("verdict") or ""),
+            "held_to_rule": str(row.get("held_to_rule") or ""),
+            "reason": str(row.get("reason") or ""),
+            "failure_reason_code": str(row.get("failure_reason_code") or ""),
+        }
+        for row in (variants or [])
+        if str(row.get("variant_name") or "")
+    ]
+
+
 class FrameworkEventRecorder:
     """Records one FRAMEWORK_AGENT entry's facts, one fragment per row.
 
@@ -535,18 +552,7 @@ class FrameworkEventRecorder:
             name = str(field or "")
             if name and name not in ruling:
                 ruling[name] = value
-        rows = [
-            {
-                "variant_name": str(row.get("variant_name") or ""),
-                "verdict": str(row.get("verdict") or ""),
-                "effective_verdict": str(row.get("effective_verdict") or "") or str(row.get("verdict") or ""),
-                "held_to_rule": str(row.get("held_to_rule") or ""),
-                "reason": str(row.get("reason") or ""),
-                "failure_reason_code": str(row.get("failure_reason_code") or ""),
-            }
-            for row in (review.variants or [])
-            if str(row.get("variant_name") or "")
-        ]
+        rows = _variant_rulings(review.variants)
         if rows:
             ruling["variants"] = rows
         self._sink.record(
@@ -828,21 +834,13 @@ def assemble_framework_ext(
     rows, out of the sections read back from the spool. Rows of every other
     event are ignored, and the status is empty when the event holds no work,
     which leaves the caller's own reading standing."""
-    event_rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
-    header = event_rows[0] if event_rows else {}
+    header = event_header(parts, SECTION_EVENT, event)
 
-    plateau = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_PLATEAU) or [], event), keys=("evaluated_at", "arm")),
-        drop=("event_id",),
-    )
-    runs = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_RUN) or [], event), keys=("dispatched_at", "run_id")),
-        drop=("event_id",),
-    )
-    attempt_rows = sort_rows(rows_for_event(parts.get(SECTION_ATTEMPT) or [], event), keys=("ts", "attempt_id"))
+    plateau = wire_rows(_ordered_rows(parts, SECTION_PLATEAU, event, ("evaluated_at", "arm")), drop=("event_id",))
+    runs = wire_rows(_ordered_rows(parts, SECTION_RUN, event, ("dispatched_at", "run_id")), drop=("event_id",))
+    attempt_rows = _ordered_rows(parts, SECTION_ATTEMPT, event, ("ts", "attempt_id"))
     gates_by_attempt = group_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_ATTEMPT_GATE) or [], event), keys=("ordinal", "ts", "gate")),
-        "attempt_id",
+        _ordered_rows(parts, SECTION_ATTEMPT_GATE, event, ("ordinal", "ts", "gate")), "attempt_id"
     )
     attempts: list[dict[str, Any]] = []
     for row in wire_rows(attempt_rows, drop=("event_id",)):
@@ -851,16 +849,10 @@ def assemble_framework_ext(
         row["blocked_by"] = _text_or_none(_blocking_gate(row["gates"]))
         attempts.append(row)
 
-    steps_by_proposal = group_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_PROPOSAL_STEP) or [], event), keys=("ts", "step")),
-        "proposal_id",
-    )
+    steps_by_proposal = group_rows(_ordered_rows(parts, SECTION_PROPOSAL_STEP, event, ("ts", "step")), "proposal_id")
     attempts_by_proposal = group_rows(attempts, "proposal_ref")
     proposals: list[dict[str, Any]] = []
-    for row in wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_PROPOSAL) or [], event), keys=("proposal_id",)),
-        drop=("event_id",),
-    ):
+    for row in wire_rows(_ordered_rows(parts, SECTION_PROPOSAL, event, ("proposal_id",)), drop=("event_id",)):
         key = str(row.get("proposal_id") or "")
         row["lifecycle"] = wire_rows(steps_by_proposal.get(key, []), drop=("event_id", "proposal_id"))
         # Derived at close: the attempt already names its proposal, and a
@@ -887,6 +879,16 @@ def assemble_framework_ext(
         "duration_sec": header.get("duration_sec"),
     }
     return ext, _derived_status(header, runs=runs, proposals=proposals, attempts=attempts)
+
+
+def _ordered_rows(
+    parts: Mapping[str, list[dict[str, Any]]],
+    section: str,
+    event: str,
+    keys: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """``event``'s rows of one section, ordered by ``keys``."""
+    return sort_rows(rows_for_event(parts.get(section) or [], event), keys=keys)
 
 
 def _derived_status(
