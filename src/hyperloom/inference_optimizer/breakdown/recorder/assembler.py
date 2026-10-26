@@ -19,7 +19,6 @@ from typing import Any
 from hyperloom.common.coerce import dict_rows
 from hyperloom.common.jsonio import read_json
 
-from .close_out import STATUS_PENDING
 from .sections import EVENT_SECTIONS, may_hold_event, section_glob, slug
 
 _UNREADABLE = object()
@@ -182,8 +181,12 @@ def _compose_write_back(out: dict[str, Any]) -> dict[str, Any] | None:
     if not block.get("status"):
         # Attempts but no settled arc: opened, then the process died before
         # anything answered. Not a failure the store never returned.
-        block["status"] = STATUS_PENDING
+        block["status"] = _WRITE_BACK_PENDING
     return block
+
+
+#: Mirrors ``close_out.STATUS_PENDING``, spelled out to break an import cycle.
+_WRITE_BACK_PENDING = "pending"
 
 
 def close_steps(session_dir: Path | str) -> list[dict[str, Any]]:
