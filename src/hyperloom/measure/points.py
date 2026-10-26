@@ -119,6 +119,10 @@ def _reference(canonical: CanonicalMeasurement, pins: Mapping[str, str]) -> dict
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+#: The file :func:`default_canonical` renders the canonical measurement to, in its ``out_dir``.
+CANONICAL_FILE = "canonical.yaml"
+
+
 def default_canonical(
     out_dir: Path, *, primary_concurrency: int, config_path: Path | None = None, **materialize: Any
 ) -> CanonicalMeasurement:
@@ -131,10 +135,8 @@ def default_canonical(
     base = config_path or default_baseline_config()
     canonical = CanonicalMeasurement(base, MeasurementSurface({}), primary_concurrency, materialize)
     evaluation = {} if canonical.agentx else {ENV_RUN_EVAL: "true"}
-    config = _render(
-        canonical, out_dir, "canonical.yaml", extra_envs={ENV_CONC: str(primary_concurrency), **evaluation}
-    )
-    surface = _canonical_surface(config, out_dir / "canonical.yaml")
+    config = _render(canonical, out_dir, CANONICAL_FILE, extra_envs={ENV_CONC: str(primary_concurrency), **evaluation})
+    surface = _canonical_surface(config, out_dir / CANONICAL_FILE)
     return CanonicalMeasurement(base, surface, primary_concurrency, materialize)
 
 
@@ -343,6 +345,7 @@ def accept_measurement(
 
 
 __all__ = [
+    "CANONICAL_FILE",
     "AcceptedMeasurement",
     "CanonicalMeasurement",
     "PointError",

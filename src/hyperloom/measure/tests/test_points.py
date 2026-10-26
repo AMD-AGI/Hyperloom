@@ -22,6 +22,7 @@ from hyperloom.measure.compile import (
 )
 from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.measure.points import (
+    CANONICAL_FILE,
     PointError,
     accept_measurement,
     default_canonical,
@@ -301,6 +302,7 @@ def test_an_agentx_canonical_is_what_the_main_flow_renders_for_the_workload(tmp_
     main_flow = materialize_benchmark_config(source, tmp_path / "main", model_path=str(model))
 
     rendered = load(tmp_path / "canonical" / "canonical.yaml")
+    assert CANONICAL_FILE == "canonical.yaml", "the name callers read the rendered canonical by"
     assert rendered == load(main_flow)
     bench = rendered["benchmark"]
     assert bench["envs"]["RUN_EVAL"] == "false"
