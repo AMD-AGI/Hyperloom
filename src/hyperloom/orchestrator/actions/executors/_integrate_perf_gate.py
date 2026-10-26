@@ -583,7 +583,7 @@ class PerfGateMixin:
         from ...knowledge import kb_writeback as _kb
 
         enablers = [entry["switch"] for entry in switch_manifest if entry.get("enabler")]
-        if measured.new_tput is not None:
+        if params.get(SCREEN_PARAM) != SCREEN_CYCLE:
             await self._maybe_write_framework_kb_record(
                 measured.lesson(_kb.OUTCOME_KEPT_INERT),
                 done_payload=attempt.done_payload,

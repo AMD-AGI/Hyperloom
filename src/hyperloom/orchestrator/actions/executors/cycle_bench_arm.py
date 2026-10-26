@@ -39,6 +39,9 @@ CYCLE_BANDS = cb.Bands(batch_pct=1.0, per_bs_pct=3.0, regress_pct=1.5)
 #: Admission price of one arm: a warm boot without the host KV cache plus one log window per batch size.
 CYCLE_ARM_MINUTES = 8.0
 
+#: Candidates per batch: with its two bases, about an hour of serving lanes.
+CYCLE_BATCH_MAX_ARMS = 6
+
 #: Explore ``reason`` of a Coordinator-enqueued cycle-bench batch.
 CYCLE_BATCH_REASON = "cycle_bench_batch"
 _BASES = ("base", "base2")
@@ -62,13 +65,13 @@ class BatchSpec:
 
 
 def cycle_arms(levers: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One arm per patch among *levers* awaiting the screen, each switching all of its patch's levers on."""
+    """One arm per patch among *levers* awaiting the screen, oldest first, up to the batch's arm limit."""
     arms: dict[str, dict[str, str]] = {}
     for row in levers:
         if row.get("attribution_source") == ATTRIBUTION_CYCLE_PENDING:
             patch = str(row.get("specialist_task_id") or row.get("switch") or "")
             arms.setdefault(patch, {})[str(row["switch"])] = str(row.get("value") or "1")
-    return [{"name": name, "envs": envs} for name, envs in arms.items()]
+    return [{"name": name, "envs": envs} for name, envs in arms.items()][:CYCLE_BATCH_MAX_ARMS]
 
 
 def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, out_dir: Path, port: int) -> BatchSpec:

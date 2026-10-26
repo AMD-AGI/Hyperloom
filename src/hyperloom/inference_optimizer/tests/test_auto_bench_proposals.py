@@ -221,3 +221,16 @@ async def test_a_phase_on_its_way_out_hands_unscreened_levers_back_to_replay_att
     rows = [(r["switch"], r["attribution_source"]) for r in state.authored_framework_levers]
     assert rows == [("HL_DONE", ""), ("HL_A", "cycle_bench_inconclusive"), ("HL_C", "cycle_bench_inconclusive")]
     assert _explores(fp) == []
+
+
+async def test_a_batch_carries_at_most_its_arm_limit_oldest_patches_first():
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM, CYCLE_BATCH_MAX_ARMS
+
+    fp = _phase()
+    for i in range(CYCLE_BATCH_MAX_ARMS + 2):
+        _awaiting_screen(fp._coord.shared_state, f"HL_{i}", f"t-{i}")
+
+    assert await fp.enqueue_cycle_batch() is True
+
+    (batch,) = _explores(fp)
+    assert [arm["name"] for arm in batch["params"][CYCLE_ARMS_PARAM]] == [f"t-{i}" for i in range(CYCLE_BATCH_MAX_ARMS)]

@@ -586,6 +586,7 @@ async def _run_rewrite_integrate(
     parity_tput_missing: bool = False,
     patch_body: str | None = None,
     extra_params: "dict[str, Any] | None" = None,
+    kb_lessons: "list[Any] | None" = None,
 ):
     """Run integrate_patch on a switch-gated rewrite patch with a faked bench."""
     import json as _json
@@ -642,8 +643,9 @@ async def _run_rewrite_integrate(
             {"accuracy_pass": accuracy_pass, "timed_out": False},
         )
 
-    async def _noop_kb(*_args, **_kwargs):
-        return None
+    async def _noop_kb(lesson, **_kwargs):
+        if kb_lessons is not None:
+            kb_lessons.append(lesson)
 
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
     monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
@@ -1312,3 +1314,23 @@ async def test_a_cycle_batch_that_failed_hands_its_levers_back_to_replay_attribu
         ("HL_B", "cycle_bench_inconclusive"),
         ("HL_C", "cycle_bench_pending"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_only_a_screened_admission_skips_the_kept_inert_lesson(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import SCREEN_CYCLE, SCREEN_PARAM
+
+    for sub in ("benched", "screened"):
+        (tmp_path / sub).mkdir()
+    benched: list[Any] = []
+    await _run_rewrite_integrate(tmp_path / "benched", monkeypatch, delta_pct=0.2, kb_lessons=benched)
+    screened: list[Any] = []
+    await _run_rewrite_integrate(
+        tmp_path / "screened",
+        monkeypatch,
+        delta_pct=0.2,
+        kb_lessons=screened,
+        extra_params={SCREEN_PARAM: SCREEN_CYCLE},
+    )
+
+    assert (len(benched), screened) == (1, [])
