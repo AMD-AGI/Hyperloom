@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+import kernelforge.gemm_tune.aiter_graph_retime as retime
 import kernelforge.gemm_tune.aiter_splitk_validate as validate
 import kernelforge.gemm_tune.tuners._aiter_dense_common as ac
 import kernelforge.gemm_tune.tuners._row_accuracy as accuracy
@@ -178,6 +179,7 @@ def _tune(tmp_path: Path, monkeypatch, rel_norm_err: float, *, trial_max: int = 
     monkeypatch.delenv("FORGE_SPLITK_TRIAL", raising=False)
     monkeypatch.setitem(validate._TRIAL_OPS, _OP, lambda m, n, k, sk, device="cuda": sk <= trial_max)
     monkeypatch.setitem(validate._REL_NORM_OPS, _OP, lambda mnk, sk, name, device="cuda": rel_norm_err)
+    monkeypatch.delitem(retime._RETIME_OPS, _OP)
     (tmp_path / "in.csv").write_text("M,N,K\n64,5120,17408\n")
     profile = profile or [_row("asm", 6, "0.0125")]
     _write(tmp_path / "tuned_bpre.csv", [min(profile, key=lambda r: float(r[_HDR.index("us")]))])

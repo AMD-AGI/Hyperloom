@@ -77,6 +77,8 @@ class TuneResult:
     shape_results: list[dict[str, Any]] = field(default_factory=list)
     # Rows removed from the deployed artifact because the tuner's own accuracy check found them wrong.
     dropped_inaccurate: list[dict[str, Any]] = field(default_factory=list)
+    # Decode rows whose in-graph re-time shipped another kernel than the tuner's pick, or could not time it.
+    graph_retime: list[dict[str, Any]] = field(default_factory=list)
     # Timing
     elapsed_s: float = 0.0
     # Error info
@@ -124,6 +126,8 @@ class TuneResult:
             d["shape_results"] = self.shape_results
         if self.dropped_inaccurate:
             d["dropped_inaccurate"] = self.dropped_inaccurate
+        if self.graph_retime:
+            d["graph_retime"] = self.graph_retime
         if self.error:
             d["error"] = self.error
             d["error_class"] = self.error_class
