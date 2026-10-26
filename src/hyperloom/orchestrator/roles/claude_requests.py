@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from hyperloom.common.token_usage import TOKEN_KEYS
 from hyperloom.inference_optimizer.trace.context_events import COMPACT_BOUNDARY, compaction_attributes
 from hyperloom.inference_optimizer.trace.tool_events import ToolCall, tool_attributes, tool_status
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
@@ -35,19 +36,12 @@ from hyperloom.common.coerce import to_int
 TIMING_STREAM = "stream_events"
 TIMING_ASSISTANT_MESSAGE = "assistant_message"
 
-_USAGE_KEYS: tuple[str, ...] = (
-    "input_tokens",
-    "output_tokens",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-)
-
 
 def _usage_counts(usage: Any) -> dict[str, int]:
     """The canonical counters a usage mapping reports (absent keys are left out, so a later delta cannot zero them)."""
     if not isinstance(usage, dict):
         return {}
-    return {key: to_int(usage.get(key), 0) for key in _USAGE_KEYS if usage.get(key) is not None}
+    return {key: to_int(usage.get(key), 0) for key in TOKEN_KEYS if usage.get(key) is not None}
 
 
 def _mapping(value: Any) -> dict[str, Any]:

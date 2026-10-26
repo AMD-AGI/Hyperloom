@@ -12,20 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import redact_secret_values
-from hyperloom.common.token_usage import uncached_input_tokens
+from hyperloom.common.token_usage import TOKEN_KEYS, sdk_field, uncached_input_tokens
 
 from hyperloom.common.coerce import to_int
 
 log = logging.getLogger(__name__)
-
-
-# The four canonical counters, in stable order.
-_TOKEN_KEYS: tuple[str, ...] = (
-    "input_tokens",
-    "output_tokens",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-)
 
 
 # Provider spellings for a reply's hidden reasoning output.
@@ -33,27 +24,20 @@ _REASONING_TOKEN_KEYS: tuple[str, ...] = ("reasoning_output_tokens", "reasoning_
 _REASONING_DETAIL_KEYS: tuple[str, ...] = ("completion_tokens_details", "output_tokens_details")
 
 
-def _field(usage: Any, key: str) -> Any:
-    """Read ``key`` off a usage payload that may be a mapping or an SDK object."""
-    if isinstance(usage, dict):
-        return usage.get(key)
-    return getattr(usage, key, None)
-
-
 def reasoning_output_tokens(usage: Any) -> int | None:
     """Recover the reasoning-output token count from any provider usage shape."""
     if usage is None:
         return None
     for key in _REASONING_TOKEN_KEYS:
-        value = to_int(_field(usage, key))
+        value = to_int(sdk_field(usage, key))
         if value is not None:
             return value
     for detail_key in _REASONING_DETAIL_KEYS:
-        details = _field(usage, detail_key)
+        details = sdk_field(usage, detail_key)
         if details is None:
             continue
         for key in _REASONING_TOKEN_KEYS:
-            value = to_int(_field(details, key))
+            value = to_int(sdk_field(details, key))
             if value is not None:
                 return value
     return None
@@ -63,7 +47,7 @@ def normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | None] | Non
     """Project an arbitrary ``usage`` dict onto the canonical four keys."""
     if not isinstance(usage, dict) or not usage:
         return None
-    projected: dict[str, int | None] = {k: to_int(usage.get(k)) for k in _TOKEN_KEYS}
+    projected: dict[str, int | None] = {k: to_int(usage.get(k)) for k in TOKEN_KEYS}
     if all(v is None for v in projected.values()):
         return None
     return projected

@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
-from hyperloom.common.coerce import to_int as _to_int
 from hyperloom.common.env import is_truthy
 from hyperloom.common.llm_attribution import call_headers as _attribution_headers
 from hyperloom.common.llm_attribution import gateway_selected as _gateway_selected
@@ -25,7 +24,7 @@ from hyperloom.common.llm_request_hooks import (
     observed_request,
 )
 from hyperloom.common.reasoning_effort import gateway_reasoning_effort
-from hyperloom.common.token_usage import uncached_input_tokens
+from hyperloom.common.token_usage import anthropic_usage_counts, openai_usage_counts, sdk_field
 
 log = logging.getLogger(__name__)
 
@@ -723,10 +722,10 @@ def _observe_chat(observation: RequestObservation, resp: object) -> ChatCompleti
     """Fold one chat-completions response onto ``observation``, then flatten it."""
     result = _chat_completion_result(resp)
     observation.update(
-        response_id=_sdk_field(resp, "id"),
-        model=_sdk_field(resp, "model"),
+        response_id=sdk_field(resp, "id"),
+        model=sdk_field(resp, "model"),
         stop_reason=result.finish_reason,
-        usage=_openai_usage_counts(result.usage),
+        usage=openai_usage_counts(result.usage),
     )
     return result
 
@@ -759,44 +758,6 @@ async def achat_completion(
     ) as observation:
         resp = await client.chat.completions.create(**_tag_request(params, component, operation))  # type: ignore[union-attr]
         return _observe_chat(observation, resp)
-
-
-def _sdk_field(obj: object, key: str) -> object:
-    """Read ``key`` off a dict or an attribute-carrying object."""
-    if isinstance(obj, dict):
-        return obj.get(key)
-    return getattr(obj, key, None)
-
-
-def _sdk_token_count(usage: object, key: str) -> int:
-    """Read one ``usage`` counter as a non-negative int; ``0`` when absent, not numeric, or negative."""
-    raw = _sdk_field(usage, key)
-    parsed = _to_int(raw, default=0)
-    return max(0, parsed)  # type: ignore[type-var]
-
-
-def _openai_usage_counts(usage: object) -> dict[str, int]:
-    """An OpenAI ``usage`` as Hyperloom's four counters; ``prompt_tokens`` already includes both cache shares."""
-    if usage is None:
-        return {}
-    cached = _sdk_token_count(_sdk_field(usage, "prompt_tokens_details") or {}, "cached_tokens")
-    created = _sdk_token_count(usage, "cache_creation_input_tokens")
-    return {
-        "input_tokens": uncached_input_tokens(_sdk_token_count(usage, "prompt_tokens"), cached + created),
-        "output_tokens": _sdk_token_count(usage, "completion_tokens"),
-        "cache_read_input_tokens": cached,
-        "cache_creation_input_tokens": created,
-    }
-
-
-def _anthropic_usage_counts(usage: object) -> dict[str, int]:
-    """An Anthropic ``usage``, whose ``input_tokens`` is already the uncached share."""
-    if usage is None:
-        return {}
-    return {
-        key: _sdk_token_count(usage, key)
-        for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
-    }
 
 
 def _anthropic_text_from_content(content: object) -> str:
@@ -879,7 +840,7 @@ def _observe_anthropic(observation: RequestObservation, resp: object) -> Anthrop
         response_id=body.get("id"),
         model=body.get("model"),
         stop_reason=result.stop_reason,
-        usage=_anthropic_usage_counts(result.usage),
+        usage=anthropic_usage_counts(result.usage),
     )
     return result
 
@@ -1050,21 +1011,21 @@ async def astream_chat_completion_text(
                 delta = chunk.choices[0].delta
                 if delta is not None and delta.content:
                     parts.append(delta.content)
-        observation.update(usage=_openai_usage_counts(usage_obj))
+        observation.update(usage=openai_usage_counts(usage_obj))
     return "".join(parts), usage_obj
 
 
 def _observe_stream_chunk(observation: RequestObservation, chunk: object) -> None:
     """Fold one streamed chunk's id, model, first content token and finish reason onto ``observation``."""
-    choices = _sdk_field(chunk, "choices") or []
+    choices = sdk_field(chunk, "choices") or []
     choice = choices[0] if isinstance(choices, list) and choices else None
-    delta = _sdk_field(choice, "delta") if choice is not None else None
-    if delta is not None and _sdk_field(delta, "content"):
+    delta = sdk_field(choice, "delta") if choice is not None else None
+    if delta is not None and sdk_field(delta, "content"):
         observation.mark_first_token()
     observation.update(
-        response_id=_sdk_field(chunk, "id"),
-        model=_sdk_field(chunk, "model"),
-        stop_reason=_sdk_field(choice, "finish_reason") if choice is not None else None,
+        response_id=sdk_field(chunk, "id"),
+        model=sdk_field(chunk, "model"),
+        stop_reason=sdk_field(choice, "finish_reason") if choice is not None else None,
     )
 
 

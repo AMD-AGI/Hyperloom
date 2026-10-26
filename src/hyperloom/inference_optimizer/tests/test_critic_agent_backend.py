@@ -2204,35 +2204,6 @@ async def test_raw_completion_max_turns_is_floored_by_the_real_backend(monkeypat
     assert seen["max_turns"] > 1
 
 
-def test_accumulate_anthropic_usage_folds_tokens_and_tolerates_garbage():
-    acc = {"input_tokens": 0, "output_tokens": 0}
-    CriticAgentBackend._accumulate_anthropic_usage(acc, {"input_tokens": 3, "output_tokens": 4})
-    CriticAgentBackend._accumulate_anthropic_usage(acc, {"input_tokens": "x", "output_tokens": None})
-    CriticAgentBackend._accumulate_anthropic_usage(acc, None)
-    assert acc["input_tokens"] == 3
-    assert acc["output_tokens"] == 4
-
-
-def test_accumulate_anthropic_usage_keeps_cache_counters_in_their_own_columns():
-    """The judge bundle repeats across turns, so most of the input side arrives as cache reads."""
-    acc = {"input_tokens": 0, "output_tokens": 0}
-    CriticAgentBackend._accumulate_anthropic_usage(
-        acc,
-        {
-            "input_tokens": 12,
-            "cache_read_input_tokens": 4000,
-            "cache_creation_input_tokens": 300,
-            "output_tokens": 500,
-        },
-    )
-    assert acc == {
-        "input_tokens": 12,
-        "output_tokens": 500,
-        "cache_read_input_tokens": 4000,
-        "cache_creation_input_tokens": 300,
-    }
-
-
 @pytest.mark.asyncio
 async def test_anthropic_protocol_traces_cache_counters_separately(
     fake_critic_root: Path,

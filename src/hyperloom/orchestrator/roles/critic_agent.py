@@ -27,7 +27,6 @@ from hyperloom.common.llm_config import (
     build_http_timeout,
     get_async_openai_client,
 )
-from hyperloom.common.coerce import to_int
 from hyperloom.common.jsonio import extract_last_json_matching
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
@@ -35,7 +34,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     validate_envelope,
 )
 from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir, manifest_path
-from hyperloom.common.token_usage import uncached_input_tokens
+from hyperloom.common.token_usage import anthropic_usage_counts, openai_usage_counts
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tokens
@@ -59,22 +58,15 @@ CRITIC_AGENT_TRUNCATION_RETRY_FACTOR = 2
 # Finish/stop reasons that mean "cut off at the output cap": OpenAI reports ``length``, the Anthropic Messages API
 # reports ``max_tokens``.
 _TRUNCATED_FINISH_REASONS = frozenset({"length", "max_tokens"})
-# Anthropic usage counters carried through to the trace row, each in its own column so critic rows stay comparable
-# with the orchestration ones.
-_ANTHROPIC_USAGE_KEYS = (
-    "input_tokens",
-    "output_tokens",
-    "cache_read_input_tokens",
-    "cache_creation_input_tokens",
-)
 
 
-def _accumulate_reasoning_tokens(acc: dict[str, int], usage: Any) -> None:
-    """Fold a reply's reasoning-output tokens into the accumulator, when reported."""
-    count = reasoning_output_tokens(usage)
-    if count is None:
-        return
-    acc["reasoning_output_tokens"] = acc.get("reasoning_output_tokens", 0) + count
+def _accumulate_usage(acc: dict[str, int], counts: dict[str, int], usage: Any) -> None:
+    """Fold one reply's token counts and reasoning-output tokens into the accumulator."""
+    for key, count in counts.items():
+        acc[key] = acc.get(key, 0) + count
+    reasoning = reasoning_output_tokens(usage)
+    if reasoning is not None:
+        acc["reasoning_output_tokens"] = acc.get("reasoning_output_tokens", 0) + reasoning
 
 
 # HTTP client timeout defaults for critic review calls.
@@ -908,7 +900,7 @@ class CriticAgentBackend:
                 call_id=call_id,
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
-        self._accumulate_usage(usage_acc, result.usage)
+        _accumulate_usage(usage_acc, openai_usage_counts(result.usage), result.usage)
         self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms, call_id=call_id)
         return result.text, result.finish_reason
 
@@ -946,44 +938,10 @@ class CriticAgentBackend:
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         usage_acc = {"input_tokens": 0, "output_tokens": 0}
-        self._accumulate_anthropic_usage(usage_acc, result.usage)
+        _accumulate_usage(usage_acc, anthropic_usage_counts(result.usage), result.usage)
         self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms, call_id=call_id)
         stop_reason = result.stop_reason
         return (result.text or "", stop_reason if isinstance(stop_reason, str) and stop_reason else None)
-
-    @staticmethod
-    def _accumulate_anthropic_usage(
-        acc: dict[str, int],
-        usage: Any,
-    ) -> None:
-        """Fold one Anthropic ``usage`` block into the running accumulator."""
-        if not isinstance(usage, dict):
-            return
-        for key in _ANTHROPIC_USAGE_KEYS:
-            try:
-                acc[key] = acc.get(key, 0) + int(usage.get(key, 0) or 0)
-            except (TypeError, ValueError):
-                continue
-        _accumulate_reasoning_tokens(acc, usage)
-
-    @staticmethod
-    def _accumulate_usage(
-        acc: dict[str, int],
-        usage: Any,
-    ) -> None:
-        """Fold one OpenAI ``resp.usage`` into the running token accumulator."""
-        if usage is None:
-            return
-        cached = to_int(getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", None))
-        prompt = to_int(getattr(usage, "prompt_tokens", None))
-        acc["input_tokens"] += uncached_input_tokens(prompt, cached) or 0
-        if cached is not None:
-            acc["cache_read_input_tokens"] = acc.get("cache_read_input_tokens", 0) + cached
-        try:
-            acc["output_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
-        except (TypeError, ValueError):
-            pass
-        _accumulate_reasoning_tokens(acc, usage)
 
     def set_trace_context(
         self,

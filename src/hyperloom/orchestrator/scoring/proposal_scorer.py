@@ -23,6 +23,7 @@ from hyperloom.common.llm_config import (
 )
 from ..roles.base import parse_call_timeout_env
 from hyperloom.common.timeutil import format_exc_brief
+from hyperloom.common.token_usage import openai_usage_counts
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tokens
@@ -302,13 +303,7 @@ class ProposalScorer:
         if self.session_dir is None:
             return
         try:
-            input_tokens = None
-            output_tokens = None
-            if usage is not None:
-                pt = getattr(usage, "prompt_tokens", None)
-                ct = getattr(usage, "completion_tokens", None)
-                input_tokens = int(pt) if pt is not None else None
-                output_tokens = int(ct) if ct is not None else None
+            counts = openai_usage_counts(usage)
             record = LLMCallRecord(
                 session_id=self.session_dir.name,
                 component="proposal_scorer",
@@ -318,8 +313,10 @@ class ProposalScorer:
                 task_id=keys.task_id,
                 tick=keys.tick,
                 phase=keys.phase,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
+                input_tokens=counts.get("input_tokens"),
+                output_tokens=counts.get("output_tokens"),
+                cache_read_input_tokens=counts.get("cache_read_input_tokens"),
+                cache_creation_input_tokens=counts.get("cache_creation_input_tokens"),
                 # A scoring model with a reasoning split bills it separately; reading it here keeps the ledger
                 # consistent with the backends that report it on their turn metadata.
                 reasoning_output_tokens=reasoning_output_tokens(usage),

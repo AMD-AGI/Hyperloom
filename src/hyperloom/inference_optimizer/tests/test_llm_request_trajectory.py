@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.common.token_usage import uncached_input_tokens
+from hyperloom.common.token_usage import openai_usage_counts, uncached_input_tokens
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
@@ -21,7 +21,7 @@ from hyperloom.orchestrator.roles.claude_requests import (
     TIMING_STREAM,
     ClaudeRequestTracker,
 )
-from hyperloom.orchestrator.roles.critic_agent import CriticAgentBackend
+from hyperloom.orchestrator.roles.critic_agent import _accumulate_usage
 from hyperloom.inference_optimizer.trace import parse_usage as pu
 from hyperloom.inference_optimizer.trace import trajectory_trace as tt
 
@@ -215,8 +215,9 @@ def test_critic_openai_usage_reports_cached_tokens_separately():
         completion_tokens=50,
         prompt_tokens_details=SimpleNamespace(cached_tokens=800),
     )
-    CriticAgentBackend._accumulate_usage(acc, usage)
-    CriticAgentBackend._accumulate_usage(acc, SimpleNamespace(prompt_tokens=10, completion_tokens=5))
+    second = SimpleNamespace(prompt_tokens=10, completion_tokens=5)
+    _accumulate_usage(acc, openai_usage_counts(usage), usage)
+    _accumulate_usage(acc, openai_usage_counts(second), second)
     assert acc["input_tokens"] == 200 + 10
     assert acc["cache_read_input_tokens"] == 800
     assert acc["output_tokens"] == 55
