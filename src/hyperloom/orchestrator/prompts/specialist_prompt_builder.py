@@ -1848,7 +1848,7 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
     """Render the recipe row's ``lessons`` from prior KEEPs, compactly
     (statement + measured_impact).
 
-    Rows are the flat shape ``Recipe.to_dict`` / ``_normalise_lessons`` write —
+    Rows are the flat shape ``Recipe.to_dict`` writes —
     ``{statement, measured_impact, ...}`` — normalised by ``recipe_kb_t0``
     before they land on ``warm_start_lessons``.
 
@@ -1965,8 +1965,8 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
     """Render the recipe row's ``pitfalls`` from prior REVERTs (description +
     severity); framed as forbidden paths, not suggestions.
 
-    Rows are the flat ``{description, severity, ...}`` shape ``Recipe.to_dict`` /
-    ``_normalise_str_dicts`` write, normalised by ``recipe_kb_t0``.
+    Rows are the flat ``{description, severity, ...}`` shape ``Recipe.to_dict``
+    writes, normalised by ``recipe_kb_t0``.
 
     Args:
         inp: The specialist prompt inputs (reads ``warm_start_pitfalls``).
