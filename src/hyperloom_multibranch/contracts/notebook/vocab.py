@@ -124,7 +124,7 @@ class MergeOutcome(str, Enum):
 
 
 #: The merge outcomes that did not carry their commits onto integration: skipped untested because they conflicted, or
-#: tested and not stackable.
+#: tested and not stackable, the candidate failing its merge test included.
 FAILED_MERGES = frozenset({MergeOutcome.CONFLICT_SKIPPED, MergeOutcome.NOT_STACKABLE})
 
 

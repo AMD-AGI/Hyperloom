@@ -53,6 +53,8 @@ from hyperloom_multibranch.notebook.local.state import JudgementWrite, NotebookS
 
 _SPECIALIST_ORIGINS = frozenset({CommitOrigin.COMMIT, CommitOrigin.SPLIT})
 _MEASURE_PHASE = "measure"
+#: Why a merge whose test the candidate failed is not stackable, before the failure's first line.
+MERGE_TEST_FAILED = "its merge test failed"
 
 
 @dataclass
@@ -166,13 +168,22 @@ def _commit_node(
 
 
 def merge_state(state: NotebookState, attempt: MergeAttempt, at: float = 0.0) -> MergeState:
-    """Where a merge attempt recorded ``at`` stands, from the judgement of its merge test."""
+    """Where a merge attempt recorded ``at`` stands, from the judgement of its merge test. A merge test the candidate
+    failed, which the integrator leaves unjudged, is not stackable, for :data:`MERGE_TEST_FAILED` and the first line
+    of the failure; one the measurement failed stays pending."""
 
     if attempt.request_id is None:
         return MergeState(attempt.skipped_outcome, attempt.integration_head, reason=attempt.skipped_reason, at=at)
     write = state.latest_judgement(attempt.request_id)
     if write is None:
-        return MergeState(MergeOutcome.PENDING, attempt.integration_head, attempt.request_id, at=at)
+        result = state.results.get(attempt.request_id)
+        if result is None or result.validity is not Validity.CANDIDATE_FAILED:
+            return MergeState(MergeOutcome.PENDING, attempt.integration_head, attempt.request_id, at=at)
+        lines = (result.failure_reason or "").strip().splitlines()
+        reason = f"{MERGE_TEST_FAILED}: {lines[0]}" if lines else MERGE_TEST_FAILED
+        return MergeState(
+            MergeOutcome.NOT_STACKABLE, attempt.integration_head, attempt.request_id, reason=reason, at=at
+        )
     if write.conclusion is Conclusion.MERGED:
         return MergeState(MergeOutcome.MERGED, attempt.integration_head, attempt.request_id, write.commit_id, at=at)
     reason = f"{write.judgement.gain_pct:+.2f}% on the integration head"
@@ -205,21 +216,10 @@ def committed(state: NotebookState, view: LineageView) -> tuple[CommittedCommit,
                 merged_into=next((merge.commit_id for merge in merges if node.commit_id in merge.merged_from), None),
                 last_merge=attempts[-1] if attempts else None,
                 merge_attempts=len(attempts),
-                first_failed_at=next((item.at for item in attempts if _failed(state, item)), None),
+                first_failed_at=next((item.at for item in attempts if item.outcome in FAILED_MERGES), None),
             )
         )
     return tuple(sorted(found, key=lambda commit: (not commit.foundation_fix, -commit.gain_pct)))
-
-
-def _failed(state: NotebookState, merge: MergeState) -> bool:
-    """Whether ``merge`` failed its commits: skipped on a conflict, not stackable, or a merge test the candidate failed,
-    which the integrator leaves pending and unjudged and offers again only on a head that changes what the commit
-    changes."""
-
-    if merge.outcome in FAILED_MERGES:
-        return True
-    result = state.results.get(merge.request_id) if merge.request_id is not None else None
-    return merge.outcome is MergeOutcome.PENDING and result is not None and result.validity is Validity.CANDIDATE_FAILED
 
 
 def recorded_value(state: NotebookState, view: LineageView, commit_id: str) -> RecordedValue:

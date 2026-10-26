@@ -100,9 +100,16 @@ async def test_a_merge_test_the_candidate_failed_fails_its_commit_and_a_failed_m
     snapshot = await w.as_role(Role.OBSERVER).snapshot()
 
     failed = {commit.commit_id: commit.first_failed_at for commit in snapshot.committed if commit.branch != "s1"}
+    merges = {commit.commit_id: commit.last_merge for commit in snapshot.committed if commit.branch != "s1"}
 
     assert failed["c3"] == pytest.approx(failed_at, abs=1.0)
     assert failed["c4"] is None
+    assert merges["c3"] is not None and merges["c4"] is not None
+    assert (merges["c3"].outcome, merges["c3"].reason) == (
+        MergeOutcome.NOT_STACKABLE,
+        "its merge test failed: server exited during warmup",
+    )
+    assert merges["c4"].outcome is MergeOutcome.PENDING
     (span,) = stranded_spans(snapshot, METRIC)
     assert (span.branch, span.minutes) == ("s3", pytest.approx(30.0, abs=0.1))
 

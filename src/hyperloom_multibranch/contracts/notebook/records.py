@@ -515,7 +515,8 @@ class LineageView:
 @dataclass(frozen=True)
 class MergeState:
     """The latest merge attempt a commit took part in, recorded ``at``. ``reason`` says why one that did not merge did
-    not: the integrator's reason for a merge skipped untested, the merge test's gain for one not stackable."""
+    not: the integrator's reason for a merge skipped untested, the merge test's gain for one not stackable, or the
+    first line of its failure for a merge test the candidate failed, which is not stackable too."""
 
     outcome: MergeOutcome
     integration_head: str
