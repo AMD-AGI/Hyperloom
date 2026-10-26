@@ -1086,7 +1086,7 @@ async def test_explore_projection_drops_a_variant_before_it_is_benchmarked(sub_a
         {"name": "v_keep", "extra_args": "--keep-flag", "extra_envs": {}, "provenance": "llm_direct"},
         {"name": "v_c2", "extra_args": "", "extra_envs": {"CONC": "2"}, "provenance": "llm_direct"},
     ]
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         TaskSpec(
             kind="explore",
             params={
@@ -1123,7 +1123,7 @@ async def test_explore_projection_drops_a_variant_before_it_is_benchmarked(sub_a
 async def _explore_round(sub, tr, tmp_path, name: str, *, base_tput: float, grid: list, fake_run) -> dict:
     base = tmp_path / f"{name}.yaml"
     _write_baseline_yaml(base)
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         TaskSpec(
             kind="explore",
             params={"config_path": str(base), "output_dir": str(tmp_path / name), "base_tput": base_tput, "grid": grid},
