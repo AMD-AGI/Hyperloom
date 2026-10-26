@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import dict_rows, first_str
 from hyperloom.common.jsonio import read_json
 from hyperloom.inference_optimizer.roofline_ceiling import RooflineBreakdown
 
@@ -434,6 +435,11 @@ def _fmt_pct_cell(v: float | None) -> str:
     return f"{float(v):.1f}%"
 
 
+def _pct_cells(snaps: list[dict[str, Any]], key: str) -> list[str]:
+    """One :func:`_fmt_pct_cell` per snapshot for ``key``."""
+    return [_fmt_pct_cell(snap.get(key)) for snap in snaps]
+
+
 #: Ceiling unit -> the label the report uses for it.
 _CEILING_LABELS: dict[str, str] = {
     "tok/s": "Theoretical peak (decode memory-roofline ceiling)",
@@ -548,31 +554,28 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
         lines += ["| Metric | Value |", "|--------|-------|"]
     else:
         lines += ["| Metric | Base | Opt | Δ |", "|--------|------|-----|---|"]
-    lines.append(row("Compute %", [_fmt_pct_cell(snap.get("compute_pct")) for snap in sides], delta.get("compute_pct")))
-    lines.append(row("Idle %", [_fmt_pct_cell(snap.get("idle_pct")) for snap in sides], delta.get("idle_pct")))
-    lines.append(row("Comm %", [_fmt_pct_cell(snap.get("comm_pct")) for snap in sides], delta.get("comm_pct")))
+    lines.append(row("Compute %", _pct_cells(sides, "compute_pct"), delta.get("compute_pct")))
+    lines.append(row("Idle %", _pct_cells(sides, "idle_pct"), delta.get("idle_pct")))
+    lines.append(row("Comm %", _pct_cells(sides, "comm_pct"), delta.get("comm_pct")))
     lines.append(row("Top bottleneck", [str(snap.get("top_bottleneck") or "—") for snap in sides]))
     lines.append(
-        row(
-            "Top kernel efficiency",
-            [_fmt_pct_cell(kernel.get("efficiency_pct")) for kernel in kernels],
-            delta.get("top_kernel_efficiency_pct"),
-        )
+        row("Top kernel efficiency", _pct_cells(kernels, "efficiency_pct"), delta.get("top_kernel_efficiency_pct"))
     )
     if any(kernel.get("name") for kernel in kernels):
         lines.append(row("Top kernel", [f"`{kernel.get('name') or '—'}`" for kernel in kernels]))
     lines.append(
         row(
             "Achieved output_throughput",
-            [_fmt_tput(snap.get("achieved_tok_per_sec"), snap.get("framework") or "") for snap in sides],
+            [_fmt_tput(snap.get("achieved_tok_per_sec"), snap.get("framework")) for snap in sides],
         )
     )
     for label, key in (("Within roofline %", "within_roofline_pct"), ("Gap to roofline %", "gap_to_roofline_pct")):
-        lines.append(row(label, [_fmt_pct_cell(snap.get(key)) for snap in sides], delta.get(key)))
-    if any(_ceiling_exceeded(snap) for snap in sides):
-        lines.append(row("Within roofline % (uncapped)", [_fmt_pct_cell(snap.get(_UNCAPPED_KEY)) for snap in sides]))
+        lines.append(row(label, _pct_cells(sides, key), delta.get(key)))
+    exceeded = _ceiling_exceeded_lines(baseline, {} if single else latest, mode=mode)
+    if exceeded:
+        lines.append(row("Within roofline % (uncapped)", _pct_cells(sides, _UNCAPPED_KEY)))
     lines.append("")
-    lines.extend(_ceiling_exceeded_lines(baseline, {} if single else latest, mode=mode))
+    lines.extend(exceeded)
     return lines
 
 
@@ -586,17 +589,15 @@ BOTTLENECK_DOMAIN_HINTS: dict[str, tuple[str, str]] = {
     "memory": ("serving_specialist", "framework"),
 }
 
+_DIRECTION_PCT_KEYS = (("compute", "compute_pct"), ("idle", "idle_pct"), ("comm", "comm_pct"))
+
 
 def dominant_direction(snapshot: dict[str, Any] | None) -> tuple[str, float]:
     """Return ``(direction, pct)`` for the most-saturated direction in one snapshot."""
     if not isinstance(snapshot, dict):
         return "", 0.0
     candidates: dict[str, float] = {}
-    for direction, key in (
-        ("compute", "compute_pct"),
-        ("idle", "idle_pct"),
-        ("comm", "comm_pct"),
-    ):
+    for direction, key in _DIRECTION_PCT_KEYS:
         val = snapshot.get(key)
         if isinstance(val, (int, float)):
             candidates[direction] = float(val)
@@ -635,7 +636,7 @@ def build_profiler_digest(
     trace_analyze: dict[str, Any] | None,
 ) -> str:
     """Render a compact, bottleneck-focused profiler block for prompt injection."""
-    snaps = [s for s in (snapshots or []) if isinstance(s, dict)]
+    snaps = dict_rows(snapshots)
     ta = trace_analyze if isinstance(trace_analyze, dict) else {}
     if not snaps and not ta:
         return ""
@@ -653,11 +654,7 @@ def build_profiler_digest(
     if len(snaps) >= 2:
         prev = snaps[-2]
         parts: list[str] = []
-        for label, key in (
-            ("compute", "compute_pct"),
-            ("idle", "idle_pct"),
-            ("comm", "comm_pct"),
-        ):
+        for label, key in _DIRECTION_PCT_KEYS:
             d = _num_delta(latest.get(key), prev.get(key))
             if d is not None:
                 parts.append(f"{label} {_fmt_delta(d)}pp")
@@ -666,7 +663,7 @@ def build_profiler_digest(
 
     rows: list[str] = []
     for entry in ta.get("hot_kernels_top15", [])[:3]:
-        name = str(entry.get("name") or entry.get("kernel_id") or "?")
+        name = first_str(entry.get("name"), entry.get("kernel_id"), "?")
         seg = f"  {name}  {_fmt_pct_cell(entry.get('gpu_pct'))} gpu"
         eff = entry.get("efficiency_percent")
         if isinstance(eff, (int, float)):
