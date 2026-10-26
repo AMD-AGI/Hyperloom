@@ -34,7 +34,6 @@ _DEV_ONLY = ("hyperloom.measure", "hyperloom.sandbox", "hyperloom.hosted", "hype
 _ON_MAIN = (
     "hyperloom.hosted.__init__",
     "hyperloom.hosted.campaign",
-    "hyperloom.hosted.context",
     "hyperloom.hosted.entry",
     "hyperloom.hosted.host_info",
 )

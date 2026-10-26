@@ -14,9 +14,10 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.hosted import context, entry, host_info
+from hyperloom.hosted import entry, host_info
 from hyperloom.hosted.host_info import Var
 from hyperloom.hosted.tests.test_campaign import FULL, MINIMAL
+from hyperloom.inference_optimizer.cli import bootstrap
 from hyperloom.inference_optimizer.cli.bootstrap import set_hosted_plug_inputs
 from hyperloom.plugs.manifest import LOCKABLE_SOCKETS, load_builtin_profile
 
@@ -51,14 +52,13 @@ def run(tmp_path, monkeypatch):
 
     def inject():
         """What the host does at every (re)start of the application: the same environment again."""
-        context.clear()
         set_hosted_plug_inputs(None)
         for name, value in values.items():
             monkeypatch.setenv(name, value)
 
     inject()
     yield type("Run", (), {"state": state, "work": work, "spec": spec, "restart": staticmethod(inject)})
-    context.clear()
+    set_hosted_plug_inputs(None)
 
 
 class FakeOptimize:
@@ -67,7 +67,7 @@ class FakeOptimize:
     def __init__(self, monkeypatch, *, returncode=0, writes_session=True, stop_reason=None, effect=None):
         self.calls: list[list[str]] = []
         self.environments: list[dict[str, str]] = []
-        self.runs: list[context.HostedRun | None] = []
+        self.runs: list[bootstrap.HostedPlugInputs | None] = []
         self._opts = (returncode, writes_session, stop_reason, effect)
         monkeypatch.setattr(entry, "_optimize_main", self)
 
@@ -75,7 +75,7 @@ class FakeOptimize:
         returncode, writes_session, stop_reason, effect = self._opts
         self.calls.append(list(argv))
         self.environments.append(dict(os.environ))
-        self.runs.append(context.current())
+        self.runs.append(bootstrap._hosted_inputs)
         session = Path(argv[1].partition("=")[2] if argv[1].startswith("--resume-from") else self._session_dir(argv))
         if writes_session:  # what a real fresh session leaves behind
             (session / "manifest.json").write_text("{}")
@@ -110,7 +110,6 @@ def test_a_fresh_run_gets_its_session_dir_the_plug_profile_and_a_private_archive
     assert _exit(run) == {"final": True, "returncode": 0, "stop_reason": "target_reached"}
     archive = Path(session) / "archive"
     assert stat.S_IMODE(archive.stat().st_mode) == 0o700 and archive.stat().st_uid == os.getuid()
-    assert context.current().archive_root == archive
 
 
 def test_session_json_is_written_before_optimize_starts(run, monkeypatch):
@@ -171,7 +170,12 @@ def _start_plug_host(profile):
 
     def probe(argv):
         manifest = bootstrap.resolve_plug_manifest(argparse.Namespace(plug_profile=profile))
-        host = bootstrap.open_plug_host(manifest, context.current().session_dir)
+        host = bootstrap.open_plug_host(
+            manifest,
+            Path(
+                json.loads((bootstrap._hosted_inputs.host_info.state_dir / "session.json").read_text())["session_dir"]
+            ),
+        )
         with bootstrap.running_plug_host(host):
             progress.warn("probe", "first event")
         return 0
@@ -351,7 +355,7 @@ def test_the_host_values_travel_in_code_to_the_plug_host(run, monkeypatch):
     entry.main(["run"])
     (hosted,) = fake.runs
     declared = load_builtin_profile("hosted-gpu")["sockets"]
-    assert hosted.plug_lock == {n: {"impl": v["impl"]} for n, v in declared.items() if n in LOCKABLE_SOCKETS}
+    assert hosted.lock == {n: {"impl": v["impl"]} for n, v in declared.items() if n in LOCKABLE_SOCKETS}
     assert hosted.host_info.sandbox_keys.measurement.reveal() == _SECRETS[Var.SANDBOX_KEY_MEASUREMENT]
     assert hosted.host_info.mcp_token.reveal() == _SECRETS[Var.MCP_TOKEN]
     assert hosted.host_info.sandbox_templates == {"runner": {"1": "r1"}}
