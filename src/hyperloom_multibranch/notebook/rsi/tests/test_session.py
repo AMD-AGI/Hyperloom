@@ -49,6 +49,7 @@ from hyperloom_multibranch.notebook.rsi.session import (
     NO_PROFILE,
     NO_REPORTS,
     NO_RETRIEVAL_LOG,
+    STOP_AUDIT_REPORT,
     WRITTEN,
     CloseStep,
     CloseTargets,
@@ -146,6 +147,27 @@ def test_close_writes_the_frontier_calibration_over_the_archived_sessions_like_t
     assert done.archive.status == ARCHIVED
     assert done.calibration.status == WRITTEN and done.calibration.reason.startswith("Too little evidence")
     assert (reports / CALIBRATION_REPORT).read_text(encoding="utf-8").startswith("Frontier calibration")
+
+
+@pytest.mark.usefixtures("unconfigured")
+def test_close_writes_the_stop_audit_of_the_sessions_stops_beside_the_receipts(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    reports = tmp_path / "reports"
+
+    done = close_knowledge(snapshot, METRIC, targets=CloseTargets(archive=TreeArchive(tmp_path), receipts=reports))
+
+    counts = {
+        "stops": 1,
+        "judge_stops": 0,
+        "early_stops": 0,
+        "below_bar": 0,
+        "probations": 0,
+        "probations_committed": 0,
+    }
+    assert done.stop_audit == CloseStep(WRITTEN, "the judge stopped no branch", counts)
+    assert (reports / STOP_AUDIT_REPORT).read_text(encoding="utf-8").startswith("# Stop audit of sess-1\n")
+    assert close_knowledge(snapshot, METRIC).stop_audit == CloseStep(SKIPPED, NO_REPORTS)
 
 
 @pytest.mark.usefixtures("unconfigured")
@@ -266,6 +288,7 @@ def test_the_breakdown_records_the_knowledge_steps_only_when_given(snapshot: Not
         "calibration": {"status": SKIPPED, "reason": NO_REPORTS, "counts": {}},
         "lessons": {"status": SKIPPED, "reason": NO_ARCHIVE, "counts": {}},
         "lesson_standings": {"status": SKIPPED, "reason": NO_ARCHIVE, "counts": {}},
+        "stop_audit": {"status": SKIPPED, "reason": NO_REPORTS, "counts": {}},
     }
     assert json.loads(json.dumps(close["knowledge"])) == close["knowledge"]
     assert "knowledge" not in build_breakdown(snapshot)["close"]

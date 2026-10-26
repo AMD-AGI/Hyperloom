@@ -80,6 +80,23 @@ def test_the_command_runs_the_calibration_and_the_branch_cap_study_on_an_archive
     assert study["rows"][0]["policy"]["stop_pct"] is None
 
 
+def test_the_command_reads_the_stall_odds_and_every_sessions_stops_off_one_archive_or_more(
+    archive: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    more = tmp_path / "more"
+    TreeArchive(more).put(_wide("c"))
+
+    assert main(["stalls", "--archive", str(archive), "--archive", str(more), "--archive", str(archive)]) == 0
+    text = capsys.readouterr().out
+    assert main(["--json", "stalls", "--archive", str(archive)]) == 0
+    study = json.loads(capsys.readouterr().out)
+
+    rows = [line.split(" | ")[0] for line in text.splitlines() if line.startswith(("| a ", "| b ", "| c "))]
+    assert text.startswith("## any model type, inferencex") and "Over the archive the judge stopped 0 branches" in text
+    assert rows == ["| a", "| b", "| c"]
+    assert [audit["session_id"] for audit in study["audits"]] == ["a", "b"]
+
+
 def test_a_study_that_cannot_run_says_why(archive: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["branch-cap", "--archive", str(archive), "--like", "nowhere"]) == 2
     assert "holds no session 'nowhere'" in capsys.readouterr().err

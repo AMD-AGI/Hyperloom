@@ -8,9 +8,10 @@
   shared declaration cannot hold, kernel changes and an AgentX session's, are a step of their own. The learnings go
   to the RSI lesson pool beside the archive too, revising and retiring the past sessions' lessons they name, and the
   pooled lessons the session showed get their standing from what its branches did next (:mod:`rsi.lesson_close`).
-  The last step writes the frontier calibration over the archived sessions like this one beside the receipts. A step
-  that cannot be done says why and never stops CLOSE; :meth:`KnowledgeClose.document` is what the breakdown records
-  of the steps (``CloseOutcome.knowledge`` of ``build_breakdown``).
+  Beside the receipts go the frontier calibration over the archived sessions like this one, and the stop audit of
+  this session's stops and probations against the stall odds the judge read (:mod:`rsi.stops`). A step that cannot
+  be done says why and never stops CLOSE; :meth:`KnowledgeClose.document` is what the breakdown records of the steps
+  (``CloseOutcome.knowledge`` of ``build_breakdown``).
 * :func:`session_frontier_policy` chooses its policy once the session has a profile: the calibration's recommendation
   for sessions like it, or the defaults; :func:`session_frontier_scorer` chooses the same way among the scorers of
   :mod:`rsi.scorers` too, crowning a challenger that passes the promotion gate (a 1-in-4 exploration session's pick,
@@ -51,6 +52,7 @@ from hyperloom_multibranch.notebook.rsi.archive import (
     TreeArchive,
     archive_session,
     similar_trees,
+    tree_from_snapshot,
 )
 from hyperloom_multibranch.notebook.rsi.calibration import (
     DEFAULT_POLICY,
@@ -62,7 +64,7 @@ from hyperloom_multibranch.notebook.rsi.calibration import (
 )
 from hyperloom_multibranch.notebook.rsi.expression import ExpressionError
 from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, FrontierPolicy
-from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_stall_odds
+from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_stall_odds, stall_odds
 from hyperloom_multibranch.notebook.rsi.lesson_close import publish_lessons, session_standings
 from hyperloom_multibranch.notebook.rsi.lessons import LessonPool
 from hyperloom_multibranch.notebook.rsi.scorers import (
@@ -73,6 +75,7 @@ from hyperloom_multibranch.notebook.rsi.scorers import (
     scorer_named,
 )
 from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
+from hyperloom_multibranch.notebook.rsi.stops import stop_audit
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +89,8 @@ MULTIBRANCH_RECEIPT = "experience_kb_multibranch_experiences.json"
 LEARNING_RECEIPT = "experience_kb_learnings.json"
 #: The frontier calibration's report, written beside the receipts at every CLOSE.
 CALIBRATION_REPORT = "frontier-calibration.md"
+#: The stop audit, written beside the receipts at every CLOSE.
+STOP_AUDIT_REPORT = "stop-audit.md"
 NO_REPORTS = "no_reports_folder"
 #: The scores log's usual name in the session's reports folder.
 FRONTIER_LOG = "frontier.jsonl"
@@ -114,7 +119,8 @@ class CloseStep:
 class KnowledgeClose:
     """CLOSE's knowledge steps: the Experiences, the learnings, the archived search tree, the Experiences only the
     notebook's own declaration holds (``multibranch_experiences``), the frontier calibration's report, the learnings
-    into the RSI lesson pool (``lessons``), and the standing of the pooled lessons the session showed."""
+    into the RSI lesson pool (``lessons``), the standing of the pooled lessons the session showed, and the stop
+    audit, whose counts are the stops and probations by what came of them."""
 
     experiences: CloseStep
     learnings: CloseStep
@@ -123,6 +129,7 @@ class KnowledgeClose:
     calibration: CloseStep = CloseStep(SKIPPED, NO_REPORTS)
     lessons: CloseStep = CloseStep(SKIPPED, NO_ARCHIVE)
     lesson_standings: CloseStep = CloseStep(SKIPPED, NO_ARCHIVE)
+    stop_audit: CloseStep = CloseStep(SKIPPED, NO_REPORTS)
 
     def steps(self) -> dict[str, CloseStep]:
         """The steps by their names in the breakdown's ``close.knowledge``."""
@@ -135,6 +142,7 @@ class KnowledgeClose:
             "calibration": self.calibration,
             "lessons": self.lessons,
             "lesson_standings": self.lesson_standings,
+            "stop_audit": self.stop_audit,
         }
 
     def document(self) -> dict[str, object]:
@@ -202,6 +210,29 @@ def _calibrated(
     except STEP_ERRORS as exc:
         return _failed("write the frontier calibration", exc)
     return CloseStep(WRITTEN, report.note)
+
+
+def _audited(
+    snapshot: NotebookSnapshot,
+    metric: str,
+    archive: TreeArchive | None,
+    path: Path | None,
+    bottlenecks: Mapping[str, float] | None,
+) -> CloseStep:
+    """The stop audit of the session, read against the stall odds of the archive and the session, written to
+    ``path``."""
+
+    if path is None:
+        return CloseStep(SKIPPED, NO_REPORTS)
+    try:
+        tree = tree_from_snapshot(snapshot, metric, bottlenecks=bottlenecks)
+        audit = stop_audit(tree, stall_odds(archived_history(archive), tree.task, session=tree))
+        atomic_write_text(path, audit.render() + "\n", options=WriteOptions(make_parents=True))
+    except NotRecorded:
+        return CloseStep(SKIPPED, NO_PROFILE)
+    except STEP_ERRORS as exc:
+        return _failed("write the stop audit", exc)
+    return CloseStep(WRITTEN, audit.note(), audit.counts())
 
 
 @dataclass(frozen=True)
@@ -291,6 +322,7 @@ def close_knowledge(
         calibration=_calibrated(snapshot, targets.archive, targets.receipt(CALIBRATION_REPORT), bottlenecks),
         lessons=_lessons(snapshot, targets.lesson_pool()),
         lesson_standings=_standings(snapshot, targets.lesson_pool(), targets.receipt(LEARNINGS_LOG)),
+        stop_audit=_audited(snapshot, metric, targets.archive, targets.receipt(STOP_AUDIT_REPORT), bottlenecks),
     )
 
 
@@ -441,6 +473,7 @@ __all__ = [
     "NO_REPORTS",
     "NO_RETRIEVAL_LOG",
     "STEP_ERRORS",
+    "STOP_AUDIT_REPORT",
     "WRITTEN",
     "CloseStep",
     "CloseTargets",
