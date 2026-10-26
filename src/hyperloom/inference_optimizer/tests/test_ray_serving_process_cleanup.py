@@ -22,7 +22,7 @@ import sys
 import time
 from pathlib import Path
 
-from hyperloom.common.proctree import group_alive, running
+from hyperloom.common.proctree import group_members, running
 from hyperloom.orchestrator.actions.executors._ray_serving import ManagedServerProcess
 
 # Only this isolated harness adopts and reaps its orphaned descendants.
@@ -64,7 +64,7 @@ try:
     assert running(child_pid)
     if root_exits:
         assert root.wait(timeout=5) == 0
-        assert not group_alive(root_pid), "the old root group should be empty"
+        assert not group_members(root_pid), "the old root group should be empty"
         assert mgr.stop(grace_seconds=0.1) is False, "empty old PGID is not a tree cleanup ACK"
         assert mgr._proc is root
         assert running(child_pid), "unowned detached descendants must not be signalled"
