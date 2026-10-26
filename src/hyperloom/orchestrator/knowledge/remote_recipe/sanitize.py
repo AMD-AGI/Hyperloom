@@ -168,7 +168,13 @@ def sanitize_publish_env_mapping(
 
 
 def sanitize_publish_server_args(value: str) -> str:
-    """Remove credential options and host-local path operands from argv text."""
+    """Remove credential options, host-local path operands and the flags the launch guards add from argv text.
+
+    The launch guards size ``INJECTED_LAUNCH_FLAGS`` for the run they launch and add them again to any later run that
+    leaves them out, so a shared recipe that kept them would hand one run's context cap to every replay.
+    """
+    from hyperloom.inference_optimizer.grid_server_args import INJECTED_LAUNCH_FLAGS
+
     try:
         tokens = shlex.split(str(value or ""))
     except ValueError as exc:
@@ -181,7 +187,7 @@ def sanitize_publish_server_args(value: str) -> str:
             continue
         option, separator, operand = token.partition("=")
         normalized_option = option.lstrip("-")
-        if _is_secret_option(normalized_option):
+        if _is_secret_option(normalized_option) or option in INJECTED_LAUNCH_FLAGS:
             skip_value = not separator
             continue
         path_operand = operand if separator else token
