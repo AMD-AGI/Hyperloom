@@ -1621,3 +1621,54 @@ def test_a_git_probe_propagates_an_unexpected_failure(monkeypatch: pytest.Monkey
     monkeypatch.setattr(integration, "_git_output", _git_failing_with(TypeError("bad repo")))
     with pytest.raises(TypeError, match="bad repo"):
         _GIT_PROBES[probe][0]()
+
+
+@pytest.mark.asyncio
+async def test_a_controller_keep_is_reinstalled_on_a_fresh_tree(tmp_path: Path) -> None:
+    """A KEEP the Controller committed is part of current_best, so a resume onto a stock tree has to put it back."""
+    from hyperloom.orchestrator.source_snapshot import install_source_layers, source_layer_overlay_dir
+
+    repo, base = _repo(tmp_path)
+    source = repo / "python" / "sglang" / "first.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add sglang package")
+    base = _git(repo, "rev-parse", "HEAD").lower()
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="reinstall",
+        kernel_path="python/sglang/first.py",
+        patch=_patch(repo, "python/sglang/first.py", "VALUE = 2\n"),
+    )
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    coordinator = _coordinator(session_dir, repo)
+    coordinator.shared_state.framework = "sglang"
+
+    async def _validate(_publication):
+        return {"status": "ok", "decision": "KEEP", "base_tput": 100.0, "new_tput": 130.0, "gain_pct": 30.0}
+
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session=KeepSession(
+            session_dir=session_dir,
+            shared_state=coordinator.shared_state,
+            record_keep=coordinator.writeback.record_integrate_keep,
+        ),
+        validator=_validate,
+    )
+    assert summary.kept_count == 1
+    entry = coordinator.shared_state.optimization_stack[-1]
+    assert entry["source_import_root"] == "python"
+    assert source_layer_overlay_dir(entry) == str(Path(entry["source_snapshot"]) / "files" / "python")
+    _git(repo, "reset", "--hard", base)
+    _git(repo, "clean", "-fdq")
+    installed = install_source_layers(coordinator.shared_state.optimization_stack)
+
+    assert installed.failed == []
+    assert installed.unreproducible == []
+    assert source.read_text(encoding="utf-8") == "VALUE = 2\n"

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import filecmp
 import json
+import logging
 import shutil
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, NamedTuple
@@ -14,6 +16,8 @@ SCHEMA_VERSION = 2
 _OP_UPSERT = "upsert"
 _FILES = "files"
 _ENCODING = "utf-8"
+
+log = logging.getLogger(__name__)
 
 
 def _safe_rel(rel: str) -> str | None:
@@ -62,6 +66,29 @@ def source_layer_overlay_dir(entry: dict[str, Any]) -> str:
     overlay = Path(snapshot_dir) / _FILES
     import_root = _safe_rel(str(entry.get("source_import_root") or ""))
     return str(overlay / import_root) if import_root else str(overlay)
+
+
+def missing_source_snapshot(entry: Mapping[str, Any]) -> bool:
+    """Return whether a landed source layer has no snapshot to reinstall it from."""
+    if str(entry.get("source_snapshot") or "").strip():
+        return False
+    recipe_patch_landed = any(
+        isinstance(row, Mapping) and str(row.get("status") or "") not in ("", "failed")
+        for row in entry.get("recipe_patch_statuses") or []
+    )
+    return bool(entry.get("source_layer_landed")) or recipe_patch_landed
+
+
+def report_missing_source_snapshot(entry: Mapping[str, Any], task_kind: str, variant_name: Any) -> None:
+    """Report a landed source layer that cannot be reinstalled from the optimization stack."""
+    if missing_source_snapshot(entry):
+        log.error(
+            "%s %s left a source layer on %s with no source snapshot to reinstall it from; "
+            "a resume onto a stock tree benches every later candidate without it",
+            task_kind,
+            variant_name,
+            entry.get("framework_root") or "its framework tree",
+        )
 
 
 @dataclass(frozen=True)

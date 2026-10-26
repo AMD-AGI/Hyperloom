@@ -561,7 +561,8 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
             try:
                 _connect(address)
                 landed = True
-            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+            except BaseException as exc:  # re-raised on the caller's thread
+                log.debug("ray.init(address=%r) raised on the connect thread", address, exc_info=True)
                 outcome["error"] = exc
                 landed = False
             with verdict_lock:

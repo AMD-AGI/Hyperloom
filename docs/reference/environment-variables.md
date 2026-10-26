@@ -40,7 +40,7 @@ provider-side combinations and what each one enables.
 | `OPENAI`<br>`_CUSTOM_HEADERS` | No | —    | Extra request headers for the OpenAI side. Same shape as `ANTHROPIC_CUSTOM_HEADERS`; set it whenever you set `OPENAI_BASE_URL` against a gateway that authenticates on its own header. |
 | `CLAUDE_MODEL`         | No       | Derived from `ANTHROPIC_BASE_URL` | Orchestration model id on the Anthropic side. Falls back to the endpoint default, then the project-wide `DEFAULT_CLAUDE_MODEL`. `GEAK_CLAUDE_MODEL` inherits from it, and Forge reads it directly for its Claude backend.                                                                    |
 | `CODEX_MODEL`          | No       | Derived from `OPENAI_BASE_URL`    | Model id on the OpenAI side, used by the Codex backend, including Forge running on it. Model settings are never borrowed across providers.                                                                    |
-| `INFERENCE_OPTIMIZER`<br>`_AGENT_BACKEND` | No | Ranked by credentials | Names the agent CLI for the agentic roles: `claude`, `codex` or `deepseek`. An explicit `claude` or `codex` pins the role to that CLI instead of the credential-ranked choice. The choice applies to orchestration, Forge and TraceLens; quantization honours only `deepseek`. `deepseek` (the DeepSeek Harness) is reachable only through this variable, needs the `deepseek` extra, and uses the `OPENAI_BASE_URL` / `OPENAI_API_KEY` gateway. |
+| `INFERENCE_OPTIMIZER`<br>`_AGENT_BACKEND` | No | Ranked by credentials | Names the agent CLI for the agentic roles: `claude`, `codex` or `deepseek`. An explicit `claude` or `codex` pins the role to that CLI instead of the credential-ranked choice. The choice applies to orchestration, specialists, Forge and TraceLens; quantization honours only `deepseek`. `deepseek` (the DeepSeek Harness) is never picked by the credential ranking: Hyperloom's roles reach it only through this variable, and Forge also takes `--agent-backend deepseek` / `FORGE_AGENT_BACKEND=deepseek`. It needs the `deepseek` extra, and uses the `OPENAI_BASE_URL` / `OPENAI_API_KEY` gateway. With `deepseek`, specialists run on the `dsh` CLI with `DSH_PERMISSION_MODE=danger-full-access`, so dsh applies no sandbox of its own, and a run with specialists enabled (`--research-lane-capacity` above 0) refuses to boot when no `dsh` is found. |
 | `DSH_MODEL`            | No       | `deepseek-v4-flash`               | Model id the DeepSeek Harness runs, for every role that selects it. |
 | `GEAK_API_KEY`         | No       | —    | Internal alias, never derived from either side. GEAK runs on the Anthropic side (`ANTHROPIC_*` + `GEAK_CLAUDE_MODEL`); set this only to point GEAK elsewhere.                                                                                                                              |
 | `GEAK_BASE_URL`        | No       | —    | Internal alias, never derived from either side. Set it only to point GEAK at a different endpoint than the Anthropic side.                                                                                                                          |
@@ -1036,7 +1036,7 @@ and input variables are always required, and a variable that is set is checked e
 | `HYPERLOOM_RUN_ID` | Always | Run identifier, no whitespace. |
 | `HYPERLOOM_RUN_CREATED_AT` | Always | Run creation time, ISO 8601 with a UTC offset or `Z`. |
 | `HYPERLOOM_STATE_DIR` | Always | Absolute path of the run's state directory on shared storage; must exist. |
-| `HYPERLOOM_EVENTS_DIR` | No | Directory of the progress-event segments. Default `$HYPERLOOM_STATE_DIR/events`. |
+| `HYPERLOOM_EVENTS_DIR` | No | Directory of the progress-event segments (see "Progress events" below). Default `$HYPERLOOM_STATE_DIR/events`. |
 | `HYPERLOOM_MCP_PORT`<br>`HYPERLOOM_MCP_TOKEN` | When the MCP server runs (default) | Port (1 to 65535) of the run's MCP server and the token the host presents. The token is a credential. |
 | `HYPERLOOM_MCP_PUBLIC_URL` | When sub-runs call back into the run | `http(s)` URL under which sub-runs reach the run's MCP server. No credentials, query or fragment. |
 | `HYPERLOOM_SANDBOX_TEMPLATES` | When a sandbox is hosted | JSON object of template names, for example `{"runner": {"1": "t1", "8": "t8"}, "dev": "t"}`. |
@@ -1072,6 +1072,27 @@ archive directory of the run is `<session dir>/archive/`, mode 0700, owned by th
 | `HYPERLOOM_SOURCE_REPO` | Yes | `OWNER/NAME` on GitHub, or a git URL or path, of the Hyperloom source to run. |
 | `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built once into `$USER_DATA_PATH/.hyperloom/wheels/<sha>/` and the dependencies are installed with `--require-hashes` from the commit's `requirements/app.lock` into `$HYPERLOOM_STATE_DIR/venv`. |
 | `HYPERLOOM_CODE_REVISION` | Set by the script | The commit id, exported before the entry starts: a wheel has no `.git` to read it from. |
+
+### Progress events
+
+With the hosted `events` implementation (`src/hyperloom/hosted/events.py`, selected by the `hosted-*` plug profiles) the run writes
+CloudEvents 1.0 structured JSON, one event per line, to `<events dir>/<10-digit segment>.jsonl`; a new segment starts before the
+current one would pass 4 MiB. The directory and the run id (`source` is `hyperloom/<run id>`) come from `HostInfo`, never from the
+environment, so a child process started by the run has no events directory and never emits.
+
+* `id` is a decimal string that strictly increases within the run. After a restart it continues from the last complete line of the
+  last segment; a half-written last line is cut off first.
+* Every line ends with a newline and is written whole, so a line without one is an unfinished write, not an event. A reader that
+  tails by byte offset takes only complete lines.
+* One event is at most 16 KiB; a larger one is sent with `data` replaced by `{"oversized": true, "bytes": N, "keys": [...]}` and a
+  warning is logged. Put large content in a file and send its path.
+* `fsync` runs at most once a second, and on `flush()` and close. Emitting never raises into the run: a failure is logged.
+
+Types (v1): `hyperloom.campaign_started`, `plugs_lock_mismatch`, `phase_changed`, `measurement_started`, `measurement_finished`,
+`node_quarantined`, `candidate_settled`, `best_updated`, `budget`, `warning`, `campaign_finished`, `campaign_failed`. The `data`
+schema of each is `src/hyperloom/contracts/hyperloom_events.v1.schema.json`; a test keeps the emitters consistent with it.
+`hyperloom.budget` is sent after a state save, at most every 5 minutes; its `tokens` and `gpu_sec` are null in the legacy flow.
+With the local implementation (the default) an event is only a debug log line.
 
 ## Variables intentionally not exposed
 

@@ -1190,6 +1190,8 @@ def _run_registered_author_once(prompt: str, workspace: AuthorWorkspace, agent: 
         reason = _with_run_error(reason)
         _record_author_log(workspace.log_path, progress, text=text, error=reason)
         log.error("%s", reason)
+        if run_error is not None and not isinstance(run_error, Exception):
+            raise run_error
         return rc, False
 
     try:
@@ -1203,16 +1205,10 @@ def _run_registered_author_once(prompt: str, workspace: AuthorWorkspace, agent: 
         return _rejected(f"{heading}: {_safety_detail(exc)}", AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY)
     except Exception as exc:
         detail = f"{type(exc).__name__}: internal workspace guard failure"
-        _record_author_log(
-            workspace.log_path,
-            progress,
-            text=text,
-            error=_with_run_error(f"author workspace safety rejection: {detail}"),
-        )
         # The agent-facing log stays content-free (a guard defect is not something the author can act on), but the
         # operator needs the traceback to fix it.
         log.exception("author workspace safety restoration failed: %s", _with_run_error(detail))
-        return AUTHOR_RC_SAFETY, False
+        return _rejected(f"author workspace safety rejection: {detail}", AUTHOR_RC_SAFETY)
 
     if enforcement.violations:
         violations = enforcement.violations
