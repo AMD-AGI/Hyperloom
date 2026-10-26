@@ -297,11 +297,13 @@ def classify_unfinished_attempt(sdk_error: str | None, *, phase: str | None) -> 
     """Classify an attempt that reached no end on a workspace holding an earlier attempt's outputs.
 
     Only what the attempt raised can say why it stopped: the model, manifest
-    and reports on disk may all be the earlier attempt's.
+    and reports on disk may all be the earlier attempt's. That is also why the
+    outcome is never an auto-recover one: those end the run ``partial`` and
+    hand back the model on disk as this run's result.
     """
     if sdk_error:
         outcome = _classify_bootstrap_sdk_error(sdk_error) or _classify_sdk_phase_error(sdk_error, phase)
-        if outcome is not None:
+        if outcome is not None and outcome not in AUTO_RECOVER:
             return outcome
     return OutcomeId.unclassified_failure
 

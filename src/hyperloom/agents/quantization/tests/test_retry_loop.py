@@ -330,10 +330,23 @@ async def test_an_unfinished_retry_is_judged_on_what_it_raised_not_on_inherited_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raised",
+    [
+        None,
+        # What a DeepSeek session that keeps replying without tool calls ends on (common/deepseek_task.py).
+        "the owed artifact was still not written after 3 continuations",
+        "CUDA out of memory",
+    ],
+)
 async def test_a_retry_that_only_marks_the_eval_phase_does_not_pass_on_the_previous_model(
-    tmp_path, quark_root, build_workspace
+    tmp_path, quark_root, build_workspace, raised
 ):
-    """``last_phase.txt`` is written at the start of a phase, so it says nothing about what the attempt produced."""
+    """``last_phase.txt`` is written at the start of a phase, so it says nothing about what the attempt produced.
+
+    An error at eval would otherwise map to an auto-recover outcome, which ends
+    the run ``partial`` on the earlier attempt's model.
+    """
 
     ws = tmp_path / "ws"
 
@@ -349,7 +362,7 @@ async def test_a_retry_that_only_marks_the_eval_phase_does_not_pass_on_the_previ
 
     def mark_eval(workspace: Path, attempt: int) -> str | None:
         (workspace / "last_phase.txt").write_text("eval\n", encoding="utf-8")
-        return None
+        return raised
 
     result = await quantize_via_prompt(
         "fp8 it",
@@ -362,6 +375,7 @@ async def test_a_retry_that_only_marks_the_eval_phase_does_not_pass_on_the_previ
 
     assert result.assessment.attempts == (OutcomeId.unclassified_failure, OutcomeId.unclassified_failure)
     assert result.status == "failed"
+    assert result.quantized_model_dir is None
 
 
 @pytest.mark.asyncio

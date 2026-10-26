@@ -135,8 +135,9 @@ can read these directly:
   starts so that attempt is judged on its own files. An attempt on a workspace
   holding any such archive that stops without writing its own `blocked.md`,
   `eval_report.json` or `eval_skipped.txt` is judged only on the error it
-  raised (`unclassified_failure` when it raised none), never on the earlier
-  model and reports left on disk.
+  raised (`unclassified_failure` when it raised none, or when the error maps to
+  an auto-recover outcome), never on the earlier model and reports left on
+  disk, so it fails the run rather than ending it `partial`.
 
 ## Environment knobs
 
