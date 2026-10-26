@@ -293,6 +293,54 @@ class TestReadingBackWhatAiterServed:
         assert (aiter_log.level, list(aiter_log.handlers)) == before
 
 
+class TestOperandsFollowTheKeysActivation:
+    """GLM-5.3's MoE is the same per_1x32 fp4 path at Silu; refusing it threw away a whole tuned table."""
+
+    @staticmethod
+    def _aiter_with_a_recording_tuner(monkeypatch, tmp_path) -> list[object]:
+        import enum
+
+        seen: list[object] = []
+        aiter = ModuleType("aiter")
+        aiter.__file__ = str(tmp_path / "aiter" / "__init__.py")
+        aiter.ActivationType = enum.Enum("ActivationType", ["Silu", "Swiglu"])
+        aiter.QuantType = enum.Enum("QuantType", ["per_1x32"])
+        tuner = ModuleType("gemm_moe_tune")
+
+        class FmoeTuner:
+            @staticmethod
+            def generate_data_2stages(*args):
+                seen.append(args[5])
+                return {}
+
+        tuner.FmoeTuner = FmoeTuner
+        codegen = tmp_path / "csrc" / "ck_gemm_moe_2stages_codegen"
+        codegen.mkdir(parents=True)
+        (codegen / "gemm_moe_tune.py").write_text("", encoding="utf-8")
+        monkeypatch.setitem(sys.modules, "aiter", aiter)
+        monkeypatch.setitem(sys.modules, "gemm_moe_tune", tuner)
+        return seen
+
+    @pytest.mark.parametrize("activation", ["Silu", "Swiglu"])
+    def test_operands_are_built_at_the_keys_activation(self, monkeypatch, tmp_path, activation):
+        seen = self._aiter_with_a_recording_tuner(monkeypatch, tmp_path)
+        shape = "|".join(f"{k}={v}" for k, v in {**_KEY, "act_type": f"ActivationType.{activation}"}.items())
+
+        with dp._FusedMoeAdapter() as adapter:
+            assert adapter._ops(shape) is not None
+
+        assert [member.name for member in seen] == [activation]
+
+    def test_a_key_off_the_mxfp4_path_still_has_no_operands(self, monkeypatch, tmp_path):
+        seen = self._aiter_with_a_recording_tuner(monkeypatch, tmp_path)
+        shape = "|".join(f"{k}={v}" for k, v in {**_KEY, "q_type": "QuantType.per_Token"}.items())
+
+        with dp._FusedMoeAdapter() as adapter:
+            assert adapter._ops(shape) is None
+
+        assert seen == []
+
+
 class TestTheAttemptPutsTheProcessBack:
     """The adapter steers aiter with a process-wide variable; it has to give it back."""
 

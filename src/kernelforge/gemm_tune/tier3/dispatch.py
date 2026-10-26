@@ -150,8 +150,8 @@ def describe_candidate_protocol(table: str) -> str:
             "so a pair without one is refused here rather than timed as a phantom win. The\n"
             "partner name may be a CK, CKTile or Opus kernel.\n"
             "\n"
-            "Only the mxfp4 SwiGLU path is re-timable here (`q_type=QuantType.per_1x32`,\n"
-            "`q_dtype_w=torch.float4_e2m1fn_x2`, `act_type=ActivationType.Swiglu`); a candidate\n"
+            "Only the mxfp4 path is re-timable here (`q_type=QuantType.per_1x32`,\n"
+            "`q_dtype_w=torch.float4_e2m1fn_x2`, at the key's own `act_type`); a candidate\n"
             "for any other combination is recorded as not dispatchable, because building the\n"
             "operands for it in the layout its kernels expect is not something this harness knows\n"
             "how to do yet. Report what you find for those anyway -- it just cannot be promoted."
@@ -236,8 +236,15 @@ def moe_shape_key(shape: str) -> dict[str, str]:
     return {f: got[f] for f in MOE_KEY_FIELDS}
 
 
+def _activation(key: dict[str, str]) -> Any:
+    """The aiter activation a fused-MoE key names, e.g. ``ActivationType.Silu``."""
+    from aiter import ActivationType
+
+    return getattr(ActivationType, key["act_type"].removeprefix("ActivationType."))
+
+
 class _FusedMoeAdapter:
-    """Dispatch and validate aiter fused mxfp4 SwiGLU MoE candidates.
+    """Dispatch and validate aiter fused mxfp4 MoE candidates.
 
     Cache resets, observed kernel read-back, compatible operand layouts, and
     pair checks prevent silently timing a substituted/default kernel. Scope is
@@ -343,10 +350,10 @@ class _FusedMoeAdapter:
         torch = self._torch()
         try:
             import aiter
-            from aiter import ActivationType, QuantType
+            from aiter import QuantType
 
-            if key["q_type"] != "QuantType.per_1x32" or key["act_type"] != "ActivationType.Swiglu":
-                log.info("tier3: %s is not the mxfp4 SwiGLU path; no fused-MoE operands for it", shape)
+            if key["q_type"] != "QuantType.per_1x32":
+                log.info("tier3: %s is not the mxfp4 path; no fused-MoE operands for it", shape)
                 self._operands[shape] = None
                 return None
             codegen = Path(aiter.__file__).resolve().parent.parent / "csrc" / "ck_gemm_moe_2stages_codegen"
@@ -368,7 +375,7 @@ class _FusedMoeAdapter:
                 int(key["inter_dim"]),
                 int(key["expert"]),
                 int(key["topk"]),
-                ActivationType.Swiglu,
+                _activation(key),
                 dtype,
                 q_dtype_w,
                 q_dtype_w,
@@ -398,10 +405,11 @@ class _FusedMoeAdapter:
         bundle = self._ops(shape)
         if bundle is None:
             return None
-        from aiter import ActivationType, QuantType
+        from aiter import QuantType
 
         fm = self._fused_moe()
         torch = self._torch()
+        activation = _activation(moe_shape_key(shape))
 
         def run():
             return fm.fused_moe(
@@ -410,7 +418,7 @@ class _FusedMoeAdapter:
                 bundle["w2_qt_shffle_flydsl"],
                 bundle["topk_weights"],
                 bundle["topk_ids"],
-                activation=ActivationType.Swiglu,
+                activation=activation,
                 quant_type=QuantType.per_1x32,
                 w1_scale=bundle["w1_scale_flydsl"],
                 w2_scale=bundle["w2_scale_flydsl"],
