@@ -12,6 +12,7 @@ import tempfile
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from kernelforge.tools.device_lock import campaign_device_lock_path
 from kernelforge.tools.git import git, git_async
 
 from kernelforge.tools.process_reaping import (
@@ -24,13 +25,6 @@ from kernelforge.tools.process_reaping import (
 log = logging.getLogger(__name__)
 
 SERIALIZED_DRIVER_NAME = "forge_lane_driver.py"
-DEVICE_LOCK_SENTINEL = ".forge-device-bench.lock"
-
-
-def campaign_device_lock_path(workspace: str | Path) -> Path:
-    """The sentinel the fan-out lanes and the analysis-phase probes lock."""
-    workspace = Path(workspace).expanduser().resolve()
-    return workspace.parent / f"{workspace.name}{DEVICE_LOCK_SENTINEL}"
 
 
 @dataclass(frozen=True)

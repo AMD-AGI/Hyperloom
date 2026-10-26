@@ -115,13 +115,6 @@ _PROBE_CHILD_ENV_VARS = (
 _PROBE_CHILD_ENV_PREFIXES = ("HSA_", "AMD_", "ROCM_", "TRITON_")
 
 
-def _device_lock_path(workspace: Path) -> Path:
-    """The campaign sentinel a fan-out lane's serialized driver locks."""
-    from kernelforge.loop.fanout import campaign_device_lock_path
-
-    return campaign_device_lock_path(workspace)
-
-
 def _probe_child_env() -> dict[str, str]:
     """Collect what the probe's MCP child needs from this process's environment."""
     return {
@@ -136,12 +129,17 @@ class SpecialistProbeConfig:
     """Bound the scratch measurement one analysis phase may run."""
 
     scratch_root: str
+    # The campaign's device sentinel, the file a fan-out lane's serialized driver flocks, whichever checkout a probe
+    # measures.
+    device_lock: str
     max_probes: int = 6
     budget_sec: float = 600.0
 
     def __post_init__(self) -> None:
         if not self.scratch_root.strip():
             raise ValueError("scratch_root must not be empty")
+        if not self.device_lock.strip():
+            raise ValueError("device_lock must not be empty")
         if self.max_probes <= 0:
             raise ValueError("max_probes must be greater than zero")
         if self.budget_sec <= 0:
@@ -614,7 +612,7 @@ class SpecialistAgent:
             budget_path=(probe_round.budget_path if probe_round is not None else None),
             # The campaign's sentinel, not one of the probe's own: the GPU a probe times on is the one a fan-out lane
             # drives, so a probe and a lane queue on the same file.
-            device_lock=_device_lock_path(workspace),
+            device_lock=Path(self.probe.device_lock),
             session_timeout_sec=float(self.timeout_sec),
             session_deadline=time.time() + float(self.timeout_sec),
         )

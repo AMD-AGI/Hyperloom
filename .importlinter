@@ -403,5 +403,4 @@ ignore_imports =
     kernelforge.knowledge.kb_store.recipe -> kernelforge.config
     kernelforge.orchestrator.agent -> kernelforge.loop.insession_gate
     kernelforge.orchestrator.agent -> kernelforge.loop.lessons
-    kernelforge.orchestrator.specialists -> kernelforge.loop.fanout
 unmatched_ignore_imports_alerting = error

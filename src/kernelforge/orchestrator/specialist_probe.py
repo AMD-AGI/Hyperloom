@@ -33,7 +33,7 @@ BUDGET_SEC_ENV = "FORGE_PROBE_BUDGET_SEC"
 # The round's shared counters; see ``ProbeBudget``.
 ROUND_BUDGET_ENV = "FORGE_PROBE_ROUND_BUDGET"
 # The campaign-wide sentinel a run must flock before it touches the GPU, from
-# ``kernelforge.loop.fanout.campaign_device_lock_path``.
+# ``kernelforge.tools.device_lock.campaign_device_lock_path``.
 DEVICE_LOCK_ENV = "FORGE_PROBE_DEVICE_LOCK"
 # Unix timestamp at which the specialist session this probe serves is killed.
 SESSION_DEADLINE_ENV = "FORGE_PROBE_SESSION_DEADLINE"

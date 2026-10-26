@@ -76,12 +76,14 @@ class SearchActorBuildContext:
             setup=setup,
             usage=self.usage,
         )
-        orchestration = make_orchestration_service(
+        make_planning = partial(
+            make_orchestration_service,
             config=actor_config,
             usage=self.usage,
             definitions=self.specialist_definitions,
             enable_plan_critic=self.critic_enabled,
         )
+        orchestration = make_planning()
         supervisor_provider = self.supervisor_backend or profile.provider
         supervisor = make_supervisor_fn(
             program_md=self.program_md,
@@ -90,7 +92,14 @@ class SearchActorBuildContext:
             usage=self.usage,
             config=self._supervisor_config(supervisor_provider, profile, actor_config),
         )
-        return SearchActorBundle(effective_profile, actor_fn, orchestration, lane_factory, supervisor)
+        return SearchActorBundle(
+            effective_profile,
+            actor_fn,
+            orchestration,
+            lane_factory,
+            supervisor,
+            orchestration_factory=partial(make_planning, preflight=False),
+        )
 
     def _profile_config(self, profile: AgentProfile) -> Config:
         return config_for_profile(self.config, profile, primary_provider=self.relay.primary_profile.provider)

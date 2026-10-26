@@ -371,7 +371,7 @@ def test_the_deadline_is_stated_before_the_probe_section_that_relies_on_it() -> 
     """The probe text says "your own session"; that clock must come first."""
     setup = specialists_module._ProbeSetup(
         enabled=True,
-        config=SpecialistProbeConfig(scratch_root="/tmp/probe-scratch"),
+        config=SpecialistProbeConfig(scratch_root="/tmp/probe-scratch", device_lock="/tmp/device.lock"),
         workspace="/tmp/workspace",
         scratch_dir=Path("/tmp/probe-scratch/memory-0"),
         ledger_path=Path("/tmp/probe-scratch/memory-0/ledger.jsonl"),
@@ -1539,30 +1539,8 @@ async def test_a_leaked_probe_is_reported_to_the_loop_that_must_refuse(tmp_path,
         )
 
     monkeypatch.setattr(specialists_module, "reap_processes_under", _leaked)
-    orchestration_backend = _QueuedBackend([_dispatch_payload(), "# Optimization plan\nUse vector loads."])
-    service = OrchestrationService(
-        agent=OrchestrationAgent(
-            backend=orchestration_backend,
-            timeout_sec=1,
-            max_turns=2,
-            min_assignments=1,
-        ),
-        specialist_pool=SpecialistPool(
-            {
-                "memory": SpecialistAgent(
-                    definition=_definitions()["memory"],
-                    backend=_StaticBackend("Memory analysis"),
-                    timeout_sec=1,
-                    max_turns=2,
-                    probe=SpecialistProbeConfig(scratch_root=str(tmp_path / "probe")),
-                )
-            },
-            max_parallel=1,
-        ),
-        definitions={"memory": _definitions()["memory"]},
-    )
 
-    result = await service.run(_context())
+    result = await _probing_service(tmp_path).run(_context())
 
     finding = result.structured_output_diagnostics["probe_device_hazard"]
     assert finding["pids"] == [4321]
@@ -1579,7 +1557,15 @@ async def test_a_clean_probe_round_reports_no_hazard(tmp_path, monkeypatch) -> N
         return ReapReport(directory=str(directory))
 
     monkeypatch.setattr(specialists_module, "reap_processes_under", _clean)
-    service = OrchestrationService(
+
+    result = await _probing_service(tmp_path).run(_context())
+
+    assert "probe_device_hazard" not in result.structured_output_diagnostics
+
+
+def _probing_service(tmp_path) -> OrchestrationService:
+    """A one-specialist planning service whose specialist may probe."""
+    return OrchestrationService(
         agent=OrchestrationAgent(
             backend=_QueuedBackend([_dispatch_payload(), "# Optimization plan\nUse vector loads."]),
             timeout_sec=1,
@@ -1593,17 +1579,15 @@ async def test_a_clean_probe_round_reports_no_hazard(tmp_path, monkeypatch) -> N
                     backend=_StaticBackend("Memory analysis"),
                     timeout_sec=1,
                     max_turns=2,
-                    probe=SpecialistProbeConfig(scratch_root=str(tmp_path / "probe")),
+                    probe=SpecialistProbeConfig(
+                        scratch_root=str(tmp_path / "probe"), device_lock=str(tmp_path / "device.lock")
+                    ),
                 )
             },
             max_parallel=1,
         ),
         definitions={"memory": _definitions()["memory"]},
     )
-
-    result = await service.run(_context())
-
-    assert "probe_device_hazard" not in result.structured_output_diagnostics
 
 
 @pytest.mark.asyncio

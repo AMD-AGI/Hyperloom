@@ -18,6 +18,7 @@ from kernelforge.cli import lanes as cli_lanes
 from kernelforge.config import Config
 from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask
 from kernelforge.loop import fanout
+from kernelforge.tools.device_lock import campaign_device_lock_path
 from kernelforge.tools.process_reaping import ReapReport
 from kernelforge.loop.fanout import (
     SERIALIZED_DRIVER_NAME,
@@ -391,7 +392,7 @@ async def test_lane_workspaces_are_removed_even_when_a_session_fails(tmp_path):
 
     # The device sentinel is campaign-scoped and is meant to outlive the round; what must not survive it is the lane
     # copies.
-    left = set(tmp_path.iterdir()) - {fanout.campaign_device_lock_path(workspace)}
+    left = set(tmp_path.iterdir()) - {campaign_device_lock_path(workspace)}
     assert left == before
 
 
@@ -837,7 +838,7 @@ async def test_a_lane_session_inside_its_lane_runs(tmp_path):
 async def test_every_round_serializes_on_one_campaign_wide_sentinel(tmp_path):
     """A sentinel created per round serializes that round's lanes and nothing else."""
     workspace = _workspace(tmp_path)
-    expected = fanout.campaign_device_lock_path(workspace)
+    expected = campaign_device_lock_path(workspace)
     seen = []
 
     async def session(_lane: LanePlan, _lane_dir: Path, driver: Path) -> None:

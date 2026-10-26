@@ -8,7 +8,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from kernelforge.loop.fanout import LanePlan, campaign_device_lock_path, run_lanes
+from kernelforge.loop.fanout import LanePlan, run_lanes
+from kernelforge.tools.device_lock import campaign_device_lock_path
 from kernelforge.loop.tree.worktrees import StartWorktrees, untracked_outside
 
 DRIVER = "driver.py"
