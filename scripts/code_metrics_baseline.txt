@@ -205,7 +205,7 @@ function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_probe_critic_
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_probe_llm_catalog 56
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_reexport_session_environment 80
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_resolve_agent_lineup 79
-function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_resolve_run_topology 64
+function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_resolve_run_topology 60
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 222
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_seed_fresh_session 51
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_validate_and_resolve_claude_model 58
@@ -216,7 +216,7 @@ function-lines src/hyperloom/inference_optimizer/cli/kb.py::_bootstrap_knowledge
 function-lines src/hyperloom/inference_optimizer/cli/kb.py::_bootstrap_recipe_kb 68
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_context_window 116
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_model_config_compat 71
-function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_prepare_multi_node_state 76
+function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_prepare_multi_node_state 75
 function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 907
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_emit_preflight_diagnostics 65
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_inferencex 51
@@ -228,7 +228,7 @@ function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_probe_rocm_b
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_report_unusable_framework 62
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_run_ir3_preflight 66
 function-lines src/hyperloom/inference_optimizer/grid_server_args.py::validate_warm_replay_context_length 51
-function-lines src/hyperloom/inference_optimizer/multi_node/_internal/external_state.py::build_external_state_from_env 55
+function-lines src/hyperloom/inference_optimizer/multi_node/_internal/external_state.py::build_external_state_from_env 52
 function-lines src/hyperloom/inference_optimizer/multi_node/_internal/serving_probe.py::cluster_is_serving 64
 function-lines src/hyperloom/inference_optimizer/multi_node/cli.py::_build_multinode_launch_entrypoint 64
 function-lines src/hyperloom/inference_optimizer/multi_node/cli.py::_restart_multinode 54
