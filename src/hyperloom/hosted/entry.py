@@ -40,7 +40,7 @@ from hyperloom.inference_optimizer.session.paths import (
     hosted_session_dir,
 )
 from hyperloom.plugs.errors import ManifestError
-from hyperloom.plugs.manifest import load_builtin_profile
+from hyperloom.plugs.manifest import LOCKABLE_SOCKETS, load_builtin_profile
 
 EXIT_FILE = "exit.json"
 SESSION_FILE = "session.json"
@@ -119,18 +119,22 @@ def _read_spec(info: HostInfo) -> CampaignSpec:
 
 
 def _plug_lock(spec: CampaignSpec) -> dict[str, dict[str, str]]:
-    """The hosted lock layer for the legacy flow: the measurement socket, which must agree with the profile."""
+    """The hosted lock layer: every lockable socket the spec's profile declares, with the implementation it names.
+
+    A declared ``measurement`` must agree with ``placement.measurement``.
+    """
     try:
         profile = load_builtin_profile(spec.profile)
     except ManifestError as exc:
         raise Refused(str(exc)) from None
-    profile_impl = profile["sockets"].get("measurement", {}).get("impl")
-    if profile_impl != spec.measurement:
+    lock = {name: {"impl": setting["impl"]} for name, setting in profile["sockets"].items() if name in LOCKABLE_SOCKETS}
+    measured = lock.get("measurement", {}).get("impl", spec.measurement)
+    if measured != spec.measurement:
         raise Refused(
             f"placement.measurement {spec.measurement!r} does not match profile {spec.profile!r}, "
-            f"which measures with {profile_impl!r}; the legacy flow measures locally"
+            f"which measures with {measured!r}; the legacy flow measures locally"
         )
-    return {"measurement": {"impl": spec.measurement}}
+    return lock
 
 
 def _exec_multibranch() -> None:
