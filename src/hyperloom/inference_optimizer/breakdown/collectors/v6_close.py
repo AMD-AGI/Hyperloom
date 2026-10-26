@@ -42,6 +42,7 @@ from ..recorder.close_out import SESSION_BREAKDOWN_PATH
 from ._common import (
     _dict_rows,
     _mapping,
+    _optional_text,
 )
 
 
@@ -81,8 +82,8 @@ def _close_step(row: dict[str, Any]) -> dict[str, Any]:
     """Normalize one recorded close step to the V6 shape."""
     step = str(row.get("step") or "")
     status = str(row.get("status") or "").strip().lower()
-    task_id = str(row.get("task_id") or "") or None
-    detail = str(row.get("detail") or "") or None
+    task_id = _optional_text(row.get("task_id"))
+    detail = _optional_text(row.get("detail"))
     return {
         "step": step,
         # An unrecognized status is passed through rather than coerced into the enum: inventing ``done`` for something

@@ -54,6 +54,11 @@ def _optional_bool(value: Any) -> bool | None:
     return None
 
 
+def _optional_text(value: Any) -> str | None:
+    """``value`` as text, ``None`` when it is absent or empty."""
+    return str(value or "") or None
+
+
 def _string_list(value: Any) -> list[str]:
     """Normalize a list-like value to non-empty strings."""
     if not isinstance(value, (list, tuple, set)):

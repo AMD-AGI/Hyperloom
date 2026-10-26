@@ -25,6 +25,7 @@ from ._common import (
     _first,
     _mapping,
     _optional_bool,
+    _optional_text,
     _parse_iso_unix as _timestamp_number,
     _to_float as _optional_float,
     _to_int as _optional_int,
@@ -464,11 +465,6 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str
         # the JSON would otherwise find a bare ``false`` here and have to walk the timeline to learn why.
         "submission_invalid_reasons": [str(r) for r in (measurement.get("submission_invalid_reasons") or [])],
     }
-
-
-def _optional_text(value: Any) -> str | None:
-    """``value`` as text, ``None`` when it is absent or empty."""
-    return str(value or "") or None
 
 
 def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str]) -> dict[str, Any]:
