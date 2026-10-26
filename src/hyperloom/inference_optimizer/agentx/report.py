@@ -37,7 +37,7 @@ def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
     )
     identity = {key: metrics.get(key) for key in ("mode", "scenario_type", "dataset", "recipe")}
     identity_hash = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    output = throughput.get("output_tokens_per_second")
+    intvty = latency.get("e2e_norm_intvty") or {}
     result: dict[str, Any] = {
         "benchmark_backend": "magpie_agentx",
         "workload_identity": identity_hash,
@@ -50,7 +50,7 @@ def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
         "framework": report.get("framework"),
         "model": report.get("model"),
         "request_throughput": throughput.get("request_throughput"),
-        "output_throughput": output,
+        "output_throughput": throughput.get("output_tokens_per_second"),
         "input_throughput": throughput.get("input_tokens_per_second"),
         "total_token_throughput": throughput.get("total_tokens_per_second"),
         "total_throughput": throughput.get("total_tokens_per_second"),
@@ -58,8 +58,8 @@ def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
         "requested_requests": requests.get("total"),
         "duration_seconds": throughput.get("duration_seconds"),
         "request_error_rate": None if requests.get("error_rate") is None else requests["error_rate"] * 100,
-        "e2e_norm_intvty_p50": (latency.get("e2e_norm_intvty") or {}).get("p50"),
-        "e2e_norm_intvty_p90": (latency.get("e2e_norm_intvty") or {}).get("p90"),
+        "e2e_norm_intvty_p50": intvty.get("p50"),
+        "e2e_norm_intvty_p90": intvty.get("p90"),
         "agentx_metrics": metrics,
         "agentx_server_launch": metrics.get("server_launch"),
         "tp": recipe.get("tp"),
