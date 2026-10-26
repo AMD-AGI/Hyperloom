@@ -109,9 +109,14 @@ def test_a_setup_no_sheet_could_carry_is_refused_when_it_is_made(key: str, sha: 
         ShortPromptSetup(key, sha)
 
 
-def test_nothing_named_and_no_model_means_no_check_and_a_blank_variable_names_nothing(tmp_path: Path) -> None:
-    assert staged_short_prompts(None, {CACHE_ENV: str(tmp_path)}) is None
-    assert staged_short_prompts(None, {CACHE_ENV: str(tmp_path), SHORT_PROMPTS_ENV: "  "}) is None
+def test_nothing_named_and_no_model_means_no_check_and_a_blank_variable_names_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("WARNING"):
+        assert staged_short_prompts(None, {CACHE_ENV: str(tmp_path)}) is None
+        assert staged_short_prompts(None, {CACHE_ENV: str(tmp_path), SHORT_PROMPTS_ENV: "  "}) is None
+
+    assert caplog.records == [], "a toolbox of no model has no set to find: that is not a warning on every build"
 
 
 @pytest.mark.parametrize("by_variable", [False, True], ids=["spec-model-dir", "MODEL_PATH"])

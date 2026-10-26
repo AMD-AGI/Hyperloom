@@ -144,7 +144,8 @@ def _setup_of(asked: str, read: Callable[[], StagedEntry]) -> ShortPromptSetup:
 def default_short_prompts(model_dir: Path | None, environ: Mapping[str, str]) -> ShortPromptSetup | None:
     """The set ``measure.short_prompts.build`` stages for the tokenizer in ``model_dir`` (else the directory
     ``MODEL_PATH`` in ``environ`` names) with its default seed, read in the runner cache ``environ`` names; ``None``, and
-    a warning that says why, when there is no model directory, it holds no tokenizer or that set is not staged.
+    a log line that says why, when there is no model directory (information: a toolbox of no model has nothing to find), it
+    holds no tokenizer or that set is not staged (a warning: the model's own check is off).
 
     Raises:
         ShortPromptsNotStaged: The set is there and unfinished, or is not what its manifest recorded: a set that was found
@@ -152,7 +153,7 @@ def default_short_prompts(model_dir: Path | None, environ: Mapping[str, str]) ->
     """
     directory = model_dir or (Path(environ[MODEL_PATH_ENV]) if environ.get(MODEL_PATH_ENV) else None)
     if directory is None:
-        _LOG.warning("short-prompt consistency check off: no model directory to find its prompt set by")
+        _LOG.info("short-prompt consistency check off: no model directory to find its prompt set by")
         return None
     try:
         key = entry_key({"seed": DEFAULT_SEED, "tokenizer": tokenizer_hashes(directory)})
