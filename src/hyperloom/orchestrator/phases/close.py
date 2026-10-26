@@ -858,8 +858,10 @@ class ClosePhase(CoordinatorCollaborator):
         now = time.time()
         decision = _phase_state.compute_next_phase(
             state,
-            enablement_in_flight=enablement_in_flight,
-            kernel_work_in_flight=kernel_facts.agent_in_flight,
+            live=_phase_state.LiveFacts(
+                enablement_in_flight=enablement_in_flight,
+                kernel_work_in_flight=kernel_facts.agent_in_flight,
+            ),
             now_unix=now,
             flags=_phase_state.PhaseFlags(
                 kernel_enabled=machine.kernel_enabled(),

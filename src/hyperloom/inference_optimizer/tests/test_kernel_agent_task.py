@@ -379,9 +379,9 @@ def test_kernel_agent_in_flight_blocks_an_idle_queue_exit(label, arm, reason):
     out_without_flag = ps.compute_next_phase(st)
     assert out_without_flag is not None and out_without_flag[1] == reason, label
 
-    inputs = ps.workflow_predicate_inputs(st, kernel_work_in_flight=True)
+    inputs = ps.workflow_predicate_inputs(st, live=ps.LiveFacts(kernel_work_in_flight=True))
     assert inputs["pending_work"]["kernel_agent_in_flight"] is True
-    assert ps.compute_next_phase(st, kernel_work_in_flight=True) is None, label
+    assert ps.compute_next_phase(st, live=ps.LiveFacts(kernel_work_in_flight=True)) is None, label
     assert ps.replay_next_phase(inputs) is None, label
 
 
@@ -391,12 +391,12 @@ def test_a_terminal_controller_exits_even_while_the_agent_is_in_flight():
     _arm_kernel_phase(st)
     _arm_terminal_controller(st)
 
-    transition = ps.compute_next_phase(st, kernel_work_in_flight=True)
+    transition = ps.compute_next_phase(st, live=ps.LiveFacts(kernel_work_in_flight=True))
 
     assert transition is not None
     assert transition[1] == "kernel_controller_done"
     assert transition[2]["agent_in_flight"] is True
-    inputs = ps.workflow_predicate_inputs(st, kernel_work_in_flight=True)
+    inputs = ps.workflow_predicate_inputs(st, live=ps.LiveFacts(kernel_work_in_flight=True))
     replayed = ps.replay_next_phase(inputs)
     assert replayed is not None
     assert (replayed[0], replayed[1]) == (transition[0], "kernel_controller_done")
@@ -407,7 +407,7 @@ def test_kernel_agent_in_flight_never_blocks_a_budget_exit():
     _arm_kernel_phase(st)
     _spend_the_phase_budget(st)
 
-    transition = ps.compute_next_phase(st, kernel_work_in_flight=True)
+    transition = ps.compute_next_phase(st, live=ps.LiveFacts(kernel_work_in_flight=True))
 
     assert transition is not None
     assert transition[1] in {"kernel_phase_budget_exhausted", "kernel_budget_cap"}

@@ -391,14 +391,16 @@ def test_a_framework_phase_no_round_fits_is_spent():
     state = _framework_state_inside_its_budget()
     assert phase_state.compute_next_phase(state) is None
 
-    out = phase_state.compute_next_phase(state, framework_round_fits=False)
+    out = phase_state.compute_next_phase(state, live=phase_state.LiveFacts(framework_round_fits=False))
 
     assert out is not None and out[1] == "optimize_phase_budget_exhausted"
     assert out[2]["evidence"] == "no_round_fits" and out[2]["remaining_seconds"] > 0
 
 
 def test_a_framework_record_frozen_before_round_fits_replays_as_decided():
-    inputs = phase_state.workflow_predicate_inputs(_framework_state_inside_its_budget(), framework_round_fits=False)
+    inputs = phase_state.workflow_predicate_inputs(
+        _framework_state_inside_its_budget(), live=phase_state.LiveFacts(framework_round_fits=False)
+    )
     del inputs["budget"]["round_fits"]
 
     assert phase_state.replay_next_phase(inputs) is None
@@ -1003,12 +1005,16 @@ def test_enablement_holds_while_work_is_in_flight():
     state = _enablement_state("ENABLEMENT", tput=1000.0)
     assert (
         phase_state.compute_next_phase(
-            state, enablement_in_flight=True, flags=phase_state.PhaseFlags(enablement_enabled=True)
+            state,
+            live=phase_state.LiveFacts(enablement_in_flight=True),
+            flags=phase_state.PhaseFlags(enablement_enabled=True),
         )
         is None
     )
     inputs = phase_state.workflow_predicate_inputs(
-        state, enablement_in_flight=True, flags=phase_state.PhaseFlags(enablement_enabled=True)
+        state,
+        live=phase_state.LiveFacts(enablement_in_flight=True),
+        flags=phase_state.PhaseFlags(enablement_enabled=True),
     )
     assert phase_state.replay_next_phase(inputs) is None
 

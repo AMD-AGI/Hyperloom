@@ -231,20 +231,13 @@ class MachinePhase(CoordinatorCollaborator):
         )
 
     async def _next_phase(
-        self,
-        *,
-        optimize_enabled: bool,
-        enablement_in_flight: bool,
-        kernel_work_in_flight: bool,
-        framework_round_fits: bool,
+        self, *, optimize_enabled: bool, live: _phase_state.LiveFacts
     ) -> tuple[str, str, dict[str, Any]] | None:
         """The transition the predicates ask for, held while the operator-defined specialist's work is pending."""
         state = self.shared_state
         next_phase = _phase_state.compute_next_phase(
             state,
-            enablement_in_flight=enablement_in_flight,
-            kernel_work_in_flight=kernel_work_in_flight,
-            framework_round_fits=framework_round_fits,
+            live=live,
             flags=_phase_state.PhaseFlags(
                 kernel_enabled=self.kernel_enabled(),
                 optimize_enabled=optimize_enabled,
@@ -416,9 +409,11 @@ class MachinePhase(CoordinatorCollaborator):
         await self._release_holds_no_task_will_settle()
         next_phase = await self._next_phase(
             optimize_enabled=self.optimize_enabled(),
-            enablement_in_flight=in_enablement and await self._coord.enablement_lane.enablement_in_flight(),
-            kernel_work_in_flight=kernel_facts.agent_in_flight,
-            framework_round_fits=await self._framework_round_fits(),
+            live=_phase_state.LiveFacts(
+                enablement_in_flight=in_enablement and await self._coord.enablement_lane.enablement_in_flight(),
+                kernel_work_in_flight=kernel_facts.agent_in_flight,
+                framework_round_fits=await self._framework_round_fits(),
+            ),
         )
         await self._coord.phase_internal.maybe_enqueue_trajectory_reviewer()
         dispatcher = self._coord.dispatcher

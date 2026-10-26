@@ -974,6 +974,15 @@ class PhaseFlags:
     enablement_enabled: bool = False
 
 
+@dataclass(frozen=True)
+class LiveFacts:
+    """What the running Coordinator knows of its own work when a phase decision is taken."""
+
+    enablement_in_flight: bool = False
+    kernel_work_in_flight: bool = False
+    framework_round_fits: bool = True
+
+
 def _base_workflow_predicate_inputs(
     state: Any,
     *,
@@ -1164,9 +1173,7 @@ def workflow_predicate_inputs(
     *,
     flags: PhaseFlags = PhaseFlags(),
     now_unix: float | None = None,
-    enablement_in_flight: bool = False,
-    kernel_work_in_flight: bool = False,
-    framework_round_fits: bool = True,
+    live: LiveFacts = LiveFacts(),
 ) -> dict[str, Any]:
     """Freeze primitive, normalized facts consumed by one phase decision."""
     current = (state.phase or "").strip().upper() or PHASE_PRELUDE
@@ -1176,7 +1183,7 @@ def workflow_predicate_inputs(
         current=current,
         now_unix=frozen_now,
         flags=flags,
-        enablement_in_flight=enablement_in_flight,
+        enablement_in_flight=live.enablement_in_flight,
     )
     if current == PHASE_PRELUDE:
         inputs["baseline"] = _prelude_predicate_inputs(state, now_unix=frozen_now)
@@ -1189,16 +1196,16 @@ def workflow_predicate_inputs(
         }
         inputs["pending_work"] = {
             "validation_pending": bool(enablement.validation_pending),
-            "enablement_in_flight": bool(enablement_in_flight),
+            "enablement_in_flight": bool(live.enablement_in_flight),
         }
     elif current == PHASE_FRAMEWORK_AGENT:
         inputs["plateau"], inputs["budget"] = _framework_predicate_inputs(state, now_unix=frozen_now)
-        inputs["budget"]["round_fits"] = bool(framework_round_fits)
+        inputs["budget"]["round_fits"] = bool(live.framework_round_fits)
     elif current == PHASE_KERNEL_AGENT:
         inputs["pending_work"], inputs["plateau"], inputs["budget"] = _kernel_predicate_inputs(
             state,
             now_unix=frozen_now,
-            kernel_work_in_flight=kernel_work_in_flight,
+            kernel_work_in_flight=live.kernel_work_in_flight,
         )
     elif current == PHASE_SWEEP:
         inputs["sweep_result"], inputs["budget"] = _sweep_predicate_inputs(state, now_unix=frozen_now)
@@ -1480,19 +1487,10 @@ def compute_next_phase(
     *,
     flags: PhaseFlags = PhaseFlags(),
     now_unix: float | None = None,
-    enablement_in_flight: bool = False,
-    kernel_work_in_flight: bool = False,
-    framework_round_fits: bool = True,
+    live: LiveFacts = LiveFacts(),
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return the next transition with the primitive inputs it consumed."""
-    inputs = workflow_predicate_inputs(
-        state,
-        flags=flags,
-        now_unix=now_unix,
-        enablement_in_flight=enablement_in_flight,
-        kernel_work_in_flight=kernel_work_in_flight,
-        framework_round_fits=framework_round_fits,
-    )
+    inputs = workflow_predicate_inputs(state, flags=flags, now_unix=now_unix, live=live)
     if "baseline_tput" in inputs["global"]:
         return replay_next_phase(inputs)
     # The session's contract cannot carry the baseline in the frozen inputs, so
