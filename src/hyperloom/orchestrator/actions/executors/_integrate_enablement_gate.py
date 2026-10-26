@@ -492,14 +492,16 @@ class EnablementGateMixin:
             return {}
         action = attempt.localization_action
         try:
-            from ...source_snapshot import snapshot_source_layer
+            from ...source_snapshot import SourceLayer, snapshot_source_layer
 
             base_sha = _git_head_sha(framework_root)
             dest = self.session_dir / "optimization_stack" / "localization" / (specialist_task_id or "keep")
             snap = snapshot_source_layer(
-                framework_root=framework_root,
-                base_sha=base_sha,
-                rel_paths=touched,
+                SourceLayer(
+                    framework_root=framework_root,
+                    base_sha=base_sha,
+                    rel_paths=touched,
+                ),
                 dest_dir=dest,
                 provenance="localization",
                 extra={

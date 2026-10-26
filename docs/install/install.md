@@ -246,6 +246,10 @@ and KB tokens are never forwarded. To suppress credential forwarding when the
 agent CLI (`claude` or `codex`) is authenticated through its own config, set
 `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0`.
 
+To also keep specialists away from the app's own files and `/proc/<pid>/environ`, set
+`HYPERLOOM_SPECIALIST_USER` to a non-root account; see
+[environment variables](../reference/environment-variables.md).
+
 `.env` in the current workspace is the single source of truth; no extra script
 needs sourcing. Setup only needs to run again when changing the LLM provider,
 base URL, model, `USER_DATA_PATH`, run mode, Docker target host, or bare-metal

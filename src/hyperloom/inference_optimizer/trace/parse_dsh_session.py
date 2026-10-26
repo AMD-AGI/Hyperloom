@@ -13,10 +13,11 @@ from typing import Any
 
 from hyperloom.common.deepseek_session import step_usage, turn_end_failure
 from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.common.fs_utils import read_text_below_nofollow
 
 from ._row_utils import coerce_optional_int
 from .agent_trace import AgentTrace
-from .parse_usage import _iter_json_events, _summarize_tool_input, normalize_usage
+from .parse_usage import _json_objects, _summarize_tool_input, normalize_usage
 
 log = logging.getLogger(__name__)
 
@@ -42,9 +43,18 @@ _TOOL_NAMES: dict[str, str] = {
 }
 
 
-def _session_records(path: Path) -> list[dict[str, Any]]:
-    """The JSON records of one session log, up to a cut-off final line."""
-    return list(_iter_json_events(path, "dsh session"))
+def _session_records(home: Path, path: Path) -> list[dict[str, Any]]:
+    """The JSON records of one session log under ``home``, up to a cut-off final line.
+
+    The file is opened component by component without following a link, so an
+    entry the account swaps for a link after the listing is not read.
+    """
+    try:
+        text = read_text_below_nofollow(home, path.relative_to(home).parts)
+    except OSError as exc:
+        log.warning("parse_dsh_session: cannot read %s: %r", path, exc)
+        return []
+    return list(_json_objects(text.splitlines()))
 
 
 def _is_root(records: list[dict[str, Any]]) -> bool:
@@ -97,9 +107,11 @@ def parse_dsh_session_trace(dsh_home: str | Path) -> AgentTrace:
     tool_calls: list[dict[str, Any]] = []
     replies: list[str] = []
     error = ""
-    paths = sorted(Path(dsh_home).glob(_SESSION_LOG_GLOB))
+    home = Path(dsh_home).resolve()
+    # The account that ran dsh owns this tree: read only what really sits under it, never what a link points to.
+    paths = sorted(p for p in home.glob(_SESSION_LOG_GLOB) if not p.is_symlink() and p.resolve().is_relative_to(home))
     for path in paths:
-        records = _session_records(path)
+        records = _session_records(home, path)
         steps += [usage for usage in map(step_usage, records) if usage]
         tool_calls += [call for call in map(_tool_call, records) if call is not None]
         if _is_root(records):

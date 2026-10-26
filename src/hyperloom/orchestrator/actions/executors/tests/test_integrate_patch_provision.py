@@ -13,7 +13,7 @@ import yaml
 
 from hyperloom.common.failure_signature import classify_failure
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
-from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml
+from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml, GridRecipe
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
 from hyperloom.orchestrator.enablement.runtime.stack_actions import (
     EnablementStackAction,
@@ -382,9 +382,7 @@ def test_provisioned_runtime_lands_in_yaml_not_process_env(tmp_path, monkeypatch
     variant.runtime_override = runtime.to_runtime_override()
 
     env_before = dict(os.environ)
-    out_yaml = _build_variant_yaml(
-        base_yaml_path=base, base_extra_args="", variant=variant, output_subdir=tmp_path / "out"
-    )
+    out_yaml = _build_variant_yaml(GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "out")
     assert dict(os.environ) == env_before  # os.environ untouched
 
     materialized = yaml.safe_load(out_yaml.read_text(encoding="utf-8"))

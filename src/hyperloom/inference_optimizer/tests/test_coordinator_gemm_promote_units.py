@@ -21,9 +21,14 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.kernel import KernelPhase
-from hyperloom.orchestrator.phases.machine_state import record_lifecycle_event
+from hyperloom.orchestrator.phases.machine_state import LifecycleMark, record_lifecycle_event
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.kernel import integrate_accuracy as integrate_accuracy
+from hyperloom.orchestrator.kernel import _integrate_payload as integrate_payload
+from hyperloom.orchestrator.kernel import _integrate_outcomes as integrate_outcomes
+from hyperloom.orchestrator.kernel import _integrate_rebaseline as integrate_rebaseline
+from hyperloom.orchestrator.kernel import request_handlers
 
 
 def _journal_entries(session_dir: Path) -> list[dict]:
@@ -94,15 +99,17 @@ def test_syncs_standard_roofline_fallback_into_live_coordinator_state(tmp_path):
 def test_sync_unions_lifecycle_instead_of_overwriting(tmp_path):
     """Neither the live state's nor the inline Roofline's rows may be dropped."""
     coord = _coord(tmp_path)
-    record_lifecycle_event(coord.shared_state, step="explore", status="END", ts="2026-01-01T00:00:00Z")
+    record_lifecycle_event(coord.shared_state, LifecycleMark(step="explore", status="END"), ts="2026-01-01T00:00:00Z")
     coord.shared_state.save(tmp_path)
     # Recorded on the live state only; never persisted before the sync.
-    record_lifecycle_event(coord.shared_state, step="live_only", status="START", ts="2026-01-01T00:00:05Z")
+    record_lifecycle_event(
+        coord.shared_state, LifecycleMark(step="live_only", status="START"), ts="2026-01-01T00:00:05Z"
+    )
 
     selected_trace = str(tmp_path / "mixed_steady_state.trace.json.gz")
     persisted = SharedState.load_or_init(tmp_path)
     persisted.last_trace_analyze = {"steady_state_trace": selected_trace}
-    record_lifecycle_event(persisted, step="profile", status="END", ts="2026-01-01T00:00:03Z")
+    record_lifecycle_event(persisted, LifecycleMark(step="profile", status="END"), ts="2026-01-01T00:00:03Z")
     persisted.save(tmp_path)
 
     result = {
@@ -1675,12 +1682,15 @@ class TestKernelE2EMeasurementPromotion:
             raise AssertionError("Paired measurements must not resolve, apply, or grade a patch")
 
         monkeypatch.setenv("FRAMEWORK", "sglang")
-        monkeypatch.setattr(krh_mod, "_resolve_integrate_payload", unexpected)
-        monkeypatch.setattr(krh_mod, "repo_relative_manifest", unexpected)
-        monkeypatch.setattr(krh_mod, "apply_kernel_patch", SimpleNamespace(verify_cpp_itfs_rebuilt=unexpected))
-        monkeypatch.setattr(krh_mod, "_grade_integrate_accuracy", unexpected)
-        monkeypatch.setattr(krh_mod, "_maybe_finalize_kernel_patch", unexpected)
-        monkeypatch.setattr(krh_mod, "_sweep_integrate_aiter_locks", lambda **kwargs: {})
+        monkeypatch.setattr(request_handlers, "_resolve_integrate_payload", unexpected)
+        monkeypatch.setattr(integrate_payload, "repo_relative_manifest", unexpected)
+        monkeypatch.setattr(
+            integrate_rebaseline, "apply_kernel_patch", SimpleNamespace(verify_cpp_itfs_rebuilt=unexpected)
+        )
+        monkeypatch.setattr(integrate_accuracy, "grade_integrate_accuracy", unexpected)
+        monkeypatch.setattr(integrate_outcomes, "_maybe_finalize_kernel_patch", unexpected)
+        for _module in (krh_mod, integrate_rebaseline):
+            monkeypatch.setattr(_module, "_sweep_integrate_aiter_locks", lambda **kwargs: {})
         monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: "/usr/bin/python3")
         monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
         return krh_mod.integrate_handler
@@ -1761,7 +1771,7 @@ class TestKernelE2EMeasurementPromotion:
         async def integrate(payload, *, session_dir):
             calls.append(payload["kernel_id"])
             if payload["source"] != "forge_gemm_paired":
-                resolved = krh_mod._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+                resolved = integrate_payload._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
                 response = await candidate_integrate(resolved, session_dir=session_dir)
                 state.baseline_config_path = "/live/base.yaml"
                 return response

@@ -5,6 +5,7 @@ from __future__ import annotations
 import filecmp
 import json
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, NamedTuple
 
@@ -63,26 +64,33 @@ def source_layer_overlay_dir(entry: dict[str, Any]) -> str:
     return str(overlay / import_root) if import_root else str(overlay)
 
 
+@dataclass(frozen=True)
+class SourceLayer:
+    """The files of one framework tree a snapshot captures, and the ops their patch declared."""
+
+    framework_root: str | Path
+    base_sha: str | None
+    rel_paths: Iterable[str]
+    declared_ops: dict[str, str] | None = None
+    import_root: str = ""
+
+
 def snapshot_source_layer(
+    layer: SourceLayer,
     *,
-    framework_root: str | Path,
-    base_sha: str | None,
-    rel_paths: Iterable[str],
     dest_dir: str | Path,
     provenance: str = "",
     extra: dict[str, Any] | None = None,
-    declared_ops: dict[str, str] | None = None,
-    import_root: str = "",
 ) -> dict[str, Any] | None:
-    """Capture the realized contents of ``rel_paths`` under ``framework_root``."""
-    framework_root = Path(framework_root)
+    """Capture the realized contents of ``layer.rel_paths`` under ``layer.framework_root``."""
+    framework_root = Path(layer.framework_root)
     dest_dir = Path(dest_dir)
     files_root = dest_dir / _FILES
-    ops = dict(declared_ops or {})
+    ops = dict(layer.declared_ops or {})
 
     captured: list[dict[str, str]] = []
     all_complete = True
-    for raw in sorted({str(p) for p in rel_paths}):
+    for raw in sorted({str(p) for p in layer.rel_paths}):
         rel = _safe_rel(raw)
         if rel is None:
             continue
@@ -104,9 +112,9 @@ def snapshot_source_layer(
     manifest: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "framework_root": str(framework_root),
-        "base_sha": str(base_sha or ""),
+        "base_sha": str(layer.base_sha or ""),
         "provenance": provenance,
-        "import_root": import_root,
+        "import_root": layer.import_root,
         "complete": all_complete,
         _FILES: captured,
     }

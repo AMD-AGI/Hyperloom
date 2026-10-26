@@ -624,7 +624,7 @@ async def test_lifecycle_end_emit_bug_propagates(tmp_path, monkeypatch):
 
     def flaky_evt(*args, **kwargs):
         calls["n"] += 1
-        if kwargs.get("status") == "END":
+        if args[1].status == "END":
             raise RuntimeError("lifecycle END boom")
         return real_evt(*args, **kwargs)
 

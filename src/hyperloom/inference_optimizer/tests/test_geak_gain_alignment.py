@@ -53,7 +53,6 @@ def test_revalidation_validated_when_identity_and_engagement_hold() -> None:
             baseline=100.0,
             got_hash="abc",
             expected_hash="abc",
-            min_engaged_gain_pct=2.0,
         )
         == "validated"
     )
@@ -67,7 +66,6 @@ def test_revalidation_fallback_on_config_identity_mismatch() -> None:
             baseline=100.0,
             got_hash="WRONG",
             expected_hash="abc",
-            min_engaged_gain_pct=2.0,
         )
         == "fallback"
     )
@@ -81,7 +79,6 @@ def test_revalidation_fallback_when_not_engaged() -> None:
             baseline=100.0,
             got_hash="abc",
             expected_hash="abc",
-            min_engaged_gain_pct=2.0,
         )
         == "fallback"
     )
@@ -95,7 +92,6 @@ def test_revalidation_identity_skipped_when_no_expected_hash() -> None:
             baseline=100.0,
             got_hash="",
             expected_hash="",
-            min_engaged_gain_pct=2.0,
         )
         == "validated"
     )
@@ -109,7 +105,6 @@ def test_revalidation_fallback_on_bad_measurement(measured, baseline) -> None:
             baseline=baseline,
             got_hash="abc",
             expected_hash="abc",
-            min_engaged_gain_pct=2.0,
         )
         == "fallback"
     )
@@ -139,7 +134,6 @@ def test_revalidation_no_promote_when_not_beating_current_best() -> None:
             baseline=7380.7,
             got_hash="abc",
             expected_hash="abc",
-            min_engaged_gain_pct=2.0,
             current_best=10067.9,
         )
         == "no_promote"
@@ -154,7 +148,6 @@ def test_revalidation_validated_when_beating_current_best() -> None:
             baseline=7380.7,
             got_hash="abc",
             expected_hash="abc",
-            min_engaged_gain_pct=2.0,
             current_best=10067.9,
         )
         == "validated"

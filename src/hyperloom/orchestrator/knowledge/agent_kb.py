@@ -9,6 +9,7 @@ import hashlib
 import logging
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -236,6 +237,17 @@ class ConfigKB(_ColumnKB):
         )
 
 
+@dataclass(frozen=True)
+class OverlayProvenance:
+    """How one patch-column overlay was captured, as its provenance row records it."""
+
+    base_sha: str = ""
+    complete: bool = True
+    artifacts_outside_root: int = 0
+    realized: bool = True
+    host_origin: Mapping[str, Any] | None = None
+
+
 class PatchKB(_ColumnKB):
     """Source overlays in replay order plus their source-layer snapshots."""
 
@@ -310,16 +322,7 @@ class PatchKB(_ColumnKB):
             return []
         return [ref for ref, _content in members]
 
-    def stage_provenance(
-        self,
-        *,
-        stack_index: int,
-        base_sha: str = "",
-        complete: bool = True,
-        artifacts_outside_root: int = 0,
-        realized: bool = True,
-        host_origin: Mapping[str, Any] | None = None,
-    ) -> bool:
+    def stage_provenance(self, stack_index: int, provenance: OverlayProvenance) -> bool:
         """Record how the overlay at ``stack_index`` was captured."""
         if self._sections is None:
             return False
@@ -329,12 +332,12 @@ class PatchKB(_ColumnKB):
             return False
         row = {
             "stack_index": index,
-            "base_sha": str(base_sha or ""),
-            "complete": bool(complete),
-            "artifacts_outside_root": max(0, int(artifacts_outside_root or 0)),
-            "realized": bool(realized),
+            "base_sha": str(provenance.base_sha or ""),
+            "complete": bool(provenance.complete),
+            "artifacts_outside_root": max(0, int(provenance.artifacts_outside_root or 0)),
+            "realized": bool(provenance.realized),
         }
-        if origin := _host_origin(host_origin):
+        if origin := _host_origin(provenance.host_origin):
             row[HOST_ORIGIN_KEY] = origin
         document, _ = self._staged()
         rows = [
@@ -466,5 +469,6 @@ __all__ = [
     "ConfigKB",
     "DraftArtifactSink",
     "KernelAgentKB",
+    "OverlayProvenance",
     "PatchKB",
 ]

@@ -1271,7 +1271,7 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
         def get_authoritative_recipe(self, **kwargs):
             raise AssertionError("remote CLOSE read legacy RecipeKB")
 
-        def put_recipe(self, **kwargs):
+        def put_recipe(self, upsert):
             raise AssertionError("remote CLOSE wrote legacy RecipeKB")
 
     coordinator = SimpleNamespace(
@@ -2048,6 +2048,7 @@ def test_vendored_scope_query_serializes_only_supplied_dimensions() -> None:
 
 def test_recipe_canonical_id_changes_only_the_agentx_scheme() -> None:
     from hyperloom.inference_optimizer.recipe_snapshot_constants import (
+        RecipeIdentity,
         recipe_canonical_id,
     )
 
@@ -2060,8 +2061,8 @@ def test_recipe_canonical_id_changes_only_the_agentx_scheme() -> None:
         "framework_version": "v",
         "precision": "p",
     }
-    inference = recipe_canonical_id(**kwargs)
-    agentx = recipe_canonical_id(**kwargs, scheme="agentx")
+    inference = recipe_canonical_id(RecipeIdentity(**kwargs))
+    agentx = recipe_canonical_id(RecipeIdentity(**kwargs), scheme="agentx")
     assert inference == "inference:m:h:f:mt:a:v:p"
     assert agentx == "agentx:m:h:f:mt:a:v:p"
     assert inference.split(":", 1)[1] == agentx.split(":", 1)[1]

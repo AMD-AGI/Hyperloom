@@ -20,6 +20,8 @@ import click
 from kernelforge.option_groups import option_group
 
 from . import __version__
+from .dense_shapes import MGrid
+from .router import RoutingEvidence, RoutingTarget
 
 if TYPE_CHECKING:
     from .tuners.base import TuneContext, TuneResult
@@ -332,12 +334,7 @@ def _route(
     """The tuners routed for this model and these inputs; ``plan`` asks the router exactly what ``run`` does."""
     from .router import select_tuners
 
-    return select_tuners(
-        profile,
-        framework=target.framework,
-        precision=target.precision,
-        quant_type=target.quant_type,
-        gpu_type=target.gpu_type,
+    evidence = RoutingEvidence(
         kernel_signature_log=sources.kernel_signature_log or None,
         has_untuned_csv=bool(sources.untuned_csv),
         # A demand file is a shape source like the others, and a stronger one: it lists the keys the runtime actually
@@ -347,6 +344,7 @@ def _route(
         # ...and a stronger *selection* input for the same reason.
         demand_report=demand_report,
     )
+    return select_tuners(profile, target, evidence)
 
 
 def _write_gpu_check(output_dir: Path) -> None:
@@ -557,22 +555,13 @@ def gemm_tune():
 
 
 @dataclass(frozen=True)
-class RoutingTarget:
-    """The deployment the tuners are routed for: framework, precision, quant type and GPU."""
-
-    framework: str
-    precision: str
-    quant_type: str
-    gpu_type: str
-
-
-@dataclass(frozen=True)
 class ServingWorkload:
     """The serving deployment the token coverage is computed for."""
 
     tp: int
     conc: int
     tokens: str
+    m_grid: str
 
 
 @dataclass(frozen=True)
@@ -650,6 +639,7 @@ class TuneRequest:
             **dataclasses.asdict(target),
             tp=self.workload.tp,
             conc=self.workload.conc,
+            m_grid=MGrid(self.workload.m_grid),
             tokens=tokens,
             mp=self.mp,
             output_dir=Path(self.output_dir),
@@ -691,6 +681,12 @@ class TuneRequest:
         click.option("--tp", default=1, type=int, help="Tensor parallel degree"),
         click.option("--conc", default=64, type=int, help="Target serving concurrency (for token coverage)"),
         click.option("--tokens", default="", help="Comma-separated explicit token list (overrides auto)"),
+        click.option(
+            "--m-grid",
+            default=MGrid.BUCKET.value,
+            type=click.Choice([g.value for g in MGrid]),
+            help="Decode and demand M: aiter's multiple-of-16 bucket up to 256 (bucket), or exact batch sizes (exact)",
+        ),
     ),
     click.option("--mp", default=1, type=int, help="Number of GPUs for parallel tuning"),
     click.option("--output-dir", required=True, type=click.Path(), help="Output directory for all artifacts"),

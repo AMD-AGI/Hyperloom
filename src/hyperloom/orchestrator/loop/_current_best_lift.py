@@ -310,11 +310,8 @@ class CurrentBestLiftMixin:
         stack_event.record_adoption(
             stack_index=len(self.shared_state.optimization_stack) - 1,
             entry=stack_entry,
-            throughput_before=graded.reference,
-            throughput_after=graded.candidate,
+            graded=graded,
             baseline_tput=baseline_on_axis(self.shared_state, graded.objective),
-            objective=graded.objective,
-            degrade_reason=graded.degrade_reason,
         )
 
     def _stack_entry(self, request: _LiftRequest, launch: _ResolvedLaunch) -> dict[str, Any]:
