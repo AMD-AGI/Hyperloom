@@ -160,6 +160,82 @@ def test_a_broad_noqa_the_change_removed_elsewhere_was_moved_not_added() -> None
     assert checks.broad_noqa_problems("m.py", BROAD_NOQA, {3, 15}, removed) == []
 
 
+# --- Broad catch that records nothing ---------------------------------------------
+
+
+BROAD_UNRECORDED = """\
+def swallows():
+    try:
+        f()
+    except Exception:
+        pass
+def logs():
+    try:
+        f()
+    except Exception:
+        log.warning("f failed", exc_info=True)
+def reraises():
+    try:
+        f()
+    except BaseException:
+        cleanup()
+        raise
+def converts():
+    try:
+        return f()
+    except Exception:
+        return None
+def narrow():
+    try:
+        f()
+    except ValueError:
+        pass
+def helper():
+    try:
+        f()
+    except:
+        _log(traceback.format_exc())
+def nested():
+    try:
+        f()
+    except (OSError, Exception):
+        def later():
+            log.warning("f failed")
+        return later
+def raising_helper():
+    try:
+        f()
+    except Exception as exc:
+        _raise_failure(exc)
+def stored():
+    try:
+        f()
+    except BaseException as exc:
+        error = exc
+    restore()
+    if error is not None:
+        raise error
+def converted_by_name():
+    try:
+        f()
+    except Exception as exc:
+        return _raised(exc), catalog_entry()
+"""
+_EXCEPT_ROWS = {4, 9, 14, 20, 25, 30, 35, 42, 47, 55}
+
+
+def test_an_added_broad_handler_must_reraise_or_record() -> None:
+    got = [(p.check, p.line) for p in checks.broad_unrecorded_problems("m.py", BROAD_UNRECORDED, _EXCEPT_ROWS)]
+    unrecorded = [(checks.BROAD_UNRECORDED, row) for row in (4, 20, 35, 55)]
+    assert got == unrecorded
+
+
+def test_a_broad_handler_the_change_did_not_add_or_only_moved_is_not_judged() -> None:
+    assert checks.broad_unrecorded_problems("m.py", BROAD_UNRECORDED, {3, 5, 21}) == []
+    assert checks.broad_unrecorded_problems("m.py", BROAD_UNRECORDED, {4}, {"except Exception:"}) == []
+    assert checks.broad_unrecorded_problems("src/tests/test_m.py", BROAD_UNRECORDED, _EXCEPT_ROWS) == []
+
+
 # --- English only ----------------------------------------------------------------
 
 

@@ -86,10 +86,17 @@ _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 _SNIFF_BYTES = 8192
 #: Check names, as ``Problem.check`` and the report's sections carry them.
 COMMENTS, ENGLISH, TEST_IMPORTS, LITERALS = "comments", "english", "test-imports", "literals"
-BROAD_NOQA = "broad-noqa"
+BROAD_NOQA, BROAD_UNRECORDED = "broad-noqa", "broad-unrecorded"
 #: A noqa comment naming BLE001; ``reason`` is what follows the code list.
 _BROAD_NOQA = re.compile(r"#\s*noqa:\s*(?:[A-Z]+[0-9]+\s*,\s*)*BLE001\b(?:\s*,\s*[A-Z]+[0-9]+)*(?P<reason>.*)")
 _REASON_PUNCTUATION = " \t-:#\u2014"
+_BROAD_TYPES = frozenset({"Exception", "BaseException"})
+#: Calls that record an error: logger methods, ``print``, ``err`` / ``warn`` helpers.
+_RECORD_CALLS = frozenset({"debug", "info", "warning", "warn", "error", "exception", "critical", "log", "print", "err"})
+_RECORD_MODULES = frozenset({"traceback", "warnings"})
+#: A helper named for logging (``_log``, ``append_log``, ``logger``) or for raising (``_raise_failure``).
+_RECORD_NAME, _RAISE_NAME = re.compile(r"(?:^|_)log(?:_|ger|$)"), re.compile(r"_*raise(?:_|$)")
+_OWN_SCOPE_STOP = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 #: What makes a module test code: a ``tests`` package on its path, or a ``test_`` file name.
 _TESTS, _TEST_PREFIX, _CONFTEST = "tests", "test_", "conftest"
 #: Calls that import the module their first (string) argument names.
@@ -285,6 +292,50 @@ def broad_noqa_problems(path: str, text: str, added: set[int], removed: Iterable
             continue
         problems.append(Problem(BROAD_NOQA, path, row, "`# noqa: BLE001` gives no reason"))
     return problems
+
+
+def broad_unrecorded_problems(path: str, text: str, added: set[int], removed: Iterable[str] = ()) -> list[Problem]:
+    """Refusals for each broad ``except`` that ``added`` puts into a non-test ``text`` and that neither re-raises
+    nor records the error."""
+    if is_test_path(path):
+        return []
+    lines, moved = text.splitlines(), set(removed)
+    problems = []
+    for node in ast.walk(ast.parse(text)):
+        if not isinstance(node, ast.ExceptHandler) or node.lineno not in added or not _is_broad(node):
+            continue
+        if lines[node.lineno - 1].strip() in moved or _reraises_or_records(node):
+            continue
+        problems.append(Problem(BROAD_UNRECORDED, path, node.lineno, "broad `except` neither re-raises nor records"))
+    return sorted(problems, key=lambda p: p.line)
+
+
+def _is_broad(handler: ast.ExceptHandler) -> bool:
+    caught = handler.type
+    names = caught.elts if isinstance(caught, ast.Tuple) else [caught]
+    return caught is None or any(isinstance(n, ast.Name) and n.id in _BROAD_TYPES for n in names)
+
+
+def _reraises_or_records(handler: ast.ExceptHandler) -> bool:
+    """Whether the handler's own body (nested defs aside) raises, keeps the error to raise later, or records it."""
+    pending: list[ast.AST] = [node for node in handler.body if not isinstance(node, _OWN_SCOPE_STOP)]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ast.Raise) or (isinstance(node, ast.Call) and _records_or_raises(node.func)):
+            return True
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name) and node.value.id == handler.name:
+            return True
+        pending += [child for child in ast.iter_child_nodes(node) if not isinstance(child, _OWN_SCOPE_STOP)]
+    return False
+
+
+def _records_or_raises(func: ast.expr) -> bool:
+    """A call that records the error (a logger method, ``print``, a ``*log*`` helper) or raises it (``*raise*``)."""
+    name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+    module = func.value.id if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) else ""
+    lowered = name.lower()
+    named = _RECORD_NAME.search(lowered) or _RAISE_NAME.match(lowered)
+    return name in _RECORD_CALLS or named is not None or module in _RECORD_MODULES
 
 
 def _comment_text_problems(path: str, row: int, comment: str) -> list[Problem]:
@@ -599,6 +650,7 @@ def run_all(root: Path, roots: Iterable[str], exclude: Iterable[str], units: Uni
         text = full.read_text(encoding=ENCODING)
         problems += comment_problems(path, text, diff.added.get(path, set()), diff.removed)
         problems += broad_noqa_problems(path, text, diff.added.get(path, set()), diff.removed)
+        problems += broad_unrecorded_problems(path, text, diff.added.get(path, set()), diff.removed)
         if path in modules and not is_test_path(path):
             literal_paths.append((path, text))
     befores = [(p, show(root, since, p)) for p in touched if _counts_literals(p, roots, excluded)]
