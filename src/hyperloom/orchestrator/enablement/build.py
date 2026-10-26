@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.coerce import first_text
 from hyperloom.common.fs_utils import read_text_nofollow
 from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
 from hyperloom.inference_optimizer.gpu_types import targeted_build_validated
@@ -48,9 +49,30 @@ def _repo_matches_targeted_build_component(repo_url: str, component: str) -> boo
 _ROUTING_FIELDS: tuple[str, ...] = ("routed", "probe_task_id")
 
 
-def _targeted_build_switched_off() -> bool:
-    """The operator switched targeted builds off."""
-    return os.environ.get("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "").strip() == "1"
+def _targeted_build_unavailable() -> bool:
+    """The operator switched targeted builds off, or the run is multi-node, where none is attempted."""
+    if os.environ.get("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "").strip() == "1":
+        return True
+    from ..actions.executors._multi_node_env import is_multi_node
+
+    return is_multi_node()
+
+
+def _compiled_gap_component(framework: str, symbol: str, launch_log: str) -> str:
+    """The component a compiled-miss build targets, picked from the failure evidence.
+
+    sgl_kernel when the offending symbol or log names sgl-kernel; vllm_source when vLLM's own C extension is
+    implicated; aiter for every other compiled-miss gap.
+    """
+    sym_lower = symbol.lower()
+    log_lower = launch_log.lower()
+    if "sgl_kernel" in sym_lower or "sgl-kernel" in sym_lower or "sgl_kernel" in log_lower:
+        return "sgl_kernel"
+    if framework == "vllm" and (
+        "vllm/_c" in log_lower or "vllm.extension" in log_lower or "_c.so" in log_lower or "vllm._c" in sym_lower
+    ):
+        return "vllm_source"
+    return "aiter"
 
 
 class EnablementBuild(CoordinatorCollaborator):
@@ -85,11 +107,7 @@ class EnablementBuild(CoordinatorCollaborator):
         attempt: int = 0,
     ) -> None:
         """Enqueue a targeted build row when the residual gap is a compiled miss."""
-        if _targeted_build_switched_off():
-            return
-        from ..actions.executors._multi_node_env import is_multi_node
-
-        if is_multi_node():
+        if _targeted_build_unavailable():
             return
         from hyperloom.common.failure_signature import (
             MISSING_MODEL_ARCH,
@@ -108,40 +126,37 @@ class EnablementBuild(CoordinatorCollaborator):
             session_dir=session_root(self),
         )
         signature = verdict.signature
-        framework = (getattr(state, "framework", "") or "").strip().lower()
-        gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
+        framework = first_text(getattr(state, "framework", "")).lower()
+        gpu_type = first_text(getattr(state, "gpu_type", "")).lower()
 
         # Two escalation triggers: 1.
         is_compiled_gap = is_targeted_build_candidate(signature, launch_log)
         arch_stall = (
             signature.kind in (MISSING_MODEL_ARCH, MISSING_WEIGHT, NOT_IMPLEMENTED)
             and framework == "vllm"
-            and int(attempt or 0) >= 1
+            and attempt >= 1
         )
         if not is_compiled_gap and not arch_stall:
             return
+        # Past the guard, a gap that is not a compiled miss is an arch stall.
+        arch_only = not is_compiled_gap
 
         # Derive novelty fields from the current failure + session context.
         existing_stack = state.enablement.kept_stack_action or {}
-        repo_url = str(existing_stack.get("repo_url") or "").strip()
-        ref = str(existing_stack.get("ref") or "").strip()
+        repo_url = first_text(existing_stack.get("repo_url"))
+        ref = first_text(existing_stack.get("ref"))
 
-        # Pick the component from the failure evidence: sgl_kernel when the offending symbol/log names sgl-kernel;
-        # vllm_source when vLLM's own C extension is implicated; aiter (default) for all other compiled-miss gaps.
-        sym_lower = (signature.offending_symbol or "").lower()
-        log_lower = launch_log.lower()
-        if arch_stall and not is_compiled_gap:
+        if arch_only:
             # Arch/weight deep-failure on vLLM after source patches: the fix is a from-source vLLM build that
             # natively implements the arch, not an aiter/sgl-kernel op build.
             component = "vllm_source"
-        elif "sgl_kernel" in sym_lower or "sgl-kernel" in sym_lower or "sgl_kernel" in log_lower:
-            component = "sgl_kernel"
-        elif framework == "vllm" and (
-            "vllm/_c" in log_lower or "vllm.extension" in log_lower or "_c.so" in log_lower or "vllm._c" in sym_lower
-        ):
-            component = "vllm_source"
+            reason = (
+                f"Rung-5 arch-stall auto-escalation: {signature.kind} persists on vLLM "
+                f"after {attempt} source-patch attempt(s) — build vLLM from source"
+            )
         else:
-            component = "aiter"
+            component = _compiled_gap_component(framework, signature.offending_symbol, launch_log)
+            reason = f"Rung-5 auto-escalation from {signature.kind}"
 
         source_pr_url = ""
         # When no operator-pinned/kept ref, try the top discovery candidate.
@@ -155,26 +170,18 @@ class EnablementBuild(CoordinatorCollaborator):
                 "framework_ext": (),
             }
             hints = _component_hints.get(component, ())
-            default_repo = repo_url or ""
-            for _cand in list(state.enablement.candidate_refs or []):
-                _repo, _ref, _pr_url = resolve_build_ref(str(_cand), default_repo)
+            for _cand in list(state.enablement.candidate_refs):
+                _repo, _ref, _pr_url = resolve_build_ref(str(_cand), repo_url)
                 if not _ref:
                     continue
-                if hints:
-                    _repo_lower = (_repo or _cand).lower()
-                    if not any(h in _repo_lower for h in hints):
-                        continue
-                repo_url = _repo or repo_url
+                _repo_lower = (_repo or _cand).lower()
+                if not any(h in _repo_lower for h in hints):
+                    continue
+                repo_url = _repo
                 ref = _ref
                 source_pr_url = _pr_url
                 break
 
-        reason = (
-            f"Rung-5 arch-stall auto-escalation: {signature.kind} persists on vLLM "
-            f"after {int(attempt or 0)} source-patch attempt(s) — build vLLM from source"
-            if (arch_stall and not is_compiled_gap)
-            else f"Rung-5 auto-escalation from {signature.kind}"
-        )
         if not _repo_matches_targeted_build_component(repo_url, component):
             log.warning(
                 "ENABLEMENT: targeted_build repo/component mismatch component=%s repo_url=%s",
@@ -186,7 +193,7 @@ class EnablementBuild(CoordinatorCollaborator):
             gap_id=f"gap.enablement.{signature.kind}",
             framework=framework or "vllm",
             component=component,
-            capability=str(signature.offending_symbol or signature.kind or ""),
+            capability=signature.offending_symbol or signature.kind,
             reason=reason,
             repo_url=repo_url,
             ref=ref,
@@ -203,7 +210,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 "gpu_arch=%s digest=%s degraded=%s task=%s",
                 signature.kind,
                 component,
-                bool(arch_stall and not is_compiled_gap),
+                arch_only,
                 action.gpu_arch,
                 failure_digest(verdict.observation)[:12],
                 loaded.degraded or "-",
@@ -218,8 +225,8 @@ class EnablementBuild(CoordinatorCollaborator):
     ) -> None:
         """Enqueue a targeted build the enablement specialist explicitly requested."""
         state = self.shared_state
-        marker_task_id = str(state.enablement.last_specialist_task_id or "").strip()
-        task_id = str(task_id or marker_task_id).strip()
+        marker_task_id = first_text(state.enablement.last_specialist_task_id)
+        task_id = first_text(task_id, marker_task_id)
         if not task_id:
             return
 
@@ -228,12 +235,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 state.enablement.last_specialist_task_id = ""
 
         try:
-            if _targeted_build_switched_off():
-                _consume_marker()
-                return
-            from ..actions.executors._multi_node_env import is_multi_node
-
-            if is_multi_node():
+            if _targeted_build_unavailable():
                 _consume_marker()
                 return
             if payload is None:
@@ -251,65 +253,72 @@ class EnablementBuild(CoordinatorCollaborator):
                 _consume_marker()
                 return
 
-            from .runtime.build_actions import (
-                _COMPONENTS,
-                TargetedBuildAction,
-                resolve_build_ref,
-            )
-
-            component = str(req.get("component") or "").strip().lower()
-            if component not in _COMPONENTS:
-                # A from-source framework build is the safest default for an arch/model request that named no valid
-                # compiled component.
-                component = "vllm_source"
-            framework = (getattr(state, "framework", "") or "").strip().lower() or "vllm"
-            gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
-            repo_url = str(req.get("repo_url") or "").strip()
-            ref = str(req.get("ref") or "").strip()
-            source_pr_url = ""
-            # A PR-like ``ref``/``repo_url`` carries its own repo + provenance.
-            candidate = ref or repo_url
-            if candidate:
-                _repo, _ref, _pr = resolve_build_ref(candidate, repo_url)
-                repo_url = _repo or repo_url
-                # Take the resolved ref verbatim, including empty.
-                ref = _ref
-                source_pr_url = _pr
-            if not _repo_matches_targeted_build_component(repo_url, component):
-                log.warning(
-                    "ENABLEMENT: specialist-requested build repo/component mismatch component=%s repo_url=%s",
-                    component,
-                    repo_url,
-                )
+            capability = first_text(req.get("capability"))
+            action = self._specialist_build_action(req, capability)
+            if action is None:
                 _consume_marker()
                 return
-            capability = str(req.get("capability") or "").strip()
-            reason = str(req.get("reason") or "").strip() or "specialist-requested targeted build"
-            action = TargetedBuildAction(
-                gap_id=f"gap.enablement.{capability or component}",
-                framework=framework,
-                component=component,
-                capability=capability or component,
-                reason=f"specialist request: {reason}",
-                repo_url=repo_url,
-                ref=ref,
-                gpu_arch=gfx_arch_for_gpu_type(gpu_type) or "",
-                build_budget_sec=0,
-                source_pr_url=source_pr_url,
-            )
             build_task_id = await self._coord.build_lifecycle.enqueue_targeted_build(action)
             if build_task_id:
                 _consume_marker()
                 log.info(
                     "ENABLEMENT: enqueued specialist-requested targeted_build "
                     "component=%s capability=%s ref=%s task=%s",
-                    component,
+                    action.component,
                     capability or "(none)",
-                    ref or "(autoselect)",
+                    action.ref or "(autoselect)",
                     build_task_id,
                 )
         except Exception:
             log.debug("enablement: specialist-requested build enqueue failed", exc_info=True)
+
+    def _specialist_build_action(self, req: dict[str, Any], capability: str) -> TargetedBuildAction | None:
+        """The targeted build a specialist request names, or ``None`` when its repo cannot build the component."""
+        from .runtime.build_actions import (
+            _COMPONENTS,
+            TargetedBuildAction,
+            resolve_build_ref,
+        )
+
+        state = self.shared_state
+        component = first_text(req.get("component")).lower()
+        if component not in _COMPONENTS:
+            # A from-source framework build is the safest default for an arch/model request that named no valid
+            # compiled component.
+            component = "vllm_source"
+        framework = first_text(getattr(state, "framework", "")).lower() or "vllm"
+        gpu_type = first_text(getattr(state, "gpu_type", "")).lower()
+        repo_url = first_text(req.get("repo_url"))
+        ref = first_text(req.get("ref"))
+        source_pr_url = ""
+        # A PR-like ``ref``/``repo_url`` carries its own repo + provenance.
+        candidate = ref or repo_url
+        if candidate:
+            _repo, _ref, _pr = resolve_build_ref(candidate, repo_url)
+            repo_url = _repo or repo_url
+            # Take the resolved ref verbatim, including empty.
+            ref = _ref
+            source_pr_url = _pr
+        if not _repo_matches_targeted_build_component(repo_url, component):
+            log.warning(
+                "ENABLEMENT: specialist-requested build repo/component mismatch component=%s repo_url=%s",
+                component,
+                repo_url,
+            )
+            return None
+        reason = first_text(req.get("reason")) or "specialist-requested targeted build"
+        return TargetedBuildAction(
+            gap_id=f"gap.enablement.{capability or component}",
+            framework=framework,
+            component=component,
+            capability=capability or component,
+            reason=f"specialist request: {reason}",
+            repo_url=repo_url,
+            ref=ref,
+            gpu_arch=gfx_arch_for_gpu_type(gpu_type) or "",
+            build_budget_sec=0,
+            source_pr_url=source_pr_url,
+        )
 
     async def maybe_route_build_outcomes(self) -> None:
         """Turn the oldest unrouted succeeded targeted_build row into a launch probe.
