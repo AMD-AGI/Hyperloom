@@ -152,8 +152,17 @@ def test_a_missing_store_reads_as_no_tree(tmp_path):
     assert SearchTreeStore(str(tmp_path)).load() is None
 
 
+def test_tree_view_says_where_every_attempt_and_lesson_lives(tree):
+    view = render_tree_view(tree, archive_dir="/ws/forge_experiments/candidates", lessons_dir="/ws/lessons")
+
+    assert "/ws/forge_experiments/candidates/iter_NNN/" in view
+    assert "/ws/lessons/iter_NNN.md" in view
+    assert "git diff <parent> <commit>" in view
+    assert view.index("## Where the detail lives") < view.index("## Search tree")
+
+
 def test_tree_view_names_every_node_its_attempts_and_each_branch_stall(tree):
-    view = render_tree_view(tree)
+    view = render_tree_view(tree, archive_dir="candidates", lessons_dir="lessons")
 
     node_lines = {
         line.split()[1]: line for line in view.splitlines() if line.lstrip().startswith("- ") and "depth" in line

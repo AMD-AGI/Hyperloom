@@ -74,8 +74,9 @@ class _Script:
     async def select(self, *, workspace, tree_view, resolve, usage=None):
         start = self._step()["start"](self.loop._search_tree)
         if start is None:
-            return StartSelection(failure="the answer named no START_COMMIT")
-        return StartSelection(commit=resolve(start), reason=f"build on {start[:8]}")
+            return StartSelection(failure="the answer named no START_COMMIT", answer="I cannot decide.")
+        answer = f"build on {start[:8]}\nSTART_COMMIT: {start[:12]}"
+        return StartSelection(commit=resolve(start), reason=f"build on {start[:8]}", answer=answer)
 
     async def agent(self, kernel_path, _history, session_sink):
         session_sink["plan"] = f"variant {len(self.loop.results) + 1}"
@@ -177,6 +178,20 @@ def test_a_node_commit_message_carries_its_start_plan_and_measurement(campaign):
     assert "plan: variant 3" in message
     assert "mean case speedup: 1.15" in message
     assert "case ms: case=" in message and "snr_db: 40.0" in message
+
+
+def test_every_selection_is_recorded_with_the_view_it_was_given_and_its_whole_answer(campaign):
+    root = campaign.workspace / "forge_experiments" / "tree_selection"
+    tree = SearchTreeStore(str(campaign.workspace)).load()
+
+    assert sorted(path.name for path in root.iterdir()) == [f"iter_{n:03d}.md" for n in range(1, len(_STEPS) + 1)]
+    first = (root / "iter_001.md").read_text()
+    assert f"- Start: {tree.root.commit}" in first and "- Fallback: none" in first
+    assert "## Where the detail lives" in first and "forge_experiments/candidates/iter_NNN/" in first
+    assert f"START_COMMIT: {tree.root.commit[:12]}" in first
+    last = (root / "iter_004.md").read_text()
+    assert "- Fallback: the answer named no START_COMMIT" in last
+    assert "I cannot decide." in last
 
 
 def test_only_a_new_global_best_is_published(campaign):
