@@ -19,7 +19,8 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import enablement_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import ENABLEMENT_EVENT_SECTIONS
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -81,7 +82,7 @@ def _events(session_dir: Path) -> list[dict[str, Any]]:
 def _ext() -> dict[str, Any]:
     """The lane's assembled ``ext``, whether or not it has closed yet."""
     ext, _status = enablement_event.assemble_enablement_ext(
-        enablement_event_parts(),
+        event_parts(ENABLEMENT_EVENT_SECTIONS),
         event=enablement_event.enablement_event_id(),
     )
     return ext

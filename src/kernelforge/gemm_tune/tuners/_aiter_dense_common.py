@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from .base import TuneContext, TuneResult, micro_metrics
+from ..aiter_graph_retime import RetimeTarget
+from ._graph_retime import retime_table
 from ._row_accuracy import RelNormFn, drop_inaccurate_rows, dropped_row_record
 from ._serve_safe import _SPLITK_FORWARDING_LIBTYPES, _fastest_serve_safe, _serve_safe_candidates, _SplitKLimit
 from ..script_probe import filter_args, probe_script
@@ -460,7 +462,7 @@ def _derive_input_csv_from_config(ctx: TuneContext, work_dir: Path, needs_q_dtyp
     if intermediate_size < 1 and not (q_lora_rank and not kv_lora_rank):
         return None
     num_heads = int(getattr(profile, "num_attention_heads", 0) or 0)
-    num_kv_heads = int(getattr(profile, "num_key_value_heads", 0) or num_heads or 0)
+    num_kv_heads = int(getattr(profile, "num_key_value_heads", 0) or num_heads)
     nk_shapes = compute_dense_nk_shapes(
         DenseGeometry(
             hidden_size=hidden_size,
@@ -469,8 +471,8 @@ def _derive_input_csv_from_config(ctx: TuneContext, work_dir: Path, needs_q_dtyp
             num_kv_heads=num_kv_heads,
             head_dim=int(getattr(profile, "head_dim", 0) or 0),
             v_head_dim=int(getattr(profile, "v_head_dim", 0) or 0),
-            q_lora_rank=int(getattr(profile, "q_lora_rank", 0) or 0),
-            kv_lora_rank=int(getattr(profile, "kv_lora_rank", 0) or 0),
+            q_lora_rank=q_lora_rank,
+            kv_lora_rank=kv_lora_rank,
             qk_nope_head_dim=int(getattr(profile, "qk_nope_head_dim", 0) or 0),
             qk_rope_head_dim=int(getattr(profile, "qk_rope_head_dim", 0) or 0),
         ),
@@ -693,6 +695,7 @@ def _invoke_tuner(
             cwd=invocation.aiter_root,
             timeout_s=ctx.timeout_s,
             log_file=invocation.work_dir / "tune.log",
+            env_override=_tr.compare_temp_env(),
         )
         return rc, stdout, stderr, None
     # Per-shape process isolation + provenance-keyed fault blocklist.
@@ -750,7 +753,7 @@ def _splitk_rel_norm_fn(script_key: str, ctx: TuneContext) -> RelNormFn | None:
 
 
 def _serve_safe_limit(script_key: str, ctx: TuneContext) -> _SplitKLimit:
-    """The split-K each shape may ship and the accuracy check a replacement passes, for the cap and the filter."""
+    """The split-K each shape may ship and the accuracy check a replacement passes, for cap, filter and re-time."""
     support_fn, rel_norm = _splitk_support_fn(script_key, ctx), _splitk_rel_norm_fn(script_key, ctx)
     return _SplitKLimit(int(os.environ.get("FORGE_MAX_SPLITK", "2")), support_fn, rel_norm)
 
@@ -783,13 +786,13 @@ def _apply_splitk_cap(artifact: str, profile_csv: Path, limit: _SplitKLimit, *, 
 def _shape_results_from_compare_report(tuner_name: str, run_start_time: float, work_dir: Path) -> list[dict]:
     """Per-shape rows from the compare table aiter writes to disk instead of stdout.
 
-    aiter writes the ``--compare`` table to ``/tmp/aiter_compare/`` when there
+    aiter writes the ``--compare`` table to ``<tempdir>/aiter_compare/`` when there
     are more than 30 shapes; stdout then carries only a "Successfully tuned N
     shapes" summary.
     """
     compare_report = _find_latest_compare_report(tuner_name, run_start_time)
     if compare_report is None or not compare_report.is_file():
-        log.info("no compare report for %s under /tmp/aiter_compare after run start", tuner_name)
+        log.info("no compare report for %s under %s after run start", tuner_name, _compare_dir())
         return []
     log.info("compare report found for %s: %s", tuner_name, compare_report)
     dest = work_dir / f"compare_{tuner_name}.txt"
@@ -906,6 +909,7 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
 
     aiter_root = resolve_aiter_root()
     run_start_time = time.time()
+    deadline = run_start_time + ctx.timeout_s
 
     rc, stdout, stderr, iso_candidate = _invoke_tuner(
         _tr.TunerInvocation(script, base_args, input_csv, tuned_csv, work_dir, aiter_root),
@@ -929,7 +933,6 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
             error_class="subprocess_error",
         )
 
-    # Find candidate CSV.
     candidate = iso_candidate if iso_candidate is not None else _find_latest_candidate(tuner_name, run_start_time)
     artifact = str(candidate) if candidate else str(tuned_csv)
 
@@ -960,9 +963,8 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
             error=f"aiter's accuracy figures were not applied to {artifact}: {accuracy.reason}",
             error_class="accuracy_filter_incomplete",
         )
-    dropped_inaccurate = accuracy.dropped
-    if dropped_inaccurate:
-        shape_results = _forget_shapes_that_lost_their_row(shape_results, dropped_inaccurate)
+    if accuracy.dropped:
+        shape_results = _forget_shapes_that_lost_their_row(shape_results, accuracy.dropped)
 
     if any(r.get("is_new") or r.get("tuned_unverified") for r in shape_results):
         force_candidate = True
@@ -971,11 +973,7 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
     # deployed artifact.
     n_dropped, n_kept = _filter_unimproved_rows(Path(artifact), shape_results)
     if n_dropped:
-        log.info(
-            "deployed artifact: dropped %d row(s) that were compared and did not win, %d kept",
-            n_dropped,
-            n_kept,
-        )
+        log.info("deployed artifact: dropped %d row(s) that lost their comparison, %d kept", n_dropped, n_kept)
 
     summary = _summarize_shape_results(shape_results)
 
@@ -992,7 +990,8 @@ def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path
         avg_micro_speedup=summary["avg"],
         candidate=force_candidate,
         shape_results=shape_results,
-        dropped_inaccurate=[dropped_row_record(r) for r in dropped_inaccurate],
+        dropped_inaccurate=[dropped_row_record(r) for r in accuracy.dropped],
+        graph_retime=retime_table(artifact, profile_csv, limit, RetimeTarget(script_key, _gpu_ids(ctx), deadline)),
     )
 
 
@@ -1024,12 +1023,7 @@ def _filter_unimproved_rows(
             continue
         if r.get("is_new") or r.get("tuned_unverified") or r.get("below_update_bar") and r["speedup"] > 1.0:
             continue
-        if r.get("speedup") is None and r.get("default_us") is None:
-            continue
-        try:
-            losers.add((int(r["M"]), int(r["N"]), int(r["K"])))
-        except (KeyError, TypeError, ValueError):
-            continue
+        losers.add((r["M"], r["N"], r["K"]))
     if not losers:
         return 0, 0
 
@@ -1215,37 +1209,27 @@ def _find_latest_compare_report_impl(
     tuner_name: str,
     start_time: float,
     compare_dir: Path,
+    pattern: str = "*.compare.txt",
 ) -> Path | None:
-    """Find the most recent compare report from ``compare_dir`` for THIS run."""
+    """Find the most recent ``pattern`` file in ``compare_dir`` written by THIS run."""
     if not compare_dir.is_dir():
         return None
-    reports = [
-        p
-        for p in compare_dir.glob("*.compare.txt")
-        if p.stat().st_mtime > start_time and _stem_matches(tuner_name, p.name)
+    found = [
+        p for p in compare_dir.glob(pattern) if p.stat().st_mtime > start_time and _stem_matches(tuner_name, p.name)
     ]
-    if not reports:
-        return None
-    reports.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return reports[0]
+    return max(found, key=lambda p: p.stat().st_mtime, default=None)
+
+
+def _compare_dir() -> Path:
+    """aiter's compare dir: under ``tempfile.gettempdir()``, which the tuner is pinned to."""
+    return Path(_tr.compare_temp_env()["TMPDIR"]) / "aiter_compare"
 
 
 def _find_latest_compare_report(tuner_name: str, start_time: float) -> Path | None:
-    """Find the most recent compare report from /tmp/aiter_compare/ for THIS run."""
-    return _find_latest_compare_report_impl(tuner_name, start_time, Path("/tmp/aiter_compare"))
+    """Find the most recent compare report from the aiter compare dir for THIS run."""
+    return _find_latest_compare_report_impl(tuner_name, start_time, _compare_dir())
 
 
 def _find_latest_candidate(tuner_name: str, start_time: float) -> Path | None:
-    """Find the most recent candidate CSV from /tmp/aiter_compare/ for THIS run."""
-    compare_dir = Path("/tmp/aiter_compare")
-    if not compare_dir.is_dir():
-        return None
-    candidates = [
-        p
-        for p in compare_dir.glob("*.candidate.csv")
-        if p.stat().st_mtime > start_time and _stem_matches(tuner_name, p.name)
-    ]
-    if not candidates:
-        return None
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0]
+    """Find the most recent candidate CSV from the aiter compare dir for THIS run."""
+    return _find_latest_compare_report_impl(tuner_name, start_time, _compare_dir(), "*.candidate.csv")

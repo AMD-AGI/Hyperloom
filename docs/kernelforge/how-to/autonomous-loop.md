@@ -276,11 +276,16 @@ exception summary. Apply decisions remain separate in `reference_reason`.
 ## Model relay
 
 Every new campaign relays its search between Agent profiles: one profile per
-registered provider (`claude` runs Claude Code, `codex` runs Codex), the
-`--agent-backend` provider first as the primary. The campaign records only the
+auto-selectable provider (`claude` runs Claude Code, `codex` runs Codex), the
+`--agent-backend` provider first as the primary. `deepseek` (the DeepSeek
+Harness) is not auto-selectable: it joins the relay only as the primary, when
+the campaign starts on it through `--agent-backend deepseek`,
+`FORGE_AGENT_BACKEND=deepseek` or `INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`
+(the last is how a Hyperloom run selects it). The campaign records only the
 members, the primary and the blockage threshold. Each session resolves every
 member's model: the primary takes `--model`; every member without one takes its
-provider's `CLAUDE_MODEL` / `CODEX_MODEL`, else the provider's default model.
+provider's `CLAUDE_MODEL` / `CODEX_MODEL` / `DSH_MODEL`, else the provider's
+default model.
 `--model`, `--agent-reasoning-effort` and the model variables therefore apply on
 `--resume` as well. An `--agent-backend` (or `FORGE_AGENT_BACKEND`) that differs
 from the campaign's primary is refused on resume; leave it unset to keep the

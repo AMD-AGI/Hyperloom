@@ -107,7 +107,7 @@ def attribute_sigma(
 ) -> SigmaAttribution | None:
     """Blame the objective's spread on the cases that produced it."""
     scored = [case_id for case_id in sorted(baseline_case_times) if case_id in case_series]
-    if not scored or len(scored) != len(baseline_case_times):
+    if len(scored) != len(baseline_case_times):
         return None
     count = len(scored)
     sizes = {len(tuple(case_series[case_id])) for case_id in scored}
@@ -119,7 +119,7 @@ def attribute_sigma(
     mean_times: dict[str, float] = {}
     for case_id in scored:
         baseline = float(baseline_case_times[case_id])
-        times = [float(value) for value in case_series[case_id]]
+        times = case_series[case_id]
         if baseline <= 0.0 or not math.isfinite(baseline):
             return None
         if any(not math.isfinite(t) or t <= 0.0 for t in times):
@@ -130,7 +130,7 @@ def attribute_sigma(
 
     total_variance = sum(sigma * sigma for sigma in case_sigmas.values())
     total_time = sum(mean_times.values())
-    if total_variance <= 0.0 or total_time <= 0.0:
+    if total_variance <= 0.0:
         return None
 
     variance_shares = {case_id: (sigma * sigma) / total_variance for case_id, sigma in case_sigmas.items()}

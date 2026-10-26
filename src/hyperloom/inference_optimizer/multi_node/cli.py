@@ -12,6 +12,7 @@ import os
 import shlex
 import tempfile
 import time
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -1796,5 +1797,6 @@ def main(argv: list[str] | None = None) -> int:
         err(f"{type(exc).__name__}: {exc}")
         return EXIT_TRANSIENT
     except Exception as exc:  # noqa: BLE001
+        err(traceback.format_exc().rstrip())
         err(f"{type(exc).__name__}: {exc}")
         return EXIT_TRANSIENT

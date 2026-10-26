@@ -239,8 +239,8 @@ def _is_inside(child: Path, parent: Path) -> bool:
 def load_sandbox(environ: dict[str, str] | None = None) -> ProbeSandbox:
     """Read the sandbox this probe was started for and validate its isolation."""
     env = os.environ if environ is None else environ
-    scratch_raw = str(env.get(SCRATCH_ENV) or "").strip()
-    workspace_raw = str(env.get(WORKSPACE_ENV) or "").strip()
+    scratch_raw = env.get(SCRATCH_ENV, "").strip()
+    workspace_raw = env.get(WORKSPACE_ENV, "").strip()
     if not scratch_raw or not workspace_raw:
         raise ProbeSandboxError(f"{SCRATCH_ENV} and {WORKSPACE_ENV} must both be set")
     scratch_root = Path(scratch_raw).expanduser().resolve()
@@ -249,7 +249,7 @@ def load_sandbox(environ: dict[str, str] | None = None) -> ProbeSandbox:
         raise ProbeSandboxError(f"probe scratch root {scratch_root} overlaps the canonical tree {workspace}")
     if not scratch_root.is_dir():
         raise ProbeSandboxError(f"probe scratch root is not a directory: {scratch_root}")
-    ledger_raw = str(env.get(LEDGER_ENV) or "").strip()
+    ledger_raw = env.get(LEDGER_ENV, "").strip()
     ledger_path = Path(ledger_raw).expanduser().resolve() if ledger_raw else scratch_root / "probe_ledger.jsonl"
     if not _is_inside(ledger_path, scratch_root):
         raise ProbeSandboxError(f"probe ledger {ledger_path} lies outside the scratch root {scratch_root}")
@@ -260,9 +260,9 @@ def load_sandbox(environ: dict[str, str] | None = None) -> ProbeSandbox:
         raise ProbeSandboxError(f"probe budget is not numeric: {error}") from error
     if max_probes <= 0 or budget_sec <= 0:
         raise ProbeSandboxError(f"{MAX_PROBES_ENV} and {BUDGET_SEC_ENV} must both be greater than zero")
-    budget_raw = str(env.get(ROUND_BUDGET_ENV) or "").strip()
-    device_raw = str(env.get(DEVICE_LOCK_ENV) or "").strip()
-    deadline_raw = str(env.get(SESSION_DEADLINE_ENV) or "").strip()
+    budget_raw = env.get(ROUND_BUDGET_ENV, "").strip()
+    device_raw = env.get(DEVICE_LOCK_ENV, "").strip()
+    deadline_raw = env.get(SESSION_DEADLINE_ENV, "").strip()
     # An absent deadline is fail-open on purpose -- the configured probe budget still bounds every probe, and a
     # session run outside a round has no deadline to declare.
     session_deadline: float | None = None
@@ -451,7 +451,7 @@ async def _measure_on_device(
     except asyncio.TimeoutError:
         failure = f"probe exceeded its {timeout_sec}s ceiling"
         return {"status": FAILED, "detail": failure, "duration_sec": monotonic_clock() - started}
-    except Exception as error:  # noqa: BLE001 - a broken probe is a reported probe
+    except (OSError, ValueError) as error:
         return {
             "status": FAILED,
             "detail": f"{type(error).__name__}: {error}",

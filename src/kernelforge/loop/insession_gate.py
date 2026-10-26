@@ -16,6 +16,7 @@ import shlex
 import shutil
 import stat
 import sys
+import traceback
 from typing import Any
 
 from kernelforge.workspace.edit_policy import (
@@ -751,8 +752,6 @@ class InSessionGate:
             elif old.kind != new.kind or old.digest != new.digest or old.mode != new.mode:
                 modified.append(key)
 
-        if not (modified or deleted or added or errors):
-            return ""
         parts = []
         if modified:
             parts.append(f"modified={modified[:5]}")
@@ -1252,7 +1251,10 @@ class InSessionGate:
             self.integrity_verdict = "violation"
             self.integrity_reason = f"in-session gate failed: {type(e).__name__}: {e}"
             self.end_reason = "gate_error"
-            self._log(f"gate error ({type(e).__name__}: {e}) -> allow stop, outer loop will reject candidate")
+            self._log(
+                f"gate error ({type(e).__name__}: {e}) -> allow stop, outer loop will reject candidate\n"
+                f"{traceback.format_exc().rstrip()}"
+            )
             return self._allow()
 
     def _log(self, msg: str) -> None:

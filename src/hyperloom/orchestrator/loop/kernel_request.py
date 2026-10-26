@@ -202,7 +202,7 @@ async def run_kernel_handler(router: Any, request: KernelRequest, handler: Any) 
     lanes, ttl = router._coord.dispatcher.registry_lanes_ttl(action)
     handler_lease = None
     if lanes:
-        handler_lease = await router.locks.try_acquire_many(
+        handler_lease = await router.locks.acquire_many(
             lanes,
             holder_id=request.message.msg_id,
             task_id=request.message.msg_id,

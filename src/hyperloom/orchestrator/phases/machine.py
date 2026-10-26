@@ -14,8 +14,8 @@ from typing import Any
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
-from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
 from ..collaborator import CoordinatorCollaborator
+from hyperloom.plugs import progress as _progress
 
 log = _logging.getLogger(__name__)
 
@@ -227,12 +227,6 @@ class MachinePhase(CoordinatorCollaborator):
         state = self.shared_state
         if "hint" in move.evidence:
             state.consume_pending_escalate_hint()
-        elif (
-            move.from_phase.strip().upper() == _phase_state.PHASE_SWEEP
-            and str(state.pending_escalate_hint or "").strip() == ESCALATE_HINT_SKIP_TO_CLOSE
-        ):
-            # SWEEP already had an honest closeout, so skip_to_close was suppressed in _global_terminal.
-            state.consume_pending_escalate_hint()
         elif state.pending_escalate_hint:
             # A hint speaks for the phase it was emitted in; carried across a transition it did not drive, it would
             # act on a phase it was never about.
@@ -350,6 +344,10 @@ class MachinePhase(CoordinatorCollaborator):
             state.save(self.session_dir)
         except OSError as exc:
             save_error = exc
+            _progress.warn(
+                "state_save_failed", f"state.json could not be written at the {move.to_phase} boundary: {exc}"
+            )
+        _progress.phase_changed(move.from_phase, move.to_phase, state.macro_cycle)
         log.info(
             "Coordinator.phase: %s → %s (reason=%s)",
             move.from_phase or "<unset>",

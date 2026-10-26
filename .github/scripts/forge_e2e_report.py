@@ -117,6 +117,39 @@ class ForgeE2ERun:
     error: str = ""
 
 
+def _result_rows(forge_result: dict[str, Any]) -> list[tuple[str, str]]:
+    """The performance, validation and iteration rows of one ``__FORGE_RESULT__`` object."""
+
+    rows = []
+    checkpoint = forge_result.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        checkpoint = {}
+    baseline = _number(forge_result.get("pristine_baseline_ms", forge_result.get("baseline_ms")), 4)
+    best = _number(forge_result.get("best_ms"), 4)
+    speedup = _number(forge_result.get("mean_case_speedup", forge_result.get("total_speedup")), 6)
+    if baseline is not None and best is not None:
+        rows.append(("baseline → best", f"{baseline} ms → {best} ms"))
+    if speedup is not None:
+        percent = (float(speedup) - 1.0) * 100.0
+        rows.append(("speedup", f"**{speedup}x** ({percent:+.2f}%)"))
+
+    passed = forge_result.get("validation_passed", checkpoint.get("validation_passed"))
+    snr = _number(forge_result.get("snr_db", checkpoint.get("snr_db")), 1)
+    if isinstance(passed, bool) or snr is not None:
+        verdict = "PASS" if passed is True else "FAIL" if passed is False else "unknown"
+        rows.append(("validation", f"{verdict}{f' (SNR {snr} dB)' if snr is not None else ''}"))
+
+    iterations = forge_result.get("iteration_count")
+    best_iteration = forge_result.get("best_iteration")
+    if isinstance(iterations, int):
+        suffix = f" (best at iteration {best_iteration})" if isinstance(best_iteration, int) else ""
+        rows.append(("iterations", f"{iterations}{suffix}"))
+    best_commit = forge_result.get("best_commit")
+    if isinstance(best_commit, str) and best_commit:
+        rows.append(("best commit", f"`{best_commit}`"))
+    return rows
+
+
 def render_report(
     run: ForgeE2ERun,
     *,
@@ -141,35 +174,8 @@ def render_report(
         ("run time", _duration(dispatched, terminal)),
         ("total", _duration(queued, terminal)),
     ]
-
     if forge_result:
-        checkpoint = forge_result.get("checkpoint")
-        if not isinstance(checkpoint, dict):
-            checkpoint = {}
-        baseline = _number(forge_result.get("pristine_baseline_ms", forge_result.get("baseline_ms")), 4)
-        best = _number(forge_result.get("best_ms"), 4)
-        speedup = _number(forge_result.get("mean_case_speedup", forge_result.get("total_speedup")), 6)
-        if baseline is not None and best is not None:
-            rows.append(("baseline → best", f"{baseline} ms → {best} ms"))
-        if speedup is not None:
-            percent = (float(speedup) - 1.0) * 100.0
-            rows.append(("speedup", f"**{speedup}x** ({percent:+.2f}%)"))
-
-        passed = forge_result.get("validation_passed", checkpoint.get("validation_passed"))
-        snr = _number(forge_result.get("snr_db", checkpoint.get("snr_db")), 1)
-        if isinstance(passed, bool) or snr is not None:
-            verdict = "PASS" if passed is True else "FAIL" if passed is False else "unknown"
-            rows.append(("validation", f"{verdict}{f' (SNR {snr} dB)' if snr is not None else ''}"))
-
-        iterations = forge_result.get("iteration_count")
-        best_iteration = forge_result.get("best_iteration")
-        if isinstance(iterations, int):
-            suffix = f" (best at iteration {best_iteration})" if isinstance(best_iteration, int) else ""
-            rows.append(("iterations", f"{iterations}{suffix}"))
-        best_commit = forge_result.get("best_commit")
-        if isinstance(best_commit, str) and best_commit:
-            rows.append(("best commit", f"`{best_commit}`"))
-
+        rows += _result_rows(forge_result)
     if run.error:
         rows.append(("reason", run.error))
 

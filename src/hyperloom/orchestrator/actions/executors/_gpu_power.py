@@ -332,20 +332,13 @@ class GpuPowerRecorder:
                     peak_vram[gpu] = max(peak_vram.get(gpu, 0.0), fraction)
                 if power is not None:
                     watts.setdefault(gpu, []).append(power)
-        serving = sorted(gpu for gpu, frac in peak_vram.items() if frac >= _SERVING_VRAM_FRACTION and gpu in watts)
+        loaded = {gpu for gpu, frac in peak_vram.items() if frac >= _SERVING_VRAM_FRACTION}
+        serving = sorted(loaded.intersection(watts))
         # A card that may be serving but cannot be read would drop out of the total and escape its own limit, so it
         # leaves the whole round unmeasured: a card holding a model with no power reading, or a card in scope whose
         # VRAM was never read (absent from amd-smi, or reported N/A), so it cannot be ruled out as serving.
         in_scope = self._gpus if self._gpus is not None else {gpu for reading in samples for gpu in reading}
-        unread = (
-            sorted(
-                gpu
-                for gpu in in_scope
-                if gpu not in peak_vram or (peak_vram[gpu] >= _SERVING_VRAM_FRACTION and gpu not in watts)
-            )
-            if samples
-            else []
-        )
+        unread = sorted(in_scope.difference(peak_vram) | loaded.difference(watts)) if samples else []
         per_gpu = {
             str(gpu): {
                 **_power_fields(watts[gpu], peak_vram.get(gpu, 0.0)),

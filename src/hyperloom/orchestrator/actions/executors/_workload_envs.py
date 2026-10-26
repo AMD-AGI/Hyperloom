@@ -75,12 +75,8 @@ from hyperloom.inference_optimizer.grid_server_args import validate_server_args_
 from hyperloom.inference_optimizer import framework_registry
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
-from ._profile_setup import (
-    _AtomTracelensCaps,
-    _profiler_bound_holds,
-    _profiler_flag_value,
-    apply_atom_profile_caps,
-)
+from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
+from ._profile_setup import fit_capture_to_speculative
 from hyperloom.inference_optimizer.model_config_utils import (
     _fp8_is_per_channel_per_token,
     _load_model_config_dict,
@@ -488,7 +484,7 @@ def prepare_agentx_runtime(
         )
     except AgentXPreflightError as exc:
         return f"AgentX preflight failed: {exc}"
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, yaml.YAMLError) as exc:
         return f"AgentX runtime preparation failed: {type(exc).__name__}: {exc}"
     return None
 
@@ -1506,6 +1502,9 @@ def _restate_profile_capture(
             )
             # The seal applies the sink-side guard to whatever is left here.
             envs[framework_env] = merge_server_args(profile_args, " ".join(restored))
+    # After the restore, so a vLLM delay it re-added is divided like any other.
+    if window.profiling and window.serves_requests:
+        fit_capture_to_speculative(envs, framework_env)
     # After extra_envs / replace_args / remove_args so TraceLens knobs survive the
     # same last-wins path as vLLM profiler bounds, and before the seal.
     apply_atom_profile_caps(envs, window.atom_caps)

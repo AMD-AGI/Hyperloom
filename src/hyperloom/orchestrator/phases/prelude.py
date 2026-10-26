@@ -47,7 +47,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     Verdict,
 )
 from ..actions.executors._launch_restatement import config_launch_restated_by
-from ..actions.executors.baseline import _revert_warm_patch_state, revert_warm_kernel_patches
+from ..actions.executors.baseline import revert_warm_kernel_patches
 from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
 from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
 from ..state.task_registry import Task, TaskSpec
@@ -60,7 +60,7 @@ from .warm_replay_stack import (
     commit_warm_replay_overlays,
     committing_overlays,
     replayed_patch_refs as _replayed_patch_refs,
-    uncommit_promoted_overlays,
+    restore_recipe_trees,
     warm_patch_trees as _warm_patch_trees,
     warm_replay_source_layer,
 )
@@ -528,17 +528,11 @@ class PreludePhase(CoordinatorCollaborator):
                 "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in kernel_id)[:96] or "warm_kernel"
             )
             snapshot_dir = Path(self.session_dir) / "runtime" / "warm_kernel_materialized" / safe_kernel_id
-            try:
-                materialized = materialize_unified_patch_snapshot(
-                    patch_path=patch_path,
-                    repo_root=repo_root,
-                    snapshot_dir=snapshot_dir,
-                )
-            except Exception as exc:  # noqa: BLE001
-                return {
-                    "status": "failed",
-                    "error": (f"warm replay unified diff materialization failed: {type(exc).__name__}: {exc}"),
-                }
+            materialized = materialize_unified_patch_snapshot(
+                patch_path=patch_path,
+                repo_root=repo_root,
+                snapshot_dir=snapshot_dir,
+            )
             payload["snapshot_dir"] = materialized
             payload["kernel_repo"] = str(repo_root)
 
@@ -745,12 +739,7 @@ class PreludePhase(CoordinatorCollaborator):
             "kernel_apply_results": [],
             "kernel_snapshots": [],
         }
-        try:
-            state.save(self.session_dir)
-        except Exception as exc:  # noqa: BLE001
-            return self._set_warm_kernel_outcome(
-                {"status": "error", "reason": f"kernel_pending_state_persist_failed:{type(exc).__name__}"}
-            )
+        state.save(self.session_dir)
         for index, entry in enumerate(plan):
             if not (entry.get("source_paths") or entry.get("patch_path")):
                 entry["decision"] = "DEFERRED"
@@ -1047,7 +1036,7 @@ class PreludePhase(CoordinatorCollaborator):
             return None
         try:
             sdk_replay = self._read_current_recipe_replay()
-        except Exception as exc:  # noqa: BLE001 — current replay fails closed
+        except (OSError, ValueError, RuntimeError, AttributeError, TypeError) as exc:  # current replay fails closed
             self._skip_warm_replay(
                 code=SKIP_RECIPE_READ_FAILED,
                 outcome={
@@ -1497,31 +1486,8 @@ class PreludePhase(CoordinatorCollaborator):
 
     def rollback_combined_warm(self, result: dict[str, Any], task: "Task | None") -> dict[str, Any]:
         """Restore both Recipe and Kernel halves of a combined replay."""
-        restores: list[dict[str, Any]] = []
         pending = self.shared_state.warm_replay_pending
-        for tree in _warm_patch_trees(result, pending):
-            target = str(tree.get("root") or "")
-            if not target:
-                continue
-            uncommit_promoted_overlays(pending, target, str(tree.get("pre_sha") or ""))
-            recipe_manifest = tree.get("snapshot_manifest")
-            backups = list(tree.get("nogit_backups") or [])
-            if not bool(tree.get("mutated", True)):
-                # An overlay the tree already carried applies as a no-op, writing
-                # nothing and so owing nothing. A record predating the flag reads as
-                # written-to, and still has to answer with a channel below.
-                continue
-            if not recipe_manifest and not backups:
-                restores.append({"ok": False, "errors": [f"recipe:{target}:missing_snapshot_manifest"]})
-                continue
-            restores.append(
-                _revert_warm_patch_state(
-                    target,
-                    pre_sha=str(tree.get("pre_sha") or ""),
-                    snapshot_manifest=recipe_manifest,
-                    nogit_backups=backups,
-                )
-            )
+        restores = restore_recipe_trees(result, pending)
         params = task.params if task is not None else {}
 
         def _kernel_rows(key: str, pending_key: str) -> list[Any]:

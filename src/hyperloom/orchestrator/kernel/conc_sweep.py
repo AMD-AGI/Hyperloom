@@ -181,6 +181,18 @@ def _deadline_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> Var
     )
 
 
+def _raised_result(variant: GridVariant, stage: str, exc: Exception) -> VariantResult:
+    """The failed result of a rung whose run raised ``exc`` at ``stage``."""
+    return VariantResult(
+        name=variant.name,
+        extra_server_args=variant.extra_server_args,
+        extra_envs=dict(variant.extra_envs),
+        status="failed",
+        error=f"{stage}: {exc}",
+        error_class=type(exc).__name__,
+    )
+
+
 def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
     """Flatten a ``VariantResult`` into one row of the curve."""
     envs = v.extra_envs or {}
@@ -563,6 +575,69 @@ class _SweepRun:
             ),
         )
 
+    def record_ran(self, arm_name: str, results: list[VariantResult], note: _RungNote) -> None:
+        """Publish the results a rung returned; one a run-side stop names is recorded as a budget skip."""
+        for result in results:
+            self.results.append(result)
+            if self.stop_named_by(result) is not None:
+                stopped = replace(note, stage=STAGE_BUDGET_SKIP, budget_remaining_sec=self.budget.remaining_sec)
+                self.record_rung(arm_name, result, stopped)
+            else:
+                self.record_rung(arm_name, result, note)
+
+    def record_boot(
+        self,
+        arm_name: str,
+        attempted: list[GridVariant],
+        failed: list[VariantResult],
+        booted: GridVariant | None = None,
+    ) -> None:
+        """Record how the boot-retry-descend loop resolved: the rung it booted at, or ``None`` when none came up."""
+        if self.recorder is None:
+            return
+        self.recorder.record_arm_boot(
+            arm_name,
+            succeeded=booted is not None,
+            booted_conc=variant_conc(booted) if booted is not None else None,
+            attempted_concs=[variant_conc(variant) for variant in attempted],
+            failed_concs=[variant_conc(fb) for fb in failed],
+        )
+
+    def refuse_arm(self, arm: _Arm) -> bool:
+        """Skip every rung of ``arm`` when the sweep is cancelled, out of budget or closing; return whether it did."""
+        if self.observe_cancel():
+            skipped = [_deadline_skip_result(v, _CANCEL_STOP) for v in self.arm_grid(arm)]
+            reason, remaining_sec = ORCHESTRATOR_CANCELLED_CLASS, 0.0
+        elif self.budget.refuses_next_arm():
+            skipped = [_deadline_skip_result(v, self.deadline_stop) for v in self.arm_grid(arm)]
+            reason, remaining_sec = self.budget.skip_reason, self.budget.remaining_sec
+        elif self.session_closing():
+            self.budget.spend_on_session_reserve()
+            skipped = [_budget_skip_result(v) for v in self.arm_grid(arm)]
+            reason, remaining_sec = _SESSION_RESERVE, 0.0
+        else:
+            return False
+        self.results.extend(skipped)
+        if self.recorder is not None:
+            self.recorder.record_arm_refused(arm.name, reason=reason, remaining_sec=remaining_sec)
+        return True
+
+    def skip_rest(self, arm_name: str, rest: list[GridVariant]) -> bool:
+        """Record ``rest`` as never run when the sweep is cancelled or the session is closing; return whether it did."""
+        if self.observe_cancel():
+            skipped = [_deadline_skip_result(v, _CANCEL_STOP) for v in rest]
+            note = _RungNote(stage=STAGE_BUDGET_SKIP)
+        elif self.session_closing():
+            self.budget.spend_on_session_reserve()
+            skipped = [_budget_skip_result(v) for v in rest]
+            note = _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0)
+        else:
+            return False
+        for skip_r in skipped:
+            self.results.append(skip_r)
+            self.record_rung(arm_name, skip_r, note)
+        return True
+
     def commit_failed_boots(self, arm_name: str, boots: list[VariantResult]) -> None:
         """Publish the boot attempts a lower rung's outcome has settled as part of the curve."""
         for failed in boots:
@@ -711,48 +786,28 @@ class _SweepRun:
         self.write(payload)
 
 
-async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
-    """Sweep one arm across all CONC values reusing a single persistent server.
+@dataclass(frozen=True)
+class _ArmServer:
+    """The server one arm's ladder runs against: where its pids live, how to reach it, and the Ray lease it holds."""
 
-    Boots the server on the highest CONC (Option A), then reuses it for all
-    lower CONCs.  If boot fails, retries with the next lower CONC
-    (boot-retry-descend).  Falls back to the legacy per-variant server-restart
-    path (Option B) when all boot retries are exhausted.
-    """
-    from ..actions.executors._grid_runner import _num_gpus_for_config
-    from ..actions.executors._ray_serving import maybe_serving_lease
-    from ..actions.executors._server_lifecycle import (
-        resolve_lifecycle_params,
-        teardown_lifecycle_server,
-    )
+    arm_name: str
+    pid_dir: Path
+    port: int
+    framework: str
+    lease: Any = None
+
+    def close(self, run: _SweepRun, exc: BaseException | None) -> None:
+        """Release the arm's lease and close its row, whichever of its ladder's paths the arm leaves by."""
+        if self.lease is not None:
+            self.lease.close()
+        run.close_arm(self.arm_name, exc)
+
+
+def _resolve_arm_strategy(run: _SweepRun, arm_name: str, *, serving_lease_held: bool) -> ArmStrategy:
+    """How one arm runs its ladder: on one persistent server when its framework is lifecycle-eligible."""
+    from ..actions.executors._server_lifecycle import resolve_lifecycle_params
 
     recorder = run.recorder
-    arm_name = arm.name
-    grid = run.arm_grid(arm)
-    if not grid:
-        return
-    if recorder is not None:
-        recorder.record_arm_grid(
-            arm_name,
-            rungs=[
-                {
-                    "name": variant.name,
-                    "conc": variant.extra_envs.get("CONC"),
-                    "num_prompts": variant.extra_envs.get("NUM_PROMPTS"),
-                }
-                for variant in grid
-            ],
-        )
-
-    # Ray-managed GPU execution: one held Ray lease (``num_gpus=TP``) spans this arm's persistent server — boot +
-    # every CONC reuse round, or the Option B per-variant restarts — so the shared server's whole lifetime is covered
-    # by a single lease and no GPU process outlives it.
-    arm_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(run.base_yaml_path))
-
-    # Shared pid_dir for server reuse across all CONC variants in this arm.
-    pid_dir = run.workspace / f"server_{arm_name}"
-    pid_dir.mkdir(parents=True, exist_ok=True)
-
     # Resolve lifecycle params (port, framework) from the materialized config.
     lc_reason = "resolve_failed"
     try:
@@ -778,46 +833,69 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
         lifecycle_reason=lc_reason,
         port=port,
         framework=framework,
-        serving_lease_held=arm_lease is not None,
+        serving_lease_held=serving_lease_held,
     )
     if recorder is not None:
         recorder.record_arm_strategy(arm_name, arm_strategy)
+    return arm_strategy
 
-    async def _sweep_ladder_by_restart() -> None:
-        """Run the whole ladder with a server restart per rung.
 
-        The arm whose framework cannot hold a server across rungs and the arm
-        whose every boot failed both run the ladder this way, and it is the
-        same run for both.
-        """
-        arm_failure: BaseException | None = None
-        try:
-            await _sweep_arm_option_b(run, arm_name, grid, serving_lease=arm_lease)
-        except BaseException as exc:
-            arm_failure = exc
-            raise
-        finally:
-            if arm_lease is not None:
-                arm_lease.close()
-            run.close_arm(arm_name, arm_failure)
+async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
+    """Sweep one arm across all CONC values reusing a single persistent server.
 
-    if not lc_eligible:
+    Boots the server on the highest CONC (Option A), then reuses it for all
+    lower CONCs.  If boot fails, retries with the next lower CONC
+    (boot-retry-descend).  Falls back to the legacy per-variant server-restart
+    path (Option B) when all boot retries are exhausted.
+    """
+    from ..actions.executors._grid_runner import _num_gpus_for_config
+    from ..actions.executors._ray_serving import maybe_serving_lease
+    from ..actions.executors._server_lifecycle import teardown_lifecycle_server
+
+    recorder = run.recorder
+    arm_name = arm.name
+    grid = run.arm_grid(arm)
+    if recorder is not None:
+        recorder.record_arm_grid(
+            arm_name,
+            rungs=[
+                {
+                    "name": variant.name,
+                    "conc": variant.extra_envs.get("CONC"),
+                    "num_prompts": variant.extra_envs.get("NUM_PROMPTS"),
+                }
+                for variant in grid
+            ],
+        )
+
+    # Ray-managed GPU execution: one held Ray lease (``num_gpus=TP``) spans this arm's persistent server — boot +
+    # every CONC reuse round, or the Option B per-variant restarts — so the shared server's whole lifetime is covered
+    # by a single lease and no GPU process outlives it.
+    arm_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(run.base_yaml_path))
+
+    # Shared pid_dir for server reuse across all CONC variants in this arm.
+    pid_dir = run.workspace / f"server_{arm_name}"
+    pid_dir.mkdir(parents=True, exist_ok=True)
+
+    arm_strategy = _resolve_arm_strategy(run, arm_name, serving_lease_held=arm_lease is not None)
+    server = _ArmServer(
+        arm_name=arm_name, pid_dir=pid_dir, port=arm_strategy.port, framework=arm_strategy.framework, lease=arm_lease
+    )
+
+    if not arm_strategy.lifecycle_eligible:
         # Framework does not support server_lifecycle — fall through to Option B (per-variant server restart via
         # normal run_grid).
         log.info(
             "conc_sweep single-server: arm=%s not lifecycle-eligible (%s); using per-variant server restart (Option B)",
             arm_name,
-            lc_reason,
+            arm_strategy.lifecycle_reason,
         )
-        await _sweep_ladder_by_restart()
+        await _sweep_arm_option_b(run, server, grid)
         return
 
     # Boot-retry-descend: try each CONC from highest to lowest until boot succeeds.
     failed_boots: list[VariantResult] = []
-    boot_idx = 0
-    boot_succeeded = False
-    while boot_idx < len(grid):
-        boot_variant = grid[boot_idx]
+    for boot_idx, boot_variant in enumerate(grid):
         log.info(
             "conc_sweep single-server: arm=%s boot attempt %d/%d (conc=%s)",
             arm_name,
@@ -828,7 +906,7 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
         server_lifecycle_boot = {
             "cleanup": False,
             "pid_dir": str(pid_dir),
-            "port": port,
+            "port": server.port,
         }
         boot_started_iso = now_iso("seconds")
         boot_started_at = time.time()
@@ -851,19 +929,11 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
                 boot_variant.extra_envs.get("CONC", "?"),
                 exc,
             )
-            boot_results = [
-                VariantResult(
-                    name=boot_variant.name,
-                    extra_server_args=boot_variant.extra_server_args,
-                    extra_envs=dict(boot_variant.extra_envs),
-                    status="failed",
-                    error=f"single_server_boot: {exc}",
-                    error_class=type(exc).__name__,
-                )
-            ]
+            boot_results = [_raised_result(boot_variant, "single_server_boot", exc)]
 
-        br = boot_results[0] if boot_results else None
-        boot_failed = br is None or br.status in {"failed", "skipped"}
+        # run_rung returns one result for its one-variant grid.
+        br = boot_results[0]
+        boot_failed = br.status in {"failed", "skipped"}
         boot_elapsed = round(time.time() - boot_started_at, 3)
 
         boot_stop = run.stop_named_by(br)
@@ -876,44 +946,30 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
                     "conc_sweep single-server: arm=%s stopped at boot conc=%s (%s); not trying lower concs",
                     arm_name,
                     boot_variant.extra_envs.get("CONC", "?"),
-                    run.cancel_reason or ORCHESTRATOR_CANCELLED_CLASS,
+                    run.cancel_reason,
                 )
             run.commit_failed_boots(arm_name, failed_boots)
-            stopped_results = [
-                *([br] if br is not None else []),
-                *[_deadline_skip_result(v, boot_stop) for v in grid[boot_idx + 1 :]],
-            ]
-            for stopped in stopped_results:
-                run.results.append(stopped)
-                run.record_rung(
-                    arm_name, stopped, _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=run.budget.remaining_sec)
-                )
+            run.record_ran(
+                arm_name,
+                [br, *[_deadline_skip_result(v, boot_stop) for v in grid[boot_idx + 1 :]]],
+                _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=run.budget.remaining_sec),
+            )
             try:
-                teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
+                teardown_lifecycle_server(pid_dir=pid_dir, framework=server.framework, port=server.port)
             finally:
-                if arm_lease is not None:
-                    arm_lease.close()
-                run.close_arm(arm_name, None)
+                server.close(run, None)
             return
 
         if boot_failed:
             # Ensure server is torn down before retrying at a lower CONC.
-            teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
-            failed = br or VariantResult(
-                name=boot_variant.name,
-                extra_server_args=boot_variant.extra_server_args,
-                extra_envs=dict(boot_variant.extra_envs),
-                status="failed",
-                error="single_server_boot_failed",
-                error_class="single_server_boot_failed",
-            )
-            failed_boots.append(failed)
+            teardown_lifecycle_server(pid_dir=pid_dir, framework=server.framework, port=server.port)
+            failed_boots.append(br)
             # Recorded now and uncommitted: a concurrency the server would not
             # come up at is the finding, and whether it counts toward the curve
             # is not known until a lower rung either boots or does not.
             run.record_rung(
                 arm_name,
-                failed,
+                br,
                 _RungNote(
                     stage=STAGE_BOOT_ATTEMPT,
                     committed=False,
@@ -921,13 +977,9 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
                     wall_duration_sec=boot_elapsed,
                 ),
             )
-            boot_idx += 1
             continue
 
-        # Boot succeeded (br is not None here — boot_failed guarded above).
-        assert br is not None
-        boot_succeeded = True
-        boot_only = str(getattr(br, "note", "") or "") == "server_lifecycle_boot_only"
+        boot_only = br.note == "server_lifecycle_boot_only"
         # Commit the higher-CONC failed boots (genuine capacity failures) first.
         run.commit_failed_boots(arm_name, failed_boots)
         if not boot_only:
@@ -935,194 +987,137 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
         run.record_rung(
             arm_name, br, _RungNote(stage=STAGE_BOOT, start_time=boot_started_iso, wall_duration_sec=boot_elapsed)
         )
-        if recorder is not None:
-            recorder.record_arm_boot(
-                arm_name,
-                succeeded=True,
-                booted_conc=variant_conc(boot_variant),
-                attempted_concs=[variant_conc(variant) for variant in grid[: boot_idx + 1]],
-                failed_concs=[variant_conc(fb) for fb in failed_boots],
-            )
+        run.record_boot(arm_name, grid[: boot_idx + 1], failed_boots, booted=boot_variant)
         # Incremental flush after boot point.
         run.flush_progress()
-        break
 
-    if not boot_succeeded:
-        # Every CONC failed to boot the persistent server — retry the full grid via Option B (per-variant restart, no
-        # lifecycle) which may succeed where persistent reuse could not.
-        log.warning(
-            "conc_sweep single-server: arm=%s all boot attempts failed; "
-            "falling back to Option B (per-variant restart) for the full ladder",
-            arm_name,
-        )
-        if recorder is not None:
-            recorder.record_arm_boot(
-                arm_name,
-                succeeded=False,
-                attempted_concs=[variant_conc(variant) for variant in grid],
-                failed_concs=[variant_conc(fb) for fb in failed_boots],
-            )
-            # The whole ladder is retried per-rung, and those results supersede
-            # the boot attempts rather than adding to them -- which is why the
-            # attempts above stay uncommitted.
-            recorder.record_arm_strategy(
-                arm_name, replace(arm_strategy, strategy=STRATEGY_SERVER_RESTART, reason="all_boot_attempts_failed")
-            )
-        await _sweep_ladder_by_restart()
+        # Server is up: sweep remaining CONCs by reuse.
+        reuse_failure: BaseException | None = None
+        try:
+            await _sweep_by_reuse(run, server, grid[boot_idx:] if boot_only else grid[boot_idx + 1 :])
+        except BaseException as exc:
+            reuse_failure = exc
+            raise
+        finally:
+            # Safety teardown — idempotent, no-op if already torn down.
+            try:
+                teardown_lifecycle_server(pid_dir=pid_dir, framework=server.framework, port=server.port)
+            except Exception as exc:
+                # The last word on this arm's server: a teardown that failed here
+                # leaves it alive past the arm that owned it.
+                log.warning("conc_sweep single-server: arm=%s teardown failed", arm_name, exc_info=True)
+                if recorder is not None:
+                    recorder.record_fault(stage=f"teardown_lifecycle_server:{arm_name}", exc=exc)
+            server.close(run, reuse_failure)
         return
 
-    # Server is up: sweep remaining CONCs by reuse.
-    reuse_failure: BaseException | None = None
-    try:
-        reuse_grid = (
-            grid[boot_idx:]
-            if str(getattr(br, "note", "") or "") == "server_lifecycle_boot_only"
-            else grid[boot_idx + 1 :]
+    # Every CONC failed to boot the persistent server — retry the full grid via Option B (per-variant restart, no
+    # lifecycle) which may succeed where persistent reuse could not.
+    log.warning(
+        "conc_sweep single-server: arm=%s all boot attempts failed; "
+        "falling back to Option B (per-variant restart) for the full ladder",
+        arm_name,
+    )
+    run.record_boot(arm_name, grid, failed_boots)
+    if recorder is not None:
+        # The whole ladder is retried per-rung, and those results supersede
+        # the boot attempts rather than adding to them -- which is why the
+        # attempts above stay uncommitted.
+        recorder.record_arm_strategy(
+            arm_name, replace(arm_strategy, strategy=STRATEGY_SERVER_RESTART, reason="all_boot_attempts_failed")
         )
-        for r_idx, variant in enumerate(reuse_grid):
-            _reuse_remaining = session_deadline_to_remaining_sec(run.session_deadline_sec)
-            if run.observe_cancel():
-                for v in reuse_grid[r_idx:]:
-                    skip_r = _deadline_skip_result(v, _CANCEL_STOP)
-                    run.results.append(skip_r)
-                    run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP))
-                break
-            # Check session deadline before each reuse point.
-            if run.session_closing():
-                run.budget.spend_on_session_reserve()
-                for v in reuse_grid[r_idx:]:
-                    skip_r = _budget_skip_result(v)
-                    run.results.append(skip_r)
-                    run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0))
-                break
+    await _sweep_arm_option_b(run, server, grid)
 
-            is_last = r_idx == len(reuse_grid) - 1
-            reuse_started_iso = now_iso("seconds")
-            reuse_started_at = time.time()
-            server_lifecycle_reuse = {
-                "cleanup": is_last,
-                "pid_dir": str(pid_dir),
-                "port": port,
-            }
-            try:
-                reuse_results = await run.run_rung(
-                    variant,
-                    GridLaunch(
-                        serving_lease=arm_lease,
-                        server_lifecycle=server_lifecycle_reuse,
-                        server_already_ready=True,
-                        warmup_before_measure=False,
-                    ),
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "conc_sweep single-server: arm=%s reuse conc=%s raised %r",
-                    arm_name,
-                    variant.extra_envs.get("CONC", "?"),
-                    exc,
-                )
-                reuse_results = [
-                    VariantResult(
-                        name=variant.name,
-                        extra_server_args=variant.extra_server_args,
-                        extra_envs=dict(variant.extra_envs),
-                        status="failed",
-                        error=f"single_server_reuse: {exc}",
-                        error_class=type(exc).__name__,
-                    )
-                ]
-            reuse_elapsed = round(time.time() - reuse_started_at, 3)
-            for rr in reuse_results:
-                run.results.append(rr)
-                stopped = run.stop_named_by(rr) is not None
-                run.record_rung(
-                    arm_name,
-                    rr,
-                    _RungNote(
-                        stage=STAGE_BUDGET_SKIP if stopped else STAGE_REUSE,
-                        start_time=reuse_started_iso,
-                        wall_duration_sec=reuse_elapsed,
-                        budget_remaining_sec=run.budget.remaining_sec if stopped else _reuse_remaining,
-                    ),
-                )
-            # Incremental flush after each reuse point.
-            run.flush_progress()
-    except BaseException as exc:
-        reuse_failure = exc
-        raise
-    finally:
-        # Safety teardown — idempotent, no-op if already torn down.
+
+async def _sweep_by_reuse(run: _SweepRun, server: _ArmServer, reuse_grid: list[GridVariant]) -> None:
+    """Run the rungs below the boot rung against the arm's already-booted server; the last one tears it down."""
+    arm_name = server.arm_name
+    for r_idx, variant in enumerate(reuse_grid):
+        _reuse_remaining = session_deadline_to_remaining_sec(run.session_deadline_sec)
+        # Check cancel and session deadline before each reuse point.
+        if run.skip_rest(arm_name, reuse_grid[r_idx:]):
+            break
+
+        is_last = r_idx == len(reuse_grid) - 1
+        reuse_started_iso = now_iso("seconds")
+        reuse_started_at = time.time()
+        server_lifecycle_reuse = {
+            "cleanup": is_last,
+            "pid_dir": str(server.pid_dir),
+            "port": server.port,
+        }
         try:
-            teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
-        except Exception as exc:
-            # The last word on this arm's server: a teardown that failed here
-            # leaves it alive past the arm that owned it.
-            log.warning("conc_sweep single-server: arm=%s teardown failed", arm_name, exc_info=True)
-            if recorder is not None:
-                recorder.record_fault(stage=f"teardown_lifecycle_server:{arm_name}", exc=exc)
-        if arm_lease is not None:
-            arm_lease.close()
-        run.close_arm(arm_name, reuse_failure)
+            reuse_results = await run.run_rung(
+                variant,
+                GridLaunch(
+                    serving_lease=server.lease,
+                    server_lifecycle=server_lifecycle_reuse,
+                    server_already_ready=True,
+                    warmup_before_measure=False,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "conc_sweep single-server: arm=%s reuse conc=%s raised %r",
+                arm_name,
+                variant.extra_envs.get("CONC", "?"),
+                exc,
+            )
+            reuse_results = [_raised_result(variant, "single_server_reuse", exc)]
+        reuse_elapsed = round(time.time() - reuse_started_at, 3)
+        run.record_ran(
+            arm_name,
+            reuse_results,
+            _RungNote(
+                stage=STAGE_REUSE,
+                start_time=reuse_started_iso,
+                wall_duration_sec=reuse_elapsed,
+                budget_remaining_sec=_reuse_remaining,
+            ),
+        )
+        # Incremental flush after each reuse point.
+        run.flush_progress()
 
 
-async def _sweep_arm_option_b(
-    run: _SweepRun,
-    arm_name: str,
-    grid: list[GridVariant],
-    *,
-    serving_lease: Any = None,
-) -> None:
+async def _sweep_arm_option_b(run: _SweepRun, server: _ArmServer, grid: list[GridVariant]) -> None:
     """Option B fallback: run each variant with its own server (legacy behaviour).
 
     Used when ``_sweep_one_arm_single_server`` detects the framework is not
     lifecycle-eligible or all boot retries are exhausted. The same monotonic
-    deadline covers both arms and all retries. ``serving_lease`` is ``None``
+    deadline covers both arms and all retries. ``server.lease`` is ``None``
     when the arm runs on the local (non-Ray) path.
     """
-    for variant in grid:
-        _ob_rem = session_deadline_to_remaining_sec(run.session_deadline_sec)
-        if run.observe_cancel():
-            skip_r = _deadline_skip_result(variant, _CANCEL_STOP)
-            run.results.append(skip_r)
-            run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP))
-            continue
-        if run.session_closing():
-            run.budget.spend_on_session_reserve()
-            skip_r = _budget_skip_result(variant)
-            run.results.append(skip_r)
-            run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0))
-            continue
-        rung_started_iso = now_iso("seconds")
-        rung_started_at = time.time()
-        try:
-            sub = await run.run_rung(variant, GridLaunch(serving_lease=serving_lease))
-        except Exception as exc:  # noqa: BLE001
-            log.warning("conc_sweep option B: arm=%s variant=%s raised %r", arm_name, variant.name, exc)
-            sub = [
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="failed",
-                    error=f"option_b: {exc}",
-                    error_class=type(exc).__name__,
-                )
-            ]
-        rung_elapsed = round(time.time() - rung_started_at, 3)
-        for r in sub:
-            run.results.append(r)
-            stopped = run.stop_named_by(r) is not None
-            run.record_rung(
+    arm_name = server.arm_name
+    arm_failure: BaseException | None = None
+    try:
+        for variant in grid:
+            _ob_rem = session_deadline_to_remaining_sec(run.session_deadline_sec)
+            if run.skip_rest(arm_name, [variant]):
+                continue
+            rung_started_iso = now_iso("seconds")
+            rung_started_at = time.time()
+            try:
+                sub = await run.run_rung(variant, GridLaunch(serving_lease=server.lease))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("conc_sweep option B: arm=%s variant=%s raised %r", arm_name, variant.name, exc)
+                sub = [_raised_result(variant, "option_b", exc)]
+            rung_elapsed = round(time.time() - rung_started_at, 3)
+            run.record_ran(
                 arm_name,
-                r,
+                sub,
                 _RungNote(
-                    stage=STAGE_BUDGET_SKIP if stopped else STAGE_SERVER_RESTART,
+                    stage=STAGE_SERVER_RESTART,
                     start_time=rung_started_iso,
                     wall_duration_sec=rung_elapsed,
-                    budget_remaining_sec=run.budget.remaining_sec if stopped else _ob_rem,
+                    budget_remaining_sec=_ob_rem,
                 ),
             )
-        run.flush_progress()
+            run.flush_progress()
+    except BaseException as exc:
+        arm_failure = exc
+        raise
+    finally:
+        server.close(run, arm_failure)
 
 
 def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> Exception | None:
@@ -1180,6 +1175,112 @@ def conc_sweep_declined_to_run(record: Mapping[str, Any] | None) -> bool:
     return bool(rec.get("was_skipped")) and not rec.get("budget_exhausted")
 
 
+def _decline_before_start(
+    recorder: Any, state: SharedState, optimized: _Arm | None, concs: list[int], total_budget_sec: int | None
+) -> dict[str, Any] | None:
+    """The skip envelope for a sweep whose prerequisites are unmet, or ``None`` when it can start."""
+    isl = int(getattr(state, "isl", 0) or 0)
+    osl = int(getattr(state, "osl", 0) or 0)
+    baseline_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+    if baseline_tput <= 0:
+        return _declined(recorder, "no_baseline_tput")
+    if isl <= 0 or osl <= 0:
+        return _declined(recorder, "missing_workload_shape", isl=isl, osl=osl)
+    if optimized is None:
+        return _declined(recorder, "no_optimization_to_compare")
+    if optimized.overlay:
+        from hyperloom.inference_optimizer.runtime_environment import is_safe_path_entry
+        from ..kernel.geak_config import geak_overlay_is_loadable
+
+        if not is_safe_path_entry(optimized.overlay) or not geak_overlay_is_loadable(optimized.overlay):
+            return _declined(recorder, "optimized_overlay_unavailable", final_overlay=optimized.overlay)
+    if not concs:
+        return _declined(recorder, "empty_conc_list")
+    # A non-positive budget is "no time left", not "budget gate off": running the
+    # ladder here would spend wall-clock the caller already accounted as gone.
+    # No variant started, so this is a decline (see conc_sweep_declined_to_run)
+    # and must not stamp ``budget_exhausted``.
+    if total_budget_sec is not None and int(total_budget_sec) <= 0:
+        return _declined(recorder, "no_time_budget_remaining", total_budget_sec=int(total_budget_sec))
+    return None
+
+
+async def _sweep_arms(run: _SweepRun, grid_source: str) -> None:
+    """Record the budget and plan, then run the optimized arm and the baseline arm in turn."""
+    recorder = run.recorder
+    total_budget_sec = run.total_budget_sec
+    if recorder is not None:
+        recorder.record_budget(
+            SweepBudget(
+                declared_total_sec=total_budget_sec,
+                granted_total_sec=total_budget_sec,
+                rung_cost_sec=run.variant_expected_sec,
+                raised=False,
+                gate_active=total_budget_sec is not None,
+                deadline=run.started_at + total_budget_sec if total_budget_sec is not None else None,
+            )
+        )
+    log.info(
+        "conc_sweep (single-server): arms=optimized,baseline concs=%s isl=%d osl=%d total_budget=%s",
+        run.concs_desc,
+        run.isl,
+        run.osl,
+        f"{total_budget_sec}s" if total_budget_sec is not None else "unbounded",
+    )
+    arms_order = [run.optimized, run.baseline]
+    if recorder is not None:
+        recorder.record_plan(
+            SweepPlan(
+                concs_requested=run.concs,
+                concs_ordered=run.concs_desc,
+                grid_source=grid_source,
+                num_prompts_factor=DEFAULT_NUM_PROMPTS_FACTOR,
+                variant_timeout_sec=run.benchmark_timeout_sec,
+                arms_order=[arm.name for arm in arms_order],
+            )
+        )
+    for arm in arms_order:
+        if run.refuse_arm(arm):
+            continue
+        if recorder is not None:
+            recorder.open_arm(arm.name, extra_server_args=arm.args, extra_envs=arm.envs)
+        await _sweep_one_arm_single_server(run, arm)
+
+
+def _finish_sweep(run: _SweepRun) -> dict[str, Any]:
+    """Settle the final report from every recorded rung, write it and close the sweep's event on it."""
+    recorder = run.recorder
+    payload = run.payload(in_progress=False)
+    comparison, summary = payload["comparison"], payload["summary"]
+    ceiling = _build_roofline_ceiling(
+        run.state,
+        _ArmCurves(baseline=payload["baseline"]["points"], optimized=payload["optimized"]["points"]),
+        concs=run.concs,
+        isl=run.isl,
+        osl=run.osl,
+    )
+    if ceiling is not None:
+        payload["roofline_ceiling"] = ceiling
+
+    report_error = run.write(payload)
+
+    if recorder is not None:
+        if report_error is not None:
+            recorder.record_fault(stage="report_write", exc=report_error)
+        recorder.record_progress(comparison=comparison, summary=summary)
+        recorder.finish(payload, stop_reason=getattr(run.state, "stop_reason", ""))
+
+    log.info(
+        "conc_sweep: done — status=%s successful_pairs=%d failed_pairs=%d best_speedup=%s%s",
+        payload["status"],
+        summary["successful_pairs"],
+        summary["failed_pairs"],
+        summary["best_speedup"],
+        f" cancelled_by={run.cancel_reason}" if run.cancelled else "",
+    )
+    return payload
+
+
 async def run_conc_sweep(
     state: SharedState,
     session_dir: Path,
@@ -1205,32 +1306,14 @@ async def run_conc_sweep(
     grid_source = GRID_REQUESTED if concs is not None else GRID_MODE_DEFAULT
     # ``None`` → default ladder; an explicit empty list short-circuits below.
     concs = list(concs) if concs is not None else default_concs_for_mode(getattr(state, "benchmark_mode", ""))
-    isl = int(getattr(state, "isl", 0) or 0)
-    osl = int(getattr(state, "osl", 0) or 0)
-    baseline_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
-
     optimized = _optimized_arm(state)
-
-    if baseline_tput <= 0:
-        return _declined(recorder, "no_baseline_tput")
-    if isl <= 0 or osl <= 0:
-        return _declined(recorder, "missing_workload_shape", isl=isl, osl=osl)
-    if optimized is None:
-        return _declined(recorder, "no_optimization_to_compare")
-    if optimized.overlay:
-        from hyperloom.inference_optimizer.runtime_environment import is_safe_path_entry
-        from ..kernel.geak_config import geak_overlay_is_loadable
-
-        if not is_safe_path_entry(optimized.overlay) or not geak_overlay_is_loadable(optimized.overlay):
-            return _declined(recorder, "optimized_overlay_unavailable", final_overlay=optimized.overlay)
-    if not concs:
-        return _declined(recorder, "empty_conc_list")
-    # A non-positive budget is "no time left", not "budget gate off": running the
-    # ladder here would spend wall-clock the caller already accounted as gone.
-    # No variant started, so this is a decline (see conc_sweep_declined_to_run)
-    # and must not stamp ``budget_exhausted``.
-    if total_budget_sec is not None and int(total_budget_sec) <= 0:
-        return _declined(recorder, "no_time_budget_remaining", total_budget_sec=int(total_budget_sec))
+    declined = _decline_before_start(recorder, state, optimized, concs, total_budget_sec)
+    if declined is not None:
+        return declined
+    # Positive past the decline above.
+    isl = int(state.isl)
+    osl = int(state.osl)
+    baseline_tput = float(state.baseline_tput)
 
     # Prefer the materialized baseline config; fall back to the shipped asset.
     base_yaml_raw = str(getattr(state, "baseline_config_path", "") or "").strip() or str(default_baseline_config())
@@ -1325,18 +1408,6 @@ async def run_conc_sweep(
     json_path = rdir / "conc_sweep_summary.json"
     csv_path = rdir / "conc_sweep_raw.csv"
 
-    if recorder is not None:
-        recorder.record_budget(
-            SweepBudget(
-                declared_total_sec=total_budget_sec,
-                granted_total_sec=total_budget_sec,
-                rung_cost_sec=variant_expected_sec,
-                raised=False,
-                gate_active=total_budget_sec is not None,
-                deadline=started_at + total_budget_sec if total_budget_sec is not None else None,
-            )
-        )
-
     run = _SweepRun(
         state=state,
         session_dir=session_dir,
@@ -1361,78 +1432,8 @@ async def run_conc_sweep(
         csv_path=csv_path,
         recorder=recorder,
     )
-    log.info(
-        "conc_sweep (single-server): arms=optimized,baseline concs=%s isl=%d osl=%d total_budget=%s",
-        run.concs_desc,
-        isl,
-        osl,
-        f"{total_budget_sec}s" if total_budget_sec is not None else "unbounded",
-    )
-    arms_order = [run.optimized, run.baseline]
-    if recorder is not None:
-        recorder.record_plan(
-            SweepPlan(
-                concs_requested=concs,
-                concs_ordered=run.concs_desc,
-                grid_source=grid_source,
-                num_prompts_factor=DEFAULT_NUM_PROMPTS_FACTOR,
-                variant_timeout_sec=benchmark_timeout_sec,
-                arms_order=[arm.name for arm in arms_order],
-            )
-        )
-    for arm in arms_order:
-        if run.observe_cancel():
-            run.results.extend(_deadline_skip_result(v, _CANCEL_STOP) for v in run.arm_grid(arm))
-            if recorder is not None:
-                recorder.record_arm_refused(arm.name, reason=ORCHESTRATOR_CANCELLED_CLASS, remaining_sec=0.0)
-            continue
-        if run.budget.refuses_next_arm():
-            run.results.extend(_deadline_skip_result(v, deadline_stop) for v in run.arm_grid(arm))
-            if recorder is not None:
-                recorder.record_arm_refused(
-                    arm.name, reason=run.budget.skip_reason, remaining_sec=run.budget.remaining_sec
-                )
-            continue
-        if run.session_closing():
-            run.budget.spend_on_session_reserve()
-            run.results.extend(_budget_skip_result(v) for v in run.arm_grid(arm))
-            if recorder is not None:
-                recorder.record_arm_refused(arm.name, reason=_SESSION_RESERVE, remaining_sec=0.0)
-            continue
-
-        if recorder is not None:
-            recorder.open_arm(arm.name, extra_server_args=arm.args, extra_envs=arm.envs)
-        await _sweep_one_arm_single_server(run, arm)
-
-    payload = run.payload(in_progress=False)
-    comparison, summary = payload["comparison"], payload["summary"]
-    ceiling = _build_roofline_ceiling(
-        state,
-        _ArmCurves(baseline=payload["baseline"]["points"], optimized=payload["optimized"]["points"]),
-        concs=concs,
-        isl=isl,
-        osl=osl,
-    )
-    if ceiling is not None:
-        payload["roofline_ceiling"] = ceiling
-
-    report_error = run.write(payload)
-
-    if recorder is not None:
-        if report_error is not None:
-            recorder.record_fault(stage="report_write", exc=report_error)
-        recorder.record_progress(comparison=comparison, summary=summary)
-        recorder.finish(payload, stop_reason=getattr(state, "stop_reason", ""))
-
-    log.info(
-        "conc_sweep: done — status=%s successful_pairs=%d failed_pairs=%d best_speedup=%s%s",
-        payload["status"],
-        summary["successful_pairs"],
-        summary["failed_pairs"],
-        summary["best_speedup"],
-        f" cancelled_by={run.cancel_reason}" if run.cancelled else "",
-    )
-    return payload
+    await _sweep_arms(run, grid_source)
+    return _finish_sweep(run)
 
 
 __all__ = [

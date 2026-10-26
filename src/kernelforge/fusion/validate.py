@@ -41,6 +41,7 @@ Mamba backend cannot init on ROCm).
 from __future__ import annotations
 
 import contextlib
+import http.client
 import json
 import logging
 import math
@@ -400,7 +401,7 @@ def _vllm_decode_probe(
         model_id = (models.get("data") or [{}])[0].get("id")
         if not model_id:
             return False, "no served model id from /v1/models"
-    except Exception as e:  # noqa: BLE001
+    except (OSError, http.client.HTTPException, ValueError, AttributeError, KeyError, TypeError) as e:
         return False, f"/v1/models probe error: {type(e).__name__}: {e}"
 
     prompt = "The quick brown fox " * max(1, isl // 4)
@@ -422,7 +423,7 @@ def _vllm_decode_probe(
         try:
             with _rq.urlopen(req, timeout=timeout_s) as r:
                 body = _json.loads(r.read().decode())
-        except Exception as e:  # noqa: BLE001
+        except (OSError, http.client.HTTPException, ValueError) as e:
             return False, f"completion {i} error: {type(e).__name__}: {e}"
         text = (body.get("choices") or [{}])[0].get("text") or ""
         if not text:
@@ -1101,8 +1102,7 @@ def eager_trace_alignment(
     anchor = str(evidence.get("anchor") or "").strip()
     if not anchor:
         return None, "no anchored trace evidence to check the eager arm against"
-    seen = [str(n) for n in (observed or []) if str(n).strip()]
-    if not seen:
+    if not observed:
         return None, "harness reported no eager kernel names; alignment unchecked"
 
     neighbours: list[str] = []
@@ -1112,12 +1112,12 @@ def eager_trace_alignment(
             if text and text != anchor and text not in neighbours:
                 neighbours.append(text)
 
-    if not any(_same_kernel(anchor, name) for name in seen):
+    if not any(_same_kernel(anchor, name) for name in observed):
         return False, (
             f"eager arm never launched the anchor kernel ({_tail(anchor, 120)}); "
-            f"it issued {len(seen)} other kernel(s), so it is a different code path"
+            f"it issued {len(observed)} other kernel(s), so it is a different code path"
         )
-    matched = [n for n in neighbours if any(_same_kernel(n, name) for name in seen)]
+    matched = [n for n in neighbours if any(_same_kernel(n, name) for name in observed)]
     if neighbours and not matched:
         return False, (
             f"eager arm launched the anchor but none of its {len(neighbours)} recorded "

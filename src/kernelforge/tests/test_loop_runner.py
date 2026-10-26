@@ -6443,7 +6443,7 @@ def test_recovered_keep_archive_none_retains_pending_journal(
     monkeypatch.setattr(loop.archive, "record", lambda _record: None)
 
     with pytest.raises(RuntimeError, match="recover candidate archive"):
-        loop._archive_pending_keep(pending, "committed-hash")
+        loop._archive_pending_keep(pending, loop._pending_keep_result(pending, "committed-hash"))
 
     assert loop._pending_keep_path.is_file()
 

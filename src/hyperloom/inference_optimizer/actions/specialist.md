@@ -159,9 +159,11 @@ Each specialist subprocess sees:
   fan-out is single-layer and stays within the parent's lane/GPU lease.
 * A 60s heartbeat protocol — the subprocess writes
   `runs/specialist/<task_id>/heartbeat.json`; SpecialistRunner reaps an agent
-  after approximately 5 minutes if neither heartbeat nor process-log activity
-  ever appears. Once either activity file has appeared, it reaps the agent
-  after approximately 10 minutes of subsequent silence. The staleness
+  after approximately 5 minutes if no activity ever appears in the heartbeat,
+  the process log, or (for a `dsh` specialist, which prints only its final
+  message) the session log under `.dsh/sessions`. Once one of them has
+  appeared, it reaps the agent after approximately 10 minutes of subsequent
+  silence in all of them. The staleness
   threshold is currently fixed and has no operator override.
 * The exit contract:
   - one `specialist_done` intent (the SpecialistRunner harvests it from

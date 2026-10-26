@@ -40,6 +40,35 @@ from .tracelens_skill_runner import normalize_upstream_category
 
 log = logging.getLogger(__name__)
 
+# Kernel-name markers per GEAK category, in priority order: the first category with a marker in the name wins.
+_NAME_CATEGORY_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "GEMM",
+        (
+            "gemm",
+            "matmul",
+            "rocblas",
+            "hipblas",
+            "cijk",
+            "sgemm",
+            "hgemm",
+            # PyTorch op-name variants.
+            "::mm",
+            "::addmm",
+            "::bmm",
+        ),
+    ),
+    ("SDPA", ("attention", "attn", "fmha", "paged_attention", "flash")),
+    ("LayerNorm", ("rmsnorm", "layernorm", "norm_kernel")),
+    ("Activation", ("act_and_mul", "silu", "gelu", "activation")),
+    ("MoE", ("moe", "topk", "expert")),
+    ("Softmax", ("softmax",)),
+    ("Embedding", ("embed",)),
+    ("Communication", ("reduce", "all_reduce", "all_gather")),
+    ("Triton", ("triton",)),
+    ("Elementwise", ("elementwise", "binary")),
+)
+
 
 def derive_kernel_category(candidate: dict[str, Any]) -> str:
     """Map a candidate to its GEAK-facing kernel category.
@@ -59,41 +88,9 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
     if candidate.get("source_type") == "flydsl":
         return "FlyDSL"
     name = str(candidate.get("name") or "").lower()
-    if any(
-        t in name
-        for t in (
-            "gemm",
-            "matmul",
-            "rocblas",
-            "hipblas",
-            "cijk",
-            "sgemm",
-            "hgemm",
-            # PyTorch op-name variants.
-            "::mm",
-            "::addmm",
-            "::bmm",
-        )
-    ):
-        return "GEMM"
-    if any(t in name for t in ("attention", "attn", "fmha", "paged_attention", "flash")):
-        return "SDPA"
-    if "rmsnorm" in name or "layernorm" in name or "norm_kernel" in name:
-        return "LayerNorm"
-    if "act_and_mul" in name or "silu" in name or "gelu" in name or "activation" in name:
-        return "Activation"
-    if "moe" in name or "topk" in name or "expert" in name:
-        return "MoE"
-    if "softmax" in name:
-        return "Softmax"
-    if "embed" in name:
-        return "Embedding"
-    if "reduce" in name or "all_reduce" in name or "all_gather" in name:
-        return "Communication"
-    if "triton" in name:
-        return "Triton"
-    if "elementwise" in name or "binary" in name:
-        return "Elementwise"
+    for category, markers in _NAME_CATEGORY_MARKERS:
+        if any(marker in name for marker in markers):
+            return category
     return "unknown"
 
 

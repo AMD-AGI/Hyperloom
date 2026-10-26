@@ -155,14 +155,21 @@ async def test_an_attempt_runs_on_the_harness_when_the_platform_names_it(
     assert any("DeepSeek runner" in line and "attempt=2" in line for line in logs)
 
 
-def test_an_attempt_is_unfinished_until_it_is_blocked_or_has_reached_evaluation(tmp_path: Path) -> None:
-    """An attempt that stops after one reply must not read as a quantized model whose path is ``None``."""
+def test_an_attempt_is_unfinished_until_it_is_blocked_or_has_an_eval_result(tmp_path: Path) -> None:
+    """An attempt that stops after one reply must not read as a quantized model whose path is ``None``.
+
+    ``last_phase.txt`` is written when a phase starts, so reaching eval is not
+    an end: the attempt still owes the eval report, or the reason it skipped it.
+    """
     assert not runner._attempt_finished(tmp_path)
 
     (tmp_path / "last_phase.txt").write_text("export\n", encoding="utf-8")
     assert not runner._attempt_finished(tmp_path)
 
     (tmp_path / "last_phase.txt").write_text("eval\n", encoding="utf-8")
+    assert not runner._attempt_finished(tmp_path)
+
+    (tmp_path / "eval_skipped.txt").write_text("no eval environment\n", encoding="utf-8")
     assert runner._attempt_finished(tmp_path)
 
 

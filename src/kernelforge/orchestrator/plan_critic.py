@@ -544,7 +544,8 @@ class PlanCriticAgent:
                 role=_WIDTH_BLOCK_LABEL,
                 allow_incomplete=True,
             )
-        except Exception as error:  # noqa: BLE001 - provider boundary
+        except Exception as error:  # provider boundary
+            log.warning("plan critic width repair pass failed: %s", error, exc_info=True)
             return self._unrepaired(
                 ruling,
                 f"one repair pass for the width block failed: {_bounded_error_detail(error)}",

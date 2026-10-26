@@ -12,7 +12,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import kernel_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import KERNEL_EVENT_SECTIONS
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     REBENCH_FALLBACK,
     REBENCH_NO_PROMOTE,
@@ -130,7 +131,7 @@ def test_the_stage_in_flight_is_recoverable_from_the_rows_alone(tmp_path):
     recorder.enter_stage("gemm_tuning")
 
     assert _kernel_events(tmp_path)[0]["status"] == "running"
-    ext, status = assemble_kernel_ext(kernel_event_parts(), event=recorder.event_id)
+    ext, status = assemble_kernel_ext(event_parts(KERNEL_EVENT_SECTIONS), event=recorder.event_id)
     assert ext["in_flight_stage"] == "gemm_tuning"
     # An event still in flight has reached no verdict, whatever its rows so far
     # add up to.
@@ -777,7 +778,7 @@ def test_geak_opaque_ids_survive_acceptance_rebench_integration_and_late_rejecti
     assert attempts[SOURCE_GEAK_ENV_SELECTION]["outcome"] == "adopted"
     assert attempts[SOURCE_GEAK_ENV_SELECTION]["rebench_ref"] == "geak:rebench:0"
     assert ext["rebench"][0]["attempt_id"] == "geak:rebench:0"
-    assert kernel_event_parts()["kernel_integrate"][0]["integration_id"] == f"geak:{kernel_id}"
+    assert event_parts(KERNEL_EVENT_SECTIONS)["kernel_integrate"][0]["integration_id"] == f"geak:{kernel_id}"
 
     reject_geak_attempts(
         event=recorder.event_id,
@@ -803,7 +804,7 @@ def test_name_only_discovered_kernels_keep_distinct_rank_fallback_ids():
     recorder.record_discovered_kernels(
         {"roofline_snapshot_id": 4, "hot_kernels_top15": [{"name": "kernel_a"}, {"name": "kernel_b"}]}
     )
-    rows = kernel_event_parts()["kernel_discovered"]
+    rows = event_parts(KERNEL_EVENT_SECTIONS)["kernel_discovered"]
     assert [row["name"] for row in rows] == ["kernel_a", "kernel_b"]
     assert [row["rank"] for row in rows] == [0, 1]
 
@@ -1012,7 +1013,7 @@ def test_reassembling_a_crashed_visit_reaches_the_same_status(tmp_path):
     recorder.finish_crashed(RuntimeError("boom"))
 
     event_id = _kernel_events(tmp_path)[0]["id"]
-    _ext, status = assemble_kernel_ext(kernel_event_parts(), event=event_id)
+    _ext, status = assemble_kernel_ext(event_parts(KERNEL_EVENT_SECTIONS), event=event_id)
     assert status == "failed"
 
 
@@ -1104,7 +1105,7 @@ def test_an_unfinished_visit_states_no_verdict(tmp_path):
         )
     )
 
-    ext, status = assemble_kernel_ext(kernel_event_parts(), event=recorder.event_id)
+    ext, status = assemble_kernel_ext(event_parts(KERNEL_EVENT_SECTIONS), event=recorder.event_id)
     assert status == "running"
     assert ext["outcome"]["verdict"] == ""
     assert ext["outcome"]["reason"] == ""

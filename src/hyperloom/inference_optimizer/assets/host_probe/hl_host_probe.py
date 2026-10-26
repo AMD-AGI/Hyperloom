@@ -700,8 +700,8 @@ class HostProbe:
                 f"hl_host_probe_rank{_rank()}_pid{os.getpid()}.json",
                 self.report(),
             )
-        except Exception as exc:  # noqa: BLE001 - reporting is best-effort
-            sys.stderr.write(f"[hl_host_probe] could not write report: {exc!r}\n")
+        except Exception as exc:
+            log.warning("could not write host probe report: %s", exc, exc_info=True)
             return ""
 
 
@@ -735,17 +735,13 @@ def install_from_env() -> "HostProbe | None":
         for part in str(os.environ.get("HYPERLOOM_HOST_PROBE_ROOTS", "") or "").split(os.pathsep)
         if part.strip()
     )
-    try:
-        probe = HostProbe(
-            out_dir=out_dir,
-            roots=roots,
-            deep=_env_on("HYPERLOOM_HOST_PROBE_DEEP"),
-            max_sites=_env_int("HYPERLOOM_HOST_PROBE_MAX_SITES", _DEFAULT_MAX_SITES),
-            arg_samples=_env_int("HYPERLOOM_HOST_PROBE_ARG_SAMPLES", _DEFAULT_ARG_SAMPLES),
-        ).install()
-    except Exception as exc:  # noqa: BLE001 - installation must never break the run
-        sys.stderr.write(f"[hl_host_probe] install failed: {exc!r}\n")
-        return None
+    probe = HostProbe(
+        out_dir=out_dir,
+        roots=roots,
+        deep=_env_on("HYPERLOOM_HOST_PROBE_DEEP"),
+        max_sites=_env_int("HYPERLOOM_HOST_PROBE_MAX_SITES", _DEFAULT_MAX_SITES),
+        arg_samples=_env_int("HYPERLOOM_HOST_PROBE_ARG_SAMPLES", _DEFAULT_ARG_SAMPLES),
+    ).install()
     _ACTIVE = probe
     return probe
 

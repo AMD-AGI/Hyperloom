@@ -53,9 +53,9 @@ SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
 ABORTED_STOP_REASONS: frozenset[str] = frozenset({"signal"})
 
 #: Terminals about the machine or the harness rather than the model: a host
-#: that cannot run the combo, an argv the installed parser refuses, a bring-up
-#: round that expired unreaped, a supervisor that found the coordinator dead
-#: or its tick wedged, or an agent's LLM backend that stopped answering.
+#: that cannot run the combo, an argv the installed parser refuses, a supervisor
+#: that found the coordinator dead or its tick wedged, or an agent's LLM backend
+#: that stopped answering.
 INFRASTRUCTURE_STOP_REASONS: frozenset[str] = frozenset(
     {ENV_FAULT, ARGV_INVALID, DIED_STOP_REASON, WEDGED_STOP_REASON, BACKEND_UNHEALTHY_STOP_REASON}
 )
@@ -124,8 +124,6 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # infrastructure by ``INFRASTRUCTURE_STOP_REASONS``.
         ENV_FAULT,
         ARGV_INVALID,
-        # A bring-up round expired with nothing confirming its holder dead, so
-        # it keeps excluding the machine.
         # The out-of-band supervisor found the coordinator's process gone; it
         # reaches a report through the terminal artifact the supervisor writes.
         DIED_STOP_REASON,

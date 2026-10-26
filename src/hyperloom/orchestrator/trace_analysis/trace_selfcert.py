@@ -289,12 +289,16 @@ class StepPass:
                     self.kernel_by_corr.setdefault(args.get("correlation"), []).append((ts, ts + dur))
         finally:
             fobj.close()
+        self._index_scan(runtime, roots)
+        return errors
+
+    def _index_scan(self, runtime: list[tuple[float, Any]], roots: dict[str, list[dict[str, Any]]]) -> None:
+        """Order the runtime launches by time and keep the steps of the highest-precedence root family found."""
         runtime.sort(key=lambda x: x[0])
         self.runtime_ts = [t for t, _ in runtime]
         self.runtime_corr = [c for _, c in runtime]
         self.root_family = next((family for family in _ROOT_PATTERNS if family in roots), None)
         self.steps = sorted(roots.get(self.root_family, ()), key=lambda s: s["ts"])
-        return errors
 
     def attribute_steps(self) -> None:
         """Fill each step with the device work its own launches produced."""
