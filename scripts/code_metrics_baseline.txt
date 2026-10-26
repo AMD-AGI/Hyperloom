@@ -320,7 +320,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/trace_analyze.py::tr
 function-lines src/hyperloom/orchestrator/bringup/argv_preflight.py::check_server_argv 68
 function-lines src/hyperloom/orchestrator/bus/gpu_pool.py::SpecialistGpuPool.try_acquire 63
 function-lines src/hyperloom/orchestrator/bus/resource_lock.py::SqliteLeaseBackend.acquire_many 73
-function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_escalate_to_targeted_build 93
+function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_escalate_to_targeted_build 92
 function-lines src/hyperloom/orchestrator/enablement/lane.py::EnablementLane._maybe_enqueue_enablement_specialist 73
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams._derive_checkpoint_weight_facts 56
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams._discover_enablement_candidate_refs 52
@@ -467,7 +467,7 @@ function-lines src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.p
 function-lines src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::_certify_rank 65
 function-lines src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::build_verdict 55
 function-lines src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::certify_trace_dir 67
-function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::main 481
+function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::main 480
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_arch_benchmark.py::populate_gpu_arch_json 59
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py::aggregate_by_source_function 59
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py::run_tracelens_skill 60

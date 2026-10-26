@@ -167,9 +167,8 @@ class EnablementBuild(CoordinatorCollaborator):
                 "aiter": ("aiter",),
                 "sgl_kernel": ("sglang", "sgl-kernel", "sgl_kernel"),
                 "vllm_source": ("vllm",),
-                "framework_ext": (),
             }
-            hints = _component_hints.get(component, ())
+            hints = _component_hints[component]
             for _cand in list(state.enablement.candidate_refs):
                 _repo, _ref, _pr_url = resolve_build_ref(str(_cand), repo_url)
                 if not _ref:

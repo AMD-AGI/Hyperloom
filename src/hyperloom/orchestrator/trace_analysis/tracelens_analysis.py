@@ -166,8 +166,14 @@ def _gpu_arch_json(
     )
 
 
-def _check_tracelens_checkout(args: argparse.Namespace, log_path: Path) -> tuple[Path, Path | None]:
-    """Return the usable TraceLens root and the internal-extension root (None when open-source-only).
+class _TraceLensCheckout(NamedTuple):
+    root: Path
+    internal_root: Path | None
+    skill: Path
+
+
+def _check_tracelens_checkout(args: argparse.Namespace, log_path: Path) -> _TraceLensCheckout:
+    """Return the usable TraceLens root, internal-extension root (None when open-source-only) and skill.
 
     Raises when the root is missing or incomplete, TraceLens and its splitter do not import, or the
     analysis-orchestrator skill is absent.
@@ -216,7 +222,7 @@ def _check_tracelens_checkout(args: argparse.Namespace, log_path: Path) -> tuple
     if not skill.exists():
         raise FileNotFoundError(f"TraceLens analysis-orchestrator skill not found: {skill}")
     append_log(log_path, f"TraceLens skill: {skill}")
-    return tl_root, tl_internal_root
+    return _TraceLensCheckout(tl_root, tl_internal_root, skill)
 
 
 def _check_tracelens_importable(tl_root: Path, budget_minutes: float, log_path: Path) -> None:
@@ -832,8 +838,7 @@ def main() -> int:
                 state="running",
                 current_step="check_tracelens_dependencies",
             )
-            tl_root, tl_internal_root = _check_tracelens_checkout(args, log_path)
-            skill = tl_root / _ORCHESTRATOR_SKILL
+            tl_root, tl_internal_root, skill = _check_tracelens_checkout(args, log_path)
 
             tracelens_dir = run_dir / "tracelens"
             tracelens_dir.mkdir(parents=True, exist_ok=True)
