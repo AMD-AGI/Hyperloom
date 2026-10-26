@@ -101,7 +101,6 @@ class RewriteOutcome:
 
 def build_result(scope: ResultScope, outcome: RewriteOutcome) -> RewriteResult:
     """Combine the port + preflight + optimize outcomes into one result."""
-    op_name = scope.op_name
     port_ok = outcome.port_ok
     optimize_result = outcome.optimize_result
     applyback_required = outcome.applyback_required
@@ -119,9 +118,9 @@ def build_result(scope: ResultScope, outcome: RewriteOutcome) -> RewriteResult:
     )
 
     return RewriteResult(
-        logical_op_name=op_name,
-        operator_slug=protocol.operator_slug(op_name),
-        builder_symbol=protocol.builder_symbol(op_name),
+        logical_op_name=scope.op_name,
+        operator_slug=protocol.operator_slug(scope.op_name),
+        builder_symbol=protocol.builder_symbol(scope.op_name),
         target_language="flydsl",
         # MVP mapping: a successful port yields a building, correct FlyDSL kernel (forge-loop only keeps
         # correctness-passing versions), so compiled and correct track port_ok.
