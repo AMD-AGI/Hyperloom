@@ -6,8 +6,10 @@
 ``run`` takes the fixed workload, spelled as ``hyperloom optimize`` spells it, the wall-clock budget and the kernel
 optimizer its recipes are scoped to, and the hard limits the judge works within. ``--workload`` names the workload
 kind: ``inferencex`` takes ``--isl`` and ``--osl``, and ``agentx`` refuses them, as the trace it replays fixes its
-requests; an operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than ``--workload``, or that names a
-benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``, is refused.
+requests; ``agentx`` takes ``--ep``, 1 when not given, and ``inferencex`` refuses it. An agentx session serves its
+model in the image ``HYPERLOOM_ACTIVE_IMAGE_REF`` names, and a ``--model`` that is a directory is recorded by its
+resolved path, which its benchmark pins. An operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than
+``--workload``, or that names a benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``, is refused.
 ``--max-gpu-hours`` caps the GPU hours the session's tests use: EXPLORE ends with ``gpu_hours_exhausted`` once only
 FINAL's share is left, and FINAL still runs. ``--max-llm-usd`` caps the dollars the session's LLM calls cost: EXPLORE
 ends with ``llm_budget_exhausted`` once their recorded spend reaches it, and FINAL still runs. Each call is priced from
@@ -84,6 +86,7 @@ from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_co
 from hyperloom.common.env import EnvValueError
 from hyperloom.common.outside_facts.image_check import ImageCheckFailed, mode_from_environment
 from hyperloom.common.perf_metric import agentx_enabled
+from hyperloom.common.workload_defaults import DEFAULT_EP
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
@@ -197,6 +200,12 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
     run.add_argument("--conc", type=int, required=True, help="Concurrency of the primary operating point.")
     for name in SEQUENCE_LENGTHS:
         run.add_argument(f"--{name}", type=int, default=None, help="Required for inferencex; refused for agentx.")
+    run.add_argument(
+        "--ep",
+        type=int,
+        default=None,
+        help=f"Expert-parallel size of an agentx workload, default {DEFAULT_EP}; refused for inferencex.",
+    )
     run.add_argument("--precision", required=True, help="Model precision, as hyperloom optimize spells it.")
     run.add_argument(
         "--kernel-optimizer",
@@ -324,10 +333,28 @@ def _shape_errors(args: argparse.Namespace) -> list[str]:
     return missing or _positive(args, SEQUENCE_LENGTHS)
 
 
+def _ep_errors(args: argparse.Namespace) -> list[str]:
+    if args.ep is None:
+        return []
+    if WorkloadKind(args.workload) is WorkloadKind.INFERENCEX:
+        return [f"--ep is not taken by an inferencex workload, which is served at EP {DEFAULT_EP}"]
+    return _positive(args, ("ep",))
+
+
 def _workload_shape(args: argparse.Namespace) -> InferenceXShape | None:
     if WorkloadKind(args.workload) is WorkloadKind.AGENTX:
         return None
     return InferenceXShape(args.isl, args.osl)
+
+
+def _workload_model(args: argparse.Namespace) -> str:
+    """``--model``, an agentx workload's model directory by its resolved path: the benchmark the session writes for it
+    pins the directory so, and its PRELUDE child's ``--model`` must name it as pinned."""
+
+    directory = Path(args.model).expanduser()
+    if WorkloadKind(args.workload) is WorkloadKind.AGENTX and directory.is_dir():
+        return str(directory.resolve())
+    return args.model
 
 
 #: Schemes whose URL user is a login name rather than a credential; any other scheme's user, or a password, is one.
@@ -374,7 +401,7 @@ def _references(specs: list[str]) -> tuple[ReferenceSource, ...]:
 def settings_from(args: argparse.Namespace) -> RunSettings:
     """The run's settings; raises ValueError naming the invalid options. :class:`RosterCaps` checks the caps."""
 
-    errors = _shape_errors(args) + _positive(args, ("tp", "conc", "judge_interval_sec"))
+    errors = _shape_errors(args) + _ep_errors(args) + _positive(args, ("tp", "conc", "judge_interval_sec"))
     if args.max_hours < 0 or 0 < args.max_hours < MB_MIN_PRELUDE_HOURS:
         errors.append(f"--max-hours must be 0 (no limit) or at least {MB_MIN_PRELUDE_HOURS:.4f} (one minute)")
     if not math.isfinite(args.max_gpu_hours) or args.max_gpu_hours < 0:
@@ -395,7 +422,7 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
     if parallel > fitting:
         raise ValueError(f"--max-parallel-tests must be at most {fitting}, the tests the machine's cards run at TP")
     workload = Workload(
-        args.model,
+        _workload_model(args),
         args.framework,
         args.tp,
         args.conc,
@@ -403,6 +430,7 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         args.gpu_type,
         KernelOptimizer(args.kernel_optimizer),
         _workload_shape(args),
+        DEFAULT_EP if args.ep is None else args.ep,
     )
     caps = RosterCaps(args.max_branches, args.max_k_per_branch, parallel)
     return RunSettings(

@@ -180,6 +180,31 @@ def test_an_agentx_run_has_no_sequence_lengths_and_is_graded_on_p50_interactivit
     assert (workload.kind, workload.metric, workload.final_concs) == (WorkloadKind.AGENTX, GRADED_INTVTY_P50, (16,))
 
 
+def test_an_agentx_run_is_served_at_the_ep_it_names_and_at_ep_1_by_default() -> None:
+    assert _settings(workload=AGENTX_ARGS).workload.ep == 1
+    assert _settings("--ep", "8", workload=AGENTX_ARGS).workload.ep == 8
+
+
+def test_run_help_names_the_ep_option(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--help"])
+
+    assert "--ep EP" in capsys.readouterr().out
+
+
+def test_an_agentx_model_directory_is_recorded_by_its_resolved_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "models" / "Llama-3-8B").mkdir(parents=True)
+    (tmp_path / "llama").symlink_to(tmp_path / "models" / "Llama-3-8B")
+    monkeypatch.chdir(tmp_path)
+    agentx = ["--model", "llama", *AGENTX_ARGS[2:]]
+    inferencex = ["--model", "llama", *WORKLOAD_ARGS[2:]]
+
+    assert _settings(workload=agentx).workload.model == str(tmp_path.resolve() / "models" / "Llama-3-8B")
+    assert _settings(workload=inferencex).workload.model == "llama"
+
+
 def test_kernel_optimizer_can_be_geak() -> None:
     assert _settings("--kernel-optimizer", "geak").workload.kernel_optimizer is KernelOptimizer.GEAK
 
@@ -223,6 +248,8 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *WORKLOAD_ARGS, "--isl", "0"],
         ["run", *AGENTX_ARGS, "--isl", "1024"],
         ["run", *AGENTX_ARGS, "--osl", "512"],
+        ["run", *AGENTX_ARGS, "--ep", "0"],
+        ["run", *WORKLOAD_ARGS, "--ep", "2"],
     ],
 )
 def test_usage_errors_exit_two(argv: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
