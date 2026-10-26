@@ -164,9 +164,6 @@ class ProposalScorer:
     """Score proposals without ranking or selecting them."""
 
     models: tuple[str, ...] = DEFAULT_SCORER_MODELS
-    # Scorer talks the OpenAI protocol, so prefer the OpenAI-side key/URL.
-    api_key_env: str = "OPENAI_API_KEY"
-    base_url_env: str = "OPENAI_BASE_URL"
     # Large cap so reasoning raters can finish reasoning and still emit the scores JSON.
     max_completion_tokens: int = 4096
     call_timeout_s: float = field(
@@ -200,10 +197,7 @@ class ProposalScorer:
         if self._client is not None:
             return self._client
         try:
-            self._client = get_async_openai_client(
-                api_key_env=self.api_key_env,
-                base_url_env=self.base_url_env,
-            )
+            self._client = get_async_openai_client()
         except LLMConfigError as exc:
             raise RuntimeError(str(exc).replace("OpenAI-compatible client", "ProposalScorer")) from exc
         return self._client

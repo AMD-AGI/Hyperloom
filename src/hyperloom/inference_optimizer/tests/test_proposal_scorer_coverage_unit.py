@@ -10,7 +10,6 @@ import sys
 
 import pytest
 
-from hyperloom.orchestrator.scoring import proposal_scorer as proposal_scorer_module
 from hyperloom.orchestrator.scoring.proposal_scorer import (
     ProposalScorer,
     _ScoringProposal,
@@ -162,20 +161,6 @@ def test_ensure_client_works_in_an_anthropic_only_deployment(monkeypatch):
     assert scorer._ensure_client() is not None
     assert captured["api_key"] == "anthropic-token"
     assert captured["base_url"] == "https://llm-api.amd.com/Unified/v1"
-
-
-def test_ensure_client_comes_from_the_shared_llm_gateway(monkeypatch):
-    """The scorer owns no credentials: it forwards its env-var contract to llm_config."""
-    captured: dict = {}
-    sentinel = object()
-    monkeypatch.setattr(
-        proposal_scorer_module,
-        "get_async_openai_client",
-        lambda **kwargs: captured.update(kwargs) or sentinel,
-    )
-    scorer = ProposalScorer(models=("m",), api_key_env="SCORER_KEY", base_url_env="SCORER_URL")
-    assert scorer._ensure_client() is sentinel
-    assert captured == {"api_key_env": "SCORER_KEY", "base_url_env": "SCORER_URL"}
 
 
 def test_ensure_client_without_openai_sdk_raises(monkeypatch):

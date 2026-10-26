@@ -393,17 +393,11 @@ def test_provider_overrides_require_a_credential():
         )
 
 
-def test_env_key_follows_llm_config_precedence():
-    """The caller's preferred variable wins, then OPENAI_API_KEY."""
-    both = _gateway_env(LLM_GATEWAY_KEY="b")
+def test_env_key_is_openai_api_key():
+    """Codex reads its key from OPENAI_API_KEY."""
+    overrides = cs.resolve_codex_provider_config(env=_gateway_env(LLM_GATEWAY_KEY="b")).overrides
 
-    default = cs.resolve_codex_provider_config(env=both).overrides
-    preferred = cs.resolve_codex_provider_config(
-        api_key_env="SAFE_API_KEY", env={"SAFE_API_KEY": "c", **both}
-    ).overrides
-
-    assert _override_value(default, "model_providers.hyperloom.env_key") == '"OPENAI_API_KEY"'
-    assert _override_value(preferred, "model_providers.hyperloom.env_key") == '"SAFE_API_KEY"'
+    assert _override_value(overrides, "model_providers.hyperloom.env_key") == '"OPENAI_API_KEY"'
 
 
 # --------------------------------------------------------------------------- # Sandbox and approval selection
@@ -517,7 +511,7 @@ def test_resolve_codex_sandbox_mode_rejects_an_unknown_value():
 
 
 @pytest.mark.parametrize(("returncode", "expected"), [(0, True), (1, False)])
-def test_probe_codex_sandbox_executes_a_real_bwrap_sandbox(returncode, expected):
+def test_probe_codex_sandbox_executes_a_real_bwrap_sandbox(monkeypatch, returncode, expected):
     """The capability check executes mount isolation instead of only finding bwrap."""
     calls: list[tuple[list[str], dict[str, Any]]] = []
 
@@ -525,12 +519,9 @@ def test_probe_codex_sandbox_executes_a_real_bwrap_sandbox(returncode, expected)
         calls.append((argv, kwargs))
         return type("_Completed", (), {"returncode": returncode})()
 
-    available = cs.probe_codex_sandbox_capability(
-        env={"PATH": "/probe/bin"},
-        bwrap_resolver=lambda _name, *, path: "/probe/bin/bwrap",
-        runner=_runner,
-        use_cache=False,
-    )
+    monkeypatch.setattr(cs.subprocess, "run", _runner)
+
+    available = cs._run_bwrap_probe("/probe/bin/bwrap", source={"PATH": "/probe/bin"})
 
     assert available is expected
     assert calls[0][0] == [
@@ -886,8 +877,6 @@ def test_run_codex_turn_reports_persistent_busy_cleanup_without_leaking_details(
 
         assert attempts >= 2
         assert home == Path(record["codex_home_at_enter"])
-        assert excinfo.value.completed_result is not None
-        assert excinfo.value.completed_result.text == "done"
         assert str(home) in str(excinfo.value)
         assert "resource-busy" in str(excinfo.value)
         assert "pack" not in str(excinfo.value)

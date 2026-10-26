@@ -178,11 +178,9 @@ def test_llm_config_parse_and_derive_edges() -> None:
     assert derive_openai_base_url("https://gw.example/custom") == "https://gw.example/custom"
 
     cfg = resolve_openai_client_config(
-        api_key_env="CUSTOM_KEY",
-        base_url_env="CUSTOM_BASE",
         env={
-            "CUSTOM_KEY": " key ",
-            "CUSTOM_BASE": " https://base.example/v1 ",
+            "OPENAI_API_KEY": " key ",
+            "OPENAI_BASE_URL": " https://base.example/v1 ",
             "OPENAI_CUSTOM_HEADERS": '{"X-Trace": " 1 "}',
         },
     )
