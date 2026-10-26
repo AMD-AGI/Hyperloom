@@ -571,7 +571,7 @@ function-lines src/kernelforge/loop/task_preflight.py::_count_graph_replays 68
 function-lines src/kernelforge/loop/task_preparer.py::_commit_prepared_task 61
 function-lines src/kernelforge/loop/task_preparer.py::prepare_task 216
 function-lines src/kernelforge/loop/task_preparer_prompts.py::_build_prompt 54
-function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 250
+function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 223
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 114
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._finalize_framework_artifacts 74
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._has_valid_profile_evidence 53
@@ -652,7 +652,7 @@ module-lines src/kernelforge/loop/insession_gate.py 1263
 module-lines src/kernelforge/loop/knowledge_integration.py 1464
 module-lines src/kernelforge/loop/task_preparer.py 1511
 module-lines src/kernelforge/orchestrator/analysis.py 1959
-module-lines src/kernelforge/orchestrator/orchestration.py 1831
+module-lines src/kernelforge/orchestrator/orchestration.py 1744
 nested-blocks scripts/platform_audit_bmc.py::main 5
 nested-blocks src/hyperloom/common/launch_log_evidence.py::_read_launch_record 5
 nested-blocks src/hyperloom/common/launch_log_evidence.py::_recipe_server_env 5
