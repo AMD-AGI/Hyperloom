@@ -41,11 +41,13 @@ from hyperloom_multibranch.scheduling.judge import (
     JudgeDecision,
     JudgeView,
     KOrder,
+    QueuedIntent,
     StopOrder,
     cap_decision,
     held_branches,
     hold_decision,
     parse_decision,
+    queued_intents,
     render_prompt,
 )
 from hyperloom_multibranch.scheduling.forks import PendingBranch
@@ -121,6 +123,7 @@ def _view(
     specialists: dict[str, SpecialistStatus] | None = None,
     held: dict[str, HoldReason] | None = None,
     candidates: tuple[PendingCandidate, ...] = (),
+    queued: dict[str, tuple[QueuedIntent, ...]] | None = None,
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
@@ -166,6 +169,7 @@ def _view(
         held=held or {},
         frontier_policy=CHOSEN,
         frontier_scorer=FRONTIER_V1_LABEL,
+        queued=queued or {},
     )
 
 
@@ -887,3 +891,38 @@ def test_a_branch_row_shows_its_pending_candidates_and_the_prompt_says_it_cannot
     assert "pending_candidates" not in rows["b02"]
     prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
     assert "A branch with a pending candidate cannot be stopped or narrowed until its confirm is judged" in prose
+
+
+def test_a_branch_row_shows_its_explore_tests_not_measured_yet_with_their_intent_and_wait() -> None:
+    moe, attention = intent("b01", "c-b01"), intent("b01", "c-b01", "attention", "fused rope")
+    late = replace(TestRecord(request("b01-r9", attention)), requested_at=NOW - 30.0)
+    early = replace(TestRecord(request("b01-r8", moe)), requested_at=NOW - 180.4)
+    records = [
+        late,
+        early,
+        _ended("b01", 1),
+        _ended("b01", 2, validity=None),
+        _ended("b01", 3, validity=Validity.MEASUREMENT_FAILED),
+        TestRecord(request("b01-r4", moe, purpose=Purpose.INTEGRATION)),
+        TestRecord(request("b02-r1", intent("b02", "c-root", "sampler", "cuda graph"))),
+    ]
+    known = {moe.fingerprint: moe, attention.fingerprint: attention}
+
+    queued = queued_intents(records, known)
+
+    assert queued == {
+        "b01": (
+            QueuedIntent("b01-r8", "moe gemm: tuned kernel", NOW - 180.4),
+            QueuedIntent("b01-r9", "attention: fused rope", NOW - 30.0),
+        ),
+        "b02": (QueuedIntent("b02-r1", "", 0.0),),
+    }
+    rows = {row["branch"]: row for row in _state(_view(queued=queued))["branches"]}
+    assert rows["b01"]["queued_intents"] == [
+        {"request_id": "b01-r8", "intent": "moe gemm: tuned kernel", "waiting_seconds": 180},
+        {"request_id": "b01-r9", "intent": "attention: fused rope", "waiting_seconds": 30},
+    ]
+    assert rows[INTEGRATION_BRANCH]["queued_intents"] == []
+    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
+    assert "A branch's queued_intents are its explore tests requested and not measured yet, queued or running" in prose
+    assert "weigh a stop against the tests the branch is about to report" in prose

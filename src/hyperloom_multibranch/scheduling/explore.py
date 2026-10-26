@@ -23,7 +23,7 @@ events since its last call, how far each branch lies behind the integration head
 commits fail to merge, whether a profile of the integration head runs, the GPU hours and the LLM dollars the
 specialists and the scheduler itself spent so far, and what is known of each running branch's specialist (given up,
 stopped because its judging failed, its heartbeat lost
-again and again), and decides what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed,
+again and again) and which explore tests each branch has queued, and decides what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed,
 and a branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background
 task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the
 integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and no merge
@@ -64,6 +64,7 @@ from hyperloom_multibranch.scheduling.judge import (
     JudgeView,
     held_branches,
     hold_decision,
+    queued_intents,
 )
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
@@ -341,6 +342,7 @@ class Explorer:
             held=await self._held(specialists),
             frontier_policy=self._frontier_policy,
             frontier_scorer=self._progress.guard.label,
+            queued=queued_intents(snapshot.records, snapshot.intents),
         )
         try:
             decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)

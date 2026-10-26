@@ -8,7 +8,7 @@ the integration branch's recorded value, how similar archived sessions went, whe
 still pay off, which running branches made much the same change, the events since its last call, how far each
 branch lies behind the integration head, which branches lead it while their commits fail to merge, whether a profile
 of the integration head runs, the GPU hours and LLM tokens the session has used, and what is known of each running
-branch's specialist). The judge answers with one JSON
+branch's specialist and which explore tests each branch has queued). The judge answers with one JSON
 object, which :func:`parse_decision` reads and :func:`cap_decision` cuts to the caps and to the branches that are
 still live. A failed call or an unreadable reply gives ``None``, and the scheduler keeps the status quo. The judge
 never calls a peer; the scheduler applies its decision. The judge may neither stop nor lower the K of a held branch
@@ -33,6 +33,7 @@ from hyperloom.common.jsonio import extract_last_json_with_key
 from hyperloom.contracts.measurement import Purpose, Validity
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.intent import Intent
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, PendingCandidate, TestRecord
 from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
@@ -166,6 +167,9 @@ test at a time: no stop or K you give it is applied, unless its judging failed: 
 judging failed. Otherwise weigh the slot it holds as given.
 A branch's pending_candidates are its measured candidates that beat its head by at least the bar while their confirm
 runs, each with its gain_over_head_pct.
+A branch's queued_intents are its explore tests requested and not measured yet, queued or running, each with the
+intent it tests and waiting_seconds since it was requested. Stopping the branch withdraws them and loses what they
+would have measured: weigh a stop against the tests the branch is about to report.
 Stop the session only when no branch is expected to gain anything worth the remaining time, and weigh that against
 explore_remaining_seconds: while hours of it are left and slots are free, a branch out of ideas is one to stop and
 replace, so refill the free slots rather than stop the session. Nothing measures convergence, so an early stop is
@@ -221,6 +225,7 @@ class JudgeView:
     K of to why, as :func:`held_branches` finds them when the view is built; it is what the prompt shows.
     ``frontier_policy`` is the policy the frontier scores rest on, with its label and evidence, and
     ``frontier_scorer`` the label of the scorer that scores now, ``frontier-v1`` once the chosen one fell back.
+    ``queued`` maps a branch to its explore tests not measured yet, as :func:`queued_intents` finds them.
     """
 
     now: float
@@ -252,6 +257,31 @@ class JudgeView:
     held: Mapping[str, HoldReason]
     frontier_policy: PolicyChoice
     frontier_scorer: str
+    queued: Mapping[str, tuple[QueuedIntent, ...]]
+
+
+@dataclass(frozen=True)
+class QueuedIntent:
+    """An explore test requested at ``requested_at`` and neither measured nor withdrawn yet; ``intent`` is the target and
+    mechanism it tests, ``""`` when the notebook holds no intent for it."""
+
+    request_id: str
+    intent: str
+    requested_at: float
+
+
+def queued_intents(records: Iterable[TestRecord], intents: Mapping[str, Intent]) -> dict[str, tuple[QueuedIntent, ...]]:
+    """Each branch's explore tests in flight, in the order they were requested, read off the notebook's ``records``
+    and its ``intents`` by fingerprint; a branch with none is left out."""
+
+    queued: dict[str, list[QueuedIntent]] = {}
+    for record in records:
+        if record.request.purpose is not Purpose.EXPLORE or not record.in_flight:
+            continue
+        intent = intents.get(record.request.intent_fingerprint or "")
+        text = "" if intent is None else f"{intent.target}: {intent.mechanism}"
+        queued.setdefault(record.request.branch, []).append(QueuedIntent(record.request_id, text, record.requested_at))
+    return {branch: tuple(sorted(items, key=lambda item: item.requested_at)) for branch, items in queued.items()}
 
 
 def _measured_with_verdict(record: TestRecord) -> bool:
@@ -392,6 +422,7 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None, view: Judge
         "start_commit": entry.start_commit,
         "k": entry.k,
         "similar_to": [asdict(item) for item in view.similar_to.get(entry.branch, ())],
+        "queued_intents": [_queued_row(item, view.now) for item in view.queued.get(entry.branch, ())],
     }
     if entry.branch == INTEGRATION_BRANCH:
         row["profile_running"] = view.profile_running
@@ -410,6 +441,14 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None, view: Judge
         row["specialist"] = asdict(specialist)
     row.update(_progress_row(progress))
     return row
+
+
+def _queued_row(queued: QueuedIntent, now: float) -> dict[str, object]:
+    return {
+        "request_id": queued.request_id,
+        "intent": queued.intent,
+        "waiting_seconds": round(now - queued.requested_at),
+    }
 
 
 def _pending_row(pending: PendingBranch, now: float) -> dict[str, object]:
@@ -644,10 +683,12 @@ __all__ = [
     "JudgeDecision",
     "JudgeView",
     "KOrder",
+    "QueuedIntent",
     "StopOrder",
     "cap_decision",
     "parse_decision",
     "held_branches",
+    "queued_intents",
     "hold_decision",
     "render_prompt",
 ]
