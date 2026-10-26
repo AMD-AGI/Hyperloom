@@ -41,6 +41,7 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, list[str]]]:
         (["recover", "--session-dir", "s"], ("hyperloom.inference_optimizer.cli", ["recover", "--session-dir", "s"])),
         (["quantize", "--workspace", "w"], ("hyperloom.agents.quantization.cli", ["--workspace", "w"])),
         (["multi-node", "verify"], ("hyperloom.inference_optimizer.multi_node.cli", ["verify"])),
+        (["hosted", "run"], ("hyperloom.hosted.entry", ["run"])),
         (
             ["session", "breakdown", "--session-dir", "s"],
             ("hyperloom.inference_optimizer.tools.dump_session_breakdown", ["--session-dir", "s"]),
@@ -76,7 +77,7 @@ def test_unknown_or_missing_subcommand_prints_usage(
 def test_help_lists_commands(calls: list[tuple[str, list[str]]], capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["--help"]) == 0
     out = capsys.readouterr().out
-    for name in ("setup", "check", "optimize", "recover", "quantize", "session", "multi-node"):
+    for name in ("setup", "check", "optimize", "recover", "quantize", "session", "multi-node", "hosted"):
         assert f"  {name}" in out
 
 
