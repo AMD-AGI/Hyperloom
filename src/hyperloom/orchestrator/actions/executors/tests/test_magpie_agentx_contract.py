@@ -18,6 +18,7 @@ from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml, GridRecipe
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
+    prepare_grid_benchmark_config,
     BenchmarkTarget,
     LaunchLayer,
 )
@@ -103,6 +104,19 @@ def test_grid_composes_accepted_launch_then_candidate(source, tmp_path):
     assert launch["env"] == {"SGLANG_NEXT": "1"}
     assert launch["unset_env"] == ["SGLANG_TEST"]
     assert load_benchmark(base)["agentx"]["launch_overrides"]["env"] == {"SGLANG_TEST": "1"}
+
+
+def test_pre_baseline_candidate_carries_operator_server_args(source, tmp_path, monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SERVER_ARGS", "--max-num-seqs 16")
+    base = prepare_grid_benchmark_config(source, tmp_path / "integrate")
+    candidate = _build_variant_yaml(
+        GridRecipe(base_yaml_path=base),
+        GridVariant("candidate", "--language-model-only", {}),
+        output_subdir=tmp_path / "candidate",
+    )
+    argv = load_benchmark(candidate)["agentx"]["launch_overrides"]["append_args"]
+    assert argv == ["--max-num-seqs", "16", "--language-model-only"]
+    assert prepare_grid_benchmark_config(base, tmp_path / "next") == base
 
 
 @pytest.mark.parametrize("appended,recipe", [(True, False), (False, True), (True, True)])
