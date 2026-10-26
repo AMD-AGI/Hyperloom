@@ -50,10 +50,27 @@ def test_two_ports_of_one_change_overlap_despite_different_names_and_paths():
 def test_the_same_code_line_under_different_comments_is_one_change():
     # Three GLM-5.3 specialists wrote this one-line fix, each with its own explanatory comment.
     first = '+++ b/m.py\n+    # the draft arch is rewritten\n+    fused = "NextN"\n'
-    second = '+++ b/m.py\n+    // NextN draft fusion gate\n+    /* compare against\n+     * the rewritten name */\n+    fused = "NextN"\n'
+    second = '+++ b/m.py\n+    # compare against the\n+    # rewritten name\n+    fused = "NextN"\n'
+    kernel_a = "+++ b/k.cu\n+// tile for small M\n+  run<64>(x);\n"
+    kernel_b = "+++ b/k.cu\n+/* small-M tile\n+ * chosen by sweep */\n+  run<64>(x);\n"
 
     assert po.changed_line_keys([first]) == po.changed_line_keys([second])
-    assert po.overlap_ratio(po.changed_line_keys([first]), po.changed_line_keys([second])) == 1.0
+    assert po.changed_line_keys([kernel_a]) == po.changed_line_keys([kernel_b])
+
+
+def test_a_preprocessor_line_is_code_outside_python():
+    tile_64 = "+++ b/k.cu\n+#define TILE_M 64\n+  run<TILE_M>(x);\n"
+    tile_128 = "+++ b/k.cu\n+#define TILE_M 128\n+  run<TILE_M>(x);\n"
+
+    assert po.overlap_ratio(po.changed_line_keys([tile_64]), po.changed_line_keys([tile_128])) == 1 / 3
+
+
+def test_an_edit_or_a_revert_of_a_landed_line_is_not_a_repeat_of_it():
+    landed = po.changed_line_keys(['+++ b/m.py\n+arch = "A"\n'])
+    edit = po.changed_line_keys(['+++ b/m.py\n-arch = "A"\n+arch = "B"\n'])
+    revert = po.changed_line_keys(['+++ b/m.py\n-arch = "A"\n'])
+
+    assert (po.overlap_ratio(edit, landed), po.overlap_ratio(revert, landed)) == (0.0, 0.0)
 
 
 def test_a_follow_up_to_the_same_file_does_not_look_like_a_repeat():

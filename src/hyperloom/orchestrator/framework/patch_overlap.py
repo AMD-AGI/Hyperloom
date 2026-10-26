@@ -21,8 +21,9 @@ _MAX_LINES: int = 400
 MAX_MEASURED: int = 64
 
 
-#: Line openings of a comment in the Python, C++ and HIP sources specialists patch.
-_COMMENT_OPENINGS: tuple[str, ...] = ("#", "//", "/*", "* ", "*/")
+#: Line openings of a comment: Python's, and the C-family's for every other source (where ``#`` opens a directive).
+_PY_COMMENT_OPENINGS: tuple[str, ...] = ("#",)
+_C_COMMENT_OPENINGS: tuple[str, ...] = ("//", "/*", "* ", "*/")
 
 
 def _line_key(body: str) -> str:
@@ -39,15 +40,19 @@ def changed_line_keys(diff_texts: Iterable[str]) -> list[str]:
     """
     keys: dict[str, None] = {}
     for text in diff_texts:
+        comments = _C_COMMENT_OPENINGS
         for raw in str(text or "").splitlines():
+            if raw.startswith("+++ "):
+                comments = _PY_COMMENT_OPENINGS if raw.rstrip().endswith(".py") else _C_COMMENT_OPENINGS
             if raw.startswith(("+++", "---", "@@", "diff ", "index ")):
                 continue
             if raw[:1] not in ("+", "-"):
                 continue
             body = raw[1:].strip()
-            if not body or body.startswith(_COMMENT_OPENINGS) or body == "*":
+            if not body or body.startswith(comments) or body == "*":
                 continue
-            keys.setdefault(_line_key(body), None)
+            # The sign is part of the key: removing a line someone added is not repeating their change.
+            keys.setdefault(_line_key(raw[0] + body), None)
             if len(keys) >= _MAX_LINES:
                 return list(keys)
     return list(keys)
@@ -82,8 +87,8 @@ def overlapping_measured(
 ) -> list[dict[str, Any]]:
     """Measured entries whose changed lines overlap *line_keys* by at least *min_ratio*, strongest first.
 
-    Reported, never enforced: a follow-up to an already-measured patch legitimately repeats much of it, and only
-    the review that reads both can tell that apart from the same work arriving twice.
+    Reported, not enforced here: a follow-up to a measured patch legitimately repeats much of it. The framework
+    refuses only a repeat of a patch still queued or kept in the tree; the review weighs every other overlap.
     """
     keys = list(line_keys)
     if not keys:

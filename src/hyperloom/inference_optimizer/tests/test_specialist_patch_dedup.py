@@ -195,3 +195,28 @@ async def test_an_authoring_round_repeat_still_reaches_review(session_dir: Path)
         assert await _integrate_specialists(coord) == ["s1", "s2"]
     finally:
         await coord.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_edit_of_a_landed_line_is_reviewed_not_refused(session_dir: Path) -> None:
+    coord = _coordinator(session_dir)
+    try:
+        landed = po.changed_line_keys([_FIX_A])
+        coord.shared_state.record_measured_patch_set(
+            task_id="old-landed",
+            patch_name="a",
+            identity={"files": ["f"], "line_keys": landed},
+            outcome="reverted",
+            landed=True,
+        )
+        edit = _FIX_A.replace(
+            '+    fused_shared_experts_architecture = "GlmMoeDsaForCausalLMNextN"',
+            '-    fused_shared_experts_architecture = "GlmMoeDsaForCausalLMNextN"\n'
+            '+    fused_shared_experts_architecture = "GlmMoeDsaForCausalLMNextN_v2"',
+        )
+        await _specialist_wrote(coord, "s1", edit)
+        await coord.reactor_pass("critic")
+
+        assert await _integrate_specialists(coord) == ["s1"]
+    finally:
+        await coord.stop()
