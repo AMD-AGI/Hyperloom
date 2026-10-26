@@ -39,6 +39,8 @@ class LanePlan:
 
     lane_id: str
     plan: str
+    # The checkout the lane is copied from; empty copies the campaign workspace.
+    source_dir: str = ""
 
 
 @dataclass(frozen=True)
@@ -174,13 +176,14 @@ def _available_bytes(directory: Path) -> int:
     return shutil.disk_usage(directory).free
 
 
-async def _require_room(*, source: Path, parent: Path, lane_count: int) -> None:
-    """Refuse the round unless every lane copy fits where it is going."""
-    needed = await _tree_bytes(source) * lane_count
+async def _require_room(*, sources: Sequence[Path], parent: Path) -> None:
+    """Refuse the round unless every lane copy, one per entry of ``sources``, fits where it is going."""
+    sizes = {source: await _tree_bytes(source) for source in set(sources)}
+    needed = sum(sizes[source] for source in sources)
     available = _available_bytes(parent)
     if available < needed:
         raise RuntimeError(
-            f"not enough room for {lane_count} lane copies of {source} under "
+            f"not enough room for {len(sources)} lane copies of {', '.join(sorted(map(str, sizes)))} under "
             f"{parent}: {needed} B needed "
             f"({needed / 1024**3:.1f} GiB), {available} B available "
             f"({available / 1024**3:.1f} GiB)"
@@ -283,19 +286,22 @@ async def run_lanes(
     # Before the first lane process exists: it is what makes a lane's orphaned benchmark still identifiable as this
     # campaign's when its shell is gone.
     install_child_subreaper()
-    source = Path(workspace_dir).resolve()
+    campaign = Path(workspace_dir).resolve()
+    sources = [Path(lane.source_dir).resolve() if lane.source_dir else campaign for lane in lanes]
     parent = Path(parent_dir).resolve()
-    driver_relative = _lane_driver(source=source, driver=driver)
-    await _require_room(source=source, parent=parent, lane_count=len(lanes))
+    driver_relative = Path(driver)
+    for source in set(sources):
+        driver_relative = _lane_driver(source=source, driver=driver)
+    await _require_room(sources=sources, parent=parent)
     root = Path(tempfile.mkdtemp(prefix="forge-lanes-", dir=str(parent)))
     try:
         lane_dirs = [root / lane.lane_id for lane in lanes]
         for lane_dir in lane_dirs:
             lane_dir.mkdir(parents=True)
-        await asyncio.gather(*(_clone_lane(source, lane_dir) for lane_dir in lane_dirs))
+        await asyncio.gather(*(_clone_lane(source, lane_dir) for source, lane_dir in zip(sources, lane_dirs)))
         # One sentinel for the whole campaign rather than for this round, so a lane queues behind an analysis-phase
-        # probe as well as behind its siblings.
-        lock = DeviceBenchmarkLock(campaign_device_lock_path(source))
+        # probe as well as behind its siblings, whichever checkout it was copied from.
+        lock = DeviceBenchmarkLock(campaign_device_lock_path(campaign))
         serialized_drivers = [
             await lock.install(lane_dir=lane_dir, driver=lane_dir / driver_relative) for lane_dir in lane_dirs
         ]
