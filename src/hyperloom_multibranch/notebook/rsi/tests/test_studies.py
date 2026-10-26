@@ -87,27 +87,11 @@ def test_a_study_that_cannot_run_says_why(archive: Path, tmp_path: Path, capsys:
         main(["scheduling", "--archive", str(archive), "--beyond", "anywhere"])
 
 
-def test_the_command_evaluates_a_sessions_learnings_and_the_dispersion_prior(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_the_command_evaluates_a_sessions_learnings(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     asyncio.run(scripted_session(tmp_path / "notebook", FakeClock()))
-    log, shadow, labels = tmp_path / "learnings.jsonl", tmp_path / "consistency.jsonl", tmp_path / "labels.json"
+    log = tmp_path / "learnings.jsonl"
     log.write_text(json.dumps({"at": 0.0, "branch": "s1", "source": "tool", "here": [], "past": []}) + "\n", "utf-8")
-    item = {"type": "item", "id": "t1", "compared": True, "throughput_diff_signed_pct": -1.5, "hosted": {"cv_pct": 0.9}}
-    shadow.write_text(json.dumps(item) + "\n", encoding="utf-8")
-    labels.write_text(json.dumps({"t1": {"model": "m", "tp": 8, "gpu": "MI355X"}}), encoding="utf-8")
 
     assert main(["learnings", "--notebook", str(tmp_path / "notebook"), "--log", str(log)]) == 0
-    learnt = capsys.readouterr().out
-    prior_args = ["--shadow", str(shadow), "--labels", str(labels), "--model", "m", "--tp", "8", "--gpu", "MI355X"]
-    assert main(["--json", "dispersion", *prior_args]) == 0
-    prior = json.loads(capsys.readouterr().out)
-    assert main(["dispersion", *prior_args]) == 0
 
-    assert learnt.startswith("Learnings retrieval: 1 retrievals (tool 1)")
-    assert (prior["prior"]["source"], prior["prior"]["dispersion_pct"], prior["prior"]["offset_pct"]) == (
-        "shadow",
-        0.9,
-        -1.5,
-    )
-    assert "| prior | 0.90% from shadow (hosted) |" in capsys.readouterr().out
+    assert capsys.readouterr().out.startswith("Learnings retrieval: 1 retrievals (tool 1)")

@@ -17,9 +17,6 @@
   playbook offline, a generation at a time, and replays the result held out (:mod:`rsi.generations`);
 * ``learnings --notebook DIR --log learnings.jsonl [--archive DIR]``: one session's learnings retrieval
   (:mod:`rsi.learning_eval`), and with an archive what it missed of the lesson pool beside it;
-* ``dispersion --shadow consistency.jsonl [--labels FILE] [--archive DIR] --model M --tp N --gpu G [--agentx]``: the
-  dispersion prior with the shadow runs' noise (:mod:`rsi.shadow`); ``--labels`` is a JSON object of test id to model,
-  TP, GPU, and ``--agentx`` asks for an AgentX trace replay's prior;
 * ``stalls --archive DIR [--archive DIR ...]``: the stall odds for each model type and workload the archives hold,
   and each archived session's stop audit (:mod:`rsi.stops`).
 """
@@ -34,7 +31,6 @@ import math
 import sys
 import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -54,11 +50,8 @@ from hyperloom_multibranch.notebook.rsi.expression import ExpressionError, Expre
 from hyperloom_multibranch.notebook.rsi.generations import GENERATION_RUNS, GENERATIONS, generations
 from hyperloom_multibranch.notebook.rsi.ladder import Complete
 from hyperloom_multibranch.notebook.rsi.learning_eval import read_session
-from hyperloom_multibranch.notebook.rsi.priors import HOSTED, DispersionPrior, DispersionTask, dispersion_prior
 from hyperloom_multibranch.notebook.rsi.replay import OPTIMISTIC, PESSIMISTIC, REPLAY_RUNS, check, compare, variants
-from hyperloom_multibranch.notebook.rsi.report import number, table
 from hyperloom_multibranch.notebook.rsi.scorers import ScorerPool, custom_scorers
-from hyperloom_multibranch.notebook.rsi.shadow import ShadowNoise, read_shadow, shadow_noise
 from hyperloom_multibranch.notebook.rsi.stops import stall_study
 
 log = logging.getLogger(__name__)
@@ -69,26 +62,6 @@ _RUNS = "--runs"
 STUDIES = "notebook-studies"
 COMPLETION_TOKENS = 4096
 COMPLETION_SECONDS = 300.0
-
-
-@dataclass(frozen=True)
-class DispersionReport:
-    """The dispersion prior for one task, beside the shadow runs' noise it was given."""
-
-    prior: DispersionPrior
-    shadow: ShadowNoise
-
-    def render(self) -> str:
-        """The prior and the shadow noise as markdown."""
-
-        prior, shadow = self.prior, self.shadow
-        rows = [
-            ("prior", f"{number(prior.dispersion_pct)}% from {prior.source.value} ({prior.environment})"),
-            ("single-host floor", number(prior.lower_bound_pct)),
-            ("shadow hosted / local cv", f"{number(shadow.hosted_cv_pct)}% / {number(shadow.local_cv_pct)}%"),
-            ("hosted minus local", f"{number(shadow.offset_pct)}% over {len(shadow.test_ids)} shadow tests"),
-        ]
-        return "\n".join(["Dispersion prior (Q1):", "", *table(("measure", "value"), rows)])
 
 
 class StudyError(ValueError):
@@ -125,15 +98,6 @@ def _frontier(args: argparse.Namespace) -> Any:
 
 def _learnings(args: argparse.Namespace) -> Any:
     return asyncio.run(read_session(args.notebook, args.log, args.archive))
-
-
-def _dispersion(args: argparse.Namespace) -> Any:
-    labels = json.loads(args.labels.read_text(encoding="utf-8")) if args.labels else None
-    noise = shadow_noise(read_shadow(args.shadow), labels=labels, model=args.model, tp=args.tp, gpu=args.gpu)
-    history = TreeArchive(args.archive).load() if args.archive else []
-    task = DispersionTask(args.model, args.tp, args.gpu, agentx=args.agentx)
-    prior = dispersion_prior(history, task, environment=args.environment, shadow=noise)
-    return DispersionReport(prior, noise)
 
 
 def _archived(archives: Sequence[Path]) -> tuple[SearchTree, ...]:
@@ -224,15 +188,6 @@ def _parser() -> argparse.ArgumentParser:
     learnt.add_argument("--notebook", type=Path, required=True)
     learnt.add_argument("--log", type=Path, required=True)
     learnt.add_argument(_ARCHIVE, type=Path, default=None, help="an archive whose lesson pool the session drew on")
-    noise = command("dispersion", _dispersion, "the dispersion prior with the shadow runs' noise (Q1)")
-    noise.add_argument("--shadow", type=Path, required=True)
-    noise.add_argument("--labels", type=Path, default=None)
-    noise.add_argument(_ARCHIVE, type=Path, default=None)
-    noise.add_argument("--model", required=True)
-    noise.add_argument("--tp", type=int, required=True)
-    noise.add_argument("--gpu", required=True)
-    noise.add_argument("--environment", default=HOSTED)
-    noise.add_argument("--agentx", action="store_true", help="the prior of an AgentX trace replay")
     stalls = command("stalls", _stalls, "the stall odds and every archived session's stop audit")
     _archives(stalls)
     return parser
@@ -264,7 +219,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 __all__ = [
-    "DispersionReport",
     "StudyError",
     "main",
 ]

@@ -3,13 +3,13 @@
 
 """Archived search trees: what each past session's branches did over time, what they cost, how noisy it measured.
 
-A tree keeps what the replay, the frontier priors and their calibration, the dispersion priors, the stall odds and the
-stop audit need: when each branch opened and stopped and why, when its tests were requested (its kernel-layer ones
-apart), the directions they tried, when its commits landed, the cumulative gain they reached and whether their merge
-failed, the stalls the scheduler held it through on probation, the GPU time it spent, the session's task conditions,
-its roofline bound, its baseline's dispersion and where it measured. A tree an older version wrote, or one backfilled
-from a session that recorded no intents, reads with no stop reasons, no directions, no kernel test times, no
-probations and no roofline bound, and with every commit merged. Trees are written once, under
+A tree keeps what the replay, the frontier priors and their calibration, the stall odds and the stop audit need:
+when each branch opened and stopped and why, when its tests were requested (its kernel-layer ones apart), the
+directions they tried, when its commits landed, the cumulative gain they reached and whether their merge failed, the
+stalls the scheduler held it through on probation, the GPU time it spent, the session's task conditions, its roofline
+bound, its baseline's dispersion and where it measured. A tree an older version wrote, or one backfilled from a
+session that recorded no intents, reads with no stop reasons, no directions, no kernel test times, no probations and
+no roofline bound, and with every commit merged. Trees are written once, under
 ``<archive>/trees/<session_id>.json``; the archive is a shared folder the deployment names. CLOSE archives its session
 with :func:`archive_session`, which says why when it archives nothing.
 """
