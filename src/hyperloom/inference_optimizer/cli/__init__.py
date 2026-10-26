@@ -859,8 +859,8 @@ def _probe_critic_review_model(
                     messages=messages,
                     max_completion_tokens=16,
                 )
-        except Exception as exc:  # noqa: BLE001 — any failure means the review path is unusable
-            log.warning("critic model %r probe failed over the %s protocol: %s", model, protocol, exc)
+        except Exception as exc:  # any failure means the review path is unusable; exits 2 after the last retry
+            log.warning("critic model %r probe failed over the %s protocol: %s", model, protocol, exc, exc_info=True)
             last_error = exc
             continue
         print(f"Preflight: critic model {model!r} answered over the {protocol} protocol")
@@ -1626,7 +1626,7 @@ def _persist_preflight_failure_artifacts(
                 if not getattr(manifest_args, "model", None):
                     manifest_args.model = os.environ.get("MODEL_PATH", "")
                 write_manifest(session_dir, args=manifest_args)
-            except Exception as write_exc:
+            except Exception as write_exc:  # isolation boundary: the preflight-failure manifest write
                 log.warning("failed to write manifest for SBD V6 preflight failure", exc_info=True)
                 from ..session.sbd_v6 import record_write_warning
 
@@ -2083,7 +2083,7 @@ def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_res
         from hyperloom.inference_optimizer.trace.langfuse_emitter import record_session_start
 
         record_session_start(session_dir)
-    except Exception:
+    except Exception:  # isolation boundary: the Langfuse session_start marker
         log.debug("langfuse record_session_start failed (non-fatal)", exc_info=True)
     print(f"Session dir     : {session_dir}")
     print(f"Session id      : {manifest['session_id']}  (manifest label only)")
