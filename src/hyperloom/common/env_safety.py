@@ -81,6 +81,7 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
         "CLAW_API_KEY",
         "DEEPSEEK_API_KEY",
         "GEAK_API_KEY",
+        "KB_STORE_TOKEN",
         "LLM_API_KEY",
         "LLM_GATEWAY_KEY",
         "LLM_PROXY_API_KEY",
@@ -522,6 +523,8 @@ def scrub_benchmark_process_env(env: dict[str, str]) -> dict[str, str]:
     scrub_child_process_env(env)
     for name in BENCHMARK_SECRET_ENV_NAMES:
         env.pop(name, None)
+    # The --extra-env blob repeats every pin's value, credentials included; each pin is also exported by name.
+    env.pop(OPERATOR_EXTRA_ENV_VAR, None)
     return env
 
 
