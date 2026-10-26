@@ -1067,7 +1067,7 @@ archive directory of the run is `<session dir>/archive/`, mode 0700, owned by th
 
 `src/hyperloom/hosted/app_bootstrap.sh` starts a hosted run in an image without Hyperloom.
 
-`scripts/hosted_app_image/build.sh` builds that image: a framework base image (`--base`), the script as the image's command, and the `hl-specialist` account for `HYPERLOOM_SPECIALIST_USER`.
+`scripts/hosted_app_image/build.sh --tag <ref> [--base <image>] [--claude-version V] [--push]` builds that image: a framework base image (`--base`), the script as the image's command, the `hl-specialist` account for `HYPERLOOM_SPECIALIST_USER`, and the claude CLI that specialists spawn (`/usr/local/bin/claude` -> `/opt/claude-code`). The CLI's version is `--claude-version`; when it is not passed the build takes `latest`, so two builds of one tag can carry different CLI versions. Pass a version to pin it. The codex CLI is not installed separately: it comes with the wheel (`openai-codex-cli-bin`).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
