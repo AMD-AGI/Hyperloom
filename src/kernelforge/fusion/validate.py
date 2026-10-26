@@ -41,6 +41,7 @@ Mamba backend cannot init on ROCm).
 from __future__ import annotations
 
 import contextlib
+import http.client
 import json
 import logging
 import math
@@ -400,7 +401,7 @@ def _vllm_decode_probe(
         model_id = (models.get("data") or [{}])[0].get("id")
         if not model_id:
             return False, "no served model id from /v1/models"
-    except Exception as e:  # noqa: BLE001
+    except (OSError, http.client.HTTPException, ValueError, AttributeError, KeyError, TypeError) as e:
         return False, f"/v1/models probe error: {type(e).__name__}: {e}"
 
     prompt = "The quick brown fox " * max(1, isl // 4)
@@ -422,7 +423,7 @@ def _vllm_decode_probe(
         try:
             with _rq.urlopen(req, timeout=timeout_s) as r:
                 body = _json.loads(r.read().decode())
-        except Exception as e:  # noqa: BLE001
+        except (OSError, http.client.HTTPException, ValueError) as e:
             return False, f"completion {i} error: {type(e).__name__}: {e}"
         text = (body.get("choices") or [{}])[0].get("text") or ""
         if not text:
