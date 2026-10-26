@@ -11,7 +11,7 @@ import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from hyperloom.common.env_safety import is_allowed_external_env_key, is_secret_shaped_env_name
 from hyperloom.common.overlay import validate_overlay_pythonpath
@@ -80,13 +80,28 @@ def _read_source(source: str) -> str:
     return Path(s).read_text(encoding="utf-8", errors="replace")
 
 
-def _entrypoint_markers(framework: str) -> tuple[str, ...]:
+class _Launcher(NamedTuple):
+    """How one framework family's server starts: the recipe markers that find it and the command a script runs."""
+
+    entrypoint_markers: tuple[str, ...]
+    command: str
+
+
+_ATOM_LAUNCHER = _Launcher(("atom.entrypoints",), "python3 -m atom.entrypoints.openai_server")
+_VLLM_LAUNCHER = _Launcher(("vllm serve",), "vllm serve $MODEL")
+_SGLANG_LAUNCHER = _Launcher(
+    ("sglang.launch_server", "sglang serve"), "python3 -m sglang.launch_server --model-path=$MODEL"
+)
+
+
+def _launcher(framework: str) -> _Launcher:
+    """The launcher of ``framework``'s family: atom, vllm, else sglang."""
     fw = str(framework or "").strip().lower()
     if "atom" in fw:
-        return ("atom.entrypoints",)
+        return _ATOM_LAUNCHER
     if "vllm" in fw:
-        return ("vllm serve",)
-    return ("sglang.launch_server", "sglang serve")
+        return _VLLM_LAUNCHER
+    return _SGLANG_LAUNCHER
 
 
 def _join_continuations(text: str) -> list[str]:
@@ -107,7 +122,7 @@ def _join_continuations(text: str) -> list[str]:
 
 
 def _find_entrypoint_line(text: str, framework: str) -> str | None:
-    markers = _entrypoint_markers(framework)
+    markers = _launcher(framework).entrypoint_markers
     for line in _join_continuations(text):
         if any(m in line for m in markers):
             return line
@@ -174,7 +189,9 @@ def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
     line = _find_entrypoint_line(text, framework)
     if not line:
         log.warning(
-            "reference-script: no %s entrypoint in %r; carrying exports only", _entrypoint_markers(framework), source
+            "reference-script: no %s entrypoint in %r; carrying exports only",
+            _launcher(framework).entrypoint_markers,
+            source,
         )
         return ReferenceRecipe(server_args="", envs=envs, model=None, launch_controls=controls)
 
@@ -377,6 +394,67 @@ class ServingTarget:
     gpu_type: str | None = None
 
 
+def _launch_controls(launch: LaunchSettings) -> dict[str, Any]:
+    """The launch controls ``launch`` sets, as the script's controls header records them."""
+    controls: dict[str, Any] = {}
+    if launch.overlay_pythonpath:
+        controls["overlay_pythonpath"] = launch.overlay_pythonpath
+    if launch.unset_envs:
+        controls["unset_envs"] = launch.unset_envs
+    if launch.remove_args:
+        controls["remove_args"] = launch.remove_args
+    if launch.args_mode == "replace":
+        controls["args_mode"] = launch.args_mode
+    return controls
+
+
+def _model_lines(model: str | None, setup_script: str | None) -> list[str]:
+    """The lines that export the served model and, for an enablement replay, guard ``$MODEL`` and run the setup script."""
+    lines: list[str] = []
+    exported_model = bool(model) and "/" in str(model)
+    if exported_model:
+        lines.append(f"export MODEL={shlex.quote(str(model))}")
+    elif model:
+        # A bare basename cannot be launched; the parser records one when the operator recipe named the model without
+        # a path.
+        lines.append(f"# model: {model}")
+    if setup_script:
+        if not exported_model:
+            # The launch line dereferences $MODEL, which set -u would kill first.
+            lines.append(': "${MODEL:?set MODEL to the model path before running}"')
+        # $SCRIPT_DIR stays outside the quotes so the shell still expands it.
+        lines.append(f'bash "$SCRIPT_DIR"/{shlex.quote(setup_script)}')
+    return lines
+
+
+def _serving_exports(target: ServingTarget) -> list[str]:
+    """The ``export`` lines for the TP, context length and GPU type ``target`` serves at."""
+    lines: list[str] = []
+    for name, value in (("TP", target.tp), ("MAX_MODEL_LEN", target.max_model_len)):
+        if value and int(value) > 0:
+            lines.append(f"export {name}={int(value)}")
+    if target.gpu_type:
+        lines.append(f"export GPU_TYPE={shlex.quote(str(target.gpu_type))}")
+    return lines
+
+
+def _env_exports(launch: LaunchSettings) -> list[str]:
+    """The ``export`` lines for the launch envs, credentials redacted, then the overlay ``PYTHONPATH``."""
+    lines: list[str] = []
+    for k, v in (launch.envs or {}).items():
+        if not str(k).strip():
+            continue
+        # The artifact is archived and uploaded, so a credential-shaped value is named but never written out.
+        if is_secret_shaped_env_name(k):
+            lines.append(f"# export {k}=<redacted; supply manually>")
+        else:
+            lines.append(f"export {k}={shlex.quote(str(v))}")
+    if launch.overlay_pythonpath:
+        prefix = shlex.quote(str(launch.overlay_pythonpath))
+        lines.append(f'export PYTHONPATH={prefix}"${{PYTHONPATH:+:$PYTHONPATH}}"')
+    return lines
+
+
 def render_reference_script(
     *,
     framework: str,
@@ -390,72 +468,27 @@ def render_reference_script(
     environment. It runs before the launch envs are exported, as the session's
     own setup did, and the launch follows only when it succeeds.
     """
-    fw = str(framework or "sglang").strip().lower()
-    has_enablement = bool(setup_script)
-    overlay_pythonpath, unset_envs = launch.overlay_pythonpath, launch.unset_envs
-    model, tp, max_model_len, gpu_type = target.model, target.tp, target.max_model_len, target.gpu_type
-
+    launch_command = _launcher(framework).command
     lines: list[str] = ["#!/usr/bin/env bash"]
-    controls = _validate_launch_controls(
-        {
-            **({"overlay_pythonpath": overlay_pythonpath} if overlay_pythonpath else {}),
-            **({"unset_envs": unset_envs} if unset_envs else {}),
-            **({"remove_args": launch.remove_args} if launch.remove_args else {}),
-            **({"args_mode": launch.args_mode} if launch.args_mode == "replace" else {}),
-        }
-    )
+    controls = _validate_launch_controls(_launch_controls(launch))
     if controls:
         lines.append(_CONTROLS_PREFIX + json.dumps(controls, sort_keys=True))
-    for name in unset_envs or []:
+    for name in launch.unset_envs or []:
         lines.append(f"unset {shlex.quote(name)}")
-    if has_enablement:
+    if setup_script:
         lines.append("# Auto-generated by hyperloom — enablement fix replay script.")
         lines.append("set -euo pipefail")
         lines.append('SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"')
         lines.append('cd "$SCRIPT_DIR"')
     else:
         lines.append("# Auto-generated by hyperloom — current best launch recipe.")
-
-    exported_model = bool(model) and "/" in str(model)
-    if exported_model:
-        lines.append(f"export MODEL={shlex.quote(str(model))}")
-    elif model:
-        # A bare basename cannot be launched; the parser records one when the operator recipe named the model without
-        # a path.
-        lines.append(f"# model: {model}")
-    if has_enablement and not exported_model:
-        # The launch line dereferences $MODEL, which set -u would kill first.
-        lines.append(': "${MODEL:?set MODEL to the model path before running}"')
-    if setup_script:
-        # $SCRIPT_DIR stays outside the quotes so the shell still expands it.
-        lines.append(f'bash "$SCRIPT_DIR"/{shlex.quote(setup_script)}')
-    if tp and int(tp) > 0:
-        lines.append(f"export TP={int(tp)}")
-    if max_model_len and int(max_model_len) > 0:
-        lines.append(f"export MAX_MODEL_LEN={int(max_model_len)}")
-    if gpu_type:
-        lines.append(f"export GPU_TYPE={shlex.quote(str(gpu_type))}")
-    for k, v in (launch.envs or {}).items():
-        if not str(k).strip():
-            continue
-        # The artifact is archived and uploaded, so a credential-shaped value is named but never written out.
-        if is_secret_shaped_env_name(k):
-            lines.append(f"# export {k}=<redacted; supply manually>")
-        else:
-            lines.append(f"export {k}={shlex.quote(str(v))}")
-    if overlay_pythonpath:
-        prefix = shlex.quote(str(overlay_pythonpath))
-        lines.append(f'export PYTHONPATH={prefix}"${{PYTHONPATH:+:$PYTHONPATH}}"')
+    lines += _model_lines(target.model, setup_script)
+    lines += _serving_exports(target)
+    lines += _env_exports(launch)
 
     args = _shell_ready_server_args(launch.server_args)
     lines.append("")
-    if "atom" in fw:
-        entry = f"python3 -m atom.entrypoints.openai_server {args}".rstrip()
-    elif "vllm" in fw:
-        entry = f"vllm serve $MODEL {args}".rstrip()
-    else:
-        entry = f"python3 -m sglang.launch_server --model-path=$MODEL {args}".rstrip()
-    lines.append(entry)
+    lines.append(f"{launch_command} {args}".rstrip())
     return "\n".join(lines) + "\n"
 
 

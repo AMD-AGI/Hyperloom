@@ -528,13 +528,18 @@ def _read_hf_config(model_path: Path) -> dict[str, Any] | None:
     return _merge_config_scopes(data)
 
 
-def _derive_experts_per_tok(cfg: dict[str, Any]) -> int:
-    """Routed experts activated per token, across the naming variants in use."""
-    for key in ("num_experts_per_tok", "num_experts_per_token", "top_k_experts", "moe_topk"):
+def _config_int(cfg: dict[str, Any], *keys: str) -> int:
+    """The first set value among the aliases ``keys``, as an ``int``; ``0`` when none is set."""
+    for key in keys:
         value = cfg.get(key)
         if value:
             return int(value)
     return 0
+
+
+def _derive_experts_per_tok(cfg: dict[str, Any]) -> int:
+    """Routed experts activated per token, across the naming variants in use."""
+    return _config_int(cfg, "num_experts_per_tok", "num_experts_per_token", "top_k_experts", "moe_topk")
 
 
 def _derive_moe_hidden_size(cfg: dict[str, Any]) -> int:
@@ -682,16 +687,15 @@ def load_model_meta(
         weight_bytes=weight_bytes,
         expert_bpe=expert_dtype_bytes,
     )
-    n_moe_layers, n_dense_ffn_layers = _derive_moe_layer_counts(
-        cfg, int(cfg.get("num_hidden_layers") or 0), num_experts
-    )
-    intermediate_size = int(cfg.get("intermediate_size") or 0)
-    moe_intermediate_size = int(cfg.get("moe_intermediate_size") or 0)
+    num_layers = _config_int(cfg, "num_hidden_layers")
+    n_moe_layers, n_dense_ffn_layers = _derive_moe_layer_counts(cfg, num_layers, num_experts)
+    intermediate_size = _config_int(cfg, "intermediate_size")
+    moe_intermediate_size = _config_int(cfg, "moe_intermediate_size")
     if num_experts > 0 and moe_intermediate_size <= 0:
         moe_intermediate_size = intermediate_size
     return ModelMeta(
         weight_bytes=weight_bytes,
-        num_layers=int(cfg.get("num_hidden_layers") or 0),
+        num_layers=num_layers,
         num_kv_heads=_derive_kv_heads(cfg),
         head_dim=_derive_head_dim(cfg),
         weight_dtype_bytes=dtype_bytes,
@@ -700,12 +704,12 @@ def load_model_meta(
         num_experts=num_experts,
         experts_per_tok=experts_per_tok,
         expert_weight_bytes=total_expert_bytes,
-        hidden_size=int(cfg.get("hidden_size") or 0),
+        hidden_size=_config_int(cfg, "hidden_size"),
         intermediate_size=intermediate_size,
         moe_intermediate_size=moe_intermediate_size,
         moe_hidden_size=(_derive_moe_hidden_size(cfg) if num_experts > 0 else 0),
-        vocab_size=int(cfg.get("vocab_size") or 0),
-        num_attention_heads=int(cfg.get("num_attention_heads") or 0),
+        vocab_size=_config_int(cfg, "vocab_size"),
+        num_attention_heads=_config_int(cfg, "num_attention_heads"),
         moe_layers=n_moe_layers,
         dense_ffn_layers=n_dense_ffn_layers,
     )
@@ -879,36 +883,36 @@ class DitGeometry(NamedTuple):
     hidden_size: int
 
 
+def _dit_patch_hw(patch_size: Any) -> tuple[int, int]:
+    """``(h, w)`` of a DiT ``patch_size``: a scalar, ``(h, w)`` (need not be square) or ``(temporal, h, w)``."""
+    if not patch_size:
+        return 1, 1
+    if isinstance(patch_size, (list, tuple)):
+        return int(patch_size[0] or 1) or 1, int(patch_size[-1] or 1) or 1
+    side = int(patch_size) or 1
+    return side, side
+
+
 def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0) -> DitGeometry | None:
     """DiT transformer shape from ``<model>/transformer/config.json`` for the compute-bound diffusion ceiling."""
-    try:
-        cfg = json.loads((Path(model_path) / "transformer" / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return None
-    if not isinstance(cfg, dict):
-        return None
     # Every field below is attacker-shaped JSON, so a non-numeric value must degrade to "unreadable" rather than
     # escape as TypeError past the caller.
     try:
-        num_layers = int(cfg.get("num_layers") or cfg.get("num_hidden_layers") or 0)
-        num_single_layers = int(cfg.get("num_single_layers") or 0)
-        hidden = int(cfg.get("hidden_size") or cfg.get("inner_dim") or 0)
+        cfg = json.loads((Path(model_path) / "transformer" / "config.json").read_text(encoding="utf-8"))
+        if not isinstance(cfg, dict):
+            return None
+        num_layers = _config_int(cfg, "num_layers", "num_hidden_layers")
+        num_single_layers = _config_int(cfg, "num_single_layers")
+        hidden = _config_int(cfg, "hidden_size", "inner_dim")
         if hidden <= 0:
-            heads = int(cfg.get("num_attention_heads") or 0)
-            head_dim = int(cfg.get("attention_head_dim") or cfg.get("head_dim") or 0)
-            hidden = heads * head_dim
+            hidden = _config_int(cfg, "num_attention_heads") * _config_int(cfg, "attention_head_dim", "head_dim")
         _ps = cfg.get("patch_size")
         # A 3-element patch is (temporal, h, w): a video denoiser, whose token count needs the frame axis nothing in
         # this module models.
         video_patch = isinstance(_ps, (list, tuple)) and len(_ps) >= 3
-        if isinstance(_ps, (list, tuple)):
-            # A 2-element patch is (h, w) and need not be square, so keep both.
-            patch_h = int((_ps[0] if _ps else 0) or 1) or 1
-            patch_w = int((_ps[-1] if _ps else 0) or 1) or 1
-        else:
-            patch_h = patch_w = int(_ps or 1) or 1
-        sample = int(cfg.get("sample_size") or 0)
-    except (TypeError, ValueError):
+        patch_h, patch_w = _dit_patch_hw(_ps)
+        sample = _config_int(cfg, "sample_size")
+    except (OSError, ValueError, TypeError):
         return None
     if num_layers <= 0 or hidden <= 0:
         return None
@@ -923,12 +927,8 @@ def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0
     if latent_tokens <= 0 and not video_patch:
         return None
 
-    total_layers = num_layers + num_single_layers
     param_layer_units = 2 * num_layers + num_single_layers if num_single_layers > 0 else num_layers
-    dit_params = 12 * param_layer_units * hidden * hidden
-    if dit_params <= 0:
-        return None
-    return DitGeometry(dit_params, latent_tokens, total_layers, hidden)
+    return DitGeometry(12 * param_layer_units * hidden * hidden, latent_tokens, num_layers + num_single_layers, hidden)
 
 
 def _diffusion_latent_tokens_from_resolution(

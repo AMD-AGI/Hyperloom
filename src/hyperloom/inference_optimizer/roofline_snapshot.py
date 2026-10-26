@@ -526,6 +526,18 @@ def _ceiling_exceeded_lines(
     ]
 
 
+def _pct_cells(snapshots: list[dict[str, Any]], key: str) -> list[str]:
+    """One percent cell per compared snapshot, for its field ``key``."""
+    return [_fmt_pct_cell(snap.get(key)) for snap in snapshots]
+
+
+def _kernel_name_cells(kernels: list[dict[str, Any]]) -> list[str]:
+    """The ``Top kernel`` cell per side; empty when no side names its top kernel."""
+    if not any(kernel.get("name") for kernel in kernels):
+        return []
+    return [f"`{kernel.get('name') or '—'}`" for kernel in kernels]
+
+
 def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
     """Render the compact Base / Opt / Δ markdown table (session-constant ceiling rendered once above the Base/Opt columns)."""
     baseline = cmp.get("baseline") or {}
@@ -548,19 +560,16 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
         lines += ["| Metric | Value |", "|--------|-------|"]
     else:
         lines += ["| Metric | Base | Opt | Δ |", "|--------|------|-----|---|"]
-    lines.append(row("Compute %", [_fmt_pct_cell(snap.get("compute_pct")) for snap in sides], delta.get("compute_pct")))
-    lines.append(row("Idle %", [_fmt_pct_cell(snap.get("idle_pct")) for snap in sides], delta.get("idle_pct")))
-    lines.append(row("Comm %", [_fmt_pct_cell(snap.get("comm_pct")) for snap in sides], delta.get("comm_pct")))
+    lines.append(row("Compute %", _pct_cells(sides, "compute_pct"), delta.get("compute_pct")))
+    lines.append(row("Idle %", _pct_cells(sides, "idle_pct"), delta.get("idle_pct")))
+    lines.append(row("Comm %", _pct_cells(sides, "comm_pct"), delta.get("comm_pct")))
     lines.append(row("Top bottleneck", [str(snap.get("top_bottleneck") or "—") for snap in sides]))
     lines.append(
-        row(
-            "Top kernel efficiency",
-            [_fmt_pct_cell(kernel.get("efficiency_pct")) for kernel in kernels],
-            delta.get("top_kernel_efficiency_pct"),
-        )
+        row("Top kernel efficiency", _pct_cells(kernels, "efficiency_pct"), delta.get("top_kernel_efficiency_pct"))
     )
-    if any(kernel.get("name") for kernel in kernels):
-        lines.append(row("Top kernel", [f"`{kernel.get('name') or '—'}`" for kernel in kernels]))
+    kernel_names = _kernel_name_cells(kernels)
+    if kernel_names:
+        lines.append(row("Top kernel", kernel_names))
     lines.append(
         row(
             "Achieved output_throughput",
@@ -568,9 +577,9 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
         )
     )
     for label, key in (("Within roofline %", "within_roofline_pct"), ("Gap to roofline %", "gap_to_roofline_pct")):
-        lines.append(row(label, [_fmt_pct_cell(snap.get(key)) for snap in sides], delta.get(key)))
+        lines.append(row(label, _pct_cells(sides, key), delta.get(key)))
     if any(_ceiling_exceeded(snap) for snap in sides):
-        lines.append(row("Within roofline % (uncapped)", [_fmt_pct_cell(snap.get(_UNCAPPED_KEY)) for snap in sides]))
+        lines.append(row("Within roofline % (uncapped)", _pct_cells(sides, _UNCAPPED_KEY)))
     lines.append("")
     lines.extend(_ceiling_exceeded_lines(baseline, {} if single else latest, mode=mode))
     return lines
@@ -586,17 +595,16 @@ BOTTLENECK_DOMAIN_HINTS: dict[str, tuple[str, str]] = {
     "memory": ("serving_specialist", "framework"),
 }
 
+#: The utilization shares a snapshot reports: (direction, snapshot field).
+_UTILIZATION_SHARES = (("compute", "compute_pct"), ("idle", "idle_pct"), ("comm", "comm_pct"))
+
 
 def dominant_direction(snapshot: dict[str, Any] | None) -> tuple[str, float]:
     """Return ``(direction, pct)`` for the most-saturated direction in one snapshot."""
     if not isinstance(snapshot, dict):
         return "", 0.0
     candidates: dict[str, float] = {}
-    for direction, key in (
-        ("compute", "compute_pct"),
-        ("idle", "idle_pct"),
-        ("comm", "comm_pct"),
-    ):
+    for direction, key in _UTILIZATION_SHARES:
         val = snapshot.get(key)
         if isinstance(val, (int, float)):
             candidates[direction] = float(val)
@@ -630,6 +638,40 @@ def direction_saturation(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _delta_vs_prev_lines(latest: dict[str, Any], prev: dict[str, Any]) -> list[str]:
+    """The ``delta_vs_prev`` line over the utilization shares both snapshots report; empty when none is comparable."""
+    parts: list[str] = []
+    for label, key in _UTILIZATION_SHARES:
+        d = _num_delta(latest.get(key), prev.get(key))
+        if d is not None:
+            parts.append(f"{label} {_fmt_delta(d)}pp")
+    if not parts:
+        return []
+    return ["delta_vs_prev: " + "  ".join(parts)]
+
+
+def _hot_kernel_row(entry: dict[str, Any]) -> str:
+    """One ``top_bottlenecks`` row: a hot kernel's name, GPU share and, when reported, its efficiency."""
+    name = str(entry.get("name") or entry.get("kernel_id") or "?")
+    seg = f"  {name}  {_fmt_pct_cell(entry.get('gpu_pct'))} gpu"
+    eff = entry.get("efficiency_percent")
+    if isinstance(eff, (int, float)):
+        seg += f"  (eff {float(eff):.1f}%)"
+    return seg
+
+
+def _top_bottleneck_lines(trace_analyze: dict[str, Any], latest: dict[str, Any]) -> list[str]:
+    """The ``top_bottlenecks`` block: the three hottest kernels, else the latest snapshot's top bottleneck."""
+    rows: list[str] = []
+    for entry in trace_analyze.get("hot_kernels_top15", [])[:3]:
+        rows.append(_hot_kernel_row(entry))
+    if not rows and latest.get("top_bottleneck"):
+        rows.append(f"  {latest.get('top_bottleneck')}")
+    if not rows:
+        return []
+    return ["top_bottlenecks:", *rows]
+
+
 def build_profiler_digest(
     snapshots: list[dict[str, Any]] | None,
     trace_analyze: dict[str, Any] | None,
@@ -651,32 +693,8 @@ def build_profiler_digest(
     ]
 
     if len(snaps) >= 2:
-        prev = snaps[-2]
-        parts: list[str] = []
-        for label, key in (
-            ("compute", "compute_pct"),
-            ("idle", "idle_pct"),
-            ("comm", "comm_pct"),
-        ):
-            d = _num_delta(latest.get(key), prev.get(key))
-            if d is not None:
-                parts.append(f"{label} {_fmt_delta(d)}pp")
-        if parts:
-            lines.append("delta_vs_prev: " + "  ".join(parts))
-
-    rows: list[str] = []
-    for entry in ta.get("hot_kernels_top15", [])[:3]:
-        name = str(entry.get("name") or entry.get("kernel_id") or "?")
-        seg = f"  {name}  {_fmt_pct_cell(entry.get('gpu_pct'))} gpu"
-        eff = entry.get("efficiency_percent")
-        if isinstance(eff, (int, float)):
-            seg += f"  (eff {float(eff):.1f}%)"
-        rows.append(seg)
-    if not rows and latest.get("top_bottleneck"):
-        rows.append(f"  {latest.get('top_bottleneck')}")
-    if rows:
-        lines.append("top_bottlenecks:")
-        lines.extend(rows)
+        lines += _delta_vs_prev_lines(latest, snaps[-2])
+    lines += _top_bottleneck_lines(ta, latest)
 
     direction, _pct_val = dominant_direction(latest)
     lever = BOTTLENECK_DOMAIN_HINTS.get(direction)
