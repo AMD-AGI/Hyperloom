@@ -119,8 +119,8 @@ class RetrievalConfiguration:
             capability not in {RetrievalCapability.FUZZY, RetrievalCapability.SEMANTIC} for capability in provider_refs
         ):
             raise RetrievalPolicyError("provider_refs may pin only fuzzy or semantic providers")
-        if any(not str(ref or "").strip() for ref in provider_refs.values()):
-            raise RetrievalPolicyError("provider_refs must be non-empty")
+        for ref in provider_refs.values():
+            _required_text(ref, "provider_refs")
         object.__setattr__(self, "provider_refs", provider_refs)
         if self.ranking_policy_ref not in _RANKING_POLICIES:
             raise RetrievalPolicyError("ranking_policy_ref is not implemented")

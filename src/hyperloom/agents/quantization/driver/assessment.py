@@ -258,7 +258,7 @@ def classify_attempt(
             return phase_outcome
 
     # (4) MUST-have files on the quantized directory, then (5) validator results.
-    if art.manifest_present and not art.manifest_parse_error:
+    if art.manifest_present:
         if not art.quantized_dir_exists or not art.has_weights:
             return OutcomeId.must_have_weights_missing
         if not art.has_config_json:

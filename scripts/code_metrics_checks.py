@@ -506,16 +506,21 @@ def _non_value_children(node: ast.AST) -> list[ast.AST]:
         return [value for value in node.values if isinstance(value, ast.Constant)]
     if isinstance(node, ast.FormattedValue) and node.format_spec is not None:
         return [node.format_spec]
+    return _declaration_children(node)
+
+
+def _declaration_children(node: ast.AST) -> list[ast.AST]:
+    """The annotation, return annotation or ``__all__`` value ``node`` declares."""
     if isinstance(node, (ast.AnnAssign, ast.arg)):
         return [node.annotation] if node.annotation is not None else []
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return [node.returns] if node.returns is not None else []
-    if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and _assigns_all(node):
-        return [node.value] if node.value is not None else []
+    if isinstance(node, (ast.Assign, ast.AugAssign)) and _assigns_all(node):
+        return [node.value]
     return []
 
 
-def _assigns_all(node: ast.Assign | ast.AugAssign | ast.AnnAssign) -> bool:
+def _assigns_all(node: ast.Assign | ast.AugAssign) -> bool:
     targets = node.targets if isinstance(node, ast.Assign) else [node.target]
     return any(isinstance(t, ast.Name) and t.id == "__all__" for t in targets)
 
