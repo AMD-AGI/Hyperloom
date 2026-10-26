@@ -9,8 +9,11 @@ directory, the events segments and the coordinator database opened read-only -- 
 objects. A source that cannot be read is reported as an error or as an explicit ``null`` with a warning, never as an
 empty answer.
 
-``request_stop`` writes ``<session>/hosted/control/stop.json`` and then sends this process SIGTERM, which
-:class:`hyperloom.orchestrator.loop.signals.SignalDrain` turns into the ordinary operator stop.
+``request_stop`` records the stop in ``<session>/hosted/control/stop.json`` and then wakes the process with SIGTERM.
+The file is the request: ``Coordinator.stop_requested`` reads it on every tick, and the hosted entry reads it before
+every leg and ends a run that has it with a final ``exit.json`` instead of starting ``optimize``. The signal only
+hastens the stop. While ``SignalDrain`` is armed it records the signal too; outside the tick loop the entry ignores a
+SIGTERM that arrives while the file exists, so the stop then takes effect at the next tick or the next start.
 """
 
 from __future__ import annotations
