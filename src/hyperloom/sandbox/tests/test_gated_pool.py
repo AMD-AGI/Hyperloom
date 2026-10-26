@@ -210,3 +210,51 @@ def test_a_pool_that_observes_still_refuses_what_a_plain_pool_refuses() -> None:
 
     with pytest.raises(SandboxUnavailable, match=r"no 1 free GPUs within 0.0s \(0 free\)"):
         pool.acquire(1, 0.0)
+
+
+# --- the log of a card an enforcing pool skips -------------------------------------------------------------------------
+
+_SKIP_LOGGER = "hyperloom.sandbox.gated_pool"
+
+
+def _skips(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [record.getMessage() for record in caplog.records if "is not handed out" in record.getMessage()]
+
+
+def test_an_enforcing_pool_names_the_card_it_skips_the_holder_and_its_size(caplog: pytest.LogCaptureFixture) -> None:
+    holder = Holder(card=1, pid=4242, command="python3 -c import torch", vram=2 << 30)
+    pool = GatedPool(range(4), CardGuard.ENFORCE, read=_Probe(CardReading((holder,))))
+
+    with caplog.at_level(logging.WARNING, logger=_SKIP_LOGGER):
+        assert pool.acquire(2, 0.0) == (0, 2)
+
+    assert _skips(caplog) == ["card 1 is not handed out: pid 4242 holds 2.0 GiB on it (python3 -c import torch)"]
+
+
+def test_a_skip_is_logged_once_per_holder_of_a_card_however_often_the_pool_looks(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    probe = _Probe(CardReading((Holder(card=0, pid=9, command="", vram=1 << 30),)))
+    pool = GatedPool(range(1), CardGuard.ENFORCE, read=probe, poll_sec=0.01)
+
+    with caplog.at_level(logging.WARNING, logger=_SKIP_LOGGER):
+        with pytest.raises(CardsHeld):
+            pool.acquire(1, 0.1)  # a wait that looks about ten times
+        probe.reading = CardReading((Holder(card=0, pid=10, command="", vram=1 << 30),))  # another process
+        with pytest.raises(CardsHeld):
+            pool.acquire(1, 0.0)
+
+    assert len(probe.asked) > 2
+    assert _skips(caplog) == [
+        "card 0 is not handed out: pid 9 holds 1.0 GiB on it",
+        "card 0 is not handed out: pid 10 holds 1.0 GiB on it",
+    ]
+
+
+def test_a_pool_that_observes_logs_no_skip(caplog: pytest.LogCaptureFixture) -> None:
+    pool = GatedPool(range(4), CardGuard.OBSERVE, read=_Probe(CardReading((_INTRUDER,))))
+
+    with caplog.at_level(logging.WARNING, logger=_SKIP_LOGGER):
+        pool.acquire(2, 0.0)
+
+    assert _skips(caplog) == []

@@ -5,11 +5,11 @@
 
 A card nobody leased is not necessarily a card nobody uses: an agent's command, a tool that outlived its lease or a server
 a teardown missed can hold it. Every hand-out of this pool, to a measurement sandbox or to a lease, looks at what holds
-the free cards first (:mod:`hyperloom.sandbox.card_occupancy`). Enforcing, it takes only cards nobody holds; a card that is
-held stays in the pool and is looked at again at the next try. Observing, which is the default until the probe has been shown
-right on the machines that run tests, it hands cards out as a plain pool does and the log says who holds the ones that are
-held. Where the probe cannot say who holds the cards they are handed out in both modes and the reason is logged: the runner
-of a test states for itself, in the signed result, what it could check.
+the free cards first (:mod:`hyperloom.sandbox.card_occupancy`). Enforcing, which is the default, it takes only cards nobody
+holds; a card that is held stays in the pool and is looked at again at the next try, and the log names the card, the
+process and what it holds there, once for each holder of each card. Observing, it hands cards out as a plain pool does and
+the log says who holds the ones that are held. Where the probe cannot say who holds the cards they are handed out in both
+modes and the reason is logged: the runner of a test states for itself, in the signed result, what it could check.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ __all__ = ["CardsHeld", "GatedPool"]
 log = logging.getLogger(__name__)
 
 _POLL_SEC = 1.0
+_GIB = 1 << 30
 #: How many holders a refusal names.
 _NAMED = 3
 
@@ -68,6 +69,8 @@ class GatedPool(GpuPool):
         self._read = read
         self._poll_sec = poll_sec
         self._unavailable = ""
+        #: The (card, pid) of every holder a skip was logged for, so a wait that looks every second logs it once.
+        self._skipped: set[tuple[int, int]] = set()
 
     def acquire(self, count: int, wait_sec: float) -> tuple[int, ...]:
         """Lease ``count`` cards nobody holds, waiting up to ``wait_sec`` for them to be free and let go.
@@ -118,6 +121,7 @@ class GatedPool(GpuPool):
                 )
         else:
             held_cards = reading.held_cards()
+            self._say_skipped(reading.holders)
             chosen = tuple(card for card in free if card not in held_cards)[:count]
             if len(chosen) < count:
                 raise CardsHeld(
@@ -129,6 +133,20 @@ class GatedPool(GpuPool):
             for card in chosen:
                 self._free.remove(card)
         return chosen
+
+    def _say_skipped(self, holders: Sequence[Holder]) -> None:
+        """Log each holder of a free card that is not handed out for it, the first time it is seen on that card."""
+        for holder in holders:
+            if (holder.card, holder.pid) in self._skipped:
+                continue
+            self._skipped.add((holder.card, holder.pid))
+            log.warning(
+                "card %d is not handed out: pid %d holds %.1f GiB on it%s",
+                holder.card,
+                holder.pid,
+                holder.vram / _GIB,
+                f" ({holder.command})" if holder.command else "",
+            )
 
     def _say_unchecked(self, reason: str) -> None:
         if reason != self._unavailable:
