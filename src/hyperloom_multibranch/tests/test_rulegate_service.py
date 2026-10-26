@@ -4,6 +4,7 @@
 import pytest
 
 from hyperloom.common.accuracy import ACCURACY_METRICS
+from hyperloom.common.perf_metric import AGENTX_KEEP_P50_THRESHOLD_PCT, GRADED_INTVTY_P50
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta
 from hyperloom_multibranch.contracts.gate import NotMeasured, ResultUnverified
@@ -14,7 +15,7 @@ from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import delta
-from hyperloom_multibranch.rulegate.rules import InferenceXRule
+from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
 from hyperloom_multibranch.rulegate.service import GateService, Polling
 from hyperloom_multibranch.tests.fakes import RecordingVerifier
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
@@ -51,7 +52,8 @@ class _Session:
     Nothing is measured before the first drain; from then on every test is measured as soon as it is queued.
     """
 
-    def __init__(self, root, accuracy_score: float = 0.93):
+    def __init__(self, root, accuracy_score: float = 0.93, *, agentx: bool = False):
+        self.agentx = agentx
         self.toolbox = FakeToolbox(
             FakeToolboxConfig(
                 noise=QUIET,
@@ -69,7 +71,7 @@ class _Session:
         self.gate = self.new_gate()
 
     def new_gate(self) -> GateService:
-        rule = InferenceXRule(self.notebook, CONC)
+        rule = AgentXRule() if self.agentx else InferenceXRule(self.notebook, CONC)
         return GateService(self.notebook, self.toolbox, rule, self.verifier, polling=Polling(0.001))
 
     async def record_root(self) -> None:
@@ -135,6 +137,27 @@ async def test_prelude_with_one_root_test_measured_sets_no_bar(tmp_path):
     ids = await session.root_tests(failing=2)
 
     with pytest.raises(NotMeasured, match="1 of 3 root tests measured"):
+        await session.gate.establish_baseline(ROOT, ids)
+    await session.toolbox.close()
+
+
+async def test_an_agentx_prelude_anchors_on_its_one_root_test(tmp_path):
+    session = _Session(tmp_path / "notebook", agentx=True)
+    ids = await session.root_tests()
+
+    record = await session.gate.establish_baseline(ROOT, ids)
+
+    assert len(ids) == 1 and record.request_ids == tuple(ids)
+    assert record.dispersion_pct == {}
+    assert record.threshold_pct == {GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT}
+    await session.toolbox.close()
+
+
+async def test_an_agentx_prelude_whose_root_test_did_not_measure_sets_no_bar(tmp_path):
+    session = _Session(tmp_path / "notebook", agentx=True)
+    ids = await session.root_tests(failing=1)
+
+    with pytest.raises(NotMeasured, match="0 of 1 root tests measured"):
         await session.gate.establish_baseline(ROOT, ids)
     await session.toolbox.close()
 

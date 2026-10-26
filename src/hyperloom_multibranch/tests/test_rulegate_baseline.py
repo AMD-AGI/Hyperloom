@@ -120,6 +120,16 @@ async def test_an_agentx_baseline_averages_every_metric_its_baselines_share(sess
     assert record.threshold_pct == {GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT}
 
 
+async def test_an_agentx_baseline_of_one_reading_records_no_spread(session):
+    only = await session.measured("b0", metrics=AGENTX)
+
+    record = await write_agentx_baseline(session.gate, ROOT, [only])
+
+    assert record.values == AGENTX
+    assert record.dispersion_pct == {}
+    assert record.threshold_pct == {GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT}
+
+
 async def test_an_agentx_baseline_needs_what_every_comparison_reads(session):
     partial = {key: value for key, value in AGENTX.items() if key != GRADED_DURATION}
     baselines = [await session.measured("b0", metrics=AGENTX), await session.measured("b1", metrics=partial)]

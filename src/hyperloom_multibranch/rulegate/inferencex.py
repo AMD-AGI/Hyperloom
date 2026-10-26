@@ -26,6 +26,8 @@ NOISE_MULTIPLE = 2.0
 FLOOR_PCT = 0.6
 
 MIN_BASELINES = 2
+# PRELUDE measures the root this many times, so one failed measurement still leaves the bar its two.
+BASELINE_TESTS = 3
 
 GAIN_BELOW_THRESHOLD = "gain_below_threshold"
 GAIN_NOT_CONFIRMED = "gain_not_confirmed"
@@ -164,6 +166,7 @@ def confirm(
 
 
 __all__ = [
+    "BASELINE_TESTS",
     "DROPPED_REQUESTS",
     "FLOOR_PCT",
     "GAIN_BELOW_THRESHOLD",

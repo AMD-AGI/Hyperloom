@@ -22,12 +22,9 @@ from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery, Gat
 from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, TestRecord
 from hyperloom_multibranch.contracts.toolbox import Toolbox
 from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
-from hyperloom_multibranch.rulegate.inferencex import MIN_BASELINES
+from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
 from hyperloom_multibranch.rulegate.rules import Rule, repeats, retest_request
-
-#: PRELUDE measures the root this many times, so one failed measurement still leaves the bar its two.
-BASELINE_TESTS = 3
 
 
 class GateNotebook(RecordSearch, SnapshotQuery, CommitQuery, GateRecords, Protocol):
@@ -65,13 +62,14 @@ class GateService:
         self._polling = polling
 
     async def baseline_test_count(self) -> int:
-        return BASELINE_TESTS
+        return self._rule.baseline_tests
 
     async def establish_baseline(self, root_commit: str, request_ids: Sequence[str]) -> BaselineRecord:
         records = [await self._ended(request_id) for request_id in request_ids]
         measured = [record for record in records if _succeeded(record)]
-        if len(measured) < MIN_BASELINES:
-            raise NotMeasured(f"{len(measured)} of {len(records)} root tests measured; the bar needs {MIN_BASELINES}")
+        if len(measured) < self._rule.min_baselines:
+            needed = self._rule.min_baselines
+            raise NotMeasured(f"{len(measured)} of {len(records)} root tests measured; the baseline needs {needed}")
         for record in measured:
             await self._verifier.reverify(record.request_id)
         with _judgeable():

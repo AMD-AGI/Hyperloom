@@ -35,9 +35,14 @@ from hyperloom_multibranch.rulegate.readings import (
 
 
 class Rule(Protocol):
-    """How the session's workload is judged; ``accuracy_round`` says whether its tests run the eval it reads."""
+    """How the session's workload is judged; ``accuracy_round`` says whether its tests run the eval it reads.
+
+    PRELUDE submits ``baseline_tests`` root tests, and the baseline needs ``min_baselines`` of them measured.
+    """
 
     accuracy_round: bool
+    baseline_tests: int
+    min_baselines: int
 
     async def baseline(self, store: GateRecords, root_commit: str, records: Sequence[TestRecord]) -> BaselineRecord: ...
 
@@ -56,6 +61,8 @@ class InferenceXRule(Rule):
     notebook: CommitQuery
     concurrency: int
     accuracy_round = True
+    baseline_tests = inferencex.BASELINE_TESTS
+    min_baselines = inferencex.MIN_BASELINES
 
     async def baseline(self, store: GateRecords, root_commit: str, records: Sequence[TestRecord]) -> BaselineRecord:
         return await write_inferencex_baseline(store, root_commit, records, self.concurrency)
@@ -80,9 +87,14 @@ class InferenceXRule(Rule):
 
 
 class AgentXRule(Rule):
-    """P50 interactivity with its guards; the error rate the run reports is its accuracy."""
+    """P50 interactivity with its guards; the error rate the run reports is its accuracy.
+
+    The bar is fixed rather than drawn from the root's spread, so one root test is enough to anchor the parent values.
+    """
 
     accuracy_round = False
+    baseline_tests = 1
+    min_baselines = 1
 
     async def baseline(self, store: GateRecords, root_commit: str, records: Sequence[TestRecord]) -> BaselineRecord:
         return await write_agentx_baseline(store, root_commit, records)
