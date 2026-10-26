@@ -204,23 +204,23 @@ def _env_digits(name: str) -> int | None:
     return int(raw) if raw.strip().isdigit() else None
 
 
-def build_manifest(
-    session_dir: Path,
-    *,
-    args: argparse.Namespace | None = None,
-    session_id: str | None = None,
-) -> dict[str, Any]:
-    """Assemble the session manifest dictionary (schema ``SCHEMA_VERSION``)."""
-    from ..breakdown.workflow_contract import CURRENT_WORKFLOW_CONTRACT_VERSION, workflow_contract_digest
+def _env_text(name: str) -> str | None:
+    """The env var stripped; ``None`` when unset or blank."""
+    return (os.environ.get(name) or "").strip() or None
 
-    model_path = model_name = ""
+
+def _model_identity(args: argparse.Namespace | None) -> tuple[str, str]:
+    """``(model_path, model_name)`` of the session's model; both empty when no model is given."""
     model = getattr(args, "model", None)
-    if model:
-        model_path = str(model)
-        # Prefer the quantize prelude's pinned source identity over the generic "quantized" export-dir basename.
-        model_name = (getattr(args, "model_display_name", "") or "").strip() or Path(model_path).name
-    framework = str(getattr(args, "framework", None) or os.environ.get("FRAMEWORK", ""))
-    gpu_type = str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", ""))
+    if not model:
+        return "", ""
+    model_path = str(model)
+    # Prefer the quantize prelude's pinned source identity over the generic "quantized" export-dir basename.
+    return model_path, (getattr(args, "model_display_name", "") or "").strip() or Path(model_path).name
+
+
+def _workload_block(args: argparse.Namespace | None) -> dict[str, Any]:
+    """The manifest's ``workload`` block: the serving shape the session benchmarks, ``args`` over the environment."""
     workload: dict[str, Any] = {
         "max_model_len": _env_digits("MAX_MODEL_LEN"),
         "precision": str(getattr(args, "precision", None) or os.environ.get("PRECISION", "")) or None,
@@ -237,14 +237,30 @@ def build_manifest(
         isl, osl = getattr(args, "isl", None), getattr(args, "osl", None)
         workload["isl"] = _env_digits("ISL") if isl is None else int(isl)
         workload["osl"] = _env_digits("OSL") if osl is None else int(osl)
+    return workload
+
+
+def build_manifest(
+    session_dir: Path,
+    *,
+    args: argparse.Namespace | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Assemble the session manifest dictionary (schema ``SCHEMA_VERSION``)."""
+    from ..breakdown.workflow_contract import CURRENT_WORKFLOW_CONTRACT_VERSION, workflow_contract_digest
+
+    model_path, model_name = _model_identity(args)
+    framework = str(getattr(args, "framework", None) or os.environ.get("FRAMEWORK", ""))
+    gpu_type = str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", ""))
+    workload = _workload_block(args)
     # Shared provenance builder (WP-0) so a trace consumer can pin gfx arch / EP / graph mode / server args, kept in
     # lockstep with the TraceShapeManifest's provenance block so the two never drift.
     _prov = build_provenance(args, env=os.environ)
     return {
         "schema_version": SCHEMA_VERSION,
         "session_id": session_id or build_session_id(model_name),
-        "claw_session_id": (os.environ.get("CLAW_SESSION_ID") or "").strip() or None,
-        "sandbox_user_id": (os.environ.get("SANDBOX_USER_ID") or "").strip() or None,
+        "claw_session_id": _env_text("CLAW_SESSION_ID"),
+        "sandbox_user_id": _env_text("SANDBOX_USER_ID"),
         "created_at_utc": now_iso(timespec="seconds"),
         "session_dir": str(session_dir),
         # USER_DATA_PATH root snapshotted so a trace-based consumer can locate the on-disk artifacts.

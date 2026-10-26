@@ -44,57 +44,69 @@ def is_safe_path_entry(entry: str) -> bool:
 _RUNTIME_ENV_RESERVED: frozenset[str] = frozenset({"PATH", "PYTHONPATH", "LD_LIBRARY_PATH"})
 
 
+def _override_text(override: dict[str, Any], key: str) -> str:
+    """The override's text field ``key``, stripped; empty when unset."""
+    return str(override.get(key) or "").strip()
+
+
+def _prepend_safe_entry(envs: dict[str, str], var: str, entry: str, unsafe_warning: str) -> None:
+    """Prepend ``entry`` to the path-list env ``var`` when it is a safe path entry; else log ``unsafe_warning``."""
+    if is_safe_path_entry(entry):
+        prepend_launch_path(envs, var, entry)
+    else:
+        log.warning(unsafe_warning, entry)
+
+
+def _copy_safe_runtime_env(envs: dict[str, str], runtime_env: dict[Any, Any]) -> None:
+    """Copy the override's extra env vars onto ``envs``, dropping a key that is malformed, blocked or reserved."""
+    for raw_k, raw_v in runtime_env.items():
+        key = str(raw_k)
+        if (
+            not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+            or key in BLOCKED_CHILD_ENV_NAMES
+            or key in _RUNTIME_ENV_RESERVED
+        ):
+            log.warning("apply_runtime_override: dropping unsafe runtime_env key %r", key)
+            continue
+        envs[key] = str(raw_v)
+
+
 def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> None:
     """Inject an attempt runtime override into the materialized YAML envs dict."""
     if not override:
         return
 
-    path_prefix = str(override.get("path_prefix") or "").strip()
+    path_prefix = _override_text(override, "path_prefix")
     if path_prefix:
         prepend_launch_path(envs, "PATH", path_prefix)
-    entrypoint_bin = str(override.get("entrypoint_bin_dir") or "").strip()
+    entrypoint_bin = _override_text(override, "entrypoint_bin_dir")
     if entrypoint_bin:
-        if is_safe_path_entry(entrypoint_bin):
-            prepend_launch_path(envs, "PATH", entrypoint_bin)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe entrypoint_bin_dir %r", entrypoint_bin)
-    pp_prefix = str(override.get("pythonpath_prefix") or "").strip()
+        _prepend_safe_entry(
+            envs, "PATH", entrypoint_bin, "apply_runtime_override: dropping unsafe entrypoint_bin_dir %r"
+        )
+    pp_prefix = _override_text(override, "pythonpath_prefix")
     if pp_prefix:
-        if is_safe_path_entry(pp_prefix):
-            prepend_launch_path(envs, "PYTHONPATH", pp_prefix)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe pythonpath_prefix %r", pp_prefix)
+        _prepend_safe_entry(
+            envs, "PYTHONPATH", pp_prefix, "apply_runtime_override: dropping unsafe pythonpath_prefix %r"
+        )
     # Multi-entry prefixes: prepend in order so the first entry wins, ahead of any single-dir pythonpath_prefix and
     # the inherited value.
     for entry in reversed(_coerce_prefix_list(override.get("pythonpath_prefixes"))):
-        if is_safe_path_entry(entry):
-            prepend_launch_path(envs, "PYTHONPATH", entry)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe pythonpath entry %r", entry)
+        _prepend_safe_entry(envs, "PYTHONPATH", entry, "apply_runtime_override: dropping unsafe pythonpath entry %r")
     # Native loader path: prepend attempt entries while preserving any inherited entries (e.g. /opt/rocm/lib).
     for entry in reversed(_coerce_prefix_list(override.get("ld_library_path_prefix"))):
-        if is_safe_path_entry(entry):
-            prepend_launch_path(envs, "LD_LIBRARY_PATH", entry)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe ld_library_path entry %r", entry)
+        _prepend_safe_entry(
+            envs, "LD_LIBRARY_PATH", entry, "apply_runtime_override: dropping unsafe ld_library_path entry %r"
+        )
     _runtime_env = override.get("runtime_env")
     if isinstance(_runtime_env, dict):
-        for raw_k, raw_v in _runtime_env.items():
-            key = str(raw_k)
-            if (
-                not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
-                or key in BLOCKED_CHILD_ENV_NAMES
-                or key in _RUNTIME_ENV_RESERVED
-            ):
-                log.warning("apply_runtime_override: dropping unsafe runtime_env key %r", key)
-                continue
-            envs[key] = str(raw_v)
+        _copy_safe_runtime_env(envs, _runtime_env)
     for key in ("framework_bin", "framework_python", "framework_venv_root"):
-        val = str(override.get(key) or "").strip()
+        val = _override_text(override, key)
         if val:
             envs[f"HYPERLOOM_{key.upper()}"] = val
     # runtime_python_exe takes priority over framework_python as the launch interpreter.
-    rpe = str(override.get("runtime_python_exe") or "").strip()
+    rpe = _override_text(override, "runtime_python_exe")
     if rpe:
         envs["HYPERLOOM_FRAMEWORK_PYTHON"] = rpe
 

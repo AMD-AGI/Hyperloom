@@ -282,6 +282,33 @@ class AcceptedMetrics:
     e2e_norm_intvty_p90: float | None = None
 
 
+@dataclass(frozen=True)
+class _GapAxes:
+    """The benchmark mode's own gap axes: TPOT ratio, interactivity gap and the gap that dominates."""
+
+    tpot_ratio: float | None
+    interactivity_gap_pct: float | None
+    primary_gap: str | None
+
+
+def _agentx_gap_axes(row: dict[str, Any], ours: AcceptedMetrics, throughput_gap_pct: float | None) -> _GapAxes:
+    """AgentX axes: interactivity is the E2E normalized P90, and no gap dominates while neither trails."""
+    interactivity_gap_pct = _gap_pct(row.get("e2e_norm_intvty_p90"), ours.e2e_norm_intvty_p90)
+    tput_gap, inter_gap = throughput_gap_pct or 0, interactivity_gap_pct or 0
+    primary_gap = None if max(tput_gap, inter_gap) <= 0 else "latency" if inter_gap >= tput_gap else "throughput"
+    return _GapAxes(None, interactivity_gap_pct, primary_gap)
+
+
+def _synthetic_gap_axes(row: dict[str, Any], ours: AcceptedMetrics, throughput_gap_pct: float | None) -> _GapAxes:
+    """Synthetic axes: the TPOT ratio and the interactivity it implies; latency dominates when TPOT trails further."""
+    tgt_tpot, our_tpot_ms = to_float(row.get("tpot_ms")), ours.tpot_ms
+    tpot_ratio = our_tpot_ms / tgt_tpot if tgt_tpot and our_tpot_ms and tgt_tpot > 0 else None
+    interactivity_gap_pct = _gap_pct(row.get("interactivity"), 1000.0 / our_tpot_ms if our_tpot_ms else None)
+    latency_wins = tpot_ratio is not None and (tpot_ratio - 1.0) * 100.0 > (throughput_gap_pct or 0)
+    primary_gap = "latency" if latency_wins else "throughput"
+    return _GapAxes(tpot_ratio, interactivity_gap_pct, primary_gap)
+
+
 def gap_analysis(
     target: dict[str, Any] | None,
     ours: AcceptedMetrics,
@@ -306,21 +333,15 @@ def gap_analysis(
     row = row or {}
     throughput_gap_pct = _gap_pct(row.get("tput_per_gpu"), ours.tput_per_gpu)
     if agentx:
-        tpot_ratio = None
-        interactivity_gap_pct = _gap_pct(row.get("e2e_norm_intvty_p90"), ours.e2e_norm_intvty_p90)
-        tput_gap, inter_gap = throughput_gap_pct or 0, interactivity_gap_pct or 0
-        primary_gap = None if max(tput_gap, inter_gap) <= 0 else "latency" if inter_gap >= tput_gap else "throughput"
+        axes = _agentx_gap_axes(row, ours, throughput_gap_pct)
     else:
-        tgt_tpot, our_tpot_ms = to_float(row.get("tpot_ms")), ours.tpot_ms
-        tpot_ratio = our_tpot_ms / tgt_tpot if tgt_tpot and our_tpot_ms and tgt_tpot > 0 else None
-        interactivity_gap_pct = _gap_pct(row.get("interactivity"), 1000.0 / our_tpot_ms if our_tpot_ms else None)
-        latency_wins = tpot_ratio is not None and (tpot_ratio - 1.0) * 100.0 > (throughput_gap_pct or 0)
-        primary_gap = "latency" if latency_wins else "throughput"
+        axes = _synthetic_gap_axes(row, ours, throughput_gap_pct)
+    interactivity_gap_pct = axes.interactivity_gap_pct
     gap: dict[str, Any] = {
         "throughput_gap_pct": throughput_gap_pct,
-        "tpot_ratio": tpot_ratio,
+        "tpot_ratio": axes.tpot_ratio,
         "interactivity_gap_pct": interactivity_gap_pct,
-        "primary_gap": primary_gap,
+        "primary_gap": axes.primary_gap,
         "target_conc": to_float(row.get("conc")),
         "source": row.get("source"),
     }
@@ -465,15 +486,8 @@ def _tokens(text: str) -> set[str]:
     return out
 
 
-def match_variants_to_priors(
-    variants: list[dict[str, Any]],
-    hints: list[dict[str, Any]],
-    *,
-    primary_gap: str | None = None,
-) -> dict[str, dict[str, Any]]:
-    """Annotate which variants align with proven priors (advisory; informs ordering only). Returns ``{name: {hints, latency_aligned}}`` for variants matching a hint or a dominant latency gap; ``hints`` lists the most shared content words first."""
-    out: dict[str, dict[str, Any]] = {}
-    latency_dominant = str(primary_gap or "").strip().lower() == "latency"
+def _hint_token_sets(hints: list[dict[str, Any]]) -> list[tuple[str, set[str]]]:
+    """``(what, content words)`` of every hint that names a change, its domain tags' words included."""
     hint_tokens: list[tuple[str, set[str]]] = []
     for h in hints or []:
         if not isinstance(h, dict):
@@ -486,20 +500,42 @@ def match_variants_to_priors(
             toks |= _tokens(tag)
         if toks:
             hint_tokens.append((what, toks))
+    return hint_tokens
+
+
+def _variant_tokens(variant: dict[str, Any]) -> set[str]:
+    """Content words of a variant's name, server args, description and domain tags."""
+    text = " ".join(
+        str(variant.get(k) or "") for k in ("name", "extra_server_args", "candidate_extra_server_args", "description")
+    )
+    text += " " + " ".join(str(t) for t in (variant.get("domain_tags") or []))
+    return _tokens(text)
+
+
+def _matched_hints(vtoks: set[str], hint_tokens: list[tuple[str, set[str]]]) -> list[str]:
+    """The hints sharing a content word with ``vtoks``, the most shared first."""
+    overlaps = [(len(vtoks & toks), what) for what, toks in hint_tokens]
+    return [what for shared, what in sorted(overlaps, key=lambda pair: -pair[0]) if shared]
+
+
+def match_variants_to_priors(
+    variants: list[dict[str, Any]],
+    hints: list[dict[str, Any]],
+    *,
+    primary_gap: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Annotate which variants align with proven priors (advisory; informs ordering only). Returns ``{name: {hints, latency_aligned}}`` for variants matching a hint or a dominant latency gap; ``hints`` lists the most shared content words first."""
+    out: dict[str, dict[str, Any]] = {}
+    latency_dominant = str(primary_gap or "").strip().lower() == "latency"
+    hint_tokens = _hint_token_sets(hints)
     for variant in variants or []:
         if not isinstance(variant, dict):
             continue
         name = str(variant.get("name") or "").strip()
         if not name:
             continue
-        text = " ".join(
-            str(variant.get(k) or "")
-            for k in ("name", "extra_server_args", "candidate_extra_server_args", "description")
-        )
-        text += " " + " ".join(str(t) for t in (variant.get("domain_tags") or []))
-        vtoks = _tokens(text)
-        overlaps = [(len(vtoks & toks), what) for what, toks in hint_tokens]
-        matched_hints = [what for shared, what in sorted(overlaps, key=lambda pair: -pair[0]) if shared]
+        vtoks = _variant_tokens(variant)
+        matched_hints = _matched_hints(vtoks, hint_tokens)
         latency_aligned = bool(latency_dominant and any(kw in vtoks for kw in _LATENCY_DIRECTION_KEYWORDS))
         if matched_hints or latency_aligned:
             out[name] = {
