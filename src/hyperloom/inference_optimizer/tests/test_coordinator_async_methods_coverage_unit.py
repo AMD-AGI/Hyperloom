@@ -288,6 +288,7 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
             idempotency_key="bl-mixed",
         )
 
+    coord.shared_state.enablement_mode = "off"
     # Two different outputs: the identical-failure rule must not be what stops the third call.
     subproc_a = _nonzero_result("RuntimeError: HIP out of memory")
     subproc_b = _nonzero_result("ConnectionError: port refused")
@@ -1278,6 +1279,7 @@ def _baseline_task(task_id: str) -> Task:
 @pytest.mark.asyncio
 async def test_unpromotable_baseline_same_failure_twice_stops_at_two(coord: Coordinator) -> None:
     """Two subprocess_nonzero baselines that printed the same thing (modulo numbers) end the run at two."""
+    coord.shared_state.enablement_mode = "off"
     first = _nonzero_result("RuntimeError: worker 1234 died at t=17")
     second = _nonzero_result("RuntimeError: worker 98 died at t=4")
 
@@ -1291,6 +1293,7 @@ async def test_unpromotable_baseline_same_failure_twice_stops_at_two(coord: Coor
 @pytest.mark.asyncio
 async def test_unpromotable_baseline_different_failures_keep_three_strikes(coord: Coordinator) -> None:
     """Two different failures are not evidence of a third: the three-strike budget still applies."""
+    coord.shared_state.enablement_mode = "off"
     a = _nonzero_result("RuntimeError: HIP out of memory")
     b = _nonzero_result("ConnectionError: port refused")
 
@@ -1358,6 +1361,21 @@ async def test_unpromotable_baseline_same_failure_in_enablement_does_not_stop_ea
 
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-en-1"), result)
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-en-2"), result)
+    assert coord.shared_state.stop_reason != "baseline_failed"
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_same_failure_in_prelude_with_enablement_admitted_does_not_stop_early(
+    coord: Coordinator,
+) -> None:
+    """A retry that settles before the PRELUDE->ENABLEMENT transition is still enablement's input."""
+    from hyperloom.orchestrator.phases.machine_state import PHASE_PRELUDE
+
+    coord.shared_state.phase = PHASE_PRELUDE
+    result = _nonzero_result("ImportError: no module named foo")
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-pre-1"), result)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-pre-2"), result)
     assert coord.shared_state.stop_reason != "baseline_failed"
 
 
@@ -1447,6 +1465,7 @@ async def test_baseline_executor_same_output_modulo_numbers_stops_at_two(
 
     assert first["output_signature"] == second["output_signature"] != ""
 
+    coord.shared_state.enablement_mode = "off"
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-1"), first)
     assert coord.shared_state.stop_reason != "baseline_failed"
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-2"), second)
