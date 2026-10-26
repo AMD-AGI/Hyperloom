@@ -36,12 +36,14 @@ _DEFAULT_PROFILE_MAX_STEPS = 128
 # profile reuses min(served OSL, this) so its trace stays light.
 _PROFILE_DEFAULT_OSL = 1024
 # Speculative-decoding flags: SGLang ``--speculative-*``, vLLM ``--speculative-config`` (JSON or dotted keys),
-# and the count each one bounds tokens per step by, as (pattern, added to the count).
+# and the count each one bounds accepted tokens per step by, as (pattern, added to the count), in order of
+# preference: the first pattern present decides. SGLang's draft depth beats its draft-token count, because a
+# tree launch (``--speculative-eagle-topk`` > 1) verifies many more tokens than one step can accept.
 _SPECULATIVE_FLAG = re.compile(r"--speculative[-_.]|--num[-_]speculative[-_]tokens")
 _SPECULATIVE_BOUNDS = (
     (re.compile(r"--speculative[-_]num[-_]steps[=\s]+(\d+)"), 1),
-    (re.compile(r"--speculative[-_]num[-_]draft[-_]tokens[=\s]+(\d+)"), 0),
     (re.compile(r"num[-_]speculative[-_]tokens[\"']?\s*[:=\s]\s*(\d+)"), 1),
+    (re.compile(r"--speculative[-_]num[-_]draft[-_]tokens[=\s]+(\d+)"), 0),
 )
 _SPECULATIVE_FALLBACK_TOKENS_PER_STEP = 8
 # vLLM ``--profiler-config`` keys that bound the capture window, and the delay an operator-set window defaults to.
@@ -303,15 +305,19 @@ def _prompts_for_steps(steps: int, conc: int, osl: int) -> int:
 def speculative_tokens_per_step(server_args: str) -> int:
     """The most tokens one decode forward step can emit under ``server_args``: 1 without speculative decoding.
 
-    SGLang accepts at most ``--speculative-num-steps`` + 1 tokens per step and verifies at most
-    ``--speculative-num-draft-tokens``; vLLM accepts at most ``num_speculative_tokens`` + 1. The largest
-    bound present wins, and a launch that enables speculation without stating a count gets a deliberately
-    high fallback, because overestimating only moves the window earlier while underestimating loses it.
+    SGLang accepts at most ``--speculative-num-steps`` + 1 tokens per step, whatever the tree width; vLLM
+    accepts at most ``num_speculative_tokens`` + 1. Only without either does ``--speculative-num-draft-tokens``
+    bound it (DSpark, whose verify window is gamma + 1). A launch that enables speculation without stating a
+    count gets a deliberately high fallback, because overestimating only moves the window earlier while
+    underestimating loses it.
     """
     if not _SPECULATIVE_FLAG.search(server_args):
         return 1
-    bounds = [int(value) + extra for pattern, extra in _SPECULATIVE_BOUNDS for value in pattern.findall(server_args)]
-    return max(1, max(bounds, default=_SPECULATIVE_FALLBACK_TOKENS_PER_STEP))
+    for pattern, extra in _SPECULATIVE_BOUNDS:
+        values = pattern.findall(server_args)
+        if values:
+            return max(1, int(values[-1]) + extra)
+    return _SPECULATIVE_FALLBACK_TOKENS_PER_STEP
 
 
 def fit_capture_to_speculative(envs: dict[str, Any], framework_env: str) -> None:

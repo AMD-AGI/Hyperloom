@@ -312,6 +312,10 @@ _SGLANG_MTP = (
     "--speculative-algorithm NEXTN --speculative-num-steps 5 --speculative-eagle-topk 1 "
     "--speculative-num-draft-tokens 6"
 )
+_SGLANG_EAGLE_TREE = (
+    "--speculative-algorithm EAGLE --speculative-num-steps 5 --speculative-eagle-topk 8 "
+    "--speculative-num-draft-tokens 64"
+)
 
 
 @pytest.mark.parametrize(
@@ -322,6 +326,8 @@ _SGLANG_MTP = (
         (_SGLANG_MTP, 6),
         ("--speculative-algorithm EAGLE --speculative-num-steps=3 --speculative-num-draft-tokens=4", 4),
         ("--speculative-algorithm EAGLE --speculative-eagle-topk 4 --speculative-num-draft-tokens 8", 8),
+        (_SGLANG_EAGLE_TREE, 6),
+        ("--speculative-algorithm DSPARK --speculative-dspark-block-size 7 --speculative-num-draft-tokens 8", 8),
         ("--speculative-algorithm NEXTN", 8),
         ('--speculative-config {"method":"mtp","num_speculative_tokens":3}', 4),
         ("--speculative-config.method mtp --speculative-config.num_speculative_tokens=2", 3),
@@ -358,6 +364,13 @@ def test_sglang_speculative_launch_reaches_the_profile_window(tmp_path):
     assert body["start_step"] == 6080 // 6
     assert body["num_steps"] == plain["num_steps"] == 128
     assert body["start_step"] + body["num_steps"] <= _steps_at_full_acceptance(envs, 6) // 2
+
+
+def test_sglang_eagle_tree_launch_is_bounded_by_draft_depth_not_tree_size(tmp_path):
+    """topk 8 verifies 64 tree nodes but accepts at most num_steps + 1 = 6, so the window stays past the first wave."""
+    envs = _materialized_profile(tmp_path, "sglang", _SGLANG_EAGLE_TREE)
+    body = json.loads(envs["PROFILE_EXTRA_BODY"])
+    assert (body["start_step"], body["num_steps"], int(envs["NUM_PROMPTS"])) == (1013, 128, 856)
 
 
 def test_sglang_plain_launch_keeps_its_capture_plan(tmp_path):
