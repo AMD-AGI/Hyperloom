@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Sequence
 
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 from kernelforge.loop.path_ownership import PRODUCER_PATH_PATTERNS, runtime_gitignore_globs
 
 log = logging.getLogger("forge_fusion")

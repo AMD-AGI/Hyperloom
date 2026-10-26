@@ -225,7 +225,7 @@ keep their values, with any recognizable credential inside a value masked.
 Replaying a session takes credentials from its own environment, never from the
 breakdown.
 
-`metadata.grading` — which axis this session was configured to grade on:
+`metadata.grading` — the grading mode this session was started in:
 `benchmark_mode` (`agentx` or `synthetic`), `objective`, and the `tput_guard`
 that rides along with the interactivity objective (`enabled`, `noise_pct`).
 
@@ -237,12 +237,14 @@ document is the output axis by construction, so without this block a consumer
 cannot tell the two kinds of session apart — and on the canonical corpus the
 two axes differ by roughly two orders of magnitude.
 
-This is the session-level *setting*. What a promotion was actually decided on
-is `outcome.validation.graded_on`, read off the promotion itself. On a session
-that promoted anything the two agree, because a comparison that cannot supply
-the configured axis pair fails rather than settling for another axis — nothing
-is ever promoted off-objective. Neither field resolves the other even so: a
-session can be configured for an axis and promote nothing on it.
+`grading.objective` is a mode marker written when the session starts: an
+interactivity session always carries `e2e_norm_intvty_p90`, which is not the
+axis promotions are decided on. The deciding axis is
+`outcome.validation.graded_on` (and `outcome.final.graded_on`), read off the
+promotion itself (`e2e_norm_intvty_p50` on an AgentX replay). A session that
+adopted nothing has no `graded_on`; one that adopted but never validated
+reports the adoption axis.
+
 `tput_guard.noise_pct` is null on a session that predates the band being
 recorded.
 
@@ -425,7 +427,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "schema_version": "hyperloom.session_breakdown.v6.1",
       "hyperloom": "a1b2c3d",
       "framework": "sglang",
-      "framework_version": "0.5.21",
+      "framework_version": "0.5.22",
       "tools": {
         "geak": { "tool": "geak", "root_dir": "/opt/geak", "commit": "9f8e7d6", "version": "0.4.2" }
       }
@@ -445,8 +447,8 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "session_dir": "/workspace/hyperloom/GLM-5-FP8/20260517T113000Z",
       "user_data_path": "/workspace",
       "tick_count": 89,
-      "image": "lmsysorg/sglang-rocm:v0.5.21-rocm10-mi30x-20261008",
-      "image_id": "sglang-rocm:v0.5.21-rocm10-mi30x-20261008",
+      "image": "lmsysorg/sglang-rocm:v0.5.22-rocm10-mi30x-20261022",
+      "image_id": "sglang-rocm:v0.5.22-rocm10-mi30x-20261022",
       "recovery": {
         "recovered": false,
         "crash_count": 0,
@@ -458,7 +460,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     },
     "task_config": {
       "framework_name": "sglang",
-      "framework_version": "0.5.21",
+      "framework_version": "0.5.22",
       "model_name": "GLM-5-FP8",
       "model_path": "/models/GLM-5-FP8",
       "gpu_type": "mi355x",

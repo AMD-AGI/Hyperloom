@@ -52,12 +52,12 @@ class _TasksStub:
     async def running(self) -> list[Any]:
         return list(self._running)
 
-    async def create_or_return_existing(self, **kwargs: Any) -> Any:
-        self.created.append(kwargs)
+    async def create_or_return_existing(self, spec) -> Any:
+        self.created.append(vars(spec))
         t = SimpleNamespace(
-            kind=kwargs.get("kind"),
+            kind=spec.kind,
             task_id=f"t-{len(self.created)}",
-            params=kwargs.get("params") or {},
+            params=spec.params or {},
             state="queued",
         )
         self._queued.append(t)
@@ -522,11 +522,11 @@ async def test_enqueue_authoring_stamps_recovery_failed_when_unrecoverable(tmp_p
         "batch_id": "b0",
     }
 
-    async def _create_or_return_existing(**kwargs: Any) -> Any:
+    async def _create_or_return_existing(spec) -> Any:
         terminal = SimpleNamespace(
-            kind=kwargs.get("kind"),
+            kind=spec.kind,
             task_id="specialist-terminal",
-            params=kwargs.get("params") or {},
+            params=spec.params or {},
             state="succeeded",
         )
         return terminal, True
@@ -655,7 +655,6 @@ def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": cand,
             "framework_batch_id": "b1",
-            "framework_audit": {"semantic_status": "not_present"},
         },
     )
     done_payload = {
@@ -672,7 +671,7 @@ def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
     rows = stub.shared_state.framework_agent_phase_progress
     assert len(rows) == 1
     assert rows[0]["candidate_id"] == cand
-    assert rows[0]["status"] == "not_applicable"
+    assert rows[0]["status"] == "author_empty"
     assert rows[0]["kept"] is False
 
 
@@ -776,7 +775,6 @@ def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": "https://github.com/ROCm/vllm/pull/1014",
             "framework_batch_id": "b1",
-            "framework_audit": {"semantic_status": "not_present"},
         },
     )
     done_payload = {
@@ -821,7 +819,6 @@ def test_empty_outcome_skips_when_artifacts_written_routable(tmp_path: Path):
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": "https://github.com/ROCm/aiter/pull/4130",
             "framework_batch_id": "b1",
-            "framework_audit": {"semantic_status": "not_present"},
         },
     )
     done_payload = {
@@ -856,7 +853,6 @@ def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": "https://github.com/ROCm/aiter/pull/9999",
             "framework_batch_id": "b1",
-            "framework_audit": {"semantic_status": "not_present"},
         },
     )
     done_payload = {
@@ -878,7 +874,7 @@ def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
     )
     rows = stub.shared_state.framework_agent_phase_progress
     assert len(rows) == 1
-    assert rows[0]["status"] == "not_applicable"
+    assert rows[0]["status"] == "author_empty"
     assert rows[0]["kept"] is False
 
 
@@ -901,7 +897,6 @@ def test_empty_outcome_stamps_when_artifacts_source_outside_sandbox(tmp_path: Pa
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": "https://github.com/ROCm/aiter/pull/8888",
             "framework_batch_id": "b1",
-            "framework_audit": {"semantic_status": "not_present"},
         },
     )
     done_payload = {
@@ -922,7 +917,7 @@ def test_empty_outcome_stamps_when_artifacts_source_outside_sandbox(tmp_path: Pa
     )
     rows = stub.shared_state.framework_agent_phase_progress
     assert len(rows) == 1
-    assert rows[0]["status"] == "not_applicable"
+    assert rows[0]["status"] == "author_empty"
     assert rows[0]["kept"] is False
 
 

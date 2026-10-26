@@ -25,20 +25,29 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .event_fields import (
-    as_dict as _as_dict,
-    as_list as _as_list,
-    clip as _clip,
-    failure_row as _failure_row,
-    float_or_none as _float_or_none,
-    now_iso_seconds as _now,
+from hyperloom.common.coerce import (
     text_or_none as _text_or_none,
+    to_float as _float_or_none,
+    to_mapping as _as_dict,
+    to_list as _as_list,
 )
+
+from .event_fields import clip as _clip, failure_row as _failure_row, now_iso_seconds as _now
 from ..round_archive import ROLE_LAUNCH_CONFIG
 
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink, make_sink
+from .enablement_keep_pairing import (
+    KEEP_REF_FIELD,
+    VALIDATING_KEEP_FIELD,
+    VERDICT_CLEARED,
+    VERDICT_PROMOTED,
+    VERDICT_REJECTED,
+    VERDICT_STOPPED,
+    keep_ref,
+    pair_keep_rounds,
+)
 from .event_timeline import EventHeader, finish_event, open_event
 from .recorder_warnings import RECORDING_ERRORS, note_failure
 
@@ -158,53 +167,59 @@ def _open(*, mode: str = "", origin: str = "", start_time: str = "") -> int | No
     )
 
 
-def record_trigger(
-    *,
-    origin: str,
-    mode: str,
-    kind: str = "",
-    evidence: Any = "",
-    observed_accuracy: Any = None,
-    accuracy_floor: Any = None,
-    observed_task: Any = None,
-    observed_metric: Any = None,
-    eval_contract_fingerprint: Any = None,
-    probe_config_path: Any = None,
-) -> None:
+@dataclass(frozen=True)
+class LaneTrigger:
+    """The failure that opened the lane; the accuracy fields are eval-origin only."""
+
+    origin: str
+    mode: str
+    kind: str = ""
+    evidence: Any = ""
+    observed_accuracy: Any = None
+    accuracy_floor: Any = None
+    observed_task: Any = None
+    observed_metric: Any = None
+    eval_contract_fingerprint: Any = None
+    probe_config_path: Any = None
+
+    def block(self) -> dict[str, Any]:
+        """The ``trigger`` block this trigger persists as."""
+        return {
+            "kind": str(self.kind or ""),
+            "recorded_at": _now(),
+            "evidence_excerpt": _tail(self.evidence),
+            "observed_accuracy": _float_or_none(self.observed_accuracy),
+            "accuracy_floor": _float_or_none(self.accuracy_floor),
+            "observed_task": _text_or_none(self.observed_task),
+            "observed_metric": _text_or_none(self.observed_metric),
+            "eval_contract_fingerprint": _text_or_none(self.eval_contract_fingerprint),
+            "probe_config_path": _text_or_none(self.probe_config_path),
+        }
+
+
+def record_trigger(trigger: LaneTrigger) -> None:
     """Open the lane and record what opened it. Never raises.
 
     The first call wins the ``trigger`` block: a lane reopened by a second
     failure is the same lane on the same gap, and letting the newest failure
     overwrite the oldest is how an eval-less re-baseline downgrades a measured
-    ``accuracy_below_floor`` to an empty ``accuracy_unavailable``. The accuracy
-    fields are eval-origin only.
+    ``accuracy_below_floor`` to an empty ``accuracy_unavailable``.
     """
     sink = _sink()
     if sink is None:
         return
-    _open(mode=mode, origin=origin)
+    _open(mode=trigger.mode, origin=trigger.origin)
     if _recorded_trigger():
         # Keyed rows deep-merge, so a second trigger would overwrite the
         # first field by field; mode and origin are already on the shell.
         return
-    trigger: dict[str, Any] = {
-        "kind": str(kind or ""),
-        "recorded_at": _now(),
-        "evidence_excerpt": _tail(evidence),
-        "observed_accuracy": _float_or_none(observed_accuracy),
-        "accuracy_floor": _float_or_none(accuracy_floor),
-        "observed_task": _text_or_none(observed_task),
-        "observed_metric": _text_or_none(observed_metric),
-        "eval_contract_fingerprint": _text_or_none(eval_contract_fingerprint),
-        "probe_config_path": _text_or_none(probe_config_path),
-    }
     sink.record(
         SECTION_EVENT,
         {
-            "mode": str(mode or ""),
-            "origin": str(origin or ""),
+            "mode": str(trigger.mode or ""),
+            "origin": str(trigger.origin or ""),
             # Under its own key so a later write cannot flatten it.
-            "trigger": trigger,
+            "trigger": trigger.block(),
         },
     )
 
@@ -302,13 +317,12 @@ class AuthoringRound:
         """The attempt row fields this round settles."""
         res = _as_dict(self.result)
         status = str(res.get("status") or "")
-        advanced = status == ROUND_ADVANCED or bool(res.get("advanced"))
         return {
             "attempt": int(self.attempt or 0),
             "task_id": str(self.task_id or ""),
             "settled_at": _now(),
             "status": status,
-            "advanced": advanced,
+            "advanced": status == ROUND_ADVANCED,
             "reason": str(res.get("reason") or ""),
             "landed": bool(self.succeeded),
             "validation_pending": bool(self.validation_pending),
@@ -343,7 +357,11 @@ def record_round(round_: AuthoringRound) -> None:
     if sink is None:
         return
     _open()
-    sink.record(SECTION_ATTEMPT, round_.row(), row_type="attempt", natural_ids=_row_id(round_.task_id, round_.attempt))
+    row = round_.row()
+    sink.record(SECTION_ATTEMPT, row, row_type="attempt", natural_ids=_row_id(round_.task_id, round_.attempt))
+    if row["status"] == ROUND_KEPT:
+        # The KEEP the next windows judge, named on the event so each window row can carry it.
+        sink.record(SECTION_EVENT, {VALIDATING_KEEP_FIELD: keep_ref(row)})
 
 
 def record_human_review(*, digest: str, failure_kind: str, reason: str = "", signature: Any = None) -> None:
@@ -426,29 +444,65 @@ def record_revalidation(
         row["config_path"] = str(config_path)
     if reason:
         row["reason"] = str(reason)
-    sink.record(
-        SECTION_REVALIDATION,
-        row,
-        row_type="revalidation",
-        natural_ids=str(int(generation or 0)),
-    )
+    _record_window(sink, row)
 
 
-def record_revalidation_outcome(
-    *,
-    generation: int,
-    promoted: bool,
-    task_id: str = "",
-    accuracy: Any = None,
-    accuracy_floor: Any = None,
-    error_class: str = "",
-    reason: str = "",
-) -> None:
+@dataclass(frozen=True)
+class RevalidationOutcome:
+    """How one revalidation window closed on the baseline that measured it."""
+
+    generation: int
+    promoted: bool
+    task_id: str = ""
+    accuracy: Any = None
+    accuracy_floor: Any = None
+    error_class: str = ""
+    reason: str = ""
+
+    def row(self) -> dict[str, Any]:
+        """The window row fields this outcome closes."""
+        row: dict[str, Any] = {
+            "generation": int(self.generation or 0),
+            "closed_at": _now(),
+            "promoted": bool(self.promoted),
+            "verdict": VERDICT_PROMOTED if self.promoted else VERDICT_REJECTED,
+            "accuracy": _float_or_none(self.accuracy),
+            "accuracy_floor": _float_or_none(self.accuracy_floor),
+        }
+        if self.task_id:
+            row["task_id"] = str(self.task_id)
+        if self.error_class:
+            row["error_class"] = str(self.error_class)
+        if self.reason:
+            row["reason"] = str(self.reason)
+        return row
+
+
+def record_revalidation_outcome(outcome: RevalidationOutcome) -> None:
     """Record how a revalidation window closed.
 
     ``error_class`` is set only when the baseline failed rather than measuring
-    under the floor; a window the run stopped is not a window that failed.
+    under the floor. A window that did not promote is ``rejected``; one the run
+    stopped goes through :func:`record_revalidation_stopped`.
     """
+    sink = _sink()
+    if sink is None:
+        return
+    _open()
+    _record_window(sink, outcome.row())
+
+
+def record_revalidation_stopped(*, generation: int, task_id: str = "", accuracy_floor: Any = None) -> None:
+    """Record a window the run stopped, which measured nothing and leaves its KEEP pending."""
+    _record_window_end(generation, VERDICT_STOPPED, "stopped by the run", task_id, accuracy_floor)
+
+
+def record_revalidation_cleared(*, generation: int, task_id: str = "") -> None:
+    """Record a window a recovery pass closed with no result, so nothing is waiting on its KEEP."""
+    _record_window_end(generation, VERDICT_CLEARED, "closed without a result", task_id, None)
+
+
+def _record_window_end(generation: int, verdict: str, reason: str, task_id: str, accuracy_floor: Any) -> None:
     sink = _sink()
     if sink is None:
         return
@@ -456,22 +510,22 @@ def record_revalidation_outcome(
     row: dict[str, Any] = {
         "generation": int(generation or 0),
         "closed_at": _now(),
-        "promoted": bool(promoted),
-        "accuracy": _float_or_none(accuracy),
+        "promoted": False,
+        "verdict": verdict,
         "accuracy_floor": _float_or_none(accuracy_floor),
+        "reason": reason,
     }
     if task_id:
         row["task_id"] = str(task_id)
-    if error_class:
-        row["error_class"] = str(error_class)
-    if reason:
-        row["reason"] = str(reason)
-    sink.record(
-        SECTION_REVALIDATION,
-        row,
-        row_type="revalidation",
-        natural_ids=str(int(generation or 0)),
-    )
+    _record_window(sink, row)
+
+
+def _record_window(sink: EventSink, row: dict[str, Any]) -> None:
+    """Write one window row under its generation, naming the KEEP being validated."""
+    ref = _validating_keep()
+    if ref:
+        row[KEEP_REF_FIELD] = ref
+    sink.record(SECTION_REVALIDATION, row, row_type="revalidation", natural_ids=str(row["generation"]))
 
 
 def record_fault(
@@ -629,6 +683,9 @@ def assemble_enablement_ext(
         sort_rows(rows_for_event(parts.get(SECTION_REVALIDATION) or [], event), keys=("generation",)),
         drop=("event_id",),
     )
+    paired = pair_keep_rounds(
+        attempts, revalidations, str(header.get(VALIDATING_KEEP_FIELD) or ""), kept_status=ROUND_KEPT
+    )
     human_review = wire_rows(
         sort_rows(rows_for_event(parts.get(SECTION_HUMAN_REVIEW) or [], event), keys=("recorded_at", "digest")),
         drop=("event_id",),
@@ -645,9 +702,9 @@ def assemble_enablement_ext(
             "count": len(attempts),
             # Rounds with a verdict; ``count`` includes one still in flight.
             "settled": sum(1 for row in attempts if row.get("status")),
-            "landed": sum(1 for row in attempts if str(row.get("status") or "") == ROUND_KEPT),
+            **_keep_counts(attempts, paired),
             "advanced": sum(1 for row in attempts if row.get("advanced")),
-            "rows": attempts,
+            "rows": paired or attempts,
         },
         "builds": {
             "count": len(builds),
@@ -672,6 +729,17 @@ def assemble_enablement_ext(
     if failure:
         status = STATUS_FAILED
     return ext, status
+
+
+def _keep_counts(attempts: Sequence[Mapping[str, Any]], paired: Sequence[Mapping[str, Any]] | None) -> dict[str, int]:
+    """KEEP rounds that landed, and those still awaiting revalidation when rows name their windows."""
+    if paired is None:
+        return {"landed": sum(1 for row in attempts if str(row.get("status") or "") == ROUND_KEPT)}
+    kept = [row for row in paired if str(row.get("status") or "") == ROUND_KEPT]
+    return {
+        "landed": sum(1 for row in kept if row["landed"]),
+        "validation_pending": sum(1 for row in kept if row["validation_pending"]),
+    }
 
 
 def _status_for(outcome: str, *, attempts: int) -> str:
@@ -719,6 +787,11 @@ def _start_time() -> str:
         if recorded:
             return recorded
     return ""
+
+
+def _validating_keep() -> str:
+    """The KEEP the lane is validating, as the latest KEEP round recorded."""
+    return str(_header(_event_rows()).get(VALIDATING_KEEP_FIELD) or "")
 
 
 def _row_id(task_id: Any, attempt: Any) -> str:

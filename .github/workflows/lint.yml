@@ -3,8 +3,10 @@
 
 name: Lint
 
-# Static analysis on push and pull_request for all branches. Skips when every
-# changed file matches paths-ignore (same list as ``tests-coverage.yml``).
+# Static analysis on push and pull_request for all branches, every time: ``ruff``
+# is required on main, so it must report even for a documentation-only change,
+# and it runs on every event. The other jobs run only when the ``changes`` job
+# (code-changes.yml) finds a changed file outside the documentation-only list.
 #
 # Ruff reads ``[tool.ruff]`` / ``[tool.ruff.lint]`` in ``pyproject.toml``. Ruff
 # check and format are hard gates. Bandit and Pylint remain advisory until their
@@ -28,21 +30,7 @@ on:
   # PR does not double-trigger (one run per event class).
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "LICENSE*"
-      - "COPYRIGHT"
-      - "**/CODEOWNERS"
-      - ".gitattributes"
   pull_request:
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "LICENSE*"
-      - "COPYRIGHT"
-      - "**/CODEOWNERS"
-      - ".gitattributes"
 
 permissions:
   contents: read
@@ -53,6 +41,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/code-changes.yml
+
   ruff:
     name: ruff
     runs-on: ubuntu-latest
@@ -92,6 +83,8 @@ jobs:
 
   import-linter:
     name: import-linter (architecture contracts)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -118,6 +111,8 @@ jobs:
 
   compile:
     name: byte-compile (syntax check)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     # Seconds long, and it catches the failure mode ruff cannot: ruff parses
     # with its own frontend, so a construct CPython rejects can lint clean.
@@ -137,6 +132,8 @@ jobs:
 
   bandit:
     name: bandit (medium+, production code)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -183,6 +180,8 @@ jobs:
 
   pylint:
     name: pylint (errors-only, multi-package)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -218,6 +217,8 @@ jobs:
 
   mypy:
     name: mypy (advisory)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

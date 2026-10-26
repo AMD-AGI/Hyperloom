@@ -17,6 +17,7 @@ from typing import Any, Callable, Mapping
 
 import yaml
 
+from hyperloom.common.coerce import first_text
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS, effective_mask_tokens, is_rocr_level
@@ -37,42 +38,14 @@ from ._gpu_power import (
     read_measured_gpu_power_by_gpu,
 )
 from ._subprocess_kill import _LogCursor
-from ._launch_evidence import build_launch_evidence, persist_launch_evidence
+from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_launch_evidence
 from ._workload_envs import GEAK_METRIC_OUTPUT
 
 log = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class _GeakPointReport:
-    """One replayed sweep point as its ``benchmark_report.json`` records it."""
-
-    conc: int
-    isl: int
-    osl: int
-    success: bool
-    output_throughput_tok_s: float | None
-    mean_ttft_ms: float | None
-    mean_tpot_ms: float | None
-    mean_e2el_ms: float | None
-    error: str | None = None
-
-
-def _write_benchmark_report(out_dir: Path, point: _GeakPointReport) -> None:
+def _write_benchmark_report(out_dir: Path, report: dict[str, Any]) -> None:
     """Write a session-breakdown-compatible ``benchmark_report.json``."""
-    report = {
-        "success": bool(point.success),
-        "conc": point.conc,
-        "isl": point.isl,
-        "osl": point.osl,
-        "output_throughput_tok_s": point.output_throughput_tok_s,
-        "mean_ttft_ms": point.mean_ttft_ms,
-        "mean_tpot_ms": point.mean_tpot_ms,
-        "mean_e2el_ms": point.mean_e2el_ms,
-        "source": "geak",
-    }
-    if point.error:
-        report["error"] = point.error
     try:
         (out_dir / "benchmark_report.json").write_text(
             json.dumps(report, indent=2),
@@ -142,49 +115,51 @@ def _run_sampled(
             recorder.close()
 
 
+def _replay_logical_masks(pin: Mapping[str, Any], gpu_ids: str) -> dict[str, str]:
+    var = first_text(pin.get("var"))
+    tokens = effective_mask_tokens(pin.get("value"))
+    if not is_rocr_level(var) or not tokens:
+        raise ValueError("missing_replay_logical_gpu_pin")
+    if any(not token.isdigit() or int(token) >= len(tokens) for token in effective_mask_tokens(gpu_ids)):
+        raise ValueError("invalid_replay_logical_gpu_ids")
+    return {var: ",".join(tokens)}
+
+
 def _replay_serving_env(handoff: Mapping[str, Any], env_spec: Mapping[str, Any]) -> dict[str, str]:
     """Resolve serving identity from the frozen handoff or its materialized recipe."""
-    recipe_path = str(handoff.get("launch_recipe") or env_spec.get("base_launch_recipe") or "")
+    recipe_path = first_text(handoff.get("launch_recipe"), env_spec.get("base_launch_recipe"))
     benchmark: dict[str, Any] = {}
     if recipe_path:
-        parsed = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8")) or {}
+        parsed = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8"))
         if not isinstance(parsed, dict) or not isinstance(parsed.get("benchmark"), dict):
             raise ValueError("invalid_replay_recipe")
         benchmark = parsed["benchmark"]
     recipe_envs = benchmark.get("envs") or {}
     if not isinstance(recipe_envs, dict):
         raise ValueError("invalid_replay_recipe_envs")
-    frozen = bool(handoff or benchmark)
-    legacy_env = {} if frozen else os.environ
+    legacy_env = {} if handoff or benchmark else os.environ
     tp = coerce_tp(handoff.get("tp"), recipe_envs.get("TP"), legacy_env.get("TP"))
     pin = handoff.get("gpu_pin")
     if not isinstance(pin, dict):
         pin = resolve_gpu_pin(recipe_envs=recipe_envs, environ=legacy_env)
     gpu_ids = ",".join(effective_mask_tokens(handoff.get("gpu_ids"))) or _resolve_handoff_gpu_ids(gpu_pin=pin, tp=tp)
-    space = str(handoff.get("gpu_ids_space") or _resolve_handoff_gpu_ids_space(gpu_pin=pin))
-    if space not in {"absolute", "logical"} or _resolve_handoff_gpu_ids_space(gpu_pin=pin) == "none":
+    pin_space = _resolve_handoff_gpu_ids_space(gpu_pin=pin)
+    space = str(handoff.get("gpu_ids_space") or pin_space)
+    if space not in {"absolute", "logical"} or pin_space == "none":
         raise ValueError("invalid_replay_gpu_ids_space")
     if len(effective_mask_tokens(gpu_ids)) < tp:
         raise ValueError("replay_gpu_count_below_tp")
-    masks: dict[str, str] = {}
-    if space == "logical":
-        var = str(pin.get("var") or "")
-        tokens = effective_mask_tokens(pin.get("value"))
-        if not is_rocr_level(var) or not tokens:
-            raise ValueError("missing_replay_logical_gpu_pin")
-        if any(not token.isdigit() or int(token) >= len(tokens) for token in effective_mask_tokens(gpu_ids)):
-            raise ValueError("invalid_replay_logical_gpu_ids")
-        masks[var] = ",".join(tokens)
-    masks["HIP_VISIBLE_DEVICES"] = gpu_ids
-    masks["CUDA_VISIBLE_DEVICES"] = gpu_ids
+    masks = _replay_logical_masks(pin, gpu_ids) if space == "logical" else {}
     return {
-        "MODEL": str(handoff.get("model_path") or benchmark.get("model") or legacy_env.get("MODEL_PATH") or "").strip(),
-        "BACKEND": str(
-            handoff.get("framework") or benchmark.get("framework") or legacy_env.get("FRAMEWORK") or "sglang"
-        ).strip(),
+        "MODEL": first_text(handoff.get("model_path"), benchmark.get("model"), legacy_env.get("MODEL_PATH")),
+        "BACKEND": first_text(
+            handoff.get("framework"), benchmark.get("framework"), legacy_env.get("FRAMEWORK"), "sglang"
+        ),
         "TP": str(tp),
         "GPU": gpu_ids,
         **masks,
+        "HIP_VISIBLE_DEVICES": gpu_ids,
+        "CUDA_VISIBLE_DEVICES": gpu_ids,
     }
 
 
@@ -201,52 +176,256 @@ def _replay_point_failure(
     return None
 
 
-async def sweep_via_geak(
-    *,
-    result: dict[str, Any],
-    conc_values: list[int],
-    isl_osl_configs: list[str],
-    output_root: Path,
-    variant_timeout_sec: int,
-    repeats: int = 3,
-    pin_num_prompts: bool = False,
-    handoff: Mapping[str, Any] | None = None,
-    env_spec: Mapping[str, Any] | None = None,
-    metric_axis: tuple[str, str] = GEAK_METRIC_OUTPUT,
-) -> dict[str, Any]:
-    """Run a CONC × (ISL, OSL) sweep on the GEAK-optimized server.
+@dataclass(frozen=True)
+class _ReplayPlan:
+    script: Path
+    use_final_launch: bool
+    flags: str
+    accepted_env: dict[str, str]
+    serving_env: dict[str, str]
+    bench_client: str
+    e2e_metric: str
+    requested_basis: str
+    overlay: str
+    repeats: int
+    timeout_sec: int
+    protocol_env: dict[str, str]
 
-    ``metric_axis`` is the ``(E2E_METRIC, metric_basis)`` pair from ``geak_metric_axis``. Every point is measured
-    on it, and a point whose summary records another basis fails: a GEAK that cannot measure the requested axis
-    and falls back to another would otherwise have that number rank the points.
-    """
-    handoff = handoff or {}
-    e2e_metric, requested_basis = metric_axis
-    bench_client = str(result.get("bench_client") or "native").strip() or "native"
-    bench_script = result.get("bench_script") or result.get("geak_bench_script")
-    final_launch_script = str(result.get("final_launch_script") or "").strip()
-    final_launch_path = Path(final_launch_script) if final_launch_script else None
-    use_final_launch = bool(final_launch_path and final_launch_path.is_file() and os.access(final_launch_path, os.X_OK))
+    @property
+    def replay_mode(self) -> str:
+        return "final_launch_script" if self.use_final_launch else "bench_e2e_fallback"
+
+
+def _requires_deployment(result: Mapping[str, Any]) -> bool:
     tuning = result.get("tuning_skillset")
-    requires_deployment = (
+    return (
         isinstance(tuning, dict)
         and tuning.get("gate") == "accepted"
         and bool(tuning.get("live_tree_files") or tuning.get("cache_invalidation"))
     )
-    if requires_deployment and not use_final_launch:
+
+
+def _executable_final_launcher(script: str) -> Path | None:
+    path = Path(script) if script else None
+    return path if path and path.is_file() and os.access(path, os.X_OK) else None
+
+
+# Forward the validated measurement config + client trust onto every variant so the sweep measures on the same
+# workload shape the KERNEL_AGENT phase accepted (else bench_e2e.sh falls back to its own defaults).
+def _replay_protocol_env(result: Mapping[str, Any], flags: str, *, pin_num_prompts: bool) -> dict[str, str]:
+    protocol = result.get("bench_protocol")
+    if not isinstance(protocol, dict):
+        regimes = result.get("validated_regimes") or []
+        protocol = regimes[0] if regimes and isinstance(regimes[0], dict) else {}
+    fields = [("random_range_ratio", "RANDOM_RANGE_RATIO"), ("num_warmups", "NUM_WARMUPS"), ("seed", "SEED")]
+    # Single-point validated replay: also pin num_prompts (see ``sweep_via_geak``).
+    if pin_num_prompts:
+        fields.append(("num_prompts", "NUM_PROMPTS"))
+    env = {dst: str(protocol[src]) for src, dst in fields if protocol.get(src) is not None}
+    # Mirror the server's --trust-remote-code onto the bench client so its tokenizer load doesn't raise.
+    if "trust-remote-code" in flags or "trust_remote_code" in flags:
+        for key in ("BENCH_TRUST_REMOTE_CODE", "HF_HUB_TRUST_REMOTE_CODE", "MAGPIE_TRUST_REMOTE_CODE"):
+            env.setdefault(key, "1")
+    return env
+
+
+def _sweep_point_env(plan: _ReplayPlan, out_dir: Path, *, conc: int, isl: int, osl: int) -> dict[str, str]:
+    env = build_benchmark_env(
+        {
+            "OUT_DIR": str(out_dir),
+            **plan.serving_env,
+            "ISL": str(isl),
+            "OSL": str(osl),
+            "CONC": str(conc),
+            "REPEATS": str(plan.repeats),
+            "PROFILE": "0",
+            "OVERLAY_PYTHONPATH": plan.overlay,
+            "EXTRA_SERVER_ARGS": plan.flags,
+            "EXTRA_ENV": shlex.join(f"{name}={value}" for name, value in plan.accepted_env.items()),
+            "BENCH_CLIENT": plan.bench_client,
+            "E2E_METRIC": plan.e2e_metric,
+        }
+    )
+    for name in VISIBLE_DEVICE_VARS:
+        env.pop(name, None)
+    env.update(plan.serving_env)
+    # setdefault: forwarded config/trust apply unless already pinned.
+    for key, value in plan.protocol_env.items():
+        env.setdefault(key, value)
+    # Final launch scripts accept the output directory as their first positional argument.
+    if plan.use_final_launch:
+        env["REPLICAS"] = str(plan.repeats)
+    return env
+
+
+def _launch_evidence_fields(plan: _ReplayPlan, out_dir: Path) -> dict[str, Any]:
+    actual_log = _geak_replay_server_log(out_dir)
+    requested = RequestedLaunch(
+        plan.script,
+        plan.serving_env["BACKEND"],
+        server_args=plan.flags,
+        server_env=plan.accepted_env,
+        model_path=plan.serving_env["MODEL"],
+    )
+    evidence = build_launch_evidence(requested, actual_server_log=actual_log, slot=out_dir)
+    return {
+        "server_log_path": actual_log or "",
+        "launch_evidence": evidence,
+        "launch_evidence_path": persist_launch_evidence(evidence, slot=out_dir),
+    }
+
+
+def _measured_number(value: object) -> float | int | None:
+    return value if isinstance(value, (int, float)) else None
+
+
+async def _replay_sweep_point(plan: _ReplayPlan, out_dir: Path, *, conc: int, isl: int, osl: int) -> dict[str, Any]:
+    env = _sweep_point_env(plan, out_dir, conc=conc, isl=isl, osl=osl)
+    cmd = ["bash", str(plan.script), str(out_dir)] if plan.use_final_launch else ["bash", str(plan.script)]
+
+    def _run() -> subprocess.CompletedProcess:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=plan.timeout_sec,
+            env=env,
+            cwd=str(out_dir),
+        )
+
+    entry: dict[str, Any] = {
+        "conc": conc,
+        "isl": isl,
+        "osl": osl,
+        "variant_name": out_dir.name,
+        "workspace": str(out_dir),
+        "replay_script": str(plan.script),
+        "replay_mode": plan.replay_mode,
+    }
+    ttft = tpot = e2el = tput = None
+    basis = ""
+    succeeded = False
+    err: str | None = None
+    try:
+        proc = await asyncio.to_thread(_run_with_power_sampling, _run, out_dir, env, entry)
+        summ = read_json(out_dir / "bench_summary.json", default={}, require_dict=True)
+        # ``throughput_tok_s_median`` is the metric-neutral median of whatever basis GEAK
+        # measured, and the only field populated on every axis: GEAK nulls the output-named
+        # alias off the output axis precisely so nobody reads another axis under an "output"
+        # name. On output the two are the same number, so synthetic sweeps stay
+        # byte-identical. The output-named field stays as the fallback for summaries written
+        # before the neutral one existed.
+        tput = summ.get("throughput_tok_s_median")
+        if tput is None:
+            tput = summ.get("output_throughput_tok_s_median")
+        # A summary that names no basis predates the field and was measured on output.
+        basis = str(summ.get("metric_basis") or GEAK_METRIC_OUTPUT[1])
+        ttft, tpot, e2el = summ.get("ttft_ms_median"), summ.get("tpot_ms_median"), summ.get("e2el_ms_median")
+        failure = _replay_point_failure(proc, tput, basis, plan.requested_basis)
+        if failure is None:
+            succeeded = True
+            evaluation = parse_eval_results(out_dir, framework=plan.serving_env["BACKEND"])
+            entry.update(
+                {
+                    "status": "succeeded",
+                    "measured_value": tput,
+                    "metric_basis": basis,
+                    # ``output_throughput`` is GRADED_OUTPUT, which the perf snapshot reads, so a number on
+                    # any other axis published under it would be recorded as the session's output throughput.
+                    **({"output_throughput": tput} if basis == GEAK_METRIC_OUTPUT[1] else {}),
+                    "ttft_mean_ms": ttft,
+                    "tpot_mean_ms": tpot,
+                    "accuracy": evaluation.get("accuracy"),
+                    "accuracy_source": evaluation.get("source_file"),
+                }
+            )
+        else:
+            err = failure["error"]
+            entry.update(failure)
+    except Exception as exc:  # noqa: BLE001
+        err = repr(exc)
+        entry.update({"status": "failed", "error": err})
+
+    entry.update(_launch_evidence_fields(plan, out_dir))
+    # Emit a session-breakdown-compatible benchmark_report.json so the sweep collector parses this point like
+    # the native sweep; bench_summary.json is kept as the raw artifact.
+    report: dict[str, Any] = {
+        "success": succeeded,
+        "conc": conc,
+        "isl": isl,
+        "osl": osl,
+        "output_throughput_tok_s": _measured_number(tput) if basis == GEAK_METRIC_OUTPUT[1] else None,
+        "mean_ttft_ms": _measured_number(ttft),
+        "mean_tpot_ms": _measured_number(tpot),
+        "mean_e2el_ms": _measured_number(e2el),
+        "source": "geak",
+    }
+    if err:
+        report["error"] = err
+    _write_benchmark_report(out_dir, report)
+    return entry
+
+
+def _sweep_outcome(entries: list[dict[str, Any]], plan: _ReplayPlan, output_root: Path) -> dict[str, Any]:
+    # The replay runs one (conc, isl, osl) repeated, so the best succeeded point is the headline. Every succeeded
+    # point was measured on the requested basis, and every axis GEAK measures is higher-is-better.
+    succeeded = [e for e in entries if e["status"] == "succeeded"]
+    measured = [e for e in succeeded if isinstance(e.get("measured_value"), (int, float))]
+    return {
+        "status": "succeeded" if succeeded else "failed",
+        **({"error": str(entries[0].get("error") or "replay_failed")} if entries and not succeeded else {}),
+        "grid_size": len(entries),
+        "points": entries,
+        "workspace": output_root.as_posix(),
+        "source": "geak",
+        "replay_mode": plan.replay_mode,
+        "replay_script": str(plan.script),
+        "promotion_measurement": max(measured, key=lambda e: e["measured_value"], default={}),
+    }
+
+
+@dataclass(frozen=True)
+class GeakSweepSpec:
+    """The CONC × (ISL, OSL) points a GEAK replay sweep measures, and how each point is measured."""
+
+    conc_values: list[int]
+    isl_osl_configs: list[str]
+    variant_timeout_sec: int
+    repeats: int = 3
+    pin_num_prompts: bool = False
+    metric_axis: tuple[str, str] = GEAK_METRIC_OUTPUT
+
+
+async def sweep_via_geak(
+    *,
+    result: dict[str, Any],
+    spec: GeakSweepSpec,
+    output_root: Path,
+    handoff: Mapping[str, Any] | None = None,
+    env_spec: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run a CONC × (ISL, OSL) sweep on the GEAK-optimized server.
+
+    ``spec.metric_axis`` is the ``(E2E_METRIC, metric_basis)`` pair from ``geak_metric_axis``. Every point is measured
+    on it, and a point whose summary records another basis fails: a GEAK that cannot measure the requested axis
+    and falls back to another would otherwise have that number rank the points.
+    """
+    handoff = handoff or {}
+    e2e_metric, requested_basis = spec.metric_axis
+    bench_script = result.get("bench_script") or result.get("geak_bench_script")
+    final_launch_script = first_text(result.get("final_launch_script"))
+    final_launch = _executable_final_launcher(final_launch_script)
+    if _requires_deployment(result) and final_launch is None:
         return {
             "status": "failed",
             "error_class": "missing_deployment_launcher",
             "error": "GEAK accepted tuning requires file deployment, but its final launch script is unavailable.",
         }
-    replay_script = final_launch_path if use_final_launch else Path(str(bench_script or ""))
-    overlay = result.get("final_overlay") or ""
+    replay_script = final_launch or Path(str(bench_script or ""))
     try:
         flags, accepted_env = _accepted_config_as_variant(result.get("accepted_config"))
     except ValueError as exc:
         return {"status": "failed", "error_class": "invalid_accepted_config", "error": str(exc)}
-    env_str = shlex.join(f"{name}={value}" for name, value in accepted_env.items())
-
     if not replay_script.is_file():
         return {
             "status": "failed",
@@ -256,192 +435,35 @@ async def sweep_via_geak(
                 f"bench script not found: {bench_script}"
             ),
         }
-
     env_spec = handoff.get("baseline_env_spec") or env_spec or {}
     try:
         serving_env = _replay_serving_env(handoff, env_spec)
     except (OSError, UnicodeDecodeError, yaml.YAMLError, TypeError, ValueError) as exc:
         return {"status": "failed", "error_class": "invalid_replay_identity", "error": str(exc)}
-    model, backend = serving_env["MODEL"], serving_env["BACKEND"]
 
-    # Forward the validated measurement config + client trust onto every variant so the sweep measures on the same
-    # workload shape the KERNEL_AGENT phase accepted (else bench_e2e.sh falls back to its own defaults).
-    _protocol = result.get("bench_protocol")
-    if not isinstance(_protocol, dict):
-        _regimes = result.get("validated_regimes") or []
-        _protocol = _regimes[0] if _regimes and isinstance(_regimes[0], dict) else {}
-    protocol_env: dict[str, str] = {}
-    _protocol_map = [
-        ("random_range_ratio", "RANDOM_RANGE_RATIO"),
-        ("num_warmups", "NUM_WARMUPS"),
-        ("seed", "SEED"),
-    ]
-    # Single-point validated replay: also pin num_prompts (see docstring).
-    if pin_num_prompts:
-        _protocol_map.append(("num_prompts", "NUM_PROMPTS"))
-    for _src, _dst in _protocol_map:
-        _val = _protocol.get(_src)
-        if _val is not None:
-            protocol_env[_dst] = str(_val)
-    # Mirror the server's --trust-remote-code onto the bench client so its tokenizer load doesn't raise.
-    if "trust-remote-code" in flags or "trust_remote_code" in flags:
-        for _tk in ("BENCH_TRUST_REMOTE_CODE", "HF_HUB_TRUST_REMOTE_CODE", "MAGPIE_TRUST_REMOTE_CODE"):
-            protocol_env.setdefault(_tk, "1")
+    plan = _ReplayPlan(
+        script=replay_script,
+        use_final_launch=final_launch is not None,
+        flags=flags,
+        accepted_env=accepted_env,
+        serving_env=serving_env,
+        bench_client=first_text(result.get("bench_client")) or "native",
+        e2e_metric=e2e_metric,
+        requested_basis=requested_basis,
+        overlay=result.get("final_overlay") or "",
+        repeats=spec.repeats,
+        timeout_sec=spec.variant_timeout_sec,
+        protocol_env=_replay_protocol_env(result, flags, pin_num_prompts=spec.pin_num_prompts),
+    )
 
     output_root.mkdir(parents=True, exist_ok=True)
     entries: list[dict[str, Any]] = []
+    for index, (conc, shape) in enumerate((c, s) for c in spec.conc_values for s in spec.isl_osl_configs):
+        isl, osl = _parse_isl_osl(shape)
+        # Name matches the sweep collector's scanner regex (``variant_<idx>_conc<c>_isl<i>_osl<o>``) so it is
+        # discovered.
+        out_dir = output_root / f"variant_{index}_conc{conc}_isl{isl}_osl{osl}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        entries.append(await _replay_sweep_point(plan, out_dir, conc=conc, isl=isl, osl=osl))
 
-    variant_idx = 0
-    for conc in conc_values:
-        for spec in isl_osl_configs:
-            isl, osl = _parse_isl_osl(spec)
-            # Name matches the sweep collector's scanner regex (``variant_<idx>_conc<c>_isl<i>_osl<o>``) so it is
-            # discovered.
-            variant_name = f"variant_{variant_idx}_conc{conc}_isl{isl}_osl{osl}"
-            variant_idx += 1
-            out_dir = output_root / variant_name
-            out_dir.mkdir(parents=True, exist_ok=True)
-            env = build_benchmark_env(
-                {
-                    "OUT_DIR": str(out_dir),
-                    **serving_env,
-                    "ISL": str(isl),
-                    "OSL": str(osl),
-                    "CONC": str(conc),
-                    "REPEATS": str(repeats),
-                    "PROFILE": "0",
-                    "OVERLAY_PYTHONPATH": overlay,
-                    "EXTRA_SERVER_ARGS": flags,
-                    "EXTRA_ENV": env_str,
-                    "BENCH_CLIENT": bench_client,
-                    "E2E_METRIC": e2e_metric,
-                }
-            )
-            for name in VISIBLE_DEVICE_VARS:
-                env.pop(name, None)
-            env.update(serving_env)
-            # setdefault: forwarded config/trust apply unless already pinned.
-            for _k, _v in protocol_env.items():
-                env.setdefault(_k, _v)
-            # Final launch scripts accept the output directory as their first positional argument.
-            if use_final_launch:
-                env["REPLICAS"] = str(repeats)
-                cmd = ["bash", str(replay_script), str(out_dir)]
-            else:
-                cmd = ["bash", str(replay_script)]
-
-            def _run() -> subprocess.CompletedProcess:
-                return subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=variant_timeout_sec,
-                    env=env,
-                    cwd=str(out_dir),
-                )
-
-            entry: dict[str, Any] = {
-                "conc": conc,
-                "isl": isl,
-                "osl": osl,
-                "variant_name": variant_name,
-                "workspace": str(out_dir),
-                "replay_script": str(replay_script),
-                "replay_mode": "final_launch_script" if use_final_launch else "bench_e2e_fallback",
-            }
-            ttft = tpot = e2el = None
-            tput = None
-            basis = ""
-            succeeded = False
-            err: str | None = None
-            try:
-                proc = await asyncio.to_thread(_run_with_power_sampling, _run, out_dir, env, entry)
-                summ = read_json(out_dir / "bench_summary.json", default={}, require_dict=True)
-                # ``throughput_tok_s_median`` is the metric-neutral median of
-                # whatever basis GEAK measured, and the only field populated on
-                # every axis: GEAK nulls the output-named alias off the output
-                # axis precisely so nobody reads another axis under an "output"
-                # name. On output the two are the same number, so synthetic
-                # sweeps stay byte-identical. The output-named field stays as the
-                # fallback for summaries written before the neutral one existed.
-                tput = summ.get("throughput_tok_s_median")
-                if tput is None:
-                    tput = summ.get("output_throughput_tok_s_median")
-                # A summary that names no basis predates the field and was measured on output.
-                basis = str(summ.get("metric_basis") or GEAK_METRIC_OUTPUT[1])
-                ttft = summ.get("ttft_ms_median")
-                tpot = summ.get("tpot_ms_median")
-                e2el = summ.get("e2el_ms_median")
-                failure = _replay_point_failure(proc, tput, basis, requested_basis)
-                if failure is None:
-                    succeeded = True
-                    evaluation = parse_eval_results(out_dir, framework=backend)
-                    entry.update(
-                        {
-                            "status": "succeeded",
-                            "measured_value": tput,
-                            "metric_basis": basis,
-                            # ``output_throughput`` is GRADED_OUTPUT, which the perf snapshot reads, so a number on
-                            # any other axis published under it would be recorded as the session's output throughput.
-                            **({"output_throughput": tput} if basis == GEAK_METRIC_OUTPUT[1] else {}),
-                            "ttft_mean_ms": ttft,
-                            "tpot_mean_ms": tpot,
-                            "accuracy": evaluation.get("accuracy"),
-                            "accuracy_source": evaluation.get("source_file"),
-                        }
-                    )
-                else:
-                    err = failure["error"]
-                    entry.update(failure)
-            except Exception as exc:  # noqa: BLE001
-                err = repr(exc)
-                entry.update({"status": "failed", "error": err})
-
-            actual_log = _geak_replay_server_log(out_dir)
-            evidence = build_launch_evidence(
-                config_path=replay_script,
-                actual_server_log=actual_log,
-                framework=backend,
-                slot=out_dir,
-                requested_server_args=flags,
-                requested_server_env=accepted_env,
-                model_path=model,
-            )
-            entry["server_log_path"] = actual_log or ""
-            entry["launch_evidence"] = evidence
-            entry["launch_evidence_path"] = persist_launch_evidence(evidence, slot=out_dir)
-
-            # Emit a session-breakdown-compatible benchmark_report.json so the sweep collector parses this point like
-            # the native sweep; bench_summary.json is kept as the raw artifact.
-            point = _GeakPointReport(
-                conc=conc,
-                isl=isl,
-                osl=osl,
-                success=succeeded,
-                output_throughput_tok_s=(
-                    tput if isinstance(tput, (int, float)) and basis == GEAK_METRIC_OUTPUT[1] else None
-                ),
-                mean_ttft_ms=ttft if isinstance(ttft, (int, float)) else None,
-                mean_tpot_ms=tpot if isinstance(tpot, (int, float)) else None,
-                mean_e2el_ms=e2el if isinstance(e2el, (int, float)) else None,
-                error=err,
-            )
-            _write_benchmark_report(out_dir, point)
-            entries.append(entry)
-
-    # The replay runs one (conc, isl, osl) repeated, so the best succeeded point is the headline. Every succeeded
-    # point was measured on the requested basis, and every axis GEAK measures is higher-is-better.
-    succeeded = [e for e in entries if e["status"] == "succeeded"]
-    measured = [e for e in succeeded if isinstance(e.get("measured_value"), (int, float))]
-    promotion_measurement = max(measured, key=lambda e: e["measured_value"], default={})
-    return {
-        "status": "succeeded" if succeeded else "failed",
-        **({"error": str(entries[0].get("error") or "replay_failed")} if entries and not succeeded else {}),
-        "grid_size": len(entries),
-        "points": entries,
-        "workspace": output_root.as_posix(),
-        "source": "geak",
-        "replay_mode": "final_launch_script" if use_final_launch else "bench_e2e_fallback",
-        "replay_script": str(replay_script),
-        "promotion_measurement": promotion_measurement,
-    }
+    return _sweep_outcome(entries, plan, output_root)

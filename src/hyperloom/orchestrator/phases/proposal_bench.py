@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from ..collaborator import CoordinatorCollaborator
 from ..specialists.domains import CUSTOM_SPECIALIST_KEY
 from ..state.shared_state import inject_stack_base_params
+from ..state.task_registry import TaskSpec
 from .dispatch_order import LEVER_BUNDLE_REASON, is_operator_work
 
 if TYPE_CHECKING:
@@ -70,20 +71,19 @@ class ProposalBench(CoordinatorCollaborator):
         if state.baseline_config_path:
             task_params["config_path"] = state.baseline_config_path
         inject_stack_base_params(task_params, state, anchor=True)
-        last_baseline = state.last_baseline or {}
-        benchmark_script = (
-            str(last_baseline.get("benchmark_script") or "").strip() if isinstance(last_baseline, dict) else ""
-        )
+        benchmark_script = state.accepted_baseline_script()
         if benchmark_script:
             task_params["benchmark_script"] = benchmark_script
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("explore")
         task, was_existing = await self.tasks.create_or_return_existing(
-            kind="explore",
-            params=task_params,
-            idempotency_key=idempotency_key,
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="explore",
+                params=task_params,
+                idempotency_key=idempotency_key,
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
+            )
         )
         return None if was_existing else task
 

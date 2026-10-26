@@ -18,6 +18,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..collaborator import CoordinatorCollaborator
 from ..measurement.runtime_findings import render_runtime_findings
 from ..state.shared_state import KbInjection
+from ..state.task_registry import TaskSpec
 from ..phases import machine_state as _phase_state
 from ..policy.gate import (
     PolicyDenied,
@@ -42,10 +43,15 @@ _ADMISSION_DROPS: tuple[tuple[str, str], ...] = (
     ("proposals_env_ungrounded", "proposal_env_file_missing"),
 )
 
+#: Domains whose focus reads the target's ``config.json`` summary from ``model_info``.
+_MODEL_INFO_DOMAINS: frozenset[str] = frozenset({"static_recon_specialist", "speculative_decoding_specialist"})
+
 #: ``(SharedState field, param key, conversion)`` for the values a specialist is warmed with. The converted value
 #: decides: an empty string, an empty container and a zero are not exported, because an absent key is how the
 #: specialist reads "this session has none".
 _STATE_PARAMS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
+    ("model_name", "model_name", str),
+    ("model_path", "model_path", str),
     ("warm_start_recipe", "warm_start_recipe", dict),
     ("warm_start_pitfalls", "warm_start_pitfalls", list),
     ("warm_start_lessons", "warm_start_lessons", list),
@@ -135,7 +141,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         plane = self.knowledge_plane
 
-        from .domains import gap_backfilled_domain, normalize_dispatch_tags
+        from .domains import dispatch_domain, gap_backfilled_domain, normalize_dispatch_tags
         from .profile import resolve_specialist_profile
 
         # Bench-capable specialists run a real serving + benchmark loop, so
@@ -145,7 +151,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         if backfilled := gap_backfilled_domain(params, state.find_gap):
             params["domain"] = backfilled
-        domain = str(params.get("domain") or "").strip()
+        # Resolve as the runner does, so a tags-only or gap-backfilled dispatch is warmed for the domain it runs as.
+        resolved_domain = dispatch_domain(params)
+        domain = resolved_domain.key if resolved_domain is not None else ""
         normalize_dispatch_tags(params)
 
         if "pr_monitor_available" not in params:
@@ -198,7 +206,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             if _arch_notes:
                 params["arch_notes"] = _arch_notes
 
-        if domain == "static_recon_specialist" and "model_info" not in params:
+        if domain in _MODEL_INFO_DOMAINS and "model_info" not in params:
             _minfo = getattr(state, "model_info", None)
             if isinstance(_minfo, dict) and _minfo:
                 params["model_info"] = dict(_minfo)
@@ -409,12 +417,14 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         with trajectory_scope(parent_span_id=task.task_id):
             new_task, was_existing = await self.tasks.create_or_return_existing(
-                kind="specialist",
-                params=retry_params,
-                idempotency_key=retry_key,
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind="specialist",
+                    params=retry_params,
+                    idempotency_key=retry_key,
+                    requires_lanes=lanes,
+                    lease_ttl_sec=ttl,
+                    dispatch_class="coordinator",
+                )
             )
         if was_existing:
             # Retry slot already taken: let normal bookkeeping record this attempt.

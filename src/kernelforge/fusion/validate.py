@@ -41,6 +41,7 @@ Mamba backend cannot init on ROCm).
 from __future__ import annotations
 
 import contextlib
+import http.client
 import json
 import logging
 import math
@@ -400,7 +401,7 @@ def _vllm_decode_probe(
         model_id = (models.get("data") or [{}])[0].get("id")
         if not model_id:
             return False, "no served model id from /v1/models"
-    except Exception as e:  # noqa: BLE001
+    except (OSError, http.client.HTTPException, ValueError, AttributeError, KeyError, TypeError) as e:
         return False, f"/v1/models probe error: {type(e).__name__}: {e}"
 
     prompt = "The quick brown fox " * max(1, isl // 4)
@@ -422,7 +423,7 @@ def _vllm_decode_probe(
         try:
             with _rq.urlopen(req, timeout=timeout_s) as r:
                 body = _json.loads(r.read().decode())
-        except Exception as e:  # noqa: BLE001
+        except (OSError, http.client.HTTPException, ValueError) as e:
             return False, f"completion {i} error: {type(e).__name__}: {e}"
         text = (body.get("choices") or [{}])[0].get("text") or ""
         if not text:
@@ -1261,43 +1262,19 @@ def validate_recipe(
     if not comp.ok:
         lesson = classify_compile_error(comp.error, recipe)
         kind = "triton JIT" if comp.is_triton else "module import"
-        return ValidationResult(
-            correctness_passed=False,
-            correctness_measured=False,
-            max_abs_err=None,
-            rtol=rtol,
-            kernel_speedup=None,
-            eager_us=None,
-            fused_us=None,
-            kept=False,
-            note=f"COMPILE FAILED ({kind}): {_tail(comp.error)} | LESSON: {lesson}",
-        )
+        return _unmeasured_rejection(f"COMPILE FAILED ({kind}): {_tail(comp.error)} | LESSON: {lesson}", rtol)
 
     # ── gate (b): numerical parity vs the imported REAL eager op ─────────────
     samples = runner.parity_samples(recipe)
     if not samples:
-        return ValidationResult(
-            correctness_passed=False,
-            correctness_measured=False,
-            max_abs_err=None,
-            rtol=rtol,
-            kernel_speedup=None,
-            eager_us=None,
-            fused_us=None,
-            kept=False,
-            note=(
-                "PARITY UNAVAILABLE: the runner returned no samples — the eager "
-                "reference could not be imported/executed. LESSON: import the REAL "
-                "eager op per the recipe's eager_reference_hint and assert parity."
-            ),
+        return _unmeasured_rejection(
+            "PARITY UNAVAILABLE: the runner returned no samples — the eager "
+            "reference could not be imported/executed. LESSON: import the REAL "
+            "eager op per the recipe's eager_reference_hint and assert parity.",
+            rtol,
         )
-    worst_err: Optional[float] = None
-    min_snr: Optional[float] = None
-    for s in samples:
-        if s.max_abs_err is not None:
-            worst_err = s.max_abs_err if worst_err is None else max(worst_err, s.max_abs_err)
-        if s.snr_db is not None:
-            min_snr = s.snr_db if min_snr is None else min(min_snr, s.snr_db)
+    worst_err = max((s.max_abs_err for s in samples if s.max_abs_err is not None), default=None)
+    min_snr = min((s.snr_db for s in samples if s.snr_db is not None), default=None)
     # SNR is the primary gate; rtol is the fallback only when SNR is unavailable.
     if min_snr is not None:
         parity_ok = min_snr >= snr_threshold_db
@@ -1322,9 +1299,29 @@ def validate_recipe(
                 f"the accumulation dtype and the fused math against the eager op."
             ),
         )
+    return _microbench_verdict(runner.microbench(recipe), worst_err, rtol, target_speedup)
 
+
+def _unmeasured_rejection(note: str, rtol: float) -> ValidationResult:
+    """A rejection decided before anything compared the fused path against eager."""
+    return ValidationResult(
+        correctness_passed=False,
+        correctness_measured=False,
+        max_abs_err=None,
+        rtol=rtol,
+        kernel_speedup=None,
+        eager_us=None,
+        fused_us=None,
+        kept=False,
+        note=note,
+    )
+
+
+def _microbench_verdict(
+    bench: BenchOutcome, worst_err: Optional[float], rtol: float, target_speedup: float
+) -> ValidationResult:
+    """Gates (c) and (d) for a kernel that passed parity: its microbench speedup and launch count decide ``kept``."""
     # ── gate (c): microbench speedup (eager vs fused) ────────────────────────
-    bench = runner.microbench(recipe)
     if bench.skipped:
         note = classify_bench_skip(bench.skip_reason)
         return ValidationResult(

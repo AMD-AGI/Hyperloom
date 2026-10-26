@@ -18,7 +18,7 @@ from kernelforge.cli import lanes as cli_lanes
 from kernelforge.config import Config
 from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask
 from kernelforge.loop import fanout
-from kernelforge.llm.process_reaping import ReapReport
+from kernelforge.tools.process_reaping import ReapReport
 from kernelforge.loop.fanout import (
     SERIALIZED_DRIVER_NAME,
     DeviceBenchmarkLock,
@@ -672,6 +672,7 @@ class _RecordingImplementer:
         async def agent(kernel_path: str, plan: str) -> str:
             return f"{kernel_path}:{plan}"
 
+        agent.close = lambda: None
         return agent
 
 

@@ -8,11 +8,11 @@ CLI subprocess scoped via ``--add-dir``, and a ``specialist_done.json``
 (+ ``worktree/patches/``) exit signal harvested into the final
 :class:`SpecialistRunResult`.
 
-Two agent CLIs can drive that contract, and the deployment's credential shape
-picks one (:func:`hyperloom.common.llm_config.preferred_agent_backend`):
+Three agent CLIs can drive that contract, and the deployment picks one
+(:func:`hyperloom.common.llm_config.resolve_agent_backend`):
 ``claude --print --output-format stream-json`` authenticates against the
-Anthropic side, and
-``codex exec --json`` against the OpenAI side. An OpenAI-only deployment has no
+Anthropic side, ``codex exec --json`` against the OpenAI side and
+``dsh --profile headless`` through the DeepSeek Harness. An OpenAI-only deployment has no
 Anthropic credential at all, so spawning the Claude CLI there produced a
 ``Not logged in`` exit on every specialist task and silently cost the session
 those domains. Everything around the spawn — worktree setup, the reap loop,
@@ -27,14 +27,12 @@ import asyncio
 import json
 import logging
 import os
-import re
 import subprocess
 import time
 from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-from urllib.parse import urlsplit
 
 from hyperloom.common.agent_cli import resolve_codex_executable
 from hyperloom.common.codex_session import (
@@ -44,369 +42,45 @@ from hyperloom.common.codex_session import (
     resolve_codex_sandbox_mode,
 )
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.env import env_bool
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
-    preferred_agent_backend,
+    AGENT_BACKEND_DEEPSEEK,
+    resolve_agent_backend,
+    resolve_forge_llm_model,
 )
 from hyperloom.common.env_safety import (
-    BLOCKED_CHILD_ENV_NAMES,
     redact_file_in_place,
-    scrub_child_process_env,
-    valid_env_key,
 )
-from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+from hyperloom.common.fs_utils import (
+    create_nofollow,
+    read_text_nofollow,
+    regular_files_nofollow,
+    write_text_nofollow,
+)
+from hyperloom.common.env_safety import RunAs, RunAsError
 from hyperloom.common.proctree import collect_tree, kill_tree
 
+from .agent_cli_config import (
+    SpecialistAgentUnavailableError,
+    _build_specialist_env,
+    _codex_mcp_config,
+    _codex_provider_resolver_overlay,
+    _write_private_codex_config,
+)
+from .launch_env import apply_gpu_env, prepare_demote, resolve_launch_user, stage_mcp_config
+from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles, resolve_dsh_executable
+from .reap_watch import PROCESS_LOG_NAME, ReapWatch, newest_activity, specialist_activity_paths
+from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
-from ..bringup.trees import head_commit
+from hyperloom.common.git_safety import app_git, worktree_head
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 from .wall_budget import clear_wall_budget_extension, wall_budget_extension
-from hyperloom.inference_optimizer.trace.parse_usage import (
-    parse_claude_stream_json_response,
-    parse_claude_stream_json_tool_calls,
-    parse_claude_stream_json_turn_usages,
-    parse_claude_stream_json_usage,
-    parse_codex_jsonl_response,
-    parse_codex_jsonl_error,
-    parse_codex_jsonl_tool_calls,
-    parse_codex_jsonl_turn_usages,
-    parse_codex_jsonl_usage,
-)
-from hyperloom.inference_optimizer.trace.context_events import record_stream_json_compactions
-from hyperloom.inference_optimizer.trace.request_events import record_stream_json_requests
-from hyperloom.inference_optimizer.trace.tool_events import record_stream_json_tools
+from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
 
 
 log = logging.getLogger(__name__)
-
-
-class SpecialistAgentUnavailableError(RuntimeError):
-    """Raised when the agent CLI the deployment needs cannot be assembled.
-
-    A missing runtime or an unconfigurable gateway means this deployment cannot
-    run specialists at all. It surfaces as the task's failure rather than being
-    absorbed into a fallback CLI that would fail to authenticate.
-    """
-
-
-_SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
-    {
-        "ANTHROPIC_BASE_URL",
-        "AWS_DEFAULT_REGION",
-        "AWS_REGION",
-        # Session identity, so a child that reports its own spend files it under
-        # the same session the parent does. Not a credential.
-        "CLAW_SESSION_ID",
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CONFIG_DIR",
-        "CLAUDE_MODEL",
-        "CODEX_MODEL",
-        "HOME",
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "INFERENCEX_PATH",
-        "LANG",
-        "LC_ALL",
-        # The agent CLIs are Node processes, which read neither SSL_CERT_FILE nor REQUESTS_CA_BUNDLE; behind a
-        # TLS-intercepting gateway these are the only trust knobs that reach them.
-        "NODE_EXTRA_CA_CERTS",
-        "NODE_TLS_REJECT_UNAUTHORIZED",
-        "NO_PROXY",
-        "OPENAI_BASE_URL",
-        "PATH",
-        "REQUESTS_CA_BUNDLE",
-        "SSL_CERT_FILE",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
-        "USER",
-        "USERNAME",
-    }
-)
-_SPECIALIST_SECRET_ENV_ALLOWLIST: frozenset[str] = frozenset(
-    {
-        "ANTHROPIC_CUSTOM_HEADERS",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_CONFIG_FILE",
-        "AWS_PROFILE",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        "AWS_SHARED_CREDENTIALS_FILE",
-        "OPENAI_API_KEY",
-        "OPENAI_CUSTOM_HEADERS",
-    }
-)
-
-_CODEX_MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
-_ENV_REFERENCE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-_CODEX_MCP_ENV_PREFIX = "HYPERLOOM_CODEX_MCP_ENV_"
-_CODEX_PROVIDER_ENV_PREFIX = "HYPERLOOM_CODEX_HTTP_HEADER_"
-_CODEX_MCP_RESERVED_ENV_NAMES: frozenset[str] = frozenset(
-    {
-        *_SPECIALIST_ENV_ALLOWLIST,
-        *_SPECIALIST_SECRET_ENV_ALLOWLIST,
-        # Every mask spelling, not the three canonical ones: the reason a mask
-        # is reserved is that setting it re-pins the specialist's cards, and a
-        # guard that names only the modern spellings is bypassed by the legacy
-        # ones it honours just as well.
-        *GPU_MASK_ENV_NAMES,
-        "API_TIMEOUT_MS",
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-        "CODEX_HOME",
-        "DISABLE_AUTOUPDATER",
-        "INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS",
-        "IS_SANDBOX",
-    }
-)
-
-
-def _toml_string(value: str) -> str:
-    """Encode a string for the JSON-compatible subset of TOML."""
-    return json.dumps(str(value), ensure_ascii=False)
-
-
-def _resolve_env_references(value: str, *, source: Mapping[str, str], context: str) -> str:
-    """Expand ``${NAME}`` references without reading them into generated config."""
-
-    def _replacement(match: re.Match[str]) -> str:
-        name = match.group(1)
-        if name not in source:
-            raise SpecialistAgentUnavailableError(f"{context} references unset environment variable {name!r}")
-        return source[name]
-
-    return _ENV_REFERENCE_RE.sub(_replacement, value)
-
-
-def _private_mcp_env_name(
-    index: int,
-    *,
-    source: Mapping[str, str],
-    additions: Mapping[str, str],
-    protected_env_names: frozenset[str],
-) -> str:
-    """Return a collision-free child-only variable name for one MCP header."""
-    base = f"{_CODEX_MCP_ENV_PREFIX}{index}"
-    candidate = base
-    suffix = 1
-    while candidate in source or candidate in additions or candidate in protected_env_names:
-        candidate = f"{base}_{suffix}"
-        suffix += 1
-    return candidate
-
-
-def _codex_provider_resolver_overlay(base_env: Mapping[str, str]) -> dict[str, str]:
-    """Mask every omitted specialist secret before resolver environment overlay.
-
-    The canonical provider resolver intentionally overlays its input on
-    ``os.environ``. Empty sentinels preserve that contract while preventing an
-    omitted child secret from falling back to the parent process.
-    """
-    overlay = dict(base_env)
-    for name in _SPECIALIST_SECRET_ENV_ALLOWLIST:
-        overlay.setdefault(name, "")
-    return overlay
-
-
-def _codex_mcp_config(
-    config_path: str | None,
-    *,
-    source: Mapping[str, str],
-    child_env: Mapping[str, str],
-    protected_env_names: frozenset[str],
-) -> tuple[list[str], dict[str, str]]:
-    """Translate Claude-style MCP JSON into secret-free Codex TOML lines.
-
-    Stdio environment values and HTTP header values are copied into the child
-    environment. The generated TOML contains only their variable names through
-    Codex's verified ``env_vars`` and ``env_http_headers`` fields.
-    """
-    if not config_path:
-        return [], {}
-    path = Path(config_path)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SpecialistAgentUnavailableError(f"cannot read specialist MCP config {path}: {exc}") from exc
-    servers = payload.get("mcpServers") if isinstance(payload, dict) else None
-    if not isinstance(servers, dict):
-        raise SpecialistAgentUnavailableError(f"specialist MCP config {path} must contain an object at 'mcpServers'")
-
-    lines: list[str] = []
-    env_additions: dict[str, str] = {}
-    header_index = 0
-    for raw_name, raw_server in servers.items():
-        name = str(raw_name or "")
-        if not _CODEX_MCP_SERVER_NAME_RE.fullmatch(name):
-            raise SpecialistAgentUnavailableError(
-                f"Codex MCP server name {name!r} is not translatable; "
-                "use a letter followed by letters, digits, '_' or '-'"
-            )
-        if not isinstance(raw_server, dict):
-            raise SpecialistAgentUnavailableError(f"Codex MCP server {name!r} must be an object")
-        server = dict(raw_server)
-        declared_type = str(server.get("type") or "").strip().lower()
-        if not declared_type:
-            declared_type = "http" if server.get("url") else "stdio" if server.get("command") else ""
-        if declared_type not in {"http", "stdio"}:
-            raise SpecialistAgentUnavailableError(
-                f"Codex MCP server {name!r} uses unsupported transport "
-                f"{declared_type or '<missing>'!r}; expected 'http' or 'stdio'"
-            )
-
-        lines.extend([f"[mcp_servers.{name}]"])
-        if declared_type == "http":
-            unsupported = set(server) - {"type", "url", "headers"}
-            if unsupported:
-                raise SpecialistAgentUnavailableError(
-                    f"Codex MCP server {name!r} has unsupported HTTP fields: {sorted(unsupported)!r}"
-                )
-            url = server.get("url")
-            if not isinstance(url, str) or not url.strip():
-                raise SpecialistAgentUnavailableError(f"Codex MCP server {name!r} requires a non-empty URL")
-            parsed_url = urlsplit(url.strip())
-            if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
-                raise SpecialistAgentUnavailableError(f"Codex MCP server {name!r} has invalid HTTP URL")
-            if parsed_url.username is not None or parsed_url.password is not None:
-                raise SpecialistAgentUnavailableError(
-                    f"Codex MCP server {name!r} URL embeds credentials; use environment-backed headers instead"
-                )
-            lines.append(f"url = {_toml_string(url.strip())}")
-            headers = server.get("headers") or {}
-            if not isinstance(headers, dict):
-                raise SpecialistAgentUnavailableError(f"Codex MCP server {name!r} headers must be an object")
-            header_rows: list[tuple[str, str]] = []
-            for raw_header, raw_value in headers.items():
-                header = str(raw_header or "").strip()
-                if not header or not isinstance(raw_value, str):
-                    raise SpecialistAgentUnavailableError(f"Codex MCP server {name!r} has an invalid HTTP header")
-                value = _resolve_env_references(
-                    raw_value,
-                    source=source,
-                    context=f"Codex MCP server {name!r} header {header!r}",
-                )
-                env_name = _private_mcp_env_name(
-                    header_index,
-                    source=source,
-                    additions=env_additions,
-                    protected_env_names=protected_env_names,
-                )
-                header_index += 1
-                env_additions[env_name] = value
-                header_rows.append((header, env_name))
-            if header_rows:
-                lines.extend(["", f"[mcp_servers.{name}.env_http_headers]"])
-                lines.extend(f"{_toml_string(header)} = {_toml_string(env_name)}" for header, env_name in header_rows)
-        else:
-            unsupported = set(server) - {"type", "command", "args", "env"}
-            if unsupported:
-                raise SpecialistAgentUnavailableError(
-                    f"Codex MCP server {name!r} has unsupported stdio fields: {sorted(unsupported)!r}"
-                )
-            command = server.get("command")
-            if not isinstance(command, str) or not command.strip():
-                raise SpecialistAgentUnavailableError(f"Codex MCP server {name!r} requires a non-empty command")
-            args = server.get("args") or []
-            if not isinstance(args, list) or not all(isinstance(value, str) for value in args):
-                raise SpecialistAgentUnavailableError(f"Codex MCP server {name!r} args must be a list of strings")
-            raw_env = server.get("env") or {}
-            if not isinstance(raw_env, dict):
-                raise SpecialistAgentUnavailableError(f"Codex MCP server {name!r} env must be an object")
-            env_names: list[str] = []
-            for raw_key, raw_value in raw_env.items():
-                key = str(raw_key or "").strip()
-                if not valid_env_key(key) or key in BLOCKED_CHILD_ENV_NAMES or not isinstance(raw_value, str):
-                    raise SpecialistAgentUnavailableError(
-                        f"Codex MCP server {name!r} has an unsafe or invalid env entry {key!r}"
-                    )
-                if (
-                    key in _CODEX_MCP_RESERVED_ENV_NAMES
-                    or key in protected_env_names
-                    or key.startswith((_CODEX_PROVIDER_ENV_PREFIX, _CODEX_MCP_ENV_PREFIX))
-                ):
-                    raise SpecialistAgentUnavailableError(
-                        f"Codex MCP server {name!r} env key {key!r} is reserved "
-                        "for specialist control or provider configuration"
-                    )
-                resolved_value = _resolve_env_references(
-                    raw_value,
-                    source=source,
-                    context=f"Codex MCP server {name!r} env {key!r}",
-                )
-                existing_value = env_additions.get(key, child_env.get(key))
-                if existing_value is not None and existing_value != resolved_value:
-                    raise SpecialistAgentUnavailableError(
-                        f"Codex MCP server {name!r} env key {key!r} collides with an existing child environment value"
-                    )
-                if existing_value is None:
-                    env_additions[key] = resolved_value
-                env_names.append(key)
-            lines.append(f"command = {_toml_string(command.strip())}")
-            lines.append(f"args = {json.dumps(args, ensure_ascii=False)}")
-            if env_names:
-                lines.append(f"env_vars = {json.dumps(env_names)}")
-        lines.append("")
-    return lines, env_additions
-
-
-def _write_private_codex_config(
-    *,
-    codex_home: Path,
-    developer_instructions: str,
-    mcp_lines: list[str],
-) -> Path:
-    """Write task-local Codex configuration with private filesystem modes."""
-    codex_home.mkdir(parents=True, mode=0o700, exist_ok=True)
-    codex_home.chmod(0o700)
-    config_path = codex_home / "config.toml"
-    lines: list[str] = []
-    if developer_instructions:
-        lines.extend(
-            [
-                f"developer_instructions = {_toml_string(developer_instructions)}",
-                "",
-            ]
-        )
-    lines.extend(mcp_lines)
-    temporary = config_path.with_suffix(".toml.tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write("\n".join(lines).rstrip() + "\n")
-    except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            # fdopen owns and may already have closed the descriptor.
-            pass
-        raise
-    os.replace(temporary, config_path)
-    config_path.chmod(0o600)
-    return config_path
-
-
-def _build_specialist_env() -> dict[str, str]:
-    """Build a minimal env for Bash-enabled specialist subprocesses."""
-    inherit_secrets = env_bool("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", True)
-    allowed = set(_SPECIALIST_ENV_ALLOWLIST)
-    if inherit_secrets:
-        allowed.update(_SPECIALIST_SECRET_ENV_ALLOWLIST)
-    env = {key: value for key, value in os.environ.items() if key in allowed}
-    env = scrub_child_process_env(env)
-    # claude's bypassPermissions/--dangerously-skip-permissions refuses to start
-    # under root unless IS_SANDBOX=1 (SWSPLAT-42390). Mirror the kernel-agent
-    # forge tools (forge_fusion) so specialist authoring
-    # subprocesses run on bare-root pods (non-Claw hosts) instead of crashing
-    # immediately. setdefault only under root keeps the guard intact elsewhere.
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
-        env.setdefault("IS_SANDBOX", "1")
-    return env
-
 
 #: How long the reaper waits on a specialist nobody bounded, matching the
 #: largest deadline the dispatcher hands down.
@@ -423,10 +97,10 @@ class SpecialistSubprocessConfig:
     """
 
     agent_backend: str = ""
-    """Which agent CLI to spawn: ``"claude"``, ``"codex"``, or ``""``.
+    """Which agent CLI to spawn: ``"claude"``, ``"codex"``, ``"deepseek"``, or ``""``.
 
-    Empty resolves the deployment's credential shape per dispatch via
-    :func:`preferred_agent_backend`. The CLI pins it explicitly at boot
+    Empty resolves the deployment's backend per dispatch via
+    :func:`resolve_agent_backend`. The CLI pins it explicitly at boot
     so the backend cannot disagree with the executable and model chosen next to
     it; leaving it empty is for callers that construct a config directly.
     """
@@ -437,6 +111,10 @@ class SpecialistSubprocessConfig:
     codex_executable: str = ""
     """Path / name of the codex CLI binary. Empty resolves it per
     :func:`resolve_codex_executable`."""
+
+    dsh_executable: str = ""
+    """Path / name of the DeepSeek Harness ``dsh`` CLI. Empty resolves it per
+    :func:`resolve_dsh_executable`."""
 
     model: str = ""
     """Model id for the selected agent CLI. Empty = that CLI's own default."""
@@ -471,10 +149,10 @@ class SpecialistSubprocessConfig:
     """How often the reaper polls done.json / process exit / heartbeat."""
 
     heartbeat_stale_seconds: float = 300.0
-    """Liveness window for heartbeat.json or process.log activity.
+    """Liveness window for activity in any of :func:`specialist_activity_paths`.
 
-    A process that never creates either file is reaped after this window.
-    After either file has appeared, its mtime can refresh the liveness clock
+    A process that never creates any of them is reaped after this window.
+    After one has appeared, its mtime can refresh the liveness clock
     for one window before the subsequent stale window expires, yielding about
     two windows of silence before reap.
     """
@@ -518,29 +196,11 @@ class SpecialistSubprocessResult:
     Empty for patches merely found on disk, whose target tree is not knowable at
     collection time and must therefore still be resolved from their contents."""
 
-    usage: dict[str, Any] | None = None
-    """Token usage recovered from the agent CLI's ``process.log``. Carries the
-    four canonical counters (``input_tokens`` / ``output_tokens`` /
-    ``cache_creation_input_tokens`` / ``cache_read_input_tokens``); the two
-    ``cache_*`` may be ``None``, and the codex backend adds
-    ``reasoning_output_tokens``. ``None`` when no row carried a ``usage`` block.
-    Re-enters the unified ledger the production specialist's token spend."""
-
-    response: str | None = None
-    """Assistant reply text recovered from the same log. The prompt is held by
-    the parent; pairing it with this response lands the production specialist
-    turn in ``conversations.jsonl``. ``None`` when no response text could be
-    recovered."""
-
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    """Intel/tool calls (``{"tool", "query"}``) recovered from the same log
-    (WebSearch / WebFetch / pr_monitor / Bash / ...). Empty when none were made
-    or the log was missing/truncated."""
-
-    turn_usages: list[dict[str, int | None]] = field(default_factory=list)
-    """Per-turn token usage recovered from the same log so the parent can trace
-    the multi-turn subprocess as one ledger row per model turn. Empty when no
-    per-turn usage was present (parent falls back to ``usage``)."""
+    trace: AgentTrace = field(default_factory=AgentTrace)
+    """What the agent CLI's own log recorded: token usage (re-entering the
+    unified ledger the production specialist's spend), the reply text, the
+    intel/tool calls and the per-turn usage. Empty when the log was missing or
+    truncated."""
 
     error: str = ""
 
@@ -605,6 +265,9 @@ def _setup_worktree(
             text=True,
             timeout=60.0,
             check=False,
+            # The ref, gitfile and admin dir git makes here must stay readable by a demoted specialist,
+            # whatever umask a launch set on the app.
+            umask=0o022,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return None, f"git worktree add failed to spawn: {exc!r}"
@@ -721,8 +384,8 @@ class SpecialistSpawn:
             the specialist only as advisory prompt text baked into
             ``system_prompt``.
         disallowed_tools: Tool names to deny in the agent CLI subprocess.
-            Passed as ``--disallowedTools`` to the Claude CLI; has no Codex
-            equivalent (Codex containment uses ``--sandbox``).
+            Passed as ``--disallowedTools`` to the Claude CLI; has no Codex or
+            dsh equivalent (Codex containment uses ``--sandbox``).
         gpu_ids: GPU ids to expose to the subprocess.
         deadline: Absolute instant the reaper kills at. ``None`` means the
             caller set no bound and the reaper falls back to
@@ -751,31 +414,6 @@ class SpecialistSpawn:
     deadline: Deadline | None = None
     gpu_lease: Any = None
     progress_cb: Any = None
-
-
-@dataclass(frozen=True)
-class ReapWatch:
-    """What the reaper polls while a specialist subprocess runs.
-
-    Attributes:
-        workspace: Task workspace; supplies the ``process.log`` whose mtime is
-            the second liveness signal.
-        done_files: Candidate done-file paths to poll.
-        heartbeat_file: Heartbeat file whose mtime is one of the two activity
-            signals ORed together for the liveness check.
-        partial_files: Candidate partial-checkpoint paths polled for live
-            progress; never an exit signal.
-        progress_cb: Optional async callback for each new checkpoint.
-        task_id: Task identifier used to pick up live ``extend_lease``
-            wall-budget extensions each poll.
-    """
-
-    workspace: Path
-    done_files: tuple[Path, ...]
-    heartbeat_file: Path
-    partial_files: tuple[Path, ...] = ()
-    progress_cb: Any = None
-    task_id: str = ""
 
 
 # Dispatcher
@@ -818,26 +456,25 @@ class SpecialistSubprocessDispatcher:
         clear_wall_budget_extension(request.task_id)
         # The pre-image the harvest diffs against, so it must be read before
         # the specialist can commit anything.
-        worktree_base_commit = (
-            head_commit(request.worktree)
-            if request.worktree is not None and (request.worktree / ".git").exists()
-            else ""
-        )
+        worktree_base_commit = worktree_head(request.worktree)
         request.workspace.mkdir(parents=True, exist_ok=True)
         prompt_file = request.workspace / "prompt.md"
-        process_log = request.workspace / "process.log"
-        # Poll worktree first (prompt-advertised path), then workspace as fallback.
-        done_candidates: list[Path] = []
-        if request.worktree is not None:
-            done_candidates.append(request.worktree / "specialist_done.json")
-        done_candidates.append(request.workspace / "specialist_done.json")
-        # Incremental checkpoint recovered as best-so-far on a budget kill; does
-        # NOT trigger reap. Same worktree-first / workspace-fallback order.
-        partial_candidates: list[Path] = []
-        if request.worktree is not None:
-            partial_candidates.append(request.worktree / "specialist_done.partial.json")
-        partial_candidates.append(request.workspace / "specialist_done.partial.json")
-        heartbeat_file = request.workspace / "heartbeat.json"
+        # A reused workspace may hold a link the previous run's account planted at this name.
+        write_text_nofollow(request.workspace, (prompt_file.name,), request.user_prompt)
+        process_log = request.workspace / PROCESS_LOG_NAME
+
+        # A requested demote that cannot be honoured fails the task: running the
+        # specialist as the app user would defeat the point of asking.
+        try:
+            run_as = resolve_launch_user(request.gpu_lease)
+        except RunAsError as exc:
+            return SpecialistSubprocessResult(
+                done_payload=None,
+                exit_code=None,
+                elapsed_seconds=0.0,
+                process_log_path=str(process_log),
+                error=f"specialist user refused: {exc}",
+            )
 
         # Compose a minimal env. Provider credentials are inherited by default
         # for compatibility with deployments that authenticate the agent CLI
@@ -857,29 +494,8 @@ class SpecialistSubprocessDispatcher:
         backend = ""
         try:
             backend = self._agent_backend()
-            if backend == AGENT_BACKEND_CODEX:
-                # Codex reads the user turn from stdin. Its higher-priority
-                # developer instructions live in private task-local config.
-                prompt_file.write_text(request.user_prompt, encoding="utf-8")
-                prompt_file.chmod(0o600)
-                cmd, launch_env_additions = self._build_codex_launch(
-                    workspace=request.workspace,
-                    worktree=request.worktree,
-                    system_prompt=request.system_prompt,
-                    base_env=env,
-                    probe_sandbox=True,
-                )
-                env.update(launch_env_additions)
-            else:
-                prompt_file.write_text(request.user_prompt, encoding="utf-8")
-                prompt_file.chmod(0o600)
-                cmd = self._build_claude_cmd(
-                    system_prompt_file=prompt_file.parent / "system_prompt.md",
-                    system_prompt=request.system_prompt,
-                    workspace=request.workspace,
-                    worktree=request.worktree,
-                    disallowed_tools=frozenset(request.disallowed_tools),
-                )
+            cmd = self._build_launch(backend, request, env, run_as)
+            watch = self._reap_watch(request)
         except SpecialistAgentUnavailableError as exc:
             # No runtime for this deployment's credential shape. Report it as the
             # task's failure rather than degrading to a CLI that cannot auth.
@@ -891,38 +507,7 @@ class SpecialistSubprocessDispatcher:
                 error=f"specialist agent runtime unavailable (backend={backend or 'unresolved'}): {exc}",
             )
 
-        if backend == AGENT_BACKEND_CODEX:
-            # Per-task CODEX_HOME so concurrent specialists and the operator's
-            # own Codex state stay independent. It lives in the task workspace
-            # rather than a temp dir because Codex refuses to create its helper
-            # binaries under /tmp and would run without its PATH aliases.
-            codex_home = request.workspace / ".codex"
-            env["CODEX_HOME"] = str(codex_home)
-        if request.gpu_lease is not None:
-            # Ray-managed GPU execution: Ray sets *_VISIBLE_DEVICES in
-            # the actor's worker; never let the caller env pin them (that would
-            # override Ray's card assignment). ``gpu_ids`` here is the logical
-            # 0..N-1 view the specialist sees under Ray's mask — kept only as the
-            # informational count env for specialist tooling.
-            for var in GPU_MASK_ENV_NAMES:
-                env.pop(var, None)
-            if request.gpu_ids:
-                env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = ",".join(str(g) for g in request.gpu_ids)
-        elif request.gpu_ids:
-            visible = ",".join(str(g) for g in request.gpu_ids)
-            env["HIP_VISIBLE_DEVICES"] = visible
-            env["CUDA_VISIBLE_DEVICES"] = visible
-            env["ROCR_VISIBLE_DEVICES"] = visible
-            env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = visible
-        else:
-            # CPU specialists: hide all GPUs and use workspace-local compiler caches.
-            for var in GPU_MASK_ENV_NAMES:
-                env[var] = ""
-            cache_root = request.workspace / ".cache"
-            env["TRITON_CACHE_DIR"] = str(cache_root / "triton")
-            env["TORCHINDUCTOR_CACHE_DIR"] = str(cache_root / "torchinductor")
-            env["AITER_JIT_DIR"] = str(cache_root / "aiter_jit")
-            env["INFERENCE_OPTIMIZER_AITER_JIT_DIR"] = str(cache_root / "aiter_jit")
+        apply_gpu_env(env, request.workspace, request.gpu_ids, request.gpu_lease)
 
         with cancel_scope_listener() as scope:
             log_fh: Any = None
@@ -941,14 +526,18 @@ class SpecialistSubprocessDispatcher:
                     # unschedulable request into a structured task failure instead of an
                     # unbounded stall. The actor opens process.log inside its worker
                     # (same host on single-node), so the reaper below reads it directly.
+                    from hyperloom.orchestrator.actions.executors._ray_serving import ActorLaunch
+
                     try:
                         request.gpu_lease.start_async(
-                            cmd,
-                            env=env,
-                            cwd=str(request.worktree or request.workspace),
-                            log_path=str(process_log),
-                            env_mode="replace",
-                            stdin_path=str(prompt_file),
+                            ActorLaunch(
+                                cmd,
+                                env=env,
+                                cwd=str(request.worktree or request.workspace),
+                                log_path=str(process_log),
+                                env_mode="replace",
+                                stdin_path=str(prompt_file),
+                            )
                         )
                     except Exception as exc:  # noqa: BLE001 — surface a submit failure as a result
                         log.warning("specialist GPU actor submit failed: %s", exc)
@@ -1001,24 +590,23 @@ class SpecialistSubprocessDispatcher:
                     proc_started = time.monotonic()
                 else:
                     proc_started = time.monotonic()
-                    log_fh = process_log.open("w", encoding="utf-8")
-                    try:
-                        process_log.chmod(0o600)
-                    except OSError:
-                        # Tightening the mode is advisory; the run continues on filesystems
-                        # that reject chmod.
-                        pass
+                    # Created fresh, never through a name the previous run's account planted; owner-only.
+                    log_fh = create_nofollow(request.workspace, (process_log.name,))
                     stdin_fh: Any = None
                     try:
+                        demote = await asyncio.to_thread(
+                            prepare_demote, run_as, request.workspace, request.worktree, env, (prompt_file, process_log)
+                        )
                         stdin_fh = prompt_file.open("rb")
                         proc = subprocess.Popen(
-                            cmd,
+                            cmd if run_as is None else run_as.command(cmd),
                             stdin=stdin_fh,
                             stdout=log_fh,
                             stderr=subprocess.STDOUT,
                             env=env,
                             cwd=str(request.worktree or request.workspace),
                             start_new_session=True,
+                            **demote,
                         )
                     except (FileNotFoundError, OSError) as exc:
                         log_fh.close()
@@ -1039,19 +627,7 @@ class SpecialistSubprocessDispatcher:
                                 log.warning("failed to close specialist prompt stdin", exc_info=True)
 
                 # Reap loop — poll done-file / exit / heartbeat staleness / deadline.
-                outcome = await self._reap_loop(
-                    proc,
-                    ReapWatch(
-                        workspace=request.workspace,
-                        done_files=tuple(done_candidates),
-                        heartbeat_file=heartbeat_file,
-                        partial_files=tuple(partial_candidates),
-                        progress_cb=request.progress_cb,
-                        task_id=request.task_id,
-                    ),
-                    deadline=request.deadline,
-                    started=proc_started,
-                )
+                outcome = await self._reap_loop(proc, watch, deadline=request.deadline, started=proc_started)
             except (CancelledError, asyncio.CancelledError):
                 try:
                     if request.gpu_lease is not None:
@@ -1073,11 +649,11 @@ class SpecialistSubprocessDispatcher:
                 try:
                     await asyncio.to_thread(redact_file_in_place, process_log, mode=0o600)
                 finally:
-                    clear_wall_budget_extension(request.task_id)
+                    self._release_task(backend, request)
 
         # Parse done.json (best-effort) — first existing candidate.
         done_payload = None
-        for cand in done_candidates:
+        for cand in watch.done_files:
             if cand.exists():
                 done_payload = self._read_done(cand)
                 if done_payload is not None:
@@ -1086,7 +662,7 @@ class SpecialistSubprocessDispatcher:
         # No final done.json — fall back to the most recent incremental partial
         # so a killed-but-productive specialist still surfaces its findings.
         if done_payload is None:
-            for cand in partial_candidates:
+            for cand in watch.partial_files:
                 if cand.exists():
                     partial = self._read_done(cand)
                     if partial is not None:
@@ -1106,29 +682,10 @@ class SpecialistSubprocessDispatcher:
             targets=_declared_targets(done_payload),
         )
 
-        # Harvest the trace from process.log with the parsers for the CLI that
-        # wrote it: cumulative session token usage, the reply text that lands in
-        # conversations.jsonl, the intel/tool calls, and per-turn usage for
-        # fine-grained tracing (which falls back to ``usage`` when absent).
-        if backend == AGENT_BACKEND_CODEX:
-            usage: dict[str, Any] | None = parse_codex_jsonl_usage(process_log)
-            response = parse_codex_jsonl_response(process_log)
-            tool_calls = parse_codex_jsonl_tool_calls(process_log)
-            turn_usages = parse_codex_jsonl_turn_usages(process_log)
-            structured_error = parse_codex_jsonl_error(process_log)
-            if structured_error and (outcome["exit_code"] not in (None, 0) or done_payload is None):
-                prior_error = str(outcome.get("error") or "").strip()
-                outcome["error"] = (
-                    f"{prior_error}; codex: {structured_error}" if prior_error else f"codex: {structured_error}"
-                )
-        else:
-            usage = parse_claude_stream_json_usage(process_log)
-            response = parse_claude_stream_json_response(process_log)
-            tool_calls = parse_claude_stream_json_tool_calls(process_log)
-            turn_usages = parse_claude_stream_json_turn_usages(process_log)
-            record_stream_json_requests(process_log)
-            record_stream_json_tools(process_log)
-            record_stream_json_compactions(process_log)
+        trace = harvest_agent_trace(backend, request.workspace, process_log)
+        if trace.error and (outcome["exit_code"] not in (None, 0) or done_payload is None):
+            prior_error = str(outcome.get("error") or "").strip()
+            outcome["error"] = f"{prior_error}; {trace.error}" if prior_error else trace.error
 
         return SpecialistSubprocessResult(
             done_payload=done_payload,
@@ -1139,36 +696,94 @@ class SpecialistSubprocessDispatcher:
             process_log_path=str(process_log),
             patches=patches,
             patch_roots=collected_patch_roots,
-            usage=usage,
-            response=response,
-            tool_calls=tool_calls,
-            turn_usages=turn_usages,
+            trace=trace,
             error=outcome["error"],
         )
 
     # Internals
+    def _build_launch(
+        self, backend: str, request: SpecialistSpawn, env: dict[str, str], run_as: RunAs | None
+    ) -> list[str]:
+        """Build the CLI argv for ``backend``; child-only values go into ``env``."""
+        if backend == AGENT_BACKEND_DEEPSEEK:
+            dsh_request = DshLaunchRequest(
+                executable=resolve_dsh_executable(self.config.dsh_executable),
+                model=resolve_forge_llm_model(AGENT_BACKEND_DEEPSEEK, explicit=self.config.model),
+                mcp_config_path=self.config.mcp_config_path,
+                workspace=request.workspace,
+                system_prompt=request.system_prompt,
+                user_prompt=request.user_prompt,
+            )
+            launch = build_dsh_launch(dsh_request, env)
+            env.update(launch.env_additions)
+            return launch.cmd
+        if backend == AGENT_BACKEND_CODEX:
+            # Codex's higher-priority developer instructions live in private task-local config.
+            cmd, launch_env_additions = self._build_codex_launch(
+                workspace=request.workspace,
+                worktree=request.worktree,
+                system_prompt=request.system_prompt,
+                base_env=env,
+                probe_sandbox=True,
+            )
+            env.update(launch_env_additions)
+            # Per-task CODEX_HOME so concurrent specialists and the operator's
+            # own Codex state stay independent. It lives in the task workspace
+            # rather than a temp dir because Codex refuses to create its helper
+            # binaries under /tmp and would run without its PATH aliases.
+            env["CODEX_HOME"] = str(request.workspace / ".codex")
+            return cmd
+        cmd = self._build_claude_cmd(
+            system_prompt_file=request.workspace / "system_prompt.md",
+            system_prompt=request.system_prompt,
+            workspace=request.workspace,
+            worktree=request.worktree,
+            disallowed_tools=frozenset(request.disallowed_tools),
+        )
+        stage_mcp_config(run_as, request.workspace, cmd)
+        return cmd
+
+    @staticmethod
+    def _reap_watch(request: SpecialistSpawn) -> ReapWatch:
+        """What the reaper polls for ``request``: each file in the worktree first (the prompt-advertised path)."""
+        roots = (request.worktree, request.workspace) if request.worktree is not None else (request.workspace,)
+        return ReapWatch(
+            workspace=request.workspace,
+            done_files=tuple(root / "specialist_done.json" for root in roots),
+            # Recovered as best-so-far on a budget kill; never a reap signal.
+            partial_files=tuple(root / "specialist_done.partial.json" for root in roots),
+            progress_cb=request.progress_cb,
+            task_id=request.task_id,
+        )
+
+    @staticmethod
+    def _release_task(backend: str, request: SpecialistSpawn) -> None:
+        """Drop what a task holds once its subprocess is gone, however it ended."""
+        clear_wall_budget_extension(request.task_id)
+        if backend == AGENT_BACKEND_DEEPSEEK:
+            remove_dsh_profiles(request.workspace)
+
     def _agent_backend(self) -> str:
         """Return the agent CLI this dispatch should spawn.
 
         An explicitly configured backend wins; otherwise the deployment's
-        credential shape decides (:func:`preferred_agent_backend`).
+        selection decides (:func:`resolve_agent_backend`).
 
         Returns:
-            str: :data:`AGENT_BACKEND_CLAUDE` or :data:`AGENT_BACKEND_CODEX`.
+            str: :data:`AGENT_BACKEND_CLAUDE`, :data:`AGENT_BACKEND_CODEX` or :data:`AGENT_BACKEND_DEEPSEEK`.
 
         Raises:
-            SpecialistAgentUnavailableError: If the configured backend is not
+            SpecialistAgentUnavailableError: If the selected backend is not
                 one this dispatcher can spawn.
         """
         pinned = (self.config.agent_backend or "").strip().lower()
-        if not pinned:
-            return preferred_agent_backend()
-        if pinned not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
+        backend = pinned or resolve_agent_backend()
+        if backend not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX, AGENT_BACKEND_DEEPSEEK):
             raise SpecialistAgentUnavailableError(
                 f"agent_backend={self.config.agent_backend!r} is not one of "
-                f"{AGENT_BACKEND_CLAUDE!r} / {AGENT_BACKEND_CODEX!r}"
+                f"{AGENT_BACKEND_CLAUDE!r} / {AGENT_BACKEND_CODEX!r} / {AGENT_BACKEND_DEEPSEEK!r}"
             )
-        return pinned
+        return backend
 
     def _accessible_dirs(self, workspace: Path, worktree: Path | None) -> list[str]:
         """Return the dirs an agent CLI may open, in precedence order.
@@ -1326,17 +941,7 @@ class SpecialistSubprocessDispatcher:
         Returns:
             list[str]: The full command argv to spawn.
         """
-        fd = os.open(system_prompt_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(system_prompt)
-        except BaseException:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            raise
-        system_prompt_file.chmod(0o600)
+        write_text_nofollow(system_prompt_file.parent, (system_prompt_file.name,), system_prompt, mode=0o600)
 
         cfg = self.config
         cmd: list[str] = [
@@ -1422,7 +1027,8 @@ class SpecialistSubprocessDispatcher:
 
         Each tick checks (in order): a done-file at any candidate path
         (graceful exit with a short grace window), natural process exit,
-        activity staleness (heartbeat.json OR process.log), and the hard
+        activity staleness (heartbeat.json, process.log, or the dsh session
+        log; see :func:`specialist_activity_paths`), and the hard
         wall-clock cap. Stale / timed-out
         runs are killed via :meth:`_kill`. Partial checkpoints written along
         the way are forwarded to ``progress_cb`` as they change.
@@ -1452,9 +1058,6 @@ class SpecialistSubprocessDispatcher:
         # An unbounded caller still gets a finite instant.
         hard_stop = deadline if deadline is not None else Deadline.after(UNBOUNDED_REAP_CAP_SEC, now=started)
         last_heartbeat_seen: float = started
-        # process.log mtime is a reliable "still working" signal even when the
-        # agent never self-writes heartbeat.json.
-        process_log = watch.workspace / "process.log"
         last_partial_mtime: float = 0.0
         scope = current_cancel_scope()
 
@@ -1499,19 +1102,12 @@ class SpecialistSubprocessDispatcher:
                     progress_cb=watch.progress_cb,
                 )
 
-            # Liveness check: alive if EITHER heartbeat.json was refreshed OR
-            # process.log is still growing. The hard wall-clock cap below still
-            # bounds genuinely hung subprocesses.
-            for activity_file in (watch.heartbeat_file, process_log):
-                try:
-                    if not activity_file.exists():
-                        continue
-                    a_mtime = activity_file.stat().st_mtime
-                except OSError:
-                    continue
-                if max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds:
-                    last_heartbeat_seen = now
-                    break
+            # Liveness check: alive if any activity signal changed within the
+            # window. The hard wall-clock cap below still bounds genuinely hung
+            # subprocesses.
+            a_mtime = newest_activity(specialist_activity_paths(watch.workspace))
+            if a_mtime is not None and max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds:
+                last_heartbeat_seen = now
 
             if (now - last_heartbeat_seen) > cfg.heartbeat_stale_seconds:
                 outcome["stale_heartbeat"] = True
@@ -1608,13 +1204,7 @@ class SpecialistSubprocessDispatcher:
 
         def _git(*args: str) -> subprocess.CompletedProcess[str] | None:
             try:
-                return subprocess.run(
-                    ["git", "-C", str(worktree), *args],
-                    capture_output=True,
-                    text=True,
-                    timeout=120.0,
-                    check=False,
-                )
+                return app_git(worktree, *args)
             except (OSError, subprocess.SubprocessError) as exc:
                 log.warning("specialist: git %s in %s failed: %r", args[0], worktree, exc)
                 return None
@@ -1623,7 +1213,7 @@ class SpecialistSubprocessDispatcher:
 
         pathspec = SpecialistSubprocessDispatcher._harvest_pathspec(targets)
         _git("add", "-A", "-N", "--", *pathspec)
-        diff = _git("diff", base, "--", *pathspec)
+        diff = _git("diff", "--no-ext-diff", "--no-textconv", base, "--", *pathspec)
         if diff is None or diff.returncode != 0 or not diff.stdout.strip():
             return ""
         if patch_is_annotation_only(diff.stdout, worktree, reverse=True):
@@ -1670,22 +1260,21 @@ class SpecialistSubprocessDispatcher:
                 targets=targets,
             )
             if harvested_diff:
-                harvested = worktree / "patches" / "_worktree_diff.patch"
-                harvested.parent.mkdir(exist_ok=True)
-                harvested.write_text(harvested_diff, encoding="utf-8")
-                return [str(harvested)], {str(harvested): str(worktree_base or worktree)}
+                try:
+                    harvested = write_text_nofollow(worktree, ("patches", "_worktree_diff.patch"), harvested_diff)
+                except OSError as exc:
+                    log.warning("specialist: refusing to write the harvested patch under %s: %r", worktree, exc)
+                else:
+                    return [str(harvested)], {str(harvested): str(worktree_base or worktree)}
 
         out: list[str] = []
         for base in (worktree, workspace):
             if base is None:
                 continue
-            patches_dir = base / "patches"
-            if not patches_dir.is_dir():
-                continue
-            for ext in ("*.patch", "*.diff"):
-                for p in sorted(patches_dir.glob(ext)):
-                    if p.name != "_worktree_diff.patch":
-                        out.append(str(p))
+            for ext in (".patch", ".diff"):
+                out.extend(
+                    str(p) for p in regular_files_nofollow(base, "patches", (ext,)) if p.name != "_worktree_diff.patch"
+                )
         return out, {}
 
     @staticmethod
@@ -1707,7 +1296,7 @@ class SpecialistSubprocessDispatcher:
         if not done_file.exists():
             return None
         try:
-            data = json.loads(done_file.read_text(encoding="utf-8"))
+            data = json.loads(read_text_nofollow(done_file))
         except (OSError, json.JSONDecodeError) as exc:
             log.warning(
                 "specialist_done.json parse failed at %s: %r",
@@ -1742,7 +1331,6 @@ class SpecialistSubprocessDispatcher:
 
 __all__ = [
     "UNBOUNDED_REAP_CAP_SEC",
-    "SpecialistAgentUnavailableError",
     "SpecialistSubprocessConfig",
     "SpecialistSubprocessDispatcher",
     "SpecialistSubprocessResult",

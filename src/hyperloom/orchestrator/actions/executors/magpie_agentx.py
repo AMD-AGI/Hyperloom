@@ -21,10 +21,6 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
 
 _ENCODING = "utf-8"
-#: Where a diagnostic profile captures when the YAML does not say. The GLM-5.3 replay's decode batch ran a median
-#: of 4 (max 10) between 5 and 10 minutes in, as every session's first turns overlapped, and 1-3 in each 5-minute
-#: window after; a capture started at 300 s caught bs 7-9 only.
-_STEADY_STATE_CAPTURE: Mapping[str, Any] = {"start_seconds": 900.0, "num_steps": 100}
 
 
 class ServerArgvInvalidError(ValueError):
@@ -168,7 +164,6 @@ def materialize_agentx(
     output: Path,
     *,
     model_path: str | None = None,
-    inferencex_path: str | None = None,
 ) -> Path:
     """Keep the workload YAML intact while changing only the server candidate."""
     config = copy.deepcopy(config)
@@ -176,8 +171,6 @@ def materialize_agentx(
     envs = bench.setdefault("envs", {})
     if model_path and Path(model_path).is_dir():
         envs["MODEL_PATH"] = model_path
-    if inferencex_path:
-        bench["inferencex_path"] = inferencex_path
     envs["RUN_EVAL"] = "false"
     bench.pop("server_lifecycle", None)
     bench.pop("benchmark_script", None)
@@ -215,28 +208,53 @@ def bind_source_evidence(config_path: Path, patches: list[dict[str, Any]]) -> No
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 
-def enable_profile(config_path: Path, shape_tool: Path | None = None) -> None:
-    """Derive the diagnostic run without modifying the accepted YAML.
+def enable_profile(config_path: Path) -> None:
+    """Prepare TraceLens instrumentation and fill any missing AgentX capture settings.
 
-    The capture window is the operator's when the YAML sets one, else a steady-state window. Magpie's own default
-    is the first 20 steps of the replay, which opens on its sessions' cold long-context prefills: every GLM-5.3
-    capture taken that way held bs=1 steps only, while the same replay ran 80% of its decode steps at bs>=2 --
-    where MTP verify reaches the M>=12 GEMM, MoE and all-reduce shapes several hand-tuned kernel fixes are about.
-
-    Given TraceLens's shape tool, the server loads it and the run records operator shapes, without which the
-    analysis cannot size a single GEMM. Only a caller that has established the server's graph capture can be
-    profiled may pass it: detailed annotations make Magpie profile that capture too.
+    An explicit ``num_steps``, ``num_profiles``, ``start_seconds``,
+    ``interval_seconds``, or ``detailed_annotations`` already present in the
+    profile copy is left unchanged. A missing ``detailed_annotations`` follows the patch
+    outcome, as the fixed-sequence request body does: Magpie probes the server whenever the
+    field is true and raises when the server lacks it, so claiming it on a runtime the patch
+    did not reach ends the round before the server starts.
     """
+    from ._profile_setup import (
+        annotations_supported,
+        apply_sglang_shape_tool,
+        patch_for_profile,
+        shape_discovery_enabled,
+    )
+
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
-    profile = config["benchmark"].setdefault("profiler", {}).setdefault("torch_profiler", {})
-    profile["enabled"] = True
-    for key, value in _STEADY_STATE_CAPTURE.items():
-        profile.setdefault(key, value)
-    if shape_tool is not None and profile.setdefault("detailed_annotations", True):
-        env = config["benchmark"]["agentx"].setdefault("launch_overrides", {}).setdefault("env", {})
-        inherited = str(env.get("PYTHONPATH") or "")
-        env["PYTHONPATH"] = str(shape_tool) + (os.pathsep + inherited if inherited else "")
-        env["TRACELENS_SHAPE_DISCOVERY"] = "1"
+    bench = config["benchmark"]
+    framework = str(bench["framework"]).lower()
+    envs = bench.setdefault("envs", {})
+    _, sitecustomize = patch_for_profile(envs, framework)
+    # In sitecustomize mode annotations also profile SGLang's graph capture, which crashes without TraceLens's patch.
+    capture_patched = not sitecustomize or envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] != "unavailable"
+    apply_launch_changes(bench, LaunchChanges())
+    launch = bench["agentx"]["launch_overrides"]
+    server_env = launch["env"]
+    profile_env: dict[str, str] = {}
+    if sitecustomize:
+        if "PYTHONPATH" in server_env:
+            profile_env["PYTHONPATH"] = str(server_env["PYTHONPATH"])
+        if "PYTHONPATH" in launch["unset_env"]:
+            profile_env["PYTHONPATH"] = ""
+        apply_sglang_shape_tool(profile_env, shape_discovery=capture_patched and shape_discovery_enabled(bench))
+    if framework == "vllm":
+        name = "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
+        inherited = "1200" if name in launch["unset_env"] else os.environ.get(name, "1200")
+        profile_env[name] = str(max(1200, int(server_env.get(name, inherited))))
+    apply_launch_changes(bench, LaunchChanges(env=profile_env))
+    torch_profiler = bench.setdefault("profiler", {}).setdefault("torch_profiler", {})
+    torch_profiler["enabled"] = True
+    torch_profiler.setdefault("num_steps", 256)
+    torch_profiler.setdefault("num_profiles", 1)
+    # The replay's opening burst runs past 300 s; a capture started there missed the steady-state batch mix.
+    torch_profiler.setdefault("start_seconds", 900)
+    torch_profiler.setdefault("interval_seconds", 900)
+    torch_profiler.setdefault("detailed_annotations", capture_patched and annotations_supported(envs))
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 

@@ -92,6 +92,33 @@ def test_roofline_snapshots_capped_keeps_baseline_anchor() -> None:
     assert state.roofline_snapshots[1]["snapshot_id"] == total - (_ROOFLINE_SNAPSHOTS_CAP - 1) + 1
 
 
+def test_bottleneck_shift_is_stamped_against_the_previous_macro_cycle() -> None:
+    """A second record in a later macro cycle compares against the earlier cycle's snapshot, not the earlier call."""
+    state = SharedState()
+    readings = iter(
+        (
+            {"compute_pct": 80.0, "idle_pct": 10.0, "within_roofline_pct": 60.0, "roofline_bound_kind": "compute"},
+            {"compute_pct": 10.0, "idle_pct": 70.0, "within_roofline_pct": 85.5, "roofline_bound_kind": "compute"},
+        )
+    )
+
+    with patch(
+        "hyperloom.inference_optimizer.roofline_snapshot.build_roofline_snapshot",
+        side_effect=lambda **kwargs: {"snapshot_id": kwargs["snapshot_id"], "ts": kwargs["ts"], **next(readings)},
+    ):
+        state.macro_cycle = 3
+        _record(state, "cycle3")
+        state.macro_cycle = 4
+        _record(state, "cycle4")
+
+    shift = state.bottleneck_shift
+    assert shift["from"] == "compute"
+    assert shift["to"] == "idle"
+    assert shift["prev_cycle"] == 3
+    assert shift["cycle"] == 4
+    assert shift["within_delta"] == 25.5
+
+
 def test_history_block_failure_propagates_after_canonical_write() -> None:
     """A failure inside the history block reaches the caller; ``last_trace_analyze`` is already written and no history entry is appended."""
     state = SharedState()

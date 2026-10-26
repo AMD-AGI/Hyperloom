@@ -12,10 +12,13 @@ import os
 import shlex
 import tempfile
 import time
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.env import EnvValueError, env_int
 
 from ..session.paths import mn_profile_trace_root
 from ._internal import ray_dashboard
@@ -36,15 +39,9 @@ _DEFAULT_POLL_INTERVAL_S = 6
 _DEFAULT_POLL_TIMEOUT_S = 110
 
 
-def _resolve_poll_timeout_s() -> int:
-    """Poll budget (seconds): ``HYPERLOOM_MN_POLL_TIMEOUT_S`` env else ``_DEFAULT_POLL_TIMEOUT_S``."""
-    raw = (os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S") or "").strip()
-    if raw:
-        try:
-            return max(1, int(raw))
-        except ValueError:
-            warn(f"invalid HYPERLOOM_MN_POLL_TIMEOUT_S={raw!r}; using {_DEFAULT_POLL_TIMEOUT_S}")
-    return _DEFAULT_POLL_TIMEOUT_S
+def resolve_poll_timeout_s(default: int = _DEFAULT_POLL_TIMEOUT_S) -> int:
+    """Poll budget (seconds): ``HYPERLOOM_MN_POLL_TIMEOUT_S`` else *default*, never below one second."""
+    return max(1, env_int("HYPERLOOM_MN_POLL_TIMEOUT_S", default))
 
 
 def _poll_timeout_from_args(args: argparse.Namespace) -> int:
@@ -52,7 +49,7 @@ def _poll_timeout_from_args(args: argparse.Namespace) -> int:
     pt = getattr(args, "poll_timeout", None)
     if pt is not None:
         return max(1, int(pt))
-    return _resolve_poll_timeout_s()
+    return resolve_poll_timeout_s()
 
 
 # Ray dashboard job status strings.
@@ -311,7 +308,7 @@ def install_geak_on_pods_best_effort() -> int:
         geak_src=None,
         print_logs=False,
         poll_interval=_DEFAULT_POLL_INTERVAL_S,
-        poll_timeout=_resolve_poll_timeout_s(),
+        poll_timeout=resolve_poll_timeout_s(),
     )
     return cmd_install_geak(ns)
 
@@ -1465,7 +1462,7 @@ def kill_inference_for_kernel_agent_best_effort() -> None:
         pid_file=None,
         print_logs=False,
         poll_interval=_DEFAULT_POLL_INTERVAL_S,
-        poll_timeout=_resolve_poll_timeout_s(),
+        poll_timeout=resolve_poll_timeout_s(),
     )
     try:
         cmd_kill_inference(ns)
@@ -1779,7 +1776,7 @@ def main(argv: list[str] | None = None) -> int:
     except TransientFailure as tf:
         err(str(tf))
         return EXIT_TRANSIENT
-    except ConfigurationError as cfg:
+    except (ConfigurationError, EnvValueError) as cfg:
         # Retrying cannot fix the environment, so never report it as transient.
         err(f"{type(cfg).__name__}: {cfg}")
         return EXIT_CONFIG_ERROR
@@ -1800,5 +1797,6 @@ def main(argv: list[str] | None = None) -> int:
         err(f"{type(exc).__name__}: {exc}")
         return EXIT_TRANSIENT
     except Exception as exc:  # noqa: BLE001
+        err(traceback.format_exc().rstrip())
         err(f"{type(exc).__name__}: {exc}")
         return EXIT_TRANSIENT

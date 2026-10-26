@@ -230,7 +230,8 @@ Required env vars:
 |---|---|---|
 | `ANTHROPIC_API_KEY` | operator | Anthropic-side key; GEAK runs Claude Code, and TraceLens runs Claude unless only the OpenAI side is configured |
 | `ANTHROPIC_BASE_URL` | operator | Anthropic-side endpoint (point it at your gateway) |
-| `OPENAI_API_KEY`, `OPENAI_BASE_URL` | operator | OpenAI-side key and endpoint; with only this side configured, TraceLens and Forge run on Codex and GEAK cannot start |
+| `OPENAI_API_KEY`, `OPENAI_BASE_URL` | operator | OpenAI-side key and endpoint; with only this side configured, TraceLens and Forge run on Codex and GEAK cannot start. The DeepSeek Harness (`INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`) authenticates on this side too |
+| `INFERENCE_OPTIMIZER_AGENT_BACKEND` | operator | `claude`, `codex` or `deepseek`: the agent CLI orchestration, specialists, TraceLens and Forge run on, instead of the credential-ranked choice. Quantization honours only `deepseek`. With `deepseek`, specialists run on the `dsh` CLI with `DSH_PERMISSION_MODE=danger-full-access` |
 | `TRACELENS_ROOT` | `install.sh` (operator can override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
 | `KERNEL_OPT_BACKEND_ORDER` | Unset/blank resolves to `geak` for every framework, ATOM included; the CLI fills in nothing. Bare-metal setup only persists nonempty choices; Slurm launchers still export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Exact, case-insensitive `forge` enables per-kernel Forge; existing `.env` choices are retained |
 
@@ -308,5 +309,10 @@ When `--nodes >= 2`, the optimization sandbox has no GPU. Handlers adapt:
   Revert uses `manifest.multinode.host_backup_map` to hit the same pods.
 - **Integration**: `integrate_handler` forces a full server restart after a
   successful apply so the re-baseline measures the patched modules.
-- **RayJob recreate**: `_replay_kernel_patches_for_multi_node` replays all
-  applied kernel patches when a new RayJob pod starts.
+- **Resuming a run**: once the resume pass has put the kept source layers back
+  on the sandbox's tree, `restore_kept_patches_on_pods` sends every file a kept
+  (finalized) kernel patch changed, as the sandbox holds it, to every pod,
+  before the first measurement; the resume halts with
+  `patch_recovery_incomplete` if a file cannot be restored. A cluster without
+  server control (benchmark-only) is left as it is, since no restart would
+  load the files. Pods recreated mid-run are not re-patched.

@@ -89,6 +89,17 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         ),
     ),
     SpecialistDomain(
+        key="speculative_decoding_specialist",
+        layer="speculative decoding: MTP / EAGLE / block drafters / draft model / n-gram",
+        kb_anchor="speculative_decoding",
+        description=(
+            "Decides whether speculative decoding (MTP, EAGLE/EAGLE-3, block "
+            "drafters, draft model, n-gram/suffix) should be on and how, for "
+            "memory-bound decode: small batch or long context, judged from "
+            "profiling and roofline evidence."
+        ),
+    ),
+    SpecialistDomain(
         key="candidate_discovery_specialist",
         layer="upstream candidate discovery / ranking / audit",
         kb_anchor="pr_intelligence",

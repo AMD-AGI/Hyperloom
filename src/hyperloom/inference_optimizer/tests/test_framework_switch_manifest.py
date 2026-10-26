@@ -763,7 +763,7 @@ async def test_a_patch_without_a_manifest_still_reverts_on_a_miss(tmp_path, monk
 async def test_inert_keep_flows_into_the_lever_ledger(tmp_path, monkeypatch):
     """The writeback registers inert levers without lifting current_best."""
     from hyperloom.inference_optimizer.session.optimization_journal import Verdict
-    from hyperloom.orchestrator.loop.writeback import _PromoteOutcome
+    from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
 
     from .conftest import make_coordinator
 
@@ -952,9 +952,9 @@ async def test_parity_guards_the_inert_keep_too(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_an_agentic_replay_keeps_a_switched_patch_dormant_without_a_parity_hour(tmp_path, monkeypatch):
     """There the parity leg is a whole replay hour, judged in a band narrower than the replay's own drift."""
-    from hyperloom.orchestrator.actions.executors import integrate_patch
+    from hyperloom.orchestrator.actions.executors import _integrate_perf_gate
 
-    monkeypatch.setattr(integrate_patch, "agentx_enabled", lambda: True)
+    monkeypatch.setattr(_integrate_perf_gate, "agentx_enabled", lambda: True)
     result, _, _, legs = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2, parity_delta_pct=-5.0)
 
     assert [leg for leg in legs if leg.get("unset_envs")] == []
@@ -1024,7 +1024,8 @@ async def test_a_patch_without_switches_spends_no_parity_leg(tmp_path, monkeypat
 @pytest.mark.asyncio
 async def test_a_raising_parity_leg_does_not_read_as_a_pass(tmp_path, monkeypatch):
     """A probe that cannot run has proved nothing, so it must not wave the patch through."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor, _PatchBench
+    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
+    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 
     executor = IntegratePatchExecutor(session_dir=tmp_path)
 
@@ -1043,7 +1044,8 @@ async def test_a_raising_parity_leg_does_not_read_as_a_pass(tmp_path, monkeypatc
 @pytest.mark.asyncio
 async def test_parity_without_a_base_is_reported_as_not_run(tmp_path):
     """No base to compare against means the check was skipped, not that it passed."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor, _PatchBench
+    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
+    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 
     verdict = await IntegratePatchExecutor(session_dir=tmp_path)._switch_off_parity(
         _PatchBench(params={}, output_root=tmp_path, specialist_task_id="t"), switch_manifest=_chain(), base_tput=0.0
@@ -1055,7 +1057,8 @@ async def test_parity_without_a_base_is_reported_as_not_run(tmp_path):
 @pytest.mark.asyncio
 async def test_parity_can_be_switched_off_explicitly(tmp_path):
     """An operator debugging the harness can take the extra leg out."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor, _PatchBench
+    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
+    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 
     verdict = await IntegratePatchExecutor(session_dir=tmp_path)._switch_off_parity(
         _PatchBench(params={"enable_switch_off_parity": False}, output_root=tmp_path, specialist_task_id="t"),

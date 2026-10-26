@@ -33,18 +33,6 @@ class FrameworkInstall:
     pass_probe: Optional[PassProbe] = None
 
 
-@dataclass(frozen=True)
-class _PatternEvidence:
-    """What the trace and source say about one matched pattern."""
-
-    shapes: dict[str, Any]
-    matched_categories: list[str]
-    trigger_share: float
-    predicted_gain: float
-    mem_share: Optional[float]
-    source_confirmed: Optional[bool]
-
-
 log = logging.getLogger("kernelforge.fusion.locate")
 
 
@@ -497,28 +485,27 @@ def rank_recipes(recipes: list[Recipe]) -> list[Recipe]:
     return sorted(recipes, key=lambda r: 0 if r.candidate_kind == "compile_pass" else 1)
 
 
-def _compile_pass_recipe(pat: FusionPattern, state: PassState, evidence: _PatternEvidence) -> Recipe:
-    """Recipe that claims the framework's own disabled fusion pass."""
+def _compile_pass_recipe(recipe: Recipe, state: PassState, noun: str, subject: str) -> Recipe:
+    """Claim the framework's own disabled fusion pass in place of authoring ``recipe``, on the same evidence."""
     return Recipe(
         pattern_id=f"compile_pass:{state.flag}",
         description=(
-            f"vLLM implements this fusion as compile pass `{state.flag}`, but it is "
+            f"vLLM implements this {noun} as compile pass `{state.flag}`, but it is "
             f"DISABLED in this install: enable the native pass instead of authoring a "
-            f"kernel ({pat.description})"
+            f"kernel ({subject})"
         ),
         env_flag="",
         source_file=state.config_file,
         source_hints=[state.flag],
-        fusion_math=pat.fusion_math,
+        fusion_math=recipe.fusion_math,
         eager_reference_hint="",
-        shapes=evidence.shapes,
-        matched_categories=evidence.matched_categories,
-        trigger_share=evidence.trigger_share,
-        rocm_native=pat.rocm_native,
-        source_confirmed=evidence.source_confirmed,
-        already_satisfied=False,
-        predicted_gain=evidence.predicted_gain,
-        mem_share=float(evidence.mem_share or 0.0),
+        shapes=recipe.shapes,
+        matched_categories=recipe.matched_categories,
+        trigger_share=recipe.trigger_share,
+        rocm_native=recipe.rocm_native,
+        source_confirmed=recipe.source_confirmed,
+        predicted_gain=recipe.predicted_gain,
+        mem_share=recipe.mem_share,
         candidate_kind="compile_pass",
         compile_pass_flag=state.flag,
     )
@@ -549,7 +536,6 @@ def build_recipes(
         model_type=model_type,
     )
     source_text = _read_source(source_file)
-    have_source = bool(source_text)
     # Model-prefix the env flag so it is unambiguous per model and matches the framework's convention (e.g. lfm2 ->
     # LFM2_FUSED_RESIDUAL, zaya -> ZAYA_FUSED_QK).
     prefix = f"{model_type.upper()}_" if model_type else ""
@@ -557,8 +543,7 @@ def build_recipes(
     bytes_share = diagnosis.category_bytes_share or {}
     recipes: list[Recipe] = []
     for pat, trigger_share in matched:
-        confirmed = _source_confirms(pat, source_text) if have_source else None
-        already = _already_fused(pat, source_text) if have_source else False
+        confirmed = _source_confirms(pat, source_text) if source_text else None
         # MEASURED memory-traffic share of this pattern's op chain (the slice of HBM traffic fusion would collapse).
         mem_share = sum(bytes_share.get(c, 0.0) for c in pat.trigger_categories) if bytes_share else None
         # Per-pattern predicted cg-ON gain, grounded in the measured memory channel when available (else the
@@ -573,55 +558,36 @@ def build_recipes(
             text=" ".join((pat.id, pat.fusion_math, pat.env_flag)),
             framework=framework,
         )
-        state = (
-            vllm_compile_pass_state(compile_pass, probe=install.pass_probe, runtime=runtime) if compile_pass else None
-        )
+        state = vllm_compile_pass_state(compile_pass, probe=install.pass_probe, runtime=runtime)
         # ONLY an enabled pass makes the candidate a no-op.
         covered = state is not None and state.enabled is True
         pass_note = "" if state is None or state.claimable or covered else _unclaimable_note(state)
         if pass_note:
             log.info("compile pass not claimed for %s: %s", pat.id, pass_note)
-        already = already or covered
-        if have_source and not include_unconfirmed and confirmed is False:
-            # Drop wrong-model patterns once we can read the source.
+        already = covered or (_already_fused(pat, source_text) if source_text else False)
+        # Drop wrong-model and no-op patterns (the source already fuses, or an ENABLED vLLM pass covers).
+        if not include_unconfirmed and (confirmed is False or already):
             continue
-        if already and not include_unconfirmed:
-            # Drop no-op patterns (source already fuses OR an ENABLED vLLM pass covers).
-            continue
-        if state is not None and state.claimable:
-            evidence = _PatternEvidence(
-                shapes=shapes,
-                matched_categories=sorted(
-                    c for c in pat.trigger_categories if diagnosis.category_shares.get(c, 0.0) > 0
-                ),
-                trigger_share=trigger_share,
-                predicted_gain=predicted_gain,
-                mem_share=mem_share,
-                source_confirmed=confirmed,
-            )
-            recipes.append(_compile_pass_recipe(pat, state, evidence))
-            continue
-        recipes.append(
-            Recipe(
-                pattern_id=pat.id,
-                description=pat.description,
-                env_flag=f"{prefix}{pat.env_flag}",
-                source_file=source_file,
-                source_hints=list(pat.source_hints),
-                fusion_math=pat.fusion_math,
-                eager_reference_hint=pat.eager_reference_hint,
-                shapes=shapes,
-                matched_categories=sorted(
-                    c for c in pat.trigger_categories if diagnosis.category_shares.get(c, 0.0) > 0
-                ),
-                trigger_share=trigger_share,
-                rocm_native=pat.rocm_native,
-                source_confirmed=confirmed,
-                already_satisfied=already,
-                predicted_gain=predicted_gain,
-                mem_share=float(mem_share or 0.0),
-                compile_pass_note=pass_note,
-                source_resolution_note=source_resolution_note,
-            )
+        recipe = Recipe(
+            pattern_id=pat.id,
+            description=pat.description,
+            env_flag=f"{prefix}{pat.env_flag}",
+            source_file=source_file,
+            source_hints=list(pat.source_hints),
+            fusion_math=pat.fusion_math,
+            eager_reference_hint=pat.eager_reference_hint,
+            shapes=shapes,
+            matched_categories=sorted(c for c in pat.trigger_categories if diagnosis.category_shares.get(c, 0.0) > 0),
+            trigger_share=trigger_share,
+            rocm_native=pat.rocm_native,
+            source_confirmed=confirmed,
+            already_satisfied=already,
+            predicted_gain=predicted_gain,
+            mem_share=float(mem_share or 0.0),
+            compile_pass_note=pass_note,
+            source_resolution_note=source_resolution_note,
         )
+        if state is not None and state.claimable:
+            recipe = _compile_pass_recipe(recipe, state, "fusion", pat.description)
+        recipes.append(recipe)
     return rank_recipes(recipes)

@@ -8,7 +8,7 @@ import kernelforge.loop.insession_gate as gate_module
 import pytest
 from kernelforge.loop.gate_settings import GateMeasurement, GateScope
 from kernelforge.loop.insession_gate import InSessionGate
-from kernelforge.llm.git import GitError
+from kernelforge.tools.git import GitError
 
 
 def _gate(tmp_path: Path) -> tuple[InSessionGate, Path]:

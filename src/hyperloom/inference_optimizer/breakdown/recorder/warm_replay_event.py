@@ -23,19 +23,22 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
-from .event_fields import (
-    as_dict as _as_dict,
-    failure_row as _failure_row,
-    float_or_none as _float_or_none,
-    now_iso_seconds as _now,
+from hyperloom.common.coerce import (
     text_or_none as _text_or_none,
+    to_float as _float_or_none,
+    to_unix,
+    to_mapping as _as_dict,
 )
+
+from .event_fields import failure_row as _failure_row, now_iso_seconds as _now
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink, make_sink
 from .event_timeline import EventHeader, finish_event, open_event
+from .sections import WARM_REPLAY_EVENT_SECTIONS
 
 log = logging.getLogger(__name__)
 
@@ -145,7 +148,10 @@ __all__ = [
     "SKIP_RESTATES_BASELINE",
     "SKIP_WORKLOAD_CONFIG_INCOMPATIBLE",
     "STATUS_BY_OUTCOME",
+    "WarmReplayApplyItem",
     "WarmReplayEventRecorder",
+    "WarmReplayMeasurement",
+    "WarmReplayRequest",
     "assemble_warm_replay_ext",
     "make_warm_replay_recorder",
     "warm_replay_event_id",
@@ -175,6 +181,48 @@ def _verdict(settled: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+@dataclass(frozen=True)
+class WarmReplayRequest:
+    """The warm recipe one replay was dispatched to measure."""
+
+    task_id: str = ""
+    tier: str = ""
+    config_source: str = ""
+    config_donor_tier: str = ""
+    donor: Mapping[str, Any] | None = None
+    expected_gain_pct: Any = None
+    confidence: Any = None
+    session_baseline_tput: Any = None
+    kernel_count: Any = None
+    recipe_suppressed: Any = None
+
+
+@dataclass(frozen=True)
+class WarmReplayMeasurement:
+    """The numbers one replay was judged on."""
+
+    before_tput: Any
+    after_tput: Any
+    gain_pct: Any
+    hot_tput: Any = None
+    cold_tput: Any = None
+    accuracy: Any = None
+    baseline_accuracy: Any = None
+    eval_ran: Any = None
+
+
+@dataclass(frozen=True)
+class WarmReplayApplyItem:
+    """One item a replay had to apply, and what became of it."""
+
+    ref: str
+    kind: str
+    position: Any
+    applied: bool | None
+    reason: str = ""
+    target: str = ""
+
+
 class WarmReplayEventRecorder:
     """Records one warm replay's facts into its own event.
 
@@ -183,21 +231,7 @@ class WarmReplayEventRecorder:
     from both halves.
     """
 
-    def __init__(
-        self,
-        sink: RecordSink,
-        *,
-        task_id: str = "",
-        tier: str = "",
-        config_source: str = "",
-        config_donor_tier: str = "",
-        donor: Mapping[str, Any] | None = None,
-        expected_gain_pct: Any = None,
-        confidence: Any = None,
-        session_baseline_tput: Any = None,
-        kernel_count: Any = None,
-        recipe_suppressed: Any = None,
-    ):
+    def __init__(self, sink: RecordSink, request: WarmReplayRequest):
         """Bind a recorder to one replay's event.
 
         A warm recipe has no single id: it takes ``tier``, the record
@@ -212,8 +246,9 @@ class WarmReplayEventRecorder:
         self._t0 = time.monotonic()
         self._start_time = _now()
         self._sequence: int | None = None
+        self._rebound = False
         self._closed = False
-        self._task_id = str(task_id or "")
+        self._task_id = str(request.task_id or "")
         # Gates are stamped at seconds precision and several rule inside one
         # second, so timestamps cannot order the arc. Assigned once per gate,
         # so a gate that re-rules keeps its original place.
@@ -221,15 +256,15 @@ class WarmReplayEventRecorder:
         self._request = {
             "task_id": self._task_id,
             "baseline_action_ref": self._task_id,
-            "tier": str(tier or ""),
-            "config_source": str(config_source or ""),
-            "config_donor_tier": str(config_donor_tier or ""),
-            "donor": _as_dict(donor) or None,
-            "expected_gain_pct": _float_or_none(expected_gain_pct),
-            "confidence": _float_or_none(confidence),
-            "session_baseline_tput": _float_or_none(session_baseline_tput),
-            "kernel_count": None if kernel_count is None else int(kernel_count),
-            "recipe_suppressed": None if recipe_suppressed is None else bool(recipe_suppressed),
+            "tier": str(request.tier or ""),
+            "config_source": str(request.config_source or ""),
+            "config_donor_tier": str(request.config_donor_tier or ""),
+            "donor": _as_dict(request.donor) or None,
+            "expected_gain_pct": _float_or_none(request.expected_gain_pct),
+            "confidence": _float_or_none(request.confidence),
+            "session_baseline_tput": _float_or_none(request.session_baseline_tput),
+            "kernel_count": None if request.kernel_count is None else int(request.kernel_count),
+            "recipe_suppressed": None if request.recipe_suppressed is None else bool(request.recipe_suppressed),
         }
         self._sink.record(SECTION_EVENT, {"request": dict(self._request)})
 
@@ -258,18 +293,33 @@ class WarmReplayEventRecorder:
             ext={"request": dict(self._request)},
         )
 
-    def record_measurement(
-        self,
-        *,
-        before_tput: Any,
-        after_tput: Any,
-        gain_pct: Any,
-        hot_tput: Any = None,
-        cold_tput: Any = None,
-        accuracy: Any = None,
-        baseline_accuracy: Any = None,
-        eval_ran: Any = None,
-    ) -> None:
+    def _duration_sec(self, end_time: str) -> float:
+        """Seconds from the opening to ``end_time``; a rebound recorder measures from the restored start."""
+        started, ended = to_unix(self._start_time), to_unix(end_time)
+        if self._rebound and started is not None and ended is not None:
+            return round(ended - started, 3)
+        return round(time.monotonic() - self._t0, 3)
+
+    def rebind(self) -> None:
+        """Take over the event an earlier tick opened.
+
+        The stored sequence and start time are restored from the event-level
+        fragment, so the close updates the same timeline entry, keeps its
+        original start and measures the arc from it. An unreadable spool leaves
+        the recorder as freshly built.
+        """
+        from .assembler import recorded_rows
+        from ...session.sbd_v6 import timeline_sequence
+
+        rows = recorded_rows(SECTION_EVENT, event=self.event_id)
+        stored = rows[0] if rows else {}
+        self._sequence = timeline_sequence(stored)
+        restored = str(stored.get("start_time") or "")
+        if restored:
+            self._start_time = restored
+            self._rebound = True
+
+    def record_measurement(self, measurement: WarmReplayMeasurement) -> None:
         """Record the numbers the replay was judged on, as it is judged.
 
         ``before_tput`` is the enqueue-time anchor the gain was computed
@@ -281,14 +331,14 @@ class WarmReplayEventRecorder:
             SECTION_EVENT,
             {
                 "measurement": {
-                    "before_tput": _float_or_none(before_tput),
-                    "after_tput": _float_or_none(after_tput),
-                    "gain_pct": _float_or_none(gain_pct),
-                    "hot_tput": _float_or_none(hot_tput),
-                    "cold_tput": _float_or_none(cold_tput),
-                    "accuracy": _float_or_none(accuracy),
-                    "baseline_accuracy": _float_or_none(baseline_accuracy),
-                    "eval_ran": None if eval_ran is None else bool(eval_ran),
+                    "before_tput": _float_or_none(measurement.before_tput),
+                    "after_tput": _float_or_none(measurement.after_tput),
+                    "gain_pct": _float_or_none(measurement.gain_pct),
+                    "hot_tput": _float_or_none(measurement.hot_tput),
+                    "cold_tput": _float_or_none(measurement.cold_tput),
+                    "accuracy": _float_or_none(measurement.accuracy),
+                    "baseline_accuracy": _float_or_none(measurement.baseline_accuracy),
+                    "eval_ran": None if measurement.eval_ran is None else bool(measurement.eval_ran),
                 },
             },
         )
@@ -319,16 +369,7 @@ class WarmReplayEventRecorder:
             return
         self._sink.record(SECTION_EVENT, {"applied": applied})
 
-    def record_apply_item(
-        self,
-        ref: str,
-        *,
-        kind: str,
-        position: Any,
-        applied: bool | None,
-        reason: str = "",
-        target: str = "",
-    ) -> None:
+    def record_apply_item(self, item: WarmReplayApplyItem) -> None:
         """Record what became of one item the replay had to apply.
 
         ``applied`` is tri-state for the reason a gate's ``passed`` is: an item
@@ -342,16 +383,16 @@ class WarmReplayEventRecorder:
         self._sink.record(
             SECTION_APPLY,
             {
-                "ref": str(ref or ""),
-                "kind": str(kind or ""),
-                "position": None if position is None else int(position),
-                "applied": None if applied is None else bool(applied),
-                "reason": str(reason or ""),
-                "target": str(target or ""),
+                "ref": str(item.ref or ""),
+                "kind": str(item.kind or ""),
+                "position": None if item.position is None else int(item.position),
+                "applied": None if item.applied is None else bool(item.applied),
+                "reason": str(item.reason or ""),
+                "target": str(item.target or ""),
                 "ts": _now(),
             },
             row_type=ROW_APPLY,
-            natural_ids=(str(kind or ""), str(ref or "")),
+            natural_ids=(str(item.kind or ""), str(item.ref or "")),
         )
 
     def record_rollback(self, *, ok: Any, errors: Any = None) -> None:
@@ -489,14 +530,16 @@ class WarmReplayEventRecorder:
                 **payload,
                 "status": str(status),
                 "end_time": end_time,
-                "duration_sec": round(time.monotonic() - self._t0, 3),
+                "duration_sec": self._duration_sec(end_time),
             },
         )
-        from .assembler import warm_replay_event_parts
+        from .assembler import event_parts
         from .recorder_warnings import RECORDING_ERRORS, note_failure
 
         try:
-            ext, derived = assemble_warm_replay_ext(warm_replay_event_parts(self.event_id), event=self.event_id)
+            ext, derived = assemble_warm_replay_ext(
+                event_parts(WARM_REPLAY_EVENT_SECTIONS, event=self.event_id), event=self.event_id
+            )
             finish_event(
                 EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
@@ -575,16 +618,7 @@ def make_warm_replay_recorder(
     *,
     phase: str,
     macro_cycle: Any = 0,
-    task_id: str = "",
-    tier: str = "",
-    config_source: str = "",
-    config_donor_tier: str = "",
-    donor: Mapping[str, Any] | None = None,
-    expected_gain_pct: Any = None,
-    confidence: Any = None,
-    session_baseline_tput: Any = None,
-    kernel_count: Any = None,
-    recipe_suppressed: Any = None,
+    request: WarmReplayRequest = WarmReplayRequest(),
     open_event_on_timeline: bool = True,
 ) -> WarmReplayEventRecorder | None:
     """Build a recorder, or ``None`` when no session is bound.
@@ -596,19 +630,9 @@ def make_warm_replay_recorder(
 
     if decline_unbound("warm replay"):
         return None
-    recorder = WarmReplayEventRecorder(
-        make_sink(warm_replay_event_id(phase, macro_cycle), producer=PRODUCER),
-        task_id=task_id,
-        tier=tier,
-        config_source=config_source,
-        config_donor_tier=config_donor_tier,
-        donor=donor,
-        expected_gain_pct=expected_gain_pct,
-        confidence=confidence,
-        session_baseline_tput=session_baseline_tput,
-        kernel_count=kernel_count,
-        recipe_suppressed=recipe_suppressed,
-    )
+    recorder = WarmReplayEventRecorder(make_sink(warm_replay_event_id(phase, macro_cycle), producer=PRODUCER), request)
     if open_event_on_timeline:
         recorder.begin()
+    else:
+        recorder.rebind()
     return recorder

@@ -21,9 +21,14 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.kernel import KernelPhase
-from hyperloom.orchestrator.phases.machine_state import record_lifecycle_event
+from hyperloom.orchestrator.phases.machine_state import LifecycleMark, record_lifecycle_event
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.kernel import integrate_accuracy as integrate_accuracy
+from hyperloom.orchestrator.kernel import _integrate_payload as integrate_payload
+from hyperloom.orchestrator.kernel import _integrate_outcomes as integrate_outcomes
+from hyperloom.orchestrator.kernel import _integrate_rebaseline as integrate_rebaseline
+from hyperloom.orchestrator.kernel import request_handlers
 
 
 def _journal_entries(session_dir: Path) -> list[dict]:
@@ -94,15 +99,17 @@ def test_syncs_standard_roofline_fallback_into_live_coordinator_state(tmp_path):
 def test_sync_unions_lifecycle_instead_of_overwriting(tmp_path):
     """Neither the live state's nor the inline Roofline's rows may be dropped."""
     coord = _coord(tmp_path)
-    record_lifecycle_event(coord.shared_state, step="explore", status="END", ts="2026-01-01T00:00:00Z")
+    record_lifecycle_event(coord.shared_state, LifecycleMark(step="explore", status="END"), ts="2026-01-01T00:00:00Z")
     coord.shared_state.save(tmp_path)
     # Recorded on the live state only; never persisted before the sync.
-    record_lifecycle_event(coord.shared_state, step="live_only", status="START", ts="2026-01-01T00:00:05Z")
+    record_lifecycle_event(
+        coord.shared_state, LifecycleMark(step="live_only", status="START"), ts="2026-01-01T00:00:05Z"
+    )
 
     selected_trace = str(tmp_path / "mixed_steady_state.trace.json.gz")
     persisted = SharedState.load_or_init(tmp_path)
     persisted.last_trace_analyze = {"steady_state_trace": selected_trace}
-    record_lifecycle_event(persisted, step="profile", status="END", ts="2026-01-01T00:00:03Z")
+    record_lifecycle_event(persisted, LifecycleMark(step="profile", status="END"), ts="2026-01-01T00:00:03Z")
     persisted.save(tmp_path)
 
     result = {
@@ -207,52 +214,10 @@ class _Bus:
 class TestGemmE2eCandidates:
     """Guard rails deciding which tuning results reach the E2E validator."""
 
-    def test_geak_result_yields_the_tuned_dispatch_csv(self, tmp_path):
-        coord = _coord(tmp_path, baseline_tput=200.0)
-        cands = coord.phase_kernel._gemm_e2e_candidates(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.1,
-                "backend": "geak",
-                "tuned_file": "/tuned/gemm.csv",
-            }
-        )
-        assert len(cands) == 1
-        assert cands[0]["tuner"] == "a8w8_blockscale_tuned_gemm"
-        assert cands[0]["envs"] == {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tuned/gemm.csv"}
-        assert cands[0]["micro_speedup"] == pytest.approx(1.1)
-
-    @pytest.mark.parametrize(
-        "overrides",
-        [
-            {"status": "failed"},
-            {"decision": "REVERT"},
-            {"best_speedup": 1.0},
-            {"best_speedup": object()},
-            {"tuned_file": ""},
-        ],
-    )
-    def test_geak_result_yields_nothing_without_a_usable_keep(self, tmp_path, overrides):
-        coord = _coord(tmp_path, baseline_tput=200.0)
-        result = {
-            "status": "ok",
-            "decision": "KEEP",
-            "best_speedup": 1.1,
-            "backend": "geak",
-            "tuned_file": "/tuned/gemm.csv",
-        }
-        result.update(overrides)
-        assert coord.phase_kernel._gemm_e2e_candidates(result) == []
-
-    def test_non_dict_result_is_rejected(self, tmp_path):
-        coord = _coord(tmp_path, baseline_tput=100.0)
-        assert coord.phase_kernel._gemm_e2e_candidates({}) == []
-
     def test_a_forced_split_k_candidate_reaches_e2e(self, tmp_path):
         """split-K benefit is e2e-only, so micro reports ``no_improvement``."""
         coord = _coord(tmp_path, baseline_tput=100.0)
-        cands = coord.phase_kernel._gemm_e2e_candidates(
+        cands = coord.phase_kernel._gemm_canonical_candidates(
             {
                 "backend": "forge",
                 "candidates": [
@@ -288,7 +253,7 @@ class TestGemmE2eCandidates:
     def test_moe_and_dense_stay_independent_candidates(self, tmp_path):
         """One call tunes both, and each earns its own KEEP/REVERT."""
         coord = _coord(tmp_path, baseline_tput=100.0)
-        cands = coord.phase_kernel._gemm_e2e_candidates(
+        cands = coord.phase_kernel._gemm_canonical_candidates(
             {
                 "backend": "forge",
                 "candidates": [
@@ -303,7 +268,7 @@ class TestGemmE2eCandidates:
     def test_the_producer_verdict_is_not_re_derived_from_the_tuner_rows(self, tmp_path):
         """The producer's list is authoritative once it names any candidate."""
         coord = _coord(tmp_path, baseline_tput=100.0)
-        cands = coord.phase_kernel._gemm_e2e_candidates(
+        cands = coord.phase_kernel._gemm_canonical_candidates(
             {
                 "backend": "forge",
                 "candidates": [
@@ -327,7 +292,7 @@ class TestGemmE2eCandidates:
     def test_a_candidate_with_no_env_is_not_offered(self, tmp_path):
         """Nothing to apply means nothing an e2e run could validate."""
         coord = _coord(tmp_path, baseline_tput=100.0)
-        cands = coord.phase_kernel._gemm_e2e_candidates(
+        cands = coord.phase_kernel._gemm_canonical_candidates(
             {
                 "backend": "forge",
                 "candidates": [
@@ -338,30 +303,10 @@ class TestGemmE2eCandidates:
         )
         assert [c["tuner"] for c in cands] == ["usable"]
 
-    def test_an_envelope_without_candidates_still_reads_the_tuner_rows(self, tmp_path):
-        """The pre-candidates envelope and the GEAK backend keep working."""
-        coord = _coord(tmp_path, baseline_tput=100.0)
-        cands = coord.phase_kernel._gemm_e2e_candidates(
-            {
-                "backend": "forge",
-                "tuners_run": [
-                    {
-                        "tuner": "fmoe_ck",
-                        "status": "ok",
-                        "improved_shapes": 3,
-                        "env_var": "AITER_CONFIG_FMOE",
-                        "env_value": "/tuned/moe.csv",
-                        "best_micro_speedup": 1.4,
-                    }
-                ],
-            }
-        )
-        assert [c["tuner"] for c in cands] == ["fmoe_ck"]
-
     def test_a_multi_variable_candidate_leaves_the_singular_pair_empty(self, tmp_path):
         """The singular pair is only unambiguous for a one-variable candidate."""
         coord = _coord(tmp_path, baseline_tput=100.0)
-        (cand,) = coord.phase_kernel._gemm_e2e_candidates(
+        (cand,) = coord.phase_kernel._gemm_canonical_candidates(
             {
                 "backend": "forge",
                 "candidates": [
@@ -372,46 +317,6 @@ class TestGemmE2eCandidates:
         assert cand["envs"] == {"A": "1", "B": "2"}
         assert cand["env_var"] == ""
         assert cand["env_value"] == ""
-
-    def test_forge_result_yields_one_candidate_per_improved_tuner(self, tmp_path):
-        coord = _coord(tmp_path, baseline_tput=100.0)
-        cands = coord.phase_kernel._gemm_e2e_candidates(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "backend": "forge",
-                "tuners_run": [
-                    {
-                        "tuner": "fmoe_ck",
-                        "status": "ok",
-                        "candidate": True,
-                        "env_var": "AITER_CONFIG_FMOE",
-                        "env_value": "/cfg/fmoe.csv",
-                        "best_micro_speedup": 1.3,
-                    },
-                    {"tuner": "skipped_one", "status": "ok", "improved_shapes": 0},
-                    {"tuner": "failed_one", "status": "failed", "candidate": True},
-                ],
-            }
-        )
-        assert [c["tuner"] for c in cands] == ["fmoe_ck"]
-        assert cands[0]["envs"] == {"AITER_CONFIG_FMOE": "/cfg/fmoe.csv"}
-
-    def test_forge_result_ignores_a_tuned_file(self, tmp_path):
-        """tuned_file is the GEAK shape; forge must come from tuners_run."""
-        coord = _coord(tmp_path, baseline_tput=100.0)
-        assert (
-            coord.phase_kernel._gemm_e2e_candidates(
-                {
-                    "status": "ok",
-                    "decision": "KEEP",
-                    "best_speedup": 1.2,
-                    "backend": "forge",
-                    "tuned_file": "/tuned/gemm.csv",
-                }
-            )
-            == []
-        )
 
 
 class TestQueueFusionSiblings:
@@ -528,6 +433,41 @@ class TestQueueFusionSiblings:
         queue = coord.shared_state.pending_kernel_integrations
         assert len(queue) == 1
         assert next(iter(queue.values()))["source_file"] == "/repo/g.py"
+
+    @pytest.mark.asyncio
+    async def test_a_fusion_record_that_cannot_be_persisted_fails_the_kernel_entry_with_its_siblings_queued(
+        self, tmp_path, monkeypatch
+    ):
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        result = {
+            "status": "ok",
+            "kept": True,
+            "requires_e2e_validation": True,
+            "engine": "forge_fusion",
+            "patches": [
+                {
+                    "kernel_name": "fuse_a",
+                    "patch_path": "/out/fuse_a.patch",
+                    "target_file": "/repo/a.py",
+                    "micro_speedup": 1.4,
+                    "kind": "fusion",
+                }
+            ],
+        }
+
+        def _disk_full(_session_dir):
+            raise OSError("No space left on device")
+
+        monkeypatch.setattr(coord.shared_state, "save", _disk_full)
+
+        with pytest.raises(OSError, match="No space left on device"):
+            await phase._handle_fusion_result(result)
+        # The kept fusion is recorded only together with its queued sibling, so the KEEP survives the failed save.
+        assert coord.shared_state.last_fusion["kept"] is True
+        queued = [str(r["source_file"]) for r in coord.shared_state.pending_kernel_integrations.values()]
+        assert queued == ["/repo/a.py"]
 
     @pytest.mark.asyncio
     async def test_handle_fusion_result_posts_and_integrates_kept_candidate(self, tmp_path, monkeypatch):
@@ -706,13 +646,10 @@ class TestForgeGemmRuntimeConfigMerge:
         result = {
             "backend": "forge",
             "precision": "bf16",
-            "tuners_run": [
+            "candidates": [
                 {
-                    "status": "ok",
-                    "candidate": True,
                     "tuner": "a8w8_blockscale_bpreshuffle",
-                    "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE",
-                    "env_value": str(candidate),
+                    "env": {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(candidate)},
                 }
             ],
         }
@@ -737,14 +674,8 @@ class TestForgeGemmRuntimeConfigMerge:
         result = {
             "backend": "forge",
             "precision": "fp8",
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "candidate": True,
-                    "tuner": "a8w8_blockscale",
-                    "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
-                    "env_value": str(missing_candidate),
-                }
+            "candidates": [
+                {"tuner": "a8w8_blockscale", "env": {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": str(missing_candidate)}}
             ],
         }
 
@@ -776,7 +707,6 @@ class TestForgeGemmRuntimeConfigMerge:
             return {"status": "ok", "decision": "KEEP", "new_tput": 120.0, "gain_pct": 9.09}
 
         monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "61")
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -785,21 +715,9 @@ class TestForgeGemmRuntimeConfigMerge:
 
         result = {
             "backend": "forge",
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "tuner": "fmoe_ck",
-                    "improved_shapes": 2,
-                    "env_var": "AITER_CONFIG_FMOE",
-                    "env_value": str(fmoe_candidate),
-                },
-                {
-                    "status": "ok",
-                    "tuner": "dense_bf16",
-                    "improved_shapes": 1,
-                    "env_var": "AITER_CONFIG_DENSE",
-                    "env_value": str(dense_candidate),
-                },
+            "candidates": [
+                {"tuner": "fmoe_ck", "env": {"AITER_CONFIG_FMOE": str(fmoe_candidate)}},
+                {"tuner": "dense_bf16", "env": {"AITER_CONFIG_DENSE": str(dense_candidate)}},
             ],
         }
 
@@ -839,15 +757,7 @@ class TestForgeGemmRuntimeConfigMerge:
         )
         result = {
             "backend": "forge",
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "tuner": "dense_bf16",
-                    "improved_shapes": 1,
-                    "env_var": "AITER_CONFIG_DENSE",
-                    "env_value": str(dense_candidate),
-                },
-            ],
+            "candidates": [{"tuner": "dense_bf16", "env": {"AITER_CONFIG_DENSE": str(dense_candidate)}}],
         }
 
         await phase._validate_gemm_tuning_e2e(result)
@@ -877,7 +787,6 @@ class TestForgeGemmRuntimeConfigMerge:
             }
 
         monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "61")
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -886,21 +795,9 @@ class TestForgeGemmRuntimeConfigMerge:
 
         result = {
             "backend": "forge",
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "tuner": "fmoe_ck",
-                    "improved_shapes": 1,
-                    "env_var": "AITER_CONFIG_FMOE",
-                    "env_value": str(first),
-                },
-                {
-                    "status": "ok",
-                    "tuner": "dense_bf16",
-                    "improved_shapes": 1,
-                    "env_var": "AITER_CONFIG_DENSE",
-                    "env_value": str(second),
-                },
+            "candidates": [
+                {"tuner": "fmoe_ck", "env": {"AITER_CONFIG_FMOE": str(first)}},
+                {"tuner": "dense_bf16", "env": {"AITER_CONFIG_DENSE": str(second)}},
             ],
         }
 
@@ -926,15 +823,7 @@ class TestForgeGemmRuntimeConfigMerge:
         monkeypatch.setattr(phase, "_merge_gemm_candidate_with_runtime", lambda _env_var, env_value: env_value)
         result = {
             "backend": "forge",
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "tuner": "dense_bf16",
-                    "improved_shapes": 1,
-                    "env_var": "AITER_CONFIG_DENSE",
-                    "env_value": str(candidate),
-                }
-            ],
+            "candidates": [{"tuner": "dense_bf16", "env": {"AITER_CONFIG_DENSE": str(candidate)}}],
         }
 
         await phase._validate_gemm_tuning_e2e(result)
@@ -970,7 +859,6 @@ class TestForgeGemmRuntimeConfigMerge:
             return responses[len(calls) - 1]
 
         monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "61")
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -983,25 +871,9 @@ class TestForgeGemmRuntimeConfigMerge:
             "workspace": str(tmp_path / "gemm"),
             "recommended_env": {"AITER_CONFIG_FMOE": "/raw.csv"},
             "extra_envs": {"AITER_CONFIG_FMOE": "/raw.csv"},
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "tuner": "fmoe_ck",
-                    "improved_shapes": 2,
-                    "env_var": "AITER_CONFIG_FMOE",
-                    "env_value": str(fmoe_candidate),
-                    "best_micro_speedup": 1.2,
-                },
-                {
-                    "status": "ok",
-                    "tuner": "dense_bf16",
-                    "improved_shapes": 1,
-                    "env_var": "AITER_CONFIG_DENSE",
-                    "env_value": str(dense_candidate),
-                    "best_micro_speedup": 1.1,
-                },
-                {"status": "failed", "tuner": "ignored"},
-                {"status": "ok", "tuner": "no_env", "improved_shapes": 1},
+            "candidates": [
+                {"tuner": "fmoe_ck", "env": {"AITER_CONFIG_FMOE": str(fmoe_candidate)}, "best_micro_speedup": 1.2},
+                {"tuner": "dense_bf16", "env": {"AITER_CONFIG_DENSE": str(dense_candidate)}, "best_micro_speedup": 1.1},
             ],
         }
 
@@ -1016,7 +888,6 @@ class TestForgeGemmRuntimeConfigMerge:
         assert calls[0]["base_tput"] == 110.0
         assert calls[0]["extra_server_args"] == "--moe-runner-backend aiter"
         assert calls[0]["extra_envs"] == {"AITER_CONFIG_FMOE": str(fmoe_candidate)}
-        assert calls[0]["budget_minutes"] == 2
         assert calls[1]["base_tput"] == 130.0
         assert calls[1]["extra_envs"] == {
             "AITER_CONFIG_FMOE": str(fmoe_candidate),
@@ -1040,10 +911,7 @@ class TestForgeGemmRuntimeConfigMerge:
             "precision": "bf16",
             "recommended_env": {"AITER_CONFIG": "/raw.csv"},
             "extra_envs": {"AITER_CONFIG": "/raw.csv"},
-            "tuners_run": [
-                {"status": "failed", "tuner": "bad"},
-                {"status": "ok", "tuner": "zero", "improved_shapes": 0},
-            ],
+            "candidates": [],
         }
 
         await phase._validate_gemm_tuning_e2e(result)
@@ -1076,15 +944,7 @@ class TestForgeGemmRuntimeConfigMerge:
         result = {
             "backend": "forge",
             "precision": "bf16",
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "tuner": "dense_bf16",
-                    "improved_shapes": 1,
-                    "env_var": "AITER_CONFIG_DENSE",
-                    "env_value": str(dense_candidate),
-                },
-            ],
+            "candidates": [{"tuner": "dense_bf16", "env": {"AITER_CONFIG_DENSE": str(dense_candidate)}}],
         }
 
         await phase._validate_gemm_tuning_e2e(result)
@@ -1138,9 +998,7 @@ class TestBf16DenseFallbackIsInternalToForge:
                 "precision": "fp8",
                 "framework": "sglang",
                 "micro_decision": "no_improvement",
-                "tuners_run": [
-                    {"status": "no_improvement", "tuner": "a8w8", "improved_shapes": 0},
-                ],
+                "candidates": [],
             }
 
         monkeypatch.setattr(krh_mod, "run_gemm_tuning_handler", _fake_run_gemm)
@@ -1209,15 +1067,7 @@ class TestHandleGemmTuningResult:
                 "requires_e2e_validation": True,
                 "recommended_env": {"AITER_DENSE": "/dense.json"},
                 "extra_envs": {"AITER_DENSE": "/dense.json"},
-                "tuners_run": [
-                    {
-                        "status": "ok",
-                        "improved_shapes": 3,
-                        "tuner": "dense_gemm",
-                        "env_var": "AITER_DENSE",
-                        "env_value": "/dense.json",
-                    }
-                ],
+                "candidates": [{"tuner": "dense_gemm", "env": {"AITER_DENSE": "/dense.json"}}],
             }
         )
 
@@ -1246,15 +1096,7 @@ class TestHandleGemmTuningResult:
                 "requires_e2e_validation": True,
                 "recommended_env": {"AITER_DENSE": "/dense.json"},
                 "extra_envs": {"AITER_DENSE": "/dense.json"},
-                "tuners_run": [
-                    {
-                        "status": "ok",
-                        "improved_shapes": 3,
-                        "tuner": "dense_gemm",
-                        "env_var": "AITER_DENSE",
-                        "env_value": "/dense.json",
-                    }
-                ],
+                "candidates": [{"tuner": "dense_gemm", "env": {"AITER_DENSE": "/dense.json"}}],
             }
         )
 
@@ -1288,15 +1130,7 @@ class TestHandleGemmTuningResult:
                 "requires_e2e_validation": True,
                 "recommended_env": {"AITER_DENSE": env_value},
                 "extra_envs": {"AITER_DENSE": env_value},
-                "tuners_run": [
-                    {
-                        "status": "ok",
-                        "improved_shapes": 3,
-                        "tuner": "dense_gemm",
-                        "env_var": "AITER_DENSE",
-                        "env_value": env_value,
-                    }
-                ],
+                "candidates": [{"tuner": "dense_gemm", "env": {"AITER_DENSE": env_value}}],
             }
 
         monkeypatch.setattr(
@@ -1338,15 +1172,7 @@ class TestHandleGemmTuningResult:
                 "requires_e2e_validation": True,
                 "recommended_env": {"AITER_DENSE": "/dense.json"},
                 "extra_envs": {"AITER_DENSE": "/dense.json"},
-                "tuners_run": [
-                    {
-                        "status": "ok",
-                        "improved_shapes": 3,
-                        "tuner": "dense_gemm",
-                        "env_var": "AITER_DENSE",
-                        "env_value": "/dense.json",
-                    }
-                ],
+                "candidates": [{"tuner": "dense_gemm", "env": {"AITER_DENSE": "/dense.json"}}],
             }
         )
 
@@ -1354,7 +1180,7 @@ class TestHandleGemmTuningResult:
         assert not coord.shared_state.gemm_tuning_attempts[0].get("tuned_file")
 
     @pytest.mark.asyncio
-    async def test_geak_promotes_on_the_measured_tput_not_the_micro_speedup(self, tmp_path, monkeypatch):
+    async def test_promotes_on_the_measured_tput_not_the_micro_speedup(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
         tuned = tmp_path / "gemm.csv"
         tuned.write_text("token,model_dim\n1,2\n", encoding="utf-8")
@@ -1370,47 +1196,25 @@ class TestHandleGemmTuningResult:
             {
                 "status": "ok",
                 "decision": "KEEP",
-                "best_speedup": 1.4,
-                "backend": "geak",
-                "tuned_file": str(tuned),
+                "backend": "forge",
+                "candidates": [
+                    {
+                        "tuner": "a8w8_blockscale_tuned_gemm",
+                        "env": {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": str(tuned)},
+                        "best_micro_speedup": 1.4,
+                    }
+                ],
             }
         )
 
         assert len(fake.calls) == 1
         stack = coord.shared_state.optimization_stack
         assert len(stack) == 1
-        assert stack[0]["variant_name"] == "geak_a8w8_blockscale_tuned_gemm"
-        assert stack[0]["backend"] == "geak"
+        assert stack[0]["variant_name"] == "forge_a8w8_blockscale_tuned_gemm"
         # 150.0 measured, not baseline * best_speedup (140.0).
         assert stack[0]["tput"] == pytest.approx(150.0)
         assert coord.shared_state.current_best["tput"] == pytest.approx(150.0)
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(50.0)
-
-    @pytest.mark.asyncio
-    async def test_geak_promotes_nothing_when_the_measurement_reverts(self, tmp_path, monkeypatch):
-        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
-        tuned = tmp_path / "gemm.csv"
-        tuned.write_text("token,model_dim\n1,2\n", encoding="utf-8")
-        fake = _make_integrate([{"decision": "REVERT", "new_tput": 90.0, "gain_pct": -10.0}])
-        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
-        monkeypatch.setattr(
-            KernelPhase,
-            "_merge_gemm_candidate_with_runtime",
-            lambda _self, _env_var, env_value: env_value,
-        )
-
-        await coord.phase_kernel._handle_gemm_tuning_result(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.4,
-                "backend": "geak",
-                "tuned_file": str(tuned),
-            }
-        )
-
-        assert coord.shared_state.optimization_stack == []
-        assert not coord.shared_state.current_best
 
 
 class TestKernelE2EMeasurementPromotion:
@@ -1542,7 +1346,8 @@ class TestKernelE2EMeasurementPromotion:
     async def test_promotion_recorder_keeps_gain_objective_separate_from_output(
         self, coord, monkeypatch, explicit_output
     ):
-        from hyperloom.inference_optimizer.breakdown.recorder.assembler import kernel_event_parts
+        from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+        from hyperloom.inference_optimizer.breakdown.recorder.sections import KERNEL_EVENT_SECTIONS
         from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
             ROUTE_FORGE,
             SOURCE_GEMM_TUNING,
@@ -1575,7 +1380,7 @@ class TestKernelE2EMeasurementPromotion:
             phase._open_kernel_timeline(route=ROUTE_FORGE, route_reason="unit", from_phase="")
             await phase._handle_gemm_tuning_result(result)
             recorder = phase.timeline()
-            ext, _status = assemble_kernel_ext(kernel_event_parts(), event=recorder.event_id)
+            ext, _status = assemble_kernel_ext(event_parts(KERNEL_EVENT_SECTIONS), event=recorder.event_id)
 
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(gain)
         # The gain is graded on the session's own axis, and the run says which
@@ -1675,12 +1480,15 @@ class TestKernelE2EMeasurementPromotion:
             raise AssertionError("Paired measurements must not resolve, apply, or grade a patch")
 
         monkeypatch.setenv("FRAMEWORK", "sglang")
-        monkeypatch.setattr(krh_mod, "_resolve_integrate_payload", unexpected)
-        monkeypatch.setattr(krh_mod, "repo_relative_manifest", unexpected)
-        monkeypatch.setattr(krh_mod, "apply_kernel_patch", SimpleNamespace(verify_cpp_itfs_rebuilt=unexpected))
-        monkeypatch.setattr(krh_mod, "_grade_integrate_accuracy", unexpected)
-        monkeypatch.setattr(krh_mod, "_maybe_finalize_kernel_patch", unexpected)
-        monkeypatch.setattr(krh_mod, "_sweep_integrate_aiter_locks", lambda **kwargs: {})
+        monkeypatch.setattr(request_handlers, "_resolve_integrate_payload", unexpected)
+        monkeypatch.setattr(integrate_payload, "repo_relative_manifest", unexpected)
+        monkeypatch.setattr(
+            integrate_rebaseline, "apply_kernel_patch", SimpleNamespace(verify_cpp_itfs_rebuilt=unexpected)
+        )
+        monkeypatch.setattr(integrate_accuracy, "grade_integrate_accuracy", unexpected)
+        monkeypatch.setattr(integrate_outcomes, "_maybe_finalize_kernel_patch", unexpected)
+        for _module in (krh_mod, integrate_rebaseline):
+            monkeypatch.setattr(_module, "_sweep_integrate_aiter_locks", lambda **kwargs: {})
         monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: "/usr/bin/python3")
         monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
         return krh_mod.integrate_handler
@@ -1707,7 +1515,7 @@ class TestKernelE2EMeasurementPromotion:
         monkeypatch.setenv("HYPERLOOM_GEMM_PAIRED_PAIRS", "invalid")
 
         with pytest.raises(EnvValueError, match="HYPERLOOM_GEMM_PAIRED_PAIRS"):
-            await KernelPhase(coord)._confirm_gemm_gain_paired({}, {}, config_path="", budget_minutes=1)
+            await KernelPhase(coord)._confirm_gemm_gain_paired({}, {}, config_path="")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("second_keep", [False, True], ids=["keep-revert", "keep-keep"])
@@ -1761,7 +1569,7 @@ class TestKernelE2EMeasurementPromotion:
         async def integrate(payload, *, session_dir):
             calls.append(payload["kernel_id"])
             if payload["source"] != "forge_gemm_paired":
-                resolved = krh_mod._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+                resolved = integrate_payload._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
                 response = await candidate_integrate(resolved, session_dir=session_dir)
                 state.baseline_config_path = "/live/base.yaml"
                 return response
@@ -1934,10 +1742,6 @@ class TestKernelE2EMeasurementPromotion:
             pytest.param({"target_file": "/unexpected.py"}, id="target_file"),
             pytest.param({"source_file": "/unexpected.py"}, id="source_file"),
             pytest.param({"snapshot_dir": "/unexpected-snapshot"}, id="snapshot_dir"),
-            pytest.param(
-                {"preapplied_apply_result": {"status": "ok", "manifest_path": "/unexpected-manifest.json"}},
-                id="preapplied_apply_result",
-            ),
         ],
     )
     async def test_gemm_paired_native_handler_rejects_artifacts(
@@ -2064,12 +1868,7 @@ class TestValidateForgeGemmTuningE2E:
             "recommended_env": {"X": "1"},
             "extra_envs": {"X": "1"},
             "requires_e2e_validation": True,
-            "tuners_run": [
-                "not-a-dict",
-                {"status": "failed", "improved_shapes": 5, "env_var": "A", "env_value": "1"},
-                {"status": "ok", "improved_shapes": 0, "env_var": "B", "env_value": "2"},
-                {"status": "ok", "improved_shapes": 3, "env_var": "", "env_value": ""},
-            ],
+            "candidates": [{"tuner": "unknown", "env": {"": ""}}],
         }
         await coord.phase_kernel._validate_gemm_tuning_e2e(result)
 
@@ -2091,7 +1890,7 @@ class TestValidateForgeGemmTuningE2E:
         result = {
             "requires_e2e_validation": True,
             "micro_decision": "no_improvement",
-            "tuners_run": [{"status": "ok", "improved_shapes": 0}],
+            "candidates": [],
         }
         await coord.phase_kernel._validate_gemm_tuning_e2e(result)
 
@@ -2118,15 +1917,10 @@ class TestValidateForgeGemmTuningE2E:
             },
             "extra_envs": {},
             "requires_e2e_validation": True,
-            "tuners_run": [
+            "candidates": [
                 {
-                    "status": "ok",
-                    "candidate": True,
-                    "improved_shapes": 0,
                     "tuner": "vllm_dense_tunableop",
-                    "env_var": "PYTORCH_TUNABLEOP_FILENAME",
-                    "env_value": "/tunableop.csv",
-                    "env_vars": {
+                    "env": {
                         "PYTHONPATH": "/candidate/site",
                         "HL_TUNABLEOP_MODE": "candidate",
                         "HL_TUNABLEOP_FILE": "/tunableop.csv",
@@ -2173,14 +1967,10 @@ class TestValidateForgeGemmTuningE2E:
         monkeypatch.setattr(krh_mod, "integrate_handler", fake)
         result = {
             "workspace": str(tmp_path),
-            "tuners_run": [
+            "candidates": [
                 {
-                    "status": "ok",
-                    "candidate": True,
                     "tuner": "combined_aiter",
-                    "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
-                    "env_value": str(dense),
-                    "env_vars": {
+                    "env": {
                         "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": str(dense),
                         "AITER_CONFIG_FMOE": str(moe),
                     },
@@ -2229,23 +2019,9 @@ class TestValidateForgeGemmTuningE2E:
                 "AITER_DENSE": "/dense.json",
             },
             "requires_e2e_validation": True,
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "improved_shapes": 5,
-                    "tuner": "fmoe_ck",
-                    "env_var": "AITER_CONFIG_FMOE",
-                    "env_value": str(fmoe_candidate),
-                    "best_micro_speedup": 1.2,
-                },
-                {
-                    "status": "ok",
-                    "improved_shapes": 3,
-                    "tuner": "dense_gemm",
-                    "env_var": "AITER_DENSE",
-                    "env_value": "/dense.json",
-                    "best_micro_speedup": 1.1,
-                },
+            "candidates": [
+                {"tuner": "fmoe_ck", "env": {"AITER_CONFIG_FMOE": str(fmoe_candidate)}, "best_micro_speedup": 1.2},
+                {"tuner": "dense_gemm", "env": {"AITER_DENSE": "/dense.json"}, "best_micro_speedup": 1.1},
             ],
         }
         await coord.phase_kernel._validate_gemm_tuning_e2e(result)
@@ -2307,16 +2083,7 @@ class TestValidateForgeGemmTuningE2E:
             "recommended_env": {"X": "1"},
             "extra_envs": {"X": "1"},
             "requires_e2e_validation": True,
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "improved_shapes": 2,
-                    "tuner": "dense",
-                    "env_var": "X",
-                    "env_value": "1",
-                    "best_micro_speedup": 1.05,
-                },
-            ],
+            "candidates": [{"tuner": "dense", "env": {"X": "1"}, "best_micro_speedup": 1.05}],
         }
         await coord.phase_kernel._validate_gemm_tuning_e2e(result)
 
@@ -2334,16 +2101,7 @@ class TestValidateForgeGemmTuningE2E:
             "recommended_env": {"X": "1"},
             "extra_envs": {"X": "1"},
             "requires_e2e_validation": True,
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "improved_shapes": 4,
-                    "tuner": "dense",
-                    "env_var": "X",
-                    "env_value": "1",
-                    "best_micro_speedup": 1.05,
-                },
-            ],
+            "candidates": [{"tuner": "dense", "env": {"X": "1"}, "best_micro_speedup": 1.05}],
         }
         await coord.phase_kernel._validate_gemm_tuning_e2e(result)
 
@@ -2367,16 +2125,7 @@ class TestValidateForgeGemmTuningE2E:
             "recommended_env": {"X": "1"},
             "extra_envs": {"X": "1"},
             "requires_e2e_validation": True,
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "improved_shapes": 2,
-                    "tuner": "dense",
-                    "env_var": "X",
-                    "env_value": "1",
-                    "best_micro_speedup": 1.1,
-                },
-            ],
+            "candidates": [{"tuner": "dense", "env": {"X": "1"}, "best_micro_speedup": 1.1}],
         }
         await coord.phase_kernel._validate_gemm_tuning_e2e(result)
 
@@ -2387,39 +2136,6 @@ class TestValidateForgeGemmTuningE2E:
         assert len(faults) == 1
         assert faults[0]["reason"] == "integrate_fault:handler_exception"
         assert result["e2e_results"]["reverted"] == []
-
-    @pytest.mark.asyncio
-    async def test_gemm_validation_uses_fixed_benchmark_budget(self, tmp_path, monkeypatch):
-        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
-
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "7800")
-
-        captured: dict[str, object] = {}
-
-        async def _fake(payload, *, session_dir):
-            captured["budget"] = payload["budget_minutes"]
-            return {"decision": "KEEP", "new_tput": 150.0, "gain_pct": 50.0}
-
-        monkeypatch.setattr(krh_mod, "integrate_handler", _fake)
-
-        result = {
-            "recommended_env": {"X": "1"},
-            "extra_envs": {"X": "1"},
-            "requires_e2e_validation": True,
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "improved_shapes": 2,
-                    "tuner": "dense",
-                    "env_var": "X",
-                    "env_value": "1",
-                    "best_micro_speedup": 1.1,
-                },
-            ],
-        }
-        await coord.phase_kernel._validate_gemm_tuning_e2e(result)
-
-        assert captured["budget"] == 130
 
     @pytest.mark.asyncio
     async def test_prepares_serving_so_before_e2e_and_drops_it_on_revert(self, tmp_path, monkeypatch):
@@ -2456,15 +2172,12 @@ class TestValidateForgeGemmTuningE2E:
         result = {
             "workspace": str(tmp_path),
             "requires_e2e_validation": True,
-            "tuners_run": [
+            "candidates": [
                 {
-                    "status": "ok",
-                    "improved_shapes": 2,
                     "tuner": "a8w8_blockscale_bpreshuffle",
-                    "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE",
-                    "env_value": str(candidate),
+                    "env": {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(candidate)},
                     "best_micro_speedup": 1.2,
-                },
+                }
             ],
         }
         await coord.phase_kernel._validate_gemm_tuning_e2e(result)
@@ -2483,16 +2196,7 @@ class TestForgeGemmE2EApplyGate:
             "recommended_env": {"X": "1"},
             "extra_envs": {"X": "1"},
             "requires_e2e_validation": True,
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "improved_shapes": 2,
-                    "tuner": "dense",
-                    "env_var": "X",
-                    "env_value": "1",
-                    "best_micro_speedup": 1.1,
-                },
-            ],
+            "candidates": [{"tuner": "dense", "env": {"X": "1"}, "best_micro_speedup": 1.1}],
         }
 
     @staticmethod

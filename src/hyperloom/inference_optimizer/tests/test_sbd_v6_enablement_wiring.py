@@ -19,7 +19,8 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import enablement_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import ENABLEMENT_EVENT_SECTIONS
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -81,7 +82,7 @@ def _events(session_dir: Path) -> list[dict[str, Any]]:
 def _ext() -> dict[str, Any]:
     """The lane's assembled ``ext``, whether or not it has closed yet."""
     ext, _status = enablement_event.assemble_enablement_ext(
-        enablement_event_parts(),
+        event_parts(ENABLEMENT_EVENT_SECTIONS),
         event=enablement_event.enablement_event_id(),
     )
     return ext
@@ -93,8 +94,8 @@ class _FakeTasks:
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
 
-    async def create_or_return_existing(self, **kwargs: Any):
-        self.created.append(kwargs)
+    async def create_or_return_existing(self, spec):
+        self.created.append(vars(spec))
         return types.SimpleNamespace(task_id=f"spec-{len(self.created)}", state="queued"), False
 
     async def get(self, task_id: str):
@@ -335,7 +336,8 @@ async def test_a_kept_round_records_the_patch_it_landed(_bound_session):
     assert len(events) == 1
     assert events[0]["status"] == "running"
     ext = _ext()
-    assert ext["attempts"]["landed"] == 1
+    assert ext["attempts"]["landed"] == 0
+    assert ext["attempts"]["validation_pending"] == 1
     row = ext["attempts"]["rows"][0]
     assert row["failure_kind"] == "missing_model_arch"
     assert row["status"] == "kept"
@@ -390,7 +392,9 @@ async def test_the_stall_cap_closes_the_lane_on_a_real_coordinator(_bound_sessio
     coord = make_coordinator(_bound_session)
     coord.shared_state.enablement.launch_log = _MISSING_ARCH_LOG
     await _seed_stalled(coord.rounds, ENABLEMENT_MAX_ATTEMPTS)
-    enablement_event.record_trigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="missing_model_arch")
+    enablement_event.record_trigger(
+        enablement_event.LaneTrigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="missing_model_arch")
+    )
     lane = coord.enablement_lane
     lane._environment_verdict = lambda: None
 
@@ -498,7 +502,9 @@ async def test_a_round_still_open_leaves_one_unruled_row(_bound_session):
 @pytest.mark.asyncio
 async def test_an_unclassifiable_failure_is_recorded_without_a_round(_bound_session):
     lane = _lane(_bound_session)
-    enablement_event.record_trigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="unknown")
+    enablement_event.record_trigger(
+        enablement_event.LaneTrigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="unknown")
+    )
 
     await lane._maybe_record_enablement_human_review("Segmentation fault (core dumped)")
 
@@ -646,7 +652,9 @@ def test_the_build_executor_records_the_build_it_ran(_bound_session):
             "attempt_root": "/s/enablement/builds/build-7",
         },
     )
-    enablement_event.record_trigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="compiled_miss")
+    enablement_event.record_trigger(
+        enablement_event.LaneTrigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="compiled_miss")
+    )
 
     TargetedBuildExecutor._record_result(result, None, task_id="build-7")
 
@@ -687,9 +695,11 @@ def test_an_exception_the_lane_did_not_raise_is_not_named_on_it(_bound_session):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     enablement_event.record_trigger(
-        origin=enablement_event.ORIGIN_EVAL,
-        mode="all",
-        kind="accuracy_below_floor",
+        enablement_event.LaneTrigger(
+            origin=enablement_event.ORIGIN_EVAL,
+            mode="all",
+            kind="accuracy_below_floor",
+        ),
     )
     coordinator = types.SimpleNamespace(
         phase_kernel=types.SimpleNamespace(timeline=lambda: None),
@@ -717,10 +727,12 @@ async def test_a_raising_pump_is_named_on_the_event(_bound_session):
     handler, which no longer speaks for it -- see the test above.
     """
     enablement_event.record_trigger(
-        origin=enablement_event.ORIGIN_BOOT,
-        mode="all",
-        kind="import_error",
-        evidence="ImportError: cannot import name 'fused_moe'",
+        enablement_event.LaneTrigger(
+            origin=enablement_event.ORIGIN_BOOT,
+            mode="all",
+            kind="import_error",
+            evidence="ImportError: cannot import name 'fused_moe'",
+        ),
     )
 
     async def _boom() -> None:

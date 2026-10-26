@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import time
@@ -15,7 +16,7 @@ from typing import Any
 
 from kernelforge.cli.lanes import LaneBinding
 from kernelforge.config import Config, resolve_agent_model
-from kernelforge.llm.gateway import (
+from kernelforge.agent_backends.gateway import (
     anthropic_environment_from_openai,
     openai_gateway_from_anthropic,
     resolve_openai_gateway,
@@ -33,6 +34,8 @@ from kernelforge.loop.agent_relay import (
 )
 from kernelforge.loop.search_actors import SearchActorBundle, SearchActorPool
 from kernelforge.orchestrator.agent import ImplementerSetup
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -118,11 +121,15 @@ def resolve_relay_policy(
     *,
     blockage_threshold: int = 3,
 ) -> AgentRelayPolicy:
-    """One relay member per registered provider, the provider this campaign starts on first as primary."""
-    from kernelforge.agent_backends.registry import list_agent_providers
+    """One relay member per auto-selectable provider, the provider this campaign starts on first as primary.
+
+    A provider only an explicit name reaches joins the relay only as the primary that name chose.
+    """
+    from kernelforge.agent_backends.registry import get_agent_provider, list_agent_providers
 
     primary = replace(config, agent_fallback_provider="").agent_runtime().provider
-    providers = [primary, *(provider for provider in list_agent_providers() if provider != primary)]
+    members = (name for name in list_agent_providers() if name != primary and get_agent_provider(name).auto_selectable)
+    providers = [primary, *members]
     return AgentRelayPolicy(
         primary_profile_id=primary,
         profiles=tuple(AgentProfileSpec(provider, provider) for provider in providers),
@@ -462,7 +469,8 @@ def _provider_is_available(registration) -> tuple[bool, str]:
     try:
         if not registration.availability():
             return False, "provider SDK or CLI is not installed"
-    except Exception as error:  # noqa: BLE001 - third-party provider predicate
+    except Exception as error:  # third-party provider predicate
+        log.warning("Agent provider availability check failed: %s", error, exc_info=True)
         return False, f"{type(error).__name__}: {error}"
     return True, ""
 

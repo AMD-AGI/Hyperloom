@@ -40,7 +40,7 @@ def coordinator(session_dir, monkeypatch):
     coord = Coordinator(session_dir, backends={"orchestration": orchestration, "critic": MockCriticBackend()})
     coord._run_deadline = SimpleNamespace(remaining=lambda: SESSION_LEFT)
     monkeypatch.setattr(SharedState, "closing_reserve_sec", lambda _self: CLOSING_RESERVE)
-    monkeypatch.setattr(ps, "phase_seconds_left", lambda _state, **_kw: PHASE_LEFT)
+    monkeypatch.setattr(ps, "phase_budget_remaining_seconds", lambda _state, **_kw: PHASE_LEFT)
     state = coord.shared_state
     state.baseline_runtime_sec = BOOT + BENCH
     state.baseline_post_ready_runtime_sec = BENCH
@@ -76,7 +76,7 @@ def test_without_a_measured_baseline_geak_holds_back_the_benchmark_hard_cap(coor
 
 
 def test_geak_gets_no_time_when_the_measurement_alone_overruns_the_phase(coordinator, monkeypatch):
-    monkeypatch.setattr(ps, "phase_seconds_left", lambda _state, **_kw: ONE_ROUND + SPARE - 1.0)
+    monkeypatch.setattr(ps, "phase_budget_remaining_seconds", lambda _state, **_kw: ONE_ROUND + SPARE - 1.0)
 
     runner, kill, budget_known = coordinator.phase_kernel._geak_timeouts()
 
@@ -92,9 +92,8 @@ def test_geak_gets_no_time_when_the_measurement_alone_overruns_the_phase(coordin
 def test_the_rewrite_controller_returns_with_one_measurement_left_in_the_phase(
     coordinator, monkeypatch, phase_left, hard_expected
 ):
-    monkeypatch.setattr(ps, "phase_seconds_left", lambda _state, **_kw: phase_left)
+    monkeypatch.setattr(ps, "phase_budget_remaining_seconds", lambda _state, **_kw: phase_left)
     monkeypatch.setattr(ps, "session_remaining_seconds", lambda _state, **_kw: SESSION_LEFT)
-    monkeypatch.setattr(ps, "phase_cap_seconds", lambda _state: None)
 
     soft, hard = coordinator.phase_kernel._kernel_rewrite_controller_timeouts()
 

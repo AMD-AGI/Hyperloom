@@ -27,7 +27,7 @@ from typing import Any, Callable, NamedTuple
 # same thing on the same signal, so it waits exactly as long.
 from hyperloom.common.env import env_flag
 from hyperloom.common.proctree import TERM_GRACE_SEC as TERM_GRACE_SECONDS
-from hyperloom.common.proctree import collect_tree, kill_tree, signal_group
+from hyperloom.common.proctree import collect_tree, kill_tree, marked_pids, signal_group
 
 from .bypass_analysis import parse_server_log_throughput
 
@@ -38,6 +38,9 @@ log = logging.getLogger(__name__)
 
 # How long the reaper waits to collect the SIGKILL'd child before giving up on it.
 _REAP_COLLECT_SECONDS: float = 1.0
+
+#: Set in a run's env, its value marks the run: whatever inherited it is reaped on every exit path, however it detached.
+REAP_MARK_ENV: str = "HYPERLOOM_REAP_MARK"
 
 # How long draining a reaped child's capture threads is given.
 _CAPTURE_DRAIN_SECONDS: float = 2.0
@@ -74,11 +77,15 @@ def kill_my_spawned_server(
     proc: subprocess.Popen | None,
     *,
     grace_seconds: float = TERM_GRACE_SECONDS,
+    mark: str = "",
 ) -> None:
-    """Tear down the entire process tree rooted at ``proc``."""
+    """Tear down the entire process tree rooted at ``proc``, and every process carrying ``mark`` in its environment."""
     if proc is None:
         return
+    marked = marked_pids(REAP_MARK_ENV, mark) if mark else []
     if proc.poll() is not None:
+        if marked:
+            kill_tree(collect_tree(marked), grace_sec=grace_seconds, confirm_sec=grace_seconds)
         return
     if os.name != "posix":
         try:
@@ -121,7 +128,7 @@ def kill_my_spawned_server(
         return
 
     try:
-        tree = collect_tree([proc.pid])
+        tree = collect_tree([proc.pid, *marked])
     except OSError as exc:
         # Every caller reaps from a ``finally:``, so an unreadable procfs has to
         # be reported rather than raised on top of whatever sent us here.
@@ -810,7 +817,7 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
     if not env_flag(_KV_METRICS_ENV, default=True):
         return None
     try:
-        from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder
+        from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder, KvRound
 
         workspace = Path(server_log_path).parent
         return KvMetricsRecorder(
@@ -820,15 +827,17 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
             # Authoritative phase boundaries when this round is an AgentX one; a no-op otherwise, since no other client
             # publishes a progress address and the poller then never resolves a URL.
             progress=AiperfProgressPoller(workspace),
-            output_path=str(workspace / KV_ARTIFACT_NAME),
-            scope={
-                "server_log_path": str(server_log_path),
-                "workspace": workspace.name,
-                "run_path": _run_relative_path(workspace),
-                "session": os.path.basename(
-                    os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
-                ),
-            },
+            kv_round=KvRound(
+                output_path=str(workspace / KV_ARTIFACT_NAME),
+                scope={
+                    "server_log_path": str(server_log_path),
+                    "workspace": workspace.name,
+                    "run_path": _run_relative_path(workspace),
+                    "session": os.path.basename(
+                        os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
+                    ),
+                },
+            ),
         )
     except Exception:
         log.warning("kv_metrics: recorder could not be built; this round collects nothing", exc_info=True)
@@ -896,27 +905,34 @@ def _run_relative_path(workspace: Path) -> str:
     return workspace.name
 
 
+@dataclass(frozen=True)
+class RoundWatch:
+    """The stop gates the watchdog enforces on one round and the server log it watches."""
+
+    timeout: int | float | None = None
+    server_log_path: str | None = None
+    silence_timeout_sec: float | None = None
+    server_already_ready: bool = False
+    session_deadline_sec: float | None = None
+
+
 def run_with_session_kill(
     cmd: list[str],
     *,
     env: dict[str, str] | None = None,
     cwd: str | None = None,
-    timeout: int | float | None = None,
-    text: bool = True,
-    server_log_path: str | None = None,
-    silence_timeout_sec: float | None = None,
-    server_already_ready: bool = False,
+    watch: RoundWatch = RoundWatch(),
     on_output: Callable[[], None] | None = None,
-    session_deadline_sec: float | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run a subprocess in its own session and reap descendants on every exit path."""
+    """Run a subprocess in its own session and reap descendants, and what carries ``REAP_MARK_ENV``, on every exit path."""
     child_env = dict(os.environ if env is None else env)
-    if silence_timeout_sec is not None:
+    mark = child_env.get(REAP_MARK_ENV, "")
+    if watch.silence_timeout_sec is not None:
         child_env["PYTHONUNBUFFERED"] = "1"
-    scan_offsets = _stale_scan_log_sizes(server_log_path) if server_log_path else {}
+    scan_offsets = _stale_scan_log_sizes(watch.server_log_path) if watch.server_log_path else {}
     proc: subprocess.Popen | None = None
     capture: _StreamCapture | None = None
-    empty: str | bytes = "" if text else b""
+    empty = ""
     try:
         with cancel_scope_listener() as cancel_scope:
             started_at = time.monotonic()
@@ -929,31 +945,23 @@ def run_with_session_kill(
                 cwd=cwd,
                 **new_session_kwargs(),
             )
-            capture = _StreamCapture(proc, text=text, on_output=on_output)
+            capture = _StreamCapture(proc, text=True, on_output=on_output)
             capture.start()
             try:
                 stdout, stderr = _communicate_with_watchdog(
                     proc,
-                    _WatchedRound(
-                        hard_timeout=timeout,
-                        server_log_path=server_log_path,
-                        silence_timeout_sec=silence_timeout_sec,
-                        server_already_ready=server_already_ready,
-                        session_deadline_sec=session_deadline_sec,
-                        started_at=started_at,
-                        scan_offsets=scan_offsets,
-                    ),
+                    _WatchedRound(watch, started_at=started_at, scan_offsets=scan_offsets),
                     capture=capture,
                     cancel_scope=cancel_scope,
-                    recorders=_build_round_recorders(server_log_path, child_env),
+                    recorders=_build_round_recorders(watch.server_log_path, child_env),
                 )
             except subprocess.TimeoutExpired as exc:
-                kill_my_spawned_server(proc)
-                exc.output, exc.stderr = _finish_capture(capture, text=text)
+                kill_my_spawned_server(proc, mark=mark)
+                exc.output, exc.stderr = _finish_capture(capture, text=True)
                 raise
             except _ReapedByWatchdog as exc:
-                kill_my_spawned_server(proc)
-                stdout, stderr = _finish_capture(capture, text=text)
+                kill_my_spawned_server(proc, mark=mark)
+                stdout, stderr = _finish_capture(capture, text=True)
                 log.log(
                     exc.log_level,
                     "_subprocess_kill: %s; reaped the tree with sentinel returncode=%d.",
@@ -973,7 +981,7 @@ def run_with_session_kill(
                 stderr=stderr if stderr is not None else empty,
             )
     finally:
-        kill_my_spawned_server(proc)
+        kill_my_spawned_server(proc, mark=mark)
 
 
 def _finish_capture(capture: _StreamCapture | None, *, text: bool) -> tuple[str | bytes, str | bytes]:
@@ -1046,32 +1054,28 @@ class _ServerStalledDetected(_ReapedByWatchdog):
 
 @dataclass(frozen=True)
 class _WatchedRound:
-    """The stop gates the watchdog enforces on one round and the log baseline it scans from.
+    """One round's watch and the log baseline it scans from.
 
     ``started_at`` defaults to the moment the watch begins and ``scan_offsets`` to reading every log from its start.
     """
 
-    hard_timeout: int | float | None
-    server_log_path: str | None = None
-    silence_timeout_sec: float | None = None
-    server_already_ready: bool = False
-    session_deadline_sec: float | None = None
+    watch: RoundWatch
     started_at: float | None = None
     scan_offsets: dict[str, int] | None = None
 
     def enforce_stop_gates(self, proc: subprocess.Popen, scope: CancelScope | None, now: float, elapsed: float) -> None:
         """Raise as soon as the session budget, an orchestrator cancellation or the round cap is spent."""
-        if self.session_deadline_sec is not None and now >= self.session_deadline_sec:
-            raise _SessionDeadlineExceeded(overrun_sec=now - self.session_deadline_sec, elapsed_sec=elapsed)
+        if self.watch.session_deadline_sec is not None and now >= self.watch.session_deadline_sec:
+            raise _SessionDeadlineExceeded(overrun_sec=now - self.watch.session_deadline_sec, elapsed_sec=elapsed)
         if scope is not None and scope.cancelled:
             raise _OrchestratorCancelled(reason=scope.reason, elapsed_sec=elapsed)
-        if self.hard_timeout is not None and elapsed >= self.hard_timeout:
-            raise subprocess.TimeoutExpired(proc.args, self.hard_timeout)
+        if self.watch.timeout is not None and elapsed >= self.watch.timeout:
+            raise subprocess.TimeoutExpired(proc.args, self.watch.timeout)
 
     def poll_slice_sec(self, now: float, elapsed: float, silence_remaining: float | None) -> float:
         """How long to wait on the child before the nearest armed gate has to be re-checked."""
-        hard = None if self.hard_timeout is None else self.hard_timeout - elapsed
-        session = None if self.session_deadline_sec is None else self.session_deadline_sec - now
+        hard = None if self.watch.timeout is None else self.watch.timeout - elapsed
+        session = None if self.watch.session_deadline_sec is None else self.watch.session_deadline_sec - now
         return min(sec for sec in (STOP_GATE_POLL_SECONDS, hard, session, silence_remaining) if sec is not None)
 
 
@@ -1123,13 +1127,13 @@ def _communicate_with_watchdog(
     cancel_scope: CancelScope | None = None,
 ) -> tuple[str | bytes, str | bytes]:
     """Wait for exit, enforcing cancellation, session budget and explicit round caps."""
-    server_log_path = watched.server_log_path
-    silence_timeout_sec = watched.silence_timeout_sec
+    server_log_path = watched.watch.server_log_path
+    silence_timeout_sec = watched.watch.silence_timeout_sec
     start = time.monotonic() if watched.started_at is None else watched.started_at
     cursor = _LogCursor(watched.scan_offsets if watched.scan_offsets is not None else {})
     activity = _RoundActivity(started_at=start, cursor=cursor, last_activity_at=start)
     completed = False
-    if watched.server_already_ready:
+    if watched.watch.server_already_ready:
         recorders.note_phase(_READY_PHASE, start)
         if server_log_path:
             stamp_server_ready(server_log_path, 0.0)
@@ -1144,12 +1148,12 @@ def _communicate_with_watchdog(
             elapsed = now - start
             watched.enforce_stop_gates(proc, cancel_scope, now, elapsed)
             activity.note_log_progress(server_log_path, recorders, capture, now)
-            server_is_live = activity.ready or watched.server_already_ready
+            server_is_live = activity.ready or watched.watch.server_already_ready
             if server_is_live or activity.reusing_warm_server(server_log_path, elapsed):
                 recorders.tick(now)
             silence_remaining = activity.silence_remaining_sec(silence_timeout_sec, now)
             if silence_remaining is not None and silence_remaining <= 0:
-                raise _ServerStalledDetected(grace_sec=watched.silence_timeout_sec, elapsed_sec=elapsed)
+                raise _ServerStalledDetected(grace_sec=watched.watch.silence_timeout_sec, elapsed_sec=elapsed)
             slice_sec = watched.poll_slice_sec(now, elapsed, silence_remaining)
             try:
                 if capture is None:
@@ -1173,6 +1177,7 @@ __all__ = [
     "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
     "INFERENCEX_CHECKOUT_INVALID_RETURNCODE",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
+    "RoundWatch",
     "SERVER_DEAD_RETURNCODE",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "STOP_GATE_POLL_SECONDS",

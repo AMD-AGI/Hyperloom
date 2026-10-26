@@ -21,7 +21,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.inference_optimizer.framework_paths import point_session_framework_root
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.reference_script import ServingTarget
-from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, is_env_fault, load_boot_observation, observation_summary
+from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, load_boot_observation, observation_summary
 from ..collaborator import CoordinatorCollaborator
 from hyperloom.inference_optimizer.breakdown.round_archive import ROLE_LAUNCH_CONFIG, RoundArchive
 from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
@@ -44,6 +44,9 @@ log = _logging.getLogger(__name__)
 
 #: Shortest lease a renewal may stamp.
 _MIN_LEASE_SEC = 300.0
+
+#: The outcome a result that moved the lane settles its round with; any other result is a stall.
+_MOVED_ROUND_OUTCOMES = {"kept": BOOTED, "advanced": ADVANCED}
 
 
 def bind_integrate_to_lane(params: dict[str, Any], state: Any, *, session_dir: Path) -> None:
@@ -215,18 +218,8 @@ class EnablementLane(CoordinatorCollaborator):
             routes to CLOSE on the next tick through ``_global_terminal``.
         """
         state = self.shared_state
-        loaded = load_boot_observation(state.enablement.launch_observation_path)
-        observation = loaded.observation
-        fault, detail = "", ""
-        if observation is not None and is_env_fault(observation):
-            excerpt = observation.excerpt
-            fault = str(observation.env_fault)
-            detail = (excerpt.text if excerpt is not None else "").replace("\n", " | ")
-        else:
-            verdict = self._environment_verdict()
-            if verdict is not None and verdict.terminal:
-                fault, detail = verdict.fault, verdict.detail
-        if not fault:
+        verdict = self._environment_verdict()
+        if verdict is None or not verdict.terminal:
             return False
         if not state.stop_reason:
             state.set_stop_reason(ENV_FAULT)
@@ -234,8 +227,8 @@ class EnablementLane(CoordinatorCollaborator):
             log.error(
                 "ENABLEMENT: this host cannot run the combo (%s); stopping the run rather than "
                 "authoring a framework patch for it -- %s",
-                fault,
-                detail,
+                verdict.fault,
+                verdict.detail,
             )
         return True
 
@@ -243,25 +236,20 @@ class EnablementLane(CoordinatorCollaborator):
         """Ask the host, structurally, whether it can run this combo.
 
         Returns:
-            EnvVerdict | None: The host's verdict, or ``None`` when the checks
-            could not be made -- they stat a checkout on a network mount and
-            open a socket, and neither failing is evidence about the host.
+            EnvVerdict | None: The host's verdict, or ``None`` when the check
+            could not be made -- it stats a checkout on a network mount, and
+            that failing is no evidence about the host.
         """
         from hyperloom.common.env_safety import build_benchmark_env
 
         from ..bringup import check_environment
 
-        state = self.shared_state
         try:
-            launch_env = build_benchmark_env()
+            # The session's own resolved checkpoint. The launch env is a
+            # scrubbed environ that only the CLI exports MODEL_PATH into,
+            # so reading it alone turns this check off everywhere else.
             return check_environment(
-                framework=state.framework or os.environ.get("FRAMEWORK", ""),
-                # The session's own resolved checkpoint. The launch env is a
-                # scrubbed environ that only the CLI exports MODEL_PATH into,
-                # so reading it alone turns this check off everywhere else.
-                model=state.model_path or launch_env.get("MODEL_PATH", ""),
-                port=int(launch_env.get("PORT") or 0),
-                launch_env=launch_env,
+                model=self.shared_state.model_path or build_benchmark_env().get("MODEL_PATH", ""),
             )
         except OSError:
             log.debug("enablement: environment preflight could not be made", exc_info=True)
@@ -299,7 +287,6 @@ class EnablementLane(CoordinatorCollaborator):
                     params=params,
                     idempotency_key=holder,
                     requires_lanes=lanes,
-                    side_effects=["writes_results", "writes_patches"],
                     lease_ttl_sec=lease_ttl_sec,
                     task_id=holder,
                     dispatch_class="coordinator",
@@ -435,6 +422,39 @@ class EnablementLane(CoordinatorCollaborator):
         if await self.tasks.cancel_if_queued(holder, kind="specialist", reason="enablement_round_settled"):
             log.info("ENABLEMENT: cancelled specialist %s; its round was settled before it started", holder)
 
+    async def on_baseline_promoted(self) -> None:
+        """Take a baseline promoted outside a pending revalidation: an anchor ends a boot-origin lane.
+
+        A boot-origin lane exists to make the combo boot, so an anchor reached by any route leaves it nothing to
+        bring up. An eval-origin lane starts from a combo that already boots; only its revalidation ends it.
+        """
+        state = self.shared_state
+        if (
+            (state.phase or "").strip().upper() == PHASE_ENABLEMENT
+            and state.enablement.origin != "eval"
+            and state.enablement.accepts_rounds
+            and float(state.baseline_tput or 0.0) > 0.0
+        ):
+            await self.close_booted(reason="baseline anchored")
+            return
+        state.enablement.origin = ""
+        state.enablement.pending = False
+
+    async def close_booted(self, *, reason: str) -> None:
+        """End the lane on a combo that boots: mark it succeeded, settle its open round and close its event.
+
+        Once the lane no longer accepts rounds, an integrate that executes afterwards is graded as any other
+        candidate rather than as an enablement round.
+        """
+        enablement = self.shared_state.enablement
+        enablement.succeeded = True
+        enablement.validation_pending = False
+        enablement.revalidation_task_id = ""
+        enablement.origin = ""
+        enablement.pending = False
+        await self.settle_enablement_round(BOOTED, reason=reason)
+        await self.close_lane_event(outcome=enablement_event.OUTCOME_SUCCEEDED, reason=reason)
+
     async def close_lane_event(self, *, outcome: str, reason: str) -> None:
         """Close the enablement lane's event on the terminal it just reached.
 
@@ -514,7 +534,7 @@ class EnablementLane(CoordinatorCollaborator):
             signature.kind,
         )
 
-    async def maybe_rearm_enablement(self, res: dict[str, Any] | None) -> None:
+    async def maybe_rearm_enablement(self, res: dict[str, Any]) -> None:
         """Re-arm, advance, or terminate the enablement retry loop.
 
         Called on every ``integrate_patch`` completion. An enablement patch has
@@ -530,25 +550,23 @@ class EnablementLane(CoordinatorCollaborator):
         from a specialist the lane never dispatched leaves it untouched.
 
         Args:
-            res: The integrate_patch result dict (may be ``None`` / non-dict).
+            res: The integrate_patch result dict.
         """
-        if not isinstance(res, dict) or not res.get("enablement"):
+        if not res.get("enablement"):
             return
         state = self.shared_state
         status = str(res.get("status") or "")
-        is_advanced = status == "advanced" or bool(res.get("advanced"))
-        stop_set = ""
         # Only a real specialist round carries this; targeted_build rearm rows
         # do not, and must not clear it.
         spec_tid = str(res.get("specialist_task_id") or "").strip()
-        if await _is_foreign_stall(self.rounds, spec_tid, status=status, moved=status == "kept" or is_advanced):
+        if await _is_foreign_stall(self.rounds, spec_tid, status=status):
             return
         if spec_tid:
             state.enablement.last_specialist_task_id = spec_tid
 
         if status == "kept":
             _rearm_on_kept(state, res)
-        elif is_advanced:
+        elif status == "advanced":
             _rearm_on_advanced(state, res)
         # A round that bought no ground gets no branch of its own: it is charged
         # by the FAILED settle below, which the pre-hoc ``consecutive_stalled``
@@ -563,40 +581,8 @@ class EnablementLane(CoordinatorCollaborator):
         # The ordinal the dispatch filed this round under, read before the
         # settle scores it, so every row of this round meets on the same number.
         attempt = await self.rounds.consecutive_stalled() + 1
-        setting_script = ""
-        archive = RoundArchive(self.session_dir)
-        try:
-            archive = snapshot_round(self.session_dir, res)
-            # Where the copies come into being, and from the archive rather
-            # than from ``res``. Inside the try so that a snapshot which raised
-            # leaves the row silent instead of claiming nothing landed.
-            enablement_event.record_archive(
-                task_id=_round_task_id(state, res),
-                attempt=attempt,
-                files=archive.to_list(),
-            )
-            if status in ("kept", "advanced"):
-                setting_script = write_setting_script(
-                    self.session_dir,
-                    state.enablement,
-                    framework=state.framework or os.environ.get("FRAMEWORK") or "sglang",
-                    target=ServingTarget(
-                        model=os.environ.get("MODEL_PATH") or state.model_path or state.reference_model,
-                        tp=state.tp or None,
-                        max_model_len=state.max_model_len or None,
-                        gpu_type=state.gpu_type or os.environ.get("GPU_TYPE") or None,
-                    ),
-                )
-        except Exception:
-            log.warning("enablement: artifact write failed", exc_info=True)
-        # Absolute and not the session-relative path the archive records: the
-        # revalidation baseline opens this file directly. Only a copy that
-        # landed overrides the ``runs/`` original the round reported, since a
-        # later reader resolves nothing under ``runs/``.
-        archived_config = archive.path_for(ROLE_LAUNCH_CONFIG)
-        if status == "kept" and archived_config:
-            state.enablement.accepted_config_path = str(Path(self.session_dir) / archived_config)
-        outcome = await _answered_round_outcome(self.rounds, spec_tid, status=status, is_advanced=is_advanced)
+        setting_script = _archive_round(state, res, self.session_dir, attempt)
+        outcome = await _answered_round_outcome(self.rounds, spec_tid, status=status)
         if outcome:
             await self.settle_enablement_round(outcome, reason=status)
         # Recorded after the accepted path is settled, because the row carries
@@ -607,7 +593,6 @@ class EnablementLane(CoordinatorCollaborator):
             res,
             RoundSettlement(
                 setting_script=setting_script,
-                stop_reason=stop_set,
                 attempt=attempt,
                 stall_streak=await self.rounds.consecutive_stalled(),
             ),
@@ -615,12 +600,11 @@ class EnablementLane(CoordinatorCollaborator):
         )
         state.save(self.session_dir)
         log.info(
-            "ENABLEMENT: rearm from integrate status=%s succeeded=%s advanced=%s stacked=%d%s",
+            "ENABLEMENT: rearm from integrate status=%s succeeded=%s advanced=%s stacked=%d",
             status,
             bool(state.enablement.succeeded),
-            is_advanced,
+            status == "advanced",
             len(state.enablement.kept_patches),
-            f" stop_reason={stop_set}" if stop_set else "",
         )
 
     async def pump_enablement_safely(self) -> None:
@@ -769,13 +753,11 @@ class RoundSettlement:
 
     Attributes:
         setting_script: Session-relative path of the exported setting script.
-        stop_reason: Set only when this round hit the stall cap.
         attempt: The ordinal the dispatch filed the round under.
         stall_streak: Consecutive stalled rounds after this one settled.
     """
 
     setting_script: str
-    stop_reason: str
     attempt: int
     stall_streak: int
 
@@ -811,9 +793,9 @@ def _authoring_round_id(holder: str) -> str:
     return f"enablement-{holder}"
 
 
-async def _is_foreign_stall(rounds: Any, spec_tid: str, *, status: str, moved: bool) -> bool:
+async def _is_foreign_stall(rounds: Any, spec_tid: str, *, status: str) -> bool:
     """Whether this result bought nothing for a specialist the lane never dispatched."""
-    if not spec_tid or moved or await rounds.get(_authoring_round_id(spec_tid)) is not None:
+    if not spec_tid or status in _MOVED_ROUND_OUTCOMES or await rounds.get(_authoring_round_id(spec_tid)) is not None:
         return False
     log.info(
         "ENABLEMENT: integrate for specialist %s, which the lane did not dispatch, bought nothing (%s); "
@@ -824,7 +806,7 @@ async def _is_foreign_stall(rounds: Any, spec_tid: str, *, status: str, moved: b
     return True
 
 
-async def _answered_round_outcome(rounds: Any, spec_tid: str, *, status: str, is_advanced: bool) -> str:
+async def _answered_round_outcome(rounds: Any, spec_tid: str, *, status: str) -> str:
     """The outcome to settle the held round with, or ``""`` when this result answers none.
 
     A kept or advanced patch settles whichever round is held: the wall that
@@ -834,10 +816,10 @@ async def _answered_round_outcome(rounds: Any, spec_tid: str, *, status: str, is
     cap must not charge it.
     """
     held = await rounds.held()
-    moved = status == "kept" or is_advanced
+    moved = status in _MOVED_ROUND_OUTCOMES
     if held is None or not (moved or not spec_tid or held.round_id == _authoring_round_id(spec_tid)):
         return ""
-    return BOOTED if status == "kept" else ADVANCED if is_advanced else FAILED
+    return _MOVED_ROUND_OUTCOMES.get(status, FAILED)
 
 
 def _round_task_id(state: Any, res: dict[str, Any]) -> str:
@@ -847,6 +829,48 @@ def _round_task_id(state: Any, res: dict[str, Any]) -> str:
     the dispatch filed stands in.
     """
     return str(res.get("specialist_task_id") or "").strip() or str(state.enablement.last_specialist_task_id or "")
+
+
+def _archive_round(state: Any, res: dict[str, Any], session_dir: str | Path, attempt: int) -> str:
+    """Archive one round's deliverables, and export the setting script of a round that moved the lane.
+
+    Returns:
+        str: The setting script's session-relative path, ``""`` when none was written.
+    """
+    setting_script = ""
+    archive = RoundArchive(session_dir)
+    try:
+        archive = snapshot_round(session_dir, res)
+        # Where the copies come into being, and from the archive rather
+        # than from ``res``. Inside the try so that a snapshot which raised
+        # leaves the row silent instead of claiming nothing landed.
+        enablement_event.record_archive(
+            task_id=_round_task_id(state, res),
+            attempt=attempt,
+            files=archive.to_list(),
+        )
+        if res.get("status") in _MOVED_ROUND_OUTCOMES:
+            setting_script = write_setting_script(
+                session_dir,
+                state.enablement,
+                framework=state.framework or os.environ.get("FRAMEWORK") or "sglang",
+                target=ServingTarget(
+                    model=os.environ.get("MODEL_PATH") or state.model_path or state.reference_model,
+                    tp=state.tp or None,
+                    max_model_len=state.max_model_len or None,
+                    gpu_type=state.gpu_type or os.environ.get("GPU_TYPE") or None,
+                ),
+            )
+    except Exception:
+        log.warning("enablement: artifact write failed", exc_info=True)
+    # Absolute and not the session-relative path the archive records: the
+    # revalidation baseline opens this file directly. Only a copy that
+    # landed overrides the ``runs/`` original the round reported, since a
+    # later reader resolves nothing under ``runs/``.
+    archived_config = archive.path_for(ROLE_LAUNCH_CONFIG)
+    if res.get("status") == "kept" and archived_config:
+        state.enablement.accepted_config_path = str(Path(session_dir) / archived_config)
+    return setting_script
 
 
 def _record_enablement_round(
@@ -859,11 +883,9 @@ def _record_enablement_round(
 
     A function of the lane state rather than a method, because it needs nothing
     of the coordinator: the round's own facts are in ``res`` and the terminal it
-    reached is what the rearm just wrote to ``state``. ``stop_reason`` is set
-    only when this round hit the stall cap, and ``attempt`` is the ordinal the
-    dispatch filed it under.
+    reached is what the rearm just wrote to ``state``. ``attempt`` is the
+    ordinal the dispatch filed it under.
     """
-    stop_reason = settlement.stop_reason
     stall_streak = settlement.stall_streak
     lane = state.enablement
     succeeded = bool(lane.succeeded)
@@ -878,18 +900,14 @@ def _record_enablement_round(
         )
     )
     # A KEEP opens a revalidation window, so succeeded is only set by the
-    # promote path, not here. This branch fires only after the stall cap.
-    if succeeded:
-        outcome, reason = enablement_event.OUTCOME_SUCCEEDED, str(res.get("status") or "")
-    elif stop_reason:
-        outcome, reason = enablement_event.OUTCOME_STALLED, stop_reason
-    else:
+    # promote path, not here.
+    if not succeeded:
         return
     _finish_lane_event(
         state,
         LaneEnd(
-            outcome=outcome,
-            reason=reason,
+            outcome=enablement_event.OUTCOME_SUCCEEDED,
+            reason=str(res.get("status") or ""),
             stall_streak=int(stall_streak or 0),
             setting_script=settlement.setting_script,
         ),

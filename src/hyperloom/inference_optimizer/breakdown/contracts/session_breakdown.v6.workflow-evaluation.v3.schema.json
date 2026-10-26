@@ -1333,7 +1333,6 @@
       "required": [
         "current_balance",
         "remaining_sec",
-        "cap_sec",
         "entry_elapsed_sec",
         "cumulative_elapsed_sec"
       ],

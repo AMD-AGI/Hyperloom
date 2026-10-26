@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.kernel import request_handlers as rh
+from hyperloom.orchestrator.kernel import _forge_gemm_tuning as forge_gemm_tuning
+from hyperloom.orchestrator.kernel import _forge_shapes as forge_shapes
+from hyperloom.orchestrator.kernel import serving_log_evidence as serving_log_evidence
 
 # A real aiter hit line, copied from a fleet server.log.
 HIT = (
@@ -36,42 +38,42 @@ def _log(path: Path, text: str) -> Path:
 
 class TestEvidenceDetection:
     def test_a_hit_line_is_evidence(self, tmp_path):
-        assert rh._log_has_aiter_evidence(_log(tmp_path / "a.log", HIT.format(m=128)))
+        assert serving_log_evidence._log_has_aiter_evidence(_log(tmp_path / "a.log", HIT.format(m=128)))
 
     def test_a_miss_line_is_also_evidence(self, tmp_path):
         # A miss still proves the process routed a GEMM through aiter, which is what makes the log a usable shape
         # source.
-        assert rh._log_has_aiter_evidence(_log(tmp_path / "a.log", MISS.format(m=128)))
+        assert serving_log_evidence._log_has_aiter_evidence(_log(tmp_path / "a.log", MISS.format(m=128)))
 
     def test_a_quiet_log_is_not_evidence(self, tmp_path):
-        assert not rh._log_has_aiter_evidence(_log(tmp_path / "a.log", QUIET))
+        assert not serving_log_evidence._log_has_aiter_evidence(_log(tmp_path / "a.log", QUIET))
 
     def test_a_missing_file_is_not_evidence(self, tmp_path):
-        assert not rh._log_has_aiter_evidence(tmp_path / "nope.log")
+        assert not serving_log_evidence._log_has_aiter_evidence(tmp_path / "nope.log")
 
     def test_a_marker_straddling_a_chunk_boundary_is_still_found(self, tmp_path, monkeypatch):
         # Fleet logs are ~17MB, so the scan is chunked; the overlap must cover a marker split across two reads.
-        monkeypatch.setattr(rh, "_LOG_SCAN_CHUNK", 16)
+        monkeypatch.setattr(serving_log_evidence, "_LOG_SCAN_CHUNK", 16)
         text = "x" * 10 + HIT.format(m=128)
-        assert rh._log_has_aiter_evidence(_log(tmp_path / "a.log", text))
+        assert serving_log_evidence._log_has_aiter_evidence(_log(tmp_path / "a.log", text))
 
     def test_evidence_late_in_a_large_log_is_found(self, tmp_path):
         text = ("noise line\n" * 200_000) + HIT.format(m=99)
-        assert rh._log_has_aiter_evidence(_log(tmp_path / "a.log", text))
+        assert serving_log_evidence._log_has_aiter_evidence(_log(tmp_path / "a.log", text))
 
     def test_a_moe_only_log_is_evidence_too(self, tmp_path):
         # The resolved log is not only a dense-shape source: kernelforge's router reads it for MoE stage coverage and
         # 1-stage ASM detection, which parse [fused_moe] lines.
-        assert rh._log_has_aiter_evidence(_log(tmp_path / "a.log", MOE))
-        assert rh._log_has_aiter_evidence(_log(tmp_path / "b.log", "Mxfp4 MoE backend selected\n"))
+        assert serving_log_evidence._log_has_aiter_evidence(_log(tmp_path / "a.log", MOE))
+        assert serving_log_evidence._log_has_aiter_evidence(_log(tmp_path / "b.log", "Mxfp4 MoE backend selected\n"))
 
     def test_a_moe_only_log_yields_no_dense_tokens(self, tmp_path):
         # ...and it must not invent any: --tokens comes from dense M only.
-        assert rh._tokens_from_serving_log(_log(tmp_path / "a.log", MOE)) == ""
+        assert serving_log_evidence._tokens_from_serving_log(_log(tmp_path / "a.log", MOE)) == ""
 
     def test_a_dispatch_line_at_m_zero_is_still_evidence(self, tmp_path):
         # The M counter skips 0, so an evidence check derived from its output read this log as silent.
-        assert rh._log_has_aiter_evidence(_log(tmp_path / "a.log", HIT.format(m=0)))
+        assert serving_log_evidence._log_has_aiter_evidence(_log(tmp_path / "a.log", HIT.format(m=0)))
 
 
 class TestSelection:
@@ -80,7 +82,7 @@ class TestSelection:
         _log(ws / "server.log", QUIET)
         good = _log(tmp_path / "runs" / "baseline" / "h0" / "warmup_round" / "b0" / "server.log", HIT.format(m=256))
 
-        picked = rh._resolve_forge_server_log(_State(current_best={"workspace": str(ws)}), tmp_path)
+        picked = serving_log_evidence.resolve_forge_server_log(_State(current_best={"workspace": str(ws)}), tmp_path)
 
         assert picked == str(good)
 
@@ -89,7 +91,9 @@ class TestSelection:
         mine = _log(ws / "server.log", HIT.format(m=256))
         _log(tmp_path / "runs" / "baseline" / "h0" / "warmup_round" / "b0" / "server.log", HIT.format(m=1))
 
-        assert rh._resolve_forge_server_log(_State(current_best={"workspace": str(ws)}), tmp_path) == str(mine)
+        assert serving_log_evidence.resolve_forge_server_log(
+            _State(current_best={"workspace": str(ws)}), tmp_path
+        ) == str(mine)
 
     def test_the_warmup_sibling_search_skips_quiet_logs(self, tmp_path):
         # server.log lives in warmup_round while current_best points at measure_round; several warmup benchmark dirs
@@ -104,7 +108,9 @@ class TestSelection:
         os.utime(older, (1, 1))  # make the quiet one strictly newer
 
         assert newest.stat().st_mtime > older.stat().st_mtime
-        assert rh._resolve_forge_server_log(_State(current_best={"workspace": str(ws)}), tmp_path) == str(older)
+        assert serving_log_evidence.resolve_forge_server_log(
+            _State(current_best={"workspace": str(ws)}), tmp_path
+        ) == str(older)
 
     def test_the_runs_fallback_skips_quiet_logs(self, tmp_path):
         import os
@@ -114,13 +120,13 @@ class TestSelection:
         os.utime(good, (1, 1))
 
         assert newer_quiet.stat().st_mtime > good.stat().st_mtime
-        assert rh._resolve_forge_server_log(_State(), tmp_path) == str(good)
+        assert serving_log_evidence.resolve_forge_server_log(_State(), tmp_path) == str(good)
 
     def test_no_candidate_with_evidence_returns_empty_and_says_why(self, tmp_path, caplog):
         _log(tmp_path / "runs" / "baseline" / "h0" / "warmup_round" / "b0" / "server.log", QUIET)
 
         with caplog.at_level("WARNING"):
-            assert rh._resolve_forge_server_log(_State(), tmp_path) == ""
+            assert serving_log_evidence.resolve_forge_server_log(_State(), tmp_path) == ""
 
         # "no log at all" and "logs exist but are silent" are different problems; only the second is actionable.
         assert "AITER_LOG_TUNED_CONFIG" in caplog.text
@@ -128,7 +134,7 @@ class TestSelection:
     def test_no_logs_at_all_is_quiet(self, tmp_path, caplog):
         (tmp_path / "runs").mkdir()
         with caplog.at_level("WARNING"):
-            assert rh._resolve_forge_server_log(_State(), tmp_path) == ""
+            assert serving_log_evidence.resolve_forge_server_log(_State(), tmp_path) == ""
         assert "AITER_LOG_TUNED_CONFIG" not in caplog.text
 
     def test_baseline_is_consulted_when_current_best_is_quiet(self, tmp_path):
@@ -140,22 +146,22 @@ class TestSelection:
 
         state = _State(current_best={"workspace": str(quiet)}, last_baseline={"workspace": str(base)})
 
-        assert rh._resolve_forge_server_log(state, tmp_path) == str(real)
+        assert serving_log_evidence.resolve_forge_server_log(state, tmp_path) == str(real)
 
 
 class TestTokensFromServingLog:
     def test_the_observed_m_values_come_back_sorted(self, tmp_path):
         text = "".join(HIT.format(m=m) for m in (512, 128, 15842))
-        assert rh._tokens_from_serving_log(_log(tmp_path / "a.log", text)) == "128,512,15842"
+        assert serving_log_evidence._tokens_from_serving_log(_log(tmp_path / "a.log", text)) == "128,512,15842"
 
     def test_a_miss_line_counts_too(self, tmp_path):
         text = MISS.format(m=64) + HIT.format(m=32)
-        assert rh._tokens_from_serving_log(_log(tmp_path / "a.log", text)) == "32,64"
+        assert serving_log_evidence._tokens_from_serving_log(_log(tmp_path / "a.log", text)) == "32,64"
 
     def test_the_most_frequent_m_values_win_the_budget(self, tmp_path):
         # 1 appears once, 2..4 appear three times each; with a budget of 3 the rare one is dropped.
         text = HIT.format(m=1) + "".join(HIT.format(m=m) * 3 for m in (2, 3, 4))
-        assert rh._tokens_from_serving_log(_log(tmp_path / "a.log", text), limit=3) == "2,3,4"
+        assert serving_log_evidence._tokens_from_serving_log(_log(tmp_path / "a.log", text), limit=3) == "2,3,4"
 
     def test_uniform_counts_do_not_starve_the_prefill_end(self, tmp_path):
         # Regression: a serving warmup sweeps every M about equally often, so the counts come out uniform and a plain
@@ -163,7 +169,7 @@ class TestTokensFromServingLog:
         # shapes the runtime then missed.
         ms = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 8192, 16384, 24576, 32768]
         text = "".join(HIT.format(m=m) * 4 for m in ms)
-        got = rh._tokens_from_serving_log(_log(tmp_path / "a.log", text), limit=8)
+        got = serving_log_evidence._tokens_from_serving_log(_log(tmp_path / "a.log", text), limit=8)
         picked = {int(t) for t in got.split(",")}
         assert {24576, 32768} <= picked, got
         assert len(picked) == 8, got
@@ -171,23 +177,23 @@ class TestTokensFromServingLog:
         assert len([m for m in picked if m <= 256]) >= 4, got
 
     def test_a_quiet_log_yields_nothing(self, tmp_path):
-        assert rh._tokens_from_serving_log(_log(tmp_path / "a.log", QUIET)) == ""
+        assert serving_log_evidence._tokens_from_serving_log(_log(tmp_path / "a.log", QUIET)) == ""
 
     def test_a_missing_log_yields_nothing(self, tmp_path):
-        assert rh._tokens_from_serving_log(tmp_path / "nope.log") == ""
+        assert serving_log_evidence._tokens_from_serving_log(tmp_path / "nope.log") == ""
 
     def test_the_result_is_what_forge_accepts(self, tmp_path):
         # forge parses --tokens as int(t) for t in value.split(","); round-trip through the normaliser must not change
         # it.
         text = "".join(HIT.format(m=m) for m in (7, 4096))
-        raw = rh._tokens_from_serving_log(_log(tmp_path / "a.log", text))
-        assert rh._normalize_tokens(raw) == raw
+        raw = serving_log_evidence._tokens_from_serving_log(_log(tmp_path / "a.log", text))
+        assert forge_shapes._normalize_tokens(raw) == raw
         assert [int(t) for t in raw.split(",")] == [7, 4096]
 
     def test_m_values_are_read_across_chunk_boundaries(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(rh, "_LOG_SCAN_CHUNK", 24)
+        monkeypatch.setattr(serving_log_evidence, "_LOG_SCAN_CHUNK", 24)
         text = "".join(HIT.format(m=m) for m in (11, 22, 33))
-        assert rh._tokens_from_serving_log(_log(tmp_path / "a.log", text)) == "11,22,33"
+        assert serving_log_evidence._tokens_from_serving_log(_log(tmp_path / "a.log", text)) == "11,22,33"
 
 
 class TestShapeManifestResolution:
@@ -201,13 +207,13 @@ class TestShapeManifestResolution:
             path.write_text("{}", encoding="utf-8")
         os.utime(old, (1, 1))
 
-        assert rh._resolve_trace_shape_manifest(_State(), tmp_path) == str(new)
+        assert forge_shapes._resolve_trace_shape_manifest(_State(), tmp_path) == str(new)
 
     def test_no_manifest_is_an_empty_string_not_an_error(self, tmp_path):
-        assert rh._resolve_trace_shape_manifest(_State(), tmp_path) == ""
+        assert forge_shapes._resolve_trace_shape_manifest(_State(), tmp_path) == ""
 
     def test_a_missing_session_dir_is_survivable(self, tmp_path):
-        assert rh._resolve_trace_shape_manifest(_State(), tmp_path / "gone") == ""
+        assert forge_shapes._resolve_trace_shape_manifest(_State(), tmp_path / "gone") == ""
 
 
 class TestTheWrapperForwardsTheNewInputs:
@@ -254,18 +260,18 @@ class TestTheDenseLaneTokens:
         from hyperloom.common import model_paths, visible_devices
         from hyperloom.inference_optimizer import model_config_utils
 
-        monkeypatch.setattr(rh, "_forge_gemm_tune_available", lambda: True)
-        monkeypatch.setattr(rh, "_resolve_forge_precision_and_quant", lambda *_a, **_k: ("bf16", ""))
+        monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_precision_and_quant", lambda *_a, **_k: ("bf16", ""))
         monkeypatch.setattr(model_paths, "resolve_serving_model_path", lambda p: str(p))
         monkeypatch.setattr(model_config_utils, "resolve_local_model_dir", lambda _p: model_dir)
         monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
-        monkeypatch.setattr(rh, "_resolve_forge_shapes", lambda *_a, **_k: "")
-        monkeypatch.setattr(rh, "_resolve_forge_untuned_csv", lambda *_a, **_k: "")
-        monkeypatch.setattr(rh.forge_gemm_tuning, "build_command", _build)
+        monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_shapes", lambda *_a, **_k: "")
+        monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_untuned_csv", lambda *_a, **_k: "")
+        monkeypatch.setattr(forge_gemm_tuning.forge_gemm_tuning, "build_command", _build)
 
         payload = {"model_path": str(model_dir), "framework": "sglang", "kernel_signature_log": str(log_path)}
         with pytest.raises(_StopHere):
-            await rh._run_forge_gemm_tuning({**payload, **payload_extra}, session_dir=tmp_path)
+            await forge_gemm_tuning._run_forge_gemm_tuning({**payload, **payload_extra}, session_dir=tmp_path)
         return str(seen["tokens"])
 
     @pytest.mark.asyncio
@@ -274,7 +280,7 @@ class TestTheDenseLaneTokens:
 
         tokens = await self._forge_tokens(tmp_path, monkeypatch, text)
 
-        assert tokens == rh._tokens_from_serving_log(tmp_path / "server.log")
+        assert tokens == serving_log_evidence._tokens_from_serving_log(tmp_path / "server.log")
         # Not forge's ``conc``-derived guess, and not a single value of any kind.
         assert len(tokens.split(",")) > 1
 

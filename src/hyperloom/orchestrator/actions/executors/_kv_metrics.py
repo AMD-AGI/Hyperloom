@@ -71,6 +71,7 @@ __all__ = [
     "AiperfProgressPoller",
     "KvMetricsPoller",
     "KvMetricsRecorder",
+    "KvRound",
     "KvSample",
     "canonical_label_key",
     "counter_delta",
@@ -267,8 +268,84 @@ def _server_metrics_exports(workspace: Any) -> list[Path]:
     return found
 
 
-def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
-    """Rebuild scrape-like samples from AIPerf 0.12 aggregate JSON timeslices."""
+def _ns(raw: Any) -> int:
+    return int(_number(raw) or 0)
+
+
+def _phase_blocks(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any], tuple[int, int]]]:
+    summary = payload.get("summary")
+    ranges = (summary if isinstance(summary, dict) else {}).get("phase_time_ranges") or {}
+
+    def window(name: str) -> tuple[int, int]:
+        value = ranges.get(name)
+        if not isinstance(value, dict):
+            return 0, 0
+        return _ns(value.get("start_ns")), _ns(value.get("end_ns"))
+
+    blocks: list[tuple[str, dict[str, Any], tuple[int, int]]] = []
+    warmup = payload.get("warmup_metrics")
+    if isinstance(warmup, dict):
+        blocks.append(("warmup", warmup, window("warmup")))
+    measured = payload.get("metrics")
+    if isinstance(measured, dict):
+        metrics_phase = str(payload.get("metrics_phase") or "").lower()
+        blocks.append((_CREDIT_PHASE_NAMES.get(metrics_phase, "measured"), measured, window(metrics_phase)))
+    return blocks
+
+
+def _timeslices_in_window(series: dict[str, Any], window: tuple[int, int]) -> list[dict[str, Any]]:
+    start, end = window
+    return [
+        item
+        for item in (series.get("timeslices") or [])
+        if isinstance(item, dict)
+        and (not start or _ns(item.get("end_ns")) > start)
+        and (not end or _ns(item.get("start_ns")) < end)
+    ]
+
+
+def _series_readings(
+    series: dict[str, Any], metric_type: str, window: tuple[int, int], running: float
+) -> tuple[list[tuple[int, int, float]], float]:
+    counter = metric_type == "counter"
+    slices = _timeslices_in_window(series, window)
+    rows: list[tuple[int, int, float]] = []
+    if counter and slices:
+        opening = _ns(slices[0].get("start_ns"))
+        if opening > 0:
+            # AIPerf stores per-timeslice increments. Emit the opening cumulative snapshot so
+            # phase deltas include the first interval instead of starting after it.
+            rows.append((opening, opening, running))
+    for item in slices:
+        end = _ns(item.get("end_ns"))
+        value = _number(item.get("total" if counter else "avg"))
+        if end <= 0 or value is None:
+            continue
+        if counter:
+            running += value
+            value = running
+        rows.append((_ns(item.get("start_ns")), end, value))
+    return rows, running
+
+
+def _metric_readings(
+    metric: dict[str, Any], window: tuple[int, int], name: str, cumulative: dict[tuple[str, str], float]
+) -> list[tuple[int, int, dict[str, str], float]]:
+    rows: list[tuple[int, int, dict[str, str], float]] = []
+    metric_type = str(metric.get("type") or "").lower()
+    for series in metric.get("series") or []:
+        if not isinstance(series, dict):
+            continue
+        labels = series.get("labels")
+        label_map = {str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {}
+        key = (name, canonical_label_key(label_map))
+        readings, cumulative[key] = _series_readings(series, metric_type, window, cumulative.get(key, 0.0))
+        rows += [(start, end, label_map, value) for start, end, value in readings]
+    return rows
+
+
+def read_aiperf_server_metrics(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
+    """Read AIPerf aggregate JSON as ``(sample, timing, phase)`` rows."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -276,89 +353,20 @@ def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, An
         return []
     if not isinstance(payload, dict):
         return []
-
-    phase_ranges = (
-        ((payload.get("summary") or {}).get("phase_time_ranges") or {})
-        if isinstance(payload.get("summary"), dict)
-        else {}
-    )
-
-    def bounds(name: str) -> tuple[int, int]:
-        value = phase_ranges.get(name)
-        if not isinstance(value, dict):
-            return 0, 0
-        return int(_number(value.get("start_ns")) or 0), int(_number(value.get("end_ns")) or 0)
-
-    blocks: list[tuple[str, Any, tuple[int, int]]] = []
-    warmup = payload.get("warmup_metrics")
-    if isinstance(warmup, dict):
-        blocks.append(("warmup", warmup, bounds("warmup")))
-    measured = payload.get("metrics")
-    if isinstance(measured, dict):
-        metrics_phase = str(payload.get("metrics_phase") or "").lower()
-        phase = _CREDIT_PHASE_NAMES.get(metrics_phase, "measured")
-        blocks.append((phase, measured, bounds(metrics_phase)))
-
     cumulative: dict[tuple[str, str], float] = {}
-    rows: list[tuple[int, int, str, str, dict[str, str], float]] = []
-    for phase, metrics, (phase_start, phase_end) in blocks:
+    grouped: dict[tuple[int, int, str], dict[str, list[dict[str, Any]]]] = {}
+    for phase, metrics, window in _phase_blocks(payload):
         for name, metric in metrics.items():
             if not isinstance(metric, dict):
                 continue
-            metric_type = str(metric.get("type") or "").lower()
-            for series in metric.get("series") or []:
-                if not isinstance(series, dict):
-                    continue
-                labels = series.get("labels")
-                label_map = {str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {}
-                series_key = (str(name), canonical_label_key(label_map))
-                running = cumulative.get(series_key, 0.0)
-                timeslices = [
-                    item
-                    for item in (series.get("timeslices") or [])
-                    if isinstance(item, dict)
-                    and (not phase_start or int(_number(item.get("end_ns")) or 0) > phase_start)
-                    and (not phase_end or int(_number(item.get("start_ns")) or 0) < phase_end)
-                ]
-                if metric_type == "counter" and timeslices:
-                    start = int(_number(timeslices[0].get("start_ns")) or 0)
-                    if start > 0:
-                        # AIPerf stores per-timeslice increments. Emit the
-                        # opening cumulative snapshot so phase deltas include
-                        # the first interval instead of starting after it.
-                        rows.append((start, start, phase, str(name), label_map, running))
-                for timeslice in timeslices:
-                    start = int(_number(timeslice.get("start_ns")) or 0)
-                    end = int(_number(timeslice.get("end_ns")) or 0)
-                    if end <= 0:
-                        continue
-                    if metric_type == "counter":
-                        delta = _number(timeslice.get("total"))
-                        if delta is None:
-                            continue
-                        running += delta
-                        value = running
-                    else:
-                        value = _number(timeslice.get("avg"))
-                        if value is None:
-                            continue
-                    rows.append((start, end, phase, str(name), label_map, value))
-                cumulative[series_key] = running
-
-    grouped: dict[tuple[int, int, str], ParsedFamilies] = {}
-    for start, end, phase, name, labels, value in rows:
-        grouped.setdefault((start, end, phase), {}).setdefault(name, []).append((labels, value))
+            for start, end, label_map, value in _metric_readings(metric, window, str(name), cumulative):
+                group = grouped.setdefault((start, end, phase), {})
+                group.setdefault(str(name), []).append({"labels": label_map, "value": value})
 
     out: list[tuple[KvSample, dict[str, Any], str | None]] = []
-    for (start, end, phase), families in sorted(grouped.items()):
-        families = families_from_aiperf_record(
-            {
-                name: [{"labels": labels, "value": value} for labels, value in samples]
-                for name, samples in families.items()
-            }
-        )
+    for (start, end, phase), record in sorted(grouped.items()):
         ts = end / 1e9
-        sample = sample_from_families(families, ts=ts, mono=ts)
+        sample = sample_from_families(families_from_aiperf_record(record), ts=ts, mono=ts)
         if not sample.has_readings():
             continue
         out.append(
@@ -373,11 +381,6 @@ def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, An
             )
         )
     return out
-
-
-def read_aiperf_server_metrics(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
-    """Read AIPerf aggregate JSON as ``(sample, timing, phase)`` rows."""
-    return _read_aiperf_aggregate_json(path)
 
 
 def parse_prometheus_text(text: str) -> ParsedFamilies:
@@ -540,6 +543,15 @@ class KvSample:
         )
 
 
+def _outranks(candidate: dict[str, Any], best: dict[str, Any]) -> bool:
+    for metric in ("active", "physical", "used"):
+        mine, theirs = candidate.get(metric), best.get(metric)
+        if mine is None and theirs is None:
+            continue
+        return theirs is None or (mine is not None and mine > theirs)
+    return False
+
+
 def _detect_engine(families: ParsedFamilies) -> str:
     """Identify the engine from its metric-name prefix."""
     for name in families:
@@ -564,7 +576,7 @@ def sample_from_families(
     # Assemble each rank in full before choosing one. Taking a per-field max across ranks silently welds numbers from
     # different sides of the engine together: rank A's capacity against rank B's used tokens produced a physical
     # occupancy of 1.7 on two individually valid readings.
-    best: dict[str, Any] | None = None
+    best: dict[str, Any] = {}
     for key in keys:
         used = _read(families, _SGL_USED, key)
         available = _read(families, _SGL_AVAILABLE, key)
@@ -573,29 +585,23 @@ def sample_from_families(
         # Engine-reported capacity wins; the sum is a fallback for builds that do not expose it, flagged so a consumer
         # knows it may run short of the true pool size.
         capacity = _read(families, _SGL_CAPACITY_TOKENS, key)
+        evicted = evictable or 0.0
         capacity_derived = False
         if capacity is None and used is not None and available is not None:
-            capacity = used + available + (evictable or 0.0)
+            capacity = used + available + evicted
             capacity_derived = True
 
         physical: float | None = None
         if capacity and capacity > 0 and used is not None:
-            physical = (used + (evictable or 0.0)) / capacity
+            physical = (used + evicted) / capacity
 
         # ``token_usage`` is already the maximum across the full, SWA and Mamba subpools on current SGLang, so it is
         # read directly. The per-subpool gauges are only consulted when it is missing, which is what an older build
         # looks like.
         active = _read(families, _SGL_USAGE_PRIMARY, key)
-        if active is None:
-            active = max(
-                (v for n in _SGL_USAGE_FALLBACK if (v := _read(families, n, key)) is not None),
-                default=None,
-            )
-        if active is None:
-            active = max(
-                (v for n in _VLLM_USAGE if (v := _read(families, n, key)) is not None),
-                default=None,
-            )
+        for names in (_SGL_USAGE_FALLBACK, _VLLM_USAGE):
+            if active is None:
+                active = max((v for n in names if (v := _read(families, n, key)) is not None), default=None)
 
         candidate = {
             "active": active,
@@ -609,41 +615,24 @@ def sample_from_families(
         }
         # The most pressured rank is the one that will retract, so it is the one worth reporting. Fall back to physical,
         # then to having read anything.
-        if best is None:
+        if not best or _outranks(candidate, best):
             best = candidate
-            continue
-        for metric in ("active", "physical", "used"):
-            mine, theirs = candidate.get(metric), best.get(metric)
-            if mine is None and theirs is None:
-                continue
-            if theirs is None or (mine is not None and mine > theirs):
-                best = candidate
-            break
-
-    assembled = best or {}
-    used = assembled.get("used")
-    available = assembled.get("available")
-    evictable = assembled.get("evictable")
-    capacity = assembled.get("capacity")
-    capacity_derived = bool(assembled.get("capacity_derived"))
-    physical = assembled.get("physical")
-    active = assembled.get("active")
 
     return KvSample(
         ts=time.time() if ts is None else ts,
         mono=time.monotonic() if mono is None else mono,
         engine=engine,
-        active_pool_usage=active,
-        physical_pool_usage=physical,
-        used_tokens=used,
-        evictable_tokens=evictable,
-        available_tokens=available,
-        capacity_tokens=capacity,
-        capacity_derived=capacity_derived,
+        active_pool_usage=best.get("active"),
+        physical_pool_usage=best.get("physical"),
+        used_tokens=best.get("used"),
+        evictable_tokens=best.get("evictable"),
+        available_tokens=best.get("available"),
+        capacity_tokens=best.get("capacity"),
+        capacity_derived=bool(best.get("capacity_derived")),
         series_count=len(keys) if keys != [""] else 0,
         # From the rank that was assembled, not re-read: a fresh lookup would be free to land on a different rank than
         # every field above it.
-        capacity_gb=assembled.get("capacity_gb"),
+        capacity_gb=best.get("capacity_gb"),
         retract_total=_series(families, _SGL_RETRACT_TOTAL),
         preempt_total=_series(families, _VLLM_PREEMPT_TOTAL),
         prefix_cache_queries=_series(families, _VLLM_PREFIX_QUERIES),
@@ -1048,6 +1037,15 @@ def counter_delta(first: dict[str, dict[str, float]], last: dict[str, dict[str, 
     return aggregate_series(deltas) or 0.0
 
 
+@dataclass(frozen=True)
+class KvRound:
+    """The round a KV recorder collects for: where its artifact goes, its directory and the scope it records."""
+
+    output_path: str | None = None
+    workspace: Any = None
+    scope: dict[str, Any] | None = None
+
+
 class KvMetricsRecorder:
     """Collects phase-tagged KV samples for one benchmark round.
 
@@ -1063,19 +1061,21 @@ class KvMetricsRecorder:
         self,
         *,
         poller: KvMetricsPoller,
-        output_path: str | None = None,
-        scope: dict[str, Any] | None = None,
+        kv_round: KvRound = KvRound(),
         min_interval_sec: float | None = None,
         progress: AiperfProgressPoller | None = None,
-        workspace: Any = None,
     ) -> None:
         """Prepare a recorder without contacting anything."""
         self._poller = poller
-        self._output_path = output_path
+        self._output_path = kv_round.output_path
         # The round's own directory, which is where both aiperf's export and our artifacts live. Derived from the
         # output path when not given, so the two can never point at different rounds.
-        self._workspace = workspace if workspace is not None else (Path(output_path).parent if output_path else None)
-        self._scope = dict(scope or {})
+        self._workspace = (
+            kv_round.workspace
+            if kv_round.workspace is not None
+            else (Path(kv_round.output_path).parent if kv_round.output_path else None)
+        )
+        self._scope = dict(kv_round.scope or {})
         self._min_interval = resolve_scrape_interval_sec() if min_interval_sec is None else float(min_interval_sec)
         self._progress = progress
         self._phase_timeline: dict[str, dict[str, Any]] = {}

@@ -69,7 +69,7 @@ src/hyperloom/inference_optimizer/
 │   ├── __init__.py             # main()/_run_optimize()
 │   ├── parser.py               # _build_parser()
 │   ├── constraint_args.py      # --max-latency-ms / --max-power-w / --max-per-gpu-power-w
-│   ├── gpu_power_args.py       # --gpu-power-cap-w / --gpu-perf-level / --apply-gpu-power-settings
+│   ├── gpu_power_args.py       # --gpu-*, --apply-gpu-power-settings, --node-power-* and --allow-shared-npm-node flags
 │   ├── gpu_power_apply.py      # sets and restores the cards for --apply-gpu-power-settings
 │   ├── backends/bootstrap/executors/kb/model_gate/preflight.py
 │   └── credentials/multi_node/quantization/recover.py

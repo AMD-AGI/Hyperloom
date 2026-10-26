@@ -6,9 +6,8 @@
 from __future__ import annotations
 
 import logging
-import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, NamedTuple
 
 from hyperloom.common.coerce import to_unix
@@ -78,8 +77,6 @@ OPTIMIZATION_RESERVE_PCT: float = 0.50
 
 # Wall-clock ceiling for an unbounded run (``max_minutes`` == 0): the container lifetime.
 DEFAULT_LONGRUN_MAX_MINUTES: int = 14 * 24 * 60
-# Reference window the absolute per-phase cap applies its budget fraction to.
-PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES: int = 24 * 60
 
 
 # Plateau judgment defaults (CLI --plateau-* flags); kept here for pure callers + tests.
@@ -446,42 +443,6 @@ def phase_budget_remaining_seconds(
     return max(0.0, total - phase_elapsed_seconds(state, now_unix=now_unix))
 
 
-def effective_max_minutes(state: Any) -> float:
-    """Session minutes for deadline/cap math; unbounded runs use the 14-day ceiling."""
-    mm = _max_minutes(state)
-    return mm if mm > 0 else float(DEFAULT_LONGRUN_MAX_MINUTES)
-
-
-def phase_cap_seconds(state: Any) -> float | None:
-    """Absolute wall-clock ceiling (seconds) for the current phase."""
-    budget = state.phase_budget_pct
-    phase = (state.phase or "").upper()
-    if phase not in budget:
-        return None
-    pct = float(budget[phase])
-    if pct <= 0.0:
-        # Zero fraction = no wall-clock allowed, as opposed to no cap at all.
-        return 0.0
-    proportional = effective_max_minutes(state) * 60.0 * pct
-    abs_cap = math.ceil(PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES * pct) * 60.0
-    return float(min(proportional, abs_cap))
-
-
-def phase_seconds_left(state: Any, *, now_unix: float | None = None) -> float | None:
-    """Seconds before a budget exit ends the current phase (``None`` when neither clock bounds it).
-
-    The phase exits on whichever runs out first: this entry's budget (:func:`phase_budget_remaining_seconds`) or the
-    absolute cap on its time over every entry (:func:`phase_cap_seconds`). Work sized against the entry budget alone
-    is admitted for hours in a phase the cap ends within the hour.
-    """
-    entry_left = phase_budget_remaining_seconds(state, now_unix=now_unix)
-    cap = phase_cap_seconds(state)
-    if cap is None:
-        return entry_left
-    cap_left = max(0.0, cap - phase_cumulative_seconds(state, now_unix=now_unix))
-    return cap_left if entry_left is None else min(entry_left, cap_left)
-
-
 def session_remaining_seconds(
     state: Any,
     *,
@@ -530,12 +491,13 @@ def phase_status_summary(
     *,
     now_unix: float | None = None,
 ) -> str:
-    """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable."""
+    """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable, and a phase held for its initial roofline a ``hold`` line."""
     phase = (state.phase or "").strip().upper() or "UNSET"
     elapsed = int(phase_elapsed_seconds(state, now_unix=now_unix))
+    # ``remaining`` paces this entry; ``cumulative`` totals every entry.
     cumulative = int(phase_cumulative_seconds(state, now_unix=now_unix))
     budget_pct_for_phase = state.phase_budget_pct.get(phase, 0.0)
-    remaining = phase_seconds_left(state, now_unix=now_unix)
+    remaining = phase_budget_remaining_seconds(state, now_unix=now_unix)
     budget_line: str
     if remaining is None:
         budget_line = f"budget    : pct={budget_pct_for_phase:.2f} (unlimited run; no per-phase cap)"
@@ -569,6 +531,8 @@ def phase_status_summary(
         if phase != PHASE_SWEEP:
             reloop_line += " (projected)"
         lines.append(reloop_line)
+    if hold_line := _initial_analysis_hold_line(state, phase):
+        lines.append(hold_line)
     return "\n".join(lines)
 
 
@@ -957,7 +921,6 @@ def _budget_predicate_inputs(
     remaining_sec = phase_budget_remaining_seconds(state, now_unix=now_unix)
     budget: dict[str, Any] = {
         "remaining_sec": remaining_sec,
-        "cap_sec": phase_cap_seconds(state),
         "entry_elapsed_sec": phase_elapsed_seconds(state, now_unix=now_unix),
         "cumulative_elapsed_sec": phase_cumulative_seconds(state, now_unix=now_unix),
         "current_balance": remaining_sec,
@@ -1035,8 +998,7 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         "warm_replay_status": warm_status,
         "measure_round_dropped": bool(state.baseline_measure_round_dropped),
         "tput": _number(state.baseline_tput) or 0.0,
-        "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
-        "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
+        **_initial_analysis_inputs(state),
         "session_usable_sec": session_usable_seconds(state),
         "phase_spent_sec": phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
         "runtime_sec": _positive_number(state.baseline_runtime_sec),
@@ -1150,8 +1112,8 @@ def _extend_budget_to_sweep_grant(budget: dict[str, Any], state: Any, *, now_uni
     """Widen SWEEP's budget to cover the conc_sweep it granted and is still waiting on.
 
     SWEEP's only work is the sweep it enqueued on entry, whose budget is already clamped to the session clock. The
-    per-phase cap is a share of the whole session (5% of three hours is nine minutes) and would otherwise cancel that
-    sweep mid-ladder. The widened numbers are what the predicate compares, so a replay of the frozen inputs reaches
+    per-entry budget is a share of the remaining session (5% of three hours is nine minutes) and would otherwise cancel
+    that sweep mid-ladder. The widened numbers are what the predicate compares, so a replay of the frozen inputs reaches
     the same decision.
     """
     grant_left = (_number(state.conc_sweep_granted_until_unix) or 0.0) - float(now_unix)
@@ -1162,10 +1124,6 @@ def _extend_budget_to_sweep_grant(budget: dict[str, Any], state: Any, *, now_uni
         budget["remaining_sec"] = grant_left
         if "current_balance" in budget:
             budget["current_balance"] = grant_left
-    cap = _number(budget.get("cap_sec"))
-    cumulative = _number(budget.get("cumulative_elapsed_sec")) or 0.0
-    if cap is not None and cap < cumulative + grant_left:
-        budget["cap_sec"] = cumulative + grant_left
 
 
 def workflow_predicate_inputs(
@@ -1189,11 +1147,7 @@ def workflow_predicate_inputs(
         inputs["baseline"] = _prelude_predicate_inputs(state, now_unix=frozen_now)
     elif current == PHASE_ENABLEMENT:
         enablement = state.enablement
-        inputs["baseline"] = {
-            "tput": _number(state.baseline_tput) or 0.0,
-            "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
-            "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
-        }
+        inputs["baseline"] = {"tput": _number(state.baseline_tput) or 0.0, **_initial_analysis_inputs(state)}
         inputs["pending_work"] = {
             "validation_pending": bool(enablement.validation_pending),
             "enablement_in_flight": bool(live.enablement_in_flight),
@@ -1260,7 +1214,6 @@ def _budget_exit(
     budget: dict[str, Any],
     *,
     exhausted_reason: str,
-    cap_reason: str,
     evidence: dict[str, Any],
 ) -> tuple[str, dict[str, Any]] | None:
     remaining = _number(budget.get("remaining_sec"))
@@ -1273,9 +1226,6 @@ def _budget_exit(
     }
     if remaining is not None and remaining <= 0.0:
         return exhausted_reason, timing
-    cap = _number(budget.get("cap_sec"))
-    if cap is not None and cumulative >= cap:
-        return cap_reason, timing
     return None
 
 
@@ -1332,7 +1282,6 @@ def _framework_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None
     return _budget_exit(
         budget,
         exhausted_reason="optimize_phase_budget_exhausted",
-        cap_reason="optimize_budget_cap",
         evidence=arms,
     )
 
@@ -1392,7 +1341,6 @@ def _kernel_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     return _budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="kernel_phase_budget_exhausted",
-        cap_reason="kernel_budget_cap",
         evidence={"rejected_kernel_count": int(plateau.get("rejected_kernel_count") or 0)},
     )
 
@@ -1422,7 +1370,6 @@ def _sweep_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     return _budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="sweep_budget_exhausted",
-        cap_reason="sweep_budget_cap",
         evidence={"sweep_status": status} if status else {},
     )
 
@@ -1527,6 +1474,25 @@ def _skip_to_close_reason(
     return reason, evidence
 
 
+def skip_to_close_contradiction(state: Any) -> str | None:
+    """Why the session's own facts refuse a new ``skip_to_close``, or ``None`` when they admit it.
+
+    Only an unmeasured baseline or a budget that cannot fund another cycle earns that close; anything else would
+    be booked as ``global_converged`` for a run that never converged.
+    """
+    baseline_tput = _number(state.baseline_tput) or 0.0
+    remaining = session_remaining_seconds(state)
+    floor = _cycle_reloop_min_remaining_sec(state)
+    reason, _ = _skip_to_close_reason(
+        {"session_remaining_sec": remaining, "cycle_reloop_min_remaining_sec": floor, "baseline_tput": baseline_tput},
+        ESCALATE_HINT_SKIP_TO_CLOSE,
+    )
+    if reason != "global_converged":
+        return None
+    left = "no deadline bounds the session" if remaining is None else f"{remaining / 60.0:.0f} min remain"
+    return f"baseline_tput={baseline_tput:.2f} is measured and {left}; a new cycle needs {floor / 60.0:.0f} min"
+
+
 def _holds_for_initial_analysis(baseline: dict[str, Any]) -> bool:
     """Whether the phase must stay open for an initial roofline it enqueued but has not booked yet.
 
@@ -1537,6 +1503,30 @@ def _holds_for_initial_analysis(baseline: dict[str, Any]) -> bool:
         return False
     affordable = _number(baseline.get("analysis_affordable_sec"))
     return affordable is None or affordable > 0.0
+
+
+def _initial_analysis_inputs(state: Any) -> dict[str, Any]:
+    """The two facts :func:`_holds_for_initial_analysis` decides on, read once for the predicates and the block."""
+    return {
+        "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
+        "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
+    }
+
+
+def _initial_analysis_hold_line(state: Any, phase: str) -> str | None:
+    """The ``hold`` line of a PRELUDE or ENABLEMENT kept open for its initial roofline, or ``None`` when none holds it."""
+    if phase not in (PHASE_PRELUDE, PHASE_ENABLEMENT) or (_number(state.baseline_tput) or 0.0) <= 0.0:
+        return None
+    facts = _initial_analysis_inputs(state)
+    if not _holds_for_initial_analysis(facts):
+        return None
+    affordable = facts["analysis_affordable_sec"]
+    bound = "" if affordable is None else f", for at most {int(affordable)}s more"
+    return (
+        f"hold      : waiting for initial roofline {state.auto_roofline_pending_task_id.strip()}{bound}. "
+        f"No hint advances {phase}, and remaining_sec above is this phase's share, not the session's; "
+        "answer each tick with a send_message observation until it moves on."
+    )
 
 
 def _terminal_close_transition(
@@ -1959,33 +1949,14 @@ def append_phase_history_event(
     return row
 
 
-def record_lifecycle_event(
-    state,
-    *,
-    step: str,
-    status: str,
-    phase: str | None = None,
-    label: str | None = None,
-    artifacts: dict[str, str] | None = None,
-    detail: str = "",
-    duration_s: float | None = None,
-    ts: str | None = None,
-) -> dict[str, Any]:
-    """Append a structured lifecycle event marking a phase/step boundary."""
+def record_lifecycle_event(state, mark: LifecycleMark, *, ts: str | None = None) -> dict[str, Any]:
+    """Append a structured lifecycle event marking a phase/step boundary; an unset phase is the current one."""
     events = state.lifecycle
     if events is None:
         events = state.lifecycle = []
     next_seq = (int(events[-1].get("seq", -1)) + 1) if events else 0
     event = make_lifecycle_event(
-        LifecycleMark(
-            step=step,
-            status=status,
-            phase=(phase if phase is not None else (state.phase or "")),
-            label=label,
-            artifacts=artifacts,
-            detail=detail,
-            duration_s=duration_s,
-        ),
+        mark if mark.phase is not None else replace(mark, phase=state.phase or ""),
         seq=next_seq,
         ts=ts or _now_iso(),
     )
@@ -2054,7 +2025,6 @@ __all__ = [
     "phase_cumulative_seconds",
     "phase_elapsed_seconds",
     "phase_index",
-    "phase_seconds_left",
     "phase_status_summary",
     "session_remaining_seconds",
     "warm_replay_in_flight",

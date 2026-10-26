@@ -11,6 +11,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
+from hyperloom.common import llm_config
+from hyperloom.agents.quantization.driver.result_collector import CollectedArtifacts, collect_artifacts
+from hyperloom.common.deepseek_task import DeepSeekTaskRequest, OwedArtifact, run_deepseek_task
 from hyperloom.common.llm_attribution import sdk_env_overlay
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
 
@@ -172,6 +175,77 @@ SKILL.md retry/checkpoint protocol explicitly requires it.
 """
 
 
+_ATTEMPT_SYSTEM_PROMPT = (
+    "You are the Hyperloom quantization-agent. Drive the Quark workflow per "
+    "SKILL.md. Never modify files under quark_root. Treat artifact presence "
+    "in workspace as the source of truth; do not lie about success."
+)
+
+
+def _attempt_child_env() -> dict[str, str]:
+    """The Quark py310 shim plus the attribution tags, for the tools an attempt's session spawns."""
+    env = _quark_py310_compat_env()
+    env.update(sdk_env_overlay(component="quantization", operation="quantize_attempt"))
+    return env
+
+
+def attempt_ended(artifacts: CollectedArtifacts) -> bool:
+    """Whether the attempt has an end the classifier can judge: blocked, an eval report, or why eval was skipped.
+
+    ``last_phase.txt`` is written when a phase starts, so reaching eval is not an end. The owed-end check and the retry
+    loop both read this, so a session is continued exactly when its attempt would otherwise be judged unfinished.
+    """
+    return (
+        artifacts.blocked_reason is not None
+        or artifacts.eval_report_present
+        or artifacts.eval_skipped_reason is not None
+    )
+
+
+def _attempt_finished(workspace: Path) -> bool:
+    """:func:`attempt_ended` on the files ``workspace`` holds now."""
+    return attempt_ended(collect_artifacts(workspace))
+
+
+def _owed_attempt_end(workspace: Path) -> OwedArtifact:
+    """What an attempt owes: a ``blocked.md``, or the workflow carried through evaluation."""
+    return OwedArtifact(
+        done=lambda: _attempt_finished(workspace),
+        continuation_prompt=(
+            "The quantization workflow is not finished: there is no blocked.md, eval_report.json or "
+            "eval_skipped.txt. A tool call written out as text in a reply is not executed. Continue from the phase "
+            "last_phase.txt names, calling tools directly, and write blocked.md if you cannot go on."
+        ),
+    )
+
+
+async def _run_attempt_on_deepseek(
+    attempt: AttemptContext,
+    prompt: str,
+    *,
+    log: Callable[[str], None] | None,
+) -> AttemptResult:
+    """Run one attempt's session on the DeepSeek Harness."""
+    workspace = Path(attempt.workspace)
+    if log:
+        log(
+            f"quantization-agent DeepSeek runner: workspace={workspace} "
+            f"quark_root={attempt.quark_root} attempt={attempt.attempt_number}"
+        )
+    request = DeepSeekTaskRequest(
+        prompt=prompt,
+        system_prompt=_ATTEMPT_SYSTEM_PROMPT,
+        cwd=workspace,
+        writable=True,
+        child_env=_attempt_child_env(),
+        log=log,
+    )
+    # An interactive attempt stops at its checkpoints for an answer nobody gives a headless session.
+    owed = None if attempt.interactive else _owed_attempt_end(workspace)
+    result = await run_deepseek_task(request, owed)
+    return AttemptResult(workspace=workspace, sdk_error=result.error, raw_text=result.text)
+
+
 async def run_one_attempt(
     attempt: AttemptContext,
     *,
@@ -197,21 +271,18 @@ async def run_one_attempt(
 
     prompt = build_attempt_prompt(attempt, skill_path=skill_path, fix_hypothesis_path=fix_hypothesis_path)
 
+    if sdk is None and llm_config.resolve_agent_backend() == llm_config.AGENT_BACKEND_DEEPSEEK:
+        return await _run_attempt_on_deepseek(attempt, prompt, log=log)
+
     sdk = sdk or _import_sdk()
 
-    system_prompt = (
-        "You are the Hyperloom quantization-agent. Drive the Quark workflow per "
-        "SKILL.md. Never modify files under quark_root. Treat artifact presence "
-        "in workspace as the source of truth; do not lie about success."
-    )
     kwargs: dict[str, Any] = {
         "max_turns": DEFAULT_MAX_TURNS,
-        "system_prompt": system_prompt,
+        "system_prompt": _ATTEMPT_SYSTEM_PROMPT,
         "allowed_tools": DEFAULT_ALLOWED_TOOLS,
         "stderr": (lambda line: log(f"[claude-sdk] {line.rstrip()}")) if log else None,
-        "env": _quark_py310_compat_env(),
+        "env": _attempt_child_env(),
     }
-    kwargs["env"].update(sdk_env_overlay(component="quantization", operation="quantize_attempt"))
     if model:
         kwargs["model"] = model
     kwargs["cwd"] = str(workspace)

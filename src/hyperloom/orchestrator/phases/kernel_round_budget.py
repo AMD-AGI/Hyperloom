@@ -48,7 +48,7 @@ def rebench_round_sec(state: Any) -> float:
 
 def round_stop(state: Any) -> StoppedByTheRun | None:
     """How to record a measured round the KERNEL budget can no longer fit, or ``None`` while one still fits."""
-    remaining = _phase_state.phase_seconds_left(state)
+    remaining = _phase_state.phase_budget_remaining_seconds(state)
     if remaining is None or remaining >= measurement_round_sec(state):
         return None
     return STOPPED_BY_THE_RUN[PHASE_TIME_EXHAUSTED_CLASS]

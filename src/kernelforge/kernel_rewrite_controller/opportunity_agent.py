@@ -43,7 +43,7 @@ from kernelforge.kernel_rewrite_controller.task_publisher import (
     pending_rejections,
     publish_complete_staged_tasks,
 )
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 from kernelforge.tracker.usage import UsageAccumulator
 
 _ResumePublications = tuple[TaskPublicationResult, ...]
@@ -607,7 +607,8 @@ class OpportunityAnalysisAgent:
                 except asyncio.CancelledError:
                     if status != ANALYSIS_STATUS_TIMED_OUT:
                         raise
-                except Exception as error:  # noqa: BLE001 - agent backend failure is not enumerable
+                except Exception as error:  # agent backend failure is not enumerable
+                    log.warning("opportunity analysis session failed: %s", error, exc_info=True)
                     status = ANALYSIS_STATUS_FAILED
                     reason = f"opportunity analysis failed: {error}"
         finally:

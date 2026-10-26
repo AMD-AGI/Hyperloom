@@ -20,7 +20,7 @@ from typing import Any, Awaitable, Callable, Sequence
 
 from hyperloom.common.provenance import detect_kineto_backend
 from hyperloom.common.timeutil import now_iso
-from ...phases.machine_state import record_lifecycle_event
+from ...phases.machine_state import LifecycleMark, record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
 from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
@@ -1234,7 +1234,7 @@ class RooflineExecutor:
         The auto-roofline path bypasses Coordinator._handle_request, so the action emits its own START / END pair.
         """
         try:
-            record_lifecycle_event(self.shared_state, step="roofline", **event)
+            record_lifecycle_event(self.shared_state, LifecycleMark(step="roofline", **event))
             if session_dir.name and session_dir.is_dir() and (session_dir / "state.json").exists():
                 self.shared_state.save(session_dir)
         except OSError:
@@ -1284,7 +1284,6 @@ class RooflineExecutor:
             params=params,
             idempotency_key=f"{parent_task.idempotency_key}-profile",
             requires_lanes=list(parent_task.requires_lanes or []),
-            side_effects=list(parent_task.side_effects or []),
             lease_ttl_sec=parent_task.lease_ttl_sec,
         )
         return RunnerContext(

@@ -117,6 +117,19 @@ def patches_dir(session_dir: Path, kernel_id: str) -> Path:
     return Path(session_dir) / "patches" / kid
 
 
+_KERNEL_PATCH_BACKUPS: str = "backup"
+
+
+def kernel_patch_backup_root(session_dir: Path, kernel_id: str) -> Path:
+    """``<sd>/patches/<kernel_id>/backup/`` — one subdirectory per kernel-patch apply, holding its manifest and backups."""
+    return patches_dir(session_dir, kernel_id) / _KERNEL_PATCH_BACKUPS
+
+
+def kernel_patch_backup_roots(session_dir: Path) -> list[Path]:
+    """Every :func:`kernel_patch_backup_root` in the session."""
+    return sorted((Path(session_dir) / "patches").glob(f"*/{_KERNEL_PATCH_BACKUPS}"))
+
+
 # Session-breakdown record fragments (recorder write-side spool).
 def breakdown_parts_dir(session_dir: Path) -> Path:
     """``<sd>/runtime/breakdown/parts/`` — per-producer breakdown record fragments."""

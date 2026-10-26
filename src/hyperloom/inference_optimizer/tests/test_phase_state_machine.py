@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from pathlib import Path
 from typing import Any
@@ -266,6 +266,22 @@ def test_the_initial_roofline_wait_stops_at_the_optimization_reserve():
     assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
     state.session_budget_usable_sec = lambda: 6_000.0
     assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
+
+
+def test_the_phase_block_shows_the_initial_roofline_hold_exactly_while_it_holds():
+    """A spent phase share under the hold must not read as a spent session."""
+
+    def hold_lines(state: SharedState) -> list[str]:
+        return [line for line in phase_state.phase_status_summary(state).splitlines() if line.startswith("hold")]
+
+    state = _prelude_state(usable_sec=10_000.0, baseline_tput=1074.7, auto_roofline_pending_task_id="rl-1")
+    [hold] = hold_lines(state)
+    assert "rl-1" in hold and "4600" in hold
+    state.session_budget_usable_sec = lambda: 5_000.0
+    assert hold_lines(state) == []
+    state.session_budget_usable_sec = lambda: 10_000.0
+    state.auto_roofline_pending_task_id = ""
+    assert hold_lines(state) == []
 
 
 def test_prelude_exit_states_whether_one_optimization_round_still_fits():
@@ -629,11 +645,14 @@ class TestAMetTargetDoesNotOutrankTheGuards:
 
 def test_a_met_target_renames_a_budget_limited_sweep_exit():
     """``sweep_budget_exhausted`` is outside STOP_REASON_VOCAB, so CLOSE would recover it as ``time_exhausted`` -- a met target reported as a timeout."""
+    now = 1_800_000_000.0
+    started = datetime.fromtimestamp(now, tz=timezone.utc) - timedelta(hours=2)
     state = SharedState(
         phase=phase_state.PHASE_SWEEP,
-        phase_started_unix=1.0,
+        phase_started_unix=started.timestamp(),
+        start_ts=started.isoformat(),
         max_minutes=60,
-        phase_budget_pct={phase_state.PHASE_SWEEP: 0.0001},
+        phase_budget_pct={phase_state.PHASE_SWEEP: 0.5},
         stop_reason="",
         closing_phase=False,
         target_reached_at="2026-09-04T00:00:00+00:00",
@@ -648,7 +667,7 @@ def test_a_met_target_renames_a_budget_limited_sweep_exit():
         no_gain_cycle_streak=0,
         resumed_ts="",
     )
-    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True), now_unix=now)
     assert out is not None
     assert out[0] == phase_state.PHASE_CLOSE and out[1] == "target_reached"
     assert out[2].get("terminal") is True
@@ -878,7 +897,7 @@ def _enter_framework_for(c, elapsed_sec: float) -> None:
 
 
 async def _phase_block(c) -> str:
-    prompt = await c.conversation.compose_prompt("orchestration")
+    prompt = (await c.conversation.compose_prompt("orchestration")).text
     return prompt.split("=== Phase ===", 1)[1]
 
 

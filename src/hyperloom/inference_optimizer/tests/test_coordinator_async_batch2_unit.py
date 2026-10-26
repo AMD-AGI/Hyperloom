@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -28,9 +29,12 @@ from hyperloom.orchestrator.actions.executors.explore import STACK_REVALIDATE_SO
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
-from hyperloom.orchestrator.loop.writeback import IntegrateRecoveryIncomplete
-from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.loop._promote_outcome import IntegrateRecoveryIncomplete
+from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.actions.executors import _patch_artifacts as patch_artifacts
+from hyperloom.orchestrator.actions.executors import _patch_sources as patch_sources
+from hyperloom.orchestrator.loop.verdicts import CriticRuling
 
 
 def _idle_intent() -> Intent:
@@ -65,10 +69,12 @@ async def test_resume_rolls_back_recipe_checkout_and_kernel(
         "_maybe_revert_kernel_patch",
         lambda result: kernel_restores.append(result) or {"status": "ok"},
     )
-    task = await coord.tasks.create(
-        kind="replay_warm_recipe",
-        params={},
-        idempotency_key="resume-warm",
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="replay_warm_recipe",
+            params={},
+            idempotency_key="resume-warm",
+        ),
     )
     coord.shared_state.warm_replay_pending = {
         "task_id": task.task_id,
@@ -181,6 +187,56 @@ async def test_context_inbox_reader_with_events(coord: Coordinator) -> None:
     out = coord.conversation._context_inbox_reader()
     assert "(no inbox events)" not in out
     assert isinstance(out, str)
+
+
+@pytest.mark.asyncio
+async def test_context_inbox_reader_survives_scalar_specialist_findings(coord: Coordinator) -> None:
+    """``new_findings`` / ``residual_questions`` reach the row from the specialist's own JSON.
+
+    The schema asks for a list, but a model writes it, so a bare scalar can arrive
+    there. The inbox is rendered on every orchestration round, so a scalar that
+    raises costs the whole session, not one row, and one counted by ``len`` reports
+    the character count of a string as a finding count.
+    """
+    for findings, questions in ((5, 3), ("one finding", "is the tokenizer the bound?")):
+        await coord.bus.append_and_seq(
+            Message.new(
+                "kernel_agent",
+                "orchestration",
+                "delegated_result",
+                {
+                    "kind": "specialist",
+                    "state": "done",
+                    "result": {
+                        "specialist_done": {
+                            "summary": "fp8 kv cache holds",
+                            "new_findings": findings,
+                            "residual_questions": questions,
+                        }
+                    },
+                },
+            )
+        )
+        out = coord.conversation._context_inbox_reader()
+        assert "fp8 kv cache holds" in out
+        assert "findings=1" in out
+        assert "questions=1" in out
+
+    await coord.bus.append_and_seq(
+        Message.new(
+            "kernel_agent",
+            "orchestration",
+            "delegated_result",
+            {
+                "kind": "specialist",
+                "state": "done",
+                "result": {"specialist_done": {"new_findings": ["a", "b"], "residual_questions": ["q"]}},
+            },
+        )
+    )
+    out = coord.conversation._context_inbox_reader()
+    assert "findings=2" in out
+    assert "questions=1" in out
 
 
 # -- _context_recent_outcomes_reader ----------------------------------------
@@ -344,6 +400,343 @@ async def test_resume_does_not_export_a_framework_tree_as_the_inferencex_path(
     assert coord.shared_state.stop_reason != "active_inferencex_checkout_missing"
 
 
+def _source_layer_entry(
+    tmp_path: Path, name: str, framework_root: Path, files: dict[str, str | None], *, complete: bool = True
+) -> dict:
+    """A kept ``source_patch`` stack entry whose durable snapshot holds ``files``; ``None`` marks a deletion."""
+    snapshot = tmp_path / "optimization_stack" / "src" / name
+    rows = []
+    for rel, text in files.items():
+        if text is None:
+            rows.append({"rel": rel, "op": "delete"})
+            continue
+        target = snapshot / "files" / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        rows.append({"rel": rel, "op": "upsert"})
+    (snapshot / "manifest.json").write_text(
+        json.dumps({"schema_version": 2, "complete": complete, "files": rows}), encoding="utf-8"
+    )
+    return {
+        "action": "integrate_patch",
+        "scope": "source_patch",
+        "variant_name": name,
+        "framework_root": str(framework_root),
+        "source_snapshot": str(snapshot),
+        "source_snapshot_complete": complete,
+        "tput": 120.0,
+    }
+
+
+def _resume_with_stack(coord: Coordinator, stack: list[dict]) -> None:
+    coord.writeback._resumed_from["is_resume"] = True
+    coord.shared_state.optimization_stack = stack
+    coord.shared_state.cumulative_gain_validated_stack_len = len(stack)
+
+
+@pytest.mark.asyncio
+async def test_resume_reinstalls_the_kept_source_layer_on_a_fresh_tree(coord: Coordinator, tmp_path: Path) -> None:
+    """A resumed session on a pristine framework tree gets its kept patches back before any bench measures it."""
+    tree = tmp_path / "vllm"
+    (tree / "v1").mkdir(parents=True)
+    (tree / "envs.py").write_text("stock envs\n", encoding="utf-8")
+    entry = _source_layer_entry(
+        tmp_path, "kv_window", tree, {"envs.py": "patched envs\n", "v1/rocm_aiter_mla.py": "patched mla\n"}
+    )
+    _resume_with_stack(coord, [entry])
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert (tree / "envs.py").read_text(encoding="utf-8") == "patched envs\n"
+    assert (tree / "v1" / "rocm_aiter_mla.py").read_text(encoding="utf-8") == "patched mla\n"
+    restored = [
+        fix for fix in report["fixes"] if isinstance(fix, dict) and fix.get("kind") == "reinstalled_source_layer"
+    ]
+    assert [sorted(fix["files"]) for fix in restored] == [
+        [str(tree / "envs.py"), str(tree / "v1" / "rocm_aiter_mla.py")]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resume_leaves_a_tree_that_already_carries_the_source_layer_alone(
+    coord: Coordinator, tmp_path: Path
+) -> None:
+    tree = tmp_path / "vllm"
+    tree.mkdir()
+    (tree / "envs.py").write_text("patched envs\n", encoding="utf-8")
+    _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})])
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert not any(isinstance(fix, dict) and fix.get("kind") == "reinstalled_source_layer" for fix in report["fixes"])
+
+
+@pytest.mark.asyncio
+async def test_resume_installs_the_last_kept_state_of_a_file_two_patches_touch(
+    coord: Coordinator, tmp_path: Path
+) -> None:
+    tree = tmp_path / "vllm"
+    tree.mkdir()
+    (tree / "envs.py").write_text("stock envs\n", encoding="utf-8")
+    _resume_with_stack(
+        coord,
+        [
+            _source_layer_entry(tmp_path, "first", tree, {"envs.py": "first\n", "gone.py": None}),
+            _source_layer_entry(tmp_path, "second", tree, {"envs.py": "second\n"}),
+        ],
+    )
+    (tree / "gone.py").write_text("stock\n", encoding="utf-8")
+
+    await coord.writeback._resume_consistency_pass()
+
+    assert (tree / "envs.py").read_text(encoding="utf-8") == "second\n"
+    assert not (tree / "gone.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_resume_halts_when_a_kept_snapshot_cannot_be_installed(coord: Coordinator, tmp_path: Path) -> None:
+    tree = tmp_path / "vllm"
+    tree.mkdir()
+    entry = _source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})
+    (Path(entry["source_snapshot"]) / "files" / "envs.py").unlink()
+    _resume_with_stack(coord, [entry])
+
+    with pytest.raises(IntegrateRecoveryIncomplete):
+        await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+
+
+@pytest.mark.asyncio
+async def test_resume_halts_instead_of_building_a_tree_where_the_framework_root_is_gone(
+    coord: Coordinator, tmp_path: Path
+) -> None:
+    tree = tmp_path / "vllm"
+    _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})])
+
+    with pytest.raises(IntegrateRecoveryIncomplete):
+        await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    assert not tree.exists()
+
+
+def _git(tree: Path, *args: str) -> str:
+    done = subprocess.run(
+        ["git", "-C", str(tree), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return done.stdout
+
+
+def _git_framework_tree(tmp_path: Path) -> Path:
+    """A real git checkout holding stock ``envs.py`` and ``v1/mla.py``, all committed."""
+    tree = tmp_path / "vllm"
+    (tree / "v1").mkdir(parents=True)
+    (tree / "envs.py").write_text("stock envs\n", encoding="utf-8")
+    (tree / "v1" / "mla.py").write_text("stock mla\n", encoding="utf-8")
+    _git(tree, "init", "-q")
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-q", "-m", "stock")
+    return tree
+
+
+@pytest.mark.asyncio
+async def test_resume_commits_the_reinstalled_source_layer_on_a_git_tree(coord: Coordinator, tmp_path: Path) -> None:
+    tree = _git_framework_tree(tmp_path)
+    stock_head = _git(tree, "rev-parse", "HEAD").strip()
+    entry = _source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n", "v1/mla.py": None})
+    _resume_with_stack(coord, [entry])
+
+    await coord.writeback._resume_consistency_pass()
+
+    assert _git(tree, "status", "--porcelain") == ""
+    assert _git(tree, "rev-parse", "HEAD~1").strip() == stock_head
+    assert _git(tree, "show", "HEAD:envs.py") == "patched envs\n"
+    assert "v1/mla.py" not in _git(tree, "ls-tree", "-r", "--name-only", "HEAD")
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_after_resume_still_sees_the_kept_source_layer(coord: Coordinator, tmp_path: Path) -> None:
+    from hyperloom.orchestrator.actions.executors._git import _git_head_sha
+    from hyperloom.orchestrator.actions.executors._patch_git import _git_reset_clean, _git_stash_if_dirty
+
+    tree = _git_framework_tree(tmp_path)
+    _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})])
+
+    await coord.writeback._resume_consistency_pass()
+    accepted_head = _git_head_sha(tree)
+    stash_state, _ = _git_stash_if_dirty(tree)
+    (tree / "v1" / "mla.py").write_text("candidate mla\n", encoding="utf-8")
+    reverted, _ = _git_reset_clean(tree, accepted_head)
+
+    assert stash_state == "clean"
+    assert _git(tree, "stash", "list") == ""
+    assert reverted
+    assert (tree / "envs.py").read_text(encoding="utf-8") == "patched envs\n"
+    assert (tree / "v1" / "mla.py").read_text(encoding="utf-8") == "stock mla\n"
+
+
+@pytest.mark.asyncio
+async def test_resume_commits_a_source_layer_the_tree_holds_uncommitted(coord: Coordinator, tmp_path: Path) -> None:
+    tree = _git_framework_tree(tmp_path)
+    (tree / "envs.py").write_text("patched envs\n", encoding="utf-8")
+    _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})])
+
+    await coord.writeback._resume_consistency_pass()
+
+    assert _git(tree, "status", "--porcelain") == ""
+    assert _git(tree, "show", "HEAD:envs.py") == "patched envs\n"
+
+
+@pytest.mark.asyncio
+async def test_resume_adds_no_commit_when_the_git_tree_already_carries_the_source_layer(
+    coord: Coordinator, tmp_path: Path
+) -> None:
+    tree = _git_framework_tree(tmp_path)
+    _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "stock envs\n"})])
+    head = _git(tree, "rev-parse", "HEAD")
+
+    await coord.writeback._resume_consistency_pass()
+
+    assert _git(tree, "rev-parse", "HEAD") == head
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_halt_on_a_kept_delete_the_git_tree_already_committed(
+    coord: Coordinator, tmp_path: Path
+) -> None:
+    tree = _git_framework_tree(tmp_path)
+    _git(tree, "rm", "-q", "v1/mla.py")
+    _git(tree, "commit", "-q", "-m", "kept delete")
+    head = _git(tree, "rev-parse", "HEAD")
+    entry = _source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "stock envs\n", "v1/mla.py": None})
+    _resume_with_stack(coord, [entry])
+
+    await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.stop_reason != PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    assert _git(tree, "rev-parse", "HEAD") == head
+
+
+def _captured_keep(tmp_path: Path, tree: Path, name: str, rels: list[str], deleted: tuple[str, ...] = ()) -> dict:
+    """Commit the tree's current edits as a KEEP and snapshot them the way integrate_patch does."""
+    from hyperloom.orchestrator.source_snapshot import SourceLayer, snapshot_source_layer
+
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-q", "-m", f"hyperloom KEEP {name}")
+    snap = snapshot_source_layer(
+        SourceLayer(
+            framework_root=tree,
+            base_sha=_git(tree, "rev-parse", "HEAD").strip(),
+            rel_paths=rels,
+            declared_ops=dict.fromkeys(deleted, "delete"),
+        ),
+        dest_dir=tmp_path / "optimization_stack" / "src" / name,
+    )
+    assert snap is not None
+    return {
+        "action": "integrate_patch",
+        "scope": "source_patch",
+        "variant_name": name,
+        "framework_root": str(tree),
+        "source_snapshot": snap["snapshot_dir"],
+        "source_snapshot_complete": snap["complete"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_committed_work_newer_than_the_kept_snapshot(coord: Coordinator, tmp_path: Path) -> None:
+    tree = _git_framework_tree(tmp_path)
+    (tree / "envs.py").write_text("stock envs\nA_KV_WINDOW = 1\n", encoding="utf-8")
+    entry = _captured_keep(tmp_path, tree, "kv_window", ["envs.py"])
+    (tree / "envs.py").write_text("stock envs\nA_KV_WINDOW = 1\nB_FUSED_MOE_REWRITE = 0\n", encoding="utf-8")
+    _git(tree, "commit", "-q", "-am", "hyperloom KEEP_INERT fused_moe")
+    head = _git(tree, "rev-parse", "HEAD")
+    _resume_with_stack(coord, [entry])
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert (tree / "envs.py").read_text(encoding="utf-8") == "stock envs\nA_KV_WINDOW = 1\nB_FUSED_MOE_REWRITE = 0\n"
+    assert _git(tree, "rev-parse", "HEAD") == head
+    assert not any(isinstance(fix, dict) and fix.get("kind") == "reinstalled_source_layer" for fix in report["fixes"])
+    assert {"kind": "source_layer_superseded", "files": [str(tree / "envs.py")]} in report["warnings"]
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_a_file_committed_work_restored_after_a_kept_delete(
+    coord: Coordinator, tmp_path: Path
+) -> None:
+    tree = _git_framework_tree(tmp_path)
+    (tree / "v1" / "mla.py").unlink()
+    entry = _captured_keep(tmp_path, tree, "drop_mla", ["v1/mla.py"], deleted=("v1/mla.py",))
+    (tree / "v1" / "mla.py").write_text("rewritten mla\n", encoding="utf-8")
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-q", "-m", "hyperloom KEEP_INERT mla_rewrite")
+    _resume_with_stack(coord, [entry])
+
+    await coord.writeback._resume_consistency_pass()
+
+    assert (tree / "v1" / "mla.py").read_text(encoding="utf-8") == "rewritten mla\n"
+    assert _git(tree, "status", "--porcelain") == ""
+
+
+@pytest.mark.asyncio
+async def test_resume_halts_when_the_reinstalled_source_layer_cannot_be_committed(
+    coord: Coordinator, tmp_path: Path
+) -> None:
+    tree = _git_framework_tree(tmp_path)
+    hook = tree / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})])
+
+    with pytest.raises(IntegrateRecoveryIncomplete, match="cannot be committed"):
+        await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+
+
+@pytest.mark.asyncio
+async def test_resume_reinstalls_on_a_root_that_is_not_a_git_tree_and_commits_nothing(
+    coord: Coordinator, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hyperloom.orchestrator.loop.resume_source_layers as resume_layers
+
+    tree = tmp_path / "vllm"
+    tree.mkdir()
+    (tree / "envs.py").write_text("stock envs\n", encoding="utf-8")
+    monkeypatch.setattr(
+        resume_layers, "_git_commit_kept", lambda *args, **kwargs: pytest.fail("a non-git root has nothing to commit")
+    )
+    _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})])
+
+    await coord.writeback._resume_consistency_pass()
+
+    assert (tree / "envs.py").read_text(encoding="utf-8") == "patched envs\n"
+    assert not (tree / ".git").exists()
+
+
+@pytest.mark.asyncio
+async def test_resume_warns_about_a_kept_patch_with_no_snapshot_to_install(coord: Coordinator, tmp_path: Path) -> None:
+    tree = tmp_path / "vllm"
+    tree.mkdir()
+    legacy = {
+        "action": "integrate_patch",
+        "scope": "source_patch",
+        "variant_name": "legacy",
+        "framework_root": str(tree),
+    }
+    _resume_with_stack(coord, [legacy])
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert {"kind": "source_layer_not_reproducible", "variant": "legacy"} in report["warnings"]
+    assert coord.shared_state.stop_reason != PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+
+
 @pytest.fixture
 def pending_candidate(coord: Coordinator, tmp_path: Path, monkeypatch):
     """Apply real local files, then discard the live state before resume."""
@@ -355,8 +748,9 @@ def pending_candidate(coord: Coordinator, tmp_path: Path, monkeypatch):
 
     root = tmp_path / "candidate-framework"
     init_git_repo(root, seed_file="cfg.json", seed_text="A\n")
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: (str(root),))
-    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: str(root))
+    for module in (patch_sources, patch_artifacts):
+        monkeypatch.setattr(module, "resolve_kernel_search_roots", lambda: (str(root),))
+    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: str(root))
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
     workspace = runs_dir(coord.session_dir, "specialist", "spec-restore")
     workspace.mkdir(parents=True)
@@ -386,7 +780,9 @@ def pending_candidate(coord: Coordinator, tmp_path: Path, monkeypatch):
             if two_artifacts:
                 params["artifacts"].append({"source": str(source), "target": str(root / "created.json")})
         coord.shared_state.record_specialist_patch_verdict("spec-restore", "approve")
-        task = await coord.tasks.create(kind="integrate_patch", params=params, idempotency_key="pending-restore")
+        task, _ = await coord.tasks.create_or_return_existing(
+            TaskSpec(kind="integrate_patch", params=params, idempotency_key="pending-restore")
+        )
         result = await ip.IntegratePatchExecutor(session_dir=coord.session_dir)(
             RunnerContext(task=task, lease=None, extra={"shared_state": coord.shared_state})
         )
@@ -553,8 +949,9 @@ async def test_reused_output_directory_never_reuses_prior_attempt_preimages(coor
     root.mkdir()
     output = tmp_path / "reused-output"
     target = root / "cfg.json"
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: (str(root),))
-    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: str(root))
+    for module in (patch_sources, patch_artifacts):
+        monkeypatch.setattr(module, "resolve_kernel_search_roots", lambda: (str(root),))
+    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: str(root))
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
     executor = ip.IntegratePatchExecutor(session_dir=coord.session_dir)
     for index, content in enumerate(("KEPT", "CANDIDATE")):
@@ -564,16 +961,18 @@ async def test_reused_output_directory_never_reuses_prior_attempt_preimages(coor
         source = workspace / "cfg.json"
         source.write_text(content)
         coord.shared_state.record_specialist_patch_verdict(sid, "approve")
-        task = await coord.tasks.create(
-            kind="integrate_patch",
-            idempotency_key=sid,
-            params={
-                "specialist_task_id": sid,
-                "framework_source_root": str(root),
-                "output_dir": str(output),
-                "artifacts": [{"source": str(source), "target": str(target)}],
-                "apply_only": True,
-            },
+        task, _ = await coord.tasks.create_or_return_existing(
+            TaskSpec(
+                kind="integrate_patch",
+                idempotency_key=sid,
+                params={
+                    "specialist_task_id": sid,
+                    "framework_source_root": str(root),
+                    "output_dir": str(output),
+                    "artifacts": [{"source": str(source), "target": str(target)}],
+                    "apply_only": True,
+                },
+            ),
         )
         result = await executor(RunnerContext(task=task, lease=None, extra={"shared_state": coord.shared_state}))
         assert result["status"] == "applied_no_bench", result
@@ -630,7 +1029,7 @@ def crashed_integrate_window(coord: Coordinator, pending_candidate):
     writes before the bus sees anything. ``outcome_status=None`` is the crash
     that happened first: the phase is on disk, the runner never finished.
     """
-    from hyperloom.orchestrator.actions.executors.integrate_patch import restore_pending_integrate
+    from hyperloom.orchestrator.actions.executors._patch_git import restore_pending_integrate
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     async def crash(*, keep: bool, outcome_status: str | None = None, cleanup_confirmed: bool = True):
@@ -929,7 +1328,9 @@ def ordinary_integrate_completion(coord: Coordinator, tmp_path: Path):
     anchor = deepcopy(coord.shared_state.current_best)
 
     async def prepare(*, phase="ready", status="kept", error_class="", recovery_errors=None, marker_task_id=None):
-        task = await coord.tasks.create(kind="integrate_patch", params={}, idempotency_key="ordinary-integrate")
+        task, _ = await coord.tasks.create_or_return_existing(
+            TaskSpec(kind="integrate_patch", params={}, idempotency_key="ordinary-integrate")
+        )
         pending = {
             "task_id": task.task_id if marker_task_id is None else marker_task_id,
             "workspace": str(backup.parent),
@@ -1175,7 +1576,9 @@ async def test_resume_consistency_replays_pending_integrate_keep(coord: Coordina
 @pytest.mark.asyncio
 async def test_resume_consistency_rolls_back_pending_integrate(coord: Coordinator, monkeypatch) -> None:
     coord.writeback._resumed_from["is_resume"] = True
-    await coord.tasks.create(kind="integrate_patch", params={}, idempotency_key="ti-roll", task_id="ti-roll")
+    await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="integrate_patch", params={}, idempotency_key="ti-roll", task_id="ti-roll")
+    )
     coord.shared_state.pending_integrate = {
         "task_id": "ti-roll",
         "framework_source_root": "/tmp/framework",
@@ -1222,7 +1625,9 @@ async def test_resume_settles_an_env_only_integrate_from_its_task_row(
     environment from the stack. A recorded revert still just clears.
     """
     coord.writeback._resumed_from["is_resume"] = True
-    task = await coord.tasks.create(kind="integrate_patch", params={}, idempotency_key="ti-env", task_id="ti-env")
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="integrate_patch", params={}, idempotency_key="ti-env", task_id="ti-env")
+    )
     await coord.tasks.transition(task.task_id, "running")
     result = {
         "kind": "integrate_patch",
@@ -1491,7 +1896,7 @@ async def test_resume_consistency_replays_pending_integrate_with_kept_result(coo
 
 @pytest.mark.asyncio
 async def test_resume_refuses_legacy_patch_without_task_evidence(coord: Coordinator, monkeypatch) -> None:
-    import hyperloom.orchestrator.actions.executors.integrate_patch as ip
+    from hyperloom.orchestrator.actions.executors import _patch_git as patch_git
 
     reversed_calls: list[str] = []
 
@@ -1499,7 +1904,7 @@ async def test_resume_refuses_legacy_patch_without_task_evidence(coord: Coordina
         reversed_calls.append(str(patch))
         return True, ""
 
-    monkeypatch.setattr(ip, "_git_apply_reverse", _fake_reverse)
+    monkeypatch.setattr(patch_git, "_git_apply_reverse", _fake_reverse)
     coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.pending_integrate = {
         "task_id": "ti-crash",
@@ -1712,10 +2117,12 @@ async def test_pump_dispatcher_noop_when_empty(coord: Coordinator) -> None:
 @pytest.mark.asyncio
 async def test_pump_dispatcher_explore_promotes(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
-    task = await coord.tasks.create(
-        kind="explore",
-        params={},
-        idempotency_key="disp-explore",
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={},
+            idempotency_key="disp-explore",
+        ),
     )
 
     async def fake_run(t, **kw):
@@ -1743,10 +2150,12 @@ async def test_pump_dispatcher_explore_promotes(coord: Coordinator, monkeypatch)
 @pytest.mark.asyncio
 async def test_pump_dispatcher_specialist_bookkeeping(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", "0")
-    await coord.tasks.create(
-        kind="specialist",
-        params={"domain": "kernel_agent"},
-        idempotency_key="disp-spec",
+    await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="specialist",
+            params={"domain": "kernel_agent"},
+            idempotency_key="disp-spec",
+        ),
     )
 
     async def fake_run(t, **kw):
@@ -1768,10 +2177,12 @@ async def test_pump_dispatcher_specialist_bookkeeping(coord: Coordinator, monkey
 
 @pytest.mark.asyncio
 async def test_pump_dispatcher_absorbs_spawn_exception(coord: Coordinator, monkeypatch) -> None:
-    await coord.tasks.create(
-        kind="explore",
-        params={},
-        idempotency_key="disp-boom",
+    await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={},
+            idempotency_key="disp-boom",
+        ),
     )
 
     async def fake_run(t, **kw):
@@ -1785,13 +2196,15 @@ async def test_pump_dispatcher_absorbs_spawn_exception(coord: Coordinator, monke
 @pytest.mark.asyncio
 async def test_compose_prompt_has_no_specialist_status_block(coord: Coordinator) -> None:
     """No periodic specialist block: it can never observe a live specialist."""
-    spec = await coord.tasks.create(
-        kind="specialist",
-        params={"domain": "serving_specialist"},
-        idempotency_key="visible-spec",
+    spec, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="specialist",
+            params={"domain": "serving_specialist"},
+            idempotency_key="visible-spec",
+        ),
     )
     await coord.tasks.transition(spec.task_id, "running")
-    out = await coord.conversation.compose_prompt("orchestration")
+    out = (await coord.conversation.compose_prompt("orchestration")).text
     assert "Specialist health" not in out
     assert "stale" not in out.lower()
 
@@ -1799,10 +2212,12 @@ async def test_compose_prompt_has_no_specialist_status_block(coord: Coordinator)
 @pytest.mark.asyncio
 async def test_running_tasks_reader_sees_live_specialist(coord: Coordinator) -> None:
     """``get_running_tasks`` is the on-demand path and is not turn-bound."""
-    spec = await coord.tasks.create(
-        kind="specialist",
-        params={"domain": "serving_specialist", "gap_canonical_id": "gap.xyz"},
-        idempotency_key="queryable-spec",
+    spec, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="specialist",
+            params={"domain": "serving_specialist", "gap_canonical_id": "gap.xyz"},
+            idempotency_key="queryable-spec",
+        ),
     )
     await coord.tasks.transition(spec.task_id, "running")
     out = coord.conversation._context_running_tasks_reader()
@@ -2404,14 +2819,16 @@ async def test_direct_integrate_proposal_inherits_specialist_owner(
     coord: Coordinator,
     monkeypatch,
 ) -> None:
-    specialist = await coord.tasks.create(
-        kind="specialist",
-        params={
-            "source_phase": "FRAMEWORK_AGENT",
-            "domain": "serving_specialist",
-            "gap_layer": "framework",
-        },
-        idempotency_key="owner-source",
+    specialist, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="specialist",
+            params={
+                "source_phase": "FRAMEWORK_AGENT",
+                "domain": "serving_specialist",
+                "gap_layer": "framework",
+            },
+            idempotency_key="owner-source",
+        ),
     )
     monkeypatch.setattr(
         coord.dispatcher,
@@ -2513,17 +2930,6 @@ async def test_materialize_explore_proposal_id_does_not_break_content_dedup(
     queued = [task for task in await coord.tasks.queued() if task.kind == "explore"]
     assert len(queued) == 1
     assert queued[0].params["proposal_msg_id"] == "prop-first"
-
-
-@pytest.mark.asyncio
-async def test_materialize_sweep_stamps_base(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    coord.shared_state.current_best = {"tput": 900.0, "extra_server_args": "--tp 1"}
-    coord.shared_state.baseline_config_path = "/tmp/base.yaml"
-    pending = _pending("sweep", {"params": {}}, msg_id="prop-sweep")
-    await coord.proposals.materialize_approved_proposal(pending)
-    task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
-    assert task.kind == "sweep"
 
 
 @pytest.mark.asyncio
@@ -2799,7 +3205,9 @@ async def test_pump_framework_agent_phase_done_noop(coord: Coordinator) -> None:
 @pytest.mark.asyncio
 async def test_pump_framework_agent_skips_when_task_inflight(coord: Coordinator) -> None:
     _enter_framework(coord)
-    await coord.tasks.create(kind="framework_agent", params={}, idempotency_key="fpr-inflight")
+    await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="framework_agent", params={}, idempotency_key="fpr-inflight")
+    )
     await coord.phase_framework._pump_framework_agent_phase()
 
 
@@ -2882,8 +3290,7 @@ async def test_framework_agent_reject_records_critic_denied(coord: Coordinator, 
     await coord.router._handle_single_verdict(
         source="critic",
         pending=pending,
-        verdict="reject",
-        reasoning="unsafe",
+        ruling=CriticRuling(verdict="reject", reasoning="unsafe"),
     )
     prog = coord.shared_state.framework_agent_phase_progress
     assert any(p.get("status") == "critic_denied" and p.get("candidate_id") == "c1" for p in prog)
@@ -2917,8 +3324,7 @@ async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, mon
     await coord.router._handle_single_verdict(
         source="critic",
         pending=pending,
-        verdict="approve",
-        reasoning="ok",
+        ruling=CriticRuling(verdict="approve", reasoning="ok"),
     )
     assert enq
 

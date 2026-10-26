@@ -8,13 +8,30 @@ import re
 from hyperloom.orchestrator.phases import kernel as kernel_mod
 
 
+# The validator delegates the apply-blocker checks to a helper it awaits, so the offload contract is read across
+# both: a probe moved out of the loop body is still on the event loop unless it is wrapped there too.
+_ON_THE_LOOP = (
+    kernel_mod.KernelPhase._validate_gemm_tuning_e2e,
+    kernel_mod.KernelPhase._gemm_apply_blockers,
+)
+
+
 def _validator_source() -> str:
-    return inspect.getsource(kernel_mod.KernelPhase._validate_gemm_tuning_e2e)
+    return "".join(inspect.getsource(fn) for fn in _ON_THE_LOOP)
 
 
 def test_the_validator_is_still_a_coroutine():
     # The whole premise: if it ever becomes sync, it is not on the loop and these assertions are measuring nothing.
-    assert inspect.iscoroutinefunction(kernel_mod.KernelPhase._validate_gemm_tuning_e2e)
+    for fn in _ON_THE_LOOP:
+        assert inspect.iscoroutinefunction(fn), fn
+
+
+def test_the_blocker_helper_is_reached_from_the_validator():
+    """The helper only carries the contract while the validator actually awaits it."""
+    assert re.search(
+        r"await\s+self\._gemm_apply_blockers\(",
+        inspect.getsource(kernel_mod.KernelPhase._validate_gemm_tuning_e2e),
+    )
 
 
 def test_the_serving_log_is_read_off_the_loop():

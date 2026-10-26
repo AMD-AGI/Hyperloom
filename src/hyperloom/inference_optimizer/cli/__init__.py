@@ -19,6 +19,7 @@ from typing import Any
 
 from hyperloom.common import llm_config
 from hyperloom.common.env import EnvValueError, env_bool
+from hyperloom.common.gpu_partition import PartitionModel
 from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
 from hyperloom.common.llm_headers import parse_custom_headers
 from .executors import (
@@ -34,8 +35,9 @@ from .backends import (
     ModelRouting,
     _build_backends,
     _build_proposal_scorer,
+    _orchestration_banner,
     critic_review_target,
-    orchestration_runs_on_codex,
+    critic_on_codex_side,
 )
 from .model_gate import (
     _load_model_max_position_embeddings,
@@ -68,6 +70,10 @@ from .bootstrap import (
     _print_final_summary,
     _print_session_skeleton,
     _reconcile_crash_count,
+    open_plug_host,
+    resolve_plug_manifest,
+    warn_without_target_gpu,
+    running_plug_host,
     _seed_shared_state,
     _snapshot_system_prompts,
     agentx_state_is_stale,
@@ -92,6 +98,7 @@ from .credentials import (
 )
 from .multi_node import (
     _prepare_multi_node_state as _prepare_multi_node_state,
+    _resolve_gpus_per_node,
     _resolve_mn_backend as _resolve_mn_backend,
 )
 from .quantization import (
@@ -122,11 +129,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 
 from ..session.lock import SessionAlreadyRunning, SessionLock, SessionLockPathError
-from ..session.paths import (
-    ENV_USER_DATA_PATH,
-    asset_system_prompts_dir,
-    make_session_dir,
-)
+from ..session.paths import ENV_USER_DATA_PATH, asset_system_prompts_dir, make_session_dir
 
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
@@ -621,7 +624,7 @@ def _reject_unusable_claude_model(chosen: str, *, allow_custom: bool) -> None:
 
 
 def _catalog_probe_candidates(
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
     *,
     claude_follows_codex: bool,
 ) -> list[tuple[str, str]]:
@@ -632,9 +635,9 @@ def _catalog_probe_candidates(
     """
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
-    if not anthropic_url and resolved_urls is not None:
+    if not anthropic_url:
         anthropic_url = resolved_urls[0]
-    if not openai_url and resolved_urls is not None:
+    if not openai_url:
         openai_url = resolved_urls[1]
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
     # OpenAI-side key only.
@@ -658,7 +661,7 @@ def _catalog_probe_candidates(
 
 
 def _probe_claude_catalog(
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
     *,
     chosen: str,
     claude_follows_codex: bool,
@@ -699,7 +702,7 @@ def _probe_claude_catalog(
 
 def _validate_and_resolve_claude_model(
     args: argparse.Namespace,
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
     *,
     claude_follows_codex: bool | None = None,
 ) -> set[str] | None:
@@ -778,7 +781,7 @@ def _validate_and_resolve_claude_model(
 
 def _resolve_models_for_run(
     args: argparse.Namespace,
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
     *,
     claude_follows_codex: bool | None = None,
     codex_follows_claude: bool | None = None,
@@ -823,7 +826,7 @@ def _probe_critic_review_model(
     try:
         protocol, model = critic_review_target(
             args.critic_protocol,
-            orchestration_on_codex=orchestration_runs_on_codex(
+            orchestration_on_codex=critic_on_codex_side(
                 codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
             ),
             claude_model=args.claude_model,
@@ -874,7 +877,7 @@ def _probe_critic_review_model(
 
 def _smoke_test_codex_model(
     args: argparse.Namespace,
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
 ) -> None:
     """WARN-only catalog check for ``--codex-model`` on an OpenAI-only launch, where it becomes the orchestration model.
 
@@ -883,7 +886,7 @@ def _smoke_test_codex_model(
     openai_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
     if not openai_url:
         openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
-    if not openai_url and resolved_urls is not None:
+    if not openai_url:
         openai_url = resolved_urls[1]
     # OpenAI-side key only.
     openai_key = os.environ.get("OPENAI_API_KEY", "")
@@ -1333,15 +1336,6 @@ class PartitionRequest:
     streams_per_partition: int | None = None
 
 
-@dataclass(frozen=True)
-class PartitionModel:
-    """The model a partition shape must fit: its path and precision, and the session state holding its identity."""
-
-    model_path: str | None = None
-    precision: str | None = None
-    shared_state: Any = None
-
-
 def _export_partition_shape(
     request: PartitionRequest,
     *,
@@ -1421,11 +1415,7 @@ def _export_partition_shape(
         declared_mode=mode,
         streams=streams,
         gpu_type=gpu_type,
-        params={
-            "model_path": str(model.model_path or ""),
-            "precision": str(model.precision or ""),
-        },
-        shared_state=model.shared_state,
+        model=model,
         # The footprint refusal is arithmetic about streams sharing a partition.
         fanout_expected=fanout or bool(mode) or streams_named,
     )
@@ -1897,6 +1887,9 @@ def _open_resumed_session(args: argparse.Namespace) -> _SessionStart:
 
     ws = workspace_root()
     session_dir = Path(args.resume_from).expanduser().resolve()
+    if getattr(args, "session_dir", None):
+        print("ERROR: --session-dir names a new session; it cannot be combined with --resume-from.", file=sys.stderr)
+        sys.exit(2)
     if not is_path_within(session_dir, ws):
         print(
             f"ERROR: --resume-from {session_dir!r} is not under $USER_DATA_PATH={ws}. Move USER_DATA_PATH to the "
@@ -2074,8 +2067,9 @@ def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
 
 def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_resolved: int) -> _SessionStart:
     """Create and lock the session directory, then write its manifest, launch info and seeded state."""
-    # session_dir defaults to <workspace_root>/<model>/<UTC ts>-<rand8>/.
-    session_dir = make_session_dir(model_name=resolve_model_display_name(args))
+    session_dir = make_session_dir(
+        model_name=resolve_model_display_name(args), target=getattr(args, "session_dir", None)
+    )
     # Single-optimizer guard: take the lock so the contract holds uniformly and the owner pid is published for the
     # session diagnostics.
     session_lock = _acquire_session_lock_or_exit(session_dir)
@@ -2223,12 +2217,7 @@ def _resolve_run_topology(args: argparse.Namespace) -> int:
         _resolve_workload_knobs(args)
     tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
     ep_resolved = max(1, int(getattr(args, "ep", 1) or 1))
-    # Resolve gpus_per_node from the explicit CLI flag or the policy default.
-    gpn_attr = getattr(args, "gpus_per_node", None)
-    if gpn_attr is not None:
-        gpus_per_node_resolved = int(gpn_attr)
-    else:
-        gpus_per_node_resolved = 8
+    gpus_per_node_resolved = _resolve_gpus_per_node(args)
 
     # Project before ``_preflight``: ``check_gpu_visibility`` reads ``$TP`` to warn when the run asks for more
     # shards than rocm-smi can see.
@@ -2414,6 +2403,7 @@ def _settle_custom_specialist_only(args: argparse.Namespace) -> None:
 
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
+    plug_manifest = resolve_plug_manifest(args)  # first: a refused flag must leave any session as it was
     nodes_resolved = _resolve_run_topology(args)
     _settle_custom_specialist_only(args)
 
@@ -2481,6 +2471,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     session_dir = session.session_dir
     session_lock = session.session_lock
     manifest = session.manifest
+    plug_host = open_plug_host(plug_manifest, session_dir)
 
     # Recipe KB T0 anchor (after seed/restore for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
     recipe_kb_client = _bootstrap_recipe_kb(
@@ -2528,6 +2519,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             codex_model=args.codex_model,
             codex_follows_claude=codex_follows_claude,
             claude_follows_codex=claude_follows_codex,
+            deepseek_model=llm_config.resolve_forge_llm_model(llm_config.AGENT_BACKEND_DEEPSEEK),
         ),
         CriticSetup(
             choice=critic_choice,
@@ -2626,21 +2618,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir, prompts=prompts, orchestration_phase=_initial_phase, macro_cycle=_initial_macro_cycle
     )
 
-    def _backend_kind(role: str) -> str:
-        backend = backends.get(role)
-        name = str(getattr(backend, "name", "") or "").strip().lower()
-        if name == "claude":
-            return "Claude"
-        if name == "codex":
-            return "Codex"
-        if backend is None:
-            return "DISABLED"
-        return backend.__class__.__name__
-
-    orchestration_str = (
-        f"Claude({args.claude_model})"
-        if _backend_kind("orchestration") == "Claude"
-        else f"{_backend_kind('orchestration')}({args.codex_model})"
+    orchestration_str = _orchestration_banner(
+        backends.get("orchestration"),
+        claude_model=args.claude_model,
+        codex_model=args.codex_model,
     )
     kernel_str = "DISABLED" if no_kernel else "programmatic"
     if critic_choice == "mock":
@@ -2659,27 +2640,21 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     print(f"Tick interval   : {args.tick_interval_sec}s")
     print()
 
-    if not (getattr(args, "compare_against_gpu", None) or "").strip():
-        print(
-            "[target_analysis] no --compare-against-gpu set; will write a "
-            "marker JSON at $SESSION_DIR/target_analysis/target_baseline.json "
-            "(reason=no_target_gpu_configured) — set --compare-against-gpu "
-            "to fetch real InferenceX reference data.",
-            file=sys.stderr,
-        )
+    warn_without_target_gpu(args)
 
     stop_reason: str | None = None
     try:
-        stop_reason = await coordinator.run(
-            objective=objective,
-            options=RunOptions(
-                max_minutes=args.max_hours * 60.0,
-                tick_interval_sec=args.tick_interval_sec,
-                max_ticks=args.max_ticks,
-                install_signal_handlers=True,
-                closing_grace_sec=args.closing_grace_sec,
-            ),
-        )
+        with running_plug_host(plug_host):
+            stop_reason = await coordinator.run(
+                objective=objective,
+                options=RunOptions(
+                    max_minutes=args.max_hours * 60.0,
+                    tick_interval_sec=args.tick_interval_sec,
+                    max_ticks=args.max_ticks,
+                    install_signal_handlers=True,
+                    closing_grace_sec=args.closing_grace_sec,
+                ),
+            )
     finally:
         state = coordinator.shared_state
         effective_stop_reason = stop_reason or coordinator.stop_classification

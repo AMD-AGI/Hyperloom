@@ -12,16 +12,15 @@ import time
 
 import pytest
 
+from hyperloom.orchestrator.bringup import reconcile
 from hyperloom.orchestrator.bringup.reconcile import (
     TIMEOUT_VERDICT,
-    ReconcileLimits,
     ReconcileLinks,
     Reconciler,
     ReconcileStores,
 )
 from hyperloom.orchestrator.bus.resource_lock import (
     BRINGUP_ROUND_LANE,
-    ResourceLockManager,
     SqliteLeaseBackend,
     drop_round_lane,
 )
@@ -33,7 +32,7 @@ from hyperloom.orchestrator.state.round_store import (
     RoundRequest,
     RoundStore,
 )
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 
 _LEASE = 600.0
 
@@ -59,6 +58,7 @@ class _Enablement:
     def __init__(self) -> None:
         self.validation_pending = False
         self.revalidation_task_id = ""
+        self.revalidation_generation = 0
 
 
 class _State:
@@ -94,29 +94,31 @@ def db(tmp_path):
 
 
 def _build(
-    db, *, proposals=None, state=None, result_pending=None, **limits
+    db, *, proposals=None, state=None, result_pending=None
 ) -> tuple[Reconciler, RoundStore, TaskRegistry, _State]:
     """A reconciler over ``db``, with the pieces a test needs to inspect."""
     rounds = RoundStore(db)
     tasks = TaskRegistry(db)
     shared = state or _State()
     rec = Reconciler(
-        ReconcileStores(rounds=rounds, tasks=tasks, locks=ResourceLockManager(SqliteLeaseBackend(db))),
+        ReconcileStores(rounds=rounds, tasks=tasks, locks=SqliteLeaseBackend(db)),
         shared,
         links=ReconcileLinks(
             resources=ResourceFacts(),
-            proposals=(lambda: proposals) if proposals is not None else None,
+            proposals=lambda: proposals if proposals is not None else {},
+            drop_proposal=lambda _pending, _reason: None,
             session_dir=db.db_path.parent,
-            result_pending=result_pending,
+            result_pending=result_pending or (lambda _task_id: False),
         ),
-        limits=ReconcileLimits(**limits),
     )
     return rec, rounds, tasks, shared
 
 
 async def _open_round(rounds: RoundStore, tasks: TaskRegistry, *, holder: str, lease: float = _LEASE) -> None:
     """Open a round held by a real task row."""
-    await tasks.create(kind="specialist", params={}, idempotency_key=f"k:{holder}", task_id=holder)
+    await tasks.create_or_return_existing(
+        TaskSpec(kind="specialist", params={}, idempotency_key=f"k:{holder}", task_id=holder)
+    )
     result = await rounds.open(
         f"round-{holder}",
         RoundRequest(now_unix=_NOW, request_id=f"open:{holder}"),
@@ -176,8 +178,8 @@ async def test_an_old_round_does_not_kill_its_live_recorded_process(db):
         await _open_round(rounds, tasks, holder="spec-1", lease=1.0)
         async with db.transaction() as cur:
             cur.execute(
-                "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at, heartbeat_at)"
-                " VALUES ('server_lifecycle', 'h1', 'spec-1', 'bench', ?, '', '', '')",
+                "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at)"
+                " VALUES ('server_lifecycle', 'h1', 'spec-1', 'bench', ?, '', '')",
                 (child.pid,),
             )
 
@@ -212,11 +214,13 @@ async def test_a_terminal_holder_hands_the_round_to_the_integrate_that_follows_i
     await _open_round(rounds, tasks, holder="spec-1")
     await tasks.transition("spec-1", "running")
     await tasks.transition("spec-1", "succeeded")
-    integrate = await tasks.create(
-        kind="integrate_patch",
-        params={"specialist_task_id": "spec-1"},
-        idempotency_key="integrate:1",
-        lease_ttl_sec=900,
+    integrate, _ = await tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params={"specialist_task_id": "spec-1"},
+            idempotency_key="integrate:1",
+            lease_ttl_sec=900,
+        ),
     )
 
     report = await rec.run(_NOW + elapsed)
@@ -232,12 +236,12 @@ async def test_a_terminal_holder_hands_the_round_to_the_integrate_that_follows_i
 async def test_terminal_holder_cannot_handoff_before_gpu_cleanup(db):
     from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 
-    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0)
+    rec, rounds, tasks, _ = _build(db)
     await _open_round(rounds, tasks, holder="spec-1", lease=1)
     await tasks.transition("spec-1", "running")
     await tasks.transition("spec-1", "succeeded")
-    successor = await tasks.create(
-        kind="integrate_patch", params={"specialist_task_id": "spec-1"}, idempotency_key="next"
+    successor, _ = await tasks.create_or_return_existing(
+        TaskSpec(kind="integrate_patch", params={"specialist_task_id": "spec-1"}, idempotency_key="next")
     )
     pool = SpecialistGpuPool(db, gpu_ids=[0])
     lease = await pool.try_acquire(count=1, holder_id="spec-1", task_id="spec-1")
@@ -255,7 +259,7 @@ async def test_terminal_holder_cannot_handoff_before_gpu_cleanup(db):
 @pytest.mark.parametrize("confirmed", [False, True], ids=["unconfirmed", "confirmed"])
 @pytest.mark.parametrize("with_successor", [False, True], ids=["expire", "handoff"])
 async def test_terminal_round_uses_latest_cleanup_outcome(db, state, appended, confirmed, with_successor):
-    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0)
+    rec, rounds, tasks, _ = _build(db)
     await _open_round(rounds, tasks, holder="spec-1", lease=1)
     await tasks.transition("spec-1", "running")
     evidence = {
@@ -271,8 +275,10 @@ async def test_terminal_round_uses_latest_cleanup_outcome(db, state, appended, c
             history.append({"progress": {"message": "completion recorded"}})
             cur.execute("UPDATE tasks SET history=? WHERE task_id='spec-1'", (json.dumps(history),))
     if with_successor:
-        await tasks.create(
-            kind="integrate_patch", params={"specialist_task_id": "spec-1"}, idempotency_key="next", task_id="next"
+        await tasks.create_or_return_existing(
+            TaskSpec(
+                kind="integrate_patch", params={"specialist_task_id": "spec-1"}, idempotency_key="next", task_id="next"
+            )
         )
 
     report = await rec.run(_NOW + 10_000)
@@ -307,7 +313,7 @@ async def test_an_undecided_review_holds_the_round_open_until_its_ttl(db):
 @pytest.mark.asyncio
 async def test_a_terminal_holder_with_nothing_following_it_expires_on_its_cap(db):
     """Not on the tick it went terminal -- the successor is created by a later one."""
-    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=300.0)
+    rec, rounds, tasks, _ = _build(db)
     await _open_round(rounds, tasks, holder="spec-1")
     await tasks.transition("spec-1", "running")
     await tasks.transition("spec-1", "succeeded")
@@ -320,24 +326,11 @@ async def test_a_terminal_holder_with_nothing_following_it_expires_on_its_cap(db
 
 
 @pytest.mark.asyncio
-async def test_a_holder_that_reported_its_own_end_is_proof_but_a_lease_watchdog_is_not(db):
-    """A watchdog times a lease; it never looks at a process."""
-    rec, rounds, tasks, state = _build(db, terminal_holder_cap_sec=0.0)
-    await _open_round(rounds, tasks, holder="spec-1")
-    await tasks.transition("spec-1", "running")
-    await tasks.transition("spec-1", "failed", {"reason": "lease_expired", "lease_ttl_sec": 60.0, "age_sec": 99.0})
-
-    await rec.run(_NOW + 10.0)
-
-    assert (await rounds.get("round-spec-1")).state == OPEN
-
-
-@pytest.mark.asyncio
 async def test_a_running_task_whose_process_is_gone_is_failed_and_one_unobservable_is_not(db, monkeypatch):
     """Inability to observe is UNKNOWN. Nothing is manufactured from it."""
     rec, _rounds, tasks, _ = _build(db)
-    dead = await tasks.create(kind="specialist", params={}, idempotency_key="dead")
-    blind = await tasks.create(kind="specialist", params={}, idempotency_key="blind")
+    dead, _ = await tasks.create_or_return_existing(TaskSpec(kind="specialist", params={}, idempotency_key="dead"))
+    blind, _ = await tasks.create_or_return_existing(TaskSpec(kind="specialist", params={}, idempotency_key="blind"))
     await tasks.transition(dead.task_id, "running")
     await tasks.transition(blind.task_id, "running")
     gone = subprocess.Popen([sys.executable, "-c", "pass"])  # nosec B603
@@ -346,8 +339,8 @@ async def test_a_running_task_whose_process_is_gone_is_failed_and_one_unobservab
     monkeypatch.setattr(SqliteLeaseBackend, "_pid_alive", staticmethod(lambda pid: pid != gone.pid))
     async with db.transaction() as cur:
         cur.execute(
-            "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at, heartbeat_at)"
-            " VALUES ('server_lifecycle', 'h1', ?, 'bench', ?, '', '', '')",
+            "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at)"
+            " VALUES ('server_lifecycle', 'h1', ?, 'bench', ?, '', '')",
             (dead.task_id, gone.pid),
         )
         cur.execute("UPDATE leases SET owner_scope='test-node'")
@@ -363,7 +356,7 @@ async def test_a_running_task_whose_process_is_gone_is_failed_and_one_unobservab
 async def test_an_unanswered_review_is_denied_and_a_verdict_that_arrived_is_not_overwritten(db):
     """The timeout is a deny, and it is written compare-and-set."""
     pending = {"m-late": _Pending("spec-1"), "m-answered": _Pending("spec-2")}
-    rec, _rounds, _tasks, _ = _build(db, proposals=pending, review_ttl_sec=1.0)
+    rec, _rounds, _tasks, _ = _build(db, proposals=pending)
     async with db.transaction() as cur:
         for msg_id in ("m-late", "m-answered"):
             cur.execute(
@@ -395,7 +388,7 @@ async def test_a_timeout_deny_closes_the_proposal_span_once(db, tmp_path):
 
     pending = {"m-late": _Pending("spec-1")}
     pending["m-late"].action_name = "integrate_patch"
-    rec, _rounds, _tasks, _ = _build(db, proposals=pending, review_ttl_sec=1.0)
+    rec, _rounds, _tasks, _ = _build(db, proposals=pending)
     async with db.transaction() as cur:
         cur.execute(
             "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts)"
@@ -416,7 +409,7 @@ async def test_a_timeout_deny_closes_the_proposal_span_once(db, tmp_path):
 @pytest.mark.asyncio
 async def test_a_second_pass_does_not_deny_a_proposal_twice(db):
     """The compare-and-set is the guard, so the pass is safe to run every tick."""
-    rec, _rounds, _tasks, _ = _build(db, review_ttl_sec=1.0)
+    rec, _rounds, _tasks, _ = _build(db)
     async with db.transaction() as cur:
         cur.execute(
             "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts)"
@@ -491,7 +484,9 @@ async def test_a_revalidation_window_whose_task_is_terminal_is_closed(db):
     state.enablement.validation_pending = True
     state.enablement.revalidation_task_id = "reval-1"
     rec, _, tasks, _ = _build(db, state=state)
-    await tasks.create(kind="baseline", params={}, idempotency_key="k:reval-1", task_id="reval-1")
+    await tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={}, idempotency_key="k:reval-1", task_id="reval-1")
+    )
     await tasks.transition("reval-1", "running")
     await tasks.transition("reval-1", "failed")
 
@@ -510,7 +505,9 @@ async def test_a_revalidation_window_whose_task_still_runs_is_left_alone(db):
     state.enablement.validation_pending = True
     state.enablement.revalidation_task_id = "reval-1"
     rec, _, tasks, _ = _build(db, state=state)
-    await tasks.create(kind="baseline", params={}, idempotency_key="k:reval-1", task_id="reval-1")
+    await tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={}, idempotency_key="k:reval-1", task_id="reval-1")
+    )
 
     report = await rec.run(_NOW + 1.0)
 
@@ -525,8 +522,8 @@ async def test_the_pass_sweeps_the_leases_and_reports_what_it_swept(db):
     await _open_round(rounds, tasks, holder="spec-1", lease=_LEASE)
     async with db.transaction() as cur:
         cur.execute(
-            "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at, heartbeat_at)"
-            " VALUES ('server_lifecycle', 'h1', 'other', 'bench', 0, '', '', '')",
+            "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at)"
+            " VALUES ('server_lifecycle', 'h1', 'other', 'bench', 0, '', '')",
         )
 
     report = await rec.run(_NOW + 1.0)
@@ -560,7 +557,7 @@ async def _wedge_round_with_lane_rows(db, rounds, tasks, *, cleanup_confirmed: b
     Returns:
         str: The successor task's id.
     """
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     await _open_round(rounds, tasks, holder="spec-1")
     await locks.acquire_many(["server_lifecycle"], holder_id="h1", task_id="spec-1", action="explore", ttl_sec=7200)
     await tasks.transition("spec-1", "running")
@@ -569,8 +566,8 @@ async def _wedge_round_with_lane_rows(db, rounds, tasks, *, cleanup_confirmed: b
         "succeeded",
         evidence={"outcome": {"state": "succeeded"}, "cleanup_confirmed": cleanup_confirmed},
     )
-    successor = await tasks.create(
-        kind="integrate_patch", params={"specialist_task_id": "spec-1"}, idempotency_key="next"
+    successor, _ = await tasks.create_or_return_existing(
+        TaskSpec(kind="integrate_patch", params={"specialist_task_id": "spec-1"}, idempotency_key="next")
     )
     # Nothing here is reclaimable by liveness: the pid on the rows is this test.
     assert await locks.reap_dead_holders() == []
@@ -578,7 +575,7 @@ async def _wedge_round_with_lane_rows(db, rounds, tasks, *, cleanup_confirmed: b
 
 
 @pytest.mark.asyncio
-async def test_a_round_whose_holder_left_cleanup_unconfirmed_keeps_everything(db):
+async def test_a_round_whose_holder_left_cleanup_unconfirmed_keeps_everything(db, monkeypatch):
     """The bound on the rule above: nothing is freed and nothing is advanced.
 
     This is the shape of the 2026-09-21 rows. Nothing resolves them, by design:
@@ -588,7 +585,8 @@ async def test_a_round_whose_holder_left_cleanup_unconfirmed_keeps_everything(db
     ended cleanly enough to move a round on. A pass that freed these lanes would
     be freeing a lane whose work may still be running.
     """
-    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0.0)
+    monkeypatch.setattr(reconcile, "TERMINAL_HOLDER_CAP_SEC", 0.0)
+    rec, rounds, tasks, _ = _build(db)
     await _wedge_round_with_lane_rows(db, rounds, tasks, cleanup_confirmed=False)
 
     report = await rec.run(_NOW + 10.0)
@@ -607,7 +605,7 @@ async def test_a_round_whose_holder_left_cleanup_unconfirmed_keeps_everything(db
 
 
 @pytest.mark.asyncio
-async def test_a_round_wedged_by_lane_rows_stays_wedged_and_is_reported(db):
+async def test_a_round_wedged_by_lane_rows_stays_wedged_and_is_reported(db, monkeypatch):
     """The cost of refusing to guess, pinned one level up.
 
     A holder that ended with its cleanup unconfirmed keeps its lane, so a round
@@ -617,7 +615,8 @@ async def test_a_round_wedged_by_lane_rows_stays_wedged_and_is_reported(db):
     rounds on the same cards. So the round waits, and the operator is told which
     lane to look at.
     """
-    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0.0)
+    monkeypatch.setattr(reconcile, "TERMINAL_HOLDER_CAP_SEC", 0.0)
+    rec, rounds, tasks, _ = _build(db)
     await _wedge_round_with_lane_rows(db, rounds, tasks, cleanup_confirmed=True)
 
     report = await rec.run(_NOW + 10.0)
@@ -637,7 +636,9 @@ async def test_a_revalidation_window_whose_result_is_still_to_be_booked_is_left_
     state.enablement.revalidation_task_id = "reval-1"
     owed = {"reval-1"}
     rec, _, tasks, _ = _build(db, state=state, result_pending=lambda task_id: task_id in owed)
-    await tasks.create(kind="baseline", params={}, idempotency_key="k:reval-1", task_id="reval-1")
+    await tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={}, idempotency_key="k:reval-1", task_id="reval-1")
+    )
     await tasks.transition("reval-1", "running")
     await tasks.transition("reval-1", "succeeded")
 

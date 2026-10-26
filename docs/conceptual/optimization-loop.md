@@ -282,16 +282,48 @@ serving card power throttled for at least 10% of the phase is listed in
 throttled share and mean clock: its throughput was set by the power cap, not by
 its clock limit. This is only reported; nothing changes the cards.
 
-The optimizer never changes power settings during a session. The power cap and
-DPM performance level decide how much of the card's throughput is available at
-what power, so they are part of the measurement contract, and setting them is
-privileged and card-wide. By default, set them with `amd-smi set --power-cap` /
-`--perf-level` before launch; `--gpu-power-cap-w` and `--gpu-perf-level` then
+The optimizer never changes power settings during a session. The power cap, the
+DPM performance level and the graphics clock's maximum (sclk) decide how much of
+the card's throughput is available at what power, so they are part of the
+measurement contract, and setting them is privileged and card-wide. By default,
+set them with `amd-smi set --power-cap` / `--perf-level` / `-L sclk max` before
+launch; `--gpu-power-cap-w`, `--gpu-perf-level` and `--gpu-sclk-max-mhz` then
 assert them, the way `--compute-partition-mode` asserts a partition mode: the
 session refuses to start (and to resume) if a card it uses is at a different
-value. The observed cap and perf level are recorded in the platform
-fingerprint whether or not they are asserted. Neither can be checked on a
-multi-node session, so asserting one there refuses.
+value. The observed cap, perf level and sclk limit are recorded in the platform
+fingerprint whether or not they are asserted. None can be checked on a
+multi-node session, so asserting one there refuses. The sclk limit is read from
+`amd-smi metric --clock`, where a limit set with `-L` shows; it is a ceiling,
+not a locked clock, so under load a card may run below it. The limit is only
+ever asserted: `--apply-gpu-power-settings` sets the cap and perf level, not the
+limit.
+
+Node Power Management (NPM, MI350 series) is the node-wide counterpart: when it
+is enabled, firmware holds the sum of every card's power to a node limit and
+moves power between cards, so a card's throughput also depends on what the
+other cards draw. Its state and the limit firmware enforces, as
+`amd-smi node -p` reports them, are recorded in the same record under `node`
+(left out where `amd-smi` has no `node` command, before ROCm 7.2).
+`--node-power-management enabled|disabled` and `--node-power-limit-w` assert
+them the same way, refusing a launch or resume whose node differs or cannot be
+read. They are only ever asserted: NPM is enabled and its limit set on the
+BMC, and `--apply-gpu-power-settings` never changes them. The enforced limit
+can sit below the one the BMC was asked for, since firmware clamps it to the
+node's maximum, so assert the value `amd-smi` reports.
+
+Because NPM moves power between cards, a session on part of an NPM-enabled node
+is measured against whatever runs on the rest of it. So when `amd-smi` reports
+NPM enabled, a launch or resume whose visible-device mask leaves any of the
+node's GPUs out is refused, naming the cards left out, whether or not they are
+busy at that moment: an idle neighbour at launch says nothing about the hours
+after it. A mask that is set but whose cards cannot be named is refused the same
+way. The check is on the mask: a session with no mask counts as having every
+card, as everywhere else, even if its tensor parallelism uses fewer.
+`--allow-shared-npm-node` measures anyway and records the cards left out as a
+list of amd-smi indices under `shared_npm_node` (`null` when the mask's cards
+cannot be named). Like `--apply-gpu-power-settings`, the permission is not kept:
+pass it again on resume. A node with NPM disabled, or without it, and a
+multi-node session are not checked.
 
 ### Applying the power settings (opt-in)
 
@@ -481,7 +513,10 @@ One phase, two levers worked in parallel:
   a specialist wrote, `upstream_pr` for a diff fetched from an upstream PR
   that a `candidate_discovery_specialist` found, ranked and judged. Both
   serialise on the `workspace_mutation` lane: one landing at a time,
-  independent of how fast proposals arrive.
+  independent of how fast proposals arrive. A candidate whose every patch
+  reverse-applies cleanly, and that changes nothing else, is not benchmarked:
+  it ends `already_present`, and a candidate with an upstream PR identity is
+  recorded so in the framework KB.
 
 `specialist` serves both levers — investigation, patch authoring, and
 candidate discovery are all dispatches of the one specialist action. An
@@ -507,7 +542,7 @@ The phase advances to KERNEL_AGENT only when **both** levers are dry
 (`optimize_no_more_leverage`). Either arm going quiet raises
 `switch_bottleneck` so the next macro-cycle steers off this bottleneck,
 without abandoning the lever that is still paying. It also exits when its
-phase budget is spent, and at the absolute phase cap.
+phase budget is spent.
 
 After each KEEP the runtime revalidates the full stack end to end, so the
 reported `cumulative_gain_validated` always comes from a measurement taken

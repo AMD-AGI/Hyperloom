@@ -198,12 +198,12 @@ def test_no_executor_is_registered_under_an_unknown_action_name():
     """The reverse direction: a stale key left behind by a rename."""
     from hyperloom.inference_optimizer.protocol.action_surfaces import (
         ACTION_CATALOGUE,
-        INTERNAL_ONLY_ACTION_NAMES,
+        COORDINATOR_INTERNAL_ACTIONS,
     )
 
     registry = _fully_wired_registry()
     catalogue = {meta.name for meta in ACTION_CATALOGUE.values()}
-    uncatalogued_by_design = INTERNAL_ONLY_ACTION_NAMES - catalogue
+    uncatalogued_by_design = COORDINATOR_INTERNAL_ACTIONS - catalogue
 
     phantom = sorted(set(registry) - catalogue - uncatalogued_by_design)
     assert not phantom, f"executor keys absent from ACTION_CATALOGUE: {phantom}"

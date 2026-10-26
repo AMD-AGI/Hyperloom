@@ -126,15 +126,19 @@ class TestWhatItUnblocks:
     @staticmethod
     def _select(report):
         from kernelforge.gemm_tune.model_analyzer import ModelProfile
-        from kernelforge.gemm_tune.router import select_tuners
+        from kernelforge.gemm_tune.router import RoutingEvidence, RoutingTarget, select_tuners
 
         specs = select_tuners(
             ModelProfile(model_path="/fake", architecture="LlamaForCausalLM"),
-            framework="sglang",
-            precision="bf16",
-            quant_type="none",
-            gpu_type="mi355x",
-            demand_report=report,
+            RoutingTarget(
+                framework="sglang",
+                precision="bf16",
+                quant_type="none",
+                gpu_type="mi355x",
+            ),
+            RoutingEvidence(
+                demand_report=report,
+            ),
         )
         return [s.name for s in specs if not s.skip_reason]
 

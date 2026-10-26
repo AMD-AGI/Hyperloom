@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import enum
 import json
+import os
 import logging
 import re
 import time
@@ -24,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.fs_utils import append_text_nofollow, write_text_nofollow
 from hyperloom.common.io import JsonFormat, WriteOptions, atomic_write_json
 from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, redact_secret_values
@@ -101,7 +103,7 @@ def _worktree_source(params: dict[str, Any], *, framework_repo_path: str = "") -
 def _subprocess_call_outcome(result: SpecialistSubprocessResult) -> tuple[str, dict[str, Any]]:
     """The terminal status and attributes of a specialist subprocess's ``llm.call`` span."""
     attributes: dict[str, Any] = {
-        **llm_call_summary(result.usage),
+        **llm_call_summary(result.trace.usage),
         "exit_code": result.exit_code,
         "timed_out": result.timed_out,
     }
@@ -313,26 +315,23 @@ def _patch_path_within_bases(path: Path, bases: list[Path]) -> bool:
 
     A claimed patch path (possibly absolute or ``..``-relative) must stay under
     the specialist worktree/workspace before it is read back; only
-    sandbox-internal paths are legitimate.
+    sandbox-internal paths are legitimate, and none may pass through a symlink.
     """
     try:
         rp = path.resolve()
     except OSError:
         return False
+    lexical = Path(os.path.normpath(path))
     for base in bases:
         try:
             br = base.resolve()
-        except OSError:
+            rel = lexical.relative_to(os.path.normpath(base))
+        except (OSError, ValueError):
             continue
-        try:
-            if rp == br or rp.is_relative_to(br):
-                return True
-        except AttributeError:  # pragma: no cover - Python <3.9
-            try:
-                rp.relative_to(br)
-                return True
-            except ValueError:
-                continue
+        # The sandbox is writable by a demoted child: a link on the way (a planted ``patches`` symlink) would make
+        # the path resolve somewhere else inside the base, so what is named must be what is read.
+        if rp == br / rel:
+            return True
     return False
 
 
@@ -668,6 +667,8 @@ class SpecialistRunner:
                     else ""
                 ),
                 source_hint_directories=tuple(params.get("source_hint_directories") or ()),
+                model_name=str(params.get("model_name") or ""),
+                model_path=str(params.get("model_path") or ""),
                 model_info=dict(params.get("model_info") or {}),
                 static_recon_checklist=str(params.get("static_recon_checklist") or ""),
                 enablement_source_context=str(params.get("enablement_source_context") or ""),
@@ -992,6 +993,7 @@ class SpecialistRunner:
         latency_ms: int | None,
     ) -> None:
         """Record what a reaped subprocess left for the session's ledgers, then mark its heartbeat finished."""
+        trace = sub_result.trace
         self._append_transcript(
             prep.workspace,
             1,
@@ -1003,17 +1005,17 @@ class SpecialistRunner:
                 "stale_heartbeat": sub_result.stale_heartbeat,
                 "process_log_path": sub_result.process_log_path,
                 "patch_count": len(sub_result.patches),
-                "usage": sub_result.usage,
+                "usage": trace.usage,
                 "error": sub_result.error,
             },
         )
         tick, phase = self._ctx_tick_phase(ctx)
         # Fold the production specialist's token spend into the unified ledger: one row per turn
         # when per-turn usage is available, else one cumulative row; the session latency lands on the last.
-        if len(sub_result.turn_usages) > 1:
-            model = (sub_result.usage or {}).get("model")
-            last_idx = len(sub_result.turn_usages)
-            for turn, usage in enumerate(sub_result.turn_usages, start=1):
+        if len(trace.turn_usages) > 1:
+            model = (trace.usage or {}).get("model")
+            last_idx = len(trace.turn_usages)
+            for turn, usage in enumerate(trace.turn_usages, start=1):
                 metadata: dict[str, Any] = {**usage, "call_id": call_id}
                 if model:
                     metadata.setdefault("model", model)
@@ -1024,26 +1026,21 @@ class SpecialistRunner:
             self._trace_specialist_llm_call(
                 ctx,
                 turn=1,
-                metadata={**sub_result.usage, "call_id": call_id} if sub_result.usage else None,
+                metadata={**trace.usage, "call_id": call_id} if trace.usage else None,
                 latency_ms=latency_ms,
             )
-        self._record_specialist_intel(task_id=ctx.task.task_id, turn=1, tool_calls=sub_result.tool_calls)
+        self._record_specialist_intel(task_id=ctx.task.task_id, turn=1, tool_calls=trace.tool_calls)
         # Pair the parent-held prompt with the recovered assistant reply so the
         # production specialist turn lands in conversations.jsonl.
-        if sub_result.response:
+        if trace.response:
             self._record_specialist_conversation(
                 task_id=ctx.task.task_id,
                 turn=1,
-                metadata={"prompt": prep.system_prompt + "\n---\n" + prep.user_prompt, "response": sub_result.response},
+                metadata={"prompt": prep.system_prompt + "\n---\n" + prep.user_prompt, "response": trace.response},
                 tick=tick,
                 phase=phase,
             )
-        self._write_heartbeat(
-            prep.workspace,
-            turn=1,
-            max_turns=prep.max_turns,
-            status="finished",
-        )
+        self._write_heartbeat(prep.workspace, turn=1, max_turns=prep.max_turns, status="finished")
 
     # Finalize phase (shared)
     def _finalize(
@@ -1358,7 +1355,7 @@ class SpecialistRunner:
         if path is None:
             return
         text = "<!-- system_prompt -->\n" + system + "\n<!-- user_prompt -->\n" + user + "\n"
-        path.write_text(text, encoding="utf-8")
+        write_text_nofollow(path.parent, (path.name,), text)
 
     def _append_transcript(
         self,
@@ -1388,8 +1385,7 @@ class SpecialistRunner:
             sort_keys=True,
             separators=(",", ":"),
         )
-        with path.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        append_text_nofollow(path.parent, (path.name,), line + "\n")
 
     def _write_heartbeat(
         self,

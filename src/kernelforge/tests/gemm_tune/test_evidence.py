@@ -189,18 +189,9 @@ class TestDemandConsumption:
         assert [s["M"] for s in ev.demand_shapes(entry, limit=1)] == [512]
         assert [s["M"] for s in ev.demand_shapes(entry, limit=1, bucket=False)] == [64]
 
-    def test_padding_matches_aiter_gl1(self):
-        assert [ev.padded_m(m, 7168) for m in (1, 2, 3, 15, 16, 17, 64, 100, 513)] == [
-            1,
-            2,
-            4,
-            16,
-            16,
-            32,
-            64,
-            128,
-            1024,
-        ]
+    def test_padding_is_aiters_multiple_of_16_up_to_256_then_a_capped_power_of_two(self):
+        ms = (1, 2, 3, 12, 15, 16, 17, 40, 56, 64, 100, 256, 257, 513, 3000)
+        assert [ev.padded_m(m, 7168) for m in ms] == [1, 16, 16, 16, 16, 16, 32, 48, 64, 64, 112, 256, 512, 1024, 4096]
         assert ev.padded_m(8192, 7168) == 8192 and ev.padded_m(20000, 7168) == 8192
         # Only a wide output is held at 8192.
         assert ev.padded_m(20000, 2624) == 32768
@@ -212,6 +203,11 @@ class TestDemandConsumption:
         (shape,) = ev.demand_shapes(entry)
 
         assert (shape["M"], shape["requests"], shape["observed_M"]) == (32768, 12, [16639, 26174, 32400])
+
+    def test_graph_batch_sizes_are_not_rounded_to_powers_of_two(self):
+        entry = {"keys": [{"M": m, "N": "5120", "K": "17408", "requests": 1} for m in (12, 40, 48, 56, 64)]}
+        shapes = ev.demand_shapes(entry)
+        assert sorted((s["M"], s["observed_M"]) for s in shapes) == [(16, [12]), (48, [40, 48]), (64, [56, 64])]
 
     def test_buckets_do_not_merge_across_differing_extended_keys(self):
         entry = {

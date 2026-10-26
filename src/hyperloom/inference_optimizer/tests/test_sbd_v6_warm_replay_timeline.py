@@ -24,6 +24,9 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     GATE_KEEP_THRESHOLD,
     GATE_QUALITY,
     GATE_TPUT_VALID,
+    WarmReplayApplyItem,
+    WarmReplayMeasurement,
+    WarmReplayRequest,
     make_warm_replay_recorder,
 )
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
@@ -47,11 +50,9 @@ def _ext(session_dir: Path) -> dict[str, Any]:
     return events[0]["ext"]
 
 
-def _recorder(**overrides: Any):
+def _recorder(*, open_event_on_timeline: bool = True, **overrides: Any):
     """Build a recorder the way an enqueued replay gets one."""
-    kwargs: dict[str, Any] = {
-        "phase": "prelude",
-        "macro_cycle": 0,
+    fields: dict[str, Any] = {
         "task_id": "t-warm-1",
         "tier": "T0",
         "config_source": "recipe-abc",
@@ -63,8 +64,13 @@ def _recorder(**overrides: Any):
         "kernel_count": 0,
         "recipe_suppressed": False,
     }
-    kwargs.update(overrides)
-    recorder = make_warm_replay_recorder(**kwargs)
+    fields.update(overrides)
+    recorder = make_warm_replay_recorder(
+        phase="prelude",
+        macro_cycle=0,
+        request=WarmReplayRequest(**fields),
+        open_event_on_timeline=open_event_on_timeline,
+    )
     assert recorder is not None
     return recorder
 
@@ -80,7 +86,7 @@ def test_the_anchor_the_gain_was_measured_against_is_recorded_verbatim(_bound_se
     recorder = _recorder(session_baseline_tput=15630.0)
     # Enqueued against a lower baseline than the session now holds: back-solving
     # from the gain would report a gain the replay never measured.
-    recorder.record_measurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0)
+    recorder.record_measurement(WarmReplayMeasurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0))
     recorder.finish({"status": "reproduced"})
 
     ext = _ext(_bound_session)
@@ -91,7 +97,7 @@ def test_the_anchor_the_gain_was_measured_against_is_recorded_verbatim(_bound_se
 
 def test_a_gate_that_never_ran_is_absent_rather_than_failed(_bound_session):
     recorder = _recorder()
-    recorder.record_measurement(before_tput=0.0, after_tput=0.0, gain_pct=None)
+    recorder.record_measurement(WarmReplayMeasurement(before_tput=0.0, after_tput=0.0, gain_pct=None))
     recorder.record_gate(GATE_TPUT_VALID, passed=False, reason="invalid_tput tput=0 baseline=0")
     recorder.finish({"status": "failed", "reason": "invalid_tput tput=0 baseline=0"})
 
@@ -102,7 +108,9 @@ def test_a_gate_that_never_ran_is_absent_rather_than_failed(_bound_session):
 
 def test_an_eval_that_ran_without_a_score_neither_passes_nor_fails(_bound_session):
     recorder = _recorder()
-    recorder.record_measurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0, eval_ran=True)
+    recorder.record_measurement(
+        WarmReplayMeasurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0, eval_ran=True)
+    )
     recorder.record_gate(GATE_ACCURACY, passed=None, reason="keep_verdict_unscored")
     recorder.finish({"status": "reproduced"})
 
@@ -113,7 +121,7 @@ def test_an_eval_that_ran_without_a_score_neither_passes_nor_fails(_bound_sessio
 
 def test_a_threshold_rejection_after_an_unscored_eval_names_the_threshold(_bound_session):
     recorder = _recorder()
-    recorder.record_measurement(before_tput=14000.0, after_tput=14050.0, gain_pct=0.36)
+    recorder.record_measurement(WarmReplayMeasurement(before_tput=14000.0, after_tput=14050.0, gain_pct=0.36))
     recorder.record_gate(GATE_ACCURACY, passed=None, reason="keep_verdict_unscored")
     recorder.record_gate(GATE_KEEP_THRESHOLD, passed=False, observed=0.36, threshold=2.0)
     recorder.finish({"status": "not_reproduced", "keep_threshold_pct": 2.0})
@@ -125,7 +133,7 @@ def test_a_threshold_rejection_after_an_unscored_eval_names_the_threshold(_bound
 
 def test_a_quality_rejection_reads_as_a_completed_arc_not_a_failure(_bound_session):
     recorder = _recorder()
-    recorder.record_measurement(before_tput=14000.0, after_tput=17000.0, gain_pct=21.4)
+    recorder.record_measurement(WarmReplayMeasurement(before_tput=14000.0, after_tput=17000.0, gain_pct=21.4))
     recorder.record_gate(GATE_QUALITY, passed=False, reason="image-quality gate failed vs baseline reference")
     recorder.finish({"status": "quality_failed"})
 
@@ -138,16 +146,22 @@ def test_every_item_the_replay_had_to_apply_reads_back_with_its_fate(_bound_sess
     landed is what separates "the recipe did not reproduce" from "half of it
     was never in the server that was measured"."""
     recorder = _recorder()
-    recorder.record_apply_item("/kb/prior/fusion-attn.patch", kind=APPLY_KERNEL, position=0, applied=True)
     recorder.record_apply_item(
-        "/kb/prior/rewrite-moe.patch",
-        kind=APPLY_KERNEL,
-        position=1,
-        applied=False,
-        reason="no patch target under the active root",
+        WarmReplayApplyItem("/kb/prior/fusion-attn.patch", kind=APPLY_KERNEL, position=0, applied=True)
     )
-    recorder.record_apply_item("fix-attn.patch", kind=APPLY_PATCH, position=0, applied=True, target="/opt/sglang")
-    recorder.record_measurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0)
+    recorder.record_apply_item(
+        WarmReplayApplyItem(
+            "/kb/prior/rewrite-moe.patch",
+            kind=APPLY_KERNEL,
+            position=1,
+            applied=False,
+            reason="no patch target under the active root",
+        )
+    )
+    recorder.record_apply_item(
+        WarmReplayApplyItem("fix-attn.patch", kind=APPLY_PATCH, position=0, applied=True, target="/opt/sglang")
+    )
+    recorder.record_measurement(WarmReplayMeasurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0))
     recorder.finish({"status": "reproduced"})
 
     items = _ext(_bound_session)["applied"]["items"]
@@ -165,7 +179,9 @@ def test_the_config_and_the_apply_list_settle_into_one_applied_block(_bound_sess
     dispatched, the config as it is judged -- and a reader wants one answer to
     "what did this replay actually run"."""
     recorder = _recorder()
-    recorder.record_apply_item("/kb/prior/fusion-attn.patch", kind=APPLY_KERNEL, position=0, applied=True)
+    recorder.record_apply_item(
+        WarmReplayApplyItem("/kb/prior/fusion-attn.patch", kind=APPLY_KERNEL, position=0, applied=True)
+    )
     recorder.record_applied(extra_server_args="--enable-torch-compile", extra_envs={"SGLANG_X": "1"})
     recorder.finish({"status": "reproduced"})
 
@@ -179,7 +195,7 @@ def test_a_rejected_replay_survives_the_export_that_recovers_killed_events(_boun
     recover it: a judged rejection reported as ``interrupted`` is a verdict
     overwritten by the claim that nothing judged it."""
     recorder = _recorder()
-    recorder.record_measurement(before_tput=14000.0, after_tput=14050.0, gain_pct=0.36)
+    recorder.record_measurement(WarmReplayMeasurement(before_tput=14000.0, after_tput=14050.0, gain_pct=0.36))
     recorder.record_gate(GATE_KEEP_THRESHOLD, passed=False, observed=0.36, threshold=2.0)
     recorder.finish({"status": "drift", "keep_threshold_pct": 2.0})
 
@@ -191,7 +207,9 @@ def test_a_rejected_replay_survives_the_export_that_recovers_killed_events(_boun
 
 def test_a_reproduced_replay_records_what_the_promotion_moved(_bound_session):
     recorder = _recorder()
-    recorder.record_measurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0, accuracy=0.71)
+    recorder.record_measurement(
+        WarmReplayMeasurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0, accuracy=0.71)
+    )
     recorder.record_gate(GATE_ACCURACY, passed=True, observed=0.71, threshold=0.65)
     recorder.record_gate(GATE_KEEP_THRESHOLD, passed=True, observed=10.0, threshold=2.0)
     recorder.record_promotion(
@@ -211,7 +229,7 @@ def test_a_reproduced_replay_records_what_the_promotion_moved(_bound_session):
 
 def test_a_reproduced_replay_with_nothing_to_replay_is_degraded(_bound_session):
     recorder = _recorder()
-    recorder.record_measurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0)
+    recorder.record_measurement(WarmReplayMeasurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0))
     recorder.finish({"status": "reproduced_but_no_params", "reason": "task.params missing extra_server_args"})
 
     assert _events(_bound_session)[0]["status"] == "degraded"
@@ -226,7 +244,7 @@ def test_an_outcome_status_the_module_does_not_know_does_not_read_as_success(_bo
 
 def test_a_replay_killed_mid_flight_is_recovered_as_interrupted(_bound_session):
     recorder = _recorder()
-    recorder.record_measurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0)
+    recorder.record_measurement(WarmReplayMeasurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0))
     recorder.record_gate(GATE_ACCURACY, passed=True, observed=0.71, threshold=0.65)
 
     assert finalize_events(_bound_session) == [recorder.event_id]
@@ -248,7 +266,7 @@ def test_a_crash_is_told_apart_from_a_kill(_bound_session):
 
 def test_the_gates_read_back_in_the_order_they_were_evaluated(_bound_session):
     recorder = _recorder()
-    recorder.record_measurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0)
+    recorder.record_measurement(WarmReplayMeasurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0))
     for gate in (GATE_TPUT_VALID, GATE_QUALITY, GATE_ACCURACY, GATE_KEEP_THRESHOLD):
         recorder.record_gate(gate, passed=True)
     recorder.finish({"status": "reproduced"})
@@ -280,3 +298,47 @@ def test_an_unreadable_spool_on_finish_does_not_raise(_bound_session, monkeypatc
         lambda *_a, **_k: (_ for _ in ()).throw(OSError("spool down")),
     )
     recorder.finish({"status": "reproduced"})
+
+
+def test_a_rebound_recorder_closes_the_event_the_enqueue_opened(_bound_session, monkeypatch):
+    from hyperloom.inference_optimizer.breakdown.recorder import warm_replay_event
+    from hyperloom.inference_optimizer.session.sbd_v6 import timeline_sequence
+
+    monkeypatch.setattr(warm_replay_event, "_now", lambda: "2026-01-01T00:00:00Z")
+    _recorder()
+    opened = _events(_bound_session)
+    assert len(opened) == 1
+
+    monkeypatch.setattr(warm_replay_event, "_now", lambda: "2026-01-01T01:30:00Z")
+    rebound = _recorder(open_event_on_timeline=False)
+    rebound.finish({"status": "reproduced"})
+
+    events = _events(_bound_session)
+    assert len(events) == 1
+    assert events[0]["id"] == opened[0]["id"]
+    assert events[0]["start_time"] == "2026-01-01T00:00:00Z"
+    assert events[0]["end_time"] == "2026-01-01T01:30:00Z"
+    assert events[0]["ext"]["duration_sec"] == 5400.0
+    assert timeline_sequence(events[0]) == timeline_sequence(opened[0])
+
+
+def test_a_rebind_over_an_unreadable_spool_falls_back_to_a_fresh_recorder(_bound_session, monkeypatch):
+    import errno
+    from pathlib import Path
+
+    from hyperloom.inference_optimizer.breakdown.recorder import assembler
+
+    _recorder()
+    parts = assembler.parts_dir(_bound_session)
+    real_is_dir = Path.is_dir
+
+    def stale(self: Path) -> bool:
+        if self == parts:
+            raise OSError(errno.ESTALE, "Stale file handle")
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", stale)
+    rebound = _recorder(open_event_on_timeline=False)
+
+    assert rebound is not None
+    assert rebound._sequence is None

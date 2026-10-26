@@ -7,7 +7,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import RenderedSection, as_dict, md_kv_list, register_renderer, stop_target_text, task_config_of
+
+from hyperloom.common.coerce import to_mapping
+
+from ..base import RenderedSection, md_kv_list, register_renderer, stop_target_text, task_config_of
 
 
 @register_renderer("workload")
@@ -28,7 +31,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     w = task_config_of(breakdown)
     # ``model_class`` is part of the structural summary rather than the launch
     # shape, so it sits one level down.
-    model_class = as_dict(w.get("architecture")).get("model_class")
+    model_class = to_mapping(w.get("architecture")).get("model_class")
     facts: list[str] = []
     warnings: list[str] = []
 

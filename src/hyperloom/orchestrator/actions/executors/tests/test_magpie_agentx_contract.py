@@ -5,7 +5,6 @@
 
 from copy import deepcopy
 import json
-import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,8 +15,12 @@ from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom.common.perf_metric import constraint_veto_reason, graded_axes_of
 from hyperloom.inference_optimizer.cli.benchmark_config import bind_benchmark, configure_benchmark
 from hyperloom.inference_optimizer.cli.parser import _build_parser
-from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml
-from hyperloom.orchestrator.actions.executors._workload_envs import materialize_benchmark_config
+from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml, GridRecipe
+from hyperloom.orchestrator.actions.executors._workload_envs import (
+    materialize_benchmark_config,
+    BenchmarkTarget,
+    LaunchLayer,
+)
 from hyperloom.orchestrator.actions.executors.benchmark_result import (
     extract_benchmark_measurement,
     is_valid_measurement,
@@ -75,9 +78,8 @@ def test_materializer_does_not_turn_native_workload_into_synthetic(source, tmp_p
     rendered = materialize_benchmark_config(
         source,
         tmp_path / "round",
-        gpu_type="mi300x",
-        extra_server_args="--disable-cuda-graph",
-        extra_envs={"SGLANG_TEST": "1"},
+        launch=LaunchLayer(extra_server_args="--disable-cuda-graph", extra_envs={"SGLANG_TEST": "1"}),
+        target=BenchmarkTarget(gpu_type="mi300x"),
     )
     bench = load_benchmark(rendered)
     assert bench["runner_type"] == "mi355x"
@@ -90,10 +92,12 @@ def test_materializer_does_not_turn_native_workload_into_synthetic(source, tmp_p
 
 def test_grid_composes_accepted_launch_then_candidate(source, tmp_path):
     base = materialize_benchmark_config(
-        source, tmp_path / "base", extra_server_args="--chunked-prefill-size 4096", extra_envs={"SGLANG_TEST": "1"}
+        source,
+        tmp_path / "base",
+        launch=LaunchLayer(extra_server_args="--chunked-prefill-size 4096", extra_envs={"SGLANG_TEST": "1"}),
     )
     variant = GridVariant("candidate", "--chunked-prefill-size 2048", {"SGLANG_NEXT": "1"}, unset_envs=["SGLANG_TEST"])
-    candidate = _build_variant_yaml(base, "", variant, output_subdir=tmp_path / "candidate")
+    candidate = _build_variant_yaml(GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "candidate")
     launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
     assert launch["append_args"] == ["--chunked-prefill-size", "2048"]
     assert launch["env"] == {"SGLANG_NEXT": "1"}
@@ -112,8 +116,7 @@ def test_grid_ablation_removes_the_option_from_its_owning_layers(source, tmp_pat
     receipt["base_argv"] = list(receipt["effective_argv"]) + ([option, "128"] if recipe else [])
     persist_launch_evidence(native_launch_evidence(extract_benchmark_measurement(report), base), slot=base.parent)
     candidate = _build_variant_yaml(
-        base,
-        f"{option}=256" if appended else "",
+        GridRecipe(base_yaml_path=base, base=LaunchLayer(extra_server_args=f"{option}=256" if appended else "")),
         GridVariant("ablate", "--mem-fraction-static 0.85", {}, remove_args=[option]),
         output_subdir=tmp_path / "candidate",
     )
@@ -124,11 +127,12 @@ def test_grid_ablation_removes_the_option_from_its_owning_layers(source, tmp_pat
 
 def test_recipe_removal_survives_readding_and_ablating_an_override(source, tmp_path):
     base = materialize_benchmark_config(
-        source, tmp_path / "base", remove_args=["--cuda-graph-max-bs"], extra_server_args="--cuda-graph-max-bs 256"
+        source,
+        tmp_path / "base",
+        launch=LaunchLayer(remove_args=["--cuda-graph-max-bs"], extra_server_args="--cuda-graph-max-bs 256"),
     )
     candidate = _build_variant_yaml(
-        base,
-        "",
+        GridRecipe(base_yaml_path=base),
         GridVariant("ablate", "", {}, remove_args=["--cuda-graph-max-bs"]),
         output_subdir=tmp_path / "candidate",
     )
@@ -150,7 +154,9 @@ def test_source_evidence_is_taken_after_application_and_survives_materialization
     bind_source_evidence(rendered, [{"framework_root": str(root), "patch_file": str(patch)}])
     evidence = load_benchmark(rendered)["agentx"]["launch_overrides"]["source_files"]
     assert str(module) in evidence
-    next_round = materialize_benchmark_config(rendered, tmp_path / "next", extra_server_args="--disable-cuda-graph")
+    next_round = materialize_benchmark_config(
+        rendered, tmp_path / "next", launch=LaunchLayer(extra_server_args="--disable-cuda-graph")
+    )
     assert load_benchmark(next_round)["agentx"]["launch_overrides"]["source_files"] == evidence
 
 
@@ -238,16 +244,30 @@ def test_rejected_report_cannot_be_salvaged(report, key, tmp_path):
     assert measured["output_throughput"] == 50
 
 
-def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path, report):
+def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path, report, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "patched")
+    monkeypatch.delenv("PROFILE_OSL", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PROFILE_MAX_ITERS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PROFILE_DELAY_ITERS", raising=False)
     rendered = materialize_benchmark_config(source, tmp_path / "profile")
     enable_profile(rendered)
-    assert load_benchmark(rendered)["profiler"]["torch_profiler"] == {
-        "enabled": True,
+    bench = load_benchmark(rendered)
+    torch_profiler = bench["profiler"]["torch_profiler"]
+    assert torch_profiler["enabled"] is True
+    assert torch_profiler["num_profiles"] == 3
+    assert torch_profiler["num_steps"] == 5
+    assert torch_profiler["start_seconds"] == 900
+    assert torch_profiler["interval_seconds"] == 900
+    assert "PROFILE_EXTRA_BODY" not in bench["envs"]
+    assert bench["model"] == "Qwen/Qwen3-0.6B"
+    assert str(bench["envs"]["CONC"]) == "8"
+    assert "OSL" not in bench["envs"]
+    assert load_benchmark(source)["profiler"]["torch_profiler"] == {
+        "enabled": False,
         "num_steps": 5,
         "num_profiles": 3,
-        "start_seconds": 900.0,
     }
-    assert load_benchmark(source)["profiler"]["torch_profiler"]["enabled"] is False
     report["agentx_metrics"]["diagnostic_only"] = True
     measured = extract_benchmark_measurement(report)
     assert measured["round_succeeded"] is True
@@ -255,8 +275,9 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
     assert constraint_veto_reason(measured, SimpleNamespace()) == "agentx_evidence_invalid"
 
 
-def test_a_profile_with_no_window_of_its_own_captures_the_steady_state(source, tmp_path):
+def test_a_profile_with_no_window_of_its_own_captures_the_steady_state(source, tmp_path, monkeypatch):
     """Magpie's default is the replay's first 20 steps: the opening prefills alone, at bs=1."""
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
     config = yaml.safe_load(source.read_text())
     config["benchmark"]["profiler"] = {"torch_profiler": {"enabled": False}}
     source.write_text(yaml.safe_dump(config))
@@ -264,70 +285,8 @@ def test_a_profile_with_no_window_of_its_own_captures_the_steady_state(source, t
 
     enable_profile(rendered)
 
-    assert load_benchmark(rendered)["profiler"]["torch_profiler"] == {
-        "enabled": True,
-        "start_seconds": 900.0,
-        "num_steps": 100,
-    }
-
-
-def test_a_profile_given_the_shape_tool_records_shapes_through_it(source, tmp_path):
-    """The server loads TraceLens's shape tool ahead of whatever overlay the round already carries."""
-    config = yaml.safe_load(source.read_text())
-    config["benchmark"]["profiler"] = {"torch_profiler": {"enabled": False}}
-    config["benchmark"]["agentx"].setdefault("launch_overrides", {"version": 1})["env"] = {"PYTHONPATH": "/overlay"}
-    source.write_text(yaml.safe_dump(config))
-    rendered = materialize_benchmark_config(source, tmp_path / "profile")
-
-    enable_profile(rendered, shape_tool=Path("/tracelens/kernel_shape_tool"))
-
-    bench = load_benchmark(rendered)
-    assert bench["profiler"]["torch_profiler"]["detailed_annotations"] is True
-    env = bench["agentx"]["launch_overrides"]["env"]
-    assert env["PYTHONPATH"].split(os.pathsep) == ["/tracelens/kernel_shape_tool", "/overlay"]
-    assert env["TRACELENS_SHAPE_DISCOVERY"] == "1"
-
-
-def test_a_profile_without_the_shape_tool_stays_shapeless_rather_than_crash_at_boot(source, tmp_path):
-    """Detailed annotations profile CUDA-graph capture, which an unpatched SGLang tree dies on."""
-    rendered = materialize_benchmark_config(source, tmp_path / "profile")
-
-    enable_profile(rendered)
-
-    bench = load_benchmark(rendered)
-    assert "detailed_annotations" not in bench["profiler"]["torch_profiler"]
-    assert "TRACELENS_SHAPE_DISCOVERY" not in bench["agentx"]["launch_overrides"].get("env", {})
-
-
-def test_a_native_profile_gets_the_shape_tool_only_once_graph_capture_can_be_profiled(source, tmp_path, monkeypatch):
-    """Without TraceLens's graph-capture patch the profiled capture raises IndexError on a DSA decode graph."""
-    from hyperloom.orchestrator.actions.executors import _server_patcher, profile
-
-    rendered = materialize_benchmark_config(source, tmp_path / "profile")
-    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
-    monkeypatch.setattr(_server_patcher, "kernel_shape_tool_dir", lambda: Path("/tracelens/kernel_shape_tool"))
-
-    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: False)
-    assert profile._native_shape_tool(rendered) is None
-
-    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: True)
-    assert profile._native_shape_tool(rendered) == Path("/tracelens/kernel_shape_tool")
-
-    config = yaml.safe_load(rendered.read_text())
-    config["benchmark"]["framework"] = "vllm"
-    rendered.write_text(yaml.safe_dump(config))
-    assert profile._native_shape_tool(rendered) is None
-
-
-def test_an_operator_who_turned_detailed_annotations_off_gets_no_shape_tool(source, tmp_path):
-    config = yaml.safe_load(source.read_text())
-    config["benchmark"]["profiler"] = {"torch_profiler": {"enabled": False, "detailed_annotations": False}}
-    source.write_text(yaml.safe_dump(config))
-    rendered = materialize_benchmark_config(source, tmp_path / "profile")
-
-    enable_profile(rendered, shape_tool=Path("/tracelens/kernel_shape_tool"))
-
-    assert "TRACELENS_SHAPE_DISCOVERY" not in load_benchmark(rendered)["agentx"]["launch_overrides"].get("env", {})
+    torch_profiler = load_benchmark(rendered)["profiler"]["torch_profiler"]
+    assert (torch_profiler["start_seconds"], torch_profiler["num_steps"]) == (900, 256)
 
 
 @pytest.mark.parametrize("checkout", ["default", "yaml", "environment"])
@@ -587,19 +546,23 @@ def vllm_source(source):
 def test_json_server_args_survive_every_native_composition(vllm_source, tmp_path, args):
     from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
 
-    base = materialize_benchmark_config(vllm_source, tmp_path / "base", extra_server_args=args)
+    base = materialize_benchmark_config(vllm_source, tmp_path / "base", launch=LaunchLayer(extra_server_args=args))
     assert load_benchmark(base)["agentx"]["launch_overrides"]["append_args"] == args.split(" ")
     bind_source_evidence(base, [])
     apply_native_runtime(base, {})
     assert load_benchmark(base)["agentx"]["launch_overrides"]["append_args"] == args.split(" ")
 
     candidate = _build_variant_yaml(
-        base, "", GridVariant("candidate", "--max-num-seqs 32", {}), output_subdir=tmp_path / "candidate"
+        GridRecipe(base_yaml_path=base),
+        GridVariant("candidate", "--max-num-seqs 32", {}),
+        output_subdir=tmp_path / "candidate",
     )
     argv = load_benchmark(candidate)["agentx"]["launch_overrides"]["append_args"]
     assert _json_values(argv) == _json_values(args.split(" "))
     assert argv[argv.index("--max-num-seqs") + 1] == "32"
-    again = _build_variant_yaml(candidate, "", GridVariant("again", "", {}), output_subdir=tmp_path / "again")
+    again = _build_variant_yaml(
+        GridRecipe(base_yaml_path=candidate), GridVariant("again", "", {}), output_subdir=tmp_path / "again"
+    )
     assert load_benchmark(again)["agentx"]["launch_overrides"]["append_args"] == argv
 
 
@@ -612,13 +575,15 @@ def test_a_value_with_a_single_quote_survives_repeated_native_composition(vllm_s
     from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
 
     argv = args.split(" ")
-    base = materialize_benchmark_config(vllm_source, tmp_path / "base", extra_server_args=args)
+    base = materialize_benchmark_config(vllm_source, tmp_path / "base", launch=LaunchLayer(extra_server_args=args))
     for _ in range(2):
         bind_source_evidence(base, [])
         apply_native_runtime(base, {})
         assert load_benchmark(base)["agentx"]["launch_overrides"]["append_args"] == argv
     candidate = _build_variant_yaml(
-        base, "", GridVariant("candidate", "--max-num-seqs 32", {}), output_subdir=tmp_path / "candidate"
+        GridRecipe(base_yaml_path=base),
+        GridVariant("candidate", "--max-num-seqs 32", {}),
+        output_subdir=tmp_path / "candidate",
     )
     assert load_benchmark(candidate)["agentx"]["launch_overrides"]["append_args"] == [*argv, "--max-num-seqs", "32"]
 
@@ -654,11 +619,13 @@ def test_server_args_that_cannot_become_argv_are_refused_as_argv_invalid(vllm_so
     from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
     with pytest.raises(ValueError) as refused:
-        materialize_benchmark_config(vllm_source, tmp_path / "base", extra_server_args=args)
+        materialize_benchmark_config(vllm_source, tmp_path / "base", launch=LaunchLayer(extra_server_args=args))
     assert refused.value.error_class == ARGV_INVALID
     base = materialize_benchmark_config(vllm_source, tmp_path / "accepted")
     with pytest.raises(ValueError) as refused:
-        _build_variant_yaml(base, "", GridVariant("candidate", args, {}), output_subdir=tmp_path / "candidate")
+        _build_variant_yaml(
+            GridRecipe(base_yaml_path=base), GridVariant("candidate", args, {}), output_subdir=tmp_path / "candidate"
+        )
     assert refused.value.error_class == ARGV_INVALID
     offending = args.split(" ", 1)[1] if " " in args else args.partition("=")[2]
     assert offending in str(refused.value)
@@ -669,17 +636,16 @@ async def test_run_grid_writes_no_launch_evidence_for_a_refused_argv(vllm_source
     from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
     from hyperloom.orchestrator.actions.executors import _grid_runner
 
-    def never_launched(**kwargs):
+    def never_launched(_bench_round, **kwargs):
         raise AssertionError("a refused variant must not reach Magpie")
 
     monkeypatch.setattr(_grid_runner, "_run_magpie", never_launched)
     base = materialize_benchmark_config(vllm_source, tmp_path / "base")
     output_root = tmp_path / "grid"
     results = await _grid_runner.run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
         grid=[GridVariant("refused", "--speculative-config {1:2}", {})],
         output_root=output_root,
+        recipe=_grid_runner.GridRecipe(base_yaml_path=base),
     )
     assert [(result.status, result.error_class) for result in results] == [("failed", ARGV_INVALID)]
     assert not results[0].launch_evidence

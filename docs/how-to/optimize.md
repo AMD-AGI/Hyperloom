@@ -102,6 +102,34 @@ Requirements:
 6. Read persisted state on requested status checks; report completion or failure. Do not start a watchdog or automatic resume loop.
 ```
 
+## Select plug implementations
+
+A plain `optimize` run needs none of this: it uses the built-in `local` plug profile, writes nothing extra to the
+session and prints nothing about plugs. To choose other implementations of a plug socket, pass any of:
+
+| Flag | Effect |
+|------|--------|
+| `--plug-profile NAME` | Load a built-in profile (`local`, `hosted-gpu`, `hosted-cpu`). Not `--profile`, which stays the abbreviation of `--profile-osl`. |
+| `--manifest PATH` | Lay a JSON manifest over the profile. `$HYPERLOOM_MANIFEST` is the same, from the environment. |
+| `--plug SOCKET=IMPL` | Pick one implementation for one socket (repeatable). |
+| `--plug-config SOCKET.KEY=VALUE` | Set one configuration key (repeatable; a JSON value is read as JSON). |
+
+Later layers win: profile, manifest, `$HYPERLOOM_MANIFEST_OVERRIDES`, then `--plug` and `--plug-config`. See
+[Plug selection](../reference/environment-variables.md#plug-selection) for the two variables.
+
+A run that selects anything prints one `Plugs : profile=... fingerprint=...` line and records the outcome in
+`$SESSION_DIR/plugs.resolved.json`. `--resume-from` reads that file back before applying flags, so the resumed run keeps
+the same implementations; pass the flags again only to change them. An exported `$HYPERLOOM_MANIFEST` or
+`$HYPERLOOM_MANIFEST_OVERRIDES` is a later layer than that file, so it still changes the selection on a resume.
+
+The selection is resolved and checked before the session is opened or changed. A refused one (an unknown socket or
+implementation, a malformed or missing manifest, an unset `${VAR}` without a default, or a damaged
+`plugs.resolved.json`) prints `ERROR: plug configuration refused: ...` and exits 2, and a refused `--resume-from`
+leaves `state.json` and the rest of the session exactly as they were, so it can be retried with the flag fixed.
+Fix or remove a damaged `plugs.resolved.json` to resume.
+
+---
+
 ## Output and artifacts
 
 When the loop exits, Hyperloom writes the final report, reproducible session
@@ -183,12 +211,16 @@ cannot supply KEEP evidence. Baseline and candidate must have the same workload
 identity. GEAK's search measurements are provisional until the candidate passes
 the same canonical Magpie workload and Hyperloom's KEEP gate.
 
-The profile phase enables `profiler.torch_profiler` on a separate copy of the YAML.
-The generated YAML uses Magpie's capture defaults. For custom capture steps, count,
-interval or annotation options, supply a YAML with those settings and leave
-`enabled` false in the benchmark input. Magpie owns capture timing; Hyperloom selects a
-primary rank and passes each capture window separately to TraceLens. Profiled
-measurements never replace the unprofiled performance baseline.
+The profile phase prepares the TraceLens runtime patch and SGLang kernel-shape tool
+using the same helpers as fixed-sequence profiling, on a separate copy of the YAML.
+The copy enables `profiler.torch_profiler` and preserves explicit capture steps, count,
+start delay, interval, and detailed-annotation settings. A missing capture setting
+becomes one capture of 256 steps, a 300-second start delay, and a 900-second interval.
+When annotation settings are absent, the profile copy sets `detailed_annotations` to true,
+or to false when the TraceLens runtime patch was attempted and did not apply.
+The shape tool is prepended to the server's existing Python path, preserving candidate
+runtime paths. Magpie owns server profiling flags and the capture/flush lifecycle.
+Profiled measurements never replace the unprofiled performance baseline.
 
 The session archives its resolved workload as `benchmark.yaml` before writing the
 manifest. `hyperloom optimize --resume-from SESSION_DIR` reuses that file without

@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.session import paths
-from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.sub_agent_runner import (
     PROGRESS_OWNER_AGENT,
@@ -25,7 +25,7 @@ from hyperloom.orchestrator.loop.sub_agent_runner import (
     SubAgentRunner,
     _format_progress,
 )
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.inference_optimizer.trace import task_progress
 from hyperloom.inference_optimizer.trace.task_progress import (
     OutputActivity,
@@ -39,7 +39,7 @@ def _runner(tmp_path: Path, monkeypatch) -> SubAgentRunner:
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "coord.db")
-    return SubAgentRunner(ResourceLockManager(SqliteLeaseBackend(db)), TaskRegistry(db), session_dir=sd)
+    return SubAgentRunner(SqliteLeaseBackend(db), TaskRegistry(db), session_dir=sd)
 
 
 def _progress_notes(task) -> list[dict]:
@@ -94,7 +94,7 @@ async def test_a_task_that_reports_units_leaves_a_trail_on_its_own_row(tmp_path,
         return {"status": "ok"}
 
     sub.register_executor("explore", _grid)
-    task = await sub.tasks.create(kind="explore", params={}, idempotency_key="grid-0")
+    task, _ = await sub.tasks.create_or_return_existing(TaskSpec(kind="explore", params={}, idempotency_key="grid-0"))
     res = await sub.run_task(task)
 
     assert res.state == "succeeded"
@@ -112,7 +112,9 @@ async def test_every_note_names_the_agent_it_vouches_for(tmp_path, monkeypatch):
         return {"status": "ok"}
 
     sub.register_executor("explore", _grid)
-    task = await sub.tasks.create(kind="explore", params={}, idempotency_key="grid-owner")
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(kind="explore", params={}, idempotency_key="grid-owner")
+    )
     await sub.run_task(task)
 
     done = await sub.tasks.get(task.task_id)
@@ -139,7 +141,9 @@ async def test_a_heartbeat_leaves_the_running_mark_where_it_was(tmp_path, monkey
         return {"status": "ok"}
 
     sub.register_executor("baseline", _slow)
-    task = await sub.tasks.create(kind="baseline", params={}, idempotency_key="baseline-0")
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={}, idempotency_key="baseline-0")
+    )
     await sub.run_task(task)
 
     assert seen["updated_at"] == started_iso
@@ -150,11 +154,13 @@ async def test_a_heartbeat_leaves_the_running_mark_where_it_was(tmp_path, monkey
 async def test_an_old_running_task_keeps_its_budget_without_an_age_reclaimer(tmp_path, monkeypatch):
     """Elapsed admission budget is not evidence that an executor has stopped."""
     sub = _runner(tmp_path, monkeypatch)
-    task = await sub.tasks.create(
-        kind="roofline",
-        params={},
-        idempotency_key="roofline-lease",
-        lease_ttl_sec=2700,
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="roofline",
+            params={},
+            idempotency_key="roofline-lease",
+            lease_ttl_sec=2700,
+        ),
     )
     await sub.tasks.transition(task.task_id, "running")
     await sub.tasks.db.execute(
@@ -180,7 +186,9 @@ async def test_dead_task_requires_local_owner_evidence(tmp_path, monkeypatch, ow
     monkeypatch.setattr(resource_lock, "local_owner_scope", lambda: "test-node")
     monkeypatch.setattr(SqliteLeaseBackend, "_pid_alive", staticmethod(lambda pid: not dead))
     sub = _runner(tmp_path, monkeypatch)
-    task = await sub.tasks.create(kind="explore", params={}, idempotency_key="dead-owner")
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(kind="explore", params={}, idempotency_key="dead-owner")
+    )
     await sub.tasks.transition(task.task_id, "running")
     await sub.locks.acquire_many(
         ["research_lane"], holder_id=task.task_id, task_id=task.task_id, action="explore", ttl_sec=-1
@@ -201,8 +209,8 @@ async def test_dead_task_requires_local_owner_evidence(tmp_path, monkeypatch, ow
 @pytest.mark.parametrize("fails", [True, False])
 async def test_worker_cleanup_precedes_lane_release(tmp_path, monkeypatch, confirmed, fails):
     sub = _runner(tmp_path, monkeypatch)
-    task = await sub.tasks.create(
-        kind="explore", params={}, idempotency_key="cleanup", requires_lanes=["research_lane"]
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(kind="explore", params={}, idempotency_key="cleanup", requires_lanes=["research_lane"])
     )
     lease = await sub.locks.acquire_many(
         ["research_lane"], holder_id=task.task_id, task_id=task.task_id, action="explore", ttl_sec=1
@@ -240,8 +248,8 @@ async def test_worker_cleanup_precedes_lane_release(tmp_path, monkeypatch, confi
 @pytest.mark.asyncio
 async def test_direct_cancel_during_cleanup_retains_capacity(tmp_path, monkeypatch, caplog):
     sub = _runner(tmp_path, monkeypatch)
-    task = await sub.tasks.create(
-        kind="explore", params={}, idempotency_key="cancel-cleanup", requires_lanes=["research_lane"]
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(kind="explore", params={}, idempotency_key="cancel-cleanup", requires_lanes=["research_lane"])
     )
     lease = await sub.locks.acquire_many(
         ["research_lane"], holder_id=task.task_id, task_id=task.task_id, action="explore", ttl_sec=1
@@ -298,7 +306,7 @@ async def test_the_scope_does_not_outlive_the_task_that_opened_it(tmp_path, monk
         return {"status": "ok"}
 
     sub.register_executor("explore", _noop)
-    task = await sub.tasks.create(kind="explore", params={}, idempotency_key="grid-2")
+    task, _ = await sub.tasks.create_or_return_existing(TaskSpec(kind="explore", params={}, idempotency_key="grid-2"))
     await sub.run_task(task)
 
     await report_progress(unit="variant", label="after")
@@ -465,7 +473,7 @@ async def test_a_cancel_landing_in_teardown_still_cancels_the_step() -> None:
 async def test_a_cancelled_progress_write_leaves_the_connection_usable(tmp_path, monkeypatch):
     """A cancel mid-``BEGIN IMMEDIATE`` must not wedge the shared connection."""
     sub = _runner(tmp_path, monkeypatch)
-    task = await sub.tasks.create(kind="explore", params={}, idempotency_key="wedge")
+    task, _ = await sub.tasks.create_or_return_existing(TaskSpec(kind="explore", params={}, idempotency_key="wedge"))
     await sub.tasks.transition(task.task_id, "running")
 
     begun = threading.Event()
@@ -494,7 +502,9 @@ async def test_a_cancelled_progress_write_leaves_the_connection_usable(tmp_path,
 async def test_the_loop_keeps_running_while_a_cancelled_write_rolls_back(tmp_path, monkeypatch):
     """The rollback waits on a lock a worker thread holds; the loop must not wait with it."""
     sub = _runner(tmp_path, monkeypatch)
-    task = await sub.tasks.create(kind="explore", params={}, idempotency_key="loop-liveness")
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(kind="explore", params={}, idempotency_key="loop-liveness")
+    )
     await sub.tasks.transition(task.task_id, "running")
 
     tick_s = 0.01
@@ -556,7 +566,9 @@ def _rollback_gated_on(db, entered: threading.Event, release: threading.Event, m
 async def test_a_cancel_landing_on_the_rollback_does_not_release_the_lock_early(tmp_path, monkeypatch):
     """The second cancel must not abandon the wait the first one created."""
     sub = _runner(tmp_path, monkeypatch)
-    task = await sub.tasks.create(kind="explore", params={}, idempotency_key="second-cancel")
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(kind="explore", params={}, idempotency_key="second-cancel")
+    )
     await sub.tasks.transition(task.task_id, "running")
 
     db = sub.tasks.db
@@ -596,7 +608,9 @@ async def test_a_cancel_landing_on_the_rollback_does_not_release_the_lock_early(
 async def test_a_cancel_arriving_while_the_rollback_runs_is_not_lost(tmp_path, monkeypatch):
     """One cancel is enough, and it must not be swallowed by the rollback handler."""
     sub = _runner(tmp_path, monkeypatch)
-    task = await sub.tasks.create(kind="explore", params={}, idempotency_key="lost-cancel")
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(kind="explore", params={}, idempotency_key="lost-cancel")
+    )
     await sub.tasks.transition(task.task_id, "running")
     await sub.tasks.db.execute(
         "UPDATE tasks SET history=? WHERE task_id=?",

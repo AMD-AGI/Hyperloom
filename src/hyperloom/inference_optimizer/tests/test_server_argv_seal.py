@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from hyperloom.inference_optimizer.framework_registry import names, server_args_env_name
-from hyperloom.orchestrator.actions.executors import _grid_runner, _workload_envs
+from hyperloom.orchestrator.actions.executors import _grid_runner, _profile_setup, _workload_envs
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors._server_argv import (
     ServerArgv,
@@ -22,7 +22,7 @@ from hyperloom.orchestrator.actions.executors._server_argv import (
     reseal_config_argv,
     seal_server_argv,
 )
-from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
+from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs, LaunchLayer
 
 #: The name every composer ends on.
 SEAL = "seal_server_argv"
@@ -40,18 +40,25 @@ _COMPOSERS = (
     (_grid_runner, "_build_variant_yaml"),
 )
 
-#: The functions allowed to write the argument env: the two composers, the two
-#: helpers they delegate a step to -- the per-flag merge every injection goes
-#: through and the final guards -- all of which run above the seal, plus the
-#: seal itself and the re-seal a repair is written back through.
+#: The functions allowed to write the argument env: the phases a composer delegates
+#: to -- each source merged in turn, the profiler flags, the caller's removals and the
+#: final guards -- all of which run above the seal, plus the composer that still writes
+#: the env itself, the seal, and the re-seal a repair is written back through.
 _WRITERS = frozenset(
     {
-        "materialize_config_with_envs",
+        "_seed_reference_launch",
+        "_merge_caller_overrides",
+        "_settle_merged_server_args",
+        "_apply_caller_removals",
+        "_restate_profile_capture",
         "add_server_arg_unless_pinned",
         "_finalize_framework_server_args",
         "_build_variant_yaml",
         "seal_server_argv",
         "reseal_config_argv",
+        "_apply_vllm_profile",
+        "_apply_sglang_profile",
+        "apply_atom_profile_caps",
     }
 )
 
@@ -160,6 +167,44 @@ def test_every_write_inside_a_composer_happens_above_the_seal(module, name):
     assert not late, f"{name} writes the argument env after the seal at line {seal_line}, at line(s) {late}"
 
 
+def test_profile_argument_writers_only_run_through_the_sealed_composer():
+    """Every profile argument mutation reaches the fixed-sequence final seal."""
+    owners = {
+        "_apply_vllm_profile": (_profile_setup, "_apply_framework_profile"),
+        "_apply_sglang_profile": (_profile_setup, "_apply_framework_profile"),
+        "_apply_framework_profile": (_profile_setup, "prepare_profile"),
+        "prepare_profile": (_workload_envs, "_shape_request_window"),
+        "apply_atom_profile_caps": (_workload_envs, "_restate_profile_capture"),
+    }
+    calls = {name: [] for name in owners}
+    for path in sorted(_PACKAGE.rglob("*.py")):
+        if "/tests/" in str(path):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            for call in ast.walk(node):
+                if not isinstance(call, ast.Call):
+                    continue
+                name = call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", "")
+                if name in calls:
+                    calls[name].append((path, node.name, call.lineno))
+    composer = _function(_workload_envs, "materialize_config_with_envs")
+    seal_line = _seal_call(composer.body)[1].lineno
+    phase_lines = {
+        call.func.id: call.lineno
+        for call in ast.walk(composer)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+    }
+    for name, (module, function) in owners.items():
+        assert calls[name], f"{name} is no longer composed"
+        for path, caller, line in calls[name]:
+            assert (path, caller) == (Path(module.__file__), function), f"unsealed call to {name}: {path}:{line}"
+            if module is _workload_envs:
+                assert phase_lines[function] < seal_line, f"{function} runs after the seal"
+
+
 def test_the_census_sees_a_writer_that_renames_everything_it_touches():
     """The check is dataflow, not convention, so renaming does not hide a write."""
     plant = (
@@ -195,7 +240,9 @@ def test_what_the_preflight_reads_back_is_what_the_launch_exports(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
 
-    config = materialize_config_with_envs(source, out, extra_server_args="--attention-backend aiter")
+    config = materialize_config_with_envs(
+        source, out, launch=LaunchLayer(extra_server_args="--attention-backend aiter")
+    )
 
     sealed = config_server_argv(config)
     exported = config_launch_env(config, {})[sealed.env_name]
@@ -362,7 +409,11 @@ def test_a_replacing_grid_variant_keeps_the_expert_parallel_flag(tmp_path, varia
     variant = GridVariant(name="v", extra_server_args="--max-num-seqs 64", args_mode=variant_mode)
 
     config = _grid_runner._build_variant_yaml(
-        base, "--max-num-seqs 32", variant, output_subdir=tmp_path / "v", base_args_mode=base_mode
+        _grid_runner.GridRecipe(
+            base_yaml_path=base, base=LaunchLayer(extra_server_args="--max-num-seqs 32", args_mode=base_mode)
+        ),
+        variant,
+        output_subdir=tmp_path / "v",
     )
 
     argv = config_server_argv(config).argv
@@ -407,7 +458,9 @@ def test_a_grid_variant_ep_that_does_not_divide_tp_adds_no_flag(tmp_path, caplog
     variant = GridVariant(name="v", extra_envs={"EP": "3"})
 
     with caplog.at_level("WARNING"):
-        config = _grid_runner._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v")
+        config = _grid_runner._build_variant_yaml(
+            _grid_runner.GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "v"
+        )
 
     assert "--ep-size" not in config_server_argv(config).argv
     assert "EP=3 does not divide the launched TP=8" in caplog.text

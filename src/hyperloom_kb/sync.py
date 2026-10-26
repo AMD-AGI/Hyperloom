@@ -222,6 +222,8 @@ class _SyncTally:
 
     counts: Counter[str] = field(default_factory=Counter)
     rejected: list[JsonValue] = field(default_factory=list)
+    #: On a pull, the Experiences written here.
+    fetched: list[str] = field(default_factory=list)
 
 
 def _report(
@@ -432,49 +434,59 @@ class GlobalSync:
                 saved = self._service.begin_pull(schema_ref)
                 self._service.bring_in(schema_ref, self._ledger.on_global(url, schema_ref))
             tally = _SyncTally()
-            fetched: list[str] = []
             # Where the next batch resumes: past this page, or past the last record handled before a file that could
             # not be fetched yet.
             resume, resume_id, error = page.next_cursor, page.next_cursor_id, ""
             reached, reached_id = position, anchor
             for item in page.items:
-                try:
-                    experience = Experience.from_dict(item.get("experience"))
-                    if experience.schema_ref != schema_ref:
-                        raise ValueError(f"exported under {schema_ref} but belongs to {experience.schema_ref}")
-                    self._fetch_files(target, experience)
-                    status = str(self._service.write(experience, source=WriteSource(global_kb_id))["status"])
-                except RemoteClientError as exc:
-                    if exc.retryable:
-                        resume, resume_id, error = reached, reached_id, str(exc)
-                        break
-                    tally.rejected.append({"experience_id": _record_id(item), "detail": str(exc)})
-                except (KeyError, TypeError, ValueError, StorageContractError) as exc:
-                    tally.rejected.append({"experience_id": _record_id(item), "detail": str(exc)})
-                else:
-                    if status == "created":
-                        self._ledger.mark_pulled(experience.id)
-                    fetched.append(experience.id)
-                    tally.counts[status] += 1
+                error = self._receive(target, item, schema_ref, global_kb_id, tally)
+                if error:
+                    resume, resume_id = reached, reached_id
+                    break
                 sequence = item.get("sequence")
                 reached = sequence if isinstance(sequence, int) and not isinstance(sequence, bool) else reached
                 reached_id = _record_id(item)
-            self._ledger.note_on_global(url, schema_ref, fetched)
-            self._service.bring_in(schema_ref, fetched)
+            self._ledger.note_on_global(url, schema_ref, tally.fetched)
+            self._service.bring_in(schema_ref, tally.fetched)
             self._ledger.advance(url, direction, resume, resume_id)
             self._ledger.note_pulled_state(url, schema_ref, page.state)
-            self._ledger.mark_pull_in_progress(url, schema_ref, bool(error) or page.has_more)
+            has_more = bool(error) or page.has_more
+            self._ledger.mark_pull_in_progress(url, schema_ref, has_more)
             return {
                 **_report(
                     "incomplete" if error else "completed",
                     url,
                     tally,
-                    has_more=bool(error) or page.has_more,
+                    has_more=has_more,
                     error=error,
                 ),
                 "schema_ref": schema_ref,
                 "saved": saved,
             }
+
+    def _receive(
+        self, target: RemoteClient, item: Mapping[str, Any], schema_ref: str, global_kb_id: str, tally: _SyncTally
+    ) -> str:
+        """Write one exported record here; returns the error that should stop this pull, if any."""
+
+        try:
+            experience = Experience.from_dict(item.get("experience"))
+            if experience.schema_ref != schema_ref:
+                raise ValueError(f"exported under {schema_ref} but belongs to {experience.schema_ref}")
+            self._fetch_files(target, experience)
+            status = str(self._service.write(experience, source=WriteSource(global_kb_id))["status"])
+        except RemoteClientError as exc:
+            if exc.retryable:
+                return str(exc)
+            tally.rejected.append({"experience_id": _record_id(item), "detail": str(exc)})
+        except (KeyError, TypeError, ValueError, StorageContractError) as exc:
+            tally.rejected.append({"experience_id": _record_id(item), "detail": str(exc)})
+        else:
+            if status == "created":
+                self._ledger.mark_pulled(experience.id)
+            tally.fetched.append(experience.id)
+            tally.counts[status] += 1
+        return ""
 
     def _fetch_files(self, target: RemoteClient, experience: Experience) -> None:
         """Bring each file ``experience`` names that is not held here from the global KB, before the record."""

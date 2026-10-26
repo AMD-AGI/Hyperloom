@@ -288,6 +288,7 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
             idempotency_key="bl-mixed",
         )
 
+    coord.shared_state.enablement_mode = "off"
     # Two different outputs: the identical-failure rule must not be what stops the third call.
     subproc_a = _nonzero_result("RuntimeError: HIP out of memory")
     subproc_b = _nonzero_result("ConnectionError: port refused")
@@ -392,7 +393,7 @@ async def test_compose_prompt_orchestration_with_time_budget(coord: Coordinator)
     coord._run_started_monotonic = time.monotonic() - 60.0
     coord._run_deadline = Deadline.after(600.0)
     coord.shared_state.max_minutes = 60
-    out = await coord.conversation.compose_prompt("orchestration")
+    out = (await coord.conversation.compose_prompt("orchestration")).text
     assert "SESSION_DIR=" in out
     assert "Mission progress" in out
     assert "Time budget" in out
@@ -404,7 +405,7 @@ async def test_compose_prompt_orchestration_deadline_imminent_warning(coord: Coo
     coord._run_deadline = Deadline.after(60.0)
     coord.shared_state.max_minutes = 60
     coord.shared_state.closing_phase = False
-    out = await coord.conversation.compose_prompt("orchestration")
+    out = (await coord.conversation.compose_prompt("orchestration")).text
     assert "< 5 min remaining" in out
 
 
@@ -413,7 +414,7 @@ async def test_compose_prompt_kernel(coord: Coordinator) -> None:
     coord._run_started_monotonic = time.monotonic() - 60.0
     coord._run_deadline = Deadline.after(600.0)
     coord.shared_state.max_minutes = 60
-    out_k = await coord.conversation.compose_prompt("kernel_agent")
+    out_k = (await coord.conversation.compose_prompt("kernel_agent")).text
     assert "SESSION_DIR=" in out_k
 
 
@@ -450,7 +451,7 @@ def _stub_advisories(coord: Coordinator, monkeypatch) -> list[str]:
 async def test_compose_prompt_keeps_the_orchestration_advisory_order(coord: Coordinator, monkeypatch) -> None:
     markers = _stub_advisories(coord, monkeypatch)
 
-    prompt = await coord.conversation.compose_prompt("orchestration")
+    prompt = (await coord.conversation.compose_prompt("orchestration")).text
 
     for (heading, _owner, _producer), marker in zip(_ORCHESTRATION_ADVISORIES, markers):
         assert (marker if heading is None else f"{heading}\n{marker}") in prompt
@@ -462,7 +463,7 @@ async def test_compose_prompt_keeps_the_orchestration_advisory_order(coord: Coor
 async def test_compose_prompt_withholds_every_advisory_from_a_reviewer(coord: Coordinator, monkeypatch) -> None:
     markers = _stub_advisories(coord, monkeypatch)
 
-    prompt = await coord.conversation.compose_prompt("critic")
+    prompt = (await coord.conversation.compose_prompt("critic")).text
 
     assert [marker for marker in markers if marker in prompt] == []
 
@@ -475,7 +476,7 @@ async def test_compose_prompt_drops_the_heading_of_an_advisory_that_produced_not
     _stub_advisories(coord, monkeypatch)
     monkeypatch.setattr(coord.conversation, "plateau_advisory_block", lambda: "")
 
-    prompt = await coord.conversation.compose_prompt("orchestration")
+    prompt = (await coord.conversation.compose_prompt("orchestration")).text
 
     assert "=== Plateau advisory ===" not in prompt
     # The trajectory digest is shown only on a plateau, so it goes with it.
@@ -493,7 +494,7 @@ async def test_compose_prompt_puts_the_trajectory_review_under_the_plateau_advis
     _stub_advisories(coord, monkeypatch)
     monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", lambda *_a, **_k: "<trajectory>")
 
-    prompt = await coord.conversation.compose_prompt("orchestration")
+    prompt = (await coord.conversation.compose_prompt("orchestration")).text
 
     assert (
         "=== Plateau advisory ===\n<plateau_advisory_block>\n=== Trajectory review (advisory) ===\n<trajectory>"
@@ -519,8 +520,8 @@ async def test_trajectory_reviewer_task_is_seeded_without_a_digest_when_the_dige
 
     created: list[dict] = []
 
-    async def _create_or_return_existing(**kwargs):
-        created.append(kwargs["params"])
+    async def _create_or_return_existing(spec):
+        created.append(spec.params)
         return SimpleNamespace(task_id="t-1"), False
 
     async def _warm(_params):
@@ -671,11 +672,39 @@ async def test_escalate_skip_to_kernel_outside_framework_agent_is_refused_to_its
     assert "skip_to_close" in denials[0]["hint"]
 
 
+def _three_hour_session(coord: Coordinator, *, baseline_tput: float, spent_sec: float) -> None:
+    """A 180-minute FRAMEWORK_AGENT session, whose cycle floor is 5400s, with ``spent_sec`` charged."""
+    state = coord.shared_state
+    state.phase = "FRAMEWORK_AGENT"
+    state.max_minutes = 180
+    state.leg_anchor_unix = 0.0
+    state.elapsed_charged_sec = spent_sec
+    state.baseline_tput = baseline_tput
+
+
 @pytest.mark.asyncio
-async def test_escalate_skip_to_close_sets_pending_hint(coord: Coordinator) -> None:
-    """skip_to_close reaches pending_escalate_hint (no suppression guard any more)."""
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.shared_state.baseline_tput = 1234.0
+async def test_escalate_skip_to_close_with_baseline_and_budget_is_denied(coord: Coordinator) -> None:
+    """A measured baseline and budget for another cycle contradict abandoning the run."""
+    _three_hour_session(coord, baseline_tput=1078.29, spent_sec=1800.0)
+    await coord.router._handle_escalate_strategy_change(
+        "orchestration",
+        _escalate("skip_to_close"),
+    )
+    assert coord.shared_state.pending_escalate_hint == ""
+    assert coord.shared_state.policy_denial_history[-1]["rule"] == "skip_to_close_contradicted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("baseline_tput", "spent_sec"),
+    [(0.0, 1800.0), (1078.29, 10200.0)],
+    ids=["no_baseline", "budget_below_cycle_floor"],
+)
+async def test_escalate_skip_to_close_the_facts_admit_is_deferred(
+    coord: Coordinator, baseline_tput: float, spent_sec: float
+) -> None:
+    """Without a baseline, or without budget for another cycle, the close is still the agent's to request."""
+    _three_hour_session(coord, baseline_tput=baseline_tput, spent_sec=spent_sec)
     await coord.router._handle_escalate_strategy_change(
         "orchestration",
         _escalate("skip_to_close"),
@@ -947,7 +976,7 @@ def test_is_promotable_result_unchanged_for_reverted_integrate_patch(coord: Coor
 async def test_compose_prompt_renders_the_gap_to_the_gain_objective(coord: Coordinator) -> None:
     coord._current_objective = TargetGainObjective(target_gain_pct=20.0)
     coord.shared_state.cumulative_gain_validated = 5.0
-    text = await coord.conversation.compose_prompt("orchestration")
+    text = (await coord.conversation.compose_prompt("orchestration")).text
     assert "target_gap_pct=15.00" in text
 
 
@@ -955,7 +984,7 @@ async def test_compose_prompt_renders_the_gap_to_the_gain_objective(coord: Coord
 async def test_compose_prompt_time_only_objective_leaves_no_gap(coord: Coordinator) -> None:
     coord._current_objective = TimeOnlyObjective()
     coord.shared_state.cumulative_gain_validated = 5.0
-    text = await coord.conversation.compose_prompt("orchestration")
+    text = (await coord.conversation.compose_prompt("orchestration")).text
     assert "target_gap_pct=0.00" in text
 
 
@@ -1291,6 +1320,7 @@ def _baseline_task(task_id: str) -> Task:
 @pytest.mark.asyncio
 async def test_unpromotable_baseline_same_failure_twice_stops_at_two(coord: Coordinator) -> None:
     """Two subprocess_nonzero baselines that printed the same thing (modulo numbers) end the run at two."""
+    coord.shared_state.enablement_mode = "off"
     first = _nonzero_result("RuntimeError: worker 1234 died at t=17")
     second = _nonzero_result("RuntimeError: worker 98 died at t=4")
 
@@ -1304,6 +1334,7 @@ async def test_unpromotable_baseline_same_failure_twice_stops_at_two(coord: Coor
 @pytest.mark.asyncio
 async def test_unpromotable_baseline_different_failures_keep_three_strikes(coord: Coordinator) -> None:
     """Two different failures are not evidence of a third: the three-strike budget still applies."""
+    coord.shared_state.enablement_mode = "off"
     a = _nonzero_result("RuntimeError: HIP out of memory")
     b = _nonzero_result("ConnectionError: port refused")
 
@@ -1374,6 +1405,21 @@ async def test_unpromotable_baseline_same_failure_in_enablement_does_not_stop_ea
     assert coord.shared_state.stop_reason != "baseline_failed"
 
 
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_same_failure_in_prelude_with_enablement_admitted_does_not_stop_early(
+    coord: Coordinator,
+) -> None:
+    """A retry that settles before the PRELUDE->ENABLEMENT transition is still enablement's input."""
+    from hyperloom.orchestrator.phases.machine_state import PHASE_PRELUDE
+
+    coord.shared_state.phase = PHASE_PRELUDE
+    result = _nonzero_result("ImportError: no module named foo")
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-pre-1"), result)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-pre-2"), result)
+    assert coord.shared_state.stop_reason != "baseline_failed"
+
+
 _SHARED_TAIL = (
     "Traceback (most recent call last):\n"
     + "  File engine.py, in run_engine_core\n    engine.step()\n" * 60
@@ -1407,16 +1453,18 @@ async def _executor_nonzero_result(
     cfg.write_text("benchmark:\n  framework: vllm\n  model: /tmp/m\n", encoding="utf-8")
     ex = bl.BaselineExecutor(session_dir=session, magpie_python="/usr/bin/python3")
     return await ex._run_single_benchmark(
+        bl.BenchmarkAttempt(
+            timeout_sec=30,
+            override_result_dir=None,
+            resolved_model="/tmp/m",
+            materialized_config_path=cfg,
+            inferencex_path="",
+            effective_extra_server_args="",
+            params={"framework": "vllm"},
+            ctx=RunnerContext(task=_baseline_task(name), lease=None, extra={}),
+        ),
         config_path=cfg,
         output_dir=out,
-        timeout_sec=30,
-        override_result_dir=None,
-        resolved_model="/tmp/m",
-        materialized_config_path=cfg,
-        inferencex_path="",
-        effective_extra_server_args="",
-        params={"framework": "vllm"},
-        ctx=RunnerContext(task=_baseline_task(name), lease=None, extra={}),
     )
 
 
@@ -1458,6 +1506,7 @@ async def test_baseline_executor_same_output_modulo_numbers_stops_at_two(
 
     assert first["output_signature"] == second["output_signature"] != ""
 
+    coord.shared_state.enablement_mode = "off"
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-1"), first)
     assert coord.shared_state.stop_reason != "baseline_failed"
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-2"), second)

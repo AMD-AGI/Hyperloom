@@ -20,7 +20,7 @@ from hyperloom.orchestrator.actions.executors.roofline import (
     make_roofline_executor,
 )
 from hyperloom.inference_optimizer.trace.task_progress import progress_scope
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import ActionAttempt, SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -895,11 +895,13 @@ def test_record_action_attempt_populates_last_roofline_and_history():
     s = SharedState()
     s.record_action_attempt(
         action="roofline",
-        task_id="t-rf-1",
-        status="succeeded",
-        decision="promoted",
-        result={"snapshot_id": 3},
-        extras={"analysis_md_path": "/p/analysis.md"},
+        attempt=ActionAttempt(
+            task_id="t-rf-1",
+            status="succeeded",
+            decision="promoted",
+            result={"snapshot_id": 3},
+            extras={"analysis_md_path": "/p/analysis.md"},
+        ),
     )
     assert s.last_roofline
     assert s.last_roofline.get("status") == "succeeded"
@@ -915,10 +917,7 @@ def test_record_action_attempt_caps_roofline_history():
     for i in range(25):
         s.record_action_attempt(
             action="roofline",
-            task_id=f"t-{i}",
-            status="succeeded",
-            decision="promoted",
-            result={"snapshot_id": i},
+            attempt=ActionAttempt(task_id=f"t-{i}", status="succeeded", decision="promoted", result={"snapshot_id": i}),
         )
     assert len(s.roofline_attempts) == 20
     assert s.roofline_attempts[-1].get("task_id") == "t-24"

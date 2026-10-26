@@ -19,7 +19,8 @@ import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder import phase_event
 from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ActionDispatch, PhaseCycle, SpecialistRound
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import phase_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import PHASE_EVENT_SECTIONS
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     ARM_SOURCE,
     ROLE_DISCOVERY,
@@ -39,7 +40,7 @@ def _bound_session(tmp_path):
 
 def _actions(phase: str, macro_cycle: int = 0) -> dict[str, Any]:
     ext, _status = phase_event.assemble_phase_ext(
-        phase_event_parts(),
+        event_parts(PHASE_EVENT_SECTIONS),
         event=phase_event.phase_event_id(phase, macro_cycle),
     )
     return ext["actions"]

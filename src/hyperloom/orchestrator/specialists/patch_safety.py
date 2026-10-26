@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from hyperloom.common.fs_utils import read_bytes_nofollow
 from hyperloom.common.env_safety import ungrounded_env_file_reason
 from hyperloom.common.unified_diff import strip_diff_path, strip_path_components
 
@@ -218,6 +219,28 @@ def patch_file_targets(patch_text: str) -> list[tuple[str, str]]:
     return pairs
 
 
+def path_resolves_at(root: Path, path: str, level: int) -> bool:
+    """True when the diff path ``path``, stripped as ``-p<level>`` would strip it, names an entry under ``root``.
+
+    Args:
+        root: The tree to resolve it in.
+        path: A raw ``---``/``+++`` path token.
+        level: The ``-p`` strip level.
+
+    Returns:
+        Whether the stripped path exists under ``root``.
+    """
+    stripped = strip_path_components(path, level)
+    # A bare filename matches any root holding that name, so deep
+    # strips of a nested path would implicate unrelated repos.
+    if "/" not in stripped and level > 1:
+        return False
+    try:
+        return (root / stripped).exists()
+    except OSError:
+        return False
+
+
 def patch_targets_missing(
     patch_text: str,
     root: Path,
@@ -248,24 +271,7 @@ def patch_targets_missing(
             existing = list(parse_patch_targets(patch_text).existing)
         except ValueError:
             return ["<invalid>"]
-    missing: list[str] = []
-    for old in existing:
-        found = False
-        for lvl in strip_levels:
-            try:
-                stripped = strip_path_components(old, lvl)
-                # A bare filename matches any root holding that name, so deep
-                # strips of a nested path would implicate unrelated repos.
-                if "/" not in stripped and lvl > 1:
-                    continue
-                if (root / stripped).exists():
-                    found = True
-                    break
-            except OSError:
-                continue
-        if not found:
-            missing.append(old)
-    return missing
+    return [old for old in existing if not any(path_resolves_at(root, old, lvl) for lvl in strip_levels)]
 
 
 def _collapse_nested_roots(roots: tuple[Path, ...]) -> tuple[Path, ...]:
@@ -988,7 +994,7 @@ def vet_patches(
     readable: list[tuple[str, str]] = []
     for path in patch_paths:
         try:
-            text = Path(path).read_text(encoding="utf-8", errors="replace")
+            text = read_bytes_nofollow(path).decode("utf-8", errors="replace")
         except OSError as exc:
             ungrounded.append({"path": path, "verdict": "unreadable", "detail": repr(exc)})
             continue
@@ -1157,6 +1163,7 @@ __all__ = [
     "patch_is_annotation_only",
     "patch_targets_missing",
     "patch_work_artifact_targets",
+    "path_resolves_at",
     "quantitative_claim_rule_descriptor",
     "resolve_patch_apply_root",
     "scan_numeric_claims",

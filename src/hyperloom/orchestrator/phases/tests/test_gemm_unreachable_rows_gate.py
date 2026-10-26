@@ -54,18 +54,7 @@ def integrate_spy(monkeypatch):
 
 
 def _result(tuner: str, env_var: str, csv: Path) -> dict:
-    return {
-        "tuners_run": [
-            {
-                "tuner": tuner,
-                "status": "ok",
-                "candidate": True,
-                "env_var": env_var,
-                "env_value": str(csv),
-                "best_micro_speedup": 1.5,
-            }
-        ]
-    }
+    return {"candidates": [{"tuner": tuner, "env": {env_var: str(csv)}, "best_micro_speedup": 1.5}]}
 
 
 def _a8w8_table(tmp_path: Path, m: int) -> dict:

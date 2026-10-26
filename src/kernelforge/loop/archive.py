@@ -265,8 +265,7 @@ class CandidateArchive:
             if status == "incomplete":
                 self._quarantine_incomplete(directory)
                 continue
-            if meta is not None:
-                complete.append((iteration, directory, meta))
+            complete.append((iteration, directory, meta))
 
         expected = [self._index_entry_from_meta(meta, directory) for _iteration, directory, meta in sorted(complete)]
         try:
@@ -277,14 +276,11 @@ class CandidateArchive:
             self._mark_degraded(f"read index {self.index_path}", error)
             return expected
 
-        if scan_unavailable:
-            preserved = current
-        else:
-            preserved = [
-                entry
-                for entry in current
-                if isinstance(entry.get("iter"), int) and entry["iter"] in uncertain_iterations
-            ]
+        preserved = [
+            entry
+            for entry in current
+            if isinstance(entry.get("iter"), int) and (scan_unavailable or entry["iter"] in uncertain_iterations)
+        ]
         reconciled_by_iteration = {
             entry["iter"]: entry for entry in preserved + expected if isinstance(entry.get("iter"), int)
         }

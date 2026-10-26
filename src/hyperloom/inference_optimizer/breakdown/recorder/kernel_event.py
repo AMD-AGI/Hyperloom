@@ -53,34 +53,40 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from .assembler import EVENT_SECTIONS, event_parts
-from .event_fields import (
-    analysis_detail as _analysis_detail,
-    as_dict as _as_dict,
-    as_list as _as_list,
-    clip as _clip,
-    failure_row as _failure_row,
-    float_or_none as _float_or_none,
-    int_or_none as _int_or_none,
-    now_iso_seconds as _now_iso,
+from hyperloom.common.coerce import (
     text_or_none as _text,
+    to_float as _float_or_none,
+    to_int as _int_or_none,
+    to_mapping as _as_dict,
+    to_list as _as_list,
 )
+from .assembler import event_parts
+from .event_fields import clip as _clip, failure_row as _failure_row, now_iso_seconds as _now_iso
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import make_sink
 from .event_timeline import EventHeader, finish_event, open_event
-from .kernel_gain import claimed_gain, stamp_rebench_gain
+from .kernel_gain import claimed_gain, lane_gain_axis, lane_gain_pct, stamp_gate_gain, stamp_rebench_gain
 from .kernel_records import (
     LEDGER_GEAK,
     SOURCE_FUSION,
     SOURCE_GEAK_AUTHORED_KERNEL,
     SOURCE_GEMM_TUNING,
     SOURCE_KERNEL_REWRITE,
+    FusionRun,
+    GeakDelegation,
+    GeakProduct,
+    GeakRebenchAttempt,
+    GemmTuningRun,
+    IntegrateVerdict,
+    KernelExit,
+    KernelReprofile,
     KernelRewriteRun,
-    LaneRunFields,
+    TraceAnalyzeRun,
 )
 from .baseline_event import assemble_baseline_actions
 from .roofline_event import assemble_roofline_action
+from .sections import EVENT_SECTIONS
 
 log = logging.getLogger(__name__)
 
@@ -240,6 +246,7 @@ __all__ = [
     "kernel_event_id",
     "make_kernel_recorder",
     "record_geak_attempts",
+    "record_integrate_axis",
     "record_integrate_verdict",
     "reject_geak_attempts",
     "record_trace_analyze_request",
@@ -400,29 +407,7 @@ def reject_geak_attempts(
     _republish_closed_event(event)
 
 
-def record_integrate_verdict(
-    *,
-    macro_cycle: Any,
-    integration_id: str,
-    kernel_id: str,
-    decision: str = "",
-    status: str = "",
-    attempt_count: Any = None,
-    fault_count: Any = None,
-    gain_pct: Any = None,
-    accuracy_pass: Any = None,
-    validation_tier: str = "",
-    patch_path: str = "",
-    target_file: str = "",
-    error_class: str = "",
-    rejected_reason: str = "",
-    retryable: bool = False,
-    settled_at: str = "",
-    extra_server_args: str = "",
-    basis: str = "",
-    alignment_status: str = "",
-    gain_attributed: Any = None,
-) -> None:
+def record_integrate_verdict(*, macro_cycle: Any, verdict: IntegrateVerdict) -> None:
     """Record the end-to-end integrate gate's verdict on one patch.
 
     The gate runs outside the phase that produced the patch: the KERNEL visit
@@ -439,55 +424,38 @@ def record_integrate_verdict(
     own budget and can settle a cycle or more later. ``kernel_id`` is on the
     row so the two can be joined either way, and the row is only written when
     that event exists, so a verdict never mints an event of its own.
-
-    Args:
-        decision: The gate's verdict (``KEEP`` / ``REVERT``).
-        fault_count: How many attempts never measured the patch fairly.
-        rejected_reason: Why the patch was rejected outright, when it was -- an
-            exhausted budget rather than a verdict on the code.
-        basis: Throughput basis the gain was measured on (``hot`` / ``cold``);
-            a gain is meaningless without the baseline behind it.
-        gain_attributed: Whether the measured gain is this one kernel's. A
-            rebench carrying several kernels measured all of them together, so
-            the gain is real but unattributable.
     """
-    if not str(integration_id or ""):
+    if not str(verdict.integration_id or ""):
         return
     sink = make_sink(kernel_event_id(macro_cycle), producer=PRODUCER)
     if not sink.has_row(SECTION_EVENT):
         log.debug(
             "kernel timeline: no event %s to hold the integrate verdict for %s",
             sink.event_id,
-            integration_id,
+            verdict.integration_id,
         )
         return
     sink.record(
         SECTION_INTEGRATE,
-        {
-            "integration_id": str(integration_id),
-            "kernel_id": str(kernel_id or ""),
-            "decision": _text(decision),
-            "status": _text(status),
-            "attempt_count": _int_or_none(attempt_count),
-            "fault_count": _int_or_none(fault_count),
-            "gain_pct": _float_or_none(gain_pct),
-            "accuracy_pass": accuracy_pass if isinstance(accuracy_pass, bool) else None,
-            "validation_tier": _text(validation_tier),
-            "patch_path": _text(patch_path),
-            "target_file": _text(target_file),
-            "error_class": _text(error_class),
-            "rejected_reason": _text(rejected_reason),
-            "retryable": bool(retryable),
-            "settled_at": _text(settled_at),
-            "settled_in_macro_cycle": _int_or_none(macro_cycle),
-            "extra_server_args": _text(extra_server_args),
-            "basis": _text(basis),
-            "alignment_status": _text(alignment_status),
-            "gain_attributed": gain_attributed if isinstance(gain_attributed, bool) else None,
-        },
+        verdict.row(macro_cycle),
         row_type=ROW_INTEGRATE,
-        natural_ids=str(integration_id),
+        natural_ids=str(verdict.integration_id),
     )
+    _republish_closed_event(sink.event_id)
+
+
+def record_integrate_axis(*, macro_cycle: Any, integration_id: str, graded_objective: str) -> None:
+    """Record the axis an integrate verdict's ``gain_pct`` was graded on.
+
+    Merges onto the verdict's row by integration id; nothing is written for a
+    verdict that has no row or an axis the gate did not report.
+    """
+    axis = _text(graded_objective)
+    sink = make_sink(kernel_event_id(macro_cycle), producer=PRODUCER)
+    if not (axis and integration_id and sink.has_row(SECTION_EVENT)):
+        return
+    row = {"integration_id": str(integration_id), "graded_objective": axis}
+    sink.record(SECTION_INTEGRATE, row, row_type=ROW_INTEGRATE, natural_ids=str(integration_id))
     _republish_closed_event(sink.event_id)
 
 
@@ -533,64 +501,20 @@ def _write_discovered_kernels(
         )
 
 
-def _write_trace_analyze_run(
-    sink: Any,
-    *,
-    run_id: str,
-    trigger: str,
-    status: str,
-    result: Any,
-    requested_by: str = "",
-    request_msg_id: str = "",
-    trace_input: str = "",
-    top_k: Any = None,
-    snapshot: dict[str, Any] | None = None,
-    cache_hit: bool = False,
-) -> None:
-    """Write one analysis row and the kernel table it produced.
-
-    ``status`` is ``ok`` or ``failed``.
-    """
-    produced = _as_dict(snapshot)
+def _write_trace_analyze_run(sink: Any, run: TraceAnalyzeRun, *, trigger: str) -> None:
+    """Write one analysis row and the kernel table it produced."""
     sink.record(
         SECTION_TRACE_ANALYZE,
-        {
-            "run_id": str(run_id or ""),
-            "trigger": _text(trigger),
-            "requested_by": _text(requested_by),
-            "request_msg_id": _text(request_msg_id),
-            "ts": _now_iso(),
-            "status": str(status or ""),
-            "cache_hit": bool(cache_hit),
-            "trace_input": _text(trace_input),
-            "top_k": _int_or_none(top_k),
-            "roofline_snapshot_id": _int_or_none(produced.get("roofline_snapshot_id")),
-            "roofline_baseline_gain_at_snapshot": _float_or_none(produced.get("roofline_baseline_gain_at_snapshot")),
-            "steady_state_trace": _text(produced.get("steady_state_trace")),
-            "analysis_md_path": _text(produced.get("analysis_md_path")),
-            "reusable_native_kernel_ids": [str(item) for item in _as_list(produced.get("reusable_native_kernel_ids"))],
-            **_analysis_detail(result),
-        },
+        run.row(trigger),
         row_type=ROW_TRACE_ANALYZE,
-        natural_ids=str(run_id or ""),
+        natural_ids=str(run.run_id or ""),
     )
+    produced = _as_dict(run.snapshot)
     if produced:
         _write_discovered_kernels(sink, produced, provenance="trace_analyze_run")
 
 
-def record_trace_analyze_request(
-    *,
-    macro_cycle: Any,
-    run_id: str,
-    status: str,
-    result: Any,
-    requested_by: str = "",
-    request_msg_id: str = "",
-    trace_input: str = "",
-    top_k: Any = None,
-    snapshot: dict[str, Any] | None = None,
-    cache_hit: bool = False,
-) -> None:
+def record_trace_analyze_request(*, macro_cycle: Any, run: TraceAnalyzeRun) -> None:
     """Record an analysis an agent requested through the bus, not a phase.
 
     A ``trace_analyze`` dispatched this way advances the roofline snapshot
@@ -604,29 +528,17 @@ def record_trace_analyze_request(
 
     ``status`` is ``ok`` or ``failed``.
     """
-    if not str(run_id or ""):
+    if not str(run.run_id or ""):
         return
     sink = make_sink(kernel_event_id(macro_cycle), producer=PRODUCER)
     if not sink.has_row(SECTION_EVENT):
         log.debug(
             "kernel timeline: no event %s to hold the trace_analyze request %s",
             sink.event_id,
-            run_id,
+            run.run_id,
         )
         return
-    _write_trace_analyze_run(
-        sink,
-        run_id=run_id,
-        trigger=TRACE_ANALYZE_TRIGGER_BUS_REQUEST,
-        status=status,
-        result=result,
-        requested_by=requested_by,
-        request_msg_id=request_msg_id,
-        trace_input=trace_input,
-        top_k=top_k,
-        snapshot=snapshot,
-        cache_hit=cache_hit,
-    )
+    _write_trace_analyze_run(sink, run, trigger=TRACE_ANALYZE_TRIGGER_BUS_REQUEST)
     _republish_closed_event(sink.event_id)
 
 
@@ -666,6 +578,7 @@ def _integrate_e2e(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
         "decision": _text(last.get("decision")),
         "patch_path": _text(last.get("patch_path")),
         "target_file": _text(last.get("target_file")),
+        "graded_objective": _text(last.get("graded_objective")) or None,
     }
 
 
@@ -692,6 +605,8 @@ _ATTEMPT_TEMPLATE: dict[str, Any] = {
     # itself, a GEAK candidate is re-benched end to end -- and state it in
     # different units, so it is normalized here rather than at every reader.
     "gain_pct": None,
+    # The instrument behind ``gain_pct``; ``None`` whenever it is.
+    "gain_axis": None,
     "compile_status": "",
     "correctness": None,
     "artifact_path": "",
@@ -760,24 +675,6 @@ _GEAK_PROMOTED = frozenset(
 _LANE_DECLINED = frozenset({"REVERT", "SKIPPED", "FAILED", "DROP", "REJECT"})
 
 
-def _lane_gain_pct(row: Mapping[str, Any]) -> float | None:
-    """The gain a forge lane measured on its own candidate, as a percentage.
-
-    A rewrite reports a ratio and a fusion or GEMM table a percentage. Both
-    are the same fact about the same kind of candidate, so the attempt carries
-    one axis and the reader is never asked which lane wrote the row before it
-    can compare two of them.
-
-    Returns:
-        float | None: The gain, or ``None`` when the lane measured none.
-    """
-    stated = _float_or_none(row.get("gain_pct"))
-    if stated is not None:
-        return stated
-    speedup = _float_or_none(row.get("speedup"))
-    return round((speedup - 1.0) * 100.0, 4) if speedup is not None else None
-
-
 def _attempt(**fields: Any) -> dict[str, Any]:
     """One normalized attempt, defaulted from the shared template."""
     row: dict[str, Any] = dict(_ATTEMPT_TEMPLATE)
@@ -787,14 +684,19 @@ def _attempt(**fields: Any) -> dict[str, Any]:
     return row
 
 
-def _lane_attempt(row: Mapping[str, Any]) -> dict[str, Any]:
+def _lane_attempt(row: Mapping[str, Any], integrate_by_id: Mapping[str, list[dict[str, Any]]]) -> dict[str, Any]:
     """Normalize one forge lane row.
 
     A lane states its own verdict in ``micro_decision``; anything it did not
     keep it declined, and that is what ``accepted`` records. Fusion says the
-    same thing a second way, through ``applied``.
+    same thing a second way, through ``applied``. A lane that states no e2e
+    result of its own takes the one its integrate gate ruled, and only an
+    authored integration reference can link a lane to that gate.
     """
     decision = str(row.get("micro_decision") or "").upper()
+    integrate_ref = _text(row.get("integrate_ref"))
+    gate_rows = integrate_by_id.get(integrate_ref, []) if integrate_ref else []
+    gain = lane_gain_pct(row)
     return _attempt(
         attempt_id=_text(row.get("run_id")),
         route=ROUTE_FORGE,
@@ -810,7 +712,8 @@ def _lane_attempt(row: Mapping[str, Any]) -> dict[str, Any]:
         backend=_text(row.get("adopted_backend")),
         backends_tried=[str(item) for item in _as_list(row.get("backends_tried"))],
         speedup=_float_or_none(row.get("speedup")),
-        gain_pct=_lane_gain_pct(row),
+        gain_pct=gain,
+        gain_axis=lane_gain_axis(row, gain),
         compile_status=_text(row.get("compile_status")),
         correctness=row.get("correctness") if isinstance(row.get("correctness"), bool) else None,
         artifact_path=_text(row.get("artifact_path")),
@@ -818,8 +721,8 @@ def _lane_attempt(row: Mapping[str, Any]) -> dict[str, Any]:
         failure_reason=_text(row.get("failure_reason")),
         micro_decision=decision,
         accepted=decision == "KEEP" or bool(row.get("applied")),
-        integrate_ref=_text(row.get("integrate_ref")),
-        e2e=_as_dict(row.get("e2e")) or None,
+        integrate_ref=integrate_ref,
+        e2e=_as_dict(row.get("e2e")) or _integrate_e2e(gate_rows),
         detail={key: value for key, value in row.items() if key not in _LANE_PROMOTED},
     )
 
@@ -947,63 +850,6 @@ def _discovered_kernel_row(
         "recommended_actions": recommended_actions,
         "reusable_native_kernel": reusable,
         "selected": reusable or bool(recommended_backends) or bool(recommended_actions),
-    }
-
-
-def _rebench_row(
-    *,
-    attempt_id: str,
-    source_kind: str,
-    ledger: str,
-    source_ref: str | None = None,
-    idempotency_key: str | None = None,
-    task_id: str | None = None,
-    dispatched_at: str | None = None,
-    settled_at: str | None = None,
-    base_tput: float | None = None,
-    measured_tput: float | None = None,
-    decision: str | None = None,
-    decision_reason: str | None = None,
-    status: str | None = None,
-    engagement: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build one rebench attempt row.
-
-    ``engagement`` is the part the orchestrator already computed but never
-    persisted: the GEAK verdict path compares the config fingerprint and the
-    overlay digest to decide ``validated`` versus ``fallback``, and dropped both
-    booleans on the floor once the decision was made.
-
-    """
-    verified = _as_dict(engagement)
-    base = _float_or_none(base_tput)
-    measured = _float_or_none(measured_tput)
-    delta = None
-    if base is not None and measured is not None and base > 0:
-        delta = round((measured - base) / base * 100.0, 4)
-    return {
-        "attempt_id": str(attempt_id or ""),
-        "source_kind": str(source_kind),
-        "ledger": str(ledger),
-        "source_ref": _text(source_ref),
-        "idempotency_key": _text(idempotency_key),
-        "task_id": _text(task_id),
-        "dispatched_at": _text(dispatched_at),
-        "settled_at": _text(settled_at),
-        "base_tput": base,
-        "measured_tput": measured,
-        "delta_pct": delta,
-        "decision": _text(decision),
-        "decision_reason": _text(decision_reason),
-        "status": _text(status),
-        "engagement": {
-            "config_matched": verified.get("config_matched"),
-            "overlay_loaded": verified.get("overlay_loaded"),
-            "expected_cfg_hash": _text(verified.get("expected_cfg_hash")),
-            "observed_cfg_hash": _text(verified.get("observed_cfg_hash")),
-            "expected_overlay_digest": _text(verified.get("expected_overlay_digest")),
-            "observed_overlay_digest": _text(verified.get("observed_overlay_digest")),
-        },
     }
 
 
@@ -1179,36 +1025,9 @@ class KernelEventRecorder:
 
     # ---- forge -----------------------------------------------------------
 
-    def record_reprofile(
-        self,
-        *,
-        ran: bool,
-        task_kind: str = "",
-        trigger: str = "",
-        skipped_reason: str = "",
-        idempotency_reason: str = "",
-        snapshot_landed: bool = False,
-        snapshot_id_before: Any = None,
-        snapshot_id_after: Any = None,
-        task_id: str = "",
-    ) -> None:
+    def record_reprofile(self, reprofile: KernelReprofile) -> None:
         """Record the entry re-profile that decides whether analysis is stale."""
-        self._sink.record(
-            SECTION_EVENT,
-            {
-                "forge_reprofile": {
-                    "ran": bool(ran),
-                    "task_id": _text(task_id),
-                    "task_kind": _text(task_kind),
-                    "trigger": _text(trigger),
-                    "skipped_reason": _text(skipped_reason),
-                    "idempotency_reason": _text(idempotency_reason),
-                    "snapshot_landed": bool(snapshot_landed),
-                    "snapshot_id_before": _int_or_none(snapshot_id_before),
-                    "snapshot_id_after": _int_or_none(snapshot_id_after),
-                }
-            },
-        )
+        self._sink.record(SECTION_EVENT, {"forge_reprofile": reprofile.block()})
 
     def _record_lane_run(self, row: Mapping[str, Any]) -> None:
         """Write one lane row, keyed by the run it describes."""
@@ -1223,65 +1042,11 @@ class KernelEventRecorder:
         """Record one forge source-level kernel rewrite."""
         self._record_lane_run(run.row())
 
-    def record_fusion_run(
-        self,
-        *,
-        run_id: str,
-        status: str,
-        pattern: str = "",
-        target_module: str = "",
-        applied: bool = False,
-        gain_pct: Any = None,
-        patch_path: str = "",
-        micro_decision: str = "",
-        integrate_ref: str = "",
-        started_at: str = "",
-        ended_at: str = "",
-        duration_sec: Any = None,
-        failure_reason: str = "",
-        error_class: str = "",
-    ) -> None:
+    def record_fusion_run(self, run: FusionRun) -> None:
         """Record one forge-fusion run."""
-        self._record_lane_run(
-            {
-                **LaneRunFields(
-                    run_id=run_id,
-                    status=status,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    duration_sec=duration_sec,
-                    micro_decision=micro_decision,
-                    integrate_ref=integrate_ref,
-                    failure_reason=failure_reason,
-                    error_class=error_class,
-                ).row(SOURCE_FUSION),
-                "pattern": _text(pattern),
-                "target_module": _text(target_module),
-                "applied": bool(applied),
-                "gain_pct": _float_or_none(gain_pct),
-                "patch_path": _text(patch_path),
-            }
-        )
+        self._record_lane_run(run.row())
 
-    def record_gemm_tuning_run(
-        self,
-        *,
-        run_id: str,
-        status: str,
-        shapes_total: Any = None,
-        shapes_tuned: Any = None,
-        config_path: str = "",
-        gain_pct: Any = None,
-        graded_objective: str = "",
-        tuner: str = "",
-        micro_decision: str = "",
-        integrate_ref: str = "",
-        started_at: str = "",
-        ended_at: str = "",
-        duration_sec: Any = None,
-        failure_reason: str = "",
-        error_class: str = "",
-    ) -> None:
+    def record_gemm_tuning_run(self, run: GemmTuningRun) -> None:
         """Record one GEMM shape-table tuning run.
 
         ``graded_objective`` names the axis ``gain_pct`` was measured on, so a
@@ -1289,27 +1054,7 @@ class KernelEventRecorder:
         output gain. ``tuner`` names which backend produced the table, which is
         a separate question from which axis judged it.
         """
-        self._record_lane_run(
-            {
-                **LaneRunFields(
-                    run_id=run_id,
-                    status=status,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    duration_sec=duration_sec,
-                    micro_decision=micro_decision,
-                    integrate_ref=integrate_ref,
-                    failure_reason=failure_reason,
-                    error_class=error_class,
-                ).row(SOURCE_GEMM_TUNING),
-                "shapes_total": _int_or_none(shapes_total),
-                "shapes_tuned": _int_or_none(shapes_tuned),
-                "config_path": _text(config_path),
-                "gain_pct": _float_or_none(gain_pct),
-                "graded_objective": _text(graded_objective),
-                "tuner": _text(tuner),
-            }
-        )
+        self._record_lane_run(run.row())
 
     # ---- geak ------------------------------------------------------------
 
@@ -1364,48 +1109,9 @@ class KernelEventRecorder:
             },
         )
 
-    def record_geak_delegation(
-        self,
-        *,
-        runner_status: str,
-        started_at: str = "",
-        ended_at: str = "",
-        duration_sec: Any = None,
-        error_class: str = "",
-        error: str = "",
-        returncode: Any = None,
-        runner_timeout_sec: Any = None,
-        kill_timeout_sec: Any = None,
-        exp_root: str = "",
-        eval_dir: str = "",
-        report_path: str = "",
-        versions: dict[str, Any] | None = None,
-        recovered_from_disk: bool = False,
-        stages_reached: Any = None,
-    ) -> None:
+    def record_geak_delegation(self, delegation: GeakDelegation) -> None:
         """Record how the delegated runner itself ended."""
-        self._sink.record(
-            SECTION_EVENT,
-            {
-                "geak_delegation": {
-                    "runner_status": str(runner_status or ""),
-                    "started_at": _text(started_at),
-                    "ended_at": _text(ended_at),
-                    "duration_sec": _float_or_none(duration_sec),
-                    "error_class": _text(error_class),
-                    "error": _clip(error) or None,
-                    "returncode": _int_or_none(returncode),
-                    "runner_timeout_sec": _int_or_none(runner_timeout_sec),
-                    "kill_timeout_sec": _int_or_none(kill_timeout_sec),
-                    "exp_root": _text(exp_root),
-                    "eval_dir": _text(eval_dir),
-                    "report_path": _text(report_path),
-                    "versions": _as_dict(versions),
-                    "recovered_from_disk": bool(recovered_from_disk),
-                    "stages_reached": [str(item) for item in _as_list(stages_reached)],
-                }
-            },
-        )
+        self._sink.record(SECTION_EVENT, {"geak_delegation": delegation.block()})
 
     def record_geak_attempts(self, journey: dict[str, Any] | None) -> None:
         """Replay what GEAK tried, from the journey it emits."""
@@ -1470,41 +1176,13 @@ class KernelEventRecorder:
             },
         )
 
-    def record_geak_product(
-        self,
-        *,
-        accepted_flags: Any = None,
-        accepted_envs: dict[str, Any] | None = None,
-        accepted_config: dict[str, Any] | None = None,
-        final_overlay: str = "",
-        final_launch_script: str = "",
-        bench_script: str = "",
-        final_patch: str = "",
-    ) -> None:
+    def record_geak_product(self, product: GeakProduct) -> None:
         """Record the reproducible configuration GEAK handed back."""
-        flags = accepted_flags
-        self._sink.record(
-            SECTION_EVENT,
-            {
-                "geak_product": {
-                    "accepted_flags": [str(item) for item in _as_list(flags)]
-                    if not isinstance(flags, str)
-                    else _text(flags),
-                    "accepted_envs": _as_dict(accepted_envs),
-                    "accepted_config": _as_dict(accepted_config),
-                    "final_overlay": _text(final_overlay),
-                    "final_launch_script": _text(final_launch_script),
-                    "bench_script": _text(bench_script),
-                    "final_patch": _text(final_patch),
-                }
-            },
-        )
+        self._sink.record(SECTION_EVENT, {"geak_product": product.block()})
 
-    def record_geak_rebench_attempt(self, *, max_attempts: Any = None, **fields: Any) -> None:
+    def record_geak_rebench_attempt(self, attempt: GeakRebenchAttempt, *, max_attempts: Any = None) -> None:
         """Record one GEAK rebench attempt."""
-        fields.setdefault("source_kind", SOURCE_GEAK_AUTHORED_KERNEL)
-        fields["ledger"] = LEDGER_GEAK
-        row = _rebench_row(**fields)
+        row = attempt.row()
         self._sink.record(
             SECTION_REBENCH,
             row,
@@ -1536,17 +1214,7 @@ class KernelEventRecorder:
 
     # ---- conclusion ------------------------------------------------------
 
-    def finish(
-        self,
-        *,
-        exit_reason: str = "",
-        failed: bool = False,
-        tput_after: Any = None,
-        cumulative_gain_validated_out: Any = None,
-        stack_depth_out: Any = None,
-        stack_added: Any = None,
-        stack_removed: Any = None,
-    ) -> None:
+    def finish(self, exit_facts: KernelExit = KernelExit(), *, failed: bool = False) -> None:
         """Record the exit facts, assemble the event and close it.
 
         The phase states what it measured on the way out, not how the visit
@@ -1569,16 +1237,7 @@ class KernelEventRecorder:
                 "end_time": end_time,
                 "duration_sec": round(time.monotonic() - self._t0, 3),
                 "closed_status": STATUS_FAILED if failed else "",
-                "outcome": {
-                    "exit_reason": _text(exit_reason),
-                    "tput_after": _float_or_none(tput_after),
-                    "cumulative_gain_validated_out": _float_or_none(cumulative_gain_validated_out),
-                    "stack_depth_out": _int_or_none(stack_depth_out),
-                    "stack_delta": {
-                        "added": [_as_dict(row) for row in _as_list(stack_added)],
-                        "removed": [_as_dict(row) for row in _as_list(stack_removed)],
-                    },
-                },
+                "outcome": exit_facts.outcome(),
             },
         )
         # Both families of sections: an inline roofline recorded its rows into this event, and assembly needs them to
@@ -1655,7 +1314,7 @@ class KernelEventRecorder:
                 )
             },
         )
-        self.finish(exit_reason=str(stage or ""), failed=True)
+        self.finish(KernelExit(exit_reason=str(stage or "")), failed=True)
 
     def finish_crashed(self, exc: BaseException) -> None:
         """Close an event whose phase raised instead of returning."""
@@ -1718,19 +1377,6 @@ def _merge_acceptances(
     return unmatched
 
 
-def _record_gain(row: dict[str, Any], measured: Any) -> None:
-    """Put the settling instrument's gain on the attempt, if it measured one.
-
-    An instrument that ruled without producing a number does not erase one an
-    earlier, coarser instrument did produce: a gate can keep a patch on
-    accuracy alone, and the lane's own timing is still the only measurement
-    anyone took.
-    """
-    gain = _float_or_none(measured)
-    if gain is not None:
-        row["gain_pct"] = gain
-
-
 def _settle(
     attempts: list[dict[str, Any]],
     verdicts: Mapping[str, Mapping[str, Any]],
@@ -1788,7 +1434,7 @@ def _settle(
             row["settled_by"] = SETTLED_BY_INTEGRATE
             # The gate measured the patch end to end, which outranks the lane's
             # own timing of the kernel in isolation.
-            _record_gain(row, e2e.get("e2e_gain_pct"))
+            stamp_gate_gain(row, e2e.get("e2e_gain_pct"), e2e.get("graded_objective"))
             row["outcome"] = OUTCOME_ADOPTED if gate == "KEEP" else OUTCOME_REJECTED
             continue
         if str(row.get("micro_decision") or "").upper() in _LANE_DECLINED:
@@ -1818,6 +1464,7 @@ def _delivered(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "ref": _text(row.get("attempt_id")),
             "kernel_id": _text(row.get("kernel_id")),
             "gain_pct": _float_or_none(row.get("gain_pct")),
+            "gain_axis": row.get("gain_axis"),
             "settled_by": _text(row.get("settled_by")),
         }
         for row in attempts
@@ -1906,26 +1553,132 @@ _STATUS_BY_VERDICT = {
 }
 
 
-def _geak_settlement(attempts: list[dict[str, Any]]) -> tuple[str, list[str]]:
-    """Pick the GEAK verdict the acceptances may be settled against.
+def _geak_rebench(rebench_rows: list[dict[str, Any]], stated: Mapping[str, Any]) -> dict[str, Any]:
+    """How GEAK's re-measurement campaign was bounded, and the verdict its acceptances settle against.
 
     GEAK may rebench the same candidate up to its per-cycle ceiling, so unlike a
     forge lane it can end the entry holding several settled verdicts. Taking the
     newest would let a KEEP after a REVERT read as an adoption; two settled
     verdicts that disagree is a fact worth seeing, so the candidate stays
-    pending and neither verdict is honoured.
-
-    Returns:
-        tuple[str, list[str]]: The attempt id to settle against -- ``""`` when
-            none may be -- and the conflicting decisions, when they conflicted.
+    pending and neither verdict is honoured: ``settled_against`` is empty and
+    ``conflicting_decisions`` names them.
     """
-    settled = [row for row in attempts if str(row.get("decision") or "")]
-    decisions = {str(row.get("decision")) for row in settled}
-    if len(decisions) == 1:
-        return str(settled[-1].get("attempt_id") or ""), []
-    if settled:
-        return "", sorted(decisions)
-    return "", []
+    ledger = group_rows(rebench_rows, "ledger").get(LEDGER_GEAK, [])
+    settled = [row for row in ledger if str(row.get("decision") or "")]
+    decisions = sorted({str(row.get("decision")) for row in settled})
+    rebench = {
+        "required": bool(ledger) or bool(stated),
+        "max_attempts": _int_or_none(stated.get("max_attempts")),
+        "attempts_used": len(ledger),
+        "settled_against": str(settled[-1].get("attempt_id") or "") if len(decisions) == 1 else "",
+        "final_status": _text(stated.get("final_status")),
+        "final_error_class": _text(stated.get("final_error_class")),
+        "final_error": _text(stated.get("final_error")),
+    }
+    if len(decisions) > 1:
+        rebench["conflicting_decisions"] = decisions
+    return rebench
+
+
+def _forge(
+    header: Mapping[str, Any],
+    rows: Mapping[str, list[dict[str, Any]]],
+    parts: Mapping[str, list[dict[str, Any]]],
+    *,
+    event: str,
+) -> dict[str, Any] | None:
+    """What only forge did on this visit, or ``None`` when forge did not run.
+
+    The re-profile dispatched the roofline executor inline, so its rows are in
+    this event under the task id the re-profile recorded.
+    """
+    reprofile = _as_dict(header.get("forge_reprofile")) or None
+    if reprofile:
+        reprofile = {
+            **reprofile,
+            "run": assemble_roofline_action(parts, event=event, task_id=str(reprofile.get("task_id") or "")),
+        }
+    trace_runs = wire_rows(rows[SECTION_TRACE_ANALYZE])
+    discovered = wire_rows(rows[SECTION_DISCOVERED], drop=("event_id", "rank"))
+    if not (reprofile or trace_runs or rows[SECTION_LANE_RUN] or discovered):
+        return None
+    return {
+        "engaged": True,
+        "reprofile": reprofile,
+        "trace_analyze_runs": trace_runs,
+        "discovered_kernels": discovered,
+        "recommended_kernels": [row for row in discovered if row.get("selected")],
+    }
+
+
+def _geak(
+    header: Mapping[str, Any],
+    rows: Mapping[str, list[dict[str, Any]]],
+    acceptances: Mapping[str, list[dict[str, Any]]],
+    rebench: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """What only GEAK did on this visit, in causal order, or ``None`` when GEAK did not run."""
+    # ``acceptance_kind`` and ``source_kind`` are the fields that chose which of the two arrays a row landed in, so on
+    # the wire the array itself says it.
+    acceptance_drop = ("event_id", "ordinal", "acceptance_kind", "source_kind")
+    authored = wire_rows(acceptances.get(_ACCEPTANCE_AUTHORED, []), drop=acceptance_drop)
+    env_selections = wire_rows(acceptances.get(_ACCEPTANCE_ENV, []), drop=acceptance_drop)
+    handoff = _as_dict(header.get("geak_handoff")) or None
+    delegation = _as_dict(header.get("geak_delegation")) or None
+    claim = _as_dict(header.get("geak_claim")) or None
+    product = _as_dict(header.get("geak_product")) or None
+    if not (handoff or delegation or claim or product or rebench["required"] or rows[SECTION_GEAK_ATTEMPT] or authored):
+        return None
+    if claim is not None or authored or env_selections:
+        claim = {
+            **(claim or {}),
+            "authored_kernels": authored,
+            "env_selections": env_selections,
+            "kernels_optimized": len(authored),
+            "accepted_heads_count": sum(1 for row in authored + env_selections if row.get("lane") == "headQueue"),
+        }
+    return {
+        "engaged": True,
+        "handoff": handoff,
+        "delegation": delegation,
+        "discovery_runs": wire_rows(rows[SECTION_GEAK_DISCOVERY]),
+        "claim": claim,
+        "product": product,
+        "rebench": rebench,
+    }
+
+
+def _outcome(header: Mapping[str, Any], attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    """How the visit ran: the verdict its settled attempts support, beside what the phase stated at exit."""
+    stated = _as_dict(header.get("outcome"))
+    failure = _as_dict(header.get("failure"))
+    verdict, reason = _derive_verdict(attempts, failure=failure)
+    return {
+        "route": _text(header.get("route")) or "",
+        "verdict": verdict,
+        "reason": reason,
+        "error_class": _text(failure.get("error_class")),
+        "failed_stage": _text(failure.get("stage")),
+        "exit_reason": _text(stated.get("exit_reason")),
+        "throughput": _throughput(stated),
+        "cumulative_gain_validated_out": _float_or_none(stated.get("cumulative_gain_validated_out")),
+        "stack_depth_out": _int_or_none(stated.get("stack_depth_out")),
+        "delivered": _delivered(attempts),
+        "stack_delta": _as_dict(stated.get("stack_delta")) or {"added": [], "removed": []},
+    }
+
+
+#: The fields one event's rows are ordered by, per section.
+_ROW_ORDER: dict[str, tuple[str, ...]] = {
+    SECTION_TRACE_ANALYZE: ("ts", "run_id"),
+    SECTION_LANE_RUN: ("started_at", "run_id"),
+    SECTION_REBENCH: ("dispatched_at", "attempt_id"),
+    SECTION_GEAK_DISCOVERY: ("ordinal", "source"),
+    SECTION_GEAK_ATTEMPT: ("ordinal", "kernel_id"),
+    SECTION_GEAK_ACCEPTANCE: ("ordinal", "kernel_id", "selection"),
+    SECTION_DISCOVERED: ("snapshot_id", "rank"),
+    SECTION_INTEGRATE: ("settled_at", "integration_id"),
+}
 
 
 def assemble_kernel_ext(
@@ -1934,163 +1687,34 @@ def assemble_kernel_ext(
     event: str,
 ) -> tuple[dict[str, Any], str]:
     """Assemble one kernel event's ``ext`` out of its recorded rows."""
-    event_rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
+    event_rows = rows_for_event(parts[SECTION_EVENT], event)
     header = event_rows[0] if event_rows else {}
+    rows = {
+        section: sort_rows(rows_for_event(parts[section], event), keys=keys) for section, keys in _ROW_ORDER.items()
+    }
 
-    trace_runs = wire_rows(
-        sort_rows(
-            rows_for_event(parts.get(SECTION_TRACE_ANALYZE) or [], event),
-            keys=("ts", "run_id"),
-        )
-    )
-    lane_rows = sort_rows(
-        rows_for_event(parts.get(SECTION_LANE_RUN) or [], event),
-        keys=("started_at", "run_id"),
-    )
-    rebench_rows = sort_rows(
-        rows_for_event(parts.get(SECTION_REBENCH) or [], event),
-        keys=("dispatched_at", "attempt_id"),
-    )
-    discovery_rows = wire_rows(
-        sort_rows(
-            rows_for_event(parts.get(SECTION_GEAK_DISCOVERY) or [], event),
-            keys=("ordinal", "source"),
-        )
-    )
-    geak_kernel_rows = wire_rows(
-        sort_rows(
-            rows_for_event(parts.get(SECTION_GEAK_ATTEMPT) or [], event),
-            keys=("ordinal", "kernel_id"),
-        )
-    )
-    acceptance_rows = sort_rows(
-        rows_for_event(parts.get(SECTION_GEAK_ACCEPTANCE) or [], event),
-        keys=("ordinal", "kernel_id", "selection"),
-    )
-    discovered_rows = wire_rows(
-        sort_rows(
-            rows_for_event(parts.get(SECTION_DISCOVERED) or [], event),
-            keys=("snapshot_id", "rank"),
-        ),
-        drop=("event_id", "rank"),
-    )
-    recommended_rows = [row for row in discovered_rows if row.get("selected")]
-    integrate_rows = sort_rows(
-        rows_for_event(parts.get(SECTION_INTEGRATE) or [], event),
-        keys=("settled_at", "integration_id"),
-    )
-
-    geak_ledger = group_rows(rebench_rows, "ledger").get(LEDGER_GEAK, [])
-    acceptances = group_rows(acceptance_rows, "acceptance_kind")
-    geak_ref, conflicting = _geak_settlement(geak_ledger)
-
-    # Only an authored integration reference can link a lane to an E2E gate.
-    integrate_by_id = group_rows(integrate_rows, "integration_id")
-    attempts = [_lane_attempt(row) for row in lane_rows]
-    attempts.extend(_geak_attempt(row) for row in geak_kernel_rows)
-    for row in attempts:
-        if row["e2e"] is not None:
-            continue
-        if row["integrate_ref"]:
-            row["e2e"] = _integrate_e2e(integrate_by_id.get(row["integrate_ref"], []))
-    attempts.extend(_merge_acceptances(attempts, acceptances, geak_ref=geak_ref))
+    acceptances = group_rows(rows[SECTION_GEAK_ACCEPTANCE], "acceptance_kind")
+    rebench = _geak_rebench(rows[SECTION_REBENCH], _as_dict(header.get("geak_rebench")))
+    integrate_by_id = group_rows(rows[SECTION_INTEGRATE], "integration_id")
+    attempts = [_lane_attempt(row, integrate_by_id) for row in rows[SECTION_LANE_RUN]]
+    attempts.extend(_geak_attempt(row) for row in wire_rows(rows[SECTION_GEAK_ATTEMPT]))
+    attempts.extend(_merge_acceptances(attempts, acceptances, geak_ref=rebench["settled_against"]))
     # A row whose producer stated no start time sorts after the ones that did,
     # rather than ahead of them where an empty string would put it.
     attempts.sort(
         key=lambda row: (not row.get("started_at"), str(row.get("started_at") or ""), str(row.get("attempt_id") or ""))
     )
+    verdicts = {str(row.get("attempt_id")): row for row in rows[SECTION_REBENCH] if row.get("attempt_id")}
+    _settle(attempts, verdicts, geak_conflicted="conflicting_decisions" in rebench)
 
-    verdicts = {str(row.get("attempt_id")): row for row in rebench_rows if row.get("attempt_id")}
-    _settle(attempts, verdicts, geak_conflicted=bool(conflicting))
-
-    # ``acceptance_kind`` and ``source_kind`` are the fields that chose which of the two arrays a row landed in, so on
-    # the wire the array itself says it.
-    acceptance_drop = ("event_id", "ordinal", "acceptance_kind", "source_kind")
-    authored = wire_rows(acceptances.get(_ACCEPTANCE_AUTHORED, []), drop=acceptance_drop)
-    env_selections = wire_rows(acceptances.get(_ACCEPTANCE_ENV, []), drop=acceptance_drop)
-
-    reprofile = _as_dict(header.get("forge_reprofile")) or None
-    if reprofile:
-        # The re-profile dispatched the roofline executor inline, so its rows are in this event under the task id the
-        # re-profile recorded.
-        reprofile = {
-            **reprofile,
-            "run": assemble_roofline_action(parts, event=event, task_id=str(reprofile.get("task_id") or "")),
-        }
-    forge_engaged = bool(reprofile or trace_runs or lane_rows or discovered_rows)
-    forge: dict[str, Any] | None = None
-    if forge_engaged:
-        forge = {
-            "engaged": True,
-            "reprofile": reprofile,
-            "trace_analyze_runs": trace_runs,
-            "discovered_kernels": discovered_rows,
-            "recommended_kernels": recommended_rows,
-        }
-
-    handoff = _as_dict(header.get("geak_handoff")) or None
-    delegation = _as_dict(header.get("geak_delegation")) or None
-    claim_block = _as_dict(header.get("geak_claim")) or None
-    product = _as_dict(header.get("geak_product")) or None
-    rebench_block = _as_dict(header.get("geak_rebench"))
-    geak_engaged = bool(
-        handoff or delegation or claim_block or product or rebench_block or geak_ledger or geak_kernel_rows or authored
-    )
-    geak: dict[str, Any] | None = None
-    if geak_engaged:
-        claim: dict[str, Any] | None = None
-        if claim_block is not None or authored or env_selections:
-            claim = {
-                **(claim_block or {}),
-                "authored_kernels": authored,
-                "env_selections": env_selections,
-                "kernels_optimized": len(authored),
-                "accepted_heads_count": sum(1 for row in authored + env_selections if row.get("lane") == "headQueue"),
-            }
-        rebench = {
-            "required": bool(geak_ledger) or bool(rebench_block),
-            "max_attempts": _int_or_none(rebench_block.get("max_attempts")),
-            "attempts_used": len(geak_ledger),
-            "settled_against": geak_ref,
-            "final_status": _text(rebench_block.get("final_status")),
-            "final_error_class": _text(rebench_block.get("final_error_class")),
-            "final_error": _text(rebench_block.get("final_error")),
-        }
-        if conflicting:
-            rebench["conflicting_decisions"] = conflicting
-        geak = {
-            "engaged": True,
-            "handoff": handoff,
-            "delegation": delegation,
-            "discovery_runs": discovery_rows,
-            "claim": claim,
-            "product": product,
-            "rebench": rebench,
-        }
-
-    outcome_block = _as_dict(header.get("outcome"))
-    route = _text(header.get("route")) or _text(_as_dict(header.get("entry")).get("route"))
-    failure = _as_dict(header.get("failure"))
-    verdict, reason = _derive_verdict(attempts, failure=failure)
-    outcome = {
-        "route": route or "",
-        "verdict": verdict,
-        "reason": reason,
-        "error_class": _text(failure.get("error_class")),
-        "failed_stage": _text(failure.get("stage")),
-        "exit_reason": _text(outcome_block.get("exit_reason")),
-        "throughput": _throughput(outcome_block),
-        "cumulative_gain_validated_out": _float_or_none(outcome_block.get("cumulative_gain_validated_out")),
-        "stack_depth_out": _int_or_none(outcome_block.get("stack_depth_out")),
-        "delivered": _delivered(attempts),
-        "stack_delta": _as_dict(outcome_block.get("stack_delta")) or {"added": [], "removed": []},
-    }
-
+    forge = _forge(header, rows, parts, event=event)
+    geak = _geak(header, rows, acceptances, rebench)
+    outcome = _outcome(header, attempts)
     ext: dict[str, Any] = {
         "macro_cycle": _int_or_none(header.get("macro_cycle")) or 0,
         "in_flight_stage": _text(header.get("in_flight_stage")),
         "entry": _as_dict(header.get("entry")),
-        "failure": failure or None,
+        "failure": _as_dict(header.get("failure")) or None,
         # Every candidate either route produced, in one shape. The two routes
         # run different machinery and state their results under different
         # names; normalizing here is what lets one reader replay the visit
@@ -2099,11 +1723,11 @@ def assemble_kernel_ext(
         # The re-measurements that settled them. Only GEAK runs one today, but
         # the attempts above point at these rows by id, so they sit beside the
         # attempts rather than inside the route that happened to dispatch them.
-        "rebench": wire_rows(rebench_rows),
+        "rebench": wire_rows(rows[SECTION_REBENCH]),
         # Sibling of the two routes rather than nested in either: the gate is
         # the orchestrator's and rules on whatever the visit produced, so a
         # patch from GEAK and one from forge go through the same one.
-        "integrate": wire_rows(integrate_rows, drop=("event_id",)),
+        "integrate": wire_rows(rows[SECTION_INTEGRATE], drop=("event_id",)),
         # The end-to-end measurements the visit ran as sub-steps -- candidate
         # A/B, stack validation, vLLM shape capture. Each went through the
         # baseline executor inline, so its rows are in this event, and its task
@@ -2133,7 +1757,7 @@ def assemble_kernel_ext(
     # delivered before it raised, and reporting the event as succeeded on the
     # strength of that win is the crashed phase reading as a clean one. The
     # verdict keeps the win, because an instrument did measure it.
-    return ext, _text(header.get("closed_status")) or _STATUS_BY_VERDICT[verdict]
+    return ext, _text(header.get("closed_status")) or _STATUS_BY_VERDICT[outcome["verdict"]]
 
 
 def make_kernel_recorder(

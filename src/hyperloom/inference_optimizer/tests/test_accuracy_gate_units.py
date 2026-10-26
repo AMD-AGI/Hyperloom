@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
+from hyperloom.orchestrator.kernel import integrate_accuracy as integrate_accuracy
 
 
 class TestParseEvalResults:
@@ -105,15 +106,8 @@ class TestGradeIntegrateAccuracy:
 
     @staticmethod
     def _grade(monkeypatch, tmp_path, *, bench: dict, baseline: float):
-        from hyperloom.orchestrator.kernel import request_handlers as krh
-        from hyperloom.orchestrator.state import shared_state as ss
 
-        monkeypatch.setattr(
-            ss.SharedState,
-            "load_or_init",
-            classmethod(lambda cls, _dir: ss.SharedState(baseline_accuracy=baseline)),
-        )
-        return krh._grade_integrate_accuracy(bench, session_dir=tmp_path, workspace=tmp_path)
+        return integrate_accuracy.grade_integrate_accuracy(bench, baseline_accuracy=baseline, workspace=tmp_path)
 
     def test_accuracy_within_tolerance_does_not_block(self, monkeypatch, tmp_path):
         out = self._grade(monkeypatch, tmp_path, bench={"accuracy": 0.78}, baseline=0.80)

@@ -33,6 +33,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from hyperloom.common.coerce import dict_rows, to_mapping as _dict
+from hyperloom.common.fs_utils import relative_posix
 from hyperloom.common.jsonio import read_json
 
 from ..critic_reviews import normalize_framework_reviews
@@ -48,14 +50,6 @@ PRODUCER = "critic"
 #: the summary is context for it, and an unbounded one would let one iteration
 #: dominate the section.
 _SUMMARY_LIMIT = 500
-
-
-def _rel(path: Path, session_dir: Path | str) -> str:
-    """Express ``path`` relative to the session, or as-is when outside it."""
-    try:
-        return Path(path).relative_to(Path(session_dir)).as_posix()
-    except (ValueError, TypeError):
-        return str(path)
 
 
 def _stable_id(prefix: str, *parts: Any) -> str:
@@ -74,17 +68,6 @@ def _stable_id(prefix: str, *parts: Any) -> str:
     return f"{prefix}:{readable}:{digest}"
 
 
-def _dict(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
-
-
-def _rows(value: Any) -> list[dict[str, Any]]:
-    """The mapping rows of ``value``, ignoring anything else in the list."""
-    if not isinstance(value, list):
-        return []
-    return [dict(row) for row in value if isinstance(row, Mapping)]
-
-
 def _spoken_message(emit: Mapping[str, Any]) -> tuple[str, str]:
     """The ``(topic, body)`` of the first message the iteration spoke.
 
@@ -92,7 +75,7 @@ def _spoken_message(emit: Mapping[str, Any]) -> tuple[str, str]:
     ``send_message`` intent inside the envelope, which is also the only thing a
     turn with nothing to rule on produces.
     """
-    intents = _rows(_dict(emit.get("intent_envelope")).get("intents"))
+    intents = dict_rows(_dict(emit.get("intent_envelope")).get("intents"))
     for intent in intents:
         if str(intent.get("intent_type") or "") != "send_message":
             continue
@@ -109,7 +92,7 @@ def _verdict_counts(review: Mapping[str, Any]) -> dict[str, int]:
     not just the framework ones, because this row describes the whole turn.
     """
     counts: dict[str, int] = {}
-    for verdict_row in _rows(review.get("review_verdicts")):
+    for verdict_row in dict_rows(review.get("review_verdicts")):
         verdict = str(verdict_row.get("verdict") or "").strip().lower()
         if verdict:
             counts[verdict] = counts.get(verdict, 0) + 1
@@ -165,11 +148,10 @@ def record_critic_iteration(session_dir: Path | str | None, iteration: CriticIte
             "verdict": _verdict_rollup(counts),
             "verdict_counts": counts,
             "summary": body[:_SUMMARY_LIMIT],
-            "request_path": _rel(wd / "request.json", session_dir) if wd else None,
-            "judge_bundle_path": _rel(wd / "judge_bundle.json", session_dir) if wd else None,
-            "emit_path": _rel(wd / "emit.json", session_dir) if wd else None,
-            "review_path": _rel(wd / "review.json", session_dir) if wd else None,
-            "kb_writes": list(emit.get("kb_writes") or []) if isinstance(emit.get("kb_writes"), list) else [],
+            "request_path": relative_posix(wd / "request.json", Path(session_dir)) if wd else None,
+            "judge_bundle_path": relative_posix(wd / "judge_bundle.json", Path(session_dir)) if wd else None,
+            "emit_path": relative_posix(wd / "emit.json", Path(session_dir)) if wd else None,
+            "review_path": relative_posix(wd / "review.json", Path(session_dir)) if wd else None,
         }
 
         context = _dict(request.get("context"))

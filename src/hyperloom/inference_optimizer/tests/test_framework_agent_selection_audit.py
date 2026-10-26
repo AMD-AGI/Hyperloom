@@ -124,6 +124,15 @@ def test_collect_framework_agent_candidate_priors(coord: Coordinator) -> None:
     assert denied["rationale"] == "off the bottleneck"
 
 
+def test_an_already_present_candidate_counts_as_tested() -> None:
+    """It reached the apply stage, so the phase summary does not read it as a discovery that found nothing."""
+    from hyperloom.orchestrator.framework.artifacts import summarize_candidate_outcomes
+
+    summary = summarize_candidate_outcomes([{"candidate_id": "c1", "status": "already_present", "kept": False}])
+    assert summary["tested"] == 1
+    assert summary["outcome_class"] == "tested_no_keep"
+
+
 # _match_framework_agent_candidate
 
 
@@ -275,7 +284,7 @@ def test_dispatch_pause_budget_spent(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(
         coord_mod._phase_state,
-        "phase_seconds_left",
+        "phase_budget_remaining_seconds",
         lambda _s: 0.0,
     )
     assert coord.dispatcher.dispatch_paused_for_phase_budget() is True
@@ -285,7 +294,7 @@ def test_dispatch_pause_budget_remaining(coord: Coordinator, monkeypatch) -> Non
     coord.shared_state.phase = "KERNEL_AGENT"
     monkeypatch.setattr(
         coord_mod._phase_state,
-        "phase_seconds_left",
+        "phase_budget_remaining_seconds",
         lambda _s: 123.0,
     )
     assert coord.dispatcher.dispatch_paused_for_phase_budget() is False
@@ -535,7 +544,7 @@ def test_record_authoring_empty_guards(coord: Coordinator) -> None:
     assert not (coord.shared_state.framework_agent_phase_progress or [])
 
 
-def test_record_authoring_empty_already_present(coord: Coordinator) -> None:
+def test_record_authoring_empty_stamps_author_empty_once(coord: Coordinator) -> None:
     _enter_fpr(coord)
     task = types.SimpleNamespace(
         task_id="spec-2",
@@ -543,48 +552,19 @@ def test_record_authoring_empty_already_present(coord: Coordinator) -> None:
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": "cand-2",
             "framework_batch_id": "b1",
-            "framework_audit": {"semantic_status": "already_equivalent"},
         },
     )
     coord.phase_framework._record_framework_agent_authoring_empty_outcome(
-        task=task, done_payload={"payload": {"patches_written": [], "summary": "already there"}}
+        task=task, done_payload={"payload": {"patches_written": [], "summary": "nothing to write"}}
     )
     row = coord.shared_state.framework_agent_phase_progress[-1]
     assert row["candidate_id"] == "cand-2"
-    assert row["status"] == "already_present"
+    assert row["status"] == "author_empty"
     # Idempotent: a second call does not append a duplicate.
     coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=task, done_payload={"payload": {"patches_written": [], "summary": "again"}}
     )
     assert sum(1 for p in coord.shared_state.framework_agent_phase_progress if p["candidate_id"] == "cand-2") == 1
-
-
-def test_record_authoring_empty_status_variants(coord: Coordinator) -> None:
-    _enter_fpr(coord)
-    coord.shared_state.framework_agent_phase_progress = []
-    # not_present -> not_applicable.
-    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
-        task=types.SimpleNamespace(
-            task_id="s-a",
-            params={
-                "framework_agent_authoring": True,
-                "framework_agent_candidate_id": "na-1",
-                "framework_audit": {"semantic_status": "not_present"},
-            },
-        ),
-        done_payload={"patches_written": [], "summary": "missing"},
-    )
-    # no audit -> author_empty.
-    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
-        task=types.SimpleNamespace(
-            task_id="s-b",
-            params={"framework_agent_authoring": True, "framework_agent_candidate_id": "ae-1"},
-        ),
-        done_payload={"patches_written": []},
-    )
-    statuses = {p["candidate_id"]: p["status"] for p in coord.shared_state.framework_agent_phase_progress}
-    assert statuses["na-1"] == "not_applicable"
-    assert statuses["ae-1"] == "author_empty"
 
 
 # Lenient ranker: an "applicable: false" reply never vetoes the phase
