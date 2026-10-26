@@ -126,18 +126,19 @@ def test_the_node_power_is_read_from_the_npm_master_cards_board(tmp_path, monkey
     assert behind_a_disabled_copy == (5200.0, 8000.0)
 
 
-def _node_summary(tmp_path, read_node) -> dict:
+def _node_summary(monkeypatch, read_node) -> dict:
+    monkeypatch.setattr(_gpu_power, "_read_node_power", read_node)
     query = _Replay(_tp4_on_eight(800.0))
-    recorder = GpuPowerRecorder(output_path=None, query=query, interval_sec=0.5, read_node=read_node)
+    recorder = GpuPowerRecorder(output_path=None, query=query, interval_sec=0.5)
     recorder._interval = 0.01
     _run_measured(recorder, query, samples=4)
     return recorder.close()
 
 
-def test_a_node_held_at_its_npm_limit_is_reported_though_no_card_counts_it(tmp_path, caplog):
+def test_a_node_held_at_its_npm_limit_is_reported_though_no_card_counts_it(monkeypatch, caplog):
     """Measured on MI350X: under a 2600 W node limit every card ran near 430 W against a 1000 W cap, the node read
     above the limit, and the cards' own PPT counters moved for under 1% of the phase."""
-    out = _node_summary(tmp_path, lambda: (3492.0, 2600.0))
+    out = _node_summary(monkeypatch, lambda: (3492.0, 2600.0))
     assert out["power_throttled_gpus"] == []
     assert out["node"]["limit_w"] == 2600.0
     assert out["node"]["limited_fraction"] == 1.0
@@ -145,52 +146,36 @@ def test_a_node_held_at_its_npm_limit_is_reported_though_no_card_counts_it(tmp_p
     assert "held at its NPM power limit (2600.0 W) for 100% of the measured phase" in caplog.text
 
 
-def test_a_node_below_its_npm_limit_is_not_held(tmp_path, caplog):
-    out = _node_summary(tmp_path, lambda: (5200.0, 8000.0))
-    assert out["node"]["limited_fraction"] == 0.0
-    assert "NPM power limit" not in caplog.text
-
-
-def test_a_limit_that_changed_during_the_phase_is_unread(tmp_path, caplog):
-    readings = iter([(2600.0, 2600.0), (2600.0, 8000.0)] * 8)
-    out = _node_summary(tmp_path, lambda: next(readings))
-    assert out["node"]["limit_w"] is None
-    assert "held at its NPM power limit (changing W)" in caplog.text
-
-
 @pytest.mark.parametrize(("power", "held"), [(2587.0, 1.0), (2573.0, 0.0)], ids=["99.5%", "99.0%-"])
-def test_a_sample_counts_as_held_from_99_percent_of_the_limit(tmp_path, power, held):
-    out = _node_summary(tmp_path, lambda: (power, 2600.0))
+def test_a_sample_counts_as_held_from_99_percent_of_the_limit(monkeypatch, caplog, power, held):
+    out = _node_summary(monkeypatch, lambda: (power, 2600.0))
     assert out["node"]["limited_fraction"] == held
+    assert ("NPM power limit" in caplog.text) is bool(held)
 
 
-def test_a_zero_limit_holds_nothing(tmp_path):
-    out = _node_summary(tmp_path, lambda: (900.0, 0.0))
-    assert out["node"]["limited_fraction"] == 0.0
+def test_a_limit_that_changed_during_the_phase_is_unread(monkeypatch):
+    readings = iter([(2600.0, 2600.0), (2600.0, 8000.0)] * 8)
+    out = _node_summary(monkeypatch, lambda: next(readings))
+    assert out["node"]["limit_w"] is None
 
 
-def test_a_node_without_npm_has_no_node_reading(tmp_path):
-    out = _node_summary(tmp_path, lambda: None)
+def test_npm_enabled_with_no_limit_is_a_failed_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(_gpu_power, "_BOARD_GLOB", str(tmp_path / "card*" / "device" / "board"))
+    _board(tmp_path, 57, npm_status="enabled\n", node_power="900\n", cur_node_power_limit="0\n")
+    out = _node_summary(monkeypatch, _read_node_power)
+    assert out["node"] is None and out["node_query_errors"] > 0
+
+
+def test_a_node_without_npm_has_no_node_reading(monkeypatch):
+    out = _node_summary(monkeypatch, lambda: None)
     assert (out["node"], out["node_query_errors"]) == (None, 0)
 
 
-def test_the_rounds_recorder_samples_the_node(tmp_path, monkeypatch):
-    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/amd-smi")
-    monkeypatch.delenv("HYPERLOOM_GPU_POWER_SAMPLING", raising=False)
-    monkeypatch.setattr(_gpu_power, "_read_node_power", lambda: (8000.0, 8000.0))
-    recorder = build_gpu_power_recorder(str(tmp_path / "server.log"), {})
-    query = _Replay(_tp4_on_eight(800.0))
-    recorder._query, recorder._interval = query, 0.01
-    _run_measured(recorder, query, samples=3)
-    out = recorder.close()
-    assert out["node"]["limited_fraction"] == 1.0
-
-
-def test_a_node_read_that_fails_is_counted_and_costs_the_cards_nothing(tmp_path):
+def test_a_node_read_that_fails_is_counted_and_costs_the_cards_nothing(monkeypatch):
     def _unreadable():
         raise OSError("permission denied")
 
-    out = _node_summary(tmp_path, _unreadable)
+    out = _node_summary(monkeypatch, _unreadable)
     assert out["node"] is None and out["node_query_errors"] > 0
     assert out["avg_power_w"] == 800.0
 

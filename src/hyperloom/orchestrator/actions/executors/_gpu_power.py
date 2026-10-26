@@ -35,7 +35,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from hyperloom.common.env import EnvValueError, env_float
-from hyperloom.common.gpu_power_settings import gfx_clock_limits, gpu_power_sampling_unavailable, single_clock_limit
+from hyperloom.common.gpu_power_settings import (
+    NPM_ENABLED,
+    gfx_clock_limits,
+    gpu_power_sampling_unavailable,
+    single_clock_limit,
+)
 
 log = logging.getLogger(__name__)
 
@@ -73,8 +78,8 @@ _FRACTION_DIGITS = 4
 #: the limit, or above it once every card is down at its minimum power; a node the limit is not holding reads below.
 _NODE_AT_LIMIT_FRACTION = 0.99
 
-#: The card directories whose ``board`` may hold the node's NPM files: the first card of an XGMI hive publishes them,
-#: and every card does on a node without a hive.
+#: The card directories whose ``board`` may hold the node's NPM files. amdgpu creates them on a card whose XGMI physical
+#: node id is 0 (``smu_v13_0_6_ppt.c``): one card of a hive, so one card on an MI350 node, and every card without a hive.
 _BOARD_GLOB = "/sys/class/drm/card*/device/board"
 
 #: The ``amd-smi metric`` fields each power sample reads, and those read at each measured window's open and close.
@@ -162,17 +167,20 @@ def _read_node_power() -> tuple[float, float] | None:
     Read from sysfs rather than ``amd-smi``, which reports the limit but not the node's power.
 
     Raises:
-        OSError, ValueError: the NPM master card's files exist but cannot be read.
+        OSError, ValueError: the node's files exist but cannot be read, or report no limit.
     """
     for board in sorted(glob.glob(_BOARD_GLOB)):
         try:
             status = _read_board(board, "npm_status").strip()
         except FileNotFoundError:
             continue
-        if status != "enabled":
+        if status != NPM_ENABLED:
             # Without an XGMI hive every card publishes its own copy; one reading disabled says nothing of the others.
             continue
-        return float(_read_board(board, "node_power")), float(_read_board(board, "cur_node_power_limit"))
+        limit = float(_read_board(board, "cur_node_power_limit"))
+        if limit <= 0:
+            raise ValueError(f"{board}: NPM is enabled with a node power limit of {limit:g} W")
+        return float(_read_board(board, "node_power")), limit
     return None
 
 
@@ -186,7 +194,7 @@ def _node_fields(samples: list[tuple[float, float]]) -> dict[str, Any] | None:
         return None
     powers = [power for power, _ in samples]
     limits = {limit for _, limit in samples}
-    held = sum(1 for power, limit in samples if limit > 0 and power >= limit * _NODE_AT_LIMIT_FRACTION)
+    held = sum(1 for power, limit in samples if power >= limit * _NODE_AT_LIMIT_FRACTION)
     return {
         "limit_w": limits.pop() if len(limits) == 1 else None,
         "avg_power_w": round(sum(powers) / len(powers), 2),
@@ -259,14 +267,12 @@ class GpuPowerRecorder:
         gpus: set[int] | None = None,
         interval_sec: float = _DEFAULT_INTERVAL_SEC,
         query: Callable[..., Any] | None = None,
-        read_node: Callable[[], tuple[float, float] | None] | None = None,
     ) -> None:
-        """Prepare a recorder without running anything; it samples the node's power only when given *read_node*."""
+        """Prepare a recorder without running anything."""
         self._output_path = output_path
         self._gpus = None if gpus is None else set(gpus)
         self._interval = max(_MIN_INTERVAL_SEC, float(interval_sec))
         self._query = query or (lambda *metrics: _query_amd_smi(subprocess.run, *metrics))
-        self._read_node = read_node or (lambda: None)
         self._node: list[tuple[float, float]] = []
         self._node_errors = 0
         self._clocks: dict[int, list[float]] = {}
@@ -367,7 +373,7 @@ class GpuPowerRecorder:
 
     def _sample_node(self) -> None:
         try:
-            sample = self._read_node()
+            sample = _read_node_power()
         except (OSError, ValueError):
             log.debug("gpu_power: node power read failed", exc_info=True)
             with self._lock:
@@ -581,7 +587,6 @@ def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | 
             output_path=str(Path(server_log_path).parent / GPU_POWER_ARTIFACT_NAME),
             gpus=gpus,
             interval_sec=env_float(_INTERVAL_ENV, _DEFAULT_INTERVAL_SEC),
-            read_node=_read_node_power,
         )
     except EnvValueError:
         log.warning("gpu_power: recorder could not be built; this round samples nothing", exc_info=True)
