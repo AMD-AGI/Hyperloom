@@ -8,12 +8,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Collection, Final, Mapping
+from typing import TYPE_CHECKING, Any, Collection, Final, Mapping
+
+from hyperloom.common.coerce import to_float
 
 from hyperloom.common.coerce import first_text
 from hyperloom.inference_optimizer.grid_server_args import (
@@ -36,6 +37,7 @@ from .models import (
     PATCH_SECTION,
     RECIPE_SECTIONS,
     Artifact,
+    KBSelectionProfile,
     KnowledgeBundle,
     RecipeScope,
     RemoteRecipeValidationError,
@@ -49,6 +51,9 @@ from .sanitize import (
     sanitize_shared_knowledge,
 )
 from ...specialists.patch_safety import parse_patch_targets
+
+if TYPE_CHECKING:
+    from ..agent_kb import DraftArtifactSink
 
 log = logging.getLogger(__name__)
 
@@ -85,14 +90,6 @@ def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
-def _number(value: Any) -> float:
-    try:
-        number = float(value or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-    return number if math.isfinite(number) else 0.0
-
-
 def _patch_declared_targets(path: Any) -> tuple[str, ...]:
     """Return every safe target declared by a unified diff."""
     patch = Path(str(path or ""))
@@ -106,13 +103,12 @@ def _patch_declared_targets(path: Any) -> tuple[str, ...]:
         raise RemoteRecipeValidationError(str(exc)) from exc
 
 
-def _kernel_apply_root(patch_source: Any, target_file: Any, declared: Any = None) -> str:
+def _kernel_apply_root(target_file: Any, declared: Collection[str]) -> str:
     """Return the directory a kernel patch's declared paths are relative to."""
     target = Path(str(target_file or ""))
     if not target.is_absolute():
         return ""
-    targets = tuple(declared) if declared is not None else _patch_declared_targets(patch_source)
-    for relative in targets:
+    for relative in declared:
         parts = Path(str(relative)).parts
         if parts and len(parts) < len(target.parts) and target.parts[-len(parts) :] == parts:
             return str(Path(*target.parts[: -len(parts)]))
@@ -141,7 +137,7 @@ _SCOPE_SHAPE_KEYS: Final[tuple[str, ...]] = ("tp", "conc", "isl", "osl")
 SHAPE_KEYS: Final[tuple[str, ...]] = (*_SCOPE_SHAPE_KEYS, "ep", "partitions")
 
 
-def workload_shape(state: Any, *, scope: RecipeScope | None = None) -> dict[str, int]:
+def workload_shape(state: Any, *, scope: RecipeScope) -> dict[str, int]:
     """Return the workload dimensions a row records about the machine it ran on.
 
     Identity-scoped dimensions come from the same validated ``RecipeScope`` the
@@ -151,12 +147,9 @@ def workload_shape(state: Any, *, scope: RecipeScope | None = None) -> dict[str,
     1`` is dense and one partition is the whole card -- which keeps a row that merely took the CLI's ``--ep`` default
     from claiming a formation it never chose.
     """
-    resolved_scope = scope or RecipeScope.from_state(state)
     extra = _mapping(getattr(state, "baseline_workload_extra", {}))
     shape = {
-        key: value
-        for key, value in resolved_scope.as_dict().items()
-        if key != "kernel_optimizer" and isinstance(value, int)
+        key: value for key, value in scope.as_dict().items() if key != "kernel_optimizer" and isinstance(value, int)
     }
     ep = _positive_int(getattr(state, "ep", None))
     if ep is None:
@@ -192,39 +185,6 @@ class _Files:
         self.root = root
         self.artifacts: list[Artifact] = []
         self.refs: set[str] = set()
-        self._sources: dict[tuple[Path, str, str], str] = {}
-
-    def add(self, source: Any, *, category: str, kind: str, name: str = "") -> str:
-        raw = str(source or "").strip()
-        if not raw:
-            return ""
-        src = Path(raw)
-        if src.is_symlink():
-            raise RemoteRecipeValidationError(f"artifact source must not be a symlink: {src}")
-        if not src.is_file():
-            return ""
-        if src.stat().st_size > MAX_FILE_BYTES:
-            raise RemoteRecipeValidationError(f"artifact {src} exceeds the {MAX_FILE_BYTES}-byte KB Store limit")
-        resolved = src.resolve()
-        source_key = (resolved, category, kind)
-        if source_key in self._sources:
-            ref = self._sources[source_key]
-            self.refs.add(ref)
-            return ref
-        basename = Path(name or src.name).name or "artifact"
-        rel = f"{category}/{kind}/{basename}"
-        occupied = {item.path for item in self.artifacts}
-        if rel in occupied:
-            suffix = hashlib.sha256(str(resolved).encode()).hexdigest()[:10]
-            rel = f"{category}/{kind}/{src.stem}-{suffix}{src.suffix}"
-        destination = self.root / rel
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, destination)
-        artifact = Artifact(path=rel, source=destination, kind=kind, meta={"origin": category})
-        self.artifacts.append(artifact)
-        self.refs.add(rel)
-        self._sources[source_key] = rel
-        return rel
 
     def validate_adoption(self, source: Path, rel: str) -> None:
         """Fail before merge when a staged file cannot safely own ``rel``."""
@@ -252,16 +212,7 @@ class _Files:
         destination = self.root / rel
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
-        category = rel.split("/", 1)[0]
-        kind = rel.split("/")[1] if rel.count("/") >= 2 else "artifacts"
-        self.artifacts.append(
-            Artifact(
-                path=rel,
-                source=destination,
-                kind=kind,
-                meta={"origin": category, "staged": True},
-            )
-        )
+        self.artifacts.append(Artifact(path=rel, source=destination))
         self.refs.add(rel)
         return rel
 
@@ -298,35 +249,6 @@ class _Files:
             candidate = path.with_name(f"{path.stem}-{digest}-{index}{path.suffix}").as_posix()
             index += 1
         return self.adopt(source, candidate)
-
-    def write(self, text: str, *, rel: str, kind: str) -> str:
-        destination = self.root / rel
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(text, encoding="utf-8")
-        self.artifacts.append(Artifact(path=rel, source=destination, kind=kind))
-        self.refs.add(rel)
-        return rel
-
-    def prune_superseded(self, knowledge: Mapping[str, Any]) -> None:
-        """Drop scraped files superseded by staged columns; reject staged orphans."""
-        paths = {artifact.path for artifact in self.artifacts}
-        referenced = extract_knowledge_artifact_refs(knowledge, paths)
-        unreferenced = paths - referenced
-        staged_orphans = sorted(
-            artifact.path
-            for artifact in self.artifacts
-            if artifact.path in unreferenced and artifact.meta.get("staged")
-        )
-        if staged_orphans:
-            raise RemoteRecipeValidationError(f"staged artifacts absent from final knowledge: {staged_orphans!r}")
-        retained: list[Artifact] = []
-        for artifact in self.artifacts:
-            if artifact.path in unreferenced:
-                artifact.source.unlink(missing_ok=True)
-                self.refs.discard(artifact.path)
-                continue
-            retained.append(artifact)
-        self.artifacts = retained
 
 
 #: Levers that never belong to the kernel column. They are consulted before the
@@ -458,7 +380,7 @@ def build_publishable_recipe_config(state: Any) -> dict[str, Any]:
 
 def _externalize_record(
     record: Mapping[str, Any],
-    files: _Files,
+    files: DraftArtifactSink,
     category: str,
     *,
     required_keys: set[str] | None = None,
@@ -505,7 +427,7 @@ def _externalize_record(
     return out
 
 
-def build_kernel_gemm_value(state: Any, files: _Files) -> dict[str, Any]:
+def build_kernel_gemm_value(state: Any, files: DraftArtifactSink) -> dict[str, Any]:
     """Build only accepted GEMM optimizations from the final stack/result."""
     stack_rows = [
         dict(item)
@@ -529,7 +451,7 @@ def build_kernel_gemm_value(state: Any, files: _Files) -> dict[str, Any]:
     return {"optimizations": optimizations}
 
 
-def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
+def build_kernel_fusion_value(state: Any, files: DraftArtifactSink) -> dict[str, Any]:
     """Build only E2E-accepted fusion solution records."""
     stack_rows = [
         dict(item)
@@ -550,7 +472,6 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
     # Recorded now or never: replay has no way back to the checkout this was measured on, and a record that cannot
     # name it cannot be replayed.
     apply_root = first_text(result.get("kernel_repo")) or _kernel_apply_root(
-        patch_source,
         stack_rows[-1].get("target_file") or result.get("source_file") or result.get("target_file"),
         declared,
     )
@@ -623,7 +544,7 @@ def _match_queued_integration(
     return {}
 
 
-def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
+def build_kernel_rewrite_value(state: Any, files: DraftArtifactSink) -> dict[str, Any]:
     """Build rewrite rows exclusively from E2E-integrated stack entries."""
     rows: list[dict[str, Any]] = []
     integrated = [
@@ -634,7 +555,7 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
     for entry in integrated:
         raw = _match_queued_integration(entry, state.pending_kernel_integrations)
         kernel_name = str(raw.get("kernel_id") or entry.get("kernel_id") or "unknown")
-        speedup = _number(raw.get("micro_speedup"))
+        speedup = to_float(raw.get("micro_speedup"), 0.0)
         integration_id = str(entry.get("integration_id") or "")
         slug = hashlib.sha256(
             f"{integration_id}|{entry.get('kernel_id')}|{entry.get('patch_path')}".encode()
@@ -655,7 +576,6 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
         # Recorded now or never: replay has no way back to the checkout this was measured on, and a record that cannot
         # name it cannot be replayed.
         apply_root = str(raw.get("deploy_repo_root") or "").strip() or _kernel_apply_root(
-            patch_source,
             entry.get("target_file"),
             declared,
         )
@@ -669,14 +589,13 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
             )
             files.discard(patch)
             continue
-        e2e_gain = _number(entry.get("gain_pct"))
-        optimized_throughput = _number(entry.get("tput"))
+        e2e_gain = to_float(entry.get("gain_pct"), 0.0)
+        optimized_throughput = to_float(entry.get("tput"), 0.0)
         experience = files.write(
             f"# Kernel rewrite: {kernel_name}\n\n- Phase: KERNEL_AGENT\n- Decision: KEEP\n"
             f"- Measured speedup: {speedup:g}x\n- E2E gain: {e2e_gain:g}%\n"
             f"- Optimized throughput: {optimized_throughput:g}\n- Patch: {patch}\n",
             rel=f"kernel/rewrite/experience/{slug}.md",
-            kind="experience",
         )
         rows.append(
             {
@@ -737,7 +656,7 @@ def _prior_apply_roots(prior_patch: Mapping[str, Any]) -> dict[str, str]:
     for prov_row in prior_patch.get("provenance") or []:
         if not isinstance(prov_row, Mapping):
             continue
-        origin = prov_row.get("host_origin")
+        origin = prov_row.get(HOST_ORIGIN_KEY)
         if not isinstance(origin, Mapping):
             continue
         for ref, root in (origin.get("apply_roots") or {}).items():
@@ -764,9 +683,9 @@ def _provenance_with_apply_roots(
             "realized": True,
         }
         rows.append(row)
-    origin = dict(row.get("host_origin") or {})
+    origin = dict(row.get(HOST_ORIGIN_KEY) or {})
     origin["apply_roots"] = {**dict(origin.get("apply_roots") or {}), **apply_roots}
-    row["host_origin"] = origin
+    row[HOST_ORIGIN_KEY] = origin
     rows.sort(key=lambda r: int(r.get("stack_index") or 0))
     return rows
 
@@ -988,13 +907,12 @@ def merge_staged_sections(
     sections: Any,
     files: "_Files",
     *,
-    only: Collection[str],
     required: Collection[str],
 ) -> dict[str, dict[str, Any]]:
     """Return each staged column's knowledge in draft order, adopting the files it names."""
     merged: dict[str, dict[str, Any]] = {}
     for name in sections.sections():
-        if name not in only:
+        if name not in RECIPE_SECTIONS:
             continue
         qualifier = "required " if name in required else ""
         try:
@@ -1054,12 +972,13 @@ def build_remote_knowledge(
     files_dir: str | Path,
     *,
     sections: Any,
-    metrics: Mapping[str, float] | None = None,
+    profile: KBSelectionProfile,
+    session_id: str,
 ) -> KnowledgeBundle:
     """Construct the final opaque knowledge document and temporary files tree."""
     if sections is None:
         raise RemoteRecipeValidationError("a Recipe can only be built from a staged draft")
-    scope = RecipeScope.from_state(state)
+    scope = profile.scope
     dropped_sections = _dropped_staged_sections(state)
     root = Path(files_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -1084,7 +1003,7 @@ def build_remote_knowledge(
     ConfigKB(sections).stage(build_publishable_recipe_config(state))
     KernelAgentKB(sections).stage_from_state(state, kernel_optimizer=scope.kernel_optimizer)
 
-    merged = merge_staged_sections(sections, files, only=RECIPE_SECTIONS, required=required_columns)
+    merged = merge_staged_sections(sections, files, required=required_columns)
     missing_columns = required_columns - merged.keys()
     if missing_columns:
         raise RemoteRecipeValidationError(f"required staged columns are missing: {sorted(missing_columns)!r}")
@@ -1099,7 +1018,7 @@ def build_remote_knowledge(
         {
             "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
             "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
-            **dict(metrics or {}),
+            **profile.metrics,
             "workload_shape": workload_shape(state, scope=scope),
             "value": value,
             "what_worked": worked,
@@ -1111,7 +1030,7 @@ def build_remote_knowledge(
                 "producer": "hyperloom-inference-optimizer",
                 "kernel_optimizer": scope.kernel_optimizer,
                 "phase": "CLOSE",
-                "session_id": str(getattr(state, "recipe_kb_session_id", "") or getattr(state, "session_id", "")),
+                "session_id": session_id,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "optimization_stack_length": len(stack),
                 "staged_sections": list(merged),
@@ -1121,7 +1040,6 @@ def build_remote_knowledge(
             },
         }
     )
-    files.prune_superseded(knowledge)
     bundle = KnowledgeBundle(knowledge=knowledge, artifacts=files.artifacts)
     bundle.validate()
     return bundle
@@ -1180,12 +1098,12 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
     knowledge = _mapping(document.get("knowledge")) or dict(document)
     _validate_current_recipe(knowledge)
     session_id = str(document.get("session_id") or "")
-    validated_gain = _number(knowledge.get("interactivity_gain_pct", knowledge.get("validated_e2e_gain")))
+    validated_gain = to_float(knowledge.get("interactivity_gain_pct", knowledge.get("validated_e2e_gain")), 0.0)
     view = _mapping(document.get("view"))
     replayable = view.get("replayable") is not False
     row = {
         "canonical_id": str(document.get("canonical_id") or ""),
-        "best_throughput": _number(knowledge.get("optimized_throughput")),
+        "best_throughput": to_float(knowledge.get("optimized_throughput"), 0.0),
         "validated_gain_pct": validated_gain,
         "what_worked": list(knowledge.get("what_worked") or []),
         "what_failed": list(knowledge.get("what_failed") or []),
@@ -1223,6 +1141,5 @@ __all__ = [
     "has_replay_material",
     "knowledge_to_warm_recipe",
     "has_new_keep",
-    "merge_staged_sections",
     "workload_shape",
 ]
