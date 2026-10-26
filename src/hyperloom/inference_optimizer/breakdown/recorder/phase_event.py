@@ -30,7 +30,7 @@ from typing import Any
 from hyperloom.common.coerce import to_float as _float_or_none, to_int as _int_or_none, to_mapping as _as_dict
 from hyperloom.plugs import progress as _progress
 
-from .event_fields import now_iso_seconds as _now
+from .event_fields import now_iso_seconds as _now, text as _text
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink, make_sink
@@ -456,50 +456,40 @@ def assemble_phase_ext(
     sections read back from the spool."""
     header = _header(rows_for_event(parts.get(SECTION_EVENT) or [], event))
     segments = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_SEGMENT) or [], event), keys=("sequence",)),
-        drop=("event_id",),
+        sort_rows(rows_for_event(parts[SECTION_SEGMENT], event), keys=("sequence",)), drop=("event_id",)
     )
     actions = [
         # Measured here because the settle cannot see the dispatch that opened
         # the row.
         dict(row, duration_sec=_span(row.get("dispatched_unix"), row.get("settled_unix")))
         for row in wire_rows(
-            sort_rows(
-                rows_for_event(parts.get(SECTION_ACTION) or [], event),
-                keys=("dispatched_at", "task_id"),
-            ),
+            sort_rows(rows_for_event(parts[SECTION_ACTION], event), keys=("dispatched_at", "task_id")),
             drop=("event_id",),
         )
     ]
     markers = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_MARKER) or [], event), keys=("sequence", "ts")),
-        drop=("event_id",),
+        sort_rows(rows_for_event(parts[SECTION_MARKER], event), keys=("sequence", "ts")), drop=("event_id",)
     )
     proposals = wire_rows(
-        sort_rows(
-            rows_for_event(parts.get(SECTION_PROPOSAL) or [], event),
-            keys=("proposed_at", "proposal_msg_id"),
-        ),
+        sort_rows(rows_for_event(parts[SECTION_PROPOSAL], event), keys=("proposed_at", "proposal_msg_id")),
         drop=("event_id",),
     )
     denials = wire_rows(
-        sort_rows(
-            rows_for_event(parts.get(SECTION_DENIAL) or [], event),
-            keys=("denied_at", "proposal_msg_id", "action"),
-        ),
+        sort_rows(rows_for_event(parts[SECTION_DENIAL], event), keys=("denied_at", "proposal_msg_id", "action")),
         drop=("event_id",),
     )
+    first, last = (segments[0], segments[-1]) if segments else ({}, {})
     # Summed over the entries, not measured first to last: a phase re-entered
     # inside one cycle did not own the time the run spent elsewhere in between.
-    measured = [row.get("duration_sec") for row in segments if isinstance(row.get("duration_sec"), (int, float))]
+    measured = [float(row["duration_sec"]) for row in segments if isinstance(row.get("duration_sec"), (int, float))]
     ext: dict[str, Any] = {
-        "phase": str(header.get("phase") or ""),
+        "phase": _text(header.get("phase")),
         "macro_cycle": int(header.get("macro_cycle") or 0),
-        "entered_at": str((segments[0] or {}).get("entered_at") or "") if segments else "",
-        "exited_at": str((segments[-1] or {}).get("exited_at") or "") if segments else "",
-        "exit_reason": str((segments[-1] or {}).get("exit_reason") or "") if segments else "",
+        "entered_at": _text(first.get("entered_at")),
+        "exited_at": _text(last.get("exited_at")),
+        "exit_reason": _text(last.get("exit_reason")),
         "entries": len(segments),
-        "duration_sec": round(sum(float(d) for d in measured), 6) if measured else None,
+        "duration_sec": round(sum(measured), 6) if measured else None,
         # An entry with no exit is the segment the run was in when it stopped.
         "open": any(not row.get("exited_at") for row in segments),
         "segments": segments,
@@ -507,7 +497,7 @@ def assemble_phase_ext(
             "count": len(actions),
             # The gap to ``count`` is the actions still in or killed in flight.
             "settled": sum(1 for row in actions if row.get("status")),
-            "kinds": sorted({str(row.get("action") or "") for row in actions if row.get("action")}),
+            "kinds": sorted({str(row["action"]) for row in actions if row.get("action")}),
             "rows": actions,
         },
         "markers": {"count": len(markers), "rows": markers},
