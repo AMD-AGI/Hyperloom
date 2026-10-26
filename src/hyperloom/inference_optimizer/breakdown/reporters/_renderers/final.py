@@ -11,10 +11,11 @@ from another -- which is what the export's disk walk for the latency could do.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NamedTuple
 
 from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
 
+from .... import framework_registry
 from ..base import (
     Decision,
     RenderedSection,
@@ -106,6 +107,131 @@ def _settled_failure(rebench: dict[str, Any], action_path: list[Any]) -> bool:
     return not any(str(step).split(":", 1)[0] == "geak_e2e" for step in action_path)
 
 
+class _Note(NamedTuple):
+    """A key fact and the warning that must be read beside it."""
+
+    fact: str
+    warning: str
+
+
+def _self_reported_gain(record: dict[str, Any]) -> str:
+    """The gain a GEAK record self-reported, as a signed percentage or ``unknown``."""
+    gain = record.get("self_reported_gain_pct")
+    return fmt_pct(gain, plus=True) if isinstance(gain, (int, float)) else "unknown"
+
+
+def _dropped_note(gain: str, status: str, error: Any, revalidation: str) -> _Note:
+    """The note on a GEAK candidate dropped before its same-harness revalidation could judge it."""
+    reason = str(error or "").strip() or "reason not recorded"
+    return _Note(
+        fact=f"GEAK candidate (self-reported {gain}) was DROPPED without revalidation (status={status}, {reason}).",
+        warning=(
+            "A measured GEAK e2e candidate was abandoned because its same-harness "
+            f"revalidation {revalidation} ({reason}). It was never judged on merit, "
+            "so this session's gain may understate what the optimizer actually "
+            "found — the candidate's artefacts are on disk but absent from "
+            "current_best / action_path / the validated gain."
+        ),
+    )
+
+
+def _geak_note(
+    candidate: dict[str, Any], rebench: dict[str, Any], claim: dict[str, Any], action_path: list[Any]
+) -> _Note | None:
+    """The note on a GEAK candidate kept out of the final stack, or ``None`` when there is none."""
+    gain = _self_reported_gain(candidate)
+    status = str(candidate.get("status") or "")
+    if status in GEAK_DROPPED_STATUSES:
+        return _dropped_note(gain, status, candidate.get("revalidation_error"), "could not land")
+    if status == "awaiting_rebench":
+        return _Note(
+            fact=(
+                f"GEAK candidate (self-reported {gain}) is AWAITING a "
+                "main-flow rebench — excluded from the headline gain and final stack "
+                "until a measured rebench validates it."
+            ),
+            warning=(
+                "A GEAK(GEAK) e2e candidate self-reported a win but has NOT been "
+                "confirmed by a same-harness main-flow rebench, so it is intentionally "
+                "kept out of current_best / action_path / the validated gain. Its "
+                "self-reported number is audit-only and must not be presented as the "
+                "headline result."
+            ),
+        )
+    # Last: a settled ``failed`` on the rebench outlives the candidate slot it was recorded from, so a LIVE candidate
+    # in a later macro-cycle must win over a terminal status left behind by an earlier one.
+    if not _settled_failure(rebench, action_path):
+        return None
+    return _dropped_note(
+        _self_reported_gain(claim), f"rebench_{rebench.get('final_status')}", rebench.get("final_error"), "failed"
+    )
+
+
+def _throughput_facts(fw: Any, final_tput: Any, base_tput: Any) -> list[str]:
+    """The final figure on the framework's primary metric, and its delta against the baseline's."""
+    facts: list[str] = []
+    if final_tput:
+        facts.append(f"Final: {framework_registry.format_primary_metric(fw, final_tput, precision=2)}.")
+    if base_tput and final_tput:
+        base_v = framework_registry.primary_metric_value(fw, base_tput)
+        final_v = framework_registry.primary_metric_value(fw, final_tput)
+        if base_v is not None and final_v is not None:
+            # For latency-based metrics, an improvement shows as a negative delta.
+            note = " (negative = faster)" if framework_registry.is_scriptable(fw) else ""
+            unit = framework_registry.primary_metric_unit(fw)
+            facts.append(f"Delta vs baseline: {final_v - base_v:+.2f} {unit}{note}.")
+    return facts
+
+
+def _shipped_stack_facts(action_path: list[Any], extra_args: Any) -> list[str]:
+    """The stack the session shipped, and the extra server args it launched with."""
+    facts: list[str] = []
+    if action_path:
+        facts.append("Final stack: " + " → ".join(f"`{p}`" for p in action_path))
+    if extra_args:
+        facts.append(f"Final extra_server_args: `{extra_args}`.")
+    return facts
+
+
+def _final_markdown(
+    final: dict[str, Any], validation: dict[str, Any], candidate: dict[str, Any], fw: Any, session: dict[str, Any]
+) -> str:
+    """The result as a key/value list, then the axes it was graded on and the launch that produced it."""
+    md_kv = md_kv_list(
+        [
+            ("final_output_throughput", final.get("output_throughput")),
+            ("throughput_unit", framework_registry.throughput_unit(fw) or None),
+            ("validated_gain_pct", final.get("gain_pct")),
+            ("revalidation_pending", bool(candidate.get("revalidation_pending")) or None),
+            ("geak_candidate", candidate or None),
+            ("validated_at_stack_len", validation.get("validated_at_stack_len")),
+            ("validated_ts", validation.get("validated_ts")),
+            ("measurement_basis", validation.get("measurement_basis")),
+            ("stack_changed_after_validation", bool(validation.get("stack_changed_after_validation"))),
+            ("extra_server_args", final.get("extra_server_args") or None),
+            ("action_path", final.get("action_path") or None),
+            ("ttft_mean_ms", measured_ms(final.get("ttft_mean_ms"))),
+            ("e2el_mean_ms", final.get("e2el_mean_ms")),
+            ("ttft_e2el_source", validation.get("ttft_e2el_source")),
+            ("extra_envs", final.get("extra_envs") or None),
+        ]
+    )
+
+    md_parts = [md_kv]
+    # The axes the validation round was graded on, beside the throughput figure above. On an AgentX session the two
+    # answer different questions: the verdict was decided on these, not on ``final_output_throughput``.
+    graded_md = render_graded_axes(validation.get("perf"))
+    if graded_md:
+        md_parts.append("")
+        md_parts.append("**AgentX graded axes** (validation round):")
+        md_parts.append(graded_md)
+    inv_md = render_invocation_block(final.get("invocation"), session.get("image"))
+    if inv_md:
+        md_parts.append("")
+        md_parts.append(inv_md)
+    return "\n".join(md_parts).strip()
+
+
 @register_renderer("final")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
     """Render the final / validated-result section.
@@ -123,42 +249,20 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     """
     outcome = outcome_of(breakdown)
     f = as_dict(outcome.get("final"))
-    b = as_dict(outcome.get("baseline"))
     validation = validation_of(breakdown)
-    session = session_of(breakdown)
     final_tput = f.get("output_throughput")
-    base_tput = b.get("output_throughput")
+    base_tput = as_dict(outcome.get("baseline")).get("output_throughput")
     gain_v = f.get("gain_pct")
     val_stack_len = validation.get("validated_at_stack_len")
-    val_ts = validation.get("validated_ts")
-    stack_changed = bool(validation.get("stack_changed_after_validation"))
-    extra_args = f.get("extra_server_args") or ""
     action_path = f.get("action_path") or []
     # The candidate's standing at close: no kernel event can hold it, since it
     # is settled after every one of them has closed.
     candidate = as_dict(close_of(breakdown).get("geak_candidate"))
     rebench, claim = _last_geak_rebench(breakdown)
-    revalidation_pending = bool(candidate.get("revalidation_pending"))
-    candidate_status = str(candidate.get("status") or "")
-    pending_awaiting = candidate_status == "awaiting_rebench"
-
-    facts: list[str] = []
-    warnings: list[str] = []
-    decisions: list[Decision] = []
-
-    from .... import framework_registry
-
     fw = task_config_of(breakdown).get("framework_name")
-    _unit = framework_registry.primary_metric_unit(fw)
-    if final_tput:
-        facts.append(f"Final: {framework_registry.format_primary_metric(fw, final_tput, precision=2)}.")
-    if base_tput and final_tput:
-        base_v = framework_registry.primary_metric_value(fw, base_tput)
-        final_v = framework_registry.primary_metric_value(fw, final_tput)
-        if base_v is not None and final_v is not None:
-            # For latency-based metrics, an improvement shows as a negative delta.
-            note = " (negative = faster)" if framework_registry.is_scriptable(fw) else ""
-            facts.append(f"Delta vs baseline: {final_v - base_v:+.2f} {_unit}{note}.")
+
+    facts = _throughput_facts(fw, final_tput, base_tput)
+    decisions: list[Decision] = []
     if gain_v is not None:
         facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}{_gain_axis_note(f)}.")
         decisions.append(
@@ -166,106 +270,28 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 kind="kept" if (gain_v or 0) > 0 else "attempted",
                 subject="final",
                 metric_pct=float(gain_v),
-                rationale=f"validated at stack_len={val_stack_len} ts={val_ts}",
+                rationale=f"validated at stack_len={val_stack_len} ts={validation.get('validated_ts')}",
             )
         )
     facts.extend(graded_axes_facts(validation.get("perf"), label="Final"))
-    self_gain = candidate.get("self_reported_gain_pct")
-    self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
-    if candidate_status in GEAK_DROPPED_STATUSES:
-        drop_reason = str(candidate.get("revalidation_error") or "").strip() or "reason not recorded"
-        facts.append(
-            f"GEAK candidate (self-reported {self_gain_str}) was DROPPED without "
-            f"revalidation (status={candidate_status}, {drop_reason})."
-        )
-        warnings.append(
-            "A measured GEAK e2e candidate was abandoned because its same-harness "
-            f"revalidation could not land ({drop_reason}). It was never judged on "
-            "merit, so this session's gain may understate what the optimizer "
-            "actually found — the candidate's artefacts are on disk but absent "
-            "from current_best / action_path / the validated gain."
-        )
-    elif pending_awaiting:
-        facts.append(
-            f"GEAK candidate (self-reported {self_gain_str}) is AWAITING a "
-            "main-flow rebench — excluded from the headline gain and final stack "
-            "until a measured rebench validates it."
-        )
-        warnings.append(
-            "A GEAK(GEAK) e2e candidate self-reported a win but has NOT been "
-            "confirmed by a same-harness main-flow rebench, so it is intentionally "
-            "kept out of current_best / action_path / the validated gain. Its "
-            "self-reported number is audit-only and must not be presented as the "
-            "headline result."
-        )
-    # Last: a settled ``failed`` on the rebench outlives the candidate slot it
-    # was recorded from, so a LIVE candidate in a later macro-cycle must win
-    # over a terminal status left behind by an earlier one.
-    elif _settled_failure(rebench, action_path):
-        geak_gain = claim.get("self_reported_gain_pct")
-        geak_gain_str = fmt_pct(geak_gain, plus=True) if isinstance(geak_gain, (int, float)) else "unknown"
-        drop_reason = str(rebench.get("final_error") or "").strip() or "reason not recorded"
-        facts.append(
-            f"GEAK candidate (self-reported {geak_gain_str}) was DROPPED without "
-            f"revalidation (status=rebench_{rebench.get('final_status')}, {drop_reason})."
-        )
-        warnings.append(
-            "A measured GEAK e2e candidate was abandoned because its same-harness "
-            f"revalidation failed ({drop_reason}). It was never judged on merit, "
-            "so this session's gain may understate what the optimizer actually "
-            "found — the candidate's artefacts are on disk but absent from "
-            "current_best / action_path / the validated gain."
-        )
-    if action_path:
-        facts.append("Final stack: " + " → ".join(f"`{p}`" for p in action_path))
-    if extra_args:
-        facts.append(f"Final extra_server_args: `{extra_args}`.")
+    warnings: list[str] = []
+    geak = _geak_note(candidate, rebench, claim, action_path)
+    if geak is not None:
+        facts.append(geak.fact)
+        warnings.append(geak.warning)
+    facts.extend(_shipped_stack_facts(action_path, f.get("extra_server_args")))
     warnings.extend(
         _validation_gap_warnings(
             validated=val_stack_len is not None,
-            stack_changed=stack_changed,
+            stack_changed=bool(validation.get("stack_changed_after_validation")),
             gain_missing=gain_v is None and bool(final_tput or base_tput),
         )
     )
-
-    md_kv = md_kv_list(
-        [
-            ("final_output_throughput", final_tput),
-            ("throughput_unit", framework_registry.throughput_unit(fw) or None),
-            ("validated_gain_pct", gain_v),
-            ("revalidation_pending", revalidation_pending or None),
-            ("geak_candidate", candidate or None),
-            ("validated_at_stack_len", val_stack_len),
-            ("validated_ts", val_ts),
-            ("measurement_basis", validation.get("measurement_basis")),
-            ("stack_changed_after_validation", stack_changed),
-            ("extra_server_args", extra_args or None),
-            ("action_path", action_path or None),
-            ("ttft_mean_ms", measured_ms(f.get("ttft_mean_ms"))),
-            ("e2el_mean_ms", f.get("e2el_mean_ms")),
-            ("ttft_e2el_source", validation.get("ttft_e2el_source")),
-            ("extra_envs", f.get("extra_envs") or None),
-        ]
-    )
-
-    md_parts = [md_kv]
-    # The axes the validation round was graded on, beside the throughput figure above. On an AgentX session the two
-    # answer different questions: the verdict was decided on these, not on ``final_output_throughput``.
-    graded_md = render_graded_axes(validation.get("perf"))
-    if graded_md:
-        md_parts.append("")
-        md_parts.append("**AgentX graded axes** (validation round):")
-        md_parts.append(graded_md)
-    inv_md = render_invocation_block(f.get("invocation"), session.get("image"))
-    if inv_md:
-        md_parts.append("")
-        md_parts.append(inv_md)
-
     return RenderedSection(
         section_id="final",
         title="Final Result",
         key_facts=facts,
-        markdown_block="\n".join(md_parts).strip(),
+        markdown_block=_final_markdown(f, validation, candidate, fw, session_of(breakdown)),
         decisions=decisions,
         warnings=warnings,
         skipped=not (final_tput or gain_v),

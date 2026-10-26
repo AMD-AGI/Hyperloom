@@ -22,6 +22,52 @@ def _elapsed_facts(session: dict[str, Any]) -> list[str]:
     return facts
 
 
+def _identity_facts(sid: str, claw: Any, sandbox: Any, stop_reason: str) -> list[str]:
+    """The session's id, the claw session and sandbox user it ran under, and why it stopped."""
+    facts: list[str] = []
+    if sid:
+        facts.append(f"Hyperloom session_id=`{sid}`")
+    if claw:
+        facts.append(f"Joined to Primus-Claw session `{claw}`")
+    else:
+        facts.append("No claw_session_id recorded — this is a standalone Hyperloom run or a pre-V2 session.")
+    if sandbox:
+        facts.append(f"Sandbox user `{sandbox}`")
+    if stop_reason:
+        facts.append(f"Run ended with stop_reason=`{stop_reason}`.")
+    return facts
+
+
+def _image_configured(image: Any) -> bool:
+    """Whether the session recorded a container image that is not blank."""
+    return isinstance(image, str) and bool(image.strip())
+
+
+def _placement_facts(host: str, image: Any, code: str) -> list[str]:
+    """The host, container image and Hyperloom code revision the session ran on."""
+    facts: list[str] = []
+    if host:
+        facts.append(f"Ran on host `{host}`.")
+    if _image_configured(image):
+        facts.append(f"Container image `{image}`.")
+    if code:
+        facts.append(f"Hyperloom code revision `{code}`.")
+    return facts
+
+
+def _session_decisions(sid: str, stop_reason: str) -> list[Decision]:
+    """Whether the identified session was attempted, read off its stop reason."""
+    if not sid:
+        return []
+    return [
+        Decision(
+            kind="attempted" if stop_reason else "not_attempted",
+            subject=f"session:{sid}",
+            rationale=f"stop_reason={stop_reason or 'unset'}",
+        )
+    ]
+
+
 @register_renderer("session")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
     """Render the session-identification + lifecycle section.
@@ -37,9 +83,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         RenderedSection: The rendered session section.
     """
     s = session_of(breakdown)
-    facts: list[str] = []
-    warnings: list[str] = []
-
     sid = str(s.get("session_id") or "")
     claw = s.get("claw_session_id")
     sandbox = s.get("sandbox_user_id")
@@ -49,17 +92,9 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     code = str(s.get("code_revision") or "")
     tick = s.get("tick_count")
 
-    if sid:
-        facts.append(f"Hyperloom session_id=`{sid}`")
-    if claw:
-        facts.append(f"Joined to Primus-Claw session `{claw}`")
-    else:
-        facts.append("No claw_session_id recorded — this is a standalone Hyperloom run or a pre-V2 session.")
-    if sandbox:
-        facts.append(f"Sandbox user `{sandbox}`")
-    if stop_reason:
-        facts.append(f"Run ended with stop_reason=`{stop_reason}`.")
+    facts = _identity_facts(sid, claw, sandbox, stop_reason)
     facts.extend(_elapsed_facts(s))
+    warnings: list[str] = []
     if tick and int(tick) > 0:
         facts.append(f"Coordinator advanced through {int(tick)} ticks.")
     elif tick == 0:
@@ -67,12 +102,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "tick_count = 0 — Coordinator either resumed without a fresh "
             "scheduler loop or this session predates per-tick counters."
         )
-    if host:
-        facts.append(f"Ran on host `{host}`.")
-    if isinstance(image, str) and image.strip():
-        facts.append(f"Container image `{image}`.")
-    if code:
-        facts.append(f"Hyperloom code revision `{code}`.")
+    facts.extend(_placement_facts(host, image, code))
 
     md = md_kv_list(
         [
@@ -85,7 +115,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ("tick_count", tick),
             ("host", host or None),
             # Always emit the image row so a missing image is visible.
-            ("image", image if (isinstance(image, str) and image.strip()) else "(not configured)"),
+            ("image", image if _image_configured(image) else "(not configured)"),
             ("code_revision", code or None),
             ("created_at_utc", s.get("created_at_utc")),
             ("ended_at_utc", s.get("ended_at_utc")),
@@ -93,25 +123,12 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ("session_dir", s.get("session_dir")),
         ]
     )
-
-    decisions = (
-        [
-            Decision(
-                kind="attempted" if stop_reason else "not_attempted",
-                subject=f"session:{sid or 'unknown'}",
-                rationale=f"stop_reason={stop_reason or 'unset'}",
-            )
-        ]
-        if sid
-        else []
-    )
-
     return RenderedSection(
         section_id="session",
         title="Session",
         key_facts=facts,
         markdown_block=md,
-        decisions=decisions,
+        decisions=_session_decisions(sid, stop_reason),
         warnings=warnings,
         skipped=not (sid or host),
     )

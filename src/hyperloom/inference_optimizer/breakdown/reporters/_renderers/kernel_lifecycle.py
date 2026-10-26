@@ -134,6 +134,38 @@ def _kernel_tables(detected: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+def _count_marked(detected: list[dict[str, Any]], field: str) -> int:
+    """How many detected kernels carry a truthy ``field``."""
+    return sum(1 for d in detected if d.get(field))
+
+
+def _adopted_facts(detected: list[dict[str, Any]]) -> list[str]:
+    """The first five kept kernels, each with the backend it was adopted from."""
+    adopted = [d for d in detected if d.get("final_decision") == "kept"]
+    if not adopted:
+        return []
+    names = ", ".join(f"`{d.get('kernel_id')}`→{d.get('adopted_by') or '?'}" for d in adopted[:5])
+    return [f"Adopted kernels: {names}."]
+
+
+def _verdict_decisions(verdicts: Counter[Any], detected_count: int) -> list[Decision]:
+    """A decision per settled verdict some kernel reached, else ``not_attempted`` when none was even attempted."""
+    decisions = [
+        Decision(kind=kind, subject=subject, rationale=f"{verdicts[kind]} {said}")
+        for kind, subject, said in _VERDICT_DECISIONS
+        if verdicts[kind]
+    ]
+    if not decisions and not verdicts["attempted"]:
+        decisions.append(
+            Decision(
+                kind="not_attempted",
+                subject="kernel_lifecycle",
+                rationale=f"all {detected_count} detected kernels left un-optimized (neither GEAK nor Forge attempted)",
+            )
+        )
+    return decisions
+
+
 @register_renderer("kernel_lifecycle")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
     """Render the kernel-lifecycle section as a single per-kernel table.
@@ -169,11 +201,10 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             skipped=True,
         )
 
-    selected = sum(1 for d in detected if d.get("selected_for_optimization"))
-    geak_touched = sum(1 for d in detected if d.get("geak"))
-    forge_touched = sum(1 for d in detected if d.get("forge"))
+    selected = _count_marked(detected, "selected_for_optimization")
+    geak_touched = _count_marked(detected, "geak")
+    forge_touched = _count_marked(detected, "forge")
     verdicts = Counter(d.get("final_decision") for d in detected)
-    adopted = [d for d in detected if d.get("final_decision") == "kept"]
 
     facts = [
         f"{len(detected)} kernel(s) detected, {selected} selected for "
@@ -187,23 +218,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "Forge recorded an attempt — kernel optimization pipeline "
             "stalled before launch."
         )
-    if adopted:
-        names = ", ".join(f"`{d.get('kernel_id')}`→{d.get('adopted_by') or '?'}" for d in adopted[:5])
-        facts.append(f"Adopted kernels: {names}.")
-
-    decisions = [
-        Decision(kind=kind, subject=subject, rationale=f"{verdicts[kind]} {said}")
-        for kind, subject, said in _VERDICT_DECISIONS
-        if verdicts[kind]
-    ]
-    if not decisions and not verdicts["attempted"]:
-        decisions.append(
-            Decision(
-                kind="not_attempted",
-                subject="kernel_lifecycle",
-                rationale=f"all {len(detected)} detected kernels left un-optimized (neither GEAK nor Forge attempted)",
-            )
-        )
+    facts.extend(_adopted_facts(detected))
+    decisions = _verdict_decisions(verdicts, len(detected))
 
     return RenderedSection(
         section_id="kernel_lifecycle",
