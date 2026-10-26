@@ -60,6 +60,10 @@ runtime = [
     "PyYAML>=6.0",
     "hyperloom-inference_optimizer[llm,web,forge]",
 ]
+# What only a hosted run needs, on top of ``runtime``. Empty until the pieces that need
+# a dependency (the events writer, the MCP server, an E2B provider) land; the lock file
+# ``requirements/app.lock`` is compiled from ``runtime`` and ``hosted``.
+hosted = []
 # Built-in kernel-opt agent (``kernelforge``). ``torch`` is deliberately absent:
 # the ROCm build is supplied by the container image and a bare specifier would
 # resolve to the CUDA wheel from PyPI.
@@ -243,6 +247,7 @@ exclude = [
 hyperloom = [
     "plugs/profiles/*.json",
     "contracts/*.json",
+    "hosted/*.sh",
     "orchestrator/prompts/*.md",
     "orchestrator/prompts/references/*.md",
 ]

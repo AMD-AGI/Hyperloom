@@ -15,7 +15,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
@@ -53,6 +53,23 @@ from ..model_config_utils import summarize_model_config
 log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class HostedPlugInputs:
+    """What a hosted run gives the plug host: the lock layer and the host inputs."""
+
+    lock: Mapping[str, Mapping[str, str]]
+    host_info: object
+
+
+_hosted_inputs: HostedPlugInputs | None = None
+
+
+def set_hosted_plug_inputs(inputs: HostedPlugInputs | None) -> None:
+    """Called by the hosted entry before ``optimize`` starts; ``None`` clears it.  Unset, plug resolution is unchanged."""
+    global _hosted_inputs
+    _hosted_inputs = inputs
+
+
 def resolve_plug_manifest(args: argparse.Namespace) -> ResolvedManifest:
     """Resolve the plug manifest for this run and check it can start; exit 2 on a configuration error.
 
@@ -62,6 +79,7 @@ def resolve_plug_manifest(args: argparse.Namespace) -> ResolvedManifest:
     """
     resume_from = getattr(args, "resume_from", None)
     registry = builtin_registry()
+    hosted = _hosted_inputs
     try:
         sources = ManifestSources(
             profile=getattr(args, "plug_profile", None),
@@ -70,6 +88,7 @@ def resolve_plug_manifest(args: argparse.Namespace) -> ResolvedManifest:
             cli_plugs=tuple(getattr(args, "plug", None) or ()),
             cli_configs=tuple(getattr(args, "plug_config", None) or ()),
             resumed=read_resolved(Path(resume_from).expanduser().resolve()) if resume_from else None,
+            locked=hosted.lock if hosted else {},
         )
         manifest = resolve_manifest(registry, sources)
         PlugHost(manifest, registry, session_dir=None).plan()
@@ -85,7 +104,13 @@ def open_plug_host(manifest: ResolvedManifest, session_dir: Path) -> PlugHost:
     A run that selects nothing (the built-in local profile) writes nothing to the session and prints nothing. A run
     that selects something records the outcome in ``plugs.resolved.json`` and prints the ``Plugs`` line.
     """
-    host = PlugHost(manifest, builtin_registry(), session_dir=session_dir)
+    hosted = _hosted_inputs
+    host = PlugHost(
+        manifest,
+        builtin_registry(),
+        session_dir=session_dir,
+        host_info=hosted.host_info if hosted else None,
+    )
     host.plan()
     if not manifest.is_builtin_default:
         write_resolved(session_dir, manifest, host.fingerprint())
