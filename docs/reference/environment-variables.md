@@ -1067,6 +1067,8 @@ archive directory of the run is `<session dir>/archive/`, mode 0700, owned by th
 
 `src/hyperloom/hosted/app_bootstrap.sh` starts a hosted run in an image without Hyperloom.
 
+`scripts/hosted_app_image/build.sh` builds that image: a framework base image (`--base`), the script as the image's command, and the `hl-specialist` account for `HYPERLOOM_SPECIALIST_USER`.
+
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `HYPERLOOM_SOURCE_REPO` | Yes | `OWNER/NAME` on GitHub, or a git URL or path, of the Hyperloom source to run. |
