@@ -605,15 +605,20 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
-# Upper bound aiter clamps the gl=1 padding to; beyond it every M shares one row.
+# aiter's get_padded_m(..., gl=1) holds M at 8192 past it, but only for an output wider than 4096.
 _PADDED_M_CAP = 8192
+_WIDE_N = 4096
 
 
-def padded_m(m: int) -> int:
-    """The M a tuned row must be written at to serve ``m``."""
-    if m <= 1:
-        return 1
-    return min(1 << (m - 1).bit_length(), _PADDED_M_CAP)
+def padded_m(m: int, n: int) -> int:
+    """The M aiter's coarsest lookup (``get_padded_m(..., gl=1)``) serves runtime batch ``m`` at, for output width ``n``.
+
+    A power of two, held at 8192 only for a wide N: GLM-5.3's prefill at N=2624 pads to 32768, and demand bucketed at
+    8192 there tuned a row no lookup reached.
+    """
+    if m > _PADDED_M_CAP and n > _WIDE_N:
+        return _PADDED_M_CAP
+    return 1 if m <= 1 else 1 << (m - 1).bit_length()
 
 
 def demand_shapes(
@@ -645,7 +650,7 @@ def demand_shapes(
     if bucket:
         grouped: dict[tuple, dict[str, Any]] = {}
         for shape in shapes:
-            padded = padded_m(shape["M"])
+            padded = padded_m(shape["M"], shape["N"])
             rest = tuple(sorted((f, v) for f, v in shape.items() if f not in ("M", "requests")))
             got = grouped.get((padded, rest))
             if got is None:

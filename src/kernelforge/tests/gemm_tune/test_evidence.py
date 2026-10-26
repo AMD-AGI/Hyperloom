@@ -159,12 +159,16 @@ class TestDemandConsumption:
         assert [s["M"] for s in got] == [65536]
 
     def test_shapes_default_to_the_padded_M_a_row_must_be_written_at(self):
-        # aiter reaches a tuned row at the exact M, else at the padded M. 65536 is past the 8192 clamp, so a row for
-        # it lives at 8192; writing it at 65536 produces a table no lookup can reach.
+        # aiter reaches a tuned row at the exact M, else at the padded M. It clamps that to 8192 only for N above
+        # 4096 (read off aiter on gfx950: (65536, 3456) -> 65536, (65536, 4097) -> 8192), so a row written on the
+        # wrong side of the branch is one no lookup can reach.
         entry = ev.demand_for_tuner(self._report(), "sglang_dense_bf16")
         shapes = ev.demand_shapes(entry)
-        assert shapes[0]["M"] == 8192
+        assert shapes[0]["M"] == 65536
         assert shapes[0]["observed_M"] == [65536]
+
+        wide = {"keys": [{"M": "65536", "N": "4097", "K": "1152", "requests": 2}]}
+        assert [s["M"] for s in ev.demand_shapes(wide)] == [8192]
 
     def test_keys_sharing_a_bucket_cost_one_slot_not_several(self):
         # The whole point of bucketing: three raw keys in one padded bucket are served by a single tuned row, so they
@@ -185,9 +189,29 @@ class TestDemandConsumption:
         assert [s["M"] for s in ev.demand_shapes(entry, limit=1)] == [512]
         assert [s["M"] for s in ev.demand_shapes(entry, limit=1, bucket=False)] == [64]
 
-    def test_padding_matches_aiter_next_power_of_two_capped(self):
-        assert [ev.padded_m(m) for m in (1, 2, 3, 15, 16, 17, 64, 100, 513)] == [1, 2, 4, 16, 16, 32, 64, 128, 1024]
-        assert ev.padded_m(8192) == 8192 and ev.padded_m(20000) == 8192
+    def test_padding_matches_aiter_gl1(self):
+        assert [ev.padded_m(m, 7168) for m in (1, 2, 3, 15, 16, 17, 64, 100, 513)] == [
+            1,
+            2,
+            4,
+            16,
+            16,
+            32,
+            64,
+            128,
+            1024,
+        ]
+        assert ev.padded_m(8192, 7168) == 8192 and ev.padded_m(20000, 7168) == 8192
+        # Only a wide output is held at 8192.
+        assert ev.padded_m(20000, 2624) == 32768
+
+    def test_a_narrow_prefill_shape_buckets_where_aiter_looks_it_up(self):
+        """GLM-5.3's prefill at N=2624 was bucketed at 8192 and tuned a row no lookup reached."""
+        entry = {"keys": [{"M": str(m), "N": "2624", "K": "6144", "requests": 4} for m in (16639, 26174, 32400)]}
+
+        (shape,) = ev.demand_shapes(entry)
+
+        assert (shape["M"], shape["requests"], shape["observed_M"]) == (32768, 12, [16639, 26174, 32400])
 
     def test_buckets_do_not_merge_across_differing_extended_keys(self):
         entry = {

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import TuneContext, TuneResult, micro_metrics
+from ..evidence import padded_m
 from ..script_probe import filter_args, probe_script
 from ..utils import find_tuner_script, resolve_aiter_root, run_subprocess
 from .. import tune_robustness as _tr
@@ -378,22 +379,9 @@ def _padded_m_gl0(m: int) -> int:
     return -(-m // step) * step
 
 
-def _next_pow2(m: int) -> int:
-    """Round up to a power of two (aiter's ``nextPow2``)."""
-    m = max(1, int(m))
-    return 1 << (m - 1).bit_length()
-
-
-def _padded_m_gl1(m: int, n: int) -> int:
-    """aiter's ``get_padded_m(..., gl=1)``, which is not a plain power of two."""
-    if int(m) > 8192 and int(n) > 4096:
-        return 8192
-    return _next_pow2(m)
-
-
 def _dispatch_lookup_ms(m: int, n: int) -> set[int]:
     """The tuned-M values aiter will accept when serving runtime batch ``m``."""
-    return {int(m), _padded_m_gl0(m), _padded_m_gl1(m, n)}
+    return {int(m), _padded_m_gl0(m), padded_m(int(m), int(n))}
 
 
 def _decode_band_buckets(
