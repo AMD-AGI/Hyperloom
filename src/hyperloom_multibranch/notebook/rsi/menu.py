@@ -83,7 +83,9 @@ def in_control(session_id: str, branch: str) -> bool:
     return int(digest, 16) < CONTROL_SHARE * 16 ** len(digest)
 
 
-def _explored(record: TestRecord) -> bool:
+def explored(record: TestRecord) -> bool:
+    """Whether ``record`` is a judged explore test of a specialist branch, what the families' evidence counts."""
+
     request = record.request
     return (
         request.kind is TestKind.TEST
@@ -116,7 +118,7 @@ class _Seen:
 def _seen(snapshot: NotebookSnapshot, commit: str) -> dict[Family, _Seen]:
     found: dict[Family, _Seen] = {}
     for record in snapshot.records:
-        family = record_family(snapshot, record) if _explored(record) else None
+        family = record_family(snapshot, record) if explored(record) else None
         if family is None:
             continue
         seen = found.setdefault(family, _Seen())
@@ -176,7 +178,7 @@ def _costs(snapshot: NotebookSnapshot) -> dict[IntentLayer | None, float]:
 
     by_layer: dict[IntentLayer | None, list[float]] = {}
     for record in snapshot.records:
-        if not _explored(record) or record.result is None or record.result.gpu_seconds <= 0:
+        if not explored(record) or record.result is None or record.result.gpu_seconds <= 0:
             continue
         intent = snapshot.intents.get(record.request.intent_fingerprint or "")
         by_layer.setdefault(intent.layer if intent is not None else None, []).append(record.result.gpu_seconds)
@@ -429,6 +431,7 @@ __all__ = [
     "MenuLog",
     "direction_menu",
     "direction_note",
+    "explored",
     "in_control",
     "record_family",
 ]

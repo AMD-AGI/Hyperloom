@@ -23,7 +23,9 @@
   for it. The scheduler holds the chosen scorer in one ``ScorerGuard`` a session, which stands ``frontier-v1`` in
   where it fails.
 * :func:`judge_history` is the stall odds the judge reads every round, as text (:mod:`rsi.history`): how often a
-  stalled branch and a new one went on to commit, here and in the archived sessions, and the stop bar they set.
+  stalled branch and a new one went on to commit, here and in the archived sessions, and the stop bar they set;
+  :func:`judge_open_areas` is where a new branch could open, and whether one should open at all
+  (:mod:`rsi.open_areas`). :func:`session_menus` gives the briefs their direction menus (:mod:`rsi.menu`).
 
 Passed no KB or archive, each step uses the environment's: the Experience KB ``HYPERLOOM_KB_URL`` names, and the
 archive ``HYPERLOOM_RSI_ARCHIVE`` names.
@@ -88,7 +90,8 @@ from hyperloom_multibranch.notebook.rsi.ladder import (
     standings,
     trial_of,
 )
-from hyperloom_multibranch.notebook.rsi.playbook import FALLBACK_KEY, PLAYBOOK_KEY, PlaybookPool
+from hyperloom_multibranch.notebook.rsi.open_areas import open_areas
+from hyperloom_multibranch.notebook.rsi.playbook import FALLBACK_KEY, H0, PLAYBOOK_KEY, Playbook, PlaybookPool
 from hyperloom_multibranch.notebook.rsi.similarity import task_conditions, workload_kind
 from hyperloom_multibranch.notebook.rsi.stops import stop_audit
 
@@ -553,6 +556,27 @@ def judge_history(
     return odds.render(max_chars) if odds is not None else ""
 
 
+def judge_open_areas(
+    snapshot: NotebookSnapshot,
+    history: Sequence[SearchTree],
+    metric: str,
+    *,
+    budget_seconds: float,
+    playbook: Playbook = H0,
+) -> str:
+    """Where a new branch could open this round, for the judge (:mod:`rsi.open_areas`), and whether one should open
+    at all under ``playbook``, the session's; empty before the session has a profile and a baseline. Pass the
+    scoring's own history, as to :func:`judge_history`."""
+
+    odds = session_stall_odds(snapshot, history, metric)
+    if odds is None:
+        return ""
+    found = open_areas(
+        snapshot, budget_seconds=budget_seconds, first_commit_minutes=odds.first_commit_minutes, playbook=playbook
+    )
+    return found.render()
+
+
 __all__ = [
     "CALIBRATION_REPORT",
     "DISABLED",
@@ -578,6 +602,7 @@ __all__ = [
     "archived_history",
     "close_knowledge",
     "judge_history",
+    "judge_open_areas",
     "named_frontier_choice",
     "session_frontier_policy",
     "session_menus",
