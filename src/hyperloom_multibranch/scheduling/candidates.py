@@ -128,7 +128,7 @@ class Candidates:
     A commit's recipe never changes and a patch's text is fixed by its sha256, so each is read from ``repo`` once:
     the idle merge loop asks on every tick, and both sides of the overlap are changes between commits already read.
     The notebook keeps only a candidate's latest merge, so the merge tests that ended as infrastructure failures are
-    tallied here as each is read; every retry is offered from a read of the one before it.
+    tallied here as the integrator records each that measured nothing.
     """
 
     def __init__(self, notebook: CandidateNotebook, repo: ExperimentRepo) -> None:
@@ -168,7 +168,8 @@ class Candidates:
         A merge test the candidate failed is such an answer: what the toolbox could not run it does not run again on
         a head that changes nothing the change names. A test that ended as an infrastructure failure is not, until the
         candidate had more than :data:`MERGE_INFRA_RETRIES` of them, and neither is a round that superseded the
-        candidate or a regression set that did not run clean -- they leave the candidate ``PENDING`` too.
+        candidate or a regression set that did not run clean -- they leave the candidate ``PENDING`` too. ``last`` is
+        one of them whether or not it was tallied, as after a restart.
         """
 
         if last.outcome is MergeOutcome.NOT_STACKABLE:
@@ -180,15 +181,17 @@ class Candidates:
         if result is None:
             return False
         if result.failure_class is FailureClass.INFRA:
-            return self._infra_endings(candidate, request_id) > MERGE_INFRA_RETRIES
+            return len(self._infra_ended.get(candidate, set()) | {request_id}) > MERGE_INFRA_RETRIES
         return result.validity is Validity.CANDIDATE_FAILED
 
-    def _infra_endings(self, candidate: str, request_id: str) -> int:
-        """How many of ``candidate``'s merge tests ended as infrastructure failures, ``request_id`` among them."""
+    async def record_unmeasured(self, carried: tuple[str, ...], request_id: str) -> None:
+        """Tally ``request_id``, a merge test that measured nothing, against each commit it ``carried`` if the
+        infrastructure ended it."""
 
-        ended = self._infra_ended.setdefault(candidate, set())
-        ended.add(request_id)
-        return len(ended)
+        result = (await self._notebook.record(request_id)).result
+        if result is not None and result.failure_class is FailureClass.INFRA:
+            for commit in carried:
+                self._infra_ended.setdefault(commit, set()).add(request_id)
 
     async def _touched_between(self, before: str, after: str) -> frozenset[str]:
         old, new = await self._recipe(before), await self._recipe(after)
