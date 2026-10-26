@@ -63,17 +63,15 @@ _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = _kernel_decision_settings._DEFAULT_HOT_KERNEL_
 _MAX_INTEGRATE_FAULT_ATTEMPTS = _kernel_decision_settings._MAX_INTEGRATE_FAULT_ATTEMPTS
 resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_min_gpu_pct
 
-# escalate_strategy_change hint vocabulary (closed enum; unknown hints ignored). ``skip_to_kernel`` is the
+# escalate_strategy_change hint vocabulary (closed enum; unknown hints are denied). ``skip_to_kernel`` is the
 # "exhausted the current lever" signal from FRAMEWORK_AGENT; it advances to KERNEL.
 # KERNEL exits automatically when settled with no pending work — the LLM does not self-set a sweep hint.
 ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
 ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
-ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
 ESCALATE_HINT_VOCAB: frozenset[str] = frozenset(
     {
         ESCALATE_HINT_SKIP_TO_KERNEL,
         ESCALATE_HINT_SKIP_TO_SWEEP,
-        ESCALATE_HINT_SKIP_TO_CLOSE,
     }
 )
 
