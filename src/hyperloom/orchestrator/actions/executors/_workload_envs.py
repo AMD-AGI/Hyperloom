@@ -91,6 +91,8 @@ from hyperloom.inference_optimizer.model_config_utils import (
 
 log = logging.getLogger(__name__)
 
+_XDIT_EXTRA_ARGS_ENV = framework_registry.extra_args_env("xdit")
+
 # The aiter CK gemm_a8w8_bpreshuffle kernel ships for gfx942 / CDNA3 only; gfx950
 # has no such kernel. The gate is the arch, so the board list is read off the
 # identity table rather than typed out beside it.
@@ -1319,6 +1321,22 @@ def _fit_profile_capture(envs: dict[str, Any], conc_val: int, osl_val: int) -> t
     )
 
 
+def _write_tracelens_patch_status(envs: dict[str, Any], *, attempted: bool, patched: bool, fw: str) -> None:
+    if not attempted:
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
+    elif patched:
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok"
+    else:
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "unavailable"
+        envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
+        log.warning(
+            "TraceLens runtime patch unavailable for framework=%s; "
+            "profile will omit annotation-only flags and roofline "
+            "analysis may be degraded.",
+            fw or "<unset>",
+        )
+
+
 def _settle_tracelens_patch(envs: dict[str, Any], fw: str) -> tuple[bool, bool]:
     # TraceLens profiler flags exist only in patched vLLM / SGLang builds;
     # try to patch, fall back to the safe set on failure. Default-on
@@ -1330,24 +1348,13 @@ def _settle_tracelens_patch(envs: dict[str, Any], fw: str) -> tuple[bool, bool]:
 
     sglang_sitecustomize = "sglang" in fw and resolve_sglang_shape_mode() == "sitecustomize"
     patch_attempted = _tracelens_patch_enabled() and "atom" not in fw and not sglang_sitecustomize
-    # Written in every branch, not only the failing one: "patched fine" and "never tried because the image
-    # already carries it" call for different reactions when a trace later turns up without annotations.
-    envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
     if patch_attempted:
         if "vllm" in fw:
             tracelens_patch_ok = ensure_vllm_patched_for_tracelens()
         else:
             tracelens_patch_ok = ensure_sglang_patched_for_tracelens()
-        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok" if tracelens_patch_ok else "unavailable"
-        if not tracelens_patch_ok:
-            envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
-            log.warning(
-                "TraceLens runtime patch unavailable for framework=%s; "
-                "profile will omit annotation-only flags and roofline "
-                "analysis may be degraded.",
-                fw or "<unset>",
-            )
-    elif sglang_sitecustomize and _tracelens_patch_enabled():
+    _write_tracelens_patch_status(envs, attempted=patch_attempted, patched=tracelens_patch_ok, fw=fw)
+    if not patch_attempted and sglang_sitecustomize and _tracelens_patch_enabled():
         # Shapes come from kernel_shape_tool, but the per-batch-size capture trace still needs
         # sglang_gc_patch or it IndexErrors. Only profiling captures traces, so patch only here.
         if not ensure_sglang_patched_for_tracelens():
@@ -1540,32 +1547,22 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     # Scriptable image frameworks (xDiT diffusion) have no LLM decode steady-state
     # window, so the OSL/steady-floor math below is a serving concept they never consume.
     serves_requests = not framework_registry.is_scriptable(bench.get("framework"))
-    _xdit_extra_env = framework_registry.extra_args_env("xdit")
-    _is_xdit_profile = (
-        is_profile and str(bench.get("framework") or "").lower() == framework_registry.FRAMEWORKS["xdit"].name
-    )
+    _is_xdit_profile = is_profile and framework_registry.extra_args_env(bench.get("framework")) == _XDIT_EXTRA_ARGS_ENV
     xdit_saved_args = ""
     if _is_xdit_profile:
         from ._server_patcher import ensure_xdit_patched_for_tracelens
 
         xdit_patch_attempted = _tracelens_patch_enabled()
         xdit_patched = xdit_patch_attempted and ensure_xdit_patched_for_tracelens()
-        existing = str(envs.get(_xdit_extra_env, "")).strip()
+        existing = str(envs.get(_XDIT_EXTRA_ARGS_ENV, "")).strip()
+        profiler_args = ""
         if "--profile_wait" not in existing:
             profiler_args = (
                 "--profile_wait 1 --profile_capture_phase --profile_with_stack" if xdit_patched else "--profile_wait 1"
             )
-            envs[_xdit_extra_env] = f"{existing} {profiler_args}".strip()
-        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = (
-            "not_attempted" if not xdit_patch_attempted else ("ok" if xdit_patched else "unavailable")
-        )
-        if xdit_patch_attempted and not xdit_patched:
-            envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
-            log.warning(
-                "TraceLens runtime patch unavailable for framework=xdit; "
-                "profile will omit capture-phase flags and roofline analysis may be degraded.",
-            )
-        xdit_saved_args = str(envs.get(_xdit_extra_env, "")).strip()
+            envs[_XDIT_EXTRA_ARGS_ENV] = f"{existing} {profiler_args}".strip()
+        _write_tracelens_patch_status(envs, attempted=xdit_patch_attempted, patched=xdit_patched, fw="xdit")
+        xdit_saved_args = profiler_args
     profile_num_prompts: int | None = None
     atom_caps: _AtomTracelensCaps | None = None
     vllm_flags: list[tuple[str, str]] = []
@@ -1759,7 +1756,7 @@ def _publish_scriptable_wiring(bench: dict[str, Any], window: _RequestWindow, es
     # keyed on the framework rather than on scriptability: an operator-supplied
     # ``custom`` workload must not have its baseline altered by settings it
     # never declared, least of all an attention backend.
-    if str(bench.get("framework") or "").strip().lower() == "xdit":
+    if framework_registry.extra_args_env(bench.get("framework")) == _XDIT_EXTRA_ARGS_ENV:
         _xdit_model_name = os.environ.get("XDIT_MODEL_NAME", "").strip()
         if _xdit_model_name:
             envs["XDIT_MODEL_NAME"] = _xdit_model_name
@@ -1987,7 +1984,7 @@ def _restate_profile_capture(
             )
             # The seal applies the sink-side guard to whatever is left here.
             envs[framework_env] = merge_server_args(profile_args, " ".join(restored))
-    if window.xdit_profiler_args and framework_env == framework_registry.extra_args_env("xdit"):
+    if window.xdit_profiler_args and framework_env == _XDIT_EXTRA_ARGS_ENV:
         current = str(envs.get(framework_env, "")).strip()
         if "--profile_wait" not in current:
             log.warning(

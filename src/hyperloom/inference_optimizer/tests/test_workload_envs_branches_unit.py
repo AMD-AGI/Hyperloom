@@ -806,7 +806,11 @@ def test_xdit_profile_kill_switch_skips_patcher(monkeypatch, tmp_path):
 
 
 def test_xdit_profile_flags_survive_replace_mode(monkeypatch, tmp_path):
-    """replace_args must not wipe --profile_wait; the re-assertion restores it."""
+    """replace_args must not wipe --profile_wait; the re-assertion restores it.
+
+    The base YAML carries --num_inference_steps 4 so the test can verify
+    that only the profiler flags are restored, not the entire pre-replace string.
+    """
     from hyperloom.orchestrator.actions.executors import _server_patcher
 
     _clear_env(monkeypatch)
@@ -815,7 +819,15 @@ def test_xdit_profile_flags_survive_replace_mode(monkeypatch, tmp_path):
     monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: True)
     src = tmp_path / "cfg.yaml"
     src.write_text(
-        yaml.safe_dump({"benchmark": {"framework": "xdit", "model": "/m", "envs": {"PROFILE": "1"}}}),
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "xdit",
+                    "model": "/m",
+                    "envs": {"PROFILE": "1", "EXTRA_XDIT_ARGS": "--num_inference_steps 4"},
+                }
+            }
+        ),
         encoding="utf-8",
     )
     bench = _materialize(
@@ -828,3 +840,4 @@ def test_xdit_profile_flags_survive_replace_mode(monkeypatch, tmp_path):
     assert "--profile_wait 1" in args
     assert "--profile_capture_phase" in args
     assert "--use_cfg_parallel" in args
+    assert "--num_inference_steps" not in args
