@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from hyperloom.contracts.measurement import Purpose, TestKind
+from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import (
     BranchProgress,
@@ -46,8 +47,8 @@ from hyperloom_multibranch.scheduling.events import (
 from hyperloom_multibranch.scheduling.integrator import MergeReport
 from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
 from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, CODE_PROFILE_UNVERIFIED
-from hyperloom_multibranch.toolbox.fake import FakeToolbox
-from hyperloom_multibranch.toolbox.fake_model import Fate
+from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
+from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
 
 METRIC = "output_throughput"
@@ -311,12 +312,20 @@ def test_a_bottleneck_without_shares_to_compare_has_not_moved() -> None:
     assert bottleneck_moved(_op_shares("c-old", {"gemm": 50.0}), None) is None
 
 
+class _HeadRecipes:
+    """An experiment repository in which every commit holds a recipe of its own, as heads a large merge moved between
+    do; the toolbox keys a profile by its recipe, so heads sharing one would share a profile."""
+
+    async def read_recipe(self, commit: str) -> Recipe:
+        return Recipe(FakeToolboxConfig().image_digest, LaunchConfig(envs={"HL_TEST_HEAD": commit}))
+
+
 class _AnalysingToolbox(FakeToolbox):
     """The toolbox module's fake with an analysis route: a TraceLens job that runs until ``finish`` puts its op shares
     in the notebook; not a placeholder, the fake has no tool jobs of its own."""
 
     def __init__(self, shares: _Shares, **options: Any) -> None:
-        super().__init__(**options)
+        super().__init__(wiring=FakeWiring(repo=_HeadRecipes()), **options)  # type: ignore[arg-type]
         self._shares = shares
         self.analyses: list[tuple[str, str, dict[str, Any], str]] = []
         self.status = JobStatus.RUNNING
