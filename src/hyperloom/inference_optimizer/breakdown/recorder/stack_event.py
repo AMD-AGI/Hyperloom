@@ -25,16 +25,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.coerce import (
+    text_or_none as _text_or_none,
+    to_float as _float_or_none,
+    to_mapping as _as_dict,
+    to_list as _as_list,
+)
 from hyperloom.common.perf_metric import GradedComparison
 
-from .event_fields import (
-    as_dict as _as_dict,
-    as_list as _as_list,
-    float_or_none as _float_or_none,
-    graded_axes as _graded_axes,
-    now_iso_seconds as _now,
-    text_or_none as _text_or_none,
-)
+from .event_fields import graded_axes as _graded_axes, now_iso_seconds as _now
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink, make_sink

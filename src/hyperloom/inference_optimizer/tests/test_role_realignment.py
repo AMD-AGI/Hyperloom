@@ -539,6 +539,39 @@ async def test_running_tasks_reader_reports_heartbeat_age(
 
 
 @pytest.mark.asyncio
+async def test_running_tasks_reader_counts_a_dsh_session_log_like_the_reaper(
+    coordinator_with_mocks,
+    session_dir,
+):
+    """dsh prints only its final message, so its session log is what shows it working."""
+    import os
+    import re
+    import time
+
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+
+    c = coordinator_with_mocks
+    try:
+        task = await c.tasks.create(TaskSpec(kind="specialist", params={}, idempotency_key="k-dsh-heartbeat"))
+        await c.tasks.transition(task.task_id, "running")
+        ws = runs_dir(c.session_dir, "specialist", task.task_id)
+        session_log = ws / ".dsh" / "sessions" / "ws" / "session-0" / "session.v3.jsonl"
+        session_log.parent.mkdir(parents=True)
+        stale = time.time() - 1200
+        for name in ("heartbeat.json", "process.log"):
+            (ws / name).write_text("{}\n", encoding="utf-8")
+            os.utime(ws / name, (stale, stale))
+        session_log.write_text('{"step": 1}\n', encoding="utf-8")
+
+        age = re.search(r"heartbeat_age_sec=(\d+)", c.conversation._context_running_tasks_reader())
+
+        assert age is not None
+        assert int(age.group(1)) < 60
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_running_tasks_reader_skips_heartbeat_for_non_specialist(
     coordinator_with_mocks,
     session_dir,

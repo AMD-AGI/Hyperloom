@@ -8,16 +8,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .event_fields import (
-    analysis_detail as _analysis_detail,
-    as_dict as _as_dict,
-    as_list as _as_list,
-    clip as _clip,
-    float_or_none as _float_or_none,
-    int_or_none as _int_or_none,
-    now_iso_seconds as _now_iso,
+from hyperloom.common.coerce import (
     text_or_none as _text,
+    to_float as _float_or_none,
+    to_int as _int_or_none,
+    to_mapping as _as_dict,
+    to_list as _as_list,
 )
+
+from .event_fields import analysis_detail as _analysis_detail, clip as _clip, now_iso_seconds as _now_iso
 
 # The five candidate producers a KERNEL entry can adopt from.
 SOURCE_KERNEL_REWRITE = "kernel_rewrite"

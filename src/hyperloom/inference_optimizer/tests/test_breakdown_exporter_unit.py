@@ -207,7 +207,6 @@ def test_fallback_never_replaces_a_complete_report(tmp_path):
 def test_historical_stop_reasons_do_not_depend_on_supervisor_runtime():
     from hyperloom.inference_optimizer.breakdown import stop_reasons
 
-    assert stop_reasons.SUPERVISOR_RESTART_REASON == "supervisor_restart_requested"
     assert stop_reasons.outcome_status("supervisor_coordinator_died", 1.0) == "aborted"
     assert stop_reasons.outcome_status("supervisor_tick_stalled", 1.0) == "aborted"
     assert stop_reasons.outcome_status("target_reached", 1.0) == "completed"
@@ -468,9 +467,9 @@ def test_the_human_report_reads_the_same_elapsed_time_as_the_machine_field(tmp_p
     assert 119.0 <= bd["metadata"]["session"]["elapsed_minutes"] <= 121.0
 
 
-def test_the_recorder_path_keeps_the_fields_only_the_collector_can_resolve(tmp_path, monkeypatch):
-    """The image comes from the manifest / environment, which the live state never sees."""
-    monkeypatch.setenv("HYPERLOOM_IMAGE", "registry.example/hyperloom:test")
+def test_the_recorder_path_keeps_the_fields_only_the_collector_can_resolve(tmp_path):
+    """The image is the one the manifest recorded, which the live state never sees."""
+    (tmp_path / "manifest.json").write_text(json.dumps({"image": "registry.example/hyperloom:test"}), encoding="utf-8")
     _stopped_session(tmp_path, ran_for=timedelta(minutes=5))
 
     bd = ex.build(tmp_path)

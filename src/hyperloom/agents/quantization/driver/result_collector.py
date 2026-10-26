@@ -23,6 +23,14 @@ _TOKENIZER_FILES = (
     "vocab.json",
 )
 
+_BLOCKED = "blocked.md"
+_LAST_PHASE = "last_phase.txt"
+_EVAL_REPORT = "eval_report.json"
+_EVAL_SKIPPED = "eval_skipped.txt"
+#: The per-attempt markers ``collect_artifacts`` reads: where the attempt stopped and how it ended. Every attempt and
+#: every run of one model share the workspace, so the retry loop archives these before each attempt.
+ATTEMPT_MARKER_FILES = (_BLOCKED, _LAST_PHASE, _EVAL_REPORT, _EVAL_SKIPPED)
+
 
 @dataclass(frozen=True)
 class ValidationSteps:
@@ -200,7 +208,7 @@ def collect_artifacts(
     validation_present = validation_text is not None
     validation_steps = _parse_validation_report(validation_text) if validation_text else ValidationSteps()
 
-    eval_data, _ = _read_json(workspace / "eval_report.json")
+    eval_data, _ = _read_json(workspace / _EVAL_REPORT)
 
     return CollectedArtifacts(
         workspace=workspace,
@@ -216,11 +224,11 @@ def collect_artifacts(
         has_tokenizer=has_tokenizer,
         validation_report_present=validation_present,
         validation_steps=validation_steps,
-        eval_report_present=(workspace / "eval_report.json").is_file(),
+        eval_report_present=(workspace / _EVAL_REPORT).is_file(),
         eval_report_data=eval_data,
-        eval_skipped_reason=_read_text(workspace / "eval_skipped.txt"),
-        last_phase=(_read_text(workspace / "last_phase.txt") or "").strip() or None,
-        blocked_reason=_read_text(workspace / "blocked.md"),
+        eval_skipped_reason=_read_text(workspace / _EVAL_SKIPPED),
+        last_phase=(_read_text(workspace / _LAST_PHASE) or "").strip() or None,
+        blocked_reason=_read_text(workspace / _BLOCKED),
     )
 
 

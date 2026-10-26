@@ -258,7 +258,7 @@ def classify_attempt(
             return phase_outcome
 
     # (4) MUST-have files on the quantized directory, then (5) validator results.
-    if art.manifest_present and not art.manifest_parse_error:
+    if art.manifest_present:
         if not art.quantized_dir_exists or not art.has_weights:
             return OutcomeId.must_have_weights_missing
         if not art.has_config_json:
@@ -291,6 +291,21 @@ def classify_attempt(
 
     # Clean success.
     return None
+
+
+def classify_unfinished_attempt(sdk_error: str | None, *, phase: str | None) -> OutcomeId:
+    """Classify an attempt that reached no end on a workspace holding an earlier attempt's outputs.
+
+    Only what the attempt raised can say why it stopped: the model, manifest
+    and reports on disk may all be the earlier attempt's. That is also why the
+    outcome is never an auto-recover one: those end the run ``partial`` and
+    hand back the model on disk as this run's result.
+    """
+    if sdk_error:
+        outcome = _classify_bootstrap_sdk_error(sdk_error) or _classify_sdk_phase_error(sdk_error, phase)
+        if outcome is not None and outcome not in AUTO_RECOVER:
+            return outcome
+    return OutcomeId.unclassified_failure
 
 
 # Assessment assembly

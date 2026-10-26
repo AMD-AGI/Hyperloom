@@ -15,10 +15,11 @@ from typing import Any
 
 from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
 
+from hyperloom.common.coerce import to_mapping
+
 from ..base import (
     Decision,
     RenderedSection,
-    as_dict,
     close_of,
     events_of,
     fmt_pct,
@@ -77,12 +78,12 @@ def _last_geak_rebench(breakdown: dict[str, Any]) -> tuple[dict[str, Any], dict[
             claim block, each ``{}`` when no visit engaged the GEAK route.
     """
     for event in reversed(events_of(breakdown, "kernel")):
-        geak = as_dict(as_dict(event.get("ext")).get("geak"))
+        geak = to_mapping(to_mapping(event.get("ext")).get("geak"))
         if not geak:
             continue
-        rebench = as_dict(geak.get("rebench"))
+        rebench = to_mapping(geak.get("rebench"))
         if rebench:
-            return rebench, as_dict(geak.get("claim"))
+            return rebench, to_mapping(geak.get("claim"))
     return {}, {}
 
 
@@ -122,8 +123,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         RenderedSection: The rendered final-result section.
     """
     outcome = outcome_of(breakdown)
-    f = as_dict(outcome.get("final"))
-    b = as_dict(outcome.get("baseline"))
+    f = to_mapping(outcome.get("final"))
+    b = to_mapping(outcome.get("baseline"))
     validation = validation_of(breakdown)
     session = session_of(breakdown)
     final_tput = f.get("output_throughput")
@@ -136,7 +137,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     action_path = f.get("action_path") or []
     # The candidate's standing at close: no kernel event can hold it, since it
     # is settled after every one of them has closed.
-    candidate = as_dict(close_of(breakdown).get("geak_candidate"))
+    candidate = to_mapping(close_of(breakdown).get("geak_candidate"))
     rebench, claim = _last_geak_rebench(breakdown)
     revalidation_pending = bool(candidate.get("revalidation_pending"))
     candidate_status = str(candidate.get("status") or "")

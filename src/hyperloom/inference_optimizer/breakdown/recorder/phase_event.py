@@ -27,14 +27,10 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from hyperloom.common.coerce import to_float as _float_or_none, to_int as _int_or_none, to_mapping as _as_dict
 from hyperloom.plugs import progress as _progress
 
-from .event_fields import (
-    as_dict as _as_dict,
-    float_or_none as _float_or_none,
-    int_or_none as _int_or_none,
-    now_iso_seconds as _now,
-)
+from .event_fields import now_iso_seconds as _now
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink, make_sink
