@@ -379,11 +379,14 @@ class FieldDeclaration:
     search: float | None = None
     values: tuple[str, ...] = ()
     role: FieldRole | None = None
+    code: bool = False
 
     def __post_init__(self) -> None:
         name = _require_name(self.name, "field.name")
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "description", _require_string(self.description, f"field {name!r} description"))
+        if self.code and self.kind is not FieldKind.FILE:
+            raise SchemaValidationError(f"field {name!r}: only a file field is code")
         if self.many and self.kind not in {FieldKind.STRING, FieldKind.TEXT, FieldKind.FILE}:
             raise SchemaValidationError(f"field {name!r}: only string, text, and file fields may hold many values")
         values = tuple(_require_string(item, f"field {name!r} values[]") for item in self.values)
@@ -458,7 +461,7 @@ class FieldDeclaration:
         return self.search if self.search is not None else default_search_weight(category)
 
     def to_dict(self) -> dict[str, JsonValue]:
-        return {
+        encoded: dict[str, JsonValue] = {
             "name": self.name,
             "description": self.description,
             "kind": self.kind.value,
@@ -470,13 +473,17 @@ class FieldDeclaration:
             "values": list(self.values),
             "role": None if self.role is None else self.role.value,
         }
+        # Absent when false, so a declaration that marks no file as code keeps the schema_ref it had.
+        if self.code:
+            encoded["code"] = True
+        return encoded
 
     @classmethod
     def from_dict(cls, value: Any) -> FieldDeclaration:
         data = _mapping(value, "field declaration")
         _reject_unknown(
             data,
-            {"name", "description", "kind", "required", "sensitive", "many", "group", "search", "values", "role"},
+            {"name", "description", "kind", "required", "sensitive", "many", "group", "search", "values", "role", "code"},
             "field declaration",
         )
         try:
@@ -499,6 +506,7 @@ class FieldDeclaration:
             search=_optional_number(data.get("search"), "field declaration.search"),
             values=tuple(_list(data.get("values", []), "field declaration.values")),
             role=role,
+            code=_boolean(data.get("code", False), "field declaration.code"),
         )
 
 

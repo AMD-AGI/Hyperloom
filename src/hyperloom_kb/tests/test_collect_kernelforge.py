@@ -105,12 +105,16 @@ def test_the_mapping_produces_the_packaged_kernelforge_declaration() -> None:
         ("driver_sha256", "string", False),
     ]
     linked = [
-        (category, field.name)
+        (category, field.name, field.code)
         for category in CATEGORIES
         for field in declaration.fields(category)
         if field.kind is FieldKind.FILE
     ]
-    assert linked == [("rationale", "plan_file"), ("change", "source_code"), ("change", "change_diff_file")]
+    assert linked == [
+        ("rationale", "plan_file", False),
+        ("change", "source_code", True),
+        ("change", "change_diff_file", True),
+    ]
     assert [(field.name, field.kind.value, field.required) for field in declaration.fields("reflection")] == [
         ("analysis_report", "text", False),
     ]
@@ -194,6 +198,32 @@ def test_reasoning_longer_than_a_text_field_holds_skips_the_candidate(files: dic
 
     assert report["collected"] == []
     assert report["skipped"][0]["reason"].startswith("schema validation failed: rationale.reasoning holds")
+
+
+@pytest.mark.parametrize(
+    ("source", "reason"),
+    [
+        pytest.param("offs_token = tl.load(ptr)\n", None, id="token-named-offset"),
+        pytest.param('key = "sk-abcdef"\n', "api key", id="api-key"),
+    ],
+)
+def test_a_kernel_and_its_diff_are_screened_with_the_token_formats_only(
+    files: dict[str, Path], source: str, reason: str | None
+) -> None:
+    """A token-named offset is code, not a credential assignment. An sk- key is still a token."""
+
+    files["kernel"].write_text(source, encoding="utf-8")
+    files["diff"].write_text(source, encoding="utf-8")
+
+    report = collect(MAPPING, {"runs": [_session_unit(files)], "raw_logs": [str(files["raw_log"])]}, dry_run=True)
+
+    if reason is None:
+        assert report.to_dict()["skipped"] == [] and report.to_dict()["counts"]["collected"] == 1
+        return
+    assert report.to_dict()["collected"] == []
+    assert report.skipped[0].reason == (
+        f"sensitive content in change.source_code file {files['kernel'].name}, line 1: {reason}"
+    )
 
 
 def test_a_per_token_plan_and_its_file_are_collected(files: dict[str, Path]) -> None:

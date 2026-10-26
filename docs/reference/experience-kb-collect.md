@@ -167,7 +167,9 @@ A mapping cannot turn these off:
   `rationale.reasoning`, `rationale.alternatives`, every `reflection` field,
   `notes`, `raw_logs`, and the change field with the `summary` role, get only
   the token formats, so prose, plan files, and raw logs are not mistaken for an
-  assignment;
+  assignment. A file field marked `code: true` is screened the same way, which
+  is how a kernel and its diff keep a name such as `offs_token` and still
+  reject an `sk-` key.
   `rationale.preconditions` is checked in full, since it may restate the
   configuration measured against. Every text file a record names is screened
   line by line the same way; a binary file is not.
