@@ -1070,7 +1070,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         }
         try:
             await self.bus.append_and_seq(Message.new("coordinator", "*", "delegated_result", announcement))
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one settled task's delegated_result append
             log.exception("dispatcher: failed to append delegated_result for task=%s", task.task_id)
             self._coord.record_exception(stage="dispatcher_result", exc=exc)
             return
@@ -1108,7 +1108,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 await self._coord.recipe_journal.fact_write_hook(
                     task=task, result=result, verdict=verdict, adopted_variants=adopted
                 )
-            except Exception as exc:
+            except Exception as exc:  # isolation boundary: one settled task's fact-write hook
                 log.exception("dispatcher: fact-write hook failed for task=%s", task.task_id)
                 self._coord.record_exception(stage="dispatcher_fact_write", exc=exc)
         if task.kind == "explore":
@@ -1157,7 +1157,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 if result.error_class and not unpromotable.get("error_class"):
                     unpromotable["error_class"] = result.error_class
                 await writeback.handle_unpromotable_result(task, unpromotable)
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one settled task's promotion
             log.exception("dispatcher: promotion/unpromotable handling failed for task=%s", task.task_id)
             self._coord.record_exception(stage="dispatcher_promote", exc=exc)
             return None
