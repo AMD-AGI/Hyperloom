@@ -360,6 +360,66 @@ class HostTools:
         return {"accepted": True}
 
 
+_LIST_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "limit": {"type": "integer", "minimum": 1, "maximum": MAX_CANDIDATE_LIMIT},
+        "phase": {"type": "string"},
+    },
+    "additionalProperties": False,
+}
+_MEASUREMENT_SCHEMA = {
+    "type": "object",
+    "properties": {"request_id": {"type": "string", "minLength": 1}},
+    "required": ["request_id"],
+    "additionalProperties": False,
+}
+_STOP_SCHEMA = {
+    "type": "object",
+    "properties": {"reason": {"type": "string", "minLength": 1}},
+    "required": ["reason"],
+    "additionalProperties": False,
+}
+
+
+def _tool_table(
+    tools: HostTools,
+) -> list[tuple[str, str, dict[str, Any], Callable[[dict[str, Any], CallContext], Any]]]:
+    return [
+        (
+            "get_status",
+            "Phase, macro round, time used and total, stop reason, best, tasks in flight.",
+            _NO_ARGS,
+            tools.get_status,
+        ),
+        (
+            "get_best",
+            "Current best: metric, lift over baseline, variant, patches, measurement.",
+            _NO_ARGS,
+            tools.get_best,
+        ),
+        ("list_candidates", "Recently settled candidates, newest first.", _LIST_SCHEMA, tools.list_candidates),
+        (
+            "get_measurement",
+            "What is recorded about one measurement request.",
+            _MEASUREMENT_SCHEMA,
+            tools.get_measurement,
+        ),
+        (
+            "get_costs",
+            "Token totals from the LLM call ledger; GPU seconds and sub-runs when recorded.",
+            _NO_ARGS,
+            tools.get_costs,
+        ),
+        (
+            "request_stop",
+            "Ask the run to stop through its normal operator-stop path.",
+            _STOP_SCHEMA,
+            tools.request_stop,
+        ),
+    ]
+
+
 def register_host_tools(
     server: McpServer,
     session_dir: Path,
@@ -370,64 +430,8 @@ def register_host_tools(
 ) -> HostTools:
     """Offer the host tools on ``server`` for the run whose session directory is ``session_dir``."""
     tools = HostTools(session_dir, events_dir, stop=stop, clock=clock)
-    scopes = {HOST_KIND}
-    specs: list[tuple[str, str, dict[str, Any], Callable[[dict[str, Any], CallContext], Any]]] = [
-        (
-            "get_status",
-            "Run phase, macro round, time used and total, stop reason, best so far, tasks in flight.",
-            _NO_ARGS,
-            tools.get_status,
-        ),
-        (
-            "get_best",
-            "The current best: metric, lift over the baseline, variant parameters, patches, measurement.",
-            _NO_ARGS,
-            tools.get_best,
-        ),
-        (
-            "list_candidates",
-            "Recently settled candidates, newest first: task, action, decision, lift, duration.",
-            {
-                "type": "object",
-                "properties": {
-                    "limit": {"type": "integer", "minimum": 1, "maximum": MAX_CANDIDATE_LIMIT},
-                    "phase": {"type": "string"},
-                },
-                "additionalProperties": False,
-            },
-            tools.list_candidates,
-        ),
-        (
-            "get_measurement",
-            "What is recorded about one measurement request.",
-            {
-                "type": "object",
-                "properties": {"request_id": {"type": "string", "minLength": 1}},
-                "required": ["request_id"],
-                "additionalProperties": False,
-            },
-            tools.get_measurement,
-        ),
-        (
-            "get_costs",
-            "Token totals from the LLM call ledger, GPU seconds and sub-run count when recorded.",
-            _NO_ARGS,
-            tools.get_costs,
-        ),
-        (
-            "request_stop",
-            "Ask the run to stop; it winds down through its normal operator-stop path.",
-            {
-                "type": "object",
-                "properties": {"reason": {"type": "string", "minLength": 1}},
-                "required": ["reason"],
-                "additionalProperties": False,
-            },
-            tools.request_stop,
-        ),
-    ]
-    for name, description, schema, handler in specs:
-        server.register(name, schema=schema, handler=handler, scopes=scopes, description=description)
+    for name, description, schema, handler in _tool_table(tools):
+        server.register(name, schema=schema, handler=handler, scopes={HOST_KIND}, description=description)
     return tools
 
 
