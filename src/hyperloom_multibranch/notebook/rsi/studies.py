@@ -12,7 +12,8 @@
   counts only the sessions that started after a scorer was registered;
 * ``scheduling --archive DIR [--archive DIR ...] [--runs N] [--beyond optimistic|pessimistic]``: the scheduling
   playbooks of :func:`rsi.replay.variants` replayed on every archived session beside the archive (:mod:`rsi.replay`),
-  the playbook's offline evaluation;
+  the playbook's offline evaluation; ``replay-check`` with the same archives checks that replay
+  (:func:`rsi.replay.check`);
 * ``learnings --notebook DIR --log learnings.jsonl [--archive DIR]``: one session's learnings retrieval
   (:mod:`rsi.learning_eval`), and with an archive what it missed of the lesson pool beside it;
 * ``dispersion --shadow consistency.jsonl [--labels FILE] [--archive DIR] --model M --tp N --gpu G [--agentx]``: the
@@ -49,7 +50,7 @@ from hyperloom_multibranch.notebook.rsi.calibration import (
 from hyperloom_multibranch.notebook.rsi.expression import ExpressionError, ExpressionScorer
 from hyperloom_multibranch.notebook.rsi.learning_eval import read_session
 from hyperloom_multibranch.notebook.rsi.priors import HOSTED, DispersionPrior, DispersionTask, dispersion_prior
-from hyperloom_multibranch.notebook.rsi.replay import OPTIMISTIC, PESSIMISTIC, REPLAY_RUNS, compare, variants
+from hyperloom_multibranch.notebook.rsi.replay import OPTIMISTIC, PESSIMISTIC, REPLAY_RUNS, check, compare, variants
 from hyperloom_multibranch.notebook.rsi.report import number, table
 from hyperloom_multibranch.notebook.rsi.scorers import ScorerPool, custom_scorers
 from hyperloom_multibranch.notebook.rsi.shadow import ShadowNoise, read_shadow, shadow_noise
@@ -58,6 +59,7 @@ from hyperloom_multibranch.notebook.rsi.stops import stall_study
 log = logging.getLogger(__name__)
 
 _ARCHIVE = "--archive"
+_RUNS = "--runs"
 
 
 @dataclass(frozen=True)
@@ -139,11 +141,19 @@ def _stalls(args: argparse.Namespace) -> Any:
     return stall_study(_archived(args.archive))
 
 
-def _scheduling(args: argparse.Namespace) -> Any:
+def _replayable(args: argparse.Namespace) -> tuple[SearchTree, ...]:
     trees = _archived(args.archive)
     if not trees:
         raise StudyError("the archives hold no session to replay")
-    return compare(trees, variants(), runs=args.runs, beyond=args.beyond)
+    return trees
+
+
+def _scheduling(args: argparse.Namespace) -> Any:
+    return compare(_replayable(args), variants(), runs=args.runs, beyond=args.beyond)
+
+
+def _replay_check(args: argparse.Namespace) -> Any:
+    return check(_replayable(args), runs=args.runs)
 
 
 def _archives(command: argparse.ArgumentParser) -> None:
@@ -169,8 +179,11 @@ def _parser() -> argparse.ArgumentParser:
     frontier.add_argument("--horizon-seconds", type=float, default=None)
     replayed = command("scheduling", _scheduling, "replay the scheduling playbooks on every archived session")
     _archives(replayed)
-    replayed.add_argument("--runs", type=int, default=REPLAY_RUNS)
+    replayed.add_argument(_RUNS, type=int, default=REPLAY_RUNS)
     replayed.add_argument("--beyond", choices=(OPTIMISTIC, PESSIMISTIC), default=OPTIMISTIC)
+    checked = command("replay-check", _replay_check, "check the scheduling replay against the archived sessions")
+    _archives(checked)
+    checked.add_argument(_RUNS, type=int, default=REPLAY_RUNS)
     learnt = command("learnings", _learnings, "evaluate one session's learnings retrieval")
     learnt.add_argument("--notebook", type=Path, required=True)
     learnt.add_argument("--log", type=Path, required=True)

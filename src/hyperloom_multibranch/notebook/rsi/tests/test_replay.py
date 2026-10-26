@@ -18,9 +18,12 @@ from hyperloom_multibranch.notebook.rsi.replay import (
     PESSIMISTIC,
     Pace,
     archive_cap,
+    check,
     compare,
+    cut_check,
     pace_for,
     simulate,
+    variants,
 )
 from hyperloom_multibranch.notebook.rsi.tests.trees import HOUR, TASK, branch, tree
 
@@ -134,6 +137,29 @@ def test_the_pace_of_a_session_is_read_off_the_others_and_held_or_dropped_beyond
     assert held.gains == dropped.gains == (2.0,) * 10
     assert held.hazard[0] == 0.0 and held.new_branch[1] == 1.0
     assert held.new_branch[2:] == (1.0,) * (MAX_POSITION - 2) and dropped.new_branch[2:] == (0.0,) * (MAX_POSITION - 2)
+
+
+def test_a_cut_ranks_the_real_outcome_among_replays_that_sample_every_outcome_after_it() -> None:
+    session = _tree(STALLED, EARLY)
+
+    after_all = cut_check(session, ALWAYS, 4 * HOUR, runs=5)
+    lucky, unlucky = cut_check(session, ALWAYS, 15 * MINUTE, runs=5), cut_check(session, NEVER, 15 * MINUTE, runs=5)
+
+    assert (after_all.real_gain_pct, after_all.median_gain_pct, after_all.rank) == (3.0, 3.0, 0.5)
+    assert lucky.rank == 0.0 and lucky.median_gain_pct > 3.0
+    # Before 15 min only b2 committed, +1.0: without b1's +3.0 every replay falls short of the real outcome.
+    assert (unlucky.median_gain_pct, unlucky.rank) == (1.0, 1.0)
+
+
+def test_the_checks_say_which_sessions_the_archive_replay_reproduces_and_where_each_cut_falls() -> None:
+    sessions = [_tree(STALLED, EARLY), dataclasses.replace(_tree(STALLED), session_id="t")]
+
+    found = check(sessions, runs=3, draws=20)
+
+    assert found.reproduced == ("s", "t") and found.not_reproduced == ()
+    assert [item.session_id for item in found.cuts] == ["s", "t"] and found.mean_rank is not None
+    assert set(found.agreeing) | set(found.disagreeing) == set(variants()) - {"h0"}
+    assert found.render().startswith("Following the archive reproduces 2 of 2 sessions.")
 
 
 def test_a_comparison_reads_each_playbook_beside_the_archive_session_by_session() -> None:

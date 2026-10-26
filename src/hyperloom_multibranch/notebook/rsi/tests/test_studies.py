@@ -57,6 +57,8 @@ def test_the_command_runs_the_calibration_and_the_scheduling_replay_on_an_archiv
     assert replayed["baseline"] == "h0"
     assert (replayed["runs"], replayed["beyond"], replayed["sessions"]) == (2, "pessimistic", ["a", "b"])
     assert table.startswith("Scheduling replay over 2 sessions, 1 runs each") and "| cap-6 |" in table
+    assert main(["replay-check", "--archive", str(archive), "--runs", "1"]) == 0
+    assert capsys.readouterr().out.startswith("Following the archive reproduces 2 of 2 sessions")
 
 
 def test_the_command_reads_the_stall_odds_and_every_sessions_stops_off_one_archive_or_more(

@@ -75,6 +75,8 @@ CAPS = (2, 4, 6)
 OLD_RULE = "old-rule"
 OLD_RULE_STALL = 3
 _SESSION_END = "session_end"
+#: The key of a branch's opening among a replay's events, before its name.
+_OPENS = "opens:"
 _SECONDS_PER_HOUR = 3600.0
 _SECONDS_PER_MINUTE = 60.0
 _INTERVAL_PERCENT = 95.0
@@ -445,6 +447,169 @@ def _chain(first: Iterator[_Test], then: Iterator[_Test]) -> Iterator[_Test]:
     yield from then
 
 
+@dataclass
+class _CutRun(_Run):
+    """The archive's decisions and test times, its outcomes sampled after ``cut``: what the replay's model of a
+    test's outcome makes of a future the archive knows."""
+
+    cut: float = 0.0
+    sources: dict[str, TreeBranch] = field(default_factory=dict)
+
+    def play(self) -> None:
+        for source in _steered(self.tree):
+            self.sources[source.name] = source
+            self.order += 1
+            heapq.heappush(self.events, (source.opened_s, self.order, f"{_OPENS}{source.name}"))
+        while self.events:
+            at, _, key = heapq.heappop(self.events)
+            if key.startswith(_OPENS):
+                self.open(self.sources[key.removeprefix(_OPENS)], at)
+                continue
+            branch = self.running[key]
+            self.gpu_seconds += branch.gpu_per_test
+            branch.judged += 1
+            if branch.next_test.gain is not None:
+                branch.gain, branch.position = branch.next_test.gain, 0
+                branch.commits += 1
+                self.best = max(self.best, branch.next_test.gain)
+            else:
+                branch.position += 1
+            self.schedule(branch)
+
+    def open(self, source: TreeBranch, at: float) -> None:
+        """Open ``source`` when it opened; after the cut, from the replay's integration gain rather than the
+        archive's."""
+
+        base = source.fork_gain_pct + (self.best - self.archive_gain_at(at) if at > self.cut else 0.0)
+        branch = _Branch(source.name, at, iter(()), _gpu_per_test(source), math.inf, gain=base)
+        branch.tests = self.outcomes(branch, source, base)
+        self.start(branch)
+
+    def outcomes(self, branch: _Branch, source: TreeBranch, base: float) -> Iterator[_Test]:
+        draws, gains = self.draws(branch.key), self.pace.gains
+        for at, gain in _recorded(source, offset=0.0, base=base, until=_last_test(source)):
+            committed, picked = draws.random(), draws.random()
+            if at <= self.cut:
+                yield _Test(at, gain)
+                continue
+            if branch.commits:
+                odds = self.pace.hazard[min(branch.position + 1, MAX_POSITION) - 1]
+            else:
+                odds = self.pace.new_branch[min(branch.judged + 1, MAX_POSITION) - 1]
+            sampled = gains[min(int(picked * len(gains)), len(gains) - 1)] if gains else 0.0
+            yield _Test(at, branch.gain + sampled if committed < odds and gains else None)
+
+
+@dataclass(frozen=True)
+class CutCheck:
+    """One session cut at ``cut_minutes``: its real best gain, the replays' median, and the share of replays below
+    the real one, ties counting half (its probability integral transform)."""
+
+    session_id: str
+    cut_minutes: float
+    real_gain_pct: float
+    median_gain_pct: float
+    rank: float
+
+
+@dataclass(frozen=True)
+class ReplayCheck:
+    """The replay's checks: whether following the archive reproduced each session, where each real outcome fell in
+    the replays cut at a random time, and whether the playbooks' differences from H0 keep their sign whether
+    ``h(k)`` holds or falls beyond the data."""
+
+    reproduced: tuple[str, ...]
+    not_reproduced: tuple[str, ...]
+    cuts: tuple[CutCheck, ...]
+    agreeing: tuple[str, ...]
+    disagreeing: tuple[str, ...]
+
+    @property
+    def mean_rank(self) -> float | None:
+        return statistics.fmean(item.rank for item in self.cuts) if self.cuts else None
+
+    def render(self) -> str:
+        rows = [
+            (
+                item.session_id,
+                f"{item.cut_minutes:.0f}",
+                number(item.real_gain_pct),
+                number(item.median_gain_pct),
+                number(item.rank),
+            )
+            for item in self.cuts
+        ]
+        lines = [
+            f"Following the archive reproduces {len(self.reproduced)} of "
+            f"{len(self.reproduced) + len(self.not_reproduced)} sessions"
+            + (f"; not {', '.join(self.not_reproduced)}." if self.not_reproduced else "."),
+            "",
+            f"Cut at a random time, the real best gain's rank among the replays averages {number(self.mean_rank)} "
+            "(0.5 when the replay is neither optimistic nor pessimistic):",
+            "",
+            *table(("session", "cut at (min)", "real best %", "replays' median %", "rank"), rows),
+            "",
+            f"The sign of each playbook's difference from H0 holds both ways beyond the data for "
+            f"{len(self.agreeing)} of {len(self.agreeing) + len(self.disagreeing)}"
+            + (f"; not for {', '.join(self.disagreeing)}." if self.disagreeing else "."),
+        ]
+        return "\n".join(lines)
+
+
+def _reproduced(tree: SearchTree) -> bool:
+    steered = _steered(tree)
+    best = max((gain for branch in steered for _, gain in _own(branch)), default=0.0)
+    gpu = sum(branch.gpu_seconds for branch in steered if judged_tests(branch)) / _SECONDS_PER_HOUR
+    kept = simulate(tree, None, pace_for(tree, (tree,)))
+    return math.isclose(kept.best_gain_pct, best) and math.isclose(kept.gpu_hours, gpu, rel_tol=1e-9, abs_tol=1e-9)
+
+
+def cut_check(tree: SearchTree, pace: Pace, cut: float, *, runs: int = REPLAY_RUNS, seed: str = "") -> CutCheck:
+    """Where ``tree``'s real best gain falls among ``runs`` replays that keep its decisions and test times and sample
+    every outcome after ``cut``."""
+
+    real = simulate(tree, None, pace).best_gain_pct
+    replays = []
+    for run in range(runs):
+        replay = _CutRun(tree, pace, None, run, seed, cut=cut)
+        replay.play()
+        replays.append(replay.best)
+    below = sum(1 for gain in replays if gain < real) + 0.5 * sum(1 for gain in replays if gain == real)
+    return CutCheck(tree.session_id, cut / _SECONDS_PER_MINUTE, real, statistics.median(replays), below / runs)
+
+
+def check(
+    trees: Sequence[SearchTree], *, runs: int = REPLAY_RUNS, seed: str = "", draws: int = BOOTSTRAP_DRAWS
+) -> ReplayCheck:
+    """The replay's checks over ``trees``: each cut at a time drawn between a fifth and four fifths of its span."""
+
+    reproduced = [tree.session_id for tree in trees if _reproduced(tree)]
+    cuts = []
+    for tree in trees:
+        steered = _steered(tree)
+        if not steered:
+            continue
+        start, end = steered[0].opened_s, tree.budget_seconds
+        cut = start + (end - start) * (0.2 + 0.6 * _seeded(seed, tree.session_id, "cut").random())
+        cuts.append(cut_check(tree, pace_for(tree, trees), cut, runs=runs, seed=seed))
+    held, dropped = (
+        {row.label: row for row in compare(trees, variants(), runs=runs, beyond=beyond, seed=seed, draws=draws).rows}
+        for beyond in (OPTIMISTIC, PESSIMISTIC)
+    )
+    signs = {
+        label: (held[label].gain_difference > 0) == (dropped[label].gain_difference > 0)
+        for label in held
+        if label not in (ARCHIVE, H0.label)
+    }
+    return ReplayCheck(
+        reproduced=tuple(reproduced),
+        not_reproduced=tuple(tree.session_id for tree in trees if tree.session_id not in reproduced),
+        cuts=tuple(cuts),
+        agreeing=tuple(label for label, same in signs.items() if same),
+        disagreeing=tuple(label for label, same in signs.items() if not same),
+    )
+
+
 def simulate(tree: SearchTree, playbook: Playbook | None, pace: Pace, run: int = 0, *, seed: str = "") -> RunOutcome:
     """One replay of ``tree`` under ``playbook``, ``None`` to follow the archive, with the draws of ``run``."""
 
@@ -589,12 +754,16 @@ __all__ = [
     "PESSIMISTIC",
     "PROBATION_SHARES",
     "REPLAY_RUNS",
+    "CutCheck",
     "Pace",
     "PolicyRow",
+    "ReplayCheck",
     "RunOutcome",
     "SchedulingComparison",
     "archive_cap",
+    "check",
     "compare",
+    "cut_check",
     "pace_for",
     "simulate",
     "variants",
