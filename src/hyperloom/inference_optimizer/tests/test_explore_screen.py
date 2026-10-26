@@ -29,6 +29,7 @@ from hyperloom.orchestrator.actions.executors.explore_prefilter._screen import (
 )
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, _build_variant_yaml
+from hyperloom.orchestrator.actions.executors._spec_decode_pin import SpeculativeDecodingPinnedError
 from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer
 
 CONFIG = """
@@ -228,6 +229,25 @@ def test_the_screen_probes_the_stack_and_each_variant_on_it(config, enabled, ses
     assert probed[BASELINE]["STACK_ENV"] == "1"
     assert probed["v2"]["EXTRA_VLLM_ARGS"].split() == ["--stack-flag", "--max-num-seqs", "2"]
     assert probed["v2"]["STACK_ENV"] == "1"
+
+
+def test_a_variant_that_cannot_be_materialized_is_benchmarked_and_a_bug_raises(config, enabled, session, monkeypatch):
+    monkeypatch.setattr(_explore_screen, "_probe", fake_probe({"v0": 99.0, "v1": 99.0, "v2": 99.0, "v3": 99.0}))
+
+    def refusing(gv, subdir):
+        if gv.name == "v0":
+            raise SpeculativeDecodingPinnedError("the stack pins its speculative-decoding config")
+        return config
+
+    kept, dropped = screen_variants(variants(), refusing, config.parent / "screen", session_dir=session)
+    assert "v0" in [v.name for v in kept]
+    assert "v0" not in {d["name"] for d in dropped}
+
+    def broken(gv, subdir):
+        raise TypeError("bad stack entry")
+
+    with pytest.raises(TypeError):
+        screen_variants(variants(), broken, config.parent / "screen2", session_dir=session)
 
 
 def test_the_pin_precedes_the_variants_own_flags(config, enabled):

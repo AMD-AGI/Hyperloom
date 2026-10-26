@@ -277,7 +277,7 @@ def _launched(materialize: Callable[[GridVariant, Path], Path], variant: GridVar
     try:
         with Path(materialize(variant, subdir)).open(encoding="utf-8") as fh:
             return dict((yaml.safe_load(fh) or {}).get("benchmark") or {})
-    except Exception as exc:  # noqa: BLE001 - a variant that cannot be materialized is benchmarked
+    except (OSError, ValueError, yaml.YAMLError) as exc:
         log.warning("explore screen: could not materialize %r (%s)", variant.name, exc)
         return None
 
