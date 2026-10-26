@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 from types import SimpleNamespace
 
@@ -240,17 +239,6 @@ def test_framework_gap_compose() -> None:
     assert "sglang" in keywords
     assert "moe" in keywords
     assert isinstance(desc, str) and desc
-
-
-# --------------------------------------------------------------------------- # manifest #
-# --------------------------------------------------------------------------- #
-def test_gpu_specialist_capacity_coercions() -> None:
-    from hyperloom.inference_optimizer.session import manifest
-
-    assert manifest._gpu_specialist_capacity_from_args(argparse.Namespace(gpu_specialist_capacity=4)) == 4
-    # Non-int coerces through the except branch then detects.
-    val = manifest._gpu_specialist_capacity_from_args(argparse.Namespace(gpu_specialist_capacity="nope"))
-    assert isinstance(val, int) and val >= 0
 
 
 # --------------------------------------------------------------------------- # protocol.intent #

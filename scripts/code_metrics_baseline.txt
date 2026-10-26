@@ -2,7 +2,7 @@
 # one per line as "<metric> <path>::<unit> <value>" ("<metric> <path> <value>" for a module).
 # Entries may only be lowered or removed, never added or raised: python scripts/code_metrics.py --update-baseline
 # A file is judged only when a change touches it; the label baseline-raise waives growth.
-cognitive-complexity scripts/platform_audit_bmc.py::main 44
+cognitive-complexity scripts/platform_audit_bmc.py::main 34
 cognitive-complexity src/hyperloom/inference_optimizer/baseline_comparison/inferencex_client.py::fetch_agentic_interactivity 31
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::_merge_acceptances 31
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_geak_attempts 31
@@ -65,11 +65,9 @@ dead-code src/hyperloom/orchestrator/actions/executors/_grid_runner.py::SessionD
 dead-code src/kernelforge/loop/run_state.py::WorkspaceLock.__exit__:exc_value 1
 directory-entries src/hyperloom/common 57
 directory-entries src/hyperloom/orchestrator/actions/executors 85
-duplicated-lines src/hyperloom/inference_optimizer/breakdown/collectors/sessions.py 19
 duplicated-lines src/hyperloom/inference_optimizer/breakdown/recorder/recorder.py 28
 duplicated-lines src/hyperloom/inference_optimizer/multi_node/scripts/kernel_node_ops.py 13
 duplicated-lines src/hyperloom/inference_optimizer/multi_node/scripts/kernel_patch_multinode.py 13
-duplicated-lines src/hyperloom/inference_optimizer/session/manifest.py 19
 duplicated-lines src/hyperloom/inference_optimizer/tests/conftest.py 54
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_apply_tracelens_patch_multinode_gc.py 20
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_baseline_moe_runner_fallback.py 145
@@ -91,7 +89,6 @@ duplicated-lines src/hyperloom/inference_optimizer/tests/test_coverage_margin3_u
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_decision_framework.py 15
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_eval_result_dir_wiring.py 66
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_explore_executor.py 87
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_fmoe_ck_coverage.py 12
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_fp8_per_token_injection.py 21
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_framework_agent_critic_gate.py 15
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_framework_agent_selection_audit.py 18
@@ -137,7 +134,6 @@ duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integra
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_helpers_unit.py 12
 duplicated-lines src/hyperloom/orchestrator/enablement/runtime/tests/test_targeted_build_recipes.py 34
 duplicated-lines src/hyperloom/orchestrator/kernel/tests/test_forge_server_log_evidence.py 48
-duplicated-lines src/hyperloom/orchestrator/measurement/tests/test_apply_verification.py 12
 duplicated-lines src/hyperloom/orchestrator/tests/_helpers.py 53
 duplicated-lines src/hyperloom/orchestrator/trace_analysis/tests/test_tracelens_csv.py 37
 duplicated-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py 11
@@ -165,12 +161,12 @@ function-args src/hyperloom_kb/retrieval_policy.py::RetrievalConfiguration.creat
 function-args src/kernelforge/evaluation/benchmark/runner.py::sweep_case 7
 function-lines scripts/partition_mode_sweep.py::render 52
 function-lines scripts/partition_mode_sweep.py::run_mode 57
-function-lines scripts/platform_audit_bmc.py::main 113
-function-lines src/hyperloom/agents/critic/runtime/decision_reviewer.py::DecisionReviewer._commit_coordinator_inbox 57
+function-lines scripts/platform_audit_bmc.py::main 88
+function-lines src/hyperloom/agents/critic/runtime/decision_reviewer.py::DecisionReviewer._commit_coordinator_inbox 56
 function-lines src/hyperloom/agents/critic/runtime/kb_writer.py::KBWriter.write_verdict 54
 function-lines src/hyperloom/agents/framework/sources/__init__.py::_run_pr_monitor 51
 function-lines src/hyperloom/agents/quantization/cli.py::_parse_args 52
-function-lines src/hyperloom/agents/quantization/driver/retry.py::quantize_via_prompt 80
+function-lines src/hyperloom/agents/quantization/driver/retry.py::quantize_via_prompt 71
 function-lines src/hyperloom/agents/quantization/driver/runner.py::run_one_attempt 56
 function-lines src/hyperloom/common/codex_session.py::CodexSession.start 70
 function-lines src/hyperloom/common/gain_math.py::conc_pair_comparison 52
@@ -256,7 +252,7 @@ function-lines src/hyperloom/inference_optimizer/roofline_ceiling.py::compute_ro
 function-lines src/hyperloom/inference_optimizer/roofline_ceiling.py::load_model_meta 60
 function-lines src/hyperloom/inference_optimizer/roofline_snapshot.py::attach_perfmodel_breakdown 59
 function-lines src/hyperloom/inference_optimizer/roofline_snapshot.py::build_roofline_comparison_from_history 51
-function-lines src/hyperloom/inference_optimizer/session/manifest.py::build_manifest 58
+function-lines src/hyperloom/inference_optimizer/session/manifest.py::build_manifest 56
 function-lines src/hyperloom/inference_optimizer/tools/backfill_langfuse.py::build_plan 51
 function-lines src/hyperloom/inference_optimizer/tools/backfill_langfuse.py::ingest 60
 function-lines src/hyperloom/inference_optimizer/tools/event_counts.py::main 57
@@ -415,13 +411,12 @@ function-lines src/hyperloom/orchestrator/phases/framework.py::_record_source_at
 function-lines src/hyperloom/orchestrator/phases/geak_native_revalidation.py::prepare_source_revalidation 57
 function-lines src/hyperloom/orchestrator/phases/geak_native_revalidation.py::revalidate_source 55
 function-lines src/hyperloom/orchestrator/phases/internal.py::InternalTasksPhase._enqueue_internal_static_recon_task 57
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._fmoe_apply_verdict 72
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._fmoe_tuned_config_coverage 61
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._maybe_reprofile_for_kernel 71
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._merge_gemm_candidate_with_runtime 57
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._record_kernel_rewrite_controller_timeline 56
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._settle_gemm_e2e_verdict 53
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 67
+function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._settle_gemm_e2e_verdict 52
+function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 64
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.record_geak_adopted_kernels 58
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.run_agent 59
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._apply_warm_kernel_patch 61
@@ -500,18 +495,17 @@ function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py::run_tracelens_skill 60
 function-lines src/hyperloom_kb/cli.py::add_commands 63
 function-lines src/hyperloom_kb/collect/engine.py::collect 59
-function-lines src/hyperloom_kb/collect/expressions.py::_compile_call 57
 function-lines src/hyperloom_kb/collect/mapping.py::compile_mapping 65
 function-lines src/hyperloom_kb/http_service.py::ExperienceHTTPService.read 92
 function-lines src/hyperloom_kb/http_service.py::ExperienceHTTPService.write 66
-function-lines src/hyperloom_kb/http_service.py::RequestHandler._dispatch 71
+function-lines src/hyperloom_kb/http_service.py::RequestHandler._dispatch 58
 function-lines src/hyperloom_kb/http_service.py::main 67
 function-lines src/hyperloom_kb/knowledge_read.py::AnthropicPlannerBackend.complete 63
 function-lines src/hyperloom_kb/knowledge_read.py::QueryExecutor._rank_groups 58
 function-lines src/hyperloom_kb/knowledge_read.py::QueryExecutor.execute 103
 function-lines src/hyperloom_kb/query_view.py::QueryViewBuilder.build 51
 function-lines src/hyperloom_kb/retrieval_policy.py::LexicalFuzzyProvider.recall 54
-function-lines src/hyperloom_kb/sync.py::GlobalSync.pull 68
+function-lines src/hyperloom_kb/sync.py::GlobalSync.pull 54
 function-lines src/kernelforge/agent_backends/claude.py::ClaudeBackend._query_once 89
 function-lines src/kernelforge/agent_backends/codex.py::CodexBackend._execute 90
 function-lines src/kernelforge/agent_backends/codex.py::CodexBackend.probe 70
@@ -728,7 +722,7 @@ module-lines src/hyperloom/orchestrator/loop/coordinator.py 1335
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1428
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1365
 module-lines src/hyperloom/orchestrator/phases/framework.py 3040
-module-lines src/hyperloom/orchestrator/phases/kernel.py 4230
+module-lines src/hyperloom/orchestrator/phases/kernel.py 4002
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 1975
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2493
 module-lines src/hyperloom/orchestrator/policy/gate.py 1564
@@ -742,7 +736,7 @@ module-lines src/kernelforge/fusion/author.py 1259
 module-lines src/kernelforge/fusion/command.py 1584
 module-lines src/kernelforge/fusion/discover.py 1421
 module-lines src/kernelforge/fusion/validate.py 1515
-module-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py 1248
+module-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py 1240
 module-lines src/kernelforge/loop/insession_gate.py 1264
 module-lines src/kernelforge/loop/knowledge_integration.py 1464
 module-lines src/kernelforge/loop/runner.py 6051

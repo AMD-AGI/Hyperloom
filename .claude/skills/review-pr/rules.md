@@ -775,7 +775,7 @@ backend registration outside `agent_backends/registry.py`; tier, path or schema 
 the code that reads them; a private re-implementation of a `hyperloom.common` helper --
 `common/io.py` (`atomic_write_*`, `safe_mtime`, `append_jsonl`), `common/jsonio.py`
 (`read_json`, `read_jsonl`), `common/timeutil.py` (`now_iso`), `common/proctree.py`
-(`group_alive`, `kill_tree`). The shape is an `os.environ` read, a hardcoded tuple of names, or a
+(`group_members`, `kill_tree`). The shape is an `os.environ` read, a hardcoded tuple of names, or a
 second `def` whose body matches an exported one.
 **The rule:** a second home for a concern means two answers to the same question, and the one
 the reader is looking at is not necessarily the one that runs. Import from the owner. If the
