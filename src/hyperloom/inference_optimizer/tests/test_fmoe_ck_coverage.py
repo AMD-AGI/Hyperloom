@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.kernel import KernelPhase
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -239,16 +241,22 @@ class TestFmoeCoverageGate:
         assert report["artifact_applied"] is True
         assert report["candidate_csv"] == str(bare)
 
-    def test_fused_moe_marker_without_parse_is_inconclusive(self, tmp_path):
-        _integrate_log(tmp_path, UNPARSEABLE_FMOE_MARKER)
-        csv_path = _candidate_csv(tmp_path)
-        phase = _phase(tmp_path)
+    @pytest.mark.parametrize(
+        ("log", "hit_logging", "reason"),
+        [
+            (UNPARSEABLE_FMOE_MARKER, "1", "fused_moe_parse_inconclusive"),
+            (AITER_BF16_MISS, "0", "fused_moe_logging_disabled"),
+        ],
+    )
+    def test_an_unreadable_dispatch_is_inconclusive(self, tmp_path, log, hit_logging, reason):
+        _integrate_log(tmp_path, log)
+        envs = {**_envs(_candidate_csv(tmp_path)), "AITER_LOG_TUNED_CONFIG": hit_logging}
 
-        report = phase._gemm_tuned_config_coverage("fmoe_ck", _envs(csv_path))
+        report = _phase(tmp_path)._gemm_tuned_config_coverage("fmoe_ck", envs)
 
         assert report is not None
         assert report["artifact_applied"] is False
-        assert report["not_applied_reason"] == "fused_moe_parse_inconclusive"
+        assert report["not_applied_reason"] == reason
         assert report.get("conclusive") is False
 
     def test_minimax_default_embedded_replay_blocks(self, tmp_path):
