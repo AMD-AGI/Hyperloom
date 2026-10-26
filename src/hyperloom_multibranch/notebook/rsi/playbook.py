@@ -401,30 +401,30 @@ def session_playbook(pool: PlaybookPool | None, *, challenger: bool) -> Playbook
     return PlaybookChoice(champion, champion)
 
 
-def envelope_breaches(rows: Sequence[BranchProgress], stops: Collection[str]) -> tuple[str, ...]:
-    """The judge's ``stops`` the :data:`SAFETY_ENVELOPE` forbids, a line each: of a running branch of ``rows`` held by
-    a candidate waiting for its confirm, by a near-bar or a stranded lead in its stall evidence, or by its probation.
-    The scheduler refuses them; in a challenger session it plays the champion for the rest of the session and records
-    the breach under :data:`FALLBACK_KEY`."""
+def held_by(row: BranchProgress) -> tuple[str, ...]:
+    """What holds ``row``'s branch under the :data:`SAFETY_ENVELOPE`, a phrase each: a candidate waiting for its
+    confirm, a near-bar or a stranded lead in its stall evidence, its probation."""
 
-    found = []
-    for row in rows:
-        if row.branch not in stops:
-            continue
-        evidence = row.frontier.components if row.frontier is not None else {}
-        held = [
-            what
-            for what, holds in (
-                ("a candidate waiting for its confirm", bool(row.pending)),
-                ("a near-bar lead", evidence.get(NEAR_BAR_COMPONENT, 0.0) > 0),
-                ("a stranded lead", STRANDED_COMPONENT in evidence),
-                ("its probation", PROBATION_COMPONENT in evidence),
-            )
-            if holds
-        ]
-        if held:
-            found.append(f"stop of {row.branch}, held by {' and '.join(held)}")
-    return tuple(found)
+    evidence = row.frontier.components if row.frontier is not None else {}
+    return tuple(
+        what
+        for what, holds in (
+            ("a candidate waiting for its confirm", bool(row.pending)),
+            ("a near-bar lead", evidence.get(NEAR_BAR_COMPONENT, 0.0) > 0),
+            ("a stranded lead", STRANDED_COMPONENT in evidence),
+            ("its probation", PROBATION_COMPONENT in evidence),
+        )
+        if holds
+    )
+
+
+def envelope_breaches(rows: Sequence[BranchProgress], stops: Collection[str]) -> tuple[str, ...]:
+    """The judge's ``stops`` the :data:`SAFETY_ENVELOPE` forbids, a line each: of a running branch of ``rows`` that
+    something holds (:func:`held_by`). The scheduler refuses them; in a challenger session it plays the champion for
+    the rest of the session and records the breach under :data:`FALLBACK_KEY`."""
+
+    held = ((row.branch, held_by(row)) for row in rows if row.branch in stops)
+    return tuple(f"stop of {branch}, held by {' and '.join(what)}" for branch, what in held if what)
 
 
 def replaced(playbook: Playbook, **numbers: float | int | None) -> Playbook:
@@ -457,6 +457,7 @@ __all__ = [
     "Retired",
     "changes",
     "envelope_breaches",
+    "held_by",
     "problems",
     "replaced",
     "session_playbook",

@@ -18,6 +18,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     BranchProgress,
     Claim,
     CommittedCommit,
+    FrontierScore,
     LlmUsage,
     LlmUsageRecord,
     MergeState,
@@ -36,7 +37,16 @@ from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.dashboard import build_dashboard, render_html, write_dashboard
-from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, score_progress
+from hyperloom_multibranch.notebook.rsi.frontier import (
+    CANDIDATE_COMPONENT,
+    MERGED_GAIN_COMPONENT,
+    NEAR_BAR_COMPONENT,
+    STALL_BAR_COMPONENT,
+    STALLED_COMPONENT,
+    FrontierPolicy,
+    score_progress,
+)
+from hyperloom_multibranch.notebook.rsi.playbook import FALLBACK_KEY, PLAYBOOK_KEY
 from hyperloom_multibranch.notebook.tests.factories import request, result
 from hyperloom_multibranch.notebook.tests.sessions import FP8_KV, GEMM_AGAIN, METRIC
 
@@ -98,6 +108,37 @@ def test_the_dashboard_holds_branches_in_flight_work_lineage_and_infrastructure(
         "cold_start_seconds": 812.0,
     }
     assert json.loads(json.dumps(dashboard)) == dashboard
+
+
+def test_a_scored_branch_shows_its_stall_against_the_bar_what_holds_it_and_the_playbook_played(
+    snapshot: NotebookSnapshot,
+) -> None:
+    near = {STALLED_COMPONENT: 7.0, STALL_BAR_COMPONENT: 6.0, MERGED_GAIN_COMPONENT: 4.0, NEAR_BAR_COMPONENT: 1.0}
+    held = BranchProgress("s1", True, "c0", "c1", 6, 1, 3600.0, {METRIC: 1040.0}, FrontierScore(0.4, near))
+    stalled = {STALLED_COMPONENT: 8.0, STALL_BAR_COMPONENT: 6.0, CANDIDATE_COMPONENT: 1.0}
+    candidate = BranchProgress("s2", True, "c0", "c0", 8, 0, 3600.0, {}, FrontierScore(0.0, stalled))
+    breach = "stop of s1, held by its probation"
+    played = dataclasses.replace(
+        snapshot.fingerprints[-1], policy_versions={PLAYBOOK_KEY: "patient", FALLBACK_KEY: breach}
+    )
+
+    dashboard = build_dashboard(dataclasses.replace(snapshot, fingerprints=(played,)), (held, candidate), metric=METRIC)
+    page = render_html(dashboard)
+
+    evidence = {row["branch"]: row["evidence"] for row in dashboard["branches"]}
+    assert evidence["s1"] == {
+        "stalled_tests": 7.0,
+        "stall_bar": 6.0,
+        "merged_gain_pct": 4.0,
+        "trend_pct": 0.4,
+        "held_by": ["a near-bar lead"],
+        "stop_candidate": False,
+    }
+    assert evidence["s2"]["stop_candidate"] and evidence["s2"]["held_by"] == []
+    assert dashboard["playbook"] == {"label": "patient", "fallback": breach}
+    assert "<td>7 of 6</td>" in page and "<td>held: a near-bar lead</td>" in page and "<td>stop candidate</td>" in page
+    assert f"playbook patient, fell back to the champion on {breach}" in page
+    assert build_dashboard(snapshot)["playbook"] is None
 
 
 def test_a_branch_ahead_of_integration_whose_merges_fail_is_listed_with_why(snapshot: NotebookSnapshot) -> None:

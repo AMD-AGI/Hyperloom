@@ -3,8 +3,11 @@
 
 """What the dashboard shows, as JSON-ready data built from one notebook snapshot.
 
-* ``branches``: each branch's progress, its head's gain over the baseline, and its frontier score when the progress
-  rows carry one (pass :class:`FrontierScoring`'s rows to show them);
+* ``branches``: each branch's progress, its head's gain over the baseline, and, when the progress rows are scored
+  (pass :class:`FrontierScoring`'s rows to show them), its stall evidence: the judged tests since its last commit
+  against the stop bar, the gain its merged commits brought, the trend, and what holds it under the safety envelope
+  or makes it a stop candidate;
+* ``playbook``: the scheduling playbook the session plays, as its manifest records it, and the breach it fell back on;
 * ``stranded``: the branches that lead integration by more than the merge bar while commits of theirs failed to merge,
   with those commits (:func:`~hyperloom_multibranch.notebook.rsi.stranded.stranded_leads`);
 * ``spend``: the session's GPU hours and LLM dollars so far, its specialists', judge's and resolver's together, and the
@@ -39,6 +42,13 @@ from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.dashboard.page import render_html
 from hyperloom_multibranch.notebook.knowledge.breakdown import measurement_usage, session_spend
 from hyperloom_multibranch.notebook.rsi.analysis import direction_occupancy, hypothesis_ledger
+from hyperloom_multibranch.notebook.rsi.frontier import (
+    CANDIDATE_COMPONENT,
+    MERGED_GAIN_COMPONENT,
+    STALL_BAR_COMPONENT,
+    STALLED_COMPONENT,
+)
+from hyperloom_multibranch.notebook.rsi.playbook import FALLBACK_KEY, PLAYBOOK_KEY, held_by
 from hyperloom_multibranch.notebook.rsi.stranded import stranded_leads
 
 SCHEMA_VERSION = "multibranch-dashboard-1"
@@ -53,6 +63,23 @@ def _iso(at: float) -> str:
 def _gain(values: Mapping[str, float], baseline: Mapping[str, float], metric: str) -> float | None:
     value, anchor = values.get(metric), baseline.get(metric)
     return (value / anchor - 1.0) * 100.0 if value and anchor else None
+
+
+def _evidence(row: BranchProgress) -> dict[str, Any] | None:
+    """The stall evidence a scored row carries: the judged tests since its last commit that did not fail to merge
+    against the stop bar, the gain its merged commits brought, the trend, and what holds it or makes it a candidate."""
+
+    if row.frontier is None:
+        return None
+    components = row.frontier.components
+    return {
+        "stalled_tests": components.get(STALLED_COMPONENT),
+        "stall_bar": components.get(STALL_BAR_COMPONENT),
+        "merged_gain_pct": components.get(MERGED_GAIN_COMPONENT),
+        "trend_pct": row.frontier.expected_gain_pct,
+        "held_by": list(held_by(row)),
+        "stop_candidate": bool(components.get(CANDIDATE_COMPONENT)),
+    }
 
 
 def _branches(snapshot: NotebookSnapshot, rows: Sequence[BranchProgress], metric: str) -> list[dict[str, Any]]:
@@ -71,9 +98,18 @@ def _branches(snapshot: NotebookSnapshot, rows: Sequence[BranchProgress], metric
             "head_value": dict(row.head_value),
             "gain_pct": _gain(row.head_value, baseline, metric),
             "frontier": encode(row.frontier),
+            "evidence": _evidence(row),
         }
         for row in rows
     ]
+
+
+def _playbook(snapshot: NotebookSnapshot) -> dict[str, str] | None:
+    """The scheduling playbook the session plays, as its manifest records it, and the breach it fell back on."""
+
+    versions = snapshot.fingerprints[-1].policy_versions if snapshot.fingerprints else {}
+    played = versions.get(PLAYBOOK_KEY)
+    return {"label": played, "fallback": versions.get(FALLBACK_KEY, "")} if played else None
 
 
 def _in_flight(snapshot: NotebookSnapshot) -> dict[str, Any]:
@@ -178,6 +214,7 @@ def build_dashboard(
         "session": encode(profile),
         "baseline": encode(baseline),
         "branches": _branches(snapshot, rows, metric),
+        "playbook": _playbook(snapshot),
         "stranded": encode(stranded_leads(snapshot, metric)),
         "spend": session_spend(snapshot),
         "in_flight": _in_flight(snapshot),

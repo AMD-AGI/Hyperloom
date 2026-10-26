@@ -60,14 +60,23 @@ def _table(title: str, headers: Sequence[str], rows: Sequence[Sequence[Any]]) ->
     )
 
 
-def _branches(rows: Sequence[Mapping[str, Any]]) -> str:
-    def frontier(row: Mapping[str, Any]) -> str:
-        score = row["frontier"]
-        return _pct(score["expected_gain_pct"]) if score else ""
+def _stall(evidence: Mapping[str, Any]) -> str:
+    stalled, bar = evidence.get("stalled_tests"), evidence.get("stall_bar")
+    return f"{stalled:g} of {bar:g}" if stalled is not None and bar is not None else ""
 
+
+def _stop(evidence: Mapping[str, Any]) -> str:
+    held = evidence.get("held_by") or []
+    if held:
+        return f"held: {', '.join(held)}"
+    return "stop candidate" if evidence.get("stop_candidate") else ""
+
+
+def _branches(rows: Sequence[Mapping[str, Any]]) -> str:
+    headers = (_BRANCH, "state", "start", "head", "tests", "commits", "GPU hours", "LLM $", "gain")
     return _table(
         "Branches",
-        (_BRANCH, "state", "start", "head", "tests", "commits", "GPU hours", "LLM $", "gain", "expected gain"),
+        (*headers, "merged gain", "stalled tests of the bar", "trend", "stop"),
         [
             (
                 row["branch"],
@@ -79,11 +88,21 @@ def _branches(rows: Sequence[Mapping[str, Any]]) -> str:
                 row["gpu_hours"],
                 row["llm_usd"],
                 _pct(row["gain_pct"]),
-                frontier(row),
+                _pct(evidence.get("merged_gain_pct")) if (evidence := row.get("evidence")) else "",
+                _stall(evidence) if evidence else "",
+                _pct(evidence.get("trend_pct")) if evidence else "",
+                _stop(evidence) if evidence else "",
             )
             for row in rows
         ],
     )
+
+
+def _played(playbook: Mapping[str, Any] | None) -> str:
+    if not playbook:
+        return ""
+    fallback = playbook.get("fallback")
+    return f"; playbook {playbook['label']}" + (f", fell back to the champion on {fallback}" if fallback else "")
 
 
 def _stranded(rows: Sequence[Mapping[str, Any]]) -> str:
@@ -240,7 +259,8 @@ def render_html(dashboard: Mapping[str, Any]) -> str:
     body = "".join(
         (
             f"<h1>{escape(title)}</h1>",
-            f'<p class="meta">{escape(task)}; {spent}; generated {escape(str(dashboard["generated_at_utc"]))}</p>',
+            f'<p class="meta">{escape(task)}; {spent}{escape(_played(dashboard.get("playbook")))}; '
+            f"generated {escape(str(dashboard['generated_at_utc']))}</p>",
             _branches(dashboard["branches"]),
             _stranded(dashboard.get("stranded") or []),
             _in_flight(dashboard["in_flight"]),
