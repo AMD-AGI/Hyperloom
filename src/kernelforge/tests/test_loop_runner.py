@@ -24,6 +24,7 @@ from kernelforge.agent_backends import AgentRunResult
 from kernelforge.tools.git import GitError
 from kernelforge.loop import analysis_evidence
 from kernelforge.loop import fanout
+from kernelforge.loop import candidate_measurement as measurement_module
 from kernelforge.loop import runner as runner_module
 from kernelforge.loop.analysis_refresh_policy import AnalysisRefreshDecision
 from kernelforge.loop.archive import CandidateRecord
@@ -58,10 +59,11 @@ from kernelforge.loop.merge_candidates import (
     MERGE_ATTEMPT_STALL_THRESHOLD,
     MERGE_PRECEDENCE_STREAK_LIMIT,
 )
+from kernelforge.loop import candidate_measurement as measurement_module
+from kernelforge.loop.iteration_result import IterationResult
 from kernelforge.loop.runner import (
     IterationConfig,
     IterationLoop,
-    IterationResult,
     WindowGain,
 )
 from kernelforge.evaluation.scoring import passes_keep_threshold
@@ -138,6 +140,7 @@ def _make_loop(
     )
 
     monkeypatch.setattr(runner_module, "force_jit_rebuild", lambda _files: None)
+    monkeypatch.setattr(measurement_module, "force_jit_rebuild", lambda _files: None)
 
     config = IterationConfig(
         kernel_file=str(kernel),
@@ -2391,10 +2394,10 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     async def fake_registers(**_kwargs):
         return {"success": False}
 
-    monkeypatch.setattr(runner_module, "run_validation_pipeline", fake_validation)
-    monkeypatch.setattr(runner_module, "measure_wallclock", fake_benchmark)
-    monkeypatch.setattr(runner_module, "check_registers", fake_registers)
-    monkeypatch.setattr(runner_module, "force_jit_rebuild", lambda _files: None)
+    monkeypatch.setattr(measurement_module, "run_validation_pipeline", fake_validation)
+    monkeypatch.setattr(measurement_module, "measure_wallclock", fake_benchmark)
+    monkeypatch.setattr(measurement_module, "check_registers", fake_registers)
+    monkeypatch.setattr(measurement_module, "force_jit_rebuild", lambda _files: None)
 
     loop = object.__new__(IterationLoop)
     loop.ic = SimpleNamespace(
@@ -7908,9 +7911,10 @@ def _stub_measurement(monkeypatch, walls):
     async def fake_registers(**_kwargs):
         return {"success": False}
 
-    monkeypatch.setattr(runner_module, "run_validation_pipeline", fake_validation)
+    monkeypatch.setattr(measurement_module, "run_validation_pipeline", fake_validation)
     monkeypatch.setattr(runner_module, "measure_wallclock", fake_bench)
-    monkeypatch.setattr(runner_module, "check_registers", fake_registers)
+    monkeypatch.setattr(measurement_module, "measure_wallclock", fake_bench)
+    monkeypatch.setattr(measurement_module, "check_registers", fake_registers)
 
 
 def test_lesson_flows_from_one_iteration_into_the_next_prompt(tmp_path, monkeypatch):

@@ -17,7 +17,9 @@ import kernelforge.loop.runner as runner_module
 from kernelforge.loop.archive import CandidateArchive
 from kernelforge.loop.experience import ExperienceLedger
 from kernelforge.loop.run_state import LoopStateStore
-from kernelforge.loop.runner import IterationConfig, IterationLoop, IterationResult
+from kernelforge.loop import candidate_measurement as measurement_module
+from kernelforge.loop.iteration_result import IterationResult
+from kernelforge.loop.runner import IterationConfig, IterationLoop
 from kernelforge.tracker import ExperimentTracker
 
 
@@ -51,7 +53,8 @@ def _initialize_workspace(tmp_path, monkeypatch):
         check=True,
         capture_output=True,
     )
-    monkeypatch.setattr(runner_module, "force_jit_rebuild", lambda _files: None)
+    for module in (runner_module, measurement_module):
+        monkeypatch.setattr(module, "force_jit_rebuild", lambda _files: None)
     return workspace, kernel, driver
 
 

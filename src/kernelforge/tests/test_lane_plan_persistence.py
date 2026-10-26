@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from kernelforge.loop import candidate_measurement as measurement_module
 from kernelforge.loop import runner as runner_module
 from kernelforge.loop.fanout import LaneResult
 from kernelforge.loop.run_state import LoopStateStore, RunState, make_event
@@ -51,6 +52,7 @@ def _reopen(workspace, tmp_path, monkeypatch):
 
 def _open_loop(workspace, experiments_root, monkeypatch):
     monkeypatch.setattr(runner_module, "force_jit_rebuild", lambda _files: None)
+    monkeypatch.setattr(measurement_module, "force_jit_rebuild", lambda _files: None)
 
     loop = IterationLoop(
         IterationConfig(

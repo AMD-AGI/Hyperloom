@@ -224,12 +224,12 @@ duplicated-lines src/kernelforge/tests/knowledge/kb_store/test_reader.py 18
 duplicated-lines src/kernelforge/tests/knowledge/kb_store/test_writer.py 18
 duplicated-lines src/kernelforge/tests/loop/test_knowledge_integration.py 28
 duplicated-lines src/kernelforge/tests/test_best_reporting.py 44
-duplicated-lines src/kernelforge/tests/test_campaign_cross_process.py 20
+duplicated-lines src/kernelforge/tests/test_campaign_cross_process.py 19
 duplicated-lines src/kernelforge/tests/test_claude_resume.py 17
 duplicated-lines src/kernelforge/tests/test_claude_timeout.py 17
 duplicated-lines src/kernelforge/tests/test_forge_loop_resume.py 34
 duplicated-lines src/kernelforge/tests/test_forge_orchestration.py 46
-duplicated-lines src/kernelforge/tests/test_loop_runner.py 52
+duplicated-lines src/kernelforge/tests/test_loop_runner.py 50
 duplicated-lines src/kernelforge/tests/test_rewrite_by_flydsl_pipeline.py 135
 duplicated-lines src/kernelforge/tests/tools/test_aiter_cache.py 77
 function-args src/hyperloom/agents/quantization/driver/retry.py::quantize_via_prompt 9
@@ -700,7 +700,6 @@ function-lines src/kernelforge/loop/runner.py::IterationLoop._build_pending_keep
 function-lines src/kernelforge/loop/runner.py::IterationLoop._case_config_coverage 64
 function-lines src/kernelforge/loop/runner.py::IterationLoop._close_iteration 82
 function-lines src/kernelforge/loop/runner.py::IterationLoop._collect_session_candidate 154
-function-lines src/kernelforge/loop/runner.py::IterationLoop._decide_iteration_keep 58
 function-lines src/kernelforge/loop/runner.py::IterationLoop._implementer_history 83
 function-lines src/kernelforge/loop/runner.py::IterationLoop._inspect_pending_keep 53
 function-lines src/kernelforge/loop/runner.py::IterationLoop._measure_baseline 58
@@ -717,7 +716,6 @@ function-lines src/kernelforge/loop/runner.py::IterationLoop._run_locked 61
 function-lines src/kernelforge/loop/runner.py::IterationLoop._run_supervisor_review 69
 function-lines src/kernelforge/loop/runner.py::IterationLoop._source_attempt 148
 function-lines src/kernelforge/loop/runner.py::IterationLoop._update_search_policy 51
-function-lines src/kernelforge/loop/runner.py::IterationLoop.run_one_iteration 61
 function-lines src/kernelforge/loop/task_preflight.py::_count_graph_replays 68
 function-lines src/kernelforge/loop/task_preparer.py::_commit_prepared_task 61
 function-lines src/kernelforge/loop/task_preparer.py::prepare_task 286
@@ -802,7 +800,7 @@ module-lines src/kernelforge/fusion/validate.py 1515
 module-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py 1240
 module-lines src/kernelforge/loop/insession_gate.py 1264
 module-lines src/kernelforge/loop/knowledge_integration.py 1464
-module-lines src/kernelforge/loop/runner.py 6051
+module-lines src/kernelforge/loop/runner.py 5993
 module-lines src/kernelforge/loop/task_preparer.py 1299
 module-lines src/kernelforge/orchestrator/analysis.py 1952
 module-lines src/kernelforge/orchestrator/orchestration.py 1831

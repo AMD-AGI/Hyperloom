@@ -27,8 +27,10 @@ from kernelforge.evaluation.benchmark.baseline import (
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.loop.recovery import CallerRecovery, publish_warm_start_recovery
 from kernelforge.loop.run_state import IterationVerdict, LoopStanding, LoopStateStore, RunState, apply_iteration
+from kernelforge.loop import candidate_measurement as measurement_module
 from kernelforge.loop import runner as runner_module
-from kernelforge.loop.runner import IterationResult, _decision_label
+from kernelforge.loop.iteration_result import IterationResult
+from kernelforge.loop.runner import _decision_label
 from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,
@@ -1006,7 +1008,7 @@ def _attributed_loop(monkeypatch, baseline, runs, extra_rounds=()):
             return _bench(runs)
         return _bench(rounds[min(len(calls) - 2, len(rounds) - 1)])
 
-    monkeypatch.setattr(runner_module, "measure_wallclock", fake_benchmark)
+    monkeypatch.setattr(measurement_module, "measure_wallclock", fake_benchmark)
     return loop, calls
 
 
@@ -1118,7 +1120,7 @@ def test_a_re_measure_bench_that_failed_is_reported_as_bought_not_as_measured(mo
             return _bench(runs)
         return {"success": False, "message": "driver aborted", "measurements": []}
 
-    monkeypatch.setattr(runner_module, "measure_wallclock", fake_benchmark)
+    monkeypatch.setattr(measurement_module, "measure_wallclock", fake_benchmark)
 
     asyncio.run(loop.run_one_iteration(1))
     line = _bench_line(capsys)
@@ -1136,18 +1138,19 @@ def test_the_extra_benches_are_charged_to_the_round_that_bought_them(monkeypatch
     """Round admission prices the next round from what this one spent measuring."""
     clock = [1000.0]
     monkeypatch.setattr(runner_module, "time", SimpleNamespace(time=lambda: clock[0]))
+    monkeypatch.setattr(measurement_module, "time", SimpleNamespace(time=lambda: clock[0]))
 
     def charged(baseline, runs, extra_rounds=(), *, incumbent=None):
         loop, calls = _attributed_loop(monkeypatch, baseline, runs, extra_rounds)
         if incumbent is not None:
             loop.best_mean_case_speedup = incumbent
-        inner = runner_module.measure_wallclock
+        inner = measurement_module.measure_wallclock
 
         async def metered(run, **kwargs):
             clock[0] += 100.0
             return await inner(run, **kwargs)
 
-        monkeypatch.setattr(runner_module, "measure_wallclock", metered)
+        monkeypatch.setattr(measurement_module, "measure_wallclock", metered)
         loop._round_started_at = clock[0]
         loop._round_measurement_sec = 0.0
         asyncio.run(loop.run_one_iteration(1))

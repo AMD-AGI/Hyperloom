@@ -17,8 +17,8 @@ import pytest
 from kernelforge.loop.runner import (
     IterationConfig,
     IterationLoop,
-    IterationResult,
 )
+from kernelforge.loop.iteration_result import IterationResult
 from kernelforge.orchestrator.contracts import CaseEvidence, OrchestrationContext
 from kernelforge.loop import runner as runner_module
 from kernelforge.loop.campaign_config import CampaignConfigStore
