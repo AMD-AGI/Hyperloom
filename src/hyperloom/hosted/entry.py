@@ -25,7 +25,8 @@ import json
 import os
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -91,17 +92,25 @@ def _run() -> int:
         archive_root=ensure_archive_root(session_dir),
     )
     install(run)
-    _hand_to_plug_host(run)
     os.environ[ENV_IMAGE] = spec.framework_image
     _announce_grant(info)
-    return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
+    with _plug_inputs(run):
+        return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
 
 
-def _hand_to_plug_host(run: HostedRun) -> None:
-    """Give plug resolution the lock and the host inputs; ``optimize`` cannot import this package (it would be a cycle)."""
+@contextmanager
+def _plug_inputs(run: HostedRun) -> Iterator[None]:
+    """Give plug resolution the lock and the host inputs for the length of ``optimize``, however it ends.
+
+    ``optimize`` cannot import this package (it would be a cycle), so the entry hands the values over.
+    """
     from hyperloom.inference_optimizer.cli.bootstrap import HostedPlugInputs, set_hosted_plug_inputs
 
     set_hosted_plug_inputs(HostedPlugInputs(lock=run.plug_lock, host_info=run.host_info))
+    try:
+        yield
+    finally:
+        set_hosted_plug_inputs(None)
 
 
 def _state_dir_from_environment() -> Path | None:
