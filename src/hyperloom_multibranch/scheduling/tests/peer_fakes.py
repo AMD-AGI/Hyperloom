@@ -561,7 +561,9 @@ class RootProfileCall:
 class RecordingToolbox(FakeToolbox):
     """The toolbox module's fake, without noise, noting every queue policy, withdrawal and close it was given.
 
-    ``withdrawals`` holds the reason of every session-wide withdrawal. ``effect`` sets what a test measures (see :func:`recipe_effect`); without one every test measures the baseline.
+    ``cancelled`` holds every branch whose tests and tool jobs were withdrawn, ``tool_cancels`` every branch whose tool
+    jobs alone were cancelled, and ``withdrawals`` the reason of every session-wide withdrawal. ``effect`` sets what a
+    test measures (see :func:`recipe_effect`); without one every test measures the baseline.
     ``accuracy`` is the accuracy score of a change by its fingerprint, and ``conc`` the workload's conc, which a test
     whose request names none is measured at. ``log`` places the submit log, which the hosted toolbox keeps in the
     session directory, so a second toolbox over that directory hands out request ids where the first one left off;
@@ -594,6 +596,7 @@ class RecordingToolbox(FakeToolbox):
         self.serving = False
         self.policies: list[QueuePolicy] = []
         self.cancelled: list[str] = []
+        self.tool_cancels: list[str] = []
         self.withdrawals: list[str] = []
         self.queue_reads = 0
         self.closed = 0
@@ -619,6 +622,10 @@ class RecordingToolbox(FakeToolbox):
     async def cancel_branch(self, branch_id: str, reason: str = "branch stopped") -> int:
         self.cancelled.append(branch_id)
         return await super().cancel_branch(branch_id, reason)
+
+    def cancel_tool_jobs(self, branch_id: str) -> int:
+        self.tool_cancels.append(branch_id)
+        return super().cancel_tool_jobs(branch_id)
 
     async def withdraw_all(self, reason: str = "session stopped") -> tuple[str, ...]:
         self.withdrawals.append(reason)
@@ -661,6 +668,10 @@ class DownToolbox(RecordingToolbox):
     async def cancel_branch(self, branch_id: str, reason: str = "branch stopped") -> int:
         self._serving()
         return await super().cancel_branch(branch_id, reason)
+
+    def cancel_tool_jobs(self, branch_id: str) -> int:
+        self._serving()
+        return super().cancel_tool_jobs(branch_id)
 
     async def withdraw_all(self, reason: str = "session stopped") -> tuple[str, ...]:
         self._serving()

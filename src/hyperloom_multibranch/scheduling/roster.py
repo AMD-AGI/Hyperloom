@@ -11,7 +11,7 @@ already has one, so the emergency ``final-only`` run carries the dead session's 
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -25,7 +25,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
 #: Names how :meth:`Roster.quota_policy` hands out K; recorded in the manifest fingerprint.
-QUOTA_POLICY_VERSION = "mb1-quota-3"
+QUOTA_POLICY_VERSION = "mb1-quota-4"
 
 
 class BranchKind(str, Enum):
@@ -91,6 +91,13 @@ class StopCause(str, Enum):
     GAVE_UP = "gave_up"
     REPAIR_TIME_LIMIT = "repair_time_limit"
 
+    @property
+    def lets_tests_finish(self) -> bool:
+        """Whether the branch's queued and running tests run to their end after the stop: every stop but the
+        session's end, which withdraws them so that none competes with FINAL's measurements."""
+
+        return self is not StopCause.SESSION_END
+
 
 @dataclass(frozen=True)
 class BranchStop:
@@ -127,6 +134,12 @@ class BranchEntry:
     @property
     def counts_toward_cap(self) -> bool:
         return self.kind is BranchKind.SPECIALIST and self.stop is None
+
+    @property
+    def finishes_tests(self) -> bool:
+        """Whether the branch is stopped and its stop lets its queued and running tests run to their end."""
+
+        return self.stop is not None and self.stop.cause.lets_tests_finish
 
 
 def specialist_open(entries: Iterable[BranchEntry]) -> bool:
@@ -263,14 +276,21 @@ class Roster:
             return entry
         return self._update(entry, stop=stop)
 
-    def quota_policy(self) -> QueuePolicy:
-        """The toolbox's queue policy: every running branch's K under the global cap on running tests.
+    def quota_policy(self, busy: Collection[str]) -> QueuePolicy:
+        """The toolbox's queue policy under the global cap on running tests: the K of every running branch, and of
+        every stopped branch whose stop lets its tests finish while ``busy``, the branches the toolbox holds a test of,
+        names it.
 
-        Only the running branches may submit: the toolbox refuses a test of a branch that is stopped or not started.
-        The session measurements of PRELUDE and FINAL take no slot of the integration branch's K.
+        Only the branches listed may submit, so the toolbox refuses a test of a branch that is not started or is
+        stopped, except while a stopped branch's tests last: those run under the K they were queued under rather than
+        the toolbox's default. The session measurements of PRELUDE and FINAL take no slot of the integration branch's K.
         """
 
-        ks = {entry.branch: entry.k for entry in self._entries.values() if entry.status is BranchStatus.RUNNING}
+        ks = {
+            entry.branch: entry.k
+            for entry in self._entries.values()
+            if entry.status is BranchStatus.RUNNING or (entry.finishes_tests and entry.branch in busy)
+        }
         return QueuePolicy(global_concurrency=self.caps.max_parallel_tests, branch_k=ks, listed_branches_only=True)
 
     def _live(self, branch: str) -> BranchEntry:

@@ -8,7 +8,8 @@ commit the window names -- the root, or the Recipe KB champion PRELUDE replayed 
 batch; the opening judge call sizes that batch into the slots those branches leave. Gains are still measured from the
 root, which the window names apart.
 
-The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it stops the repair branches that used up their time and the branches
+The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it hands the toolbox the quota again, which takes a stopped branch
+out once the tests it was left to finish have ended, stops the repair branches that used up their time and the branches
 whose specialist gave up, once no candidate of theirs waits for its confirm, moves the forks and repairs queued on the
 fork desk onto the free slots, has the rule gate land each admitted fork and starts the admitted forks and repairs, and
 every judge interval asks the judge, applies what it decided and rebuilds the dashboard. A slot the judge's stops free
@@ -235,6 +236,7 @@ class Explorer:
                 return spent
             if await self._events.record_card_shortage():
                 return SessionStopReason.NO_MEASUREMENT_CARDS
+            await self._branches.push_quota()
             overrun = await self._branches.stop_overrun_repairs()
             given_up = await self._stop_given_up()
             self._desk.fill_free_slots()

@@ -925,4 +925,5 @@ def test_a_branch_row_shows_its_explore_tests_not_measured_yet_with_their_intent
     assert rows[INTEGRATION_BRANCH]["queued_intents"] == []
     prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
     assert "A branch's queued_intents are its explore tests requested and not measured yet, queued or running" in prose
+    assert "Stopping the branch does not withdraw them: they run to their end and their results are recorded" in prose
     assert "weigh a stop against the tests the branch is about to report" in prose

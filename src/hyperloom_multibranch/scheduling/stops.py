@@ -3,14 +3,14 @@
 
 """Why a session stops, the operator's stop signals, and the two session-wide stops.
 
-Ending exploration stops every specialist branch and keeps the integration branch for FINAL; a branch stop that fails
-there is logged, not raised. Stopping everything stops every branch including integration, which withdraws every
-test, then releases what the session holds: it stops the MCP service the specialists reach their tools on, closes the
-toolbox, which releases the sandboxes it holds, and kills every process the scheduler started, then reports what is
-still alive. The toolbox close gets
-:data:`TOOLBOX_CLOSE_SECONDS`, or half the time left before the hard stop when that is less, the branch stops the rest,
-and the release runs whether or not they finished. Both close the roster first, so no fork is admitted and no branch
-opened afterwards, and void the forks and repairs still queued for a slot.
+Ending exploration stops every specialist branch, withdraws the tests the branches stopped earlier were left to finish,
+and keeps the integration branch for FINAL; a branch stop or a withdrawal that fails there is logged, not raised.
+Stopping everything stops every branch including integration, which withdraws every test, then releases what the
+session holds: it stops the MCP service the specialists reach their tools on, closes the toolbox, which releases the
+sandboxes it holds, and kills every process the scheduler started, then reports what is still alive. The toolbox close
+gets :data:`TOOLBOX_CLOSE_SECONDS`, or half the time left before the hard stop when that is less, the branch stops
+the rest, and the release runs whether or not they finished. Both close the roster first, so no fork is admitted and
+no branch opened afterwards, and void the forks and repairs still queued for a slot.
 The main flow's signal drain lives in its loop package, which this package does not import.
 """
 
@@ -148,8 +148,8 @@ class SessionStopper:
         self._clock = context.clock
 
     async def end_exploration(self, reason: SessionStopReason) -> None:
-        """Close the roster, void the queued forks and repairs and stop every specialist branch; the integration branch
-        keeps its quota for FINAL.
+        """Close the roster, void the queued forks and repairs, stop every specialist branch and withdraw the tests the
+        branches stopped earlier were left to finish; the integration branch keeps its quota for FINAL.
 
         A branch stop that fails is logged and does not hold FINAL up: the branch's own ``STOP`` decision names the
         failure, and CLOSE kills whatever it left behind and reports what outlived that.
@@ -160,6 +160,9 @@ class SessionStopper:
             logger.error("a queued fork or repair was not voided cleanly", exc_info=failure)
         for failure in await self._stop_open(reason, frozenset({BranchKind.SPECIALIST})):
             logger.error("a specialist branch did not stop cleanly at the end of EXPLORE", exc_info=failure)
+        withdrawn = await settled(self._branches.withdraw_finishing_tests(reason.value))
+        if isinstance(withdrawn, BaseException):
+            logger.error("the tests the stopped branches were left to finish were not withdrawn", exc_info=withdrawn)
 
     async def stop_everything(self, reason: SessionStopReason, hard_stop_at: float) -> StopReport:
         """Close the roster, stop every branch, read the queue, :meth:`release` what the session holds, and report.

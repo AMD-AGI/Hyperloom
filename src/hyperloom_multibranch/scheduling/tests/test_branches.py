@@ -12,7 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.recipe import Recipe
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
+from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, RepairRequest
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
@@ -364,7 +365,7 @@ async def test_a_repair_branch_is_stopped_for_its_time_limit_two_hours_after_its
     expected = BranchStop(StopCause.REPAIR_TIME_LIMIT, "a repair branch runs at most 2 hours", now[0])
     assert bench.roster.entry("b02").stop == expected
     assert bench.roster.entry("b01").stop is None
-    assert bench.sessions.stopped == ["b02"] and bench.toolbox.cancelled == ["b02"]
+    assert bench.sessions.stopped == ["b02"] and bench.toolbox.tool_cancels == ["b02"]
     stops = {branch.branch: branch.stop_reason for branch in (await bench.notebook.lineage()).branches}
     assert stops["b02"] == "repair_time_limit: a repair branch runs at most 2 hours"
     logged = json.loads((tmp_path / "MB-decisions.jsonl").read_text().splitlines()[-1])
@@ -405,7 +406,7 @@ async def test_a_fork_the_gate_did_not_land_is_stopped_as_not_started_frees_its_
     assert bench.roster.free_slots() == 2
     assert bench.reserved.voided == [("b02", "the rule gate did not land the fork")]
     await _runs_started()
-    assert "b02" not in bench.sessions.started and bench.toolbox.cancelled == ["b02"]
+    assert "b02" not in bench.sessions.started and bench.toolbox.tool_cancels == ["b02"]
 
 
 async def test_stopping_a_branch_voids_the_forks_and_repairs_it_queued(tmp_path: Path) -> None:
@@ -471,7 +472,7 @@ async def test_a_failing_specialist_stop_is_returned_and_still_withdraws_and_rec
 
     assert [str(failure) for failure in failures] == ["the runtime refused to stop b01"]
 
-    assert bench.toolbox.cancelled == ["b01"]
+    assert bench.toolbox.tool_cancels == ["b01"]
     assert "b01" not in bench.toolbox.policies[-1].branch_k
     stops = {branch.branch: branch.stop_reason for branch in (await bench.notebook.lineage()).branches}
     assert stops["b01"] == "judge: flat"
@@ -489,7 +490,7 @@ async def test_stopping_a_branch_withdraws_it_once_and_its_admitted_fork_never_s
     await bench.control.stop_branch("b01", BranchStop(StopCause.SESSION_END, "time_exhausted", NOW))
 
     assert bench.sessions.stopped == ["b01"]
-    assert bench.toolbox.cancelled == ["b02", "b01"]
+    assert bench.toolbox.tool_cancels == ["b02", "b01"]
     assert bench.roster.entry("b01").stop == stop
     assert bench.roster.entry("b02").stop == BranchStop(StopCause.JUDGE, "parent b01 stopped: flat", NOW)
     await bench.control.start_admitted(AdmittedBranch("b02", bench.root), OPEN_BY)
@@ -498,6 +499,54 @@ async def test_stopping_a_branch_withdraws_it_once_and_its_admitted_fork_never_s
     assert "b02" not in {branch.branch for branch in (await bench.notebook.lineage()).branches}
     stops = {branch.branch: branch.stop_reason for branch in (await bench.notebook.lineage()).branches}
     assert stops["b01"] == "judge: flat"
+    assert "b01" not in bench.toolbox.policies[-1].branch_k
+
+
+async def _held_tests(bench: Bench, count: int) -> list[str]:
+    """``count`` explore tests of ``b01``, held by the toolbox's executor until it drains."""
+
+    bench.toolbox.executor.gate.clear()
+    return [
+        await bench.toolbox.submit_test(
+            TestRequest(
+                TestKind.TEST,
+                Purpose.EXPLORE,
+                "b01",
+                bench.root,
+                delta=RecipeDelta(config=ConfigDelta(server_args=f"--n {n}")),
+            )
+        )
+        for n in range(count)
+    ]
+
+
+async def test_a_judge_stop_leaves_the_branchs_tests_to_finish_under_its_k_and_records_their_results(
+    tmp_path: Path,
+) -> None:
+    bench = await Bench(tmp_path).rooted()
+    await bench.control.open_branches(1, 2, BatchStart(BranchOrigin.FIRST_BATCH, bench.root, OPEN_BY))
+    tests = await _held_tests(bench, 3)
+
+    await bench.control.stop_branch("b01", BranchStop(StopCause.JUDGE, "flat", NOW))
+
+    assert bench.toolbox.cancelled == [] and bench.toolbox.tool_cancels == ["b01"]
+    assert bench.toolbox.policies[-1].k_for("b01") == 2
+    assert (await bench.toolbox.queue_state()).running_by_branch == {"b01": 2}
+    await bench.toolbox.drain()
+    assert all([(await bench.notebook.record(test)).result is not None for test in tests])
+    await bench.control.push_quota()
+    assert "b01" not in bench.toolbox.policies[-1].branch_k
+
+
+async def test_a_session_end_stop_withdraws_the_branchs_tests(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).rooted()
+    await bench.control.open_branches(1, 1, BatchStart(BranchOrigin.FIRST_BATCH, bench.root, OPEN_BY))
+    tests = await _held_tests(bench, 2)
+
+    await bench.control.stop_branch("b01", BranchStop(StopCause.SESSION_END, "time_exhausted", NOW))
+
+    assert bench.toolbox.cancelled == ["b01"]
+    assert set(bench.toolbox.withdrawn) == set(tests)
     assert "b01" not in bench.toolbox.policies[-1].branch_k
 
 
@@ -549,7 +598,7 @@ async def test_a_start_that_does_not_finish_in_time_is_withdrawn_and_the_others_
 
     stop = bench.roster.entry("b01").stop
     assert stop is not None and stop.cause is StopCause.START_FAILED
-    assert bench.toolbox.cancelled == ["b01"]
+    assert bench.toolbox.tool_cancels == ["b01"]
     assert bench.sessions.running == {"b02"} and bench.roster.entry("b02").stop is None
 
 
@@ -594,7 +643,7 @@ async def test_a_start_still_running_at_the_callers_deadline_is_withdrawn(tmp_pa
 
     stop = bench.roster.entry("b01").stop
     assert stop is not None and stop.cause is StopCause.START_FAILED and stop.reason.startswith("TimeoutError")
-    assert bench.toolbox.cancelled == ["b01"]
+    assert bench.toolbox.tool_cancels == ["b01"]
 
 
 async def test_a_new_k_the_specialist_never_takes_is_a_failed_step_after_its_time(
