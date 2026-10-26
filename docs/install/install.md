@@ -236,8 +236,10 @@ An exported value still wins. `rocm700` additionally requires Python 3.10 and
 setup fails outright on any other interpreter, because the source install would
 pull a mismatched ROCm 7.2 Triton. Any other ROCm stack derives nothing and takes
 the source install, which is a fallback rather than a validated path.
-Kernel-agent paths (`MAGPIE_PATH`, `INFERENCEX_PATH`, `TRACELENS_ROOT`,
-`GEAK_ROOT`) are added later by the workload skill's `install.sh`.
+Kernel-agent paths `TRACELENS_ROOT` and `GEAK_ROOT` are added later by the
+workload skill's `install.sh`. `MAGPIE_PATH` and `INFERENCEX_PATH` follow their
+pins and reach the runtime through the kernel-agent env file, not `.env`;
+export them in the shell to override them persistently.
 
 Specialist subprocesses inherit a minimal environment including LLM provider
 credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, AWS Bedrock vars, etc.)
