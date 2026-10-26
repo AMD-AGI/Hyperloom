@@ -107,20 +107,12 @@ def _make_explore_phase_stub(tmp_path, registry_lanes, registry_ttl, gpu_ttl, ca
     fake_task = MagicMock()
     fake_task.task_id = "retry-task-1"
 
-    async def _fake_create(
-        kind,
-        params,
-        idempotency_key,
-        requires_lanes,
-        lease_ttl_sec,
-        dispatch_class=None,
-        dispatch_origin=None,
-    ):
+    async def _fake_create(spec):
         captured_tasks.append(
             {
-                "kind": kind,
-                "requires_lanes": list(requires_lanes or []),
-                "lease_ttl_sec": lease_ttl_sec,
+                "kind": spec.kind,
+                "requires_lanes": list(spec.requires_lanes or []),
+                "lease_ttl_sec": spec.lease_ttl_sec,
             }
         )
         return fake_task, False

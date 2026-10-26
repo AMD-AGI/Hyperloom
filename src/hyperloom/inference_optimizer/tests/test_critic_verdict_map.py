@@ -1690,17 +1690,17 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     create_calls: list[dict[str, Any]] = []
 
     class _StubTaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):
-            create_calls.append(dict(kwargs))
+        async def create_or_return_existing(self, spec):
+            create_calls.append(dict(vars(spec)))
             from hyperloom.orchestrator.state.task_registry import Task
 
             return (
                 Task(
                     task_id="t-explore-filtered",
-                    kind=kwargs["kind"],
+                    kind=spec.kind,
                     state="queued",
-                    params=kwargs["params"],
-                    idempotency_key=kwargs["idempotency_key"],
+                    params=spec.params,
+                    idempotency_key=spec.idempotency_key,
                 ),
                 False,
             )
@@ -1743,8 +1743,8 @@ async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path)
     create_calls: list[dict[str, Any]] = []
 
     class _StubTaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):
-            create_calls.append(dict(kwargs))
+        async def create_or_return_existing(self, spec):
+            create_calls.append(dict(vars(spec)))
             raise AssertionError("empty filtered grid must not create a task")
 
     coord.tasks = _StubTaskRegistry()
@@ -1777,17 +1777,17 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     create_calls: list[dict[str, Any]] = []
 
     class _StubTaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):
-            create_calls.append(dict(kwargs))
+        async def create_or_return_existing(self, spec):
+            create_calls.append(dict(vars(spec)))
             from hyperloom.orchestrator.state.task_registry import Task
 
             return (
                 Task(
                     task_id="t-explore-full",
-                    kind=kwargs["kind"],
+                    kind=spec.kind,
                     state="queued",
-                    params=kwargs["params"],
-                    idempotency_key=kwargs["idempotency_key"],
+                    params=spec.params,
+                    idempotency_key=spec.idempotency_key,
                 ),
                 False,
             )
@@ -1858,17 +1858,17 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
         async def running(self) -> list:
             return []
 
-        async def create_or_return_existing(self, **kwargs: Any):
-            create_calls.append(dict(kwargs))
+        async def create_or_return_existing(self, spec):
+            create_calls.append(dict(vars(spec)))
             from hyperloom.orchestrator.state.task_registry import Task
 
             return (
                 Task(
                     task_id="t-explore-direct",
-                    kind=kwargs["kind"],
+                    kind=spec.kind,
                     state="queued",
-                    params=kwargs["params"],
-                    idempotency_key=kwargs["idempotency_key"],
+                    params=spec.params,
+                    idempotency_key=spec.idempotency_key,
                 ),
                 False,
             )
@@ -1912,17 +1912,17 @@ async def test_delegate_explore_seeds_the_stack_with_the_anchor(tmp_path: Path):
         async def running(self) -> list:
             return []
 
-        async def create_or_return_existing(self, **kwargs: Any):
-            created.append(dict(kwargs["params"]))
+        async def create_or_return_existing(self, spec):
+            created.append(dict(spec.params))
             from hyperloom.orchestrator.state.task_registry import Task
 
             return (
                 Task(
                     task_id="t-explore-stack",
-                    kind=kwargs["kind"],
+                    kind=spec.kind,
                     state="queued",
-                    params=kwargs["params"],
-                    idempotency_key=kwargs["idempotency_key"],
+                    params=spec.params,
+                    idempotency_key=spec.idempotency_key,
                 ),
                 False,
             )
@@ -1957,17 +1957,17 @@ async def test_delegate_sweep_seeds_the_stack_too(tmp_path: Path):
     created: list[dict[str, Any]] = []
 
     class _TaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):
-            created.append(dict(kwargs["params"]))
+        async def create_or_return_existing(self, spec):
+            created.append(dict(spec.params))
             from hyperloom.orchestrator.state.task_registry import Task
 
             return (
                 Task(
                     task_id="t-sweep-stack",
-                    kind=kwargs["kind"],
+                    kind=spec.kind,
                     state="queued",
-                    params=kwargs["params"],
-                    idempotency_key=kwargs["idempotency_key"],
+                    params=spec.params,
+                    idempotency_key=spec.idempotency_key,
                 ),
                 False,
             )

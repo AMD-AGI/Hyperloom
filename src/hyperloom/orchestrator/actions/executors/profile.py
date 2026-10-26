@@ -10,7 +10,6 @@ import gzip
 import json
 import logging
 import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -681,16 +680,15 @@ def _merge_profile_params(params: dict[str, Any]) -> None:
 
 # Restarts the multi-node server for this profiling round; returns the refusal result when it failed.
 async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -> dict[str, Any] | None:
-    from ._multi_node_server_lifecycle import ServerRestartFailed, restart_server_for_round
+    from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
     try:
         await restart_server_for_round(
-            extra_server_args=str(params.get("extra_server_args") or ""),
+            RoundServer.from_env(
+                str(params.get("extra_server_args") or ""),
+                str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None,
+            ),
             torch_profiler_dir=round_trace_root,
-            framework=os.environ.get("FRAMEWORK") or None,
-            model_path=str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None,
-            tp=int(os.environ.get("TP") or 0) or None,
-            ep=int(os.environ.get("EP") or 0) or None,
         )
     except ServerRestartFailed as exc:
         return {
@@ -984,6 +982,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
     """Benchmark round with the torch profiler on; extracts and certifies the trace_dir."""
 
     runs_accuracy_eval = False
+    default_timeout_sec = PROFILE_DEFAULT_TIMEOUT_SEC
 
     def __init__(
         self,
@@ -991,16 +990,12 @@ class ProfileExecutor(BenchmarkRunExecutor):
         magpie_python: str | None = None,
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
-        default_timeout_sec: int = PROFILE_DEFAULT_TIMEOUT_SEC,
-        cwd: Path | str | None = None,
     ):
         """Initialize the profile executor with profile-specific defaults."""
         super().__init__(
             magpie_python=magpie_python,
             default_config_path=default_config_path,
             session_dir=session_dir,
-            default_timeout_sec=default_timeout_sec,
-            cwd=cwd if cwd is not None else tempfile.gettempdir(),
         )
         # Set by ``_after_materialize_config`` once the probe is armed; read after the run to merge per-rank reports.
         self._host_probe_dir: str = ""

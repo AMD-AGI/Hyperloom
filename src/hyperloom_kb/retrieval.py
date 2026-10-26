@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol, TypeAlias, runtime_checkable
 
@@ -142,7 +142,7 @@ class RetrievalResult:
     groups: tuple[GroupCandidate, ...]
     rendered: RenderedResult
     executed_capabilities: tuple[RetrievalCapability, ...]
-    unavailable_capabilities: tuple[RetrievalCapability, ...]
+    unavailable_capabilities: tuple[RetrievalCapability, ...] = ()
 
 
 ExperienceRenderer: TypeAlias = Callable[[Experience, QueryView], str]
@@ -341,24 +341,12 @@ class LocalRetrievalService:
             truncated=len(shown) < len(experiences),
         )
 
-    def result(
-        self,
-        groups: tuple[GroupCandidate, ...],
-        rendered: RenderedResult,
-        *,
-        view: QueryViewRef,
-        lease_id: str,
-        executed_capabilities: tuple[RetrievalCapability, ...],
-        unavailable_capabilities: tuple[RetrievalCapability, ...] = (),
-    ) -> RetrievalResult:
-        self._leased_view(view, lease_id)
-        return RetrievalResult(
-            view=view,
-            lease_id=lease_id,
-            groups=groups,
-            rendered=rendered,
-            executed_capabilities=tuple(dict.fromkeys(executed_capabilities)),
-            unavailable_capabilities=tuple(dict.fromkeys(unavailable_capabilities)),
+    def result(self, outcome: RetrievalResult) -> RetrievalResult:
+        self._leased_view(outcome.view, outcome.lease_id)
+        return replace(
+            outcome,
+            executed_capabilities=tuple(dict.fromkeys(outcome.executed_capabilities)),
+            unavailable_capabilities=tuple(dict.fromkeys(outcome.unavailable_capabilities)),
         )
 
     def _resolve_view(

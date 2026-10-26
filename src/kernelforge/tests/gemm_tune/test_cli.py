@@ -244,8 +244,8 @@ def test_plan_routes_the_same_inputs_as_run_and_run_builds_the_tuner_context(tmp
     selection_calls = []
     contexts = []
 
-    def select_tuners(_profile, **kwargs):
-        selection_calls.append(kwargs)
+    def select_tuners(_profile, target, evidence):
+        selection_calls.append(vars(target) | vars(evidence))
         return [router_mod.TunerSpec("a8w8_blockscale", skip_reason="not supported in contract test")]
 
     def execute_tuners(_specs, ctx, _deadline):

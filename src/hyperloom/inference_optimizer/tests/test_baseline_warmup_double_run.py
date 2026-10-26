@@ -32,7 +32,10 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     SESSION_TIME_EXHAUSTED_CLASS,
     GridVariant,
     run_grid,
+    GridLaunch,
+    GridRecipe,
 )
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -75,6 +78,12 @@ def _write_yaml(path: Path, *, framework: str = "vllm") -> None:
     }
     with path.open("w") as f:
         yaml.safe_dump(cfg, f)
+
+
+def _launch_kwargs(kwargs: dict) -> dict:
+    """A launch's keywords with its RoundWatch gates spelled out; a Ray round arrives already flat."""
+    watch = kwargs.get("watch")
+    return {**kwargs, **vars(watch)} if watch is not None else dict(kwargs)
 
 
 def _fake_workspace(slot: Path, *, tput: float) -> Path:
@@ -128,6 +137,7 @@ def _cold_then_hot_fake_run(
     state = {"calls": 0}
 
     def fake_run(cmd, *args, **kwargs):
+        kwargs = _launch_kwargs(kwargs)
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         if launches is not None:
@@ -924,6 +934,7 @@ def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
     state = {"calls": 0}
 
     def fake_run(cmd, *args, **kwargs):
+        kwargs = _launch_kwargs(kwargs)
         launches.append(kwargs)
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
@@ -1433,6 +1444,16 @@ def test_baseline_double_run_can_be_disabled_by_task_param(tmp_path, monkeypatch
     assert "server_lifecycle" not in captured[0]["benchmark"]
 
 
+def _candidate_grid(base: Path, output_dir: Path):
+    """The one-variant mi300x grid run the two ``run_grid`` round-count tests launch."""
+    return run_grid(
+        grid=[GridVariant(name="candidate")],
+        output_root=output_dir,
+        recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+        launch=GridLaunch(magpie_python=sys.executable),
+    )
+
+
 def test_run_grid_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch):
     """The shared grid runner reports the HOT measured round when lifecycle reuse is eligible."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
@@ -1447,16 +1468,7 @@ def test_run_grid_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
         "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
-        results = _run(
-            run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
-                grid=[GridVariant(name="candidate")],
-                output_root=output_dir,
-                magpie_python=sys.executable,
-                gpu_type="mi300x",
-            )
-        )
+        results = _run(_candidate_grid(base, output_dir))
 
     assert state["calls"] == 2
     assert len(results) == 1
@@ -1487,16 +1499,7 @@ def test_run_grid_single_round_when_warmup_disabled(tmp_path, monkeypatch):
         "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
-        results = _run(
-            run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
-                grid=[GridVariant(name="candidate")],
-                output_root=output_dir,
-                magpie_python=sys.executable,
-                gpu_type="mi300x",
-            )
-        )
+        results = _run(_candidate_grid(base, output_dir))
 
     assert state["calls"] == 1
     assert len(results) == 1
@@ -2288,6 +2291,7 @@ def _capturing_fake_run(
         # The memoized interpreter probe is not a benchmark round.
         if "--output-dir" not in cmd:
             return subprocess.CompletedProcess(cmd, 0, "ok", "")
+        kwargs = _launch_kwargs(kwargs)
         slot = Path(cmd[cmd.index("--output-dir") + 1])
         calls.append({"round_slot": slot.name, **kwargs})
         granted = float(kwargs.get("timeout") or 0.0)
@@ -2324,9 +2328,10 @@ class _CapturingLease:
     def __init__(self) -> None:
         self._run, self.calls = _capturing_fake_run()
 
-    def run_session_kill(self, cmd, **kwargs) -> tuple[int | None, str, str]:
+    def run_session_kill(self, bench_round) -> tuple[int | None, str, str]:
         """Record the launch and answer as the actor does, with a bare triple."""
-        proc = self._run(cmd, **kwargs)
+        fields = dict(vars(bench_round))
+        proc = self._run(fields.pop("cmd"), **fields)
         return proc.returncode, proc.stdout, proc.stderr
 
     def close(self) -> None:

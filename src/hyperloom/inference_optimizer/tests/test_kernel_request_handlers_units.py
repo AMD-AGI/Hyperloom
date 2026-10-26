@@ -42,6 +42,7 @@ from hyperloom.orchestrator.kernel import _forge_shapes as forge_shapes
 from hyperloom.orchestrator.kernel import serving_log_evidence as serving_log_evidence
 from hyperloom.orchestrator.kernel import _shape_capture as shape_capture
 from hyperloom.orchestrator.kernel import _untuned_gemm_csv as untuned_gemm_csv
+from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer
 
 
 _FUSION_PROVIDER_ENV_KEYS = (
@@ -2468,8 +2469,7 @@ class TestRunGemmTuningHandler:
         materialized = materialize_config_with_envs(
             base,
             tmp_path / "materialized",
-            extra_envs=task.params["extra_envs"],
-            unset_envs=task.params["unset_envs"],
+            launch=LaunchLayer(extra_envs=task.params["extra_envs"], unset_envs=task.params["unset_envs"]),
         )
         envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
         assert envs["PYTORCH_TUNABLEOP_ENABLED"] == "1"
@@ -2817,8 +2817,7 @@ class TestRunGemmTuningHandler:
                 framework="vllm",
                 precision="fp8",
                 quant_type="blockscale",
-                shapes_json="",
-                tunableop_input="",
+                supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
                 dry_run=False,
             )
             is False
@@ -2834,8 +2833,7 @@ class TestRunGemmTuningHandler:
             shape_capture._vllm_dense_shape_capture_required(
                 framework="vllm",
                 model_path=str(model),
-                shapes_json="",
-                tunableop_input="",
+                supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
                 dry_run=False,
             )
             is False
@@ -2845,8 +2843,7 @@ class TestRunGemmTuningHandler:
                 framework="vllm",
                 precision="fp8",
                 quant_type="blockscale",
-                shapes_json="",
-                tunableop_input="",
+                supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
                 dry_run=False,
             )
             is False
@@ -2919,8 +2916,7 @@ class TestRunGemmTuningHandler:
             shape_capture._vllm_dense_shape_capture_required(
                 framework=framework,
                 model_path=str(model),
-                shapes_json=shapes_json,
-                tunableop_input=tunableop_input,
+                supplied=shape_capture.SuppliedShapes(shapes_json=shapes_json, tunableop_input=tunableop_input),
                 dry_run=dry_run,
             )
             is False
@@ -2938,8 +2934,7 @@ class TestRunGemmTuningHandler:
             shape_capture._vllm_dense_shape_capture_required(
                 framework="vllm",
                 model_path=str(model),
-                shapes_json="",
-                tunableop_input="",
+                supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
                 dry_run=False,
             )
             is False
@@ -2962,8 +2957,7 @@ class TestRunGemmTuningHandler:
             shape_capture._vllm_dense_shape_capture_required(
                 framework="vllm",
                 model_path=str(model),
-                shapes_json="",
-                tunableop_input="",
+                supplied=shape_capture.SuppliedShapes(shapes_json="", tunableop_input=""),
                 dry_run=False,
             )
             is False
@@ -4813,5 +4807,5 @@ async def test_a_shape_capture_for_a_lane_the_phase_cannot_fund_never_starts(tmp
     result = await forge_gemm_tuning._run_forge_gemm_tuning({"task_id": "capture"}, session_dir=tmp_path)
 
     assert (result["status"], result["error_class"]) == ("skipped", lane_budget.INSUFFICIENT_BUDGET)
-    assert [call["has_tunableop_input"] for call in router_calls] == [True]
+    assert [call["evidence"].has_tunableop_input for call in router_calls] == [True]
     assert _FORGE_GEMM_PAYLOADS == []

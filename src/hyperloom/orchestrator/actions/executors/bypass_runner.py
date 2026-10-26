@@ -555,13 +555,12 @@ def _terminate_server(proc: subprocess.Popen | None) -> None:
 
 def _run_subprocess(cmd: list[str], timeout_s: float, workspace: Path, tag: str) -> int:
     """Run a client/eval subprocess, appending logs; return its exit code."""
-    from ._subprocess_kill import run_with_session_kill
+    from ._subprocess_kill import RoundWatch, run_with_session_kill
 
     try:
         proc = run_with_session_kill(
             cmd,
-            text=True,
-            timeout=timeout_s,
+            watch=RoundWatch(timeout=timeout_s),
             env=build_benchmark_env(),
         )
     except subprocess.TimeoutExpired:

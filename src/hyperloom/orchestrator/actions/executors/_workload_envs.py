@@ -24,6 +24,7 @@ import logging
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple
 
@@ -59,6 +60,7 @@ from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS, GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs
 from hyperloom.inference_optimizer.grid_server_args import (
+    WorkloadTokenWindow,
     compact_json_server_args,
     dedup_vllm_server_args,
     inject_sglang_attention_backend,
@@ -924,9 +926,7 @@ def _finalize_framework_server_args(
         resolved_server_args,
         bench.get("framework"),
         bench.get("model"),
-        window.isl,
-        window.osl,
-        max_model_len=envs.get("MAX_MODEL_LEN") or os.environ.get("MAX_MODEL_LEN"),
+        WorkloadTokenWindow(window.isl, window.osl, envs.get("MAX_MODEL_LEN") or os.environ.get("MAX_MODEL_LEN")),
     )
     resolved_server_args = inject_sglang_watchdog_timeout(
         resolved_server_args,
@@ -980,24 +980,22 @@ class _RequestWindow(NamedTuple):
     atom_caps: _AtomTracelensCaps | None
 
 
-def _pin_benchmark_target(
-    bench: dict[str, Any], model_path: str | None, gpu_type: str | None, script: str | None, inferencex: str | None
-) -> None:
-    if model_path:
-        bench["model"] = str(model_path)
+def _pin_benchmark_target(bench: dict[str, Any], target: BenchmarkTarget) -> None:
+    if target.model_path:
+        bench["model"] = str(target.model_path)
     precision = os.environ.get("PRECISION", "").strip()
     if precision:
         bench["precision"] = precision
-    if gpu_type:
-        bench["runner_type"] = gpu_runner_type(gpu_type)
+    if target.gpu_type:
+        bench["runner_type"] = gpu_runner_type(target.gpu_type)
         framework = str(bench.get("framework") or "").lower()
         if framework:
             bench["benchmark_script"] = f"{framework}_{bench['runner_type']}.sh"
         else:
             bench.pop("benchmark_script", None)
-    if script:
-        bench["benchmark_script"] = str(script)
-    effective_inferencex_path = str(inferencex or "").strip() or os.environ.get("INFERENCEX_PATH", "").strip()
+    if target.benchmark_script:
+        bench["benchmark_script"] = str(target.benchmark_script)
+    effective_inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if effective_inferencex_path:
         # Persist the resolved InferenceX checkout so Magpie's runtime checkout
         # matches Hyperloom's patch target.
@@ -1412,7 +1410,7 @@ def _pin_accuracy_eval_envs(envs: dict[str, Any]) -> None:
         try:
             from ._multi_node_env import resolve_kb_topology
 
-            if str(resolve_kb_topology().get("pd_mode") or "").lower() == "disaggregated":
+            if str(resolve_kb_topology().pd_mode or "").lower() == "disaggregated":
                 _eval_tok_env = "false"
         except Exception as exc:  # noqa: BLE001 - best-effort; never block config materialization
             # Don't degrade silently: if this IS a PD run, failing to resolve the
@@ -1527,16 +1525,62 @@ def _drop_benchmark_credentials(envs: dict[str, Any]) -> None:
         envs.update(filtered_envs)
 
 
-def prepare_grid_benchmark_config(config_path: Path, output_dir: Path, **overrides: Any) -> Path:
+@dataclass(frozen=True)
+class LaunchLayer:
+    """One layer of server-arg and env changes composed over a config's launch."""
+
+    extra_server_args: str = ""
+    extra_envs: dict[str, Any] | None = None
+    remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None
+    unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None
+    args_mode: str = "append"
+
+
+@dataclass(frozen=True)
+class BenchmarkTarget:
+    """The model, GPU type and benchmark script a rendered config is pinned to."""
+
+    model_path: str | None = None
+    gpu_type: str | None = None
+    benchmark_script: str | None = None
+
+
+@dataclass(frozen=True)
+class MaterializeOptions:
+    """Per-run choices for a materialized config beyond its launch layer and target."""
+
+    out_name: str = "baseline_config.with_envs.yaml"
+    establish_quality_ref: bool = False
+    drop_moe_runner_backend: bool = False
+    flydsl_source_dirs: bool = False
+    agentx_mode: bool | None = None
+    grading: Mapping[str, Any] | None = None
+
+
+def prepare_grid_benchmark_config(
+    config_path: Path,
+    output_dir: Path,
+    *,
+    launch: LaunchLayer = LaunchLayer(),
+    target: BenchmarkTarget = BenchmarkTarget(),
+    options: MaterializeOptions = MaterializeOptions(),
+) -> Path:
     """Keep the verified native baseline intact until the grid composes its candidate."""
     from .magpie_agentx import native_config
 
     if native_config(config_path):
         return config_path
-    return materialize_config_with_envs(config_path, output_dir, **overrides)
+    return materialize_config_with_envs(config_path, output_dir, launch=launch, target=target, options=options)
 
 
-def materialize_benchmark_config(config_path: Path, output_dir: Path, **overrides: Any) -> Path:
+def materialize_benchmark_config(
+    config_path: Path,
+    output_dir: Path,
+    *,
+    launch: LaunchLayer = LaunchLayer(),
+    target: BenchmarkTarget = BenchmarkTarget(),
+    options: MaterializeOptions = MaterializeOptions(),
+) -> Path:
     """Resolve the workload owner before applying server candidate changes."""
     import yaml
 
@@ -1546,14 +1590,14 @@ def materialize_benchmark_config(config_path: Path, output_dir: Path, **override
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if not is_magpie_agentx(config["benchmark"]):
-        return materialize_config_with_envs(config_path, output_dir, **overrides)
-    replacing = overrides.get("args_mode") == "replace"
+        return materialize_config_with_envs(config_path, output_dir, launch=launch, target=target, options=options)
+    replacing = launch.args_mode == "replace"
     inherited = "" if replacing else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "")
     recipe_options = recipe_option_names(config_path)
     apply_launch_changes(config["benchmark"], LaunchChanges(args=inherited), recipe_options=recipe_options)
     from hyperloom.common.env import is_truthy
 
-    unset_envs = to_str_list(overrides.get("unset_envs"))
+    unset_envs = to_str_list(launch.unset_envs)
     server_env, dropped = filter_untrusted_env_mapping(
         {
             key: value
@@ -1566,22 +1610,21 @@ def materialize_benchmark_config(config_path: Path, output_dir: Path, **override
     )
     for key in dropped:
         log.warning("Dropping extra_envs key %s before AgentX materialization", key)
-    server_env.update(overrides.get("extra_envs") or {})
+    server_env.update(launch.extra_envs or {})
     if is_truthy(server_env.pop("RUN_EVAL", False)):
         raise ValueError("AgentX uses Magpie's replay validity; RUN_EVAL cannot enable GSM8K for this workload")
     changes = LaunchChanges(
-        overrides.get("extra_server_args", ""),
+        launch.extra_server_args,
         server_env,
-        to_str_list(overrides.get("remove_args")),
+        to_str_list(launch.remove_args),
         unset_envs,
         replacing,
     )
     apply_launch_changes(config["benchmark"], changes, recipe_options=recipe_options)
     return materialize_agentx(
         config,
-        output_dir / overrides.get("out_name", "baseline_config.with_envs.yaml"),
-        model_path=overrides.get("model_path"),
-        inferencex_path=overrides.get("inferencex_path"),
+        output_dir / options.out_name,
+        model_path=target.model_path,
     )
 
 
@@ -1589,21 +1632,9 @@ def materialize_config_with_envs(
     config_path: Path,
     output_dir: Path,
     *,
-    extra_server_args: str = "",
-    extra_envs: dict[str, Any] | None = None,
-    remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None,
-    unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
-    args_mode: str = "append",
-    model_path: str | None = None,
-    gpu_type: str | None = None,
-    inferencex_path: str | None = None,
-    benchmark_script: str | None = None,
-    out_name: str = "baseline_config.with_envs.yaml",
-    establish_quality_ref: bool = False,
-    drop_moe_runner_backend: bool = False,
-    flydsl_source_dirs: bool = False,
-    agentx_mode: bool | None = None,
-    grading: Mapping[str, Any] | None = None,
+    launch: LaunchLayer = LaunchLayer(),
+    target: BenchmarkTarget = BenchmarkTarget(),
+    options: MaterializeOptions = MaterializeOptions(),
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
 
@@ -1612,47 +1643,51 @@ def materialize_config_with_envs(
     from every source, the per-framework and per-model envs, and the caller's own removals.
 
     Raises:
-        FrameworkScriptMismatchError: If ``benchmark_script`` targets a
+        FrameworkScriptMismatchError: If ``target.benchmark_script`` targets a
             different known framework than the run's framework.
     """
-    server_args = (extra_server_args or "").strip()
+    server_args = (launch.extra_server_args or "").strip()
     operator_server_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
-    replace_args = str(args_mode or "append").strip().lower() == "replace"
+    replace_args = str(launch.args_mode or "append").strip().lower() == "replace"
     if operator_server_args and not replace_args:
         server_args = merge_server_args(operator_server_args, server_args)
     with config_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     bench = cfg.setdefault("benchmark", {})
-    _pin_benchmark_target(bench, model_path, gpu_type, benchmark_script, inferencex_path)
-    agentx_run = agentx_enabled() if agentx_mode is None else agentx_mode
+    _pin_benchmark_target(bench, target)
+    agentx_run = agentx_enabled() if options.agentx_mode is None else options.agentx_mode
     envs = bench["envs"] = {k: v for k, v in (bench.get("envs") or {}).items() if agentx_run or k != "RUN_EVAL"}
     runtime_path = os.environ.get("PATH", "").strip()
     if "PATH" in envs and runtime_path:
         envs["PATH"] = runtime_path
-    apply_scriptable_runtime_defaults(bench, envs, gpu_type=gpu_type, explicit_benchmark_script=bool(benchmark_script))
-    apply_agentx_switch(bench, model_path, active=agentx_run, grading=grading)
+    apply_scriptable_runtime_defaults(
+        bench, envs, gpu_type=target.gpu_type, explicit_benchmark_script=bool(target.benchmark_script)
+    )
+    apply_agentx_switch(bench, target.model_path, active=agentx_run, grading=options.grading)
     _refuse_framework_script_mismatch(bench)
     _pin_workload_shape_envs(envs)
     framework_env = server_args_env_name(bench.get("framework"))
     window = _shape_request_window(bench)
     reference_envs, reference_controls = _seed_reference_launch(bench, framework_env)
-    safe_extra_envs = _merge_caller_overrides(bench, framework_env, server_args, replace_args, extra_envs)
+    safe_extra_envs = _merge_caller_overrides(bench, framework_env, server_args, replace_args, launch.extra_envs)
     _settle_merged_server_args(bench, framework_env)
-    _publish_scriptable_wiring(bench, window, establish_quality_ref)
-    model_basename = _pin_model_launch_workarounds(bench, model_path)
-    _finalize_framework_server_args(bench, window, gpu_type=gpu_type, drop_moe_runner_backend=drop_moe_runner_backend)
-    _pin_client_model_access(bench, model_path, model_basename)
+    _publish_scriptable_wiring(bench, window, options.establish_quality_ref)
+    model_basename = _pin_model_launch_workarounds(bench, target.model_path)
+    _finalize_framework_server_args(
+        bench, window, gpu_type=target.gpu_type, drop_moe_runner_backend=options.drop_moe_runner_backend
+    )
+    _pin_client_model_access(bench, target.model_path, model_basename)
     _pin_accuracy_eval_envs(envs)
-    _pin_runtime_build_envs(bench, model_path, gpu_type, flydsl_source_dirs)
+    _pin_runtime_build_envs(bench, target.model_path, target.gpu_type, options.flydsl_source_dirs)
     unset_by_reference = reference_controls.get("unset_envs", [])
     stale = [k for k in unset_by_reference if k not in reference_envs and k not in safe_extra_envs]
-    _apply_caller_removals(envs, framework_env, remove_args, unset_envs, stale)
+    _apply_caller_removals(envs, framework_env, launch.remove_args, launch.unset_envs, stale)
     _restate_profile_capture(envs, framework_env, window, replace_args)
     _apply_vllm_source_runtime(bench, envs)
     _drop_benchmark_credentials(envs)
     seal_server_argv(envs, bench.get("framework"))
     output_dir.mkdir(parents=True, exist_ok=True)
-    materialized = output_dir / out_name
+    materialized = output_dir / options.out_name
     with materialized.open("w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
     return materialized
