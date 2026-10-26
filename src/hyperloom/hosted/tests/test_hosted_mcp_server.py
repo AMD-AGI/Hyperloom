@@ -17,7 +17,9 @@ from typing import Any
 
 import pytest
 
+from hyperloom.hosted.host_info import Var, take_host_info
 from hyperloom.hosted.mcp_server import (
+    HOST_KIND,
     CallContext,
     McpServer,
     McpServerConfig,
@@ -279,6 +281,22 @@ def test_tokens_are_stored_as_digests_only(server: McpServer) -> None:
     token = server.issue_token("spec-1", "b")
     assert all(token.encode() != key for key in server._tokens._by_digest)
     assert token not in repr(server.__dict__.get("_tokens").__dict__)
+
+
+def test_config_built_from_the_host_info_the_hosted_entry_takes(tmp_path) -> None:
+    (tmp_path / "campaign.json").write_text("{}")
+    environ = {
+        Var.INPUT_FILE: str(tmp_path / "campaign.json"),
+        Var.RUN_ID: "run-1",
+        Var.RUN_CREATED_AT: "2026-10-01T12:30:00Z",
+        Var.STATE_DIR: str(tmp_path),
+        Var.MCP_PORT: "8765",
+        Var.MCP_TOKEN: HOST_TOKEN,
+    }
+    info = take_host_info(environ)
+    assert Var.MCP_TOKEN not in environ
+    server = McpServer(McpServerConfig(port=info.mcp_port, host_token=info.mcp_token.reveal()), campaign="c")
+    assert server.authenticate(HOST_TOKEN).kind == HOST_KIND
 
 
 def test_config_validation() -> None:
