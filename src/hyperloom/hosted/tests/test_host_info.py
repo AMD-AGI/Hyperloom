@@ -18,7 +18,7 @@ from hyperloom.hosted import host_info
 from hyperloom.hosted.host_info import HostGroup, HostInfoError, Var, read_host_info, take_host_info
 
 # Distinct, recognisable values, so a leak anywhere is found by a plain substring search.
-_SECRETS = {name: f"sentinel-{index}-{index}{index}{index}" for index, name in enumerate(host_info.SECRET_VARS)}
+_SECRETS = {name: f"sentinel-secret-{index}-{index}{index}{index}" for index, name in enumerate(host_info.SECRET_VARS)}
 _ALL_GROUPS = tuple(HostGroup)
 
 
@@ -204,6 +204,7 @@ def test_missing_and_malformed_inputs_are_reported_together(env):
         (Var.INPUT_FILE, "/nonexistent/campaign.json", "not an existing file"),
         (Var.STATE_DIR, "/nonexistent/state", "not an existing directory"),
         (Var.MCP_TOKEN, "two words", "whitespace or control"),
+        (Var.MCP_TOKEN, "x" * 15, "at least 16 characters"),
         (Var.SOURCE_SHA, "0123abc", "40-hex"),
         (Var.SOURCE_SHA, "0123456789ABCDEF0123456789abcdef01234567", "40-hex"),
         (Var.SOURCE_REPO, "two words", "whitespace or control"),

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.coerce import to_int, to_str_list, to_unix
+from hyperloom.common.coerce import recorded_float, to_int, to_str_list, to_unix
 from hyperloom.common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
@@ -2299,19 +2299,33 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         Returns:
             float: Minutes consumed; never negative.
         """
-        charged = max(0.0, self.elapsed_charged_sec)
-        anchor = self.leg_anchor_unix
         now_dt = now or datetime.now(timezone.utc)
         if now_dt.tzinfo is None:
             now_dt = now_dt.replace(tzinfo=timezone.utc)
+        record = {
+            "elapsed_charged_sec": self.elapsed_charged_sec,
+            "leg_anchor_unix": self.leg_anchor_unix,
+            "start_ts": self.start_ts,
+        }
+        return self.elapsed_sec_of(record, now_unix=now_dt.timestamp()) / 60.0
+
+    @staticmethod
+    def elapsed_sec_of(record: Mapping[str, Any], *, now_unix: float) -> float:
+        """Seconds of budget a session consumed, from its persisted fields (``state.json`` or a live state's dict).
+
+        The charged total plus the live leg since its anchor; a session with neither falls back to the time since
+        ``start_ts``. The one rule behind :meth:`elapsed_minutes`.
+        """
+        charged = max(0.0, recorded_float(record.get("elapsed_charged_sec")))
+        anchor = recorded_float(record.get("leg_anchor_unix"))
         if anchor > 0.0:
-            return (charged + max(0.0, now_dt.timestamp() - anchor)) / 60.0
+            return charged + max(0.0, now_unix - anchor)
         if charged > 0.0:
-            return charged / 60.0
-        started = to_unix(self.start_ts.strip())
+            return charged
+        started = to_unix(str(record.get("start_ts") or "").strip())
         if started is None:
             return 0.0
-        return max(0.0, now_dt.timestamp() - started) / 60.0
+        return max(0.0, now_unix - started)
 
     def extend_budget_minutes(self, minutes: float) -> float:
         """Grant more wall-clock budget to this session.

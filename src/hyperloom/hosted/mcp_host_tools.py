@@ -26,16 +26,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_unix
 from hyperloom.common.io import atomic_write_json
 from hyperloom.hosted.events import segment_name, segment_numbers
 from hyperloom.hosted.mcp_server import HOST_KIND, CallContext, McpServer, ToolError
 from hyperloom.inference_optimizer.session.optimization_journal import read_journal_entries
-from hyperloom.inference_optimizer.session.paths import db_path_for
+from hyperloom.inference_optimizer.session.paths import db_path_for, stop_request_path
 from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 STATE_FILE = "state.json"
-CONTROL_DIR = Path("hosted") / "control"
-STOP_FILE = "stop.json"
 MEASUREMENT_SANDBOXES = Path("hosted") / "measurement_sandboxes.jsonl"
 EVENT_BEST_UPDATED = "hyperloom.best_updated"
 IN_FLIGHT_STATES = ("queued", "running")
@@ -94,30 +94,6 @@ def _lift_pct(tput: Any, baseline: Any) -> float | None:
     if value is None or base is None or base <= 0 or value <= 0:
         return None
     return round((value / base - 1.0) * 100.0, 3)
-
-
-def _elapsed_sec(state: dict[str, Any], now: float) -> float:
-    """Seconds of budget used: what earlier legs charged plus the live leg, as ``SharedState.elapsed_minutes`` counts."""
-    charged = max(0.0, _number(state.get("elapsed_charged_sec")) or 0.0)
-    anchor = _number(state.get("leg_anchor_unix")) or 0.0
-    if anchor > 0:
-        return charged + max(0.0, now - anchor)
-    if charged > 0:
-        return charged
-    started = _parse_time(state.get("start_ts"))
-    return max(0.0, now - started) if started is not None else 0.0
-
-
-def _parse_time(value: Any) -> float | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    text = value.strip()
-    text = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
-    try:
-        stamp = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    return (stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)).timestamp()
 
 
 def _read_jsonl(path: Path) -> Iterator[dict[str, Any] | None]:
@@ -190,7 +166,7 @@ def _task_timings(session_dir: Path, task_ids: list[str]) -> dict[str, tuple[str
         ).fetchall()
     out: dict[str, tuple[str, float | None]] = {}
     for task_id, kind, created, updated in rows:
-        begun, ended = _parse_time(created), _parse_time(updated)
+        begun, ended = to_unix(created), to_unix(updated)
         out[task_id] = (kind, round(ended - begun, 3) if begun is not None and ended is not None else None)
     return out
 
@@ -238,7 +214,7 @@ class HostTools:
             "phase": state.get("phase") or None,
             "macro_round": state.get("macro_cycle"),
             "tick": state.get("tick"),
-            "elapsed_sec": round(_elapsed_sec(state, self._clock()), 1),
+            "elapsed_sec": round(SharedState.elapsed_sec_of(state, now_unix=self._clock()), 1),
             "total_sec": total_min * 60.0 if total_min > 0 else None,
             "stop_reason": state.get("stop_reason") or None,
             "stopped": bool(state.get("stop_ts")),
@@ -351,7 +327,7 @@ class HostTools:
         reason = args["reason"].strip()[:MAX_REASON_CHARS]
         if not reason:
             raise ToolError("a stop reason is required")
-        path = self._session / CONTROL_DIR / STOP_FILE
+        path = stop_request_path(self._session)
         try:
             atomic_write_json(
                 path, {"reason": reason, "requested_at": datetime.now(timezone.utc).isoformat(), "by": HOST_KIND}

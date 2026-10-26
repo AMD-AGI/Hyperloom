@@ -353,3 +353,17 @@ def test_initialize_then_every_tool_over_http_and_auth_boundaries(rig, stops):
         _, reply = rig.post(specialist, "tools/call", {"name": tool, "arguments": {"reason": "x", "request_id": "r"}})
         assert reply["error"]["code"] == -32001 and "result" not in reply, tool
     assert stops == ["stop"]  # the specialist's request_stop never ran
+
+
+def test_elapsed_time_is_the_budget_rule_of_the_state_itself(session):
+    from datetime import datetime, timezone
+
+    recorded = json.loads((session / "state.json").read_text())
+    for fields in ({}, {"leg_anchor_unix": 5000.0}, {"elapsed_charged_sec": 0.0, "start_ts": "1970-01-01T00:00:00Z"}):
+        recorded.update(fields)
+        live = SharedState.from_dict(recorded)
+        live.leg_anchor_unix = recorded.get("leg_anchor_unix", 0.0)  # a loaded state starts no leg of its own
+        now = datetime.fromtimestamp(9000.0, timezone.utc)
+        assert SharedState.elapsed_sec_of(recorded, now_unix=9000.0) == pytest.approx(
+            live.elapsed_minutes(now=now) * 60.0
+        )
