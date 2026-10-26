@@ -197,7 +197,7 @@ def _notify_checkpoint(callback: Callable[[], None] | None) -> bool:
         return True
     try:
         callback()
-    except Exception:  # a probe failure must not end the campaign
+    except Exception:  # isolation boundary: one checkpoint-recovery probe tick
         log.debug("checkpoint recovery probe raised", exc_info=True)
         return False
     return True
