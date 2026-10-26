@@ -52,6 +52,13 @@ _AGENTIC_PARITY_NOT_BENCHED = (
 )
 
 
+def _graded_change(graded: Any, delta_pct: float | None) -> float | None:
+    """The change on the graded objective; an interactivity pair reports it even when the gate leaves ``delta_pct``."""
+    if graded.comparable and graded.graded_on_intvty:
+        return gain_pct(graded.candidate, graded.reference)
+    return delta_pct
+
+
 class PerfGateMixin:
     """Decide keep or revert from the measurement, and establish the parity a switched-off variant has to hold."""
 
@@ -163,6 +170,7 @@ class PerfGateMixin:
             acc_delta_pct=acc_delta_pct,
             cfg_fingerprint=canonical_fingerprint(params.get("extra_server_args"), params.get("extra_envs")),
             measured_against=_measured_against(params, base_tput=base_tput),
+            graded_delta_pct=_graded_change(graded, delta_pct),
         )
 
         switch_manifest: list[dict[str, Any]] = list(attempt.switch_manifest)

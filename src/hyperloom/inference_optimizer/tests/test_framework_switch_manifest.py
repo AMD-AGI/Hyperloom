@@ -1067,3 +1067,61 @@ async def test_parity_can_be_switched_off_explicitly(tmp_path):
     )
     assert verdict["ran"] is False
     assert verdict["ok"] is True
+
+
+def _interactivity_revert(candidate: float, reference: float):
+    """A pair graded on the AgentX P50 objective that missed KEEP, as an inert-keep round reads it."""
+    from hyperloom.common.perf_metric import GRADED_INTVTY_P50, VERDICT_REVERT, GradedComparison
+
+    return GradedComparison(
+        objective=GRADED_INTVTY_P50,
+        candidate=candidate,
+        reference=reference,
+        verdict=VERDICT_REVERT,
+        tput_candidate=301.4,
+        tput_reference=321.1,
+        refused_by="intvty_p50",
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_interactivity_graded_inert_keep_reports_the_change_it_measured(tmp_path, monkeypatch):
+    """Off KEEP the gate leaves ``delta_pct`` empty; the measured P50 change still travels with the result."""
+    from hyperloom.common.gain_math import gain_pct
+    from hyperloom.orchestrator.actions.executors import _integrate_perf_gate as gate
+
+    graded = _interactivity_revert(106.65, 108.97)
+    monkeypatch.setattr(gate, "resolve_graded_comparison", lambda *_a, **_k: graded)
+
+    result, _, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
+
+    assert result["status"] == "kept_inert"
+    assert result["delta_pct"] is None
+    assert result["graded_delta_pct"] == gain_pct(106.65, 108.97)
+
+
+@pytest.mark.asyncio
+async def test_an_inert_lever_carries_the_change_its_round_measured(tmp_path, monkeypatch):
+    """The lever ledger records the measured P50 change of an interactivity-graded inert keep, not ``None``."""
+    from hyperloom.common.gain_math import gain_pct
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.actions.executors import _integrate_perf_gate as gate
+    from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
+
+    from .conftest import make_coordinator
+
+    graded = _interactivity_revert(106.65, 108.97)
+    monkeypatch.setattr(gate, "resolve_graded_comparison", lambda *_a, **_k: graded)
+    result, _, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
+    state = _state()
+    state.baseline_tput = 100.0
+    state.save(tmp_path)
+    coord = make_coordinator(tmp_path)
+
+    await coord.writeback._promote_integrate_patch(result, None, _PromoteOutcome(verdict=Verdict.RECORDED))
+
+    rows = coord.shared_state.authored_framework_levers
+    assert [(row["switch"], row["stack_delta_pct"]) for row in rows] == [
+        ("HL_HOIST", gain_pct(106.65, 108.97)),
+        ("HL_CACHE", gain_pct(106.65, 108.97)),
+    ]

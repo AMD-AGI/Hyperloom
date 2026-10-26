@@ -81,16 +81,22 @@ class _PatchMeasurement:
     acc_delta_pct: float | None
     cfg_fingerprint: str
     measured_against: dict[str, Any]
+    #: The change on the graded objective, reported even where the gate leaves ``delta_pct`` empty.
+    graded_delta_pct: float | None = None
+
+    def _measured_pct(self) -> float | None:
+        return self.delta_pct if self.delta_pct is not None else self.graded_delta_pct
 
     def lesson(self, outcome: str) -> _KbLesson:
         """The KB record of this measurement under ``outcome``."""
-        return _KbLesson(outcome, float(self.delta_pct or 0.0), self.acc_delta_pct, self.cfg_fingerprint)
+        return _KbLesson(outcome, float(self._measured_pct() or 0.0), self.acc_delta_pct, self.cfg_fingerprint)
 
     def envelope(self) -> dict[str, Any]:
         """How every perf verdict reports the measurement behind it."""
         return {
             "output_throughput": self.new_tput,
             "delta_pct": self.delta_pct,
+            "graded_delta_pct": self.graded_delta_pct,
             "accuracy_pass": self.accuracy_pass,
             "base_tput": self.base_tput,
             "measured_against": self.measured_against,
