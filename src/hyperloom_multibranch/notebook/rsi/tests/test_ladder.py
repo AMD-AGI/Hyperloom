@@ -15,6 +15,7 @@ import pytest
 from hyperloom_multibranch.notebook.rsi.ladder import (
     BETTER,
     GAIN_PER_GPU_HOUR,
+    JUDGE_SYSTEM_PROMPT,
     MAX_TRIALS,
     PAIR_SECONDS,
     UNCLEAR,
@@ -30,6 +31,7 @@ from hyperloom_multibranch.notebook.rsi.ladder import (
     r0,
     r1,
     r2,
+    r2_sessions,
     r3,
     record_standing,
     record_trial,
@@ -94,6 +96,22 @@ def test_r1_replays_a_number_change_both_ways_and_leaves_a_rule_change_to_r2() -
 def _call(minutes: float, *stopped: str) -> dict[str, object]:
     reply = json.dumps({"stop": [{"branch": name, "reason": "lowest"} for name in stopped]})
     return {"at": 1000.0 + minutes * MINUTE, "prompt": f"view at {minutes:g} min", "reply": reply}
+
+
+async def test_r2_replays_a_rule_change_with_the_judge_asked_every_round_and_leaves_numbers_to_r1() -> None:
+    ruled = Playbook("ruled", rules=(ALIKE,), parent=H0.label)
+    systems: set[str] = set()
+
+    async def judge(system: str, prompt: str) -> str:
+        systems.add(system)
+        return '{"stop": []}'
+
+    replayed = await r2_sessions(ruled, H0, (SESSION,), judge, runs=2)
+    skipped = await r2_sessions(PATIENT, H0, (SESSION,), judge, runs=2)
+
+    assert replayed.rung == "R2" and not replayed.passed and systems == {JUDGE_SYSTEM_PROMPT}
+    assert replayed.reason.startswith("judged replay of 1 sessions, 2 runs each: best gain +0.00 points against h0")
+    assert skipped.skipped and skipped.reason == "a change of numbers: R1 replays it"
 
 
 def test_the_decision_points_are_the_judges_stops_whose_outcome_is_known() -> None:

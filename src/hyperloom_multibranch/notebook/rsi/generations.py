@@ -7,8 +7,8 @@
 one of each model type the archive holds where there are enough. Each generation the LLM reads how the champion
 replays on the evolution set, its stop audits and the ledger of every change tried so far
 (:func:`generation_prompt`), and proposes one change, as at CLOSE. A change that passes the static check (R0) and the
-replay of the evolution set (R1) is crowned; the rest are retired with their evidence, so the next generation reads
-them. At the end the last champion and H0 are replayed on the held-out sessions, both ways beyond the data: a
+replay of the evolution set (R1; for a rule change, the judged replay of :data:`JUDGED_SESSIONS` of its sessions) is
+crowned; the rest are retired with their evidence, so the next generation reads them. At the end the last champion and H0 are replayed on the held-out sessions, both ways beyond the data: a
 champion better on the evolution set and not on the held-out one has fitted the archive.
 """
 
@@ -22,7 +22,7 @@ from pathlib import Path
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree
 from hyperloom_multibranch.notebook.rsi.authoring import PLAYBOOK_SYSTEM_PROMPT, read_change
 from hyperloom_multibranch.notebook.rsi.history import MODEL_TYPE_LABEL
-from hyperloom_multibranch.notebook.rsi.ladder import Complete, r0, r1
+from hyperloom_multibranch.notebook.rsi.ladder import JUDGED_SESSIONS, Complete, Rung, r0, r1, r2_sessions
 from hyperloom_multibranch.notebook.rsi.playbook import BOUNDS, H0, Crowned, Playbook, PlaybookPool, Retired, changes
 from hyperloom_multibranch.notebook.rsi.replay import OPTIMISTIC, PESSIMISTIC, SchedulingComparison, compare
 from hyperloom_multibranch.notebook.rsi.stops import stall_study
@@ -166,7 +166,11 @@ async def generations(
             done.append(Generation(number, proposed.label, "", str(exc), False))
             continue
         checked = r0(proposed, champion)
-        replayed = r1(proposed, champion, evolution, runs=runs, seed=seed) if checked.passed else checked
+        replayed: Rung = checked
+        if checked.passed and "rules" in changes(champion, proposed):
+            replayed = await r2_sessions(proposed, champion, evolution[:JUDGED_SESSIONS], complete, seed=seed)
+        elif checked.passed:
+            replayed = r1(proposed, champion, evolution, runs=runs, seed=seed)
         crowned = checked.passed and replayed.passed and not replayed.skipped
         verdict = f"{checked.rung} {checked.reason}; {replayed.rung} {replayed.reason}"
         if crowned:

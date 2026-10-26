@@ -10,7 +10,10 @@
 * R2, :func:`r2`: the judge's own decision points, the prompts the archived sessions' judge was asked, asked again
   with the candidate's playbook and the champion's. A point counts where its outcome is known: a stop at most
   :data:`EARLY_STOP_TESTS` judged tests past a commit, which the playbook should have prevented, and a stop at or past
-  the stall bar, which it should keep. The candidate passes when it gets more of them right than the champion.
+  the stall bar, which it should keep. The candidate passes when it gets more of them right than the champion. A rule
+  change also replays :data:`JUDGED_SESSIONS` sessions :data:`JUDGED_RUNS` times each under either playbook with the
+  judge asked every round (:func:`r2_sessions`), and passes when its best gain beats the champion's, paired run by
+  run.
 * R3, :func:`r3`: the challenger sessions, each recorded at CLOSE as a :class:`Trial` with its task
   (:func:`session_task`) and its decision measures (:func:`session_measures`), and paired with the champion's session
   of its task that started nearest it (:func:`pairs`): the run entry runs the two side by side. A playbook is crowned
@@ -27,6 +30,7 @@ At every CLOSE the replay reruns over the archive with the session's tree in it,
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import re
@@ -49,6 +53,7 @@ from hyperloom_multibranch.notebook.rsi.replay import (
     PolicyRow,
     SchedulingComparison,
     compare,
+    stops_in,
     variants,
 )
 from hyperloom_multibranch.notebook.rsi.similarity import MODEL, WORKLOAD, model_name, workload_kind
@@ -83,8 +88,16 @@ WORSE = "worse"
 UNCLEAR = "unclear"
 #: How many of the judge's decision points R2 asks again, each once under either playbook.
 R2_POINTS = 15
-#: The key of a judge reply's stop orders.
-_STOP_KEY = "stop"
+#: The judged replay of a rule change: sessions, runs each, the judge asked every round under either playbook; about
+#: 2000 calls in all over twelve-hour sessions.
+JUDGED_SESSIONS = 3
+JUDGED_RUNS = 5
+#: What the judge of a judged replay is told it is.
+JUDGE_SYSTEM_PROMPT = (
+    "You are the scheduling judge of a multi-branch optimization session. Every round you read the running branches' "
+    "stall evidence and the scheduling playbook, and decide which branches to stop. Follow the playbook, its numbers, "
+    "its rules and its safety envelope; stop a branch only where they say to."
+)
 _TRIALS = "trials"
 _REPLAYS = "replays"
 _JSON = "*.json"
@@ -141,18 +154,6 @@ class DecisionPoint:
     prompt: str
 
 
-def _stopped(reply: str) -> tuple[str, ...]:
-    """The branches a judge reply stops; none when it holds no JSON object with a stop list."""
-
-    start, end = reply.find("{"), reply.rfind("}")
-    try:
-        document = json.loads(reply[start : end + 1]) if 0 <= start < end else None
-    except json.JSONDecodeError:
-        return ()
-    orders = document.get(_STOP_KEY) if isinstance(document, dict) else None
-    return tuple(str(item.get("branch")) for item in orders or () if isinstance(item, Mapping))
-
-
 def _stall_at(tree: SearchTree, name: str, t_s: float) -> tuple[int, bool] | None:
     """The judged tests of ``name`` at ``t_s`` since its last commit that did not fail to merge, or since it opened,
     and whether it had made one; ``None`` for a branch the tree lacks."""
@@ -177,7 +178,7 @@ def decision_points(
         at, prompt, reply = call.get("at"), call.get("prompt"), call.get("reply")
         if not isinstance(at, (int, float)) or not isinstance(prompt, str) or not isinstance(reply, str):
             continue
-        for name in _stopped(reply):
+        for name in stops_in(reply):
             when = float(at) - began
             found = _stall_at(tree, name, when)
             if found is None:
@@ -214,11 +215,42 @@ async def r2(
     right = {candidate.label: 0, champion.label: 0}
     for point in chosen:
         for playbook in (candidate, champion):
-            stops = point.branch in _stopped(await complete(system, _asked(point, playbook)))
+            stops = point.branch in stops_in(await complete(system, _asked(point, playbook)))
             right[playbook.label] += int(stops != point.keep)
     passed = right[candidate.label] > right[champion.label]
     said = f"right on {right[candidate.label]} of {len(chosen)} points, {champion.label} on {right[champion.label]}"
     return Rung("R2", passed, said)
+
+
+async def r2_sessions(
+    candidate: Playbook,
+    champion: Playbook,
+    trees: Sequence[SearchTree],
+    complete: Complete,
+    *,
+    system: str = JUDGE_SYSTEM_PROMPT,
+    runs: int = JUDGED_RUNS,
+    seed: str = "",
+) -> Rung:
+    """R2 for a rule change: ``trees`` replayed ``runs`` times each under ``candidate`` and ``champion``, the judge
+    asked every round through ``complete`` with ``system``; it passes when the candidate's best gain beats the
+    champion's, paired run by run. A change of numbers only is R1's to replay."""
+
+    if "rules" not in changes(champion, candidate):
+        return Rung("R2", True, "a change of numbers: R1 replays it", skipped=True)
+    loop = asyncio.get_running_loop()
+
+    def decide(prompt: str) -> str:
+        return asyncio.run_coroutine_threadsafe(complete(system, prompt), loop).result()
+
+    pair = {champion.label: champion, candidate.label: candidate}
+    found = await asyncio.to_thread(compare, trees, pair, runs=runs, seed=seed, baseline=champion.label, decide=decide)
+    row = next(item for item in found.rows if item.label == candidate.label)
+    said = (
+        f"judged replay of {len(found.sessions)} sessions, {runs} runs each: best gain {row.gain_difference:+.2f} "
+        f"points against {champion.label} ({row.difference_low:+.2f} to {row.difference_high:+.2f})"
+    )
+    return Rung("R2", row.gain_difference > 0, said)
 
 
 @dataclass(frozen=True)
@@ -555,6 +587,9 @@ __all__ = [
     "MAX_TRIALS",
     "MIN_TRIALS",
     "PAIR_SECONDS",
+    "JUDGED_RUNS",
+    "JUDGED_SESSIONS",
+    "JUDGE_SYSTEM_PROMPT",
     "R2_POINTS",
     "STANDING_FORMAT",
     "TASK_LABELS",
@@ -577,6 +612,7 @@ __all__ = [
     "r0",
     "r1",
     "r2",
+    "r2_sessions",
     "r3",
     "record_standing",
     "record_trial",

@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 from hyperloom_multibranch.notebook.rsi.generations import generation_prompt, generations, split
+from hyperloom_multibranch.notebook.rsi.ladder import JUDGE_SYSTEM_PROMPT
 from hyperloom_multibranch.notebook.rsi.playbook import H0, PlaybookPool
 from hyperloom_multibranch.notebook.rsi.tests.trees import HOUR, TASK, branch, tree
 
@@ -41,10 +42,14 @@ def test_the_held_out_sessions_hold_one_of_each_model_type_and_the_evolution_set
 
 
 def _answers(*documents: object):
+    """The author's replies in turn, and a judge that stops nothing; what the author was asked."""
+
     replies = iter(json.dumps(document) for document in documents)
     asked: list[str] = []
 
     async def complete(system: str, prompt: str) -> str:
+        if system == JUDGE_SYSTEM_PROMPT:
+            return '{"stop": []}'
         asked.append(prompt)
         return next(replies)
 
@@ -73,7 +78,8 @@ async def test_each_generation_proposes_one_change_that_the_replay_crowns_or_ret
     first, second, third = report.generations
     assert (first.proposed, first.changed) == ("early-stop", "stall_tests")
     assert "R1 best gain against h0" in first.verdict
-    assert (second.proposed, second.crowned) == ("alike", False) and "the replay cannot play it" in second.verdict
+    assert (second.proposed, second.crowned) == ("alike", False)
+    assert "R2 judged replay of 3 sessions, 5 runs each: best gain +0.00 points against" in second.verdict
     assert (third.proposed, third.verdict) == ("", "the LLM proposed no change: nothing else to try")
     assert report.champion.label == ("early-stop" if first.crowned else H0.label)
     assert len(report.held_out) == 4 and "retired: R0" in asked[2]

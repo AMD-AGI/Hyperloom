@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 
 import pytest
 
@@ -16,6 +17,7 @@ from hyperloom_multibranch.notebook.rsi.replay import (
     ARCHIVE,
     OPTIMISTIC,
     PESSIMISTIC,
+    STOP_REPLY,
     Pace,
     archive_cap,
     check,
@@ -23,6 +25,7 @@ from hyperloom_multibranch.notebook.rsi.replay import (
     cut_check,
     pace_for,
     simulate,
+    stops_in,
     variants,
 )
 from hyperloom_multibranch.notebook.rsi.tests.trees import HOUR, TASK, branch, tree
@@ -82,6 +85,42 @@ def test_a_branch_stopped_earlier_loses_what_it_did_after_and_frees_its_gpu() ->
     # Its stall reaches four tests at 60 min: six of its ten tests ran.
     assert (cut.best_gain_pct, cut.stops, cut.opened) == (3.0, 1, 1)
     assert cut.gpu_hours == pytest.approx(6.0)
+
+
+def _past_the_bar(prompt: str) -> str:
+    """A judge that stops every branch its view shows past the stop bar."""
+
+    lines = [line[2:] for line in prompt.splitlines() if line.startswith("- b")]
+    named = [line.split(":")[0] for line in lines if not line.endswith(("grace", "below the stop bar"))]
+    return json.dumps({"stop": [{"branch": name, "reason": "stalled"} for name in named]})
+
+
+def test_a_judged_replay_asks_the_judge_every_round_and_refuses_the_stop_of_a_branch_on_probation() -> None:
+    asked: list[str] = []
+
+    def never(prompt: str) -> str:
+        asked.append(prompt)
+        return "no branch to stop"
+
+    kept = simulate(_tree(STALLED), STRICT, NEVER, decide=never)
+    stopped = simulate(_tree(STALLED), STRICT, NEVER, decide=_past_the_bar)
+    held = simulate(
+        _tree(STALLED), replaced(STRICT, probation_share=1.0, probation_tests=8), NEVER, decide=_past_the_bar
+    )
+
+    assert kept.stops == 0 and kept.gpu_hours == pytest.approx(24.0)
+    assert asked[0].startswith(
+        "Session clock 10 of 240 minutes; the best gain so far +0.00%.\nRunning branches:\n- b1: "
+    )
+    assert "in its grace" in asked[0] and "Scheduling playbook" in asked[0] and asked[0].endswith(STOP_REPLY)
+    # Its stall reaches the bar of four with its test at 60 min; the round at 70 min stops it before its seventh.
+    assert (stopped.stops, stopped.best_gain_pct, stopped.gpu_hours) == (1, 3.0, pytest.approx(6.0))
+    assert held.stops == 1 and held.gpu_hours > stopped.gpu_hours
+
+
+def test_a_judges_reply_names_the_branches_to_stop_in_its_json_object() -> None:
+    assert stops_in('Stop these: {"stop": [{"branch": "b1", "reason": "stalled"}, "b2"]} done') == ("b1",)
+    assert stops_in("{not json}") == () == stops_in('["b1"]') == stops_in('{"stop": null}')
 
 
 def test_a_branch_the_judge_stopped_and_the_playbook_keeps_goes_on_with_sampled_tests() -> None:

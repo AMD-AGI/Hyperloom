@@ -24,17 +24,23 @@ on its own outcome. Beyond what they recorded, ``h(k)`` and ``g(i)`` hold their 
 (:data:`OPTIMISTIC`) or fall to 0 (:data:`PESSIMISTIC`); a conclusion has to hold both ways. Each draw is keyed by the
 session, the run and the branch, test by test, so every playbook meets the same draws, and :func:`compare` reads
 paired differences against the archive, with an interval bootstrapped over sessions.
+
+A playbook's rules only a judge reads, so given ``decide``, a judge's answer to a prompt, the replay asks it every
+:data:`ROUND_SECONDS` which running branches to stop, as a session asks its judge, instead of stopping them at the
+stall bar; it refuses the stop of a branch on probation, as the scheduler does. Opening and K follow the numbers
+either way.
 """
 
 from __future__ import annotations
 
 import hashlib
 import heapq
+import json
 import math
 import random
 import statistics
 from collections import deque
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from hyperloom_multibranch.contracts.notebook.vocab import CommitOrigin
@@ -77,9 +83,19 @@ CAPS = (2, 4, 6)
 #: their last commit over the archived sessions (the stop audit), and kept no probation.
 OLD_RULE = "old-rule"
 OLD_RULE_STALL = 3
+#: How often a judged replay asks its judge, as a session's judge is asked.
+ROUND_SECONDS = 600.0
+#: How a judge's reply names the branches to stop.
+STOP_REPLY = (
+    'Reply with one JSON object {"stop": [{"branch": "<name>", "reason": "<why>"}]}, its list empty to stop none.'
+)
+ON_PROBATION = "on probation"
+_STOP_KEY = "stop"
 _SESSION_END = "session_end"
 #: The key of a branch's opening among a replay's events, before its name.
 _OPENS = "opens:"
+#: The key of a judge's round among a judged replay's events.
+_ROUND = "round"
 _SECONDS_PER_HOUR = 3600.0
 _SECONDS_PER_MINUTE = 60.0
 _INTERVAL_PERCENT = 95.0
@@ -205,6 +221,19 @@ def _gpu_per_test(branch: TreeBranch) -> float:
 def _seeded(*parts: object) -> random.Random:
     digest = hashlib.sha256("\x1f".join(map(str, parts)).encode()).digest()
     return random.Random(int.from_bytes(digest[:8], "big"))
+
+
+def stops_in(reply: str) -> tuple[str, ...]:
+    """The branches a judge's reply stops, as :data:`STOP_REPLY` asks; none when it holds no JSON object with a stop
+    list."""
+
+    start, end = reply.find("{"), reply.rfind("}")
+    try:
+        document = json.loads(reply[start : end + 1]) if 0 <= start < end else None
+    except json.JSONDecodeError:
+        return ()
+    orders = document.get(_STOP_KEY) if isinstance(document, dict) else None
+    return tuple(str(item.get("branch")) for item in orders or () if isinstance(item, Mapping))
 
 
 @dataclass(frozen=True)
@@ -358,6 +387,9 @@ class _PlaybookRun(_Run):
             pass
         while self.events:
             at, _, key = heapq.heappop(self.events)
+            if key == _ROUND:
+                self.round(at)
+                continue
             branch = self.running.get(key)
             if branch is None:
                 continue
@@ -367,6 +399,9 @@ class _PlaybookRun(_Run):
                 self.running.pop(key)
                 self.stops += 1
                 self.refill(at)
+
+    def round(self, at: float) -> None:
+        """A judge's round at ``at``; the numbers need none."""
 
     def ended(self, at: float) -> None:
         self.refill(at)
@@ -437,14 +472,77 @@ class _PlaybookRun(_Run):
         branch.position += 1
         return not self.stopped(branch)
 
+    def on_probation(self, branch: _Branch) -> bool:
+        """Whether ``branch``'s stall past the bar was drawn for probation and its probation runs still."""
+
+        drawn = _seeded(self.seed, self.tree.session_id, self.run, branch.key, "probation", branch.commits).random()
+        numbers = self.numbers
+        return drawn < numbers.probation_share and branch.position < self.bar + numbers.probation_tests
+
     def stopped(self, branch: _Branch) -> bool:
         """Whether ``branch`` is stopped here: past the bar and its grace, and not held by a probation draw."""
 
-        numbers = self.numbers
-        if branch.judged < numbers.grace_tests or branch.position < self.bar:
+        if branch.judged < self.numbers.grace_tests or branch.position < self.bar:
             return False
-        drawn = _seeded(self.seed, self.tree.session_id, self.run, branch.key, "probation", branch.commits).random()
-        return not (drawn < numbers.probation_share and branch.position < self.bar + numbers.probation_tests)
+        return not self.on_probation(branch)
+
+
+@dataclass
+class _JudgedRun(_PlaybookRun):
+    """The playbook's replay with ``decide`` asked every :data:`ROUND_SECONDS` which running branches to stop, and the
+    stall bar stopping none: what a judge makes of the playbook's rules. A stop of a branch on probation is
+    refused."""
+
+    decide: Callable[[str], str] | None = None
+
+    def play(self) -> None:
+        for index in range(1, int(self.tree.budget_seconds // ROUND_SECONDS) + 1):
+            self.order += 1
+            heapq.heappush(self.events, (index * ROUND_SECONDS, self.order, _ROUND))
+        super().play()
+
+    def stopped(self, branch: _Branch) -> bool:
+        return False
+
+    def standing(self, branch: _Branch) -> str:
+        if branch.judged < self.numbers.grace_tests:
+            return "in its grace"
+        if branch.position < self.bar:
+            return "below the stop bar"
+        return ON_PROBATION if self.on_probation(branch) else "a stop candidate"
+
+    def view(self, at: float) -> str:
+        """What the judge reads in the round at ``at``: the clock, each running branch's stall evidence, the
+        playbook."""
+
+        if self.playbook is None:
+            raise ValueError("a judged replay needs a playbook")
+        return "\n".join(
+            [
+                f"Session clock {at / _SECONDS_PER_MINUTE:.0f} of {self.tree.budget_seconds / _SECONDS_PER_MINUTE:.0f}"
+                f" minutes; the best gain so far {self.best:+.2f}%.",
+                "Running branches:",
+                *(
+                    f"- {branch.key}: {branch.position} judged tests since its last commit (stop bar {self.bar}), "
+                    f"{branch.commits} commits, at {branch.gain:+.2f}%; {self.standing(branch)}"
+                    for branch in self.running.values()
+                ),
+                "",
+                self.playbook.render(),
+                "",
+                STOP_REPLY,
+            ]
+        )
+
+    def round(self, at: float) -> None:
+        if not self.running or self.decide is None:
+            return
+        for key in stops_in(self.decide(self.view(at))):
+            branch = self.running.get(key)
+            if branch is not None and self.standing(branch) != ON_PROBATION:
+                self.running.pop(key)
+                self.stops += 1
+        self.refill(at)
 
 
 def _chain(first: Iterator[_Test], then: Iterator[_Test]) -> Iterator[_Test]:
@@ -615,10 +713,25 @@ def check(
     )
 
 
-def simulate(tree: SearchTree, playbook: Playbook | None, pace: Pace, run: int = 0, *, seed: str = "") -> RunOutcome:
-    """One replay of ``tree`` under ``playbook``, ``None`` to follow the archive, with the draws of ``run``."""
+def simulate(
+    tree: SearchTree,
+    playbook: Playbook | None,
+    pace: Pace,
+    run: int = 0,
+    *,
+    seed: str = "",
+    decide: Callable[[str], str] | None = None,
+) -> RunOutcome:
+    """One replay of ``tree`` under ``playbook``, ``None`` to follow the archive, with the draws of ``run``; with
+    ``decide``, the judge it asks every round which branches to stop."""
 
-    replay: _Run = (_ArchiveRun if playbook is None else _PlaybookRun)(tree, pace, playbook, run, seed)
+    replay: _Run
+    if playbook is None:
+        replay = _ArchiveRun(tree, pace, playbook, run, seed)
+    elif decide is None:
+        replay = _PlaybookRun(tree, pace, playbook, run, seed)
+    else:
+        replay = _JudgedRun(tree, pace, playbook, run, seed, decide=decide)
     replay.play()
     return RunOutcome(replay.best, replay.gpu_seconds / _SECONDS_PER_HOUR, replay.stops, replay.opened)
 
@@ -704,9 +817,11 @@ def compare(
     seed: str = "",
     draws: int = BOOTSTRAP_DRAWS,
     baseline: str = H0.label,
+    decide: Callable[[str], str] | None = None,
 ) -> SchedulingComparison:
     """Each of ``playbooks`` replayed ``runs`` times on every tree, beside the archive, and read against
-    ``baseline``, one of them, or the archive when it is none of them."""
+    ``baseline``, one of them, or the archive when it is none of them; with ``decide``, the judge each playbook's
+    replay asks every round."""
 
     against = baseline if baseline in playbooks else ARCHIVE
     outcomes: dict[str, list[tuple[float, float, float, float]]] = {ARCHIVE: [], **{label: [] for label in playbooks}}
@@ -715,7 +830,7 @@ def compare(
         kept = simulate(tree, None, pace)
         played = {ARCHIVE: [kept] * runs}
         played.update(
-            (label, [simulate(tree, playbook, pace, run, seed=seed) for run in range(runs)])
+            (label, [simulate(tree, playbook, pace, run, seed=seed, decide=decide) for run in range(runs)])
             for label, playbook in playbooks.items()
         )
         base = played[against]
@@ -756,10 +871,13 @@ __all__ = [
     "MIN_GAINS",
     "OLD_RULE",
     "OLD_RULE_STALL",
+    "ON_PROBATION",
     "OPTIMISTIC",
     "PESSIMISTIC",
     "PROBATION_SHARES",
     "REPLAY_RUNS",
+    "ROUND_SECONDS",
+    "STOP_REPLY",
     "CutCheck",
     "Pace",
     "PolicyRow",
@@ -772,5 +890,6 @@ __all__ = [
     "cut_check",
     "pace_for",
     "simulate",
+    "stops_in",
     "variants",
 ]
