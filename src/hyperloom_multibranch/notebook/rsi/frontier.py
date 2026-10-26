@@ -155,7 +155,8 @@ FALLBACK_LIMIT = 3
 
 @dataclass(frozen=True)
 class FrontierPolicy:
-    """The scoring's parameters; ``metric`` is the recorded-value metric gains are read off."""
+    """The scoring's parameters; ``metric`` is the recorded-value metric gains are read off, and ``settled_tests``
+    how many explore tests that succeeded and were judged end a new branch's floor, as they end the judge's grace."""
 
     metric: str
     window_seconds: float = WINDOW_SECONDS
@@ -164,6 +165,7 @@ class FrontierPolicy:
     new_branch_floor_pct: float = NEW_BRANCH_FLOOR_PCT
     min_effective_sessions: float = MIN_EFFECTIVE_SESSIONS
     min_similarity: float = MIN_SIMILARITY
+    settled_tests: int = SETTLED_TESTS
 
     @classmethod
     def for_budget(cls, metric: str, budget_seconds: float) -> FrontierPolicy:
@@ -332,7 +334,7 @@ def checked_estimate(label: str, estimate: object) -> Estimate:
 
 
 def is_young(branch: TreeBranch, t_s: float, policy: FrontierPolicy) -> bool:
-    """Too new to have a trend: fewer than :data:`SETTLED_TESTS` explore tests succeeded and were judged, as the
+    """Too new to have a trend: fewer than ``policy.settled_tests`` explore tests succeeded and were judged, as the
     judge's grace counts them, so the floor and the grace end at the same test, and a branch whose tests failed keeps
     its floor. A tree archived before that was kept counts its ended explore tests, then its judged tests; one
     archived before judgements were kept, too, is young while open less than a window and without a commit."""
@@ -340,7 +342,7 @@ def is_young(branch: TreeBranch, t_s: float, policy: FrontierPolicy) -> bool:
     for counted in (branch.settled_by, branch.ended_by, branch.judged_by):
         settled = counted(t_s)
         if settled is not None:
-            return settled < SETTLED_TESTS
+            return settled < policy.settled_tests
     return t_s - branch.opened_s < policy.window_seconds and not branch.commits
 
 
