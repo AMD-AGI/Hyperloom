@@ -1473,8 +1473,6 @@ def _apply_caller_removals(
 def _restate_profile_capture(
     envs: dict[str, Any], framework_env: str, window: _RequestWindow, replace_args: bool
 ) -> None:
-    if window.profiling and window.serves_requests:
-        fit_capture_to_speculative(envs, framework_env)
     if window.vllm_profiler_flags and framework_env == "EXTRA_VLLM_ARGS":
         # The profile path's iteration bounds have to be the LAST word on this env,
         # because three separate steps above can drop them: a candidate carrying
@@ -1504,6 +1502,9 @@ def _restate_profile_capture(
             )
             # The seal applies the sink-side guard to whatever is left here.
             envs[framework_env] = merge_server_args(profile_args, " ".join(restored))
+    # After the restore, so a vLLM delay it re-added is divided like any other.
+    if window.profiling and window.serves_requests:
+        fit_capture_to_speculative(envs, framework_env)
     # After extra_envs / replace_args / remove_args so TraceLens knobs survive the
     # same last-wins path as vLLM profiler bounds, and before the seal.
     apply_atom_profile_caps(envs, window.atom_caps)

@@ -331,15 +331,16 @@ def test_speculative_tokens_per_step_reads_the_upper_bound(server_args, expected
     assert speculative_tokens_per_step(server_args) == expected
 
 
-def _materialized_profile(tmp_path: Path, framework: str, server_args: str) -> dict:
+def _materialized_profile(tmp_path: Path, framework: str, server_args: str, args_mode: str = "append") -> dict:
     source = asset_root() / "assets" / "configs" / f"profile_{framework}.yaml"
     config = yaml.safe_load(source.read_text(encoding="utf-8"))
     config["benchmark"]["model"] = "Qwen/Qwen3-0.6B"
     config["benchmark"]["envs"].update({"TP": 1, "CONC": 64, "ISL": 1024, "OSL": 1024})
     path = tmp_path / f"{framework}.yaml"
     path.write_text(yaml.safe_dump(config))
-    out = tmp_path / f"{framework}-{len(server_args)}"
-    rendered = materialize_config_with_envs(path, out, launch=LaunchLayer(extra_server_args=server_args))
+    out = tmp_path / f"{framework}-{args_mode}-{len(server_args)}"
+    launch = LaunchLayer(extra_server_args=server_args, args_mode=args_mode)
+    rendered = materialize_config_with_envs(path, out, launch=launch)
     return load_benchmark(rendered)["envs"]
 
 
@@ -365,15 +366,18 @@ def test_sglang_plain_launch_keeps_its_capture_plan(tmp_path):
     assert (body["start_step"], body["num_steps"], int(envs["NUM_PROMPTS"])) == (6080, 128, 776)
 
 
-def test_vllm_speculative_launch_reaches_the_profile_window(tmp_path):
+@pytest.mark.parametrize("args_mode", ["append", "replace"])
+def test_vllm_speculative_launch_reaches_the_profile_window(tmp_path, args_mode):
+    """``replace`` drops the profiler flags, so the delay that ships is the one the restore re-adds."""
     spec = '--speculative-config {"method":"mtp","num_speculative_tokens":3}'
     plain = _materialized_profile(tmp_path, "vllm", "")
-    envs = _materialized_profile(tmp_path, "vllm", spec)
+    envs = _materialized_profile(tmp_path, "vllm", spec, args_mode)
     assert "--profiler-config.delay_iterations 6080" in plain["EXTRA_VLLM_ARGS"]
     assert int(plain["NUM_PROMPTS"]) == 776
     args = envs["EXTRA_VLLM_ARGS"]
     assert args.count("delay_iterations") == 1
     assert f"--profiler-config.delay_iterations {6080 // 4}" in args
+    assert int(envs["NUM_PROMPTS"]) == 824
     assert 6080 // 4 + 128 <= _steps_at_full_acceptance(envs, 4) // 2
 
 
