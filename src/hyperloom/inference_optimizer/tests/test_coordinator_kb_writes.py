@@ -971,3 +971,27 @@ def test_fact_write_hook_lets_an_unexpected_recipe_store_error_propagate(tmp_pat
 
     with pytest.raises(TypeError, match="put_recipe signature drifted"):
         _fact_write_for_three_kept_variants(coord)
+
+
+def test_a_cycle_batch_writes_no_fact_or_config_run(tmp_path: Path, monkeypatch) -> None:
+    """A cycle-bench batch is not a replay measurement, so it leaves the KB as it was."""
+    import asyncio
+
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.knowledge import recipe_journal
+    from hyperloom.orchestrator.state.task_registry import Task
+    from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
+
+    coord = _make_coordinator(tmp_path)
+    writes: list[str] = []
+    monkeypatch.setattr(recipe_journal, "_record_config_run", lambda *_a, **_k: writes.append("config_run"))
+    monkeypatch.setattr(type(coord.recipe_journal), "_record_fact_per_task", lambda *_a, **_k: writes.append("fact"))
+    task = Task(task_id="explore-c", kind="explore", state="succeeded", params={}, idempotency_key="explore-c")
+
+    asyncio.run(
+        coord.recipe_journal.fact_write_hook(
+            task=task, result={"status": STATUS_SCREENED, "valid": True}, verdict=Verdict.RECORDED
+        )
+    )
+
+    assert writes == []
