@@ -30,7 +30,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from hyperloom.hosted.context import HostedRun, install
 from hyperloom.hosted.campaign import FLOW_MULTIBRANCH, CampaignError, CampaignSpec, optimize_args, parse_campaign
 from hyperloom.hosted.host_info import HostInfo, HostInfoError, Var, read_host_info, take_host_info
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
@@ -84,29 +83,22 @@ def _run() -> int:
     # From here on the host-only inputs live in ``info`` only: no child process may inherit them.
     info = take_host_info(os.environ, require=())
     session_dir = _prepare_session_dir(spec, info)
-    run = HostedRun(
-        spec=spec,
-        host_info=info,
-        plug_lock=lock,
-        session_dir=session_dir,
-        archive_root=ensure_archive_root(session_dir),
-    )
-    install(run)
+    ensure_archive_root(session_dir)
     os.environ[ENV_IMAGE] = spec.framework_image
     _announce_grant(info)
-    with _plug_inputs(run):
+    with _plug_inputs(lock, info):
         return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
 
 
 @contextmanager
-def _plug_inputs(run: HostedRun) -> Iterator[None]:
+def _plug_inputs(lock: Mapping[str, Mapping[str, str]], info: HostInfo) -> Iterator[None]:
     """Give plug resolution the lock and the host inputs for the length of ``optimize``, however it ends.
 
     ``optimize`` cannot import this package (it would be a cycle), so the entry hands the values over.
     """
     from hyperloom.inference_optimizer.cli.bootstrap import HostedPlugInputs, set_hosted_plug_inputs
 
-    set_hosted_plug_inputs(HostedPlugInputs(lock=run.plug_lock, host_info=run.host_info))
+    set_hosted_plug_inputs(HostedPlugInputs(lock=lock, host_info=info))
     try:
         yield
     finally:
