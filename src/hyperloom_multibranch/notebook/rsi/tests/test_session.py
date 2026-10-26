@@ -29,6 +29,7 @@ from hyperloom_multibranch.notebook.rsi.expression import ExpressionScorer
 from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1, FRONTIER_V1_LABEL, FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, Retrieval, RetrievalLog, RetrievalSource
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_stall_odds
+from hyperloom_multibranch.notebook.rsi.decisions import decision_calls
 from hyperloom_multibranch.notebook.rsi.ladder import standings, trials
 from hyperloom_multibranch.notebook.rsi.outcomes import OUTCOMES_REPORT, OutcomePool
 from hyperloom_multibranch.notebook.rsi.playbook import FALLBACK_KEY, H0, PLAYBOOK_KEY, PlaybookPool
@@ -53,6 +54,7 @@ from hyperloom_multibranch.notebook.rsi.session import (
     NO_REPORTS,
     NO_PLAYBOOK_PLAYED,
     NO_RETRIEVAL_LOG,
+    NO_TRANSCRIPT,
     SCHEDULING_REPLAY_REPORT,
     STOP_AUDIT_REPORT,
     WRITTEN,
@@ -219,6 +221,25 @@ def test_close_reruns_the_scheduling_replay_and_says_what_moved_since_the_last_c
 
 
 @pytest.mark.usefixtures("unconfigured")
+def test_close_keeps_the_judges_exchanges_beside_the_archive_once(snapshot: NotebookSnapshot, tmp_path: Path) -> None:
+    transcript = tmp_path / "MB-judge.jsonl"
+    transcript.write_text(json.dumps({"at": START, "prompt": "view", "reply": "{}", "error": ""}) + "\n")
+    targets = CloseTargets(archive=TreeArchive(tmp_path / "archive"))
+
+    done = close_knowledge(snapshot, METRIC, targets=targets, judge_transcript=transcript)
+    again = close_knowledge(snapshot, METRIC, targets=targets, judge_transcript=transcript)
+
+    assert (done.judge_decisions, again.judge_decisions) == (
+        CloseStep(WRITTEN, counts={"calls": 1}),
+        CloseStep(SKIPPED, ALREADY_RECORDED),
+    )
+    assert [call["prompt"] for call in decision_calls(TreeArchive(tmp_path / "archive"), "sess-1")] == ["view"]
+    assert close_knowledge(snapshot, METRIC, judge_transcript=tmp_path / "none.jsonl").judge_decisions == CloseStep(
+        SKIPPED, NO_TRANSCRIPT
+    )
+
+
+@pytest.mark.usefixtures("unconfigured")
 def test_close_counts_the_specialists_outcomes_beside_the_receipts_and_keeps_them_beside_the_archive(
     snapshot: NotebookSnapshot, tmp_path: Path
 ) -> None:
@@ -376,6 +397,7 @@ def test_the_breakdown_records_the_knowledge_steps_only_when_given(snapshot: Not
         "playbook_trial": {"status": SKIPPED, "reason": NO_PLAYBOOK_PLAYED, "counts": {}},
         "scheduling_replay": {"status": SKIPPED, "reason": NO_REPORTS, "counts": {}},
         "specialist_outcomes": {"status": SKIPPED, "reason": NO_REPORTS, "counts": {}},
+        "judge_decisions": {"status": SKIPPED, "reason": NO_TRANSCRIPT, "counts": {}},
     }
     assert json.loads(json.dumps(close["knowledge"])) == close["knowledge"]
     assert "knowledge" not in build_breakdown(snapshot)["close"]

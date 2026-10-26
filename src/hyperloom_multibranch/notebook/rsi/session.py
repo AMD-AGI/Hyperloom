@@ -12,10 +12,11 @@
   this session's stops and probations against the stall odds the judge read (:mod:`rsi.stops`). A session that
   played a scheduling playbook is kept as its trial beside the playbook pool, which may crown or retire a playbook
   (:mod:`rsi.ladder`); then the scheduling replay reruns over the archive with this session's tree in it, against the
-  champion, and says which of its readings moved since the last CLOSE. Last, the specialists' outcomes, the menu's
-  branches beside its control, go beside the receipts and the archive (:mod:`rsi.outcomes`). A step that cannot be done says why and never
-  stops CLOSE; :meth:`KnowledgeClose.document` is what the breakdown records of the steps (``CloseOutcome.knowledge``
-  of ``build_breakdown``).
+  champion, and says which of its readings moved since the last CLOSE. Then the specialists' outcomes, the menu's
+  branches beside its control, go beside the receipts and the archive (:mod:`rsi.outcomes`), and, given the judge's
+  transcript, its exchanges beside the archive for R2 to ask again (:mod:`rsi.decisions`). A step that cannot be
+  done says why and never stops CLOSE; :meth:`KnowledgeClose.document` is what the breakdown records of the steps
+  (``CloseOutcome.knowledge`` of ``build_breakdown``).
 * :func:`session_frontier_policy` chooses its policy once the session has a profile: the calibration's recommendation
   for sessions like it, or the defaults; :func:`session_frontier_scorer` chooses the same way among the scorers of
   :mod:`rsi.scorers` too, crowning a challenger that passes the promotion gate (a 1-in-4 exploration session's pick,
@@ -68,6 +69,7 @@ from hyperloom_multibranch.notebook.rsi.calibration import (
     frontier_policy_for,
     frontier_scorer_for,
 )
+from hyperloom_multibranch.notebook.rsi.decisions import archive_decisions
 from hyperloom_multibranch.notebook.rsi.expression import ExpressionError
 from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, FrontierPolicy
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_stall_odds, stall_odds
@@ -122,6 +124,7 @@ NO_LESSON_SHOWN = "no_pooled_lesson_shown"
 ALREADY_RECORDED = "already_recorded"
 NO_PLAYBOOK_PLAYED = "no_playbook_played"
 NO_TREES = "no_archived_tree"
+NO_TRANSCRIPT = "no_judge_transcript"
 #: What a step raises when its target or its input lets it down; CLOSE records it and goes on.
 STEP_ERRORS = (LookupError, OSError, RuntimeError, ValueError)
 
@@ -158,6 +161,7 @@ class KnowledgeClose:
     playbook_trial: CloseStep = CloseStep(SKIPPED, NO_PLAYBOOK_PLAYED)
     scheduling_replay: CloseStep = CloseStep(SKIPPED, NO_REPORTS)
     specialist_outcomes: CloseStep = CloseStep(SKIPPED, NO_REPORTS)
+    judge_decisions: CloseStep = CloseStep(SKIPPED, NO_TRANSCRIPT)
 
     def steps(self) -> dict[str, CloseStep]:
         """The steps by their names in the breakdown's ``close.knowledge``."""
@@ -174,6 +178,7 @@ class KnowledgeClose:
             "playbook_trial": self.playbook_trial,
             "scheduling_replay": self.scheduling_replay,
             "specialist_outcomes": self.specialist_outcomes,
+            "judge_decisions": self.judge_decisions,
         }
 
     def document(self) -> dict[str, object]:
@@ -294,6 +299,26 @@ def _audited(
     return CloseStep(WRITTEN, audit.note(), audit.counts())
 
 
+def _decided(snapshot: NotebookSnapshot, archive: TreeArchive | None, transcript: Path | None) -> CloseStep:
+    """The judge's exchanges of the session's ``transcript``, kept beside the archive for R2 and the offline
+    generations (:mod:`rsi.decisions`)."""
+
+    if transcript is None or not transcript.is_file():
+        return CloseStep(SKIPPED, NO_TRANSCRIPT)
+    target = archive if archive is not None else TreeArchive.from_env()
+    if target is None:
+        return CloseStep(SKIPPED, NO_ARCHIVE)
+    if snapshot.profile is None:
+        return CloseStep(SKIPPED, NO_PROFILE)
+    try:
+        kept = archive_decisions(transcript, target, snapshot.profile.session_id)
+    except STEP_ERRORS as exc:
+        return _failed("keep the judge's decisions", exc)
+    if kept is None:
+        return CloseStep(SKIPPED, ALREADY_RECORDED)
+    return CloseStep(WRITTEN, counts={"calls": kept})
+
+
 def _outcomes(snapshot: NotebookSnapshot, archive: TreeArchive | None, receipts: Path | None) -> CloseStep:
     """The specialists' outcomes, the menu's branches beside its control, read against the menus the session's log
     kept beside the receipts; written there, and kept beside the archive for the studies to add up."""
@@ -387,6 +412,7 @@ def close_knowledge(
     targets: CloseTargets = CloseTargets(),
     bottlenecks: Mapping[str, float] | None = None,
     cross_image: Collection[str] = (),
+    judge_transcript: Path | None = None,
 ) -> KnowledgeClose:
     """CLOSE, after the Recipe KB write-back: what the session leaves the sessions after it.
 
@@ -394,7 +420,8 @@ def close_knowledge(
     later sessions compare the archived tree at shares of; without it the archive uses the time the notebook spans.
     ``targets`` says where each step writes, the environment's KB and archive by default. ``cross_image`` names, by
     canonical id, the Recipe KB champions PRELUDE prepared from another image than the session's, whose replays the
-    archived tree marks.
+    archived tree marks. ``judge_transcript`` is the judge's transcript of the session, whose exchanges go beside the
+    archive (:mod:`rsi.decisions`).
     """
 
     return KnowledgeClose(
@@ -437,6 +464,7 @@ def close_knowledge(
         playbook_trial=_trialled(snapshot, metric, targets.archive, bottlenecks),
         scheduling_replay=_replayed(snapshot, targets.archive, targets.receipt(SCHEDULING_REPLAY_REPORT)),
         specialist_outcomes=_outcomes(snapshot, targets.archive, targets.receipts),
+        judge_decisions=_decided(snapshot, targets.archive, judge_transcript),
     )
 
 
@@ -616,6 +644,7 @@ __all__ = [
     "NO_PROFILE",
     "NO_REPORTS",
     "NO_RETRIEVAL_LOG",
+    "NO_TRANSCRIPT",
     "NO_TREES",
     "SCHEDULING_REPLAY_REPORT",
     "STEP_ERRORS",
