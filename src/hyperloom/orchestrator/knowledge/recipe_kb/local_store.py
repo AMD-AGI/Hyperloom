@@ -75,6 +75,38 @@ class RecipeFilters:
     order_by: str = "updated_at DESC"
 
 
+@dataclass(frozen=True)
+class RecipeUpsert:
+    """The producer-side fields of one recipe row, before ``put_recipe`` normalises and versions it."""
+
+    canonical_id: str
+    # 7-tuple identity (also encoded in canonical_id; stamped at the top
+    # level for arbor-compat).
+    model: str = ""
+    hardware: str = ""
+    framework_name: str = ""
+    framework_version: str = ""
+    precision: str = ""
+    # Arbor-aligned payload.
+    best_config: dict[str, str] | None = None
+    best_throughput: float = 0.0
+    what_worked: list[Any] | None = None
+    what_failed: list[Any] | None = None
+    remaining_gaps: list[Any] | None = None
+    pitfalls: list[Any] | None = None
+    lessons: list[Any] | None = None
+    last_profiled: str = ""
+    stack_fingerprint: dict[str, str] | None = None
+    sessions: list[Any] | None = None
+    # v2 audit / wire-compat fields. provenance is required by the central server so we always stamp something.
+    authority: str = "EXPERIENTIAL"
+    confidence: float = 0.85
+    evidence_refs: list[Any] | None = None
+    provenance: dict[str, Any] | None = None
+    # Free-form session-level keys preserved verbatim across rewrite.
+    extras: dict[str, Any] | None = None
+
+
 # Errors
 class LocalRecipeStoreError(RuntimeError):
     """Raised on unrecoverable failures inside the local KB store."""
@@ -254,45 +286,16 @@ class LocalRecipeStore:
         atomic_write_json(archive_path, archive_payload, options=WriteOptions(make_parents=True, fsync=True))
 
     # put_recipe
-    def put_recipe(
-        self,
-        *,
-        canonical_id: str,
-        # 7-tuple identity (also encoded in canonical_id; stamped at the top
-        # level for arbor-compat).
-        model: str = "",
-        hardware: str = "",
-        framework_name: str = "",
-        framework_version: str = "",
-        precision: str = "",
-        # Arbor-aligned payload.
-        best_config: dict[str, str] | None = None,
-        best_throughput: float = 0.0,
-        what_worked: list[Any] | None = None,
-        what_failed: list[Any] | None = None,
-        remaining_gaps: list[Any] | None = None,
-        pitfalls: list[Any] | None = None,
-        lessons: list[Any] | None = None,
-        last_profiled: str = "",
-        stack_fingerprint: dict[str, str] | None = None,
-        sessions: list[Any] | None = None,
-        # v2 audit / wire-compat fields. provenance is required by the central server so we always stamp something.
-        authority: str = "EXPERIENTIAL",
-        confidence: float = 0.85,
-        evidence_refs: list[Any] | None = None,
-        provenance: dict[str, Any] | None = None,
-        # Free-form session-level keys preserved verbatim across rewrite.
-        extras: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    def put_recipe(self, upsert: RecipeUpsert) -> dict[str, Any]:
         """Atomically upsert a recipe row and archive the prior live version."""
-        if not canonical_id:
+        if not upsert.canonical_id:
             raise ValueError("put_recipe requires a non-empty canonical_id")
-        recipe_dir = self._recipe_dir(canonical_id)
+        recipe_dir = self._recipe_dir(upsert.canonical_id)
         recipe_dir.mkdir(parents=True, exist_ok=True)
-        lock = _CidLock(self._lock_path(canonical_id))
+        lock = _CidLock(self._lock_path(upsert.canonical_id))
         with lock:
             now = now_iso(timespec="microseconds")
-            live = _read_json(self._live_path(canonical_id))
+            live = _read_json(self._live_path(upsert.canonical_id))
             created = live is None
             prior_counts = _collection_counts(live)
             prior_version = int(live.get("version", 0)) if isinstance(live, dict) else 0
@@ -300,57 +303,57 @@ class LocalRecipeStore:
 
             if live is not None:
                 self._archive_live_version(
-                    canonical_id=canonical_id,
+                    canonical_id=upsert.canonical_id,
                     snapshot=dict(live),
                     version=prior_version,
                     archived_at=now,
-                    replaced_by=provenance,
+                    replaced_by=upsert.provenance,
                 )
 
             # Build payload via ``Recipe.from_dict`` so dataclass instances and dicts both round-trip into the same
             # on-disk shape.
             payload_dict: dict[str, Any] = {
-                "canonical_id": canonical_id,
+                "canonical_id": upsert.canonical_id,
                 "version": new_version,
                 "created_at": (str(live.get("created_at") or now) if isinstance(live, dict) else now),
                 "updated_at": now,
-                "model": model,
-                "hardware": hardware,
-                "framework_name": framework_name,
-                "framework_version": framework_version,
-                "precision": precision,
-                "best_config": dict(best_config or {}),
-                "best_throughput": float(best_throughput),
+                "model": upsert.model,
+                "hardware": upsert.hardware,
+                "framework_name": upsert.framework_name,
+                "framework_version": upsert.framework_version,
+                "precision": upsert.precision,
+                "best_config": dict(upsert.best_config or {}),
+                "best_throughput": float(upsert.best_throughput),
                 # No projection: these rows are stored as the Coordinator wrote them, so a field it adds arrives
                 # without a schema here to teach. ``Recipe.from_dict`` rejects an unusable ``extra_envs`` / ``gain_pct``.
-                "what_worked": _coerce_dicts(what_worked),
-                "what_failed": _coerce_dicts(what_failed),
-                "remaining_gaps": _normalise_str_dicts(remaining_gaps, ("description", "metrics")),
-                "pitfalls": _normalise_str_dicts(pitfalls, ("description", "severity")),
-                "lessons": _normalise_lessons(lessons),
-                "last_profiled": last_profiled
+                "what_worked": _coerce_dicts(upsert.what_worked),
+                "what_failed": _coerce_dicts(upsert.what_failed),
+                "remaining_gaps": _normalise_str_dicts(upsert.remaining_gaps, ("description", "metrics")),
+                "pitfalls": _normalise_str_dicts(upsert.pitfalls, ("description", "severity")),
+                "lessons": _normalise_lessons(upsert.lessons),
+                "last_profiled": upsert.last_profiled
                 or (str(live.get("last_profiled") or "") if isinstance(live, dict) else ""),
-                "stack_fingerprint": dict(stack_fingerprint or {}),
-                "sessions": _normalise_sessions(sessions),
-                "authority": authority,
-                "confidence": float(confidence),
-                "evidence_refs": list(evidence_refs or []),
-                "provenance": dict(provenance or {}),
+                "stack_fingerprint": dict(upsert.stack_fingerprint or {}),
+                "sessions": _normalise_sessions(upsert.sessions),
+                "authority": upsert.authority,
+                "confidence": float(upsert.confidence),
+                "evidence_refs": list(upsert.evidence_refs or []),
+                "provenance": dict(upsert.provenance or {}),
             }
-            if extras:
+            if upsert.extras:
                 # Splat extras at the top level (no nested ``extras`` key on disk).
-                for key, val in extras.items():
+                for key, val in upsert.extras.items():
                     payload_dict.setdefault(key, val)
 
             recipe = Recipe.from_dict(payload_dict)
             written = recipe.to_dict()
             atomic_write_json(
-                self._live_path(canonical_id), written, options=WriteOptions(make_parents=True, fsync=True)
+                self._live_path(upsert.canonical_id), written, options=WriteOptions(make_parents=True, fsync=True)
             )
             counts = _collection_counts(written)
 
         return {
-            "canonical_id": canonical_id,
+            "canonical_id": upsert.canonical_id,
             "version": new_version,
             "created": created,
             "prior_counts": prior_counts,

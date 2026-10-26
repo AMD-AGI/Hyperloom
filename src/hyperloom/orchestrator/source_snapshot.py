@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import filecmp
 import json
+import logging
 import shutil
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, NamedTuple
 
@@ -13,6 +16,8 @@ SCHEMA_VERSION = 2
 _OP_UPSERT = "upsert"
 _FILES = "files"
 _ENCODING = "utf-8"
+
+log = logging.getLogger(__name__)
 
 
 def _safe_rel(rel: str) -> str | None:
@@ -63,26 +68,56 @@ def source_layer_overlay_dir(entry: dict[str, Any]) -> str:
     return str(overlay / import_root) if import_root else str(overlay)
 
 
+def missing_source_snapshot(entry: Mapping[str, Any]) -> bool:
+    """Return whether a landed source layer has no snapshot to reinstall it from."""
+    if str(entry.get("source_snapshot") or "").strip():
+        return False
+    recipe_patch_landed = any(
+        isinstance(row, Mapping) and str(row.get("status") or "") not in ("", "failed")
+        for row in entry.get("recipe_patch_statuses") or []
+    )
+    return bool(entry.get("source_layer_landed")) or recipe_patch_landed
+
+
+def report_missing_source_snapshot(entry: Mapping[str, Any], task_kind: str, variant_name: Any) -> None:
+    """Report a landed source layer that cannot be reinstalled from the optimization stack."""
+    if missing_source_snapshot(entry):
+        log.error(
+            "%s %s left a source layer on %s with no source snapshot to reinstall it from; "
+            "a resume onto a stock tree benches every later candidate without it",
+            task_kind,
+            variant_name,
+            entry.get("framework_root") or "its framework tree",
+        )
+
+
+@dataclass(frozen=True)
+class SourceLayer:
+    """The files of one framework tree a snapshot captures, and the ops their patch declared."""
+
+    framework_root: str | Path
+    base_sha: str | None
+    rel_paths: Iterable[str]
+    declared_ops: dict[str, str] | None = None
+    import_root: str = ""
+
+
 def snapshot_source_layer(
+    layer: SourceLayer,
     *,
-    framework_root: str | Path,
-    base_sha: str | None,
-    rel_paths: Iterable[str],
     dest_dir: str | Path,
     provenance: str = "",
     extra: dict[str, Any] | None = None,
-    declared_ops: dict[str, str] | None = None,
-    import_root: str = "",
 ) -> dict[str, Any] | None:
-    """Capture the realized contents of ``rel_paths`` under ``framework_root``."""
-    framework_root = Path(framework_root)
+    """Capture the realized contents of ``layer.rel_paths`` under ``layer.framework_root``."""
+    framework_root = Path(layer.framework_root)
     dest_dir = Path(dest_dir)
     files_root = dest_dir / _FILES
-    ops = dict(declared_ops or {})
+    ops = dict(layer.declared_ops or {})
 
     captured: list[dict[str, str]] = []
     all_complete = True
-    for raw in sorted({str(p) for p in rel_paths}):
+    for raw in sorted({str(p) for p in layer.rel_paths}):
         rel = _safe_rel(raw)
         if rel is None:
             continue
@@ -104,9 +139,9 @@ def snapshot_source_layer(
     manifest: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "framework_root": str(framework_root),
-        "base_sha": str(base_sha or ""),
+        "base_sha": str(layer.base_sha or ""),
         "provenance": provenance,
-        "import_root": import_root,
+        "import_root": layer.import_root,
         "complete": all_complete,
         _FILES: captured,
     }

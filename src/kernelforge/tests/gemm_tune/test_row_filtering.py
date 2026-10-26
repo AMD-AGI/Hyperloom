@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from kernelforge.gemm_tune.tuners._aiter_dense_common import _filter_unimproved_rows
+from kernelforge.gemm_tune.tuners._aiter_dense_common import _filter_unimproved_rows, _parse_tuner_stdout
 
 _HDR = "gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio"
 
@@ -71,6 +71,46 @@ class TestDropsLosers:
         dropped, _ = _filter_unimproved_rows(csv, [_won(64, 5120, 5120)])
         assert dropped == 0
         assert _rows_of(csv) == [("64", "5120", "5120")]
+
+
+def _below_aiters_bar(m, n, k):
+    """aiter's compare skips a shape improved by less than 3%: (64, 34816, 5120) at 49.69 -> 48.38 us."""
+    return {
+        "M": m,
+        "N": n,
+        "K": k,
+        "default_us": 49.69,
+        "tuned_us": 48.38,
+        "speedup": 1.0271,
+        "improved": False,
+        "below_update_bar": True,
+    }
+
+
+class TestKeepsAFasterRow:
+    def test_a_row_faster_than_what_serving_runs_without_it_ships_below_aiters_update_bar(self, tmp_path):
+        # Dropping it hands the shape back to the slower pre-run config: on gate_up M=64 that is 6% in a graph.
+        csv = _csv(tmp_path, [_row(64, 34816, 5120), _row(48, 34816, 5120)])
+        dropped, kept = _filter_unimproved_rows(csv, [_below_aiters_bar(64, 34816, 5120), _lost(48, 34816, 5120)])
+        assert (dropped, kept) == (1, 1)
+        assert _rows_of(csv) == [("64", "34816", "5120")]
+
+
+def _compare_skipped(reason: str) -> list[dict]:
+    """A compare report whose only shape aiter skipped, as `aiter.utility.base_tuner` prints it."""
+    line = f"(64, 34816, 5120)                        |      49.69 |      48.38 |     2.64% | {reason:>18}"
+    return _parse_tuner_stdout(f"--- Skipped (1 shapes) ---\n{line}\n", "")
+
+
+class TestKeepsOnlyARowThatPassedItsPostCheck:
+    def test_a_row_below_the_bar_ships(self, tmp_path):
+        csv = _csv(tmp_path, [_row(64, 34816, 5120)])
+        assert _filter_unimproved_rows(csv, _compare_skipped("< 3.0% improve")) == (0, 0)
+
+    def test_a_faster_row_whose_post_check_failed_is_dropped(self, tmp_path):
+        csv = _csv(tmp_path, [_row(64, 34816, 5120)])
+        assert _filter_unimproved_rows(csv, _compare_skipped("post-mismatch")) == (1, 0)
+        assert _rows_of(csv) == []
 
 
 class TestKeepsUnmeasured:

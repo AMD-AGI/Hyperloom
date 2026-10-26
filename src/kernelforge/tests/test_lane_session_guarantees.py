@@ -131,6 +131,53 @@ def _run_lane_session(
     return specs[0], lane_dir
 
 
+@pytest.mark.parametrize("fails", [False, True])
+def test_every_lane_round_releases_the_backend_it_built(tmp_path, monkeypatch, fails):
+    """Each round builds a fresh backend per lane, so nothing but the lane can release it.
+
+    The DeepSeek backend keeps one harness process per workspace for resumes. A
+    lane session is never resumed once it returns, and the next round builds a
+    new backend that cannot see the old one's processes.
+    """
+    backends = []
+
+    class Backend:
+        """Stand in for a provider that holds a process between sessions."""
+
+        name = "claude"
+        capabilities = AgentCapabilities(resumable=True, stop_hooks=True)
+
+        def __init__(self, runtime):
+            self.runtime = runtime
+            self.closed = False
+            backends.append(self)
+
+        async def run(self, spec: AgentRunSpec, usage=None) -> AgentRunResult:
+            """Answer, or fail the way a lost provider does."""
+            if fails:
+                raise RuntimeError("provider lost")
+            return AgentRunResult(text="PLAN: tune it")
+
+        def close(self) -> None:
+            """Record the release."""
+            self.closed = True
+
+    monkeypatch.setattr(agent_module, "create_registered_backend", lambda runtime, **_kwargs: Backend(runtime))
+    factory = _lane_factory(tmp_path)
+
+    for round_number in (1, 2):
+        lane_dir = _tree(tmp_path / f"round{round_number}" / "1")
+        session = factory(str(lane_dir), None)
+        if fails:
+            with pytest.raises(RuntimeError):
+                asyncio.run(session(str(lane_dir / "src" / "kernel.py"), "plan"))
+        else:
+            asyncio.run(session(str(lane_dir / "src" / "kernel.py"), "plan"))
+
+    assert len(backends) == 2
+    assert all(backend.closed for backend in backends)
+
+
 def test_a_hookless_provider_is_given_no_hooks_to_drop(tmp_path, monkeypatch):
     """The gate's callbacks are built for the provider that runs them, or not at all.
 

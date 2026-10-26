@@ -29,8 +29,12 @@ class A8W8BlockscaleBpreshuffleTuner(BaseTuner):
 
     def run(self) -> TuneResult:
         return run_aiter_dense_tuner(
+            # --splitK enables aiter's asm split-K search; ck/cktile rows stay at 0 via the forwarding contract.
             DenseTunerSpec(
-                self.name, "a8w8_blockscale_bpreshuffle", self.env_var, ("--libtype", "all", "--preshuffle")
+                self.name,
+                "a8w8_blockscale_bpreshuffle",
+                self.env_var,
+                ("--libtype", "all", "--preshuffle", "--splitK"),
             ),
             self.ctx,
             self.work_dir,

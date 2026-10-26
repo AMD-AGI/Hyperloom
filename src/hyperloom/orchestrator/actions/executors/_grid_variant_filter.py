@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import shlex
+from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.env import is_truthy
@@ -267,22 +268,26 @@ def _fingerprint_component_matches(actual: str, expected: str) -> bool:
     return found is not None and expected.startswith(found.group(1))
 
 
-def _matches_unsafe_unified_attn_stack(
-    *,
-    framework: str,
-    model_path: str,
-    gpu_type: str,
-    stack_fingerprint: dict | None,
-) -> bool:
-    if framework.strip().lower() != "sglang" or not is_gfx_arch(gpu_type, "gfx950"):
+@dataclass(frozen=True)
+class ServingStack:
+    """The framework, model, GPU and component versions a grid's variants are served on."""
+
+    framework: str
+    model_path: str
+    gpu_type: str = ""
+    stack_fingerprint: dict | None = None
+
+
+def _matches_unsafe_unified_attn_stack(serving: ServingStack) -> bool:
+    if serving.framework.strip().lower() != "sglang" or not is_gfx_arch(serving.gpu_type, "gfx950"):
         return False
-    stack = stack_fingerprint if isinstance(stack_fingerprint, dict) else {}
+    stack = serving.stack_fingerprint if isinstance(serving.stack_fingerprint, dict) else {}
     if any(
         not _fingerprint_component_matches(str(stack.get(key) or ""), value)
         for key, value in _UNSAFE_UNIFIED_ATTN_STACK.items()
     ):
         return False
-    model_dir = Path(model_path)
+    model_dir = Path(serving.model_path)
     if "14b" not in model_dir.name.lower() or "fp8" not in model_dir.name.lower():
         return False
     try:
@@ -344,28 +349,20 @@ def _unsafe_unified_attn_reason(variant: GridVariant, *, base_server_args: str) 
 def apply_compatibility_filter(
     grid: list["GridVariant"],
     *,
-    framework: str,
-    model_path: str,
-    gpu_type: str = "",
-    stack_fingerprint: dict | None = None,
+    serving: ServingStack,
     base_server_args: str = "",
 ) -> tuple[list["GridVariant"], list[dict]]:
     """Skip variants known to be incompatible with current model/framework."""
-    if model_path:
-        is_mla, is_moe = _detect_model_class(model_path)
+    if serving.model_path:
+        is_mla, is_moe = _detect_model_class(serving.model_path)
     else:
         # Cannot detect -> assume compatible.
         is_mla, is_moe = True, True
 
-    fw = framework.strip().lower()
+    fw = serving.framework.strip().lower()
 
     is_xdit = fw == "xdit"
-    unsafe_unified_attn_stack = _matches_unsafe_unified_attn_stack(
-        framework=fw,
-        model_path=model_path,
-        gpu_type=gpu_type,
-        stack_fingerprint=stack_fingerprint,
-    )
+    unsafe_unified_attn_stack = _matches_unsafe_unified_attn_stack(serving)
 
     kept: list[GridVariant] = []
     dropped: list[dict] = []
@@ -403,7 +400,7 @@ def apply_compatibility_filter(
             if not class_ok:
                 skip_reason = (
                     f"{flag} requires {required_class.upper()} model; "
-                    f"MODEL_PATH={model_path!r} not recognised as "
+                    f"MODEL_PATH={serving.model_path!r} not recognised as "
                     f"{required_class.upper()}-class"
                 )
                 break

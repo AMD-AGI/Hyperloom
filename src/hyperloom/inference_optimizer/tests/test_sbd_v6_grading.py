@@ -20,22 +20,26 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, GRADED_INTVTY, GRADED_OUTPUT
+from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, GRADED_INTVTY, GRADED_OUTPUT, VERDICT_KEEP, GradedComparison
 from hyperloom.inference_optimizer.breakdown.collectors.v6 import (
     MetadataSources,
     OutcomeSources,
     collect_v6_metadata,
     collect_v6_outcome,
 )
-from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, recorder_for, snapshot_metadata
-from hyperloom.inference_optimizer.breakdown.recorder import stack_event
+from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, stack_event
+from hyperloom.inference_optimizer.breakdown.recorder.recorder import recorder_for
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     PRODUCER as BASELINE_PRODUCER,
+    BaselineRequest,
     baseline_event_id,
     make_baseline_recorder,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
-from hyperloom.inference_optimizer.breakdown.recorder.session_metadata import SECTION as METADATA_SECTION
+from hyperloom.inference_optimizer.breakdown.recorder.session_metadata import (
+    SECTION as METADATA_SECTION,
+    snapshot_metadata,
+)
 from hyperloom.inference_optimizer.breakdown.session_facts import grading_block
 from hyperloom.inference_optimizer.cli.bootstrap import seed_grading
 from hyperloom.inference_optimizer.grading import resolved_grading
@@ -188,7 +192,6 @@ def test_the_grading_block_reaches_the_exported_metadata(tmp_path):
             recorded=assemble_parts(tmp_path)[METADATA_SECTION],
         ),
         exported_at_utc="2026-09-01T02:00:05+00:00",
-        warnings=[],
     )
     assert metadata["grading"] == {
         "benchmark_mode": "agentx",
@@ -226,10 +229,13 @@ def _adopt(index: int, *, objective: str = GRADED_OUTPUT) -> None:
     stack_event.record_adoption(
         stack_index=index,
         entry={"action": "explore"},
-        throughput_before=100.0 + index * 10.0,
-        throughput_after=110.0 + index * 10.0,
         baseline_tput=100.0,
-        objective=objective,
+        graded=GradedComparison(
+            objective=objective,
+            candidate=110.0 + index * 10.0,
+            reference=100.0 + index * 10.0,
+            verdict=VERDICT_KEEP,
+        ),
     )
 
 
@@ -249,12 +255,17 @@ def _outcome(session_dir, *, close: dict[str, Any] | None = None) -> dict[str, A
 def test_outcome_reports_the_axis_the_settled_validation_was_measured_on(tmp_path):
     _adopt(0, objective=GRADED_INTVTY)
     stack_event.record_validation(
-        stack_len=1,
-        baseline_tput=38.0,
-        validated_tput=41.2,
-        validated_gain_pct=8.42,
-        graded_objective=GRADED_INTVTY,
-        measurement=AGENTX_AXES,
+        stack_event.StackValidation(
+            stack_len=1,
+            graded=GradedComparison(
+                objective=GRADED_INTVTY,
+                candidate=41.2,
+                reference=38.0,
+                verdict=VERDICT_KEEP,
+            ),
+            validated_gain_pct=8.42,
+            measurement=AGENTX_AXES,
+        ),
     )
 
     assert _outcome(tmp_path)["validation"]["graded_on"] == GRADED_INTVTY
@@ -273,12 +284,17 @@ def test_the_final_gain_carries_the_same_axis_as_the_reconciliation(tmp_path):
     # find two axis labels on them.
     _adopt(0, objective=GRADED_INTVTY)
     stack_event.record_validation(
-        stack_len=1,
-        baseline_tput=38.0,
-        validated_tput=41.2,
-        validated_gain_pct=8.42,
-        graded_objective=GRADED_INTVTY,
-        measurement=AGENTX_AXES,
+        stack_event.StackValidation(
+            stack_len=1,
+            graded=GradedComparison(
+                objective=GRADED_INTVTY,
+                candidate=41.2,
+                reference=38.0,
+                verdict=VERDICT_KEEP,
+            ),
+            validated_gain_pct=8.42,
+            measurement=AGENTX_AXES,
+        ),
     )
 
     outcome = _outcome(tmp_path, close={"final_recipe": {"throughput": 183.0}})
@@ -289,12 +305,17 @@ def test_the_settled_axes_are_published_beside_the_gain_they_produced(tmp_path):
     # Read off the validation row rather than ``current_best``: a revalidation moves the cumulative figure
     # without re-promoting the recipe, so ``current_best`` can be a different measurement entirely.
     stack_event.record_validation(
-        stack_len=1,
-        baseline_tput=38.0,
-        validated_tput=41.2,
-        validated_gain_pct=8.42,
-        graded_objective=GRADED_INTVTY,
-        measurement=AGENTX_AXES,
+        stack_event.StackValidation(
+            stack_len=1,
+            graded=GradedComparison(
+                objective=GRADED_INTVTY,
+                candidate=41.2,
+                reference=38.0,
+                verdict=VERDICT_KEEP,
+            ),
+            validated_gain_pct=8.42,
+            measurement=AGENTX_AXES,
+        ),
     )
 
     outcome = _outcome(tmp_path)
@@ -306,12 +327,17 @@ def test_an_unmeasured_axis_is_an_explicit_null_rather_than_an_absent_key(tmp_pa
     # Absent would be indistinguishable from an axis the framework failed to report, and zero reads as
     # "measured, and it was zero".
     stack_event.record_validation(
-        stack_len=1,
-        baseline_tput=100.0,
-        validated_tput=120.0,
-        validated_gain_pct=20.0,
-        graded_objective=GRADED_OUTPUT,
-        measurement={"output_throughput": 120.0},
+        stack_event.StackValidation(
+            stack_len=1,
+            graded=GradedComparison(
+                objective=GRADED_OUTPUT,
+                candidate=120.0,
+                reference=100.0,
+                verdict=VERDICT_KEEP,
+            ),
+            validated_gain_pct=20.0,
+            measurement={"output_throughput": 120.0},
+        ),
     )
 
     perf = _outcome(tmp_path)["validation"]["perf"]
@@ -333,12 +359,17 @@ def test_a_fully_graded_ledger_reports_no_finding(tmp_path):
     # ``test_a_degraded_agentx_lift_is_refused`` pins, so every row in this sum is on ``graded_on``.
     _adopt(0, objective=GRADED_INTVTY)
     stack_event.record_validation(
-        stack_len=1,
-        baseline_tput=100.0,
-        validated_tput=110.0,
-        validated_gain_pct=10.0,
-        graded_objective=GRADED_INTVTY,
-        measurement=AGENTX_AXES,
+        stack_event.StackValidation(
+            stack_len=1,
+            graded=GradedComparison(
+                objective=GRADED_INTVTY,
+                candidate=110.0,
+                reference=100.0,
+                verdict=VERDICT_KEEP,
+            ),
+            validated_gain_pct=10.0,
+            measurement=AGENTX_AXES,
+        ),
     )
 
     assert _outcome(tmp_path)["validation"]["notes"] == []
@@ -353,12 +384,14 @@ def _record_baseline(**axes: Any) -> None:
     """Record an anchoring baseline the way a dispatched measurement does."""
     recorder = make_baseline_recorder(
         make_sink(baseline_event_id("prelude", 0), producer=BASELINE_PRODUCER),
-        task_id="t-1",
-        task_kind="baseline",
-        reason="",
-        framework="sglang",
-        establishes_quality_ref=True,
-        params={"config_path": "/cfg.yaml", "output_dir": "/w", "timeout_sec": 7800},
+        BaselineRequest(
+            task_id="t-1",
+            task_kind="baseline",
+            reason="",
+            framework="sglang",
+            establishes_quality_ref=True,
+            params={"config_path": "/cfg.yaml", "output_dir": "/w", "timeout_sec": 7800},
+        ),
     )
     assert recorder is not None
     recorder.finish({"status": "succeeded", "output_throughput": 183.0, **axes})

@@ -27,6 +27,14 @@ it.
   `v0.5.21-rocm10-mi30x|mi35x-20261008` to
   `v0.5.22-rocm10-mi30x|mi35x-20261022` (or match `SGLANG_REF` on bare metal).
 
+- **`optimize --session-dir DIR` creates the new session in the directory you
+  name.** The directory must be absolute and below `$USER_DATA_PATH`, and the
+  flag cannot be combined with `--resume-from`. Without it the session
+  directory is generated as before. A hosted run uses it to find its session
+  again after a restart. The same change adds the campaign spec
+  (`hyperloom.campaign-spec/v1`) a hosted run is given, with its JSON Schema
+  and a field-by-field validator, and keeps a hosted session's
+  `<session dir>/archive/` out of the session package.
 - **The accuracy eval can no longer be turned off.** `--no-eval`, the
   `RUN_EVAL` process-environment override and the `disable_run_eval` task
   param are removed, and a baseline whose eval fails stops the run instead of

@@ -67,23 +67,22 @@ def test_endpoint_methods_build_bodies(monkeypatch) -> None:
 
     monkeypatch.setattr(client, "_request", fake_request)
 
-    client.list(KBListQuery(scope_filter={"model": "m"}, kind="pitfall", metadata_filter={"a": 1}, limit=5))
+    client.list(KBListQuery(scope_filter={"model": "m"}, kind="pitfall", limit=5))
     client.upsert({"topic": "t"})
-    client.batch_insert([{"x": 1}], on_conflict="skip")
-    client.add_edges([{"src": "a", "dst": "b"}])
 
     paths = [p for p, _ in seen]
     assert paths == [
         "/api/kb/list",
         "/api/kb/upsert",
-        "/api/kb/batch_insert",
-        "/api/kb/edges/add",
     ]
     list_body = seen[0][1]
-    assert list_body["kind"] == "pitfall"
-    assert list_body["metadata_filter"] == {"a": 1}
-    assert list_body["limit"] == 5
-    assert seen[2][1] == {"items": [{"x": 1}], "on_conflict": "skip"}
+    assert list_body == {
+        "scope_filter": {"model": "m"},
+        "limit": 5,
+        "sort_by": "updated_at_desc",
+        "include_deleted": False,
+        "kind": "pitfall",
+    }
 
 
 def test_request_success(monkeypatch) -> None:

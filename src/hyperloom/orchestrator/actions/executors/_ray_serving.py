@@ -12,12 +12,15 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 
 from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
+
+if TYPE_CHECKING:
+    from ._ray_backend import SessionKillRound
 
 log = logging.getLogger(__name__)
 
@@ -541,21 +544,9 @@ class ServingLease:
             self._actor = make_serving_actor(self._num_gpus, serving_slot=self._serving_slot)
             _note_lease_actor_submitted()
 
-    def run_session_kill(
-        self,
-        cmd: list[str],
-        *,
-        env: dict[str, str] | None = None,
-        cwd: str | None = None,
-        timeout: int | float | None = None,
-        silence_timeout_sec: float | None = None,
-        server_log_path: str | None = None,
-        server_already_ready: bool = False,
-        session_remaining_sec: float | None = None,
-    ) -> tuple[int, str, str]:
+    def run_session_kill(self, bench_round: SessionKillRound) -> tuple[int, str, str]:
         """Run one benchmark round inside the lease's actor; return ``(rc, stdout, stderr)``."""
         from ..cancel_channel import cancel_scope_listener
-        from ._ray_backend import SessionKillRound
 
         if self._quarantined:
             # Reported the way an ensure failure is, rather than raised: callers
@@ -577,23 +568,12 @@ class ServingLease:
         # this call is counted as able to hear -- the same window the local path opens around its spawn.
         with cancel_scope_listener() as cancel_scope:
             acquire_ref = self._actor.pid.remote()
-            ref = self._actor.run_blocking.remote(
-                SessionKillRound(
-                    cmd,
-                    env=env,
-                    cwd=cwd,
-                    timeout=timeout,
-                    silence_timeout_sec=silence_timeout_sec,
-                    server_log_path=server_log_path,
-                    server_already_ready=server_already_ready,
-                    session_remaining_sec=session_remaining_sec,
-                )
-            )
+            ref = self._actor.run_blocking.remote(bench_round)
             return self._collect_round(
                 ref,
                 acquire_ref=acquire_ref,
-                cmd=cmd,
-                timeout=timeout,
+                cmd=bench_round.cmd,
+                timeout=bench_round.timeout,
                 cancel_scope=cancel_scope,
             )
 
@@ -951,16 +931,7 @@ class GpuSpecialistLease:
         # §3.3 non-blocking start: the pending ObjectRef for the actor's ``start`` remote call.
         self._start_ref: Any = None
 
-    def start_async(
-        self,
-        cmd: list[str],
-        *,
-        env: dict[str, str] | None = None,
-        cwd: str | None = None,
-        log_path: str | None = None,
-        env_mode: str = "merge",
-        stdin_path: str | None = None,
-    ) -> None:
+    def start_async(self, launch: ActorLaunch) -> None:
         """Create the actor and SUBMIT the subprocess launch without blocking."""
         from ._ray_backend import get_ray_backend
 
@@ -971,9 +942,7 @@ class GpuSpecialistLease:
             )
             self._actor = make_gpu_specialist_actor(self._num_gpus, serving_slot=self._serving_slot)
             _note_lease_actor_submitted()
-        self._start_ref = self._actor.start.remote(
-            ActorLaunch(cmd, env=env, cwd=cwd, log_path=log_path, env_mode=env_mode, stdin_path=stdin_path)
-        )
+        self._start_ref = self._actor.start.remote(launch)
 
     def poll_started(self) -> int | None:
         """Non-blocking poll for the launched pid."""

@@ -383,7 +383,7 @@ async def test_executor_ends_an_all_noop_patch_set_as_already_present(tmp_path, 
     assert result["already_present"] == [{"patch": str(p), "check": check.value} for p in patches]
     assert result["patches_applied"] == []
     assert result["patches_reverted"] == []
-    rows = read_pr_ledger(kb_root=kb_root)
+    rows = read_pr_ledger()
     assert [(row["outcome"], row["pr_url"]) for row in rows] == [("already_present", _PR_URL)]
     assert {f: (repo / "mod" / f).read_text(encoding="utf-8") for f in before} == before
     if git_tree:
@@ -462,7 +462,7 @@ async def test_executor_ends_a_merged_pr_fetched_by_diff_url_as_already_present(
 
     assert result["status"] == "already_present"
     assert [row["check"] for row in result["already_present"]] == ["git_reverse_apply_check"]
-    assert [row["outcome"] for row in read_pr_ledger(kb_root=kb_root)] == ["already_present"]
+    assert [row["outcome"] for row in read_pr_ledger()] == ["already_present"]
 
 
 @pytest.mark.asyncio
@@ -478,7 +478,7 @@ async def test_executor_benchmarks_a_reverted_pr_head(tmp_path, executor_env, mo
 
     assert reached == ["t-reverted"]
     assert result["status"] != "already_present"
-    assert "already_present" not in [row["outcome"] for row in read_pr_ledger(kb_root=kb_root)]
+    assert "already_present" not in [row["outcome"] for row in read_pr_ledger()]
 
 
 @pytest.mark.asyncio
@@ -494,7 +494,7 @@ async def test_executor_benchmarks_an_all_noop_set_that_changes_server_args(tmp_
 
     assert reached == ["t-args"]
     assert result["status"] != "already_present"
-    assert "already_present" not in [row["outcome"] for row in read_pr_ledger(kb_root=kb_root)]
+    assert "already_present" not in [row["outcome"] for row in read_pr_ledger()]
 
 
 @pytest.mark.asyncio
@@ -511,4 +511,4 @@ async def test_executor_lands_a_set_whose_noop_rides_with_a_real_change(tmp_path
 
     assert result["status"] == "applied_no_bench"
     assert result["patches_applied"] == [str(p) for p in patches]
-    assert read_pr_ledger(kb_root=kb_root) == []
+    assert read_pr_ledger() == []

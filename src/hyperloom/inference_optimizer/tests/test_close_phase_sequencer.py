@@ -20,7 +20,8 @@ from hyperloom.common.deadline import Deadline
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.inference_optimizer.breakdown.collectors.v6_close import collect_v6_close
 from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts, phase_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts, event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import PHASE_EVENT_SECTIONS
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
@@ -39,7 +40,7 @@ from hyperloom.orchestrator.phases.close import (
 )
 from hyperloom.orchestrator.actions.executors.session_breakdown import session_breakdown_executor
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.state.task_registry import task_dispatch_record
+from hyperloom.orchestrator.state.task_registry import task_dispatch_record, TaskSpec
 
 from .conftest import make_coordinator
 
@@ -75,37 +76,24 @@ class _StubTaskRegistry:
         self._by_id: dict[str, _StubTaskRow] = {}
         self.insertion_order: list[str] = []
 
-    async def create_or_return_existing(
-        self,
-        *,
-        kind: str,
-        params: dict,
-        idempotency_key: str,
-        requires_lanes: list | None = None,
-        allowed_tools: list | None = None,
-        side_effects: list | None = None,
-        lease_ttl_sec: int = 0,
-        task_id: str | None = None,
-        dispatch_class: str | None = None,
-        dispatch_origin: dict | None = None,
-    ):
-        existing = self._by_key.get(idempotency_key)
+    async def create_or_return_existing(self, spec):
+        existing = self._by_key.get(spec.idempotency_key)
         if existing is not None:
             return existing, True
         import uuid as _uuid
 
-        tid = task_id or _uuid.uuid4().hex
+        tid = spec.task_id or _uuid.uuid4().hex
         row = _StubTaskRow(
             task_id=tid,
-            kind=kind,
+            kind=spec.kind,
             # Matches the registry's INSERT: a new row is always ``queued``.
             state="queued",
-            params=dict(params),
-            idempotency_key=idempotency_key,
+            params=dict(spec.params),
+            idempotency_key=spec.idempotency_key,
         )
-        self._by_key[idempotency_key] = row
+        self._by_key[spec.idempotency_key] = row
         self._by_id[tid] = row
-        self.insertion_order.append(idempotency_key)
+        self.insertion_order.append(spec.idempotency_key)
         return row, False
 
     async def get(self, task_id):
@@ -144,8 +132,8 @@ class _StubRecipeKB:
     def update_recipe(self, **kwargs) -> dict:
         return {"status": "auto_accepted"}
 
-    def put_recipe(self, **kwargs) -> dict:
-        return {"status": "written", "canonical_id": kwargs.get("canonical_id", "")}
+    def put_recipe(self, upsert) -> dict:
+        return {"status": "written", "canonical_id": upsert.canonical_id}
 
     def get_authoritative_recipe(self, *, canonical_id: str) -> dict:
         return {}
@@ -448,7 +436,9 @@ async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
         return {"status": "ok"}
 
     coord.sub.register_executor("report", execute)
-    queued = await coord.tasks.create(kind="report", params={}, idempotency_key="internal-report-close_phase_entry")
+    queued = await coord.tasks.create(
+        TaskSpec(kind="report", params={}, idempotency_key="internal-report-close_phase_entry")
+    )
     try:
         started = time.monotonic()
         state = await coord.phase_close._run_close_task(queued, step="1 (report)")
@@ -1219,7 +1209,9 @@ class TestEveryTerminalReachesAWrittenReport:
             assert transition["ts_unix"] == transition["evidence"]["predicate_inputs"]["now_unix"]
             assert state.pending_escalate_hint == ""
             assert assemble_parts(coord.session_dir)["outcome"]["stage_reached_recorded"] == "close"
-            prior, _ = phase_event.assemble_phase_ext(phase_event_parts(), event=phase_event.phase_event_id(phase, 0))
+            prior, _ = phase_event.assemble_phase_ext(
+                event_parts(PHASE_EVENT_SECTIONS), event=phase_event.phase_event_id(phase, 0)
+            )
             assert prior["open"] is False
             assert prior["duration_sec"] is not None
             if phase in {"FRAMEWORK_AGENT", "KERNEL_AGENT"}:
@@ -1232,7 +1224,7 @@ class TestEveryTerminalReachesAWrittenReport:
                     assert internal["ext"]["exit"]["reason"] == transition_reason
                 else:
                     assert internal["ext"]["outcome"]["exit_reason"] == transition_reason
-            close, _ = phase_event.assemble_phase_ext(phase_event_parts(), event="close:0:phase")
+            close, _ = phase_event.assemble_phase_ext(event_parts(PHASE_EVENT_SECTIONS), event="close:0:phase")
             actions = {row["task_id"]: row for row in close["actions"]["rows"]}
             receipts = transition["evidence"]["close_steps"]
             for step in ("report", "session_breakdown"):

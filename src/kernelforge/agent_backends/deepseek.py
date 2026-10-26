@@ -304,6 +304,16 @@ class DeepSeekHarnessBackend:
         spec = AgentRunSpec(system_prompt="", user_prompt="", cwd=cwd)
         self._harness_for(spec.resolved(self.runtime))
 
+    def close(self) -> None:
+        """Shut down every runtime this backend started; a later session starts a fresh one."""
+        with self._runtimes_lock:
+            runtimes = list(self._runtimes.values())
+            self._runtimes.clear()
+            self._session_runtimes.clear()
+        for runtime in runtimes:
+            with contextlib.suppress(*sdk_failures()):
+                runtime.close()
+
     def _discard_harness(self, harness: Any) -> None:
         """Close one runtime and stop serving anything from it."""
         with self._runtimes_lock:

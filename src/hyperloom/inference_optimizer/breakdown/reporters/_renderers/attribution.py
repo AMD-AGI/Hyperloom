@@ -7,7 +7,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import Decision, RenderedSection, as_dict, fmt_pct, md_table, register_renderer, validation_of
+
+from hyperloom.common.coerce import to_mapping
+
+from ..base import Decision, RenderedSection, fmt_pct, md_table, register_renderer, validation_of
 
 #: Below this the residue is float noise from re-serialized throughputs, well
 #: under any measurement's own repeatability.
@@ -32,11 +35,11 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             per-source split to show.
     """
     validation = validation_of(breakdown)
-    attribution = as_dict(validation.get("attribution"))
+    attribution = to_mapping(validation.get("attribution"))
 
     claimed = [
-        [source, as_dict(bucket).get("total_gain_pct")]
-        for source, bucket in as_dict(attribution.get("by_source")).items()
+        [source, to_mapping(bucket).get("total_gain_pct")]
+        for source, bucket in to_mapping(attribution.get("by_source")).items()
     ]
     total_v = validation.get("validated_total_gain_pct")
     unattributed = validation.get("unattributed_gain_pct")

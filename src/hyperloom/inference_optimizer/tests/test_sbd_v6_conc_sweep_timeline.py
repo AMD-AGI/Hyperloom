@@ -17,7 +17,8 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.breakdown import schema
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import conc_sweep_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import CONC_SWEEP_EVENT_SECTIONS
 from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     ARM_BASELINE,
     ARM_OPTIMIZED,
@@ -855,7 +856,7 @@ def test_rows_of_another_event_are_not_pulled_in(_bound_session):
     second.record_variant(ARM_OPTIMIZED, SweepRung(stage=STAGE_BOOT, conc=8, point=_point(8)))
     second.finish(_final())
 
-    parts = conc_sweep_event_parts()
+    parts = event_parts(CONC_SWEEP_EVENT_SECTIONS)
     first_ext, _ = assemble_conc_sweep_ext(parts, event="sweep:1:conc_sweep")
     second_ext, _ = assemble_conc_sweep_ext(parts, event="sweep:2:conc_sweep")
     assert [point["conc"] for point in first_ext["arms"][ARM_OPTIMIZED]["points"]] == [64]
@@ -868,7 +869,7 @@ def test_a_second_sweep_in_one_cycle_is_named_rather_than_dropped(_bound_session
     second = _recorder(task_id="cs-2")
     second.finish(_final(elapsed_sec=20.0))
 
-    ext, _ = assemble_conc_sweep_ext(conc_sweep_event_parts(), event="sweep:2:conc_sweep")
+    ext, _ = assemble_conc_sweep_ext(event_parts(CONC_SWEEP_EVENT_SECTIONS), event="sweep:2:conc_sweep")
     assert ext["request"]["task_id"] == "cs-2"
     assert ext["superseded_sweeps"] == ["cs-1"]
 

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from ..dense_shapes import MGrid
 from ..model_analyzer import ModelProfile
 
 log = logging.getLogger(__name__)
@@ -76,6 +77,8 @@ class TuneResult:
     shape_results: list[dict[str, Any]] = field(default_factory=list)
     # Rows removed from the deployed artifact because the tuner's own accuracy check found them wrong.
     dropped_inaccurate: list[dict[str, Any]] = field(default_factory=list)
+    # Decode rows whose in-graph re-time shipped another kernel than the tuner's pick, or could not time it.
+    graph_retime: list[dict[str, Any]] = field(default_factory=list)
     # Timing
     elapsed_s: float = 0.0
     # Error info
@@ -123,6 +126,8 @@ class TuneResult:
             d["shape_results"] = self.shape_results
         if self.dropped_inaccurate:
             d["dropped_inaccurate"] = self.dropped_inaccurate
+        if self.graph_retime:
+            d["graph_retime"] = self.graph_retime
         if self.error:
             d["error"] = self.error
             d["error_class"] = self.error_class
@@ -152,6 +157,7 @@ class TuneContext:
     min_improvement_pct: float
     timeout_s: int
     thorough: bool = False  # Full search: all libtypes, more shapes, no per-shape timeout
+    m_grid: MGrid = MGrid.BUCKET
     # Optional input files
     untuned_csv: Path | None = None
     # MoE shapes are kept in their own field because the dense and MoE untuned CSVs are different schemas (M,N,K

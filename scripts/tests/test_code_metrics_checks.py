@@ -127,6 +127,39 @@ def test_a_comment_the_change_removed_elsewhere_was_moved_not_added() -> None:
     assert got[0] == "adds a 10-line comment block (limit 8)"
 
 
+# --- Broad catch reason ----------------------------------------------------------
+
+
+BROAD_NOQA = """\
+try:
+    f()
+except Exception:  # noqa: BLE001
+    log()
+try:
+    g()
+except Exception:  # noqa: BLE001 - outermost CLI boundary, logged
+    log()
+try:
+    h()
+except Exception:  # noqa: E722, BLE001
+    log()
+try:
+    k()
+except Exception:  # noqa: BLE001
+    log()
+"""
+
+
+def test_an_added_broad_noqa_needs_a_reason_on_its_line() -> None:
+    got = [(p.check, p.line) for p in checks.broad_noqa_problems("m.py", BROAD_NOQA, {3, 7, 11})]
+    assert got == [(checks.BROAD_NOQA, 3), (checks.BROAD_NOQA, 11)]
+
+
+def test_a_broad_noqa_the_change_removed_elsewhere_was_moved_not_added() -> None:
+    removed = {"except Exception:  # noqa: BLE001"}
+    assert checks.broad_noqa_problems("m.py", BROAD_NOQA, {3, 15}, removed) == []
+
+
 # --- English only ----------------------------------------------------------------
 
 
@@ -322,6 +355,18 @@ def test_diff_only_checks_judge_the_change_and_skip_tests(tmp_path: Path) -> Non
     ]
     # Without a base there is no diff: only the whole-tree checks run.
     assert checks.run_all(tmp_path, ["src"], [], Units(tmp_path), None) == []
+
+
+def test_show_reads_a_file_and_refuses_a_directory(tmp_path: Path) -> None:
+    """A caller writes what ``show`` returns as a file, and ``git show <ref>:<dir>`` prints a tree listing."""
+    (tmp_path / "src/pkg").mkdir(parents=True)
+    (tmp_path / "src/pkg/a.py").write_text("x = 1\n", encoding="utf-8")
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-q", "-m", "base")
+    assert checks.show(tmp_path, "HEAD", "src/pkg/a.py") == "x = 1\n"
+    assert checks.show(tmp_path, "HEAD", "src/pkg") is None
+    assert checks.show(tmp_path, "HEAD", "src/pkg/gone.py") is None
 
 
 def commit_base(root: Path, files: dict[str, str]) -> None:

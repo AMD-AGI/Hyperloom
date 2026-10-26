@@ -831,6 +831,7 @@ def _restore_entry_mode(gpu_id: int, entry_mode: str, *, sudo: bool) -> bool:
         print(f"\nrestoring {entry_mode} on GPU {gpu_id}")
         set_mode(gpu_id, entry_mode, sudo=sudo)
     except Exception as exc:  # noqa: BLE001 - operator script barrier
+        traceback.print_exc()
         print(
             f"ERROR: could not restore {entry_mode} on GPU {gpu_id}: {exc}\n"
             f"The card is NOT in the mode it started in. Anything that runs on it now "
