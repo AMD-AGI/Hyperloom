@@ -341,7 +341,7 @@ class ClosePhase(CoordinatorCollaborator):
         """
         try:
             await coro
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one CLOSE step of the sequence
             log.exception("CLOSE step %r failed", step_name)
             await self._record_close_step(step_name, status="failed", detail=repr(exc)[:240])
 
@@ -517,7 +517,7 @@ class ClosePhase(CoordinatorCollaborator):
         pkg_path: Path | None = None
         try:
             pkg_path = await self._do_artifact_package()
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: the artifact_package CLOSE step
             log.exception("CLOSE step %r failed", "artifact_package")
             await self._record_close_step("artifact_package", status="failed", detail=repr(exc)[:240])
 
