@@ -545,6 +545,7 @@ class Integrator:
         try:
             judgement = await self._gate.compare(request_id)
         except NotMeasured as exc:
+            await self._candidates.record_unmeasured(merge.carried, request_id)
             return replace(tested, reason=f"the merge test failed: {exc}")
         return _TestedMerge(tested, merge.delta, judgement)
 
