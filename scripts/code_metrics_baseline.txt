@@ -166,7 +166,7 @@ function-lines src/hyperloom/agents/critic/runtime/decision_reviewer.py::Decisio
 function-lines src/hyperloom/agents/critic/runtime/kb_writer.py::KBWriter.write_verdict 54
 function-lines src/hyperloom/agents/framework/sources/__init__.py::_run_pr_monitor 51
 function-lines src/hyperloom/agents/quantization/cli.py::_parse_args 52
-function-lines src/hyperloom/agents/quantization/driver/retry.py::quantize_via_prompt 71
+function-lines src/hyperloom/agents/quantization/driver/retry.py::quantize_via_prompt 69
 function-lines src/hyperloom/agents/quantization/driver/runner.py::run_one_attempt 56
 function-lines src/hyperloom/common/codex_session.py::CodexSession.start 70
 function-lines src/hyperloom/common/gain_math.py::conc_pair_comparison 52
