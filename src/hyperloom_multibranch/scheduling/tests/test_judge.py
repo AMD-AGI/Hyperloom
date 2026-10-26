@@ -23,11 +23,12 @@ from hyperloom_multibranch.contracts.notebook.records import (
     TestRecord,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis, MergeOutcome
+from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
 from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, SETTLED_TESTS, FrontierPolicy
 from hyperloom_multibranch.notebook.rsi.stranded import StrandedCommit, StrandedLead
-from hyperloom_multibranch.notebook.tests.factories import intent, request, result
+from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
 from hyperloom_multibranch.scheduling.branches import REPAIR_PROTECTED_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, EventKind, SessionEvent
@@ -734,33 +735,37 @@ def _ended(
     validity: Validity | None = Validity.SUCCEEDED,
     kind: TestKind = TestKind.TEST,
     purpose: Purpose = Purpose.EXPLORE,
+    judged: bool = True,
 ) -> TestRecord:
-    """An unjudged test of ``branch``; ``validity`` ``None`` leaves it without a result, withdrawn."""
+    """A test of ``branch``, judged FLAT unless ``judged`` is false; ``validity`` ``None`` leaves it without a
+    result, withdrawn."""
 
     request_id = f"{branch}-r{number}"
     test = request(request_id, intent(branch, "c-root"), kind=kind, purpose=purpose)
     if validity is None:
         return TestRecord(test, withdrawn_at=10.0, withdrawal_reason="branch stopped")
-    return TestRecord(test, result(request_id, validity=validity))
+    if not judged:
+        return TestRecord(test, result(request_id, validity=validity))
+    verdict = judgement(0.0, (request_id,), verdict=Verdict.FLAT)
+    return TestRecord(test, result(request_id, validity=validity), verdict, judged_at=11.0)
 
 
-def test_a_specialist_branch_keeps_its_grace_until_enough_of_its_explore_tests_ended() -> None:
+def test_a_specialist_branch_keeps_its_grace_until_enough_of_its_explore_tests_succeeded_and_were_judged() -> None:
     roster = (*ROSTER, _entry("b04", origin=BranchOrigin.USER), _entry("b05", origin=BranchOrigin.FORK))
     early = [_ended("b01", n) for n in range(SETTLED_TESTS - 1)]
-    not_ended = [
+    not_counted = [
         _ended("b01", 90, validity=None),
         _ended("b01", 91, kind=TestKind.PROFILE, purpose=Purpose.PROFILE),
         _ended("b01", 92, purpose=Purpose.INTEGRATION),
         TestRecord(request("b01-r93", intent("b01", "c-root"))),
+        _ended("b01", 94, validity=Validity.CANDIDATE_FAILED),
+        _ended("b01", 95, validity=Validity.MEASUREMENT_FAILED),
+        _ended("b01", 96, judged=False),
     ]
-    failed = [
-        _ended("b02", 0, validity=Validity.CANDIDATE_FAILED),
-        _ended("b04", 0, validity=Validity.MEASUREMENT_FAILED),
-    ]
-    done = [_ended(branch, n) for branch in ("b02", "b04", "b05") for n in range(1, SETTLED_TESTS)]
-    integration = [_ended(INTEGRATION_BRANCH, n) for n in range(SETTLED_TESTS - 1)]
+    done = [_ended(branch, n) for branch in ("b02", "b04") for n in range(SETTLED_TESTS)]
+    integration = [_ended(INTEGRATION_BRANCH, n) for n in range(SETTLED_TESTS)]
 
-    assert held_branches(roster, (), [*early, *not_ended, *failed, *done, *integration], {}, NOW) == {
+    assert held_branches(roster, (), [*early, *not_counted, *done, *integration], {}, NOW) == {
         "b01": HoldReason.GRACE,
         "b05": HoldReason.GRACE,
     }
@@ -783,9 +788,9 @@ def test_a_held_branch_row_names_why_it_is_held_and_the_prompt_explains_each_rea
     assert rows == {INTEGRATION_BRANCH: None, "b01": "grace", "b02": None, "b03": None, "b04": "repair"}
     prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
     assert (
-        f"grace: a specialist branch until {SETTLED_TESTS} of its explore tests ended with a result, a failed one "
-        f"included. repair: a branch opened to fix a blocked candidate, for {REPAIR_PROTECTED_SECONDS / 60:g} minutes "
-        "from its open"
+        f"grace: a specialist branch until {SETTLED_TESTS} of its explore tests measured its candidate and were "
+        "judged; a failed test, and one whose verdict is still to come, does not count. repair: a branch opened to fix "
+        f"a blocked candidate, for {REPAIR_PROTECTED_SECONDS / 60:g} minutes from its open"
     ) in prose
 
 

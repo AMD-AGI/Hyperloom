@@ -12,7 +12,7 @@ branch's specialist). The judge answers with one JSON
 object, which :func:`parse_decision` reads and :func:`cap_decision` cuts to the caps and to the branches that are
 still live. A failed call or an unreadable reply gives ``None``, and the scheduler keeps the status quo. The judge
 never calls a peer; the scheduler applies its decision. The judge may neither stop nor lower the K of a held branch
-(:func:`held_branches`): a specialist branch until :data:`SETTLED_TESTS` of its explore tests ended and a repair
+(:func:`held_branches`): a specialist branch until :data:`SETTLED_TESTS` of its explore tests measured and a repair
 branch for its protected period, unless its specialist gave up or its judging failed, and a branch with a candidate
 waiting for its confirm, unless its judging failed. The scheduler finds the held branches again as it applies the decision, since a candidate can start waiting
 while the judge answers, and :func:`hold_decision` refuses their orders and names them in the decision.
@@ -30,7 +30,7 @@ from pathlib import Path
 
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.jsonio import extract_last_json_with_key
-from hyperloom.contracts.measurement import Purpose, TestKind
+from hyperloom.contracts.measurement import Purpose, Validity
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, PendingCandidate, TestRecord
@@ -155,8 +155,8 @@ losing its heartbeat without gaining.
 A branch of origin user follows a direction the user wrote; such branches open from that same commit ahead of the
 opening batch, and the opening batch fills the slots they leave.
 A branch's held says why a stop or a lower K you give it is not applied, and is absent from a branch you may stop and
-narrow freely. grace: a specialist branch until {SETTLED_TESTS} of its explore tests ended with a result, a failed one
-included. repair: a branch opened to fix a blocked candidate, for {REPAIR_PROTECTED_SECONDS / 60:g} minutes from its
+narrow freely. grace: a specialist branch until {SETTLED_TESTS} of its explore tests measured its candidate and were
+judged; a failed test, and one whose verdict is still to come, does not count. repair: a branch opened to fix a blocked candidate, for {REPAIR_PROTECTED_SECONDS / 60:g} minutes from its
 open, since the numerics fix it carries is worth what its blocked candidate measured and shows later than the first few
 tests of a new branch. pending_confirm: A branch with a pending candidate cannot be stopped or narrowed until its
 confirm is judged. A branch whose specialist gave up, and one stopped for a failed judging, is held by neither its grace
@@ -254,6 +254,19 @@ class JudgeView:
     frontier_scorer: str
 
 
+def _measured_with_verdict(record: TestRecord) -> bool:
+    """An explore test that succeeded and was judged: what a branch's grace counts. A failed test, whether the candidate
+    or the measurement failed, a result still waiting for its verdict and a withdrawn test show nothing of the
+    branch's direction."""
+
+    return (
+        record.request.purpose is Purpose.EXPLORE
+        and record.judged
+        and record.result is not None
+        and record.result.validity is Validity.SUCCEEDED
+    )
+
+
 def held_branches(
     roster: Iterable[BranchEntry],
     progress: Iterable[BranchProgress],
@@ -263,22 +276,15 @@ def held_branches(
 ) -> dict[str, HoldReason]:
     """The live branches the judge may neither stop nor lower the K of, with why.
 
-    A specialist branch is in its grace while fewer than :data:`SETTLED_TESTS` of its explore tests have a result,
-    whatever its validity, and its specialist neither gave up nor was stopped for a failed judging; a withdrawn test
-    has no result. A repair branch is held for :data:`REPAIR_PROTECTED_SECONDS` from its open, however its tests
+    A specialist branch is in its grace while fewer than :data:`SETTLED_TESTS` of its explore tests succeeded and
+    were judged, and its specialist neither gave up nor was stopped for a failed judging. A repair branch is held for :data:`REPAIR_PROTECTED_SECONDS` from its open, however its tests
     read: the fix it carries is worth the gain its blocked candidate measured, which takes longer to show than the
     few tests a new branch is scored on. :data:`REPAIR_BRANCH_SECONDS` still ends it, as do a give-up and a failed
     judging. A branch whose progress row holds a pending candidate is held until its confirm is judged, unless
     its judging failed: the confirm's verdict does not need the specialist. A branch whose origin the judge does not
     steer is held for that, or for its pending confirm, which the scheduler's own stops must still wait for."""
 
-    ended = Counter(
-        record.request.branch
-        for record in records
-        if record.request.kind is TestKind.TEST
-        and record.request.purpose is Purpose.EXPLORE
-        and record.result is not None
-    )
+    measured = Counter(record.request.branch for record in records if _measured_with_verdict(record))
     waiting = {row.branch for row in progress if row.pending}
     held: dict[str, HoldReason] = {}
     for entry in roster:
@@ -288,7 +294,7 @@ def held_branches(
         gave_up = state is not None and state.gave_up
         if not entry.origin.steered_by_judge:
             held[entry.branch] = HoldReason.PENDING_CONFIRM if entry.branch in waiting else HoldReason.UNSTEERED
-        elif entry.kind is BranchKind.SPECIALIST and ended[entry.branch] < SETTLED_TESTS and not gave_up:
+        elif entry.kind is BranchKind.SPECIALIST and measured[entry.branch] < SETTLED_TESTS and not gave_up:
             held[entry.branch] = HoldReason.GRACE
         elif entry.origin is BranchOrigin.REPAIR and not gave_up and now - entry.opened_at < REPAIR_PROTECTED_SECONDS:
             held[entry.branch] = HoldReason.REPAIR
