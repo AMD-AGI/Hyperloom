@@ -491,7 +491,7 @@ def phase_status_summary(
     *,
     now_unix: float | None = None,
 ) -> str:
-    """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable."""
+    """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable, and a phase held for its initial roofline a ``hold`` line."""
     phase = (state.phase or "").strip().upper() or "UNSET"
     elapsed = int(phase_elapsed_seconds(state, now_unix=now_unix))
     # ``remaining`` paces this entry; ``cumulative`` totals every entry.
@@ -531,6 +531,8 @@ def phase_status_summary(
         if phase != PHASE_SWEEP:
             reloop_line += " (projected)"
         lines.append(reloop_line)
+    if hold_line := _initial_analysis_hold_line(state, phase):
+        lines.append(hold_line)
     return "\n".join(lines)
 
 
@@ -987,8 +989,7 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         "warm_replay_status": warm_status,
         "measure_round_dropped": bool(state.baseline_measure_round_dropped),
         "tput": _number(state.baseline_tput) or 0.0,
-        "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
-        "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
+        **_initial_analysis_inputs(state),
         "session_usable_sec": session_usable_seconds(state),
         "phase_spent_sec": phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
         "runtime_sec": _positive_number(state.baseline_runtime_sec),
@@ -1138,11 +1139,7 @@ def workflow_predicate_inputs(
         inputs["baseline"] = _prelude_predicate_inputs(state, now_unix=frozen_now)
     elif current == PHASE_ENABLEMENT:
         enablement = state.enablement
-        inputs["baseline"] = {
-            "tput": _number(state.baseline_tput) or 0.0,
-            "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
-            "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
-        }
+        inputs["baseline"] = {"tput": _number(state.baseline_tput) or 0.0, **_initial_analysis_inputs(state)}
         inputs["pending_work"] = {
             "validation_pending": bool(enablement.validation_pending),
             "enablement_in_flight": bool(enablement_in_flight),
@@ -1491,6 +1488,30 @@ def _holds_for_initial_analysis(baseline: dict[str, Any]) -> bool:
         return False
     affordable = _number(baseline.get("analysis_affordable_sec"))
     return affordable is None or affordable > 0.0
+
+
+def _initial_analysis_inputs(state: Any) -> dict[str, Any]:
+    """The two facts :func:`_holds_for_initial_analysis` decides on, read once for the predicates and the block."""
+    return {
+        "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
+        "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
+    }
+
+
+def _initial_analysis_hold_line(state: Any, phase: str) -> str | None:
+    """The ``hold`` line of a PRELUDE or ENABLEMENT kept open for its initial roofline, or ``None`` when none holds it."""
+    if phase not in (PHASE_PRELUDE, PHASE_ENABLEMENT) or (_number(state.baseline_tput) or 0.0) <= 0.0:
+        return None
+    facts = _initial_analysis_inputs(state)
+    if not _holds_for_initial_analysis(facts):
+        return None
+    affordable = facts["analysis_affordable_sec"]
+    bound = "" if affordable is None else f", for at most {int(affordable)}s more"
+    return (
+        f"hold      : waiting for initial roofline {state.auto_roofline_pending_task_id.strip()}{bound}. "
+        f"No hint advances {phase}, and remaining_sec above is this phase's share, not the session's; "
+        "answer each tick with a send_message observation until it moves on."
+    )
 
 
 def _terminal_close_transition(

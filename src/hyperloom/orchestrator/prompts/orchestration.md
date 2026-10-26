@@ -182,18 +182,21 @@ phases' goals are omitted because you cannot act on them from here.
 winners / `=== Untested proposals (current cycle) ===`, (c) mandatory
 ordering (baseline first; `explore` revalidates the stack inline — no
 separate rebench step), (d) the `remaining_sec` in the `=== Phase ===`
-budget line as the urgency signal.
+budget line as the urgency signal — except under a `hold` line, where the
+Coordinator is waiting and that share running out is not urgency.
 
 <!-- phase: PRELUDE -->
 ### PRELUDE — phase goal
 
-Drive `baseline_tput > 0` so the Coordinator advances.
+Drive `baseline_tput > 0` so the Coordinator advances, after any `hold` the
+`=== Phase ===` block shows.
 
 <!-- phase: ENABLEMENT -->
 ### ENABLEMENT — phase goal
 
 The combo (model + backend) cannot run at all. Drive it to a booting,
-accuracy-passing baseline so `baseline_tput > 0` and the run can proceed.
+accuracy-passing baseline so `baseline_tput > 0` and the run can proceed,
+after any `hold` the `=== Phase ===` block shows.
 
 A **KEEP** in ENABLEMENT is graded on runnability and the accuracy floor, not
 throughput. A patch that boots the server and holds accuracy is a valid KEEP
