@@ -177,6 +177,8 @@ class Diff:
     removed: set[str]
     #: New path -> old path of each rename the diff detected.
     renames: dict[str, str]
+    #: The same removed text, per new path: a line that only changed in place.
+    removed_in: dict[str, set[str]] = dataclasses.field(default_factory=dict)
 
 
 #: Read every file as text whatever ``.gitattributes`` says (``-diff``/``binary`` would hide
@@ -209,6 +211,8 @@ def parse_diff(text: str) -> Diff:
         elif in_hunk:
             if line.startswith("-"):
                 diff.removed.add(line[1:].strip())
+                if path is not None:
+                    diff.removed_in.setdefault(path, set()).add(line[1:].strip())
         elif line.startswith("rename from "):
             old = line[len("rename from ") :]
         elif line.startswith("rename to ") and old is not None:
@@ -296,7 +300,7 @@ def broad_noqa_problems(path: str, text: str, added: set[int], removed: Iterable
 
 def broad_unrecorded_problems(path: str, text: str, added: set[int], removed: Iterable[str] = ()) -> list[Problem]:
     """Refusals for each broad ``except`` that ``added`` puts into a non-test ``text`` and that neither re-raises
-    nor records the error."""
+    nor records the error; ``removed`` is the text this file lost."""
     if is_test_path(path):
         return []
     lines, moved = text.splitlines(), {_without_comment(line) for line in removed}
@@ -327,11 +331,12 @@ def _is_broad(handler: ast.ExceptHandler) -> bool:
 
 
 def _raised_names(handler: ast.ExceptHandler, owner: dict[ast.AST, ast.AST]) -> set[str]:
-    """Names the function enclosing ``handler`` raises with ``raise <name>``."""
+    """Names the function enclosing ``handler`` raises, as ``raise <name>`` or ``raise ... from <name>``."""
     scope: ast.AST = handler
     while scope in owner and not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
         scope = owner[scope]
-    return {n.exc.id for n in ast.walk(scope) if isinstance(n, ast.Raise) and isinstance(n.exc, ast.Name)}
+    raises = [n for n in ast.walk(scope) if isinstance(n, ast.Raise)]
+    return {part.id for n in raises for part in (n.exc, n.cause) if isinstance(part, ast.Name)}
 
 
 def _reraises_or_records(handler: ast.ExceptHandler, raised: set[str]) -> bool:
@@ -675,7 +680,7 @@ def run_all(root: Path, roots: Iterable[str], exclude: Iterable[str], units: Uni
         text = full.read_text(encoding=ENCODING)
         problems += comment_problems(path, text, diff.added.get(path, set()), diff.removed)
         problems += broad_noqa_problems(path, text, diff.added.get(path, set()), diff.removed)
-        problems += broad_unrecorded_problems(path, text, diff.added.get(path, set()), diff.removed)
+        problems += broad_unrecorded_problems(path, text, diff.added.get(path, set()), diff.removed_in.get(path, set()))
         if path in modules and not is_test_path(path):
             literal_paths.append((path, text))
     befores = [(p, show(root, since, p)) for p in touched if _counts_literals(p, roots, excluded)]

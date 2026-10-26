@@ -231,8 +231,14 @@ def status_check_is_not_a_raise():
         f()
     except Exception:
         response.raise_for_status()
+def wrapped_later():
+    try:
+        f()
+    except Exception as exc:
+        error = exc
+    raise RuntimeError("f failed") from error
 """
-_EXCEPT_ROWS = {4, 9, 14, 20, 25, 30, 35, 42, 47, 55, 60, 66}
+_EXCEPT_ROWS = {4, 9, 14, 20, 25, 30, 35, 42, 47, 55, 60, 66, 71}
 
 
 def test_an_added_broad_handler_must_reraise_or_record() -> None:
@@ -515,7 +521,19 @@ def test_parse_diff_keeps_hunk_lines_apart_from_headers() -> None:
     diff = checks.parse_diff(text)
     assert diff.added == {"y.py": {3, 4}}
     assert diff.removed == {"# old"}
+    assert diff.removed_in == {"y.py": {"# old"}}
     assert diff.renames == {"y.py": "x.py"}
+
+
+def test_a_widened_except_is_judged_even_when_another_file_lost_the_same_line(tmp_path: Path) -> None:
+    before_a = "try:\n    f()\nexcept ValueError:\n    pass\n"
+    before_b = "try:\n    g()\nexcept Exception:\n    raise\n"
+    commit_base(tmp_path, {"src/pkg/a.py": before_a, "src/pkg/b.py": before_b})
+    (tmp_path / "src/pkg/a.py").write_text(before_a.replace("ValueError", "Exception"), encoding="utf-8")
+    (tmp_path / "src/pkg/b.py").write_text("g()\n", encoding="utf-8")
+    problems = checks.run_all(tmp_path, ["src"], [], Units(tmp_path), "HEAD")
+    got = [(p.where, p.line) for p in problems if p.check == checks.BROAD_UNRECORDED]
+    assert got == [("src/pkg/a.py", 3)]
 
 
 def test_parse_added_lines_reads_new_side_hunks() -> None:
