@@ -23,7 +23,6 @@ from hyperloom.inference_optimizer.breakdown.workflow_contract import workflow_c
 from . import machine_state as _phase_state
 from .machine import Transition
 from ..bus.message_bus import Message
-from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
 from ..state.task_registry import IllegalTransition, Task, TaskNotFound, TaskSpec
 from ..collaborator import CoordinatorCollaborator
 
@@ -871,9 +870,7 @@ class ClosePhase(CoordinatorCollaborator):
         assert decision is not None and decision[0] == _phase_state.PHASE_CLOSE
         target, reason, evidence = decision
         machine.set_terminal_stop_reason(state, reason)
-        if state.pending_escalate_hint == ESCALATE_HINT_SKIP_TO_CLOSE:
-            state.consume_pending_escalate_hint()
-        elif state.pending_escalate_hint:
+        if state.pending_escalate_hint:
             state.discard_pending_escalate_hint()
         _phase_state.record_phase_transition(
             state, to_phase=target, reason=reason, evidence=evidence, at=_phase_state.PhaseClock(ts_unix=now)
