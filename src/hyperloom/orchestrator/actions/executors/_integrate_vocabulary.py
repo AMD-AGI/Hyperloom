@@ -27,6 +27,9 @@ SCREEN_PARAM = "screen"
 #: The cycle bench screens the patch's levers, so integration commits the patch dormant without benching it.
 SCREEN_CYCLE = "cycle"
 
+#: Attribution source of a lever admitted for the cycle screen and not measured yet.
+ATTRIBUTION_CYCLE_PENDING = "cycle_bench_pending"
+
 #: Where the patches this action applies came from. Every source lands through
 #: the same apply / vet / bench / KEEP-REVERT pipeline below; they differ only
 #: in how the diff is obtained and, for ``upstream_pr``, in which gate admitted

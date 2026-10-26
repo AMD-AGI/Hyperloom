@@ -1162,3 +1162,57 @@ async def test_an_unswitched_patch_marked_for_the_cycle_screen_is_still_benched(
     assert len(legs) == 1
     assert result["status"] == "reverted"
     assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+def test_levers_awaiting_the_cycle_screen_are_neither_bundled_nor_attributed_by_replay():
+    """An admitted lever has no measurement yet; the cycle bench decides whether it enters a bundle."""
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
+    from hyperloom.orchestrator.actions.executors.explore import dormant_lever_bundle, framework_lever_grid
+
+    state = _state()
+    for i, name in enumerate(("HL_ONE", "HL_TWO", "HL_THREE")):
+        state.record_authored_framework_levers([_entry_parsed(name)], default_on=False, specialist_task_id=f"t-{i}")
+    state.record_authored_framework_levers(
+        [_entry_parsed("HL_A"), _entry_parsed("HL_B")], default_on=False, specialist_task_id="t-pair"
+    )
+    for name in ("HL_TWO", "HL_THREE", "HL_A", "HL_B"):
+        state.record_framework_lever_attribution(name, gain_pct=None, source=ATTRIBUTION_CYCLE_PENDING)
+
+    assert dormant_lever_bundle(state) is None
+    assert framework_lever_grid(state) == []
+
+
+@pytest.mark.asyncio
+async def test_a_screened_admission_registers_its_levers_pending_and_enqueues_no_bundle(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import (
+        ATTRIBUTION_CYCLE_PENDING,
+        SCREEN_CYCLE,
+        SCREEN_PARAM,
+    )
+    from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
+
+    from .conftest import make_coordinator
+
+    result, _, _, _ = await _run_rewrite_integrate(
+        tmp_path, monkeypatch, delta_pct=0.2, extra_params={SCREEN_PARAM: SCREEN_CYCLE}
+    )
+    state = _state()
+    state.baseline_tput = 100.0
+    state.save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    bundles: list[str] = []
+
+    async def _bundle() -> None:
+        bundles.append("enqueued")
+
+    monkeypatch.setattr(coord.phase_framework, "enqueue_dormant_lever_bundle", _bundle)
+
+    await coord.writeback._promote_integrate_patch(result, None, _PromoteOutcome(verdict=Verdict.RECORDED))
+
+    rows = coord.shared_state.authored_framework_levers
+    assert [(r["switch"], r["attributed_gain_pct"], r["attribution_source"]) for r in rows] == [
+        ("HL_HOIST", None, ATTRIBUTION_CYCLE_PENDING),
+        ("HL_CACHE", None, ATTRIBUTION_CYCLE_PENDING),
+    ]
+    assert bundles == []

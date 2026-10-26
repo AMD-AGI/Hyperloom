@@ -12,7 +12,12 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
-from ..actions.executors._integrate_vocabulary import KEEP_STATUSES
+from ..actions.executors._integrate_vocabulary import (
+    ATTRIBUTION_CYCLE_PENDING,
+    KEEP_STATUSES,
+    SCREEN_CYCLE,
+    SCREEN_PARAM,
+)
 from ..measurement.integrate_performance import integrate_measurement_fields
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 from ..state.task_registry import Task
@@ -354,6 +359,13 @@ class IntegratePromotionMixin:
                 stack_delta_pct=measured_pct if measured_pct is not None else result.get("graded_delta_pct"),
             )
         )
+        if result.get(SCREEN_PARAM) == SCREEN_CYCLE:
+            # Admitted unmeasured: the cycle bench, not a replay bundle, decides what these levers are worth.
+            for entry in levers:
+                self.shared_state.record_framework_lever_attribution(
+                    str((entry or {}).get("switch") or ""), gain_pct=None, source=ATTRIBUTION_CYCLE_PENDING
+                )
+            return recorded
         if recorded:
             await self._coord.phase_framework.enqueue_dormant_lever_bundle()
         return recorded

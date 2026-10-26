@@ -62,6 +62,7 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from . import _framework_switch_manifest as _switch_manifest
+from ._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import BaseControls, effective_fingerprint, normalize_proposal
 from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
@@ -342,8 +343,9 @@ def dormant_lever_bundle(shared_state: Any) -> dict[str, Any] | None:
 
 
 def _lever_rows(shared_state: Any) -> list[dict[str, Any]]:
-    """The session's registered rewrite levers."""
-    return [row for row in getattr(shared_state, "authored_framework_levers", None) or [] if isinstance(row, dict)]
+    """The session's registered rewrite levers, less those the cycle bench has yet to screen."""
+    rows = getattr(shared_state, "authored_framework_levers", None) or []
+    return [r for r in rows if isinstance(r, dict) and r.get("attribution_source") != ATTRIBUTION_CYCLE_PENDING]
 
 
 def _by_patch(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
