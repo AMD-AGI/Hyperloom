@@ -408,8 +408,7 @@ function-lines src/hyperloom/orchestrator/phases/sweep.py::SweepPhase._start_con
 function-lines src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_integrate_patch_critic_gate 54
 function-lines src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_specialist_gpu_request 57
 function-lines src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_warm_replay_targets 62
-function-lines src/hyperloom/orchestrator/prompts/prompt_builder.py::_section_decision_framework 85
-function-lines src/hyperloom/orchestrator/prompts/prompt_builder.py::_section_phase_semantics 52
+function-lines src/hyperloom/orchestrator/prompts/prompt_builder.py::_section_decision_framework 84
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_framework_rewrite_specialist 105
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_kernel_switch_specialist 67
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_research_scout_specialist 53
@@ -695,14 +694,14 @@ module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1428
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1365
 module-lines src/hyperloom/orchestrator/phases/framework.py 3044
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4005
-module-lines src/hyperloom/orchestrator/phases/machine_state.py 1975
+module-lines src/hyperloom/orchestrator/phases/machine_state.py 1928
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2493
 module-lines src/hyperloom/orchestrator/policy/gate.py 1565
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2568
 module-lines src/hyperloom/orchestrator/specialists/runner.py 1465
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1339
-module-lines src/hyperloom/orchestrator/state/shared_state.py 2455
+module-lines src/hyperloom/orchestrator/state/shared_state.py 2453
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1309
 module-lines src/kernelforge/fusion/author.py 1259
 module-lines src/kernelforge/fusion/command.py 1584

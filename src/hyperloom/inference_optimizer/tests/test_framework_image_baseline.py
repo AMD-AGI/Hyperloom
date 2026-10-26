@@ -38,11 +38,13 @@ def _pin(roots: str, *, extra: str = "", cwd: Path | None = None) -> subprocess.
     return subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, cwd=cwd)
 
 
+_GIT_ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e"}
+_GIT_ENV.update(GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
+
+
 def _git(repo: Path, *args: str) -> str:
-    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e", "GIT_COMMITTER_NAME": "t"}
-    env["GIT_COMMITTER_EMAIL"] = "t@e"
     return subprocess.run(
-        ["git", "-C", str(repo), *args], text=True, capture_output=True, check=True, env=env
+        ["git", "-C", str(repo), *args], text=True, capture_output=True, check=True, env=_GIT_ENV
     ).stdout.strip()
 
 
@@ -136,7 +138,8 @@ def test_a_tree_with_unmerged_paths_is_refused(tmp_path: Path) -> None:
     _git(repo, "checkout", "-q", "-")
     _write(repo / "pkg" / "edited.py", "edited = main\n")
     _git(repo, "commit", "-qam", "main")
-    subprocess.run(["git", "-C", str(repo), "merge", "-q", "other"], capture_output=True, check=False)
+    subprocess.run(["git", "-C", str(repo), "merge", "-q", "other"], capture_output=True, check=False, env=_GIT_ENV)
+    assert _git(repo, "ls-files", "--unmerged")
     head = _git(repo, "rev-parse", "HEAD")
 
     result = _pin(str(repo))
