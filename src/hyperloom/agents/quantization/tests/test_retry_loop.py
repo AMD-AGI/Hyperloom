@@ -482,6 +482,7 @@ async def test_retries_are_capped_per_run_and_a_rerun_gets_its_own(tmp_path, qua
     fail = _fail_with_hypothesis(build_workspace)
     for _ in range(2):
         runner = _StubRunner([fail, fail, fail])
+        logged: list[str] = []
         result = await quantize_via_prompt(
             "fp8 it",
             workspace=ws,
@@ -489,9 +490,13 @@ async def test_retries_are_capped_per_run_and_a_rerun_gets_its_own(tmp_path, qua
             runner_fn=runner,
             interactive=False,
             max_requantize_attempts=1,
+            log=logged.append,
         )
         assert len(runner.calls) == 2
         assert any("max_attempts_exhausted:counter=1/1" in n for n in result.assessment.notes)
+        assert [m for m in logged if "retrying after" in m] == [
+            "quantization-agent: retrying after outcome=must_have_weights_missing (retry 1/1)"
+        ]
 
 
 @pytest.mark.asyncio
