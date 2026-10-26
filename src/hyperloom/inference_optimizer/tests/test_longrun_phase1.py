@@ -228,7 +228,7 @@ def test_framework_skip_to_close_at_budget_end_is_time_exhausted():
 
 
 def test_framework_skip_to_close_with_budget_left_stays_escalated():
-    """With budget to spare, skip_to_close is still a genuine early abandonment."""
+    """A hint already pending with budget to spare still closes the run; new ones are denied at the router."""
     st = _framework_state(max_minutes=180, started_hours_ago=1.0)
     st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
     nxt = ps.compute_next_phase(st)
