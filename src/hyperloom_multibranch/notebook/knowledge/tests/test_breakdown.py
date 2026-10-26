@@ -9,11 +9,12 @@ import dataclasses
 import json
 from pathlib import Path
 
+from hyperloom.contracts.measurement import BuildCharge, BuildPayment
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import LlmUsage, LlmUsageRecord, NotebookSnapshot
+from hyperloom_multibranch.contracts.notebook.records import LlmUsage, LlmUsageRecord, NotebookSnapshot, TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.notebook.knowledge.breakdown import (
     EXPORTER_VERSION,
@@ -54,6 +55,31 @@ def test_the_breakdown_lays_out_the_session_tree_tests_and_measurement(snapshot:
     ]
     assert breakdown["close"]["kb_write_back"]["status"] == "written"
     assert build_breakdown(snapshot)["close"] == {"final": None, "selection": {}, "kb_write_back": None}
+    assert breakdown["builds"] == {"by_branch": [], "total": {"paid": 0, "build_seconds": 0, "reused": 0}}
+
+
+def test_the_breakdown_adds_up_the_native_builds_by_branch_and_component(snapshot: NotebookSnapshot) -> None:
+    aiter = BuildCharge("k1", "aiter", 120.0, BuildPayment.PAID)
+    reused = BuildCharge("k1", "aiter", 0.0, BuildPayment.REUSED)
+    sglang = BuildCharge("k2", "sglang", 30.0, BuildPayment.PAID)
+    charged = {"r1": (aiter, sglang), "r4": (reused,), "r2": (reused,)}
+
+    def built(record: TestRecord) -> TestRecord:
+        builds = charged.get(record.request_id)
+        if builds is None or record.result is None:
+            return record
+        return dataclasses.replace(record, result=dataclasses.replace(record.result, builds=builds))
+
+    found = build_breakdown(dataclasses.replace(snapshot, records=tuple(map(built, snapshot.records))))["builds"]
+
+    assert found == {
+        "by_branch": [
+            {"branch": "s1", "component": "aiter", "paid": 1, "build_seconds": 120.0, "reused": 1},
+            {"branch": "s1", "component": "sglang", "paid": 1, "build_seconds": 30.0, "reused": 0},
+            {"branch": "s2", "component": "aiter", "paid": 0, "build_seconds": 0.0, "reused": 1},
+        ],
+        "total": {"paid": 2, "build_seconds": 150.0, "reused": 2},
+    }
 
 
 def test_the_close_section_holds_the_merge_statistics_the_scheduler_passes(snapshot: NotebookSnapshot) -> None:

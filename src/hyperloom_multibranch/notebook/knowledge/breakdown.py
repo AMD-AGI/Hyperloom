@@ -19,7 +19,8 @@ export has its own schema version and its own sections:
 * ``tests``: every test record: request, result with its attempts and GPU time, judgement, conclusion, commit, times.
 * ``measurement_nodes``: per node, GPU model, backend and image, the tests run there, their GPU time and failed
   attempts; ``environment_changes``: where a node's image, GPU model, power cap or partition mode moved between its
-  results.
+  results; ``builds``: by branch and component, the native builds the tests paid for, with their build seconds, and
+  those they reused, and the session's totals.
 * ``agent_manifests``: by autonomous branch, the manifest of the third-party agent that drove it, credentials dropped.
 * ``close``: the commit final selection chose and its recipe, how the scheduler chose it, and the Recipe KB
   write-back, as the single-lineage export reports it; when the scheduler passes them, what CLOSE's knowledge steps
@@ -38,6 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from hyperloom.common.io import atomic_write_json
+from hyperloom.contracts.measurement import BuildPayment
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
 from hyperloom.orchestrator.specialists.resources import (
     CONTAINER_RECORD_KIND,
@@ -259,10 +261,47 @@ def build_breakdown(
         "committed": encode(snapshot.committed),
         "tests": encode(snapshot.records),
         "measurement_nodes": encode(measurement_usage(snapshot.records)),
+        "builds": build_usage(snapshot.records),
         "environment_changes": encode(snapshot.environment_changes),
         "agent_manifests": encode(snapshot.agent_manifests),
         "close": close,
     }
+
+
+@dataclass
+class BuildUsage:
+    """What one branch's tests built of one component: the builds they paid for, the CPU seconds those took, and the
+    builds they reused."""
+
+    branch: str
+    component: str
+    paid: int = 0
+    build_seconds: float = 0.0
+    reused: int = 0
+
+
+def build_usage(records: Iterable[TestRecord]) -> dict[str, object]:
+    """The native builds the session's tests needed: by branch and component, the paid builds with their build seconds
+    and the reused ones, counted only, and the totals. A result that names no builds, as one written before builds
+    were, adds none."""
+
+    found: dict[tuple[str, str], BuildUsage] = {}
+    for record in records:
+        for charge in record.result.builds if record.result is not None else ():
+            branch = record.request.branch
+            usage = found.setdefault((branch, charge.component), BuildUsage(branch, charge.component))
+            if charge.payment is BuildPayment.PAID:
+                usage.paid += 1
+                usage.build_seconds += charge.build_seconds
+            else:
+                usage.reused += 1
+    rows = [found[key] for key in sorted(found)]
+    total = {
+        "paid": sum(row.paid for row in rows),
+        "build_seconds": sum(row.build_seconds for row in rows),
+        "reused": sum(row.reused for row in rows),
+    }
+    return {"by_branch": encode(rows), "total": total}
 
 
 def write_breakdown(directory: Path, breakdown: Mapping[str, object]) -> Path:
@@ -280,11 +319,13 @@ __all__ = [
     "HOSTED_RECORDS",
     "SCHEMA_VERSION",
     "SESSION_VARIABLES",
+    "BuildUsage",
     "CloseOutcome",
     "MeasurementUsage",
     "SessionPlace",
     "agent_resources",
     "build_breakdown",
+    "build_usage",
     "hosted_records",
     "measurement_usage",
     "session_metadata",
