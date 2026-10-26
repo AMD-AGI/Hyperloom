@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
+from hyperloom.inference_optimizer.cli import ray_smoke
 
 
 @pytest.fixture(autouse=True)
@@ -237,3 +238,45 @@ def test_smoke_reports_the_detected_ray_version_before_failing(tmp_path: Path) -
 
     assert result.returncode == 1
     assert cli_preflight._smoke_ray_version(result) == "2.44.1"
+
+
+def test_ray_install_retries_with_the_fallback_and_names_both_attempts(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1 if len(calls) == 1 else 0, "", "")
+
+    monkeypatch.setattr(ray_smoke.subprocess, "run", fake_run)
+
+    attempt = ray_smoke._ray_install("/usr/bin/python3", [], ("ray[default]==2.44.1", "click<8.3.0"), ("click<8.3.0",))
+
+    assert attempt.result.returncode == 0
+    assert attempt.specs == ("click<8.3.0",)
+    assert attempt.tried == "ray[default]==2.44.1 click<8.3.0 then click<8.3.0"
+    installed = [argv[argv.index("--quiet") + 1 :] for argv in calls]
+    assert installed == [["ray[default]==2.44.1", "click<8.3.0"], ["click<8.3.0"]]
+
+
+def test_ray_install_without_a_fallback_keeps_the_first_attempt(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, "", "No matching distribution found")
+
+    monkeypatch.setattr(ray_smoke.subprocess, "run", fake_run)
+
+    attempt = ray_smoke._ray_install("/usr/bin/python3", [], ("ray[default]==2.58.0", "click<8.3.0"), ())
+
+    assert len(calls) == 1
+    assert attempt.result.returncode == 1
+    assert attempt.specs == ("ray[default]==2.58.0", "click<8.3.0")
+    assert attempt.tried == "ray[default]==2.58.0 click<8.3.0"
+
+
+def test_ray_version_tuple_names_its_parts() -> None:
+    version = ray_smoke._ray_version_tuple("2.44.1")
+
+    assert (version.major, version.minor, version.patch) == (2, 44, 1)
+    assert version < ray_smoke._ray_version_tuple("2.55.0")

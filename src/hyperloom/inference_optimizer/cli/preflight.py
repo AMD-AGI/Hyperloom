@@ -74,6 +74,7 @@ from .ray_smoke import (
     _RAY_CLI_CLICK_MAX_VERSION,
     _RAY_MIN_VERSION,
     _RAY_SMOKE,
+    _ray_install,
     _ray_retry_specs,
     _smoke_ray_version,
 )
@@ -579,30 +580,16 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
         }
     reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip().splitlines()[-1]
     print(f"Preflight: ray/click invalid ({reason}), installing {ray_spec} + {click_spec} ...")
-    specs: tuple[str, ...] = (ray_spec, click_spec)
-    attempted: list[str] = []
-    install = subprocess.run(
-        [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
-        capture_output=True,
-        text=True,
-    )
-    if install.returncode != 0 and not ray_version:
-        attempted.append(" ".join(specs))
-        specs = _ray_retry_specs(_smoke_ray_version(check), click_spec, click_override)
-        print(f"Preflight: {ray_spec} does not resolve for {python_exe}; retrying with {' '.join(specs)}")
-        install = subprocess.run(
-            [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
-            capture_output=True,
-            text=True,
-        )
-    if install.returncode != 0:
-        detail = (install.stderr or install.stdout or "no pip output").strip()
-        raise RuntimeError(f"Ray install failed for {' '.join(specs)}: {detail}")
+    # An explicit RAY_VERSION is the operator's pin: there is no other release to fall back to.
+    retry_specs = () if ray_version else _ray_retry_specs(_smoke_ray_version(check), click_spec, click_override)
+    attempt = _ray_install(python_exe, pip_extra, (ray_spec, click_spec), retry_specs)
+    if attempt.result.returncode != 0:
+        detail = (attempt.result.stderr or attempt.result.stdout or "no pip output").strip()
+        raise RuntimeError(f"Ray install failed for {' '.join(attempt.specs)}: {detail}")
     check = _ray_smoke(python_exe, ray_version, click_override)
     if check.returncode != 0:
         reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip()
-        tried = " then ".join([*attempted, " ".join(specs)])
-        raise RuntimeError(f"Ray install completed ({tried}) but smoke test still failed: {reason}")
+        raise RuntimeError(f"Ray install completed ({attempt.tried}) but smoke test still failed: {reason}")
     version_after = (check.stdout or "").strip() or ray_version or _RAY_MIN_VERSION
     print(f"Preflight: ray installed OK ({version_after})")
     return {
@@ -610,7 +597,7 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
         "skip_reason": None,
         "target": "ray",
         "interpreter": python_exe,
-        "spec": " ".join(specs),
+        "spec": " ".join(attempt.specs),
         "version_after": version_after,
         "message": reason,
     }

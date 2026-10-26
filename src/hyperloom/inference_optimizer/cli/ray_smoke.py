@@ -1,16 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The Ray smoke test preflight runs on a backend interpreter, and the pip specs built from what it reports.
+"""The Ray smoke test preflight runs on a backend interpreter, and the pip installs built from what it reports.
 
-``preflight.py`` owns running the script and the install; this module owns the script's text, the versions it
-gates on, and the reading of its output back into the specs a failed install is retried with.
+``preflight.py`` owns running the script and deciding what the interpreter needs; this module owns the script's
+text, the versions it gates on, the reading of its output back into the specs a failed install is retried with,
+and running that install-then-retry sequence.
 """
 
 from __future__ import annotations
 
 import re
 import subprocess
+from typing import NamedTuple
 
 # A floor rather than an exact requirement: interpreters with no 2.44.1 wheel
 # (cp314 postdates it) must be allowed to keep the newer release the
@@ -90,11 +92,19 @@ _RAY_SMOKE = (
 _RAY_SMOKE_DETECTED_RE = re.compile(r"^ray detected: (\S+)$", re.MULTILINE)
 
 
-def _ray_version_tuple(version: str) -> tuple[int, int, int]:
+class _RayVersion(NamedTuple):
+    """A Ray release read as numbers, ordered the way the smoke's own comparison orders it."""
+
+    major: int
+    minor: int
+    patch: int
+
+
+def _ray_version_tuple(version: str) -> _RayVersion:
     """The first three numbers of ``version``, zero-padded — as the smoke reads them."""
     parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
     parts.extend([0] * (3 - len(parts)))
-    return (parts[0], parts[1], parts[2])
+    return _RayVersion(parts[0], parts[1], parts[2])
 
 
 def _smoke_ray_version(check: subprocess.CompletedProcess) -> str:
@@ -123,3 +133,37 @@ def _ray_retry_specs(installed_ray: str, click_spec: str, click_override: str) -
     # Ray is past the floor with no Click ceiling of its own: only a strictly
     # newer Ray can repair it, and ``>`` cannot be satisfied by doing nothing.
     return (f"ray[default]>{installed_ray}",)
+
+
+class _RayInstall(NamedTuple):
+    """The pip run that decided the install, the specs it ran with, and every spec attempted."""
+
+    result: subprocess.CompletedProcess
+    specs: tuple[str, ...]
+    tried: str
+
+
+def _pip_install(python_exe: str, pip_extra: list[str], specs: tuple[str, ...]) -> subprocess.CompletedProcess:
+    """Install ``specs`` with the pip of ``python_exe``, the interpreter that will import Ray."""
+    return subprocess.run(
+        [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _ray_install(
+    python_exe: str, pip_extra: list[str], specs: tuple[str, ...], retry_specs: tuple[str, ...]
+) -> _RayInstall:
+    """Install ``specs``, falling back to ``retry_specs`` when pip cannot resolve them.
+
+    An empty ``retry_specs`` means there is nothing else to ask for — an operator's
+    explicit Ray pin, say — and the first result stands. ``tried`` names every spec
+    attempted so the caller's failure message can quote the whole sequence.
+    """
+    install = _pip_install(python_exe, pip_extra, specs)
+    if install.returncode == 0 or not retry_specs:
+        return _RayInstall(install, specs, " ".join(specs))
+    print(f"Preflight: {' '.join(specs)} does not resolve for {python_exe}; retrying with {' '.join(retry_specs)}")
+    install = _pip_install(python_exe, pip_extra, retry_specs)
+    return _RayInstall(install, retry_specs, f"{' '.join(specs)} then {' '.join(retry_specs)}")
