@@ -88,6 +88,14 @@ SECTION_REVALIDATION = "enablement_revalidation"
 #: such a log dispatches nothing, so it would leave no other trace.
 SECTION_HUMAN_REVIEW = "enablement_human_review"
 
+#: The fields one event's rows are ordered by, per section.
+_ROW_ORDER: dict[str, tuple[str, ...]] = {
+    SECTION_ATTEMPT: ("attempt", "dispatched_at"),
+    SECTION_BUILD: ("recorded_at", "task_id"),
+    SECTION_REVALIDATION: ("generation",),
+    SECTION_HUMAN_REVIEW: ("recorded_at", "digest"),
+}
+
 #: The lane was opened by a baseline that could not launch at all.
 ORIGIN_BOOT = "boot"
 
@@ -671,30 +679,20 @@ def assemble_enablement_ext(
     leaves the caller's own reading standing.
     """
     header = _header(rows_for_event(parts.get(SECTION_EVENT) or [], event))
-    attempts = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_ATTEMPT) or [], event), keys=("attempt", "dispatched_at")),
-        drop=("event_id",),
-    )
-    builds = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_BUILD) or [], event), keys=("recorded_at", "task_id")),
-        drop=("event_id",),
-    )
-    revalidations = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_REVALIDATION) or [], event), keys=("generation",)),
-        drop=("event_id",),
-    )
+    rows = {
+        section: wire_rows(sort_rows(rows_for_event(parts.get(section) or [], event), keys=keys), drop=("event_id",))
+        for section, keys in _ROW_ORDER.items()
+    }
+    attempts, builds = rows[SECTION_ATTEMPT], rows[SECTION_BUILD]
+    revalidations, human_review = rows[SECTION_REVALIDATION], rows[SECTION_HUMAN_REVIEW]
     paired = pair_keep_rounds(
-        attempts, revalidations, str(header.get(VALIDATING_KEEP_FIELD) or ""), kept_status=ROUND_KEPT
-    )
-    human_review = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_HUMAN_REVIEW) or [], event), keys=("recorded_at", "digest")),
-        drop=("event_id",),
+        attempts, revalidations, str(header.get(VALIDATING_KEEP_FIELD, "")), kept_status=ROUND_KEPT
     )
     result = _as_dict(header.get("result"))
     failure = _as_dict(header.get("failure")) or None
     ext: dict[str, Any] = {
-        "mode": str(header.get("mode") or ""),
-        "origin": str(header.get("origin") or ""),
+        "mode": str(header.get("mode", "")),
+        "origin": str(header.get("origin", "")),
         # Recorded, not inferred: an event that exists at all was engaged.
         "engaged": True,
         "trigger": _as_dict(header.get("trigger")) or None,
@@ -723,7 +721,7 @@ def assemble_enablement_ext(
         # always carries a verdict, including an explicitly insufficient one.
         "recipe": _as_dict(header.get("recipe")) or None,
     }
-    status = _status_for(str(result.get("outcome") or ""), attempts=len(attempts)) if result else ""
+    status = _status_for(result.get("outcome"), attempts=len(attempts)) if result else ""
     # A fault the lane survived outranks a clean terminal: the exception is
     # what says the outcome was not come by cleanly, matching KERNEL/FRAMEWORK.
     if failure:
