@@ -385,13 +385,12 @@ class ExternalArtifactTransaction:
         source_root: Path,
         desired: dict[Path, _FileEntry],
         *,
-        scope: set[Path] | None = None,
+        scope: set[Path],
         expected_current: dict[Path, _FileEntry] | None = None,
     ) -> None:
         current = self._manifest(self.root, apply_exclusions=True)
         if expected_current is not None:
-            checked_paths = scope if scope is not None else set(expected_current) | set(current)
-            conflicts = [rel for rel in checked_paths if current.get(rel) != expected_current.get(rel)]
+            conflicts = [rel for rel in scope if current.get(rel) != expected_current.get(rel)]
             if conflicts:
                 raise ExternalArtifactError(
                     "external artifact path(s) changed concurrently: "
@@ -401,14 +400,14 @@ class ExternalArtifactTransaction:
         removals = [
             rel
             for rel, entry in current.items()
-            if (scope is None or rel in scope)
+            if rel in scope
             if rel not in desired or desired[rel].kind != entry.kind
         ]
         for rel in sorted(removals, key=lambda path: len(path.parts), reverse=True):
             self._remove_path(self.root / rel)
 
         for rel, entry in sorted(desired.items()):
-            if scope is not None and rel not in scope:
+            if rel not in scope:
                 continue
             if current.get(rel) == entry:
                 continue
@@ -423,8 +422,7 @@ class ExternalArtifactTransaction:
                 raise ExternalArtifactError(f"unsupported staged artifact kind: {entry.kind}")
 
         actual = self._manifest(self.root, apply_exclusions=True)
-        matches = actual == desired if scope is None else all(actual.get(rel) == desired.get(rel) for rel in scope)
-        if not matches:
+        if not all(actual.get(rel) == desired.get(rel) for rel in scope):
             raise ExternalArtifactError("external artifact tree does not match the requested state after sync")
 
     @staticmethod

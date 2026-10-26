@@ -12,6 +12,11 @@ from kernelforge.orchestrator.contracts import calculate_evidence_gain
 
 
 ANALYSIS_REFRESH_THRESHOLD = 0.05
+# (refresh, reason) for a commit already attempted, by how that attempt ended.
+_ATTEMPTED_COMMIT_OUTCOMES = {
+    "exhausted": (False, "ANALYSIS_ATTEMPTS_EXHAUSTED"),
+    "failed": (True, "RETRY_FAILED_ANALYSIS"),
+}
 
 
 @dataclass(frozen=True)
@@ -37,31 +42,19 @@ def decide_analysis_refresh(
     evidence = str(state.evidence_commit or "").strip()
     stale = bool(evidence) and canonical != evidence
     gain = calculate_evidence_gain(state.evidence_mean_case_speedup, current_mean_case_speedup)
-    attempted_this_commit = state.last_attempt_commit == canonical
 
-    if attempted_this_commit and state.last_attempt_iteration == current_iteration:
-        return AnalysisRefreshDecision(
-            refresh=False,
-            reasons=("ALREADY_ATTEMPTED_THIS_ITERATION",),
-            evidence_stale=stale or not evidence,
-            gain_since_evidence=gain,
-        )
-
-    if attempted_this_commit and state.last_attempt_status == "exhausted":
-        return AnalysisRefreshDecision(
-            refresh=False,
-            reasons=("ANALYSIS_ATTEMPTS_EXHAUSTED",),
-            evidence_stale=stale or not evidence,
-            gain_since_evidence=gain,
-        )
-
-    if attempted_this_commit and state.last_attempt_status == "failed":
-        return AnalysisRefreshDecision(
-            refresh=True,
-            reasons=("RETRY_FAILED_ANALYSIS",),
-            evidence_stale=stale or not evidence,
-            gain_since_evidence=gain,
-        )
+    if state.last_attempt_commit == canonical:
+        outcome = _ATTEMPTED_COMMIT_OUTCOMES.get(state.last_attempt_status)
+        if state.last_attempt_iteration == current_iteration:
+            outcome = (False, "ALREADY_ATTEMPTED_THIS_ITERATION")
+        if outcome is not None:
+            refresh, reason = outcome
+            return AnalysisRefreshDecision(
+                refresh=refresh,
+                reasons=(reason,),
+                evidence_stale=stale or not evidence,
+                gain_since_evidence=gain,
+            )
 
     status = str(state.evidence_status or "").strip().lower()
     if evidence == canonical and status == "partial" and state.last_attempt_iteration < current_iteration:
