@@ -660,7 +660,6 @@ async def test_reap_loop_process_log_activity_prevents_stale_kill(
     workspace.mkdir()
     process_log = workspace / "process.log"
     process_log.write_text("start\n", encoding="utf-8")
-    heartbeat_file = workspace / "heartbeat.json"  # never written
 
     cfg = SpecialistSubprocessConfig(
         heartbeat_stale_seconds=1.0,
@@ -679,7 +678,7 @@ async def test_reap_loop_process_log_activity_prevents_stale_kill(
     writer = asyncio.create_task(_keep_streaming())
     outcome = await disp._reap_loop(
         proc,
-        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=heartbeat_file),
+        ReapWatch(workspace=workspace, done_files=()),
         deadline=Deadline.after(60.0),
         started=time.monotonic(),
     )
@@ -699,7 +698,6 @@ async def test_reap_loop_kills_when_no_activity_at_all(
     workspace = tmp_path / "ws"
     workspace.mkdir()
     # No process.log, no heartbeat.json — total silence.
-    heartbeat_file = workspace / "heartbeat.json"
 
     cfg = SpecialistSubprocessConfig(
         heartbeat_stale_seconds=0.5,
@@ -723,7 +721,7 @@ async def test_reap_loop_kills_when_no_activity_at_all(
 
     outcome = await disp._reap_loop(
         proc,
-        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=heartbeat_file),
+        ReapWatch(workspace=workspace, done_files=()),
         deadline=Deadline.after(60.0),
         started=time.monotonic(),
     )
@@ -763,7 +761,7 @@ async def test_reap_loop_times_out_at_base_budget_without_extension(_live_reaper
     started = time.monotonic()
     outcome = await disp._reap_loop(
         proc,
-        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=workspace / "heartbeat.json", task_id="task-base"),
+        ReapWatch(workspace=workspace, done_files=(), task_id="task-base"),
         deadline=Deadline.after(0.3),
         started=time.monotonic(),
     )
@@ -784,9 +782,7 @@ async def test_reap_loop_deadline_moves_when_extension_granted_mid_run(_live_rea
     loop = asyncio.create_task(
         disp._reap_loop(
             proc,
-            ReapWatch(
-                workspace=workspace, done_files=(), heartbeat_file=workspace / "heartbeat.json", task_id="task-live"
-            ),
+            ReapWatch(workspace=workspace, done_files=(), task_id="task-live"),
             deadline=Deadline.after(0.3),
             started=time.monotonic(),
         )
@@ -817,7 +813,7 @@ async def test_reap_loop_ignores_extension_for_a_different_task(_live_reaper):
     started = time.monotonic()
     outcome = await disp._reap_loop(
         proc,
-        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=workspace / "heartbeat.json", task_id="task-mine"),
+        ReapWatch(workspace=workspace, done_files=(), task_id="task-mine"),
         deadline=Deadline.after(0.3),
         started=time.monotonic(),
     )

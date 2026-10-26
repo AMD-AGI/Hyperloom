@@ -749,7 +749,6 @@ class SpecialistSubprocessDispatcher:
         return ReapWatch(
             workspace=request.workspace,
             done_files=tuple(root / "specialist_done.json" for root in roots),
-            heartbeat_file=request.workspace / "heartbeat.json",
             # Recovered as best-so-far on a budget kill; never a reap signal.
             partial_files=tuple(root / "specialist_done.partial.json" for root in roots),
             progress_cb=request.progress_cb,
@@ -1093,7 +1092,7 @@ class SpecialistSubprocessDispatcher:
             # Liveness check: alive if any activity signal changed within the
             # window. The hard wall-clock cap below still bounds genuinely hung
             # subprocesses.
-            a_mtime = newest_activity((watch.heartbeat_file, *specialist_activity_paths(watch.workspace)))
+            a_mtime = newest_activity(specialist_activity_paths(watch.workspace))
             if a_mtime is not None and max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds:
                 last_heartbeat_seen = now
 

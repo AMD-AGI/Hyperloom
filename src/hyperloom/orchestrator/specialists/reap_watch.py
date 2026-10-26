@@ -23,8 +23,6 @@ class ReapWatch:
         workspace: Task workspace; :func:`specialist_activity_paths` of it are
             the liveness signals.
         done_files: Candidate done-file paths to poll.
-        heartbeat_file: Heartbeat file whose mtime is one of the activity
-            signals ORed together for the liveness check.
         partial_files: Candidate partial-checkpoint paths polled for live
             progress; never an exit signal.
         progress_cb: Optional async callback for each new checkpoint.
@@ -34,7 +32,6 @@ class ReapWatch:
 
     workspace: Path
     done_files: tuple[Path, ...]
-    heartbeat_file: Path
     partial_files: tuple[Path, ...] = ()
     progress_cb: Any = None
     task_id: str = ""
