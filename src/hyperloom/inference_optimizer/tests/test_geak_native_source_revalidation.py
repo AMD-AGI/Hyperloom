@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.phases.geak_native_revalidation import ORIGIN
+from hyperloom.orchestrator.loop.verdicts import CriticRuling
 from .test_geak_revalidation_dispatch import coordinator as coordinator
 
 
@@ -47,7 +48,7 @@ async def _actual_verdict(c, verdict):
     assert pending.action_name == "integrate"
     assert pending.payload["params"]["covered_executor"] == "integrate_patch"
     await c.router._handle_single_verdict(
-        source="critic", pending=pending, verdict=verdict, reasoning="reviewed the staged patch"
+        source="critic", pending=pending, ruling=CriticRuling(verdict=verdict, reasoning="reviewed the staged patch")
     )
 
 

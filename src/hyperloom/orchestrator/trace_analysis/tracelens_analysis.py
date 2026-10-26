@@ -1060,7 +1060,8 @@ def main() -> int:
         )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
-    except Exception as exc:  # noqa: BLE001 - top-level barrier; logged and reported
+    except Exception as exc:  # top-level barrier; logged and reported
+        log.warning("tracelens analysis failed: %s", exc, exc_info=True)
         append_log(log_path, f"[error] {type(exc).__name__}: {exc}")
         run_status.write(
             state="failed",

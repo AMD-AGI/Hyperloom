@@ -345,11 +345,13 @@ class BaselinePromotionMixin:
         promoting_tid: str,
     ) -> None:
         enablement_event.record_revalidation_outcome(
-            generation=generation,
-            promoted=True,
-            task_id=str(promoting_tid or ""),
-            accuracy=accuracy,
-            accuracy_floor=floor,
+            enablement_event.RevalidationOutcome(
+                generation=generation,
+                promoted=True,
+                task_id=str(promoting_tid or ""),
+                accuracy=accuracy,
+                accuracy_floor=floor,
+            ),
         )
         # This promote is the lane's terminal: the KEEP that preceded it was
         # provisional, so the round that landed it did not close the lane.
@@ -372,12 +374,14 @@ class BaselinePromotionMixin:
         enablement.revalidation_task_id = ""
         await self._coord.enablement_lane.settle_enablement_round(FAILED, reason="revalidation_below_floor")
         enablement_event.record_revalidation_outcome(
-            generation=generation,
-            promoted=False,
-            task_id=str(promoting_tid or ""),
-            accuracy=accuracy,
-            accuracy_floor=floor,
-            reason="accuracy below floor",
+            enablement_event.RevalidationOutcome(
+                generation=generation,
+                promoted=False,
+                task_id=str(promoting_tid or ""),
+                accuracy=accuracy,
+                accuracy_floor=floor,
+                reason="accuracy below floor",
+            ),
         )
 
     def _promote_anchor_run_facts(self, result: dict, task_params: Mapping[str, Any]) -> bool:

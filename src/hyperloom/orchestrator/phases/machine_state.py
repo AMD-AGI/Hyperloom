@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, NamedTuple
 
 from hyperloom.common.coerce import to_unix
@@ -1894,33 +1894,14 @@ def append_phase_history_event(
     return row
 
 
-def record_lifecycle_event(
-    state,
-    *,
-    step: str,
-    status: str,
-    phase: str | None = None,
-    label: str | None = None,
-    artifacts: dict[str, str] | None = None,
-    detail: str = "",
-    duration_s: float | None = None,
-    ts: str | None = None,
-) -> dict[str, Any]:
-    """Append a structured lifecycle event marking a phase/step boundary."""
+def record_lifecycle_event(state, mark: LifecycleMark, *, ts: str | None = None) -> dict[str, Any]:
+    """Append a structured lifecycle event marking a phase/step boundary; an unset phase is the current one."""
     events = state.lifecycle
     if events is None:
         events = state.lifecycle = []
     next_seq = (int(events[-1].get("seq", -1)) + 1) if events else 0
     event = make_lifecycle_event(
-        LifecycleMark(
-            step=step,
-            status=status,
-            phase=(phase if phase is not None else (state.phase or "")),
-            label=label,
-            artifacts=artifacts,
-            detail=detail,
-            duration_s=duration_s,
-        ),
+        mark if mark.phase is not None else replace(mark, phase=state.phase or ""),
         seq=next_seq,
         ts=ts or _now_iso(),
     )

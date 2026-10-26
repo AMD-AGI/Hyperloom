@@ -21,6 +21,7 @@ from hyperloom.orchestrator.roles import (
     MockCriticBackend,
     ScriptedPlan,
 )
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 # Far above any real pid on Linux, so the liveness probe proves it dead.
 _DEAD_PID = 2_147_483_646
@@ -59,7 +60,7 @@ async def _running_task_with_dead_lease(
     params: dict[str, Any] | None = None,
 ):
     """Create a running task holding a lease from a provably dead process."""
-    task = await coord.tasks.create(kind=kind, params=params or {}, idempotency_key=key)
+    task = await coord.tasks.create(TaskSpec(kind=kind, params=params or {}, idempotency_key=key))
     await coord.tasks.transition(task.task_id, "running")
     coord.db.raw.execute(
         "INSERT INTO leases(lane, holder_id, task_id, action, pid, "

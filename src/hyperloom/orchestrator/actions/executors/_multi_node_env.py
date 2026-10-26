@@ -19,6 +19,7 @@ from hyperloom.inference_optimizer.multi_node._internal.external_state import (
     reachable_service_url,
 )
 from hyperloom.inference_optimizer.multi_node.state_paths import resolve_state_file
+from hyperloom.inference_optimizer.recipe_snapshot_constants import KbTopology
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ def _compute_partition_mode(state: dict[str, Any]) -> str:
     return mode or str((published_shape() or {}).get("mode") or "").strip().upper()
 
 
-def resolve_kb_topology() -> dict[str, Any]:
+def resolve_kb_topology() -> KbTopology:
     """Resolve the node/GPU and PD-disaggregation topology for the KB hardware suffix."""
     state = _read_state()
     nodes = to_int(state.get("nodes"), 0)
@@ -111,17 +112,17 @@ def resolve_kb_topology() -> dict[str, Any]:
     if not backend:
         backend = str(state.get("backend") or "").strip().lower() or "rayjob"
 
-    return {
-        "nodes": max(1, nodes),
-        "gpus_per_node": max(1, gpn),
-        "pd_mode": pd_mode or "aggregated",
-        "pd_prefill_nodes": pn,
-        "pd_decode_nodes": dn,
-        "tp": tp,
-        "ep": ep,
-        "partition_mode": _compute_partition_mode(state),
-        "backend": backend,
-    }
+    return KbTopology(
+        nodes=max(1, nodes),
+        gpus_per_node=max(1, gpn),
+        pd_mode=pd_mode or "aggregated",
+        pd_prefill_nodes=pn,
+        pd_decode_nodes=dn,
+        tp=tp,
+        ep=ep,
+        partition_mode=_compute_partition_mode(state),
+        backend=backend,
+    )
 
 
 def pd_topology_from_state() -> dict[str, Any]:

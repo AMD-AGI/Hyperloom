@@ -13,6 +13,8 @@ import pytest
 import yaml
 
 from hyperloom.inference_optimizer import framework_registry as fr
+from hyperloom.orchestrator.actions.executors._grid_runner import GridLaunch, GridRecipe
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
 
 
 class TestRegistryEntry:
@@ -636,10 +638,10 @@ class TestCustomAdapterMeasurement:
         )
 
         def _ok(cmd, *a, **k):
-            assert k["timeout"] == expected_timeout
-            assert k["silence_timeout_sec"] == 600
-            assert k["server_log_path"] is None
-            assert k["session_deadline_sec"] is None
+            assert k["watch"].timeout == expected_timeout
+            assert k["watch"].silence_timeout_sec == 600
+            assert k["watch"].server_log_path is None
+            assert k["watch"].session_deadline_sec is None
             slot = Path(cmd[cmd.index("--output-dir") + 1])
             ws = slot / "benchmark_custom_20260101_000000"
             ws.mkdir(parents=True, exist_ok=True)
@@ -670,8 +672,6 @@ class TestCustomAdapterMeasurement:
         ) as launch:
             results = asyncio.run(
                 run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
                     grid=[
                         GridVariant(name="baseline"),
                         GridVariant(
@@ -680,8 +680,8 @@ class TestCustomAdapterMeasurement:
                         ),
                     ],
                     output_root=tmp_path / "out",
-                    magpie_python=sys.executable,
-                    gpu_type="mi355x",
+                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi355x")),
+                    launch=GridLaunch(magpie_python=sys.executable),
                 )
             )
         assert launch.call_count == 2

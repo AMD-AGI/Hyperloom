@@ -21,6 +21,7 @@ from hyperloom.orchestrator.lever import FRAMEWORK_STACK_ACTION, lever_kind_for_
 
 from ..framework.artifacts import candidate_key
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
+from ..source_snapshot import report_missing_source_snapshot
 from ..state.shared_state import resolve_graded_comparison
 from .launch_controls import kept_launch_controls
 from typing import TYPE_CHECKING
@@ -159,6 +160,8 @@ def _variant_source_layer(bv: Mapping[str, Any]) -> dict[str, Any]:
     scope = str(bv.get("scope") or "").strip()
     if scope:
         fields["scope"] = scope
+    if bv.get("source_layer_landed"):
+        fields["source_layer_landed"] = True
     return fields
 
 
@@ -292,6 +295,7 @@ class CurrentBestLiftMixin:
             return
         stack_entry = self._stack_entry(request, launch)
         self.shared_state.optimization_stack.append(stack_entry)
+        report_missing_source_snapshot(stack_entry, request.task_kind, launch.variant_name)
         # Mirror the append into gain_per_stack_entry so the two lists stay index-aligned.
         self.shared_state.append_stack_gain_entry(
             action=request.task_kind,
@@ -310,11 +314,8 @@ class CurrentBestLiftMixin:
         stack_event.record_adoption(
             stack_index=len(self.shared_state.optimization_stack) - 1,
             entry=stack_entry,
-            throughput_before=graded.reference,
-            throughput_after=graded.candidate,
+            graded=graded,
             baseline_tput=baseline_on_axis(self.shared_state, graded.objective),
-            objective=graded.objective,
-            degrade_reason=graded.degrade_reason,
         )
 
     def _stack_entry(self, request: _LiftRequest, launch: _ResolvedLaunch) -> dict[str, Any]:

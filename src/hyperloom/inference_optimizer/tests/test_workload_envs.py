@@ -14,6 +14,8 @@ import yaml
 
 from hyperloom.common.env_safety import OPERATOR_EXTRA_ENV_VAR
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from hyperloom.inference_optimizer.recipe_snapshot_constants import KbTopology
+from hyperloom.orchestrator.actions.executors import _profile_setup as profile_setup
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
 
@@ -104,14 +106,13 @@ def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
             "SGLANG_REMOVE_ME": "1",
         },
     )
-    bench = _materialize(
-        src,
-        tmp_path / "out",
+    layer = we.LaunchLayer(
         extra_server_args="--variant 4",
         extra_envs={"SGLANG_REMOVE_ME": "override"},
         remove_args="--bad-base",
         unset_envs="SGLANG_REMOVE_ME",
     )
+    bench = _materialize(src, tmp_path / "out", launch=layer)
     envs = bench["envs"]
     assert "--bad-base" not in envs["EXTRA_SGLANG_ARGS"]
     assert "--keep-base 2" in envs["EXTRA_SGLANG_ARGS"]
@@ -129,7 +130,7 @@ def test_materialize_refuses_to_unset_pinned_workload_envs(tmp_path, monkeypatch
     bench = _materialize(
         src,
         tmp_path / "out",
-        unset_envs=["TP", "CONC", "RUN_EVAL", "SGLANG_TUNING_KNOB"],
+        launch=we.LaunchLayer(unset_envs=["TP", "CONC", "RUN_EVAL", "SGLANG_TUNING_KNOB"]),
     )
     envs = bench["envs"]
 
@@ -147,7 +148,7 @@ def test_materialize_pd_forces_string_prompts_for_lm_eval(tmp_path, monkeypatch)
     monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
-    monkeypatch.setattr(mne, "resolve_kb_topology", lambda: {"pd_mode": "disaggregated"})
+    monkeypatch.setattr(mne, "resolve_kb_topology", lambda: KbTopology(pd_mode="disaggregated"))
     src = tmp_path / "base.yaml"
     _write(src)
     bench = _materialize(src, tmp_path / "out")
@@ -161,7 +162,7 @@ def test_materialize_aggregated_leaves_lm_eval_default(tmp_path, monkeypatch):
     monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
-    monkeypatch.setattr(mne, "resolve_kb_topology", lambda: {"pd_mode": "aggregated"})
+    monkeypatch.setattr(mne, "resolve_kb_topology", lambda: KbTopology(pd_mode="aggregated"))
     src = tmp_path / "base.yaml"
     _write(src)
     bench = _materialize(src, tmp_path / "out")
@@ -215,7 +216,7 @@ def test_precision_and_gpu_type_no_framework_agent(monkeypatch, tmp_path):
     src.write_text(
         yaml.safe_dump({"benchmark": {"model": "/m", "envs": {}, "benchmark_script": "old.sh"}}), encoding="utf-8"
     )
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x")
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(gpu_type="mi300x"))
     assert bench["precision"] == "fp8"
     assert "benchmark_script" not in bench
 
@@ -268,7 +269,7 @@ def test_server_args_merge_existing(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     src = _write(tmp_path / "cfg.yaml", envs={"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"})
-    bench = _materialize(src, tmp_path / "out", extra_server_args="--chunked-prefill-size 2048")
+    bench = _materialize(src, tmp_path / "out", launch=we.LaunchLayer(extra_server_args="--chunked-prefill-size 2048"))
     merged = bench["envs"]["EXTRA_SGLANG_ARGS"]
     assert "mem-fraction-static" in merged
     assert "chunked-prefill-size" in merged
@@ -365,7 +366,7 @@ def test_an_extra_env_ep_that_does_not_divide_tp_adds_no_flag(monkeypatch, tmp_p
     src = _write(tmp_path / "cfg.yaml", envs={"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"})
 
     with caplog.at_level("WARNING"):
-        envs = _materialize(src, tmp_path / "out", extra_envs=extra_envs)["envs"]
+        envs = _materialize(src, tmp_path / "out", launch=we.LaunchLayer(extra_envs=extra_envs))["envs"]
 
     assert "--ep-size" not in envs["EXTRA_SGLANG_ARGS"].split()
     assert "EP=3 does not divide the launched TP=8" in caplog.text
@@ -392,7 +393,7 @@ def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     src = _write(tmp_path / "cfg.yaml")
-    bench = _materialize(src, tmp_path / "out", model_path="/path/models/MiMo-V2-7B")
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path="/path/models/MiMo-V2-7B"))
     assert "attention-backend triton" in bench["envs"]["EXTRA_SGLANG_ARGS"]
 
 
@@ -462,7 +463,7 @@ def test_profile_atom_num_prompts_equals_conc(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("CONC", "16")
-    monkeypatch.setattr(we, "_atom_tracelens_caps", lambda: we._ATOM_CAPS_NONE)
+    monkeypatch.setattr(profile_setup, "_atom_tracelens_caps", lambda: profile_setup._ATOM_CAPS_NONE)
     src = tmp_path / "cfg.yaml"
     src.write_text(
         yaml.safe_dump({"benchmark": {"framework": "atom", "model": "/m", "envs": {"PROFILE": "1"}}}), encoding="utf-8"
@@ -481,9 +482,9 @@ def test_profile_atom_injects_tracelens_knobs_when_probe_hits(monkeypatch, tmp_p
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("CONC", "8")
     monkeypatch.setattr(
-        we,
+        profile_setup,
         "_atom_tracelens_caps",
-        lambda: we._AtomTracelensCaps(True, True, True),
+        lambda: profile_setup._AtomTracelensCaps(True, True, True),
     )
     src = tmp_path / "cfg.yaml"
     src.write_text(
@@ -509,18 +510,18 @@ def test_profile_atom_injects_tracelens_knobs_when_probe_hits(monkeypatch, tmp_p
 
 
 def test_atom_tracelens_caps_parses_and_fail_soft(monkeypatch):
-    we._atom_tracelens_caps.cache_clear()
-    monkeypatch.setattr(we, "_resolve_probe_python", lambda fw: "python3")
+    profile_setup._atom_tracelens_caps.cache_clear()
+    monkeypatch.setattr(profile_setup, "_resolve_probe_python", lambda fw: "python3")
     monkeypatch.setattr(
-        we.subprocess,
+        profile_setup.subprocess,
         "run",
         lambda *a, **k: SimpleNamespace(returncode=0, stdout="1\n1\n0\n"),
     )
-    assert we._atom_tracelens_caps() == we._AtomTracelensCaps(True, True, False)
-    we._atom_tracelens_caps.cache_clear()
-    monkeypatch.setattr(we.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("gone")))
-    assert we._atom_tracelens_caps() == we._ATOM_CAPS_NONE
-    we._atom_tracelens_caps.cache_clear()
+    assert profile_setup._atom_tracelens_caps() == profile_setup._AtomTracelensCaps(True, True, False)
+    profile_setup._atom_tracelens_caps.cache_clear()
+    monkeypatch.setattr(profile_setup.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("gone")))
+    assert profile_setup._atom_tracelens_caps() == profile_setup._ATOM_CAPS_NONE
+    profile_setup._atom_tracelens_caps.cache_clear()
 
 
 def test_profile_sglang_bad_extra_body(monkeypatch, tmp_path):
@@ -651,7 +652,7 @@ def test_quality_ref_baseline_establishes(monkeypatch, tmp_path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
     src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={"XDIT_QUALITY_REF": ""})
-    bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
+    bench = _materialize(src, tmp_path / "out", options=we.MaterializeOptions(establish_quality_ref=True))
     assert bench["envs"]["XDIT_QUALITY_REF"] == ""
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == "/ref/q.png"
 
@@ -667,7 +668,7 @@ def test_custom_baseline_gets_no_xdit_only_envs(monkeypatch, tmp_path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_MODEL_ROOT", "/models")
     src = _write(tmp_path / "cfg.yaml", framework="custom", envs={})
-    bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
+    bench = _materialize(src, tmp_path / "out", options=we.MaterializeOptions(establish_quality_ref=True))
     for key in _XDIT_ONLY_ENVS:
         assert key not in bench["envs"], f"{key} leaked into a custom baseline"
 
@@ -678,7 +679,7 @@ def test_xdit_baseline_still_gets_xdit_only_envs(monkeypatch, tmp_path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_MODEL_ROOT", "/models")
     src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={})
-    bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
+    bench = _materialize(src, tmp_path / "out", options=we.MaterializeOptions(establish_quality_ref=True))
     assert bench["envs"]["XDIT_MODEL_ROOT"] == "/models"
     assert bench["envs"]["XDIT_ATTENTION_BACKEND"] == "aiter"
 
@@ -715,7 +716,7 @@ def test_quality_ref_baseline_write_env_override(monkeypatch, tmp_path):
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
     monkeypatch.setenv("XDIT_QUALITY_REF_WRITE", "/ref/write.png")
     src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={"XDIT_QUALITY_REF": ""})
-    bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
+    bench = _materialize(src, tmp_path / "out", options=we.MaterializeOptions(establish_quality_ref=True))
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == "/ref/write.png"
 
 
@@ -763,7 +764,7 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
     sess = tmp_path / "sess"
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(sess))
     src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={})
-    bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
+    bench = _materialize(src, tmp_path / "out", options=we.MaterializeOptions(establish_quality_ref=True))
     expected = str(sess / "storage" / "quality_ref" / "baseline.png")
     assert bench["envs"]["XDIT_QUALITY_REF"] == ""
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == expected

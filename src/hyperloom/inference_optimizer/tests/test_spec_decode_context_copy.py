@@ -28,7 +28,7 @@ from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, Sqlite
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 
 
 # --------------------------------------------------------------------------
@@ -237,17 +237,20 @@ async def _explore(sub_agent_runner, tmp_path, names: list[str], *, entry: dict 
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
     task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(_base_yaml(tmp_path / "base.yaml")),
-            "output_dir": str(tmp_path / "explore"),
-            "base_tput": _BASE_TPUT,
-            "grid": [
-                {"name": name, "extra_args": _ARGS[name], **_ENTRIES.get(name, {}), **(entry or {})} for name in names
-            ],
-            **params,
-        },
-        idempotency_key="ex-spec",
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(_base_yaml(tmp_path / "base.yaml")),
+                "output_dir": str(tmp_path / "explore"),
+                "base_tput": _BASE_TPUT,
+                "grid": [
+                    {"name": name, "extra_args": _ARGS[name], **_ENTRIES.get(name, {}), **(entry or {})}
+                    for name in names
+                ],
+                **params,
+            },
+            idempotency_key="ex-spec",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(

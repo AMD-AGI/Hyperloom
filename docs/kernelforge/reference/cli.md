@@ -215,7 +215,7 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 |:--|:--|:--|
 | `--gpu-target <arch>` | none | ROCm compilation architecture, e.g. `gfx950`. Also exported to the environment. |
 | `--gpu-type <sku>` | `mi355x` | Hardware SKU for rewrite KB identities. |
-| `--model <name>` | provider default | LLM model; overrides `CLAUDE_MODEL`/`CODEX_MODEL`. |
+| `--model <name>` | provider default | LLM model; overrides `CLAUDE_MODEL`/`CODEX_MODEL`/`DSH_MODEL`. |
 | `--permission-mode <v>` | `acceptEdits` | Claude permission mode. |
 | `--supervisor-backend <name>` | `codex` | OPTIMIZE supervisor backend on stall: `codex` or `claude`. |
 | `--rewrite-kb` / `--no-rewrite-kb` | on | Read and publish rewrite recipes. |
@@ -336,6 +336,7 @@ Shape sources, in descending priority — `--demand` wins, then
 | `--kernel-signature-log <file>` | `''` | Server log for 1-stage ASM detection. |
 | `--tokens <a,b>` | auto | Comma-separated explicit token list, overriding the automatic coverage. |
 | `--conc <n>` | `64` | Target serving concurrency, used for token coverage. |
+| `--m-grid bucket\|exact` | `bucket` | M the aiter dense (fp8/fp4) tuners tune the decode band and `--demand` rows at: aiter's multiple of 16 up to 256 and a power of two above (`bucket`), or the exact batch sizes (`exact`). The decode band takes sglang's graph batch sizes up to 64 and the powers of two above, up to `--conc`. The sglang bf16 tuner buckets its decode band and `--demand` rows the same way and does not read this flag. |
 | `--tp <n>` | `1` | Tensor-parallel degree. |
 
 Search and execution:

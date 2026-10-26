@@ -115,7 +115,7 @@ class LaunchIdentityMixin:
             if model_path and not any(token == "--model-path" or token.startswith("--model-path=") for token in tokens):
                 tokens = ["--model-path", model_path, *tokens]
             namespace, _unknown = parser.parse_known_args(tokens)
-        except (Exception, SystemExit):  # noqa: BLE001 - optional declared-only evidence
+        except (ImportError, OSError, ValueError, SystemExit):  # optional declared-only evidence
             return {}
         fields = (
             "model_path",

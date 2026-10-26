@@ -506,12 +506,21 @@ class GradedComparison:
         return self.objective in INTVTY_OBJECTIVES
 
 
+@dataclass(frozen=True)
+class GradingAnchor:
+    """The reference a candidate is graded against in place of the session anchor; ``None`` keeps the session's."""
+
+    perf: Mapping[str, float] | None = None
+    tput: float | None = None
+
+
 __all__ = [
     "AGENTX_KEEP_P50_THRESHOLD_PCT",
     "CONSTRAINT_FIELDS",
     "DURATION_DRIFT_PCT",
     "ERROR_RATE_SLACK_PCT",
     "GradedComparison",
+    "GradingAnchor",
     "GRADED_AXIS_KEYS",
     "GRADED_DURATION",
     "GRADED_ERROR_RATE",

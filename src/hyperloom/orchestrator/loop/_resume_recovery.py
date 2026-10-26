@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -278,7 +279,7 @@ class ResumeRecoveryMixin:
                             evidence={"failure_class": "resume_interrupted"},
                         )
                         task_state = "failed"
-            except Exception as exc:  # noqa: BLE001
+            except (sqlite3.Error, RuntimeError, ValueError) as exc:
                 state.warm_replay_pending = {
                     **dict(pending),
                     "status": "task_invalidation_failed",

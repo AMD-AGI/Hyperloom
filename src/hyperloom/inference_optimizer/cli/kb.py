@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.io import JsonLineFormat, append_jsonl
-from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
+from hyperloom.orchestrator.knowledge.recipe_kb_t0 import T0AnchorRequest, run_t0_anchor
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import
@@ -167,15 +167,16 @@ def _bootstrap_recipe_kb(
         run_t0_anchor(
             t0_kb,
             state,
-            workload=workload,
-            hw=hw,
-            image_digest=image_digest,
-            stack_fingerprint=stack_fp,
-            extra_attrs=extra_attrs,
-            resume=resume,
+            T0AnchorRequest(
+                workload=workload,
+                hw=hw,
+                image_digest=image_digest,
+                stack_fingerprint=stack_fp,
+                extra_attrs=extra_attrs,
+                resume=resume,
+            ),
             on_status=print,
             session_dir=session_dir,
-            save_state=True,
         )
         if kb is None:
             print("Recipe KB       : REMOTE (KB Store current Recipe warm replay)")

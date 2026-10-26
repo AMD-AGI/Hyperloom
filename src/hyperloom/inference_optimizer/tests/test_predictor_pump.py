@@ -81,8 +81,8 @@ async def _auto_bench_grid(state: SharedState) -> list[dict[str, Any]]:
     async def _none():
         return []
 
-    async def _create(**kwargs):
-        created.append(kwargs)
+    async def _create(spec):
+        created.append(vars(spec))
         return SimpleNamespace(task_id="t1"), False
 
     tasks = SimpleNamespace(queued=_none, running=_none, create_or_return_existing=_create)
