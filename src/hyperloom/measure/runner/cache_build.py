@@ -10,8 +10,11 @@ It runs on a machine with egress, in the application that starts a campaign, bef
 ``--out`` defaults to ``$HYPERLOOM_RUNNER_CACHE``. A build that fails fails the campaign: nothing falls back to
 installing over the network inside a sandbox. The wheels are downloaded for the interpreter and platform of the
 *framework image*, which is not the builder's own unless it is told: ``--python-version 3.10 --implementation cp
---abi cp310 --platform manylinux_2_28_x86_64`` for a CPython 3.10 image, and ``--index-url`` (or ``--find-links`` with
-``--no-index``) for where they come from. The lock's hashes are those of the files the index serves. A pin that the index
+--abi cp310 --abi abi3 --abi none`` and one ``--platform`` for every platform tag the image accepts
+(``manylinux_2_28_x86_64``, ``manylinux_2_17_x86_64``, ``manylinux2014_x86_64`` and so on down to ``manylinux1_x86_64``)
+for a CPython 3.10 image on glibc 2.28, and ``--index-url`` (or ``--find-links`` with ``--no-index``) for where they come
+from. pip does not widen a ``--platform`` to the older tags it covers, so naming only the newest one turns every pin
+published as ``manylinux2014`` into a source build. The lock's hashes are those of the files the index serves. A pin that the index
 serves only as a source distribution is built here into a wheel (the sdist's hash must be one the lock lists, and the
 manifest records it); that wheel must be pure Python, because a platform wheel built on the builder is not a wheel for
 the image, and the build is refused otherwise. Reading or building a source distribution runs its code on the builder, so
