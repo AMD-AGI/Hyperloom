@@ -287,7 +287,7 @@ def _run_bwrap_probe(bwrap: str, *, source: Mapping[str, str]) -> bool:
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return getattr(completed, "returncode", 1) == 0
+    return completed.returncode == 0
 
 
 def probe_codex_sandbox_capability(*, env: dict[str, str] | None = None) -> bool:
@@ -297,10 +297,7 @@ def probe_codex_sandbox_capability(*, env: dict[str, str] | None = None) -> bool
 
 def _probe_codex_sandbox_capability(*, source: Mapping[str, str]) -> bool:
     """Probe bubblewrap from one already-effective environment."""
-    try:
-        bwrap = shutil.which("bwrap", path=source.get("PATH"))
-    except OSError:
-        return False
+    bwrap = shutil.which("bwrap", path=source.get("PATH"))
     if not bwrap:
         return False
     try:

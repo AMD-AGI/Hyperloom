@@ -360,7 +360,6 @@ def test_claude_backend_raises_without_sdk_or_seams(monkeypatch):
             sdk_query_factory=None,
             sdk_options_cls=None,
             sdk_module=None,
-            mcp_server_factory=lambda *a, **k: None,
         )
 
 
