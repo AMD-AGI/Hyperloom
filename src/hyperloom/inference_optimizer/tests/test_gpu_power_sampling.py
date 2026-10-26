@@ -105,12 +105,13 @@ def _board(root, card: int, **files: str) -> None:
 def test_the_node_power_is_read_from_the_npm_master_cards_board(tmp_path, monkeypatch):
     """Every card has a board directory; only firmware's NPM master publishes the node's files in it."""
     monkeypatch.setattr(_gpu_power, "_BOARD_GLOB", str(tmp_path / "card*" / "device" / "board"))
-    assert _read_node_power() is None
+    no_boards = _read_node_power()
     _board(tmp_path, 1)
     _board(tmp_path, 57, npm_status="enabled\n", node_power="3492\n", cur_node_power_limit="2600\n")
-    assert _read_node_power() == (3492.0, 2600.0)
+    enabled = _read_node_power()
     (tmp_path / "card57" / "device" / "board" / "npm_status").write_text("disabled\n")
-    assert _read_node_power() is None
+    disabled = _read_node_power()
+    assert (no_boards, enabled, disabled) == (None, (3492.0, 2600.0), None)
 
 
 def _node_summary(tmp_path, read_node) -> dict:
