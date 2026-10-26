@@ -97,7 +97,6 @@ from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import FixProof, ReproRun
 from hyperloom_multibranch.rulegate.service import Polling
 from hyperloom_multibranch.scheduling.budget import (
-    MB_FINAL_SHARE,
     MB_SECONDS_PER_HOUR,
     SessionBudget,
     explore_gpu_seconds,
@@ -1151,7 +1150,7 @@ async def test_spent_gpu_hours_end_explore_as_a_completed_session_that_still_run
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.GPU_HOURS_EXHAUSTED, "", 0)
-    explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).phases_after_prelude(START, 0.0).explore_end
+    explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).explore_end(START, 0.0)
     [final_phase] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "final"]
     assert float(str(final_phase["at"])) < explore_end
     assert outcome.final is not None and outcome.final.chosen is not None
@@ -1187,7 +1186,7 @@ async def test_spent_specialist_llm_dollars_end_explore_as_a_completed_session_t
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.LLM_BUDGET_EXHAUSTED, "", 0)
-    explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).phases_after_prelude(START, 0.0).explore_end
+    explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).explore_end(START, 0.0)
     [final_phase] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "final"]
     assert float(str(final_phase["at"])) < explore_end
     assert outcome.final is not None and outcome.final.chosen is not None
@@ -1250,7 +1249,7 @@ async def test_a_judge_soft_stop_ends_explore_early_and_still_runs_final(tmp_pat
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.JUDGE_STOPPED, "", 0)
-    explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).phases_after_prelude(START, 0.0).explore_end
+    explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).explore_end(START, 0.0)
     [final_phase] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "final"]
     assert float(str(final_phase["at"])) < explore_end
     root = await stage.root()
@@ -1386,19 +1385,25 @@ async def test_forks_admitted_while_the_opening_batch_starts_cut_the_batch_and_t
     assert cut["detail"] == {"requested": 3, "opened": 1, "open_cut": 2}
 
 
-async def test_final_is_reserved_the_longest_baseline_test_when_its_share_is_shorter(tmp_path: Path) -> None:
+async def test_explore_ends_the_longest_baseline_test_and_one_close_grace_before_the_deadline_then_final_and_close_run(
+    tmp_path: Path,
+) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
 
-    await stage.run()
+    outcome = await stage.run()
 
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    budget = SessionBudget.from_hours(SETTINGS.max_hours, START)
     decisions = _decisions(stage)
     [baseline] = [row for row in decisions if row["kind"] == "prelude" and row["reason"] == "baseline established"]
-    [explore] = [row for row in decisions if row["kind"] == "phase" and row["reason"] == "explore"]
+    phases = {str(row["reason"]): row for row in decisions if row["kind"] == "phase"}
     longest = float(str(baseline["detail"]["longest_test_seconds"]))
-    final_window = float(str(explore["detail"]["final_end"])) - float(str(explore["detail"]["explore_end"]))
-    share = SETTINGS.max_hours * MB_SECONDS_PER_HOUR * MB_FINAL_SHARE / 92
-    assert longest > share
-    assert final_window == pytest.approx(longest)
+    explore_end = float(str(phases["explore"]["detail"]["explore_end"]))
+    assert longest > 0
+    assert explore_end == pytest.approx(budget.deadline - longest - budget.close_grace_seconds)
+    assert explore_end <= float(str(phases["final"]["at"])) < budget.deadline
+    assert outcome.final is not None and outcome.final.chosen is not None
+    assert "close" in phases and outcome.close is not None
 
 
 def _slow_final(stage: Stage, *, interrupt: bool = False) -> type[RecordingToolbox]:

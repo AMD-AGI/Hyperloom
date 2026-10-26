@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract of the session budget: PRELUDE gets everything, the rest splits 85/5/2 with FINAL no shorter than the
-longest root test, then the CLOSE grace; a GPU-hour
-budget leaves FINAL its share the same way, counted on the tests with a result.
+"""Contract of the session budget: PRELUDE gets everything, EXPLORE then ends one longest root test and one CLOSE grace
+before the deadline, and the CLOSE grace follows it; a GPU-hour budget leaves FINAL the main flow's share, counted on
+the tests with a result.
 
 The re-declared MB_ constants are compared with their sources by reading the source text;
 those modules are never imported.
@@ -26,7 +26,6 @@ from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, re
 from hyperloom_multibranch.scheduling.budget import (
     MB_CLOSE_GRACE_CAP_SECONDS,
     MB_CLOSE_GRACE_FRACTION,
-    MB_CLOSE_SHARE,
     MB_DEFAULT_MAX_HOURS,
     MB_EXPLORE_SHARE,
     MB_FINAL_SHARE,
@@ -40,6 +39,9 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.explore import spent_gpu_seconds
 
 _HOUR = 3600.0
+#: A 12-hour session's PRELUDE left about 710 minutes, and one test of its workload took about 11.
+_LEFT_AFTER_PRELUDE = 710 * 60.0
+_ROOT_TEST_SECONDS = 11 * 60.0
 _SRC = Path(hyperloom.__file__).parent
 
 
@@ -58,7 +60,6 @@ def test_constants_match_the_main_flow_sources() -> None:
     shares = {name: int(round(float(pct) * 100)) for name, pct in re.findall(r"PHASE_(\w+): (0\.\d+),", machine)}
     assert shares["FRAMEWORK_AGENT"] + shares["KERNEL_AGENT"] == MB_EXPLORE_SHARE
     assert shares["SWEEP"] == MB_FINAL_SHARE
-    assert shares["CLOSE"] == MB_CLOSE_SHARE
     assert f"min({MB_CLOSE_GRACE_CAP_SECONDS}, (max_minutes or 0.0) * 60.0 * {MB_CLOSE_GRACE_FRACTION})" in shared
 
 
@@ -83,38 +84,29 @@ def test_prelude_below_one_minute_is_exhausted() -> None:
         budget.prelude_max_hours(_HOUR + 30)
 
 
-def test_after_prelude_the_remainder_splits_by_the_main_flow_shares() -> None:
-    budget = SessionBudget.from_hours(10.0, started_at=0.0)
-    unit = 100.0
-    now = 10 * _HOUR - 92 * unit
+def test_explore_ends_one_root_test_and_one_close_grace_before_the_deadline_however_long_the_budget() -> None:
+    budget = SessionBudget.from_hours(12.0, started_at=0.0)
+    after_prelude = budget.deadline - _LEFT_AFTER_PRELUDE
 
-    phases = budget.phases_after_prelude(now, 0.0)
+    explore_end = budget.explore_end(after_prelude, _ROOT_TEST_SECONDS)
 
-    assert phases.explore_end == pytest.approx(now + 85 * unit)
-    assert phases.final_end == pytest.approx(now + 90 * unit)
-    assert budget.hard_stop_at == budget.deadline + 120.0
-
-
-def test_final_keeps_at_least_the_longest_root_test_and_explore_ends_that_much_earlier() -> None:
-    budget = SessionBudget.from_hours(10.0, started_at=0.0)
-    unit = 100.0
-    now = 10 * _HOUR - 92 * unit
-
-    phases = budget.phases_after_prelude(now, 20 * unit)
-
-    assert phases.final_end == pytest.approx(now + 90 * unit)
-    assert phases.explore_end == pytest.approx(now + 70 * unit)
-    assert budget.phases_after_prelude(now, 4 * unit) == budget.phases_after_prelude(now, 0.0)
+    assert explore_end == budget.deadline - _ROOT_TEST_SECONDS - budget.close_grace_seconds
+    assert SessionBudget.from_hours(0, 0.0).explore_end(after_prelude, _ROOT_TEST_SECONDS) == pytest.approx(
+        MB_UNLIMITED_HOURS * _HOUR - _ROOT_TEST_SECONDS - budget.close_grace_seconds
+    )
 
 
-def test_a_floor_longer_than_the_time_left_ends_explore_at_once() -> None:
+def test_explore_ends_before_the_deadline_even_without_a_timed_root_test() -> None:
+    budget = SessionBudget.from_hours(2.0, started_at=0.0)
+
+    assert budget.explore_end(_HOUR, 0.0) == budget.deadline - budget.close_grace_seconds
+
+
+def test_a_reserve_longer_than_the_time_left_ends_explore_at_once() -> None:
     budget = SessionBudget.from_hours(1.0, started_at=0.0)
-    now = 0.5 * _HOUR
+    now = budget.deadline - 60.0
 
-    phases = budget.phases_after_prelude(now, _HOUR)
-
-    assert phases.explore_end == pytest.approx(now)
-    assert phases.final_end == pytest.approx(budget.deadline - 0.5 * _HOUR * 2 / 92)
+    assert budget.explore_end(now, _ROOT_TEST_SECONDS) == now
 
 
 def test_close_grace_is_two_percent_capped_at_two_minutes() -> None:
@@ -122,12 +114,10 @@ def test_close_grace_is_two_percent_capped_at_two_minutes() -> None:
     assert SessionBudget.from_hours(0.5, 0.0).close_grace_seconds == pytest.approx(36.0)
 
 
-def test_phases_after_the_deadline_all_collapse_onto_it() -> None:
+def test_explore_after_the_deadline_ends_on_it() -> None:
     budget = SessionBudget.from_hours(1.0, started_at=0.0)
 
-    phases = budget.phases_after_prelude(2 * _HOUR, 0.0)
-
-    assert phases.explore_end == phases.final_end == budget.deadline
+    assert budget.explore_end(2 * _HOUR, _ROOT_TEST_SECONDS) == budget.deadline
     assert budget.remaining(2 * _HOUR) == 0.0
 
 

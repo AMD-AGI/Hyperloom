@@ -18,7 +18,7 @@ stays a lead with the refusal named in place of the replay, and one acceptance h
 is anchored to is measured through the toolbox in a second step, once the caller has put the integration branch on the
 roster and given the toolbox its K: as many tests of the root as the rule gate asks for, from which the gate writes the
 baseline and its bar. The longest of those tests, start to finish, is how long one test of this workload takes;
-FINAL's reserve is never shorter.
+it is FINAL's reserve.
 
 Right after the root is committed, the toolbox is asked for the TraceLens report of the child's latest roofline
 profile, so the root has operator shares in the notebook; PRELUDE does not wait for it, and a child without a profile

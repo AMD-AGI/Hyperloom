@@ -4,8 +4,8 @@
 """One multi-branch session, PRELUDE -> EXPLORE -> FINAL -> CLOSE, on the peers a factory builds for it.
 
 PRELUDE gets the whole remaining budget, and spends none of it on a child when it reuses an earlier session's PRELUDE;
-whatever it leaves is split into the EXPLORE, FINAL and CLOSE windows, FINAL's no shorter than the longest baseline
-test. Once the baseline is established, the session chooses the frontier policy EXPLORE and CLOSE score with: the scorer
+EXPLORE then runs until the longest baseline test and one CLOSE grace are left before the deadline. Once the
+baseline is established, the session chooses the frontier policy EXPLORE and CLOSE score with: the scorer
 or variation the calibration over sessions like it chooses against the scorer pool's champion, the scorer
 ``--frontier-scorer`` pins, or the defaults under ``--frontier-policy default``; a scorer that keeps failing falls back
 to ``frontier-v1``, recorded as a decision. The FINAL candidates are fixed while every branch still stands, then
@@ -443,13 +443,13 @@ class Session:
                 policy_versions=self._policy_versions(),
             )
         )
-        deadlines = budget.phases_after_prelude(self._clock.now(), longest_root_test)
-        self._phase("explore", explore_end=deadlines.explore_end, final_end=deadlines.final_end)
+        explore_end = budget.explore_end(self._clock.now(), longest_root_test)
+        self._phase("explore", explore_end=explore_end)
         window = ExploreWindow(
             prelude.root_commit,
             start_commit,
             prelude.profile.roofline_ceiling,
-            deadlines.explore_end,
+            explore_end,
             budget.deadline,
             budget.total_seconds,
             explore_gpu_seconds(self._settings.max_gpu_hours),
