@@ -83,6 +83,26 @@ def _ruling(verdict: dict[str, Any], effective: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _effective_verdicts(emit: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The ``review_verdict`` payloads the emitted envelope made effective, by the proposal each targets."""
+    effective: dict[str, dict[str, Any]] = {}
+    for intent in _dict_rows(_nested(emit, "intent_envelope", "intents")):
+        if str(intent.get("intent_type") or "") != "review_verdict":
+            continue
+        payload = _mapping(intent.get("payload"))
+        target = str(payload.get("target_proposal_msg_id") or "")
+        if target:
+            effective[target] = payload
+    return effective
+
+
+def _review_route(action: str, params: dict[str, Any], candidate_id: str) -> tuple[str, str] | None:
+    """The arm and the gated action of a reviewed action, ``None`` when no Framework review covers it."""
+    if action == "specialist":
+        return ("source" if _specialist_authors_source(params, candidate_id) else "config"), "specialist"
+    return _ACTION_ROUTES.get(action)
+
+
 def normalize_framework_reviews(
     *,
     request: dict[str, Any] | None,
@@ -100,14 +120,7 @@ def normalize_framework_reviews(
         return []
 
     proposals = {str(row["msg_id"]): row for row in _dict_rows(judge.get("proposals")) if row.get("msg_id")}
-    effective: dict[str, dict[str, Any]] = {}
-    for intent in _dict_rows(_nested(emit, "intent_envelope", "intents")):
-        if str(intent.get("intent_type") or "") != "review_verdict":
-            continue
-        payload = _mapping(intent.get("payload"))
-        target = str(payload.get("target_proposal_msg_id") or "")
-        if target:
-            effective[target] = payload
+    effective = _effective_verdicts(emit)
 
     rows: list[dict[str, Any]] = []
     for verdict_row in _dict_rows(review.get("review_verdicts")):
@@ -117,13 +130,10 @@ def normalize_framework_reviews(
         params = _mapping(payload.get("params"))
         action = str(_first(proposal.get("action_name"), payload.get("action_name"), payload.get("kind")) or "").lower()
         candidate_id = _candidate_id(payload, params)
-        if action == "specialist":
-            arm = "source" if _specialist_authors_source(params, candidate_id) else "config"
-            target_action = "specialist"
-        elif action in _ACTION_ROUTES:
-            arm, target_action = _ACTION_ROUTES[action]
-        else:
+        route = _review_route(action, params, candidate_id)
+        if route is None:
             continue
+        arm, target_action = route
 
         rows.append(
             {

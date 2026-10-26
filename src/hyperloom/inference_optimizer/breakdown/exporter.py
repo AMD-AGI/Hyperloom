@@ -525,37 +525,12 @@ def _crash_safe_platform(gpu_type: str | None) -> dict[str, Any]:
 FINAL_PRODUCER_COORDINATOR = "coordinator"
 
 
-def write_minimal_final_json(
-    session_dir: Path | str,
-    *,
-    output_path: Path | str | None = None,
-) -> Path:
-    """Crash-safe ``reports/final.json`` fallback for any non-graceful exit."""
+def _crash_safe_summary(state: dict[str, Any]) -> dict[str, Any]:
+    """The crash-safe ``final.json`` payload, read off the session's state."""
     from datetime import datetime, timezone
 
-    from ..session.session_paths import reports_dir
-
-    sd = Path(session_dir).resolve()
-    target = Path(output_path).resolve() if output_path else reports_dir(sd) / "final.json"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    # Keep a full report (``safety_net`` absent/false); refresh an earlier fallback;
-    # preserve a corrupt file as ``final.json.corrupt`` and overwrite it.
-    if target.exists() and target.stat().st_size > 0:
-        try:
-            existing = json.loads(target.read_text(encoding="utf-8"))
-            overwrite = isinstance(existing, dict) and existing.get("safety_net") is True
-        except (OSError, json.JSONDecodeError):
-            try:
-                target.replace(target.with_name(target.name + ".corrupt"))
-            except OSError:
-                log.warning("crash-safe final.json: could not back up corrupt %s", target)
-            overwrite = True
-        if not overwrite:
-            return target
-
-    state = read_json(state_path(sd), default={}, require_dict=True)
     gpu_type = state.get("gpu_type") or ""
-    summary: dict[str, Any] = {
+    return {
         # Crash-safe markers: a consumer can distinguish this from the full ReportExecutor output and know the run did
         # not finish gracefully.
         "safety_net": True,
@@ -580,7 +555,36 @@ def write_minimal_final_json(
         # A run that died unattended is exactly when the host record is most useful, since nobody was watching.
         "platform": _crash_safe_platform(gpu_type),
     }
-    atomic_write_json(target, summary)
+
+
+def write_minimal_final_json(
+    session_dir: Path | str,
+    *,
+    output_path: Path | str | None = None,
+) -> Path:
+    """Crash-safe ``reports/final.json`` fallback for any non-graceful exit."""
+    from ..session.session_paths import reports_dir
+
+    sd = Path(session_dir).resolve()
+    target = Path(output_path).resolve() if output_path else reports_dir(sd) / "final.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Keep a full report (``safety_net`` absent/false); refresh an earlier fallback;
+    # preserve a corrupt file as ``final.json.corrupt`` and overwrite it.
+    if target.exists() and target.stat().st_size > 0:
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+            overwrite = isinstance(existing, dict) and existing.get("safety_net") is True
+        except (OSError, json.JSONDecodeError):
+            try:
+                target.replace(target.with_name(target.name + ".corrupt"))
+            except OSError:
+                log.warning("crash-safe final.json: could not back up corrupt %s", target)
+            overwrite = True
+        if not overwrite:
+            return target
+
+    state = read_json(state_path(sd), default={}, require_dict=True)
+    atomic_write_json(target, _crash_safe_summary(state))
     log.info("crash-safe final.json: wrote %s", target)
     return target
 

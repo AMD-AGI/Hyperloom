@@ -136,14 +136,8 @@ def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
     return recovery_block(state)
 
 
-def collect_session(
-    session_dir: Path,
-    state: dict[str, Any],
-    manifest: dict[str, Any],
-    warnings: list[str],
-) -> dict[str, Any]:
-    """Collect the session-identification + lifecycle section."""
-    start_ts = str(state.get("start_ts") or manifest.get("created_at_utc") or "")
+def _stop_reason_and_end(state: dict[str, Any], start_ts: str) -> tuple[str, str]:
+    """Why the session stopped and when it ended, both ``""`` while it is still running."""
     stop_reason = str(state.get("stop_reason") or "").strip()
     close_stop_reason, close_ts = _close_phase_stop_reason(state, leg_start_ts=_leg_start_ts(state, start_ts))
     if _should_use_close_stop_reason(stop_reason, close_stop_reason):
@@ -153,6 +147,18 @@ def collect_session(
         # ``stop_ts`` is stamped once, when the reason is written, so a re-export of a finished session keeps
         # reporting the same end.
         ended_at_utc = _first_recorded_end(state.get("stop_ts"), close_ts) or now_iso(timespec="seconds")
+    return stop_reason, ended_at_utc
+
+
+def collect_session(
+    session_dir: Path,
+    state: dict[str, Any],
+    manifest: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Collect the session-identification + lifecycle section."""
+    start_ts = str(state.get("start_ts") or manifest.get("created_at_utc") or "")
+    stop_reason, ended_at_utc = _stop_reason_and_end(state, start_ts)
     image = _detect_image_for_session(manifest)
     if image is None:
         warnings.append("image: not configured (set HYPERLOOM_IMAGE env var)")

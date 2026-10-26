@@ -312,9 +312,7 @@ def _stage_reached(
         "ENABLEMENT": "enablement",
         "FRAMEWORK_AGENT": "framework_agent",
         "EXPLORE": "framework_agent",
-        "KERNEL_AGENT": (
-            "kernel" if any(state.get(key) for key in ("last_fusion", "last_gemm_tuning")) else "kernel_agent"
-        ),
+        "KERNEL_AGENT": "kernel" if _state_holds_any(state, "last_fusion", "last_gemm_tuning") else "kernel_agent",
         "SWEEP": "conc_sweep",
         "CLOSE": "close",
     }
@@ -336,31 +334,37 @@ def _stage_reached(
     return "install"
 
 
-def _prelude_stage_from_state(state: dict[str, Any], timeline: list[dict[str, Any]]) -> str:
-    """PRELUDE stage from leftover state fields when the timeline is empty."""
-    if state.get("roofline_snapshots") or state.get("last_roofline") or state.get("roofline_attempts"):
-        return "roofline"
-    if state.get("last_profile_trace") or state.get("last_profile") or state.get("profile_attempts"):
-        return "profile"
-    if state.get("warm_replay_attempted") or state.get("warm_replay_outcome") or state.get("warm_replay_pending"):
-        return "warm_replay"
-    if _recorded_types(timeline, "enablement"):
-        return "enablement"
+def _state_holds_any(state: dict[str, Any], *keys: str) -> bool:
+    """Whether any of ``keys`` holds a truthy value in ``state``."""
+    return any(state.get(key) for key in keys)
+
+
+def _baseline_attempted(state: dict[str, Any]) -> bool:
+    """Whether leftover state shows a baseline was measured, attempted or failed."""
     baseline_tput = state.get("baseline_tput")
-    if (
+    return bool(
         isinstance(baseline_tput, (int, float))
         and baseline_tput > 0
         or state.get("last_baseline")
         or state.get("baseline_attempts")
         or int(state.get("baseline_failure_streak") or 0) > 0
-    ):
+    )
+
+
+def _prelude_stage_from_state(state: dict[str, Any], timeline: list[dict[str, Any]]) -> str:
+    """PRELUDE stage from leftover state fields when the timeline is empty."""
+    if _state_holds_any(state, "roofline_snapshots", "last_roofline", "roofline_attempts"):
+        return "roofline"
+    if _state_holds_any(state, "last_profile_trace", "last_profile", "profile_attempts"):
+        return "profile"
+    if _state_holds_any(state, "warm_replay_attempted", "warm_replay_outcome", "warm_replay_pending"):
+        return "warm_replay"
+    if _recorded_types(timeline, "enablement"):
+        return "enablement"
+    if _baseline_attempted(state):
         return "baseline"
-    if (
-        state.get("warm_start_ts")
-        or state.get("warm_start_recipe")
-        or state.get("warm_start_pitfalls")
-        or state.get("warm_start_lessons")
-        or state.get("warm_start_context")
+    if _state_holds_any(
+        state, "warm_start_ts", "warm_start_recipe", "warm_start_pitfalls", "warm_start_lessons", "warm_start_context"
     ):
         return "warm_start"
     return ""
@@ -462,6 +466,11 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str
     }
 
 
+def _optional_text(value: Any) -> str | None:
+    """``value`` as text, ``None`` when it is absent or empty."""
+    return str(value or "") or None
+
+
 def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str]) -> dict[str, Any]:
     """Read the session's gain attribution off the ``stack`` ledger event.
 
@@ -497,7 +506,7 @@ def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[s
         # that produced the settled figure, falling back to the axis the adoptions were graded on for a session that
         # adopted but never validated -- and never from the session's configured axis, which says what was asked
         # for rather than what this figure was measured on.
-        "graded_on": str(settled.get("graded_objective") or ledger.get("objective") or "") or None,
+        "graded_on": _optional_text(settled.get("graded_objective") or ledger.get("objective")),
         # The settled measurement's own axes, carried beside the gain they produced rather than read off
         # ``current_best``: a revalidation moves the cumulative figure without re-promoting the recipe.
         "perf": _graded_axes(settled.get("perf")),
@@ -513,15 +522,15 @@ def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[s
         # read off the validation row that produced the figure rather than
         # inferred from the stack's length at export.
         "validated_at_stack_len": _optional_int(settled.get("stack_len")),
-        "validated_ts": str(settled.get("ts") or "") or None,
-        "measurement_basis": str(settled.get("measurement_basis") or "") or None,
+        "validated_ts": _optional_text(settled.get("ts")),
+        "measurement_basis": _optional_text(settled.get("measurement_basis")),
         # The latency the settled measurement reported, carried on the same row
         # as the throughput it was measured beside.
         "ttft_mean_ms": _optional_float(settled.get("ttft_mean_ms")),
         "e2el_mean_ms": _optional_float(settled.get("e2el_mean_ms")),
-        "ttft_e2el_source": str(settled.get("ttft_e2el_source") or "") or None,
-        "server_launch_flags": str(settled.get("server_launch_flags") or "") or None,
-        "workspace": str(settled.get("workspace") or "") or None,
+        "ttft_e2el_source": _optional_text(settled.get("ttft_e2el_source")),
+        "server_launch_flags": _optional_text(settled.get("server_launch_flags")),
+        "workspace": _optional_text(settled.get("workspace")),
         # The settled figure does not cover the stack that shipped: adoptions
         # landed after it was measured. ``at_head`` is absent on a session with
         # no ledger, which is not the same as a stack that outran its
