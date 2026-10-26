@@ -52,7 +52,7 @@ file name for a module; value no worse) keeps the baseline entry it left; see
 
 Usage::
 
-    pip install ruff==0.16.2 complexipy==8.0.1 vulture==2.16
+    pip install ruff==0.16.2 complexipy==8.0.1 radon==6.0.1 vulture==2.16
     npm install -g jscpd@5.4.1      # or CODE_METRICS_JSCPD="npx --yes jscpd@5.4.1"
 
     python scripts/code_metrics.py                         # judge every file
@@ -98,6 +98,7 @@ from code_metrics_collect import (
     jscpd_findings,
     list_files,
     module_line_findings,
+    radon_findings,
     module_lines,
     ruff_findings,
     tool_version,
@@ -129,6 +130,7 @@ _BASELINE_HEADER = f"""\
 _TOOL_COMMANDS = {
     "ruff": ["ruff"],
     "complexipy": ["complexipy"],
+    "radon": ["radon"],
     "vulture": ["vulture"],
 }
 #: Scalar parameters where a larger value makes the gate see less.
@@ -404,6 +406,7 @@ def per_file_findings(root: Path, files: list[str], limits: dict[str, int], unit
     if not files:
         return []
     findings = ruff_findings(root, files, limits, units)
+    findings += radon_findings(root, files, limits["cyclomatic-complexity"], units)
     findings += complexipy_findings(root, files, limits["cognitive-complexity"], units)
     findings += function_line_findings(files, limits["function-lines"], units)
     findings += module_line_findings(root, files, limits["module-lines"])
