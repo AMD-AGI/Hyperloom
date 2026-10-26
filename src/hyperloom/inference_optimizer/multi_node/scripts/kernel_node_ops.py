@@ -106,6 +106,28 @@ def _do_apply(a: argparse.Namespace) -> int:
     )
 
 
+def _restore_backup(record: dict) -> str:
+    """Copy one revert record's backup back over its target; return the restored target path."""
+    target = Path(str(record.get("target_path") or ""))
+    backup = Path(str(record.get("backup_path") or ""))
+    if not backup.is_file():
+        raise FileNotFoundError(f"backup missing: {backup}")
+    assert_backup_path_allowed(backup)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(backup, target)
+    return str(target)
+
+
+def _restore_jit_backup(jit_records: list[dict]) -> dict:
+    """Restore the one JIT build backup the reverted records share."""
+    if not jit_records:
+        return {"status": "skipped", "reason": "no JIT backup"}
+    first = jit_records[0]
+    if any(record != first for record in jit_records[1:]):
+        raise ValueError("conflicting JIT backup records")
+    return restore_aiter_jit_build(first)
+
+
 def _do_revert(a: argparse.Namespace) -> int:
     """Restore the target file from its backup copy."""
     host = socket.gethostname()
@@ -143,23 +165,11 @@ def _do_revert(a: argparse.Namespace) -> int:
     jit_records: list[dict] = []
     try:
         for record in reversed(records):
-            target = Path(str(record.get("target_path") or ""))
-            backup = Path(str(record.get("backup_path") or ""))
-            if not backup.is_file():
-                raise FileNotFoundError(f"backup missing: {backup}")
-            assert_backup_path_allowed(backup)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(backup, target)
-            restored.append(str(target))
+            restored.append(_restore_backup(record))
             jit_record = record.get("jit_backup")
             if isinstance(jit_record, dict) and jit_record.get("status") in {"ok", "clean"}:
                 jit_records.append(jit_record)
-        jit_restore = {"status": "skipped", "reason": "no JIT backup"}
-        if jit_records:
-            first = jit_records[0]
-            if any(record != first for record in jit_records[1:]):
-                raise ValueError("conflicting JIT backup records")
-            jit_restore = restore_aiter_jit_build(first)
+        jit_restore = _restore_jit_backup(jit_records)
     except Exception as exc:  # noqa: BLE001
         log.warning("revert failed on %s: %s", host, exc)
         return _emit(

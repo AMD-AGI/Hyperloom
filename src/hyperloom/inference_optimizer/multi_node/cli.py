@@ -586,6 +586,42 @@ def _extract_launcher_summary(launch_logs: str) -> dict:
     return {}
 
 
+def _pd_launch_knobs(args: argparse.Namespace) -> dict[str, Any]:
+    """The PD knobs a disaggregated RayJob launch is spawned with; unset reads as 0 / ``""``."""
+    return {
+        "pd_prefill_nodes": int(getattr(args, "pd_prefill_nodes", 0) or 0),
+        "pd_decode_nodes": int(getattr(args, "pd_decode_nodes", 0) or 0),
+        "pd_prefill_tp": int(getattr(args, "pd_prefill_tp", 0) or 0),
+        "pd_decode_tp": int(getattr(args, "pd_decode_tp", 0) or 0),
+        "pd_transfer_backend": (getattr(args, "pd_transfer_backend", "") or "").strip(),
+        "pd_ib_device": (getattr(args, "pd_ib_device", "") or "").strip(),
+        "pd_bootstrap_port": int(getattr(args, "pd_bootstrap_port", 0) or 0),
+    }
+
+
+def _pd_launch_flags(args: argparse.Namespace) -> str:
+    """The launcher's PD flags with a trailing space; "" keeps the aggregated default unless disaggregated."""
+    if (getattr(args, "pd_mode", "") or "aggregated").lower() != "disaggregated":
+        return ""
+    knobs = _pd_launch_knobs(args)
+    chunks = [
+        "--pd-mode disaggregated",
+        f"--pd-prefill-nodes {knobs['pd_prefill_nodes']}",
+        f"--pd-decode-nodes {knobs['pd_decode_nodes']}",
+    ]
+    if knobs["pd_prefill_tp"] > 0:
+        chunks.append(f"--pd-prefill-tp {knobs['pd_prefill_tp']}")
+    if knobs["pd_decode_tp"] > 0:
+        chunks.append(f"--pd-decode-tp {knobs['pd_decode_tp']}")
+    if knobs["pd_transfer_backend"]:
+        chunks.append(f"--pd-transfer-backend {shlex.quote(str(knobs['pd_transfer_backend']))}")
+    if knobs["pd_ib_device"]:
+        chunks.append(f"--pd-ib-device {shlex.quote(str(knobs['pd_ib_device']))}")
+    if knobs["pd_bootstrap_port"] > 0:
+        chunks.append(f"--pd-bootstrap-port {knobs['pd_bootstrap_port']}")
+    return " ".join(chunks) + " "
+
+
 def _build_multinode_launch_entrypoint(
     args: argparse.Namespace,
     nnodes: int,
@@ -624,33 +660,7 @@ def _build_multinode_launch_entrypoint(
     except (TypeError, ValueError):
         ep_val = 1
     ep_arg = f"--ep {ep_val} " if ep_val > 1 else ""
-    # Forward PD knobs only when disaggregated (else keep the aggregated default).
-    pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
-    pd_args = ""
-    if pd_mode == "disaggregated":
-        pn = int(getattr(args, "pd_prefill_nodes", 0) or 0)
-        dn = int(getattr(args, "pd_decode_nodes", 0) or 0)
-        ptp = int(getattr(args, "pd_prefill_tp", 0) or 0)
-        dtp = int(getattr(args, "pd_decode_tp", 0) or 0)
-        tb = (getattr(args, "pd_transfer_backend", "") or "").strip()
-        ib = (getattr(args, "pd_ib_device", "") or "").strip()
-        bp = int(getattr(args, "pd_bootstrap_port", 0) or 0)
-        chunks = [
-            "--pd-mode disaggregated",
-            f"--pd-prefill-nodes {pn}",
-            f"--pd-decode-nodes {dn}",
-        ]
-        if ptp > 0:
-            chunks.append(f"--pd-prefill-tp {ptp}")
-        if dtp > 0:
-            chunks.append(f"--pd-decode-tp {dtp}")
-        if tb:
-            chunks.append(f"--pd-transfer-backend {shlex.quote(str(tb))}")
-        if ib:
-            chunks.append(f"--pd-ib-device {shlex.quote(str(ib))}")
-        if bp > 0:
-            chunks.append(f"--pd-bootstrap-port {bp}")
-        pd_args = " ".join(chunks) + " "
+    pd_args = _pd_launch_flags(args)
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
         f"cat > \"$WORK_DIR/launch_multinode.py\" <<'__MN_LAUNCH_PY_EOF__'\n"
@@ -1128,17 +1138,7 @@ def _rayjob_topology_fingerprint(
     if pd_mode == "disaggregated":
         # Only meaningful under PD; leaving them out when aggregated keeps a stale value from an earlier PD run out of
         # the comparison.
-        fingerprint.update(
-            {
-                "pd_prefill_nodes": int(getattr(args, "pd_prefill_nodes", 0) or 0),
-                "pd_decode_nodes": int(getattr(args, "pd_decode_nodes", 0) or 0),
-                "pd_prefill_tp": int(getattr(args, "pd_prefill_tp", 0) or 0),
-                "pd_decode_tp": int(getattr(args, "pd_decode_tp", 0) or 0),
-                "pd_transfer_backend": (getattr(args, "pd_transfer_backend", "") or "").strip(),
-                "pd_ib_device": (getattr(args, "pd_ib_device", "") or "").strip(),
-                "pd_bootstrap_port": int(getattr(args, "pd_bootstrap_port", 0) or 0),
-            }
-        )
+        fingerprint.update(_pd_launch_knobs(args))
     return fingerprint
 
 

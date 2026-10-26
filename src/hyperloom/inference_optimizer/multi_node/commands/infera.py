@@ -11,9 +11,10 @@ import json
 import os
 import shlex
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from .._internal import infera_support
 from .._internal.env_safety import filter_forward_env
@@ -227,6 +228,66 @@ def _resolve_pd_node_counts(
     return pn, dn
 
 
+def _int_override(value: Any) -> int:
+    """A per-role PD TP/EP override as an int; unset reads as 0, which defers to the shared value."""
+    return int(value or 0)
+
+
+def _text_override(value: Any) -> Any:
+    """A per-role PD extra-args override; unset reads as ``""``."""
+    return value or ""
+
+
+class _PdRoleOverride(NamedTuple):
+    """A per-role PD launch override: ``pd_<role>_<knob>`` on the args, ``last_restart_pd_<role>_<knob>`` in state."""
+
+    knob: str
+    normalise: Callable[[Any], Any]
+
+    def state_key(self, role: str) -> str:
+        """The state key the last successful launch recorded this override under."""
+        return f"last_restart_pd_{role}_{self.knob}"
+
+    def requested(self, args: argparse.Namespace, role: str) -> Any:
+        """The override this restart asks for."""
+        return self.normalise(getattr(args, f"pd_{role}_{self.knob}", None))
+
+    def record(self, state: dict[str, Any], args: argparse.Namespace) -> None:
+        """Record both roles' requested override as the last launch's."""
+        for role in _PD_ROLES:
+            state[self.state_key(role)] = self.requested(args, role)
+
+    def matches(self, state: dict[str, Any], args: argparse.Namespace) -> bool:
+        """Whether both roles' requested override is the one the last launch recorded."""
+        for role in _PD_ROLES:
+            if self.normalise(state.get(self.state_key(role))) != self.requested(args, role):
+                return False
+        return True
+
+
+_PD_ROLES = ("prefill", "decode")
+_PD_TP = _PdRoleOverride("tp", _int_override)
+_PD_EP = _PdRoleOverride("ep", _int_override)
+_PD_EXTRA_ARGS = _PdRoleOverride("extra_args", _text_override)
+
+
+def _infera_pd_restart_matches(state: dict[str, Any], args: argparse.Namespace, kv_transfer_backend: str) -> bool:
+    """Whether the requested PD topology, transfer backend and per-role overrides match the last launch."""
+    # Compare effective PD topology (CLI explicit > pod-list inference), not raw CLI zeros left unset by the operator.
+    prefill_n, decode_n = _pd_role_pod_counts(state)
+    args_pn, args_dn = _resolve_pd_node_counts(args, state)
+    state_pn = int(state.get("last_restart_pd_prefill_nodes") or 0) or prefill_n
+    state_dn = int(state.get("last_restart_pd_decode_nodes") or 0) or decode_n
+    return (
+        args_pn == state_pn
+        and args_dn == state_dn
+        and (state.get("last_restart_pd_transfer_backend") or "").strip() == (kv_transfer_backend or "").strip()
+        and _PD_TP.matches(state, args)
+        and _PD_EP.matches(state, args)
+        and _PD_EXTRA_ARGS.matches(state, args)
+    )
+
+
 def _infera_restart_config_matches(
     state: dict[str, Any],
     args: argparse.Namespace,
@@ -253,23 +314,7 @@ def _infera_restart_config_matches(
         return False
     if pd_mode != "disaggregated":
         return True
-    # Compare effective PD topology (CLI explicit > pod-list inference), not raw CLI zeros left unset by the operator.
-    prefill_n, decode_n = _pd_role_pod_counts(state)
-    args_pn, args_dn = _resolve_pd_node_counts(args, state)
-    state_pn = int(state.get("last_restart_pd_prefill_nodes") or 0) or prefill_n
-    state_dn = int(state.get("last_restart_pd_decode_nodes") or 0) or decode_n
-    return (
-        args_pn == state_pn
-        and args_dn == state_dn
-        and (state.get("last_restart_pd_transfer_backend") or "").strip() == (kv_transfer_backend or "").strip()
-        and int(state.get("last_restart_pd_prefill_tp") or 0) == int(getattr(args, "pd_prefill_tp", 0) or 0)
-        and int(state.get("last_restart_pd_decode_tp") or 0) == int(getattr(args, "pd_decode_tp", 0) or 0)
-        and int(state.get("last_restart_pd_prefill_ep") or 0) == int(getattr(args, "pd_prefill_ep", 0) or 0)
-        and int(state.get("last_restart_pd_decode_ep") or 0) == int(getattr(args, "pd_decode_ep", 0) or 0)
-        and (state.get("last_restart_pd_prefill_extra_args") or "")
-        == (getattr(args, "pd_prefill_extra_args", "") or "")
-        and (state.get("last_restart_pd_decode_extra_args") or "") == (getattr(args, "pd_decode_extra_args", "") or "")
-    )
+    return _infera_pd_restart_matches(state, args, kv_transfer_backend)
 
 
 def _infera_servers_alive(
@@ -321,9 +366,9 @@ def _infera_launch_pd_groups(
     all_results: dict[str, Any] = {}
     for role, targets, rnnodes in (("prefill", prefill_targets, pn), ("decode", decode_targets, dn)):
         # Per-role TP / EP / extra-args; 0 / "" falls back to the shared --tp / --ep / --extra-args.
-        rtp = int(getattr(args, f"pd_{role}_tp", 0) or 0) or int(args.tp)
-        rep = int(getattr(args, f"pd_{role}_ep", 0) or 0) or shared_ep
-        rextra = (shared_extra + " " + (getattr(args, f"pd_{role}_extra_args", "") or "")).strip()
+        rtp = _PD_TP.requested(args, role) or int(args.tp)
+        rep = _PD_EP.requested(args, role) or shared_ep
+        rextra = (shared_extra + " " + _PD_EXTRA_ARGS.requested(args, role)).strip()
         launch_args = infera_support.build_node_launch_args(
             infera_support.NodeLaunch(
                 framework=framework,
@@ -349,15 +394,12 @@ def _infera_launch_pd_groups(
     state["pd_decode_nodes"] = dn
     state["last_restart_pd_prefill_nodes"] = pn
     state["last_restart_pd_decode_nodes"] = dn
-    state["last_restart_pd_prefill_tp"] = int(getattr(args, "pd_prefill_tp", 0) or 0)
-    state["last_restart_pd_decode_tp"] = int(getattr(args, "pd_decode_tp", 0) or 0)
+    _PD_TP.record(state, args)
     # The orchestrator's PD arg resolution reads this key as its fallback tier between an explicit argument and
     # $PD_TRANSFER_BACKEND.
     state["last_restart_pd_transfer_backend"] = kv
-    state["last_restart_pd_prefill_ep"] = int(getattr(args, "pd_prefill_ep", 0) or 0)
-    state["last_restart_pd_decode_ep"] = int(getattr(args, "pd_decode_ep", 0) or 0)
-    state["last_restart_pd_prefill_extra_args"] = getattr(args, "pd_prefill_extra_args", "") or ""
-    state["last_restart_pd_decode_extra_args"] = getattr(args, "pd_decode_extra_args", "") or ""
+    _PD_EP.record(state, args)
+    _PD_EXTRA_ARGS.record(state, args)
     return rc_total, all_results
 
 
@@ -516,6 +558,43 @@ def _infera_ssh_node_op(
     }
 
 
+def _tracelens_patch_op_args(args: argparse.Namespace, tracelens_root: str) -> str:
+    """The ``apply_tracelens_patch_multinode.py --local`` arguments: TraceLens root, SGLang pin, patch set."""
+    pin = getattr(args, "sglang_version_pin", None) or ""
+    op_args = f"--local --tracelens-root {shlex.quote(str(tracelens_root))}"
+    if pin:
+        op_args += f" --sglang-version-pin {shlex.quote(str(pin))}"
+    patch_set = getattr(args, "patch_set", None) or ""
+    if patch_set:
+        op_args += f" --patch-set {shlex.quote(str(patch_set))}"
+    return op_args
+
+
+def _tracelens_patch_pod(
+    state: dict[str, Any], target: dict[str, Any], remote: RemoteScript, timeout: int
+) -> tuple[list[dict], dict | None]:
+    """Run the TraceLens patch on one GPU pod; return its per-pod records, or the failure that stopped it."""
+    ip = str(target.get("podIP") or "").strip()
+    port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
+    info(f"apply-tracelens-patch (infera): ssh -> {ip}:{port}")
+    try:
+        cp = _mn_cli._infera_ssh_run_script(state, ip, remote, timeout=timeout, port=port)
+    except subprocess.TimeoutExpired:
+        return [], {"host": ip, "sshPort": port, "error": f"timeout after {timeout}s"}
+    parsed = _mn_cli._extract_pod_json(cp.stdout or "")
+    pods = (parsed or {}).get("per_pod") or []
+    if parsed and str(parsed.get("status")) in ("applied", "skipped") and pods:
+        for r in pods:
+            r["host"] = ip
+        return pods, None
+    return [], {
+        "host": ip,
+        "sshPort": port,
+        "error": (parsed or {}).get("error") or (cp.stderr or "")[-800:] or "unknown",
+        "rc": cp.returncode,
+    }
+
+
 def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
     """Infera apply-tracelens-patch: SSH fan-out the TraceLens SGLang patch set to every GPU pod via ``apply_tracelens_patch_multinode.py --local``."""
     state = _infera_require_state()
@@ -531,13 +610,7 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
         err("apply-tracelens-patch (infera): no GPU pod IPs in state")
         return EXIT_CONFIG_ERROR
     script = _mn_cli._read_pod_script("apply_tracelens_patch_multinode.py")
-    pin = getattr(args, "sglang_version_pin", None) or ""
-    op_args = f"--local --tracelens-root {shlex.quote(str(tracelens_root))}"
-    if pin:
-        op_args += f" --sglang-version-pin {shlex.quote(str(pin))}"
-    patch_set = getattr(args, "patch_set", None) or ""
-    if patch_set:
-        op_args += f" --patch-set {shlex.quote(str(patch_set))}"
+    op_args = _tracelens_patch_op_args(args, tracelens_root)
     timeout = _mn_cli._poll_timeout_from_args(args)
     per_pod: list[dict] = []
     failures: list[dict] = []
@@ -545,35 +618,10 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
     # lacks sglang so _apply_on_pod's `import sglang` fails with "No module named 'sglang'".
     pod_python = os.environ.get("HYPERLOOM_MN_POD_PYTHON", "/opt/venv/bin/python")
     for target in gpu_targets:
-        ip = str(target.get("podIP") or "").strip()
-        port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
-        info(f"apply-tracelens-patch (infera): ssh -> {ip}:{port}")
-        try:
-            cp = _mn_cli._infera_ssh_run_script(
-                state,
-                ip,
-                RemoteScript(script, pod_python, op_args),
-                timeout=timeout,
-                port=port,
-            )
-        except subprocess.TimeoutExpired:
-            failures.append({"host": ip, "sshPort": port, "error": f"timeout after {timeout}s"})
-            continue
-        parsed = _mn_cli._extract_pod_json(cp.stdout or "")
-        pods = (parsed or {}).get("per_pod") or []
-        if parsed and str(parsed.get("status")) in ("applied", "skipped") and pods:
-            for r in pods:
-                r["host"] = ip
-                per_pod.append(r)
-        else:
-            failures.append(
-                {
-                    "host": ip,
-                    "sshPort": port,
-                    "error": (parsed or {}).get("error") or (cp.stderr or "")[-800:] or "unknown",
-                    "rc": cp.returncode,
-                }
-            )
+        pod_records, failure = _tracelens_patch_pod(state, target, RemoteScript(script, pod_python, op_args), timeout)
+        per_pod.extend(pod_records)
+        if failure is not None:
+            failures.append(failure)
     overall = "applied" if not failures else "failed"
     if overall == "applied" and per_pod and all(r.get("status") == "skipped" for r in per_pod):
         overall = "skipped"
