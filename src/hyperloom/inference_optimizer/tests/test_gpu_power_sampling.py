@@ -103,7 +103,7 @@ def _board(root, card: int, **files: str) -> None:
 
 
 def test_the_node_power_is_read_from_the_npm_master_cards_board(tmp_path, monkeypatch):
-    """Every card has a board directory; only firmware's NPM master publishes the node's files in it."""
+    """Every card has a board directory; only the cards that publish the node's files have them in it."""
     monkeypatch.setattr(_gpu_power, "_BOARD_GLOB", str(tmp_path / "card*" / "device" / "board"))
     no_boards = _read_node_power()
     _board(tmp_path, 1)
@@ -147,6 +147,12 @@ def test_a_limit_that_changed_during_the_phase_is_unread(tmp_path, caplog):
     out = _node_summary(tmp_path, lambda: next(readings))
     assert out["node"]["limit_w"] is None
     assert "held at its NPM power limit (changing W)" in caplog.text
+
+
+@pytest.mark.parametrize(("power", "held"), [(2587.0, 1.0), (2573.0, 0.0)], ids=["99.5%", "99.0%-"])
+def test_a_sample_counts_as_held_from_99_percent_of_the_limit(tmp_path, power, held):
+    out = _node_summary(tmp_path, lambda: (power, 2600.0))
+    assert out["node"]["limited_fraction"] == held
 
 
 def test_a_zero_limit_holds_nothing(tmp_path):

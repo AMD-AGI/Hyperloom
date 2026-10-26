@@ -73,7 +73,8 @@ _FRACTION_DIGITS = 4
 #: the limit, or above it once every card is down at its minimum power; a node the limit is not holding reads below.
 _NODE_AT_LIMIT_FRACTION = 0.99
 
-#: The card directories whose ``board`` holds the node's NPM files; only firmware's NPM master card publishes them.
+#: The card directories whose ``board`` may hold the node's NPM files: the first card of an XGMI hive publishes them,
+#: and every card does on a node without a hive.
 _BOARD_GLOB = "/sys/class/drm/card*/device/board"
 
 #: The ``amd-smi metric`` fields each power sample reads, and those read at each measured window's open and close.
