@@ -17,6 +17,7 @@ import pytest
 from hyperloom.hosted import context, entry, host_info
 from hyperloom.hosted.host_info import Var
 from hyperloom.hosted.tests.test_campaign import FULL, MINIMAL
+from hyperloom.plugs.manifest import LOCKABLE_SOCKETS, load_builtin_profile
 
 _SECRETS = {name: f"sentinel-secret-{index}" for index, name in enumerate(host_info.SECRET_VARS)}
 _IMAGE = "registry.example/sglang:v0.5.4-rocm"
@@ -218,6 +219,39 @@ def test_outside_a_hosted_run_the_plug_resolution_is_unchanged(tmp_path, monkeyp
     assert resolve_plug_manifest(argparse.Namespace(plug_profile=None)).sockets["events"].layer != "locked"
 
 
+# -- the lock follows the profile --------------------------------------------------------------------------------
+def _spec(measurement="local"):
+    from hyperloom.hosted.campaign import parse_campaign
+
+    return parse_campaign({**MINIMAL, "placement": {"profile": "hosted-gpu", "measurement": measurement}})
+
+
+def test_the_lock_is_the_lockable_sockets_the_profile_declares(monkeypatch):
+    monkeypatch.setattr(entry, "load_builtin_profile", lambda name: {"sockets": {"events": {"impl": "hosted"}}})
+    assert entry._plug_lock(_spec()) == {"events": {"impl": "hosted"}}
+
+
+def test_a_profile_declaring_several_sockets_locks_each_lockable_one(monkeypatch):
+    sockets = {
+        "measurement": {"impl": "local"},
+        "agent_runner": {"impl": "local"},  # not lockable: left to the profile layer
+        "events": {"impl": "hosted"},
+        "gpu_token": {"impl": "none"},
+    }
+    monkeypatch.setattr(entry, "load_builtin_profile", lambda name: {"sockets": sockets})
+    assert entry._plug_lock(_spec()) == {
+        "measurement": {"impl": "local"},
+        "events": {"impl": "hosted"},
+        "gpu_token": {"impl": "none"},
+    }
+
+
+def test_a_declared_measurement_must_agree_with_the_spec(monkeypatch):
+    monkeypatch.setattr(entry, "load_builtin_profile", lambda name: {"sockets": {"measurement": {"impl": "hosted"}}})
+    with pytest.raises(entry.Refused, match="does not match profile"):
+        entry._plug_lock(_spec())
+
+
 # -- exit.json ---------------------------------------------------------------------------------------------------
 @pytest.mark.parametrize("returncode", [1, 2, 130])
 def test_a_normal_end_with_a_failing_return_code_is_still_final(run, monkeypatch, returncode):
@@ -317,7 +351,8 @@ def test_the_host_values_travel_in_code_to_the_plug_host(run, monkeypatch):
     fake = FakeOptimize(monkeypatch)
     entry.main(["run"])
     (hosted,) = fake.runs
-    assert hosted.plug_lock == {"measurement": {"impl": "local"}}
+    declared = load_builtin_profile("hosted-gpu")["sockets"]
+    assert hosted.plug_lock == {n: {"impl": v["impl"]} for n, v in declared.items() if n in LOCKABLE_SOCKETS}
     assert hosted.host_info.sandbox_keys.measurement.reveal() == _SECRETS[Var.SANDBOX_KEY_MEASUREMENT]
     assert hosted.host_info.mcp_token.reveal() == _SECRETS[Var.MCP_TOKEN]
     assert hosted.host_info.sandbox_templates == {"runner": {"1": "r1"}}
