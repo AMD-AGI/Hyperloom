@@ -668,7 +668,7 @@ function-lines src/kernelforge/loop/task_preflight.py::_count_graph_replays 68
 function-lines src/kernelforge/loop/task_preparer.py::_commit_prepared_task 61
 function-lines src/kernelforge/loop/task_preparer.py::prepare_task 286
 function-lines src/kernelforge/loop/task_preparer_prompts.py::_build_prompt 54
-function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 263
+function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 260
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 142
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._finalize_framework_artifacts 74
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._has_valid_profile_evidence 53
