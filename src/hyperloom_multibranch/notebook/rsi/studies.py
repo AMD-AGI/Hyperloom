@@ -18,7 +18,8 @@
 * ``learnings --notebook DIR --log learnings.jsonl [--archive DIR]``: one session's learnings retrieval
   (:mod:`rsi.learning_eval`), and with an archive what it missed of the lesson pool beside it;
 * ``stalls --archive DIR [--archive DIR ...]``: the stall odds for each model type and workload the archives hold,
-  and each archived session's stop audit (:mod:`rsi.stops`).
+  and each archived session's stop audit (:mod:`rsi.stops`); ``families`` with the same archives: the direction
+  families with the most evidence, and how well their odds tell committing tests apart (:mod:`rsi.family_stats`).
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ from hyperloom_multibranch.notebook.rsi.calibration import (
     scorer_baseline,
 )
 from hyperloom_multibranch.notebook.rsi.expression import ExpressionError, ExpressionScorer
+from hyperloom_multibranch.notebook.rsi.family_stats import family_report
 from hyperloom_multibranch.notebook.rsi.generations import GENERATION_RUNS, GENERATIONS, generations
 from hyperloom_multibranch.notebook.rsi.ladder import Complete
 from hyperloom_multibranch.notebook.rsi.learning_eval import read_session
@@ -112,6 +114,10 @@ def _archived(archives: Sequence[Path]) -> tuple[SearchTree, ...]:
 
 def _stalls(args: argparse.Namespace) -> Any:
     return stall_study(_archived(args.archive))
+
+
+def _families(args: argparse.Namespace) -> Any:
+    return family_report(_archived(args.archive))
 
 
 def _replayable(args: argparse.Namespace) -> tuple[SearchTree, ...]:
@@ -190,6 +196,7 @@ def _parser() -> argparse.ArgumentParser:
     learnt.add_argument(_ARCHIVE, type=Path, default=None, help="an archive whose lesson pool the session drew on")
     stalls = command("stalls", _stalls, "the stall odds and every archived session's stop audit")
     _archives(stalls)
+    _archives(command("families", _families, "the direction families' evidence and the menu's offline check"))
     return parser
 
 

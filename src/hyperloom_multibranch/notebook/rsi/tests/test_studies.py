@@ -76,6 +76,8 @@ def test_the_command_reads_the_stall_odds_and_every_sessions_stops_off_one_archi
     assert text.startswith("## any model type, inferencex") and "Over the archive the judge stopped 0 branches" in text
     assert rows == ["| a", "| b", "| c"]
     assert [audit["session_id"] for audit in study["audits"]] == ["a", "b"]
+    assert main(["families", "--archive", str(archive)]) == 0
+    assert capsys.readouterr().out.startswith("Over 0 archived tests, 0 of them committing")
 
 
 def test_a_study_that_cannot_run_says_why(archive: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -152,13 +152,23 @@ def test_each_branch_keeps_why_it_stopped_and_the_directions_it_tried(snapshot: 
     branches = {branch.name: branch for branch in tree_from_snapshot(snapshot, METRIC).branches}
     s1, s2 = branches["s1"], branches["s2"]
 
+    def words(direction: TreeDirection) -> TreeDirection:
+        return dataclasses.replace(direction, family_target="", family_mechanism="")
+
     assert (s1.stop_reason, s2.stop_reason) == ("", "no progress")
-    assert s1.directions == (TreeDirection("moe gemm", "tuned kernel", IntentLayer.KERNEL, 2, 1, pytest.approx(4.0)),)
-    assert s2.directions == (
+    assert tuple(map(words, s1.directions)) == (
+        TreeDirection("moe gemm", "tuned kernel", IntentLayer.KERNEL, 2, 1, pytest.approx(4.0)),
+    )
+    assert tuple(map(words, s2.directions)) == (
         TreeDirection("attention", "split kv", IntentLayer.CONFIG, 1, 0, pytest.approx(-2.0)),
         TreeDirection("scheduler", "chunked prefill", IntentLayer.CONFIG, 1, 0, None),
         TreeDirection("kv cache", "fp8 kv cache", IntentLayer.CONFIG, 1, 0, None),
     )
+    assert [(item.family_target, item.family_mechanism) for item in s2.directions] == [
+        ("attention", "kernel tuning"),
+        ("scheduling and batching", "other"),
+        ("KV cache", "quantization precision"),
+    ]
     assert branches[INTEGRATION_BRANCH].directions == ()
 
 

@@ -49,6 +49,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     LineageKind,
 )
 from hyperloom_multibranch.notebook.codec import decode, encode
+from hyperloom_multibranch.notebook.families import family_of
 from hyperloom_multibranch.notebook.local.files import encode_json, publish_once
 from hyperloom_multibranch.notebook.local.unfinished import hinted_gain
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions, task_conditions, task_similarity
@@ -85,7 +86,9 @@ class TreeProbation:
 class TreeDirection:
     """One intent a branch tested: how many tests it took, how many committed, and the best gain any of them was judged
     at over its parent, among those that kept accuracy; ``None`` when none was. ``cross_image`` when it replayed a
-    Recipe KB champion built on another image, so later sessions learn how often such a replay pays."""
+    Recipe KB champion built on another image, so later sessions learn how often such a replay pays.
+    ``family_target`` and ``family_mechanism`` are its direction family (:mod:`notebook.families`), read off the change
+    its first test made; empty in a tree archived before they were kept."""
 
     target: str
     mechanism: str
@@ -94,6 +97,8 @@ class TreeDirection:
     commits: int = 0
     best_gain_pct: float | None = None
     cross_image: bool = False
+    family_target: str = ""
+    family_mechanism: str = ""
 
 
 @dataclass(frozen=True)
@@ -370,7 +375,8 @@ def _directions(
     directions = []
     for fingerprint, tests in tried.items():
         intent = intents[fingerprint]
-        gains = [gain for gain in map(hinted_gain, tests) if gain is not None]
+        gains = [gain for gain in map(_kept_gain, tests) if gain is not None]
+        family = family_of(intent.target, intent.mechanism, intent.layer, tests[0].request.delta)
         directions.append(
             TreeDirection(
                 target=intent.target,
@@ -380,6 +386,8 @@ def _directions(
                 commits=sum(1 for record in tests if record.conclusion in COMMITTING),
                 best_gain_pct=max(gains) if gains else None,
                 cross_image=intent.target == REPLAY_TARGET and intent.mechanism in cross_image,
+                family_target=family.target,
+                family_mechanism=family.mechanism.value,
             )
         )
     return tuple(directions)
