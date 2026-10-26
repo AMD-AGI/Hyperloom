@@ -55,6 +55,20 @@ benchmark:
     # --- Profiler: graph capture (#126; shape-discovery flag dropped
     # because the deployed SGLang argparse rejects it) ---
     EXTRA_SGLANG_ARGS: "--enable-profile-cuda-graph"
+    # --- Profiler: graph replays ---
+    # The HIP runtime replays a captured graph by dispatching its pre-recorded AQL packets, and the ROCm profiler then
+    # records a replay's kernels only for the replay that a host sync follows (the profiler's stop, or a prefill step),
+    # so a decode window's shares are those of the eager ops around the replays. Each ROCm line has its own switch to
+    # the per-node dispatch path instead; a runtime ignores the switches it does not define, so all three are set:
+    #   ROCm 7.1.0-7.2.3:  DEBUG_CLR_GRAPH_PACKET_CAPTURE=0      (packet capture off)
+    #   ROCm 7.2.4:        DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING=0  (segmented executor off, so no packet capture)
+    #   ROCm 10.x:         DEBUG_HIP_GRAPH_CLASSIC_PATH=1        (classic executor, no packet capture; single-device
+    #                      graphs only). On 10.x SEGMENT_SCHEDULING=0 is that runtime's default and changes nothing.
+    # Measured on ROCm 7.2.0 only (Qwen3-14B-FP8 decode replays of 764 kernels): a 128-step window recorded 1 of 127
+    # replays by default and 128 of 128 with packet capture off. The 7.2.4 and 10.x switches are not yet measured.
+    DEBUG_CLR_GRAPH_PACKET_CAPTURE: "0"
+    DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING: "0"
+    DEBUG_HIP_GRAPH_CLASSIC_PATH: "1"
     # --- Profiler: steady-state window via extra_body (#194) ---
     # PROFILE_EXTRA_BODY is consumed by InferenceX benchmark_lib.sh to inject
     # into the benchmark request body. start_step skips warmup, num_steps

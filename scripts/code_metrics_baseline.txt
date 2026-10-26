@@ -385,7 +385,6 @@ function-lines src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::bui
 function-lines src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::knowledge_to_warm_recipe 52
 function-lines src/hyperloom/orchestrator/loop/_baseline_failures.py::BaselineFailureMixin.handle_unpromotable_result 57
 function-lines src/hyperloom/orchestrator/loop/_resume_consistency.py::ResumeConsistencyMixin.enqueue_internal_stack_rebench 51
-function-lines src/hyperloom/orchestrator/loop/_resume_recovery.py::ResumeRecoveryMixin._resume_recover_pending_warm_replay 75
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator.__init__ 89
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._reactor_turn 88
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._run_ticks 60
@@ -733,7 +732,7 @@ module-lines src/hyperloom/orchestrator/loop/intent_router.py 1380
 module-lines src/hyperloom/orchestrator/phases/framework.py 3052
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4230
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 1975
-module-lines src/hyperloom/orchestrator/phases/prelude.py 2516
+module-lines src/hyperloom/orchestrator/phases/prelude.py 2493
 module-lines src/hyperloom/orchestrator/policy/gate.py 1576
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2556

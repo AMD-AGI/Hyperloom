@@ -47,7 +47,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     Verdict,
 )
 from ..actions.executors._launch_restatement import config_launch_restated_by
-from ..actions.executors.baseline import _revert_warm_patch_state, revert_warm_kernel_patches
+from ..actions.executors.baseline import revert_warm_kernel_patches
 from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
 from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
 from ..state.task_registry import Task, TaskSpec
@@ -60,7 +60,7 @@ from .warm_replay_stack import (
     commit_warm_replay_overlays,
     committing_overlays,
     replayed_patch_refs as _replayed_patch_refs,
-    uncommit_promoted_overlays,
+    restore_recipe_trees,
     warm_patch_trees as _warm_patch_trees,
     warm_replay_source_layer,
 )
@@ -1486,31 +1486,8 @@ class PreludePhase(CoordinatorCollaborator):
 
     def rollback_combined_warm(self, result: dict[str, Any], task: "Task | None") -> dict[str, Any]:
         """Restore both Recipe and Kernel halves of a combined replay."""
-        restores: list[dict[str, Any]] = []
         pending = self.shared_state.warm_replay_pending
-        for tree in _warm_patch_trees(result, pending):
-            target = str(tree.get("root") or "")
-            if not target:
-                continue
-            uncommit_promoted_overlays(pending, target, str(tree.get("pre_sha") or ""))
-            recipe_manifest = tree.get("snapshot_manifest")
-            backups = list(tree.get("nogit_backups") or [])
-            if not bool(tree.get("mutated", True)):
-                # An overlay the tree already carried applies as a no-op, writing
-                # nothing and so owing nothing. A record predating the flag reads as
-                # written-to, and still has to answer with a channel below.
-                continue
-            if not recipe_manifest and not backups:
-                restores.append({"ok": False, "errors": [f"recipe:{target}:missing_snapshot_manifest"]})
-                continue
-            restores.append(
-                _revert_warm_patch_state(
-                    target,
-                    pre_sha=str(tree.get("pre_sha") or ""),
-                    snapshot_manifest=recipe_manifest,
-                    nogit_backups=backups,
-                )
-            )
+        restores = restore_recipe_trees(result, pending)
         params = task.params if task is not None else {}
 
         def _kernel_rows(key: str, pending_key: str) -> list[Any]:
