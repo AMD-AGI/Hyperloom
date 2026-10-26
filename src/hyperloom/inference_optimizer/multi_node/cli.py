@@ -597,7 +597,7 @@ def _build_multinode_launch_entrypoint(
     wait_flag = "--no-wait-health" if args.no_wait_health else ""
     try:
         extra_args = prepare_shell_safe_extra_args(
-            args.extra_args or "",
+            args.extra_args,
             context="rayjob restart-server --extra-args",
         )
     except ServerArgsRejected as exc:
@@ -619,22 +619,17 @@ def _build_multinode_launch_entrypoint(
             info(f"profile-traces dir derived from rayjob_id: {profiler_dir}")
     profiler_arg = f"--torch-profiler-dir {shlex.quote(str(profiler_dir))} " if profiler_dir else ""
     # Expert-parallel size; ep <= 1 emits no flag.
-    try:
-        ep_val = int(getattr(args, "ep", 1) or 1)
-    except (TypeError, ValueError):
-        ep_val = 1
-    ep_arg = f"--ep {ep_val} " if ep_val > 1 else ""
+    ep_arg = f"--ep {args.ep} " if args.ep > 1 else ""
     # Forward PD knobs only when disaggregated (else keep the aggregated default).
-    pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
     pd_args = ""
-    if pd_mode == "disaggregated":
-        pn = int(getattr(args, "pd_prefill_nodes", 0) or 0)
-        dn = int(getattr(args, "pd_decode_nodes", 0) or 0)
-        ptp = int(getattr(args, "pd_prefill_tp", 0) or 0)
-        dtp = int(getattr(args, "pd_decode_tp", 0) or 0)
-        tb = (getattr(args, "pd_transfer_backend", "") or "").strip()
-        ib = (getattr(args, "pd_ib_device", "") or "").strip()
-        bp = int(getattr(args, "pd_bootstrap_port", 0) or 0)
+    if args.pd_mode == "disaggregated":
+        pn = args.pd_prefill_nodes
+        dn = args.pd_decode_nodes
+        ptp = args.pd_prefill_tp
+        dtp = args.pd_decode_tp
+        tb = args.pd_transfer_backend.strip()
+        ib = args.pd_ib_device.strip()
+        bp = args.pd_bootstrap_port
         chunks = [
             "--pd-mode disaggregated",
             f"--pd-prefill-nodes {pn}",

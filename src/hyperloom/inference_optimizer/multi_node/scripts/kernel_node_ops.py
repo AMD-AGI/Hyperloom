@@ -109,7 +109,7 @@ def _do_apply(a: argparse.Namespace) -> int:
 def _do_revert(a: argparse.Namespace) -> int:
     """Restore the target file from its backup copy."""
     host = socket.gethostname()
-    records_json = getattr(a, "records_json", "") or ""
+    records_json = getattr(a, "records_json", "")
     try:
         records = json.loads(records_json or "[]")
     except json.JSONDecodeError as exc:
