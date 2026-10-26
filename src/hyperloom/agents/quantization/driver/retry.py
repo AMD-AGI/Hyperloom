@@ -19,7 +19,7 @@ from .assessment import (
     derive_status,
 )
 from .outcomes import OutcomeId, SUCCESS_TAGS, UNCLASSIFIED_FAILURE
-from .result_collector import collect_artifacts
+from .result_collector import ATTEMPT_MARKER_FILES, collect_artifacts
 from .runner import AttemptContext, RunOneAttemptFn, attempt_ended, run_one_attempt
 
 
@@ -59,23 +59,20 @@ def _bump_counter(workspace: Path) -> int:
     return n
 
 
-#: The files an attempt ends on. Every attempt and every run of one model share the workspace, and both the owed-end
-#: check and the classifier read these from it.
-_ATTEMPT_END_MARKERS = ("blocked.md", "last_phase.txt", "eval_report.json", "eval_skipped.txt")
 _ARCHIVE_INFIX = ".attempt_"
 
 
 def _archive_earlier_end(workspace: Path) -> bool:
-    """Rename the end markers an earlier attempt or run left to the next free ``.attempt_<k>``.
+    """Rename the markers an earlier attempt or run left to the next free ``.attempt_<k>``.
 
     Archiving is what lets the next attempt be judged on its own files. Returns
-    whether the workspace holds any earlier end, archived now or by an earlier
-    attempt, and so the outputs that attempt left.
+    whether the workspace holds any earlier attempt's markers, archived now or
+    by an earlier attempt, and so the outputs that attempt left.
     """
-    present = [name for name in _ATTEMPT_END_MARKERS if (workspace / name).is_file()]
+    present = [name for name in ATTEMPT_MARKER_FILES if (workspace / name).is_file()]
     archived = [
         int(suffix)
-        for name in _ATTEMPT_END_MARKERS
+        for name in ATTEMPT_MARKER_FILES
         for path in workspace.glob(f"{name}{_ARCHIVE_INFIX}*")
         if (suffix := path.name.removeprefix(f"{name}{_ARCHIVE_INFIX}")).isdigit()
     ]

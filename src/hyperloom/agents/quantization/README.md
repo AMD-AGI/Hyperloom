@@ -129,7 +129,7 @@ can read these directly:
   retry N+1).
 - `blocked.md` — present when the SDK aborted; may carry `outcome_id: <id>`
   to short-circuit classification.
-- `<marker>.attempt_N` — the Nth archived end in this workspace: the
+- `<marker>.attempt_N` — the Nth archived set of markers in this workspace: the
   `blocked.md`, `last_phase.txt`, `eval_report.json` and `eval_skipped.txt` an
   earlier attempt or an earlier run left, renamed before the next attempt
   starts so that attempt is judged on its own files. An attempt on a workspace
