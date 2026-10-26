@@ -15,7 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.sandbox.card_occupancy import CardReading, Holder
+from hyperloom.sandbox.card_occupancy import CardGuard, CardReading, Holder
+from hyperloom.sandbox.gated_pool import CardsHeld, GatedPool
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases, CardDrain
@@ -59,8 +60,8 @@ def _closed_after() -> Iterator[None]:
         _MADE.pop().close()
 
 
-def _leases(tmp_path: Path, listing: Listing) -> tuple[BranchLeases, list[float]]:
-    provider = SimpleNamespace(pool=GpuPool(range(4)), quarantined=set())
+def _leases(tmp_path: Path, listing: Listing, pool: GpuPool | None = None) -> tuple[BranchLeases, list[float]]:
+    provider = SimpleNamespace(pool=pool or GpuPool(range(4)), quarantined=set())
     leases = BranchLeases(
         provider,  # type: ignore[arg-type]
         tmp_path / "leases",
@@ -168,3 +169,30 @@ async def test_closing_the_leases_stops_reading_a_card_that_is_kept_out(tmp_path
 
     assert _until(lambda: not [t for t in threading.enumerate() if t.name == f"hl-lease-drain-{lease.lease_id}"])
     assert leases.held_out() == frozenset(lease.gpu_ids)
+
+
+async def test_a_card_a_released_lease_still_drains_is_never_read_as_held_by_an_enforcing_pool(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The memory a lease's ended server leaves while the driver frees it is not a foreign process: the card stays out
+    of the pool until it is free, so the pool that gates the tests' cards never looks at it, skips it or refuses for it."""
+    caplog.set_level(logging.WARNING, logger="hyperloom.sandbox.gated_pool")
+    listing = Listing()
+    pool = GatedPool(range(4), CardGuard.ENFORCE, read=listing)  # the pool reads the same kernel list
+    leases, _ = _leases(tmp_path, listing, pool)
+    lease = await leases.lease("b1", 1, wait_sec=0)
+    (busy,) = lease.gpu_ids
+    listing.vram[busy] = 238 * _GIB
+
+    leases.release(lease.lease_id)
+
+    others = pool.acquire(3, 0.0)
+    assert busy not in others
+    pool.release(others)
+    with pytest.raises(SandboxUnavailable, match=r"no 4 free GPUs within 0.0s \(3 free\)") as refused:
+        pool.acquire(4, 0.0)
+    assert not isinstance(refused.value, CardsHeld), "a draining card is not free, so it is never refused as held"
+    listing.free(busy)
+    assert _until(lambda: busy in pool.free_cards())
+    assert sorted(pool.acquire(4, 0.0)) == [0, 1, 2, 3]
+    assert [r.getMessage() for r in caplog.records if r.name == "hyperloom.sandbox.gated_pool"] == []
