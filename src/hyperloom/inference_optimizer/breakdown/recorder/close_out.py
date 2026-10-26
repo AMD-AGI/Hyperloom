@@ -351,26 +351,34 @@ def record_roofline_progress(session_dir: Path | str | None, progress: RooflineP
     # ideal per-image compute floor against measured latency. ``ceiling_kind``
     # keeps a reader from taking the null tok/s fields for a failed analysis.
     if not ceiling_available:
-        ideal_ms = to_float(snapshot.get("roofline_ideal_ms"))
-        measured_ms = to_float(snapshot.get("e2e_mean_ms"))
-        if ideal_ms and ideal_ms > 0 and measured_ms and measured_ms > 0:
-            payload["ceiling_kind"] = "latency"
-            payload["latency_ceiling_ms"] = round(ideal_ms, 4)
-            payload["achieved_latency_ms"] = round(measured_ms, 4)
-            payload["latency_ceiling_available"] = True
-            # Ideal over measured: higher is nearer the floor.
-            payload["current_best_pct_of_latency_ceiling"] = round(ideal_ms / measured_ms * 100.0, 4)
+        payload.update(_latency_ceiling(snapshot))
+    payload.update(_trajectory_tail(to_float(progress.current_best_tput), best))
+    _write(session_dir, {"roofline_progress": payload})
 
+
+def _latency_ceiling(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """The latency ceiling fields ``snapshot`` supports, or none without a positive ideal and measured latency."""
+    ideal_ms = to_float(snapshot.get("roofline_ideal_ms"))
+    measured_ms = to_float(snapshot.get("e2e_mean_ms"))
+    if not (ideal_ms and ideal_ms > 0 and measured_ms and measured_ms > 0):
+        return {}
+    return {
+        "ceiling_kind": "latency",
+        "latency_ceiling_ms": round(ideal_ms, 4),
+        "achieved_latency_ms": round(measured_ms, 4),
+        "latency_ceiling_available": True,
+        # Ideal over measured: higher is nearer the floor.
+        "current_best_pct_of_latency_ceiling": round(ideal_ms / measured_ms * 100.0, 4),
+    }
+
+
+def _trajectory_tail(declared: float | None, best: float) -> dict[str, Any]:
+    """Whether the trajectory's tail disagrees with the best throughput the session declared."""
     # A tail disagreeing with the session's own best means a promotion never
     # made it onto the stack, as when a resume interrupted a mid-promote.
-    declared = to_float(progress.current_best_tput)
     if declared and declared > 0 and best > 0 and abs(declared - best) / max(declared, 1.0) > 0.001:
-        payload["trajectory_incomplete"] = True
-        payload["current_best_tput_declared"] = declared
-    else:
-        payload["trajectory_incomplete"] = False
-
-    _write(session_dir, {"roofline_progress": payload})
+        return {"trajectory_incomplete": True, "current_best_tput_declared": declared}
+    return {"trajectory_incomplete": False}
 
 
 def _trajectory(baseline: float, baseline_ts: str, stack: Any) -> list[dict[str, Any]]:

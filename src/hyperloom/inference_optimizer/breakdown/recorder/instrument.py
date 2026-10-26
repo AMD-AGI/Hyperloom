@@ -176,13 +176,7 @@ def record_backend_versions_and_timeline(
             continue
         recorded.add(backend)
         att_meta = att.get("metadata") if isinstance(att.get("metadata"), dict) else {}
-        tool_versions.record_tool_version(
-            session_dir,
-            tool=backend,
-            root=str(att_meta.get("root_dir") or result_meta.get("root_dir") or "") or None,
-            version=str(att_meta.get("version") or result_meta.get("version") or "") or None,
-            producer=producer,
-        )
+        _record_build(session_dir, backend, att_meta, result_meta, producer)
     # No attempts means the run failed before any backend launched. The
     # backend the result names is still the one whose build was in play --
     # unless it names none, which is the pre-dispatch gating case that
@@ -190,14 +184,25 @@ def record_backend_versions_and_timeline(
     if not recorded:
         backend = str(result.get("backend") or "").lower()
         if backend:
-            tool_versions.record_tool_version(
-                session_dir,
-                tool=backend,
-                root=str(result_meta.get("root_dir") or "") or None,
-                version=str(result_meta.get("version") or "") or None,
-                producer=producer,
-            )
+            _record_build(session_dir, backend, result_meta, {}, producer)
     _mirror_backend_attempts_to_kernel_timeline(result, recorder)
+
+
+def _record_build(
+    session_dir: Path | str,
+    backend: str,
+    metadata: dict[str, Any],
+    fallback: dict[str, Any],
+    producer: str,
+) -> None:
+    """Record ``backend``'s build, reading what ``metadata`` leaves unset from ``fallback``."""
+    tool_versions.record_tool_version(
+        session_dir,
+        tool=backend,
+        root=str(metadata.get("root_dir") or fallback.get("root_dir") or "") or None,
+        version=str(metadata.get("version") or fallback.get("version") or "") or None,
+        producer=producer,
+    )
 
 
 __all__ = [

@@ -138,6 +138,19 @@ class CriticIteration:
     kb_priors: dict[str, Any] | None = None
 
 
+_ARTIFACT_FILES = (
+    ("request_path", "request.json"),
+    ("judge_bundle_path", "judge_bundle.json"),
+    ("emit_path", "emit.json"),
+    ("review_path", "review.json"),
+)
+
+
+def _artifact_paths(wd: Path | None, session_dir: Path | str) -> dict[str, str | None]:
+    """Where the iteration's four artifacts sit relative to the session, each ``None`` without a workdir."""
+    return {key: _rel(wd / name, session_dir) if wd else None for key, name in _ARTIFACT_FILES}
+
+
 def record_critic_iteration(session_dir: Path | str | None, iteration: CriticIteration) -> None:
     """Record one critic iteration under a session-unique identity.
 
@@ -165,10 +178,7 @@ def record_critic_iteration(session_dir: Path | str | None, iteration: CriticIte
             "verdict": _verdict_rollup(counts),
             "verdict_counts": counts,
             "summary": body[:_SUMMARY_LIMIT],
-            "request_path": _rel(wd / "request.json", session_dir) if wd else None,
-            "judge_bundle_path": _rel(wd / "judge_bundle.json", session_dir) if wd else None,
-            "emit_path": _rel(wd / "emit.json", session_dir) if wd else None,
-            "review_path": _rel(wd / "review.json", session_dir) if wd else None,
+            **_artifact_paths(wd, session_dir),
             "kb_writes": list(emit.get("kb_writes") or []) if isinstance(emit.get("kb_writes"), list) else [],
         }
 
