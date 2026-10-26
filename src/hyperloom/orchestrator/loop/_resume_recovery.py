@@ -325,7 +325,7 @@ class ResumeRecoveryMixin:
         aiter JIT locks (a killed compile leaves a pid-less lock that wedges
         every later build of that module), mark the row failed with a
         ``timeout`` failure_class for the framework channel, and clear the
-        sentinel. Best-effort throughout.
+        sentinel. Each step absorbs its expected failures; any other aborts the resume.
         """
         import shutil
         import signal
