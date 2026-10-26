@@ -752,8 +752,6 @@ class InSessionGate:
             elif old.kind != new.kind or old.digest != new.digest or old.mode != new.mode:
                 modified.append(key)
 
-        if not (modified or deleted or added or errors):
-            return ""
         parts = []
         if modified:
             parts.append(f"modified={modified[:5]}")
