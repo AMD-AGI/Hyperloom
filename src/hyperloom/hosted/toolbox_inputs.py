@@ -14,21 +14,6 @@ from pathlib import Path
 
 from hyperloom.hosted.host_info import GrantLimits, HostInfo, Var
 
-#: The keys :func:`hosted_toolbox_inputs` returns: the field names of the toolbox's input.
-TOOLBOX_INPUT_KEYS: tuple[str, ...] = (
-    "run_id",
-    "session_dir",
-    "api_url",
-    "sandbox_url",
-    "measurement_key",
-    "sandbox_templates",
-    "source_repo",
-    "source_sha",
-    "tp",
-    "dev_key",
-    "grant_limits",
-)
-
 
 class ToolboxInputsError(ValueError):
     """A value the hosted toolbox needs is missing from the host inputs.  Names variables, never values."""
