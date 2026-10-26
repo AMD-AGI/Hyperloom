@@ -320,8 +320,8 @@ def direction_note(snapshot: NotebookSnapshot, intent: Intent, delta: RecipeDelt
 
 @dataclass(frozen=True)
 class LoggedMenu:
-    """A menu as the log keeps it: who was given it, on which commit and when, whether it was shown, and its families'
-    labels in order, the exploring one last when there is one."""
+    """A menu as the log keeps it: who was given it, on which commit and when, whether it was shown, its families'
+    labels in order, the exploring one last when there is one, and the commit odds it gave each."""
 
     at: float
     branch: str
@@ -329,6 +329,7 @@ class LoggedMenu:
     control: bool
     families: tuple[str, ...]
     exploring: str = ""
+    odds: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -375,6 +376,7 @@ class MenuLog:
                         bool(line["control"]),
                         tuple(str(label) for label in line["families"]),
                         str(line.get("exploring") or ""),
+                        tuple(float(value) for value in line.get("odds") or ()),
                     )
                 )
             except (AttributeError, KeyError, TypeError, ValueError):

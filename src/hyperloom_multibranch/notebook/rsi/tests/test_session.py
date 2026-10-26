@@ -30,6 +30,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1, FRONTIER_V1
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, Retrieval, RetrievalLog, RetrievalSource
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_stall_odds
 from hyperloom_multibranch.notebook.rsi.ladder import standings, trials
+from hyperloom_multibranch.notebook.rsi.outcomes import OUTCOMES_REPORT, OutcomePool
 from hyperloom_multibranch.notebook.rsi.playbook import FALLBACK_KEY, H0, PLAYBOOK_KEY, PlaybookPool
 from hyperloom_multibranch.notebook.rsi.lessons import (
     LessonPool,
@@ -218,6 +219,21 @@ def test_close_reruns_the_scheduling_replay_and_says_what_moved_since_the_last_c
 
 
 @pytest.mark.usefixtures("unconfigured")
+def test_close_counts_the_specialists_outcomes_beside_the_receipts_and_keeps_them_beside_the_archive(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    archive, reports = TreeArchive(tmp_path / "archive"), tmp_path / "reports"
+
+    done = close_knowledge(snapshot, METRIC, targets=CloseTargets(archive=archive, receipts=reports))
+
+    assert done.specialist_outcomes.status == WRITTEN and done.specialist_outcomes.counts["kept"] == 1
+    assert done.specialist_outcomes.reason.startswith("commit rate ")
+    assert (reports / OUTCOMES_REPORT).read_text(encoding="utf-8").startswith("# Specialist outcomes of sess-1")
+    assert [item.session_id for item in OutcomePool.beside(archive).sessions()] == ["sess-1"]
+    assert close_knowledge(snapshot, METRIC).specialist_outcomes == CloseStep(SKIPPED, NO_REPORTS)
+
+
+@pytest.mark.usefixtures("unconfigured")
 def test_close_writes_the_stop_audit_of_the_sessions_stops_beside_the_receipts(
     snapshot: NotebookSnapshot, tmp_path: Path
 ) -> None:
@@ -359,6 +375,7 @@ def test_the_breakdown_records_the_knowledge_steps_only_when_given(snapshot: Not
         "stop_audit": {"status": SKIPPED, "reason": NO_REPORTS, "counts": {}},
         "playbook_trial": {"status": SKIPPED, "reason": NO_PLAYBOOK_PLAYED, "counts": {}},
         "scheduling_replay": {"status": SKIPPED, "reason": NO_REPORTS, "counts": {}},
+        "specialist_outcomes": {"status": SKIPPED, "reason": NO_REPORTS, "counts": {}},
     }
     assert json.loads(json.dumps(close["knowledge"])) == close["knowledge"]
     assert "knowledge" not in build_breakdown(snapshot)["close"]

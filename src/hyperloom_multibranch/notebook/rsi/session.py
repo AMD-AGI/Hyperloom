@@ -12,7 +12,8 @@
   this session's stops and probations against the stall odds the judge read (:mod:`rsi.stops`). A session that
   played a scheduling playbook is kept as its trial beside the playbook pool, which may crown or retire a playbook
   (:mod:`rsi.ladder`); then the scheduling replay reruns over the archive with this session's tree in it, against the
-  champion, and says which of its readings moved since the last CLOSE. A step that cannot be done says why and never
+  champion, and says which of its readings moved since the last CLOSE. Last, the specialists' outcomes, the menu's
+  branches beside its control, go beside the receipts and the archive (:mod:`rsi.outcomes`). A step that cannot be done says why and never
   stops CLOSE; :meth:`KnowledgeClose.document` is what the breakdown records of the steps (``CloseOutcome.knowledge``
   of ``build_breakdown``).
 * :func:`session_frontier_policy` chooses its policy once the session has a profile: the calibration's recommendation
@@ -91,6 +92,7 @@ from hyperloom_multibranch.notebook.rsi.ladder import (
     trial_of,
 )
 from hyperloom_multibranch.notebook.rsi.open_areas import open_areas
+from hyperloom_multibranch.notebook.rsi.outcomes import OUTCOMES_REPORT, OutcomePool, specialist_outcomes
 from hyperloom_multibranch.notebook.rsi.playbook import FALLBACK_KEY, H0, PLAYBOOK_KEY, Playbook, PlaybookPool
 from hyperloom_multibranch.notebook.rsi.similarity import task_conditions, workload_kind
 from hyperloom_multibranch.notebook.rsi.stops import stop_audit
@@ -142,8 +144,8 @@ class KnowledgeClose:
     """CLOSE's knowledge steps: the Experiences, the learnings, the archived search tree, the Experiences only the
     notebook's own declaration holds (``multibranch_experiences``), the frontier calibration's report, the learnings
     into the RSI lesson pool (``lessons``), the standing of the pooled lessons the session showed, the stop audit,
-    whose counts are the stops and probations by what came of them, the playbook trial, and the scheduling replay
-    rerun."""
+    whose counts are the stops and probations by what came of them, the playbook trial, the scheduling replay rerun,
+    and the specialists' outcomes."""
 
     experiences: CloseStep
     learnings: CloseStep
@@ -155,6 +157,7 @@ class KnowledgeClose:
     stop_audit: CloseStep = CloseStep(SKIPPED, NO_REPORTS)
     playbook_trial: CloseStep = CloseStep(SKIPPED, NO_PLAYBOOK_PLAYED)
     scheduling_replay: CloseStep = CloseStep(SKIPPED, NO_REPORTS)
+    specialist_outcomes: CloseStep = CloseStep(SKIPPED, NO_REPORTS)
 
     def steps(self) -> dict[str, CloseStep]:
         """The steps by their names in the breakdown's ``close.knowledge``."""
@@ -170,6 +173,7 @@ class KnowledgeClose:
             "stop_audit": self.stop_audit,
             "playbook_trial": self.playbook_trial,
             "scheduling_replay": self.scheduling_replay,
+            "specialist_outcomes": self.specialist_outcomes,
         }
 
     def document(self) -> dict[str, object]:
@@ -288,6 +292,26 @@ def _audited(
     except STEP_ERRORS as exc:
         return _failed("write the stop audit", exc)
     return CloseStep(WRITTEN, audit.note(), audit.counts())
+
+
+def _outcomes(snapshot: NotebookSnapshot, archive: TreeArchive | None, receipts: Path | None) -> CloseStep:
+    """The specialists' outcomes, the menu's branches beside its control, read against the menus the session's log
+    kept beside the receipts; written there, and kept beside the archive for the studies to add up."""
+
+    if receipts is None:
+        return CloseStep(SKIPPED, NO_REPORTS)
+    if snapshot.profile is None:
+        return CloseStep(SKIPPED, NO_PROFILE)
+    target = archive if archive is not None else TreeArchive.from_env()
+    try:
+        found = specialist_outcomes(snapshot, MenuLog(receipts / MENU_LOG).menus(), archived_history(target))
+        report = receipts / OUTCOMES_REPORT
+        atomic_write_text(report, found.render() + "\n", options=WriteOptions(make_parents=True))
+        kept = OutcomePool.beside(target).record(found) if target is not None else False
+    except STEP_ERRORS as exc:
+        return _failed("count the specialists' outcomes", exc)
+    tests = {f"{name}_tests": group.tests for name, group in found.groups.items()}
+    return CloseStep(WRITTEN, found.note(), {"kept": int(kept), **tests})
 
 
 def _replayed(snapshot: NotebookSnapshot, archive: TreeArchive | None, path: Path | None) -> CloseStep:
@@ -412,6 +436,7 @@ def close_knowledge(
         stop_audit=_audited(snapshot, metric, targets.archive, targets.receipt(STOP_AUDIT_REPORT), bottlenecks),
         playbook_trial=_trialled(snapshot, metric, targets.archive, bottlenecks),
         scheduling_replay=_replayed(snapshot, targets.archive, targets.receipt(SCHEDULING_REPLAY_REPORT)),
+        specialist_outcomes=_outcomes(snapshot, targets.archive, targets.receipts),
     )
 
 

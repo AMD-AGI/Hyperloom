@@ -19,7 +19,9 @@
   (:mod:`rsi.learning_eval`), and with an archive what it missed of the lesson pool beside it;
 * ``stalls --archive DIR [--archive DIR ...]``: the stall odds for each model type and workload the archives hold,
   and each archived session's stop audit (:mod:`rsi.stops`); ``families`` with the same archives: the direction
-  families with the most evidence, and how well their odds tell committing tests apart (:mod:`rsi.family_stats`).
+  families with the most evidence, and how well their odds tell committing tests apart (:mod:`rsi.family_stats`);
+  ``outcomes`` with the same archives: the specialists' outcomes CLOSE kept, added up over the sessions, the menu's
+  branches beside its control (:mod:`rsi.outcomes`).
 """
 
 from __future__ import annotations
@@ -52,6 +54,7 @@ from hyperloom_multibranch.notebook.rsi.family_stats import family_report
 from hyperloom_multibranch.notebook.rsi.generations import GENERATION_RUNS, GENERATIONS, generations
 from hyperloom_multibranch.notebook.rsi.ladder import Complete
 from hyperloom_multibranch.notebook.rsi.learning_eval import read_session
+from hyperloom_multibranch.notebook.rsi.outcomes import OutcomePool, pooled
 from hyperloom_multibranch.notebook.rsi.replay import OPTIMISTIC, PESSIMISTIC, REPLAY_RUNS, check, compare, variants
 from hyperloom_multibranch.notebook.rsi.scorers import ScorerPool, custom_scorers
 from hyperloom_multibranch.notebook.rsi.stops import stall_study
@@ -118,6 +121,17 @@ def _stalls(args: argparse.Namespace) -> Any:
 
 def _families(args: argparse.Namespace) -> Any:
     return family_report(_archived(args.archive))
+
+
+def _outcomes(args: argparse.Namespace) -> Any:
+    kept = {
+        item.session_id: item
+        for archive in args.archive
+        for item in OutcomePool.beside(TreeArchive(archive)).sessions()
+    }
+    if not kept:
+        raise StudyError("the archives hold no session's specialist outcomes")
+    return pooled(tuple(kept.values()))
 
 
 def _replayable(args: argparse.Namespace) -> tuple[SearchTree, ...]:
@@ -197,6 +211,7 @@ def _parser() -> argparse.ArgumentParser:
     stalls = command("stalls", _stalls, "the stall odds and every archived session's stop audit")
     _archives(stalls)
     _archives(command("families", _families, "the direction families' evidence and the menu's offline check"))
+    _archives(command("outcomes", _outcomes, "the specialists' outcomes over the archived sessions, menu and control"))
     return parser
 
 
