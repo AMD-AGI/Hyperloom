@@ -65,11 +65,9 @@ dead-code src/hyperloom/orchestrator/actions/executors/_grid_runner.py::SessionD
 dead-code src/kernelforge/loop/run_state.py::WorkspaceLock.__exit__:exc_value 1
 directory-entries src/hyperloom/common 57
 directory-entries src/hyperloom/orchestrator/actions/executors 85
-duplicated-lines src/hyperloom/inference_optimizer/breakdown/collectors/sessions.py 19
 duplicated-lines src/hyperloom/inference_optimizer/breakdown/recorder/recorder.py 28
 duplicated-lines src/hyperloom/inference_optimizer/multi_node/scripts/kernel_node_ops.py 13
 duplicated-lines src/hyperloom/inference_optimizer/multi_node/scripts/kernel_patch_multinode.py 13
-duplicated-lines src/hyperloom/inference_optimizer/session/manifest.py 19
 duplicated-lines src/hyperloom/inference_optimizer/tests/conftest.py 54
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_apply_tracelens_patch_multinode_gc.py 20
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_baseline_moe_runner_fallback.py 145
@@ -91,7 +89,6 @@ duplicated-lines src/hyperloom/inference_optimizer/tests/test_coverage_margin3_u
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_decision_framework.py 15
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_eval_result_dir_wiring.py 66
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_explore_executor.py 87
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_fmoe_ck_coverage.py 12
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_fp8_per_token_injection.py 21
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_framework_agent_critic_gate.py 15
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_framework_agent_selection_audit.py 18
@@ -137,7 +134,6 @@ duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integra
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_helpers_unit.py 12
 duplicated-lines src/hyperloom/orchestrator/enablement/runtime/tests/test_targeted_build_recipes.py 34
 duplicated-lines src/hyperloom/orchestrator/kernel/tests/test_forge_server_log_evidence.py 48
-duplicated-lines src/hyperloom/orchestrator/measurement/tests/test_apply_verification.py 12
 duplicated-lines src/hyperloom/orchestrator/tests/_helpers.py 53
 duplicated-lines src/hyperloom/orchestrator/trace_analysis/tests/test_tracelens_csv.py 37
 duplicated-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py 11
@@ -256,7 +252,7 @@ function-lines src/hyperloom/inference_optimizer/roofline_ceiling.py::compute_ro
 function-lines src/hyperloom/inference_optimizer/roofline_ceiling.py::load_model_meta 60
 function-lines src/hyperloom/inference_optimizer/roofline_snapshot.py::attach_perfmodel_breakdown 59
 function-lines src/hyperloom/inference_optimizer/roofline_snapshot.py::build_roofline_comparison_from_history 51
-function-lines src/hyperloom/inference_optimizer/session/manifest.py::build_manifest 58
+function-lines src/hyperloom/inference_optimizer/session/manifest.py::build_manifest 56
 function-lines src/hyperloom/inference_optimizer/tools/backfill_langfuse.py::build_plan 51
 function-lines src/hyperloom/inference_optimizer/tools/backfill_langfuse.py::ingest 60
 function-lines src/hyperloom/inference_optimizer/tools/event_counts.py::main 57
@@ -417,13 +413,12 @@ function-lines src/hyperloom/orchestrator/phases/geak_native_revalidation.py::pr
 function-lines src/hyperloom/orchestrator/phases/geak_native_revalidation.py::revalidate_source 55
 function-lines src/hyperloom/orchestrator/phases/internal.py::InternalTasksPhase._enqueue_internal_static_recon_task 58
 function-lines src/hyperloom/orchestrator/phases/internal.py::InternalTasksPhase.maybe_enqueue_trajectory_reviewer 56
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._fmoe_apply_verdict 72
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._fmoe_tuned_config_coverage 61
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._maybe_reprofile_for_kernel 71
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._merge_gemm_candidate_with_runtime 57
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._record_kernel_rewrite_controller_timeline 56
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._settle_gemm_e2e_verdict 53
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 67
+function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._settle_gemm_e2e_verdict 52
+function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 64
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.record_geak_adopted_kernels 58
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.run_agent 59
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._apply_warm_kernel_patch 61
@@ -710,7 +705,7 @@ function-lines src/kernelforge/rewrite_by_flydsl/runner.py::_Rewrite.finish 61
 function-lines src/kernelforge/tools/aiter_cache.py::prune_aiter_cache_shards 68
 module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 1784
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2681
-module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2727
+module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2723
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1759
 module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2523
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1802
@@ -730,7 +725,7 @@ module-lines src/hyperloom/orchestrator/loop/coordinator.py 1337
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1455
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1380
 module-lines src/hyperloom/orchestrator/phases/framework.py 3052
-module-lines src/hyperloom/orchestrator/phases/kernel.py 4230
+module-lines src/hyperloom/orchestrator/phases/kernel.py 4002
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 1975
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2493
 module-lines src/hyperloom/orchestrator/policy/gate.py 1576
