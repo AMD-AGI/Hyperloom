@@ -213,8 +213,30 @@ class MachinePhase(CoordinatorCollaborator):
         if not state.stop_reason:
             state.set_stop_reason(_BUDGET_EXIT_STOP_REASONS.get(reason, reason), strict=True)
 
+    async def _framework_round_fits(self) -> bool:
+        """Whether FRAMEWORK_AGENT has a round left: work queued or running, or one it admits fits the time left.
+
+        A remainder shorter than every round the phase admits never admits another; a resumed GLM-5.3 session sat
+        out the last 44 minutes of its FRAMEWORK_AGENT budget that way with every GPU idle. Priced through the
+        dispatcher's own gate, as the orchestration prompt's affordability line is.
+        """
+        if str(self.shared_state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return True
+        if await self.tasks.queued() or await self.tasks.running():
+            return True
+        dispatcher = self._coord.dispatcher
+        return any(
+            dispatcher.time_budget_denial_for_action(action) is None
+            for action in _phase_state.allowed_actions_for(_phase_state.PHASE_FRAMEWORK_AGENT)
+        )
+
     async def _next_phase(
-        self, *, optimize_enabled: bool, enablement_in_flight: bool, kernel_work_in_flight: bool
+        self,
+        *,
+        optimize_enabled: bool,
+        enablement_in_flight: bool,
+        kernel_work_in_flight: bool,
+        framework_round_fits: bool,
     ) -> tuple[str, str, dict[str, Any]] | None:
         """The transition the predicates ask for, held while the operator-defined specialist's work is pending."""
         state = self.shared_state
@@ -222,6 +244,7 @@ class MachinePhase(CoordinatorCollaborator):
             state,
             enablement_in_flight=enablement_in_flight,
             kernel_work_in_flight=kernel_work_in_flight,
+            framework_round_fits=framework_round_fits,
             flags=_phase_state.PhaseFlags(
                 kernel_enabled=self.kernel_enabled(),
                 optimize_enabled=optimize_enabled,
@@ -395,6 +418,7 @@ class MachinePhase(CoordinatorCollaborator):
             optimize_enabled=self.optimize_enabled(),
             enablement_in_flight=in_enablement and await self._coord.enablement_lane.enablement_in_flight(),
             kernel_work_in_flight=kernel_facts.agent_in_flight,
+            framework_round_fits=await self._framework_round_fits(),
         )
         await self._coord.phase_internal.maybe_enqueue_trajectory_reviewer()
         dispatcher = self._coord.dispatcher

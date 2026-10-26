@@ -1360,6 +1360,9 @@
         "cumulative_elapsed_sec": {
           "type": "number",
           "minimum": 0
+        },
+        "round_fits": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false

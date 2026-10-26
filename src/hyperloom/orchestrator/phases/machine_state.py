@@ -1166,6 +1166,7 @@ def workflow_predicate_inputs(
     now_unix: float | None = None,
     enablement_in_flight: bool = False,
     kernel_work_in_flight: bool = False,
+    framework_round_fits: bool = True,
 ) -> dict[str, Any]:
     """Freeze primitive, normalized facts consumed by one phase decision."""
     current = (state.phase or "").strip().upper() or PHASE_PRELUDE
@@ -1192,6 +1193,7 @@ def workflow_predicate_inputs(
         }
     elif current == PHASE_FRAMEWORK_AGENT:
         inputs["plateau"], inputs["budget"] = _framework_predicate_inputs(state, now_unix=frozen_now)
+        inputs["budget"]["round_fits"] = bool(framework_round_fits)
     elif current == PHASE_KERNEL_AGENT:
         inputs["pending_work"], inputs["plateau"], inputs["budget"] = _kernel_predicate_inputs(
             state,
@@ -1312,8 +1314,16 @@ def _framework_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None
         return "optimize_no_more_leverage", {**arms, "evidence": "skip_to_sweep", "hint": hint}
     if plateau.config_dry and plateau.source_dry:
         return "optimize_no_more_leverage", {**arms, "evidence": "both_arms_plateaued", "plateau": True}
+    budget = dict(inputs.get("budget") or {})
+    # A record frozen before this fact existed carries no value and replays as it was decided.
+    if budget.get("round_fits") is False:
+        return "optimize_phase_budget_exhausted", {
+            **arms,
+            "evidence": "no_round_fits",
+            "remaining_seconds": _number(budget.get("remaining_sec")),
+        }
     return _budget_exit(
-        dict(inputs.get("budget") or {}),
+        budget,
         exhausted_reason="optimize_phase_budget_exhausted",
         cap_reason="optimize_budget_cap",
         evidence=arms,
@@ -1472,6 +1482,7 @@ def compute_next_phase(
     now_unix: float | None = None,
     enablement_in_flight: bool = False,
     kernel_work_in_flight: bool = False,
+    framework_round_fits: bool = True,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return the next transition with the primitive inputs it consumed."""
     inputs = workflow_predicate_inputs(
@@ -1480,6 +1491,7 @@ def compute_next_phase(
         now_unix=now_unix,
         enablement_in_flight=enablement_in_flight,
         kernel_work_in_flight=kernel_work_in_flight,
+        framework_round_fits=framework_round_fits,
     )
     if "baseline_tput" in inputs["global"]:
         return replay_next_phase(inputs)

@@ -371,6 +371,69 @@ def test_prelude_baseline_failed_after_three_failures():
     assert out is not None and out[1] == "prelude_baseline_failed"
 
 
+def _framework_state_inside_its_budget() -> SharedState:
+    from hyperloom.orchestrator.phases.machine_state import normalize_budget_pct
+
+    state = SharedState(
+        phase=phase_state.PHASE_FRAMEWORK_AGENT,
+        phase_started_unix=1.0,
+        max_minutes=600,
+        phase_budget_pct=normalize_budget_pct(None),
+        optimization_stack=[{"action": "explore"}],
+        pending_escalate_hint="",
+    )
+    state._now_unix = lambda: 61.0
+    return state
+
+
+def test_a_framework_phase_no_round_fits_is_spent():
+    """A remainder shorter than every round the phase admits never admits another; one sat out 44 idle minutes."""
+    state = _framework_state_inside_its_budget()
+    assert phase_state.compute_next_phase(state) is None
+
+    out = phase_state.compute_next_phase(state, framework_round_fits=False)
+
+    assert out is not None and out[1] == "optimize_phase_budget_exhausted"
+    assert out[2]["evidence"] == "no_round_fits" and out[2]["remaining_seconds"] > 0
+
+
+def test_a_framework_record_frozen_before_round_fits_replays_as_decided():
+    inputs = phase_state.workflow_predicate_inputs(_framework_state_inside_its_budget(), framework_round_fits=False)
+    del inputs["budget"]["round_fits"]
+
+    assert phase_state.replay_next_phase(inputs) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("queued", "fits", "expected"),
+    [((), set(), False), (("explore",), set(), True), ((), {"specialist"}, True)],
+    ids=["nothing-fits", "queued-work", "one-action-fits"],
+)
+async def test_the_machine_reads_a_round_fits_off_the_queue_and_the_time_gate(queued, fits, expected):
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.phases.machine import MachinePhase
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
+
+    async def _queued():
+        return [SimpleNamespace(kind=kind) for kind in queued]
+
+    async def _running():
+        return []
+
+    def _denial(action: str):
+        return None if action in fits else PolicyDenied(f"{action} does not fit", rule="phase_time_budget")
+
+    coord = SimpleNamespace(
+        shared_state=_framework_state_inside_its_budget(),
+        tasks=SimpleNamespace(queued=_queued, running=_running),
+        dispatcher=SimpleNamespace(time_budget_denial_for_action=_denial),
+    )
+
+    assert await MachinePhase(coord)._framework_round_fits() is expected
+
+
 def test_optimize_phase_budget_exhaustion_advances():
     # Elapsed exceeds the phase budget.
     from hyperloom.orchestrator.phases.machine_state import normalize_budget_pct
