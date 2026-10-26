@@ -186,6 +186,7 @@ async def test_a_retest_appends_a_judgement_and_the_latest_one_is_in_force(open_
         (Role.TOOLBOX, LineageEvent(LineageKind.OPEN, "s1", from_commit="c0")),
         (Role.SCHEDULER, LineageEvent(LineageKind.SPLIT, "s1-fix", commit_id="c2", from_commit="c1", from_branch="s1")),
         (Role.GATE, LineageEvent(LineageKind.STOP, "s1")),
+        (Role.GATE, LineageEvent(LineageKind.PROBATION, "s1", tests=4)),
     ],
 )
 async def test_each_lineage_event_has_one_writer(open_as: Open, role: Role, event: LineageEvent) -> None:
@@ -203,6 +204,9 @@ async def test_each_lineage_event_has_one_writer(open_as: Open, role: Role, even
         LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0", recipe_digest="sha256:c0"),
         LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0", driver=BranchDriver.AUTONOMOUS),
         LineageEvent(LineageKind.STOP, "s1", driver=BranchDriver.AUTONOMOUS),
+        LineageEvent(LineageKind.PROBATION, "s1"),
+        LineageEvent(LineageKind.STOP, "s1", tests=4),
+        LineageEvent(LineageKind.PROBATION, INTEGRATION_BRANCH, tests=4),
     ],
 )
 async def test_a_lineage_event_names_what_its_kind_needs(open_as: Open, event: LineageEvent) -> None:
@@ -227,6 +231,25 @@ async def test_a_branch_an_autonomous_agent_drives_is_known_from_its_open_even_w
         "b01": BranchDriver.SPECIALIST,
         "b02": BranchDriver.AUTONOMOUS,
     }
+
+
+async def test_a_running_branch_is_held_on_probation_once_a_stall(open_as: Open) -> None:
+    scheduler = open_as(Role.SCHEDULER)
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s1", from_commit="c0"))
+    first = LineageEvent(LineageKind.PROBATION, "s1", reason="drawn", tests=4)
+
+    for event in (first, replace(first, reason="drawn again", tests=6), replace(first, commit_id="c1")):
+        await scheduler.record_lineage(event)
+    await scheduler.record_lineage(LineageEvent(LineageKind.STOP, "s1", reason="judge: stalled"))
+
+    branches = {node.branch: node for node in (await scheduler.lineage()).branches}
+    assert [(item.tests, item.since_commit) for item in branches["s1"].probations] == [(4, ""), (4, "c1")]
+    assert branches["s1"].stop_reason == "judge: stalled"
+    with pytest.raises(ConflictingWrite):
+        await scheduler.record_lineage(replace(first, commit_id="c2"))
+    with pytest.raises(NotRecorded):
+        await scheduler.record_lineage(replace(first, branch="s9"))
 
 
 async def test_a_commit_keeps_the_recipe_digest_it_was_recorded_with(open_as: Open) -> None:

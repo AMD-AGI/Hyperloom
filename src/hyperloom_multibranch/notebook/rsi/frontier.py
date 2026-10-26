@@ -66,13 +66,14 @@ from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import (
     BranchProgress,
     FrontierScore,
+    LineageEvent,
     LineageView,
     NotebookSnapshot,
     OpShares,
     TestRecord,
     amdahl_ceiling_pct,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, CommitOrigin, FrontierBasis
+from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, CommitOrigin, FrontierBasis, LineageKind
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.local.files import encode_json
 from hyperloom_multibranch.notebook.local.unfinished import near_misses
@@ -588,6 +589,25 @@ def stall_evidence(
     return evidence
 
 
+def probation_event(
+    snapshot: NotebookSnapshot, row: BranchProgress, rule: StopRule | None = None
+) -> LineageEvent | None:
+    """The ``PROBATION`` event the scheduler records while ``row``'s stall evidence holds it on probation under
+    ``rule``, :class:`StopRule`'s defaults without one; ``None`` otherwise. It is the same event every round of the
+    stall, and the notebook records one a stall."""
+
+    if row.frontier is None or not row.frontier.components.get(PROBATION_COMPONENT):
+        return None
+    anchor, _ = _last_mergeable_commit(snapshot, row.branch)
+    return LineageEvent(
+        LineageKind.PROBATION,
+        row.branch,
+        commit_id=anchor,
+        reason=f"stalled past the stop bar since {anchor or 'it opened'}, drawn for probation",
+        tests=(rule or StopRule()).probation_tests,
+    )
+
+
 def score_branch(
     snapshot: NotebookSnapshot,
     row: BranchProgress,
@@ -796,6 +816,7 @@ __all__ = [
     "is_young",
     "largest_ceiling_pct",
     "paced",
+    "probation_event",
     "remaining_prior",
     "score_at",
     "score_branch",

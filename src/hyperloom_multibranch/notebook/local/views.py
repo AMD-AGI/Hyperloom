@@ -4,8 +4,8 @@
 """What the notebook's queries derive from its state: the branch tree, progress, commits, values and briefs.
 
 Each fact is written once and every view is derived from it: a specialist commit comes from the judgement that
-carries its commit id, a merge from the integrator's merge judgement and its merge attempt, a branch's start, split
-and stop from lineage events.
+carries its commit id, a merge from the integrator's merge judgement and its merge attempt, a branch's start, split,
+probations and stop from lineage events.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import math
 import statistics
 from collections import deque
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from hyperloom_multibranch.contracts.notebook.interfaces import NotRecorded
 from hyperloom_multibranch.contracts.notebook.peers import Purpose, TestKind, TestResult, Validity
@@ -30,6 +30,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     MergeState,
     NotebookSnapshot,
     PendingCandidate,
+    Probation,
     QuarantineEvent,
     RecordedValue,
     RegressionCase,
@@ -70,6 +71,7 @@ class _BranchDraft:
     repairs: str = ""
     driver: BranchDriver = BranchDriver.SPECIALIST
     rerooted: bool = False
+    probations: list[Probation] = field(default_factory=list)
 
     def node(self) -> BranchNode:
         return BranchNode(
@@ -83,6 +85,7 @@ class _BranchDraft:
             stopped_at=self.stopped_at,
             repairs=self.repairs,
             driver=self.driver,
+            probations=tuple(self.probations),
         )
 
 
@@ -122,6 +125,9 @@ def _apply_event(
     elif event.kind is LineageKind.REROOT:
         if draft is not None:
             draft.head, draft.rerooted = event.commit_id, True
+    elif event.kind is LineageKind.PROBATION:
+        if draft is not None:
+            draft.probations.append(Probation(at, event.tests, event.commit_id))
     elif draft is None:
         branches[event.branch] = _BranchDraft(
             event.branch,

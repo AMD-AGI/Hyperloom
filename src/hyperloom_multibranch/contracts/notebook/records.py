@@ -185,7 +185,7 @@ class MergeAttempt:
 @dataclass(frozen=True)
 class LineageEvent:
     """A branch starting (``from_commit``), splitting off ``from_branch`` with fix ``commit_id``, re-rooted onto
-    ``commit_id``, or stopping.
+    ``commit_id``, held on probation, or stopping.
 
     ``ROOT`` records the baseline commit ``commit_id`` the integration branch starts from, and may name the digest of
     its recipe (``Recipe.digest()``); a judgement names the recipe digest of every other commit. The ``OPEN`` of a
@@ -197,6 +197,11 @@ class LineageEvent:
     branch's runtime records it for its own branch once it has moved the branch in the repository. From then on only a
     commit built on the branch's head moves it, so one measured on the old head that lands later does not take the
     branch back.
+
+    ``PROBATION`` gives a running branch that stalled past the stop bar ``tests`` more judged tests before the judge
+    may stop it; ``commit_id`` names the commit its stall counts from, empty when the branch has none. The scheduler
+    records it once a stall, when the stall evidence draws the branch, so what a stalled branch does next is known for
+    the branches it would have stopped.
     """
 
     kind: LineageKind
@@ -208,6 +213,7 @@ class LineageEvent:
     recipe_digest: str | None = None
     repairs: str = ""
     driver: BranchDriver = BranchDriver.SPECIALIST
+    tests: int = 0
 
 
 @dataclass(frozen=True)
@@ -484,7 +490,18 @@ class CommitNode:
 
 
 @dataclass(frozen=True)
+class Probation:
+    """A stalled branch held from ``at`` for ``tests`` more judged tests, its stall counted from ``since_commit``."""
+
+    at: float
+    tests: int
+    since_commit: str = ""
+
+
+@dataclass(frozen=True)
 class BranchNode:
+    """A branch of the tree; ``probations`` are the stalls it was held through, in the order they began."""
+
     branch: str
     origin: LineageKind
     start_commit: str
@@ -495,6 +512,7 @@ class BranchNode:
     stopped_at: float | None = None
     repairs: str = ""
     driver: BranchDriver = BranchDriver.SPECIALIST
+    probations: tuple[Probation, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -850,6 +868,7 @@ __all__ = [
     "OpShares",
     "PeerReplay",
     "PendingCandidate",
+    "Probation",
     "QuarantineEvent",
     "RecordedValue",
     "RegressionCase",

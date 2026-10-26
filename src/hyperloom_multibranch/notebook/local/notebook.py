@@ -138,6 +138,7 @@ _LINEAGE_FIELDS: dict[LineageKind, tuple[str, ...]] = {
     LineageKind.SPLIT: (_COMMIT_ID, _FROM_COMMIT, "from_branch"),
     LineageKind.STOP: (),
     LineageKind.REROOT: (_COMMIT_ID, _FROM_COMMIT),
+    LineageKind.PROBATION: (),
 }
 _RECIPE_DIGEST = re.compile(re.escape(DIGEST_PREFIX) + "[0-9a-f]{64}")
 #: What a merge attempt without a test may say of itself.
@@ -271,6 +272,10 @@ def _check_lineage(event: LineageEvent) -> None:
         raise ValueError(f"the root commit, and only it, starts the {INTEGRATION_BRANCH} branch")
     if event.kind is LineageKind.REROOT and event.branch == INTEGRATION_BRANCH:
         raise ValueError(f"the {INTEGRATION_BRANCH} branch moves by its merges, never by a re-root")
+    if event.kind is LineageKind.PROBATION and event.branch == INTEGRATION_BRANCH:
+        raise ValueError(f"the {INTEGRATION_BRANCH} branch is never held on probation")
+    if (event.kind is LineageKind.PROBATION) != (event.tests > 0):
+        raise ValueError("a probation event, and only it, gives its branch tests, one at least")
     if event.recipe_digest is not None and event.kind is not LineageKind.ROOT:
         raise ValueError("only the root event names its commit's recipe digest; judgements name the others'")
     if event.driver is not BranchDriver.SPECIALIST and event.kind is not LineageKind.OPEN:
@@ -278,10 +283,15 @@ def _check_lineage(event: LineageEvent) -> None:
 
 
 def _new_lineage(state: NotebookState, event: LineageEvent) -> bool:
-    """Whether ``event`` adds to the lineage; raises when its branch already started, already stopped or never began."""
+    """Whether ``event`` adds to the lineage, a probation once a stall; raises when its branch already started,
+    already stopped or never began."""
 
     recorded = [item for item in state.lineage if item.branch == event.branch]
     if event in recorded:
+        return False
+    if event.kind is LineageKind.PROBATION and any(
+        item.kind is LineageKind.PROBATION and item.commit_id == event.commit_id for item in recorded
+    ):
         return False
     started = [item for item in recorded if item.kind in LINEAGE_STARTS]
     if event.kind in LINEAGE_STARTS:

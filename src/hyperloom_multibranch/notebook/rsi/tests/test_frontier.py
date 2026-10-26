@@ -17,6 +17,7 @@ from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, W
 from hyperloom_multibranch.contracts.notebook.peers import Purpose, TestKind, Validity, Verdict
 from hyperloom_multibranch.contracts.notebook.records import (
     BranchProgress,
+    FrontierScore,
     LineageEvent,
     NotebookSnapshot,
     PendingCandidate,
@@ -40,6 +41,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     OBSERVATION_SECONDS,
     PROBATION_COMPONENT,
     PROBATION_SHARE,
+    PROBATION_TESTS,
     SETTLED_TESTS,
     STALL_BAR_COMPONENT,
     STALLED_COMPONENT,
@@ -58,6 +60,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     drawn_for_probation,
     is_young,
     paced,
+    probation_event,
     remaining_prior,
     score_at,
     score_progress,
@@ -291,6 +294,26 @@ def test_a_stall_drawn_for_probation_runs_its_extra_tests_first_the_same_draw_ev
     assert draws == [drawn_for_probation(snapshot, name, "c1", PROBATION_SHARE) for name in stalls]
     assert 60 < sum(draws) < 140
     assert drawn_for_probation(snapshot, "s1", "c1", 1.0) and not drawn_for_probation(snapshot, "s1", "c1", 0.0)
+
+
+def test_a_branch_on_probation_gives_the_scheduler_the_same_event_every_round_of_its_stall(
+    snapshot: NotebookSnapshot,
+) -> None:
+    row = _row(snapshot)
+    drawn = stall_evidence(snapshot, row, METRIC, StallBar(StopRule(probation_share=1.0), 1), young=False)
+    held = dataclasses.replace(row, frontier=FrontierScore(0.0, drawn, FrontierBasis.TREND, FRONTIER_V1_LABEL))
+    longer = StopRule(probation_tests=6)
+
+    assert probation_event(snapshot, held, longer) == LineageEvent(
+        LineageKind.PROBATION,
+        "s1",
+        commit_id="c1",
+        reason="stalled past the stop bar since c1, drawn for probation",
+        tests=6,
+    )
+    assert probation_event(snapshot, held) == probation_event(snapshot, held)
+    assert probation_event(snapshot, held).tests == PROBATION_TESTS
+    assert probation_event(snapshot, dataclasses.replace(held, frontier=None)) is None
 
 
 def test_a_commit_that_failed_to_merge_does_not_end_the_stall(snapshot: NotebookSnapshot) -> None:

@@ -80,6 +80,7 @@ class LineageKind(str, Enum):
     SPLIT = "split"
     STOP = "stop"
     REROOT = "reroot"
+    PROBATION = "probation"
 
 
 #: The events that start a branch, once each.
@@ -92,6 +93,7 @@ LINEAGE_WRITERS: dict[LineageKind, Role] = {
     LineageKind.SPLIT: Role.GATE,
     LineageKind.STOP: Role.SCHEDULER,
     LineageKind.REROOT: Role.SPECIALIST_RUNTIME,
+    LineageKind.PROBATION: Role.SCHEDULER,
 }
 
 
