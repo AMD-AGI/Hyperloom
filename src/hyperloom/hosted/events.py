@@ -127,17 +127,21 @@ class HostedProgressEvents:
         self._closed = False
         self._dir.mkdir(parents=True, exist_ok=True)
         self._segment, self._last_id = _resume_point(self._dir)
-        self._open_segment()
+        self._fd, self._size = self._open_segment(self._segment)
 
     @property
     def last_id(self) -> int:
         """The id of the last event written, ``0`` before the first."""
         return self._last_id
 
-    def _open_segment(self) -> None:
-        path = self._dir / segment_name(self._segment)
-        self._fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        self._size = os.fstat(self._fd).st_size
+    def _open_segment(self, segment: int) -> tuple[int, int]:
+        """Open a segment file; the descriptor and its size.  Changes no state, so a failure leaves the writer as it was."""
+        fd = os.open(self._dir / segment_name(segment), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            return fd, os.fstat(fd).st_size
+        except OSError:
+            os.close(fd)
+            raise
 
     def _sync(self) -> None:
         if self._fd is not None and self._dirty:
@@ -148,10 +152,9 @@ class HostedProgressEvents:
     def _roll_if_full(self, incoming: int) -> None:
         if self._size and self._size + incoming > self._segment_max:
             self._sync()
+            fd, size = self._open_segment(self._segment + 1)  # the current segment stays in use until this succeeds
             os.close(self._fd)  # type: ignore[arg-type]
-            self._fd = None
-            self._segment += 1
-            self._open_segment()
+            self._fd, self._size, self._segment = fd, size, self._segment + 1
 
     def _line(self, event_id: int, event_type: str, data: Mapping[str, Any]) -> bytes:
         event = {

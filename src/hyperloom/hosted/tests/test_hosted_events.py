@@ -195,6 +195,28 @@ def test_a_failed_write_is_logged_not_raised_and_leaves_no_partial_line(tmp_path
     assert any("could not write" in r.getMessage() for r in caplog.records)
 
 
+def test_a_failed_segment_roll_is_retried_by_the_next_emit(tmp_path, monkeypatch):
+    sink = HostedProgressEvents(tmp_path, "r", segment_max_bytes=1)  # every event after the first needs a new segment
+    sink.emit("hyperloom.warning", {"code": "c", "message": "one"})
+    real_open = os.open
+    failures = [OSError(24, "Too many open files")]
+
+    def flaky_open(path, *args, **kwargs):
+        if failures:
+            raise failures.pop()
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(hosted_events.os, "open", flaky_open)
+    sink.emit("hyperloom.warning", {"code": "c", "message": "lost"})
+    sink.emit("hyperloom.warning", {"code": "c", "message": "two"})
+    sink.close()
+
+    assert [e["data"]["message"] for e in _events(tmp_path)] == ["one", "two"]
+    assert _ids(tmp_path) == [1, 2]
+    assert sorted(p.name for p in tmp_path.glob("*.jsonl")) == [segment_name(1), segment_name(2)]
+    assert [len(p.read_bytes().splitlines()) for p in sorted(tmp_path.glob("*.jsonl"))] == [1, 1]
+
+
 def test_emit_after_close_is_ignored(tmp_path):
     sink = HostedProgressEvents(tmp_path, "r")
     sink.close()
