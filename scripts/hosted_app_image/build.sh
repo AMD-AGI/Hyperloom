@@ -16,6 +16,7 @@ REPO_ROOT="$(cd "${_script_dir}/../.." && pwd)"
 
 TAG=""
 BASE=""
+CLAUDE_VERSION=""
 PUSH=0
 
 usage() {
@@ -24,6 +25,7 @@ Usage: scripts/hosted_app_image/build.sh --tag TAG [options]
 
   --tag TAG     Image reference to build (required)
   --base IMAGE  Framework base image (default: the Dockerfile's BASE_IMAGE)
+  --claude-version V  Claude Code version to install (default: latest)
   --push        Push the image after the build
   -h, --help    Show this help
 USAGE
@@ -33,6 +35,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --tag) [ "$#" -ge 2 ] || { echo "ERROR: --tag requires a value" >&2; exit 2; }; shift; TAG="$1" ;;
     --base) [ "$#" -ge 2 ] || { echo "ERROR: --base requires a value" >&2; exit 2; }; shift; BASE="$1" ;;
+    --claude-version) [ "$#" -ge 2 ] || { echo "ERROR: --claude-version requires a value" >&2; exit 2; }; shift; CLAUDE_VERSION="$1" ;;
     --push) PUSH=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -44,5 +47,6 @@ done
 
 args=(build --file "${_script_dir}/Dockerfile" --tag "$TAG")
 [ -z "$BASE" ] || args+=(--build-arg "BASE_IMAGE=${BASE}")
+[ -z "$CLAUDE_VERSION" ] || args+=(--build-arg "CLAUDE_CODE_VERSION=${CLAUDE_VERSION}")
 docker "${args[@]}" "$REPO_ROOT"
 [ "$PUSH" -eq 0 ] || docker push "$TAG"

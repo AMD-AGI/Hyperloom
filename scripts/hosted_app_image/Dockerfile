@@ -25,6 +25,18 @@ RUN set -eux; \
     command -v git setpriv; \
     python3 -m venv --help >/dev/null
 
+# The claude CLI the specialists spawn from PATH, installed the way install_kernel_tools.sh does
+# (Claude Code's native installer, HYPERLOOM_CLAUDE_CODE_VERSION, latest when unset), but under a
+# directory every account can read. The codex CLI comes with the wheel's openai-codex-cli-bin.
+ARG CLAUDE_CODE_VERSION=latest
+RUN set -eux; \
+    command -v curl; \
+    mkdir -p /opt/claude-code; \
+    curl -fsSL --connect-timeout 20 https://claude.ai/install.sh | HOME=/opt/claude-code bash -s -- "${CLAUDE_CODE_VERSION}"; \
+    chmod -R a+rX /opt/claude-code; \
+    ln -s /opt/claude-code/.local/bin/claude /usr/local/bin/claude; \
+    claude --version
+
 COPY src/hyperloom/hosted/app_bootstrap.sh /opt/hyperloom-host/app_bootstrap.sh
 RUN chmod 0755 /opt/hyperloom-host/app_bootstrap.sh
 
