@@ -61,6 +61,46 @@ def _tunable_flags(argv: list[str], framework: str) -> str:
     return shlex.join(retained)
 
 
+def _verified_server_launch(measurement: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """The Magpie-verified server launch evidence and its argv; raise when either is missing."""
+    evidence = (measurement.get("launch_evidence") or {}).get("magpie_server_launch")
+    if not isinstance(evidence, dict):
+        raise ValueError("Native AgentX GEAK proposals require a Magpie-verified server launch")
+    argv = evidence.get("effective_argv")
+    if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
+        raise ValueError("Native AgentX GEAK server launch argv is missing")
+    return evidence, argv
+
+
+def _native_runtime_env(evidence: dict[str, Any], argv: list[str], explicit_env: dict[str, Any]) -> dict[str, Any]:
+    """The launch's env: ``explicit_env`` over its runtime env, executable dir first on PATH, no device pinning."""
+    runtime = dict(evidence.get("runtime_environment") or {})
+    for name, value in explicit_env.items():
+        if value is None:
+            runtime.pop(name, None)
+        else:
+            runtime[name] = value
+    if argv and Path(argv[0]).is_absolute():
+        executable_dir = str(Path(argv[0]).parent)
+        runtime["PATH"] = ":".join(part for part in (executable_dir, runtime.get("PATH", "")) if part)
+    for name in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        runtime.pop(name, None)
+    return runtime
+
+
+def _seeded_env_spec(
+    handoff: dict[str, Any], flags: str, runtime: dict[str, Any], explicit_env: dict[str, Any]
+) -> dict[str, Any]:
+    """A copy of the handoff's baseline env spec whose config replays the native launch's flags and env."""
+    spec = copy.deepcopy(handoff.get("baseline_env_spec") or {})
+    config = spec.setdefault("config", {})
+    config.update({"server_launch_flags": flags, "extra_server_args": "", "extra_envs": runtime})
+    unset = set(config.get("unset_envs") or []) - explicit_env.keys()
+    unset.update(name for name, value in explicit_env.items() if value is None)
+    config["unset_envs"] = sorted(unset)
+    return spec
+
+
 def seed_native_geak_proxy(
     handoff: dict[str, Any], *, benchmark: Mapping[str, Any], measurement: Mapping[str, Any]
 ) -> None:
@@ -72,32 +112,11 @@ def seed_native_geak_proxy(
     """
     if not is_magpie_agentx(benchmark):
         return
-    evidence = (measurement.get("launch_evidence") or {}).get("magpie_server_launch")
-    if not isinstance(evidence, dict):
-        raise ValueError("Native AgentX GEAK proposals require a Magpie-verified server launch")
-    argv = evidence.get("effective_argv")
-    if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
-        raise ValueError("Native AgentX GEAK server launch argv is missing")
+    evidence, argv = _verified_server_launch(measurement)
     flags = _tunable_flags(argv, str(handoff.get("framework") or ""))
-    runtime = dict(evidence.get("runtime_environment") or {})
     explicit_env = evidence.get("effective_env") or {}
-    for name, value in explicit_env.items():
-        if value is None:
-            runtime.pop(name, None)
-        else:
-            runtime[name] = value
-    if argv and Path(argv[0]).is_absolute():
-        executable_dir = str(Path(argv[0]).parent)
-        runtime["PATH"] = ":".join(part for part in (executable_dir, runtime.get("PATH", "")) if part)
-    for name in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
-        runtime.pop(name, None)
-    spec = copy.deepcopy(handoff.get("baseline_env_spec") or {})
-    config = spec.setdefault("config", {})
-    config.update({"server_launch_flags": flags, "extra_server_args": "", "extra_envs": runtime})
-    unset = set(config.get("unset_envs") or []) - explicit_env.keys()
-    unset.update(name for name, value in explicit_env.items() if value is None)
-    config["unset_envs"] = sorted(unset)
-    handoff["baseline_env_spec"] = spec
+    runtime = _native_runtime_env(evidence, argv, explicit_env)
+    handoff["baseline_env_spec"] = _seeded_env_spec(handoff, flags, runtime, explicit_env)
     handoff["accepted_flags"] = ""
     handoff["accepted_env"] = shlex.join(f"{name}={value}" for name, value in runtime.items())
     handoff["native_server_launch"] = copy.deepcopy(evidence)

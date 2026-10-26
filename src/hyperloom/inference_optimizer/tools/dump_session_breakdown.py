@@ -114,6 +114,19 @@ def _setup_logging(verbose: int) -> None:
     )
 
 
+def _geak_keep_count(validation: dict) -> int:
+    """How many validated KEEPs the GEAK kernel backend contributed."""
+    by_source = (validation.get("attribution") or {}).get("by_source") or {}
+    return int((((by_source.get("kernel") or {}).get("by_backend") or {}).get("geak") or {}).get("keep_count") or 0)
+
+
+def _gain_text(gain: object) -> str:
+    """The validated gain as a two-decimal percent; ``n/a`` when it is not a number."""
+    if isinstance(gain, (int, float)) and not math.isnan(gain):
+        return f"{gain:.2f}%"
+    return "n/a"
+
+
 def _summary_line(breakdown: dict) -> str:
     """Format a one-line summary of a session breakdown.
 
@@ -124,17 +137,16 @@ def _summary_line(breakdown: dict) -> str:
         str: Single-line summary with session id, stop reason, validated gain,
         the shape of the session's record, and how it closed.
     """
-    sess = (breakdown.get("metadata") or {}).get("session") or {}
+    metadata = breakdown.get("metadata") or {}
+    sess = metadata.get("session") or {}
     outcome = breakdown.get("outcome") or {}
     final = outcome.get("final") or {}
     validation = outcome.get("validation") or {}
-    by_source = (validation.get("attribution") or {}).get("by_source") or {}
-    geak_n = int((((by_source.get("kernel") or {}).get("by_backend") or {}).get("geak") or {}).get("keep_count") or 0)
+    geak_n = _geak_keep_count(validation)
     timeline = breakdown.get("timeline") or []
     close = breakdown.get("close") or {}
-    warnings = (breakdown.get("metadata") or {}).get("warnings") or []
-    gain = final.get("gain_pct")
-    gain_text = f"{gain:.2f}%" if isinstance(gain, (int, float)) and not math.isnan(gain) else "n/a"
+    warnings = metadata.get("warnings") or []
+    gain_text = _gain_text(final.get("gain_pct"))
     return (
         f"session_id={sess.get('session_id', '?')}  "
         f"claw_session_id={sess.get('claw_session_id') or '(none)'}  "

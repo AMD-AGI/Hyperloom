@@ -21,6 +21,22 @@ from hyperloom.common.launch_log_evidence import (
 )
 
 
+def _workload_identity(metrics: dict[str, Any]) -> str:
+    """SHA-256 of the replay's mode, scenario type, dataset and recipe."""
+    identity = {key: metrics.get(key) for key in ("mode", "scenario_type", "dataset", "recipe")}
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _latency_ms_fields(latency: dict[str, Any]) -> dict[str, Any]:
+    """``<metric>_<stat>_ms`` of TTFT, TPOT and E2E latency, from the report's seconds."""
+    fields: dict[str, Any] = {}
+    for name in ("ttft", "tpot", "e2el"):
+        for percentile in ("mean", "p50", "p90", "p99"):
+            value = (latency.get(name) or {}).get(percentile)
+            fields[f"{name}_{percentile}_ms"] = None if value is None else value * 1000
+    return fields
+
+
 def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
     """Use the public report exclusively; invalid replays cannot be salvaged."""
     metrics = report.get("agentx_metrics") or {}
@@ -35,8 +51,7 @@ def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
         and all(report.get(key) is True for key in ("success", "benchmark_valid", "publishable"))
         and not diagnostic
     )
-    identity = {key: metrics.get(key) for key in ("mode", "scenario_type", "dataset", "recipe")}
-    identity_hash = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    identity_hash = _workload_identity(metrics)
     output = throughput.get("output_tokens_per_second")
     result: dict[str, Any] = {
         "benchmark_backend": "magpie_agentx",
@@ -69,10 +84,7 @@ def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
         "tpot_source": "magpie_report",
         "nonfatal_warnings": [],
     }
-    for name in ("ttft", "tpot", "e2el"):
-        for percentile in ("mean", "p50", "p90", "p99"):
-            value = (latency.get(name) or {}).get(percentile)
-            result[f"{name}_{percentile}_ms"] = None if value is None else value * 1000
+    result.update(_latency_ms_fields(latency))
     return result
 
 
