@@ -67,6 +67,7 @@ from kernelforge.loop.candidate_measurement import (
     measurement_case_times,
 )
 from kernelforge.loop.iteration_result import IterationResult
+from kernelforge.loop.merge_runtime import MergeStackingMixin, StagedMerge
 from kernelforge.loop.relay_runtime import RelayRuntimeMixin
 from kernelforge.loop.search_policy import (
     MARGINAL_GAIN_SCAN_WINDOW,
@@ -151,15 +152,9 @@ from kernelforge.evaluation.benchmark.baseline import (
 from kernelforge.loop.device_hazard import DeviceHazard, DeviceHazardLog
 from kernelforge.loop.fanout import LanePlan, LaneResult, run_lanes
 from kernelforge.loop.merge_candidates import (
-    MERGE_ATTEMPT_STALL_THRESHOLD,
-    MERGE_PRECEDENCE_STREAK_LIMIT,
-    MergeCandidate,
-    attempted_pairs,
     case_spreads,
     cases_beating_reference,
-    eligible_candidates,
     merge_plan,
-    select_merge_pair,
 )
 from kernelforge.tracker import CampaignSegment, ExperimentTracker, Experiment, ExperimentSubject
 
@@ -471,20 +466,13 @@ class HeldRound(NamedTuple):
     error: str
 
 
-class _StagedMerge(NamedTuple):
-    """A stacked pair staged for measurement, and the diff that stacks it."""
-
-    pair: tuple | None
-    diff: str
-
-
 @dataclass(frozen=True)
 class _IterationFrame:
     """One iteration's number, its session hand-back, its staged merge and the best it is measured against."""
 
     iteration: int
     session_sink: dict
-    merge: _StagedMerge
+    merge: StagedMerge
     best_before: float | None = None
     best_mean_case_speedup_before: float | None = None
 
@@ -495,6 +483,17 @@ class _Ruling(NamedTuple):
     pending_keep: dict | None
     keep_checkpoint_finalized: bool
     commit_hash: str
+
+
+@dataclass(frozen=True)
+class IterationTurn:
+    """What the loop has settled about one iteration before its search runs."""
+
+    iteration: int
+    actors: LoopAgents
+    digest: str
+    hazard: Any
+    round_lanes: int
 
 
 @dataclass(frozen=True)
@@ -594,7 +593,7 @@ class WindowGain:
             )
 
 
-class IterationLoop(CandidateMeasurementMixin, RelayRuntimeMixin, AnalysisRuntimeMixin):
+class IterationLoop(CandidateMeasurementMixin, MergeStackingMixin, RelayRuntimeMixin, AnalysisRuntimeMixin):
     """Autonomous kernel optimization loop."""
 
     def __init__(
@@ -1933,89 +1932,6 @@ class IterationLoop(CandidateMeasurementMixin, RelayRuntimeMixin, AnalysisRuntim
             return False
         finally:
             Path(handle.name).unlink(missing_ok=True)
-
-    def _select_merge_attempt(
-        self,
-    ) -> tuple[MergeCandidate, MergeCandidate] | None:
-        """Two rejected gains worth measuring stacked, once single patches stall."""
-        if not self.ic.merge_stacking:
-            return None
-        if self.run_state.stall.unresolved_stall_iters < MERGE_ATTEMPT_STALL_THRESHOLD:
-            return None
-        incumbent_case_times = self._scored_incumbent_case_times()
-        if not incumbent_case_times:
-            return None
-        index = self.archive.load_index()
-        metas = []
-        for row in index:
-            meta = self.archive.load_meta(int(row.get("iter") or 0))
-            if meta:
-                metas.append(meta)
-        return select_merge_pair(
-            eligible_candidates(metas, incumbent_case_times),
-            already_attempted=(
-                attempted_pairs([str(row.get("plan") or "") for row in index]) | frozenset(self._declined_merge_pairs)
-            ),
-        )
-
-    # The one obstacle a later iteration clears on its own, and so the one the caller must not hold against the pair:
-    # a tree carrying work is this iteration's accident, not a fact about two archived diffs.
-    TREE_ALREADY_DIRTY_OBSTACLE = "the working tree already carried uncommitted work"
-
-    def _merge_attempt_refusal(self) -> str:
-        """Why a selected pair may not be measured this iteration, or \"\"."""
-        if self._merge_precedence_streak >= MERGE_PRECEDENCE_STREAK_LIMIT:
-            return (
-                f"{self._merge_precedence_streak} stacked iterations have run "
-                "back to back without the queue being reached"
-            )
-        return ""
-
-    def _stage_merge_attempt(
-        self,
-        pair: tuple[MergeCandidate, MergeCandidate] | None,
-    ) -> tuple[str, str]:
-        """Put both candidates' diffs in the tree; the diff, or why there is none."""
-        if pair is None:
-            return "", ""
-        if self._working_tree_diff().strip():
-            return "", self.TREE_ALREADY_DIRTY_OBSTACLE
-        for candidate in pair:
-            patch = self.archive.read_candidate_file(candidate.iteration, "change.diff")
-            if not str(patch or "").strip():
-                # Reported apart from a conflict because the two ask for opposite responses.
-                self._git_discard_worktree()
-                return "", (f"iteration {candidate.iteration}'s archived diff is missing or unreadable")
-            if not self._git_apply_patch(patch):
-                self._git_discard_worktree()
-                return "", (f"iteration {candidate.iteration}'s diff would not apply over the other's")
-        staged = self._working_tree_diff()
-        if not staged.strip():
-            self._git_discard_worktree()
-            return "", "both diffs applied but changed nothing against HEAD"
-        return staged, ""
-
-    def _decline_merge_attempt(
-        self,
-        iteration: int,
-        pair: tuple[MergeCandidate, MergeCandidate],
-        obstacle: str,
-        *,
-        about_the_iteration: bool = False,
-    ) -> None:
-        """Report a pair that was selected and not measured, and drop it or not."""
-        print(f"  [merge] declined: {obstacle}")
-        if not about_the_iteration and obstacle != self.TREE_ALREADY_DIRTY_OBSTACLE:
-            self._declined_merge_pairs.add(frozenset({pair[0].iteration, pair[1].iteration}))
-        self.state_store.append_event(
-            make_event(
-                "merge_attempt_declined",
-                iteration,
-                first_iteration=pair[0].iteration,
-                second_iteration=pair[1].iteration,
-                obstacle=obstacle,
-            )
-        )
 
     @staticmethod
     def _record_direction_verdict(
@@ -4733,51 +4649,6 @@ class IterationLoop(CandidateMeasurementMixin, RelayRuntimeMixin, AnalysisRuntim
             return True, hazard
         return False, hazard
 
-    def _stage_merge(self, *, iteration, hazard, fan_out_plan) -> _StagedMerge:
-        """Stack two rejected gains, and say which pair and what it staged.
-
-        Stacking costs a measurement but no session, so it is tried before
-        spending another Implementer round on a search that has stopped
-        producing a new best -- and, once that search has stalled, before
-        draining a candidate the same search bought.
-        """
-        # Stacking two rejected gains costs a measurement but no session, so it is tried before spending another
-        # Implementer round on a search that has stopped producing a new best -- and, once that search has
-        # stalled, before draining a candidate the same search bought.
-        merge_pair = None if hazard or fan_out_plan is not None else self._select_merge_attempt()
-        merge_refusal = "" if merge_pair is None else self._merge_attempt_refusal()
-        lane_queue_depth = 0 if hazard else len(self._lane_queue)
-        if merge_refusal:
-            merge_diff, merge_obstacle = "", merge_refusal
-        else:
-            merge_diff, merge_obstacle = self._stage_merge_attempt(merge_pair)
-        self._merge_precedence_streak = self._merge_precedence_streak + 1 if merge_diff else 0
-        if merge_diff and lane_queue_depth:
-            # Distinct from ``merge_attempt_staged``, and not foldable into it: that counts every stack measured,
-            # this counts the ones that went ahead of a queue a round already paid for, which is the only thing
-            # precedence can cost.
-            print(f"  [merge] precedence over a lane queue {lane_queue_depth} deep")
-            self.state_store.append_event(
-                make_event(
-                    "merge_took_precedence",
-                    iteration,
-                    lane_queue_depth=lane_queue_depth,
-                    first_iteration=merge_pair[0].iteration,
-                    second_iteration=merge_pair[1].iteration,
-                    unresolved_stall_iters=(self.run_state.stall.unresolved_stall_iters),
-                )
-            )
-        if merge_pair is not None and merge_obstacle:
-            self._decline_merge_attempt(
-                iteration,
-                merge_pair,
-                merge_obstacle,
-                # A refusal did not reach the pair's diffs, so it is not evidence about them and must not be
-                # remembered against them.
-                about_the_iteration=bool(merge_refusal),
-            )
-        return _StagedMerge(merge_pair, merge_diff)
-
     def _print_final_report(self) -> None:
         """Print what the campaign did, and what it cost.
 
@@ -5862,63 +5733,63 @@ class IterationLoop(CandidateMeasurementMixin, RelayRuntimeMixin, AnalysisRuntim
             if stop:
                 break
             actors = _with_search_actor(actors, self._iteration_bundle(iteration))
-            agent_fn, agent_factory, supervisor_fn = actors.agent_fn, actors.agent_factory, actors.supervisor_fn
-            orchestration_service = actors.orchestration_service
             round_lanes = self._price_round(iteration)
             if round_lanes is None:
                 break
             await self._open_iteration(
                 iteration=iteration,
                 digest=digest,
-                supervisor_fn=supervisor_fn,
+                supervisor_fn=actors.supervisor_fn,
                 analysis_service=analysis_service,
             )
-            session_sink: dict = {}
-            # What a fan-out round leaves this iteration holding, so the single-session path below spends it instead
-            # of buying it again.
-            fan_out_plan: HeldRound | None = None
-            if hazard is None and (
-                not self._lane_queue
-                and round_lanes > 1
-                and agent_factory is not None
-                and agent_fn is not None
-                and orchestration_service is not None
-            ):
-                fan_out_plan = await self._fan_out_round(
-                    iteration=iteration,
-                    orchestration_service=orchestration_service,
-                    agent_factory=agent_factory,
-                    lanes=round_lanes,
-                )
-                # The round's own lanes share one device with the canonical measurement, so a lane whose teardown
-                # could not clear it has just refused this iteration -- whatever its siblings produced.
-                hazard = self.device_hazard.live
-                if self._refused_round:
-                    # Planning cost more than the round had left.
-                    break
-            merge = self._stage_merge(
-                iteration=iteration,
-                hazard=hazard,
-                fan_out_plan=fan_out_plan,
-            )
-            # A fan-out round already paid for these candidates, so they are measured before anything new is planned.
-            queued_lane = None if hazard or merge.diff else self._take_lane_candidate()
-            frame = _IterationFrame(iteration, session_sink, merge)
-            attempt = await self._source_attempt(
-                frame,
-                _IterationSupply(hazard, queued_lane, fan_out_plan),
-                agents=agents,
-                digest=digest,
-                callbacks=callbacks,
-            )
-            if attempt is None:
-                if self._refused_round:
-                    break
-                continue
-            await self._settle_locked_attempt(attempt, frame, callbacks=callbacks)
+            turn = IterationTurn(iteration, actors, digest, hazard, round_lanes)
+            if not await self._search_iteration(turn, agents=agents, callbacks=callbacks):
+                break
         self._persist_terminal_state()
         self._print_final_report()
         return self.results
+
+    async def _search_iteration(self, turn: IterationTurn, *, agents: LoopAgents, callbacks: LoopCallbacks) -> bool:
+        """Plan, implement, measure and settle one iteration; ``False`` ends the campaign."""
+        iteration, actors, hazard = turn.iteration, turn.actors, turn.hazard
+        session_sink: dict = {}
+        # What a fan-out round leaves this iteration holding, so the single-session path below spends it instead of
+        # buying it again.
+        fan_out_plan: HeldRound | None = None
+        if hazard is None and (
+            not self._lane_queue
+            and turn.round_lanes > 1
+            and actors.agent_factory is not None
+            and actors.agent_fn is not None
+            and actors.orchestration_service is not None
+        ):
+            fan_out_plan = await self._fan_out_round(
+                iteration=iteration,
+                orchestration_service=actors.orchestration_service,
+                agent_factory=actors.agent_factory,
+                lanes=turn.round_lanes,
+            )
+            # The round's own lanes share one device with the canonical measurement, so a lane whose teardown could
+            # not clear it has just refused this iteration -- whatever its siblings produced.
+            hazard = self.device_hazard.live
+            if self._refused_round:
+                # Planning cost more than the round had left.
+                return False
+        merge = self._stage_merge(iteration=iteration, hazard=hazard, fan_out_plan=fan_out_plan)
+        # A fan-out round already paid for these candidates, so they are measured before anything new is planned.
+        queued_lane = None if hazard or merge.diff else self._take_lane_candidate()
+        frame = _IterationFrame(iteration, session_sink, merge)
+        attempt = await self._source_attempt(
+            frame,
+            _IterationSupply(hazard, queued_lane, fan_out_plan),
+            agents=agents,
+            digest=turn.digest,
+            callbacks=callbacks,
+        )
+        if attempt is None:
+            return not self._refused_round
+        await self._settle_locked_attempt(attempt, frame, callbacks=callbacks)
+        return True
 
 
 # Decision labels that can possibly mean nothing came out worse this iteration: a kept candidate, and the ones that
