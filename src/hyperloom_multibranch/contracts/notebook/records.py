@@ -670,7 +670,8 @@ class StartupBrief:
 
     ``op_shares`` are the latest op shares a tool reported on the start commit, which bound what speeding each op up
     can gain; ``None`` while the commit was not profiled. ``unfinished`` are this session's results worth finishing,
-    on any branch. ``focus`` is the bottleneck the scheduler opened the branch on, empty when it named none.
+    on any branch. ``focus`` is the bottleneck the scheduler opened the branch on, empty when it named none. ``menu``
+    is the direction families ranked for the branch, a line each; none for a branch of the menu's control.
     """
 
     start_commit: str
@@ -680,6 +681,7 @@ class StartupBrief:
     op_shares: OpShares | None = None
     unfinished: tuple[UnfinishedLead, ...] = ()
     focus: str = ""
+    menu: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

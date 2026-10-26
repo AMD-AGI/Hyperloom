@@ -13,7 +13,9 @@ Its brief has three parts:
   past sessions learnt about it, then the pitfalls and failures the warm-start records list;
 * leads: the Recipe KB champions the warm start read, and recalled priors with a positive gain, taking turns by the
   layer they change (configuration, source), so that one kind of change does not fill them all. The Experience KB's
-  schema has no kernel family, so no recalled lead is a kernel change.
+  schema has no kernel family, so no recalled lead is a kernel change;
+* the menu: the direction families ranked for the branch on its start commit (:mod:`rsi.menu`), none for a branch of
+  the menu's control. A claim's reply says the same of the claimed direction's family (:meth:`direction_note`).
 
 A champion the start commit is already, or builds on, is no lead: the lessons name it first, as :data:`ON_HEAD`, and
 ``notebook_replay`` refuses to replay it, since its change would undo what the head did since.
@@ -45,7 +47,7 @@ from typing import Protocol
 
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError, apply
 from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, StartupBriefProvider
-from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
+from hyperloom_multibranch.contracts.notebook.peers import Intent, IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import (
     LearningRecord,
     NotebookSnapshot,
@@ -76,6 +78,7 @@ from hyperloom_multibranch.notebook.learning_search import (
     session_matches,
 )
 from hyperloom_multibranch.notebook.rsi.analysis import FailureTier, failures_at, repeated_failures
+from hyperloom_multibranch.notebook.rsi.menu import DirectionMenus
 from hyperloom_multibranch.notebook.tools import render_brief
 
 log = logging.getLogger(__name__)
@@ -198,6 +201,7 @@ class CrossSessionBriefing(StartupBriefProvider):
     completed reads, so a brief built again reads the Experience KB no more. ``champions`` keeps the champions each
     commit read is, by commit, so each commit's recipe is read once a session. ``refused`` keeps, by test, the heads
     :meth:`peer_replay` found its change no longer applies to or already in, which the briefs from them leave out.
+    ``menus`` ranks the direction families for the branch (:mod:`rsi.menu`); without it the brief has no menu.
     """
 
     notebook: Notebook
@@ -215,6 +219,7 @@ class CrossSessionBriefing(StartupBriefProvider):
     champions: dict[str, frozenset[str]] | None = None
     stack_slot: StackSlot | None = None
     refused: dict[str, set[str]] | None = None
+    menus: DirectionMenus | None = None
 
     def __post_init__(self) -> None:
         if self.identities is None and self.experiences is not None:
@@ -413,13 +418,22 @@ class CrossSessionBriefing(StartupBriefProvider):
             self.learnings.record(
                 snapshot, Retrieval(self.branch, RetrievalSource.BRIEF, self.focus, shown), here, past
             )
+        menu = self.menus.menu(snapshot, self.branch, start_commit) if self.menus is not None and self.branch else None
         return replace(
             tried,
             lessons=tuple(item.text for item in kept if item.lesson),
             leads=tuple(item.text for item in kept if not item.lesson),
             unfinished=self._unrefused(tried.unfinished, snapshot, start_commit),
             focus=self.focus,
+            menu=menu.lines() if menu is not None else (),
         )
+
+    async def direction_note(self, intent: Intent, delta: RecipeDelta) -> str:
+        """What the archive and this session say of the family a claim of ``intent`` with ``delta`` falls in."""
+
+        if self.menus is None:
+            return ""
+        return self.menus.note(await self.notebook.snapshot(), intent, delta)
 
 
 @dataclass
@@ -440,6 +454,7 @@ class SessionBriefs:
     max_chars: int = DEFAULT_MAX_CHARS
     repo: RecipeReads | None = None
     stack_slot: StackSlot | None = None
+    menus: DirectionMenus | None = None
     _identities: IdentityIndex | None = field(init=False, default=None)
     _recalls: RecallCache = field(init=False, default_factory=RecallCache)
     _champions: dict[str, frozenset[str]] = field(init=False, default_factory=dict)
@@ -470,6 +485,7 @@ class SessionBriefs:
             champions=self._champions,
             stack_slot=self.stack_slot,
             refused=self._refused,
+            menus=self.menus,
         )
 
     async def text(self, branch: str, commit: str, focus: str | None = None) -> str:

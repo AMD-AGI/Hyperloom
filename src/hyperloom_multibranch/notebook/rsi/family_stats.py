@@ -4,8 +4,9 @@
 """What the direction families (:mod:`notebook.families`) of past sessions came to, and whether that tells tests apart.
 
 :func:`family_stats` adds up the families' outcomes over archived sessions: a session of the same model type counts in
-full, another half, one on another framework version half again, and each family's evidence is capped at
-:data:`MAX_TRIALS` tests, so no rate is ever read as certain. A family's commit odds (:meth:`FamilyStat.odds`) start at
+full, another half, one on another framework version half again, and half again for every :data:`AGE_SESSIONS`
+archived sessions newer than it; each family's evidence is capped at :data:`MAX_TRIALS` tests, so no rate is ever read
+as certain. A family's commit odds (:meth:`FamilyStat.odds`) start at
 its layer's base rate (:data:`BASE_RATES`), worth :data:`PRIOR_TRIALS` tests: a family tried once, with one commit,
 reads 0.39 at the source layer, not 1.0.
 
@@ -16,6 +17,7 @@ CLOSE classified from its change; an older one is classified from its words.
 
 from __future__ import annotations
 
+import bisect
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -24,6 +26,7 @@ from hyperloom_multibranch.notebook.families import Family, Mechanism, family_of
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeDirection
 from hyperloom_multibranch.notebook.rsi.history import MODEL_TYPE_LABEL
 from hyperloom_multibranch.notebook.rsi.report import table
+from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions
 
 #: The families' commit odds before any evidence: the base rate of their layer.
 BASE_RATES: Mapping[IntentLayer | None, float] = {
@@ -38,6 +41,9 @@ MAX_TRIALS = 10.0
 #: How much a session of another model type weighs; one on another framework version weighs as much less again.
 OTHER_MODEL_WEIGHT = 0.5
 OTHER_VERSION_WEIGHT = OTHER_MODEL_WEIGHT
+#: What a session's evidence keeps for every :data:`AGE_SESSIONS` archived sessions newer than it.
+AGE_WEIGHT = OTHER_MODEL_WEIGHT
+AGE_SESSIONS = 5
 #: What a tie between a committing test and another counts for in the area under the curve.
 _TIE = 0.5
 FRAMEWORK_VERSION_LABEL = "framework_version"
@@ -77,25 +83,28 @@ class FamilyStat:
         return ordered[len(ordered) // 2] if ordered else None
 
 
-def _weight(tree: SearchTree, like: SearchTree | None) -> float:
+def _weight(tree: SearchTree, like: TaskConditions | None, newer: int) -> float:
+    weight = AGE_WEIGHT ** (newer // AGE_SESSIONS)
     if like is None:
-        return 1.0
-    theirs, ours = tree.task.labels, like.task.labels
-    weight = 1.0 if theirs.get(MODEL_TYPE_LABEL) == ours.get(MODEL_TYPE_LABEL) else OTHER_MODEL_WEIGHT
+        return weight
+    theirs, ours = tree.task.labels, like.labels
+    if theirs.get(MODEL_TYPE_LABEL) != ours.get(MODEL_TYPE_LABEL):
+        weight *= OTHER_MODEL_WEIGHT
     if theirs.get(FRAMEWORK_VERSION_LABEL) != ours.get(FRAMEWORK_VERSION_LABEL):
         weight *= OTHER_VERSION_WEIGHT
     return weight
 
 
-def family_stats(trees: Sequence[SearchTree], like: SearchTree | None = None) -> dict[Family, FamilyStat]:
-    """Each family's evidence over ``trees``, weighed against ``like``, the session to rank for, and capped at
-    :data:`MAX_TRIALS` tests a family."""
+def family_stats(trees: Sequence[SearchTree], like: TaskConditions | None = None) -> dict[Family, FamilyStat]:
+    """Each family's evidence over ``trees``, weighed against ``like``, the conditions of the session to rank for,
+    and by how many of ``trees`` started after each, and capped at :data:`MAX_TRIALS` tests a family."""
 
     tests: dict[Family, float] = {}
     commits: dict[Family, float] = {}
     gains: dict[Family, list[float]] = {}
+    starts = sorted(tree.started_at or 0.0 for tree in trees)
     for tree in trees:
-        weight = _weight(tree, like)
+        weight = _weight(tree, like, len(starts) - bisect.bisect_right(starts, tree.started_at or 0.0))
         for branch in tree.branches:
             if not branch.steered:
                 continue
@@ -156,7 +165,7 @@ def discrimination(trees: Sequence[SearchTree]) -> Discrimination:
     by_family: list[tuple[float, bool]] = []
     by_layer: list[tuple[float, bool]] = []
     for tree in trees:
-        stats = family_stats([other for other in trees if other.session_id != tree.session_id], like=tree)
+        stats = family_stats([other for other in trees if other.session_id != tree.session_id], like=tree.task)
         for branch in tree.branches:
             if not branch.steered:
                 continue
@@ -201,6 +210,8 @@ def family_report(trees: Sequence[SearchTree], limit: int = REPORT_ROWS) -> Fami
 
 
 __all__ = [
+    "AGE_SESSIONS",
+    "AGE_WEIGHT",
     "BASE_RATES",
     "FRAMEWORK_VERSION_LABEL",
     "MAX_TRIALS",

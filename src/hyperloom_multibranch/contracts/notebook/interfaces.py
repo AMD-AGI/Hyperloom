@@ -14,7 +14,9 @@ A write checks the role of the caller's :class:`~hyperloom_multibranch.contracts
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Protocol
+from typing import Protocol, runtime_checkable
+
+from hyperloom.contracts.recipe import RecipeDelta
 
 from hyperloom_multibranch.contracts.notebook.peers import (
     BranchLogEntry,
@@ -290,6 +292,14 @@ class StartupBriefProvider(Protocol):
     async def startup_brief(self, start_commit: str) -> StartupBrief: ...
 
 
+@runtime_checkable
+class DirectionNotes(Protocol):
+    """A brief provider that says what is known of the family a claimed direction falls in, for the claim's reply; an
+    empty note says nothing."""
+
+    async def direction_note(self, intent: Intent, delta: RecipeDelta) -> str: ...
+
+
 class SessionRecords(Protocol):
     """What the session is and what it ran with; the scheduler writes both, the profile once at PRELUDE."""
 
@@ -357,6 +367,7 @@ __all__ = [
     "ClaimService",
     "CommitQuery",
     "ConflictingWrite",
+    "DirectionNotes",
     "GateRecords",
     "Inbox",
     "JudgementSink",

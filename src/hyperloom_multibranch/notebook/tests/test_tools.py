@@ -240,6 +240,26 @@ async def test_a_claim_is_the_handles_and_a_taken_one_is_refused_with_who_holds_
     assert again.startswith(f"{ERROR} ClaimLost:")
 
 
+async def test_a_granted_claim_says_what_the_briefing_knows_of_its_directions_family(tools_of: Tools) -> None:
+    asked: list[tuple[Intent, RecipeDelta]] = []
+
+    class Noting:
+        async def startup_brief(self, start_commit: str) -> StartupBrief:
+            raise AssertionError(start_commit)
+
+        async def direction_note(self, intent: Intent, delta: RecipeDelta) -> str:
+            asked.append((intent, delta))
+            return "your direction is attention · other · source: commit odds 0.24 over 0.0 tests, no commit yet"
+
+    claimed = await _call(tools_of("s1", Noting()), "claim", **FLASH_ON_C1, change=TUNED)
+    plain = await _call(tools_of("s2"), "claim", **GEMM_ON_C0)
+
+    ((intent, delta),) = asked
+    assert claimed.splitlines()[2].startswith("your direction is attention · other · source")
+    assert (intent.target, delta.fingerprint()) == ("attention", RecipeDelta.from_document(TUNED).fingerprint())
+    assert "your direction" not in plain
+
+
 async def test_a_claim_another_branch_is_testing_on_its_head_is_refused_saying_who_and_what_comes_next(
     tools_of: Tools,
 ) -> None:

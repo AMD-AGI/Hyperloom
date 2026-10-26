@@ -130,6 +130,12 @@ def _matched(patterns: Iterable[tuple[_Named, str]], text: str) -> _Named | None
     return next((name for name, pattern in patterns if re.search(pattern, lowered)), None)
 
 
+def op_family(op: str) -> str | None:
+    """The op family of :data:`OP_FAMILIES` a profile's op name belongs to; ``None`` for one of none."""
+
+    return _matched(OP_FAMILIES, op)
+
+
 def _target(text: str) -> str | None:
     """The op family ``text`` names, else the component, else ``None``."""
 
@@ -194,4 +200,5 @@ __all__ = [
     "Family",
     "Mechanism",
     "family_of",
+    "op_family",
 ]

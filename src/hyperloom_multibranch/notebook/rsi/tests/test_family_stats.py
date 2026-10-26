@@ -58,10 +58,18 @@ def test_evidence_weighs_by_model_type_and_version_and_is_capped() -> None:
     )
     crowded = _session("d", *(dataclasses.replace(SCHED, tests=4) for _ in range(5)))
 
-    stats = family_stats([same, other, older, crowded], like=like)
+    stats = family_stats([same, other, older, crowded], like=like.task)
 
     assert stats[FP8_KV] == FamilyStat(2.0 + 1.0 + 1.0, 1.0 + 0.5 + 0.5, (3.0, 3.0, 3.0))
     assert (stats[CHUNKS].tests, stats[CHUNKS].commits) == (MAX_TRIALS, 0.0)
+
+
+def test_a_sessions_evidence_halves_for_every_five_archived_sessions_newer_than_it() -> None:
+    once = dataclasses.replace(KV, tests=1, commits=0)
+    sessions = [dataclasses.replace(_session(f"s{n}", once), started_at=float(n)) for n in range(6)]
+
+    # s0 has five sessions newer than it: its test counts half.
+    assert family_stats(sessions)[FP8_KV].tests == pytest.approx(5 * 1.0 + 0.5)
 
 
 def test_the_offline_check_reads_how_well_the_families_tell_committing_tests_apart() -> None:

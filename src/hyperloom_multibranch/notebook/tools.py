@@ -9,8 +9,9 @@ with ``error:``, which the tool layer reports as an error result. The tools are 
 specialist the server serves, so the caller is the handle's writer and never an argument.
 
 The tools are a specialist's reads and its own writes: lookup, claim, release, search, record, branch_log,
-append_branch_log, learn, learnings and brief. A granted claim also lists what the finder knows about its direction:
-this session's learnings, and past sessions' lessons when it has them. A learning may correct or retire a past
+append_branch_log, learn, learnings and brief. A granted claim also says what the briefing knows of its direction's
+family, when it is a :class:`DirectionNotes`, and lists what the finder knows about the direction: this session's
+learnings, and past sessions' lessons when it has them. A learning may correct or retire a past
 session's lesson the finder knows. Renewing a claim is the runtime's heartbeat, and what only a program writes
 (requests, results, judgements, lineage, baselines, quarantine) has no tool.
 
@@ -32,6 +33,7 @@ from hyperloom_multibranch.contracts.notebook.interfaces import (
     AlreadyTested,
     CeilingTooLow,
     ClaimHeld,
+    DirectionNotes,
     Notebook,
     NotebookError,
     StartupBriefProvider,
@@ -89,6 +91,9 @@ UNFINISHED_TITLE = (
     f"Unfinished in this session (finish one: {REPLAY_TOOL} with its request_id makes its change for your head):"
 )
 FOCUS_LINE = "Focus, the bottleneck the scheduler opened this branch on: "
+MENU_TITLE = (
+    "Directions to consider (a draw of each family's commit odds x the gain within reach / the cost of a test):"
+)
 _UNFINISHED = {
     UnfinishedReason.NOT_STACKABLE: "committed, merge not stackable",
     UnfinishedReason.NEAR_BAR: "kept accuracy, just short of its bar",
@@ -262,6 +267,7 @@ def render_brief(brief: StartupBrief) -> str:
         ("Ceilings (largest ops; claim with target_share_pct):", _ceilings(brief.op_shares)),
         ("Tried:", [_tried(item) for item in brief.tried]),
         (UNFINISHED_TITLE, [_unfinished(item) for item in brief.unfinished]),
+        (MENU_TITLE, [f"- {text}" for text in brief.menu]),
         ("Lessons:", [f"- {text}" for text in brief.lessons]),
         ("Leads:", [f"- {text}" for text in brief.leads]),
     ):
@@ -381,8 +387,10 @@ class _SpecialistTools:
         held = await self.notebook.acquire(intent, _action(arguments), ttl_seconds=self.ttl_seconds, reason=reason)
         bounded = render_ceiling(intent, await self.notebook.op_shares(key.parent_commit))
         snapshot = await self.notebook.snapshot()
+        change = RecipeDelta.from_document(arguments.get("change") or {})
+        note = await self.briefing.direction_note(intent, change) if isinstance(self.briefing, DirectionNotes) else ""
         learnt = await self.finder.about(snapshot, f"{target} {mechanism}", branch=self.branch)
-        return "\n".join([render_claim(held), *([bounded] if bounded else []), *learnt])
+        return "\n".join([render_claim(held), *([bounded] if bounded else []), *([note] if note else []), *learnt])
 
     async def release(self, arguments: Arguments) -> str:
         released = await self.notebook.release(_key(arguments))
@@ -672,6 +680,7 @@ __all__ = [
     "LINE_CHARS",
     "MAX_LINES",
     "MAX_REPLY_CHARS",
+    "MENU_TITLE",
     "PATCH_PAGE_CHARS",
     "TOOL_PREFIX",
     "NotebookTool",

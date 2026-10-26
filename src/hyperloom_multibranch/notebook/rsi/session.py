@@ -70,6 +70,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, Front
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_stall_odds, stall_odds
 from hyperloom_multibranch.notebook.rsi.lesson_close import publish_lessons, session_standings
 from hyperloom_multibranch.notebook.rsi.lessons import LessonPool
+from hyperloom_multibranch.notebook.rsi.menu import MENU_LOG, DirectionMenus, MenuLog
 from hyperloom_multibranch.notebook.rsi.scorers import (
     ChampionRecord,
     ScorerPool,
@@ -465,6 +466,14 @@ def archived_history(archive: TreeArchive | None = None) -> tuple[SearchTree, ..
         return ()
 
 
+def session_menus(metric: str, reports: Path | None, archive: TreeArchive | None = None) -> DirectionMenus:
+    """The session's direction menus, for ``SessionBriefs(menus=...)``: over ``archive``, by default the
+    environment's, read once, each menu logged to ``<reports>/menus.jsonl`` for CLOSE to read."""
+
+    log_to = MenuLog(reports / MENU_LOG) if reports is not None else None
+    return DirectionMenus(archived_history(archive), metric, log_to)
+
+
 def session_frontier_policy(
     snapshot: NotebookSnapshot, history: Sequence[SearchTree], defaults: FrontierPolicy
 ) -> PolicyChoice:
@@ -571,5 +580,6 @@ __all__ = [
     "judge_history",
     "named_frontier_choice",
     "session_frontier_policy",
+    "session_menus",
     "session_frontier_scorer",
 ]
