@@ -376,7 +376,9 @@ class CloseTargets:
     """Where CLOSE's knowledge goes: ``experience_kb`` takes the Experiences, ``learning_kb`` the learnings and
     ``archive`` the search tree, each the environment's when ``None``; ``receipts`` is the folder for the collection
     receipts, none without it, where the session's retrieval log lies too. ``multibranch_kb`` takes the Experiences
-    under the notebook's own declaration, and ``lessons`` the lessons, by default the pool beside the archive."""
+    under the notebook's own declaration, and ``lessons`` the lessons, by default the pool beside the archive.
+    ``judge_transcript`` is the judge's transcript of the session, whose exchanges go beside the archive
+    (:mod:`rsi.decisions`), none without it."""
 
     experience_kb: CollectionTarget | None = None
     learning_kb: CollectionTarget | None = None
@@ -384,6 +386,7 @@ class CloseTargets:
     receipts: Path | None = None
     multibranch_kb: CollectionTarget | None = None
     lessons: LessonPool | None = None
+    judge_transcript: Path | None = None
 
     def receipt(self, name: str) -> Path | None:
         return self.receipts / name if self.receipts is not None else None
@@ -412,7 +415,6 @@ def close_knowledge(
     targets: CloseTargets = CloseTargets(),
     bottlenecks: Mapping[str, float] | None = None,
     cross_image: Collection[str] = (),
-    judge_transcript: Path | None = None,
 ) -> KnowledgeClose:
     """CLOSE, after the Recipe KB write-back: what the session leaves the sessions after it.
 
@@ -420,8 +422,7 @@ def close_knowledge(
     later sessions compare the archived tree at shares of; without it the archive uses the time the notebook spans.
     ``targets`` says where each step writes, the environment's KB and archive by default. ``cross_image`` names, by
     canonical id, the Recipe KB champions PRELUDE prepared from another image than the session's, whose replays the
-    archived tree marks. ``judge_transcript`` is the judge's transcript of the session, whose exchanges go beside the
-    archive (:mod:`rsi.decisions`).
+    archived tree marks.
     """
 
     return KnowledgeClose(
@@ -464,7 +465,7 @@ def close_knowledge(
         playbook_trial=_trialled(snapshot, metric, targets.archive, bottlenecks),
         scheduling_replay=_replayed(snapshot, targets.archive, targets.receipt(SCHEDULING_REPLAY_REPORT)),
         specialist_outcomes=_outcomes(snapshot, targets.archive, targets.receipts),
-        judge_decisions=_decided(snapshot, targets.archive, judge_transcript),
+        judge_decisions=_decided(snapshot, targets.archive, targets.judge_transcript),
     )
 
 

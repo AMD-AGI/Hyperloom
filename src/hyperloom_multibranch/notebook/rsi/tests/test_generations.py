@@ -9,7 +9,7 @@ import dataclasses
 import json
 from pathlib import Path
 
-from hyperloom_multibranch.notebook.rsi.generations import generation_prompt, generations, split
+from hyperloom_multibranch.notebook.rsi.generations import Evolving, generation_prompt, generations, split
 from hyperloom_multibranch.notebook.rsi.ladder import JUDGE_SYSTEM_PROMPT
 from hyperloom_multibranch.notebook.rsi.playbook import H0, PlaybookPool
 from hyperloom_multibranch.notebook.rsi.tests.trees import HOUR, TASK, branch, tree
@@ -73,17 +73,41 @@ async def test_each_generation_proposes_one_change_that_the_replay_crowns_or_ret
         {"none": "nothing else to try"},
     )
 
-    report = await generations(SESSIONS, complete, tmp_path, model="m", count=3, runs=2)
+    report = await generations(SESSIONS, complete, tmp_path, Evolving(model="m", count=3, runs=2))
 
     first, second, third = report.generations
     assert (first.proposed, first.changed) == ("early-stop", "stall_tests")
     assert "R1 best gain against h0" in first.verdict
     assert (second.proposed, second.crowned) == ("alike", False)
-    assert "R2 judged replay of 3 sessions, 5 runs each: best gain +0.00 points against" in second.verdict
+    assert (
+        "R2 no archived decision point with a known outcome; judged replay of 3 sessions, 5 runs each: best gain "
+        "+0.00 points against"
+    ) in second.verdict
     assert (third.proposed, third.verdict) == ("", "the LLM proposed no change: nothing else to try")
     assert report.champion.label == ("early-stop" if first.crowned else H0.label)
     assert len(report.held_out) == 4 and "retired: R0" in asked[2]
     assert report.render().startswith("Offline generations: 4 evolution sessions, held out ")
+
+
+async def test_a_rule_change_is_asked_at_the_archived_decision_points_before_its_judged_replay(tmp_path: Path) -> None:
+    complete, _ = _answers(
+        {
+            "label": "alike",
+            "change": {"add_rule": {"governs": "stop", "text": "Stop the later of two alike branches."}},
+            "hypothesis": "h",
+            "measure": "early_stops",
+        }
+    )
+    stop = json.dumps({"stop": [{"branch": "b1", "reason": "lowest"}]})
+    calls = [{"at": minutes * MINUTE, "prompt": f"view at {minutes} min", "reply": stop} for minutes in (30, 100)]
+    decisions = {tree.session_id: calls for tree in SESSIONS}
+
+    report = await generations(SESSIONS, complete, tmp_path, Evolving(model="m", count=1, runs=2), decisions=decisions)
+
+    # Each evolution session's stop one test past b1's commit should go, the one eight tests stalled stay; a judge that
+    # stops nothing gets the first right under either playbook, so the rule ties and never reaches the judged replay.
+    (only,) = report.generations
+    assert not only.crowned and only.verdict.endswith("R2 right on 4 of 8 points, h0 on 4")
 
 
 def test_a_generation_reads_the_champion_its_replay_the_stop_audits_and_the_ledger(tmp_path: Path) -> None:

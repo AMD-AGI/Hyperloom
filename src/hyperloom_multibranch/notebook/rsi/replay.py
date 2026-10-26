@@ -102,6 +102,19 @@ _INTERVAL_PERCENT = 95.0
 
 
 @dataclass(frozen=True)
+class Draws:
+    """How a replay draws: ``runs`` runs a session, each draw keyed by ``seed``, ``h(k)`` and ``g(i)`` ``beyond`` the
+    data, a comparison's intervals bootstrapped ``draws`` times; with ``decide``, the judge each playbook's replay asks
+    every round which branches to stop."""
+
+    runs: int = REPLAY_RUNS
+    beyond: str = OPTIMISTIC
+    seed: str = ""
+    draws: int = BOOTSTRAP_DRAWS
+    decide: Callable[[str], str] | None = None
+
+
+@dataclass(frozen=True)
 class Pace:
     """What a session is replayed with, read off the other sessions: ``h(k)`` and ``g(i)`` by position, the first at
     index 0; the gains a commit added, sorted; the stop bar their stall odds set; the median seconds a new branch
@@ -696,7 +709,10 @@ def check(
         cut = start + (end - start) * (0.2 + 0.6 * _seeded(seed, tree.session_id, "cut").random())
         cuts.append(cut_check(tree, pace_for(tree, trees), cut, runs=runs, seed=seed))
     held, dropped = (
-        {row.label: row for row in compare(trees, variants(), runs=runs, beyond=beyond, seed=seed, draws=draws).rows}
+        {
+            row.label: row
+            for row in compare(trees, variants(), drawn=Draws(runs=runs, beyond=beyond, seed=seed, draws=draws)).rows
+        }
         for beyond in (OPTIMISTIC, PESSIMISTIC)
     )
     signs = {
@@ -714,24 +730,18 @@ def check(
 
 
 def simulate(
-    tree: SearchTree,
-    playbook: Playbook | None,
-    pace: Pace,
-    run: int = 0,
-    *,
-    seed: str = "",
-    decide: Callable[[str], str] | None = None,
+    tree: SearchTree, playbook: Playbook | None, pace: Pace, *, run: int = 0, drawn: Draws = Draws()
 ) -> RunOutcome:
-    """One replay of ``tree`` under ``playbook``, ``None`` to follow the archive, with the draws of ``run``; with
-    ``decide``, the judge it asks every round which branches to stop."""
+    """One replay of ``tree`` under ``playbook``, ``None`` to follow the archive, with the draws of ``run`` from
+    ``drawn``'s seed; with its ``decide``, the judge it asks every round which branches to stop."""
 
     replay: _Run
     if playbook is None:
-        replay = _ArchiveRun(tree, pace, playbook, run, seed)
-    elif decide is None:
-        replay = _PlaybookRun(tree, pace, playbook, run, seed)
+        replay = _ArchiveRun(tree, pace, playbook, run, drawn.seed)
+    elif drawn.decide is None:
+        replay = _PlaybookRun(tree, pace, playbook, run, drawn.seed)
     else:
-        replay = _JudgedRun(tree, pace, playbook, run, seed, decide=decide)
+        replay = _JudgedRun(tree, pace, playbook, run, drawn.seed, decide=drawn.decide)
     replay.play()
     return RunOutcome(replay.best, replay.gpu_seconds / _SECONDS_PER_HOUR, replay.stops, replay.opened)
 
@@ -808,57 +818,75 @@ def _interval(values: Sequence[float], draws: int, seed: str) -> tuple[float, fl
     return means[int(tail * (draws - 1))], means[int((1.0 - tail) * (draws - 1))]
 
 
+@dataclass(frozen=True)
+class _SessionMeans:
+    """One playbook's runs on one session: the means of their best gain, GPU hours and stops, and of their best gain
+    less the baseline's, run by run."""
+
+    best_gain_pct: float
+    gpu_hours: float
+    stops: float
+    gain_difference: float
+
+    @classmethod
+    def of(cls, results: Sequence[RunOutcome], base: Sequence[RunOutcome]) -> _SessionMeans:
+        return cls(
+            statistics.fmean(item.best_gain_pct for item in results),
+            statistics.fmean(item.gpu_hours for item in results),
+            statistics.fmean(item.stops for item in results),
+            statistics.fmean(item.best_gain_pct - other.best_gain_pct for item, other in zip(results, base)),
+        )
+
+
+def _session_means(
+    tree: SearchTree, trees: Sequence[SearchTree], playbooks: Mapping[str, Playbook], against: str, drawn: Draws
+) -> dict[str, _SessionMeans]:
+    """Each of ``playbooks`` and the archive on ``tree``, paced by ``trees``, read against ``against``."""
+
+    pace = pace_for(tree, trees, drawn.beyond)
+    played = {ARCHIVE: [simulate(tree, None, pace)] * drawn.runs}
+    played.update(
+        (label, [simulate(tree, playbook, pace, run=run, drawn=drawn) for run in range(drawn.runs)])
+        for label, playbook in playbooks.items()
+    )
+    return {label: _SessionMeans.of(results, played[against]) for label, results in played.items()}
+
+
+def _mean(values: Sequence[float]) -> float:
+    return statistics.fmean(values) if values else 0.0
+
+
+def _row(label: str, sessions: Sequence[_SessionMeans], drawn: Draws) -> PolicyRow:
+    differences = [item.gain_difference for item in sessions]
+    low, high = _interval(differences, drawn.draws, f"{drawn.seed}:{label}")
+    return PolicyRow(
+        label,
+        _mean([item.best_gain_pct for item in sessions]),
+        _mean(differences),
+        low,
+        high,
+        _mean([item.gpu_hours for item in sessions]),
+        _mean([item.stops for item in sessions]),
+    )
+
+
 def compare(
     trees: Sequence[SearchTree],
     playbooks: Mapping[str, Playbook],
     *,
-    runs: int = REPLAY_RUNS,
-    beyond: str = OPTIMISTIC,
-    seed: str = "",
-    draws: int = BOOTSTRAP_DRAWS,
     baseline: str = H0.label,
-    decide: Callable[[str], str] | None = None,
+    drawn: Draws = Draws(),
 ) -> SchedulingComparison:
-    """Each of ``playbooks`` replayed ``runs`` times on every tree, beside the archive, and read against
-    ``baseline``, one of them, or the archive when it is none of them; with ``decide``, the judge each playbook's
-    replay asks every round."""
+    """Each of ``playbooks`` replayed on every tree as ``drawn`` says, beside the archive, and read against
+    ``baseline``, one of them, or the archive when it is none of them."""
 
     against = baseline if baseline in playbooks else ARCHIVE
-    outcomes: dict[str, list[tuple[float, float, float, float]]] = {ARCHIVE: [], **{label: [] for label in playbooks}}
+    sessions: dict[str, list[_SessionMeans]] = {ARCHIVE: [], **{label: [] for label in playbooks}}
     for tree in trees:
-        pace = pace_for(tree, trees, beyond)
-        kept = simulate(tree, None, pace)
-        played = {ARCHIVE: [kept] * runs}
-        played.update(
-            (label, [simulate(tree, playbook, pace, run, seed=seed, decide=decide) for run in range(runs)])
-            for label, playbook in playbooks.items()
-        )
-        base = played[against]
-        for label, results in played.items():
-            outcomes[label].append(
-                (
-                    statistics.fmean(item.best_gain_pct for item in results),
-                    statistics.fmean(item.gpu_hours for item in results),
-                    statistics.fmean(item.stops for item in results),
-                    statistics.fmean(item.best_gain_pct - other.best_gain_pct for item, other in zip(results, base)),
-                )
-            )
-    rows = []
-    for label, per_session in outcomes.items():
-        differences = [item[3] for item in per_session]
-        low, high = _interval(differences, draws, f"{seed}:{label}")
-        rows.append(
-            PolicyRow(
-                label,
-                statistics.fmean(item[0] for item in per_session) if per_session else 0.0,
-                statistics.fmean(differences) if differences else 0.0,
-                low,
-                high,
-                statistics.fmean(item[1] for item in per_session) if per_session else 0.0,
-                statistics.fmean(item[2] for item in per_session) if per_session else 0.0,
-            )
-        )
-    return SchedulingComparison(tuple(rows), tuple(tree.session_id for tree in trees), runs, beyond, against)
+        for label, means in _session_means(tree, trees, playbooks, against, drawn).items():
+            sessions[label].append(means)
+    rows = tuple(_row(label, means, drawn) for label, means in sessions.items())
+    return SchedulingComparison(rows, tuple(tree.session_id for tree in trees), drawn.runs, drawn.beyond, against)
 
 
 __all__ = [
@@ -879,6 +907,7 @@ __all__ = [
     "ROUND_SECONDS",
     "STOP_REPLY",
     "CutCheck",
+    "Draws",
     "Pace",
     "PolicyRow",
     "ReplayCheck",

@@ -17,6 +17,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
 from hyperloom_multibranch.notebook.learning_search import (
     LEARNINGS_LOG,
     LEARNINGS_LOG_FORMAT,
+    Retrieval,
     RetrievalLog,
     RetrievalSource,
     SessionLearnings,
@@ -91,7 +92,7 @@ async def test_each_retrieval_is_one_line_of_the_log(snapshot: NotebookSnapshot,
     path = tmp_path / "reports" / LEARNINGS_LOG
     finder = SessionLearnings(RetrievalLog(path))
 
-    finder.here(_with(snapshot), "fp8 kv cache", limit=2, branch="s4", source=RetrievalSource.CLAIM)
+    finder.here(_with(snapshot), Retrieval("s4", RetrievalSource.CLAIM, "fp8 kv cache"), limit=2)
     await finder.lines(_with(snapshot), "speculative draft", limit=5, branch="s4")
     logged = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
@@ -108,7 +109,7 @@ def test_a_log_that_cannot_be_written_holds_up_no_retrieval(
     finder = SessionLearnings(RetrievalLog(tmp_path))
 
     with caplog.at_level(logging.WARNING, logger="hyperloom_multibranch.notebook.learning_search"):
-        found = finder.here(_with(snapshot), "fp8 kv cache", limit=1, branch="s4", source=RetrievalSource.TOOL)
+        found = finder.here(_with(snapshot), Retrieval("s4", RetrievalSource.TOOL, "fp8 kv cache"), limit=1)
 
     assert [record.entry_id for record in found] == ["s2:1"]
     assert "could not append the learnings retrieval" in caplog.text

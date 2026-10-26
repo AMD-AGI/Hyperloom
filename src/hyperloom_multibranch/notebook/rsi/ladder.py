@@ -7,8 +7,8 @@
 * R1, :func:`r1`: the scheduling replay of :mod:`rsi.replay`, no LLM and no GPU. A change to a number passes when its
   paired gain over the champion stays above 0 across the archived sessions both ways beyond the data; a change to a
   rule cannot be replayed and goes on to R2.
-* R2, :func:`r2`: the judge's own decision points, the prompts the archived sessions' judge was asked, asked again
-  with the candidate's playbook and the champion's. A point counts where its outcome is known: a stop at most
+* R2, :func:`r2`: the judge's own decision points (:func:`archived_points`), the prompts the archived sessions' judge
+  was asked, asked again with the candidate's playbook and the champion's. A point counts where its outcome is known: a stop at most
   :data:`EARLY_STOP_TESTS` judged tests past a commit, which the playbook should have prevented, and a stop at or past
   the stall bar, which it should keep. The candidate passes when it gets more of them right than the champion. A rule
   change also replays :data:`JUDGED_SESSIONS` sessions :data:`JUDGED_RUNS` times each under either playbook with the
@@ -31,6 +31,7 @@ At every CLOSE the replay reruns over the archive with the session's tree in it,
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import math
 import re
@@ -44,12 +45,13 @@ from hyperloom_multibranch.contracts.notebook.vocab import CommitOrigin, Lineage
 from hyperloom_multibranch.notebook.codec import decode, encode
 from hyperloom_multibranch.notebook.local.files import encode_json, publish_once
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, written_by
-from hyperloom_multibranch.notebook.rsi.history import judged_tests
+from hyperloom_multibranch.notebook.rsi.history import judged_tests, stall_odds
 from hyperloom_multibranch.notebook.rsi.playbook import Crowned, Playbook, PlaybookPool, Retired, changes, problems
 from hyperloom_multibranch.notebook.rsi.replay import (
     OPTIMISTIC,
     PESSIMISTIC,
     REPLAY_RUNS,
+    Draws,
     PolicyRow,
     SchedulingComparison,
     compare,
@@ -132,7 +134,7 @@ def r1(
     lows = []
     pair = {champion.label: champion, candidate.label: candidate}
     for beyond in (OPTIMISTIC, PESSIMISTIC):
-        found = compare(trees, pair, runs=runs, beyond=beyond, seed=seed, baseline=champion.label)
+        found = compare(trees, pair, baseline=champion.label, drawn=Draws(runs=runs, beyond=beyond, seed=seed))
         row = next(item for item in found.rows if item.label == candidate.label)
         lows.append((beyond, row.gain_difference, row.difference_low))
     passed = all(low > 0 for _, _, low in lows)
@@ -190,6 +192,32 @@ def decision_points(
     return tuple(points)
 
 
+def archived_points(
+    trees: Sequence[SearchTree], decisions: Mapping[str, Sequence[Mapping[str, object]]]
+) -> tuple[DecisionPoint, ...]:
+    """The decision points of ``trees`` whose judge's calls ``decisions`` keeps by session, each tree's at the stop bar
+    the stall odds of the other trees set, its own branches counted in."""
+
+    found: list[DecisionPoint] = []
+    for tree in trees:
+        calls = decisions.get(tree.session_id, ())
+        if calls:
+            others = [other for other in trees if other.session_id != tree.session_id]
+            found += decision_points(tree, calls, bar=stall_odds(others, tree.task, session=tree).stall_tests)
+    return tuple(found)
+
+
+@dataclass(frozen=True)
+class ReplayJudge:
+    """The judge R2 asks again: ``complete`` with the judge's ``system`` prompt."""
+
+    complete: Complete
+    system: str = JUDGE_SYSTEM_PROMPT
+
+    async def ask(self, prompt: str) -> str:
+        return await self.complete(self.system, prompt)
+
+
 def _asked(point: DecisionPoint, playbook: Playbook) -> str:
     return f"{point.prompt}\n\n{_CANDIDATE_SECTION}\n{playbook.render()}"
 
@@ -198,13 +226,12 @@ async def r2(
     candidate: Playbook,
     champion: Playbook,
     points: Sequence[DecisionPoint],
-    complete: Complete,
-    system: str,
+    judge: ReplayJudge,
     *,
     limit: int = R2_POINTS,
 ) -> Rung:
-    """R2: the decision ``points`` asked again under ``candidate`` and ``champion``, through ``complete`` with the
-    judge's ``system`` prompt; the first ``limit`` of them, the stops to undo and those to keep in turn."""
+    """R2: the decision ``points`` asked again of ``judge`` under ``candidate`` and ``champion``; the first ``limit``
+    of them, the stops to undo and those to keep in turn."""
 
     undo = [point for point in points if point.keep]
     keep = [point for point in points if not point.keep]
@@ -215,7 +242,7 @@ async def r2(
     right = {candidate.label: 0, champion.label: 0}
     for point in chosen:
         for playbook in (candidate, champion):
-            stops = point.branch in stops_in(await complete(system, _asked(point, playbook)))
+            stops = point.branch in stops_in(await judge.ask(_asked(point, playbook)))
             right[playbook.label] += int(stops != point.keep)
     passed = right[candidate.label] > right[champion.label]
     said = f"right on {right[candidate.label]} of {len(chosen)} points, {champion.label} on {right[champion.label]}"
@@ -226,29 +253,29 @@ async def r2_sessions(
     candidate: Playbook,
     champion: Playbook,
     trees: Sequence[SearchTree],
-    complete: Complete,
+    judge: ReplayJudge,
     *,
-    system: str = JUDGE_SYSTEM_PROMPT,
-    runs: int = JUDGED_RUNS,
-    seed: str = "",
+    drawn: Draws = Draws(runs=JUDGED_RUNS),
 ) -> Rung:
-    """R2 for a rule change: ``trees`` replayed ``runs`` times each under ``candidate`` and ``champion``, the judge
-    asked every round through ``complete`` with ``system``; it passes when the candidate's best gain beats the
-    champion's, paired run by run. A change of numbers only is R1's to replay."""
+    """R2 for a rule change: ``trees`` replayed under ``candidate`` and ``champion`` as ``drawn`` says, ``judge``
+    asked every round; it passes when the candidate's best gain beats the champion's, paired run by run. A change of
+    numbers only is R1's to replay."""
 
     if "rules" not in changes(champion, candidate):
         return Rung("R2", True, "a change of numbers: R1 replays it", skipped=True)
     loop = asyncio.get_running_loop()
 
     def decide(prompt: str) -> str:
-        return asyncio.run_coroutine_threadsafe(complete(system, prompt), loop).result()
+        return asyncio.run_coroutine_threadsafe(judge.ask(prompt), loop).result()
 
     pair = {champion.label: champion, candidate.label: candidate}
-    found = await asyncio.to_thread(compare, trees, pair, runs=runs, seed=seed, baseline=champion.label, decide=decide)
+    judged = dataclasses.replace(drawn, decide=decide)
+    found = await asyncio.to_thread(compare, trees, pair, baseline=champion.label, drawn=judged)
     row = next(item for item in found.rows if item.label == candidate.label)
     said = (
-        f"judged replay of {len(found.sessions)} sessions, {runs} runs each: best gain {row.gain_difference:+.2f} "
-        f"points against {champion.label} ({row.difference_low:+.2f} to {row.difference_high:+.2f})"
+        f"judged replay of {len(found.sessions)} sessions, {drawn.runs} runs each: best gain "
+        f"{row.gain_difference:+.2f} points against {champion.label} ({row.difference_low:+.2f} to "
+        f"{row.difference_high:+.2f})"
     )
     return Rung("R2", row.gain_difference > 0, said)
 
@@ -521,7 +548,7 @@ def replay_standing(
     champion = pool.champion()
     playbooks = {**variants(), **{playbook.label: playbook for playbook in pool.on_trial()}, champion.label: champion}
     found = tuple(
-        compare(trees, playbooks, runs=runs, beyond=beyond, baseline=champion.label)
+        compare(trees, playbooks, baseline=champion.label, drawn=Draws(runs=runs, beyond=beyond))
         for beyond in (OPTIMISTIC, PESSIMISTIC)
     )
     held, dropped = ({row.label: row for row in comparison.rows} for comparison in found)
@@ -608,10 +635,12 @@ __all__ = [
     "DecisionPoint",
     "Difference",
     "Pair",
+    "ReplayJudge",
     "ReplayStanding",
     "Rung",
     "StandingRow",
     "Trial",
+    "archived_points",
     "decision_points",
     "moved",
     "noise_band",

@@ -18,6 +18,7 @@ from hyperloom_multibranch.notebook.rsi.replay import (
     OPTIMISTIC,
     PESSIMISTIC,
     STOP_REPLY,
+    Draws,
     Pace,
     archive_cap,
     check,
@@ -102,10 +103,13 @@ def test_a_judged_replay_asks_the_judge_every_round_and_refuses_the_stop_of_a_br
         asked.append(prompt)
         return "no branch to stop"
 
-    kept = simulate(_tree(STALLED), STRICT, NEVER, decide=never)
-    stopped = simulate(_tree(STALLED), STRICT, NEVER, decide=_past_the_bar)
+    kept = simulate(_tree(STALLED), STRICT, NEVER, drawn=Draws(decide=never))
+    stopped = simulate(_tree(STALLED), STRICT, NEVER, drawn=Draws(decide=_past_the_bar))
     held = simulate(
-        _tree(STALLED), replaced(STRICT, probation_share=1.0, probation_tests=8), NEVER, decide=_past_the_bar
+        _tree(STALLED),
+        replaced(STRICT, probation_share=1.0, probation_tests=8),
+        NEVER,
+        drawn=Draws(decide=_past_the_bar),
     )
 
     assert kept.stops == 0 and kept.gpu_hours == pytest.approx(24.0)
@@ -159,9 +163,9 @@ def test_the_same_run_meets_the_same_draws_and_another_run_its_own() -> None:
     coin = dataclasses.replace(ALWAYS, hazard=(0.5,) * MAX_POSITION, new_branch=(0.5,) * MAX_POSITION)
     session = _tree(EARLY, budget=10 * HOUR)
 
-    runs = [simulate(session, STRICT, coin, run).best_gain_pct for run in range(8)]
+    runs = [simulate(session, STRICT, coin, run=run).best_gain_pct for run in range(8)]
 
-    assert runs == [simulate(session, STRICT, coin, run).best_gain_pct for run in range(8)]
+    assert runs == [simulate(session, STRICT, coin, run=run).best_gain_pct for run in range(8)]
     assert len(set(runs)) > 1
 
 
@@ -204,10 +208,10 @@ def test_the_checks_say_which_sessions_the_archive_replay_reproduces_and_where_e
 def test_a_comparison_reads_each_playbook_beside_the_archive_session_by_session() -> None:
     sessions = [_tree(STALLED, EARLY), dataclasses.replace(_tree(STALLED), session_id="t")]
 
-    found = compare(sessions, {"strict": STRICT}, runs=3, draws=50)
+    found = compare(sessions, {"strict": STRICT}, drawn=Draws(runs=3, draws=50))
     rows = {row.label: row for row in found.rows}
 
-    against = compare(sessions, {"h0": H0, "strict": STRICT}, runs=3, draws=50)
+    against = compare(sessions, {"h0": H0, "strict": STRICT}, drawn=Draws(runs=3, draws=50))
 
     assert list(rows) == [ARCHIVE, "strict"] and found.sessions == ("s", "t") and found.baseline == ARCHIVE
     assert (rows[ARCHIVE].gain_difference, rows[ARCHIVE].difference_low) == (0.0, 0.0)

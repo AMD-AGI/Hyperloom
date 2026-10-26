@@ -33,7 +33,7 @@ import logging
 import math
 import sys
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -50,12 +50,21 @@ from hyperloom_multibranch.notebook.rsi.calibration import (
     scorer_baseline,
 )
 from hyperloom_multibranch.notebook.rsi.expression import ExpressionError, ExpressionScorer
+from hyperloom_multibranch.notebook.rsi.decisions import decision_calls
 from hyperloom_multibranch.notebook.rsi.family_stats import family_report
-from hyperloom_multibranch.notebook.rsi.generations import GENERATION_RUNS, GENERATIONS, generations
+from hyperloom_multibranch.notebook.rsi.generations import GENERATION_RUNS, GENERATIONS, Evolving, generations
 from hyperloom_multibranch.notebook.rsi.ladder import Complete
 from hyperloom_multibranch.notebook.rsi.learning_eval import read_session
 from hyperloom_multibranch.notebook.rsi.outcomes import OutcomePool, pooled
-from hyperloom_multibranch.notebook.rsi.replay import OPTIMISTIC, PESSIMISTIC, REPLAY_RUNS, check, compare, variants
+from hyperloom_multibranch.notebook.rsi.replay import (
+    OPTIMISTIC,
+    PESSIMISTIC,
+    REPLAY_RUNS,
+    Draws,
+    check,
+    compare,
+    variants,
+)
 from hyperloom_multibranch.notebook.rsi.scorers import ScorerPool, custom_scorers
 from hyperloom_multibranch.notebook.rsi.stops import stall_study
 
@@ -142,7 +151,7 @@ def _replayable(args: argparse.Namespace) -> tuple[SearchTree, ...]:
 
 
 def _scheduling(args: argparse.Namespace) -> Any:
-    return compare(_replayable(args), variants(), runs=args.runs, beyond=args.beyond)
+    return compare(_replayable(args), variants(), drawn=Draws(runs=args.runs, beyond=args.beyond))
 
 
 def _replay_check(args: argparse.Namespace) -> Any:
@@ -163,10 +172,24 @@ def _completion(model: str) -> Complete:
     return complete
 
 
+def _decisions(archives: Sequence[Path], trees: Sequence[SearchTree]) -> dict[str, tuple[Mapping[str, object], ...]]:
+    """The judge's calls each of ``trees`` left, from the first of ``archives`` that kept them."""
+
+    found: dict[str, tuple[Mapping[str, object], ...]] = {}
+    for tree in trees:
+        for archive in archives:
+            calls = decision_calls(TreeArchive(archive), tree.session_id)
+            if calls:
+                found[tree.session_id] = calls
+                break
+    return found
+
+
 def _generations(args: argparse.Namespace) -> Any:
     trees = _replayable(args)
     pool = args.pool if args.pool is not None else Path(tempfile.mkdtemp(prefix="playbook-generations-"))
-    run = generations(trees, _completion(args.model), pool, model=args.model, count=args.count, runs=args.runs)
+    evolving = Evolving(model=args.model, count=args.count, runs=args.runs)
+    run = generations(trees, _completion(args.model), pool, evolving, decisions=_decisions(args.archive, trees))
     return asyncio.run(run)
 
 

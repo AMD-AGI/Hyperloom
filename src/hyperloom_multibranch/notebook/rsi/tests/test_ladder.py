@@ -21,9 +21,11 @@ from hyperloom_multibranch.notebook.rsi.ladder import (
     UNCLEAR,
     DecisionPoint,
     Difference,
+    ReplayJudge,
     ReplayStanding,
     StandingRow,
     Trial,
+    archived_points,
     decision_points,
     moved,
     noise_band,
@@ -45,7 +47,7 @@ from hyperloom_multibranch.notebook.rsi.ladder import (
     trials,
 )
 from hyperloom_multibranch.notebook.rsi.playbook import H0, Governs, Playbook, PlaybookPool, PlaybookRule, replaced
-from hyperloom_multibranch.notebook.rsi.replay import OLD_RULE
+from hyperloom_multibranch.notebook.rsi.replay import OLD_RULE, Draws
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions, model_name
 from hyperloom_multibranch.notebook.rsi.stops import stop_audit
 from hyperloom_multibranch.notebook.rsi.tests.trees import HOUR, branch, tree
@@ -106,8 +108,8 @@ async def test_r2_replays_a_rule_change_with_the_judge_asked_every_round_and_lea
         systems.add(system)
         return '{"stop": []}'
 
-    replayed = await r2_sessions(ruled, H0, (SESSION,), judge, runs=2)
-    skipped = await r2_sessions(PATIENT, H0, (SESSION,), judge, runs=2)
+    replayed = await r2_sessions(ruled, H0, (SESSION,), ReplayJudge(judge), drawn=Draws(runs=2))
+    skipped = await r2_sessions(PATIENT, H0, (SESSION,), ReplayJudge(judge), drawn=Draws(runs=2))
 
     assert replayed.rung == "R2" and not replayed.passed and systems == {JUDGE_SYSTEM_PROMPT}
     assert replayed.reason.startswith("judged replay of 1 sessions, 2 runs each: best gain +0.00 points against h0")
@@ -124,6 +126,17 @@ def test_the_decision_points_are_the_judges_stops_whose_outcome_is_known() -> No
     assert points[0].prompt == "view at 35 min" and points[0].at == 35 * MINUTE
 
 
+def test_the_archived_points_are_those_of_each_session_whose_decisions_the_archive_kept() -> None:
+    calls = [_call(35, "b1"), _call(75, "b2"), _call(60, "b3")]
+    other = dataclasses.replace(SESSION, session_id="o")
+
+    points = archived_points((SESSION, other), {"s": calls})
+
+    # Too few other sessions to read the stall odds: the bar is the default six, past which b2's seven count.
+    assert [(point.session_id, point.branch, point.keep) for point in points] == [("s", "b1", True), ("s", "b2", False)]
+    assert archived_points((SESSION, other), {}) == ()
+
+
 async def test_r2_counts_the_points_each_playbook_gets_right_asked_through_the_judge() -> None:
     undo = DecisionPoint("s", "b1", 60.0, 1, True, "view 1")
     keep = DecisionPoint("s", "b2", 120.0, 7, False, "view 2")
@@ -134,9 +147,11 @@ async def test_r2_counts_the_points_each_playbook_gets_right_asked_through_the_j
         stops = [] if "Scheduling playbook patient" in prompt else [{"branch": "b1"}, {"branch": "b2"}]
         return json.dumps({"stop": stops})
 
-    tie = await r2(PATIENT, H0, (undo, keep), judge, "the judge's system prompt")
-    ahead = await r2(PATIENT, H0, (undo, undo, keep), judge, "the judge's system prompt")
-    nothing = await r2(PATIENT, H0, (), judge, "system")
+    asking = ReplayJudge(judge, "the judge's system prompt")
+
+    tie = await r2(PATIENT, H0, (undo, keep), asking)
+    ahead = await r2(PATIENT, H0, (undo, undo, keep), asking)
+    nothing = await r2(PATIENT, H0, (), asking)
 
     assert (tie.passed, tie.reason) == (False, "right on 1 of 2 points, h0 on 1")
     assert ahead.passed and ahead.reason == "right on 2 of 3 points, h0 on 1"

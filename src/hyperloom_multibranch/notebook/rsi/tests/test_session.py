@@ -234,19 +234,18 @@ def test_close_reruns_the_scheduling_replay_and_says_what_moved_since_the_last_c
 def test_close_keeps_the_judges_exchanges_beside_the_archive_once(snapshot: NotebookSnapshot, tmp_path: Path) -> None:
     transcript = tmp_path / "MB-judge.jsonl"
     transcript.write_text(json.dumps({"at": START, "prompt": "view", "reply": "{}", "error": ""}) + "\n")
-    targets = CloseTargets(archive=TreeArchive(tmp_path / "archive"))
+    targets = CloseTargets(archive=TreeArchive(tmp_path / "archive"), judge_transcript=transcript)
+    missing = CloseTargets(judge_transcript=tmp_path / "none.jsonl")
 
-    done = close_knowledge(snapshot, METRIC, targets=targets, judge_transcript=transcript)
-    again = close_knowledge(snapshot, METRIC, targets=targets, judge_transcript=transcript)
+    done = close_knowledge(snapshot, METRIC, targets=targets)
+    again = close_knowledge(snapshot, METRIC, targets=targets)
 
     assert (done.judge_decisions, again.judge_decisions) == (
         CloseStep(WRITTEN, counts={"calls": 1}),
         CloseStep(SKIPPED, ALREADY_RECORDED),
     )
     assert [call["prompt"] for call in decision_calls(TreeArchive(tmp_path / "archive"), "sess-1")] == ["view"]
-    assert close_knowledge(snapshot, METRIC, judge_transcript=tmp_path / "none.jsonl").judge_decisions == CloseStep(
-        SKIPPED, NO_TRANSCRIPT
-    )
+    assert close_knowledge(snapshot, METRIC, targets=missing).judge_decisions == CloseStep(SKIPPED, NO_TRANSCRIPT)
 
 
 @pytest.mark.usefixtures("unconfigured")
@@ -276,7 +275,7 @@ def test_each_rsi_step_of_close_says_why_it_kept_nothing_and_close_goes_on(
     blocked.write_text("a file where a folder should be\n")
 
     def closed(state: NotebookSnapshot, targets: CloseTargets) -> KnowledgeClose:
-        return close_knowledge(state, METRIC, targets=targets, judge_transcript=transcript)
+        return close_knowledge(state, METRIC, targets=dataclasses.replace(targets, judge_transcript=transcript))
 
     bare = closed(session, CloseTargets())
     unprofiled = closed(

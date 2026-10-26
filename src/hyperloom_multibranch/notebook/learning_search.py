@@ -121,17 +121,10 @@ class RetrievalLog:
 
 class LearningFinder(Protocol):
     def here(
-        self,
-        snapshot: NotebookSnapshot,
-        query: str,
-        *,
-        limit: int,
-        branch: str,
-        source: RetrievalSource,
-        family: Family | None = None,
+        self, snapshot: NotebookSnapshot, retrieval: Retrieval, *, limit: int, family: Family | None = None
     ) -> tuple[LearningRecord, ...]:
-        """This session's learnings that bear on ``query``, about ``family`` first, best first, without waiting on any
-        knowledge base."""
+        """This session's learnings that bear on ``retrieval``'s query, about ``family`` first, best first, without
+        waiting on any knowledge base."""
 
     async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str = "") -> list[str]:
         """The learnings that bear on ``query`` for ``branch``, as headed lines; empty when none does."""
@@ -314,27 +307,20 @@ class SessionLearnings:
         self.log = log
 
     def here(
-        self,
-        snapshot: NotebookSnapshot,
-        query: str,
-        *,
-        limit: int,
-        branch: str,
-        source: RetrievalSource,
-        family: Family | None = None,
+        self, snapshot: NotebookSnapshot, retrieval: Retrieval, *, limit: int, family: Family | None = None
     ) -> tuple[LearningRecord, ...]:
-        """This session's matches, best first, logged as one retrieval by ``branch`` through ``source``."""
+        """This session's matches, best first, logged as ``retrieval``."""
 
-        found = session_matches(snapshot, query, limit=limit, family=family)
+        found = session_matches(snapshot, retrieval.query, limit=limit, family=family)
         if self.log is not None:
-            self.log.record(snapshot, Retrieval(branch, source, query), found)
+            self.log.record(snapshot, retrieval, found)
         return found
 
     async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str = "") -> list[str]:
         """This session's matches, the family the query names first, under their heading; empty when none matched."""
 
         found = self.here(
-            snapshot, query, limit=limit, branch=branch, source=RetrievalSource.TOOL, family=query_family(query)
+            snapshot, Retrieval(branch, RetrievalSource.TOOL, query), limit=limit, family=query_family(query)
         )
         rendered = [render_session_learning(record, snapshot) for record in found]
         return [SESSION_HEADING, *rendered] if rendered else []
@@ -344,7 +330,7 @@ class SessionLearnings:
     ) -> list[str]:
         """This session's :data:`NOTES` best matches under :data:`NOTES_HEADING`; empty when none matched."""
 
-        found = self.here(snapshot, query, limit=NOTES, branch=branch, source=RetrievalSource.CLAIM, family=family)
+        found = self.here(snapshot, Retrieval(branch, RetrievalSource.CLAIM, query), limit=NOTES, family=family)
         return note_lines([render_session_learning(record, snapshot) for record in found])
 
     def knows(self, lesson_id: str) -> bool:
