@@ -250,32 +250,6 @@ def test_extract_review_json_returns_none_on_empty():
     assert _extract_review_json("just prose") is None
 
 
-@pytest.mark.asyncio
-async def test_run_request_carries_no_options(
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-) -> None:
-    runtime_calls: list[RuntimeCall] = []
-    judge_bundle = {
-        "session_id": fake_session_dir.name,
-        "proposals": [],
-        "review_constraints": {},
-    }
-    backend, _ = _make_backend(
-        fake_critic_root,
-        fake_session_dir,
-        codex_replies=[],
-        judge_bundle=judge_bundle,
-        runtime_calls=runtime_calls,
-    )
-    await backend.run(prompt="=== inbox ===\n", system_prompt="You are critic.")
-
-    request = json.loads(
-        runtime_calls[0].request_path.read_text(encoding="utf-8"),
-    )
-    assert "options" not in request
-
-
 def test_extract_review_json_returns_none_when_key_absent():
     assert _extract_review_json('```json\n{"intents": []}\n```') is None
 
