@@ -18,6 +18,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 )
 from hyperloom.inference_optimizer.session.optimization_journal import classify_change_kind, operation_kind_for
 from hyperloom.orchestrator.lever import FRAMEWORK_STACK_ACTION, lever_kind_for_task
+from hyperloom.plugs import progress as _progress
 
 from ..framework.artifacts import candidate_key
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
@@ -261,6 +262,7 @@ class CurrentBestLiftMixin:
             log.warning(
                 "current_best held: %s winner refused by %s (%s)", task_kind, graded.vetoed_by, graded.veto_reason
             )
+            _progress.warn("winner_vetoed", f"{task_kind} winner refused by {graded.vetoed_by}: {graded.veto_reason}")
             return True
         correctness_fix = bv.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX
         if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP and not correctness_fix:
@@ -420,3 +422,4 @@ class CurrentBestLiftMixin:
         self.shared_state.current_best = current_best
         self.shared_state.working_recipe_generation = int(self.shared_state.working_recipe_generation or 0) + 1
         self._stamp_current_best_measurement(bv)
+        _progress.best_updated(request.tput, self.shared_state, bv.get("request_id"))
