@@ -14,8 +14,8 @@ nothing else:
   resumes the same session.
 
 The session directory is a function of the run (see :func:`hyperloom.inference_optimizer.session.paths.hosted_session_dir`),
-so a restart finds it again; a directory that holds ``manifest.json`` and ``state.json`` is resumed, any other is
-started fresh.  A spec whose ``flow`` is ``multibranch`` is validated here and then handed, environment unchanged, to
+so a restart finds it again; a directory that holds every file of :data:`SESSION_FILES` is resumed, any other is
+started fresh, after the stray files of a session that never finished its first write are removed.  A spec whose ``flow`` is ``multibranch`` is validated here and then handed, environment unchanged, to
 the ``hyperloom-multibranch`` command, which reads the host inputs itself.
 """
 
@@ -33,7 +33,12 @@ from hyperloom.hosted.context import HostedRun, install
 from hyperloom.hosted.campaign import FLOW_MULTIBRANCH, CampaignError, CampaignSpec, optimize_args, parse_campaign
 from hyperloom.hosted.host_info import HostInfo, HostInfoError, Var, read_host_info, take_host_info
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
-from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH, ensure_archive_root, hosted_session_dir
+from hyperloom.inference_optimizer.session.paths import (
+    ENV_USER_DATA_PATH,
+    SESSION_FILES,
+    ensure_archive_root,
+    hosted_session_dir,
+)
 from hyperloom.plugs.errors import ManifestError
 from hyperloom.plugs.manifest import load_builtin_profile
 
@@ -147,13 +152,20 @@ def _prepare_session_dir(spec: CampaignSpec, info: HostInfo) -> Path:
 
 def is_resumable(session_dir: Path) -> bool:
     """Whether the directory holds a session that ``optimize --resume-from`` can pick up."""
-    return (session_dir / "manifest.json").is_file() and (session_dir / "state.json").is_file()
+    return all((session_dir / name).is_file() for name in SESSION_FILES)
+
+
+def _clear_partial_session(session_dir: Path) -> None:
+    """Remove the session files of a first write that was cut short: ``--session-dir`` refuses a directory holding any."""
+    for name in SESSION_FILES:
+        (session_dir / name).unlink(missing_ok=True)
 
 
 def optimize_command(spec: CampaignSpec, session_dir: Path) -> list[str]:
     """The ``optimize`` command line: a resume of the directory when it holds a session, else a fresh run of the spec."""
     if is_resumable(session_dir):
         return ["optimize", f"--resume-from={session_dir}", f"--plug-profile={spec.profile}"]
+    _clear_partial_session(session_dir)
     return optimize_args(spec, plug_profile=spec.profile, session_dir=str(session_dir))
 
 

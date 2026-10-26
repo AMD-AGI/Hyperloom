@@ -143,15 +143,19 @@ def test_a_different_run_never_reuses_another_runs_directory(run, monkeypatch):
 
 @pytest.mark.parametrize("present", [("manifest.json",), ("state.json",), ()])
 def test_a_directory_with_only_part_of_a_session_is_started_fresh(run, monkeypatch, present):
-    fake = FakeOptimize(monkeypatch, writes_session=False)
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+    FakeOptimize(monkeypatch, writes_session=False)
     entry.main(["run"])
     session = Path(_session_json(run))
     for name in present:
         (session / name).write_text("{}")
     run.restart()
-    entry.main(["run"])
-    assert any(a.startswith("--session-dir=") for a in fake.calls[1])
-    assert not any(a.startswith("--resume-from") for a in fake.calls[1])
+    parsed = []
+    monkeypatch.setattr(entry, "_optimize_main", lambda argv: parsed.append(_build_parser().parse_args(argv)) or 0)
+    assert entry.main(["run"]) == 0  # the real parser refuses a directory that still holds a session file
+    assert _exit(run)["returncode"] == 0
+    assert parsed[0].session_dir == session and getattr(parsed[0], "resume_from", None) is None
 
 
 # -- exit.json ---------------------------------------------------------------------------------------------------
