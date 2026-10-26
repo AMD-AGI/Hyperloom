@@ -274,6 +274,7 @@ class Session:
             services.critic(self._notebook),
             self._reference_dirs(),
             settings.dev_leases,
+            settings.agents,
         )
 
     def _score_with_defaults(self) -> None:

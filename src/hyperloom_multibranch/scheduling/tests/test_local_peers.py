@@ -62,7 +62,6 @@ from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, SessionLayou
 from hyperloom_multibranch.scheduling import local_peers as local_peers_module
 from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
-    CANONICAL_DIR,
     InferenceXCheckout,
     LocalCards,
     MeasurementHost,
@@ -84,10 +83,12 @@ from hyperloom_multibranch.scheduling.prelude import prelude_argv
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
+from hyperloom_multibranch.specialist import agent_sessions as agent_sessions_module
 from hyperloom_multibranch.specialist import model_sessions as model_sessions_module
 from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSetup
 from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
+from hyperloom_multibranch.specialist.gate_client import GateClient
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions
 from hyperloom_multibranch.specialist.prompts import role_prompt
 from hyperloom_multibranch.specialist.runtime import SessionStart, SpecialistRuntime
@@ -415,6 +416,7 @@ async def _peers(
         NoCritic(),
         {"geak": layout.reference / "geak"},
         dev_leases,
+        (),
     )
     wired: list[SessionWiring] = []
 
@@ -664,12 +666,59 @@ async def test_a_hosted_session_measures_in_the_services_sandboxes_under_its_too
         assert (layout.toolbox / "canonical" / "canonical.yaml").is_file()
 
 
-def _toolbox(tmp_path: Path) -> Path:
-    """A toolbox directory whose rendered canonical has no InferenceX client, so an agent gets none."""
-    canonical = tmp_path / "toolbox" / CANONICAL_DIR / "canonical.yaml"
-    canonical.parent.mkdir(parents=True, exist_ok=True)
-    canonical.write_text("benchmark:\n  model: /models/m\n  envs:\n    CONC: '8'\n", encoding="utf-8")
-    return tmp_path / "toolbox"
+def _agent_clients(monkeypatch: pytest.MonkeyPatch) -> list[GateClient | None]:
+    """The gate's client every session's agents are built with from here on; no specialist session is built."""
+
+    clients: list[GateClient | None] = []
+
+    def agents(*args: object, client: GateClient | None = None) -> object:
+        clients.append(client)
+        return SimpleNamespace()
+
+    def sessions(*args: object, **kwargs: object) -> ModelSessions:
+        return ModelSessions(lambda start: None, lambda branch: None)
+
+    monkeypatch.setattr(model_sessions_module, "model_sessions", sessions)
+    monkeypatch.setattr(agent_sessions_module, "AgentSessions", agents)
+    return clients
+
+
+def _with_agent(wiring: SessionWiring) -> SessionWiring:
+    return replace(wiring, setup=replace(wiring.setup, agents=("https://agents.example/tuner.git",)))
+
+
+async def test_an_agent_of_an_inferencex_session_measures_with_the_client_of_the_rendered_canonical(
+    built: _Built, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clients = _agent_clients(monkeypatch)
+
+    model_backed_sessions(AgentCommand("claude", "claude"))(_with_agent(built.wiring))
+
+    [client] = clients
+    assert client is not None and (client.conc, client.isl, client.osl) == (WORKLOAD.conc, 1024, 512)
+    assert client.inferencex_root == HOST.inferencex.path
+
+
+async def test_an_agent_of_an_agentx_session_gets_no_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "models" / "Llama-3-8B").mkdir(parents=True)
+    monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path / "models"))
+    workload = replace(AGENTX, model="meta-llama/Llama-3-8B")
+    host = replace(HOST, inferencex=InferenceXCheckout("c" * 40, "/opt/InferenceX-agentx/inferencex-e2e"))
+    clients = _agent_clients(monkeypatch)
+
+    async with _peers(tmp_path / "workspace", monkeypatch, workload, host) as built:
+        model_backed_sessions(AgentCommand("claude", "claude"))(_with_agent(built.wiring))
+
+    assert clients == [None]
+
+
+async def test_a_session_without_agents_reads_no_canonical(built: _Built, monkeypatch: pytest.MonkeyPatch) -> None:
+    clients = _agent_clients(monkeypatch)
+    unread = replace(built.wiring, canonical=built.layout.toolbox / "no-such-canonical.yaml")
+
+    model_backed_sessions(AgentCommand("claude", "claude"))(unread)
+
+    assert clients == [None]
 
 
 async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_session_lends(
@@ -683,12 +732,10 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
 
     monkeypatch.setattr(model_sessions_module, "model_sessions", sessions)
     leases = SimpleNamespace(limits=SimpleNamespace(cap=1))
-    layout = SimpleNamespace(
-        logs=tmp_path, source=tmp_path, branch_dir=lambda branch: tmp_path, toolbox=_toolbox(tmp_path)
-    )
+    layout = SimpleNamespace(logs=tmp_path, source=tmp_path, branch_dir=lambda branch: tmp_path)
     for held in (None, leases):
         wiring = SimpleNamespace(
-            setup=SimpleNamespace(layout=layout, workload=WORKLOAD, references={}, processes=None),
+            setup=SimpleNamespace(layout=layout, workload=WORKLOAD, references={}, processes=None, agents=()),
             tokens=None,
             repo=None,
             briefs=SimpleNamespace(text=None),
@@ -757,10 +804,9 @@ def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_
         logs=tmp_path / "logs",
         source=tmp_path / "MB-source",
         branch_dir=lambda branch: tmp_path / branch,
-        toolbox=_toolbox(tmp_path),
     )
     wiring = SimpleNamespace(
-        setup=SimpleNamespace(layout=layout, workload=WORKLOAD, references={}, processes=None),
+        setup=SimpleNamespace(layout=layout, workload=WORKLOAD, references={}, processes=None, agents=()),
         tokens=None,
         repo=None,
         briefs=SimpleNamespace(text=None),

@@ -89,6 +89,9 @@ TOOLBOX_WRITER = "toolbox"
 GATE_WRITER = "rule-gate"
 BRIEFS_READER = "briefs"
 CANONICAL_DIR = "canonical"
+#: The file :func:`hyperloom.measure.points.default_canonical` renders the canonical configuration to, in the
+#: directory it is given; that module exports no name for it.
+RENDERED_CANONICAL = "canonical.yaml"
 POINTS_DIR = "points"
 #: The Magpie AgentX benchmark of an AgentX session, under ``MB-toolbox``.
 BENCHMARK_FILE = "benchmark.yaml"
@@ -103,8 +106,8 @@ AGENTX_ENV = "HYPERLOOM_AGENTX"
 class SessionWiring:
     """What a session's specialist sessions are built on: the peer setup, the repository the branches use, the
     tokens that grant a branch's specialist the MCP service's tools (a grant names the service's URL, so it is issued
-    when a specialist starts), each branch's log, the session's briefs and its dev sandboxes, ``None`` when it lends
-    none."""
+    when a specialist starts), each branch's log, the session's briefs, its dev sandboxes, ``None`` when it lends
+    none, and the canonical configuration the toolbox rendered, which the gate's benchmark client is read from."""
 
     setup: PeerSetup
     repo: ExperimentRepo
@@ -113,6 +116,7 @@ class SessionWiring:
     briefs: SessionBriefs
     toolbox: RealToolbox
     dev_leases: DevLeases | None
+    canonical: Path
 
 
 #: Builds the specialist runtime's session factory, and the worktree of each branch the worktree tools serve, on a
@@ -272,7 +276,8 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     layout, workload = setup.layout, setup.workload
     _export_workload(workload, layout.toolbox, host.image.ref)
     repo = GitExperimentRepo(layout.repo, setup.blobs)
-    toolbox = _toolbox(host, setup, repo)
+    canonical_dir = layout.toolbox / CANONICAL_DIR
+    toolbox = _toolbox(host, setup, repo, _canonical(canonical_dir, workload, host))
     gate_notebook = LocalNotebook(layout.notebook, Writer(Role.GATE, GATE_WRITER))
     rule = workload_rule(workload, gate_notebook)
 
@@ -286,7 +291,9 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     briefs = _specialist_briefs(setup, repo)
     _serve_specialist_tools(mcp, toolbox, runtime_notebook, briefs)
     leases = _lend_dev_sandboxes(mcp, setup, toolbox, runtime_notebook, lambda branch: built.worktrees(branch))
-    built = sessions(SessionWiring(setup, repo, McpSpecialistTokens(mcp), runtime_notebook, briefs, toolbox, leases))
+    tokens = McpSpecialistTokens(mcp)
+    rendered = canonical_dir / RENDERED_CANONICAL
+    built = sessions(SessionWiring(setup, repo, tokens, runtime_notebook, briefs, toolbox, leases, rendered))
     register_worktree_tools(mcp, repo=repo, worktrees=built.worktrees)
     gate = RuleGate(gate_notebook, repo, setup.desk, toolbox)
     register_blocked_tools(mcp, blocked=BlockedCandidates(gate_notebook, gate), home=asyncio.get_running_loop())
@@ -302,9 +309,11 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, host.image.digest, gate, regression)
 
 
-def _toolbox(host: MeasurementHost, setup: PeerSetup, repo: ExperimentRepo) -> RealToolbox:
-    """The session's toolbox on ``host``'s backend, every test's points rendered from the session's canonical
-    measurement and compiled from the session's blob store."""
+def _toolbox(
+    host: MeasurementHost, setup: PeerSetup, repo: ExperimentRepo, canonical: CanonicalMeasurement
+) -> RealToolbox:
+    """The session's toolbox on ``host``'s backend, every test's points rendered from ``canonical``, the session's
+    canonical measurement, and compiled from the session's blob store."""
 
     from hyperloom.measure.compile import EnvironmentCompiler
     from hyperloom.measure.hosted_spec import SpecContext
@@ -312,7 +321,6 @@ def _toolbox(host: MeasurementHost, setup: PeerSetup, repo: ExperimentRepo) -> R
     from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
     layout, workload, image = setup.layout, setup.workload, host.image
-    canonical = _canonical(layout.toolbox / CANONICAL_DIR, workload, host)
     compiler = EnvironmentCompiler(setup.blobs, image.digest)
     spec = SpecContext(
         image_ref=image.ref,
@@ -547,7 +555,8 @@ AITER = "aiter"
 
 def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
     """Sessions that run ``command`` for every branch's specialist, in a worktree of the workload's framework, and
-    each branch's third-party agent in a sandbox leased from the session's toolbox.
+    each branch's third-party agent in a sandbox leased from the session's toolbox, given the gate's benchmark client
+    when the session's canonical configuration names one; a session that runs no agent reads no canonical.
 
     The CLI runs on the main flow's allowlisted specialist environment, through a local AI work socket whose resource
     log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
@@ -596,7 +605,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             wiring.toolbox,
             wiring.repo,
             wiring.setup.processes,
-            client=GateClient.read(layout.toolbox / CANONICAL_DIR / "canonical.yaml"),
+            client=GateClient.read(wiring.canonical) if wiring.setup.agents else None,
         )
         return with_agents(sessions, agents, branch_dir=layout.branch_dir, notebook_for=wiring.notebooks)
 

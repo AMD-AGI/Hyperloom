@@ -69,7 +69,8 @@ class PeerSetup:
     environment compiler reads them from it. ``critic`` decides whether the defect a proven correctness fix removes is
     reachable under the workload. ``references`` names each directory of reference material the run was given, already
     copied into the session, for the specialist role to send the specialists to. ``dev_leases`` is how many dev
-    sandboxes the session lends its specialists at once, from the toolbox's cards; 0 lends none.
+    sandboxes the session lends its specialists at once, from the toolbox's cards; 0 lends none. ``agents`` are the
+    third-party agents the user named, each run on an autonomous branch of its own.
     """
 
     layout: SessionLayout
@@ -80,6 +81,7 @@ class PeerSetup:
     critic: FixReviewer
     references: Mapping[str, Path]
     dev_leases: int
+    agents: tuple[str, ...]
 
 
 PeerFactory = Callable[[PeerSetup], Peers]
