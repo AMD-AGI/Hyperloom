@@ -462,7 +462,7 @@ def _derive_input_csv_from_config(ctx: TuneContext, work_dir: Path, needs_q_dtyp
     if intermediate_size < 1 and not (q_lora_rank and not kv_lora_rank):
         return None
     num_heads = int(getattr(profile, "num_attention_heads", 0) or 0)
-    num_kv_heads = int(getattr(profile, "num_key_value_heads", 0) or num_heads or 0)
+    num_kv_heads = int(getattr(profile, "num_key_value_heads", 0) or num_heads)
     nk_shapes = compute_dense_nk_shapes(
         DenseGeometry(
             hidden_size=hidden_size,
@@ -471,8 +471,8 @@ def _derive_input_csv_from_config(ctx: TuneContext, work_dir: Path, needs_q_dtyp
             num_kv_heads=num_kv_heads,
             head_dim=int(getattr(profile, "head_dim", 0) or 0),
             v_head_dim=int(getattr(profile, "v_head_dim", 0) or 0),
-            q_lora_rank=int(getattr(profile, "q_lora_rank", 0) or 0),
-            kv_lora_rank=int(getattr(profile, "kv_lora_rank", 0) or 0),
+            q_lora_rank=q_lora_rank,
+            kv_lora_rank=kv_lora_rank,
             qk_nope_head_dim=int(getattr(profile, "qk_nope_head_dim", 0) or 0),
             qk_rope_head_dim=int(getattr(profile, "qk_rope_head_dim", 0) or 0),
         ),
@@ -1023,12 +1023,7 @@ def _filter_unimproved_rows(
             continue
         if r.get("is_new") or r.get("tuned_unverified") or r.get("below_update_bar") and r["speedup"] > 1.0:
             continue
-        if r.get("speedup") is None and r.get("default_us") is None:
-            continue
-        try:
-            losers.add((int(r["M"]), int(r["N"]), int(r["K"])))
-        except (KeyError, TypeError, ValueError):
-            continue
+        losers.add((r["M"], r["N"], r["K"]))
     if not losers:
         return 0, 0
 
