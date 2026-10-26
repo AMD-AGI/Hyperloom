@@ -31,7 +31,7 @@ documented in `framework/aiter/` (the `aiter_flydsl_libtype` lever). Backend-neu
   kernel family, handle preshuffle/dispatch. Entry: `skills/optimize/flydsl_levers/{flydsl_kernel_library,flydsl_knob_space}.md`.
 - **Path B — *author* a new `@flyc.kernel` from scratch.** Entry: `API_docs/` (language) +
   `API_docs/conventions.md` (style) → `skills/optimize/flydsl_levers/flydsl_authoring_method.md`; for a dense GEMM,
-  `skills/gemm/INDEX.md`.
+  `skills/gemm/INDEX.md`; for attention, `skills/attention/INDEX.md`.
 
 ## Reading order (three layers)
 1. **`API_docs/`** — the language itself: `kernel_authoring_guide.md` (`@flyc.kernel`/`@flyc.jit`, launch,
@@ -39,7 +39,7 @@ documented in `framework/aiter/` (the `aiter_flydsl_libtype` lever). Backend-neu
    stack). Read alongside **`API_docs/conventions.md`** (the authoring style guide) before writing any kernel.
 2. **`skills/optimize/flydsl_levers/`** — the levers: `flydsl_kernel_library.md` + `flydsl_knob_space.md` (Path A, using the
    library) or `flydsl_authoring_method.md` (Path B, structure-first authoring). **A dense GEMM has its own package,
-   `skills/gemm/` — open its `INDEX.md`.**
+   `skills/gemm/`, and so does attention, `skills/attention/` — open its `INDEX.md`.**
 3. **`skills/`** *when you hit a problem*: `profile/` (trace, benchmark), `bottleneck/` (debug),
    `optimize/{lds,prefetch}-*.md` for the targeted levers.
 
@@ -74,6 +74,7 @@ Substitute `<op>` with the operator (catalog below). Paths are relative to this 
 | "Use the aiter FlyDSL GEMM library — which knobs?" | `skills/optimize/flydsl_levers/flydsl_kernel_library.md` → `.../flydsl_knob_space.md` |
 | "Author & optimize a new kernel (structure-first)" | `skills/optimize/flydsl_levers/flydsl_authoring_method.md` |
 | "Write or optimize a dense GEMM (fp8 / MXFP4 / MXFP8 / bf16)" | `skills/optimize/gemm-optimization.md` (FlyDSL's walkthrough) → `skills/gemm/INDEX.md` → the card it routes to |
+| "Write or optimize attention (flash forward / backward, decode split-KV)" | `skills/attention/INDEX.md` → the card it routes to |
 | "LDS bank conflicts / double-buffer / swizzle" | `skills/optimize/lds-optimization.md` → `API_docs/conventions.md` (SharedAllocator) |
 | "Overlap loads / prefetch / pipeline" | `skills/optimize/prefetch-data-load.md` |
 | "Wrong output / NaN / won't compile / fix didn't take" | `skills/bottleneck/debug-flydsl-kernel.md` (clear cache first) → `API_docs/conventions.md` |
@@ -102,6 +103,11 @@ languages/flydsl/
 │   │   ├── INDEX.md                      # task → card routing, kernel map
 │   │   └── flydsl_gemm_*.md              # workflow · grid_pricing · mainloop · datapath · schedule_and_locality ·
 │   │                                     #   epilogue · autotune · attribution · correctness · measurement · small_m
+│   ├── attention/                        # attention package (flash fwd/bwd, decode split-KV; measured work) — open its INDEX.md
+│   │   ├── INDEX.md                      # task → card routing, FlyDSL attention kernel map
+│   │   └── flydsl_attn_*.md              # workflow · attribution · grid_dispatch · mfma_layout · softmax · lds ·
+│   │                                     #   registers_occupancy · schedule_sync · backward · decode_split_kv ·
+│   │                                     #   measurement · correctness
 │   ├── optimize/
 │   │   ├── flydsl_levers/
 │   │   │   ├── flydsl_kernel_library.md  # Path A: the shipped aiter families (HGEMM, small-M, fp8-A8, MoE, GDR, silu_fq)
@@ -152,7 +158,7 @@ to an entry point that no longer exists, confidently. Where to get those facts i
 For Path A (using the shipped library), `skills/optimize/flydsl_levers/flydsl_kernel_library.md` +
 `flydsl_knob_space.md` and `API_docs/prebuilt_kernels_guide.md` carry the entry points and knob tables the
 per-operator `flydsl.md` cards duplicated. For Path B (authoring), `flydsl_authoring_method.md` is the
-structure-first path, and `skills/gemm/` is its dense-GEMM package.
+structure-first path, `skills/gemm/` is its dense-GEMM package and `skills/attention/` its attention package.
 
 **Coverage note:** none of the operators this folder used to cover (`gemm_epilogue_fused`,
 `layout_shuffle`, `linear_attention_gated_delta`, `reduction`, `splitk_streamk_gemm`, the GEMM and MoE
