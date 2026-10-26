@@ -375,7 +375,7 @@ def _directions(
     directions = []
     for fingerprint, tests in tried.items():
         intent = intents[fingerprint]
-        gains = [gain for gain in map(_kept_gain, tests) if gain is not None]
+        gains = [gain for gain in map(hinted_gain, tests) if gain is not None]
         family = family_of(intent.target, intent.mechanism, intent.layer, tests[0].request.delta)
         directions.append(
             TreeDirection(

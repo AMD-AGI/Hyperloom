@@ -284,6 +284,7 @@ __all__ = [
     "MAX_UNFINISHED",
     "NEAR_BAR_SHARE",
     "STOP_RELEASE_SECONDS",
+    "hinted_gain",
     "near_misses",
     "refused_replays",
     "unfinished_leads",
