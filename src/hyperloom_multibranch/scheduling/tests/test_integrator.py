@@ -69,6 +69,7 @@ from hyperloom_multibranch.scheduling.integrator import (
     RESOLVER_ATTEMPTS,
     RESOLVER_SYSTEM_PROMPT,
     RESOLVER_UNREACHED,
+    RESOLVER_UNREACHED_RETRIES,
     SUPERSEDED,
     Integrator,
     LlmPatchResolver,
@@ -76,7 +77,7 @@ from hyperloom_multibranch.scheduling.integrator import (
     MergeReport,
     not_stackable_reason,
 )
-from hyperloom_multibranch.contracts.llm import STOPPED_AT_MAX_TOKENS, CompletionFailed
+from hyperloom_multibranch.contracts.llm import STOPPED_AT_MAX_TOKENS, CompletionFailed, CompletionReply
 from hyperloom_multibranch.rulegate import agentx
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request
@@ -277,6 +278,7 @@ async def _bench(
     tags: tuple[str, ...] = ("c1", "c2"),
     toolbox_type: type[RecordingToolbox] = RecordingToolbox,
     repo_type: type[GitExperimentRepo] = GitExperimentRepo,
+    completion_type: type[ScriptedCompletion] = ScriptedCompletion,
 ) -> Bench:
     clock = FakeClock()
     notebook = tmp_path / "notebook"
@@ -293,7 +295,7 @@ async def _bench(
     gate = session_gate(LocalNotebook(notebook, Writer(Role.GATE, "gate"), clock=clock), toolbox)
     baseline = integration_test_request(TestKind.TEST, Purpose.BASELINE, root)
     await gate.establish_baseline(root, [await tests.submit(baseline) for _ in range(BASELINE_TESTS)])
-    completion = ScriptedCompletion()
+    completion = completion_type()
     decisions = tmp_path / "MB-decisions.jsonl"
     resolver = LlmPatchResolver(completion, repo, RESOLVER_MODEL)
     records = MergeRecords(merger, DecisionLog(decisions, Clock(now=clock)))
@@ -992,27 +994,33 @@ async def test_a_patch_that_does_not_apply_on_the_head_is_rewritten_before_the_m
     ]
 
 
+#: What the transport says of a call the gateway ended before the model answered.
+GATEWAY_TIMEOUT = "patch_resolve call failed: RuntimeError: HTTP 504 Gateway Timeout"
+
+
 @pytest.mark.parametrize(
-    ("scripted", "named"),
+    ("scripted", "named", "calls"),
     [
-        (ScriptedCompletion(fallback=json.dumps({"patch": None})), CONFLICT_UNRESOLVED),
+        (ScriptedCompletion(fallback=json.dumps({"patch": None})), CONFLICT_UNRESOLVED, 1),
         (
-            ScriptedCompletion(error=CompletionFailed("patch_resolve call failed: ReadTimeout: ")),
+            ScriptedCompletion(error=CompletionFailed(GATEWAY_TIMEOUT)),
             RESOLVER_UNREACHED,
+            1 + RESOLVER_UNREACHED_RETRIES,
         ),
         (
             ScriptedCompletion(fallback='{"patch": "diff --git a/vllm/x.py', stop_reason=STOPPED_AT_MAX_TOKENS),
             CONFLICT_TRUNCATED,
+            1,
         ),
     ],
     ids=["model-declines", "call-fails", "answer-cut-off"],
 )
 async def test_an_unresolved_patch_conflict_is_skipped_and_recorded(
-    tmp_path: Path, scripted: ScriptedCompletion, named: str
+    tmp_path: Path, scripted: ScriptedCompletion, named: str, calls: int
 ) -> None:
     """A conflict the model declined, one it was never asked about and one whose answer the output cap cut off are
-    all skipped, under reasons that tell them apart: a timed-out call or a cut-off answer says nothing about whether
-    the two patches can be combined, and none of them is asked again."""
+    all skipped, under reasons that tell them apart: a failed call or a cut-off answer says nothing about whether
+    the two patches can be combined. Only a call that failed is made again, and only once."""
 
     bench = await _bench(tmp_path, conflicting=True)
     bench.completion.fallback, bench.completion.error = scripted.fallback, scripted.error
@@ -1022,7 +1030,7 @@ async def test_an_unresolved_patch_conflict_is_skipped_and_recorded(
 
     assert report is not None and report.outcome is MergeOutcome.CONFLICT_SKIPPED
     assert report.reason.startswith(named) and report.request_id is None
-    assert len(bench.completion.calls) == 1
+    assert len(bench.completion.calls) == calls
     conflicting = bench.deltas["c1"].components[0].add_patches[1]
     assert conflicting.path in report.reason
     assert await bench.outcome("c1") is MergeOutcome.CONFLICT_SKIPPED
@@ -1146,6 +1154,36 @@ async def test_a_rewrite_that_does_not_apply_is_asked_for_again_with_why(
     assert again.startswith(asked)
     feedback = again.removeprefix(asked)
     assert feedback.startswith("\n\nYour last rewrite failed to apply: ") and quoted in feedback
+
+
+@dataclass
+class UnreachedFirst(ScriptedCompletion):
+    """Fails the first ``unreached`` calls as the gateway timing out, then answers as scripted."""
+
+    unreached: int = 0
+
+    async def __call__(self, system: str, user: str) -> CompletionReply:
+        if self.unreached:
+            self.unreached -= 1
+            self.calls.append((system, user))
+            raise CompletionFailed(GATEWAY_TIMEOUT)
+        return await super().__call__(system, user)
+
+
+async def test_a_resolver_call_that_failed_is_made_again_and_counts_as_no_answer(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, conflicting=True, completion_type=UnreachedFirst)
+    assert isinstance(bench.completion, UnreachedFirst)
+    bench.completion.unreached = RESOLVER_UNREACHED_RETRIES
+    bench.completion.replies = [json.dumps({"patch": STRAY_TEXT}), json.dumps({"patch": RESOLVED_TEXT})]
+
+    report = await _one(bench)
+
+    assert report is not None and report.outcome is MergeOutcome.MERGED
+    [written] = (await bench.handle(Role.OBSERVER).snapshot()).resolved_patches
+    assert written.attempts == RESOLVER_ATTEMPTS
+    asked = [user for _, user in bench.completion.calls]
+    assert len(asked) == RESOLVER_UNREACHED_RETRIES + RESOLVER_ATTEMPTS
+    assert len(set(asked[: RESOLVER_UNREACHED_RETRIES + 1])) == 1
 
 
 async def test_a_merge_the_recipe_contract_refuses_is_skipped_and_the_round_goes_on(tmp_path: Path) -> None:
