@@ -11,29 +11,47 @@
   with the candidate's playbook and the champion's. A point counts where its outcome is known: a stop at most
   :data:`EARLY_STOP_TESTS` judged tests past a commit, which the playbook should have prevented, and a stop at or past
   the stall bar, which it should keep. The candidate passes when it gets more of them right than the champion.
-* R3, :func:`r3`: the challenger sessions, one in four, each recorded at CLOSE as a :class:`Trial` with its decision
-  measures (:func:`session_measures`). A playbook is crowned once at least :data:`MIN_TRIALS` of its sessions beat the
-  champion's on the measure it named by more than the noise band, while their gain per GPU hour stays within the band
-  of the champion's; it is retired once :data:`MAX_TRIALS` have not. The noise band of a measure is the spread of the
-  champion's own sessions of the same model type (:func:`noise_band`): until there are :data:`MIN_TRIALS` of them,
-  nothing is crowned.
+* R3, :func:`r3`: the challenger sessions, each recorded at CLOSE as a :class:`Trial` with its task
+  (:func:`session_task`) and its decision measures (:func:`session_measures`), and paired with the champion's session
+  of its task that started nearest it (:func:`pairs`): the run entry runs the two side by side. A playbook is crowned
+  once at least :data:`MIN_TRIALS` pairs beat the champion's sessions on the measure it named, on average, by more
+  than the noise band, while their gain per GPU hour stays within the band; it is retired once :data:`MAX_TRIALS` of
+  its sessions have not. The noise band of a measure is its spread within a task over the champion's sessions of the
+  pairs' tasks (:func:`noise_band`), the repeats the run entry runs to measure it: until there are :data:`MIN_TRIALS`
+  of one task, nothing is crowned. A challenger session that broke the safety envelope played the champion from then
+  on, and pairs with nothing.
+
+At every CLOSE the replay reruns over the archive with the session's tree in it, against the champion
+(:func:`replay_standing`), and says which of its conclusions moved since the last CLOSE (:func:`moved`).
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 import statistics
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TypeVar
 
 from hyperloom_multibranch.contracts.notebook.vocab import CommitOrigin, LineageKind
 from hyperloom_multibranch.notebook.codec import decode, encode
 from hyperloom_multibranch.notebook.local.files import encode_json, publish_once
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree
-from hyperloom_multibranch.notebook.rsi.history import MODEL_TYPE_LABEL, judged_tests
+from hyperloom_multibranch.notebook.rsi.history import judged_tests
 from hyperloom_multibranch.notebook.rsi.playbook import Crowned, Playbook, PlaybookPool, Retired, changes, problems
-from hyperloom_multibranch.notebook.rsi.replay import OPTIMISTIC, PESSIMISTIC, REPLAY_RUNS, compare
+from hyperloom_multibranch.notebook.rsi.replay import (
+    OPTIMISTIC,
+    PESSIMISTIC,
+    REPLAY_RUNS,
+    PolicyRow,
+    SchedulingComparison,
+    compare,
+    variants,
+)
+from hyperloom_multibranch.notebook.rsi.similarity import MODEL, WORKLOAD, model_name, workload_kind
 from hyperloom_multibranch.notebook.rsi.stops import EARLY_STOP_TESTS, StopAudit
 
 #: Asks the LLM with a system prompt and a prompt, and returns its answer.
@@ -51,14 +69,28 @@ DIRECTION: Mapping[str, int] = {
 GAIN_PER_GPU_HOUR = "gain_per_gpu_hour"
 MIN_TRIALS = 3
 MAX_TRIALS = 6
+#: How far apart a challenger session and the champion's session it pairs with may start: the two run side by side.
+PAIR_SECONDS = 48 * 3600.0
+#: The labels and sizes of one task beside its workload's kind: the model, the GPU, the framework and its version,
+#: which the image fixes, the precision, the parallelism, the concurrency and the sequence lengths.
+TASK_LABELS = (MODEL, "gpu", "framework", "framework_version", "precision")
+TASK_SIZES = ("tp", "conc", "isl", "osl")
+#: How many runs a session gets when CLOSE reruns the scheduling replay, fewer than a study's so CLOSE stays short.
+CLOSE_REPLAY_RUNS = 50
+STANDING_FORMAT = "multibranch.scheduling-replay-standing"
+BETTER = "better"
+WORSE = "worse"
+UNCLEAR = "unclear"
 #: How many of the judge's decision points R2 asks again, each once under either playbook.
 R2_POINTS = 15
 #: The key of a judge reply's stop orders.
 _STOP_KEY = "stop"
 _TRIALS = "trials"
+_REPLAYS = "replays"
 _JSON = "*.json"
 _ENCODING = "utf-8"
 _MINUTE = 60.0
+_Kept = TypeVar("_Kept")
 _CANDIDATE_SECTION = "The scheduling playbook to follow in this round:"
 
 
@@ -191,14 +223,50 @@ async def r2(
 
 @dataclass(frozen=True)
 class Trial:
-    """One session under ``played``, with ``champion`` the champion then: its decision measures and its gain per GPU
-    hour; a measure is missing where the session gave it nothing to count."""
+    """One session under ``played``, with ``champion`` the champion then: the ``task`` it ran (:func:`session_task`),
+    when it started, whether it ``fell_back`` to the champion on a breach of the safety envelope, and its decision
+    measures and gain per GPU hour; a measure is missing where the session gave it nothing to count."""
 
     session_id: str
     played: str
     champion: str
-    model_type: str
+    task: str = ""
+    started_at: float | None = None
+    fell_back: bool = False
     measures: Mapping[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Pair:
+    """A challenger session and the champion's session of its task it is read against."""
+
+    challenger: Trial
+    champion: Trial
+
+    def difference(self, measure: str) -> float | None:
+        """How much better the challenger did on ``measure``, by :data:`DIRECTION` (more gain per GPU hour is
+        better); ``None`` when either session did not measure it."""
+
+        ours, theirs = self.challenger.measures.get(measure), self.champion.measures.get(measure)
+        if ours is None or theirs is None:
+            return None
+        return DIRECTION.get(measure, 1) * (ours - theirs)
+
+
+def session_task(tree: SearchTree) -> str:
+    """The task ``tree`` ran, as one key: its workload's kind, its :data:`TASK_LABELS` and :data:`TASK_SIZES` and its
+    budget. Two sessions pair only when their keys are one."""
+
+    labels, sizes = tree.task.labels, tree.task.sizes
+    named = [
+        f"{key}={model_name(labels[key]) if key == MODEL else labels[key].lower()}"
+        for key in TASK_LABELS
+        if key in labels
+    ]
+    sized = [f"{key}={sizes[key]:g}" for key in TASK_SIZES if key in sizes]
+    return " ".join(
+        [f"{WORKLOAD}={workload_kind(tree.task)}", *named, *sized, f"budget={tree.budget_seconds / _MINUTE:g}m"]
+    )
 
 
 def session_measures(tree: SearchTree, audit: StopAudit) -> dict[str, float]:
@@ -227,62 +295,111 @@ def session_measures(tree: SearchTree, audit: StopAudit) -> dict[str, float]:
     return found
 
 
+def _keep(folder: Path, session_id: str, fmt: str, record: object) -> bool:
+    path = folder / f"{re.sub(r'[^A-Za-z0-9._-]+', '-', session_id)}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return publish_once(path, encode_json({"format": fmt, "record": encode(record)}))
+
+
+def _kept(folder: Path, kind: type[_Kept], fmt: str) -> list[_Kept]:
+    found = []
+    for path in sorted(folder.glob(_JSON)):
+        try:
+            document = json.loads(path.read_text(encoding=_ENCODING))
+            if document.get("format") == fmt:
+                found.append(decode(kind, document.get("record")))
+        except (OSError, KeyError, TypeError, ValueError):
+            continue
+    return found
+
+
 def record_trial(pool: PlaybookPool, trial: Trial) -> bool:
     """Keep ``trial`` beside the pool's playbooks, once a session; ``False`` when it was kept already."""
 
-    path = pool.root / _TRIALS / f"{re.sub(r'[^A-Za-z0-9._-]+', '-', trial.session_id)}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return publish_once(path, encode_json({"format": TRIAL_FORMAT, "record": encode(trial)}))
+    return _keep(pool.root / _TRIALS, trial.session_id, TRIAL_FORMAT, trial)
 
 
 def trials(pool: PlaybookPool) -> tuple[Trial, ...]:
+    return tuple(_kept(pool.root / _TRIALS, Trial, TRIAL_FORMAT))
+
+
+def pairs(candidate: str, champion: str, kept: Sequence[Trial]) -> tuple[Pair, ...]:
+    """Each session that played ``candidate`` against ``champion`` and kept to it, beside the session of ``champion``
+    on its task that started nearest it, within :data:`PAIR_SECONDS`; a champion session pairs once at most, and the
+    challenger sessions take theirs in the order they started."""
+
+    started = {trial.session_id: trial.started_at for trial in kept if trial.started_at is not None}
+
+    def gap(first: Trial, second: Trial) -> float:
+        return abs(started[first.session_id] - started[second.session_id])
+
+    mine = [
+        trial
+        for trial in kept
+        if trial.session_id in started
+        and trial.played == candidate
+        and trial.champion == champion
+        and not trial.fell_back
+    ]
+    free = [trial for trial in kept if trial.session_id in started and trial.played == champion]
     found = []
-    for path in sorted((pool.root / _TRIALS).glob(_JSON)):
-        try:
-            document = json.loads(path.read_text(encoding=_ENCODING))
-            if document.get("format") == TRIAL_FORMAT:
-                found.append(decode(Trial, document.get("record")))
-        except (OSError, KeyError, TypeError, ValueError):
-            continue
+    for trial in sorted(mine, key=lambda item: started[item.session_id]):
+        near = [item for item in free if item.task == trial.task and gap(item, trial) <= PAIR_SECONDS]
+        if near:
+            partner = min(near, key=lambda item: gap(item, trial))
+            free.remove(partner)
+            found.append(Pair(trial, partner))
     return tuple(found)
 
 
 def noise_band(sessions: Sequence[Trial], measure: str) -> float | None:
-    """The spread of ``measure`` over ``sessions``, its standard deviation; ``None`` with fewer than
-    :data:`MIN_TRIALS` that measured it."""
+    """The spread of ``measure`` within a task over ``sessions``: the standard deviation pooled over their tasks, so a
+    difference between tasks is no noise; ``None`` with less to go on than :data:`MIN_TRIALS` sessions of one task."""
 
-    values = [trial.measures[measure] for trial in sessions if measure in trial.measures]
-    return statistics.stdev(values) if len(values) >= MIN_TRIALS else None
+    by_task: dict[str, list[float]] = {}
+    for trial in sessions:
+        if measure in trial.measures:
+            by_task.setdefault(trial.task, []).append(trial.measures[measure])
+    groups = [values for values in by_task.values() if len(values) > 1]
+    freedom = sum(len(values) - 1 for values in groups)
+    if freedom < MIN_TRIALS - 1:
+        return None
+    return math.sqrt(sum((len(values) - 1) * statistics.variance(values) for values in groups) / freedom)
 
 
-def _mean(sessions: Sequence[Trial], measure: str) -> float | None:
-    values = [trial.measures[measure] for trial in sessions if measure in trial.measures]
-    return statistics.fmean(values) if values else None
+def _fell(sessions: Sequence[Trial], label: str) -> str:
+    count = sum(1 for trial in sessions if trial.played == label and trial.fell_back)
+    return f"; {count} of its sessions fell back to the champion" if count else ""
 
 
 def r3(candidate: Playbook, champion: Playbook, kept: Sequence[Trial]) -> Rung:
-    """R3: ``candidate``'s sessions beside ``champion``'s of the same model types, on the measure it named."""
+    """R3: ``candidate``'s sessions paired with ``champion``'s (:func:`pairs`), on the measure it named and on gain per
+    GPU hour, each against its noise band over ``champion``'s sessions of the pairs' tasks."""
 
-    mine = [trial for trial in kept if trial.played == candidate.label]
-    types = {trial.model_type for trial in mine}
-    theirs = [trial for trial in kept if trial.played == champion.label and trial.model_type in types]
     measure = candidate.measure
     if measure not in DIRECTION:
         return Rung("R3", False, f"{candidate.label} names no decision measure")
-    if len(mine) < MIN_TRIALS:
-        return Rung("R3", False, f"{len(mine)} of its {MIN_TRIALS} trial sessions so far", skipped=True)
+    differences = [
+        (pair.challenger.task, pair.difference(measure), pair.difference(GAIN_PER_GPU_HOUR))
+        for pair in pairs(candidate.label, champion.label, kept)
+    ]
+    measured = [(task, gain, rate) for task, gain, rate in differences if gain is not None and rate is not None]
+    fell = _fell(kept, candidate.label)
+    if len(measured) < MIN_TRIALS:
+        return Rung("R3", False, f"{len(measured)} of its {MIN_TRIALS} paired sessions so far{fell}", skipped=True)
+    tasks = {task for task, _, _ in measured}
+    theirs = [trial for trial in kept if trial.played == champion.label and trial.task in tasks]
     band, floor_band = noise_band(theirs, measure), noise_band(theirs, GAIN_PER_GPU_HOUR)
     if band is None or floor_band is None:
-        return Rung("R3", False, f"too few sessions of {champion.label} to know the noise band", skipped=True)
-    ours, base = _mean(mine, measure), _mean(theirs, measure)
-    rate, base_rate = _mean(mine, GAIN_PER_GPU_HOUR), _mean(theirs, GAIN_PER_GPU_HOUR)
-    if ours is None or base is None or rate is None or base_rate is None:
-        return Rung("R3", False, f"its sessions did not measure {measure}", skipped=True)
-    better = DIRECTION[measure] * (ours - base)
-    passed = better > band and rate >= base_rate - floor_band
+        return Rung(
+            "R3", False, f"too few repeats of {champion.label} on these tasks to know the noise band", skipped=True
+        )
+    better = statistics.fmean(gain for _, gain, _ in measured)
+    rate = statistics.fmean(rate for _, _, rate in measured)
+    passed = better > band and rate >= -floor_band
     said = (
-        f"{measure} {ours:.3g} against {base:.3g} over {len(mine)} and {len(theirs)} sessions, band {band:.3g}; "
-        f"gain per GPU hour {rate:.3g} against {base_rate:.3g}, band {floor_band:.3g}"
+        f"{measure} better by {better:.3g} over {len(measured)} paired sessions, band {band:.3g}; "
+        f"gain per GPU hour {rate:+.3g}, band {floor_band:.3g}{fell}"
     )
     return Rung("R3", passed, said)
 
@@ -305,31 +422,170 @@ def settle(pool: PlaybookPool, now: float) -> tuple[str, ...]:
     return tuple(done)
 
 
-def trial_of(tree: SearchTree, audit: StopAudit, played: str, champion: str) -> Trial:
-    model_type = tree.task.labels.get(MODEL_TYPE_LABEL, "")
-    return Trial(tree.session_id, played, champion, model_type, session_measures(tree, audit))
+def trial_of(tree: SearchTree, audit: StopAudit, played: str, champion: str, *, fell_back: bool = False) -> Trial:
+    task, measures = session_task(tree), session_measures(tree, audit)
+    return Trial(tree.session_id, played, champion, task, tree.started_at, fell_back, measures)
+
+
+@dataclass(frozen=True)
+class Difference:
+    """A playbook's mean paired difference in best gain from the champion, and its interval's ends."""
+
+    mean: float
+    low: float
+    high: float
+
+    @classmethod
+    def of(cls, row: PolicyRow) -> Difference:
+        return cls(row.gain_difference, row.difference_low, row.difference_high)
+
+
+@dataclass(frozen=True)
+class StandingRow:
+    """One playbook's paired difference from the champion with h(k) optimistic and pessimistic beyond the data."""
+
+    label: str
+    optimistic: Difference
+    pessimistic: Difference
+
+    @property
+    def reading(self) -> str:
+        """:data:`BETTER` when both intervals sit above 0, :data:`WORSE` when both sit below, :data:`UNCLEAR`
+        otherwise."""
+
+        if self.optimistic.low > 0 and self.pessimistic.low > 0:
+            return BETTER
+        if self.optimistic.high < 0 and self.pessimistic.high < 0:
+            return WORSE
+        return UNCLEAR
+
+
+@dataclass(frozen=True)
+class ReplayStanding:
+    """What the scheduling replay said at the CLOSE of ``session_id``, at ``at``: each playbook against ``champion``
+    over the ``sessions`` archived then, ``runs`` runs each."""
+
+    session_id: str
+    at: float
+    champion: str
+    sessions: int
+    runs: int
+    rows: tuple[StandingRow, ...] = ()
+
+    def readings(self) -> dict[str, str]:
+        return {row.label: row.reading for row in self.rows}
+
+
+def replay_standing(
+    trees: Sequence[SearchTree], pool: PlaybookPool, *, session_id: str, at: float, runs: int = CLOSE_REPLAY_RUNS
+) -> tuple[ReplayStanding, tuple[SchedulingComparison, ...]]:
+    """The scheduling replay of ``trees`` against ``pool``'s champion, both ways beyond the data: the default variants
+    (H0 and the old rule among them) and the playbooks on trial. The standing it comes to, and the comparisons."""
+
+    champion = pool.champion()
+    playbooks = {**variants(), **{playbook.label: playbook for playbook in pool.on_trial()}, champion.label: champion}
+    found = tuple(
+        compare(trees, playbooks, runs=runs, beyond=beyond, baseline=champion.label)
+        for beyond in (OPTIMISTIC, PESSIMISTIC)
+    )
+    held, dropped = ({row.label: row for row in comparison.rows} for comparison in found)
+    rows = tuple(
+        StandingRow(label, Difference.of(row), Difference.of(dropped[label]))
+        for label, row in held.items()
+        if label != champion.label
+    )
+    return ReplayStanding(session_id, at, champion.label, len(trees), runs, rows), found
+
+
+def record_standing(pool: PlaybookPool, standing: ReplayStanding) -> bool:
+    """Keep ``standing`` beside the pool's playbooks, once a session; ``False`` when it was kept already."""
+
+    return _keep(pool.root / _REPLAYS, standing.session_id, STANDING_FORMAT, standing)
+
+
+def standings(pool: PlaybookPool) -> tuple[ReplayStanding, ...]:
+    """The standings kept beside ``pool``, the earliest first."""
+
+    return tuple(sorted(_kept(pool.root / _REPLAYS, ReplayStanding, STANDING_FORMAT), key=lambda item: item.at))
+
+
+def moved(previous: ReplayStanding | None, current: ReplayStanding) -> tuple[str, ...]:
+    """The readings of ``current`` that moved since ``previous`` against the same champion, a line each."""
+
+    if previous is None or previous.champion != current.champion:
+        return ()
+    before = previous.readings()
+    return tuple(
+        f"{label}: {before[label]} -> {reading}"
+        for label, reading in current.readings().items()
+        if label in before and before[label] != reading
+    )
+
+
+def standing_report(
+    standing: ReplayStanding, comparisons: Sequence[SchedulingComparison], previous: ReplayStanding | None
+) -> str:
+    """The rerun as CLOSE writes it: what replays better and worse than the champion both ways beyond the data, what
+    moved since ``previous``, and the comparisons."""
+
+    readings = standing.readings()
+    lines = [
+        f"Scheduling replay at the CLOSE of {standing.session_id}, over {standing.sessions} archived sessions, "
+        f"{standing.runs} runs each, against the champion {standing.champion}:",
+        "",
+        *(
+            f"- {reading} both ways: {', '.join(label for label, found in readings.items() if found == reading) or 'none'}"
+            for reading in (BETTER, WORSE, UNCLEAR)
+        ),
+        "",
+    ]
+    if previous is None or previous.champion != standing.champion:
+        lines.append(f"No earlier CLOSE read the replay against {standing.champion}.")
+    else:
+        shifted = moved(previous, standing)
+        lines.append(f"Since the CLOSE of {previous.session_id}: {'; '.join(shifted) or 'no reading moved'}.")
+    return "\n".join([*lines, *(f"\n{comparison.render()}" for comparison in comparisons)])
 
 
 __all__ = [
+    "BETTER",
+    "CLOSE_REPLAY_RUNS",
     "DIRECTION",
     "GAIN_PER_GPU_HOUR",
     "MAX_TRIALS",
     "MIN_TRIALS",
+    "PAIR_SECONDS",
     "R2_POINTS",
+    "STANDING_FORMAT",
+    "TASK_LABELS",
+    "TASK_SIZES",
     "TRIAL_FORMAT",
+    "UNCLEAR",
+    "WORSE",
     "Complete",
     "DecisionPoint",
+    "Difference",
+    "Pair",
+    "ReplayStanding",
     "Rung",
+    "StandingRow",
     "Trial",
     "decision_points",
+    "moved",
     "noise_band",
+    "pairs",
     "r0",
     "r1",
     "r2",
     "r3",
+    "record_standing",
     "record_trial",
+    "replay_standing",
     "session_measures",
+    "session_task",
     "settle",
+    "standing_report",
+    "standings",
     "trial_of",
     "trials",
 ]

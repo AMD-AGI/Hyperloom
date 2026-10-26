@@ -13,7 +13,8 @@ two alike branches to stop.
 :data:`H0` is the first champion: the evidence rules, no text rules, every number at its default. A playbook never
 overrides the :data:`SAFETY_ENVELOPE`, which the judge reads beside it and the scheduler enforces: a branch with a
 candidate waiting for its confirm or a near-bar or stranded lead is no stop candidate, a probation draw stands, the
-numbers stay in their bounds, the audit stays on, and a playbook changes one thing at a time.
+numbers stay in their bounds, the audit stays on, and a playbook changes one thing at a time. The stops it forbids are
+:func:`envelope_breaches`; a challenger session that ordered one plays the champion from then on.
 :func:`problems` is the static check (R0) every new playbook passes before it is tried.
 
 The pool beside the archive (:class:`PlaybookPool`, ``<root>/playbooks``) keeps every playbook written, the
@@ -28,18 +29,22 @@ import dataclasses
 import json
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.notebook.codec import decode, encode
 from hyperloom_multibranch.notebook.local.files import encode_json, publish_once
 from hyperloom_multibranch.notebook.rsi.archive import TreeArchive
 from hyperloom_multibranch.notebook.rsi.frontier import (
+    NEAR_BAR_COMPONENT,
+    PROBATION_COMPONENT,
     PROBATION_SHARE,
     PROBATION_TESTS,
     SETTLED_TESTS,
+    STRANDED_COMPONENT,
     FrontierPolicy,
     StopRule,
 )
@@ -50,6 +55,9 @@ log = logging.getLogger(__name__)
 PLAYBOOK_FORMAT = "multibranch.scheduling-playbook"
 #: The key of the playbook a session played in its policy versions, as the scheduler records it.
 PLAYBOOK_KEY = "playbook"
+#: The key the scheduler records beside :data:`PLAYBOOK_KEY` when a challenger session broke the safety envelope and
+#: played the champion for the rest of it, the breach as its value.
+FALLBACK_KEY = "playbook_fallback"
 CROWNED_FORMAT = "multibranch.scheduling-playbook-crowned"
 RETIRED_FORMAT = "multibranch.scheduling-playbook-retired"
 #: A playbook's label: lower-case letters, digits and ``.``, ``_``, ``-``.
@@ -378,6 +386,32 @@ def session_playbook(pool: PlaybookPool | None, *, challenger: bool) -> Playbook
     return PlaybookChoice(champion, champion)
 
 
+def envelope_breaches(rows: Sequence[BranchProgress], stops: Collection[str]) -> tuple[str, ...]:
+    """The judge's ``stops`` the :data:`SAFETY_ENVELOPE` forbids, a line each: of a running branch of ``rows`` held by
+    a candidate waiting for its confirm, by a near-bar or a stranded lead in its stall evidence, or by its probation.
+    The scheduler refuses them; in a challenger session it plays the champion for the rest of the session and records
+    the breach under :data:`FALLBACK_KEY`."""
+
+    found = []
+    for row in rows:
+        if row.branch not in stops:
+            continue
+        evidence = row.frontier.components if row.frontier is not None else {}
+        held = [
+            what
+            for what, holds in (
+                ("a candidate waiting for its confirm", bool(row.pending)),
+                ("a near-bar lead", evidence.get(NEAR_BAR_COMPONENT, 0.0) > 0),
+                ("a stranded lead", STRANDED_COMPONENT in evidence),
+                ("its probation", PROBATION_COMPONENT in evidence),
+            )
+            if holds
+        ]
+        if held:
+            found.append(f"stop of {row.branch}, held by {' and '.join(held)}")
+    return tuple(found)
+
+
 def replaced(playbook: Playbook, **numbers: float | int | None) -> Playbook:
     """``playbook`` with some numbers changed; raises ``TypeError`` for a name :class:`PlaybookNumbers` lacks."""
 
@@ -387,6 +421,7 @@ def replaced(playbook: Playbook, **numbers: float | int | None) -> Playbook:
 __all__ = [
     "BOUNDS",
     "CROWNED_FORMAT",
+    "FALLBACK_KEY",
     "H0",
     "H0_LABEL",
     "MAX_RULES",
@@ -406,6 +441,7 @@ __all__ = [
     "PlaybookRule",
     "Retired",
     "changes",
+    "envelope_breaches",
     "problems",
     "replaced",
     "session_playbook",

@@ -65,6 +65,9 @@ MIN_GAINS = 10
 DEFAULT_FIRST_COMMIT_MINUTES = 42.0
 #: The judged-test interval of a branch or a session that recorded fewer than two.
 DEFAULT_INTERVAL_SECONDS = 900.0
+#: The shortest judged-test interval a replay keeps: a server takes longer to launch, so a tree whose tests sit closer
+#: was not measured, and its replay would sample without end.
+MIN_INTERVAL_SECONDS = 60.0
 #: The archived session's own label in a comparison.
 ARCHIVE = "archive"
 #: The probation shares and branch caps :func:`variants` tries beside H0.
@@ -191,7 +194,7 @@ def archive_cap(tree: SearchTree) -> int:
 
 def _median_gap(times: Sequence[float]) -> float | None:
     gaps = [later - earlier for earlier, later in zip(times, times[1:]) if later > earlier]
-    return statistics.median(gaps) if gaps else None
+    return max(MIN_INTERVAL_SECONDS, statistics.median(gaps)) if gaps else None
 
 
 def _gpu_per_test(branch: TreeBranch) -> float:
@@ -265,10 +268,13 @@ class _Run:
     def draws(self, key: str) -> random.Random:
         return _seeded(self.seed, self.tree.session_id, self.run, key)
 
-    def start(self, branch: _Branch) -> None:
+    def start(self, branch: _Branch) -> bool:
+        """Run ``branch`` from its first test; ``False`` when none lands within the budget and it ended as it opened."""
+
         self.running[branch.key] = branch
         self.opened += 1
         self.schedule(branch)
+        return branch.key in self.running
 
     def schedule(self, branch: _Branch) -> None:
         """Queue ``branch``'s next test, or end it where its record or the budget runs out."""
@@ -370,16 +376,15 @@ class _PlaybookRun(_Run):
             pass
 
     def open(self, at: float) -> bool:
-        """Open a branch at ``at``: the archive's next, shifted, or a sampled one; ``False`` when none can open."""
+        """Open a branch at ``at``: the archive's next, shifted, or a sampled one; ``False`` when none can open, or
+        the one opened has no test left in the budget, so no other would."""
 
         if at >= self.tree.budget_seconds:
             return False
         if self.queue:
-            self.start(self.borrowed(self.queue.popleft(), at))
-        else:
-            self.synthetic += 1
-            self.start(self.sampled(f"sampled-{self.synthetic}", at, None))
-        return True
+            return self.start(self.borrowed(self.queue.popleft(), at))
+        self.synthetic += 1
+        return self.start(self.sampled(f"sampled-{self.synthetic}", at, None))
 
     def borrowed(self, source: TreeBranch, at: float) -> _Branch:
         offset = at - source.opened_s
@@ -747,6 +752,7 @@ __all__ = [
     "CAPS",
     "DEFAULT_FIRST_COMMIT_MINUTES",
     "DEFAULT_INTERVAL_SECONDS",
+    "MIN_INTERVAL_SECONDS",
     "MIN_GAINS",
     "OLD_RULE",
     "OLD_RULE_STALL",

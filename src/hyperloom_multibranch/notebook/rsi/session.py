@@ -11,8 +11,10 @@
   Beside the receipts go the frontier calibration over the archived sessions like this one, and the stop audit of
   this session's stops and probations against the stall odds the judge read (:mod:`rsi.stops`). A session that
   played a scheduling playbook is kept as its trial beside the playbook pool, which may crown or retire a playbook
-  (:mod:`rsi.ladder`). A step that cannot be done says why and never stops CLOSE; :meth:`KnowledgeClose.document` is
-  what the breakdown records of the steps (``CloseOutcome.knowledge`` of ``build_breakdown``).
+  (:mod:`rsi.ladder`); then the scheduling replay reruns over the archive with this session's tree in it, against the
+  champion, and says which of its readings moved since the last CLOSE. A step that cannot be done says why and never
+  stops CLOSE; :meth:`KnowledgeClose.document` is what the breakdown records of the steps (``CloseOutcome.knowledge``
+  of ``build_breakdown``).
 * :func:`session_frontier_policy` chooses its policy once the session has a profile: the calibration's recommendation
   for sessions like it, or the defaults; :func:`session_frontier_scorer` chooses the same way among the scorers of
   :mod:`rsi.scorers` too, crowning a challenger that passes the promotion gate (a 1-in-4 exploration session's pick,
@@ -75,9 +77,18 @@ from hyperloom_multibranch.notebook.rsi.scorers import (
     registered_scorers,
     scorer_named,
 )
-from hyperloom_multibranch.notebook.rsi.ladder import record_trial, settle, trial_of
-from hyperloom_multibranch.notebook.rsi.playbook import PLAYBOOK_KEY, PlaybookPool
-from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
+from hyperloom_multibranch.notebook.rsi.ladder import (
+    moved,
+    record_standing,
+    record_trial,
+    replay_standing,
+    settle,
+    standing_report,
+    standings,
+    trial_of,
+)
+from hyperloom_multibranch.notebook.rsi.playbook import FALLBACK_KEY, PLAYBOOK_KEY, PlaybookPool
+from hyperloom_multibranch.notebook.rsi.similarity import task_conditions, workload_kind
 from hyperloom_multibranch.notebook.rsi.stops import stop_audit
 
 log = logging.getLogger(__name__)
@@ -94,6 +105,8 @@ LEARNING_RECEIPT = "experience_kb_learnings.json"
 CALIBRATION_REPORT = "frontier-calibration.md"
 #: The stop audit, written beside the receipts at every CLOSE.
 STOP_AUDIT_REPORT = "stop-audit.md"
+#: The scheduling replay rerun over the archive, written beside the receipts at every CLOSE.
+SCHEDULING_REPLAY_REPORT = "scheduling-replay.md"
 NO_REPORTS = "no_reports_folder"
 #: The scores log's usual name in the session's reports folder.
 FRONTIER_LOG = "frontier.jsonl"
@@ -102,6 +115,7 @@ NO_RETRIEVAL_LOG = "no_retrieval_log"
 NO_LESSON_SHOWN = "no_pooled_lesson_shown"
 ALREADY_RECORDED = "already_recorded"
 NO_PLAYBOOK_PLAYED = "no_playbook_played"
+NO_TREES = "no_archived_tree"
 #: What a step raises when its target or its input lets it down; CLOSE records it and goes on.
 STEP_ERRORS = (LookupError, OSError, RuntimeError, ValueError)
 
@@ -123,8 +137,9 @@ class CloseStep:
 class KnowledgeClose:
     """CLOSE's knowledge steps: the Experiences, the learnings, the archived search tree, the Experiences only the
     notebook's own declaration holds (``multibranch_experiences``), the frontier calibration's report, the learnings
-    into the RSI lesson pool (``lessons``), the standing of the pooled lessons the session showed, and the stop
-    audit, whose counts are the stops and probations by what came of them."""
+    into the RSI lesson pool (``lessons``), the standing of the pooled lessons the session showed, the stop audit,
+    whose counts are the stops and probations by what came of them, the playbook trial, and the scheduling replay
+    rerun."""
 
     experiences: CloseStep
     learnings: CloseStep
@@ -135,6 +150,7 @@ class KnowledgeClose:
     lesson_standings: CloseStep = CloseStep(SKIPPED, NO_ARCHIVE)
     stop_audit: CloseStep = CloseStep(SKIPPED, NO_REPORTS)
     playbook_trial: CloseStep = CloseStep(SKIPPED, NO_PLAYBOOK_PLAYED)
+    scheduling_replay: CloseStep = CloseStep(SKIPPED, NO_REPORTS)
 
     def steps(self) -> dict[str, CloseStep]:
         """The steps by their names in the breakdown's ``close.knowledge``."""
@@ -149,6 +165,7 @@ class KnowledgeClose:
             "lesson_standings": self.lesson_standings,
             "stop_audit": self.stop_audit,
             "playbook_trial": self.playbook_trial,
+            "scheduling_replay": self.scheduling_replay,
         }
 
     def document(self) -> dict[str, object]:
@@ -235,7 +252,8 @@ def _trialled(
         tree = tree_from_snapshot(snapshot, metric, bottlenecks=bottlenecks)
         pool = PlaybookPool.beside(target)
         audit = stop_audit(tree, stall_odds(archived_history(target), tree.task, session=tree))
-        written = record_trial(pool, trial_of(tree, audit, played, pool.champion().label))
+        trial = trial_of(tree, audit, played, pool.champion().label, fell_back=bool(versions.get(FALLBACK_KEY)))
+        written = record_trial(pool, trial)
         settled = settle(pool, snapshot.taken_at)
     except NotRecorded:
         return CloseStep(SKIPPED, NO_PROFILE)
@@ -266,6 +284,38 @@ def _audited(
     except STEP_ERRORS as exc:
         return _failed("write the stop audit", exc)
     return CloseStep(WRITTEN, audit.note(), audit.counts())
+
+
+def _replayed(snapshot: NotebookSnapshot, archive: TreeArchive | None, path: Path | None) -> CloseStep:
+    """The scheduling replay rerun over the archived sessions of this session's workload kind, its own tree among
+    them, against the champion, written to ``path``; its standing kept beside the playbook pool for the next CLOSE to
+    read what moved against. A gain in interactivity and one in throughput do not average."""
+
+    if path is None:
+        return CloseStep(SKIPPED, NO_REPORTS)
+    target = archive if archive is not None else TreeArchive.from_env()
+    if target is None:
+        return CloseStep(SKIPPED, NO_ARCHIVE)
+    if snapshot.profile is None:
+        return CloseStep(SKIPPED, NO_PROFILE)
+    kind = workload_kind(task_conditions(snapshot.profile))
+    trees = tuple(tree for tree in archived_history(target) if workload_kind(tree.task) == kind)
+    if not trees:
+        return CloseStep(SKIPPED, NO_TREES)
+    try:
+        pool = PlaybookPool.beside(target)
+        previous = next((item for item in reversed(standings(pool)) if item.at < snapshot.taken_at), None)
+        standing, comparisons = replay_standing(
+            trees, pool, session_id=snapshot.profile.session_id, at=snapshot.taken_at
+        )
+        record_standing(pool, standing)
+        atomic_write_text(
+            path, standing_report(standing, comparisons, previous) + "\n", options=WriteOptions(make_parents=True)
+        )
+    except STEP_ERRORS as exc:
+        return _failed("rerun the scheduling replay", exc)
+    shifted = moved(previous, standing)
+    return CloseStep(WRITTEN, "; ".join(shifted), {"sessions": standing.sessions, "moved": len(shifted)})
 
 
 @dataclass(frozen=True)
@@ -357,6 +407,7 @@ def close_knowledge(
         lesson_standings=_standings(snapshot, targets.lesson_pool(), targets.receipt(LEARNINGS_LOG)),
         stop_audit=_audited(snapshot, metric, targets.archive, targets.receipt(STOP_AUDIT_REPORT), bottlenecks),
         playbook_trial=_trialled(snapshot, metric, targets.archive, bottlenecks),
+        scheduling_replay=_replayed(snapshot, targets.archive, targets.receipt(SCHEDULING_REPLAY_REPORT)),
     )
 
 
@@ -507,6 +558,8 @@ __all__ = [
     "NO_PROFILE",
     "NO_REPORTS",
     "NO_RETRIEVAL_LOG",
+    "NO_TREES",
+    "SCHEDULING_REPLAY_REPORT",
     "STEP_ERRORS",
     "STOP_AUDIT_REPORT",
     "WRITTEN",

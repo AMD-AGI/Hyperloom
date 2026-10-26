@@ -29,8 +29,8 @@ from hyperloom_multibranch.notebook.rsi.expression import ExpressionScorer
 from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1, FRONTIER_V1_LABEL, FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, Retrieval, RetrievalLog, RetrievalSource
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_stall_odds
-from hyperloom_multibranch.notebook.rsi.ladder import trials
-from hyperloom_multibranch.notebook.rsi.playbook import H0, PLAYBOOK_KEY, PlaybookPool
+from hyperloom_multibranch.notebook.rsi.ladder import standings, trials
+from hyperloom_multibranch.notebook.rsi.playbook import FALLBACK_KEY, H0, PLAYBOOK_KEY, PlaybookPool
 from hyperloom_multibranch.notebook.rsi.lessons import (
     LessonPool,
     LessonRevision,
@@ -52,6 +52,7 @@ from hyperloom_multibranch.notebook.rsi.session import (
     NO_REPORTS,
     NO_PLAYBOOK_PLAYED,
     NO_RETRIEVAL_LOG,
+    SCHEDULING_REPLAY_REPORT,
     STOP_AUDIT_REPORT,
     WRITTEN,
     CloseStep,
@@ -166,11 +167,54 @@ def test_close_keeps_a_session_that_played_a_playbook_as_its_trial_once(
     (kept,) = trials(PlaybookPool.beside(archive))
     assert done.playbook_trial == CloseStep(WRITTEN, "", {"trials": 1, "settled": 0})
     assert again.playbook_trial == CloseStep(SKIPPED, ALREADY_RECORDED, {"trials": 0, "settled": 0})
-    assert (kept.session_id, kept.played, kept.champion) == ("sess-1", H0.label, H0.label)
-    assert "early_stops" in kept.measures
+    assert (kept.session_id, kept.played, kept.champion, kept.fell_back) == ("sess-1", H0.label, H0.label, False)
+    assert kept.task.startswith("workload=inferencex model=") and "early_stops" in kept.measures
     assert close_knowledge(snapshot, METRIC, targets=CloseTargets(archive=archive)).playbook_trial == CloseStep(
         SKIPPED, NO_PLAYBOOK_PLAYED
     )
+
+
+@pytest.mark.usefixtures("unconfigured")
+def test_a_challenger_session_that_fell_back_to_the_champion_is_kept_as_such(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    archive = TreeArchive(tmp_path)
+    breach = "stop of s1, held by its probation"
+    played = dataclasses.replace(
+        snapshot.fingerprints[-1], policy_versions={PLAYBOOK_KEY: "patient", FALLBACK_KEY: breach}
+    )
+
+    close_knowledge(
+        dataclasses.replace(snapshot, fingerprints=(played,)), METRIC, targets=CloseTargets(archive=archive)
+    )
+
+    (kept,) = trials(PlaybookPool.beside(archive))
+    assert (kept.played, kept.fell_back) == ("patient", True)
+
+
+@pytest.mark.usefixtures("unconfigured")
+def test_close_reruns_the_scheduling_replay_and_says_what_moved_since_the_last_close(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    archive, reports = TreeArchive(tmp_path / "archive"), tmp_path / "reports"
+    assert snapshot.profile is not None
+    later = dataclasses.replace(
+        snapshot,
+        profile=dataclasses.replace(snapshot.profile, session_id="sess-2"),
+        taken_at=snapshot.taken_at + HOUR,
+    )
+
+    first = close_knowledge(snapshot, METRIC, targets=CloseTargets(archive=archive, receipts=reports / "1"))
+    second = close_knowledge(later, METRIC, targets=CloseTargets(archive=archive, receipts=reports / "2"))
+
+    assert first.scheduling_replay == CloseStep(WRITTEN, "", {"sessions": 1, "moved": 0})
+    assert second.scheduling_replay.status == WRITTEN and second.scheduling_replay.counts["sessions"] == 2
+    text = (reports / "1" / SCHEDULING_REPLAY_REPORT).read_text(encoding="utf-8")
+    assert text.startswith("Scheduling replay at the CLOSE of sess-1, over 1 archived sessions")
+    assert "No earlier CLOSE read the replay against h0." in text
+    assert "Since the CLOSE of sess-1:" in (reports / "2" / SCHEDULING_REPLAY_REPORT).read_text(encoding="utf-8")
+    assert [item.session_id for item in standings(PlaybookPool.beside(archive))] == ["sess-1", "sess-2"]
+    assert close_knowledge(snapshot, METRIC).scheduling_replay == CloseStep(SKIPPED, NO_REPORTS)
 
 
 @pytest.mark.usefixtures("unconfigured")
@@ -314,6 +358,7 @@ def test_the_breakdown_records_the_knowledge_steps_only_when_given(snapshot: Not
         "lesson_standings": {"status": SKIPPED, "reason": NO_ARCHIVE, "counts": {}},
         "stop_audit": {"status": SKIPPED, "reason": NO_REPORTS, "counts": {}},
         "playbook_trial": {"status": SKIPPED, "reason": NO_PLAYBOOK_PLAYED, "counts": {}},
+        "scheduling_replay": {"status": SKIPPED, "reason": NO_REPORTS, "counts": {}},
     }
     assert json.loads(json.dumps(close["knowledge"])) == close["knowledge"]
     assert "knowledge" not in build_breakdown(snapshot)["close"]

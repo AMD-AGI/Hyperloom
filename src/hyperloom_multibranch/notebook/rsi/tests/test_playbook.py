@@ -9,8 +9,17 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_multibranch.contracts.notebook.records import BranchProgress, FrontierScore, PendingCandidate
 from hyperloom_multibranch.notebook.rsi.archive import TreeArchive
-from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, StopRule, is_young
+from hyperloom_multibranch.notebook.rsi.frontier import (
+    NEAR_BAR_COMPONENT,
+    PROBATION_COMPONENT,
+    STALLED_COMPONENT,
+    STRANDED_COMPONENT,
+    FrontierPolicy,
+    StopRule,
+    is_young,
+)
 from hyperloom_multibranch.notebook.rsi.playbook import (
     H0,
     MAX_RULES,
@@ -23,6 +32,7 @@ from hyperloom_multibranch.notebook.rsi.playbook import (
     PlaybookRule,
     Retired,
     changes,
+    envelope_breaches,
     problems,
     replaced,
     session_playbook,
@@ -121,3 +131,27 @@ def test_a_session_plays_the_champion_or_in_a_challenger_session_the_oldest_play
     assert pool.champion() == LONGER and pool.on_trial() == ()
     assert session_playbook(pool, challenger=True) == session_playbook(pool, challenger=False)
     assert [item.evidence for item in pool.retired()] == ["behind the champion"]
+
+
+def _row(name: str, *, waiting: bool = False, **evidence: float) -> BranchProgress:
+    pending = (PendingCandidate(f"{name}-x", f"{name}-confirm", "c1", "output_tps", 1050.0, 5.0),) if waiting else ()
+    return BranchProgress(name, True, "c0", "c1", 6, 1, 0.0, {}, FrontierScore(0.0, evidence), pending=pending)
+
+
+def test_the_envelope_forbids_the_stops_of_branches_their_stall_evidence_holds() -> None:
+    rows = (
+        _row("b1", **{STALLED_COMPONENT: 9.0, NEAR_BAR_COMPONENT: 0.0}),
+        _row("b2", waiting=True),
+        _row("b3", **{NEAR_BAR_COMPONENT: 1.0, STRANDED_COMPONENT: 4.2}),
+        _row("b4", **{PROBATION_COMPONENT: 1.0}),
+        _row("b5", **{PROBATION_COMPONENT: 1.0}),
+    )
+
+    found = envelope_breaches(rows, {"b1", "b2", "b3", "b4"})
+
+    assert found == (
+        "stop of b2, held by a candidate waiting for its confirm",
+        "stop of b3, held by a near-bar lead and a stranded lead",
+        "stop of b4, held by its probation",
+    )
+    assert envelope_breaches(rows, ()) == ()
