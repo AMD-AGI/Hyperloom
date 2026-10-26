@@ -204,6 +204,14 @@ async def test_the_floor_ends_with_the_judges_grace_at_the_explore_tests_that_su
     assert settled is not None and settled.basis is FrontierBasis.TREND
 
 
+def test_a_tree_kept_before_settled_tests_counts_its_ended_tests_for_the_floor() -> None:
+    failing = branch("s9", [], ended_times=(0.0,) * SETTLED_TESTS, settled_times=(0.0,))
+    older = branch("s9", [], ended_times=(0.0,) * SETTLED_TESTS)
+
+    assert is_young(failing, 60.0, POLICY)
+    assert not is_young(older, 60.0, POLICY)
+
+
 def test_the_trend_reaches_back_to_the_branchs_last_four_ended_explore_tests() -> None:
     # c8927ba5's b09 at its stop: a long profile left one explore result in the 37-minute window.
     minute = 60.0
