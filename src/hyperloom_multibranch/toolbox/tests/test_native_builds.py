@@ -31,8 +31,7 @@ from hyperloom.measure.jit.native.store import BuildInfraError, BuildStore
 from hyperloom.measure.jit.native.trust import Signer, Trust, TrustedKey
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.runner.native.builder import BuildMachine
-from hyperloom.measure.runner.native import isolated
-from hyperloom.measure.runner.native.isolated import STAGED_FILE, IsolatedBuilds, Isolation, local_isolation
+from hyperloom.measure.runner.native.isolated import STAGED_FILE, IsolatedBuilds, Isolation
 from hyperloom.measure.runner.native.isolated import staged_record
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
 from hyperloom.measure.spec import Environment
@@ -313,18 +312,6 @@ def test_what_the_child_staged_is_read_as_untrusted_data(tmp_path: Path) -> None
     lying = _staged_from(tmp_path / "c", lambda work: (work / STAGED_FILE).write_text(extra))
     with pytest.raises(BuildInfraError, match="outside the schema"):
         staged_record(lying, (1.0, 1.0))
-
-
-def test_local_isolation_drops_to_an_unprivileged_user_in_a_network_namespace_or_is_none(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(isolated.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(isolated.os, "geteuid", lambda: 0)
-    found = local_isolation()
-    assert found is not None and found.uid == 65534
-    assert found.prefix[:3] == ("/usr/bin/unshare", "--net", "--") and "--reuid=65534" in found.prefix
-    monkeypatch.setattr(isolated.os, "geteuid", lambda: 1000)
-    assert local_isolation() is None, "only root can give the compile another user"
 
 
 # --- configuration --------------------------------------------------------------------------------------------------

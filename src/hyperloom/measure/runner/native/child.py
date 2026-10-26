@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``python -I -m hyperloom.measure.runner.native.child WORK``: the compile of one laid tree, in the build runner's child.
+"""The compile of one laid tree, in the build runner's child: :func:`main` with ``[WORK]``.
+
+The runner starts it under ``python -I`` with this module imported from the tree the runner itself runs from (see
+:mod:`.isolated`), never from the interpreter's installed ``hyperloom``.
 
 :class:`~hyperloom.measure.runner.native.isolated.IsolatedBuilds` lays the tree below ``WORK`` and writes ``job.json``;
 this process, started under the runner's isolation, compiles it (:func:`~hyperloom.measure.runner.native.builder.

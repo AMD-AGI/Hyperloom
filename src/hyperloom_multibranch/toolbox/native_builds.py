@@ -40,7 +40,13 @@ from hyperloom.measure.jit.native.config import (
 )
 from hyperloom.measure.jit.native.trust import Signer
 from hyperloom.measure.runner.native.builder import BuildMachine
-from hyperloom.measure.runner.native.isolated import SGL_KERNEL_FACTORY, IsolatedBuilds, Isolation, local_isolation
+from hyperloom.measure.runner.native.isolated import (
+    ISOLATION_UID_NETNS,
+    SGL_KERNEL_FACTORY,
+    IsolatedBuilds,
+    Isolation,
+    local_isolation,
+)
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
 from hyperloom.measure.runner.native.recipes import sgl_kernel_recipe
 from hyperloom_multibranch.toolbox.store_builds import BuildSite, StoreBuildDriver
@@ -147,12 +153,27 @@ def native_builds(
     )
     planner, isolated = NativePlanner(site, blobs), isolation()
     runner = IsolatedBuilds(planner, blobs, isolated, {recipe.component: SGL_KERNEL_FACTORY})
-    if isolated is None:
-        logger.warning("native builds are configured and this host cannot isolate a compile: every build will fail")
+    _log_isolation(isolated)
     build_site = BuildSite(machine.image_digest, machine.builder_image_digest, machine.gfx_arch, recipes)
     driver = StoreBuildDriver(store, signer, build_site, compiled_needs, runner)
     runner_envs = {BUILD_STORE_ENV: environ[BUILD_STORE_ENV].strip(), BUILD_TRUST_ENV: environ[BUILD_TRUST_ENV].strip()}
     return NativeBuilds(driver, planner, runner_envs)
+
+
+def _log_isolation(isolated: Isolation | None) -> None:
+    """Say once, at the start of the session, how this host isolates a compile (the level each build's record names)."""
+    if isolated is None:
+        logger.warning("native builds are configured and this host cannot isolate a compile: every build will fail")
+    elif isolated.level == ISOLATION_UID_NETNS:
+        logger.info(
+            "native builds compile as user %s in a network namespace of their own (%s)", isolated.uid, isolated.level
+        )
+    else:
+        logger.warning(
+            "native builds compile as user %s with this host's network: it cannot make a network namespace (%s)",
+            isolated.uid,
+            isolated.level,
+        )
 
 
 def with_native_plan(acceptance: AcceptanceSetup, native: NativeBuilds | None) -> AcceptanceSetup:
