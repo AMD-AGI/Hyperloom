@@ -311,7 +311,7 @@ class PerfGateMixin:
             return evidence
         try:
             from ...enablement.runtime.adapters import get_adapter
-            from ...source_snapshot import MANIFEST_NAME, snapshot_source_layer
+            from ...source_snapshot import MANIFEST_NAME, SourceLayer, snapshot_source_layer
             from ._patch_snapshot import _patch_touched_paths_split, harvest_realized_diff
 
             base_sha = _git_head_sha(framework_root)
@@ -335,14 +335,16 @@ class PerfGateMixin:
             evidence["source_import_root"] = import_root
             slot = attempt.specialist_task_id or str(attempt.task_id or "keep")
             snap = snapshot_source_layer(
-                framework_root=framework_root,
-                base_sha=base_sha,
-                rel_paths=rel_paths,
+                SourceLayer(
+                    framework_root=framework_root,
+                    base_sha=base_sha,
+                    rel_paths=rel_paths,
+                    declared_ops=declared_ops,
+                    import_root=import_root,
+                ),
                 dest_dir=self.session_dir / "optimization_stack" / "src" / slot,
                 provenance="integrate_patch",
                 extra={"specialist_task_id": attempt.specialist_task_id},
-                declared_ops=declared_ops,
-                import_root=import_root,
             )
             if not snap:
                 return evidence

@@ -144,7 +144,7 @@ def _shape_key(row: dict[str, str]) -> tuple[int, int, int] | None:
 
 
 # Shared with the fp8 dense path: the tuned CSV is deployed verbatim there too.
-from ._aiter_dense_common import _row_err_ratio, drop_inaccurate_rows  # noqa: E402
+from ._row_accuracy import drop_inaccurate_rows, dropped_row_record  # noqa: E402
 
 
 def _parse_profile_defaults(profile_csv: Path) -> dict[tuple[int, int, int], float]:
@@ -583,16 +583,5 @@ class SglangDenseBf16Tuner(BaseTuner):
             best_micro_speedup=metrics.best,
             avg_micro_speedup=metrics.avg,
             shape_results=shape_results,
-            dropped_inaccurate=[
-                {
-                    "M": r.get("M"),
-                    "N": r.get("N"),
-                    "K": r.get("K"),
-                    "libtype": r.get("libtype"),
-                    "splitK": r.get("splitK"),
-                    "us": r.get("us"),
-                    "err_ratio": _row_err_ratio(r),
-                }
-                for r in dropped
-            ],
+            dropped_inaccurate=[dropped_row_record(r) for r in dropped],
         )

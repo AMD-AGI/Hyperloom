@@ -336,6 +336,7 @@ Shape sources, in descending priority — `--demand` wins, then
 | `--kernel-signature-log <file>` | `''` | Server log for 1-stage ASM detection. |
 | `--tokens <a,b>` | auto | Comma-separated explicit token list, overriding the automatic coverage. |
 | `--conc <n>` | `64` | Target serving concurrency, used for token coverage. |
+| `--m-grid bucket\|exact` | `bucket` | M the aiter dense (fp8/fp4) tuners tune the decode band and `--demand` rows at: aiter's multiple of 16 up to 256 and a power of two above (`bucket`), or the exact batch sizes (`exact`). The decode band takes sglang's graph batch sizes up to 64 and the powers of two above, up to `--conc`. The sglang bf16 tuner buckets its decode band and `--demand` rows the same way and does not read this flag. |
 | `--tp <n>` | `1` | Tensor-parallel degree. |
 
 Search and execution:

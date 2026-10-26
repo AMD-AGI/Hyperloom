@@ -15,6 +15,7 @@ import pytest
 from hyperloom.inference_optimizer.breakdown import recorder as rec
 from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EventHeader
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import make_kernel_recorder
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelExit
 from hyperloom.inference_optimizer.session.session_binding import (
     SessionNotBoundError,
     bound_session,
@@ -451,7 +452,7 @@ def test_finalize_leaves_an_event_that_closed_itself_alone(tmp_path):
         recorder = make_kernel_recorder(macro_cycle=3, route="forge")
         assert recorder is not None
         recorder.begin(tput_before=1000.0)
-        recorder.finish(tput_after=1000.0)
+        recorder.finish(KernelExit(tput_after=1000.0))
 
     assert rec.finalize_events(tmp_path) == []
     event = json.loads(_timeline_files(tmp_path)[0].read_text(encoding="utf-8"))

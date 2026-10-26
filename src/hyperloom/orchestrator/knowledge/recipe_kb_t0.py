@@ -9,9 +9,10 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, NamedTuple
 
 from packaging.version import InvalidVersion, Version
 
@@ -20,12 +21,17 @@ from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import agentx_active
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     RecipeKB,
+    RecipeUpsert,
     cid_to_path_components,
     recipe_canonical_id,
 )
 from hyperloom.orchestrator.knowledge.workload_tags import WORKLOAD_SHAPE_FIELDS, workload_shape_tags
 from hyperloom.inference_optimizer.breakdown.recorder import warm_start_event as _warm_start_event
-from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version, kb_hardware_slug
+from hyperloom.inference_optimizer.recipe_snapshot_constants import (
+    RecipeIdentity,
+    detect_framework_version,
+    kb_hardware_slug,
+)
 from hyperloom.inference_optimizer.session.session_paths import (
     recipe_kb_lessons_json,
     recipe_kb_pitfalls_json,
@@ -303,37 +309,39 @@ def _settle_warm_start_event(
     if status in _warm_start_event.MATCHED_STATUSES and recipe:
         replay = context.get("recommended_replay")
         matched = _warm_start_event.matched_block(
-            tier=match.get("tier"),
-            confidence=match.get("confidence"),
-            source=match.get("source"),
-            canonical_id=match.get("canonical_id"),
+            match=match,
             recipe=recipe,
+            experience=experience,
             expected_gain_pct=replay.get("expected_gain_pct") if isinstance(replay, Mapping) else None,
-            lessons=experience["lessons"],
-            pitfalls=experience["pitfalls"],
         )
     recorder.finish(match_status=status, matched=matched)
 
 
+class WarmMatch(NamedTuple):
+    """A Recipe KB row a warm-start tier matched, with that tier and its confidence."""
+
+    recipe: Mapping[str, Any] | None
+    tier: str
+    confidence: float
+
+
 def _build_warm_start_context(
     *,
-    tier: str,
-    confidence: float,
+    match: WarmMatch,
     canonical_id: str,
     source: str,
-    recipe: Mapping[str, Any],
-    config_donor: Mapping[str, Any] | None = None,
-    config_donor_tier: str = "",
-    config_donor_confidence: float | None = None,
+    config_donor: WarmMatch | None = None,
 ) -> dict[str, Any]:
     """Build the model-facing WarmStartContext from a KB recipe row."""
     from .remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE
 
+    recipe, tier, confidence = match
     # Priors ride the identity match independent of replay config, and come from the exact identity when the
     # cascade carried one across from a borrowed row.
     priors = recipe.get("exact_history") or recipe
-    if config_donor_confidence is None:
-        config_donor_confidence = confidence
+    if config_donor is None:
+        config_donor = WarmMatch(None, "", confidence)
+    donor, config_donor_tier, config_donor_confidence = config_donor
     ctx: dict[str, Any] = {
         # A cascade that matched nothing reports tier ``miss``, so the tier is the status.
         "status": tier if tier in ("miss", "seed_only") else "hit",
@@ -356,7 +364,6 @@ def _build_warm_start_context(
     if recipe.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE:
         return ctx
     # Replay config comes from the donor, or the identity recipe as self-donor.
-    donor = config_donor
     if donor is None:
         if not _has_replayable_config(recipe):
             return ctx
@@ -633,7 +640,7 @@ def _tier_matches(
     tiers: tuple[tuple[str, float, dict[str, str], list[str] | None, bool], ...],
     identity: Mapping[str, Any],
     shape: Mapping[str, Any],
-) -> Iterator[tuple[Mapping[str, Any], str, float]]:
+) -> Iterator[WarmMatch]:
     """Walk the degradation tiers, yielding each tier's trustworthy candidates best first."""
     seen = {_text(identity.get("canonical_id"))}
     hardware = _text(identity.get("hardware"))
@@ -666,7 +673,7 @@ def _tier_matches(
         if rows and not usable:
             log.info("warm-start tier %s rejected all %d candidates", tier, len(rows))
         for candidate in _rank_warm_candidates(usable, target_framework_version=version):
-            yield candidate, tier, confidence
+            yield WarmMatch(candidate, tier, confidence)
 
 
 def _cascade_warm_start_search(
@@ -676,7 +683,7 @@ def _cascade_warm_start_search(
     identity: Mapping[str, Any],
     shape: Mapping[str, Any],
     warm_prefer: Any,
-) -> "tuple[dict[str, Any], str, float]":
+) -> WarmMatch:
     """Resolve exact plus cumulative four-tier seven-tuple fallbacks."""
     exact_history: Mapping[str, Any] | None = None
     try:
@@ -689,24 +696,24 @@ def _cascade_warm_start_search(
         exact = None
     if isinstance(exact, Mapping) and exact and str(exact.get("canonical_id") or "") == cid:
         if _recipe_is_actionable(exact):
-            return dict(exact), "exact", 1.0
+            return WarmMatch(dict(exact), "exact", 1.0)
         exact_history = exact
 
     # An unparseable cid — every agentx id is one — keeps the dimensions resolved from SharedState.
     stored = {**identity, **_cid_dimensions(cid)}
     for candidate, tier, confidence in _tier_matches(kb, _warm_search_tiers(stored), stored, shape):
         if _select_remote_candidate(kb, candidate):
-            return _with_exact_history(candidate, exact_history), tier, confidence
+            return WarmMatch(_with_exact_history(candidate, exact_history), tier, confidence)
     if exact_history is not None:
-        return dict(exact_history), "exact", 1.0
-    return {}, "miss", 0.0
+        return WarmMatch(dict(exact_history), "exact", 1.0)
+    return WarmMatch({}, "miss", 0.0)
 
 
 def _find_config_donor(
     kb: Any,
     identity: Mapping[str, Any],
     shape: Mapping[str, Any],
-) -> tuple[Mapping[str, Any] | None, str, float]:
+) -> WarmMatch:
     """Borrow a replayable config through the standard degradation tiers."""
     tiers = tuple(
         (
@@ -722,25 +729,25 @@ def _find_config_donor(
         )
         for tier, confidence, labels, hardware_in, relax_framework_version in _warm_search_tiers(identity)
     )
-    return next(_tier_matches(kb, tiers, identity, shape), (None, "", 0.0))
+    return next(_tier_matches(kb, tiers, identity, shape), WarmMatch(None, "", 0.0))
 
 
 def _warm_replay_donor(
     kb: "RecipeKB",
-    match: tuple[Mapping[str, Any], str, float],
+    match: WarmMatch,
     identity: Mapping[str, Any],
     shape: Mapping[str, Any],
-) -> tuple[Mapping[str, Any] | None, str, float]:
+) -> WarmMatch:
     """Pick the row whose champion config T0 recommends replaying."""
     from .remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE
 
     recipe, tier, confidence = match
     if not recipe or recipe.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE:
-        return None, "", 0.0
+        return WarmMatch(None, "", 0.0)
     # A true-self (identity ``exact``) champion always replays; a cross-model borrow must clear the trustworthiness
     # gate before it becomes the donor.
     if _has_replayable_config(recipe) and (tier == "exact" or _donor_is_trustworthy(recipe, identity, shape)):
-        return recipe, "self", confidence
+        return WarmMatch(recipe, "self", confidence)
     return _find_config_donor(kb, identity, shape)
 
 
@@ -759,7 +766,7 @@ def _resolve_t0_identity(
     model = _text(workload) or "unknown_model"
     # Topology-aware hardware slug (multi-node appends ``_ws{world_size}``), resolved once so the cid, the stored
     # ``hardware`` field, and every warm-start tier share an identical, isolated key.
-    hardware = kb_hardware_slug(_text(hw) or "unknown_gpu", **resolve_kb_topology())
+    hardware = kb_hardware_slug(_text(hw) or "unknown_gpu", resolve_kb_topology())
     framework = _text(
         extra.get("framework_name")
         or extra.get("framework")
@@ -785,13 +792,15 @@ def _resolve_t0_identity(
         "precision": _text(getattr(shared_state, "precision", "")),
     }
     identity["canonical_id"] = recipe_canonical_id(
-        model=model,
-        hardware=hardware,
-        framework_name=framework,
-        framework_version=version,
-        precision=identity["precision"],
-        model_type=identity["model_type"],
-        architectures=architectures,
+        RecipeIdentity(
+            model=model,
+            hardware=hardware,
+            framework_name=framework,
+            framework_version=version,
+            precision=identity["precision"],
+            model_type=identity["model_type"],
+            architectures=architectures,
+        ),
         scheme=("agentx" if agentx_active(benchmark_mode=getattr(shared_state, "benchmark_mode", "")) else "inference"),
     )
     return identity
@@ -823,7 +832,7 @@ def _stamp_local_authority_row(
         if value and value != "unknown":
             sfp_payload[stored] = value
     try:
-        kb.put_recipe(
+        upsert = RecipeUpsert(
             canonical_id=identity["canonical_id"],
             model=identity["model"],
             hardware=identity["hardware"],
@@ -852,6 +861,7 @@ def _stamp_local_authority_row(
                 "details": {"sid": session_id},
             },
         )
+        kb.put_recipe(upsert)
     except Exception:
         log.exception("T0 anchor put_recipe raised unexpectedly")
 
@@ -914,7 +924,8 @@ def _warm_start_lookup(
         tier, confidence = "seed_only", 0.0
     # Config-donor decoupling: the identity match supplies the priors; a champion config is borrowed from the
     # nearest same-arch sibling when the match carries none.
-    donor, donor_tier, donor_confidence = _warm_replay_donor(kb, (recipe, tier, confidence), identity, shape)
+    identity_match = WarmMatch(recipe, tier, confidence)
+    donor = _warm_replay_donor(kb, identity_match, identity, shape)
     match = {
         "workload": identity["model"],
         "hw": identity["hardware"],
@@ -923,30 +934,32 @@ def _warm_start_lookup(
         "recipe": recipe,
     }
     return match, _build_warm_start_context(
-        config_donor=donor,
-        config_donor_tier=donor_tier,
-        config_donor_confidence=donor_confidence,
-        tier=tier,
-        confidence=confidence,
+        match=identity_match,
         canonical_id=cid,
         source=_warm_recipe_source(recipe, kb),
-        recipe=recipe,
+        config_donor=donor,
     )
+
+
+@dataclass(frozen=True)
+class T0AnchorRequest:
+    """The workload a T0 anchor stamps and warm-starts, and whether the session resumes."""
+
+    workload: str
+    hw: str
+    image_digest: str = ""
+    stack_fingerprint: Mapping[str, str] | None = None
+    extra_attrs: Mapping[str, Any] | None = None
+    resume: bool = False
 
 
 def run_t0_anchor(
     kb: RecipeKB,
     shared_state: Any,
+    request: T0AnchorRequest,
     *,
-    workload: str,
-    hw: str,
-    image_digest: str = "",
-    stack_fingerprint: Mapping[str, str] | None = None,
-    extra_attrs: Mapping[str, Any] | None = None,
-    resume: bool = False,
     on_status: Callable[[str], None] = _default_status_emitter,
     session_dir: Path | None = None,
-    save_state: bool = True,
 ) -> None:
     """Run the T0 recipe-snapshot anchor and seven-tuple warm-start search."""
     if session_dir is None:
@@ -962,18 +975,20 @@ def run_t0_anchor(
     sid = _text(getattr(shared_state, "recipe_kb_session_id", "")) or sd.name
     shared_state.recipe_kb_session_id = sid
     # Short-circuit when already anchored; resume=True bypasses.
-    if not resume and _text(getattr(shared_state, "warm_start_ts", "")):
+    if not request.resume and _text(getattr(shared_state, "warm_start_ts", "")):
         on_status(f"Recipe KB        : already anchored session_id={sid}")
         return
-    if resume:
+    if request.resume:
         on_status(f"Recipe KB        : resumed session_id={sid}")
     began_now = not getattr(shared_state, "warm_start_ts", "")
     if began_now:
         shared_state.warm_start_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    extra: Mapping[str, Any] = extra_attrs or {}
-    fingerprint: Mapping[str, Any] = stack_fingerprint or {}
-    identity = _resolve_t0_identity(shared_state, workload=workload, hw=hw, extra=extra, fingerprint=fingerprint)
+    extra: Mapping[str, Any] = request.extra_attrs or {}
+    fingerprint: Mapping[str, Any] = request.stack_fingerprint or {}
+    identity = _resolve_t0_identity(
+        shared_state, workload=request.workload, hw=request.hw, extra=extra, fingerprint=fingerprint
+    )
     cid = str(identity["canonical_id"])
     # Each is empty only where SharedState already held nothing, and CLOSE/KEEP derives the same cid from them.
     shared_state.framework = identity["framework_name"]
@@ -990,7 +1005,7 @@ def run_t0_anchor(
             start_time=shared_state.warm_start_ts,
         )
     # T0 only stamps metadata (best_config preserved, rewritten at CLOSE).
-    extras = _build_t0_trace_extras(shared_state, extra=extra, fp=fingerprint, image_digest=image_digest)
+    extras = _build_t0_trace_extras(shared_state, extra=extra, fp=fingerprint, image_digest=request.image_digest)
     _stamp_local_authority_row(kb, session_id=sid, fingerprint=fingerprint, identity=identity, extras=extras)
     match, context = _warm_start_lookup(kb, shared_state, identity)
     shared_state.warm_start_recipe = match
@@ -1007,13 +1022,13 @@ def run_t0_anchor(
             f"Recipe KB        : session_id={sid} workload={cid} (warm={warm_label}, "
             f"pitfalls={len(experience['pitfalls'])}, lessons={len(experience['lessons'])})"
         )
-    if save_state:
-        try:
-            shared_state.save(sd)
-        except Exception:
-            log.exception("Recipe KB T0: SharedState.save failed (sid=%s, workload=%s)", sid, identity["model"])
+    try:
+        shared_state.save(sd)
+    except Exception:
+        log.exception("Recipe KB T0: SharedState.save failed (sid=%s, workload=%s)", sid, identity["model"])
 
 
 __all__ = [
+    "T0AnchorRequest",
     "run_t0_anchor",
 ]

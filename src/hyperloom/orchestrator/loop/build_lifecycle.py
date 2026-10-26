@@ -15,6 +15,7 @@ from hyperloom.inference_optimizer.session.session_paths import enablement_build
 from ..collaborator import CoordinatorCollaborator
 
 from ..enablement.runtime.build_actions import TargetedBuildAction, build_novelty_key
+from ..state.task_registry import TaskSpec
 
 _BUILD_KIND = "targeted_build"
 _LEASE_GRACE_SEC = 300  # added to build budget for the lease TTL reclaim backstop
@@ -43,13 +44,15 @@ class BuildLifecycleCollaborator(CoordinatorCollaborator):
             action = dataclasses.replace(action, attempt_root=str(enablement_builds_dir(self.session_dir, task_id)))
         ttl = int(_resolve_budget_sec(action)) + _LEASE_GRACE_SEC
         task, _existing = await self.tasks.create_or_return_existing(
-            kind=_BUILD_KIND,
-            params=action.to_state(),
-            idempotency_key=_novelty_idempotency_key(action),
-            requires_lanes=["build_lane"],
-            lease_ttl_sec=ttl,
-            task_id=task_id,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind=_BUILD_KIND,
+                params=action.to_state(),
+                idempotency_key=_novelty_idempotency_key(action),
+                requires_lanes=["build_lane"],
+                lease_ttl_sec=ttl,
+                task_id=task_id,
+                dispatch_class="coordinator",
+            )
         )
         return str(getattr(task, "task_id", "") or "")
 

@@ -19,7 +19,7 @@ from hyperloom.orchestrator.state._shared_state.phase_state import _cap_tested_l
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 from hyperloom.orchestrator.bus.message_bus import Message, MessageBus
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 
@@ -151,12 +151,12 @@ async def test_prune_events_protects_pending_proposal(conn):
 async def test_prune_tasks_keeps_recent_done_and_spares_inflight(conn):
     reg = TaskRegistry(conn)
     # In-flight tasks that must never be pruned.
-    q = await reg.create(kind="explore", params={}, idempotency_key="q1")
-    r = await reg.create(kind="explore", params={}, idempotency_key="r1")
+    q = await reg.create(TaskSpec(kind="explore", params={}, idempotency_key="q1"))
+    r = await reg.create(TaskSpec(kind="explore", params={}, idempotency_key="r1"))
     await reg.transition(r.task_id, "running")
     done_ids = []
     for i in range(30):
-        t = await reg.create(kind="explore", params={}, idempotency_key=f"d{i}")
+        t = await reg.create(TaskSpec(kind="explore", params={}, idempotency_key=f"d{i}"))
         await reg.transition(t.task_id, "running")
         await reg.transition(t.task_id, "succeeded")
         done_ids.append(t.task_id)

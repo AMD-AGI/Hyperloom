@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
+from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import stack_event_parts
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -19,6 +20,7 @@ from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.actions.executors._patch_snapshot import _git_commit_kept
 from hyperloom.orchestrator.kernel import controller_patch_integration as integration
 from hyperloom.orchestrator.kernel.controller_patch_integration import (
+    KeepSession,
     integrate_controller_patches,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -212,9 +214,11 @@ async def _integrate(
     coordinator.shared_state = shared_state
     return await integrate_controller_patches(
         patches_root=patches_root,
-        session_dir=session_dir,
-        shared_state=shared_state,
-        record_keep=coordinator.writeback.record_integrate_keep,
+        session=KeepSession(
+            session_dir=session_dir,
+            shared_state=shared_state,
+            record_keep=coordinator.writeback.record_integrate_keep,
+        ),
         validator=validator,
         **options,
     )
@@ -1244,7 +1248,7 @@ async def test_controller_entry_uses_session_writeback_for_every_mode(tmp_path, 
     callbacks = []
 
     async def capture_callback(**kwargs):
-        callbacks.append(kwargs["record_keep"])
+        callbacks.append(kwargs["session"].record_keep)
         return integration.ControllerIntegrationSummary("completed", (), 0, 0, 0, "")
 
     monkeypatch.setattr(integration, "integrate_controller_patches", capture_callback)
@@ -1295,27 +1299,37 @@ async def test_synthetic_controller_keep_updates_state_and_stack_ledger(tmp_path
         stack_event.record_adoption(
             stack_index=0,
             entry=state.optimization_stack[0],
-            throughput_before=100.0,
-            throughput_after=110.0,
             baseline_tput=100.0,
-            objective="output_throughput",
+            graded=GradedComparison(
+                objective="output_throughput",
+                candidate=110.0,
+                reference=100.0,
+                verdict=VERDICT_KEEP,
+            ),
         )
         stack_event.record_validation(
-            stack_len=1,
-            baseline_tput=100.0,
-            validated_tput=110.0,
-            validated_gain_pct=10.0,
-            source="writeback",
-            measurement_basis="e2e_decision_round",
-            graded_objective="output_throughput",
-            ts=state.cumulative_gain_validated_ts,
+            stack_event.StackValidation(
+                stack_len=1,
+                graded=GradedComparison(
+                    objective="output_throughput",
+                    candidate=110.0,
+                    reference=100.0,
+                    verdict=VERDICT_KEEP,
+                ),
+                validated_gain_pct=10.0,
+                source="writeback",
+                measurement_basis="e2e_decision_round",
+                ts=state.cumulative_gain_validated_ts,
+            ),
         )
 
         summary = await integrate_controller_patches(
             patches_root=patches,
-            session_dir=session_dir,
-            shared_state=state,
-            record_keep=coordinator.writeback.record_integrate_keep,
+            session=KeepSession(
+                session_dir=session_dir,
+                shared_state=state,
+                record_keep=coordinator.writeback.record_integrate_keep,
+            ),
             validator=_validate,
         )
         ledger, _status = stack_event.assemble_stack_ext(

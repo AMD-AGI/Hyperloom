@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import shlex
+from dataclasses import dataclass
 from typing import Any
 
 from hyperloom.common.coerce import optional_positive_int, to_str_list
@@ -589,6 +590,11 @@ _SGLANG_CONTEXT_LENGTH_FLAG = "--context-length"
 # Matches space- or equals-separated form without false-matching a longer flag.
 _SGLANG_CONTEXT_LENGTH_RE = re.compile(r"--context-length(?:[=\s]|$)")
 
+#: The flags the launch guards add when a recipe leaves them out (``inject_sglang_context_length`` and
+#: ``inject_sglang_watchdog_timeout``), sized for the run they launch; a recipe that keeps them carries that run's
+#: settings into every later one.
+INJECTED_LAUNCH_FLAGS = (_SGLANG_CONTEXT_LENGTH_FLAG, _SGLANG_WATCHDOG_FLAG)
+
 _SGLANG_ATTN_BACKEND_FLAG = "--attention-backend"
 
 _SGLANG_ATTN_BACKEND_RE = re.compile(r"--attention-backend(?:[=\s]|$)")
@@ -696,13 +702,20 @@ def validate_warm_replay_context_length(
     )
 
 
+@dataclass(frozen=True)
+class WorkloadTokenWindow:
+    """Tokens a workload needs from the server: ISL, OSL and the run's MAX_MODEL_LEN cap."""
+
+    isl: int
+    osl: int
+    max_model_len: int | str | None = None
+
+
 def inject_sglang_context_length(
     server_args: str | None,
     framework: str | None,
     model_path: str | None,
-    isl: int,
-    osl: int,
-    max_model_len: int | str | None = None,
+    window: WorkloadTokenWindow,
 ) -> str:
     """Append ``--context-length <N>`` to ``server_args`` for sglang runs."""
     args = str(server_args or "").strip()
@@ -723,8 +736,8 @@ def inject_sglang_context_length(
     if agentx_enabled():
         context_length = int(max_pos)
     else:
-        context_length = min(int(max_pos), resolve_sglang_context_cap(isl, osl))
-    max_model_len_int = optional_positive_int(max_model_len)
+        context_length = min(int(max_pos), resolve_sglang_context_cap(window.isl, window.osl))
+    max_model_len_int = optional_positive_int(window.max_model_len)
     if max_model_len_int is not None:
         context_length = min(context_length, max_model_len_int)
     return merge_server_args(

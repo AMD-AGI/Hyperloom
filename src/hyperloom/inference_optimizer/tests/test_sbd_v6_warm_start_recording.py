@@ -82,14 +82,15 @@ def _recipe(**overrides: Any) -> dict[str, Any]:
 
 def _matched(*, tier: str = "exact") -> dict[str, Any]:
     return matched_block(
-        tier=tier,
-        confidence=1.0 if tier == "exact" else 0.72,
-        source="kb-store",
-        canonical_id=CID,
+        match={
+            "tier": tier,
+            "confidence": 1.0 if tier == "exact" else 0.72,
+            "source": "kb-store",
+            "canonical_id": CID,
+        },
         recipe=_recipe(),
+        experience={"lessons": [{"a": 1}, {"b": 2}], "pitfalls": [{"c": 3}]},
         expected_gain_pct=36.23,
-        lessons=[{"a": 1}, {"b": 2}],
-        pitfalls=[{"c": 3}],
     )
 
 

@@ -221,7 +221,7 @@ def _dispatch_stub(session_dir):
     async def _warm(params):
         return None
 
-    async def _create(**kwargs):
+    async def _create(spec):
         return SimpleNamespace(task_id="t-recon"), False
 
     state = SharedState(session_id="t", model_name="m")

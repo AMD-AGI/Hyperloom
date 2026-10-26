@@ -14,6 +14,7 @@ from hyperloom.inference_optimizer.roofline_ceiling import RooflineBreakdown
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 from hyperloom.orchestrator.actions.executors import benchmark_result as br
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
 from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
 from hyperloom.orchestrator.actions.executors import explore as ex
 
@@ -109,7 +110,7 @@ class TestXditBlacklist:
     def test_compatibility_filter_drops_blacklisted(self):
         good = gr.GridVariant(name="xdit_ok", extra_server_args="", extra_envs={"XDIT_ATTENTION_BACKEND": "aiter"})
         bad = gr.GridVariant(name="xdit_fp4", extra_server_args="", extra_envs={"XDIT_USE_FP4_GEMMS": "1"})
-        kept, dropped = gr.apply_compatibility_filter([good, bad], framework="xdit", model_path="")
+        kept, dropped = gr.apply_compatibility_filter([good, bad], serving=ServingStack("xdit", ""))
         kept_names = {v.name for v in kept}
         dropped_names = {d["name"] for d in dropped}
         assert "xdit_ok" in kept_names

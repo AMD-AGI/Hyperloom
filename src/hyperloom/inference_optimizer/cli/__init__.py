@@ -19,6 +19,7 @@ from typing import Any
 
 from hyperloom.common import llm_config
 from hyperloom.common.env import EnvValueError, env_bool
+from hyperloom.common.gpu_partition import PartitionModel
 from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
 from hyperloom.common.llm_headers import parse_custom_headers
 from .executors import (
@@ -97,6 +98,7 @@ from .credentials import (
 )
 from .multi_node import (
     _prepare_multi_node_state as _prepare_multi_node_state,
+    _resolve_gpus_per_node,
     _resolve_mn_backend as _resolve_mn_backend,
 )
 from .quantization import (
@@ -1338,15 +1340,6 @@ class PartitionRequest:
     streams_per_partition: int | None = None
 
 
-@dataclass(frozen=True)
-class PartitionModel:
-    """The model a partition shape must fit: its path and precision, and the session state holding its identity."""
-
-    model_path: str | None = None
-    precision: str | None = None
-    shared_state: Any = None
-
-
 def _export_partition_shape(
     request: PartitionRequest,
     *,
@@ -1426,11 +1419,7 @@ def _export_partition_shape(
         declared_mode=mode,
         streams=streams,
         gpu_type=gpu_type,
-        params={
-            "model_path": str(model.model_path or ""),
-            "precision": str(model.precision or ""),
-        },
-        shared_state=model.shared_state,
+        model=model,
         # The footprint refusal is arithmetic about streams sharing a partition.
         fanout_expected=fanout or bool(mode) or streams_named,
     )
@@ -2228,12 +2217,7 @@ def _resolve_run_topology(args: argparse.Namespace) -> int:
         _resolve_workload_knobs(args)
     tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
     ep_resolved = max(1, int(getattr(args, "ep", 1) or 1))
-    # Resolve gpus_per_node from the explicit CLI flag or the policy default.
-    gpn_attr = getattr(args, "gpus_per_node", None)
-    if gpn_attr is not None:
-        gpus_per_node_resolved = int(gpn_attr)
-    else:
-        gpus_per_node_resolved = 8
+    gpus_per_node_resolved = _resolve_gpus_per_node(args)
 
     # Project before ``_preflight``: ``check_gpu_visibility`` reads ``$TP`` to warn when the run asks for more
     # shards than rocm-smi can see.

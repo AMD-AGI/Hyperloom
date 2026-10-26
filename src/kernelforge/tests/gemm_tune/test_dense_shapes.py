@@ -7,7 +7,14 @@ from __future__ import annotations
 
 import pytest
 
-from kernelforge.gemm_tune.dense_shapes import DenseGeometry, compute_dense_nk_shapes
+from kernelforge.gemm_tune.dense_shapes import (
+    DenseGeometry,
+    MGrid,
+    compute_decode_m_values,
+    compute_dense_m_values,
+    compute_dense_nk_shapes,
+)
+from kernelforge.gemm_tune.evidence import padded_m
 
 
 def test_mla_deepseek_v3_matches_recorded_shapes():
@@ -145,25 +152,44 @@ from kernelforge.gemm_tune.dense_shapes import compute_decode_m_values
 
 
 class TestDecodeMValues:
-    """Decode M is the number of running requests, so it cannot exceed ``conc``."""
+    """Decode M is the number of running requests, padded by sglang to a graph batch size."""
 
     @pytest.mark.parametrize(
         ("conc", "expected"),
         [
             (1, [1]),
-            (8, [1, 4, 8]),
-            (64, [1, 4, 16, 32, 64]),
-            (100, [1, 4, 16, 32, 64, 100]),
-            (256, [1, 4, 16, 32, 64, 128, 256]),
+            (8, [1, 16]),
+            (64, [1, 16, 32, 48, 64]),
+            (100, [1, 16, 32, 48, 64, 112]),
+            (128, [1, 16, 32, 48, 64, 128]),
+            (256, [1, 16, 32, 48, 64, 128, 256]),
         ],
     )
     def test_grid_is_clamped_to_concurrency(self, conc, expected):
         assert compute_decode_m_values(conc) == expected
 
-    def test_never_exceeds_conc(self):
+    def test_never_exceeds_the_bucket_serving_conc(self):
         for conc in (1, 2, 7, 8, 63, 64, 129, 256, 512):
-            assert max(compute_decode_m_values(conc)) <= conc
+            assert max(compute_decode_m_values(conc)) <= padded_m(conc)
+            assert max(compute_decode_m_values(conc, MGrid.EXACT)) == conc
 
     def test_degenerate_conc_falls_back_to_a_usable_grid(self):
         assert compute_decode_m_values(0) == compute_decode_m_values(64)
         assert compute_decode_m_values(-5) == [1]
+
+
+class TestDecodeGrid:
+    """The decode band follows sglang's CUDA-graph batch sizes up to the concurrency."""
+
+    def test_buckets_are_aiters_multiple_of_16_plus_m1(self):
+        assert compute_decode_m_values(64) == [1, 16, 32, 48, 64]
+
+    def test_exact_keeps_every_graph_batch_size(self):
+        assert compute_decode_m_values(64, MGrid.EXACT) == [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64]
+
+    @pytest.mark.parametrize(("m_grid", "expected_top"), [(MGrid.BUCKET, [48, 64]), (MGrid.EXACT, [48, 50])])
+    def test_a_concurrency_between_batch_sizes_is_its_own_m(self, m_grid, expected_top):
+        assert compute_decode_m_values(50, m_grid)[-2:] == expected_top
+
+    def test_thorough_mode_tunes_batch_size_40(self):
+        assert 40 in compute_dense_m_values(64, thorough=True)
