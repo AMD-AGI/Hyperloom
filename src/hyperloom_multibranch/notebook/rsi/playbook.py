@@ -401,6 +401,47 @@ def session_playbook(pool: PlaybookPool | None, *, challenger: bool) -> Playbook
     return PlaybookChoice(champion, champion)
 
 
+@dataclass
+class PlaybookPlay:
+    """What a session plays as it goes: the ``choice`` it started with, then, once a challenger session broke the
+    safety envelope, the champion for the rest of it, the first ``breach`` kept for :data:`FALLBACK_KEY`."""
+
+    choice: PlaybookChoice
+    breach: str = ""
+
+    @property
+    def playbook(self) -> Playbook:
+        return self.choice.champion if self.breach else self.choice.playbook
+
+    def stop_rule(self) -> StopRule:
+        """The stop rule the stall evidence reads now."""
+
+        return self.playbook.stop_rule()
+
+    def render(self) -> str:
+        """What the judge reads of the playbook played now."""
+
+        return self.playbook.render(challenger=self.choice.challenger and not self.breach)
+
+    def fall_back(self, breaches: Sequence[str]) -> bool:
+        """Play the champion from now on, after the first of ``breaches`` in a challenger session still on trial;
+        whether this call made it fall back."""
+
+        if self.breach or not breaches or not self.choice.challenger:
+            return False
+        self.breach = breaches[0]
+        return True
+
+    def versions(self) -> dict[str, str]:
+        """What the session's policy versions record of the play: the playbook it started with and, after a fallback,
+        the breach under :data:`FALLBACK_KEY`."""
+
+        found = {PLAYBOOK_KEY: self.choice.playbook.label}
+        if self.breach:
+            found[FALLBACK_KEY] = self.breach
+        return found
+
+
 def held_by(row: BranchProgress) -> tuple[str, ...]:
     """What holds ``row``'s branch under the :data:`SAFETY_ENVELOPE`, a phrase each: a candidate waiting for its
     confirm, a near-bar or a stranded lead in its stall evidence, its probation."""
@@ -452,6 +493,7 @@ __all__ = [
     "PlaybookChoice",
     "PlaybookConflict",
     "PlaybookNumbers",
+    "PlaybookPlay",
     "PlaybookPool",
     "PlaybookRule",
     "Retired",

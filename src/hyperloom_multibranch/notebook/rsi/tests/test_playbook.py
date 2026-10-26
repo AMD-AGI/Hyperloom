@@ -21,13 +21,17 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     is_young,
 )
 from hyperloom_multibranch.notebook.rsi.playbook import (
+    FALLBACK_KEY,
     H0,
     MAX_RULES,
+    PLAYBOOK_KEY,
     SAFETY_ENVELOPE,
     Crowned,
     Governs,
     Playbook,
+    PlaybookChoice,
     PlaybookConflict,
+    PlaybookPlay,
     PlaybookPool,
     PlaybookRule,
     Retired,
@@ -70,6 +74,21 @@ def test_the_numbers_and_rules_set_the_stop_rule_and_the_judges_text() -> None:
     assert "stalled 8 judged tests past its last commit" in ruled.render()
     assert f"- rule (stop): {ALIKE.text}" in ruled.render()
     assert ruled.render(challenger=True).startswith("Scheduling playbook ruled, on trial in this session:")
+
+
+def test_a_challenger_session_plays_the_champion_from_its_first_breach_on_and_records_it() -> None:
+    play = PlaybookPlay(PlaybookChoice(LONGER, H0, challenger=True))
+    champion = PlaybookPlay(PlaybookChoice(H0, H0))
+    breach = "stop of b1, held by its probation"
+
+    assert (play.stop_rule(), play.versions()) == (StopRule(stall_tests=8), {PLAYBOOK_KEY: LONGER.label})
+    assert "on trial in this session" in play.render()
+    assert not play.fall_back(()) and play.fall_back((breach, "stop of b2, held by a near-bar lead"))
+    assert not play.fall_back(("stop of b3, held by a stranded lead",))
+    assert (play.playbook, play.stop_rule()) == (H0, StopRule())
+    assert play.versions() == {PLAYBOOK_KEY: LONGER.label, FALLBACK_KEY: breach}
+    assert play.render() == H0.render()
+    assert not champion.fall_back((breach,)) and champion.versions() == {PLAYBOOK_KEY: H0.label}
 
 
 @pytest.mark.parametrize(

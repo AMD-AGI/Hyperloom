@@ -733,18 +733,19 @@ def frontier_log_line(
 @dataclass(frozen=True)
 class FrontierScoring(ProgressQuery):
     """The notebook's progress with frontier scores, against the archived ``history``; ``log`` keeps every round, and
-    ``guard`` holds the session's scorer and counts its failures, so one guard serves a session."""
+    ``guard`` holds the session's scorer and counts its failures, so one guard serves a session. ``stop_rule`` gives
+    the stop rule each round's stall evidence reads: the playbook's the session plays, which a fallback changes."""
 
     notebook: SnapshotQuery
     policy: FrontierPolicy
     history: tuple[SearchTree, ...] = ()
     log: Path | None = None
     guard: ScorerGuard = field(default_factory=ScorerGuard)
-    stop_rule: StopRule = field(default_factory=StopRule)
+    stop_rule: Callable[[], StopRule] = StopRule
 
     async def progress(self) -> tuple[BranchProgress, ...]:
         snapshot = await self.notebook.snapshot()
-        rows = score_progress(snapshot, self.history, self.policy, self.guard, self.stop_rule)
+        rows = score_progress(snapshot, self.history, self.policy, self.guard, self.stop_rule())
         if self.log is not None:
             policy = paced(self.policy, longest_root_test_seconds(snapshot))
             line = frontier_log_line(snapshot, rows, policy, self.guard.label)

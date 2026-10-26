@@ -296,6 +296,7 @@ def test_each_rsi_step_of_close_says_why_it_kept_nothing_and_close_goes_on(
     assert no_receipts.specialist_outcomes.status == FAILED and no_receipts.playbook_trial.status == WRITTEN
 
 
+@pytest.mark.usefixtures("unconfigured")
 def test_the_sessions_menus_read_the_archive_and_log_each_menu_beside_the_reports(
     snapshot: NotebookSnapshot, tmp_path: Path
 ) -> None:
@@ -303,11 +304,14 @@ def test_the_sessions_menus_read_the_archive_and_log_each_menu_beside_the_report
     assert archive_session(snapshot, METRIC, archive).status == ARCHIVED
 
     menus = session_menus(METRIC, reports, archive)
+    assert menus is not None
     menus.menu(snapshot, "s1", "c1")
+    unlogged = session_menus(METRIC, None, archive)
 
     assert [tree.session_id for tree in menus.trees] == ["sess-1"]
     assert [(logged.branch, logged.commit) for logged in MenuLog(reports / MENU_LOG).menus()] == [("s1", "c1")]
-    assert session_menus(METRIC, None, archive).log is None
+    assert unlogged is not None and unlogged.log is None
+    assert session_menus(METRIC, reports) is None
 
 
 @pytest.mark.usefixtures("unconfigured")
