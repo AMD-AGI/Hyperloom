@@ -22,9 +22,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.perf_metric import GradedComparison
+
 from .event_fields import (
+    as_dict as _as_dict,
     as_list as _as_list,
     float_or_none as _float_or_none,
     graded_axes as _graded_axes,
@@ -176,25 +180,23 @@ def record_adoption(
     *,
     stack_index: int,
     entry: Mapping[str, Any],
-    throughput_before: Any,
-    throughput_after: Any,
+    graded: GradedComparison,
     baseline_tput: Any,
-    objective: str = "",
-    degrade_reason: str = "",
 ) -> None:
     """Record one adoption at the moment it is accepted onto the stack. Never raises.
 
     Called from the sole ``optimization_stack`` append, where every fact below
-    is in scope: ``throughput_before`` in particular is the figure the lift just
+    is in scope: ``graded.reference`` in particular is the figure the lift just
     refused to accept the winner without beating, and this same call overwrites
     the anchor.
     """
     sink = _sink()
     if sink is None:
         return
+    objective = graded.objective
     _open(baseline_tput=baseline_tput, objective=objective)
-    before = _float_or_none(throughput_before)
-    after = _float_or_none(throughput_after)
+    before = _float_or_none(graded.reference)
+    after = _float_or_none(graded.candidate)
     base = _float_or_none(baseline_tput)
     action = str(entry.get("action") or "")
     row: dict[str, Any] = {
@@ -217,7 +219,7 @@ def record_adoption(
         "provenance": _text_or_none(entry.get("provenance")),
         "gap_canonical_id": _text_or_none(entry.get("gap_canonical_id")),
         "objective": str(objective or ""),
-        "degrade_reason": str(degrade_reason or ""),
+        "degrade_reason": str(graded.degrade_reason or ""),
         "throughput_before": before,
         "throughput_after": after,
         "baseline_tput": base,
@@ -242,23 +244,20 @@ def record_adoption(
     )
 
 
-def record_validation(
-    *,
-    stack_len: int,
-    baseline_tput: Any,
-    validated_tput: Any,
-    validated_gain_pct: Any,
-    source: str = "",
-    measurement_basis: str = "",
-    graded_objective: str = "",
-    measurement: Mapping[str, Any] | None = None,
-    ts: str = "",
-    ttft_mean_ms: Any = None,
-    e2el_mean_ms: Any = None,
-    ttft_e2el_source: str = "",
-    server_launch_flags: str = "",
-    workspace: Any = None,
-) -> None:
+@dataclass(frozen=True)
+class StackValidation:
+    """One session validation of the whole stack against the session baseline."""
+
+    stack_len: int
+    graded: GradedComparison
+    validated_gain_pct: Any
+    measurement: Mapping[str, Any] | None = None
+    source: str = ""
+    measurement_basis: str = ""
+    ts: str = ""
+
+
+def record_validation(validation: StackValidation) -> None:
     """Record one session validation of the stack as a whole. Never raises.
 
     This is the ledger's only independent check on itself: a figure measured on
@@ -269,41 +268,43 @@ def record_validation(
     ``stack_len`` keys the row, so a later validation at one length supersedes
     the earlier. ``measurement_basis`` is ``e2e_rebench`` for a full-stack
     revalidation or ``e2e_decision_round`` for the round a variant was graded
-    on. ``graded_objective`` names the axis the figure was measured on, so an
+    on. ``graded.objective`` names the axis the figure was measured on, so an
     intvty-graded gain is not later read as an output gain; the caller only
     records a comparison it found comparable, so this is always the axis the
     session was configured for. ``measurement`` is projected to its graded
     axes and recorded beside the gain they produced, because a later
     revalidation moves the cumulative figure without re-promoting the recipe,
     so reading the axes off ``current_best`` at export can pair this gain with
-    a different measurement. The latency pair and ``server_launch_flags`` are
-    carried here because the run that produced ``validated_tput`` resolves them
-    and they cannot be recovered afterwards.
+    a different measurement. The latency pair and the resolved server launch
+    flags are read off it here because the run that produced
+    ``graded.candidate`` resolves them and they cannot be recovered afterwards.
     """
     sink = _sink()
     if sink is None:
         return
-    _open(baseline_tput=baseline_tput)
+    graded = validation.graded
+    measured = _as_dict(validation.measurement)
+    _open(baseline_tput=graded.reference)
     sink.record(
         SECTION_VALIDATION,
         {
-            "stack_len": int(stack_len or 0),
-            "ts": str(ts or "") or _now(),
-            "baseline_tput": _float_or_none(baseline_tput),
-            "validated_tput": _float_or_none(validated_tput),
-            "validated_gain_pct": _float_or_none(validated_gain_pct),
-            "source": str(source or ""),
-            "measurement_basis": str(measurement_basis or ""),
-            "graded_objective": str(graded_objective or ""),
-            "perf": _graded_axes(measurement),
-            "ttft_mean_ms": _float_or_none(ttft_mean_ms),
-            "e2el_mean_ms": _float_or_none(e2el_mean_ms),
-            "ttft_e2el_source": str(ttft_e2el_source or ""),
-            "server_launch_flags": str(server_launch_flags or ""),
-            "workspace": _text_or_none(workspace),
+            "stack_len": int(validation.stack_len or 0),
+            "ts": str(validation.ts or "") or _now(),
+            "baseline_tput": _float_or_none(graded.reference),
+            "validated_tput": _float_or_none(graded.candidate),
+            "validated_gain_pct": _float_or_none(validation.validated_gain_pct),
+            "source": str(validation.source or ""),
+            "measurement_basis": str(validation.measurement_basis or ""),
+            "graded_objective": str(graded.objective or ""),
+            "perf": _graded_axes(validation.measurement),
+            "ttft_mean_ms": _float_or_none(measured.get("ttft_mean_ms")),
+            "e2el_mean_ms": _float_or_none(measured.get("e2el_mean_ms")),
+            "ttft_e2el_source": str(measured.get("ttft_e2el_source") or ""),
+            "server_launch_flags": str(measured.get("resolved_server_launch_flags") or ""),
+            "workspace": _text_or_none(measured.get("workspace")),
         },
         row_type="validation",
-        natural_ids=str(int(stack_len or 0)),
+        natural_ids=str(int(validation.stack_len or 0)),
     )
 
 
@@ -551,6 +552,7 @@ __all__ = [
     "STATUS_DEGRADED",
     "STATUS_SKIPPED",
     "STATUS_SUCCEEDED",
+    "StackValidation",
     "assemble_stack_ext",
     "finish",
     "record_adoption",

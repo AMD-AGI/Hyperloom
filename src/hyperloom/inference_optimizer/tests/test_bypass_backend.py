@@ -24,7 +24,7 @@ from hyperloom.orchestrator.actions.executors.benchmark_result import (
 
 def test_bypass_client_partial_output_reaches_outer_watchdog(tmp_path, monkeypatch):
     import sys
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import RoundWatch, run_with_session_kill
 
     monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[3]))
     code = (
@@ -37,9 +37,7 @@ def test_bypass_client_partial_output_reaches_outer_watchdog(tmp_path, monkeypat
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", code, str(tmp_path)],
-        timeout=10,
-        server_log_path=str(tmp_path / "server.log"),
-        silence_timeout_sec=2.0,
+        watch=RoundWatch(timeout=10, server_log_path=str(tmp_path / "server.log"), silence_timeout_sec=2.0),
     )
     assert cp.returncode == 0
     assert cp.stdout == "." * 30
@@ -412,7 +410,7 @@ def test_bypass_run_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
     monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None, watch=None):
         # The client writes inferencex_result.json into --result-dir.
         result_dir = Path(cmd[cmd.index("--result-dir") + 1])
         raw = {
@@ -523,7 +521,7 @@ def test_bypass_eval_env_passthrough(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bypass_engine, "build_eval_command", fake_eval_cmd)
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None, watch=None):
         if "--result-dir" in cmd:
             rd = Path(cmd[cmd.index("--result-dir") + 1])
             rd.mkdir(parents=True, exist_ok=True)
@@ -576,7 +574,7 @@ def test_bypass_eval_limit_absent_is_none(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bypass_engine, "build_eval_command", fake_eval_cmd)
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None, watch=None):
         if "--result-dir" in cmd:
             rd = Path(cmd[cmd.index("--result-dir") + 1])
             rd.mkdir(parents=True, exist_ok=True)
@@ -713,7 +711,7 @@ def test_client_phase_reuses_healthy_server(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sl, "teardown_lifecycle_server", lambda **k: teardown.__setitem__("called", True))
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None, watch=None):
         if "--result-dir" in cmd:
             rd = Path(cmd[cmd.index("--result-dir") + 1])
             rd.mkdir(parents=True, exist_ok=True)
@@ -796,7 +794,7 @@ def _write_cfg_lifecycle(tmp_path, inferencex, cleanup, pid_dir, framework="sgla
 
 
 def _fake_client_run(monkeypatch, tput=700.0):
-    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None, watch=None):
         if "--result-dir" in cmd:
             rd = Path(cmd[cmd.index("--result-dir") + 1])
             rd.mkdir(parents=True, exist_ok=True)
@@ -1065,7 +1063,7 @@ def test_remote_multinode_client_no_server(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None, watch=None):
         if "--result-dir" in cmd:
             captured["base_url"] = cmd[cmd.index("--base-url") + 1] if "--base-url" in cmd else None
             rd = Path(cmd[cmd.index("--result-dir") + 1])
@@ -1159,7 +1157,7 @@ def test_scriptable_run_timeout_writes_stderr_log(tmp_path, monkeypatch):
     workspace = tmp_path / "ws"
     workspace.mkdir()
 
-    def fake_run(cmd, env=None, capture_output=True, text=True, timeout=None):
+    def fake_run(cmd, env=None, capture_output=True, text=True, timeout=None, watch=None):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -1372,7 +1370,7 @@ def test_num_prompts_warmups_passthrough(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None, watch=None):
         if "--num-prompts" in cmd:
             captured["num_prompts"] = cmd[cmd.index("--num-prompts") + 1]
             captured["num_warmups"] = cmd[cmd.index("--num-warmups") + 1]
@@ -1734,7 +1732,7 @@ def test_write_report_emits_magpie_compat_artifacts(tmp_path):
 def test_run_subprocess_timeout_writes_log(tmp_path, monkeypatch):
     """Timeouts return 124 and leave a phase stderr log for debugging."""
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None, watch=None):
         assert "OPENAI_API_KEY" not in (env or {})
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
 

@@ -16,6 +16,7 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.proposals import PendingProposal
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.loop.verdicts import CriticRuling
 
 
 def _heartbeat() -> Intent:
@@ -158,7 +159,9 @@ async def test_approve_verdict_materializes(coord: Coordinator, monkeypatch) -> 
         }
     )
     coord.state.pending_proposals[pending.proposal_msg_id] = pending
-    await coord.router._handle_single_verdict(source="critic", pending=pending, verdict="approve", reasoning="ok")
+    await coord.router._handle_single_verdict(
+        source="critic", pending=pending, ruling=CriticRuling(verdict="approve", reasoning="ok")
+    )
     assert len(raw) == 1
     # The dispatched task carries no specialist task id, so the verdict has to be filed under the candidate for the
     # executor and PolicyGate to find it.
@@ -170,7 +173,7 @@ async def test_reject_verdict_records_critic_denied(coord: Coordinator) -> None:
     pending = _pending({"framework_agent_candidate_id": _CANDIDATE["candidate_id"], "batch_id": "batch-1"})
     coord.state.pending_proposals[pending.proposal_msg_id] = pending
     await coord.router._handle_single_verdict(
-        source="critic", pending=pending, verdict="reject", reasoning="out of scope for this gap"
+        source="critic", pending=pending, ruling=CriticRuling(verdict="reject", reasoning="out of scope for this gap")
     )
     prog = coord.shared_state.framework_agent_phase_progress
     denied = [r for r in prog if r.get("status") == "critic_denied"]

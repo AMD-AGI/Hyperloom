@@ -508,7 +508,7 @@ def test_judge_bundle_to_dict_carries_phase():
     """The on-disk bundle records the phase, so audits are not misled."""
     from hyperloom.agents.critic.runtime.decision_reviewer import JudgeBundle
 
-    bundle = JudgeBundle(kind="coordinator_inbox", session_id="s", decision_id=None, phase="EXPLORE")
+    bundle = JudgeBundle(session_id="s", decision_id=None, phase="EXPLORE")
     assert bundle.to_dict()["phase"] == "EXPLORE"
 
 

@@ -852,7 +852,7 @@ def _collect_spawned_pids(refs: list) -> dict[str, tuple[str, int]] | None:
     for tag, node_id, ref in refs:
         try:
             pid = ray.get(ref, timeout=120)
-        except Exception as exc:  # noqa: BLE001
+        except (ray.exceptions.RayError, OSError) as exc:
             _log(f"{tag}: spawn FAILED: {type(exc).__name__}: {exc}")
             _rollback_spawned(pids)
             return None

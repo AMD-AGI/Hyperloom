@@ -191,8 +191,12 @@ def _make_lane_agent_factory(
                 workspace=lane_config.workspace,
                 lane_dir=lane_dir,
             )
-            with session_environment(lane_env):
-                return await lane_agent(kernel_path, plan)
+            try:
+                with session_environment(lane_env):
+                    return await lane_agent(kernel_path, plan)
+            finally:
+                # The backend was built for this one session and nothing resumes it once the lane returns.
+                lane_agent.close()
 
         return session
 

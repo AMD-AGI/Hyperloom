@@ -281,6 +281,24 @@ def test_a_runtime_whose_workspace_is_gone_is_shut_down(tmp_path: Path) -> None:
     assert not main_runtime.closed
 
 
+def test_closing_the_backend_shuts_down_every_runtime_it_started(tmp_path: Path) -> None:
+    """A lane round builds its own backend, so the round's end is the last chance to stop its processes."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    first_repo, first_kernel = _make_repo(tmp_path / "a")
+    second_repo, second_kernel = _make_repo(tmp_path / "b")
+    backend = _backend()
+    asyncio.run(backend.run(_spec(first_repo, first_kernel)))
+    asyncio.run(backend.run(_spec(second_repo, second_kernel)))
+
+    backend.close()
+
+    assert len(_FakeHarness.instances) == 2
+    assert all(runtime.closed for runtime in _FakeHarness.instances)
+    asyncio.run(backend.run(_spec(first_repo, first_kernel)))
+    assert len(_FakeHarness.instances) == 3
+
+
 def test_a_session_that_edits_a_protected_measurement_file_is_rejected_and_restored(
     tmp_path: Path,
 ) -> None:

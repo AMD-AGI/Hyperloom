@@ -574,7 +574,6 @@ class CriticAgentBackend:
         if self._trace_macro_cycle is not None:
             context["macro_cycle"] = self._trace_macro_cycle
         request: dict[str, Any] = {
-            "kind": "coordinator_inbox",
             "session_id": self.session_dir.name,
             "raw_prompt": prompt,
             "context": context,
@@ -746,11 +745,10 @@ class CriticAgentBackend:
         """Assemble the historical-priors KB trace for one critic iteration."""
         trace = dict(judge_bundle.get("kb_priors_trace") or {})
         by_proposal = judge_bundle.get("kb_priors_by_proposal") or {}
-        for_decision = judge_bundle.get("kb_priors_for_decision") or []
         skipped = judge_bundle.get("kb_read_skipped_reason")
-        if not trace and not by_proposal and not for_decision and not skipped:
+        if not trace and not by_proposal and not skipped:
             return {}
-        total = sum(len(v) for v in by_proposal.values() if isinstance(v, list)) + len(for_decision)
+        total = sum(len(v) for v in by_proposal.values() if isinstance(v, list))
         return {
             "configured": bool(trace.get("configured")),
             "mode": trace.get("mode"),
@@ -772,7 +770,6 @@ class CriticAgentBackend:
         """Drive Codex with the judge bundle and parse a review object."""
         preamble = self._load_skill_preamble()
         bundle_view: dict[str, Any] = {
-            "kind": judge_bundle.get("kind"),
             "session_id": judge_bundle.get("session_id"),
             "decision_id": judge_bundle.get("decision_id"),
             "phase": judge_bundle.get("phase"),
@@ -781,7 +778,6 @@ class CriticAgentBackend:
             "required_context": judge_bundle.get("required_context"),
             "proposals": judge_bundle.get("proposals"),
             "kb_priors_by_proposal": judge_bundle.get("kb_priors_by_proposal"),
-            "kb_priors_for_decision": judge_bundle.get("kb_priors_for_decision"),
             "kb_read_skipped_reason": judge_bundle.get("kb_read_skipped_reason"),
             "review_constraints": judge_bundle.get("review_constraints"),
             "notes": judge_bundle.get("notes"),

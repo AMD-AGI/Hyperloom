@@ -14,6 +14,7 @@ import yaml
 
 from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
 from hyperloom.orchestrator.actions.executors import _benchmark_interpreter as bi
 
 # Patch compatibility-filter helpers in the ``_grid_variant_filter`` sibling, where apply_compatibility_filter
@@ -40,7 +41,7 @@ def test_validate_magpie_python_override_requires_python(tmp_path):
 def test_compatibility_filter_drops_on_model_class(monkeypatch) -> None:
     monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (False, False))
     grid = [_variant("mla", "--enable-flashinfer-mla"), _variant("plain", "")]
-    kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="meta-llama-3-8b")
+    kept, dropped = gr.apply_compatibility_filter(grid, serving=ServingStack("sglang", "meta-llama-3-8b"))
     assert [v.name for v in kept] == ["plain"]
     assert len(dropped) == 1
     assert dropped[0]["source"] == "compatibility_filter"
@@ -51,13 +52,13 @@ def test_compatibility_filter_keeps_a_flag_the_model_class_supports(monkeypatch)
     # Whether the installed server accepts the flag is left to its own argparse at launch.
     monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (True, True))
     grid = [_variant("moe", "--enable-ep-moe")]
-    kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="deepseek-moe")
+    kept, dropped = gr.apply_compatibility_filter(grid, serving=ServingStack("sglang", "deepseek-moe"))
     assert [v.name for v in kept] == ["moe"] and dropped == []
 
 
 def test_compatibility_filter_no_model_path_assumes_compatible() -> None:
     grid = [_variant("moe", "--enable-ep-moe")]
-    kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="")
+    kept, dropped = gr.apply_compatibility_filter(grid, serving=ServingStack("sglang", ""))
     assert [v.name for v in kept] == ["moe"] and dropped == []
 
 
@@ -348,8 +349,7 @@ def test_build_variant_yaml_injects_extra_envs(tmp_path: Path) -> None:
     )
     variant = _variant("v1", "--foo 1", envs={"USE_AITER": "1"})
     out = gr._build_variant_yaml(
-        base,
-        "",
+        gr.GridRecipe(base_yaml_path=base),
         variant,
         output_subdir=tmp_path / "v1",
     )
@@ -379,8 +379,7 @@ def test_build_variant_yaml_dedupes_repeated_flags(tmp_path: Path) -> None:
     )
     variant = _variant("v1", "--attention-backend ROCM_AITER_FA")
     out = gr._build_variant_yaml(
-        base,
-        "",
+        gr.GridRecipe(base_yaml_path=base),
         variant,
         output_subdir=tmp_path / "v1",
     )
@@ -401,7 +400,7 @@ def test_build_variant_yaml_prepends_legit_overlay(tmp_path: Path) -> None:
     overlay.mkdir()
     variant = _variant("v1")
     variant.overlay_pythonpath = str(overlay)  # type: ignore[attr-defined]
-    out = gr._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v1")
+    out = gr._build_variant_yaml(gr.GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "v1")
     envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
     assert envs.get("PYTHONPATH", "").startswith(str(overlay))
 
@@ -423,7 +422,7 @@ def test_build_variant_yaml_overlay_builds_on_the_launch_pythonpath(tmp_path, mo
     base.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": config_envs}}), encoding="utf-8")
     variant = _variant("v1")
     variant.overlay_pythonpath = "overlay"  # type: ignore[attr-defined]
-    out = gr._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v1")
+    out = gr._build_variant_yaml(gr.GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "v1")
     envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
     assert envs["PYTHONPATH"] == os.pathsep.join(["overlay", *tail])
 
@@ -441,7 +440,7 @@ def test_build_variant_yaml_drops_unsafe_overlay(tmp_path: Path) -> None:
     for bad in (f"{overlay}:/etc", f"{overlay}/../evil", str(tmp_path / "missing")):
         variant = _variant("v1")
         variant.overlay_pythonpath = bad  # type: ignore[attr-defined]
-        out = gr._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v1")
+        out = gr._build_variant_yaml(gr.GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "v1")
         envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
         assert "PYTHONPATH" not in envs or bad not in envs.get("PYTHONPATH", ""), bad
 

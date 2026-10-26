@@ -15,6 +15,7 @@ import pytest
 
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
 from hyperloom.orchestrator.loop.build_lifecycle import _driver_command
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
 def _action(cmd, **kw):
@@ -643,10 +644,12 @@ async def test_resume_kills_orphan_and_clears_sentinel(resume_coord):
 
     action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe")
     task, _ = await resume_coord.tasks.create_or_return_existing(
-        kind="targeted_build",
-        params=action.to_state(),
-        idempotency_key="k-orphan",
-        requires_lanes=["build_lane"],
+        TaskSpec(
+            kind="targeted_build",
+            params=action.to_state(),
+            idempotency_key="k-orphan",
+            requires_lanes=["build_lane"],
+        ),
     )
     await resume_coord.tasks.transition(task.task_id, "running")
     resume_coord.shared_state.pending_targeted_build = {

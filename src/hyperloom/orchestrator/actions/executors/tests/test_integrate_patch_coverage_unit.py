@@ -355,8 +355,8 @@ async def test_bench_patch_forwards_the_session_budget_to_the_grid(tmp_path, mon
         extra_envs_applied={},
     )
 
-    assert captured["session_deadline_sec"] == 4242.0
-    assert captured["variant_expected_sec"] == 600.0
+    assert captured["stop"].session_deadline_sec == 4242.0
+    assert captured["stop"].variant_expected_sec == 600.0
 
 
 @pytest.mark.asyncio

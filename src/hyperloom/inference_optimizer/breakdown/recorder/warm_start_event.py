@@ -380,24 +380,25 @@ def _reads_block(reads: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 def matched_block(
     *,
-    tier: str,
-    confidence: Any,
-    source: str,
-    canonical_id: str,
+    match: Mapping[str, Any],
     recipe: Mapping[str, Any] | None,
+    experience: Mapping[str, Any],
     expected_gain_pct: Any = None,
-    lessons: Any = None,
-    pitfalls: Any = None,
 ) -> dict[str, Any]:
-    """Build the ``matched`` block from the record T0 anchored on."""
+    """Build the ``matched`` block from the record T0 anchored on.
+
+    ``match`` is the lookup context's ``match`` block; ``experience`` carries the
+    ``lessons`` and ``pitfalls`` T0 published beside it.
+    """
     row = _as_dict(recipe)
-    tier_text = str(tier or "").strip()
+    lessons, pitfalls = experience["lessons"], experience["pitfalls"]
+    tier_text = str(match.get("tier") or "").strip()
     block: dict[str, Any] = {
         "match_type": _EXACT_TIER if tier_text.lower() == _EXACT_TIER else "degraded",
         "tier": tier_text,
-        "confidence": _float_or_none(confidence),
-        "source": str(source or ""),
-        "canonical_id": str(canonical_id or ""),
+        "confidence": _float_or_none(match.get("confidence")),
+        "source": str(match.get("source") or ""),
+        "canonical_id": str(match.get("canonical_id") or ""),
         "optimized_throughput": _float_or_none(row.get("best_throughput")),
         "validated_gain_pct": _float_or_none(row.get("validated_gain_pct")),
         "expected_gain_pct": _float_or_none(expected_gain_pct),

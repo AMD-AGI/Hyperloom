@@ -331,7 +331,8 @@ class SubAgentRunner:
                 error_class="cancelled",
             )
             return outcome, {"reason": str(exc)}
-        except Exception as exc:  # noqa: BLE001 — surface to task.history
+        except Exception as exc:  # surface to task.history
+            log.warning("sub_agent_runner: task=%s (%s) failed: %s", task.task_id, task.kind, exc, exc_info=True)
             outcome = SubAgentResult(
                 task_id=task.task_id,
                 state="failed",

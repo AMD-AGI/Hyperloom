@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import time
@@ -33,6 +34,8 @@ from kernelforge.loop.agent_relay import (
 )
 from kernelforge.loop.search_actors import SearchActorBundle, SearchActorPool
 from kernelforge.orchestrator.agent import ImplementerSetup
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -466,7 +469,8 @@ def _provider_is_available(registration) -> tuple[bool, str]:
     try:
         if not registration.availability():
             return False, "provider SDK or CLI is not installed"
-    except Exception as error:  # noqa: BLE001 - third-party provider predicate
+    except Exception as error:  # third-party provider predicate
+        log.warning("Agent provider availability check failed: %s", error, exc_info=True)
         return False, f"{type(error).__name__}: {error}"
     return True, ""
 

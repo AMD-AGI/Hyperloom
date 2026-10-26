@@ -83,6 +83,7 @@ except ModuleNotFoundError:  # Python 3.10
 import code_metrics_checks as checks
 import code_metrics_design as design
 from code_metrics_collect import (
+    DIRECTORY_ENTRIES,
     METRICS,
     MODULE,
     PENDING,
@@ -91,6 +92,7 @@ from code_metrics_collect import (
     ToolError,
     Units,
     complexipy_findings,
+    directory_findings,
     function_line_findings,
     jscpd_command,
     jscpd_findings,
@@ -414,6 +416,8 @@ def measure(root: Path, config: Config, units: Units) -> dict[Key, Finding]:
     findings += vulture_findings(root, production, config.params["dead-code-min-confidence"], units)
     tokens, lines = config.params["duplication-min-tokens"], config.params["duplication-min-lines"]
     findings += jscpd_findings(root, production + tests, tokens, lines)
+    if DIRECTORY_ENTRIES in config.thresholds:
+        findings += directory_findings(production, config.thresholds[DIRECTORY_ENTRIES])
     return worst_per_unit(findings)
 
 
@@ -565,7 +569,10 @@ def run(args: argparse.Namespace, outcome: Outcome) -> int:
         outcome.touched = checks.touched_files(root, since)
     compare(findings, outcome.baseline, outcome)
     if since:
-        paths = {f.path for f in outcome.new} | {f.path for f, _ in outcome.worsened}
+        # PER_FILE only, in all three directions: base_values measures files, and the path of a
+        # directory-entries finding is a directory.
+        paths = {f.path for f in outcome.new if f.metric in PER_FILE}
+        paths |= {f.path for f, _ in outcome.worsened if f.metric in PER_FILE}
         paths |= {key[1] for key, _was, _now in outcome.stale if key[0] in PER_FILE}
         at_base = base_values(root, since, paths, config)
         excuse_base_backlog(outcome, at_base)
