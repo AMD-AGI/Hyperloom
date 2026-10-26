@@ -179,7 +179,8 @@ class ReplayTarget:
 class ReplayReference:
     """A file of a champion's its replay leaves out: its ``kind`` (:data:`PATCH_REFERENCE` or a kernel artifact's
     kind), the path or ref and the sha256 the recipe pins, the blob it is in the session's store under, the image the
-    champion was built on, and for a patch the component and the upstream commit it was made on."""
+    champion was built on, and for a patch the component and the upstream commit it was made on, and its ``text`` as
+    PRELUDE read it into the store."""
 
     kind: str
     ref: str
@@ -187,6 +188,7 @@ class ReplayReference:
     image: str
     component: str = ""
     upstream_ref: str = ""
+    text: str = ""
 
     def describe(self) -> str:
         made = f" on {self.component} {self.upstream_ref[:SHORT_REF]}" if self.component else ""
@@ -200,8 +202,9 @@ class PreparedReplay:
     ``recipe`` is its whole recipe, its patch and kernel files already in the session's blob store; ``None`` when only
     its launch config ``launch`` replays, ``reason`` saying why. ``source_image`` is the image the champion was built
     on when it is not the session's: its kernel artifacts stay out, each head keeping its own, and its gain was
-    measured there. ``references`` are the files the replay leaves out, and ``patch_envs`` the variables of the
-    launch environment its patches read.
+    measured there. ``references`` are the files the replay leaves out, ``patch_envs`` the variables of the launch
+    environment its patches read, and ``patch_texts`` each patch's text by its sha256, which a launch-only replay
+    keeps for the specialist to port.
     """
 
     canonical_id: str
@@ -211,6 +214,7 @@ class PreparedReplay:
     references: tuple[ReplayReference, ...] = ()
     source_image: str = ""
     patch_envs: tuple[str, ...] = ()
+    patch_texts: Mapping[str, str] = field(default_factory=dict)
 
     def launch_only(self, reason: str = LAUNCH_ONLY_REASON) -> PreparedReplay:
         """The champion's launch config alone, for ``reason``: without the variables its patches read, which mean
@@ -226,11 +230,18 @@ class PreparedReplay:
             launch=replace(self.launch, envs=envs),
             reason=reason,
             references=(
-                *_patch_references(self.recipe, image),
+                *_patch_references(self.recipe, image, self.patch_texts),
                 *self.references,
                 *_kernel_references(self.recipe, image),
             ),
         )
+
+    def reference_text(self, ref: str) -> str | None:
+        """The text of the patch ``ref`` the replay leaves out; ``None`` when it leaves out no patch of that path
+        whose text PRELUDE read."""
+
+        found = (item.text for item in self.references if item.kind == PATCH_REFERENCE and item.ref == ref)
+        return next((text for text in found if text), None)
 
     def on(self, head: Recipe, parent_commit: str, stack_slot: StackSlot | None = None) -> WarmReplay | None:
         """The change that makes ``head``, the recipe of ``parent_commit``, into the champion's; ``None`` when ``head``
@@ -276,9 +287,17 @@ class PreparedReplay:
         return replace(_on_head_upstreams(champion, head), launch=replace(champion.launch, server_args=args))
 
 
-def _patch_references(recipe: Recipe, image: str) -> tuple[ReplayReference, ...]:
+def _patch_references(recipe: Recipe, image: str, texts: Mapping[str, str]) -> tuple[ReplayReference, ...]:
     return tuple(
-        ReplayReference(PATCH_REFERENCE, patch.path, patch.sha256, image, component.component, component.upstream_ref)
+        ReplayReference(
+            PATCH_REFERENCE,
+            patch.path,
+            patch.sha256,
+            image,
+            component.component,
+            component.upstream_ref,
+            texts.get(patch.sha256, ""),
+        )
         for component in recipe.components
         for patch in component.patches
     )
@@ -575,10 +594,10 @@ def _champion(client: RecipeDownloader, lead: WarmLead, scope: RecipeScope, targ
     destination = target.workdir / _UNSAFE_NAME.sub("-", lead.canonical_id)
     _asked(partial(client.read, lead.canonical_id, destination, scope=scope, envelope=envelope))
     files = destination / "files"
-    patches = []
+    patches: dict[str, bytes] = {}
     for stack, component in enumerate(champion.components):
         for member, patch in enumerate(component.patches):
-            patches.append(_keep(target.blobs, files / overlay_ref(stack, member, patch.path), patch.sha256))
+            patches[patch.sha256] = _keep(target.blobs, files / overlay_ref(stack, member, patch.path), patch.sha256)
     for artifact in champion.kernels:
         _keep(target.blobs, files / artifact.ref, artifact.sha256)
     return PreparedReplay(
@@ -587,7 +606,8 @@ def _champion(client: RecipeDownloader, lead: WarmLead, scope: RecipeScope, targ
         champion.launch,
         references=references,
         source_image=source,
-        patch_envs=_read_envs(patches, lead.envs),
+        patch_envs=_read_envs(tuple(patches.values()), lead.envs),
+        patch_texts={sha256: data.decode(errors="replace") for sha256, data in patches.items()},
     )
 
 

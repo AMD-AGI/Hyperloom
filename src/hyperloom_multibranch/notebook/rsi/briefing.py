@@ -239,6 +239,14 @@ class CrossSessionBriefing(StartupBriefProvider):
             raise ValueError(f"{canonical_id} is on your head already: your head {head} {where}; build on it")
         return await asyncio.to_thread(prepared.on, await self.repo.read_recipe(head), head, self.stack_slot)
 
+    async def warm_reference(self, canonical_id: str, ref: str) -> str | None:
+        """The text of the patch ``ref`` the replay PRELUDE prepared of the champion ``canonical_id`` leaves out, the
+        same on any head; ``None`` when that replay leaves out no such patch."""
+
+        lead = next((lead for lead in self.warm if lead.canonical_id == canonical_id), None)
+        prepared = lead.replay if lead is not None else None
+        return prepared.reference_text(ref) if prepared is not None else None
+
     async def _on_line(self, snapshot: NotebookSnapshot, commit: str) -> dict[str, str]:
         """The champions PRELUDE prepared a replay of that ``commit`` is already or builds on, each with the first commit
         found to be it: ``commit`` itself, then the commits its lineage builds on."""

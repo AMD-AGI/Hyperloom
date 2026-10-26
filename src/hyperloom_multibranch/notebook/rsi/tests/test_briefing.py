@@ -53,7 +53,13 @@ from hyperloom_multibranch.notebook.knowledge.tests.fakes import (
 )
 from hyperloom_multibranch.contracts.notebook.records import PeerReplay, WarmReplay
 from hyperloom_multibranch.notebook.knowledge.reference_leads import ReferenceLead
-from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay, ReplayRefusal, WarmLead
+from hyperloom_multibranch.notebook.knowledge.warm_start import (
+    PATCH_REFERENCE,
+    PreparedReplay,
+    ReplayReference,
+    ReplayRefusal,
+    WarmLead,
+)
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.notebook.knowledge.replay_tables import StackSlot
 from hyperloom_multibranch.notebook.rsi.briefing import ON_HEAD, CrossSessionBriefing, SessionBriefs
@@ -304,6 +310,18 @@ async def test_a_lead_with_a_replay_says_how_to_replay_it_and_the_briefing_repla
     )
     assert await briefing.warm_replay("inference:none") is None
     assert await CrossSessionBriefing(notebook, warm=warm, branch="s3").warm_replay(LEAD.canonical_id) is None
+
+
+async def test_the_briefing_reads_a_patch_a_launch_only_replay_leaves_out_whatever_the_head(tmp_path: Path) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    image, upstream = "sha256:" + "b" * 64, "e" * 40
+    patch = ReplayReference(PATCH_REFERENCE, "sglang/gate.patch", "d" * 64, image, "sglang", upstream, "+gate\n")
+    prepared = PreparedReplay(LEAD.canonical_id, None, LaunchConfig("--enable-expert-parallel"), "refused", (patch,))
+    briefing = CrossSessionBriefing(notebook, warm=(dataclasses.replace(LEAD, replay=prepared),), branch="s3")
+
+    assert await briefing.warm_reference(LEAD.canonical_id, "sglang/gate.patch") == "+gate\n"
+    assert await briefing.warm_reference(LEAD.canonical_id, "other.patch") is None
+    assert await briefing.warm_reference("inference:none", "sglang/gate.patch") is None
 
 
 def _champion_merged(unpacked: str) -> tuple[tuple[WarmLead, ...], _Repo]:

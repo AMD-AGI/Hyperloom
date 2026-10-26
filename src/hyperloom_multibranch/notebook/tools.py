@@ -73,6 +73,8 @@ TOOL_PREFIX = "notebook_"
 LINE_CHARS = 160
 MAX_LINES = 20
 MAX_REPLY_CHARS = 4000
+#: How much of a left-out patch one reply shows, leaving room in it for the lines around the text.
+PATCH_PAGE_CHARS = MAX_REPLY_CHARS - 300
 #: The brief's ceilings name every op of at least :data:`CEILING_MIN_SHARE_PCT` of GPU time, the largest first, up to
 #: this many, so that a direction on small ops can name its targets and claim several together.
 CEILING_OPS = 12
@@ -270,10 +272,12 @@ def render_brief(brief: StartupBrief) -> str:
 
 @runtime_checkable
 class WarmReplays(Protocol):
-    """A briefing that replays the champions PRELUDE prepared on its branch's head, as
-    ``rsi.briefing.CrossSessionBriefing`` does."""
+    """A briefing that replays the champions PRELUDE prepared on its branch's head, and reads the patches a replay
+    leaves out, as ``rsi.briefing.CrossSessionBriefing`` does."""
 
     async def warm_replay(self, canonical_id: str) -> WarmReplay | None: ...
+
+    async def warm_reference(self, canonical_id: str, ref: str) -> str | None: ...
 
 
 @runtime_checkable
@@ -303,6 +307,23 @@ def render_replay(replay: WarmReplay) -> str:
     lines.extend(f"left out: {reference}" for reference in replay.references)
     found = _claim_and_change(replay.canonical_id, replay.parent_commit, replay.layer, replay.delta)
     return "\n".join((*lines, *found))
+
+
+def render_reference(canonical_id: str, ref: str, text: str, offset: int = 0) -> str:
+    """The patch ``ref`` of the champion ``canonical_id``'s replay leaves out, from ``offset`` on, as much of ``text``
+    as one reply holds, and where to ask for the rest."""
+
+    start = max(offset, 0)
+    page = text[start : start + PATCH_PAGE_CHARS]
+    end = start + len(page)
+    lines = [
+        f"patch {ref} that the replay of {canonical_id} leaves out, characters {start} to {end} of {len(text)}; port "
+        "what it changes to your head, it did not apply to this session's image:",
+        page,
+    ]
+    if end < len(text):
+        lines.append(f"... {len(text) - end} more characters: ask again with offset {end}")
+    return "\n".join(lines)
 
 
 def render_peer_replay(replay: PeerReplay) -> str:
@@ -435,6 +456,8 @@ class _SpecialistTools:
             if not isinstance(self.briefing, PeerReplays):
                 return f"{ERROR} no replay of {request_id}: this specialist's brief reads no experiment repository"
             text = render_peer_replay(await self.briefing.peer_replay(request_id))
+        elif arguments.get("reference"):
+            return await self._reference(canonical_id, str(arguments["reference"]), int(arguments.get("offset") or 0))
         else:
             found = await self.briefing.warm_replay(canonical_id) if isinstance(self.briefing, WarmReplays) else None
             if found is None:
@@ -445,6 +468,13 @@ class _SpecialistTools:
             text = render_replay(found)
         source = request_id or canonical_id
         return text if len(text) <= MAX_REPLY_CHARS else f"{ERROR} the replay of {source} does not fit a reply"
+
+    async def _reference(self, canonical_id: str, ref: str, offset: int) -> str:
+        warm = self.briefing if isinstance(self.briefing, WarmReplays) else None
+        text = await warm.warm_reference(canonical_id, ref) if warm is not None else None
+        if text is None:
+            return f"{ERROR} the replay of {canonical_id} leaves out no patch {ref}: name one of its 'left out: patch' lines"
+        return render_reference(canonical_id, ref, text, offset)
 
 
 def _guarded(handler: Handler) -> Handler:
@@ -469,6 +499,10 @@ def _schema(properties: Mapping[str, Any], *required: str) -> dict[str, Any]:
 
 def _text(**more: Any) -> dict[str, Any]:
     return {"type": "string", **more}
+
+
+def _integer(**more: Any) -> dict[str, Any]:
+    return {"type": "integer", **more}
 
 
 def _list(items: Mapping[str, Any]) -> dict[str, Any]:
@@ -521,7 +555,7 @@ _SPECS = (
     _Spec(
         "search",
         "Search the notebook: ',' separates alternatives, '&' joins terms that must all appear.",
-        _schema({"query": _text(), "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LINES}}, "query"),
+        _schema({"query": _text(), "limit": _integer(minimum=1, maximum=MAX_LINES)}, "query"),
     ),
     _Spec(
         "record",
@@ -576,7 +610,7 @@ _SPECS = (
         "What specialists learnt that bears on a query: this session's learnings of every branch, then past sessions' "
         "lessons, each saying whether it was learnt under this session's conditions and tested, with the id a "
         "learning of yours may correct or retire it by.",
-        _schema({"query": _text(), "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LINES}}, "query"),
+        _schema({"query": _text(), "limit": _integer(minimum=1, maximum=MAX_LINES)}, "query"),
     ),
     _Spec(
         "brief",
@@ -588,12 +622,20 @@ _SPECS = (
         "A Recipe KB champion the startup brief names, or the change of another branch's test a peer_outcome inbox "
         "item or the brief's unfinished leads name, replayed on your branch's head: the intent to claim and the change "
         "to submit there. Give one of the two; a champion's patch and kernel files are already in the session's blob "
-        "store.",
+        "store. With a champion's canonical_id and reference, the text of one patch its replay leaves out, to port.",
         _schema(
             {
                 "canonical_id": _text(description="The champion's Recipe KB id, as the brief names it."),
                 "request_id": _text(
                     description="The other branch's test, as a peer_outcome inbox item or an unfinished lead names it."
+                ),
+                "reference": _text(
+                    description="A patch the champion's replay leaves out, its path as a 'left out: patch' line names "
+                    "it: the reply is its text, a page at a time."
+                ),
+                "offset": _integer(
+                    minimum=0,
+                    description="Where in the patch's text the page starts, as the previous page's last line says.",
                 ),
             }
         ),
@@ -630,6 +672,7 @@ __all__ = [
     "LINE_CHARS",
     "MAX_LINES",
     "MAX_REPLY_CHARS",
+    "PATCH_PAGE_CHARS",
     "TOOL_PREFIX",
     "NotebookTool",
     "PeerReplays",
@@ -643,5 +686,6 @@ __all__ = [
     "render_log",
     "render_record",
     "render_peer_replay",
+    "render_reference",
     "render_replay",
 ]

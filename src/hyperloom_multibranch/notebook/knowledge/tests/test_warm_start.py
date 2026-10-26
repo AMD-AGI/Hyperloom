@@ -458,7 +458,7 @@ def test_a_champion_built_on_another_image_replays_its_patches_but_not_its_kerne
     assert f"left out: gemm {TUNED.ref} (blob {TUNED.sha256[:12]}, built on {OTHER_IMAGE[:19]})" in found.describe()
 
 
-def test_launch_only_replays_the_launch_config_without_what_the_patches_read_listing_them(
+def test_launch_only_replays_the_launch_config_without_what_the_patches_read_listing_them_with_their_text(
     snapshot: NotebookSnapshot, tmp_path: Path
 ) -> None:
     found = replay(_elsewhere(snapshot, tmp_path, GATED), GATED_LEAD, SCOPE, _target(tmp_path))
@@ -470,8 +470,10 @@ def test_launch_only_replays_the_launch_config_without_what_the_patches_read_lis
     assert (launched.recipe, launched.reason, launched.source_image) == (None, LAUNCH_ONLY_REASON, OTHER_IMAGE)
     assert [(item.kind, item.ref) for item in launched.references] == [("patch", GATE_PATCH.path), ("gemm", TUNED.ref)]
     assert launched.references[0] == ReplayReference(
-        "patch", GATE_PATCH.path, GATE_PATCH.sha256, OTHER_IMAGE, "vllm", VLLM_AT
+        "patch", GATE_PATCH.path, GATE_PATCH.sha256, OTHER_IMAGE, "vllm", VLLM_AT, GATE_PATCH_BYTES.decode()
     )
+    assert launched.reference_text(GATE_PATCH.path) == GATE_PATCH_BYTES.decode()
+    assert launched.reference_text(TUNED.ref) is None and found.reference_text(GATE_PATCH.path) is None
     assert on_root is not None and on_root.layer is IntentLayer.CONFIG
     assert apply(ROOT, on_root.delta).launch == LaunchConfig("--max-num-seqs 256", {"VLLM_USE_AITER": "1"})
     assert apply(ROOT, on_root.delta).components == ROOT.components

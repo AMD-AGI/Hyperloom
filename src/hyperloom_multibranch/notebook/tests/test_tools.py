@@ -38,6 +38,8 @@ from hyperloom_multibranch.notebook.tools import (
     CEILING_OPS,
     ERROR,
     MAX_LINES,
+    MAX_REPLY_CHARS,
+    PATCH_PAGE_CHARS,
     NotebookTool,
     lines,
     notebook_tools,
@@ -81,7 +83,7 @@ async def test_the_replay_tool_names_the_intent_to_claim_and_the_change_on_the_b
     async def warm_replay(canonical_id: str) -> WarmReplay | None:
         return on_head if canonical_id == on_head.canonical_id else None
 
-    tools = tools_of("s1", SimpleNamespace(warm_replay=warm_replay))
+    tools = tools_of("s1", SimpleNamespace(warm_replay=warm_replay, warm_reference=_no_reference))
 
     text = await _call(tools, "replay", canonical_id="inference:older")
 
@@ -91,6 +93,37 @@ async def test_the_replay_tool_names_the_intent_to_claim_and_the_change_on_the_b
     assert REPLAY_TOOL in tools
     assert (await _call(tools, "replay", canonical_id="inference:none")).startswith(ERROR)
     assert (await _call(tools_of("s1"), "replay", canonical_id="inference:older")).startswith(ERROR)
+
+
+async def _no_replay(canonical_id: str) -> WarmReplay | None:
+    return None
+
+
+async def _no_reference(canonical_id: str, ref: str) -> str | None:
+    return None
+
+
+async def test_the_replay_tool_reads_a_patch_a_champions_replay_leaves_out_a_page_at_a_time(tools_of: Tools) -> None:
+    text = "".join(f"+line {n}\n" for n in range(1000))
+
+    async def warm_reference(canonical_id: str, ref: str) -> str | None:
+        return text if (canonical_id, ref) == ("inference:older", "vllm/gate.patch") else None
+
+    tools = tools_of("s1", SimpleNamespace(warm_replay=_no_replay, warm_reference=warm_reference))
+    asked = {"canonical_id": "inference:older", "reference": "vllm/gate.patch"}
+
+    first = await _call(tools, "replay", **asked)
+    last = await _call(tools, "replay", **asked, offset=2 * PATCH_PAGE_CHARS)
+
+    assert first.startswith(
+        f"patch vllm/gate.patch that the replay of inference:older leaves out, characters 0 to {PATCH_PAGE_CHARS} "
+        f"of {len(text)}"
+    )
+    assert text[:PATCH_PAGE_CHARS] in first and len(first) <= MAX_REPLY_CHARS
+    assert first.endswith(f"more characters: ask again with offset {PATCH_PAGE_CHARS}")
+    assert last.endswith(text[2 * PATCH_PAGE_CHARS :]) and "more characters" not in last
+    assert (await _call(tools, "replay", canonical_id="inference:older", reference="other.patch")).startswith(ERROR)
+    assert (await _call(tools_of("s1"), "replay", **asked)).startswith(ERROR)
 
 
 def test_a_replay_from_another_image_says_where_its_gain_was_measured_and_what_it_leaves_out() -> None:
