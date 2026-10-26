@@ -191,6 +191,8 @@ def _source_layer_handles(result: Mapping[str, Any]) -> dict[str, Any]:
     }
     if "source_snapshot_complete" in result:
         handles["source_snapshot_complete"] = bool(result["source_snapshot_complete"])
+    if result.get("source_layer_landed") or result.get("patches_applied") or result.get("artifacts_applied"):
+        handles["source_layer_landed"] = True
     return handles
 
 

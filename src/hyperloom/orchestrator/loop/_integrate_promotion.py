@@ -228,6 +228,7 @@ class IntegratePromotionMixin:
             "extra_envs": {str(k): str(v) for k, v in (result.get("extra_envs") or {}).items()},
             "source_phase": str(self.shared_state.phase or "KERNEL_AGENT"),
             **integrate_measurement_fields(measurement),
+            **_source_layer_handles(result),
         }
         if is_fusion:
             variant["provenance"] = "forge_fusion"
