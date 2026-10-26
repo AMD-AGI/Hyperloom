@@ -492,6 +492,24 @@ async def test_an_agentx_session_measures_the_agentx_benchmark_its_prelude_child
         )
 
 
+async def test_an_agentx_session_on_a_model_directory_serves_it_at_its_ep_in_the_sessions_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = tmp_path / "models" / "DeepSeek-V3"
+    model.mkdir(parents=True)
+    workload = replace(AGENTX, model=str(model), ep=8)
+    host = replace(HOST, inferencex=InferenceXCheckout("c" * 40, "/opt/InferenceX-agentx/inferencex-e2e"))
+
+    async with _peers(tmp_path / "workspace", monkeypatch, workload, host) as built:
+        benchmark = yaml.safe_load((built.layout.toolbox / "benchmark.yaml").read_text())["benchmark"]
+        assert (benchmark["docker_image"], benchmark["envs"]["EP_SIZE"]) == (IMAGE.ref, 8)
+        assert benchmark["envs"]["MODEL_PATH"] == str(model)
+        argv = prelude_argv(workload, 1.0, built.layout.prelude_launch)
+        args = _build_parser().parse_args(list(argv[argv.index("optimize") :]))
+        configure_benchmark(args)
+        assert (str(args.model), args.ep, args.docker_image) == (str(model), 8, IMAGE.ref)
+
+
 def test_the_specialists_recall_no_past_learnings_whatever_experience_kb_the_environment_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

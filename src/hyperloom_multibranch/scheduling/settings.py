@@ -11,6 +11,7 @@ from enum import Enum
 from pathlib import Path
 
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
+from hyperloom.common.workload_defaults import DEFAULT_EP
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.scheduling.reference import ReferenceSource
 from hyperloom_multibranch.scheduling.roster import RosterCaps
@@ -52,7 +53,8 @@ class InferenceXShape:
 class Workload:
     """The fixed workload, spelled as the single-lineage command line spells it, and the kernel optimizer its recipes
     are scoped to. ``inferencex`` is the request shape of an InferenceX workload and ``None`` for an AgentX trace
-    replay, whose shape the trace fixes; ``conc`` is the primary operating point of either.
+    replay, whose shape the trace fixes; ``conc`` is the primary operating point of either. ``ep`` is the
+    expert-parallel size an AgentX workload is served at; an InferenceX one is served at :data:`DEFAULT_EP`.
 
     ``gpu_type`` is named, not detected: the toolbox writes it into every measurement spec, built before PRELUDE runs.
     """
@@ -65,6 +67,7 @@ class Workload:
     gpu_type: str
     kernel_optimizer: KernelOptimizer
     inferencex: InferenceXShape | None
+    ep: int = DEFAULT_EP
 
     @property
     def model_basename(self) -> str:

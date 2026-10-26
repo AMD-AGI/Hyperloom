@@ -47,7 +47,6 @@ from typing import TYPE_CHECKING, Protocol
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom.common.llm_config import preferred_agent_backend, provider_model_defaults, resolve_forge_llm_model
 from hyperloom.common.model_paths import resolve_serving_model_path
-from hyperloom.common.workload_defaults import DEFAULT_EP
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, CommitQuery
@@ -191,11 +190,13 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
     }
 
 
-def _export_workload(workload: Workload, toolbox_dir: Path) -> None:
+def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> None:
     """Export :func:`workload_environment` into this process. For an AgentX workload, also write the Magpie AgentX
     benchmark ``hyperloom optimize`` generates for it to :data:`BENCHMARK_FILE` in ``toolbox_dir`` and name it in
     ``HYPERLOOM_BENCHMARK_CONFIG``: the canonical measurement is rendered from it, and the PRELUDE child binds its
-    command line to it. The file pins no model directory, so the child's ``--model`` stays the workload's model."""
+    command line to it. The benchmark serves at the workload's EP and names ``image_ref``, the image the session
+    runs on, as its image, which Magpie requires of a model it has no recipe for. It pins the model's directory when
+    the model is one, which the command line names by its resolved path, so the child's ``--model`` names it too."""
 
     os.environ.update(workload_environment(workload))
     if workload.inferencex is not None:
@@ -208,9 +209,11 @@ def _export_workload(workload: Workload, toolbox_dir: Path) -> None:
         model=workload.model,
         precision=workload.precision,
         tp=workload.tp,
-        ep=DEFAULT_EP,
+        ep=workload.ep,
         conc=workload.conc,
+        model_path=workload.model,
         gpu_type=workload.gpu_type,
+        docker_image=image_ref,
     )
     write_agentx_benchmark(path, benchmark)
     os.environ[BENCHMARK_CONFIG_ENV] = str(path.resolve())
@@ -267,7 +270,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     from hyperloom_multibranch.specialist.tools import register_worktree_tools
 
     layout, workload = setup.layout, setup.workload
-    _export_workload(workload, layout.toolbox)
+    _export_workload(workload, layout.toolbox, host.image.ref)
     repo = GitExperimentRepo(layout.repo, setup.blobs)
     toolbox = _toolbox(host, setup, repo)
     gate_notebook = LocalNotebook(layout.notebook, Writer(Role.GATE, GATE_WRITER))
