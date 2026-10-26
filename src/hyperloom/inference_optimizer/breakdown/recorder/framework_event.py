@@ -45,7 +45,7 @@ from .event_fields import (
     worst_status as _worst_status,
 )
 from .event_ids import event_id
-from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
+from .event_rows import group_rows, section_rows, wire_rows
 from .event_sink import RecordSink, make_sink
 from .event_timeline import EventHeader, finish_event, open_event
 
@@ -836,11 +836,11 @@ def assemble_framework_ext(
     which leaves the caller's own reading standing."""
     header = event_header(parts, SECTION_EVENT, event)
 
-    plateau = wire_rows(_ordered_rows(parts, SECTION_PLATEAU, event, ("evaluated_at", "arm")), drop=("event_id",))
-    runs = wire_rows(_ordered_rows(parts, SECTION_RUN, event, ("dispatched_at", "run_id")), drop=("event_id",))
-    attempt_rows = _ordered_rows(parts, SECTION_ATTEMPT, event, ("ts", "attempt_id"))
+    plateau = wire_rows(section_rows(parts, SECTION_PLATEAU, event, keys=("evaluated_at", "arm")), drop=("event_id",))
+    runs = wire_rows(section_rows(parts, SECTION_RUN, event, keys=("dispatched_at", "run_id")), drop=("event_id",))
+    attempt_rows = section_rows(parts, SECTION_ATTEMPT, event, keys=("ts", "attempt_id"))
     gates_by_attempt = group_rows(
-        _ordered_rows(parts, SECTION_ATTEMPT_GATE, event, ("ordinal", "ts", "gate")), "attempt_id"
+        section_rows(parts, SECTION_ATTEMPT_GATE, event, keys=("ordinal", "ts", "gate")), "attempt_id"
     )
     attempts: list[dict[str, Any]] = []
     for row in wire_rows(attempt_rows, drop=("event_id",)):
@@ -849,10 +849,12 @@ def assemble_framework_ext(
         row["blocked_by"] = _text_or_none(_blocking_gate(row["gates"]))
         attempts.append(row)
 
-    steps_by_proposal = group_rows(_ordered_rows(parts, SECTION_PROPOSAL_STEP, event, ("ts", "step")), "proposal_id")
+    steps_by_proposal = group_rows(
+        section_rows(parts, SECTION_PROPOSAL_STEP, event, keys=("ts", "step")), "proposal_id"
+    )
     attempts_by_proposal = group_rows(attempts, "proposal_ref")
     proposals: list[dict[str, Any]] = []
-    for row in wire_rows(_ordered_rows(parts, SECTION_PROPOSAL, event, ("proposal_id",)), drop=("event_id",)):
+    for row in wire_rows(section_rows(parts, SECTION_PROPOSAL, event, keys=("proposal_id",)), drop=("event_id",)):
         key = str(row.get("proposal_id") or "")
         row["lifecycle"] = wire_rows(steps_by_proposal.get(key, []), drop=("event_id", "proposal_id"))
         # Derived at close: the attempt already names its proposal, and a
@@ -879,16 +881,6 @@ def assemble_framework_ext(
         "duration_sec": header.get("duration_sec"),
     }
     return ext, _derived_status(header, runs=runs, proposals=proposals, attempts=attempts)
-
-
-def _ordered_rows(
-    parts: Mapping[str, list[dict[str, Any]]],
-    section: str,
-    event: str,
-    keys: tuple[str, ...],
-) -> list[dict[str, Any]]:
-    """``event``'s rows of one section, ordered by ``keys``."""
-    return sort_rows(rows_for_event(parts.get(section) or [], event), keys=keys)
 
 
 def _derived_status(

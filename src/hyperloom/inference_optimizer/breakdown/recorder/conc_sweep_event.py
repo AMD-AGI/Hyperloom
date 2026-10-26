@@ -39,7 +39,7 @@ from .event_fields import (
     text_or_none as _text_or_none,
 )
 from .event_ids import event_id
-from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
+from .event_rows import group_rows, section_rows, wire_rows
 from .event_sink import RecordSink
 from .event_timeline import EventHeader, finish_event, open_event
 
@@ -938,26 +938,17 @@ def assemble_conc_sweep_ext(
     """Assemble one conc-sweep event's ``ext`` and the sweep's status out of its
     recorded rows. Both are empty when the event holds no sweep, which is what
     a caller assembling an event that was never recorded gets."""
-    action_rows = sort_rows(
-        rows_for_event(parts.get(SECTION_ACTION) or [], event),
-        keys=("start_time", "task_id"),
-    )
+    action_rows = section_rows(parts, SECTION_ACTION, event, keys=("start_time", "task_id"))
     if not action_rows:
         return {}, ""
     row = action_rows[-1]
-    variants = group_rows(
-        sort_rows(
-            rows_for_event(parts.get(SECTION_VARIANT) or [], event),
-            keys=("ordinal", "arm", "conc"),
-        ),
-        "arm",
-    )
+    variants = group_rows(section_rows(parts, SECTION_VARIANT, event, keys=("ordinal", "arm", "conc")), "arm")
     arm_rows = {
         _text(arm_row.get("arm")): arm_row
-        for arm_row in sort_rows(rows_for_event(parts.get(SECTION_ARM) or [], event), keys=("ordinal", "arm"))
+        for arm_row in section_rows(parts, SECTION_ARM, event, keys=("ordinal", "arm"))
     }
     pairs = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_PAIR) or [], event), keys=("conc",)),
+        section_rows(parts, SECTION_PAIR, event, keys=("conc",)),
         drop=("event_id", "task_id", "ordinal"),
     )
     result = _as_dict(row.get("result"))

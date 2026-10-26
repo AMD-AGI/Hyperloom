@@ -34,7 +34,7 @@ from .event_fields import (
     now_iso_seconds as _now,
 )
 from .event_ids import event_id
-from .event_rows import rows_for_event, sort_rows, wire_rows
+from .event_rows import rows_for_event, section_rows, wire_rows
 from .event_sink import EventSink, make_sink
 from .event_timeline import EventHeader, finish_event, open_event
 from .phase_records import (
@@ -443,16 +443,22 @@ def assemble_phase_ext(
     """Assemble a phase event's ``ext``, and the status it reports, out of the
     sections read back from the spool."""
     header = _header(rows_for_event(parts.get(SECTION_EVENT) or [], event))
-    segments = _section_rows(parts, SECTION_SEGMENT, event, ("sequence",))
+    segments = wire_rows(section_rows(parts, SECTION_SEGMENT, event, keys=("sequence",)), drop=("event_id",))
     actions = [
         # Measured here because the settle cannot see the dispatch that opened
         # the row.
         dict(row, duration_sec=_span(row.get("dispatched_unix"), row.get("settled_unix")))
-        for row in _section_rows(parts, SECTION_ACTION, event, ("dispatched_at", "task_id"))
+        for row in wire_rows(
+            section_rows(parts, SECTION_ACTION, event, keys=("dispatched_at", "task_id")), drop=("event_id",)
+        )
     ]
-    markers = _section_rows(parts, SECTION_MARKER, event, ("sequence", "ts"))
-    proposals = _section_rows(parts, SECTION_PROPOSAL, event, ("proposed_at", "proposal_msg_id"))
-    denials = _section_rows(parts, SECTION_DENIAL, event, ("denied_at", "proposal_msg_id", "action"))
+    markers = wire_rows(section_rows(parts, SECTION_MARKER, event, keys=("sequence", "ts")), drop=("event_id",))
+    proposals = wire_rows(
+        section_rows(parts, SECTION_PROPOSAL, event, keys=("proposed_at", "proposal_msg_id")), drop=("event_id",)
+    )
+    denials = wire_rows(
+        section_rows(parts, SECTION_DENIAL, event, keys=("denied_at", "proposal_msg_id", "action")), drop=("event_id",)
+    )
     first = segments[0] if segments else {}
     last = segments[-1] if segments else {}
     ext: dict[str, Any] = {
@@ -485,16 +491,6 @@ def assemble_phase_ext(
         },
     }
     return ext, _status_for(segments, actions)
-
-
-def _section_rows(
-    parts: Mapping[str, list[dict[str, Any]]],
-    section: str,
-    event: str,
-    keys: tuple[str, ...],
-) -> list[dict[str, Any]]:
-    """``event``'s rows of one section, ordered by ``keys`` and stripped of the event id."""
-    return wire_rows(sort_rows(rows_for_event(parts.get(section) or [], event), keys=keys), drop=("event_id",))
 
 
 def _summed_duration(segments: Sequence[Mapping[str, Any]]) -> float | None:

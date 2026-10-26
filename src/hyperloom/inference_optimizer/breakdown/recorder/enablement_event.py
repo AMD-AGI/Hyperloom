@@ -37,7 +37,7 @@ from .event_fields import (
 from ..round_archive import ROLE_LAUNCH_CONFIG
 
 from .event_ids import event_id
-from .event_rows import rows_for_event, sort_rows, wire_rows
+from .event_rows import rows_for_event, section_rows, wire_rows
 from .event_sink import EventSink, make_sink
 from .enablement_keep_pairing import (
     KEEP_REF_FIELD,
@@ -672,13 +672,19 @@ def assemble_enablement_ext(
     leaves the caller's own reading standing.
     """
     header = _header(rows_for_event(parts.get(SECTION_EVENT) or [], event))
-    attempts = _section_rows(parts, SECTION_ATTEMPT, event, ("attempt", "dispatched_at"))
-    builds = _section_rows(parts, SECTION_BUILD, event, ("recorded_at", "task_id"))
-    revalidations = _section_rows(parts, SECTION_REVALIDATION, event, ("generation",))
+    attempts = wire_rows(
+        section_rows(parts, SECTION_ATTEMPT, event, keys=("attempt", "dispatched_at")), drop=("event_id",)
+    )
+    builds = wire_rows(section_rows(parts, SECTION_BUILD, event, keys=("recorded_at", "task_id")), drop=("event_id",))
+    revalidations = wire_rows(
+        section_rows(parts, SECTION_REVALIDATION, event, keys=("generation",)), drop=("event_id",)
+    )
     paired = pair_keep_rounds(
         attempts, revalidations, str(header.get(VALIDATING_KEEP_FIELD) or ""), kept_status=ROUND_KEPT
     )
-    human_review = _section_rows(parts, SECTION_HUMAN_REVIEW, event, ("recorded_at", "digest"))
+    human_review = wire_rows(
+        section_rows(parts, SECTION_HUMAN_REVIEW, event, keys=("recorded_at", "digest")), drop=("event_id",)
+    )
     result = _as_dict(header.get("result"))
     failure = _as_dict(header.get("failure")) or None
     ext: dict[str, Any] = {
@@ -713,16 +719,6 @@ def assemble_enablement_ext(
         "recipe": _as_dict(header.get("recipe")) or None,
     }
     return ext, _event_status(result, failure, attempts=len(attempts))
-
-
-def _section_rows(
-    parts: Mapping[str, list[dict[str, Any]]],
-    section: str,
-    event: str,
-    keys: tuple[str, ...],
-) -> list[dict[str, Any]]:
-    """``event``'s rows of one section, ordered by ``keys`` and stripped of the event id."""
-    return wire_rows(sort_rows(rows_for_event(parts.get(section) or [], event), keys=keys), drop=("event_id",))
 
 
 def _event_status(result: Mapping[str, Any], failure: Mapping[str, Any] | None, *, attempts: int) -> str:

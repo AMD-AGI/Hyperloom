@@ -14,6 +14,7 @@ __all__ = [
     "SCOPE_FIELDS",
     "group_rows",
     "rows_for_event",
+    "section_rows",
     "sort_rows",
     "wire_row",
     "wire_rows",
@@ -59,6 +60,13 @@ def sort_rows(rows: Sequence[Mapping[str, Any]], *, keys: Sequence[str]) -> list
         return (*tokens, json.dumps(row, sort_keys=True, default=str, ensure_ascii=False))
 
     return [dict(row) for row in sorted(rows, key=sort_key)]
+
+
+def section_rows(
+    parts: Mapping[str, list[dict[str, Any]]], section: str, event: str, *, keys: Sequence[str]
+) -> list[dict[str, Any]]:
+    """``event``'s rows of one section of its parts, ordered by ``keys``."""
+    return sort_rows(rows_for_event(parts.get(section) or [], event), keys=keys)
 
 
 def group_rows(rows: Iterable[Mapping[str, Any]], field: str) -> dict[str, list[dict[str, Any]]]:
