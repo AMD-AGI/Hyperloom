@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
 from hyperloom.common import llm_config
-from hyperloom.agents.quantization.driver.result_collector import collect_artifacts
+from hyperloom.agents.quantization.driver.result_collector import CollectedArtifacts, collect_artifacts
 from hyperloom.common.deepseek_task import DeepSeekTaskRequest, OwedArtifact, run_deepseek_task
 from hyperloom.common.llm_attribution import sdk_env_overlay
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
@@ -189,28 +189,31 @@ def _attempt_child_env() -> dict[str, str]:
     return env
 
 
-#: The phase an attempt reaches when it starts evaluating its quantized model; nothing later is owed.
-_TERMINAL_PHASE = "eval"
+def attempt_ended(artifacts: CollectedArtifacts) -> bool:
+    """Whether the attempt has an end the classifier can judge: blocked, an eval report, or why eval was skipped.
 
-
-def _attempt_finished(workspace: Path) -> bool:
-    """Whether the attempt has reached an end the classifier can judge: blocked, or through to evaluation."""
-    artifacts = collect_artifacts(workspace)
+    ``last_phase.txt`` is written when a phase starts, so reaching eval is not an end. The owed-end check and the retry
+    loop both read this, so a session is continued exactly when its attempt would otherwise be judged unfinished.
+    """
     return (
         artifacts.blocked_reason is not None
-        or artifacts.last_phase == _TERMINAL_PHASE
         or artifacts.eval_report_present
         or artifacts.eval_skipped_reason is not None
     )
 
 
+def _attempt_finished(workspace: Path) -> bool:
+    """:func:`attempt_ended` on the files ``workspace`` holds now."""
+    return attempt_ended(collect_artifacts(workspace))
+
+
 def _owed_attempt_end(workspace: Path) -> OwedArtifact:
-    """What an attempt owes: a ``blocked.md``, or the workflow carried through to its evaluation phase."""
+    """What an attempt owes: a ``blocked.md``, or the workflow carried through evaluation."""
     return OwedArtifact(
         done=lambda: _attempt_finished(workspace),
         continuation_prompt=(
-            "The quantization workflow is not finished: there is no blocked.md and last_phase.txt has not reached "
-            f"{_TERMINAL_PHASE}. A tool call written out as text in a reply is not executed. Continue from the phase "
+            "The quantization workflow is not finished: there is no blocked.md, eval_report.json or "
+            "eval_skipped.txt. A tool call written out as text in a reply is not executed. Continue from the phase "
             "last_phase.txt names, calling tools directly, and write blocked.md if you cannot go on."
         ),
     )
