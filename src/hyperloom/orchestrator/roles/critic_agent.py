@@ -10,6 +10,8 @@ import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,7 +43,6 @@ from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tok
 from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
 from .base import BackendError, BackendTurnResult, LLMCallFailed, build_chat_messages, parse_call_timeout_env
 from ._review_constraints import apply_review_constraints
-from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
 if TYPE_CHECKING:
     from hyperloom.inference_optimizer.breakdown.recorder.critic_out import CriticIteration
@@ -51,6 +52,8 @@ log = logging.getLogger(__name__)
 
 
 CRITIC_AGENT_RUNTIME_TIMEOUT_SEC = 30  # prepare-review / commit-review wall cap
+# Characters of the child's stderr kept in a failure message.
+_STDERR_TRUNCATE_CHARS = 500
 # Output-token cap for both review paths.
 CRITIC_AGENT_MAX_COMPLETION_TOKENS = 32000
 # One retry at this multiple of the cap when a reply stops at the limit.
@@ -121,9 +124,7 @@ Rules (mirror SKILL.md Hard Rules + Approve Standard):
   runtime falls back to a heartbeat.
 - `approve` requires comparable before/after benchmark, accuracy gate
   (or waiver), active-path proof when relevant, and a clear rollback.
-- If `review_constraints.known_actions` is non-empty, any
-  `alternative_action` MUST be drawn from it; otherwise omit
-  `alternative_action`.
+- Omit `alternative_action`.
 - When a verdict rests on a rule from `review_constraints`, copy that
   rule's `failure_reason_code` verbatim into the verdict's own
   `failure_reason_code`; leave it `""` when the verdict rests on your
@@ -148,21 +149,67 @@ def _is_truncated_finish(finish: str | None) -> bool:
     return isinstance(finish, str) and finish.strip().lower() in _TRUNCATED_FINISH_REASONS
 
 
+@dataclass
+class RuntimeCall:
+    """One ``runtime.cli`` invocation, captured for tests + logging."""
+
+    phase: str
+    request_path: Path
+    out_path: Path
+    cwd: Path
+    env: dict[str, str]
+    review_path: Path | None = None
+
+
+RuntimeCaller = Callable[[RuntimeCall], None]
+"""Callable that performs (or fakes) a ``runtime.cli`` invocation.
+
+The default real caller shells out via :mod:`subprocess`; tests inject a fake
+that writes the output JSON to ``out_path`` directly.
+"""
+
+
 def _default_runtime_caller(call: RuntimeCall) -> None:
     """Real implementation — runs ``python -m hyperloom.agents.critic.runtime.cli <phase> ...``."""
-    extra_args: list[str] = []
+    cmd = [
+        sys.executable,
+        "-m",
+        "hyperloom.agents.critic.runtime.cli",
+        call.phase,
+        "--request",
+        str(call.request_path),
+        "--out",
+        str(call.out_path),
+    ]
     if call.phase == "commit-review":
         if call.review_path is None:
             raise BackendError("commit-review invocation missing --review path")
-        extra_args = ["--review", str(call.review_path)]
+        cmd += ["--review", str(call.review_path)]
 
-    invoke_runtime_cli(
-        call,
-        module="hyperloom.agents.critic.runtime.cli",
-        agent_label="critic-agent",
-        timeout_sec=CRITIC_AGENT_RUNTIME_TIMEOUT_SEC,
-        extra_args=extra_args,
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(call.cwd),
+            env=call.env,
+            capture_output=True,
+            text=True,
+            timeout=CRITIC_AGENT_RUNTIME_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BackendError(
+            f"critic-agent runtime.cli {call.phase} timed out after {CRITIC_AGENT_RUNTIME_TIMEOUT_SEC}s "
+            f"(cwd={call.cwd})"
+        ) from exc
+    except FileNotFoundError as exc:
+        raise BackendError(
+            f"critic-agent runtime.cli {call.phase} could not start (python={sys.executable!r}, cwd={call.cwd}): {exc}"
+        ) from exc
+
+    if proc.returncode != 0:
+        raise BackendError(
+            f"critic-agent runtime.cli {call.phase} exited rc={proc.returncode}: "
+            f"stderr={proc.stderr.strip()[:_STDERR_TRUNCATE_CHARS]!r}"
+        )
 
 
 def _reviewed_msg_ids_from_bundle(judge_bundle: dict[str, Any]) -> list[str] | None:
@@ -246,10 +293,7 @@ class CriticAgentBackend:
     codex_model: str = DEFAULT_CODEX_MODEL
     codex_client_factory: Callable[[], Any] | None = None
     kb_mode: Literal["inmemory", "live"] = "inmemory"
-    kb_env: dict[str, str] | None = None
     runtime_caller_factory: Callable[[], RuntimeCaller] | None = None
-    static_context: dict[str, Any] | None = None
-    known_actions: tuple[str, ...] = ()
     # Per-action verdict policy enriched onto ``review_constraints.action_verdict_policy`` post prepare-review.
     action_verdict_policy: dict[str, str] = field(default_factory=dict)
     name: str = "critic-agent"
@@ -281,7 +325,6 @@ class CriticAgentBackend:
     )
     # Resolved review model id (protocol-aware).
     _review_model: str = field(default="", init=False, repr=False)
-    calls: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate config, wire transports, and resolve static context."""
@@ -331,15 +374,8 @@ class CriticAgentBackend:
                 ) from exc
 
         # Resolve static per-session context once.
-        if self.static_context is not None:
-            self._static_context = dict(self.static_context)
-        else:
-            self._static_context = self._load_static_context_from_manifest()
-        log.info(
-            "critic_agent_backend static_context source=%s keys=%s",
-            "explicit" if self.static_context is not None else "manifest",
-            sorted(self._static_context.keys()),
-        )
+        self._static_context = self._load_static_context_from_manifest()
+        log.info("critic_agent_backend static_context keys=%s", sorted(self._static_context.keys()))
 
     @staticmethod
     def _resolve_llm_timeouts() -> tuple[float, float]:
@@ -501,19 +537,6 @@ class CriticAgentBackend:
             llm_finish,
             kb_priors_trace.get("prior_count") or 0,
         )
-        self.calls.append(
-            {
-                "turn_idx": turn_idx,
-                "proposals": len(proposals),
-                "verdicts": verdicts_summary,
-                "kb_skipped": kb_skipped,
-                "required_context": required_context,
-                "finish_reason": llm_finish,
-                "workdir": str(workdir),
-                "kb_priors_count": kb_priors_trace.get("prior_count") or 0,
-            }
-        )
-
         from hyperloom.inference_optimizer.breakdown.recorder import critic_out
 
         iteration = critic_out.CriticIteration(
@@ -543,16 +566,7 @@ class CriticAgentBackend:
         return BackendTurnResult(
             intents=intents,
             raw_text=llm_text,
-            metadata={
-                "model": self._review_model,
-                "finish_reason": llm_finish,
-                "judge_bundle_path": str(judge_path),
-                "kb_read_skipped_reason": kb_skipped,
-                "required_context": required_context,
-                "kb_writes": [w.get("result", {}).get("status") for w in (emit.get("kb_writes") or [])],
-                "session_id": session_id,
-                "turn_idx": turn_idx,
-            },
+            metadata={"model": self._review_model},
         )
 
     # Helpers
@@ -570,10 +584,6 @@ class CriticAgentBackend:
             "raw_prompt": prompt,
             "context": context,
         }
-        if self.known_actions:
-            request["options"] = {
-                "known_actions": list(self.known_actions),
-            }
         request_path.write_text(
             json.dumps(request, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -639,12 +649,8 @@ class CriticAgentBackend:
         env.setdefault("KB_DEAD_LETTER_DIR", str(dlq_dir))
 
         if self.kb_mode == "live":
-            for k, v in (self.kb_env or {}).items():
-                env[k] = v
             if not env.get("KB_BASE_URL"):
-                raise BackendError(
-                    "CriticAgentBackend: kb_mode=live but KB_BASE_URL is not set (export it or pass via kb_env=...)"
-                )
+                raise BackendError("CriticAgentBackend: kb_mode=live but KB_BASE_URL is not set (export KB_BASE_URL)")
         return env
 
     def _mirror_kb_trace_to_langfuse(
