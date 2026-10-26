@@ -365,6 +365,47 @@ async def test_a_retry_that_only_marks_the_eval_phase_does_not_pass_on_the_previ
 
 
 @pytest.mark.asyncio
+async def test_a_retry_that_stops_on_opening_eval_is_sent_back_to_finish_it(tmp_path, quark_root, build_workspace):
+    """The owed-end check and the classifier must agree on what ends an attempt.
+
+    A retry that stops right after writing ``last_phase.txt=eval`` has produced
+    no result yet. Counting that as finished stops the session from being
+    continued, and then the classifier fails it for having no end of its own.
+    """
+
+    ws = tmp_path / "ws"
+
+    def block_after_validation(workspace: Path, attempt: int) -> str | None:
+        build_workspace(
+            workspace=workspace,
+            include_eval_report=False,
+            last_phase="validate",
+            blocked_md="outcome_id: unclassified_failure\n",
+        )
+        (workspace / "fix_hypothesis_attempt_2.md").write_text("## Fix\nPin the eval seed.\n", encoding="utf-8")
+        return None
+
+    def stop_on_opening_eval(workspace: Path, attempt: int) -> str | None:
+        build_workspace(workspace=workspace, include_eval_report=False, last_phase="eval")
+        if not _attempt_finished(workspace):
+            # The owed-end check sends the session back, and it finishes eval.
+            build_workspace(workspace=workspace, last_phase="eval")
+        return None
+
+    result = await quantize_via_prompt(
+        "fp8 it",
+        workspace=ws,
+        quark_root=quark_root,
+        runner_fn=_StubRunner([block_after_validation, stop_on_opening_eval]),
+        interactive=False,
+        max_requantize_attempts=1,
+    )
+
+    assert result.assessment.attempts == (OutcomeId.unclassified_failure, None)
+    assert result.status == "success"
+
+
+@pytest.mark.asyncio
 async def test_a_rerun_after_a_run_that_wrote_nothing_does_not_pass_on_an_older_model(
     tmp_path, quark_root, build_workspace
 ):

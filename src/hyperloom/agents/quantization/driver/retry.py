@@ -19,8 +19,8 @@ from .assessment import (
     derive_status,
 )
 from .outcomes import OutcomeId, SUCCESS_TAGS, UNCLASSIFIED_FAILURE
-from .result_collector import CollectedArtifacts, collect_artifacts
-from .runner import AttemptContext, RunOneAttemptFn, run_one_attempt
+from .result_collector import collect_artifacts
+from .runner import AttemptContext, RunOneAttemptFn, attempt_ended, run_one_attempt
 
 
 _COUNTER_FILE = "requantize_attempts.txt"
@@ -85,15 +85,6 @@ def _archive_earlier_end(workspace: Path) -> bool:
     return bool(present or archived)
 
 
-def _wrote_an_end(artifacts: CollectedArtifacts) -> bool:
-    """Whether the attempt wrote an end of its own; ``last_phase.txt`` opens a phase and says nothing it produced."""
-    return (
-        artifacts.blocked_reason is not None
-        or artifacts.eval_report_present
-        or artifacts.eval_skipped_reason is not None
-    )
-
-
 async def _run_and_classify(
     attempt: AttemptContext, run_attempt: RunOneAttemptFn, *, model: str | None, log: Callable[[str], None] | None
 ) -> OutcomeId | None:
@@ -107,7 +98,7 @@ async def _run_and_classify(
     inherits_outputs = _archive_earlier_end(workspace)
     sdk_error = (await run_attempt(attempt, model=model, log=log)).sdk_error or None
     artifacts = collect_artifacts(workspace)
-    if inherits_outputs and not _wrote_an_end(artifacts):
+    if inherits_outputs and not attempt_ended(artifacts):
         return classify_unfinished_attempt(sdk_error, phase=artifacts.last_phase)
     return classify_attempt(
         workspace,
