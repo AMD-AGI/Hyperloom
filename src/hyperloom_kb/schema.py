@@ -483,7 +483,19 @@ class FieldDeclaration:
         data = _mapping(value, "field declaration")
         _reject_unknown(
             data,
-            {"name", "description", "kind", "required", "sensitive", "many", "group", "search", "values", "role", "code"},
+            {
+                "name",
+                "description",
+                "kind",
+                "required",
+                "sensitive",
+                "many",
+                "group",
+                "search",
+                "values",
+                "role",
+                "code",
+            },
             "field declaration",
         )
         try:

@@ -140,8 +140,7 @@ def _owner_of_kernel(evidence: Path, named: str, kernel_paths: dict[Path, str]) 
     if len(matches) < 2:
         return None
     candidates = {
-        experiments: announced.parts[: -len(PurePosixPath(kernel_paths[experiments]).parts)]
-        for experiments in matches
+        experiments: announced.parts[: -len(PurePosixPath(kernel_paths[experiments]).parts)] for experiments in matches
     }
     owner = _owner(evidence, named, candidates)
     if owner is None:
