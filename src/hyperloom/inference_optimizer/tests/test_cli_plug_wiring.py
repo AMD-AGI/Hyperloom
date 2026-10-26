@@ -118,8 +118,17 @@ def test_the_manifest_and_override_environment_variables_are_layers(tmp_path: Pa
 
 def test_a_profile_naming_an_unset_variable_is_refused(tmp_path: Path, capsys, monkeypatch) -> None:
     monkeypatch.delenv("HYPERLOOM_EVENTS_DIR", raising=False)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema": "hyperloom.plugs/v1",
+                "sockets": {"events": {"impl": "local", "config": {"dir": "${HYPERLOOM_EVENTS_DIR}"}}},
+            }
+        )
+    )
     with pytest.raises(SystemExit) as exc:
-        prepare_plug_host(_args("--plug-profile", "hosted-cpu"), tmp_path)
+        prepare_plug_host(_args("--manifest", str(manifest)), tmp_path)
     assert exc.value.code == 2
     assert "environment variable HYPERLOOM_EVENTS_DIR is not set" in capsys.readouterr().err
 
@@ -132,7 +141,7 @@ def test_a_profile_whose_implementations_are_not_installed_is_refused_before_any
         prepare_plug_host(_args("--plug-profile", "hosted-cpu"), tmp_path)
     assert exc.value.code == 2
     assert (
-        "plug configuration refused: socket 'events' has no implementation 'hosted'; available: local"
+        "plug configuration refused: socket 'measurement' has no implementation 'hosted'; available: (none)"
         in capsys.readouterr().err
     )
 

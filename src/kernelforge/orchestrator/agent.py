@@ -414,7 +414,6 @@ def make_agent_fn(
     )
     session_timeout_sec, permission_mode = session.session_timeout_sec, session.permission_mode
     backend, requested_backend = _resolve_implementer_backend(config, session.agent_backend, usage)
-    backend_model = backend.runtime.model
 
     # Multi-file / repository awareness.
     source_files = [f for f in (task.source_files or []) if f]
@@ -914,10 +913,18 @@ Make your change(s) now.
 
         return text[:200]
 
-    setattr(agent_fn, "backend_name", backend.name)
-    setattr(agent_fn, "backend_model", backend_model)
-    setattr(agent_fn, "requested_backend", requested_backend)
+    _describe_agent_fn(agent_fn, backend, requested_backend)
     return agent_fn
+
+
+def _describe_agent_fn(agent_fn: Callable[..., Awaitable[str]], backend, requested_backend: str) -> None:
+    """Expose the backend serving ``agent_fn`` and the way to release it to the callers that build actors from it."""
+    setattr(agent_fn, "backend_name", backend.name)
+    setattr(agent_fn, "backend_model", backend.runtime.model)
+    setattr(agent_fn, "requested_backend", requested_backend)
+    # Only a backend that keeps processes between sessions defines close(); the rest, out-of-tree providers included,
+    # have nothing to release.
+    setattr(agent_fn, "close", getattr(backend, "close", lambda: None))
 
 
 def _make_session_summarizer(

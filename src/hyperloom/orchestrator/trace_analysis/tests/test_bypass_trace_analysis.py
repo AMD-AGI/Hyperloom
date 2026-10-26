@@ -721,17 +721,16 @@ def test_maybe_build_shape_manifest_bad_max_caps_and_skips_bad_shard(tmp_path, m
     assert res["warnings"] == ["w"]
 
 
-def test_maybe_build_shape_manifest_degrades_on_error(tmp_path, monkeypatch):
-    # any failure -> {"status": "error: ..."}; never raises.
+def test_a_manifest_that_cannot_be_built_fails_the_analysis(tmp_path, monkeypatch):
+    # Without this run's manifest, forge would resolve an older trace's manifest instead.
     monkeypatch.setenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", "1")
 
-    def _boom(*a, **k):
-        raise RuntimeError("disk gone")
+    def _disk_full(*_args, **_kwargs):
+        raise OSError("No space left on device")
 
-    monkeypatch.setattr(bta, "_discover_capture_shards", _boom)
-    res = bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": ""}, tmp_path, generated_at="t0")
-    assert res["status"].startswith("error:")
-    assert "RuntimeError" in res["status"]
+    monkeypatch.setattr(bta._tsm, "build_shape_manifest", _disk_full)
+    with pytest.raises(OSError, match="No space left on device"):
+        bta.main(_base_argv(tmp_path, "/tmp/whatever", extra=["--dry-run"]))
 
 
 def test_maybe_build_shape_manifest_enabled_by_default(tmp_path, monkeypatch):

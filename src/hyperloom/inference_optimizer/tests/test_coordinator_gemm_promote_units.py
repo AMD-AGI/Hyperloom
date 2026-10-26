@@ -537,6 +537,41 @@ class TestQueueFusionSiblings:
         assert next(iter(queue.values()))["source_file"] == "/repo/g.py"
 
     @pytest.mark.asyncio
+    async def test_a_fusion_record_that_cannot_be_persisted_fails_the_kernel_entry_with_its_siblings_queued(
+        self, tmp_path, monkeypatch
+    ):
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        result = {
+            "status": "ok",
+            "kept": True,
+            "requires_e2e_validation": True,
+            "engine": "forge_fusion",
+            "patches": [
+                {
+                    "kernel_name": "fuse_a",
+                    "patch_path": "/out/fuse_a.patch",
+                    "target_file": "/repo/a.py",
+                    "micro_speedup": 1.4,
+                    "kind": "fusion",
+                }
+            ],
+        }
+
+        def _disk_full(_session_dir):
+            raise OSError("No space left on device")
+
+        monkeypatch.setattr(coord.shared_state, "save", _disk_full)
+
+        with pytest.raises(OSError, match="No space left on device"):
+            await phase._handle_fusion_result(result)
+        # The kept fusion is recorded only together with its queued sibling, so the KEEP survives the failed save.
+        assert coord.shared_state.last_fusion["kept"] is True
+        queued = [str(r["source_file"]) for r in coord.shared_state.pending_kernel_integrations.values()]
+        assert queued == ["/repo/a.py"]
+
+    @pytest.mark.asyncio
     async def test_handle_fusion_result_posts_and_integrates_kept_candidate(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0)
         coord.bus = _Bus()

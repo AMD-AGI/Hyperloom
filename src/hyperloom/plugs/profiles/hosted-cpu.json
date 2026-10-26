@@ -5,7 +5,7 @@
     "measurement": {"impl": "hosted"},
     "sandbox": {"impl": "e2b"},
     "agent_runner": {"impl": "hosted"},
-    "events": {"impl": "hosted", "config": {"dir": "${HYPERLOOM_EVENTS_DIR}"}},
+    "events": {"impl": "hosted"},
     "gpu_token": {"impl": "none"}
   }
 }

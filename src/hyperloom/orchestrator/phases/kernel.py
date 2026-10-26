@@ -1567,12 +1567,9 @@ class KernelPhase(CoordinatorCollaborator):
         server_args = str(spec_config.get("server_launch_flags") or "")
         if not server_args:
             # Reuse baseline server settings so GEAK measures the same engine config.
-            try:
-                from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
+            from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 
-                inherited = read_baseline_server_args(self.shared_state) or ""
-            except Exception:  # noqa: BLE001 -- accessor is best-effort
-                inherited = ""
+            inherited = read_baseline_server_args(self.shared_state) or ""
             from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
             server_args = compose_server_args(
@@ -4023,14 +4020,10 @@ class KernelPhase(CoordinatorCollaborator):
             # Counted on the session for the same reason as the aborts above.
             withheld_spent = _as_int(self.shared_state.fusion_withheld_retries)
             self.shared_state.fusion_withheld_retries = withheld_spent + 1
-        try:
-            if isinstance(result, dict) and not str(result.get("fusion_run_id") or "").strip():
-                cycle = int(self.shared_state.macro_cycle or 0)
-                result["fusion_run_id"] = f"fusion-c{cycle}-{time.time_ns():x}"
-            self.shared_state.last_fusion = result if isinstance(result, dict) else {"status": status}
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 - state shape tolerant (best-effort idempotency record)
-            pass
+        if isinstance(result, dict) and not str(result.get("fusion_run_id") or "").strip():
+            cycle = int(self.shared_state.macro_cycle or 0)
+            result["fusion_run_id"] = f"fusion-c{cycle}-{time.time_ns():x}"
+        self.shared_state.last_fusion = result if isinstance(result, dict) else {"status": status}
         if isinstance(result, dict):
             self._record_fusion_timeline(result)
         try:
@@ -4053,6 +4046,8 @@ class KernelPhase(CoordinatorCollaborator):
         # A KEPT fusion is handed to integrate for the e2e re-baseline decision.
         if isinstance(result, dict) and result.get("kept") and result.get("requires_e2e_validation"):
             await self._integrate_fusion(result)
+        # One save after the queue is filled: a failed save cannot leave a kept fusion recorded without its siblings.
+        self.shared_state.save(self.session_dir)
 
     async def _integrate_fusion(self, result: dict) -> None:
         """Queue every KEPT forge-fusion sibling for the shared e2e integrate lane."""
@@ -4092,10 +4087,6 @@ class KernelPhase(CoordinatorCollaborator):
             len(outcome.patches),
             refused or "none",
         )
-        try:
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 - best-effort persist; drain reloads state
-            pass
 
     def current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed)."""
