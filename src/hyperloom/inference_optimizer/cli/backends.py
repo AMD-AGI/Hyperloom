@@ -169,7 +169,6 @@ def _build_orchestration_backend(models: ModelRouting, *, session_dir: Path) -> 
     # budget.
     return ClaudeBackend(
         model=models.claude_model,
-        capture_turn_diagnostics=True,
         allowed_intents=allowed_intents,
     )
 

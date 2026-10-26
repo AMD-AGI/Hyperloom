@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from hyperloom.orchestrator.roles import (
     build_emit_intent_server,
     validate_emit_intent_input,
 )
+from hyperloom.orchestrator.roles import claude as claude_module
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed, RetryPolicy
 from hyperloom.orchestrator.roles.mcp_emit_intent import build_emit_intent_tool_input_schema
@@ -371,16 +373,6 @@ def test_claude_backend_with_seams_constructs(monkeypatch):
     assert backend.sdk_query_factory is not None
 
 
-def test_claude_backend_warns_on_missing_api_key(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory([]),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
-    assert any("ANTHROPIC_API_KEY" in str(c) for c in backend.calls)
-
-
 def _clear_effort_env(monkeypatch):
     for k in (
         "INFERENCE_OPTIMIZER_CLAUDE_EFFORT",
@@ -455,7 +447,6 @@ async def test_run_extracts_single_emit_intent_tool_use():
     assert len(res.intents) == 1
     assert res.intents[0].type == IntentType.SEND_MESSAGE
     assert res.intents[0].payload["topic"] == "heartbeat"
-    assert res.metadata["tool_blocks"] == 1
 
 
 @pytest.mark.asyncio
@@ -653,8 +644,6 @@ async def test_run_invalid_tool_use_input_drops_block_silently():
         mcp_server_factory=lambda *a, **k: None,
     )
     res = await backend.run("p")
-    # 2 tool_blocks counted, but only 1 valid intent
-    assert res.metadata["tool_blocks"] == 2
     assert len(res.intents) == 1
 
 
@@ -679,13 +668,10 @@ async def test_unparsed_tool_wrapper_retries_dedupe_to_one_intent(tool_name):
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
         mcp_server_factory=lambda *a, **k: None,
-        capture_turn_diagnostics=True,
     )
     res = await backend.run("p")
-    assert res.metadata["tool_blocks"] == 3
     assert len(res.intents) == 2
     assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
-    assert backend.get_turn_diagnostic()["deduped_fallback_intents"] == 1
 
 
 @pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
@@ -713,18 +699,15 @@ async def test_string_wrapped_fallback_retries_dedupe_to_one_intent(tool_name):
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
         mcp_server_factory=lambda *a, **k: None,
-        capture_turn_diagnostics=True,
     )
     res = await backend.run("p")
-    assert res.metadata["tool_blocks"] == 3
     assert len(res.intents) == 2
     assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
-    assert backend.get_turn_diagnostic()["deduped_fallback_intents"] == 1
 
 
 @pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
 @pytest.mark.asyncio
-async def test_empty_string_tool_input_reports_decode_error(tool_name):
+async def test_empty_string_tool_input_reports_decode_error(tool_name, caplog):
     """An empty-string input reports a decode error, not a missing intent_type.
 
     ``input or {}`` used to swallow ``""`` into ``{}``, which decoded cleanly
@@ -744,14 +727,12 @@ async def test_empty_string_tool_input_reports_decode_error(tool_name):
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
         mcp_server_factory=lambda *a, **k: None,
-        capture_turn_diagnostics=True,
     )
-    res = await backend.run("p")
+    with caplog.at_level(logging.INFO, logger=claude_module.log.name):
+        res = await backend.run("p")
     # The empty-string block is dropped; the rest of the turn is unaffected.
-    assert res.metadata["tool_blocks"] == 2
     assert len(res.intents) == 1
-    parse_errors = backend.get_turn_diagnostic()["parse_errors"]
-    assert parse_errors == ["emit_intent tool input string is not valid JSON"]
+    assert "claude tool_use decode failed: emit_intent tool input string is not valid JSON" in caplog.messages
 
 
 @pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
@@ -771,7 +752,6 @@ async def test_identical_native_tool_inputs_are_not_deduped(tool_name):
         mcp_server_factory=lambda *a, **k: None,
     )
     res = await backend.run("p")
-    assert res.metadata["tool_blocks"] == 2
     assert len(res.intents) == 2
 
 
@@ -794,7 +774,6 @@ async def test_wrapper_then_native_same_intent_keeps_both(tool_name):
         mcp_server_factory=lambda *a, **k: None,
     )
     res = await backend.run("p")
-    assert res.metadata["tool_blocks"] == 2
     assert len(res.intents) == 2
 
 
@@ -890,8 +869,13 @@ async def test_options_includes_mcp_server_when_emit_intent_enabled():
         mcp_server_factory=fake_server,
     )
     assert backend.mcp_server_config is not None
+    assert backend.get_mcp_setup_diagnostic()["allowed_tools"] == []
+    assert backend.get_mcp_setup_diagnostic()["mcp_servers"] == []
     await backend.run("p", tools=["Read", "emit_intent", "get_failure"])
     kw = captured["options_kwargs"]
+    setup = backend.get_mcp_setup_diagnostic()
+    assert setup["allowed_tools"] == kw["allowed_tools"]
+    assert setup["mcp_servers"] == sorted(kw["mcp_servers"])
     assert "mcp_servers" in kw
     assert "inference_optimizer" in kw["mcp_servers"]
     # emit_intent qualified tool name auto-added to allowed_tools

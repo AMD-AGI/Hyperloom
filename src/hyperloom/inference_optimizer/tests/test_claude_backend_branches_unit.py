@@ -8,6 +8,7 @@ mode), timeout handling, the conversational session capture, and SDK-stream erro
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -57,7 +58,6 @@ def _backend(messages=None, **over):
     kwargs = dict(
         sdk_query_factory=_query(messages or []),
         sdk_options_cls=_FakeOptions,
-        api_key_env="UNSET_KEY_ENV_FOR_TEST",
     )
     kwargs.update(over)
     return cl.ClaudeBackend(**kwargs)
@@ -99,16 +99,16 @@ def test_post_init_imports_sdk(monkeypatch):
     fake_q = _query([])
     fake = SimpleNamespace(query=fake_q, ClaudeAgentOptions=_FakeOptions)
     monkeypatch.setattr(cl, "_import_sdk", lambda: (fake_q, _FakeOptions, fake))
-    b = cl.ClaudeBackend(api_key_env="UNSET_KEY_ENV_FOR_TEST")
+    b = cl.ClaudeBackend()
     assert b.sdk_options_cls is _FakeOptions
     assert b.sdk_module is fake
 
 
-def test_post_init_emit_intent_setup_failure(monkeypatch):
+def test_post_init_emit_intent_setup_failure(monkeypatch, caplog):
     monkeypatch.setattr(cl, "build_emit_intent_server", lambda **k: (_ for _ in ()).throw(RuntimeError("boom")))
     b = _backend()
     assert b.mcp_server_config is None
-    assert any("emit_intent MCP setup failed" in c.get("warn", "") for c in b.calls)
+    assert "emit_intent MCP setup failed: boom" in caplog.messages
 
 
 # ---- set_context_provider -------------------------------------------------
@@ -119,12 +119,12 @@ def test_set_context_provider_success(monkeypatch):
     assert b._context_server_config is not None
 
 
-def test_set_context_provider_failure(monkeypatch):
+def test_set_context_provider_failure(monkeypatch, caplog):
     monkeypatch.setattr(cl, "build_context_tools_server", lambda provider, **k: (_ for _ in ()).throw(ValueError("x")))
     b = _backend()
     b.set_context_provider(SimpleNamespace())
     assert b._context_server_config is None
-    assert any("context tools MCP setup failed" in c.get("warn", "") for c in b.calls)
+    assert "context tools MCP setup failed: x" in caplog.messages
 
 
 # ---- _build_options -------------------------------------------------------
@@ -169,11 +169,12 @@ def test_instantiate_options_typeerror_propagates():
 
 
 # ---- _stderr_sink ---------------------------------------------------------
-def test_stderr_sink():
+def test_stderr_sink_logs_non_blank_lines_at_debug(caplog):
     b = _backend()
-    b._stderr_sink("  error line  ")
-    b._stderr_sink("   ")  # blank dropped
-    assert any(c.get("stderr") == "error line" for c in b.calls)
+    with caplog.at_level(logging.DEBUG, logger=cl.log.name):
+        b._stderr_sink("  error line  ")
+        b._stderr_sink("   ")
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.DEBUG, "claude CLI stderr: error line")]
 
 
 # ---- run(): timeout -------------------------------------------------------
@@ -212,22 +213,11 @@ async def test_run_idle_timeout_allows_slow_but_live_stream():
 # ---- run(): no intents ----------------------------------------------------
 async def test_run_without_intents_returns_an_empty_result():
     msg = _Msg(content=[TextBlock("just text")], result="hi")
-    b = _backend(capture_turn_diagnostics=True)
+    b = _backend()
     b.sdk_query_factory = _query([msg])
     result = await b.run("hi")
     assert result.intents == []
-    diag = b.get_turn_diagnostic()
-    assert diag["outcome"] == "no_intent"
-    assert diag["raw_text"] == "hi"
-    assert diag["messages"] == [{"type": "_Msg", "result": "hi"}]
-
-
-async def test_run_skips_diagnostics_when_not_requested():
-    msg = _Msg(content=[TextBlock("just text")], result="hi")
-    b = _backend()
-    b.sdk_query_factory = _query([msg])
-    await b.run("hi")
-    assert b.get_turn_diagnostic() == {}
+    assert result.raw_text == "hi"
 
 
 # ---- gateway endpoint identifier -----------------------------------------

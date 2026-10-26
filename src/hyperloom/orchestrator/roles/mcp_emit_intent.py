@@ -226,14 +226,6 @@ def is_unparsed_tool_wrapper(raw_input: Any) -> bool:
     return isinstance(wrapped, dict) and isinstance(wrapped.get("raw"), str)
 
 
-def coerce_emit_intent_input(raw_input: Any) -> dict[str, Any]:
-    """Return native emit_intent input, decoding the wrapper only as fallback."""
-    if not isinstance(raw_input, dict):
-        return {}
-    coerced, _ = decode_emit_intent_input(raw_input)
-    return coerced
-
-
 def validate_emit_intent_input(
     payload: dict[str, Any],
     *,
@@ -342,7 +334,6 @@ __all__ = [
     "build_emit_intent_server",
     "build_emit_intent_tool_input_schema",
     "build_intent_envelope_schema",
-    "coerce_emit_intent_input",
     "decode_emit_intent_input",
     "is_unparsed_tool_wrapper",
     "payload_contract",

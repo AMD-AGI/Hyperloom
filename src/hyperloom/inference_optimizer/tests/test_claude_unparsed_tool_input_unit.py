@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,11 +14,11 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.orchestrator.roles import claude as claude_module
 from hyperloom.orchestrator.roles.claude import ClaudeBackend, _intent_fingerprint
 from hyperloom.orchestrator.roles.mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
     build_emit_intent_server,
-    coerce_emit_intent_input,
     is_unparsed_tool_wrapper,
 )
 
@@ -44,7 +45,6 @@ def _backend() -> ClaudeBackend:
     return ClaudeBackend(
         sdk_query_factory=_q,
         sdk_options_cls=_Opts,
-        api_key_env="UNSET_KEY_ENV_FOR_TEST",
         mcp_server_factory=lambda *a, **k: None,
     )
 
@@ -55,41 +55,6 @@ def test_is_unparsed_wrapper_false_for_native_and_junk() -> None:
     assert is_unparsed_tool_wrapper({"__unparsedToolInput": "raw"}) is False
     assert is_unparsed_tool_wrapper({"__unparsedToolInput": {"raw": 1}}) is False
     assert is_unparsed_tool_wrapper({"__unparsedToolInput": {"raw": '{"intent_type": "send_message"}'}}) is True
-
-
-def test_coerce_returns_empty_for_non_dict() -> None:
-    assert coerce_emit_intent_input(None) == {}
-    assert coerce_emit_intent_input("x") == {}
-
-
-def test_coerce_keeps_native_when_intent_type_present() -> None:
-    native = {
-        "intent_type": "send_message",
-        "payload": {"topic": "heartbeat"},
-        "__unparsedToolInput": {"raw": '{"intent_type": "alert"}'},
-    }
-    assert coerce_emit_intent_input(native) is native
-
-
-def test_coerce_decodes_wrapper_object() -> None:
-    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}'
-    out = coerce_emit_intent_input({"__unparsedToolInput": {"raw": raw, "len": len(raw)}})
-    assert out["intent_type"] == "send_message"
-    assert out["payload"]["topic"] == "heartbeat"
-
-
-def test_coerce_leaves_wrapper_when_raw_is_not_object_json() -> None:
-    wrapped = {"__unparsedToolInput": {"raw": "[1, 2]", "len": 6}}
-    assert coerce_emit_intent_input(wrapped) is wrapped
-    empty = {"__unparsedToolInput": {"raw": "   "}}
-    assert coerce_emit_intent_input(empty) is empty
-    missing = {"__unparsedToolInput": {}}
-    assert coerce_emit_intent_input(missing) is missing
-
-
-def test_coerce_leaves_wrapper_when_raw_is_malformed() -> None:
-    wrapped = {"__unparsedToolInput": {"raw": "{not-json"}}
-    assert coerce_emit_intent_input(wrapped) is wrapped
 
 
 def test_parse_unparsed_wrapper_missing_required_payload_returns_none() -> None:
@@ -119,15 +84,15 @@ def test_parse_tool_use_block_ignores_extra_native_keys() -> None:
     assert intent.payload["topic"] == "heartbeat"
 
 
-def test_parse_tool_use_block_records_malformed_wrapper_decode_error() -> None:
+def test_parse_tool_use_block_logs_malformed_wrapper_decode_error(caplog: pytest.LogCaptureFixture) -> None:
     b = _backend()
-    b._active_turn_diagnostic = {"parse_errors": []}
     block = ToolUseBlock(
         name="emit_intent",
         input={"__unparsedToolInput": {"raw": "{not-json"}},
     )
-    assert b._parse_tool_use_block(block) is None
-    assert any("__unparsedToolInput.raw is not valid JSON" in err for err in b._active_turn_diagnostic["parse_errors"])
+    with caplog.at_level(logging.INFO, logger=claude_module.log.name):
+        assert b._parse_tool_use_block(block) is None
+    assert any("__unparsedToolInput.raw is not valid JSON" in message for message in caplog.messages)
 
 
 def test_parse_tool_use_block_prefers_native_intent_type() -> None:
@@ -144,20 +109,6 @@ def test_parse_tool_use_block_prefers_native_intent_type() -> None:
     intent = b._parse_tool_use_block(block)
     assert intent is not None
     assert intent.payload["topic"] == "native"
-
-
-def test_diagnostic_records_unwrapped_intent_type() -> None:
-    b = _backend()
-    b._active_turn_diagnostic = {"tool_blocks": []}
-    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}'
-    block = ToolUseBlock(
-        name="emit_intent",
-        input={"__unparsedToolInput": {"raw": raw, "len": len(raw)}},
-    )
-    b._record_tool_block_diagnostic(block)
-    summary = b._active_turn_diagnostic["tool_blocks"][0]
-    assert summary["input_keys"] == ["__unparsedToolInput"]
-    assert summary["intent_type"] == "send_message"
 
 
 def test_intent_fingerprint_is_stable() -> None:

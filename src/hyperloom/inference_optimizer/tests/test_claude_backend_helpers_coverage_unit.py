@@ -55,7 +55,6 @@ def _backend(**over: Any) -> ClaudeBackend:
     kwargs: dict[str, Any] = dict(
         sdk_query_factory=_make_query_factory(),
         sdk_options_cls=_FakeOptions,
-        api_key_env="UNSET_KEY_ENV_FOR_TEST",
     )
     kwargs.update(over)
     return ClaudeBackend(**kwargs)

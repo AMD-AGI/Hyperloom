@@ -160,9 +160,7 @@ async def test_claude_backend_streams_partials_and_shares_the_scope_call_id(tmp_
     backend = cl.ClaudeBackend(
         sdk_query_factory=_query,
         sdk_options_cls=_FakeOptions,
-        api_key_env="UNSET_KEY_ENV_FOR_TEST",
         model="claude-x",
-        capture_turn_diagnostics=True,
     )
     with tt.trajectory_scope(session_dir=tmp_path, component="orchestration", call_id="c-7"):
         result = await backend.run("hello")
@@ -171,8 +169,6 @@ async def test_claude_backend_streams_partials_and_shares_the_scope_call_id(tmp_
     assert result.metadata["call_id"] == "c-7"
     requests = [r for r in tt.load_events(tmp_path) if r["event_type"] == tt.EVENT_LLM_REQUEST]
     assert [(r["status"], r["attributes"]["output_tokens"]) for r in requests] == [(tt.STATUS_COMPLETED, 40)]
-    diag_types = {m["type"] for m in backend.get_turn_diagnostic()["messages"]}
-    assert diag_types == {"AssistantMessage", "ResultMessage"}
 
 
 def _heartbeat() -> Intent:
