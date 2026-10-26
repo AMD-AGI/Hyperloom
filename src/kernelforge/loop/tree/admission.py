@@ -171,7 +171,7 @@ class TreeAdmissionMixin:
         direction_id = self._direction_for(tree, iteration, plan)
         commit = self._start_worktrees.commit(worktree, _commit_message(iteration, slot, direction_id, plan, result))
         pin_node(self.ic.workspace_dir, commit)
-        node = _node_of(result, _Placement(commit, slot.start, direction_id), slot=slot, plan=plan.text)
+        node = _node_of(result, _Placement(commit, slot.start, direction_id), slot=slot, plan=plan.title)
         tree.add_node(node)
         self._point_direction(tree, direction_id)
         return node
@@ -189,7 +189,7 @@ class TreeAdmissionMixin:
             failure_criterion="not stated by the plan",
         )
         direction = tree.allocate_direction(proposal, origin=slot.start, iteration=iteration)
-        if slot.hint and plan.hint_answer.lower().startswith("refuted"):
+        if slot.hint and "refut" in plan.hint_answer.lower():
             tree.record_hint_rebuttal(direction.direction_id, f"{slot.hint}: {plan.hint_answer}")
         return direction.direction_id
 
@@ -320,7 +320,7 @@ def _commit_message(iteration: int, slot: Slot, direction: str, plan: SlotPlan, 
     case_times = (result.bench_detail or {}).get("case_times") or {}
     return "\n".join(
         [
-            f"iter-{iteration}-s{slot.index}: {_summary(plan.text)[:72]}",
+            f"iter-{iteration}-s{slot.index}: {_summary(plan.title)[:72]}",
             "",
             f"plan: {_summary(plan.text)}",
             f"start: {slot.start}",

@@ -25,6 +25,8 @@ from kernelforge.tools.git import git
 
 TREE_ROUNDS_DIR = "tree_rounds"
 _DIRECTION_HEADING = "## direction"
+# Markdown emphasis a planner may wrap a record's keys and values in.
+_EMPHASIS = "*_` "
 _DIRECTION_KEYS = {
     "name": "name",
     "hypothesis": "hypothesis",
@@ -43,6 +45,15 @@ class SlotPlan:
     path: str
     proposal: DirectionProposal | None = None
     hint_answer: str = ""
+
+    @property
+    def title(self) -> str:
+        """What the plan sets out to do: its direction's name, else its first heading, else its first line."""
+        if self.proposal is not None:
+            return self.proposal.name
+        lines = [line.strip() for line in self.text.splitlines() if line.strip()]
+        headings = [line.lstrip("#").strip() for line in lines if line.startswith("#")]
+        return next((item for item in headings if item.lower() != "direction"), lines[0] if lines else "")
 
 
 @dataclass(frozen=True)
@@ -72,9 +83,9 @@ def read_direction_record(plan: str) -> tuple[DirectionProposal | None, str]:
             continue
         if inside and stripped.startswith("-") and ":" in stripped:
             key, value = stripped.lstrip("- ").split(":", 1)
-            target = _DIRECTION_KEYS.get(key.strip().lower())
-            if target:
-                fields[target] = value.strip()
+            target = _DIRECTION_KEYS.get(key.strip(_EMPHASIS).strip().lower())
+            if target and target not in fields:
+                fields[target] = value.strip().strip(_EMPHASIS).strip()
     if not fields.get("name"):
         return None, fields.get("hint", "")
     proposal = DirectionProposal(
