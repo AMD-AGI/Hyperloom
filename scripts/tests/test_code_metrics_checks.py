@@ -233,6 +233,8 @@ def test_an_added_broad_handler_must_reraise_or_record() -> None:
 def test_a_broad_handler_the_change_did_not_add_or_only_moved_is_not_judged() -> None:
     assert checks.broad_unrecorded_problems("m.py", BROAD_UNRECORDED, {3, 5, 21}) == []
     assert checks.broad_unrecorded_problems("m.py", BROAD_UNRECORDED, {4}, {"except Exception:"}) == []
+    # Only the comment on the line changed: the handler's code is not added.
+    assert checks.broad_unrecorded_problems("m.py", BROAD_UNRECORDED, {4}, {"except Exception:  # old note"}) == []
     assert checks.broad_unrecorded_problems("src/tests/test_m.py", BROAD_UNRECORDED, _EXCEPT_ROWS) == []
 
 

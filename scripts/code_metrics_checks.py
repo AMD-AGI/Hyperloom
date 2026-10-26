@@ -299,15 +299,20 @@ def broad_unrecorded_problems(path: str, text: str, added: set[int], removed: It
     nor records the error."""
     if is_test_path(path):
         return []
-    lines, moved = text.splitlines(), set(removed)
+    lines, moved = text.splitlines(), {_without_comment(line) for line in removed}
     problems = []
     for node in ast.walk(ast.parse(text)):
         if not isinstance(node, ast.ExceptHandler) or node.lineno not in added or not _is_broad(node):
             continue
-        if lines[node.lineno - 1].strip() in moved or _reraises_or_records(node):
+        if _without_comment(lines[node.lineno - 1]) in moved or _reraises_or_records(node):
             continue
         problems.append(Problem(BROAD_UNRECORDED, path, node.lineno, "broad `except` neither re-raises nor records"))
     return sorted(problems, key=lambda p: p.line)
+
+
+def _without_comment(line: str) -> str:
+    """The code of an ``except`` line: a change that only edits its comment does not add the handler."""
+    return line.split("#", 1)[0].strip()
 
 
 def _is_broad(handler: ast.ExceptHandler) -> bool:
