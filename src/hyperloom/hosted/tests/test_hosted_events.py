@@ -217,6 +217,11 @@ def test_a_failed_segment_roll_is_retried_by_the_next_emit(tmp_path, monkeypatch
     assert [len(p.read_bytes().splitlines()) for p in sorted(tmp_path.glob("*.jsonl"))] == [1, 1]
 
 
+def test_the_hosted_gpu_profile_declares_only_the_events_socket():
+    manifest = resolve_manifest(builtin_registry(), ManifestSources(profile="hosted-gpu"))
+    assert {name: s.impl for name, s in manifest.sockets.items() if s.layer == "profile"} == {"events": "hosted"}
+
+
 def test_emit_after_close_is_ignored(tmp_path):
     sink = HostedProgressEvents(tmp_path, "r")
     sink.close()
