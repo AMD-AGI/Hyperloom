@@ -2083,7 +2083,7 @@ def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_res
         from hyperloom.inference_optimizer.trace.langfuse_emitter import record_session_start
 
         record_session_start(session_dir)
-    except Exception:  # isolation boundary: the Langfuse session_start marker
+    except Exception:  # outermost telemetry sink: the Langfuse session_start marker
         log.debug("langfuse record_session_start failed (non-fatal)", exc_info=True)
     print(f"Session dir     : {session_dir}")
     print(f"Session id      : {manifest['session_id']}  (manifest label only)")

@@ -648,7 +648,7 @@ async def _drive_sdk_stream(
                 if aclose is not None:
                     try:
                         await asyncio.wait_for(aclose(), timeout=10.0)
-                    except (asyncio.TimeoutError, Exception):  # noqa: BLE001 - isolation boundary: aclose after idle abort
+                    except (asyncio.TimeoutError, Exception):  # noqa: BLE001 - outermost finalizer: aclose after idle abort
                         _log.debug("tracelens: stream aclose failed", exc_info=True)
                 break
             observe(message)

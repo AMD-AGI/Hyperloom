@@ -1060,7 +1060,7 @@ class ClaudeBackend:
             return
         try:
             await aclose()
-        except Exception:  # isolation boundary: best-effort stream cleanup, which must not mask the turn result
+        except Exception:  # outermost finalizer: stream cleanup, which must not mask the turn result
             log.debug("claude SDK stream aclose failed", exc_info=True)
 
     @staticmethod
