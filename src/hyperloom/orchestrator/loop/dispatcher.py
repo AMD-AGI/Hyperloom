@@ -1028,11 +1028,18 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             except TaskNotFound:
                 continue
             error = f"lease holder process died before reporting a result; task reclaimed by {reason}"
+            settles_specialist = task.kind == "specialist" and not self.owes_result(task_id)
+            # A death is a crash to the specialist retry, which re-dispatches the same gap within its cap; a
+            # discovery round carries no gap and is re-armed by its own pool check.
+            died = SubAgentResult(task_id, "failed", {"runner_status": "stale"}, error=error)
+            retry = settles_specialist and bool((task.params or {}).get("gap_canonical_id"))
+            if retry and await self._coord.specialist_dispatch.maybe_auto_retry_specialist(task, died):
+                continue
             await self._coord.writeback.handle_unpromotable_result(
                 task,
                 {"status": "failed", "error_class": "dead_holder_reaped", "error": error},
             )
-            if task.kind == "specialist" and not self.owes_result(task_id):
+            if settles_specialist:
                 await self._record_specialist_settlement(task, SubAgentResult(task_id, "failed", {}, error=error))
             log.warning(
                 "dispatcher: counted dead-holder death of task=%s kind=%s as an action failure",

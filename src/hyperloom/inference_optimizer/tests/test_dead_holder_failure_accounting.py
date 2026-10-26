@@ -164,6 +164,26 @@ async def test_a_reaped_discovery_round_settles_once(session_dir, monkeypatch, r
         await c.stop()
 
 
+@pytest.mark.asyncio
+async def test_a_specialist_that_died_with_its_holder_is_dispatched_again(session_dir):
+    """A specialist killed with its process gets the bounded infra retry a crash gets, on the same gap."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        params = {"domain": "serving_specialist", "mode": "patch", "gap_canonical_id": "gap.front_end_input_cost"}
+        task = await _running_task_with_dead_lease(c, kind="specialist", key="spec-front-end", params=params)
+        await c.dispatcher.pump_dispatcher_once()
+
+        assert (await c.tasks.get(task.task_id)).state == "failed"
+        live = [*await c.tasks.queued(), *await c.tasks.running()]
+        retries = [
+            (t.idempotency_key, t.params.get("gap_canonical_id"), t.params.get("_auto_retry_attempt")) for t in live
+        ]
+        assert retries == [("spec-front-end-autoretry1", "gap.front_end_input_cost", 1)]
+        assert c.shared_state.last_action_failures == []
+    finally:
+        await c.stop()
+
+
 class _ReapStub:
     """Minimal coordinator shell for the reap-path double-count guard."""
 
