@@ -1618,7 +1618,7 @@ class PreludePhase(CoordinatorCollaborator):
             else:
                 try:
                     eval_out = parse_eval_results(root)
-                except (AttributeError, TypeError, ValueError) as exc:  # an unreadable eval is "no verdict"
+                except (OSError, AttributeError, TypeError, ValueError) as exc:  # an unreadable eval is "no verdict"
                     eval_out = {"error": f"eval parse raised: {type(exc).__name__}"}
                 parsed = eval_out.get("accuracy")
                 if isinstance(parsed, (int, float)):
