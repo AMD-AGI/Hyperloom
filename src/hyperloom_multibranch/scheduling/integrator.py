@@ -11,7 +11,8 @@ tests up to the integration branch's K candidates at once on the same head, and 
 the first commit committed while it runs rather than standing idle until the round ends; the round ends its tests in
 the order it started them, and the first of them that
 may be merged is merged, and every other one that may is superseded: it gets no judgement and is tried again on the
-new head. So is a merge whose test did not measure, and one whose regression set did not run clean: the set says a
+new head. So is a merge whose test did not measure, a limited number of times where it ended as an infrastructure
+failure, and one whose regression set did not run clean: the set says a
 case did not come back clean, not whether it reproduced or never ran, so it settles nothing about the candidate. A
 merge the experiment repository cannot combine, or whose test the toolbox refuses, is skipped and recorded
 like an unresolved conflict. One that leaves the head's recipe as it is is skipped untested as already on the head:
