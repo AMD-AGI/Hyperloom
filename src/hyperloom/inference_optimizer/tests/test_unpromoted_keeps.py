@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from hyperloom.orchestrator.actions.executors import report as rp
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -36,6 +37,16 @@ def test_a_promoted_winner_records_nothing(tmp_path):
     assert coord.writeback.lift_to_current_best("explore", 1500.0, {"name": "v1", "output_throughput": 1500.0}) is True
 
     assert coord.shared_state.unpromoted_keeps == []
+
+
+def test_latency_veto_records_which_guard_refused(tmp_path):
+    coord = _coord(tmp_path)
+    graded = SimpleNamespace(comparable=True, veto_reason="latency_budget_exceeded", vetoed_by="ttft_p90")
+
+    assert coord.writeback._refuses_graded_winner("explore", {}, graded) is True
+
+    (held,) = coord.shared_state.unpromoted_keeps
+    assert (held["reason"], held["detail"]) == ("latency_veto", "refused by ttft_p90: latency_budget_exceeded")
 
 
 def test_refusals_survive_a_state_round_trip(tmp_path):

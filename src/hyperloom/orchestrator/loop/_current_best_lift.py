@@ -270,8 +270,9 @@ class CurrentBestLiftMixin:
         if not graded.comparable:
             return self._hold_current_best(task_kind, "not_comparable", str(graded.degrade_reason))
         if graded.veto_reason:
-            _progress.warn("winner_vetoed", f"{task_kind} winner refused by {graded.vetoed_by}: {graded.veto_reason}")
-            return self._hold_current_best(task_kind, "latency_veto", str(graded.veto_reason))
+            refusal = f"refused by {graded.vetoed_by}: {graded.veto_reason}"
+            _progress.warn("winner_vetoed", f"{task_kind} winner {refusal}")
+            return self._hold_current_best(task_kind, "latency_veto", refusal)
         correctness_fix = bv.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX
         if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP and not correctness_fix:
             return self._hold_current_best(
