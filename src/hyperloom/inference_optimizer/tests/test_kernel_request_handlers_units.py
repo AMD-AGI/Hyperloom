@@ -93,6 +93,12 @@ def _record_forge_gemm_payloads(monkeypatch):
     monkeypatch.setattr(forge_gemm_tuning.forge_gemm_tuning, "build_command", _recording_build)
 
 
+def _fresh_profile(state: SharedState) -> SharedState:
+    """A state whose recorded profile matches the active workload, so its shape artifacts are read."""
+    state.profile_trace_matches_workload = lambda *_args, **_kwargs: True
+    return state
+
+
 def _stub_tracelens_analysis(monkeypatch, ensure_checkout):
     """Serve a stand-in ``tracelens_analysis`` to the self-heal's lazy import.
 
@@ -295,7 +301,7 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(subprocess, "run", _fake_run)
         assert forge_gemm_probe._forge_gemm_tune_available() is True
-        assert seen == [forge_gemm_probe._forge_gemm_tune_probe_cmd()]
+        assert seen == [forge_gemm_probe.forge_gemm_tuning.gemm_tune_argv("--help")]
         assert seen[0][0] == sys.executable
 
     def test_forge_gemm_tune_available_false_when_subcommand_missing(self, monkeypatch):
@@ -376,7 +382,7 @@ class TestForgeGemmHelperCoverage:
         shapes.write_text(json.dumps({"shapes": [{"m": 1, "n": 2, "k": 3}]}), encoding="utf-8")
         state.last_trace_analyze = {"artifact_paths": {"gemm_shapes_json": str(shapes)}}
 
-        assert forge_shapes._resolve_forge_shapes(state, tmp_path) == str(shapes)
+        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == str(shapes)
 
     def test_resolve_forge_shapes_skips_incompatible_candidate(self, tmp_path):
         state = SharedState()
@@ -384,7 +390,7 @@ class TestForgeGemmHelperCoverage:
         bad.write_text(json.dumps([{"only": "noMNK"}]), encoding="utf-8")
         state.last_trace_analyze = {"shapes_json": str(bad)}
 
-        assert forge_shapes._resolve_forge_shapes(state, tmp_path) == ""
+        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == ""
 
     def test_is_forge_compatible_shapes_json_rejects_non_dict_sample(self, tmp_path):
         bad = tmp_path / "bad.json"
@@ -552,7 +558,7 @@ class TestForgeGemmHelperCoverage:
     def test_resolve_forge_shapes_returns_empty_for_non_dict_trace(self):
         state = SharedState()
         state.last_trace_analyze = ["not", "a", "dict"]
-        assert forge_shapes._resolve_forge_shapes(state, Path("/tmp")) == ""
+        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == ""
 
     def test_resolve_forge_shapes_finds_file_beside_candidates(self, tmp_path):
         state = SharedState()
@@ -562,7 +568,7 @@ class TestForgeGemmHelperCoverage:
         shapes.write_text(json.dumps([{"M": 1, "N": 2, "K": 3}]), encoding="utf-8")
         state.last_trace_analyze = {"candidates_path": str(candidates)}
 
-        assert forge_shapes._resolve_forge_shapes(state, tmp_path) == str(shapes)
+        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == str(shapes)
 
     def test_forge_fusion_skip_guard_ignores_warm_replay_fusion_flags(self):
         state = SharedState(
@@ -853,7 +859,7 @@ class TestForgeGemmHelperCoverage:
             raise AssertionError("forge-fusion availability should not be checked")
 
         monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", _should_not_check_available)
-        result = await forge_fusion_run._run_forge_fusion({}, session_dir=tmp_path)
+        result = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
 
         assert result["status"] == "complete"
         assert result["backend"] == "forge"
@@ -901,7 +907,7 @@ class TestForgeGemmHelperCoverage:
         """Provider shape selects one matching backend and its model variable."""
         _pin_fusion_provider_env(monkeypatch, shape)
 
-        assert forge_fusion_run._resolve_forge_agent({}) == (
+        assert forge_fusion_run._resolve_forge_agent() == (
             expected_backend,
             expected_model,
         )
@@ -921,20 +927,7 @@ class TestForgeGemmHelperCoverage:
     ):
         _pin_fusion_provider_env(monkeypatch, shape)
 
-        assert forge_fusion_run._resolve_forge_agent({}) == expected
-
-    def test_resolve_forge_agent_honors_valid_explicit_override(self, monkeypatch):
-        _pin_fusion_provider_env(
-            monkeypatch,
-            {**_OPENAI_ONLY_ENV, **_ANTHROPIC_ONLY_ENV},
-        )
-
-        assert forge_fusion_run._resolve_forge_agent(
-            {
-                "agent_backend": "codex",
-                "llm_model": "gpt-explicit",
-            }
-        ) == ("codex", "gpt-explicit")
+        assert forge_fusion_run._resolve_forge_agent() == expected
 
     def test_resolve_forge_agent_ignores_the_removed_forge_claude_model(self, monkeypatch):
         """The Forge-private spelling is gone; CLAUDE_MODEL is what runs."""
@@ -947,7 +940,7 @@ class TestForgeGemmHelperCoverage:
             },
         )
 
-        assert forge_fusion_run._resolve_forge_agent({}) == (
+        assert forge_fusion_run._resolve_forge_agent() == (
             "claude",
             "claude-orchestration",
         )
@@ -963,22 +956,10 @@ class TestForgeGemmHelperCoverage:
             },
         )
 
-        assert forge_fusion_run._resolve_forge_agent({}) == (
+        assert forge_fusion_run._resolve_forge_agent() == (
             "codex",
             "gpt-orchestration",
         )
-
-    def test_resolve_forge_agent_env_model_loses_to_payload_llm_model(self, monkeypatch):
-        """Request ``llm_model`` still outranks the environment."""
-        _pin_fusion_provider_env(
-            monkeypatch,
-            {
-                **_ANTHROPIC_ONLY_ENV,
-                "CLAUDE_MODEL": "claude-orchestration",
-            },
-        )
-
-        assert forge_fusion_run._resolve_forge_agent({"llm_model": "claude-payload"}) == ("claude", "claude-payload")
 
     def test_resolve_forge_agent_ignores_the_other_provider_model(self, monkeypatch):
         """A Codex-side id must not leak onto the Claude forge path."""
@@ -991,19 +972,21 @@ class TestForgeGemmHelperCoverage:
             },
         )
 
-        assert forge_fusion_run._resolve_forge_agent({}) == (
+        assert forge_fusion_run._resolve_forge_agent() == (
             "claude",
             "claude-orchestration",
         )
 
-    def test_resolve_forge_agent_rejects_invalid_explicit_backend(self, monkeypatch):
+    def test_resolve_forge_agent_rejects_an_unknown_configured_backend(self, monkeypatch):
         _pin_fusion_provider_env(
             monkeypatch,
             {**_OPENAI_ONLY_ENV, **_ANTHROPIC_ONLY_ENV},
         )
 
-        with pytest.raises(ValueError, match="agent_backend"):
-            forge_fusion_run._resolve_forge_agent({"agent_backend": "anthropic"})
+        monkeypatch.setenv(llm_config.AGENT_BACKEND_ENV, "anthropic")
+
+        with pytest.raises(ValueError, match=llm_config.AGENT_BACKEND_ENV):
+            forge_fusion_run._resolve_forge_agent()
 
     def test_resolve_forge_agent_defaults_an_unconfigured_provider_to_claude(self, monkeypatch):
         """A runtime logged in by other means carries no credential this can read."""
@@ -1011,14 +994,13 @@ class TestForgeGemmHelperCoverage:
         monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: True)
         monkeypatch.setattr(llm_config, "codex_agent_sdk_installed", lambda: True)
 
-        assert forge_fusion_run._resolve_forge_agent({}) == ("claude", DEFAULT_CLAUDE_MODEL)
+        assert forge_fusion_run._resolve_forge_agent() == ("claude", DEFAULT_CLAUDE_MODEL)
 
     def test_resolve_forge_fusion_codex_sandbox_defaults_to_workspace_write(self, monkeypatch):
         _pin_fusion_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
 
         assert (
             forge_fusion_run._resolve_forge_fusion_sandbox_mode(
-                {},
                 agent_backend="codex",
             )
             == DEFAULT_CODEX_SANDBOX_MODE
@@ -1030,7 +1012,6 @@ class TestForgeGemmHelperCoverage:
 
         assert (
             forge_fusion_run._resolve_forge_fusion_sandbox_mode(
-                {"agent_sandbox_mode": "bypass"},
                 agent_backend="codex",
             )
             == "bypass"
@@ -1042,40 +1023,29 @@ class TestForgeGemmHelperCoverage:
 
         assert (
             forge_fusion_run._resolve_forge_fusion_sandbox_mode(
-                {},
                 agent_backend="codex",
             )
             == DEFAULT_CODEX_SANDBOX_MODE
         )
 
-    def test_resolve_forge_fusion_claude_sandbox_uses_audit_default_or_override(self, monkeypatch):
+    def test_resolve_forge_fusion_claude_sandbox_uses_audit_default(self, monkeypatch):
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
         # Claude's audit default is stable even if the Codex operator default is narrower.
         monkeypatch.setenv(CODEX_SANDBOX_MODE_ENV, "read-only")
 
         assert (
             forge_fusion_run._resolve_forge_fusion_sandbox_mode(
-                {},
                 agent_backend="claude",
             )
             == DEFAULT_CODEX_SANDBOX_MODE
         )
-        assert (
-            forge_fusion_run._resolve_forge_fusion_sandbox_mode(
-                {"agent_sandbox_mode": "read-only"},
-                agent_backend="claude",
-            )
-            == "read-only"
-        )
 
     def test_resolve_forge_fusion_sandbox_rejects_invalid_mode(self, monkeypatch):
         _pin_fusion_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+        monkeypatch.setenv(CODEX_SANDBOX_MODE_ENV, "unconfined")
 
         with pytest.raises(RuntimeError, match="unknown Codex sandbox mode"):
-            forge_fusion_run._resolve_forge_fusion_sandbox_mode(
-                {"agent_sandbox_mode": "unconfined"},
-                agent_backend="codex",
-            )
+            forge_fusion_run._resolve_forge_fusion_sandbox_mode(agent_backend="codex")
 
     @pytest.mark.asyncio
     async def test_run_forge_fusion_openai_only_writes_codex_input(self, tmp_path, monkeypatch):
@@ -1107,11 +1077,10 @@ class TestForgeGemmHelperCoverage:
             }
 
         monkeypatch.setattr(forge_fusion_run.forge_fusion, "run_forge_fusion", _fake_run_forge_fusion)
+        monkeypatch.setenv("FORGE_FUSION_MAX_TURNS", "7")
+        monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "123")
 
-        result = await forge_fusion_run._run_forge_fusion(
-            {"task_id": "fusion_task", "max_turns": 7, "timeout": 123},
-            session_dir=tmp_path,
-        )
+        result = await forge_fusion_run.run_fusion_handler({"task_id": "fusion_task"}, session_dir=tmp_path)
 
         assert result["status"] == "ok"
         assert result["backend"] == "forge"
@@ -1129,9 +1098,9 @@ class TestForgeGemmHelperCoverage:
     def test_forge_fusion_timeout_invalid_env_falls_back(self, monkeypatch):
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
 
-        assert forge_lane_budget._forge_fusion_timeout_sec({}) == 7200
+        assert forge_lane_budget._forge_fusion_timeout_sec() == 7200
 
-    async def _fusion_input_payload(self, tmp_path, monkeypatch, *, max_minutes, payload=None):
+    async def _fusion_input_payload(self, tmp_path, monkeypatch, *, max_minutes):
         """Run the fusion lane against a faked forge runner and return the payload it was handed."""
         trace_dir = tmp_path / "trace"
         trace_dir.mkdir()
@@ -1152,7 +1121,7 @@ class TestForgeGemmHelperCoverage:
             return {"status": "ok", "decision": "REVERT", "kept": False}
 
         monkeypatch.setattr(forge_fusion_run.forge_fusion, "run_forge_fusion", _fake_run_forge_fusion)
-        await forge_fusion_run._run_forge_fusion({"task_id": "fusion_task", **(payload or {})}, session_dir=tmp_path)
+        await forge_fusion_run.run_fusion_handler({"task_id": "fusion_task"}, session_dir=tmp_path)
         return calls[-1]
 
     async def test_fusion_recipe_ceiling_comes_from_the_lane_share(self, tmp_path, monkeypatch):
@@ -1166,23 +1135,12 @@ class TestForgeGemmHelperCoverage:
         payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=0)
 
         assert "max_recipes" not in payload
-        assert payload["timeout"] == forge_lane_budget._forge_fusion_timeout_sec({})
-
-    async def test_an_explicit_recipe_ceiling_outranks_the_lane_share(self, tmp_path, monkeypatch):
-        """An operator/test value stays an escape hatch over the derived share."""
-        payload = await self._fusion_input_payload(
-            tmp_path,
-            monkeypatch,
-            max_minutes=120,
-            payload={"max_recipes": 1},
-        )
-
-        assert payload["max_recipes"] == 1
+        assert payload["timeout"] == forge_lane_budget._forge_fusion_timeout_sec()
 
     def test_forge_fusion_timeout_infinite_env_falls_back(self, monkeypatch):
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "inf")
 
-        assert forge_lane_budget._forge_fusion_timeout_sec({}) == 7200
+        assert forge_lane_budget._forge_fusion_timeout_sec() == 7200
 
     @pytest.mark.asyncio
     async def test_run_forge_fusion_invalid_timeout_env_uses_default(self, tmp_path, monkeypatch):
@@ -1204,7 +1162,7 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(forge_fusion_run.forge_fusion, "run_forge_fusion", _fake_run_forge_fusion)
 
-        result = await forge_fusion_run._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
+        result = await forge_fusion_run.run_fusion_handler({"task_id": "fusion_task"}, session_dir=tmp_path)
 
         assert result["status"] == "complete"
         input_payload = calls[0]
@@ -1233,7 +1191,7 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(forge_fusion_run.forge_fusion, "run_forge_fusion", _fake_run_forge_fusion)
 
-        await forge_fusion_run._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
+        await forge_fusion_run.run_fusion_handler({"task_id": "fusion_task"}, session_dir=tmp_path)
 
         input_payload = calls[0]
         assert input_payload["timeout"] == 10710
@@ -1243,20 +1201,20 @@ class TestForgeGemmHelperCoverage:
         state = SharedState(framework="sglang", model_path="/models/zaya")
         state.save(tmp_path)
         monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: False)
-        not_found = await forge_fusion_run._run_forge_fusion({}, session_dir=tmp_path)
+        not_found = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
         assert not_found["error_class"] == "forge_fusion_not_found"
 
         monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
         state.model_path = ""
         state.save(tmp_path)
         monkeypatch.delenv("MODEL_PATH", raising=False)
-        missing_model = await forge_fusion_run._run_forge_fusion({}, session_dir=tmp_path)
+        missing_model = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
         assert missing_model["error_class"] == "model_path_missing"
 
         state.model_path = "/models/zaya"
         state.last_profile_trace = ""
         state.save(tmp_path)
-        missing_trace = await forge_fusion_run._run_forge_fusion({}, session_dir=tmp_path)
+        missing_trace = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
         assert missing_trace["error_class"] == "decode_trace_missing"
 
     @pytest.mark.asyncio
@@ -1276,7 +1234,7 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(forge_fusion_run.forge_fusion, "_run_subprocess", _timeout)
 
-        result = await forge_fusion_run._run_forge_fusion({"timeout": 60}, session_dir=tmp_path)
+        result = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
 
         assert result["status"] == "failed"
         assert result["error_class"] == "subprocess_timeout"
@@ -1310,7 +1268,7 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(forge_fusion_run.forge_fusion, "run_forge_fusion", _fake_run_forge_fusion)
 
-        await forge_fusion_run._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
+        await forge_fusion_run.run_fusion_handler({"task_id": "fusion_task"}, session_dir=tmp_path)
         input_payload = calls[0]
         assert input_payload["tp"] == 8
         assert input_payload["block_size"] == 128
@@ -1330,27 +1288,16 @@ class TestForgeGemmHelperCoverage:
 
         async def _timeout(cmd, *, timeout_sec, **_kwargs):
             workspace = tmp_path / "runs" / "fusion" / "kernel_entry_fusion"
-            (workspace / "kernel_keep_checkpoint.json").write_text(
-                json.dumps(
-                    {
-                        "kept": True,
-                        "kernel_speedup": 2.69,
-                        "env_flag": "QWEN_FUSED",
-                        "source_file": "/fw/model.py",
-                        "repo_root": "/fw",
-                    }
-                ),
-                encoding="utf-8",
+            (workspace / "fusion_llm_qwen.patch").write_text("diff --git a/model.py b/model.py\n", encoding="utf-8")
+            (workspace / "forge_loop_llm_qwen.json").write_text(
+                json.dumps({"improved": True, "total_speedup": 2.69}), encoding="utf-8"
             )
-            (workspace / "fusion.patch").write_text(
-                "diff --git a/model.py b/model.py\n",
-                encoding="utf-8",
-            )
+            (workspace / "driver_llm_qwen.py").write_text("ENV_FLAGS = ('QWEN_FUSED',)\n", encoding="utf-8")
             raise subprocess.TimeoutExpired(cmd, timeout_sec)
 
         monkeypatch.setattr(forge_fusion_run.forge_fusion, "_run_subprocess", _timeout)
 
-        result = await forge_fusion_run._run_forge_fusion({"timeout": 60}, session_dir=tmp_path)
+        result = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
 
         assert result["kept"] is True
         assert result["decision"] == "KEEP"
@@ -1505,9 +1452,7 @@ class TestForgeGemmHelperCoverage:
         monkeypatch.setattr(
             forge_lane_budget,
             "_lane_budget",
-            lambda _state, _lane=None, **_k: lane_budget.LaneAllocation(
-                lane=lane_budget.LANE_GEMM, budget_sec=7140, max_targets=4
-            ),
+            lambda _state, _lane=None, **_k: lane_budget.LaneAllocation(budget_sec=7140, max_targets=4),
         )
         payload = await self._gemm_input_payload(
             tmp_path,
@@ -3872,7 +3817,7 @@ class TestRunGemmTuningHandler:
             "artifact_paths": {"gemm_shapes_json": str(shapes)},
         }
 
-        assert forge_shapes._resolve_forge_shapes(state, session_dir) == str(shapes)
+        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == str(shapes)
 
     @pytest.mark.parametrize(
         "quant_type",
@@ -3913,7 +3858,7 @@ class TestRunGemmTuningHandler:
         _write_candidates(latest_candidates, 4096)
         state = SharedState(last_trace_analyze={"candidates_path": str(latest_candidates)})
 
-        shapes_path = forge_shapes._resolve_forge_shapes(state, session_dir)
+        shapes_path = forge_shapes._resolve_forge_shapes(_fresh_profile(state))
 
         assert json.loads(Path(shapes_path).read_text(encoding="utf-8")) == [{"M": 4096, "N": 34816, "K": 5120}]
 
@@ -3935,7 +3880,7 @@ class TestRunGemmTuningHandler:
             encoding="utf-8",
         )
 
-        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates))
 
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 1024, "N": 34816, "K": 5120}]
 
@@ -3978,7 +3923,7 @@ class TestRunGemmTuningHandler:
             encoding="utf-8",
         )
 
-        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates))
 
         assert out, "per-tensor input_shapes yielded no GEMM shapes"
         shapes = json.loads(Path(out).read_text(encoding="utf-8"))
@@ -4021,7 +3966,7 @@ class TestRunGemmTuningHandler:
         candidates = tmp_path / "kernel_candidates.json"
         self._mixed_dtype_candidates(candidates)
 
-        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), tmp_path, precision="fp8")
+        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), precision="fp8")
 
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 64, "N": 8704, "K": 3072}]
 
@@ -4029,7 +3974,7 @@ class TestRunGemmTuningHandler:
         candidates = tmp_path / "kernel_candidates.json"
         self._mixed_dtype_candidates(candidates)
 
-        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), tmp_path, precision="bf16")
+        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), precision="bf16")
 
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 64, "N": 256, "K": 3072}]
 
@@ -4037,7 +3982,7 @@ class TestRunGemmTuningHandler:
         candidates = tmp_path / "kernel_candidates.json"
         self._mixed_dtype_candidates(candidates)
 
-        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates))
 
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [
             {"M": 64, "N": 256, "K": 3072},
@@ -4076,7 +4021,7 @@ class TestRunGemmTuningHandler:
             encoding="utf-8",
         )
 
-        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), tmp_path, precision=precision)
+        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), precision=precision)
 
         assert out, f"{precision!r} rejected the equivalent traced token {traced!r}"
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 64, "N": 8704, "K": 3072}]
@@ -4115,7 +4060,7 @@ class TestRunGemmTuningHandler:
             encoding="utf-8",
         )
 
-        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates))
 
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [
             {"M": 64, "N": 8704, "K": 3072},  # 1000, not the first sighting's 10
@@ -4139,7 +4084,7 @@ class TestRunGemmTuningHandler:
             encoding="utf-8",
         )
 
-        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+        out = forge_shapes._extract_gemm_shapes_from_candidates(str(candidates))
 
         assert out, f"separator {sep!r} was not recognised"
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 1024, "N": 34816, "K": 5120}]
@@ -4181,7 +4126,7 @@ class TestRunGemmTuningHandler:
             }
         )
 
-        resolved = forge_shapes._resolve_forge_shapes(state, session_dir, precision="fp8")
+        resolved = forge_shapes._resolve_forge_shapes(_fresh_profile(state), precision="fp8")
 
         assert json.loads(Path(resolved).read_text(encoding="utf-8")) == [{"M": 64, "N": 8704, "K": 3072}]
 
@@ -4193,7 +4138,7 @@ class TestRunGemmTuningHandler:
         artifact.write_text(json.dumps([{"M": 64, "N": 256, "K": 3072}]), encoding="utf-8")
         state = SharedState(last_trace_analyze={"shapes_json": str(artifact)})
 
-        assert forge_shapes._resolve_forge_shapes(state, session_dir) == str(artifact)
+        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == str(artifact)
 
 
 # _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs. _resolve_candidate_id /
@@ -4684,7 +4629,7 @@ async def test_a_bounded_phase_that_cannot_fund_a_lane_skips_it_without_launchin
     gemm = await forge_gemm_tuning._run_forge_gemm_tuning(
         {"task_id": "gemm", "timeout_sec": 7200}, session_dir=tmp_path
     )
-    fusion = await forge_fusion_run._run_forge_fusion({"task_id": "fusion", "timeout": 7200}, session_dir=tmp_path)
+    fusion = await forge_fusion_run.run_fusion_handler({"task_id": "fusion"}, session_dir=tmp_path)
 
     for result in (gemm, fusion):
         assert (result["status"], result["error_class"]) == ("skipped", lane_budget.INSUFFICIENT_BUDGET)

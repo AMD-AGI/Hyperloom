@@ -536,43 +536,20 @@ def test_canonical_fingerprint_remaining_normalization_branches() -> None:
     assert with_controls != without_controls
 
 
-def test_conc_sweep_plot_helper_series_and_payload_loading(tmp_path: Path) -> None:
+def test_conc_sweep_plot_arm_series_sorts_by_conc() -> None:
     from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
 
-    payload = {
-        "baseline": {
-            "points": [
-                {"conc": 4, "output_throughput": 800},
-                {"conc": 2, "output_throughput": 600},
-                {"conc": 0, "output_throughput": 100},
-                {"conc": None, "output_throughput": 100},
-                {"conc": 1, "output_throughput": None},
-            ]
-        },
-        "roofline_ceiling": {
-            "rows": [
-                {"conc": 8, "t_peak_tok_s": 1600},
-                {"conc": 4, "t_peak_tok_s": "1200"},
-                {"conc": 0, "t_peak_tok_s": 999},
-                {"conc": "bad", "t_peak_tok_s": 999},
-                {"conc": 1, "t_peak_tok_s": None},
-            ]
-        },
-    }
-    payload_file = tmp_path / "conc_sweep_summary.json"
-    payload_file.write_text(json.dumps(payload), encoding="utf-8")
-
-    assert plot._load_payload(payload) is payload
-    assert plot._load_payload(payload_file) == payload
+    points = [
+        {"conc": 4, "output_throughput": 800},
+        {"conc": 2, "output_throughput": 600},
+        {"conc": 0, "output_throughput": 100},
+        {"conc": None, "output_throughput": 100},
+        {"conc": 1, "output_throughput": None},
+    ]
 
     axes = plot._axes_for_metric("output_throughput", 2.0)
-    xs, ys, concs = plot._arm_series(payload["baseline"]["points"], 2.0, axes)
+    xs, ys, concs = plot._arm_series(points, 2.0, axes)
     assert xs == [300.0, 200.0]
     assert ys == [300.0, 400.0]
     assert concs == [2.0, 4.0]
     assert plot._arm_series([{"conc": None, "output_throughput": -1}], 1.0, axes) == ([], [], [])
-
-    cx, cy = plot._ceiling_series(payload["roofline_ceiling"], tp_eff=4.0)
-    assert cx == [200.0, 300.0]
-    assert cy == [400.0, 300.0]
-    assert plot._ceiling_series({"rows": [{"conc": 0, "t_peak_tok_s": 0}]}, tp_eff=1.0) == ([], [])

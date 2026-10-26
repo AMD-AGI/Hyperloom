@@ -35,7 +35,7 @@ from ..actions.executors._subprocess_kill import (
 )
 from ..phases import dispatch_order, machine_state as _phase_state
 from ..bus.message_bus import Message
-from ..kernel.request_handlers import get_handler
+from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS
 from ..policy.gate import (
     INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
     PolicyDenied,
@@ -1404,7 +1404,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             return None
         if req_kind == "trace_analyze":
             return None
-        if get_handler(req_kind) is None:
+        if req_kind not in KERNEL_REQUEST_HANDLERS:
             return None
         if self.shared_state.baseline_tput <= 0:
             return PolicyDenied(

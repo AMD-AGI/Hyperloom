@@ -11,52 +11,25 @@ import os
 import re
 import subprocess
 import sys
-from functools import partial
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.codex_session import CodexSessionError
-from hyperloom.common.env import is_truthy
 from hyperloom.common.jsonio import read_json
-from hyperloom.common.llm_config import AGENT_BACKEND_CHOICES
 
 from ..actions.executors._kernel_agent_tool import _run_subprocess
-
-# The manifest verdict for "discovery never reached the model", added in manifest schema v2 alongside the ``error``
-# block.
-LLM_UNAVAILABLE_VERDICT = "llm_unavailable"
+from .forge_gemm_tuning import _add_opt
 
 # ``fusion_loop.termination_reason`` values for a run that died before the loop ran a single attempt.
+# The manifest verdict for "discovery never reached the model", added in manifest schema v2 alongside the
+# ``error`` block.
+LLM_UNAVAILABLE_VERDICT = "llm_unavailable"
 INFRA_ABORT_REASONS = frozenset({"harness_author_failed", "no_git_workspace"})
-DEFAULT_TIMEOUT_SEC = 7200
-_AGENT_BACKENDS = frozenset(AGENT_BACKEND_CHOICES)
-
-
-def _validated_agent_backend(value: Any) -> str:
-    """Return a canonical forge-fusion agent backend or raise."""
-    backend = str(value or "").strip().lower()
-    if backend not in _AGENT_BACKENDS:
-        raise ValueError(f"agent_backend={value!r} is invalid; choose one of: {', '.join(sorted(_AGENT_BACKENDS))}")
-    return backend
-
-
-def _validated_agent_sandbox_mode(value: Any) -> str:
-    """Delegate sandbox validation, including bypass opt-in, to Hyperloom."""
-    stated = str(value or "").strip()
-    if not stated:
-        raise ValueError("agent_sandbox_mode is required")
-
-    from hyperloom.common.codex_session import (
-        resolve_codex_sandbox_mode,
-    )
-
-    return resolve_codex_sandbox_mode(sandbox_mode=stated)
 
 
 def _author_env(agent_backend: str) -> dict[str, str]:
     """The environment forge-fuse runs its author under, without crossing provider shapes."""
     env = dict(os.environ)
-    if _validated_agent_backend(agent_backend) in {"codex", "deepseek"}:
+    if agent_backend in {"codex", "deepseek"}:
         return env
 
     from hyperloom.common import llm_config
@@ -87,27 +60,16 @@ def _author_env(agent_backend: str) -> dict[str, str]:
     return env
 
 
-def _add_opt(cmd: list[str], args: dict[str, Any], key: str, flag: str, *, required: bool = False) -> None:
-    val = args.get(key)
-    if val in (None, ""):
-        if required:
-            raise ValueError(f"{key} is required")
-        return
-    cmd.extend([flag, str(val)])
-
-
 def _build_cmd(args: dict[str, Any]) -> list[str]:
-    agent_backend = _validated_agent_backend(args.get("agent_backend"))
-    agent_sandbox_mode = _validated_agent_sandbox_mode(args.get("agent_sandbox_mode"))
     cmd = [sys.executable, "-m", "kernelforge.cli", "forge-fuse"]
     _add_opt(cmd, args, "trace_path", "--trace", required=True)
     _add_opt(cmd, args, "model_path", "--model-path", required=True)
     _add_opt(cmd, args, "framework", "--framework", required=True)
     _add_opt(cmd, args, "output_dir", "--output-dir", required=True)
     _add_opt(cmd, args, "discover_mode", "--discover")
-    cmd.extend(["--agent-backend", agent_backend])
+    _add_opt(cmd, args, "agent_backend", "--agent-backend", required=True)
     _add_opt(cmd, args, "llm_model", "--model", required=True)
-    cmd.extend(["--agent-sandbox-mode", agent_sandbox_mode])
+    _add_opt(cmd, args, "agent_sandbox_mode", "--agent-sandbox-mode", required=True)
     _add_opt(cmd, args, "max_turns", "--max-turns")
     # Omitted by the caller when no lane ceiling was derived; forge-fuse reads both an absent flag and an explicit 0
     # as "try every discovered recipe".
@@ -123,21 +85,7 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "attn_tp", "--attn-tp")
     _add_opt(cmd, args, "block_size", "--block-size")
     _add_opt(cmd, args, "max_model_len", "--max-model-len")
-    # Nominate one independent sibling patch per confirmed pattern by default (the multi-patch contract).
-    if bool(args.get("fuse_all_confirmed", False)):
-        cmd.append("--fuse-all-confirmed")
-    if is_truthy(args.get("verbose", False)):
-        cmd.append("--verbose")
     return cmd
-
-
-def _timeout_sec(args: dict[str, Any]) -> int:
-    """Resolve the forge-fusion subprocess wall-clock timeout."""
-    raw = args.get("timeout") or args.get("timeout_sec") or os.environ.get("FORGE_FUSION_TIMEOUT")
-    try:
-        return max(1, int(float(raw or DEFAULT_TIMEOUT_SEC)))
-    except (OverflowError, TypeError, ValueError):
-        return DEFAULT_TIMEOUT_SEC
 
 
 def _attempted(loop: dict[str, Any]) -> bool:
@@ -169,7 +117,7 @@ def _fusion_target_file(fusion: dict[str, Any], patches: Any) -> str:
         # On the multi-patch path the producer mirrors the STRONGEST sibling into the singular ``artifacts`` slot, but
         # ``fusion.source_file`` still names the top RECIPE -- which may be a compile-pass claim whose file differs
         # from the strongest authored patch.
-        src_file = str(patches[0].get("target_file") or patches[0].get("source_file") or src_file)
+        src_file = str(patches[0].get("target_file") or src_file)
     return src_file
 
 
@@ -433,41 +381,20 @@ def _campaign_patches_on_disk(root: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _salvaged_speedup(
-    ckpt: dict[str, Any], manifest: dict[str, Any], loop: dict[str, Any], compile_pass: dict[str, Any]
-) -> Any:
-    """The checkpointed kernel speedup, else the one the aggregate manifest recorded."""
-    speedup = ckpt.get("kernel_speedup")
-    if manifest:
-        # A checkpointed ``kernel_speedup`` of 0 is a measurement, so the manifest answers
-        # for it only when the manifest is there to answer.
-        speedup = speedup or (loop.get("best") or {}).get("kernel_speedup") or compile_pass.get("speedup")
-    return speedup
-
-
 def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | None:
-    """Rebuild a KEEP result from pre-smoke checkpoint + patch after a kill."""
+    """Rebuild a KEEP result from the manifest or the per-campaign proof a killed run left."""
     root = Path(output_dir)
     if not root.is_dir():
         return None
-    # A killed run leaves either file truncated or mid-write, so neither is read strictly.
-    read = partial(read_json, default={}, require_dict=True, errors="replace")
-    manifest = read(root / "fusion_manifest.json")
-    # Only a checkpoint that kept says anything about the run.
-    ckpt = read(root / "kernel_keep_checkpoint.json")
-    ckpt = ckpt if ckpt.get("kept") else {}
+    # A killed run leaves the manifest truncated or mid-write, so it is not read strictly.
+    manifest = read_json(root / "fusion_manifest.json", default={}, require_dict=True, errors="replace")
     loop, compile_pass, artifacts, fusion = (
         manifest.get(block) or {} for block in ("fusion_loop", "compile_pass", "artifacts", "fusion")
     )
-    kept = bool(ckpt or loop.get("kept") or compile_pass.get("kept"))
-    speedup = _salvaged_speedup(ckpt, manifest, loop, compile_pass)
+    kept = bool(loop.get("kept") or compile_pass.get("kept"))
+    speedup = (loop.get("best") or {}).get("kernel_speedup") or compile_pass.get("speedup")
     env_flag, source_file, repo_root = (
-        str(ckpt.get(key) or fallback or "")
-        for key, fallback in (
-            ("env_flag", loop.get("best_env_flag")),
-            ("source_file", fusion.get("source_file")),
-            ("repo_root", artifacts.get("repo_root")),
-        )
+        str(value or "") for value in (loop.get("best_env_flag"), fusion.get("source_file"), artifacts.get("repo_root"))
     )
     patch = str(artifacts.get("patch") or "")
     siblings = manifest.get("patches")
@@ -482,8 +409,8 @@ def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | Non
         siblings = campaign
         patch = strongest["patch_path"]
         speedup = strongest["micro_speedup"]
-        # There is no checkpoint and no aggregate on this path, so the top-level flags are
-        # empty too; the strongest row read its own out of the campaign's driver.
+        # There is no aggregate on this path, so the top-level flags are empty too; the
+        # strongest row read its own out of the campaign's driver.
         env_flag, source_file, repo_root = (
             current or strongest[key]
             for current, key in ((env_flag, "env_flag"), (source_file, "target_file"), (repo_root, "kernel_repo"))
@@ -544,7 +471,7 @@ async def run_forge_fusion(args: dict[str, Any]) -> dict[str, Any]:
     """Run forge-fuse for ``args`` and return its result in Hyperloom's fusion contract."""
     try:
         cmd = _build_cmd(args)
-    except (ValueError, CodexSessionError) as exc:
+    except ValueError as exc:
         return {
             "status": "failed",
             "engine": "forge_fusion",
@@ -561,14 +488,13 @@ async def run_forge_fusion(args: dict[str, Any]) -> dict[str, Any]:
     output_root = Path(output_dir or ".")
     for stale_name in (
         "fusion_manifest.json",
-        "kernel_keep_checkpoint.json",
         "fusion.patch",
     ):
         (output_root / stale_name).unlink(missing_ok=True)
     for stale_glob in ("fusion_*.patch", "forge_loop_*.json"):
         for stale in output_root.glob(stale_glob):
             stale.unlink(missing_ok=True)
-    timeout_sec = _timeout_sec(args)
+    timeout_sec = int(args["timeout"])
     try:
         rc, _stdout, _stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec, env=env, label="forge_fusion")
     except subprocess.TimeoutExpired as exc:

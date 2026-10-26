@@ -127,7 +127,8 @@ def _fill_integrate_defaults_from_state(
     if pending_record is not None:
         resolved.setdefault("integration_id", str(pending_record.get("integration_id") or ""))
         resolved.setdefault("kernel_id", str(pending_record.get("kernel_id") or ""))
-        _fill_pending_record_identity(resolved, pending_record)
+        for key in ("task_group_key", "identity_route", "artifact_kind", "integration_validation_status"):
+            resolved.setdefault(key, str(pending_record.get(key) or ""))
         _fill_fusion_sibling_defaults(resolved, pending_record)
 
     current_best = getattr(state, "current_best", None) or {}
@@ -256,15 +257,9 @@ def _pending_integration_record(records: list[dict], integration_id: str) -> dic
     )
 
 
-def _fill_pending_record_identity(resolved: dict, pending_record: Mapping[str, Any]) -> None:
-    for key in ("task_group_key", "identity_route", "artifact_kind", "integration_validation_status"):
-        resolved.setdefault(key, str(pending_record.get(key) or ""))
-
-
 def _bind_integrate_to_pending_record(resolved: dict, pending_record: Mapping[str, Any]) -> None:
     resolved["kernel_id"] = str(pending_record.get("kernel_id") or resolved.get("kernel_id") or "")
     resolved["integration_id"] = str(pending_record.get("integration_id") or resolved.get("integration_id") or "")
-    _fill_pending_record_identity(resolved, pending_record)
     _fill_integrate_snapshot_from_bundle(resolved, pending_record.get("artifact_bundle"))
     if not resolved.get("snapshot_dir") and pending_record.get("snapshot_dir"):
         resolved["snapshot_dir"] = str(pending_record["snapshot_dir"])

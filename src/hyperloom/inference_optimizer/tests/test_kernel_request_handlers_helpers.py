@@ -60,23 +60,18 @@ def test_the_gemm_timeout_env_outranks_the_lane_share(monkeypatch) -> None:
 # -- _forge_fusion_timeout_sec --------------------------------------------
 def test_fusion_timeout_takes_the_lane_share(monkeypatch) -> None:
     monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
-    assert forge_lane_budget._forge_fusion_timeout_sec({}, lane_budget_sec=10710) == 10710
+    assert forge_lane_budget._forge_fusion_timeout_sec(lane_budget_sec=10710) == 10710
 
 
 def test_fusion_timeout_without_an_allocation_keeps_the_module_default(monkeypatch) -> None:
     """An unbounded phase must not collapse the lane to a one-second session."""
     monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
-    assert forge_lane_budget._forge_fusion_timeout_sec({}, lane_budget_sec=0) == 7200
-
-
-def test_an_explicit_fusion_timeout_outranks_the_lane_share(monkeypatch) -> None:
-    monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
-    assert forge_lane_budget._forge_fusion_timeout_sec({"timeout": 900}, lane_budget_sec=10710) == 900
+    assert forge_lane_budget._forge_fusion_timeout_sec(lane_budget_sec=0) == 7200
 
 
 def test_the_fusion_timeout_env_outranks_the_lane_share(monkeypatch) -> None:
     monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "300")
-    assert forge_lane_budget._forge_fusion_timeout_sec({}, lane_budget_sec=10710) == 300
+    assert forge_lane_budget._forge_fusion_timeout_sec(lane_budget_sec=10710) == 300
 
 
 # -- _gemm_router_targets / _gemm_capped_tuner ----------------------------

@@ -229,7 +229,7 @@ async def _forge_shape_sources(state: Any, payload: dict, run: _ForgeGemmRun) ->
     shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), run.workspace)
     untuned_csv = _requested_existing_file(payload, "untuned_csv")
     if not shapes_json and not untuned_csv and run.framework != "vllm":
-        shapes_json = _resolve_forge_shapes(state, run.session_dir, require_fresh_profile=True, precision=run.precision)
+        shapes_json = _resolve_forge_shapes(state, precision=run.precision)
         if not shapes_json:
             untuned_csv = _resolve_forge_untuned_csv(run.session_dir, run.precision, run.quant_type, run.model_dir)
 
@@ -260,7 +260,7 @@ def _profiled_block_fp8_shapes(
         dry_run=bool(payload.get("dry_run")),
     ):
         return sources
-    traced_shapes = _resolve_forge_shapes(state, run.session_dir, require_fresh_profile=True, precision=run.precision)
+    traced_shapes = _resolve_forge_shapes(state, precision=run.precision)
     if traced_shapes:
         return sources._replace(shapes_json=traced_shapes, untuned_csv="")
     reused = _reuse_vllm_block_fp8_roofline_shapes(

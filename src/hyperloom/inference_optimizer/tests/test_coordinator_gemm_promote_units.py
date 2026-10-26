@@ -1488,8 +1488,7 @@ class TestKernelE2EMeasurementPromotion:
         )
         monkeypatch.setattr(integrate_accuracy, "grade_integrate_accuracy", unexpected)
         monkeypatch.setattr(integrate_outcomes, "_maybe_finalize_kernel_patch", unexpected)
-        for _module in (krh_mod, integrate_rebaseline):
-            monkeypatch.setattr(_module, "_sweep_integrate_aiter_locks", lambda **kwargs: {})
+        monkeypatch.setattr(integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **kwargs: {})
         monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: "/usr/bin/python3")
         monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
         return krh_mod.integrate_handler

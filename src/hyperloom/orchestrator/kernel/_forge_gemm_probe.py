@@ -19,6 +19,7 @@ from hyperloom.common.checkpoint_quant import checkpoint_format
 from hyperloom.common.env import is_truthy
 from hyperloom.inference_optimizer.model_config_utils import load_model_config_dict
 
+from . import forge_gemm_tuning
 from ._integrate_payload import _normalize_precision, _requested_framework, _requested_setting
 from ._untuned_gemm_csv import _resolve_fp8_quant_type
 
@@ -77,27 +78,22 @@ def _derive_gemm_skip_reason(tuners_skipped: Any) -> str:
 _FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC = 30
 
 
-def _forge_gemm_tune_probe_cmd() -> list[str]:
-    """Return the exact interpreter and CLI prefix used by GEMM tuning."""
-    return [sys.executable, "-m", "kernelforge.cli", "gemm-tune", "--help"]
-
-
 def _forge_gemm_tune_available() -> bool:
-    """Check exactly what ``_build_cmd`` will run, in the interpreter it runs in.
+    """Check exactly what ``forge_gemm_tuning.build_command`` will run, in the interpreter it runs in.
 
     The tuner is a subpackage of the ``kernelforge`` that ships in this
     distribution, invoked as ``sys.executable -m kernelforge.cli gemm-tune run``.
     Vendoring forge in-tree removes the cross-checkout failures this probe was
     built for, but not the reason it is a subprocess: ``find_spec`` proves the
     module is importable and says nothing about whether ``gemm-tune`` is
-    registered on the CLI, which is the thing ``_build_cmd`` actually needs. So
+    registered on the CLI, which is the thing ``build_command`` actually needs. So
     ask the subcommand itself -- in a subprocess, so a heavy CLI import cannot
     land in the orchestrator's own process. ``--help`` exits 0 only if
     ``kernelforge.cli`` imported and ``gemm-tune`` is registered on it.
     """
     try:
         proc = subprocess.run(
-            _forge_gemm_tune_probe_cmd(),
+            forge_gemm_tuning.gemm_tune_argv("--help"),
             capture_output=True,
             text=True,
             timeout=_FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC,

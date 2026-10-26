@@ -45,20 +45,6 @@ class ControllerPatchPublication:
     changed_files: tuple[str, ...] = ()
 
 
-def discover_controller_patch_dirs(patches_root: str | Path) -> tuple[Path, ...]:
-    """Return complete operator directories in deterministic filename order."""
-    root = Path(patches_root).expanduser().resolve()
-    if not root.is_dir():
-        return ()
-    complete = []
-    for entry in sorted(root.iterdir(), key=lambda path: path.name):
-        if entry.name.startswith(".") or not entry.is_dir():
-            continue
-        if all((entry / name).is_file() for name in ("change.patch", "report.md", "publication.json")):
-            complete.append(entry)
-    return tuple(complete)
-
-
 def _relative_path(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ControllerPublicationError(f"{field_name} must be a non-empty string")
@@ -159,6 +145,5 @@ __all__ = [
     "PUBLICATION_SCHEMA_VERSION",
     "ControllerPatchPublication",
     "ControllerPublicationError",
-    "discover_controller_patch_dirs",
     "load_controller_publication",
 ]

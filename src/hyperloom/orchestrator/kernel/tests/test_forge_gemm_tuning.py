@@ -8,7 +8,6 @@ from __future__ import annotations
 
 
 from hyperloom.orchestrator.kernel import forge_gemm_tuning
-from hyperloom.orchestrator.kernel import _forge_gemm_probe as forge_gemm_probe
 
 
 def _payload() -> dict:
@@ -22,9 +21,6 @@ def _payload() -> dict:
         "conc": 256,
         "mp": 8,
         "output_dir": "/tmp/out",
-        "iters": 10,
-        "warmup": 2,
-        "min_improvement_pct": 3.0,
         "timeout": 123,
         "global_timeout": 456,
         "tuner": "fmoe_ck",
@@ -33,10 +29,8 @@ def _payload() -> dict:
         "shapes_json": "/tmp/shapes.json",
         "tunableop_input": "/tmp/tunable.txt",
         "kernel_signature_log": "/tmp/server.log",
-        "gpu_ids": "0,1",
         "tokens": "64,128",
         "skip_gpu_check": True,
-        "verbose": True,
         "thorough": True,
     }
 
@@ -59,17 +53,7 @@ def test_build_cmd_maps_all_options():
     assert cmd[cmd.index("--global-timeout") + 1] == "456"
     assert cmd[cmd.index("--tokens") + 1] == "64,128"
     assert "--skip-gpu-check" in cmd
-    assert "--verbose" in cmd
     assert "--thorough" in cmd
-
-
-def test_preflight_and_inner_cli_use_the_same_interpreter():
-    """The readiness probe must describe the command the wrapper will run."""
-    probe = forge_gemm_probe._forge_gemm_tune_probe_cmd()
-    inner = forge_gemm_tuning.build_command(_payload())
-
-    assert probe[:4] == inner[:4]
-    assert probe[0] == forge_gemm_tuning.sys.executable
 
 
 def test_build_cmd_forwards_the_moe_untuned_csv():
@@ -100,9 +84,6 @@ def test_build_cmd_asserts_every_option_it_can_emit():
         "--conc",
         "--mp",
         "--output-dir",
-        "--iters",
-        "--warmup",
-        "--min-improvement-pct",
         "--timeout",
         "--global-timeout",
         "--tuner",
@@ -111,9 +92,7 @@ def test_build_cmd_asserts_every_option_it_can_emit():
         "--shapes-json",
         "--tunableop-input",
         "--kernel-signature-log",
-        "--gpu-ids",
         "--skip-gpu-check",
-        "--verbose",
         "--thorough",
         "--tokens",
         "--kb-current-lib",
@@ -129,9 +108,9 @@ def test_build_cmd_forwards_provenance_but_no_knowledge_base_options(monkeypatch
             "kb_read": True,
             "kb_accept_candidate": True,
             "kb_strict_lib": True,
-            "kb_current_lib": "aiter-1",
         }
     )
+    monkeypatch.setenv("FORGE_GEMM_TUNE_KB_CURRENT_LIB", "aiter-1")
     monkeypatch.setenv("FORGE_GEMM_TUNE_KB_READ", "1")
     monkeypatch.setenv("FORGE_GEMM_TUNE_KB_ACCEPT_CANDIDATE", "1")
     monkeypatch.setenv("FORGE_GEMM_TUNE_KB_STRICT_LIB", "1")

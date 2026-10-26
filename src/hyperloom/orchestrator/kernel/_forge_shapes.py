@@ -37,13 +37,7 @@ def _is_forge_compatible_shapes_json(path: Path) -> bool:
         return False
 
 
-def _resolve_forge_shapes(
-    state,
-    session_dir: Path,
-    *,
-    require_fresh_profile: bool = False,
-    precision: str = "",
-) -> str:
+def _resolve_forge_shapes(state, *, precision: str = "") -> str:
     """Find TraceLens shapes JSON if available and in forge-compatible format.
 
     Forge dense tuners expect: [{"M": int, "N": int, "K": int}, ...]
@@ -59,9 +53,10 @@ def _resolve_forge_shapes(
     a bare ``[{M,N,K}]`` list carrying no dtype or provenance, so an artifact
     recorded for another dtype would otherwise be handed to the tuner ahead of
     correctly-scoped shapes. Artifacts stay the fallback for the unscoped case
-    and for when the trace yields nothing for this precision.
+    and for when the trace yields nothing for this precision. A profile that does
+    not match the active workload/config contributes nothing.
     """
-    if require_fresh_profile and not state.profile_trace_matches_workload():
+    if not state.profile_trace_matches_workload():
         log.info(
             "Forge GEMM shapes: latest TraceLens profile does not match the "
             "active workload/config; ignoring its shape artifacts"
@@ -94,11 +89,7 @@ def _resolve_forge_shapes(
     # Extract the GEMM shapes observed by the latest TraceLens analysis. Older
     # traces can describe a backend that is no longer active.
     def _extracted() -> str:
-        return _extract_gemm_shapes_from_candidates(
-            str(last_trace.get("candidates_path") or ""),
-            session_dir,
-            precision=precision,
-        )
+        return _extract_gemm_shapes_from_candidates(str(last_trace.get("candidates_path") or ""), precision=precision)
 
     if canonical_dtype(precision):
         scoped = _extracted()
@@ -113,7 +104,7 @@ def _resolve_forge_shapes(
     return _extracted()
 
 
-def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: Path, *, precision: str = "") -> str:
+def _extract_gemm_shapes_from_candidates(candidates_path_str: str, *, precision: str = "") -> str:
     """Extract M,N,K from kernel_candidates.json hot_kernels input_shapes.
 
     Derives the GEMM dimensions actually observed during serving and writes a
