@@ -301,3 +301,20 @@ def test_the_memory_of_a_holder_found_accounted_for_before_is_not_foreign_once_i
     pod.holds(1845543, _CARD, vram=_FOREIGN_VRAM, queues=2)
     found = _read(pod).intrusions(_NOBODY, before_test=False, accounted=remembered)
     assert [i.key for i in found] == [("crowded", _CARD), ("unaccounted", _CARD)]
+
+
+def test_read_listed_counts_every_process_the_kernel_lists_on_the_cards_running_or_ended(pod: KernelTree) -> None:
+    pod.holds(1827025, _CARD, vram=_SERVER_VRAM, queues=0)  # ended, its memory not yet freed
+    pod.holds(1845543, 7, vram=_FOREIGN_VRAM, queues=2)
+
+    reading = card_occupancy.read_listed([_CARD, 7], kfd=pod.kfd)
+
+    assert reading.unavailable is None and reading.method == METHOD_CENSUS
+    assert [(h.card, h.pid, h.vram) for h in reading.holders] == [
+        (_CARD, 1827025, _SERVER_VRAM),
+        (7, 1845543, _FOREIGN_VRAM),
+    ]
+    assert (
+        card_occupancy.read_listed([9], kfd=pod.kfd).unavailable
+        == "card(s) [9] are not among the 8 GPUs the kernel lists"
+    )

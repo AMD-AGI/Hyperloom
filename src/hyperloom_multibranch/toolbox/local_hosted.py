@@ -47,14 +47,21 @@ from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.measure.short_prompts.staging import cache_root
-from hyperloom.sandbox.card_occupancy import CARD_GUARD_ENV, CardGuard, CardReading, card_guard, read_holders
+from hyperloom.sandbox.card_occupancy import (
+    CARD_GUARD_ENV,
+    CardGuard,
+    CardReading,
+    card_guard,
+    read_holders,
+    read_listed,
+)
 from hyperloom.sandbox.gated_pool import GatedPool
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom.sandbox.templates import LocalTemplate
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
-from hyperloom_multibranch.toolbox.branch_leases import BranchLeases
+from hyperloom_multibranch.toolbox.branch_leases import BranchLeases, CardDrain
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
 from hyperloom_multibranch.toolbox.leased_toolbox import (
     LeasedToolbox,
@@ -242,7 +249,9 @@ class LocalOptions:
     (kept and recorded) or enforced (the test refused and retried, the card not handed out); ``None`` takes
     ``HYPERLOOM_CARD_GUARD`` of the host environment, and without it the guard only observes. The runners get the same
     setting. ``card_holders`` says who holds some cards, which the pool asks before it hands a card out: the kernel's list
-    of the machine unless a test of this module says otherwise. ``short_prompts`` is the staged prompt set of the
+    of the machine unless a test of this module says otherwise; ``card_memory`` lists what the kernel has on some cards,
+    which a released lease waits on before its cards go back (:func:`~hyperloom.sandbox.card_occupancy.read_listed`
+    unless a test says otherwise). ``short_prompts`` is the staged prompt set of the
     short-prompt consistency check (``acceptance.short_prompts`` of a builder that names it there says the same and must
     not differ); ``None`` takes the key in ``HYPERLOOM_SHORT_PROMPTS`` of the host environment (``off`` for no check),
     and without either the set staged for the session model's tokenizer, when it is staged. It is read in this host's
@@ -265,6 +274,7 @@ class LocalOptions:
     jit_store: Path | None = None
     card_guard: CardGuard | None = None
     card_holders: Callable[[Sequence[int]], CardReading] = read_holders
+    card_memory: Callable[[Sequence[int]], CardReading] = read_listed
     short_prompts: ShortPromptSetup | None = None
     long_context: LongContextSetup | None = None
 
@@ -411,7 +421,7 @@ def build_local_toolbox(
     shared_dirs = _shared_dirs(jit_root, eval_sets, os.environ)
     provider = _provider(session, cards, template, options, shared_dirs)
     backend = started_backend(provider, config)
-    leases = BranchLeases(provider, directory / _BRANCH_SANDBOXES, tp, template.envs)
+    leases = BranchLeases(provider, directory / _BRANCH_SANDBOXES, tp, template.envs, CardDrain(options.card_memory))
     executor = HostedExecutor(
         backend,
         directory,

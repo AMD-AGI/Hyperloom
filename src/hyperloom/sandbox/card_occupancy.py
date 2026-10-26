@@ -68,6 +68,7 @@ __all__ = [
     "card_guard",
     "own_sandbox_processes",
     "read_holders",
+    "read_listed",
 ]
 
 #: The directory the kernel's list is under, and ``/proc``; tests point both at a tree of their own.
@@ -482,6 +483,24 @@ def read_holders(cards: Sequence[int], *, kfd: Path = KFD_PATH, procfs: Path = P
         return CardReading(
             holders=_holders(kfd, procfs, {gpu.gpu_id: card for card, gpu in selected.items()}, named=True)
         )
+    except _Unreadable as exc:
+        return CardReading(unavailable=str(exc))
+    except OSError as exc:
+        return CardReading(unavailable=f"the kernel's list cannot be read ({type(exc).__name__}: {exc.strerror})")
+
+
+def read_listed(cards: Sequence[int], *, kfd: Path = KFD_PATH) -> CardReading:
+    """Every process the kernel lists with memory or a queue on any of ``cards``, running or ended, or why that cannot be
+    said. A process that ended stays listed with its memory until the driver has freed it, and a card is free for the next
+    holder only once nothing is listed on it. The holders are not named: ``pid`` is the kernel's id and the reading's
+    ``method`` is :data:`METHOD_CENSUS`."""
+    absent = _driver_absent(kfd)
+    if absent is not None:
+        return CardReading(unavailable=absent)
+    try:
+        selected = _selected(kfd, cards)
+        card_of = {gpu.gpu_id: card for card, gpu in selected.items()}
+        return CardReading(holders=_holders(kfd, PROC_PATH, card_of, named=False), method=METHOD_CENSUS)
     except _Unreadable as exc:
         return CardReading(unavailable=str(exc))
     except OSError as exc:
