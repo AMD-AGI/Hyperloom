@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -127,6 +128,41 @@ def task_dispatch_record(task: Task) -> dict[str, Any] | None:
             "tick": int(entry["tick"]),
         }
     return None
+
+
+def record_task_dispatch(task: Task) -> None:
+    """Write a task's author-time dispatch evidence to the phase timeline.
+
+    Fresh tasks carry the phase coordinates frozen when their row was authored;
+    legacy rows have no record and remain legacy on resume, so they dispatch
+    without evidence.
+
+    Args:
+        task: The task row being dispatched.
+
+    Raises:
+        RuntimeError: The evidence was not durably recorded.
+    """
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ActionDispatch, PhaseCycle
+
+    record = task_dispatch_record(task)
+    if record is None:
+        return
+    recorded = phase_event.record_dispatch(
+        ActionDispatch(
+            at=PhaseCycle(str(record["phase"]), int(record["macro_cycle"])),
+            action=str(task.kind or ""),
+            task_id=str(task.task_id or ""),
+            tick=int(record["tick"]),
+            dispatch_class=str(record["dispatch_class"]),
+            allowed=bool(record["allowed"]),
+            denial_rule=record["denial_rule"],
+            dispatched_unix=time.time(),
+        )
+    )
+    if not recorded:
+        raise RuntimeError("dispatch evidence was not durably recorded")
 
 
 def task_dispatch_evidence(task: Task) -> tuple[str, bool, str | None] | None:

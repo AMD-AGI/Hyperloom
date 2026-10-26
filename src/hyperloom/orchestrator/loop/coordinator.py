@@ -66,7 +66,6 @@ from .intent_router import IntentRouter
 from hyperloom.inference_optimizer.model_config_utils import infer_model_class
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry, task_dispatch_origin
-from ..state.task_states import TERMINAL_STATES
 from ..collaborator import OrchestrationPrompt
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.context_events import PromptSnapshotTracker, record_prompt_snapshot
@@ -266,13 +265,11 @@ class Coordinator:
                 int(self.shared_state.gpu_specialist_capacity or 0),
                 serving_tp=self.dispatcher.resolve_serving_tp(),
             ),
-            terminal_states=TERMINAL_STATES,
         )
         # Whole-node pool for enablement and bench specialists.
         self.framework_gpu_pool = SpecialistGpuPool(
             self.db,
             gpu_ids=resolve_whole_machine_devices(),
-            terminal_states=TERMINAL_STATES,
         )
         # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
         from ..bus.storage.schema import set_lane_capacity as _set_lane_capacity

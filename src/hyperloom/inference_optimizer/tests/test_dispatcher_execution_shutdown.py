@@ -31,7 +31,7 @@ from hyperloom.orchestrator.bringup.reconcile import ReconcileReport
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
-from ._dispatch_helpers import pump_until_settled
+from ._dispatch_helpers import pump_until_settled, stub_gpu_pool
 from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn
 
 
@@ -54,6 +54,7 @@ def _dispatcher(tmp_path):
         shared_state=state,
         bus=MessageBus(db),
         sub=SubAgentRunner(locks, tasks),
+        gpu_specialist_pool=stub_gpu_pool(),
         _stop=stop,
         stop_requested=stop.is_set,
         reconciler=SimpleNamespace(last_report=ReconcileReport()),
@@ -338,7 +339,6 @@ def test_forced_specialist_actor_kill_releases_capacity_and_lane(tmp_path, monke
     )
     monkeypatch.setitem(sys.modules, "ray", fake_ray)
     dispatcher = _dispatcher(tmp_path)
-    dispatcher._coord.gpu_specialist_pool = SimpleNamespace(release=AsyncMock())
     actor = SimpleNamespace(stop=SimpleNamespace(remote=lambda: False))
     specialist_lease = ray_serving.GpuSpecialistLease(num_gpus=1)
     specialist_lease._actor = actor
@@ -377,7 +377,6 @@ def test_cleanup_unconfirmed_preserves_outcome_without_completion(tmp_path, clea
     dispatcher = _dispatcher(tmp_path)
     payload = {"status": "ok", "decision": "KEEP", "nested": {"answer": [42]}}
     completed = AsyncMock()
-    dispatcher._coord.gpu_specialist_pool = SimpleNamespace(release=AsyncMock())
 
     async def execute(_ctx):
         if outcome == "failed":

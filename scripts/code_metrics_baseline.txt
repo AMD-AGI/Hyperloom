@@ -370,7 +370,7 @@ function-lines src/hyperloom/orchestrator/knowledge/remote_recipe/client.py::Rem
 function-lines src/hyperloom/orchestrator/knowledge/remote_recipe/client.py::RemoteRecipeClient.write_if_better 82
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator.__init__ 152
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._reactor_turn 97
-function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.run_task_registered 109
+function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.run_task_registered 81
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_single_verdict 111
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.handle_delegate 88
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 276
