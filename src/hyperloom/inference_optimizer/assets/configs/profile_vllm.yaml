@@ -67,6 +67,7 @@ benchmark:
     #                  auto-lowered
     #   delay_iters  = OSL * (RANDOM_RANGE_RATIO + 1) * 3 - max_iters / 2,
     #                  clamped at 0
+    #   a speculative launch divides delay_iters by its tokens-per-step bound
     EXTRA_VLLM_ARGS: "--profiler-config.ignore_frontend True"
     # --- Profiler: graph replays ---
     # The HIP runtime replays a captured graph by dispatching its pre-recorded AQL packets, and the ROCm profiler then
