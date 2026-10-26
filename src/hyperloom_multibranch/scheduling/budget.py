@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The session's wall-clock budget, split the way the single-lineage flow splits its own.
+"""The session's wall-clock budget: PRELUDE gets all of it, and EXPLORE ends as late as still lets FINAL start.
 
-The baseline-prelude child gets all the remaining time; whatever it leaves, R, is shared
-out by the main flow's phase shares: FINAL keeps R*5/92, but never less than the longest
-root test of the baseline (one test of this workload), CLOSE keeps R*2/92 and EXPLORE
-runs until both reserves are all that is left. The deadline plus the CLOSE grace is the
-hard stop, except that FINAL waits for the validation tests it started, past its reserve and the hard stop if need
-be, and a FINAL that ends later leaves CLOSE one CLOSE grace from its end. The constants are re-declared because
-their owners are modules this package must not import; each names its source. A GPU-hour budget keeps FINAL's share
-the same way: EXPLORE ends once the tests have used the rest of it.
+The baseline-prelude child gets all the remaining time. EXPLORE then runs until one longest root test of the baseline
+(one test of this workload) and one CLOSE grace are left: the grace for EXPLORE to wind down so that FINAL starts
+before the deadline, the test for FINAL's validation, whose tests run concurrently. FINAL waits for the validation tests
+it started, past the deadline and the hard stop if need be, so its reserve is the time it is expected to take, not a
+bound on it. CLOSE keeps nothing before the deadline: the deadline plus the CLOSE grace is the hard stop, and a FINAL
+that ends later leaves CLOSE one CLOSE grace from its end. The constants are re-declared because their owners are
+modules this package must not import; each names its source. A GPU-hour budget keeps FINAL the main flow's share:
+EXPLORE ends once the tests have used the rest of it.
 """
 
 from __future__ import annotations
@@ -24,10 +24,9 @@ from hyperloom_multibranch.scheduling.clock import Clock
 MB_DEFAULT_MAX_HOURS = 2.0
 # orchestrator/phases/machine_state.py DEFAULT_LONGRUN_MAX_MINUTES (14 days); a budget of 0 means unlimited
 MB_UNLIMITED_HOURS = 14 * 24
-# orchestrator/phases/machine_state.py DEFAULT_PHASE_BUDGET_PCT: FRAMEWORK_AGENT 38 + KERNEL_AGENT 47, SWEEP, CLOSE
+# orchestrator/phases/machine_state.py DEFAULT_PHASE_BUDGET_PCT: FRAMEWORK_AGENT 38 + KERNEL_AGENT 47, SWEEP
 MB_EXPLORE_SHARE = 85
 MB_FINAL_SHARE = 5
-MB_CLOSE_SHARE = 2
 # orchestrator/state/shared_state.py effective_closing_grace_sec: min(120, total * 0.02)
 MB_CLOSE_GRACE_CAP_SECONDS = 120.0
 MB_CLOSE_GRACE_FRACTION = 0.02
@@ -35,7 +34,6 @@ MB_CLOSE_GRACE_FRACTION = 0.02
 MB_MIN_PRELUDE_HOURS = 1 / 60
 
 MB_SECONDS_PER_HOUR = 3600.0
-_SHARE_TOTAL = MB_EXPLORE_SHARE + MB_FINAL_SHARE + MB_CLOSE_SHARE
 
 
 def budget_seconds(max_hours: float) -> float:
@@ -54,14 +52,6 @@ def explore_gpu_seconds(max_gpu_hours: float) -> float:
 
 class BudgetExhausted(RuntimeError):
     """Too little wall-clock time is left to start the phase that asked."""
-
-
-@dataclass(frozen=True)
-class PhaseDeadlines:
-    """Absolute clock times at which EXPLORE and FINAL's reserve end; FINAL's validation may run past ``final_end``."""
-
-    explore_end: float
-    final_end: float
 
 
 @dataclass(frozen=True)
@@ -99,17 +89,12 @@ class SessionBudget:
             raise BudgetExhausted(f"{hours * 60:.2f} min left, the baseline prelude needs at least one minute")
         return hours
 
-    def phases_after_prelude(self, now: float, final_floor_seconds: float) -> PhaseDeadlines:
-        """Split what is left at ``now``: FINAL keeps its share or ``final_floor_seconds``, whichever is longer, and
-        EXPLORE ends that much before FINAL does, at ``now`` at the earliest."""
+    def explore_end(self, now: float, final_test_seconds: float) -> float:
+        """When EXPLORE ends: ``final_test_seconds`` and one CLOSE grace before the deadline, but no sooner than
+        ``now``."""
 
-        left = self.remaining(now)
-        close_reserve = left * MB_CLOSE_SHARE / _SHARE_TOTAL
-        final_reserve = min(max(left * MB_FINAL_SHARE / _SHARE_TOTAL, final_floor_seconds), left - close_reserve)
-        return PhaseDeadlines(
-            explore_end=self.deadline - final_reserve - close_reserve,
-            final_end=self.deadline - close_reserve,
-        )
+        reserve = final_test_seconds + self.close_grace_seconds
+        return self.deadline - min(reserve, self.remaining(now))
 
 
 class HardStop:
@@ -151,7 +136,6 @@ class HardStop:
 __all__ = [
     "MB_CLOSE_GRACE_CAP_SECONDS",
     "MB_CLOSE_GRACE_FRACTION",
-    "MB_CLOSE_SHARE",
     "MB_DEFAULT_MAX_HOURS",
     "MB_EXPLORE_SHARE",
     "MB_FINAL_SHARE",
@@ -159,7 +143,6 @@ __all__ = [
     "MB_UNLIMITED_HOURS",
     "BudgetExhausted",
     "HardStop",
-    "PhaseDeadlines",
     "SessionBudget",
     "budget_seconds",
     "explore_gpu_seconds",

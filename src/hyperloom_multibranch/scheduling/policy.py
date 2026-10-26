@@ -18,7 +18,7 @@ from types import MappingProxyType
 
 from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS
-from hyperloom_multibranch.scheduling.budget import MB_CLOSE_SHARE, MB_EXPLORE_SHARE, MB_FINAL_SHARE
+from hyperloom_multibranch.scheduling.budget import MB_EXPLORE_SHARE, MB_FINAL_SHARE
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP
 from hyperloom_multibranch.scheduling.final import MB_SWEEP_DEGRADATION_PCT
 from hyperloom_multibranch.scheduling.similarity import MB_SIMILARITY_THRESHOLD
@@ -30,7 +30,6 @@ SCHEDULING_POLICY: Mapping[str, float] = MappingProxyType(
         "MB_BIG_GAIN_BARS": MB_BIG_GAIN_BARS,
         "MB_BOTTLENECK_SHIFT_PP": MB_BOTTLENECK_SHIFT_PP,
         "MB_BRANCH_GRACE_TESTS": SETTLED_TESTS,
-        "MB_CLOSE_SHARE": MB_CLOSE_SHARE,
         "MB_EXPLORE_SHARE": MB_EXPLORE_SHARE,
         "MB_FINAL_SHARE": MB_FINAL_SHARE,
         "MB_MIN_USEFUL_COLD_STARTS": MB_MIN_USEFUL_COLD_STARTS,
