@@ -9,8 +9,8 @@ import dataclasses
 
 import pytest
 
-from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
-from hyperloom_multibranch.notebook.rsi.archive import SearchTree
+from hyperloom_multibranch.contracts.notebook.vocab import CommitOrigin, LineageKind
+from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeCommit
 from hyperloom_multibranch.notebook.rsi.history import (
     DEFAULT_STALL_TESTS,
     MAX_POSITION,
@@ -65,6 +65,13 @@ def test_every_judged_test_is_one_observation_at_its_position_past_the_last_comm
         (2, F),
         (3, F),
     ]
+
+
+def test_a_commit_whose_merge_failed_does_not_end_the_stall() -> None:
+    failed = TreeCommit(1250.0, 1.0, CommitOrigin.COMMIT, merge_failed=True)
+    stalled = dataclasses.replace(branch("b1", [], judged_times=_judged(4)), commits=(failed,))
+
+    assert list(hazard_observations(stalled)) == [(1, F), (2, F), (3, F), (4, F)]
 
 
 def test_a_new_branch_counts_its_tests_up_to_its_first_commit() -> None:

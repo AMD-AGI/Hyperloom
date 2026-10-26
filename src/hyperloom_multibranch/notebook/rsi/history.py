@@ -132,7 +132,7 @@ class StallOdds:
         return "\n".join(kept)
 
 
-def _judged(branch: TreeBranch) -> list[float]:
+def judged_tests(branch: TreeBranch) -> list[float]:
     """When the branch's tests were judged: their result times, or request times, in a tree archived before that."""
 
     times = branch.judged_times
@@ -142,11 +142,12 @@ def _judged(branch: TreeBranch) -> list[float]:
 
 
 def _committing(branch: TreeBranch, judged: Sequence[float]) -> set[int]:
-    """The positions in ``judged`` of the tests behind the branch's own commits: the last judged before each."""
+    """The positions in ``judged`` of the tests behind the branch's own commits that did not fail to merge: the last
+    judged before each."""
 
     found = set()
     for commit in branch.commits:
-        if commit.origin is not CommitOrigin.COMMIT:
+        if commit.origin is not CommitOrigin.COMMIT or commit.merge_failed:
             continue
         before = [index for index, when in enumerate(judged) if when <= commit.t_s]
         if before:
@@ -155,10 +156,10 @@ def _committing(branch: TreeBranch, judged: Sequence[float]) -> set[int]:
 
 
 def hazard_observations(branch: TreeBranch) -> Iterator[tuple[int, bool]]:
-    """Each judged test of ``branch``, as (its position past the branch's last commit, 1 for the first, whether it
-    committed)."""
+    """Each judged test of ``branch``, as (its position past the branch's last commit that did not fail to merge, 1
+    for the first, whether it made one)."""
 
-    judged = _judged(branch)
+    judged = judged_tests(branch)
     committing = _committing(branch, judged)
     position = 0
     for index in range(len(judged)):
@@ -350,17 +351,21 @@ def _lines(odds: StallOdds) -> list[str]:
 
 __all__ = [
     "DEFAULT_STALL_TESTS",
+    "DEFAULT_WORKLOAD",
     "HORIZON_TESTS",
     "MAX_CHARS",
     "MAX_POSITION",
     "MAX_STALL_TESTS",
     "MIN_SEEN",
     "MIN_STALL_TESTS",
+    "MODEL_TYPE_LABEL",
     "OTHER_MODEL_WEIGHT",
     "PRIOR_TESTS",
+    "WORKLOAD_LABEL",
     "Odds",
     "StallOdds",
     "hazard_observations",
+    "judged_tests",
     "new_branch_observations",
     "session_stall_odds",
     "stall_bar",

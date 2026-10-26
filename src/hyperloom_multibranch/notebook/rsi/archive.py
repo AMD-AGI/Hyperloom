@@ -3,14 +3,15 @@
 
 """Archived search trees: what each past session's branches did over time, what they cost, how noisy it measured.
 
-A tree keeps what the replay, the frontier priors and their calibration, the dispersion priors and the history digest
-need: when each branch opened and stopped and why, when its tests were requested (its kernel-layer ones apart), the
-directions they tried, when its commits landed and the cumulative gain they reached, the GPU time it spent, the
-session's task conditions, its roofline bound, its baseline's dispersion and where it measured. A tree an older version
-wrote, or one backfilled from a session that recorded no intents, reads with no stop reasons, no directions, no kernel
-test times and no roofline bound. Trees are written once,
-under ``<archive>/trees/<session_id>.json``; the archive is a shared folder the deployment names. CLOSE archives its
-session with :func:`archive_session`, which says why when it archives nothing.
+A tree keeps what the replay, the frontier priors and their calibration, the dispersion priors, the stall odds and the
+stop audit need: when each branch opened and stopped and why, when its tests were requested (its kernel-layer ones
+apart), the directions they tried, when its commits landed, the cumulative gain they reached and whether their merge
+failed, the stalls the scheduler held it through on probation, the GPU time it spent, the session's task conditions,
+its roofline bound, its baseline's dispersion and where it measured. A tree an older version wrote, or one backfilled
+from a session that recorded no intents, reads with no stop reasons, no directions, no kernel test times, no
+probations and no roofline bound, and with every commit merged. Trees are written once, under
+``<archive>/trees/<session_id>.json``; the archive is a shared folder the deployment names. CLOSE archives its session
+with :func:`archive_session`, which says why when it archives nothing.
 """
 
 from __future__ import annotations
@@ -63,9 +64,21 @@ _FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}")
 
 @dataclass(frozen=True)
 class TreeCommit:
+    """A commit of a branch; ``merge_failed`` when its merge onto the integration branch failed and it never merged,
+    so it does not end the branch's stall."""
+
     t_s: float
     gain_pct: float
     origin: CommitOrigin
+    merge_failed: bool = False
+
+
+@dataclass(frozen=True)
+class TreeProbation:
+    """A stalled branch held from ``t_s`` for ``tests`` more judged tests before the judge could stop it."""
+
+    t_s: float
+    tests: int
 
 
 @dataclass(frozen=True)
@@ -94,7 +107,8 @@ class TreeBranch:
     ``settled_times`` when its explore tests that succeeded were judged, as the judge's grace counts them; each
     ``None`` in a tree archived before it was kept. ``driver`` is who drove the branch; a tree archived before it was
     kept reads as all specialist. ``agent`` is the manifest of the third-party agent that drove an autonomous branch,
-    as the notebook kept it, credentials dropped; ``None`` when none was recorded.
+    as the notebook kept it, credentials dropped; ``None`` when none was recorded. ``probations`` are the stalls the
+    scheduler held the branch through.
     """
 
     name: str
@@ -115,6 +129,7 @@ class TreeBranch:
     driver: BranchDriver = BranchDriver.SPECIALIST
     agent: Mapping[str, object] | None = None
     settled_times: tuple[float, ...] | None = None
+    probations: tuple[TreeProbation, ...] = ()
 
     @property
     def steered(self) -> bool:
@@ -179,6 +194,7 @@ class TreeBranch:
             judged_times=_by(self.judged_times, t_s),
             ended_times=_by(self.ended_times, t_s),
             settled_times=_by(self.settled_times, t_s),
+            probations=tuple(item for item in self.probations if item.t_s <= t_s),
         )
 
 
@@ -372,8 +388,8 @@ def _directions(
 @dataclass(frozen=True)
 class _TreeReading:
     """What every branch of one session's search tree is read against: its gains off ``metric`` from the baseline
-    value ``anchor``, its times from ``start``, each branch's tests, the intents that change a kernel, and the Recipe
-    KB champions built on another image whose replays it tested."""
+    value ``anchor``, its times from ``start``, each branch's tests, the intents that change a kernel, the Recipe KB
+    champions built on another image whose replays it tested, and the commits whose merge failed."""
 
     snapshot: NotebookSnapshot
     metric: str
@@ -382,6 +398,7 @@ class _TreeReading:
     tests: Mapping[str, Sequence[TestRecord]]
     kernel: frozenset[str]
     cross_image: frozenset[str] = frozenset()
+    merge_failed: frozenset[str] = frozenset()
 
     def gain(self, commit_id: str) -> float:
         value = self.snapshot.value_of(commit_id).get(self.metric)
@@ -398,7 +415,12 @@ class _TreeReading:
             fork_gain_pct=self.gain(node.start_commit),
             gpu_seconds=sum(record.result.gpu_seconds for record in tests if record.result is not None),
             commits=tuple(
-                TreeCommit(commit.at - start, self.gain(commit.commit_id), commit.origin)
+                TreeCommit(
+                    commit.at - start,
+                    self.gain(commit.commit_id),
+                    commit.origin,
+                    merge_failed=commit.commit_id in self.merge_failed,
+                )
                 for commit in view.commits
                 if commit.branch == node.branch and commit.origin is not CommitOrigin.ROOT
             ),
@@ -418,6 +440,7 @@ class _TreeReading:
             driver=node.driver,
             agent=self.agent(node.branch),
             settled_times=_settled_times(tests, start),
+            probations=tuple(TreeProbation(item.at - start, item.tests) for item in node.probations),
         )
 
     def agent(self, branch: str) -> Mapping[str, object] | None:
@@ -447,7 +470,12 @@ def tree_from_snapshot(
     for record in snapshot.records:
         tests[record.request.branch].append(record)
     kernel = frozenset(fp for fp, intent in snapshot.intents.items() if intent.layer is IntentLayer.KERNEL)
-    reading = _TreeReading(snapshot, metric, anchor, start, tests, kernel, cross_image=frozenset(cross_image))
+    failed = frozenset(
+        item.commit_id for item in snapshot.committed if item.first_failed_at is not None and item.merged_into is None
+    )
+    reading = _TreeReading(
+        snapshot, metric, anchor, start, tests, kernel, cross_image=frozenset(cross_image), merge_failed=failed
+    )
     ceiling = profile.roofline_ceiling.get(metric)
     return SearchTree(
         session_id=profile.session_id,
@@ -600,6 +628,7 @@ __all__ = [
     "TreeCommit",
     "TreeConflict",
     "TreeDirection",
+    "TreeProbation",
     "WeightedTree",
     "archive_session",
     "longest_root_test_seconds",

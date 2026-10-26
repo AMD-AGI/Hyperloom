@@ -14,7 +14,7 @@ import pytest
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
-from hyperloom_multibranch.contracts.notebook.records import REPLAY_TARGET, NotebookSnapshot, TestRecord
+from hyperloom_multibranch.contracts.notebook.records import REPLAY_TARGET, NotebookSnapshot, Probation, TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver, CommitOrigin, LineageKind
 from hyperloom_multibranch.notebook.rsi.archive import (
     ARCHIVE_ENV,
@@ -24,6 +24,7 @@ from hyperloom_multibranch.notebook.rsi.archive import (
     ArchiveResult,
     TreeArchive,
     TreeDirection,
+    TreeProbation,
     archive_session,
     session_start,
     similar_trees,
@@ -86,6 +87,30 @@ def test_the_tree_keeps_when_each_test_was_measured_and_judged_and_the_longest_r
     assert (len(s2.measured_times or ()), len(s2.judged_times or ())) == (3, 2)
     assert (len(then.measured_times or ()), len(then.judged_times or ())) == (1, 1)
     assert searched.longest_root_test_seconds is None
+    assert tree_from_document(tree_document(searched)) == searched
+
+
+def test_the_tree_keeps_a_commit_whose_merge_failed_and_the_stalls_a_branch_was_held_through(
+    snapshot: NotebookSnapshot,
+) -> None:
+    start = session_start(snapshot)
+    failed = tuple(
+        dataclasses.replace(item, merged_into=None, first_failed_at=start + 900.0) if item.commit_id == "c1" else item
+        for item in snapshot.committed
+    )
+    held = tuple(
+        dataclasses.replace(node, probations=(Probation(start + 1500.0, 4, "c1"),)) if node.branch == "s1" else node
+        for node in snapshot.lineage.branches
+    )
+    lineage = dataclasses.replace(snapshot.lineage, branches=held)
+    searched = tree_from_snapshot(dataclasses.replace(snapshot, committed=failed, lineage=lineage), METRIC)
+    s1 = next(branch for branch in searched.branches if branch.name == "s1")
+    merged = next(branch for branch in tree_from_snapshot(snapshot, METRIC).branches if branch.name == "s1")
+
+    assert [commit.merge_failed for commit in s1.commits] == [True]
+    assert [commit.merge_failed for commit in merged.commits] == [False]
+    assert s1.probations == (TreeProbation(1500.0, 4),)
+    assert s1.as_of(1499.0).probations == () and s1.as_of(1500.0).probations == s1.probations
     assert tree_from_document(tree_document(searched)) == searched
 
 
