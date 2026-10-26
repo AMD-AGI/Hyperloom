@@ -103,7 +103,6 @@ class WorkspaceBuilder:
     eval_skipped_reason: str | None = None
     last_phase: str | None = None
     blocked_md: str | None = None
-    requantize_attempts: int | None = None
     eval_gap_threshold: float | None = None
     model_analysis: bool = True
     quant_plan: bool = True
@@ -157,9 +156,6 @@ class WorkspaceBuilder:
 
         if self.blocked_md is not None:
             (ws / "blocked.md").write_text(self.blocked_md, encoding="utf-8")
-
-        if self.requantize_attempts is not None:
-            (ws / "requantize_attempts.txt").write_text(str(self.requantize_attempts), encoding="utf-8")
 
         if self.eval_gap_threshold is not None:
             (ws / "eval_gap_threshold.txt").write_text(str(self.eval_gap_threshold), encoding="utf-8")
