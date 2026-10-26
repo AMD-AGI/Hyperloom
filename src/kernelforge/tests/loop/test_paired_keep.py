@@ -192,6 +192,16 @@ async def test_a_candidate_is_kept_only_when_it_beats_the_incumbent_beside_it(
     assert loop.events[0]["type"] == "incumbent_tree_reset"
 
 
+def test_a_paired_revert_names_the_bar_that_decided_it() -> None:
+    # The pairs rejected this candidate although its anchor-relative score reads above the stored best.
+    loop = SimpleNamespace(best_mean_case_speedup=1.148413)
+    keep_bar = {"mode": "paired", "pairs": 3, "mean": 1.000688, "lower": 0.999894, "floor": 0.001372, "passes": False}
+    result = SimpleNamespace(mean_case_speedup=1.15015, bench_detail={"keep_bar": keep_bar})
+    reason = IterationLoop._revert_reason(loop, result)
+    assert "lower bound=0.999894 < required 1.001372x" in reason
+    assert "not better than" not in reason
+
+
 async def test_the_null_control_measures_the_incumbent_beside_itself_once(tmp_path: Path) -> None:
     loop = _loop(_workspace(tmp_path, incumbent_speed=1.2, candidate_speed=1.2))
     await IterationLoop._refresh_noise_floor_if_due(loop, 1)

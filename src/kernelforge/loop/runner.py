@@ -5890,6 +5890,25 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         if self.experiment:
             self.tracker.mark_complete(self.experiment.experiment_id)
 
+    def _revert_reason(self, result) -> str:
+        """Why a validated candidate was not kept, in the terms of the bar that decided it.
+
+        A paired verdict compares the candidate with the incumbent timed beside it, so the anchor-relative score can
+        read higher than the stored best on a candidate the pairs rejected.
+        """
+        speedup_txt = f"{result.mean_case_speedup:.6f}x" if result.mean_case_speedup is not None else "None"
+        keep_bar = (result.bench_detail or {}).get("keep_bar") or {}
+        if keep_bar.get("mode") == "paired" and not keep_bar.get("passes"):
+            mean = keep_bar.get("mean")
+            mean_txt = f"{mean:.6f}x" if mean is not None else "n/a"
+            return (
+                f"incumbent/candidate over {keep_bar.get('pairs')} pairs: mean={mean_txt}, "
+                f"lower bound={keep_bar.get('lower')} < required {1 + keep_bar['floor']:.6f}x; "
+                f"anchor-relative mean case speedup={speedup_txt}"
+            )
+        best_txt = f"{self.best_mean_case_speedup:.6f}x" if self.best_mean_case_speedup is not None else "?"
+        return f"mean case speedup={speedup_txt} not better than best={best_txt}"
+
     def _rule_on_attempt(
         self,
         result,
@@ -5926,12 +5945,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 self._git_revert_last()
             elif attempt_diff or self._new_paths_need_discard():
                 self._git_discard_worktree()
-            speedup_txt = f"{result.mean_case_speedup:.6f}x" if result.mean_case_speedup is not None else "None"
-            best_txt = f"{self.best_mean_case_speedup:.6f}x" if self.best_mean_case_speedup is not None else "?"
-            print(
-                f"  [REVERT] mean case speedup={speedup_txt} not better than "
-                f"best={best_txt}; raw mean={raw_wall_txt} ({elapsed:.0f}s)"
-            )
+            print(f"  [REVERT] {self._revert_reason(result)}; raw mean={raw_wall_txt} ({elapsed:.0f}s)")
         else:
             # Defer SIGTERM/SIGINT across the durable best-commit publication (main #hardening) so a kill
             # mid-checkpoint cannot leave the pending-keep/run-state half-written.
