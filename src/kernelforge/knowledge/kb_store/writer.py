@@ -11,6 +11,7 @@ import logging
 import math
 import re
 import tempfile
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -378,8 +379,13 @@ def write_run_experience(
         )
     except Exception as exc:  # noqa: BLE001 - isolation boundary: one experience publication
         reason = sanitize_read_error(exc, secrets=kb_store_secrets(config))
-        # Sanitized message only: a raw traceback would carry the KB store credentials.
-        log.warning("experience write failed (skipped): %s", reason)
+        # Sanitized reason and stack frames only: the raw message may carry the KB store credentials.
+        log.warning(
+            "experience write failed (skipped): %s (%s)\n%s",
+            reason,
+            type(exc).__name__,
+            "".join(traceback.format_tb(exc.__traceback__)),
+        )
         return {"written": False, "reason": reason}
 
 
