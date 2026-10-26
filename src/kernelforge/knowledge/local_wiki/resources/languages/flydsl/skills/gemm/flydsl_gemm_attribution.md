@@ -100,8 +100,10 @@ worth very different wall time.
   5.4%. One `ds_read_b128` was worth an order of magnitude more than one SALU.
 - **Cycles convert to wall at a shape-dependent rate.** *(field)* 5.3% fewer cycles gave 2.2% wall on one
   shape (42%), and 7.1% fewer gave 1.4% on another (20%). Discount cycle-only gains accordingly.
-- **Read the clock to classify a win.** If the clock moved, the change saved energy; if wall time moved
-  and the clock did not, the change overlapped a stall.
+- **Read the clock to classify a win.** If wall time and clock improved together, the change saved energy;
+  if wall time moved and the clock did not, the change moved cycles at constant energy per cycle (stalls or work
+  added or removed); below the power cap every change reads this way. A clock rise alone is not an energy
+  saving: a slower arm can clock higher (`../attention/flydsl_attn_attribution.md` §8).
 - **Sample the clock correctly.** Use one shape under sustained load for at least 45 s and average only
   the samples taken under load. The mode of a whole benchmark run is the idle clock. Alternatively use
   `GRBM_GUI_ACTIVE / 8 / dispatch time`: the counter is summed over the 8 XCDs, and only long dispatches
@@ -149,24 +151,29 @@ probes that cut one LDS read stream by 17–33%. Decide with a halve-the-reads p
 
 ## 8. Upper bounds for "hide it under the MFMAs"
 
-- **A `v_mfma_f32_16x16x32_bf16` offers 12 cycles of shadow on gfx950.** `SQ_VALU_MFMA_BUSY_CYCLES /
-  SQ_INSTS_MFMA` reads 16 cycles for it, and issue takes 4. *(field)* The same 16 was read on three
-  different kernels. Read the ratio for the MFMA and operand format your kernel issues:
-  `v_mfma_f32_16x16x128_f8f6f4` with fp8 A and B reads 32 (`flydsl_gemm_grid_pricing.md` §5). Its fp4 form
-  is shorter — LLVM's gfx950 hazard model gives it fewer wait states (`flydsl_gemm_correctness.md` §7) — so
-  read its ratio rather than assuming 32. The ceiling for interleaving work is `(cycles − 4)` per MFMA in
-  the phase: `12 × MFMAs` for the bf16 atom above.
+- **A `v_mfma_f32_16x16x32_bf16` offers 8 cycles of shadow on gfx950.** `SQ_VALU_MFMA_BUSY_CYCLES /
+  SQ_INSTS_MFMA` reads 16 cycles for it, and it blocks VALU issue on its SIMD for 8 of them: one
+  `v_exp_f32` or two `v_mul_f32` fit per MFMA. A microbenchmark gives `v_mfma_f32_32x32x16_bf16` 32 cycles
+  with a 24-cycle shadow; the 12-cycle shadow belongs to `v_mfma_f32_16x16x16_bf16` (64-bit A/B, 16 cycles,
+  half the FLOP rate). *(field)* The same 16 was read on three different kernels. Read the ratio for the
+  MFMA and operand format your kernel issues: `v_mfma_f32_16x16x128_f8f6f4` with fp8 A and B reads 32
+  (`flydsl_gemm_grid_pricing.md` §5). Its fp4 form is shorter — LLVM's gfx950 hazard model gives it fewer
+  wait states (`flydsl_gemm_correctness.md` §7) — so read its ratio rather than assuming 32. The ceiling for
+  interleaving work is the pipe cycles less the issue block, per MFMA in the phase: `8 × MFMAs` for the
+  bf16 atom above.
 - **The register allocator is the constraint.** *(field)* An epilogue interleaved into the last chunk's MFMAs
   did interleave (one MFMA per 29 instructions), but spills went 0 → 16 and wall time lost 2–4%. Dump the
   ISA and check spills before timing.
-- **At two or more waves per SIMD, moving VALU work between clusters is throughput-invariant.** Other waves
-  already fill the gaps, so the expected gain is about zero. *(field)* Moving a row sum gave −3.1% and −0.1%;
-  deleting it gave +6.4%. Only changes that reduce total pipe cycles pay.
-- **Find the bottleneck pipe first.** If a "bare" VALU chain sits on the busiest pipe, covering it with
-  MFMAs changes nothing. *(field)* A loop with 1308 VALU cycles against 1152 MFMA cycles was VALU-bound;
-  covering the chain lost 1.5%, and removing 128 VALU cycles saved 11.25%.
-- `v_exp_f32` and other transcendentals issue at half rate (8 cycles) on gfx950. Check a per-class model
-  against `SQ_ACTIVE_INST_VALU`.
+- **At two or more waves per SIMD, moving VALU work between clusters rarely pays.** Other waves fill most gaps.
+  *(field)* Moving a row sum into the P·V cluster cost 3.1% and into a memory cluster 0.1%; deleting it
+  gained 6.4%. The clusters are not interchangeable, though: count what each cluster's MFMAs already cover before
+  moving work into it (`../attention/flydsl_attn_registers_occupancy.md` §8).
+- **Price a bare VALU chain with a deletion probe before covering it.** *(field)* On one loop a chain that looked like
+  a bubble was on the critical path: covering it with MFMAs lost 1.5%, while deleting the scaling step's 32 packed
+  FMAs (the chain and its twin, 128 issue cycles) saved 11.25%. Count `v_exp_f32` at 8 cycles in any per-pipe census.
+- `v_exp_f32` (also `v_log_f32`, `v_rcp_f32`, `v_sqrt_f32`) takes 8 cycles per wave64 instruction against 4 for
+  `v_mul_f32` from one wave; at ≥ 2 waves per SIMD plain VALU reaches 2 cycles per SIMD and exp stays at 8
+  (`../attention/flydsl_attn_softmax.md` §1). Check a per-class model against `SQ_ACTIVE_INST_VALU`.
 
 ## 9. Readings you cannot trust
 
