@@ -158,6 +158,66 @@ def test_a_directory_with_only_part_of_a_session_is_started_fresh(run, monkeypat
     assert parsed[0].session_dir == session and getattr(parsed[0], "resume_from", None) is None
 
 
+# -- plug wiring ------------------------------------------------------------------------------------------------
+def _plug_probe(seen, profile):
+    """Stands in for ``cli.main``: runs the real plug resolution and host binding the way ``optimize`` does."""
+    import argparse
+
+    from hyperloom.inference_optimizer.cli import bootstrap
+
+    real_host = bootstrap.PlugHost
+
+    def spy(*args, **kwargs):
+        seen.setdefault("hosts", []).append(kwargs)
+        return real_host(*args, **kwargs)
+
+    monkeypatch_target = bootstrap  # patched by the caller through ``seen["patch"]``
+    seen["patch"] = (monkeypatch_target, spy)
+
+    def probe(argv):
+        args = argparse.Namespace(plug_profile=profile)
+        manifest = bootstrap.resolve_plug_manifest(args)
+        seen["layer"] = manifest.sockets["events"].layer
+        bootstrap.open_plug_host(manifest, context.current().session_dir)
+        return 0
+
+    return probe
+
+
+def test_a_hosted_run_hands_the_plug_host_its_lock_and_host_inputs(run, monkeypatch):
+    seen: dict = {}
+    probe = _plug_probe(seen, None)
+    monkeypatch.setattr(entry, "_plug_lock", lambda spec: {"events": {"impl": "local"}})  # an implementation main has
+    monkeypatch.setattr(seen["patch"][0], "PlugHost", seen["patch"][1])
+    monkeypatch.setattr(entry, "_optimize_main", probe)
+    assert entry.main(["run"]) == 0
+    assert seen["layer"] == "locked"
+    assert [kw.get("host_info") for kw in seen["hosts"]] == [None, context.current().host_info]  # resolve, then open
+    assert all(kw["env"][Var.EVENTS_DIR] == str(run.state / "events") for kw in seen["hosts"])
+    assert Var.EVENTS_DIR not in os.environ
+
+
+def test_the_hosted_profile_resolves_its_events_directory_from_the_host_inputs(run, monkeypatch, capsys):
+    monkeypatch.setattr(entry, "_optimize_main", _plug_probe({}, "hosted-gpu"))
+    assert entry.main(["run"]) == 2
+    err = capsys.readouterr().err
+    assert "HYPERLOOM_EVENTS_DIR" not in err  # expanded from the host inputs; what is missing is the implementation
+    assert "no implementation 'hosted'" in err
+
+
+def test_outside_a_hosted_run_the_plug_resolution_is_unchanged(tmp_path, monkeypatch):
+    import argparse
+
+    from hyperloom.inference_optimizer.cli.bootstrap import resolve_plug_manifest
+
+    context.clear()
+    monkeypatch.delenv(Var.EVENTS_DIR, raising=False)
+    with pytest.raises(SystemExit) as refused:  # the hosted profile needs the variable the hosted entry removed
+        resolve_plug_manifest(argparse.Namespace(plug_profile="hosted-gpu"))
+    assert refused.value.code == 2
+    assert resolve_plug_manifest(argparse.Namespace(plug_profile=None)).sockets["events"].layer != "locked"
+
+
 # -- exit.json ---------------------------------------------------------------------------------------------------
 @pytest.mark.parametrize("returncode", [1, 2, 130])
 def test_a_normal_end_with_a_failing_return_code_is_still_final(run, monkeypatch, returncode):

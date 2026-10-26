@@ -38,6 +38,8 @@ _ON_MAIN = (
     "hyperloom.hosted.entry",
     "hyperloom.hosted.host_info",
 )
+# The one place outside the hosted packages that reads the hosted run's context: it hands the lock and host inputs to the plug host.
+_HOSTED_CONTEXT_READERS = ("hyperloom/inference_optimizer/cli/bootstrap.py",)
 _E2B_OWNER = "hyperloom/sandbox/e2b.py"
 
 
@@ -72,6 +74,8 @@ def _plugs_import_violations(source: str) -> list[str]:
 def _hosted_import_violations(rel: str, source: str) -> list[str]:
     bad = []
     for line, module in _imports(ast.parse(source)):
+        if rel in _HOSTED_CONTEXT_READERS and module == "hyperloom.hosted.context":
+            continue
         if _under(module, _HOSTED) and not _under(
             rel.removesuffix(".py").replace("/", "."), _HOSTED + ("hyperloom.plugs.builtin",)
         ):
@@ -141,6 +145,13 @@ def test_rule_2_main_imports_no_package_that_exists_only_on_the_dev_branch() -> 
 def test_rule_2_guard_names_the_hosted_module_a_plug_module_imports() -> None:
     bad = _hosted_import_violations("hyperloom/plugs/host.py", "def f():\n    import hyperloom.measure.hosted\n")
     assert bad == ["hyperloom/plugs/host.py:2: imports hosted implementation hyperloom.measure.hosted"]
+
+
+def test_rule_2_guard_lets_only_the_bootstrap_read_the_hosted_context() -> None:
+    source = "import hyperloom.hosted.context as c"
+    assert _hosted_import_violations("hyperloom/inference_optimizer/cli/bootstrap.py", source) == []
+    assert _hosted_import_violations("hyperloom/inference_optimizer/cli/other.py", source) != []
+    assert _hosted_import_violations("hyperloom/inference_optimizer/cli/bootstrap.py", "import hyperloom.hosted.entry")
 
 
 def test_rule_2_guard_lets_the_owners_and_builtin_import_hosted_code() -> None:

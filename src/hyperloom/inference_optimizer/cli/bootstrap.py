@@ -23,6 +23,7 @@ from hyperloom.common.gpu_partition import published_shape
 from hyperloom.common.gpu_power_settings import SCLK_MAX_MHZ, DeclaredPowerSettings
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import now_iso
+import hyperloom.hosted.context as hosted_context
 from hyperloom.plugs import (
     ManifestSources,
     PlugError,
@@ -53,6 +54,11 @@ from ..model_config_utils import summarize_model_config
 log = logging.getLogger(__name__)
 
 
+def _plug_env(hosted: hosted_context.HostedRun | None) -> dict[str, str] | None:
+    """The environment a manifest's ``${...}`` expands against: the process's, plus a hosted run's removed inputs."""
+    return None if hosted is None else {**os.environ, **hosted.plug_env()}
+
+
 def resolve_plug_manifest(args: argparse.Namespace) -> ResolvedManifest:
     """Resolve the plug manifest for this run and check it can start; exit 2 on a configuration error.
 
@@ -62,6 +68,7 @@ def resolve_plug_manifest(args: argparse.Namespace) -> ResolvedManifest:
     """
     resume_from = getattr(args, "resume_from", None)
     registry = builtin_registry()
+    hosted = hosted_context.current()
     try:
         sources = ManifestSources(
             profile=getattr(args, "plug_profile", None),
@@ -70,9 +77,10 @@ def resolve_plug_manifest(args: argparse.Namespace) -> ResolvedManifest:
             cli_plugs=tuple(getattr(args, "plug", None) or ()),
             cli_configs=tuple(getattr(args, "plug_config", None) or ()),
             resumed=read_resolved(Path(resume_from).expanduser().resolve()) if resume_from else None,
+            locked=hosted.plug_lock if hosted else {},
         )
         manifest = resolve_manifest(registry, sources)
-        PlugHost(manifest, registry, session_dir=None).plan()
+        PlugHost(manifest, registry, session_dir=None, env=_plug_env(hosted)).plan()
     except PlugError as exc:
         print(f"ERROR: plug configuration refused: {exc}", file=sys.stderr)
         sys.exit(2)
@@ -85,7 +93,14 @@ def open_plug_host(manifest: ResolvedManifest, session_dir: Path) -> PlugHost:
     A run that selects nothing (the built-in local profile) writes nothing to the session and prints nothing. A run
     that selects something records the outcome in ``plugs.resolved.json`` and prints the ``Plugs`` line.
     """
-    host = PlugHost(manifest, builtin_registry(), session_dir=session_dir)
+    hosted = hosted_context.current()
+    host = PlugHost(
+        manifest,
+        builtin_registry(),
+        session_dir=session_dir,
+        host_info=hosted.host_info if hosted else None,
+        env=_plug_env(hosted),
+    )
     host.plan()
     if not manifest.is_builtin_default:
         write_resolved(session_dir, manifest, host.fingerprint())
