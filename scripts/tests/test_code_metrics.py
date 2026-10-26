@@ -611,7 +611,10 @@ def test_repo_config_names_every_metric_with_a_threshold() -> None:
     assert config.tools["ruff"] in (ROOT / ".github/workflows/lint.yml").read_text(encoding="utf-8")
     baseline = code_metrics.load_baseline((ROOT / config.baseline).read_text(encoding="utf-8"))
     assert not [path for _metric, path, _unit in baseline if Path(path).name.startswith("code_metrics")]
-    assert "radon" not in config.tools and "maintainability-index" not in config.thresholds
+    assert f'"radon=={config.tools["radon"]}"' in (ROOT / ".github/workflows/code-metrics.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "maintainability-index" not in config.thresholds
 
 
 def test_comment_poster_never_runs_pull_request_code() -> None:
@@ -1392,3 +1395,10 @@ def test_ci_reads_the_pr_from_the_api_and_logs_the_full_report() -> None:
     assert "--pull-request-json" not in run
     # stdout is the untruncated report (waived rows included) for the job log.
     assert 'python "$impl/code_metrics.py" "${args[@]}"\n' in run and "/dev/null" not in run.split("set +e", 1)[1]
+
+
+def test_the_local_install_line_names_every_pinned_python_tool() -> None:
+    outcome = code_metrics_report.Outcome()
+    outcome.versions = {"ruff": "0.16.2", "complexipy": "8.0.1", "radon": "6.0.1", "vulture": "2.16", "jscpd": "5.4.1"}
+    fix = code_metrics_report._how_to_fix(outcome)
+    assert "`pip install ruff==0.16.2 complexipy==8.0.1 radon==6.0.1 vulture==2.16`" in fix

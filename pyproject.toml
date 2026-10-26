@@ -557,6 +557,7 @@ directory-entries = 50
 [tool.hyperloom.code_metrics.tools]
 ruff = "0.16.2"
 complexipy = "8.0.1"
+radon = "6.0.1"
 vulture = "2.16"
 jscpd = "5.4.1"
 
