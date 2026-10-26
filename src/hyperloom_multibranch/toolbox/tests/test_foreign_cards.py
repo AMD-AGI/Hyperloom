@@ -182,14 +182,14 @@ def _runner_envs(tmp_path: Path, options: LocalOptions) -> dict[str, str]:
 @pytest.mark.parametrize(
     ("environ", "option", "expected"),
     [
-        ({}, None, "observe"),
+        ({}, None, "enforce"),
         ({"HYPERLOOM_CARD_GUARD": "enforce"}, None, "enforce"),
         ({"HYPERLOOM_CARD_GUARD": "observe"}, None, "observe"),
         ({"HYPERLOOM_CARD_GUARD": "enforce"}, CardGuard.OBSERVE, "observe"),
         ({}, CardGuard.ENFORCE, "enforce"),
     ],
 )
-def test_the_runners_are_given_the_guard_the_option_or_the_host_environment_names_and_observe_by_default(
+def test_the_runners_are_given_the_guard_the_option_or_the_host_environment_names_and_enforce_by_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, environ: dict[str, str], option: CardGuard | None, expected: str
 ) -> None:
     monkeypatch.delenv("HYPERLOOM_CARD_GUARD", raising=False)
@@ -208,8 +208,11 @@ def test_a_host_environment_that_names_no_guard_is_refused_when_the_toolbox_is_b
         local_hosted.card_guard_of(LocalOptions())
 
 
-@pytest.mark.parametrize(("guard", "refused"), [(CardGuard.ENFORCE, True), (CardGuard.OBSERVE, False)])
-def test_the_pool_of_the_local_provider_follows_the_guard(tmp_path: Path, guard: CardGuard, refused: bool) -> None:
+@pytest.mark.parametrize(("guard", "refused"), [(CardGuard.ENFORCE, True), (CardGuard.OBSERVE, False), (None, True)])
+def test_the_pool_of_the_local_provider_follows_the_guard_and_enforces_when_none_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, guard: CardGuard | None, refused: bool
+) -> None:
+    monkeypatch.delenv("HYPERLOOM_CARD_GUARD", raising=False)
     holders = CardList()
     holders.holders = (INTRUDER,)
     options = LocalOptions(card_guard=guard, card_holders=holders)

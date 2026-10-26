@@ -15,7 +15,14 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import CARD_CLEAN, CARD_FOREIGN, CARD_UNKNOWN
-from hyperloom.measure.runner.card_watch import AFTER_TEST, BEFORE_TEST, DURING_TEST, CardStatement, CardWatch
+from hyperloom.measure.runner.card_watch import (
+    AFTER_TEST,
+    BEFORE_TEST,
+    DURING_TEST,
+    ENDED_AT_SIGHTING,
+    CardStatement,
+    CardWatch,
+)
 from hyperloom.measure.runner.service import RunnerFailure
 from hyperloom.measure.runner.tests.conftest import SettleClock
 from hyperloom.sandbox import card_occupancy
@@ -201,6 +208,51 @@ def test_the_poll_thread_ends_with_the_block(tree: KernelTree) -> None:
         assert "hl-card-watch" in {t.name for t in threading.enumerate()}
 
     assert {t.name for t in threading.enumerate()} == before
+
+
+# --- the end of a test at the first sighting --------------------------------------------------------------------------
+
+
+def _watch_an_intruder_arrive(watch: CardWatch, tree: KernelTree, ends: list[float]) -> None:
+    """Run a block the watch watches, in which a process takes card 0 and stays a while."""
+    with watch.watching(lambda: ends.append(time.monotonic())):
+        tree.process(903, command=("python3", "matmul.py"))
+        tree.holds(903, 0)
+        deadline = time.monotonic() + 1.0
+        while not ends and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.1)  # later looks would find it again
+
+
+def test_an_enforcing_watch_ends_the_test_once_at_the_first_look_that_finds_a_process(tree: KernelTree) -> None:
+    watch, ends = _watch(tree, poll_sec=0.01), []
+
+    _watch_an_intruder_arrive(watch, tree, ends)
+
+    assert len(ends) == 1, "ended at the first sighting, and only once"
+    with pytest.raises(
+        RunnerFailure, match=rf"pid 903 on card 0, first seen \S+ {DURING_TEST}.*; {ENDED_AT_SIGHTING}$"
+    ):
+        watch.enforce_guard()
+
+
+def test_an_observing_watch_never_ends_the_test(tree: KernelTree) -> None:
+    watch, ends = _watch(tree, guard=CardGuard.OBSERVE, poll_sec=0.01), []
+
+    _watch_an_intruder_arrive(watch, tree, ends)
+
+    assert ends == [] and watch.statement().state == CARD_FOREIGN  # type: ignore[union-attr]
+
+
+def test_an_enforcing_watch_ends_nothing_while_only_the_test_holds_its_cards(tree: KernelTree) -> None:
+    tree.holds(SERVER, 0)
+    watch, ends = _watch(tree, poll_sec=0.01), []
+
+    with watch.watching(lambda: ends.append(time.monotonic())):
+        time.sleep(0.2)
+
+    assert ends == [] and watch.statement().state == CARD_CLEAN  # type: ignore[union-attr]
+    watch.enforce_guard()
 
 
 # --- a guard that only observes ---------------------------------------------------------------------------------------

@@ -16,7 +16,7 @@ from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.measure.failures import Disposition, FailureClass, classify_test_failure
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.runner import run as runner
-from hyperloom.measure.runner.card_watch import CardWatch
+from hyperloom.measure.runner.card_watch import ENDED_AT_SIGHTING, CardWatch
 from hyperloom.measure.runner.tests.test_run import _Backend, _go, _ok, _sheet, _status, env, key  # noqa: F401 - fixtures
 from hyperloom.measure.socket import TestCall, TestOutcome
 from hyperloom.sandbox import card_occupancy
@@ -113,6 +113,57 @@ def test_a_process_that_holds_the_card_for_a_while_during_the_test_refuses_the_r
     assert not (tmp_path / "out" / "manifest.json").exists(), "a result measured next to an intruder is never signed"
 
 
+#: How long the stand-in test of the early-end tests runs unless something ends it.
+_LONG_TEST_SEC = 8.0
+
+
+def _a_long_test_a_process_interrupts(tree: KernelTree, ended: dict[str, object], run_sec: float = _LONG_TEST_SEC):
+    """A test that runs ``run_sec`` unless its call is cancelled, as the backend's rounds end when it is; a process
+    takes its card once it has started."""
+
+    def run(call: TestCall) -> TestOutcome:
+        assert call.cancel is not None, "the runner hands the test a cancellation of its own"
+        _intruder(tree)
+        started = time.monotonic()
+        while not call.cancel.cancelled and time.monotonic() - started < run_sec:
+            time.sleep(0.01)
+        ended.update(after=time.monotonic() - started, reason=call.cancel.reason)
+        return _ok(call)
+
+    return run
+
+
+def test_an_enforcing_guard_ends_the_test_at_the_first_look_that_finds_a_process_not_at_its_end(
+    tmp_path, env, tree, monkeypatch
+) -> None:
+    """Measured on a GPU pod: a test beside a matrix multiply ran 33 minutes, 13 times slower, before it was refused."""
+    ended: dict[str, object] = {}
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_a_long_test_a_process_interrupts(tree, ended)))
+
+    assert _go(tmp_path, env, _sheet()) == EXIT_FOREIGN_PROCESS
+
+    assert ended["reason"] == "foreign_process_on_card", "the test was cancelled for the intruder"
+    assert isinstance(ended["after"], float) and ended["after"] < _LONG_TEST_SEC / 2, "ended at the sighting"
+    status = _status(tmp_path)
+    assert status["state"] == "failed" and status["error_class"] == "foreign_process_on_card"
+    assert "pid 900 on card 0" in status["message"] and "during the test" in status["message"]
+    assert status["message"].endswith(f"; {ENDED_AT_SIGHTING}")
+    assert not (tmp_path / "out" / "manifest.json").exists()
+
+
+def test_an_observing_guard_lets_the_test_run_to_its_end_beside_a_process(tmp_path, env, tree, monkeypatch) -> None:
+    env[CARD_GUARD_ENV] = "observe"
+    ended: dict[str, object] = {}
+    test = _a_long_test_a_process_interrupts(tree, ended, run_sec=1.0)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(test))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    assert ended["reason"] == "" and isinstance(ended["after"], float) and ended["after"] >= 1.0
+    assert _manifest(tmp_path).runner.card_occupancy.state == "foreign"  # type: ignore[union-attr]
+    assert ENDED_AT_SIGHTING not in _status(tmp_path)["message"]
+
+
 def test_a_process_still_on_the_card_when_the_test_ends_refuses_the_result(tmp_path, env, tree, monkeypatch) -> None:
     def a_test_that_ends_with_an_intruder(call: TestCall) -> TestOutcome:
         _intruder(tree)
@@ -164,7 +215,7 @@ def test_the_servers_own_processes_on_the_card_are_not_an_intruder_and_the_resul
     assert _status(tmp_path)["message"] == ""
 
 
-# --- the card guard: observing is the default, enforcing is the refusal above -----------------------------------------------
+# --- the card guard: enforcing is the default and the refusal above, observing keeps the result ---------------------------
 
 
 def test_a_guard_that_observes_keeps_a_result_measured_beside_a_process_and_signs_who_was_seen(
@@ -210,14 +261,13 @@ def test_a_guard_that_observes_runs_a_test_whose_card_a_process_held_when_the_ru
     assert occupancy is not None and occupancy.state == "foreign" and "before the test" in (occupancy.reason or "")
 
 
-def test_a_guard_named_nothing_observes(tmp_path, env, tree, monkeypatch) -> None:
+def test_a_guard_named_nothing_enforces(tmp_path, env, tree, monkeypatch) -> None:
     del env[CARD_GUARD_ENV]
     _intruder(tree)
-    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
 
-    assert _go(tmp_path, env, _sheet()) == 0
-
-    assert _manifest(tmp_path).runner.card_occupancy.state == "foreign"  # type: ignore[union-attr]
+    _refused_with_nothing_run(tmp_path, env, backend)
 
 
 def test_a_guard_that_is_not_one_stops_the_runner_before_anything_runs(tmp_path, env, monkeypatch) -> None:

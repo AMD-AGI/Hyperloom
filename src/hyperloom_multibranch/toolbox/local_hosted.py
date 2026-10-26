@@ -248,7 +248,7 @@ class LocalOptions:
     and without either this host publishes nothing (a ``HYPERLOOM_JIT_CACHE`` in ``runner_envs`` alone is a cache the
     runners only read). ``card_guard`` is what is done about a process that holds a card of a test or of a lease: observed
     (kept and recorded) or enforced (the test refused and retried, the card not handed out); ``None`` takes
-    ``HYPERLOOM_CARD_GUARD`` of the host environment, and without it the guard only observes. The runners get the same
+    ``HYPERLOOM_CARD_GUARD`` of the host environment, and without it the guard enforces. The runners get the same
     setting. ``card_holders`` says who holds some cards, which the pool asks before it hands a card out: the kernel's list
     of the machine unless a test of this module says otherwise; ``card_memory`` lists what the kernel has on some cards,
     which a released lease waits on before its cards go back (:func:`~hyperloom.sandbox.card_occupancy.read_listed`
@@ -281,7 +281,7 @@ class LocalOptions:
 
 
 def card_guard_of(options: LocalOptions, environ: Mapping[str, str] | None = None) -> CardGuard:
-    """The guard ``options`` (or ``HYPERLOOM_CARD_GUARD``) names; observing when neither does.
+    """The guard ``options`` (or ``HYPERLOOM_CARD_GUARD``) names; enforcing when neither does.
 
     Raises:
         ValueError: When the environment names something that is not a guard.

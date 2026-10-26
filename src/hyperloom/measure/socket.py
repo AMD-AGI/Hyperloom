@@ -22,6 +22,7 @@ from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef, Failur
 from hyperloom.measure.jit.session import JitCacheSession
 from hyperloom.measure.phases import PhaseRecorder
 from hyperloom.measure.long_context.plan import LongContextPlan
+from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 
 __all__ = [
@@ -151,6 +152,10 @@ class TestCall:
     #: ``None`` for one the patch deletes (``measure.farm.patched_configs``). The test's private copies of the tables
     #: (``measure.framework.copies``) carry them, so the server reads, and builds its modules from, the patched tables.
     tables_patch: Mapping[str, Path | None] = field(default_factory=dict)
+    #: Ends the test when cancelled, as its boot limit does: the backend's own cancellation, which a caller that watches the
+    #: test from beside it (the runner's card watch) passes in. ``None`` gives the backend one of its own; a caller that
+    #: published a cancel scope of its own owns the cancellation, and this one is not used.
+    cancel: CancelScope | None = None
 
 
 @dataclass(frozen=True)

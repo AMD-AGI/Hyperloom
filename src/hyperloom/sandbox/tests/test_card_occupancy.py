@@ -324,14 +324,14 @@ def test_a_launcher_is_told_by_the_source_it_runs_not_by_its_name(tree: KernelTr
 @pytest.mark.parametrize(
     ("environ", "expected"),
     [
-        ({}, CardGuard.OBSERVE),
-        ({"HYPERLOOM_CARD_GUARD": ""}, CardGuard.OBSERVE),
+        ({}, CardGuard.ENFORCE),
+        ({"HYPERLOOM_CARD_GUARD": ""}, CardGuard.ENFORCE),
         ({"HYPERLOOM_CARD_GUARD": "observe"}, CardGuard.OBSERVE),
+        ({"HYPERLOOM_CARD_GUARD": " observe\n"}, CardGuard.OBSERVE),
         ({"HYPERLOOM_CARD_GUARD": "enforce"}, CardGuard.ENFORCE),
-        ({"HYPERLOOM_CARD_GUARD": " enforce\n"}, CardGuard.ENFORCE),
     ],
 )
-def test_a_process_observes_unless_its_environment_says_to_enforce(
+def test_a_process_enforces_unless_its_environment_says_to_observe(
     environ: dict[str, str], expected: CardGuard
 ) -> None:
     assert card_guard(environ) is expected

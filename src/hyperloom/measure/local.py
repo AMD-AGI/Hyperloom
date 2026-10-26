@@ -539,11 +539,12 @@ def _watch_output(call: TestCall) -> Iterator[None]:
 
 @contextlib.contextmanager
 def _guard_boot(run: _Run) -> Iterator[None]:
-    """Publish the cancel scope a round's boot limit cancels, unless the caller already published its own."""
+    """Publish the cancel scope a round's boot limit cancels (the call's, when it carries one), unless the caller already
+    published its own."""
     if current_cancel_scope() is not None:
         yield
         return
-    scope = CancelScope()
+    scope = run.call.cancel or CancelScope()
     run.boot = BootGuard(Path(run.call.output_dir), scope)
     with use_cancel_scope(scope):
         yield

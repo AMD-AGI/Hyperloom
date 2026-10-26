@@ -26,6 +26,7 @@ from hyperloom.measure import signing
 from hyperloom.measure.docs import DocumentError
 from hyperloom.measure.failures import (
     DISK_FULL,
+    FOREIGN_PROCESS_ON_CARD,
     Disposition,
     FailureClassification,
     classify_test_failure,
@@ -78,6 +79,7 @@ from hyperloom.measure.runner.tools import ToolError, ensure_inferencex, ensure_
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
 from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
 from hyperloom.measure.surface import extract_surface
+from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 from hyperloom.orchestrator.actions.executors import harvest_leaked_artifacts
 from hyperloom.sandbox.card_occupancy import card_guard, own_sandbox_processes
 
@@ -517,7 +519,9 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     ctx.cards.enforce_guard()
     progress.phase("running")
     started = time.time()
-    with own_tmpdir(call, ctx.environ), ctx.cards.watching():
+    end = CancelScope()
+    call = dataclasses.replace(call, cancel=end)
+    with own_tmpdir(call, ctx.environ), ctx.cards.watching(lambda: end.cancel(reason=FOREIGN_PROCESS_ON_CARD)):
         outcome, timed_out = _execute(call)
     ctx.cards.enforce_guard()
     observed = ctx.cards.observation()

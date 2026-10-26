@@ -16,10 +16,12 @@ remembers every holder a look found accounted for on a card (the test's own) and
 whose holders it remembers; a holder it never saw accounted for, or a second one, still counts, however long the first one
 takes to go.
 
-What is done about it is the card guard's say. Enforcing, the result is refused as ``foreign_process_on_card``: an
-infrastructure failure, whatever the test itself did, because a failure it showed may be the intruder's doing as much as a
-number may. Observing, which is the default until the probe has been shown right on the machines that run tests, nothing is
-refused: the signed result says ``foreign`` with the process, the card and when, and the runner leaves a note.
+What is done about it is the card guard's say. Enforcing, which is the default, the result is refused as
+``foreign_process_on_card``: an infrastructure failure, whatever the test itself did, because a failure it showed may be the
+intruder's doing as much as a number may. The first look during the test that finds such a process ends the test then, as
+a boot limit does, rather than at its end: measured on a GPU pod, a test that ran beside a matrix multiply was slowed about
+13 times and ran 33 minutes before it could be refused. Observing, nothing is refused and the test runs to its end: the
+signed result says ``foreign`` with the process, the card and when, and the runner leaves a note.
 
 Where the probe cannot say who holds the cards (no driver list, ``/proc`` hiding other accounts' processes), the test goes
 on in both modes and the signed result says ``unknown`` and why; it is never written as clean. In a pid namespace of its
@@ -57,6 +59,7 @@ __all__ = [
     "BEFORE_TEST",
     "CARD_POLL_SEC",
     "DURING_TEST",
+    "ENDED_AT_SIGHTING",
     "CardStatement",
     "CardWatch",
 ]
@@ -67,6 +70,8 @@ CARD_POLL_SEC = 1.0
 BEFORE_TEST = "before the test"
 DURING_TEST = "during the test"
 AFTER_TEST = "after the test"
+#: What a refusal adds when the enforcing watch ended the test at the look that found the intruder.
+ENDED_AT_SIGHTING = "the test was ended at that look"
 #: How many intruders the failure names, and how much of each one's command line.
 _NAMED = 2
 _COMMAND_CHARS = 80
@@ -135,6 +140,7 @@ class CardWatch:
         self._checks = 0
         self._method: str | None = None
         self._accounted: frozenset[tuple[int, int]] = frozenset()
+        self._ended_early = False
 
     def check(self, when: str) -> None:
         """Look at who holds the cards now; ``when`` says which stage of the test this is, for the record."""
@@ -181,13 +187,21 @@ class CardWatch:
         return reading, found
 
     @contextlib.contextmanager
-    def watching(self) -> Iterator[None]:
-        """Look at the cards every ``poll_sec`` for as long as the block runs, then once more when it has ended."""
+    def watching(self, end_test: Callable[[], None] | None = None) -> Iterator[None]:
+        """Look at the cards every ``poll_sec`` for as long as the block runs, then once more when it has ended.
+
+        Enforcing, the first look that finds a process outside the test calls ``end_test``, once, and the watch stops
+        looking until the block has ended: the result is refused whatever else is seen.
+        """
         stop = threading.Event()
 
         def watch() -> None:
             while not stop.wait(self._poll_sec):
                 self.check(DURING_TEST)
+                if end_test is not None and self._guard is CardGuard.ENFORCE and self._seen():
+                    self._ended_early = True
+                    end_test()
+                    return
 
         thread = threading.Thread(target=watch, name="hl-card-watch", daemon=True)
         thread.start()
@@ -203,7 +217,8 @@ class CardWatch:
         at any look; observing, do nothing (:meth:`observation` and :meth:`statement` carry what was seen)."""
         found = self._seen()
         if self._guard is CardGuard.ENFORCE and found:
-            raise RunnerFailure(FOREIGN_PROCESS_ON_CARD, _describe(found))
+            ended = f"; {ENDED_AT_SIGHTING}" if self._ended_early else ""
+            raise RunnerFailure(FOREIGN_PROCESS_ON_CARD, _describe(found) + ended)
 
     def observation(self) -> str | None:
         """The note a runner that only observes leaves when a process outside the test held a card, else ``None``."""
