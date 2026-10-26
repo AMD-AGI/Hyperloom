@@ -1910,7 +1910,8 @@ class ExploreExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
         if params.get(_cycle_bench.CYCLE_ARMS_PARAM):
-            return await asyncio.to_thread(_screen_cycle_batch, params, extra.get("shared_state"), output_root)
+            state = extra.get("shared_state") or extra.get("state")
+            return await asyncio.to_thread(_screen_cycle_batch, params, state, output_root)
         try:
             return await _ExploreRound(ctx, params, output_root).run()
         except _RoundRefused as refusal:

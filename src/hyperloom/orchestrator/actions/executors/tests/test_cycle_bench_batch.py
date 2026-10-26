@@ -179,3 +179,55 @@ async def test_a_cycle_batch_without_a_baseline_launch_fails_named(tmp_path, mon
     result = await explore.ExploreExecutor(session_dir=tmp_path)(ctx)
 
     assert (result["status"], result["error_class"]) == ("failed", "cycle_bench_unavailable")
+
+
+def test_a_batch_with_no_weighted_batch_size_grades_nothing():
+    arms = {"base": _arm(10.0, 20.0), "c": _arm(5.0, 10.0), "base2": _arm(12.0, 24.0)}
+
+    summary = cba.summarize_batch(arms, ["c"], {}, band_pct=2.0)
+
+    assert (summary["valid"], summary["verdicts"]) == (False, {})
+
+
+def _workspace(tmp_path: Path, log: str, launch: dict) -> SimpleNamespace:
+    workspace = tmp_path / "baseline" / "benchmark_sglang_1"
+    workspace.mkdir(parents=True)
+    (workspace / "agentx_server_launch.json").write_text(json.dumps(launch), encoding="utf-8")
+    (workspace / "server.log").write_text(log, encoding="utf-8")
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({"vocab_size": 100}), encoding="utf-8")
+    return SimpleNamespace(
+        baseline_workspace=str(tmp_path / "baseline"), model_path=str(model), agentx_corpus_shape={"isl": {"p50": 10}}
+    )
+
+
+def test_a_session_batch_refuses_a_baseline_log_with_no_decode_line(tmp_path):
+    state = _workspace(tmp_path, "[2026] Decode batch, unparseable", {"effective_argv": ["x"]})
+
+    with pytest.raises(ValueError, match="no decode line"):
+        cba.session_batch(state, [], out_dir=tmp_path / "o", band_pct=2.0, port=1)
+
+
+@pytest.mark.parametrize("state", [None, SimpleNamespace(baseline_workspace="", model_path="/m")])
+def test_a_session_batch_refuses_a_session_without_a_baseline_workspace(tmp_path, monkeypatch, state):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "stray").mkdir()
+    (tmp_path / "stray" / "agentx_server_launch.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="no baseline workspace"):
+        cba.session_batch(state, [], out_dir=tmp_path / "o", band_pct=2.0, port=1)
+
+
+def test_a_session_batch_runs_the_launchs_effective_env_over_its_runtime_env(tmp_path):
+    decode = "[t TP0] Decode batch, #running-req: 1, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
+    launch = {
+        "effective_argv": ["x"],
+        "runtime_environment": {"A": "1", "B": "1"},
+        "effective_env": {"B": "2", "C": "3"},
+    }
+    state = _workspace(tmp_path, decode, launch)
+
+    spec = cba.session_batch(state, [], out_dir=tmp_path / "o", band_pct=2.0, port=1)
+
+    assert spec.env == {"A": "1", "B": "2", "C": "3"}

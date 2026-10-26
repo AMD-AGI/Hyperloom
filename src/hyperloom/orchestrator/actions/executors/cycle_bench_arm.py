@@ -44,6 +44,7 @@ CYCLE_ARM_MINUTES = 8.0
 CYCLE_BATCH_REASON = "cycle_bench_batch"
 _BASES = ("base", "base2")
 _ENCODING = "utf-8"
+_SERVER_LOG = "server.log"
 
 
 @dataclass(frozen=True)
@@ -75,18 +76,23 @@ def session_batch(
     state: Any, candidates: list[tuple[str, dict[str, str]]], *, out_dir: Path, band_pct: float, port: int
 ) -> BatchSpec:
     """A batch on the session baseline's own launch, weighted by where its replay ran and fed its corpus length."""
-    workspace = Path(str(getattr(state, "baseline_workspace", "") or ""))
-    launch_file = next(iter(sorted(workspace.rglob("agentx_server_launch.json"))), None)
+    root = str(getattr(state, "baseline_workspace", "") or "")
+    if not root:
+        raise FileNotFoundError("the session has no baseline workspace to take the bench launch from")
+    launch_file = next(iter(sorted(Path(root).rglob("agentx_server_launch.json"))), None)
     if launch_file is None:
-        raise FileNotFoundError(f"no agentx_server_launch.json under the baseline workspace {workspace}")
+        raise FileNotFoundError(f"no agentx_server_launch.json under the baseline workspace {root}")
     launch = json.loads(launch_file.read_text(encoding=_ENCODING))
-    log = (launch_file.parent / "server.log").read_text(encoding=_ENCODING, errors="ignore").splitlines()
+    log = (launch_file.parent / _SERVER_LOG).read_text(encoding=_ENCODING, errors="ignore").splitlines()
+    weights = cb.batch_weights(log, grid=BATCH_GRID)
+    if not weights:
+        raise ValueError(f"no decode line in {launch_file.parent / _SERVER_LOG} to weight batch sizes by")
     config = json.loads((Path(str(state.model_path)) / "config.json").read_text(encoding=_ENCODING))
     isl = (getattr(state, "agentx_corpus_shape", None) or {}).get("isl") or {}
     return BatchSpec(
         argv=list(launch["effective_argv"]),
-        env=dict(launch.get("runtime_environment") or {}),
-        weights=cb.batch_weights(log, grid=BATCH_GRID),
+        env={**(launch.get("runtime_environment") or {}), **(launch.get("effective_env") or {})},
+        weights=weights,
         candidates=list(candidates),
         out_dir=out_dir,
         port=port,
@@ -125,6 +131,8 @@ def summarize_batch(
     base, base2 = arms.get(_BASES[0]), arms.get(_BASES[1])
     if base is None or base2 is None or base.error or base2.error:
         return {"valid": False, "reason": "a base arm produced no cycle", "verdicts": {}}
+    if not {bs for bs, w in weights.items() if w > 0} & set(base.cycle_ms) & set(base2.cycle_ms):
+        return {"valid": False, "reason": "no weighted batch size was measured by both bases", "verdicts": {}}
     gap = cb.weighted_gain_pct(base.cycle_ms, base2.cycle_ms, weights)
     if not cb.batch_valid(base.cycle_ms, base2.cycle_ms, weights, band_pct=band_pct):
         return {"valid": False, "reason": f"bases disagree by {gap:+.2f}%", "verdicts": {}}
@@ -173,7 +181,7 @@ class ArmResult:
 def run_arm(spec: ArmSpec) -> ArmResult:
     """Boot the server, hold each batch size in steady decode for one log window, then tear the server down."""
     spec.out_dir.mkdir(parents=True, exist_ok=True)
-    log_path = spec.out_dir / "server.log"
+    log_path = spec.out_dir / _SERVER_LOG
     result = ArmResult()
     started = time.monotonic()
     proc = _launch_server(spec.argv, spec.env, log_path)
