@@ -42,12 +42,11 @@ from hyperloom.inference_optimizer.breakdown.workflow_contract import (
 from hyperloom.inference_optimizer.session.manifest import write_manifest
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.phases.machine_state import (
-    compute_next_phase,
     record_phase_transition,
     workflow_predicate_inputs,
     PhaseFlags,
 )
-from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE, SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 def _writer_fixture(tmp_path, *, denied: bool) -> dict:
@@ -204,34 +203,6 @@ def test_declared_consumer_paths_are_mechanically_covered(tmp_path):
     values = _declared_consumer_values(fixture)
     assert set(values) == set(workflow_contract()["consumer_paths"])
     assert all(value is not None for value in values.values())
-
-
-def test_skip_to_close_without_baseline_exports_under_session_contract(tmp_path):
-    """A skip-to-close with no baseline validates against the contract and still closes as baseline_failed."""
-    write_manifest(tmp_path, session_id="skip-to-close-contract")
-    state = SharedState(session_id="skip-to-close-contract", phase="ENABLEMENT", baseline_tput=0.0)
-    with session_scope(tmp_path):
-        # Open the segment whose exit evidence carries the frozen inputs.
-        record_phase_transition(state, to_phase="ENABLEMENT", reason="phase_entered")
-        state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
-        target, reason, evidence = compute_next_phase(state, flags=PhaseFlags(enablement_enabled=True))
-        assert (target, reason) == ("CLOSE", "baseline_failed")
-        assert evidence["baseline_tput"] == 0.0
-        frozen = evidence["predicate_inputs"]["global"]
-        assert "baseline_tput" in frozen
-        record_phase_transition(state, to_phase=target, reason=reason, evidence=evidence)
-    state.save(tmp_path)
-
-    exported = build(tmp_path)
-    exits = [
-        segment["exit_evidence"]
-        for event in exported["timeline"]
-        if event.get("type") == "phase"
-        for segment in event["ext"]["segments"]
-        if segment.get("exit_reason") == "baseline_failed"
-    ]
-    assert [row["predicate_inputs"]["global"] for row in exits] == [frozen]
-    validate(instance=exported, schema=workflow_schema())
 
 
 def test_authored_milestones_survive_sbd_export(tmp_path):

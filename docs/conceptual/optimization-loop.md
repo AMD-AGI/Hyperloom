@@ -96,7 +96,7 @@ booked. A phase budget never cancels running work -- the last action in
 flight, such as a GEAK rebench, completes and settles its result. Running
 work is cancelled only when the run is already over: a terminal transition to
 CLOSE (a recorded stop reason such as an unhealthy backend, a failed baseline,
-convergence or `skip_to_close`), an exhausted session budget, a shutdown or an
+convergence), an exhausted session budget, a shutdown or an
 operator interrupt. Each
 phase therefore starts on quiet GPUs, and its entry hook runs on the
 transition itself.
