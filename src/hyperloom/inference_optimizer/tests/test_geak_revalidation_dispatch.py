@@ -13,14 +13,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant
-from hyperloom.orchestrator.actions.executors._proposal_identity import effective_fingerprint
+from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, GridRecipe
+from hyperloom.orchestrator.actions.executors._proposal_identity import BaseControls, effective_fingerprint
 from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
 from hyperloom.orchestrator.actions.executors._subprocess_kill import REAP_MARK_ENV, run_with_session_kill
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 
 from ._geak_helpers import forbid_geak_launch, stop_geak_before_launch
+from hyperloom.orchestrator.state.task_registry import TaskSpec
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
 
 
 @pytest.fixture
@@ -305,7 +307,9 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     state.current_best = {"tput": 110.0, **current}
     state.geak_result = {"schema_version": 2, "status": "ok", "accepted_config": accepted}
     enqueued = coordinator.writeback.geak_rebench_params(reason="launch_controls_regression")
-    task = await coordinator.tasks.create(kind="explore", params=enqueued, idempotency_key="geak-revalidate-c0")
+    task = await coordinator.tasks.create(
+        TaskSpec(kind="explore", params=enqueued, idempotency_key="geak-revalidate-c0")
+    )
     calls = []
     fingerprints = []
     original_fingerprint = explore.effective_fingerprint
@@ -319,14 +323,16 @@ async def test_geak_launch_controls_reach_materialized_rebench(
         output = tmp_path / f"materialized_{len(calls)}"
         output.mkdir()
         path = _build_variant_yaml(
-            kwargs["base_yaml_path"],
-            kwargs["base_extra_args"],
+            GridRecipe(
+                base_yaml_path=kwargs["recipe"].base_yaml_path,
+                base=LaunchLayer(
+                    extra_server_args=kwargs["recipe"].base.extra_server_args,
+                    args_mode=kwargs["recipe"].base.args_mode,
+                ),
+                target=kwargs["recipe"].target,
+            ),
             kwargs["grid"][0],
             output_subdir=output,
-            model_path=kwargs["model_path"],
-            gpu_type=kwargs["gpu_type"],
-            benchmark_script=kwargs["benchmark_script"],
-            base_args_mode=kwargs["base_args_mode"],
         )
         calls.append(yaml.safe_load(path.read_text())["benchmark"]["envs"])
         if len(calls) > 1:
@@ -410,7 +416,7 @@ async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
     st.current_best = {"extra_server_args": "--incumbent", **controls}
 
     params = c.writeback.geak_rebench_params(reason="geak_e2e_win")
-    task = await c.tasks.create(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
+    task = await c.tasks.create(TaskSpec(kind="explore", params=params, idempotency_key="geak-revalidate-c0"))
     entry = task.params["grid"][0]
     ran = GridVariant(
         str(entry["name"]),
@@ -423,9 +429,11 @@ async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
     assert task.params["expected_cfg_hash"] == effective_fingerprint(
         ran.extra_server_args,
         ran.extra_envs,
-        base_remove_args=controls.get("remove_args"),
-        base_unset_envs=controls.get("unset_envs"),
-        base_args_mode=controls.get("args_mode"),
+        base=BaseControls(
+            remove_args=controls.get("remove_args"),
+            unset_envs=controls.get("unset_envs"),
+            args_mode=controls.get("args_mode"),
+        ),
     )
 
 
@@ -603,10 +611,12 @@ async def test_resume_stack_revalidate_promotes_material_geak_candidate(coordina
     }
 
     task = await c.tasks.create(
-        kind="explore",
-        params=_geak_rebench_params(),
-        idempotency_key="geak-revalidate-c0",
-        task_id="material-geak-rebench",
+        TaskSpec(
+            kind="explore",
+            params=_geak_rebench_params(),
+            idempotency_key="geak-revalidate-c0",
+            task_id="material-geak-rebench",
+        ),
     )
     st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
 
@@ -1097,7 +1107,9 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
     if source == "geak":
         state.geak_result = {"status": "ok", "accepted_config": {"flags": "--mem-fraction-static 0.9"}}
         params = coordinator.writeback.geak_rebench_params(reason="runtime_budget_regression")
-        task = await coordinator.tasks.create(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
+        task = await coordinator.tasks.create(
+            TaskSpec(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
+        )
     else:
         state.current_best = {"extra_server_args": "--mem-fraction-static 0.9"}
         enqueued = await coordinator.writeback.enqueue_internal_stack_rebench(reason="runtime_budget_regression")
@@ -1116,11 +1128,13 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
     finished = time.monotonic()
 
     assert len(calls) == 1
-    assert calls[0]["variant_expected_sec"] == (baseline_runtime or None)
+    assert calls[0]["stop"].variant_expected_sec == (baseline_runtime or None)
     if session_remaining_sec is None:
-        assert calls[0]["session_deadline_sec"] is None
+        assert calls[0]["stop"].session_deadline_sec is None
     else:
-        assert started + session_remaining_sec <= calls[0]["session_deadline_sec"] <= finished + session_remaining_sec
+        assert (
+            started + session_remaining_sec <= calls[0]["stop"].session_deadline_sec <= finished + session_remaining_sec
+        )
     assert task.params.get("baseline_runtime_sec", 0.0) == baseline_runtime
     for retired_param in ("variant_timeout_sec", "soft_deadline_sec", "overtime_kill_ratio"):
         assert retired_param not in calls[0]
@@ -1147,7 +1161,9 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     state = coordinator.shared_state
     state.baseline_tput = 0.0
     for name, tput in [("sglang_custom.sh", 100.0), ("rejected_script.sh", 90.0)]:
-        task = await coordinator.tasks.create(kind="baseline", params={"benchmark_script": name}, idempotency_key=name)
+        task = await coordinator.tasks.create(
+            TaskSpec(kind="baseline", params={"benchmark_script": name}, idempotency_key=name)
+        )
         await coordinator.writeback.promote_to_shared_state(
             "baseline", {"output_throughput": tput, "materialized_config": str(baseline)}, task=task
         )
@@ -1155,9 +1171,11 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     assert state.last_baseline["extras"]["fingerprint"]["benchmark_script"] == "rejected_script.sh"
     if enablement_revalidation:
         task = await coordinator.tasks.create(
-            kind="baseline",
-            params={"reason": "enablement_eval_revalidation", "benchmark_script": "sglang_custom.sh"},
-            idempotency_key="revalidate-baseline",
+            TaskSpec(
+                kind="baseline",
+                params={"reason": "enablement_eval_revalidation", "benchmark_script": "sglang_custom.sh"},
+                idempotency_key="revalidate-baseline",
+            ),
         )
         await coordinator.writeback.promote_to_shared_state(
             "baseline", {"output_throughput": 105.0, "materialized_config": str(baseline)}, task=task
@@ -1172,7 +1190,9 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     monkeypatch.setenv("GPU_TYPE", "mi355x")
     if source == "geak":
         params = coordinator.writeback.geak_rebench_params(reason="script_regression")
-        task = await coordinator.tasks.create(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
+        task = await coordinator.tasks.create(
+            TaskSpec(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
+        )
     else:
         enqueued = await coordinator.writeback.enqueue_internal_stack_rebench(reason="script_regression")
         task = await coordinator.tasks.get(str(enqueued["task_id"]))
@@ -1182,12 +1202,15 @@ async def test_internal_stack_rebench_preserves_baseline_script(
         output = tmp_path / f"variant_{len(calls)}"
         output.mkdir()
         variant_path = _build_variant_yaml(
-            kwargs["base_yaml_path"],
-            "",
+            GridRecipe(
+                base_yaml_path=kwargs["recipe"].base_yaml_path,
+                target=BenchmarkTarget(
+                    gpu_type=kwargs["recipe"].target.gpu_type,
+                    benchmark_script=kwargs["recipe"].target.benchmark_script,
+                ),
+            ),
             kwargs["grid"][0],
             output_subdir=output,
-            gpu_type=kwargs["gpu_type"],
-            benchmark_script=kwargs["benchmark_script"],
         )
         calls.append((kwargs, yaml.safe_load(variant_path.read_text())["benchmark"]))
         return []
@@ -1204,7 +1227,7 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     assert len(calls) == 1
     assert calls[0][1]["benchmark_script"] == "sglang_custom.sh"
     assert calls[0][1]["runner_type"] == "mi355x"
-    assert calls[0][0]["server_lifecycle"] is None
+    assert calls[0][0]["launch"].server_lifecycle is None
 
 
 @pytest.mark.asyncio
@@ -1239,6 +1262,28 @@ async def test_invalid_handoff_configuration_never_launches_geak(coordinator, mo
     assert event["status"] == "failed"
     assert event["ext"]["outcome"]["error_class"] == "invalid_env_spec"
     assert not await coordinator.tasks.queued()
+
+
+@pytest.mark.asyncio
+async def test_native_geak_proxy_refusal_is_not_an_invalid_env_spec(coordinator, monkeypatch):
+    """A native-AgentX proposal refusing an unverified Magpie launch is its own fault, not a serialization one.
+
+    ``invalid_env_spec`` names exactly one failure: the accepted launch configuration could not be
+    serialized. A refusal raised further down the handoff build must reach the caller instead of being
+    relabelled as one.
+    """
+    refusal = "Native AgentX GEAK proposals require a Magpie-verified server launch"
+
+    def refuse(*_args, **_kwargs):
+        raise ValueError(refusal)
+
+    monkeypatch.setattr("hyperloom.inference_optimizer.agentx.geak_proxy.seed_native_geak_proxy", refuse)
+    coordinator.shared_state.benchmark_mode = "agentx"
+
+    with pytest.raises(ValueError, match=refusal):
+        await coordinator.phase_kernel._run_geak_kernel_phase(from_phase="EXPLORE")
+
+    assert (coordinator.shared_state.geak_result or {}).get("error_class") != "invalid_env_spec"
 
 
 @pytest.mark.asyncio
@@ -1379,11 +1424,13 @@ async def test_a_spent_kernel_budget_waits_for_the_rebench_and_keeps_the_win(coo
     c.sub.register_executor("kernel_agent", _kernel_agent)
     lanes, _ttl = c.dispatcher.registry_lanes_ttl("kernel_agent")
     task, _ = await c.tasks.create_or_return_existing(
-        kind="kernel_agent",
-        params={"from_phase": ps.PHASE_FRAMEWORK_AGENT},
-        idempotency_key="kernel_agent_c0",
-        requires_lanes=lanes,
-        lease_ttl_sec=3600,
+        TaskSpec(
+            kind="kernel_agent",
+            params={"from_phase": ps.PHASE_FRAMEWORK_AGENT},
+            idempotency_key="kernel_agent_c0",
+            requires_lanes=lanes,
+            lease_ttl_sec=3600,
+        ),
     )
     await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(measuring.wait(), timeout=2.0)
@@ -1434,10 +1481,12 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
     # A config-identity miss makes 2b inconclusive, which hands the candidate to
     # the GEAK harness (2a), and that refuses the canonical AgentX workload.
     rebench = await c.tasks.create(
-        kind="explore",
-        params=_geak_rebench_params(expected_cfg_hash="expected-hash"),
-        idempotency_key="geak-revalidate-c0",
-        task_id="refused-rebench",
+        TaskSpec(
+            kind="explore",
+            params=_geak_rebench_params(expected_cfg_hash="expected-hash"),
+            idempotency_key="geak-revalidate-c0",
+            task_id="refused-rebench",
+        ),
     )
     await c.writeback.promote_to_shared_state(
         rebench.kind,

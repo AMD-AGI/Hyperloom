@@ -51,7 +51,7 @@ from ..bus.resource_lock import (
 )
 from .sub_agent_runner import SubAgentResult
 from ..specialists.wall_budget import limit_wall_budget_extension
-from ..state.task_registry import IllegalTransition, Task, TaskNotFound
+from ..state.task_registry import IllegalTransition, Task, TaskNotFound, TaskSpec
 from .time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     expected_action_cost_minutes,
@@ -529,12 +529,14 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             for attempt in range(1, 6):
                 new_key = f"{child_key_prefix}{attempt}"
                 new_task, was_existing = await self.tasks.create_or_return_existing(
-                    kind=task.kind,
-                    params=params,
-                    idempotency_key=new_key,
-                    requires_lanes=list(task.requires_lanes or []),
-                    lease_ttl_sec=int(task.lease_ttl_sec or 0),
-                    dispatch_class="coordinator",
+                    TaskSpec(
+                        kind=task.kind,
+                        params=params,
+                        idempotency_key=new_key,
+                        requires_lanes=list(task.requires_lanes or []),
+                        lease_ttl_sec=int(task.lease_ttl_sec or 0),
+                        dispatch_class="coordinator",
+                    )
                 )
                 if not was_existing:
                     created.append(new_task.task_id)
@@ -1048,14 +1050,13 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 task = await self.tasks.get(task_id)
             except TaskNotFound:
                 continue
+            error = f"lease holder process died before reporting a result; task reclaimed by {reason}"
             await self._coord.writeback.handle_unpromotable_result(
                 task,
-                {
-                    "status": "failed",
-                    "error_class": "dead_holder_reaped",
-                    "error": (f"lease holder process died before reporting a result; task reclaimed by {reason}"),
-                },
+                {"status": "failed", "error_class": "dead_holder_reaped", "error": error},
             )
+            if task.kind == "specialist" and not self.owes_result(task_id):
+                await self._record_specialist_settlement(task, SubAgentResult(task_id, "failed", {}, error=error))
             log.warning(
                 "dispatcher: counted dead-holder death of task=%s kind=%s as an action failure",
                 task_id,
@@ -1143,7 +1144,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             await gap_refresh.refresh_gaps(reason="explore_round", workload_id=workload_id)
 
     async def _record_specialist_settlement(self, task: Task, result: SubAgentResult) -> None:
-        """Record a finished specialist's done payload; always runs, to keep the ledgers coherent."""
+        """Record an ended specialist round once; the FRAMEWORK pump keys its next discovery round on this settle."""
         done_payload = result.result.get("specialist_done") or {}
         run_error = str(result.error or "")
         await self._coord.specialist_dispatch.record_specialist_result(

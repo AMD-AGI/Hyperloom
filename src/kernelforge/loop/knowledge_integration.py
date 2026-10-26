@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -18,11 +19,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from kernelforge.llm.workspace_policy import (
+from kernelforge.workspace.edit_policy import (
     is_protected_path,
     tracked_editable_paths,
 )
-from kernelforge.llm.git import git, git_bytes
+from kernelforge.tools.git import git, git_bytes
 from kernelforge.knowledge.kb_store import warmstart_policy
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.kb_store.identity.implementation import (
@@ -41,6 +42,9 @@ from kernelforge.evaluation.benchmark.runner import (
     aggregate_benchmark_measurements,
     calculate_measurement_case_speedups,
 )
+from kernelforge.loop.jit_rebuild import JitRebuildUnavailable
+
+log = logging.getLogger(__name__)
 
 # How much of the speedup a candidate was ranked on its own measurement has to reproduce for that ranking to count as
 # honest. The regression this answers measured 32% below the claim that had won the ranking.
@@ -707,9 +711,7 @@ def _adopt_measured_candidate(
         return "", reject_reason
     try:
         _force_jit_rebuild(workspace_dir, kernel, source_files)
-    except WarmStartRestoreError:
-        raise
-    except Exception as error:  # noqa: BLE001 - a stale artifact must not be kept
+    except (JitRebuildUnavailable, subprocess.TimeoutExpired) as error:
         _git_discard_worktree(workspace_dir, pre_untracked=pre_untracked)
         print(
             f"  [kb] warm-start candidate rejected: rebuild failed ({error})",
@@ -928,7 +930,8 @@ def _try_apply_candidate(sol: dict, trial: _CandidateField, *, pre_untracked) ->
         pristine_ms = pristine_bench.get("median_ms")
     except WarmStartRestoreError:
         raise
-    except Exception:  # noqa: BLE001 - scoring is third-party; worktree is discarded
+    except Exception as exc:  # scoring is third-party; worktree is discarded
+        log.warning("warm-start candidate probe failed: %s", exc, exc_info=True)
         _git_discard_worktree(
             workspace_dir,
             pre_untracked=pre_untracked,
@@ -1328,6 +1331,8 @@ def kb_warmstart(
         )
 
         error = sanitize_read_error(e, secrets=kb_store_secrets(config))
+        # Sanitized message only: a raw traceback would carry the KB store credentials.
+        log.warning("KB warm-start failed: %s", error)
         print(f"  [kb] warm-start skipped ({error})", flush=True)
         return {
             "candidate": False,

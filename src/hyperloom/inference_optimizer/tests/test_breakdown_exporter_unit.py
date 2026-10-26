@@ -207,7 +207,6 @@ def test_fallback_never_replaces_a_complete_report(tmp_path):
 def test_historical_stop_reasons_do_not_depend_on_supervisor_runtime():
     from hyperloom.inference_optimizer.breakdown import stop_reasons
 
-    assert stop_reasons.SUPERVISOR_RESTART_REASON == "supervisor_restart_requested"
     assert stop_reasons.outcome_status("supervisor_coordinator_died", 1.0) == "aborted"
     assert stop_reasons.outcome_status("supervisor_tick_stalled", 1.0) == "aborted"
     assert stop_reasons.outcome_status("target_reached", 1.0) == "completed"

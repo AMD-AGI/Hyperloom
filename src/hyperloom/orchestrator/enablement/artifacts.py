@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.io import WriteOptions, atomic_write_text
+from hyperloom.common.fs_utils import read_bytes_nofollow, regular_files_nofollow
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from hyperloom.inference_optimizer.reference_script import ServingTarget
 from hyperloom.inference_optimizer.session.session_paths import (
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 # A patch is a few KB; anything this large is a stray build output and would eat into the archive's per-session
 # budget.
 _FILE_SIZE_LIMIT = 2 * 1024 * 1024
+_PATCHES_DIR = "patches"
 
 # Server logs routinely exceed _FILE_SIZE_LIMIT, so they are truncated rather than skipped.
 _SERVER_LOG_TAIL_LIMIT = 1024 * 1024
@@ -41,12 +43,22 @@ _SERVER_LOG_TAIL_LIMIT = 1024 * 1024
 _LOG_TRUNCATION_NOTE = "[hyperloom] truncated: the first {dropped} bytes are missing; the tail follows.\n"
 
 
-def _archive_copy(archive: RoundArchive, role: str, src: Path, dest: Path) -> None:
-    """Copy ``src`` to ``dest`` and record it as ``role`` when it exists and is under the size limit."""
-    if not src.is_file() or src.stat().st_size > _FILE_SIZE_LIMIT:
+def _archive_copy(archive: RoundArchive, role: str, src: Path, dest: Path, *, child_written: bool = False) -> None:
+    """Copy ``src`` to ``dest`` and record it as ``role`` when it exists and is under the size limit.
+
+    ``child_written``: the file lives where a demoted specialist can replace it, so a symlink is refused, not followed.
+    """
+    try:
+        if child_written:
+            data = read_bytes_nofollow(src, limit=_FILE_SIZE_LIMIT)
+        elif src.is_file() and src.stat().st_size <= _FILE_SIZE_LIMIT:
+            data = src.read_bytes()
+        else:
+            return
+    except OSError:
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(src.read_bytes())
+    dest.write_bytes(data)
     archive.record(role, dest)
 
 
@@ -104,20 +116,24 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> RoundArchive
     copied: set[str] = set()
     for applied in res.get("patches_applied") or []:
         src = Path(str(applied))
-        _archive_copy(archive, ROLE_PATCH, src, round_dir / "patches" / src.name)
+        _archive_copy(archive, ROLE_PATCH, src, round_dir / _PATCHES_DIR / src.name, child_written=True)
         # Marked seen even when refused, so the sweep below does not retry it.
         copied.add(src.name)
 
     workspace = runs_dir(root, "specialist", task_id)
     for name, role in (("specialist_done.json", ROLE_SPECIALIST_RESULT), ("prompt.md", ROLE_PROMPT)):
-        _archive_copy(archive, role, workspace / name, round_dir / name)
+        _archive_copy(archive, role, workspace / name, round_dir / name, child_written=True)
 
     # Disk scans include rejected output: preserve evidence, not accepted patches.
     for base in (workspace, workspace / "worktree"):
-        patches = base / "patches"
-        for src in sorted(patches.glob("*.patch")) + sorted(patches.glob("*.diff")):
+        for src in (
+            *regular_files_nofollow(base, _PATCHES_DIR, (".patch",)),
+            *regular_files_nofollow(base, _PATCHES_DIR, (".diff",)),
+        ):
             if src.name not in copied:
-                _archive_copy(archive, ROLE_PATCH_EVIDENCE, src, round_dir / "attempted_patches" / src.name)
+                _archive_copy(
+                    archive, ROLE_PATCH_EVIDENCE, src, round_dir / "attempted_patches" / src.name, child_written=True
+                )
                 copied.add(src.name)
 
     artifacts_dir = round_dir / "artifacts"

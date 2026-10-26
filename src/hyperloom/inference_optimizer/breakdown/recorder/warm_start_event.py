@@ -25,18 +25,14 @@ from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Any
 
-from .event_fields import (
-    as_dict as _as_dict,
-    bool_or_none as _bool_or_none,
-    failure_row as _failure_row,
-    float_or_none as _float_or_none,
-    now_iso_seconds as _now,
-    text_or_none as _text_or_none,
-)
+from hyperloom.common.coerce import text_or_none as _text_or_none, to_float as _float_or_none, to_mapping as _as_dict
+
+from .event_fields import bool_or_none as _bool_or_none, failure_row as _failure_row, now_iso_seconds as _now
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink, make_sink
 from .event_timeline import EventHeader, finish_event, open_event
+from .sections import WARM_START_EVENT_SECTIONS
 
 log = logging.getLogger(__name__)
 
@@ -265,11 +261,13 @@ class WarmStartEventRecorder:
             payload["failure"] = _failure_row(stage="lookup", error_class=str(error))
         self._sink.record(SECTION_EVENT, payload)
 
-        from .assembler import warm_start_event_parts
+        from .assembler import event_parts
         from .recorder_warnings import RECORDING_ERRORS, note_failure
 
         try:
-            ext, derived = assemble_warm_start_ext(warm_start_event_parts(self.event_id), event=self.event_id)
+            ext, derived = assemble_warm_start_ext(
+                event_parts(WARM_START_EVENT_SECTIONS, event=self.event_id), event=self.event_id
+            )
             finish_event(
                 EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
@@ -380,24 +378,25 @@ def _reads_block(reads: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 def matched_block(
     *,
-    tier: str,
-    confidence: Any,
-    source: str,
-    canonical_id: str,
+    match: Mapping[str, Any],
     recipe: Mapping[str, Any] | None,
+    experience: Mapping[str, Any],
     expected_gain_pct: Any = None,
-    lessons: Any = None,
-    pitfalls: Any = None,
 ) -> dict[str, Any]:
-    """Build the ``matched`` block from the record T0 anchored on."""
+    """Build the ``matched`` block from the record T0 anchored on.
+
+    ``match`` is the lookup context's ``match`` block; ``experience`` carries the
+    ``lessons`` and ``pitfalls`` T0 published beside it.
+    """
     row = _as_dict(recipe)
-    tier_text = str(tier or "").strip()
+    lessons, pitfalls = experience["lessons"], experience["pitfalls"]
+    tier_text = str(match.get("tier") or "").strip()
     block: dict[str, Any] = {
         "match_type": _EXACT_TIER if tier_text.lower() == _EXACT_TIER else "degraded",
         "tier": tier_text,
-        "confidence": _float_or_none(confidence),
-        "source": str(source or ""),
-        "canonical_id": str(canonical_id or ""),
+        "confidence": _float_or_none(match.get("confidence")),
+        "source": str(match.get("source") or ""),
+        "canonical_id": str(match.get("canonical_id") or ""),
         "optimized_throughput": _float_or_none(row.get("best_throughput")),
         "validated_gain_pct": _float_or_none(row.get("validated_gain_pct")),
         "expected_gain_pct": _float_or_none(expected_gain_pct),

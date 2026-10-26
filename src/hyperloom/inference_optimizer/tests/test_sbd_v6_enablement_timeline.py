@@ -17,7 +17,8 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import enablement_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import ENABLEMENT_EVENT_SECTIONS
 from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
 from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EVENT_STATUS_INTERRUPTED
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
@@ -45,7 +46,7 @@ def _event(session_dir: Path) -> dict[str, Any]:
 def _ext(session_dir: Path) -> dict[str, Any]:
     """Assemble the lane's ``ext`` the way finalize would, since an open event holds only fragments."""
     ext, _status = enablement_event.assemble_enablement_ext(
-        enablement_event_parts(),
+        event_parts(ENABLEMENT_EVENT_SECTIONS),
         event=enablement_event.enablement_event_id(),
     )
     return ext
@@ -60,7 +61,7 @@ def _boot_trigger(**overrides: Any) -> None:
         "evidence": "ImportError: cannot import name 'fused_moe'",
     }
     kwargs.update(overrides)
-    enablement_event.record_trigger(**kwargs)
+    enablement_event.record_trigger(enablement_event.LaneTrigger(**kwargs))
 
 
 def _kept(**overrides: Any) -> dict[str, Any]:
@@ -102,20 +103,24 @@ def test_a_lane_nothing_triggered_leaves_no_event(_bound_session):
 
 def test_the_trigger_that_opened_the_lane_is_the_one_it_keeps(_bound_session):
     enablement_event.record_trigger(
-        origin=enablement_event.ORIGIN_EVAL,
-        mode="all",
-        kind="accuracy_below_floor",
-        evidence="gsm8k: 0.21",
-        observed_accuracy=0.21,
-        accuracy_floor=0.5,
-        observed_task="gsm8k",
-        observed_metric="exact_match",
+        enablement_event.LaneTrigger(
+            origin=enablement_event.ORIGIN_EVAL,
+            mode="all",
+            kind="accuracy_below_floor",
+            evidence="gsm8k: 0.21",
+            observed_accuracy=0.21,
+            accuracy_floor=0.5,
+            observed_task="gsm8k",
+            observed_metric="exact_match",
+        ),
     )
     enablement_event.record_trigger(
-        origin=enablement_event.ORIGIN_EVAL,
-        mode="all",
-        kind="accuracy_unavailable",
-        evidence="",
+        enablement_event.LaneTrigger(
+            origin=enablement_event.ORIGIN_EVAL,
+            mode="all",
+            kind="accuracy_unavailable",
+            evidence="",
+        ),
     )
 
     trigger = _ext(_bound_session)["trigger"]
@@ -127,9 +132,11 @@ def test_the_trigger_that_opened_the_lane_is_the_one_it_keeps(_bound_session):
 
 def test_the_origin_survives_the_lane_succeeding(_bound_session):
     enablement_event.record_trigger(
-        origin=enablement_event.ORIGIN_EVAL,
-        mode="all",
-        kind="accuracy_below_floor",
+        enablement_event.LaneTrigger(
+            origin=enablement_event.ORIGIN_EVAL,
+            mode="all",
+            kind="accuracy_below_floor",
+        ),
     )
     enablement_event.finish(
         enablement_event.LaneTerminal(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="revalidation promoted")
@@ -379,11 +386,22 @@ def test_a_build_with_no_verdict_is_not_a_failed_build(_bound_session):
 
 def test_a_revalidation_window_records_opening_and_closing(_bound_session):
     enablement_event.record_trigger(
-        origin=enablement_event.ORIGIN_EVAL, mode="all", kind="accuracy_below_floor", accuracy_floor=0.5
+        enablement_event.LaneTrigger(
+            origin=enablement_event.ORIGIN_EVAL,
+            mode="all",
+            kind="accuracy_below_floor",
+            accuracy_floor=0.5,
+        ),
     )
     enablement_event.record_revalidation(generation=1, task_id="base-9", config_path="/s/accepted.yaml")
     enablement_event.record_revalidation_outcome(
-        generation=1, promoted=True, task_id="base-9", accuracy=0.71, accuracy_floor=0.5
+        enablement_event.RevalidationOutcome(
+            generation=1,
+            promoted=True,
+            task_id="base-9",
+            accuracy=0.71,
+            accuracy_floor=0.5,
+        ),
     )
 
     revalidations = _ext(_bound_session)["revalidations"]
@@ -396,11 +414,17 @@ def test_a_revalidation_window_records_opening_and_closing(_bound_session):
 
 
 def test_each_generation_is_its_own_window(_bound_session):
-    enablement_event.record_trigger(origin=enablement_event.ORIGIN_EVAL, mode="all", kind="accuracy_below_floor")
+    enablement_event.record_trigger(
+        enablement_event.LaneTrigger(origin=enablement_event.ORIGIN_EVAL, mode="all", kind="accuracy_below_floor")
+    )
     enablement_event.record_revalidation(generation=1, task_id="base-1")
-    enablement_event.record_revalidation_outcome(generation=1, promoted=False, reason="accuracy below floor")
+    enablement_event.record_revalidation_outcome(
+        enablement_event.RevalidationOutcome(generation=1, promoted=False, reason="accuracy below floor")
+    )
     enablement_event.record_revalidation(generation=2, task_id="base-2")
-    enablement_event.record_revalidation_outcome(generation=2, promoted=True, accuracy=0.8)
+    enablement_event.record_revalidation_outcome(
+        enablement_event.RevalidationOutcome(generation=2, promoted=True, accuracy=0.8)
+    )
 
     rows = _ext(_bound_session)["revalidations"]["rows"]
     assert [row["generation"] for row in rows] == [1, 2]
@@ -408,9 +432,13 @@ def test_each_generation_is_its_own_window(_bound_session):
 
 
 def test_a_window_the_run_stopped_is_not_a_window_that_failed(_bound_session):
-    enablement_event.record_trigger(origin=enablement_event.ORIGIN_EVAL, mode="all", kind="accuracy_below_floor")
+    enablement_event.record_trigger(
+        enablement_event.LaneTrigger(origin=enablement_event.ORIGIN_EVAL, mode="all", kind="accuracy_below_floor")
+    )
     enablement_event.record_revalidation(generation=1, task_id="base-1")
-    enablement_event.record_revalidation_outcome(generation=1, promoted=False, reason="stopped by the run")
+    enablement_event.record_revalidation_outcome(
+        enablement_event.RevalidationOutcome(generation=1, promoted=False, reason="stopped by the run")
+    )
 
     row = _ext(_bound_session)["revalidations"]["rows"][0]
     assert row["promoted"] is False
@@ -542,7 +570,7 @@ def test_nothing_recorded_outside_a_session_raises(tmp_path, monkeypatch):
     )
     enablement_event.record_build(task_id="build-1", entry={"ok": True})
     enablement_event.record_revalidation(generation=1)
-    enablement_event.record_revalidation_outcome(generation=1, promoted=False)
+    enablement_event.record_revalidation_outcome(enablement_event.RevalidationOutcome(generation=1, promoted=False))
     enablement_event.record_human_review(digest="d", failure_kind="UNKNOWN")
     enablement_event.finish(enablement_event.LaneTerminal(outcome=enablement_event.OUTCOME_SUCCEEDED))
 

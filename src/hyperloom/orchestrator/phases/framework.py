@@ -20,7 +20,7 @@ from hyperloom.inference_optimizer import framework_registry
 from . import machine_state as _phase_state
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
-from ..state.task_registry import TaskNotFound
+from ..state.task_registry import TaskNotFound, TaskSpec
 from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
 
 if TYPE_CHECKING:
@@ -34,7 +34,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     merge_server_args,
     tokenize_server_args_preserving_json,
 )
-from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR, RESULT_BENCHED
+from ..actions.executors import _integrate_vocabulary
 from ..specialists.profile import is_authoring_specialist
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_lever_kind, patch_owner_phase
@@ -62,7 +62,7 @@ def _config_lever_from_proposal(entry: Mapping[str, Any]) -> dict[str, Any]:
         fault = (
             "has server args unsupported by Magpie's unquoted argv transport"
             if isinstance(args, str)
-            else "has unparseable server args"
+            else "has unparsable server args"
         )
     if fault:
         log.warning(
@@ -448,8 +448,10 @@ def _record_review_outcome(
     recorder = _recorder(coord)
     if recorder is None or not proposal_id:
         return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import CriticReview
+
     if verdict:
-        recorder.record_proposal_review(proposal_id, verdict=verdict, reason=reason)
+        recorder.record_proposal_review(proposal_id, CriticReview(verdict=verdict, reason=reason))
         recorder.record_proposal_step(proposal_id, step="reviewed", outcome=verdict, reason=reason)
     recorder.record_proposal_review_outcome(proposal_id, **outcome)
 
@@ -686,7 +688,7 @@ def _record_source_attempt(
         source_ref=first_str(params.get("framework_agent_candidate_id"), attempt.candidate_id),
         decision=attempt.status,
         adopted=attempt.adopted,
-        benched=bool(result.get(RESULT_BENCHED)),
+        benched=bool(result.get(_integrate_vocabulary.RESULT_BENCHED)),
         **_attempt_outcome_fields(attempt, result=result, params=params),
         **measured_against,
         **config_delta,
@@ -1226,13 +1228,15 @@ class FrameworkPhase(ProposalBench):
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _spec_existing = await self.tasks.create_or_return_existing(
-            kind="specialist",
-            params=params,
-            idempotency_key=idem,
-            requires_lanes=lanes,
-            side_effects=["writes_results", "writes_patches"],
-            lease_ttl_sec=ttl,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="specialist",
+                params=params,
+                idempotency_key=idem,
+                requires_lanes=lanes,
+                side_effects=["writes_results", "writes_patches"],
+                lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
+            )
         )
         if _spec_existing and await self._settle_finished_authoring_specialist(
             spec_task, cand_id=cand_id, batch_id=batch_id, label="authoring"
@@ -1398,13 +1402,15 @@ class FrameworkPhase(ProposalBench):
         idem = f"perf_explore_authoring:{gap_cid}:retry:{retry.attempt}{self._coord.dispatcher.cycle_idem_suffix()}"
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _ = await self.tasks.create_or_return_existing(
-            kind="specialist",
-            params=params,
-            idempotency_key=idem,
-            requires_lanes=lanes,
-            side_effects=["writes_results", "writes_patches"],
-            lease_ttl_sec=ttl,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="specialist",
+                params=params,
+                idempotency_key=idem,
+                requires_lanes=lanes,
+                side_effects=["writes_results", "writes_patches"],
+                lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
+            )
         )
         new_tid = str(getattr(spec_task, "task_id", "") or "")
         log.info(
@@ -1597,13 +1603,15 @@ class FrameworkPhase(ProposalBench):
         for attempt in range(_LOCAL_EXPLORE_MAX_ATTEMPTS):
             idem = base_idem if attempt == 0 else f"{base_idem}:r{attempt}"
             spec_task, existing = await self.tasks.create_or_return_existing(
-                kind="specialist",
-                params=params,
-                idempotency_key=idem,
-                requires_lanes=lanes,
-                side_effects=["writes_results", "writes_patches"],
-                lease_ttl_sec=ttl,
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind="specialist",
+                    params=params,
+                    idempotency_key=idem,
+                    requires_lanes=lanes,
+                    side_effects=["writes_results", "writes_patches"],
+                    lease_ttl_sec=ttl,
+                    dispatch_class="coordinator",
+                )
             )
             if not (existing and first_str(getattr(spec_task, "state", "")) == "failed"):
                 return spec_task, existing
@@ -1801,7 +1809,7 @@ class FrameworkPhase(ProposalBench):
             "candidate": candidate,
             "batch_id": candidate.get("batch_id") or "",
             # One action lands every patch; this says where the diff comes from.
-            "patch_source": PATCH_SOURCE_UPSTREAM_PR,
+            "patch_source": _integrate_vocabulary.PATCH_SOURCE_UPSTREAM_PR,
             "lever_kind": LEVER_UPSTREAM_PR,
             # The authored-outcome bridge, the candidate-processed dedup, the batch max-gain roll-up and phase
             # attribution all key on these two markers.
@@ -1824,12 +1832,14 @@ class FrameworkPhase(ProposalBench):
             if not lanes:
                 raise RuntimeError("integrate_patch resolved to no lanes; the task would run without GPU exclusivity.")
             await self.tasks.create_or_return_existing(
-                kind="integrate_patch",
-                params=params,
-                idempotency_key=idem,
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind="integrate_patch",
+                    params=params,
+                    idempotency_key=idem,
+                    requires_lanes=lanes,
+                    lease_ttl_sec=ttl,
+                    dispatch_class="coordinator",
+                )
             )
             log.info(
                 "FRAMEWORK: enqueued candidate=%s batch=%s",
@@ -2532,20 +2542,12 @@ class FrameworkPhase(ProposalBench):
         if not cand_id:
             return
         batch_id = str(params.get("framework_batch_id") or "")
-        audit = params.get("framework_audit") if isinstance(params.get("framework_audit"), dict) else {}
-        sem = str((audit or {}).get("semantic_status") or "").strip().lower()
-        if sem in ("already_equivalent", "already_superset"):
-            status = "already_present"
-        elif sem in ("not_present", "partially_present"):
-            status = "not_applicable"
-        else:
-            status = "author_empty"
         reason = str(inner.get("summary") or "").strip()[:500]
         recorded = self._stamp_framework_progress(
             ProgressStamp(
                 candidate_id=cand_id,
                 batch_id=batch_id,
-                status=status,
+                status="author_empty",
                 rationale=reason,
                 provenance="authored_empty",
                 gain_pct=0.0,
@@ -2557,13 +2559,8 @@ class FrameworkPhase(ProposalBench):
         )
         if not recorded:
             return
-        self._record_undelivered_authoring_attempt(task=task, candidate_id=cand_id, status=status)
-        log.info(
-            "FRAMEWORK: authoring specialist empty deliverable candidate=%s batch=%s status=%s",
-            cand_id,
-            batch_id,
-            status,
-        )
+        self._record_undelivered_authoring_attempt(task=task, candidate_id=cand_id, status="author_empty")
+        log.info("FRAMEWORK: authoring specialist empty deliverable candidate=%s batch=%s", cand_id, batch_id)
 
     def _record_undelivered_authoring_attempt(self, *, task: "Task", candidate_id: str, status: str) -> None:
         """Charge a newly stamped round that delivered nothing to its PR lead's lever, else to the source lever."""
@@ -2607,15 +2604,17 @@ class FrameworkPhase(ProposalBench):
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         task = await self.tasks.create_or_return_existing(
-            kind="specialist",
-            params=params,
-            # The round count is part of the key: the registry returns the row a key already names, so a fixed key
-            # would re-fetch the finished first attempt and neither streak could advance.
-            idempotency_key=f"candidate-discovery:{reason}{self._coord.dispatcher.cycle_idem_suffix()}:r{empties + failures}",
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
-            side_effects=["writes_results"],
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="specialist",
+                params=params,
+                # The round count is part of the key: the registry returns the row a key already names, so a fixed key
+                # would re-fetch the finished first attempt and neither streak could advance.
+                idempotency_key=f"candidate-discovery:{reason}{self._coord.dispatcher.cycle_idem_suffix()}:r{empties + failures}",
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                side_effects=["writes_results"],
+                dispatch_class="coordinator",
+            ),
         )
         _record_run(
             self,
@@ -2793,19 +2792,19 @@ class FrameworkPhase(ProposalBench):
         if state.baseline_config_path:
             params["config_path"] = state.baseline_config_path
         inject_stack_base_params(params, state, anchor=True)
-        last_bl = state.last_baseline or {}
-        if isinstance(last_bl, dict):
-            bs = str(last_bl.get("benchmark_script") or "").strip()
-            if bs:
-                params["benchmark_script"] = bs
+        benchmark_script = state.accepted_baseline_script()
+        if benchmark_script:
+            params["benchmark_script"] = benchmark_script
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("explore")
         etask, was_existing = await self.tasks.create_or_return_existing(
-            kind="explore",
-            params=params,
-            idempotency_key=self._bench_key(rows, operator_priority=operator_priority),
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="explore",
+                params=params,
+                idempotency_key=self._bench_key(rows, operator_priority=operator_priority),
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
+            )
         )
         if was_existing:
             return False

@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import logging as _logging
+import math
 import os
 import shlex
 import subprocess
@@ -25,6 +26,7 @@ from . import geak_rebench as _geak_rebench, machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec, rebench_round_sec
 from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.common.io import WriteOptions, atomic_write_json
+from hyperloom.common.jsonio import read_json
 from hyperloom.common.launch_log_evidence import recipe_server_launch
 from hyperloom.common.perf_metric import axis_of, graded_axes_of
 from hyperloom.orchestrator.lever import (
@@ -41,6 +43,17 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     record_geak_attempts,
     reject_geak_attempts,
 )
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
+    FusionRun,
+    GeakDelegation,
+    GeakProduct,
+    GeakRebenchAttempt,
+    GemmTuningRun,
+    IntegrateVerdict,
+    KernelExit,
+    KernelReprofile,
+    LaneRunFields,
+)
 from ..actions.stop_attribution import stopped_by_the_run_class
 from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_GEMM_TUNING,
@@ -49,7 +62,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
 )
 from ..state.analysis_failures import analysis_skip_reason, remembered_trace_failure
 from ..state.shared_state import resolve_graded_comparison
-from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound
+from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound, TaskSpec
 from ..bus.message_bus import Message
 from ..kernel.geak_config import (
     _geak_accepted_kernel_specs,
@@ -85,6 +98,9 @@ _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = 3.0
 
 _GEAK_RUNNER_MODULE = "hyperloom.orchestrator.kernel.geak_runner"
 
+# What the phase, not the Controller subprocess, decides about a rewrite-controller attempt.
+_CONTROLLER_ATTEMPT_FACTS = ("macro_cycle", "handoff_dir", "budget_minutes", "hard_timeout_sec")
+
 # How long the GEAK handoff waits for the servers it stopped to release their VRAM.
 _GEAK_GPU_FREE_WAIT_SEC: float = 120.0
 
@@ -114,6 +130,196 @@ def _as_int(value: object) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _record_gemm_e2e_envelope(
+    result: dict[str, Any],
+    stacked_envs: dict[str, str],
+    *,
+    kept: list[dict[str, Any]],
+    reverted: list[dict[str, Any]],
+    faults: list[dict[str, Any]],
+) -> None:
+    # Orchestration must never see the raw combined recommended_env and issue a bundled integrate, so the
+    # E2E-validated envs replace it and the tuners' own record moves to the ``_raw`` keys.
+    result["e2e_results"] = {"kept": kept, "reverted": reverted, "faults": faults}
+    result["recommended_env_raw"] = dict(result.get("recommended_env") or {})
+    result["extra_envs_raw"] = dict(result.get("extra_envs") or {})
+    result["recommended_env"] = dict(stacked_envs)
+    result["extra_envs"] = dict(stacked_envs)
+
+
+def _bench_envs(bench: Mapping[str, Any]) -> dict[str, Any]:
+    envs = bench.get("envs")
+    return dict(envs) if isinstance(envs, dict) else {}
+
+
+def _first_text(mapping: Mapping[str, Any], *keys: str, default: str = "") -> str:
+    # The first of ``keys`` whose value renders as non-empty text.
+    for key in keys:
+        text = str(mapping.get(key) or "")
+        if text:
+            return text
+    return default
+
+
+def _read_dispatch_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    import csv
+
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        return fieldnames, [dict(row) for row in reader]
+
+
+def _dispatch_key(row: Mapping[str, str], key_cols: list[str]) -> tuple[str, ...]:
+    return tuple(row.get(column, "") for column in key_cols)
+
+
+def _merged_dispatch_columns(column_sets: list[list[str]]) -> list[str]:
+    all_columns = list(column_sets[0])
+    for columns in column_sets[1:]:
+        for column in columns:
+            if column not in all_columns:
+                insert_at = all_columns.index("tflops") if "tflops" in all_columns else len(all_columns)
+                all_columns.insert(insert_at, column)
+    return all_columns
+
+
+def _normalized_dispatch_rows(rows: list[dict[str, str]], all_columns: list[str]) -> list[dict[str, str]]:
+    fill = {"xbf16": "0", "run_1stage": "0", "ksplit": "0"}
+    return [
+        {column: fill.get(column, "0") if row.get(column) is None else row[column] for column in all_columns}
+        for row in rows
+    ]
+
+
+def _dispatch_key_columns(all_columns: list[str], keys_from: Path | None, untuned_stem: str) -> list[str]:
+    key_cols: list[str] = []
+    untuned_path = keys_from / f"{untuned_stem}.csv" if keys_from is not None else None
+    if untuned_path is not None and untuned_path.is_file():
+        key_cols = [column for column in _read_dispatch_csv(untuned_path)[0] if column in all_columns]
+    if not key_cols:
+        key_cols = [column for column in ("M", "N", "K") if column in all_columns]
+    for column in ("gfx", "cu_num", "_tag"):
+        if column in all_columns and column not in key_cols:
+            key_cols.append(column)
+    return key_cols
+
+
+def _fastest_dispatch_row(row: Mapping[str, str]) -> float:
+    try:
+        return float(row.get("us", ""))
+    except (TypeError, ValueError):
+        return math.inf
+
+
+def _deduplicate_dispatch_rows(
+    rows: list[dict[str, str]], key_cols: list[str], all_columns: list[str], label: str, env_var: str
+) -> list[dict[str, str]] | None:
+    keys = [_dispatch_key(row, key_cols) for row in rows]
+    if len(set(keys)) == len(keys):
+        return rows
+    if "us" not in all_columns:
+        log.warning(
+            "gemm E2E: %s has duplicate dispatch keys for %s but no 'us' column to select the fastest row",
+            label,
+            env_var,
+        )
+        return None
+    # Keep the fastest (smallest us) row per dispatch key; ties keep the first row seen (stable), NaN-like
+    # values sort last.
+    best: dict[tuple[str, ...], dict[str, str]] = {}
+    for key, row in zip(keys, rows):
+        if key not in best or _fastest_dispatch_row(row) < _fastest_dispatch_row(best[key]):
+            best[key] = row
+    log.info("gemm E2E: removed %d duplicate %s row(s) for %s", len(rows) - len(best), label, env_var)
+    return list(best.values())
+
+
+def _per_tuner_budget_minutes() -> int:
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
+
+    return max(1, int((resolve_benchmark_timeouts()[1] + 59) // 60))
+
+
+def _integrate_tput_and_gain(verdict: Mapping[str, Any]) -> tuple[float, float]:
+    measurement = verdict.get("bench_result") or verdict
+    tput = float(measurement.get("output_throughput", verdict.get("new_tput")) or 0.0)
+    return tput, float(verdict.get("gain_pct") or 0.0)
+
+
+def _candidate_envs(raw: object) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): str(value) for key, value in raw.items() if str(key).strip() and str(value).strip()}
+
+
+def _legacy_tuner_candidates(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for row in result.get("tuners_run") or []:
+        if not isinstance(row, dict):
+            continue
+        # partial_output is a real artifact: the tuner wrote fewer rows than shapes it was given (the grouped
+        # batch budget ran out), but the rows it did write are deployable.
+        if row.get("status") not in ("ok", "partial_output"):
+            continue
+        # improved_shapes can never exceed 0 for tuners with no comparable baseline -- TunableOp never times the
+        # untuned dispatch, the candidate-CSV fallback has no per-shape Pre/Post table, and a hipblaslt-only bf16
+        # run has no torch candidate to measure against.
+        if (
+            not row.get("candidate")
+            and int(row.get("improved_shapes") or 0) <= 0
+            and int(row.get("unverified_shapes") or 0) <= 0
+        ):
+            continue
+        env_var = _first_text(row, "env_var").strip()
+        env_value = _first_text(row, "env_value").strip()
+        envs = _candidate_envs(row.get("env_vars"))
+        if env_var and env_value:
+            envs.setdefault(env_var, env_value)
+        if envs:
+            candidates.append(
+                {
+                    "tuner": row.get("tuner") or "unknown",
+                    "env_var": env_var,
+                    "env_value": env_value,
+                    "envs": envs,
+                    "micro_speedup": _as_float(row.get("best_micro_speedup"), 1.0),
+                }
+            )
+    return candidates
+
+
+def _a8w8_blockscale_candidate(result: Mapping[str, Any]) -> dict[str, Any]:
+    tuned_file = _first_text(result, "tuned_file").strip()
+    micro_speedup = _as_float(result.get("best_speedup"), 0.0)
+    keeps = _first_text(result, "decision").strip().upper() == "KEEP" and _first_text(
+        result, "status"
+    ).strip().lower() in {"ok", "complete", "completed", "succeeded", "success"}
+    if not (tuned_file and micro_speedup > 1.0 and keeps):
+        return {}
+    env_var = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"
+    return {
+        "tuner": "a8w8_blockscale_tuned_gemm",
+        "env_var": env_var,
+        "env_value": tuned_file,
+        "envs": {env_var: tuned_file},
+        "micro_speedup": micro_speedup,
+    }
+
+
+def _observed_identity_digest(declared: str, flags: str, server_identity: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        {
+            "declared_launch_identity": declared,
+            "observed_server_launch_flags": flags,
+            "observed_server_identity": server_identity,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 
 def _withheld_targets(result: object) -> int:
@@ -208,16 +414,18 @@ def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cyc
 
     record_integrate_verdict(
         macro_cycle=macro_cycle,
-        integration_id=f"geak-{kernel_id}",
-        kernel_id=kernel_id,
-        decision=str(entry.get("last_decision") or ""),
-        status=str(entry.get("last_status") or ""),
-        attempt_count=entry.get("attempt_count"),
-        gain_pct=entry.get("best_gain_pct"),
-        basis=str(entry.get("basis") or ""),
-        alignment_status=str(entry.get("alignment_status") or ""),
-        gain_attributed=bool(entry.get("validated", True)),
-        settled_at=str(entry.get("updated_at") or ""),
+        verdict=IntegrateVerdict(
+            integration_id=f"geak-{kernel_id}",
+            kernel_id=kernel_id,
+            decision=str(entry.get("last_decision") or ""),
+            status=str(entry.get("last_status") or ""),
+            attempt_count=entry.get("attempt_count"),
+            gain_pct=entry.get("best_gain_pct"),
+            basis=str(entry.get("basis") or ""),
+            alignment_status=str(entry.get("alignment_status") or ""),
+            gain_attributed=bool(entry.get("validated", True)),
+            settled_at=str(entry.get("updated_at") or ""),
+        ),
     )
 
 
@@ -243,11 +451,46 @@ def geak_absent_backends(eval_dir: str) -> dict[str, str]:
     }
 
 
+class EnvSpecUnserializable(Exception):
+    """The accepted launch configuration could not be serialized into an env spec.
+
+    Only this failure is an ``invalid_env_spec``. Everything else the GEAK handoff
+    raises while it is built -- a native-AgentX proposal refusing an unverified Magpie
+    launch, a malformed env var, a state field that is not a number -- is a different
+    fault and propagates to the caller rather than being reported as one.
+    """
+
+
 @dataclass(frozen=True)
 class KernelExitFacts:
     """What the phase machine's KERNEL exit reads from the task queue."""
 
     agent_in_flight: bool
+
+
+@dataclass(frozen=True)
+class GeakRunnerFacts:
+    """How the GEAK runner process ran, as the timeline and the phase evidence report it.
+
+    These are properties of the dispatch, not of the product GEAK shipped, so
+    they travel beside ``result.json``'s content and never merge into it: the
+    persisted ``geak_result`` has to stay byte-comparable with the file
+    :func:`geak_candidate_matches` reads back on the next KERNEL entry.
+    """
+
+    started_at: str = ""
+    duration_sec: float | None = None
+    runner_timeout_sec: int | None = None
+    kill_timeout_sec: int | None = None
+
+
+@dataclass(frozen=True)
+class GeakRunnerOutcome:
+    """What one GEAK runner dispatch leaves for the phase to settle."""
+
+    result: dict[str, Any] | None = None
+    facts: GeakRunnerFacts = GeakRunnerFacts()
+    recovered_from: str = ""
 
 
 class KernelPhase(CoordinatorCollaborator):
@@ -357,6 +600,39 @@ class KernelPhase(CoordinatorCollaborator):
         identity = self.shared_state.profile_workload_identity
         return identity(recorded) != identity(self.shared_state.profile_workload_context())
 
+    def _reprofile_idempotency_reason(self, profile_signature: Any, target_tput: float) -> str:
+        identity = json.dumps(
+            {
+                "config": profile_signature,
+                "target_tput": round(float(target_tput), 6),
+                "workload": self.shared_state.profile_workload_context(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        stack_len = int(self.shared_state.cumulative_gain_validated_stack_len or 0)
+        return f"kernel_entry_g{stack_len}_{hashlib.sha256(identity).hexdigest()[:12]}"
+
+    def _adopt_reprofile_snapshot(self, *, before: float, snapshot_id_before: int, snapshots_before: int) -> bool:
+        state = self.shared_state
+        after = self._last_measured_roofline_tput()
+        # A reprofile that reproduces the same tput under the same snapshot id still landed: the third signal is
+        # that the run appended a snapshot at all, and without it a same-tput reprofile never adopts its workload.
+        landed = (
+            after != before
+            or int(state.roofline_snapshot_id or 0) != snapshot_id_before
+            or len(state.roofline_snapshots or []) != snapshots_before
+        )
+        if after <= 0 or not landed:
+            log.warning("kernel-entry reprofile produced no new snapshot; the phase targets the existing trace")
+            return landed
+        state.last_roofline_tput = after
+        # Record the workload (incl. serving_config) that this trace reflects; _profile_config_changed derives the
+        # config signature from it, so last_profile_args stays the plain-args field it is everywhere else.
+        state.last_profile_workload = state.profile_workload_context()
+        state.save(self.session_dir)
+        return landed
+
     async def _maybe_reprofile_for_kernel(self) -> None:
         """Reprofile inline when projected tput diverges from the last measured trace, so the phase targets the live bottleneck."""
         before = self._last_measured_roofline_tput()
@@ -366,13 +642,13 @@ class KernelPhase(CoordinatorCollaborator):
         workload_changed = self._profile_workload_changed()
         recorder = self.timeline()
 
-        def _note_reprofile(**fields: Any) -> None:
+        def _note_reprofile(reprofile: KernelReprofile) -> None:
             if recorder is None:
                 return
-            recorder.record_reprofile(**fields)
+            recorder.record_reprofile(reprofile)
 
         if cur <= 0:
-            _note_reprofile(ran=False, skipped_reason="no_projected_tput")
+            _note_reprofile(KernelReprofile(ran=False, skipped_reason="no_projected_tput"))
             return
         # With a measured trace, reprofile only on a material gain or a change in what is being measured.
         if (
@@ -381,25 +657,12 @@ class KernelPhase(CoordinatorCollaborator):
             and not config_changed
             and not workload_changed
         ):
-            _note_reprofile(ran=False, skipped_reason="within_tolerance")
+            _note_reprofile(KernelReprofile(ran=False, skipped_reason="within_tolerance"))
             return
         trigger = "config_changed" if config_changed else ("workload_changed" if workload_changed else "gain")
-        if config_changed or workload_changed:
-            log.info("kernel-entry reprofile: active runtime context changed")
-        snapshots_before = len(self.shared_state.roofline_snapshots or [])
         snapshot_id_before = int(self.shared_state.roofline_snapshot_id or 0)
-        stack_len = int(self.shared_state.cumulative_gain_validated_stack_len or 0)
-        profile_identity = json.dumps(
-            {
-                "config": profile_signature,
-                "target_tput": round(float(cur), 6),
-                "workload": self.shared_state.profile_workload_context(),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        profile_fingerprint = hashlib.sha256(profile_identity.encode("utf-8")).hexdigest()[:12]
-        idempotency_reason = f"kernel_entry_g{stack_len}_{profile_fingerprint}"
+        snapshots_before = len(self.shared_state.roofline_snapshots or [])
+        idempotency_reason = self._reprofile_idempotency_reason(profile_signature, cur)
         task_kind = self._coord.phase_prelude.internal_analysis_kind()
         params = self._coord.phase_prelude.internal_analysis_params(
             reason=idempotency_reason, inline_event=recorder.event_id if recorder is not None else ""
@@ -407,12 +670,14 @@ class KernelPhase(CoordinatorCollaborator):
         denied = self._coord.dispatcher.time_budget_denial_for_action(task_kind)
         if params is None or denied is not None:
             _note_reprofile(
-                ran=False,
-                task_kind=task_kind,
-                trigger=trigger,
-                skipped_reason=denied.rule if denied else analysis_skip_reason(self.shared_state),
-                idempotency_reason=idempotency_reason,
-                snapshot_id_before=snapshot_id_before,
+                KernelReprofile(
+                    ran=False,
+                    task_kind=task_kind,
+                    trigger=trigger,
+                    skipped_reason=denied.rule if denied else analysis_skip_reason(self.shared_state),
+                    idempotency_reason=idempotency_reason,
+                    snapshot_id_before=snapshot_id_before,
+                )
             )
             return
         # profile_lane conflicts with the benchmark_lane the kernel_agent task holds, so the reprofile is a step of
@@ -423,38 +688,30 @@ class KernelPhase(CoordinatorCollaborator):
         except Exception:
             log.exception("kernel-entry reprofile failed; the phase proceeds on the existing snapshot")
             _note_reprofile(
+                KernelReprofile(
+                    ran=True,
+                    task_kind=task_kind,
+                    trigger=trigger,
+                    skipped_reason="dispatch_failed",
+                    idempotency_reason=idempotency_reason,
+                    snapshot_id_before=snapshot_id_before,
+                )
+            )
+            return
+        snapshot_landed = self._adopt_reprofile_snapshot(
+            before=before, snapshot_id_before=snapshot_id_before, snapshots_before=snapshots_before
+        )
+        _note_reprofile(
+            KernelReprofile(
                 ran=True,
                 task_kind=task_kind,
                 trigger=trigger,
-                skipped_reason="dispatch_failed",
                 idempotency_reason=idempotency_reason,
+                snapshot_landed=snapshot_landed,
                 snapshot_id_before=snapshot_id_before,
+                snapshot_id_after=int(self.shared_state.roofline_snapshot_id or 0),
+                task_id=str(getattr(reprofile_task, "task_id", "") or ""),
             )
-            return
-        # Advance the anchor only when a new snapshot actually landed.
-        after = self._last_measured_roofline_tput()
-        snapshots_after = len(self.shared_state.roofline_snapshots or [])
-        snapshot_id_after = int(self.shared_state.roofline_snapshot_id or 0)
-        snapshot_landed = (
-            after != before or snapshots_after != snapshots_before or snapshot_id_after != snapshot_id_before
-        )
-        if after > 0 and snapshot_landed:
-            self.shared_state.last_roofline_tput = after
-            # Record the workload (incl. serving_config) that this trace reflects; _profile_config_changed derives the
-            # config signature from it, so last_profile_args stays the plain-args field it is everywhere else.
-            self.shared_state.last_profile_workload = self.shared_state.profile_workload_context()
-            self.shared_state.save(self.session_dir)
-        else:
-            log.warning("kernel-entry reprofile produced no new snapshot; the phase targets the existing trace")
-        _note_reprofile(
-            ran=True,
-            task_kind=task_kind,
-            trigger=trigger,
-            idempotency_reason=idempotency_reason,
-            snapshot_landed=bool(snapshot_landed),
-            snapshot_id_before=snapshot_id_before,
-            snapshot_id_after=snapshot_id_after,
-            task_id=str(getattr(reprofile_task, "task_id", "") or ""),
         )
         if snapshot_landed:
             self._record_kernel_discovered_from_cache(provenance="reprofile_snapshot")
@@ -584,119 +841,68 @@ class KernelPhase(CoordinatorCollaborator):
         axis the KEEP verdict was graded on.
         """
         recorder = self.timeline()
-        if recorder is None or not isinstance(result, dict):
+        if recorder is None:
             return
-        tuners = result.get("tuners_run")
-        tuner_rows = [row for row in tuners if isinstance(row, dict)] if isinstance(tuners, list) else []
-        shape_capture = result.get("shape_capture")
-        shape_capture = shape_capture if isinstance(shape_capture, dict) else {}
-        workspace = str(result.get("workspace") or "")
-        base_run_id = str(
-            result.get("task_id")
-            or (Path(workspace).name if workspace else "")
-            or f"gemm-c{int(self.shared_state.macro_cycle or 0)}"
-        )
-        tuned_file = str(result.get("tuned_file") or result.get("config_path") or "")
-        # _validate_gemm_tuning_e2e writes the validated gain to e2e_gain_pct, not gain_pct -- no
-        # producer on this path ever sets a bare "gain_pct" key.
-        campaign_gain_pct = result.get("e2e_gain_pct")
-        campaign_graded_objective = str(result.get("graded_objective") or "")
-        campaign_micro_decision = str(result.get("micro_decision") or result.get("decision") or "")
-        campaign_integrate_ref = str(result.get("integration_id") or "")
         try:
-            if tuner_rows:
-                for row in tuner_rows:
-                    tuner_name = str(row.get("tuner") or "")
-                    artifact = str(row.get("artifact") or row.get("env_value") or "")
-                    # The campaign's e2e-validated gain names the axis the KEEP was graded on; it
-                    # belongs on the tuner whose artifact was actually applied, not on every row
-                    # this cycle produced.
-                    is_applied_tuner = bool(tuned_file) and artifact == tuned_file
-                    self._record_one_gemm_tuner_run(
-                        recorder,
-                        run_id=f"{base_run_id}-{tuner_name}" if tuner_name else base_run_id,
-                        status=str(row.get("status") or result.get("status") or "unknown"),
-                        shapes_total=row.get(
-                            "total_shapes", result.get("shapes_total", shape_capture.get("shape_count"))
-                        ),
-                        shapes_tuned=row.get("improved_shapes"),
-                        config_path=artifact,
-                        gain_pct=campaign_gain_pct if is_applied_tuner else None,
-                        graded_objective=campaign_graded_objective if is_applied_tuner else "",
-                        tuner=tuner_name,
-                        micro_decision=campaign_micro_decision,
-                        integrate_ref=campaign_integrate_ref,
-                        started_at=str(result.get("started_at") or ""),
-                        ended_at=str(result.get("ended_at") or result.get("ts") or ""),
-                        duration_sec=row.get("elapsed_s", result.get("duration_sec")),
-                        error_class=str(row.get("error_class") or ""),
-                        failure_reason=str(row.get("error") or row.get("skip_reason") or row.get("error_class") or ""),
-                    )
-            else:
-                self._record_one_gemm_tuner_run(
-                    recorder,
-                    run_id=base_run_id,
-                    status=str(result.get("status") or "unknown"),
-                    shapes_total=result.get("shapes_total", shape_capture.get("shape_count")),
-                    shapes_tuned=result.get("shapes_tuned"),
-                    config_path=tuned_file,
-                    gain_pct=campaign_gain_pct,
-                    graded_objective=campaign_graded_objective,
-                    tuner=str(result.get("tuner") or ""),
-                    micro_decision=campaign_micro_decision,
-                    integrate_ref=campaign_integrate_ref,
-                    started_at=str(result.get("started_at") or ""),
-                    ended_at=str(result.get("ended_at") or result.get("ts") or ""),
-                    duration_sec=result.get("duration_sec"),
-                    error_class=str(result.get("error_class") or ""),
-                    failure_reason=str(
-                        result.get("error") or result.get("skip_reason") or result.get("error_class") or ""
-                    ),
-                )
-            backend = str(result.get("backend") or result.get("engine") or "").lower()
-            if backend:
-                tool_versions.record_tool_version(self.session_dir, tool=backend)
+            self._record_gemm_tuner_rows(recorder, result)
         except Exception:
             log.debug("kernel timeline: GEMM tuning record failed", exc_info=True)
 
-    def _record_one_gemm_tuner_run(
-        self,
-        recorder: Any,
-        *,
-        run_id: str,
-        status: str,
-        shapes_total: Any,
-        shapes_tuned: Any,
-        config_path: str,
-        gain_pct: Any,
-        graded_objective: str,
-        tuner: str,
-        micro_decision: str,
-        integrate_ref: str,
-        started_at: str,
-        ended_at: str,
-        duration_sec: Any,
-        error_class: str,
-        failure_reason: str,
-    ) -> None:
-        """Write one ``record_gemm_tuning_run`` row for a single tuner's outcome."""
-        recorder.record_gemm_tuning_run(
-            run_id=run_id,
-            status=status,
-            shapes_total=shapes_total,
-            shapes_tuned=shapes_tuned,
-            config_path=config_path,
-            gain_pct=gain_pct,
-            graded_objective=graded_objective,
-            tuner=tuner,
-            micro_decision=micro_decision,
-            integrate_ref=integrate_ref,
-            started_at=started_at,
-            ended_at=ended_at,
-            duration_sec=duration_sec,
-            error_class=error_class,
-            failure_reason=failure_reason,
+    def _record_gemm_tuner_rows(self, recorder: Any, result: dict[str, Any]) -> None:
+        """Write one timeline row per tuner the campaign ran, and the campaign's own tool version."""
+        tuner_rows = [row for row in result.get("tuners_run") or [] if isinstance(row, dict)]
+        shape_capture = result.get("shape_capture") or {}
+        base_run_id = (
+            _first_text(result, "task_id")
+            or Path(_first_text(result, "workspace")).name
+            or f"gemm-c{int(self.shared_state.macro_cycle or 0)}"
         )
+        tuned_file = _first_text(result, "tuned_file", "config_path")
+        # Without per-tuner rows the campaign itself is the one row. It names these facts the way the campaign
+        # envelope does, so it enters the loop under the per-tuner names and every field keeps its own source.
+        campaign_row = {
+            "tuner": result.get("tuner"),
+            "total_shapes": result.get("shapes_total", shape_capture.get("shape_count")),
+            "improved_shapes": result.get("shapes_tuned"),
+            "artifact": tuned_file,
+            "elapsed_s": result.get("duration_sec"),
+            "error": result.get("error"),
+            "skip_reason": result.get("skip_reason"),
+            "error_class": result.get("error_class"),
+        }
+        for row in tuner_rows or [campaign_row]:
+            tuner_name = _first_text(row, "tuner")
+            # The campaign's e2e-validated gain names the axis the KEEP was graded on; it
+            # belongs on the tuner whose artifact was actually applied, not on every row
+            # this cycle produced.
+            artifact = _first_text(row, "artifact", "env_value")
+            applied = not tuner_rows or artifact == tuned_file != ""
+            recorder.record_gemm_tuning_run(
+                GemmTuningRun(
+                    lane=LaneRunFields(
+                        run_id=f"{base_run_id}-{tuner_name}" if tuner_rows and tuner_name else base_run_id,
+                        status=_first_text(row, "status", default=_first_text(result, "status", default="unknown")),
+                        micro_decision=_first_text(result, "micro_decision", "decision"),
+                        integrate_ref=_first_text(result, "integration_id"),
+                        started_at=_first_text(result, "started_at"),
+                        ended_at=_first_text(result, "ended_at", "ts"),
+                        duration_sec=row.get("elapsed_s", result.get("duration_sec")),
+                        error_class=_first_text(row, "error_class"),
+                        failure_reason=_first_text(row, "error", "skip_reason", "error_class"),
+                    ),
+                    shapes_total=row.get("total_shapes", result.get("shapes_total", shape_capture.get("shape_count"))),
+                    shapes_tuned=row.get("improved_shapes"),
+                    config_path=artifact,
+                    # _validate_gemm_tuning_e2e writes the validated gain to e2e_gain_pct, not
+                    # gain_pct -- no producer on this path sets a bare "gain_pct" key.
+                    gain_pct=result.get("e2e_gain_pct") if applied else None,
+                    graded_objective=_first_text(result, "graded_objective") if applied else "",
+                    tuner=tuner_name,
+                )
+            )
+        backend = _first_text(result, "backend", "engine").lower()
+        if backend:
+            tool_versions.record_tool_version(self.session_dir, tool=backend)
 
     def _record_fusion_timeline(self, result: dict[str, Any]) -> None:
         """Record a settled fusion campaign in the Forge lane."""
@@ -704,20 +910,26 @@ class KernelPhase(CoordinatorCollaborator):
         if recorder is None or not isinstance(result, dict):
             return
         recorder.record_fusion_run(
-            run_id=str(result.get("fusion_run_id") or ""),
-            status=str(result.get("status") or "unknown"),
-            pattern=str(result.get("pattern") or result.get("fusion_pattern") or ""),
-            target_module=str(result.get("target_module") or result.get("kernel_name") or ""),
-            applied=bool(result.get("kept")),
-            gain_pct=result.get("gain_pct"),
-            patch_path=str(result.get("patch_path") or result.get("source_patch") or ""),
-            micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
-            integrate_ref=str(result.get("integration_id") or ""),
-            started_at=str(result.get("started_at") or ""),
-            ended_at=str(result.get("ended_at") or result.get("ts") or ""),
-            duration_sec=result.get("duration_sec"),
-            error_class=str(result.get("error_class") or ""),
-            failure_reason=str(result.get("error") or result.get("skip_reason") or result.get("error_class") or ""),
+            FusionRun(
+                lane=LaneRunFields(
+                    run_id=str(result.get("fusion_run_id") or ""),
+                    status=str(result.get("status") or "unknown"),
+                    micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
+                    integrate_ref=str(result.get("integration_id") or ""),
+                    started_at=str(result.get("started_at") or ""),
+                    ended_at=str(result.get("ended_at") or result.get("ts") or ""),
+                    duration_sec=result.get("duration_sec"),
+                    error_class=str(result.get("error_class") or ""),
+                    failure_reason=str(
+                        result.get("error") or result.get("skip_reason") or result.get("error_class") or ""
+                    ),
+                ),
+                pattern=str(result.get("pattern") or result.get("fusion_pattern") or ""),
+                target_module=str(result.get("target_module") or result.get("kernel_name") or ""),
+                applied=bool(result.get("kept")),
+                gain_pct=result.get("gain_pct"),
+                patch_path=str(result.get("patch_path") or result.get("source_patch") or ""),
+            )
         )
         tool_versions.record_tool_version(self.session_dir, tool="forge")
         agent_backend = str(result.get("agent_backend") or "").lower()
@@ -741,12 +953,14 @@ class KernelPhase(CoordinatorCollaborator):
             stack_added = [item for item in stack_after if item not in stack_before]
             stack_removed = [item for item in stack_before if item not in stack_after]
         recorder.finish(
-            exit_reason=exit_reason,
-            tput_after=state.current_best.get("tput"),
-            cumulative_gain_validated_out=state.cumulative_gain_validated or None,
-            stack_depth_out=state.cumulative_gain_validated_stack_len or None,
-            stack_added=stack_added,
-            stack_removed=stack_removed,
+            KernelExit(
+                exit_reason=exit_reason,
+                tput_after=state.current_best.get("tput"),
+                cumulative_gain_validated_out=state.cumulative_gain_validated or None,
+                stack_depth_out=state.cumulative_gain_validated_stack_len or None,
+                stack_added=stack_added,
+                stack_removed=stack_removed,
+            )
         )
 
     async def on_enter_kernel(self, tr: "Transition") -> None:
@@ -772,12 +986,14 @@ class KernelPhase(CoordinatorCollaborator):
         attempt = 0
         while True:
             task, was_existing = await self.tasks.create_or_return_existing(
-                kind="kernel_agent",
-                params={"from_phase": str(tr.from_phase or "")},
-                idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind="kernel_agent",
+                    params={"from_phase": str(tr.from_phase or "")},
+                    idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
+                    requires_lanes=lanes,
+                    lease_ttl_sec=ttl,
+                    dispatch_class="coordinator",
+                )
             )
             if not (was_existing and task.state in TERMINAL_STATES):
                 break
@@ -913,34 +1129,13 @@ class KernelPhase(CoordinatorCollaborator):
         return {"status": "ok", "route": "forge_gemm"}
 
     @staticmethod
-    def _read_recipe_bench_envs(recipe_path: str) -> dict[str, Any]:
-        """Read recipe ``benchmark.envs``; return ``{}`` if unavailable."""
-        try:
-            import yaml
-
-            if recipe_path and Path(recipe_path).is_file():
-                cfg = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8")) or {}
-                envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
-                return dict(envs) if isinstance(envs, dict) else {}
-        except Exception:
-            log.warning("geak handoff: could not read recipe %r", recipe_path, exc_info=True)
-        return {}
-
-    @classmethod
-    def _resolve_bench_protocol(cls, recipe_path: str, *, envs: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _resolve_bench_protocol(envs: Mapping[str, Any]) -> dict[str, Any]:
         """Extract Hyperloom's bench measurement protocol for the GEAK handoff.
 
-        Reads the materialized baseline recipe's ``benchmark.envs`` (falling back
-        to the process env) and returns only the keys that resolve, so absent
-        values leave GEAK on its standalone defaults. Never raises.
-
-        Args:
-            recipe_path: Path to the baseline recipe YAML.
-            envs: An already-parsed ``benchmark.envs`` for that path. Pass it
-                when the caller needs the envs too, so the YAML is read once and
-                both consumers see the same snapshot.
+        Reads an already-parsed ``benchmark.envs`` (falling back to the process
+        env) and returns only the keys that resolve, so absent values leave GEAK
+        on its standalone defaults. Never raises.
         """
-        envs = cls._read_recipe_bench_envs(recipe_path) if envs is None else envs
 
         def _pick(key: str, cast: Callable[[str], Any]) -> Any:
             raw = envs.get(key)
@@ -990,16 +1185,6 @@ class KernelPhase(CoordinatorCollaborator):
         except Exception:
             log.warning("recipe: could not read %r", recipe_path, exc_info=True)
             return {}
-
-    @staticmethod
-    def _resolve_workload_spec(bench: Mapping[str, Any]) -> dict[str, Any]:
-        """Read the orchestrator's self-describing workload off a parsed recipe.
-
-        Only AgentX materializations carry ``benchmark.workload_spec``; every other
-        recipe omits it so GEAK keeps today's synthetic path unchanged.
-        """
-        spec = bench.get("workload_spec")
-        return dict(spec) if isinstance(spec, dict) else {}
 
     def _observed_replay_shape(self, target_tput: float) -> dict[str, Any]:
         """Measure the trace replay's real sequence shape from OUR OWN baseline.
@@ -1227,7 +1412,7 @@ class KernelPhase(CoordinatorCollaborator):
         ``GEAK_FLUSH_GRACE_S``, inside the kill cap. The launch marks the run, so whatever it left running is
         reaped when it returns, however it detached.
         """
-        from ..actions.executors._subprocess_kill import REAP_MARK_ENV, run_with_session_kill
+        from ..actions.executors._subprocess_kill import REAP_MARK_ENV, RoundWatch, run_with_session_kill
 
         runner_timeout, kill_timeout, budget_known = timeouts
         cmd = [
@@ -1261,71 +1446,25 @@ class KernelPhase(CoordinatorCollaborator):
         from hyperloom.common.llm_attribution import inject_env
 
         inject_env(runner_env, component="geak", operation="optimize_kernel")
-        return await asyncio.to_thread(run_with_session_kill, cmd, env=runner_env, timeout=kill_timeout)
+        return await asyncio.to_thread(
+            run_with_session_kill, cmd, env=runner_env, watch=RoundWatch(timeout=kill_timeout)
+        )
 
-    async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
-        """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run)."""
+    def _accepted_launch_spec(self, *, agentx: bool) -> tuple[dict[str, Any], Mapping[str, Any]]:
         state = self.shared_state
-        agentx = self._session_is_agentx()
-
-        def _finish_skip(
-            result: dict[str, Any],
-            *,
-            started_at: str = "",
-            duration_sec: float | None = None,
-            runner_timeout_s: int | None = None,
-            kill_timeout_s: int | None = None,
-            record_delegation: bool = True,
-        ) -> None:
-            """Record a (failed/skipped) GEAK outcome + wind down to SWEEP.
-
-            A settled verdict is left standing: a later failure records
-            itself without retiring the candidate that already adjudicated.
-            """
-            if record_delegation:
-                self._record_geak_delegation_timeline(
-                    result,
-                    handoff=handoff,
-                    started_at=started_at,
-                    duration_sec=duration_sec,
-                    runner_timeout_sec=runner_timeout_s,
-                    kill_timeout_sec=kill_timeout_s,
-                )
-            prev = state.geak_result if isinstance(state.geak_result, dict) else {}
-            if not _geak_rebench.geak_verdict_is_terminal(prev):
-                state.geak_result = result
-            self._coord.phase_machine.record_phase_entry_evidence(
-                geak={
-                    "status": result.get("status"),
-                    "error_class": result.get("error_class"),
-                    "error": (str(result.get("error") or "")[:500] or None),
-                }
-            )
-            state.save(self.session_dir)
-
         cb = state.current_best
         try:
             env_spec = self._coord.writeback.build_env_spec()
         except (OSError, TypeError, ValueError) as exc:
-            log.exception("geak: cannot serialize the accepted launch configuration")
-            recorder = self.timeline()
-            if recorder is not None:
-                recorder.finish_failed(stage="geak_handoff", error_class="invalid_env_spec", message=str(exc))
-            _finish_skip(
-                {"status": "error", "error_class": "invalid_env_spec", "error": str(exc)}, record_delegation=False
-            )
-            return
-        spec_config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
-        accepted_flags = str(spec_config.get("extra_server_args", cb.get("extra_server_args")) or "")
-        extra_envs = spec_config.get("extra_envs", cb.get("extra_envs")) or {}
-        accepted_env = shlex.join(f"{k}={v}" for k, v in dict(extra_envs).items())
+            raise EnvSpecUnserializable(str(exc)) from exc
         state_measurement = state.current_best_measurement or None
         measurement = (
             state_measurement
             if isinstance(state_measurement, Mapping) and state_measurement
             else (cb.get("measurement") if isinstance(cb.get("measurement"), Mapping) else {})
         )
-        if agentx and not str(spec_config.get("server_launch_flags") or "").strip():
+        config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
+        if agentx and not str(config.get("server_launch_flags") or "").strip():
             evidence = measurement.get("launch_evidence")
             server_log = str(evidence.get("actual_server_log_path") or "") if isinstance(evidence, Mapping) else ""
             recipe_launch = recipe_server_launch(server_log)
@@ -1335,128 +1474,151 @@ class KernelPhase(CoordinatorCollaborator):
                     server_launch_flags=recipe_launch.flags,
                     server_launch_envs=recipe_launch.env,
                 )
-                spec_config = env_spec["config"]
-        expected_identity = str(env_spec.get("launch_identity") or "")
-        measured_identity = str(measurement.get("declared_launch_identity") or measurement.get("launch_identity") or "")
-        identity_matches = bool(expected_identity and expected_identity == measured_identity)
-        launch_evidence = measurement.get("launch_evidence")
-        launch_evidence = dict(launch_evidence) if isinstance(launch_evidence, Mapping) else {}
-        observed_flags = str(
-            measurement.get("resolved_server_launch_flags") or launch_evidence.get("observed_server_launch_flags") or ""
-        ).strip()
-        observed_server_identity = measurement.get("observed_server_identity") or launch_evidence.get(
-            "observed_server_identity"
+        return env_spec, measurement
+
+    @staticmethod
+    def _reference_verification_status(evidence: Mapping[str, Any], *, identity_matches: bool, observed: bool) -> str:
+        if identity_matches and observed:
+            return "verified_observed"
+        declared = (
+            str(evidence.get("requested_server_args") or "").strip()
+            or bool(evidence.get("requested_server_env"))
+            or str(evidence.get("recipe_digest") or "").strip()
         )
-        observed_server_identity = (
-            {str(key): value for key, value in sorted(observed_server_identity.items())}
-            if isinstance(observed_server_identity, Mapping)
+        return "verified_declared_only" if identity_matches and declared else "unverified"
+
+    def _same_config_reference(
+        self, measurement: Mapping[str, Any], *, expected_identity: str, agentx: bool
+    ) -> dict[str, Any]:
+        measured_identity = _first_text(measurement, "declared_launch_identity", "launch_identity")
+        identity_matches = bool(expected_identity and expected_identity == measured_identity)
+        evidence = measurement.get("launch_evidence")
+        evidence = dict(evidence) if isinstance(evidence, Mapping) else {}
+        observed_flags = str(
+            measurement.get("resolved_server_launch_flags") or evidence.get("observed_server_launch_flags") or ""
+        ).strip()
+        server_identity = measurement.get("observed_server_identity") or evidence.get("observed_server_identity")
+        server_identity = (
+            {str(key): value for key, value in sorted(server_identity.items())}
+            if isinstance(server_identity, Mapping)
             else {}
         )
-        if identity_matches and (observed_flags or observed_server_identity):
-            reference_verification_status = "verified_observed"
-        elif identity_matches and (
-            str(launch_evidence.get("requested_server_args") or "").strip()
-            or bool(launch_evidence.get("requested_server_env"))
-            or str(launch_evidence.get("recipe_digest") or "").strip()
-        ):
-            reference_verification_status = "verified_declared_only"
-        else:
-            reference_verification_status = "unverified"
-        if agentx:
-            reference_verification_status = "unverified_workload"
-        reference_verified = reference_verification_status == "verified_observed"
-        observed_identity = str(measurement.get("observed_launch_identity") or "")
-        if not observed_identity and identity_matches and (observed_flags or observed_server_identity):
-            observed_payload = json.dumps(
-                {
-                    "declared_launch_identity": measured_identity,
-                    "observed_server_launch_flags": observed_flags,
-                    "observed_server_identity": observed_server_identity,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            observed_identity = f"sha256:{hashlib.sha256(observed_payload).hexdigest()}"
-        same_config_tput = float(measurement.get("tput") or 0.0) if reference_verified else 0.0
-        workload = {
-            "isl": int(state.isl),
-            "osl": int(state.osl),
-            "conc": int(state.conc or 64),
+        observed = bool(observed_flags or server_identity)
+        status = (
+            "unverified_workload"
+            if agentx
+            else self._reference_verification_status(evidence, identity_matches=identity_matches, observed=observed)
+        )
+        observed_identity = _first_text(measurement, "observed_launch_identity")
+        if not observed_identity and identity_matches and observed:
+            observed_identity = _observed_identity_digest(measured_identity, observed_flags, server_identity)
+        verified = status == "verified_observed"
+        return {
+            # Zero means no verified same-config reference.
+            "orchestrator_best_tput_same_config": float(measurement.get("tput") or 0.0) if verified else 0.0,
+            "same_config_reference_status": "verified" if verified else "unverified",
+            "same_config_reference_identity": measured_identity,
+            "same_config_expected_identity": expected_identity,
+            "same_config_reference_workspace": _first_text(measurement, "benchmark_workspace"),
+            # Additive identity semantics.
+            "same_config_reference_verification_status": status,
+            "same_config_reference_declared_identity": measured_identity,
+            "same_config_reference_observed_identity": observed_identity,
+            # GEAK compares this map with its parsed ServerArgs.
+            "same_config_observed_identity": server_identity,
+            "observed_server_identity": server_identity,
+            "measurement_evidence": evidence,
         }
-        _recipe_path = str(state.baseline_config_path or "")
-        _recipe_envs = self._read_recipe_bench_envs(_recipe_path)
-        bench_protocol = self._resolve_bench_protocol(_recipe_path, envs=_recipe_envs)
-        gpu_pin = resolve_gpu_pin(recipe_envs=_recipe_envs)
-        _tp = coerce_tp(_recipe_envs.get("TP"), os.environ.get("TP"))
-        _gpu_ids = _resolve_handoff_gpu_ids(gpu_pin=gpu_pin, tp=_tp)
-        _tp = _resolve_handoff_tp(gpu_ids=_gpu_ids, tp=_tp)
-        _gpu_ids_space = _resolve_handoff_gpu_ids_space(gpu_pin=gpu_pin)
-        if _gpu_ids_space == "none":
+
+    @staticmethod
+    def _geak_device_fields(recipe_envs: Mapping[str, Any]) -> dict[str, Any]:
+        gpu_pin = resolve_gpu_pin(recipe_envs=recipe_envs)
+        tp = coerce_tp(recipe_envs.get("TP"), os.environ.get("TP"))
+        gpu_ids = _resolve_handoff_gpu_ids(gpu_pin=gpu_pin, tp=tp)
+        space = _resolve_handoff_gpu_ids_space(gpu_pin=gpu_pin)
+        if space == "none":
             # An empty visibility mask means the ids are placeholders, not devices.
             log.error(
                 "geak handoff: %s is set but empty; the run has no visible GPUs. "
                 "gpu_ids=%s is a placeholder (gpu_ids_space=none), not a device set.",
                 gpu_pin.get("var"),
-                _gpu_ids,
+                gpu_ids,
             )
-        # Reuse baseline server settings so GEAK measures the same engine config.
-        try:
+        return {
+            "tp": _resolve_handoff_tp(gpu_ids=gpu_ids, tp=tp),
+            # The serving/optimization device set, as HIP-level ids (what the
+            # consumer exports as HIP_VISIBLE_DEVICES). Logical positions inside
+            # an inherited ROCR mask, a HIP/CUDA mask as-is, else 0..tp-1.
+            "gpu_ids": gpu_ids,
+            # Which coordinate system ``gpu_ids`` is in: "logical" (positions
+            # inside the ROCR mask the child inherits), "absolute" (whole-
+            # machine device ids), or "none" (the mask is set but empty -- the
+            # ids are placeholders and must not be launched on). Exporting them
+            # as HIP_VISIBLE_DEVICES is correct in the first two; a consumer
+            # that instead writes ROCR itself needs to know which it holds.
+            "gpu_ids_space": space,
+            # ABSOLUTE ids + the var they came from, so a consumer that writes
+            # ROCR_VISIBLE_DEVICES itself re-applies the same pin instead of
+            # resetting the child to card 0.
+            **({"gpu_pin": gpu_pin} if gpu_pin else {}),
+        }
+
+    def _geak_serving_fidelity(self, spec_config: Mapping[str, Any], accepted_flags: str) -> dict[str, Any]:
+        server_args = str(spec_config.get("server_launch_flags") or "")
+        if not server_args:
+            # Reuse baseline server settings so GEAK measures the same engine config.
             from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 
-            _baseline_srv_args = read_baseline_server_args(state) or ""
-        except Exception:  # noqa: BLE001 — accessor is best-effort
-            _baseline_srv_args = ""
-        _current_best_server_args = str(spec_config.get("server_launch_flags") or "")
-        if not _current_best_server_args:
+            inherited = read_baseline_server_args(self.shared_state) or ""
             from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
-            _current_best_server_args = compose_server_args(
-                inherited_args=_baseline_srv_args,
+            server_args = compose_server_args(
+                inherited_args=inherited,
                 variant_extra_args=accepted_flags,
                 remove_args=spec_config.get("remove_args"),
                 args_mode=str(spec_config.get("args_mode") or "append"),
             )
-        _serving_fidelity = _resolve_serving_fidelity(
-            baseline_server_args=_current_best_server_args,
-            state_max_model_len=int(state.max_model_len or 0),
+        return _resolve_serving_fidelity(
+            baseline_server_args=server_args,
+            state_max_model_len=int(self.shared_state.max_model_len or 0),
         )
 
-        # GEAK's E2E_METRIC and the workload spec's metric_basis are the same
-        # decision, so they resolve through one helper: a handoff that named a
-        # different axis than the one KEEP is decided on would have GEAK searching
-        # against a reference it was never measured against.
-        e2e_metric, _ = geak_metric_axis(
-            benchmark_mode=str(state.benchmark_mode or ""),
-            grading=state.grading or None,
+    def _geak_workload_spec(self, bench: Mapping[str, Any]) -> dict[str, Any]:
+        # Only AgentX materializations carry ``benchmark.workload_spec``; every other recipe
+        # omits it so GEAK keeps today's synthetic path unchanged.
+        spec = bench.get("workload_spec")
+        if not isinstance(spec, dict) or not spec:
+            return {}
+        # Give the kernel agents the shape they must actually optimize for;
+        # absence leaves GEAK on the handoff's synthetic isl/osl.
+        observed = self._observed_replay_shape(float(self.shared_state.baseline_tput or 0.0))
+        if not observed:
+            return dict(spec)
+        log.info(
+            "workload_spec: observed replay shape isl=%d osl=%d over %d requests (%s)",
+            observed["observed_isl"],
+            observed["observed_osl"],
+            observed["observed_requests"],
+            observed["observed_source"],
         )
-        handoff = {
+        return {**spec, **observed}
+
+    def _geak_session_fields(self, *, agentx: bool) -> dict[str, Any]:
+        state = self.shared_state
+        # GEAK's E2E_METRIC and the workload spec's metric_basis are the same decision, so they
+        # resolve through one helper: a handoff that named a different axis than the one KEEP is
+        # decided on would have GEAK searching against a reference it was never measured against.
+        e2e_metric, _ = geak_metric_axis(benchmark_mode=str(state.benchmark_mode or ""), grading=state.grading or None)
+        return {
             # v2 adds baseline_env_spec; v3 adds actual GPU-pinning metadata.
             "schema_version": 3,
             "model_path": str(state.model_path or os.environ.get("MODEL_PATH", "")),
             "framework": str(state.framework or os.environ.get("FRAMEWORK", "") or "sglang"),
             **_resolve_handoff_gpu_identity(state.gpu_type or os.environ.get("GPU_TYPE", "")),
-            "tp": _tp,
-            "workload": workload,
-            "accepted_flags": accepted_flags,
-            "accepted_env": accepted_env,
+            "workload": {"isl": int(state.isl), "osl": int(state.osl), "conc": int(state.conc or 64)},
             "launch_recipe": str(state.baseline_config_path or ""),
             # AgentX canonical throughput is not a reference for GEAK's proxy workload.
             "raw_baseline_tput": 0.0 if agentx else float(state.baseline_tput or 0.0),
-            # Zero means no verified same-config reference.
-            "orchestrator_best_tput_same_config": same_config_tput,
-            "same_config_reference_status": "verified" if reference_verified else "unverified",
-            "same_config_reference_identity": measured_identity,
-            "same_config_expected_identity": expected_identity,
-            "same_config_reference_workspace": str(measurement.get("benchmark_workspace") or ""),
-            # Additive identity semantics.
-            "same_config_reference_verification_status": reference_verification_status,
-            "same_config_reference_declared_identity": measured_identity,
-            "same_config_reference_observed_identity": observed_identity,
-            # GEAK compares this map with its parsed ServerArgs.
-            "same_config_observed_identity": observed_server_identity,
-            "observed_server_identity": observed_server_identity,
-            "measurement_evidence": launch_evidence,
-            "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
             "exp_root": str(self.session_dir / "geak"),
             # Macro-cycle-scoped eval_dir so a same-cycle resume reuses the in-progress on-disk artifacts while a new
             # cycle gets a fresh dir.
@@ -1465,52 +1627,39 @@ class KernelPhase(CoordinatorCollaborator):
             "bench_client": "auto",
             "e2e_metric": e2e_metric,
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
-            # The serving/optimization device set, as HIP-level ids (what the
-            # consumer exports as HIP_VISIBLE_DEVICES). Logical positions inside
-            # an inherited ROCR mask, a HIP/CUDA mask as-is, else 0..tp-1.
-            "gpu_ids": _gpu_ids,
-            # Which coordinate system ``gpu_ids`` is in: "logical" (positions
-            # inside the ROCR mask the child inherits), "absolute" (whole-
-            # machine device ids), or "none" (the mask is set but empty — the
-            # ids are placeholders and must not be launched on). Exporting them
-            # as HIP_VISIBLE_DEVICES is correct in the first two; a consumer
-            # that instead writes ROCR itself needs to know which it holds.
-            "gpu_ids_space": _gpu_ids_space,
         }
-        if gpu_pin:
-            # ABSOLUTE ids + the var they came from, so a consumer that writes
-            # ROCR_VISIBLE_DEVICES itself re-applies the same pin instead of
-            # resetting the child to card 0.
-            handoff["gpu_pin"] = gpu_pin
-        if bench_protocol:
-            handoff["bench_protocol"] = bench_protocol
-        # Parsed once for both resolvers below: they read the same recipe, so a
-        # second read could only disagree with the first.
-        recipe_bench = self._recipe_benchmark(str(state.baseline_config_path or ""))
-        workload_spec = self._resolve_workload_spec(recipe_bench)
-        if workload_spec:
-            # Give the kernel agents the shape they must actually optimize for;
-            # absence leaves GEAK on the handoff's synthetic isl/osl.
-            observed = self._observed_replay_shape(float(state.baseline_tput or 0.0))
-            if observed:
-                workload_spec = {**workload_spec, **observed}
-                log.info(
-                    "workload_spec: observed replay shape isl=%d osl=%d over %d requests (%s)",
-                    observed["observed_isl"],
-                    observed["observed_osl"],
-                    observed["observed_requests"],
-                    observed["observed_source"],
-                )
-            handoff["workload_spec"] = workload_spec
+
+    def _build_geak_handoff(self, *, agentx: bool) -> dict[str, Any]:
+        cb = self.shared_state.current_best
+        env_spec, measurement = self._accepted_launch_spec(agentx=agentx)
+        spec_config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
+        accepted_flags = str(spec_config.get("extra_server_args", cb.get("extra_server_args")) or "")
+        extra_envs = spec_config.get("extra_envs", cb.get("extra_envs")) or {}
+        recipe_bench = self._recipe_benchmark(str(self.shared_state.baseline_config_path or ""))
+        recipe_envs = _bench_envs(recipe_bench)
         # Absent => GEAK keeps deriving the launcher from the recipe, which is
         # correct everywhere except AgentX (see _resolve_launch_server_script).
         launch_server_script = self._resolve_launch_server_script(recipe_bench)
-        if launch_server_script:
-            handoff["launch_server_script"] = launch_server_script
-        handoff.update(_serving_fidelity)
-        # Full layered environment and its matching measurement identity.
-        if env_spec:
-            handoff["baseline_env_spec"] = env_spec
+        handoff = {
+            **self._geak_session_fields(agentx=agentx),
+            **self._geak_device_fields(recipe_envs),
+            "accepted_flags": accepted_flags,
+            "accepted_env": shlex.join(f"{k}={v}" for k, v in dict(extra_envs).items()),
+            **self._same_config_reference(
+                measurement, expected_identity=str(env_spec.get("launch_identity") or ""), agentx=agentx
+            ),
+            "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
+            **self._geak_serving_fidelity(spec_config, accepted_flags),
+        }
+        for key, value in (
+            ("bench_protocol", self._resolve_bench_protocol(recipe_envs)),
+            ("workload_spec", self._geak_workload_spec(recipe_bench)),
+            ("launch_server_script", launch_server_script),
+            # Full layered environment and its matching measurement identity.
+            ("baseline_env_spec", env_spec),
+        ):
+            if value:
+                handoff[key] = value
         if agentx:
             log.info("GEAK results remain proposal proxies; canonical AgentX validation remains in Hyperloom.")
             # Force native only when the recipe builtin could not be named. The
@@ -1525,259 +1674,60 @@ class KernelPhase(CoordinatorCollaborator):
 
         from hyperloom.inference_optimizer.agentx.geak_proxy import seed_native_geak_proxy
 
-        seed_native_geak_proxy(handoff, benchmark=recipe_bench, measurement=measurement or {})
+        seed_native_geak_proxy(handoff, benchmark=recipe_bench, measurement=measurement)
+        return handoff
 
-        out_dir = self.session_dir / "geak"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        handoff_path = out_dir / "handoff.json"
-        handoff_path.write_text(json.dumps(handoff, indent=2), encoding="utf-8")
+    def _geak_result_path(self) -> Path:
+        return self.session_dir / "geak" / "result.json"
 
-        recorder = self.timeline()
-        if recorder is not None:
-            recorder.enter_stage("geak_delegation")
-            recorder.record_geak_handoff(handoff)
-
-        def _read_geak_result(path: Path) -> dict[str, Any]:
-            if not path.is_file():
-                return {}
-            try:
-                return json.loads(path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                return {}
-
-        def _settled_replay(candidate: dict[str, Any]) -> bool:
-            """Whether ``candidate`` is a result this session already settled."""
-            prev = state.geak_result if isinstance(state.geak_result, dict) else {}
-            return _geak_rebench.geak_candidate_is_adjudicated(prev, candidate, harness_can_replay=not agentx)
-
-        def _promote_recovered_result(
-            result: dict[str, Any],
-            *,
-            recovered_from: str,
-            runner_timeout_s: int | None = None,
-            started_at: str = "",
-            duration_sec: float | None = None,
-            kill_timeout_s: int | None = None,
-        ) -> bool:
-            self._record_geak_delegation_timeline(
-                result,
-                handoff=handoff,
-                started_at=started_at,
-                duration_sec=duration_sec,
-                recovered_from_disk=True,
-                runner_timeout_sec=runner_timeout_s,
-                kill_timeout_sec=kill_timeout_s,
-            )
-            previous = state.geak_result or {}
-            if previous.get("kernel_event_id") and _geak_rebench.geak_candidate_matches(previous, result):
-                result["kernel_event_id"] = previous["kernel_event_id"]
-            state.geak_result = result
-            self._record_geak_measurement(result)
-            # Rebench-first: record the recovered win as an UNVALIDATED candidate;
-            # the caller enqueues the main-flow rebench that writes the headline.
-            if not self._record_geak_candidate(result):
-                state.save(self.session_dir)
-                return False
-            self._record_geak_kernel_journey(result)
-            evidence = {
-                "status": result.get("status"),
-                "throughput_speedup": result.get("throughput_speedup"),
-                "final_throughput_tok_s": result.get("final_throughput_tok_s"),
-                "eval_dir": result.get("eval_dir"),
-                "report_path": result.get("report_path"),
-                "recovered_from": recovered_from,
-            }
-            if runner_timeout_s is not None:
-                evidence["runner_timeout_s"] = runner_timeout_s
-            self._coord.phase_machine.record_phase_entry_evidence(geak=evidence)
-            state.save(self.session_dir)
-            return True
-
-        handoff_cards = _resolve_handoff_physical_gpus(gpu_ids=_gpu_ids, gpu_ids_space=_gpu_ids_space, gpu_pin=gpu_pin)
-        # Crash-recovery: a validated result.json written before a coordinator crash is promoted on resume, guarded by
-        # ``_geak_win_already_recorded`` so a prior cycle's result.json does not short-circuit a fresh entry.
-        result_path = out_dir / "result.json"
-        recovered = _read_geak_result(result_path)
-        # Do not recover a settled result; new candidate evidence remains eligible.
-        if recovered.get("status") == "ok" and not self._geak_win_already_recorded() and not _settled_replay(recovered):
-            log.info(
-                "GEAK result.json exists but state has no recorded win "
-                "(crash before handback); promoting recovered result."
-            )
-            if not _promote_recovered_result(recovered, recovered_from="existing_result_json"):
-                return
-            await self._revalidate_geak_candidate(reason="geak_e2e_win_recovered", handoff_cards=handoff_cards)
-            return
-
-        still_busy = await self._free_gpus_for_geak(handoff_cards)
-        if still_busy:
-            _finish_skip({"status": "error", "error_class": "gpus_busy_at_handoff", "error": still_busy})
-            return
-
-        # Budget-aware timeouts: shrink to the remaining run deadline and always reserve the closing-grace window.
-        runner_timeout, kill_timeout, budget_known = self._geak_timeouts()
-        min_run = env_int("GEAK_MIN_RUN_S", default=600)
-        if budget_known and runner_timeout < min_run:
-            log.warning(
-                "GEAK: only %ds budget remains (< min %ds); skipping e2e "
-                "and winding down to SWEEP so the closing report runs in time.",
-                runner_timeout,
-                min_run,
-            )
-            _finish_skip(
-                {
-                    "status": "skipped",
-                    "error_class": INSUFFICIENT_BUDGET,
-                    "error": (
-                        f"only {runner_timeout}s of KERNEL budget remained "
-                        f"(< min {min_run}s); skipped to protect the closing "
-                        f"report window"
-                    ),
-                    "runner_timeout_s": runner_timeout,
-                },
-                runner_timeout_s=runner_timeout,
-            )
-            return
-
-        runner_started_at = datetime.now(timezone.utc).isoformat()
-        runner_started_monotonic = time.monotonic()
-        try:
-            proc = await self._launch_geak_runner(
-                handoff_path, timeouts=(runner_timeout, kill_timeout, budget_known), from_phase=from_phase
-            )
-            stderr_tail = (proc.stderr or "")[-2000:]
-            if proc.returncode != 0:
-                log.warning("GEAK runner rc=%s: %s", proc.returncode, stderr_tail)
-        except subprocess.TimeoutExpired:
-            log.warning(
-                "GEAK runner exceeded kill_timeout=%ds; SIGTERM'd to let it flush, then reclaimed the closing window",
-                kill_timeout,
-            )
-            # The graceful SIGTERM gives run_e2e a window to flush result.json; keep a real win instead of discarding
-            # the phase as a timeout.
-            recovered = _read_geak_result(result_path)
-            if recovered.get("status") == "ok" and not (agentx and _settled_replay(recovered)):
-                log.info(
-                    "GEAK flushed an OK result.json under SIGTERM grace; promoting the recovered win despite the cap."
-                )
-                if not _promote_recovered_result(
-                    recovered,
-                    recovered_from="sigterm_flushed_result_json",
-                    runner_timeout_s=runner_timeout,
-                    started_at=runner_started_at,
-                    duration_sec=time.monotonic() - runner_started_monotonic,
-                    kill_timeout_s=kill_timeout,
-                ):
-                    return
-                await self._revalidate_geak_candidate(
-                    reason="geak_e2e_win_sigterm_recovered", handoff_cards=handoff_cards
-                )
-                return
-            _finish_skip(
-                {
-                    "status": "error",
-                    "error_class": "timeout",
-                    "error": (f"GEAK e2e killed after {kill_timeout}s (budget-capped); closing window preserved"),
-                    "runner_timeout_s": runner_timeout,
-                    "kill_timeout_s": kill_timeout,
-                },
-                started_at=runner_started_at,
-                duration_sec=time.monotonic() - runner_started_monotonic,
-                runner_timeout_s=runner_timeout,
-                kill_timeout_s=kill_timeout,
-            )
-            return
-        except Exception as exc:
-            log.exception("GEAK runner crashed")
-            _finish_skip(
-                {"status": "error", "error_class": "runner_crashed", "error": repr(exc)},
-                started_at=runner_started_at,
-                duration_sec=time.monotonic() - runner_started_monotonic,
-                runner_timeout_s=runner_timeout,
-                kill_timeout_s=kill_timeout,
-            )
-            return
-
-        result: dict[str, Any] = _read_geak_result(result_path)
-        if not result:
-            _finish_skip(
-                {
-                    "status": "error",
-                    "error_class": "no_result_json",
-                    "error": (f"runner rc={proc.returncode} produced no parseable result.json at {result_path}"),
-                    "stderr_tail": stderr_tail,
-                    "returncode": proc.returncode,
-                },
-                started_at=runner_started_at,
-                duration_sec=time.monotonic() - runner_started_monotonic,
-                runner_timeout_s=runner_timeout,
-                kill_timeout_s=kill_timeout,
-            )
-            return
-        if agentx and _settled_replay(result):
-            # The runner left the candidate this session already settled, so it
-            # shipped no product: recording it would retire the verdict and
-            # re-enqueue the revalidation that produced it. The file stays for
-            # the next run to overwrite.
-            _finish_skip(
-                {
-                    "status": "error",
-                    "error_class": "no_new_geak_product",
-                    "error": (f"runner rc={proc.returncode} left the already-adjudicated result.json at {result_path}"),
-                    "stderr_tail": stderr_tail,
-                }
-            )
-            return
-        # Carry the actual exit code so the breakdown can audit a nonzero rc.
-        result.setdefault("returncode", proc.returncode)
-        self._record_geak_delegation_timeline(
-            result,
-            handoff=handoff,
-            started_at=runner_started_at,
-            duration_sec=time.monotonic() - runner_started_monotonic,
-            runner_timeout_sec=runner_timeout,
-            kill_timeout_sec=kill_timeout,
+    def _geak_settled_replay(self, candidate: dict[str, Any], *, agentx: bool) -> bool:
+        """Whether ``candidate`` is a result this session already settled."""
+        return _geak_rebench.geak_candidate_is_adjudicated(
+            self.shared_state.geak_result, candidate, harness_can_replay=not agentx
         )
+
+    def _settle_geak_skip(self, result: dict[str, Any]) -> None:
+        # A settled verdict is left standing: a later failure records itself without
+        # retiring the candidate that already adjudicated.
+        state = self.shared_state
+        if not _geak_rebench.geak_verdict_is_terminal(state.geak_result):
+            state.geak_result = result
+        self._coord.phase_machine.record_phase_entry_evidence(
+            geak={
+                "status": result.get("status"),
+                "error_class": result.get("error_class"),
+                "error": (str(result.get("error") or "")[:500] or None),
+            }
+        )
+        state.save(self.session_dir)
+
+    def _finish_geak_skip(
+        self, result: dict[str, Any], *, handoff: dict[str, Any], facts: GeakRunnerFacts = GeakRunnerFacts()
+    ) -> None:
+        self._record_geak_delegation_timeline(result, handoff=handoff, facts=facts)
+        self._settle_geak_skip(result)
+
+    def _promote_recovered_geak_result(
+        self,
+        result: dict[str, Any],
+        *,
+        handoff: dict[str, Any],
+        recovered_from: str,
+        facts: GeakRunnerFacts = GeakRunnerFacts(),
+    ) -> bool:
+        state = self.shared_state
+        self._record_geak_delegation_timeline(result, handoff=handoff, recovered_from_disk=True, facts=facts)
+        previous = state.geak_result or {}
+        if previous.get("kernel_event_id") and _geak_rebench.geak_candidate_matches(previous, result):
+            result["kernel_event_id"] = previous["kernel_event_id"]
         state.geak_result = result
         self._record_geak_measurement(result)
-
-        # Invariant guard: a GEAK run whose baseline ref failed to reproduce ``orchestrator_best_tput_same_config``
-        # optimized against a phantom baseline, so its gain is non-comparable — never promote it.
-        if str(result.get("status") or "") == "baseline_reproduction_failed":
-            log.warning(
-                "GEAK baseline_reproduction_failed: ref did not match "
-                "orchestrator best (%s); refusing to promote a phantom-baseline gain",
-                result.get("error"),
-            )
-            _finish_skip(
-                {
-                    "status": "baseline_reproduction_failed",
-                    "error_class": "baseline_reproduction_failed",
-                    "error": (
-                        str(result.get("error") or "")[:500]
-                        or "GEAK baseline ref != orchestrator best (env_spec mismatch)"
-                    ),
-                    "ref_tput": result.get("ref_tput"),
-                    "orchestrator_best_tput_same_config": result.get("orchestrator_best_tput_same_config"),
-                    **({"absent_backends": result["absent_backends"]} if result.get("absent_backends") else {}),
-                },
-                record_delegation=False,
-            )
-            return
-
-        # Rebench-first: record the win as an UNVALIDATED candidate only; the headline is written later from the
-        # measured rebench.
+        # Rebench-first: record the recovered win as an UNVALIDATED candidate;
+        # the caller enqueues the main-flow rebench that writes the headline.
         if not self._record_geak_candidate(result):
             state.save(self.session_dir)
-            return
+            return False
         self._record_geak_kernel_journey(result)
-        # The same-harness rebench is the only path that writes the headline.
-        if str(result.get("status") or "") == "ok":
-            await self._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=handoff_cards)
-        elif _geak_has_accepted_kernel(result):
-            # A no_gain headline over an accepted, parity-checked kernel still deserves the measurement — the rebench
-            # is what decides, and without it the kernel is lost with no number attached to it.
-            await self._revalidate_geak_candidate(reason="geak_e2e_accepted_kernel", handoff_cards=handoff_cards)
         self._coord.phase_machine.record_phase_entry_evidence(
             geak={
                 "status": result.get("status"),
@@ -1785,10 +1735,211 @@ class KernelPhase(CoordinatorCollaborator):
                 "final_throughput_tok_s": result.get("final_throughput_tok_s"),
                 "eval_dir": result.get("eval_dir"),
                 "report_path": result.get("report_path"),
-                "runner_timeout_s": runner_timeout,
+                "recovered_from": recovered_from,
+                **({"runner_timeout_s": facts.runner_timeout_sec} if facts.runner_timeout_sec is not None else {}),
             }
         )
         state.save(self.session_dir)
+        return True
+
+    def _refuse_geak_for_budget(self, handoff: dict[str, Any], *, runner_timeout: int, min_run: int) -> None:
+        log.warning(
+            "GEAK: only %ds budget remains (< min %ds); skipping e2e "
+            "and winding down to SWEEP so the closing report runs in time.",
+            runner_timeout,
+            min_run,
+        )
+        self._finish_geak_skip(
+            {
+                "status": "skipped",
+                "error_class": INSUFFICIENT_BUDGET,
+                "error": (
+                    f"only {runner_timeout}s of KERNEL budget remained "
+                    f"(< min {min_run}s); skipped to protect the closing report window"
+                ),
+                "runner_timeout_s": runner_timeout,
+            },
+            handoff=handoff,
+        )
+
+    def _settle_geak_runner_exit(
+        self, proc: subprocess.CompletedProcess, *, handoff: dict[str, Any], agentx: bool, facts: GeakRunnerFacts
+    ) -> dict[str, Any] | None:
+        result_path = self._geak_result_path()
+        stderr_tail = (proc.stderr or "")[-2000:]
+        if proc.returncode != 0:
+            log.warning("GEAK runner rc=%s: %s", proc.returncode, stderr_tail)
+        result = read_json(result_path, {}, require_dict=True)
+        if not result:
+            self._finish_geak_skip(
+                {
+                    "status": "error",
+                    "error_class": "no_result_json",
+                    "error": f"runner rc={proc.returncode} produced no parseable result.json at {result_path}",
+                    "stderr_tail": stderr_tail,
+                    "returncode": proc.returncode,
+                },
+                handoff=handoff,
+                facts=facts,
+            )
+            return None
+        if agentx and self._geak_settled_replay(result, agentx=agentx):
+            # The runner left the candidate this session already settled, so it shipped no product: recording it
+            # would retire the verdict and re-enqueue the revalidation that produced it. The file stays for the
+            # next run to overwrite.
+            self._finish_geak_skip(
+                {
+                    "status": "error",
+                    "error_class": "no_new_geak_product",
+                    "error": f"runner rc={proc.returncode} left the already-adjudicated result.json at {result_path}",
+                    "stderr_tail": stderr_tail,
+                },
+                handoff=handoff,
+            )
+            return None
+        # Carry the actual exit code so the breakdown can audit a nonzero rc. Nothing else is added: the persisted
+        # record stays the product GEAK wrote, so the next KERNEL entry recognizes its own settled candidate.
+        result.setdefault("returncode", proc.returncode)
+        return result
+
+    async def _dispatch_geak_runner(
+        self, handoff: dict[str, Any], *, from_phase: str, agentx: bool
+    ) -> GeakRunnerOutcome:
+        out_dir = self.session_dir / "geak"
+        # Budget-aware timeouts: shrink to the remaining run deadline and always reserve the closing-grace window.
+        runner_timeout, kill_timeout, budget_known = self._geak_timeouts()
+        min_run = env_int("GEAK_MIN_RUN_S", default=600)
+        if budget_known and runner_timeout < min_run:
+            self._refuse_geak_for_budget(handoff, runner_timeout=runner_timeout, min_run=min_run)
+            return GeakRunnerOutcome()
+        started_at = datetime.now(timezone.utc).isoformat()
+        started = time.monotonic()
+
+        def _facts() -> GeakRunnerFacts:
+            return GeakRunnerFacts(
+                started_at=started_at,
+                duration_sec=time.monotonic() - started,
+                runner_timeout_sec=runner_timeout,
+                kill_timeout_sec=kill_timeout,
+            )
+
+        try:
+            proc = await self._launch_geak_runner(
+                out_dir / "handoff.json",
+                timeouts=(runner_timeout, kill_timeout, budget_known),
+                from_phase=from_phase,
+            )
+        except subprocess.TimeoutExpired:
+            log.warning(
+                "GEAK runner exceeded kill_timeout=%ds; SIGTERM'd to let it flush, then reclaimed the closing window",
+                kill_timeout,
+            )
+            # The graceful SIGTERM gives run_e2e a window to flush result.json; keep a real win instead of discarding
+            # the phase as a timeout.
+            facts = _facts()
+            flushed = read_json(self._geak_result_path(), {}, require_dict=True)
+            if flushed.get("status") == "ok" and not (agentx and self._geak_settled_replay(flushed, agentx=agentx)):
+                log.info(
+                    "GEAK flushed an OK result.json under SIGTERM grace; promoting the recovered win despite the cap."
+                )
+                return GeakRunnerOutcome(flushed, facts, "sigterm_flushed_result_json")
+            self._finish_geak_skip(
+                {
+                    "status": "error",
+                    "error_class": "timeout",
+                    "error": f"GEAK e2e killed after {kill_timeout}s (budget-capped); closing window preserved",
+                    "runner_timeout_s": runner_timeout,
+                    "kill_timeout_s": kill_timeout,
+                },
+                handoff=handoff,
+                facts=facts,
+            )
+            return GeakRunnerOutcome()
+        except Exception as exc:
+            log.exception("GEAK runner crashed")
+            self._finish_geak_skip(
+                {"status": "error", "error_class": "runner_crashed", "error": repr(exc)},
+                handoff=handoff,
+                facts=_facts(),
+            )
+            return GeakRunnerOutcome()
+        facts = _facts()
+        return GeakRunnerOutcome(
+            self._settle_geak_runner_exit(proc, handoff=handoff, agentx=agentx, facts=facts), facts
+        )
+
+    def _open_geak_handoff(self, *, agentx: bool) -> dict[str, Any] | None:
+        try:
+            handoff = self._build_geak_handoff(agentx=agentx)
+        except EnvSpecUnserializable as exc:
+            log.exception("geak: cannot serialize the accepted launch configuration")
+            recorder = self.timeline()
+            if recorder is not None:
+                recorder.finish_failed(stage="geak_handoff", error_class="invalid_env_spec", message=str(exc))
+            self._settle_geak_skip({"status": "error", "error_class": "invalid_env_spec", "error": str(exc)})
+            return None
+        out_dir = self.session_dir / "geak"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "handoff.json").write_text(json.dumps(handoff, indent=2), encoding="utf-8")
+        recorder = self.timeline()
+        if recorder is not None:
+            recorder.enter_stage("geak_delegation")
+            recorder.record_geak_handoff(handoff)
+        return handoff
+
+    async def _promote_crashed_geak_result(
+        self, handoff: dict[str, Any], *, agentx: bool, cards: list[int] | None
+    ) -> bool:
+        # A validated result.json written before a coordinator crash is promoted on resume, guarded by
+        # ``_geak_win_already_recorded`` so a prior cycle's result.json does not short-circuit a fresh entry. A
+        # result this session already settled is not recovered; new candidate evidence remains eligible.
+        recovered = read_json(self._geak_result_path(), {}, require_dict=True)
+        if (
+            recovered.get("status") != "ok"
+            or self._geak_win_already_recorded()
+            or self._geak_settled_replay(recovered, agentx=agentx)
+        ):
+            return False
+        log.info(
+            "GEAK result.json exists but state has no recorded win (crash before handback); promoting recovered result."
+        )
+        if self._promote_recovered_geak_result(recovered, handoff=handoff, recovered_from="existing_result_json"):
+            await self._revalidate_geak_candidate(reason="geak_e2e_win_recovered", handoff_cards=cards)
+        return True
+
+    def _refuse_phantom_baseline_gain(self, result: dict[str, Any]) -> None:
+        # A GEAK run whose baseline ref failed to reproduce ``orchestrator_best_tput_same_config`` optimized
+        # against a phantom baseline, so its gain is non-comparable -- never promote it.
+        log.warning(
+            "GEAK baseline_reproduction_failed: ref did not match "
+            "orchestrator best (%s); refusing to promote a phantom-baseline gain",
+            result.get("error"),
+        )
+        self._settle_geak_skip(
+            {
+                "status": "baseline_reproduction_failed",
+                "error_class": "baseline_reproduction_failed",
+                "error": (
+                    str(result.get("error") or "")[:500] or "GEAK baseline ref != orchestrator best (env_spec mismatch)"
+                ),
+                "ref_tput": result.get("ref_tput"),
+                "orchestrator_best_tput_same_config": result.get("orchestrator_best_tput_same_config"),
+                **({"absent_backends": result["absent_backends"]} if result.get("absent_backends") else {}),
+            }
+        )
+
+    async def _publish_geak_e2e_done(self, result: dict[str, Any], *, facts: GeakRunnerFacts) -> None:
+        self._coord.phase_machine.record_phase_entry_evidence(
+            geak={
+                "status": result.get("status"),
+                "throughput_speedup": result.get("throughput_speedup"),
+                "final_throughput_tok_s": result.get("final_throughput_tok_s"),
+                "eval_dir": result.get("eval_dir"),
+                "report_path": result.get("report_path"),
+                "runner_timeout_s": facts.runner_timeout_sec,
+            }
+        )
+        self.shared_state.save(self.session_dir)
         await self.bus.append_and_seq(
             Message.new(
                 "kernel_agent",
@@ -1799,11 +1950,63 @@ class KernelPhase(CoordinatorCollaborator):
                     "kind": "geak_e2e_done",
                     "status": str(result.get("status") or "unknown"),
                     "speedup": result.get("throughput_speedup"),
-                    "result_path": str(result_path),
+                    "result_path": str(self._geak_result_path()),
                 },
             )
         )
-        state.save(self.session_dir)
+        self.shared_state.save(self.session_dir)
+
+    async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
+        """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run)."""
+        state = self.shared_state
+        agentx = self._session_is_agentx()
+        handoff = self._open_geak_handoff(agentx=agentx)
+        if handoff is None:
+            return
+        cards = _resolve_handoff_physical_gpus(
+            gpu_ids=handoff["gpu_ids"], gpu_ids_space=handoff["gpu_ids_space"], gpu_pin=handoff.get("gpu_pin") or {}
+        )
+        if await self._promote_crashed_geak_result(handoff, agentx=agentx, cards=cards):
+            return
+
+        still_busy = await self._free_gpus_for_geak(cards)
+        if still_busy:
+            self._finish_geak_skip(
+                {"status": "error", "error_class": "gpus_busy_at_handoff", "error": still_busy}, handoff=handoff
+            )
+            return
+
+        outcome = await self._dispatch_geak_runner(handoff, from_phase=from_phase, agentx=agentx)
+        result, facts = outcome.result, outcome.facts
+        if result is None:
+            return
+        if outcome.recovered_from:
+            if self._promote_recovered_geak_result(
+                result, handoff=handoff, recovered_from=outcome.recovered_from, facts=facts
+            ):
+                await self._revalidate_geak_candidate(reason="geak_e2e_win_sigterm_recovered", handoff_cards=cards)
+            return
+
+        self._record_geak_delegation_timeline(result, handoff=handoff, facts=facts)
+        state.geak_result = result
+        self._record_geak_measurement(result)
+        status = str(result.get("status") or "")
+        if status == "baseline_reproduction_failed":
+            self._refuse_phantom_baseline_gain(result)
+            return
+
+        # Rebench-first: record the win as an UNVALIDATED candidate only; the headline is written later from the
+        # measured rebench. The same-harness rebench is the only path that writes it, and a no_gain headline over an
+        # accepted, parity-checked kernel still earns the measurement -- without it the kernel is lost with no number.
+        if not self._record_geak_candidate(result):
+            state.save(self.session_dir)
+            return
+        self._record_geak_kernel_journey(result)
+        if status == "ok":
+            await self._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=cards)
+        elif _geak_has_accepted_kernel(result):
+            await self._revalidate_geak_candidate(reason="geak_e2e_accepted_kernel", handoff_cards=cards)
+        await self._publish_geak_e2e_done(result, facts=facts)
 
     async def _revalidate_geak_candidate(self, *, reason: str, handoff_cards: list[int] | None) -> None:
         """Measure the GEAK candidate on the orchestrator harness and settle its verdict.
@@ -1886,51 +2089,87 @@ class KernelPhase(CoordinatorCollaborator):
             for item in (self.shared_state.optimization_stack or [])
         )
 
-    @staticmethod
-    def _parse_geak_accepted_config(
-        result: dict[str, Any],
-    ) -> tuple[str, dict[str, str]]:
-        """Parse ``result.accepted_config`` into (flags, env dict)."""
-        return _accepted_config_as_variant(result.get("accepted_config"))
+    def _record_geak_claim_and_product(
+        self, result: dict[str, Any], accepted_flags: str, parsed_envs: dict[str, str]
+    ) -> None:
+        recorder = self.timeline()
+        if recorder is None:
+            return
+        recorder.record_geak_claim(self.shared_state.geak_pending, specs=self._geak_acceptance_specs(result))
+        recorder.record_geak_product(
+            GeakProduct(
+                accepted_flags=accepted_flags,
+                accepted_envs=dict(parsed_envs),
+                accepted_config=result.get("accepted_config"),
+                final_overlay=result.get("final_overlay") or "",
+                final_launch_script=result.get("final_launch_script") or "",
+                bench_script=result.get("bench_script") or "",
+                final_patch=result.get("final_patch") or "",
+            )
+        )
 
     def _record_geak_candidate(self, result: dict[str, Any]) -> bool:
         """Validate the return and record any measured claim without a headline gain."""
         if not isinstance(result, dict):
             return False
         result.setdefault("kernel_event_id", kernel_event_id(int(self.shared_state.macro_cycle or 0)))
-        from .geak_native_revalidation import matching_review
-
-        reviewed_product = matching_review(self.shared_state, result)
         try:
-            accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
+            accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
         except ValueError as exc:
             self.reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
             return False
-        if result.get("status") not in ("ok",) and not _geak_has_accepted_kernel(result):
+        if result.get("status") != "ok" and not _geak_has_accepted_kernel(result):
             return True
         new_tput = float(result.get("final_throughput_tok_s") or 0.0)
         if new_tput <= 0:
             return True
+        basis_facts = result.get("baseline_basis") or {}
+        self.shared_state.geak_pending = self._geak_pending_record(
+            result, basis_facts, accepted_flags=accepted_flags, parsed_envs=parsed_envs, new_tput=new_tput
+        )
+        self._record_geak_claim_and_product(result, accepted_flags, parsed_envs)
+        # Surface a large cross-harness measurement divergence as a warning only.
+        divergence = _as_float(basis_facts.get("measurement_divergence_pct"), 0.0)
+        if abs(divergence) > _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT:
+            log.warning(
+                "geak candidate: large cross-harness measurement divergence %.2f%% (|.|>%.1f%%) - candidate held "
+                "out of headline until a main-flow rebench validates it",
+                divergence,
+                _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
+            )
+        return True
+
+    def _geak_pending_record(
+        self,
+        result: dict[str, Any],
+        basis_facts: Mapping[str, Any],
+        *,
+        accepted_flags: str,
+        parsed_envs: dict[str, str],
+        new_tput: float,
+    ) -> dict[str, Any]:
+        from .geak_native_revalidation import matching_review
+
         basis = str(result.get("metric_basis") or GEAK_METRIC_OUTPUT[1])
-        if basis == GEAK_METRIC_OUTPUT[1]:
-            base = float(self.shared_state.baseline_tput or 0.0)
-        else:
-            base = axis_of(self.shared_state.baseline_perf, basis)
+        base = (
+            float(self.shared_state.baseline_tput or 0.0)
+            if basis == GEAK_METRIC_OUTPUT[1]
+            else axis_of(self.shared_state.baseline_perf, basis)
+        )
         # synthetic isl/osl at face value reads as roughly +175% with nothing
         # optimized. The downstream rebench would eventually reject it, but the
         # number would already be recorded, so refuse to compute it here.
         # An ABSENT verdict means an older GEAK that only ever ran the synthetic
         # path, which stays comparable and keeps today's value exactly.
-        comparability = (result.get("baseline_basis") or {}).get("workload_comparability") or {}
-        workloads_comparable = comparability.get("comparable") is not False
-        self_gain = ((new_tput - base) / base * 100.0) if (base > 0 and workloads_comparable) else None
+        comparability = basis_facts.get("workload_comparability") or {}
+        comparable = comparability.get("comparable") is not False
         am = result.get("alignment_metrics") or {}
-        self.shared_state.geak_pending = {
+        return {
             "status": "awaiting_rebench",
             # Audit-only self-reported numbers (not the headline until rebench).
             "self_reported_tput": new_tput,
             "self_reported_speedup": result.get("throughput_speedup"),
-            "self_reported_gain_pct": self_gain,
+            "self_reported_gain_pct": ((new_tput - base) / base * 100.0) if (base > 0 and comparable) else None,
             # Why the gain above is a number or None, so a reader never has to
             # guess whether an absent gain means "no gain" or "not comparable".
             "workload_comparability": comparability or None,
@@ -1959,39 +2198,8 @@ class KernelPhase(CoordinatorCollaborator):
                 "geak_throughput_speedup": result.get("throughput_speedup"),
             },
             "ts": datetime.now(timezone.utc).isoformat(),
+            **matching_review(self.shared_state, result),
         }
-        self.shared_state.geak_pending.update(reviewed_product)
-        recorder = self.timeline()
-        if recorder is not None:
-            recorder.record_geak_claim(
-                self.shared_state.geak_pending,
-                specs=self._geak_acceptance_specs(result),
-            )
-            recorder.record_geak_product(
-                accepted_flags=accepted_flags,
-                accepted_envs=dict(parsed_envs),
-                accepted_config=result.get("accepted_config"),
-                final_overlay=result.get("final_overlay") or "",
-                final_launch_script=result.get("final_launch_script") or "",
-                bench_script=result.get("bench_script") or "",
-                final_patch=result.get("final_patch") or "",
-            )
-        # Surface a large cross-harness measurement divergence as a warning only.
-        bb = result.get("baseline_basis") or {}
-        mdiv = bb.get("measurement_divergence_pct")
-        try:
-            mdiv_f = abs(float(mdiv)) if mdiv is not None else None
-        except (TypeError, ValueError):
-            mdiv_f = None
-        if mdiv_f is not None and mdiv_f > _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT:
-            log.warning(
-                "geak candidate: large cross-harness measurement divergence "
-                "%.2f%% (|.|>%.1f%%) - candidate held out of headline until a "
-                "main-flow rebench validates it",
-                float(mdiv),
-                _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
-            )
-        return True
 
     @staticmethod
     def _geak_acceptance_specs(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2084,48 +2292,27 @@ class KernelPhase(CoordinatorCollaborator):
         recorder = KernelPhase.timeline(self)
         if recorder is not None:
             recorder.record_geak_rebench_attempt(
-                attempt_id=attempt_id,
-                base_tput=current_best_tput,
-                measured_tput=measured_tput if measured_tput > 0 else None,
-                decision="no_promote",
-                decision_reason=reason,
-                status="no_promote",
+                GeakRebenchAttempt(
+                    attempt_id=attempt_id,
+                    base_tput=current_best_tput,
+                    measured_tput=measured_tput if measured_tput > 0 else None,
+                    decision="no_promote",
+                    decision_reason=reason,
+                    status="no_promote",
+                )
             )
             recorder.record_geak_rebench_conclusion(final_status="no_promote", final_error=reason)
 
-    def promote_geak_from_candidate(
+    def _geak_promotion_measurement(
         self,
         result: dict[str, Any],
+        graded_measurement: Mapping[str, Any],
         *,
-        measured_tput: float,
-        provenance: str = "geak_e2e_promote",
-        overlay_loaded: bool | None = None,
-        measurement_provenance: Mapping[str, Any] | None = None,
-    ) -> bool:
-        """Promote a measured GEAK candidate and return whether the lift succeeded."""
-        if not isinstance(result, dict):
-            return False
-        try:
-            measured = float(measured_tput)
-        except (TypeError, ValueError):
-            return False
-        if measured <= 0:
-            return False
-        cb_now = self.shared_state.current_best
-        cb_tput = cb_now.get("tput")
-        try:
-            accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
-        except ValueError as exc:
-            self.reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
-            return False
-
-        # The lever is stamped here, not guessed from the task kind: GEAK promotes on a proven kernel overlay OR on a
-        # config/env-only win, and only this site holds the overlay proof.
-        entry_extra = self._geak_stack_entry_extra(result, overlay_loaded=overlay_loaded)
-        kernel_proven = bool(entry_extra.get("accepted_kernels") or entry_extra.get("accepted_heads"))
-        graded_measurement = measurement_provenance if isinstance(measurement_provenance, Mapping) else result
-
-        promotion_measurement = {
+        accepted_flags: str,
+        parsed_envs: dict[str, str],
+        kernel_proven: bool,
+    ) -> dict[str, Any]:
+        measurement = {
             "name": "geak_e2e",
             "candidate_extra_server_args": accepted_flags,
             "extra_server_args": accepted_flags,
@@ -2139,103 +2326,104 @@ class KernelPhase(CoordinatorCollaborator):
             **graded_axes_of(graded_measurement),
             "workspace": result.get("eval_dir"),
         }
-        if isinstance(measurement_provenance, Mapping):
-            for key in (
-                "extra_server_args",
-                "effective_extra_server_args",
-                "extra_envs",
-                "candidate_extra_server_args",
-                "candidate_extra_envs",
-                "recipe_delta",
-                "remove_args",
-                "unset_envs",
-                "args_mode",
-                "fingerprint",
-            ):
-                if key in measurement_provenance:
-                    promotion_measurement[key] = measurement_provenance[key]
-            for key in (
-                "accuracy",
-                "gpu_power_avg_w",
-                "gpu_power_by_gpu_w",
-                "launch_evidence",
-                "launch_evidence_path",
-                "server_log_path",
-                "workspace",
-                "single_workspace",
-            ):
-                value = measurement_provenance.get(key)
-                if value not in (None, "", {}):
-                    promotion_measurement[key] = value
-        if not isinstance(measurement_provenance, Mapping) or "extra_server_args" not in measurement_provenance:
-            from hyperloom.common.coerce import to_str_list
-            from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+        if graded_measurement is result:
+            return measurement
+        for key in (
+            "extra_server_args",
+            "effective_extra_server_args",
+            "extra_envs",
+            "candidate_extra_server_args",
+            "candidate_extra_envs",
+            "recipe_delta",
+            "remove_args",
+            "unset_envs",
+            "args_mode",
+            "fingerprint",
+        ):
+            if key in graded_measurement:
+                measurement[key] = graded_measurement[key]
+        for key in (
+            "accuracy",
+            "gpu_power_avg_w",
+            "gpu_power_by_gpu_w",
+            "launch_evidence",
+            "launch_evidence_path",
+            "server_log_path",
+            "workspace",
+            "single_workspace",
+        ):
+            value = graded_measurement.get(key)
+            if value not in (None, "", {}):
+                measurement[key] = value
+        return measurement
 
-            from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
-            from hyperloom.inference_optimizer.grid_server_args import compose_server_args, remove_server_args
+    def _compose_geak_launch_recipe(
+        self,
+        measurement: dict[str, Any],
+        accepted_config: Mapping[str, Any],
+        *,
+        accepted_flags: str,
+        parsed_envs: dict[str, str],
+    ) -> None:
+        from hyperloom.common.coerce import to_str_list
+        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
+        from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+        from hyperloom.inference_optimizer.grid_server_args import compose_server_args, remove_server_args
 
-            accepted_controls = _accepted_config_controls(result.get("accepted_config"))
-            prior_controls = _accepted_config_controls(cb_now)
-            launch_controls = {**prior_controls, **accepted_controls}
-            for key in ("remove_args", "unset_envs"):
-                values = list(
-                    dict.fromkeys(to_str_list(prior_controls.get(key)) + to_str_list(accepted_controls.get(key)))
-                )
-                if values:
-                    launch_controls[key] = values
-            accepted_config = result.get("accepted_config") or {}
-            if accepted_controls.get("args_mode") == "replace" and "remove_args" in accepted_config:
-                launch_controls["remove_args"] = to_str_list(accepted_config["remove_args"])
-            if launch_controls:
-                complete = accepted_controls.get("args_mode") == "replace"
-                prior_complete = prior_controls.get("args_mode") == "replace"
-                inherited_args = ""
-                if not complete and not prior_complete:
-                    recipe_envs = self._read_recipe_bench_envs(str(self.shared_state.baseline_config_path or ""))
-                    inherited_args = str(recipe_envs.get(server_args_env_name(self.shared_state.framework)) or "")
-                promotion_measurement["extra_server_args"] = compose_server_args(
-                    inherited_args=inherited_args,
-                    base_extra_args="" if complete else cb_now.get("extra_server_args"),
-                    variant_extra_args=accepted_flags,
-                    remove_args=launch_controls.get("remove_args"),
-                    args_mode="replace" if complete else "append",
-                )
-                if not complete and launch_controls.get("remove_args"):
-                    # A legacy delta can re-enable a removed flag. The retained
-                    # snapshot is complete, so stale removals would prune it again.
-                    accepted_identity = canonical_fingerprint(accepted_flags, {})
-                    launch_controls["remove_args"] = [
-                        spec
-                        for spec in launch_controls["remove_args"]
-                        if canonical_fingerprint(remove_server_args(accepted_flags, [spec]), {}) == accepted_identity
-                    ]
-                launch_envs = dict(cb_now.get("extra_envs") or {})
-                for key in accepted_controls.get("unset_envs", []):
-                    launch_envs.pop(key, None)
-                launch_envs.update(parsed_envs)
-                promotion_measurement["extra_envs"] = launch_envs
-                promotion_measurement.update(launch_controls)
-                promotion_measurement["args_mode"] = "replace"
-        lifted = self._coord.writeback.lift_to_current_best(
-            "geak_e2e",
-            measured,
-            promotion_measurement,
-            entry_extra=entry_extra,
+        cb_now = self.shared_state.current_best
+        accepted_controls = _accepted_config_controls(accepted_config)
+        prior_controls = _accepted_config_controls(cb_now)
+        launch_controls = {**prior_controls, **accepted_controls}
+        for key in ("remove_args", "unset_envs"):
+            values = list(dict.fromkeys(to_str_list(prior_controls.get(key)) + to_str_list(accepted_controls.get(key))))
+            if values:
+                launch_controls[key] = values
+        complete = accepted_controls.get("args_mode") == "replace"
+        if complete and "remove_args" in accepted_config:
+            launch_controls["remove_args"] = to_str_list(accepted_config["remove_args"])
+        if not launch_controls:
+            return
+        inherited_args = ""
+        if not complete and prior_controls.get("args_mode") != "replace":
+            recipe_envs = _bench_envs(self._recipe_benchmark(str(self.shared_state.baseline_config_path or "")))
+            inherited_args = str(recipe_envs.get(server_args_env_name(self.shared_state.framework)) or "")
+        measurement["extra_server_args"] = compose_server_args(
+            inherited_args=inherited_args,
+            base_extra_args="" if complete else cb_now.get("extra_server_args"),
+            variant_extra_args=accepted_flags,
+            remove_args=launch_controls.get("remove_args"),
+            args_mode="replace" if complete else "append",
         )
-        if not lifted:
-            KernelPhase.reject_geak_promotion(
-                self,
-                result,
-                measured_tput=measured,
-                current_best_tput=float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0,
-                reason="graded_comparison_rejected",
-            )
-            return False
+        if not complete and launch_controls.get("remove_args"):
+            # A legacy delta can re-enable a removed flag. The retained
+            # snapshot is complete, so stale removals would prune it again.
+            accepted_identity = canonical_fingerprint(accepted_flags, {})
+            launch_controls["remove_args"] = [
+                spec
+                for spec in launch_controls["remove_args"]
+                if canonical_fingerprint(remove_server_args(accepted_flags, [spec]), {}) == accepted_identity
+            ]
+        launch_envs = dict(cb_now.get("extra_envs") or {})
+        for key in accepted_controls.get("unset_envs", []):
+            launch_envs.pop(key, None)
+        launch_envs.update(parsed_envs)
+        measurement["extra_envs"] = launch_envs
+        measurement.update(launch_controls)
+        measurement["args_mode"] = "replace"
 
+    def _record_geak_lift_attribution(
+        self,
+        result: dict[str, Any],
+        *,
+        measured: float,
+        provenance: str,
+        overlay_loaded: bool | None,
+        pre_geak_tput: float,
+    ) -> None:
+        """Attribute the lifted GEAK result to the kernels that can carry it."""
         base = float(self.shared_state.baseline_tput or 0.0)
-        # Where the session stood before GEAK ran: the anchor both the journey rejection and the route-level residual
-        # measure from.
-        pre_geak = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 else base
+        # ``pre_geak_tput`` is read before the lift, which overwrites ``current_best`` with ``measured``: the journey
+        # rejection and the route-level residual both measure from where the session stood before GEAK ran.
         self.record_geak_adopted_kernels(
             result,
             measured_tput=measured,
@@ -2249,15 +2437,70 @@ class KernelPhase(CoordinatorCollaborator):
             self.reject_geak_kernel_journey(
                 result,
                 measured_tput=measured,
-                current_best_tput=pre_geak,
+                current_best_tput=pre_geak_tput if pre_geak_tput > 0 else base,
                 provenance=provenance,
                 rejection_reason="overlay_not_proven_loaded",
             )
-        self._coord.writeback.validate(
-            measured,
+
+    def promote_geak_from_candidate(
+        self,
+        result: dict[str, Any],
+        *,
+        measured_tput: float,
+        provenance: str = "geak_e2e_promote",
+        overlay_loaded: bool | None = None,
+        measurement_provenance: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Promote a measured GEAK candidate and return whether the lift succeeded."""
+        if not isinstance(result, dict):
+            return False
+        measured = _as_float(measured_tput, 0.0)
+        if measured <= 0:
+            return False
+        # Read before the lift overwrites ``current_best``; see :meth:`_record_geak_lift_attribution`.
+        pre_geak_tput = _as_float(self.shared_state.current_best.get("tput"), 0.0)
+        try:
+            accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
+        except ValueError as exc:
+            self.reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
+            return False
+
+        # The lever is stamped here, not guessed from the task kind: GEAK promotes on a proven kernel overlay OR on a
+        # config/env-only win, and only this site holds the overlay proof.
+        entry_extra = self._geak_stack_entry_extra(result, overlay_loaded=overlay_loaded)
+        graded_measurement = measurement_provenance if isinstance(measurement_provenance, Mapping) else result
+        promotion_measurement = self._geak_promotion_measurement(
+            result,
             graded_measurement,
-            source="geak_e2e_promote",
+            accepted_flags=accepted_flags,
+            parsed_envs=parsed_envs,
+            kernel_proven=bool(entry_extra.get("accepted_kernels") or entry_extra.get("accepted_heads")),
         )
+        if graded_measurement is result or "extra_server_args" not in graded_measurement:
+            self._compose_geak_launch_recipe(
+                promotion_measurement,
+                result.get("accepted_config") or {},
+                accepted_flags=accepted_flags,
+                parsed_envs=parsed_envs,
+            )
+        if not self._coord.writeback.lift_to_current_best(
+            "geak_e2e", measured, promotion_measurement, entry_extra=entry_extra
+        ):
+            self.reject_geak_promotion(
+                result,
+                measured_tput=measured,
+                current_best_tput=pre_geak_tput,
+                reason="graded_comparison_rejected",
+            )
+            return False
+        self._record_geak_lift_attribution(
+            result,
+            measured=measured,
+            provenance=provenance,
+            overlay_loaded=overlay_loaded,
+            pre_geak_tput=pre_geak_tput,
+        )
+        self._coord.writeback.validate(measured, graded_measurement, source="geak_e2e_promote")
         self.shared_state.geak_pending = {}
         return True
 
@@ -2382,11 +2625,8 @@ class KernelPhase(CoordinatorCollaborator):
         result: dict[str, Any],
         *,
         handoff: dict[str, Any],
-        started_at: str = "",
-        duration_sec: float | None = None,
+        facts: GeakRunnerFacts,
         recovered_from_disk: bool = False,
-        runner_timeout_sec: int | None = None,
-        kill_timeout_sec: int | None = None,
     ) -> None:
         """Record the delegated GEAK runner's terminal state."""
         absent = geak_absent_backends(str(result.get("eval_dir") or handoff.get("eval_dir") or ""))
@@ -2402,23 +2642,27 @@ class KernelPhase(CoordinatorCollaborator):
         versions = result.get("versions")
         versions = versions if isinstance(versions, dict) else {}
         recorder.record_geak_delegation(
-            runner_status=str(result.get("status") or "unknown"),
-            started_at=started_at or str(result.get("started_at") or ""),
-            ended_at=str(result.get("ended_at") or datetime.now(timezone.utc).isoformat()),
-            duration_sec=duration_sec if duration_sec is not None else result.get("duration_sec"),
-            error_class=str(result.get("error_class") or ""),
-            error=str(result.get("error") or ""),
-            returncode=result.get("returncode"),
-            runner_timeout_sec=(
-                runner_timeout_sec if runner_timeout_sec is not None else result.get("runner_timeout_s")
-            ),
-            kill_timeout_sec=kill_timeout_sec if kill_timeout_sec is not None else result.get("kill_timeout_s"),
-            exp_root=str(result.get("exp_root") or handoff.get("exp_root") or ""),
-            eval_dir=str(result.get("eval_dir") or handoff.get("eval_dir") or ""),
-            report_path=str(result.get("report_path") or ""),
-            versions=versions,
-            recovered_from_disk=recovered_from_disk,
-            stages_reached=result.get("stages_reached"),
+            GeakDelegation(
+                runner_status=str(result.get("status") or "unknown"),
+                started_at=facts.started_at or str(result.get("started_at") or ""),
+                ended_at=str(result.get("ended_at") or datetime.now(timezone.utc).isoformat()),
+                duration_sec=facts.duration_sec if facts.duration_sec is not None else result.get("duration_sec"),
+                error_class=str(result.get("error_class") or ""),
+                error=str(result.get("error") or ""),
+                returncode=result.get("returncode"),
+                runner_timeout_sec=(
+                    facts.runner_timeout_sec if facts.runner_timeout_sec is not None else result.get("runner_timeout_s")
+                ),
+                kill_timeout_sec=(
+                    facts.kill_timeout_sec if facts.kill_timeout_sec is not None else result.get("kill_timeout_s")
+                ),
+                exp_root=str(result.get("exp_root") or handoff.get("exp_root") or ""),
+                eval_dir=str(result.get("eval_dir") or handoff.get("eval_dir") or ""),
+                report_path=str(result.get("report_path") or ""),
+                versions=versions,
+                recovered_from_disk=recovered_from_disk,
+                stages_reached=result.get("stages_reached"),
+            )
         )
 
     def _record_geak_kernel_journey(self, result: dict[str, Any]) -> None:
@@ -2471,9 +2715,9 @@ class KernelPhase(CoordinatorCollaborator):
 
     def _runtime_uses_aiter_fused_moe(self) -> bool:
         """Return whether the served model dispatches MoE through aiter."""
-        from ..kernel.request_handlers import _resolve_forge_server_log
+        from ..kernel.serving_log_evidence import resolve_forge_server_log
 
-        log_path = _resolve_forge_server_log(self.shared_state, self.session_dir)
+        log_path = resolve_forge_server_log(self.shared_state, self.session_dir)
         if not log_path:
             return False
         try:
@@ -2704,14 +2948,14 @@ class KernelPhase(CoordinatorCollaborator):
         envs: dict[str, str],
     ) -> dict[str, Any] | None:
         """Did the tuned table reach the server's merge list and get read?"""
-        if tuner_name == "fmoe_ck":
-            return self._fmoe_apply_verdict(envs)
-        from ..kernel.gemm_shape_coverage import aiter_log_tuned_config_enabled
-        from ..measurement.apply_verification import verify_applied
-
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths:
             return None
+        if tuner_name == "fmoe_ck":
+            return self._fmoe_apply_verdict(envs, csv_paths)
+        from ..kernel.gemm_shape_coverage import aiter_log_tuned_config_enabled
+        from ..measurement.apply_verification import verify_applied
+
         logs = _integrate_server_logs(self.session_dir, tuner_name)
         if not logs:
             # Say so.
@@ -2737,10 +2981,7 @@ class KernelPhase(CoordinatorCollaborator):
             runtime_table_names=table_names,
         ).to_dict()
 
-    def _fmoe_apply_verdict(
-        self,
-        envs: dict[str, str],
-    ) -> dict[str, Any] | None:
+    def _fmoe_apply_verdict(self, envs: dict[str, str], csv_paths: list[str]) -> dict[str, Any] | None:
         """Apply verdict for ``fmoe_ck`` based on fused-MoE dispatch, not dense GEMM."""
         from ..kernel.gemm_shape_coverage import (
             aiter_log_tuned_config_enabled,
@@ -2752,160 +2993,93 @@ class KernelPhase(CoordinatorCollaborator):
             tuned_fmoe_csv_rows,
         )
 
-        csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
-        if not csv_paths:
-            return None
         loaded = read_latest_integrate_server_log(self.session_dir)
         if loaded is None:
-            run_dir = self.session_dir / "runs" / "integrate" / "integrate-gemm_tune_fmoe_ck"
             log.warning(
                 "forge gemm E2E: no server.log under %s; apply verification cannot run for fmoe_ck",
-                run_dir,
+                self.session_dir / "runs" / "integrate" / "integrate-gemm_tune_fmoe_ck",
             )
             return None
-        log_path, log_text = loaded
-        hit_logging = aiter_log_tuned_config_enabled(envs)
+        log_text = loaded[1]
         candidate_path = resolve_fmoe_candidate_csv(csv_paths[0])
         dispatches = parse_aiter_fused_moe_dispatches(log_text)
+
+        def _verdict(name: str, detail: str, *, hits: int = 0, misses: int = 0, blocks: bool = False) -> dict[str, Any]:
+            attributable = bool(dispatches) and candidate_path is not None
+            return {
+                "verdict": name,
+                "hits": hits,
+                "misses": misses,
+                "blocks_keep": blocks,
+                "conclusive": blocks or hits > 0,
+                "merged_tables": [],
+                "unmerged_artifacts": [] if attributable else list(csv_paths),
+                "detail": detail,
+            }
+
         if not dispatches:
             if log_has_fused_moe_activity(log_text):
-                return {
-                    "verdict": "fused_moe_parse_inconclusive",
-                    "hits": 0,
-                    "misses": 0,
-                    "blocks_keep": False,
-                    "conclusive": False,
-                    "merged_tables": [],
-                    "unmerged_artifacts": list(csv_paths),
-                    "detail": ("server.log contains fused-MoE activity but no dispatch lines could be parsed"),
-                }
-            if not hit_logging:
-                return {
-                    "verdict": "fused_moe_logging_disabled",
-                    "hits": 0,
-                    "misses": 0,
-                    "blocks_keep": False,
-                    "conclusive": False,
-                    "merged_tables": [],
-                    "unmerged_artifacts": list(csv_paths),
-                    "detail": ("AITER_LOG_TUNED_CONFIG is off; fused-MoE dispatch attribution cannot run"),
-                }
-            return {
-                "verdict": "no_fused_moe_dispatch",
-                "hits": 0,
-                "misses": 0,
-                "blocks_keep": True,
-                "conclusive": True,
-                "merged_tables": [],
-                "unmerged_artifacts": list(csv_paths),
-                "detail": ("server.log exists but contains no [aiter] [fused_moe] dispatch lines"),
-            }
-
+                return _verdict(
+                    "fused_moe_parse_inconclusive",
+                    "server.log contains fused-MoE activity but no dispatch lines could be parsed",
+                )
+            # aiter prints a hit line only under this flag, so a zero-hit result means nothing without it.
+            if not aiter_log_tuned_config_enabled(envs):
+                return _verdict(
+                    "fused_moe_logging_disabled",
+                    "AITER_LOG_TUNED_CONFIG is off; fused-MoE dispatch attribution cannot run",
+                )
+            return _verdict(
+                "no_fused_moe_dispatch",
+                "server.log exists but contains no [aiter] [fused_moe] dispatch lines",
+                blocks=True,
+            )
         if candidate_path is None:
-            return {
-                "verdict": "candidate_csv_missing",
-                "hits": 0,
-                "misses": len(dispatches),
-                "blocks_keep": False,
-                "conclusive": False,
-                "merged_tables": [],
-                "unmerged_artifacts": list(csv_paths),
-                "detail": (
-                    "env points at a merged fmoe CSV but the sibling bare "
-                    "candidate file is absent; cannot attribute runtime "
-                    "kernel names to the tuner candidate"
-                ),
-            }
+            return _verdict(
+                "candidate_csv_missing",
+                "env points at a merged fmoe CSV but the sibling bare candidate file is absent; cannot attribute "
+                "runtime kernel names to the tuner candidate",
+                misses=len(dispatches),
+            )
 
-        candidate_rows = tuned_fmoe_csv_rows(candidate_path)
-        coverage = fmoe_tuned_config_coverage(candidate_rows, dispatches)
-        covered = int(coverage.get("covered") or 0)
+        coverage = fmoe_tuned_config_coverage(tuned_fmoe_csv_rows(candidate_path), dispatches)
         requested = int(coverage.get("requested") or 0)
+        covered = int(coverage.get("covered") or 0)
         if covered > 0:
-            return {
-                "verdict": "served",
-                "hits": covered,
-                "misses": requested - covered,
-                "blocks_keep": False,
-                "conclusive": True,
-                "merged_tables": [],
-                "unmerged_artifacts": [],
-                "detail": (
-                    f"{covered} fused-MoE dispatch(es) match candidate kernelName1/kernelName2 in {candidate_path.name}"
-                ),
-            }
+            return _verdict(
+                "served",
+                f"{covered} fused-MoE dispatch(es) match candidate kernelName1/kernelName2 in {candidate_path.name}",
+                hits=covered,
+                misses=requested - covered,
+            )
         if coverage.get("runtime_default"):
-            return {
-                "verdict": "runtime_default_config",
-                "hits": 0,
-                "misses": requested,
-                "blocks_keep": True,
-                "conclusive": True,
-                "merged_tables": [],
-                "unmerged_artifacts": [],
-                "detail": ("runtime served default heuristics; tuned candidate kernels were not selected"),
-            }
+            return _verdict(
+                "runtime_default_config",
+                "runtime served default heuristics; tuned candidate kernels were not selected",
+                misses=requested,
+                blocks=True,
+            )
         if coverage.get("kernel_name_mismatch"):
-            return {
-                "verdict": "kernel_name_mismatch",
-                "hits": 0,
-                "misses": requested,
-                "blocks_keep": True,
-                "conclusive": True,
-                "merged_tables": [],
-                "unmerged_artifacts": [],
-                "detail": (
-                    "lookup key matched bundled rows but runtime kernelName1/kernelName2 differ from candidate_fmoe.csv"
-                ),
-            }
-        return {
-            "verdict": "no_shape_key_matched",
-            "hits": 0,
-            "misses": requested,
-            "blocks_keep": True,
-            "conclusive": True,
-            "merged_tables": [],
-            "unmerged_artifacts": [],
-            "detail": (f"0 of {requested} fused-MoE dispatch(es) resolve to a candidate row"),
-        }
-
-    def _merge_gemm_candidate_with_runtime(self, env_var: str, candidate_csv_path: str) -> str | None:
-        """Merge a GEMM candidate CSV with the runtime config."""
-        import csv
-        import importlib.util
-        import math
-        import re
-
-        def _read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
-            with path.open(newline="", encoding="utf-8") as handle:
-                reader = csv.DictReader(handle)
-                fieldnames = list(reader.fieldnames or [])
-                rows = [dict(row) for row in reader]
-            return fieldnames, rows
-
-        def _read_header(path: Path) -> list[str]:
-            with path.open(newline="", encoding="utf-8") as handle:
-                return list(csv.DictReader(handle).fieldnames or [])
-
-        candidate_path = Path(candidate_csv_path)
-        if not candidate_path.is_file():
-            return None
-
-        runtime_filename = _AITER_ENV_TO_TABLE.get(env_var)
-        if not runtime_filename:
-            return None
-        tuned_stem = Path(runtime_filename).stem
-        untuned_stem = (
-            re.sub(r"(?:_)?tuned$", "_untuned", tuned_stem)
-            if re.search(r"(?:_)?tuned$", tuned_stem)
-            else tuned_stem.replace("tuned", "untuned")
+            return _verdict(
+                "kernel_name_mismatch",
+                "lookup key matched bundled rows but runtime kernelName1/kernelName2 differ from candidate_fmoe.csv",
+                misses=requested,
+                blocks=True,
+            )
+        return _verdict(
+            "no_shape_key_matched",
+            f"0 of {requested} fused-MoE dispatch(es) resolve to a candidate row",
+            misses=requested,
+            blocks=True,
         )
+
+    def _aiter_config_dirs(self) -> list[Path]:
+        import importlib.util
 
         config_dirs: list[Path] = []
         explicit_root = os.environ.get("AITER_ROOT_DIR", "").strip()
         if explicit_root:
-            root = Path(explicit_root)
-            config_dirs.extend((root / "aiter" / "configs", root / "configs"))
+            config_dirs.extend((Path(explicit_root) / "aiter" / "configs", Path(explicit_root) / "configs"))
         try:
             spec = importlib.util.find_spec("aiter")
         except (ImportError, ValueError):
@@ -2914,157 +3088,78 @@ class KernelPhase(CoordinatorCollaborator):
             config_dirs.append(Path(spec.origin).resolve().parent / "configs")
         config_dirs.append(_CONTAINER_AITER_CONFIG_DIR)
         config_dirs.extend(sorted(self.session_dir.glob("runs/specialist/*/worktree/aiter/configs")))
-
-        seen_dirs: set[str] = set()
-        unique_config_dirs: list[Path] = []
+        unique: dict[str, Path] = {}
         for config_dir in config_dirs:
-            key = str(config_dir)
-            if key not in seen_dirs and config_dir.is_dir():
-                seen_dirs.add(key)
-                unique_config_dirs.append(config_dir)
+            if config_dir.is_dir():
+                unique.setdefault(str(config_dir), config_dir)
+        return list(unique.values())
 
-        try:
-            candidate_columns, candidate_rows = _read_csv(candidate_path)
-            runtime_cache_dir = Path(
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_AITER_CONFIG_CACHE_DIR",
-                    "/tmp/aiter_configs",
-                )
+    @staticmethod
+    def _aiter_source_tables(
+        config_dirs: list[Path], *, runtime_filename: str, tuned_stem: str, untuned_stem: str
+    ) -> tuple[list[Path], Path | None]:
+        # The complete runtime tables to merge the candidate into, plus the dir that defines their keys.
+        cache_dir = os.environ.get("INFERENCE_OPTIMIZER_AITER_CONFIG_CACHE_DIR", "/tmp/aiter_configs")
+        runtime_path = Path(cache_dir) / runtime_filename
+        if runtime_path.is_file():
+            keys_from = next((d for d in config_dirs if (d / f"{untuned_stem}.csv").is_file()), None)
+            return [runtime_path], keys_from
+        for config_dir in config_dirs:
+            base_path = config_dir / runtime_filename
+            model_paths = sorted(
+                path
+                for path in (config_dir / "model_configs").glob(f"*{tuned_stem}*.csv")
+                if path.is_file() and "untuned" not in path.name
             )
-            runtime_path = runtime_cache_dir / runtime_filename
-            source_paths: list[Path] = []
-            source_config_dir: Path | None = None
-            if runtime_path.is_file():
-                source_paths = [runtime_path]
-            else:
-                for config_dir in unique_config_dirs:
-                    base_path = config_dir / runtime_filename
-                    model_paths = sorted(
-                        path
-                        for path in (config_dir / "model_configs").glob(f"*{tuned_stem}*.csv")
-                        if path.is_file() and "untuned" not in path.name
-                    )
-                    paths = ([base_path] if base_path.is_file() else []) + model_paths
-                    if paths:
-                        source_paths = paths
-                        source_config_dir = config_dir
-                        break
+            paths = ([base_path] if base_path.is_file() else []) + model_paths
+            if paths:
+                return paths, config_dir
+        return [], None
+
+    def _merge_gemm_candidate_with_runtime(self, env_var: str, candidate_csv_path: str) -> str | None:
+        """Merge a GEMM candidate CSV with the runtime config."""
+        import csv
+        import re
+
+        candidate_path = Path(candidate_csv_path)
+        runtime_filename = _AITER_ENV_TO_TABLE.get(env_var)
+        if not runtime_filename or not candidate_path.is_file():
+            return None
+        tuned_stem = Path(runtime_filename).stem
+        untuned_stem = (
+            re.sub(r"(?:_)?tuned$", "_untuned", tuned_stem)
+            if re.search(r"(?:_)?tuned$", tuned_stem)
+            else tuned_stem.replace("tuned", "untuned")
+        )
+        config_dirs = self._aiter_config_dirs()
+        try:
+            candidate_columns, candidate_rows = _read_dispatch_csv(candidate_path)
+            source_paths, keys_from = self._aiter_source_tables(
+                config_dirs, runtime_filename=runtime_filename, tuned_stem=tuned_stem, untuned_stem=untuned_stem
+            )
             if not source_paths:
                 log.warning(
                     "gemm E2E: no complete aiter config found for %s; candidate-only validation would be unsafe",
                     env_var,
                 )
                 return None
-            if source_config_dir is None:
-                source_config_dir = next(
-                    (config_dir for config_dir in unique_config_dirs if (config_dir / f"{untuned_stem}.csv").is_file()),
-                    None,
-                )
-
-            source_columns: list[list[str]] = []
-            source_row_sets: list[list[dict[str, str]]] = []
-            for path in source_paths:
-                columns, rows = _read_csv(path)
-                source_columns.append(columns)
-                source_row_sets.append(rows)
-
-            all_columns = list(source_columns[0])
-            for columns in [*source_columns[1:], candidate_columns]:
-                for column in columns:
-                    if column not in all_columns:
-                        insert_at = all_columns.index("tflops") if "tflops" in all_columns else len(all_columns)
-                        all_columns.insert(insert_at, column)
-            fill_defaults = {"xbf16": "0", "run_1stage": "0", "ksplit": "0"}
-
-            def _normalize(rows: list[dict[str, str]]) -> list[dict[str, str]]:
-                normalized = []
-                for row in rows:
-                    new_row = {}
-                    for column in all_columns:
-                        value = row.get(column)
-                        if value is None:
-                            value = fill_defaults.get(column, "0")
-                        new_row[column] = value
-                    normalized.append(new_row)
-                return normalized
-
+            sources = [_read_dispatch_csv(path) for path in source_paths]
+            all_columns = _merged_dispatch_columns([columns for columns, _ in sources] + [candidate_columns])
             runtime_rows: list[dict[str, str]] = []
-            for rows in source_row_sets:
-                runtime_rows.extend(_normalize(rows))
-            candidate_rows = _normalize(candidate_rows)
-
-            key_cols: list[str] = []
-            if source_config_dir is not None:
-                untuned_path = source_config_dir / f"{untuned_stem}.csv"
-                if untuned_path.is_file():
-                    untuned_columns = _read_header(untuned_path)
-                    key_cols.extend(column for column in untuned_columns if column in all_columns)
+            for _, rows in sources:
+                runtime_rows.extend(_normalized_dispatch_rows(rows, all_columns))
+            candidate_rows = _normalized_dispatch_rows(candidate_rows, all_columns)
+            key_cols = _dispatch_key_columns(all_columns, keys_from, untuned_stem)
             if not key_cols:
-                key_cols.extend(column for column in ("M", "N", "K") if column in all_columns)
-            for column in ("gfx", "cu_num", "_tag"):
-                if column in all_columns and column not in key_cols:
-                    key_cols.append(column)
-            if not key_cols:
-                log.warning(
-                    "gemm E2E: cannot derive dispatch keys for %s",
-                    env_var,
-                )
+                log.warning("gemm E2E: cannot derive dispatch keys for %s", env_var)
                 return None
-
-            def _dispatch_key(row: dict[str, str]) -> tuple[str, ...]:
-                return tuple(row.get(column, "") for column in key_cols)
-
-            def _deduplicate_dispatch_rows(rows: list[dict[str, str]], label: str) -> list[dict[str, str]] | None:
-                counts: dict[tuple[str, ...], int] = {}
-                for row in rows:
-                    key = _dispatch_key(row)
-                    counts[key] = counts.get(key, 0) + 1
-                if not any(count > 1 for count in counts.values()):
-                    return rows
-                if "us" not in all_columns:
-                    log.warning(
-                        "gemm E2E: %s has duplicate dispatch keys for %s but no 'us' column to select the fastest row",
-                        label,
-                        env_var,
-                    )
-                    return None
-
-                def _us(row: dict[str, str]) -> float:
-                    try:
-                        return float(row.get("us", ""))
-                    except (TypeError, ValueError):
-                        return math.inf
-
-                # Keep the fastest (smallest us) row per dispatch key; ties keep the first row seen (stable), NaN-like
-                # values sort last.
-                best: dict[tuple[str, ...], dict[str, str]] = {}
-                order: list[tuple[str, ...]] = []
-                for row in rows:
-                    key = _dispatch_key(row)
-                    if key not in best:
-                        best[key] = row
-                        order.append(key)
-                    elif _us(row) < _us(best[key]):
-                        best[key] = row
-                deduplicated = [best[key] for key in order]
-                log.info(
-                    "gemm E2E: removed %d duplicate %s row(s) for %s",
-                    len(rows) - len(deduplicated),
-                    label,
-                    env_var,
-                )
-                return deduplicated
-
-            runtime_rows = _deduplicate_dispatch_rows(runtime_rows, "runtime config")
-            candidate_rows = _deduplicate_dispatch_rows(candidate_rows, "candidate")
-            if runtime_rows is None or candidate_rows is None:
+            kept = _deduplicate_dispatch_rows(runtime_rows, key_cols, all_columns, "runtime config", env_var)
+            tuned = _deduplicate_dispatch_rows(candidate_rows, key_cols, all_columns, "candidate", env_var)
+            if kept is None or tuned is None:
                 return None
-
             # Drop rows from runtime that the candidate improves, then concat.
-            candidate_keys = {_dispatch_key(row) for row in candidate_rows}
-            kept_from_runtime = [row for row in runtime_rows if _dispatch_key(row) not in candidate_keys]
-            merged_rows = kept_from_runtime + candidate_rows
-
+            candidate_keys = {_dispatch_key(row, key_cols) for row in tuned}
+            merged_rows = [row for row in kept if _dispatch_key(row, key_cols) not in candidate_keys] + tuned
             merged_path = candidate_path.parent / f"merged_{candidate_path.name}"
             with merged_path.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(handle, fieldnames=all_columns)
@@ -3072,8 +3167,8 @@ class KernelPhase(CoordinatorCollaborator):
                 writer.writerows(merged_rows)
             log.info(
                 "gemm E2E: merged %d candidate rows into %d rows from %d aiter config file(s) -> %d total (%s)",
-                len(candidate_rows),
-                len(runtime_rows),
+                len(tuned),
+                len(kept),
                 len(source_paths),
                 len(merged_rows),
                 merged_path,
@@ -3245,12 +3340,7 @@ class KernelPhase(CoordinatorCollaborator):
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            raw_env = row.get("env")
-            envs = (
-                {str(key): str(value) for key, value in raw_env.items() if str(key).strip() and str(value).strip()}
-                if isinstance(raw_env, dict)
-                else {}
-            )
+            envs = _candidate_envs(row.get("env"))
             if not envs:
                 # Nothing to apply, so nothing an e2e run could validate.
                 continue
@@ -3273,425 +3363,280 @@ class KernelPhase(CoordinatorCollaborator):
         candidates = self._gemm_canonical_candidates(result)
         # The rebuild's status gate cannot see a forced candidate, so it runs only when the producer named none: the
         # pre-``candidates[]`` envelope and GEAK.
-        for t in [] if candidates else (result.get("tuners_run") or []):
-            if not isinstance(t, dict):
-                continue
-            # partial_output is a real artifact: the tuner wrote fewer rows than shapes it was given (the grouped
-            # batch budget ran out), but the rows it did write are deployable.
-            if t.get("status") not in ("ok", "partial_output"):
-                continue
-            # improved_shapes can never exceed 0 for tuners with no comparable baseline -- TunableOp never times the
-            # untuned dispatch, the candidate-CSV fallback has no per-shape Pre/Post table, and a hipblaslt-only bf16
-            # run has no torch candidate to measure against.
-            if (
-                not bool(t.get("candidate"))
-                and int(t.get("improved_shapes") or 0) <= 0
-                and int(t.get("unverified_shapes") or 0) <= 0
-            ):
-                continue
-            env_var = str(t.get("env_var") or "").strip()
-            env_value = str(t.get("env_value") or "").strip()
-            raw_envs = t.get("env_vars") or {}
-            envs = (
-                {str(key): str(value) for key, value in raw_envs.items() if str(key).strip() and str(value).strip()}
-                if isinstance(raw_envs, dict)
-                else {}
-            )
-            if env_var and env_value:
-                envs.setdefault(env_var, env_value)
-            if envs:
-                candidates.append(
-                    {
-                        "tuner": t.get("tuner") or "unknown",
-                        "env_var": env_var,
-                        "env_value": env_value,
-                        "envs": envs,
-                        "micro_speedup": float(t.get("best_micro_speedup") or 1.0),
-                    }
-                )
-
+        if not candidates:
+            candidates = _legacy_tuner_candidates(result)
         if not candidates and str(result.get("backend") or "").strip().lower() != "forge":
-            tuned_file = str(result.get("tuned_file") or "").strip()
-            try:
-                micro_speedup = float(result.get("best_speedup") or 0.0)
-            except (TypeError, ValueError):
-                micro_speedup = 0.0
-            keeps = str(result.get("decision") or "").strip().upper() == "KEEP" and str(
-                result.get("status") or ""
-            ).strip().lower() in {"ok", "complete", "completed", "succeeded", "success"}
-            if tuned_file and micro_speedup > 1.0 and keeps:
-                env_var = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"
-                candidates.append(
-                    {
-                        "tuner": "a8w8_blockscale_tuned_gemm",
-                        "env_var": env_var,
-                        "env_value": tuned_file,
-                        "envs": {env_var: tuned_file},
-                        "micro_speedup": micro_speedup,
-                    }
-                )
-
+            fallback = _a8w8_blockscale_candidate(result)
+            if fallback:
+                candidates.append(fallback)
         return candidates
 
-    async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
-        """Sequentially E2E-validate each tuning candidate's env independently."""
-        from ..measurement.integrate_performance import integrate_measurement_fields
-        from hyperloom.common.model_paths import resolve_session_model_path
+    def _close_gemm_e2e_without_candidates(self, result: dict[str, Any]) -> None:
+        log.info("gemm tuning: no candidates to E2E validate")
+        result["decision"] = "REVERT"
+        result["requires_e2e_validation"] = False
+        result["e2e_validated"] = False
+        # Only when the tuners left no verdict of their own: ``micro_decision`` is a routing key downstream, not a
+        # label, so an existing one stands.
+        if not _first_text(result, "micro_decision").strip():
+            result["micro_decision"] = "no_e2e_candidates"
+        # ``recommended_env``/``extra_envs`` stay as the tuners left them: they are the raw record of what was
+        # produced, and the eligibility checks downstream already read them as "must be empty".
+        self._replace_latest_gemm_tuning_attempt(result)
 
-        backend = str(result.get("backend") or "geak").strip().lower()
-        candidates = self._gemm_e2e_candidates(result)
-        if not candidates:
-            log.info("gemm tuning: no candidates to E2E validate")
-            # Close the books here too.
-            result["decision"] = "REVERT"
-            result["requires_e2e_validation"] = False
-            result["e2e_validated"] = False
-            # Only when the tuners left no verdict of their own: ``micro_decision`` is a routing key downstream, not a
-            # label, so an existing one stands.
-            if not str(result.get("micro_decision") or "").strip():
-                result["micro_decision"] = "no_e2e_candidates"
-            # ``recommended_env``/``extra_envs`` stay as the tuners left them: they are the raw record of what was
-            # produced, and the eligibility checks downstream already read them as "must be empty".
-            self._replace_latest_gemm_tuning_attempt(result)
-            return
+    def _gemm_candidate_skip_reason(self, tuner_name: str, *, triton_moe_inert: bool) -> str:
+        from hyperloom.inference_optimizer.model_config_utils import model_supports_aiter_ck_fused_moe
 
-        baseline_tput = float(self.shared_state.baseline_tput or 0.0)
-        running_tput = float((self.shared_state.current_best or {}).get("tput") or baseline_tput)
-        paired_reference = deepcopy(self.shared_state.current_best or {})
-        paired_reference.setdefault("tput", running_tput)
-        paired_config_path = str(self.shared_state.baseline_config_path or "")
-        stacked_envs: dict[str, str] = {}
-        kept: list[dict[str, Any]] = []
-        reverted: list[dict[str, Any]] = []
-        faults: list[dict[str, Any]] = []
-        accepted_measurement: dict[str, Any] = {}
-        # Set by the last KEEP; the attempt row claims this exact string.
-        adopted_tuned_file = ""
-        from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
-
-        per_tuner_timeout_sec = resolve_benchmark_timeouts()[1]
-        per_tuner_budget_minutes = max(1, int((per_tuner_timeout_sec + 59) // 60))
-
+        if tuner_name == "vllm_moe_triton" and triton_moe_inert:
+            log.warning(
+                "gemm E2E: skipping %s -- the server dispatches MoE through "
+                "aiter, which never reads VLLM_TUNED_CONFIG_FOLDER, so the tuned "
+                "Triton config cannot take effect",
+                tuner_name,
+            )
+            return "aiter_moe_runtime_triton_config_inert"
         # fmoe_ck is only meaningful with --moe-runner-backend aiter, and aiter's CK fused-MoE rejects a
         # non-128-aligned intermediate_size_per_partition.
-        from hyperloom.inference_optimizer.model_config_utils import (
-            model_supports_aiter_ck_fused_moe,
-        )
+        if tuner_name == "fmoe_ck" and not model_supports_aiter_ck_fused_moe(
+            str(self.shared_state.model_path or ""), int(self.shared_state.tp or 0)
+        ):
+            log.info(
+                "gemm E2E: skipping %s -- aiter CK fused-MoE cannot serve "
+                "this model at tp=%s (intermediate size is not 128-aligned)",
+                tuner_name,
+                self.shared_state.tp or 0,
+            )
+            return "aiter_ck_moe_shape_unsupported"
+        return ""
 
-        # ``_runtime_uses_aiter_fused_moe`` resolves the serving log -- which now byte-scans the whole runs/ tree for
-        # aiter evidence -- and then reads it whole, ~17MB on the fleet.
-        triton_moe_inert = any(c.get("tuner") == "vllm_moe_triton" for c in candidates) and await asyncio.to_thread(
-            self._runtime_uses_aiter_fused_moe
-        )
-
-        for cand in candidates:
-            tuner_name = cand["tuner"]
-            if tuner_name == "vllm_moe_triton" and triton_moe_inert:
-                log.warning(
-                    "gemm E2E: skipping %s — the server dispatches MoE through "
-                    "aiter, which never reads VLLM_TUNED_CONFIG_FOLDER, so the tuned "
-                    "Triton config cannot take effect",
-                    tuner_name,
-                )
-                reverted.append({**cand, "reason": "aiter_moe_runtime_triton_config_inert"})
+    def _merged_candidate_envs(self, cand: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any] | None]:
+        # Each aiter table merged into the runtime one, plus the refusal row if one of them is unusable.
+        env = dict(cand["envs"])
+        for env_var, env_value in list(env.items()):
+            if not env_var.startswith("AITER_CONFIG"):
                 continue
-            if tuner_name == "fmoe_ck" and not model_supports_aiter_ck_fused_moe(
-                str(self.shared_state.model_path or ""),
-                int(self.shared_state.tp or 0),
-            ):
-                log.info(
-                    "gemm E2E: skipping %s — aiter CK fused-MoE cannot serve "
-                    "this model at tp=%s (intermediate size is not 128-aligned)",
-                    tuner_name,
-                    self.shared_state.tp or 0,
-                )
-                reverted.append({**cand, "reason": "aiter_ck_moe_shape_unsupported"})
-                continue
-            # Merge candidate CSV with the runtime config so that shapes NOT in the candidate keep their existing
-            # tuned entries.
-            env = dict(cand["envs"])
-            merge_failure_reason = ""
-            merge_failure_env = ""
-            for env_var, env_value in list(env.items()):
-                if not env_var.startswith("AITER_CONFIG"):
-                    continue
-                if not Path(env_value).is_file():
-                    merge_failure_reason = "candidate_artifact_missing"
-                    merge_failure_env = env_var
-                    break
-                merged_path = self._merge_gemm_candidate_with_runtime(
-                    env_var,
-                    env_value,
-                )
+            if Path(env_value).is_file():
+                merged_path = self._merge_gemm_candidate_with_runtime(env_var, env_value)
                 if merged_path:
                     env[env_var] = merged_path
-                else:
-                    merge_failure_reason = "complete_aiter_config_unavailable"
-                    merge_failure_env = env_var
-                    break
-            if merge_failure_reason:
-                log.error(
-                    "gemm E2E: refusing aiter candidate for %s (%s: %s)",
-                    tuner_name,
-                    merge_failure_env,
-                    merge_failure_reason,
-                )
-                reverted.append(
-                    {
-                        **cand,
-                        "reason": merge_failure_reason,
-                        "failed_env_var": merge_failure_env,
-                    }
-                )
-                continue
-            extra_server_args = (
-                "--moe-runner-backend aiter"
-                if tuner_name == "fmoe_ck" and str(self.shared_state.framework or "").lower() == "sglang"
-                else ""
-            )
-            # Merge with previously KEEP'd envs.
-            test_envs = dict(stacked_envs)
-            test_envs.update(env)
-
-            log.info(
-                "gemm E2E: validating tuner=%s env=%s (base_tput=%.1f)",
-                tuner_name,
-                cand["env_var"],
-                running_tput,
-            )
-
-            from ..actions.executors._aiter_jit import (
-                drop_serving_so_for_envs,
-                prepare_serving_so_for_csvs,
-            )
-
-            jit_backup_dir = self.session_dir / "runs" / "aiter_jit_backup"
-
-            from ..state.kernel_decision_settings import _MAX_INTEGRATE_FAULT_ATTEMPTS
-
-            integrate_verdict: dict[str, Any] | None = None
-            run_stopped = False
-            integrate_payload = {
-                "task_id": f"gemm_tune_e2e_{tuner_name}",
-                "kernel_id": f"gemm_tune_{tuner_name}",
-                "source": "forge_gemm_tuning",
-                "base_tput": running_tput,
-                "model_path": resolve_session_model_path(
-                    state_model_path=str(self.shared_state.model_path or ""),
-                    for_serving=True,
-                ),
-                "extra_server_args": extra_server_args,
-                "extra_envs": test_envs,
-                "keep_threshold_pct": 1.0,
-                "budget_minutes": per_tuner_budget_minutes,
-                "mode": "env_only",
-            }
-            # The native handler reloads both the recipe and grading anchor from disk.
-            self.shared_state.save(self.session_dir)
-            for fault_attempt in range(1, _MAX_INTEGRATE_FAULT_ATTEMPTS + 1):
-                await asyncio.to_thread(prepare_serving_so_for_csvs, test_envs, backup_dir=jit_backup_dir)
-                try:
-                    integrate_result = await integrate_within_phase(
-                        integrate_payload, state=self.shared_state, session_dir=self.session_dir
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    if fault_attempt < _MAX_INTEGRATE_FAULT_ATTEMPTS:
-                        log.warning(
-                            "gemm E2E: integrate raised for %s (fault attempt %d/%d): %s",
-                            tuner_name,
-                            fault_attempt,
-                            _MAX_INTEGRATE_FAULT_ATTEMPTS,
-                            exc,
-                        )
-                        continue
-                    log.warning(
-                        "gemm E2E: integrate raised for %s: %s",
-                        tuner_name,
-                        exc,
-                    )
-                    faults.append(
-                        {
-                            **cand,
-                            "reason": "integrate_fault:handler_exception",
-                            "fault": True,
-                            "error_class": "handler_exception",
-                            "error": repr(exc),
-                            "fault_attempts": fault_attempt,
-                        }
-                    )
-                    await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
-                    break
-
-                stopped = stopped_by_the_run_class(integrate_result.get("error_class"))
-                if stopped is not None:
-                    log.info(
-                        "gemm E2E: %s left unmeasured — %s",
-                        tuner_name,
-                        stopped.interrupted,
-                    )
-                    run_stopped = True
-                    break
-
-                if self.shared_state._is_integrate_fault(integrate_result):
-                    error_class = str(integrate_result.get("error_class") or "integrate_fault").strip()
-                    if fault_attempt < _MAX_INTEGRATE_FAULT_ATTEMPTS:
-                        log.warning(
-                            "gemm E2E: retrying tuner=%s after integrate fault %s (attempt %d/%d)",
-                            tuner_name,
-                            error_class,
-                            fault_attempt,
-                            _MAX_INTEGRATE_FAULT_ATTEMPTS,
-                        )
-                        continue
-                    log.warning(
-                        "gemm E2E: tuner=%s integrate fault (%s) — unmeasured, not a REVERT verdict",
-                        tuner_name,
-                        error_class,
-                    )
-                    faults.append(
-                        {
-                            **cand,
-                            "reason": f"integrate_fault:{error_class}",
-                            "fault": True,
-                            "error_class": error_class,
-                            "integrate_status": integrate_result.get("status"),
-                            "error": integrate_result.get("error"),
-                            "fault_attempts": fault_attempt,
-                        }
-                    )
-                    await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
-                    break
-
-                integrate_verdict = integrate_result
-                break
-
-            if run_stopped:
-                break
-            if integrate_verdict is None:
-                continue
-
-            decision = str(integrate_verdict.get("decision") or "").upper()
-            measurement = integrate_verdict.get("bench_result") or integrate_verdict
-            new_tput = float(measurement.get("output_throughput", integrate_verdict.get("new_tput")) or 0.0)
-            gain_pct = float(integrate_verdict.get("gain_pct") or 0.0)
-
-            log.info(
-                "gemm E2E: tuner=%s decision=%s new_tput=%.1f gain=%.2f%%",
-                tuner_name,
-                decision,
-                new_tput,
-                gain_pct,
-            )
-
-            # Two independent ways the artifact can fail to take effect, neither of which the throughput delta can
-            # see: the keys are unreachable (coverage), and the table never reached the server (apply verdict).
-            apply_blockers: list[str] = []
-
-            # Off the event loop for the same reason: this reads the integrate run's server.log in full and parses
-            # every tuned CSV named in the candidate env.
-            coverage = await asyncio.to_thread(self._gemm_tuned_config_coverage, tuner_name, env)
-            if coverage is not None:
-                cand = {**cand, "tuned_config_coverage": coverage}
-                if not coverage.get("artifact_applied") and coverage.get("conclusive", True):
-                    apply_blockers.append(str(coverage.get("not_applied_reason") or "no_shape_key_matched"))
-                    log.error(
-                        "gemm E2E: tuner=%s produced an artifact the runtime never "
-                        "applied — 0 of %d requested shape(s) resolve to a tuned row; "
-                        "the %.2f%% e2e delta measures nothing about the tuning",
-                        tuner_name,
-                        coverage.get("requested") or 0,
-                        gain_pct,
-                    )
-                elif not coverage.get("artifact_applied"):
-                    log.info(
-                        "gemm E2E: tuner=%s tuned-config coverage inconclusive — %s",
-                        tuner_name,
-                        coverage.get("not_applied_reason"),
-                    )
-                else:
-                    log.info(
-                        "gemm E2E: tuner=%s tuned-config coverage %.2f%% (%d/%d shapes)",
-                        tuner_name,
-                        coverage.get("coverage_pct") or 0.0,
-                        coverage.get("covered") or 0,
-                        coverage.get("requested") or 0,
-                    )
-
-            applied = self._gemm_apply_verdict(tuner_name, env)
-            if applied is not None:
-                cand = {**cand, "apply_verdict": applied}
-                if applied.get("blocks_keep"):
-                    apply_blockers.append(str(applied.get("verdict") or "not_applied"))
-                    log.error(
-                        "forge gemm E2E: tuner=%s apply verdict=%s — %s",
-                        tuner_name,
-                        applied.get("verdict"),
-                        applied.get("detail"),
-                    )
-                elif not applied.get("conclusive"):
-                    # "Cannot tell" is not "did not apply": hit lines need AITER_LOG_TUNED_CONFIG=1, and treating
-                    # their absence as a failure would revert every arm that ran without it.
-                    log.info(
-                        "forge gemm E2E: tuner=%s apply verdict=%s (not conclusive) — %s",
-                        tuner_name,
-                        applied.get("verdict"),
-                        applied.get("detail"),
-                    )
-
-            if decision == "KEEP" and new_tput > 0 and not apply_blockers:
-                tuned_file = _candidate_tuned_file(env, cand.get("env_var", ""))
-                lifted = self._coord.writeback.lift_to_current_best(
-                    "gemm_tuning",
-                    new_tput,
-                    {
-                        "name": f"{backend}_{tuner_name}",
-                        "candidate_extra_server_args": extra_server_args,
-                        "extra_envs": dict(env),
-                        "source_phase": "KERNEL_AGENT",
-                        **integrate_measurement_fields(measurement),
-                    },
-                    entry_extra={
-                        "tuned_file": tuned_file,
-                        "gain_pct": gain_pct,
-                        "backend": backend,
-                        "source": "kernel_entry_auto",
-                    },
-                )
-                if lifted:
-                    stacked_envs.update(env)
-                    running_tput = new_tput
-                    accepted_measurement = measurement
-                    adopted_tuned_file = tuned_file
-                    kept.append(
-                        {
-                            **cand,
-                            "envs": dict(env),
-                            "tput": new_tput,
-                            "gain_pct": gain_pct,
-                        }
-                    )
-                    self._journal_gemm_tuning_keep(
-                        self.shared_state.optimization_stack[-1],
-                        task_id=f"gemm_tune_e2e_{tuner_name}",
-                    )
                     continue
-            reason = f"decision={decision}, gain={gain_pct:.2f}%"
-            if apply_blockers:
-                # Distinguish no gain from a tuned artifact the runtime never reached.
-                reason = f"tuned_config_never_applied[{'+'.join(apply_blockers)}] ({reason})"
-            reverted.append({**cand, "reason": reason})
-            await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
+                reason = "complete_aiter_config_unavailable"
+            else:
+                reason = "candidate_artifact_missing"
+            log.error("gemm E2E: refusing aiter candidate for %s (%s: %s)", cand["tuner"], env_var, reason)
+            return env, {**cand, "reason": reason, "failed_env_var": env_var}
+        return env, None
 
+    def _gemm_candidate_server_args(self, tuner_name: str) -> str:
+        if tuner_name == "fmoe_ck" and str(self.shared_state.framework or "").lower() == "sglang":
+            return "--moe-runner-backend aiter"
+        return ""
+
+    def _gemm_integrate_payload(
+        self, tuner_name: str, test_envs: dict[str, str], *, base_tput: float, budget_minutes: int
+    ) -> dict[str, Any]:
+        from hyperloom.common.model_paths import resolve_session_model_path
+
+        return {
+            "task_id": f"gemm_tune_e2e_{tuner_name}",
+            "kernel_id": f"gemm_tune_{tuner_name}",
+            "source": "forge_gemm_tuning",
+            "base_tput": base_tput,
+            "model_path": resolve_session_model_path(
+                state_model_path=str(self.shared_state.model_path or ""), for_serving=True
+            ),
+            "extra_server_args": self._gemm_candidate_server_args(tuner_name),
+            "extra_envs": test_envs,
+            "keep_threshold_pct": 1.0,
+            "budget_minutes": budget_minutes,
+            "mode": "env_only",
+        }
+
+    async def _integrate_gemm_candidate(
+        self,
+        cand: dict[str, Any],
+        test_envs: dict[str, str],
+        jit_backup_dir: Path,
+        *,
+        base_tput: float,
+        budget_minutes: int,
+    ) -> dict[str, Any] | None:
+        # The integrate verdict, a row carrying ``fault``, or ``None`` when the run itself was stopped.
+        from ..actions.executors._aiter_jit import drop_serving_so_for_envs, prepare_serving_so_for_csvs
+        from ..state.kernel_decision_settings import _MAX_INTEGRATE_FAULT_ATTEMPTS
+
+        tuner_name = cand["tuner"]
+        payload = self._gemm_integrate_payload(
+            tuner_name, test_envs, base_tput=base_tput, budget_minutes=budget_minutes
+        )
+        # The native handler reloads both the recipe and grading anchor from disk.
+        self.shared_state.save(self.session_dir)
+
+        async def _fault(attempt: int, error_class: str, **fields: Any) -> dict[str, Any]:
+            await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
+            return {
+                **cand,
+                "reason": f"integrate_fault:{error_class}",
+                "fault": True,
+                "error_class": error_class,
+                "fault_attempts": attempt,
+                **fields,
+            }
+
+        for attempt in range(1, _MAX_INTEGRATE_FAULT_ATTEMPTS + 1):
+            last = attempt >= _MAX_INTEGRATE_FAULT_ATTEMPTS
+            await asyncio.to_thread(prepare_serving_so_for_csvs, test_envs, backup_dir=jit_backup_dir)
+            try:
+                integrate_result = await integrate_within_phase(
+                    payload, state=self.shared_state, session_dir=self.session_dir
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "gemm E2E: integrate raised for %s (fault attempt %d/%d): %s",
+                    tuner_name,
+                    attempt,
+                    _MAX_INTEGRATE_FAULT_ATTEMPTS,
+                    exc,
+                )
+                if last:
+                    return await _fault(attempt, "handler_exception", error=repr(exc))
+                continue
+            stopped = stopped_by_the_run_class(integrate_result.get("error_class"))
+            if stopped is not None:
+                log.info("gemm E2E: %s left unmeasured -- %s", tuner_name, stopped.interrupted)
+                return None
+            if not self.shared_state._is_integrate_fault(integrate_result):
+                return integrate_result
+            error_class = str(integrate_result.get("error_class") or "integrate_fault").strip()
+            log.warning(
+                "gemm E2E: tuner=%s integrate fault %s (attempt %d/%d)",
+                tuner_name,
+                error_class,
+                attempt,
+                _MAX_INTEGRATE_FAULT_ATTEMPTS,
+            )
+            if last:
+                return await _fault(
+                    attempt,
+                    error_class,
+                    integrate_status=integrate_result.get("status"),
+                    error=integrate_result.get("error"),
+                )
+        return None
+
+    async def _gemm_apply_blockers(
+        self, cand: dict[str, Any], env: dict[str, str], *, gain_pct: float
+    ) -> tuple[list[str], dict[str, Any]]:
+        # Two independent ways the artifact can fail to take effect, neither of which the throughput delta can
+        # see: the keys are unreachable (coverage), and the table never reached the server (apply verdict).
+        tuner_name = cand["tuner"]
+        blockers: list[str] = []
+        # Off the event loop for the same reason: this reads the integrate run's server.log in full and parses
+        # every tuned CSV named in the candidate env.
+        coverage = await asyncio.to_thread(self._gemm_tuned_config_coverage, tuner_name, env)
+        if coverage is not None:
+            cand = {**cand, "tuned_config_coverage": coverage}
+            if coverage.get("artifact_applied"):
+                log.info(
+                    "gemm E2E: tuner=%s tuned-config coverage %.2f%% (%d/%d shapes)",
+                    tuner_name,
+                    coverage.get("coverage_pct") or 0.0,
+                    coverage.get("covered") or 0,
+                    coverage.get("requested") or 0,
+                )
+            elif coverage.get("conclusive", True):
+                blockers.append(str(coverage.get("not_applied_reason") or "no_shape_key_matched"))
+                log.error(
+                    "gemm E2E: tuner=%s produced an artifact the runtime never "
+                    "applied -- 0 of %d requested shape(s) resolve to a tuned row; "
+                    "the %.2f%% e2e delta measures nothing about the tuning",
+                    tuner_name,
+                    coverage.get("requested") or 0,
+                    gain_pct,
+                )
+            else:
+                log.info(
+                    "gemm E2E: tuner=%s tuned-config coverage inconclusive -- %s",
+                    tuner_name,
+                    coverage.get("not_applied_reason"),
+                )
+        applied = self._gemm_apply_verdict(tuner_name, env)
+        if applied is None:
+            return blockers, cand
+        cand = {**cand, "apply_verdict": applied}
+        if applied.get("blocks_keep"):
+            blockers.append(str(applied.get("verdict") or "not_applied"))
+            log.error(
+                "forge gemm E2E: tuner=%s apply verdict=%s -- %s",
+                tuner_name,
+                applied.get("verdict"),
+                applied.get("detail"),
+            )
+        elif not applied.get("conclusive"):
+            # "Cannot tell" is not "did not apply": hit lines need AITER_LOG_TUNED_CONFIG=1, and treating
+            # their absence as a failure would revert every arm that ran without it.
+            log.info(
+                "forge gemm E2E: tuner=%s apply verdict=%s (not conclusive) -- %s",
+                tuner_name,
+                applied.get("verdict"),
+                applied.get("detail"),
+            )
+        return blockers, cand
+
+    def _keep_gemm_candidate(
+        self, cand: dict[str, Any], env: dict[str, str], verdict: Mapping[str, Any], result: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        from ..measurement.integrate_performance import integrate_measurement_fields
+
+        backend = _first_text(result, "backend").strip().lower() or "geak"
+        tuner_name = cand["tuner"]
+        tput, gain_pct = _integrate_tput_and_gain(verdict)
+        tuned_file = _candidate_tuned_file(env, cand["env_var"])
+        lifted = self._coord.writeback.lift_to_current_best(
+            "gemm_tuning",
+            tput,
+            {
+                "name": f"{backend}_{tuner_name}",
+                "candidate_extra_server_args": self._gemm_candidate_server_args(tuner_name),
+                "extra_envs": dict(env),
+                "source_phase": "KERNEL_AGENT",
+                **integrate_measurement_fields(verdict.get("bench_result") or verdict),
+            },
+            entry_extra={
+                "tuned_file": tuned_file,
+                "gain_pct": gain_pct,
+                "backend": backend,
+                "source": "kernel_entry_auto",
+            },
+        )
+        if not lifted:
+            return None
+        self._journal_gemm_tuning_keep(self.shared_state.optimization_stack[-1], task_id=f"gemm_tune_e2e_{tuner_name}")
+        return {**cand, "envs": dict(env), "tput": tput, "gain_pct": gain_pct, "tuned_file": tuned_file}
+
+    async def _settle_gemm_e2e_verdict(
+        self,
+        result: dict[str, Any],
+        accepted_measurement: Mapping[str, Any],
+        paired_reference: dict[str, Any],
+        *,
+        running_tput: float,
+        paired_config_path: str,
+    ) -> None:
+        kept = result["e2e_results"]["kept"]
+        reverted = result["e2e_results"]["reverted"]
+        faults = result["e2e_results"]["faults"]
         # The watermark covers the whole run, so it waits for the last KEEP.
         result["graded_objective"] = None
+        total_gain: float | None = 0.0
         if kept:
-            total_gain: float | None = None
+            total_gain = None
             # Paired checks isolate the GEMM increment, not cumulative session gain.
             paired = await self._confirm_gemm_gain_paired(
                 paired_reference,
                 deepcopy(self.shared_state.current_best),
                 config_path=paired_config_path,
-                budget_minutes=per_tuner_budget_minutes,
+                budget_minutes=_per_tuner_budget_minutes(),
             )
             if self._coord.writeback.validate(
                 running_tput,
@@ -3706,8 +3651,8 @@ class KernelPhase(CoordinatorCollaborator):
                     against_baseline=True,
                 ).objective
             # Name the artifact this run adopted, so the breakdown can tell it was.
-            if adopted_tuned_file:
-                result["tuned_file"] = adopted_tuned_file
+            if kept[-1]["tuned_file"]:
+                result["tuned_file"] = kept[-1]["tuned_file"]
             log.info(
                 "gemm E2E: %d tuners KEEP (total gain=%s), %d REVERT",
                 len(kept),
@@ -3715,49 +3660,103 @@ class KernelPhase(CoordinatorCollaborator):
                 len(reverted),
             )
         elif faults:
-            stacked_envs = {}
-            total_gain = 0.0
-            log.info(
-                "gemm E2E: %d tuner(s) hit integrate fault(s), no E2E verdict",
-                len(faults),
-            )
+            log.info("gemm E2E: %d tuner(s) hit integrate fault(s), no E2E verdict", len(faults))
         else:
-            stacked_envs = {}
-            total_gain = 0.0
-            log.info(
-                "gemm E2E: all %d tuners REVERT, no E2E gain",
-                len(reverted),
-            )
-
-        # Rewrite the stored result to the E2E-validated outcome so Orchestration never sees the raw combined
-        # recommended_env and issues a bundled integrate.
-        result["e2e_results"] = {"kept": kept, "reverted": reverted, "faults": faults}
-        result["recommended_env_raw"] = dict(result.get("recommended_env") or {})
-        result["extra_envs_raw"] = dict(result.get("extra_envs") or {})
-        result["recommended_env"] = dict(stacked_envs)
-        result["extra_envs"] = dict(stacked_envs)
+            log.info("gemm E2E: all %d tuners REVERT, no E2E gain", len(reverted))
         if total_gain is None or (faults and not kept and not reverted):
             result["e2e_gain_pct"] = None
         else:
             result["e2e_gain_pct"] = round(float(total_gain), 4)
         result["e2e_validated"] = True
         result["requires_e2e_validation"] = False
+        result["decision"] = "KEEP" if kept else "REVERT"
         if kept:
             result["status"] = "complete"
-            result["decision"] = "KEEP"
-        elif reverted:
-            result["status"] = "complete"
-            result["decision"] = "REVERT"
-            result["micro_decision"] = "candidate_no_e2e_gain"
-        elif faults:
+        elif faults and not reverted:
             result["status"] = "failed"
-            result["decision"] = "REVERT"
             result["micro_decision"] = "integrate_fault"
         else:
             result["status"] = "complete"
-            result["decision"] = "REVERT"
             result["micro_decision"] = "candidate_no_e2e_gain"
         self._replace_latest_gemm_tuning_attempt(result)
+
+    async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
+        """Sequentially E2E-validate each tuning candidate's env independently."""
+        from ..actions.executors._aiter_jit import drop_serving_so_for_envs
+
+        candidates = self._gemm_e2e_candidates(result)
+        if not candidates:
+            self._close_gemm_e2e_without_candidates(result)
+            return
+        running_tput = float(self.shared_state.current_best.get("tput") or self.shared_state.baseline_tput or 0.0)
+        budget_minutes = _per_tuner_budget_minutes()
+        paired_reference = deepcopy(self.shared_state.current_best)
+        paired_reference.setdefault("tput", running_tput)
+        paired_config_path = str(self.shared_state.baseline_config_path or "")
+        jit_backup_dir = self.session_dir / "runs" / "aiter_jit_backup"
+        stacked_envs: dict[str, str] = {}
+        kept: list[dict[str, Any]] = []
+        reverted: list[dict[str, Any]] = []
+        faults: list[dict[str, Any]] = []
+        accepted_measurement: dict[str, Any] = {}
+        # ``_runtime_uses_aiter_fused_moe`` resolves the serving log -- which now byte-scans the whole runs/ tree for
+        # aiter evidence -- and then reads it whole, ~17MB on the fleet.
+        triton_moe_inert = any(c.get("tuner") == "vllm_moe_triton" for c in candidates) and await asyncio.to_thread(
+            self._runtime_uses_aiter_fused_moe
+        )
+        for cand in candidates:
+            tuner_name = cand["tuner"]
+            skip_reason = self._gemm_candidate_skip_reason(tuner_name, triton_moe_inert=triton_moe_inert)
+            if skip_reason:
+                reverted.append({**cand, "reason": skip_reason})
+                continue
+            # Merge candidate CSV with the runtime config so that shapes NOT in the candidate keep their existing
+            # tuned entries.
+            env, refusal = self._merged_candidate_envs(cand)
+            if refusal is not None:
+                reverted.append(refusal)
+                continue
+            # Merge with previously KEEP'd envs.
+            test_envs = {**stacked_envs, **env}
+            log.info("gemm E2E: validating tuner=%s env=%s (base_tput=%.1f)", tuner_name, cand["env_var"], running_tput)
+            verdict = await self._integrate_gemm_candidate(
+                cand, test_envs, jit_backup_dir, base_tput=running_tput, budget_minutes=budget_minutes
+            )
+            if verdict is None:
+                break
+            if verdict.get("fault"):
+                faults.append(verdict)
+                continue
+            measurement = verdict.get("bench_result") or verdict
+            new_tput, gain_pct = _integrate_tput_and_gain(verdict)
+            decision = str(verdict.get("decision") or "").upper()
+            log.info(
+                "gemm E2E: tuner=%s decision=%s new_tput=%.1f gain=%.2f%%", tuner_name, decision, new_tput, gain_pct
+            )
+            blockers, cand = await self._gemm_apply_blockers(cand, env, gain_pct=gain_pct)
+            if decision == "KEEP" and new_tput > 0 and not blockers:
+                keep_row = self._keep_gemm_candidate(cand, env, verdict, result)
+                if keep_row is not None:
+                    stacked_envs.update(env)
+                    running_tput = new_tput
+                    accepted_measurement = measurement
+                    kept.append(keep_row)
+                    continue
+            reason = f"decision={decision}, gain={gain_pct:.2f}%"
+            if blockers:
+                # Distinguish no gain from a tuned artifact the runtime never reached.
+                reason = f"tuned_config_never_applied[{'+'.join(blockers)}] ({reason})"
+            reverted.append({**cand, "reason": reason})
+            await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
+
+        _record_gemm_e2e_envelope(result, stacked_envs, kept=kept, reverted=reverted, faults=faults)
+        await self._settle_gemm_e2e_verdict(
+            result,
+            accepted_measurement,
+            paired_reference,
+            running_tput=running_tput,
+            paired_config_path=paired_config_path,
+        )
 
     async def _finish_kernel_entry(self) -> None:
         """Run the gated kernel lanes, write the handoff, and delegate rewrite control."""
@@ -3812,55 +3811,95 @@ class KernelPhase(CoordinatorCollaborator):
             log.exception("KERNEL entry: Forge handoff generation failed")
         await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
 
-    async def _run_kernel_rewrite_controller(
-        self,
-        handoff_dir: Path,
-        output_dir: Path,
-        baselines: dict[str, object] | None = None,
-    ) -> None:
-        """Run one Controller attempt without preselecting operators."""
-        from ..kernel.controller_submit import (
-            record_controller_llm_usage,
-            run_controller_subprocess,
-        )
+    async def _controller_attempt_result(self, handoff_dir: Path, output_dir: Path) -> dict[str, Any]:
+        from ..kernel.controller_submit import run_controller_subprocess
 
-        cycle = int(self.shared_state.macro_cycle or 0)
         controller_budget_sec, hard_timeout_sec = self._kernel_rewrite_controller_timeouts()
-
+        budget_minutes = controller_budget_sec / 60.0
+        attempt = {
+            "macro_cycle": int(self.shared_state.macro_cycle or 0),
+            "handoff_dir": str(handoff_dir),
+            "budget_minutes": budget_minutes,
+            "hard_timeout_sec": hard_timeout_sec,
+            "patch_count": 0,
+            "task_count": 0,
+            "output_dir": str(output_dir),
+        }
         if controller_budget_sec <= 0 or hard_timeout_sec <= 0:
-            result = {
+            return {
+                **attempt,
                 "status": "no_result",
                 "reason": "no KERNEL phase budget remains for the rewrite controller",
-                "patch_count": 0,
-                "task_count": 0,
-                "output_dir": str(output_dir),
             }
-        else:
-            try:
-                result = await asyncio.to_thread(
-                    run_controller_subprocess,
-                    handoff_dir=handoff_dir,
-                    output_dir=output_dir,
-                    budget_minutes=controller_budget_sec / 60.0,
-                    hard_timeout_sec=hard_timeout_sec,
-                )
-            except Exception as error:
-                log.exception("KERNEL entry: kernel rewrite controller failed")
-                result = {
-                    "status": "failed",
-                    "reason": f"controller invocation failed: {error}",
-                    "patch_count": 0,
-                    "task_count": 0,
-                    "output_dir": str(output_dir),
-                }
+        try:
+            result = await asyncio.to_thread(
+                run_controller_subprocess,
+                handoff_dir=handoff_dir,
+                output_dir=output_dir,
+                budget_minutes=budget_minutes,
+                hard_timeout_sec=hard_timeout_sec,
+            )
+        except Exception as error:
+            log.exception("KERNEL entry: kernel rewrite controller failed")
+            return {**attempt, "status": "failed", "reason": f"controller invocation failed: {error}"}
+        # The four facts the phase owns are re-pinned over the child's own output: the Controller writes
+        # ``state.json`` itself and must not be able to report a budget other than the one it was given.
+        return {**attempt, **result, **{key: attempt[key] for key in _CONTROLLER_ATTEMPT_FACTS}}
 
-        result = {
-            **result,
-            "macro_cycle": cycle,
-            "handoff_dir": str(handoff_dir),
-            "budget_minutes": controller_budget_sec / 60.0,
-            "hard_timeout_sec": hard_timeout_sec,
-        }
+    async def _integrate_controller_output(self, result: dict[str, Any], output_dir: Path) -> None:
+        if int(result.get("patch_count") or 0) <= 0:
+            result["integration"] = {
+                "status": "not_run",
+                "reason": "Controller published no patches",
+                "kept_count": 0,
+                "reverted_count": 0,
+                "skipped_count": 0,
+            }
+            return
+        from ..kernel.controller_patch_integration import KeepSession, integrate_controller_patches
+
+        try:
+            integration = await integrate_controller_patches(
+                patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
+                session=KeepSession(
+                    session_dir=self.session_dir,
+                    shared_state=self.shared_state,
+                    record_keep=self._coord.writeback.record_integrate_keep,
+                ),
+                admit_round=lambda rounds_run: controller_round_stop(self.shared_state, rounds_run),
+            )
+            result["integration"] = integration.to_dict()
+        except Exception as error:
+            log.exception("KERNEL entry: Controller patch integration failed")
+            result["integration"] = {"status": "failed", "reason": str(error), "kept_count": 0}
+
+    def _file_controller_integration_failure(self, result: dict[str, Any]) -> None:
+        integration = result["integration"]
+        skipped = [
+            str(row.get("reason") or "")
+            for row in integration.get("results") or []
+            if isinstance(row, dict) and str(row.get("status") or "").startswith("skipped")
+        ]
+        status = str(integration.get("status") or "")
+        if status not in {"failed", "no_patch_admitted"} and not skipped:
+            return
+        cycle = int(self.shared_state.macro_cycle or 0)
+        self.shared_state.record_action_failure(
+            action="kernel_rewrite_controller",
+            task_id=str(result.get("run_id") or f"forge-cycle-{cycle}"),
+            result={
+                "error_class": status or "patches_skipped",
+                "error": "; ".join(x for x in ([str(integration.get("reason") or "")] + skipped) if x)[:800],
+            },
+        )
+
+    async def _run_kernel_rewrite_controller(
+        self, handoff_dir: Path, output_dir: Path, baselines: dict[str, object]
+    ) -> None:
+        """Run one Controller attempt without preselecting operators."""
+        from ..kernel.controller_submit import record_controller_llm_usage
+
+        result = await self._controller_attempt_result(handoff_dir, output_dir)
         # The Controller cannot reach this ledger from its own process, so its forge-loops' spend is filed here
         # now that the child has exited.
         record_controller_llm_usage(result=result, session_dir=self.session_dir)
@@ -3872,59 +3911,17 @@ class KernelPhase(CoordinatorCollaborator):
         try:
             from ..kernel.campaign_baseline import reclaim_campaign_repositories
 
-            reclaimed = reclaim_campaign_repositories(baselines or {})
+            reclaimed = reclaim_campaign_repositories(baselines)
             if reclaimed:
                 result["reclaimed_repositories"] = reclaimed
         except Exception:
             log.exception("KERNEL entry: reclaiming the campaign repositories failed")
-        if int(result.get("patch_count") or 0) > 0:
-            try:
-                from ..kernel.controller_patch_integration import integrate_controller_patches
-
-                integration = await integrate_controller_patches(
-                    patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
-                    session_dir=self.session_dir,
-                    shared_state=self.shared_state,
-                    record_keep=self._coord.writeback.record_integrate_keep,
-                    admit_round=lambda rounds_run: controller_round_stop(self.shared_state, rounds_run),
-                )
-                result["integration"] = integration.to_dict()
-            except Exception as error:
-                log.exception("KERNEL entry: Controller patch integration failed")
-                result["integration"] = {
-                    "status": "failed",
-                    "reason": str(error),
-                    "kept_count": 0,
-                }
-        else:
-            result["integration"] = {
-                "status": "not_run",
-                "reason": "Controller published no patches",
-                "kept_count": 0,
-                "reverted_count": 0,
-                "skipped_count": 0,
-            }
+        await self._integrate_controller_output(result, output_dir)
         self._record_kernel_rewrite_controller_timeline(result)
         self.shared_state.kernel_rewrite_controller_result = result
-        # The summary rides a ``response`` message the inbox dumps raw once.
-        _integration = result.get("integration")
-        if isinstance(_integration, dict):
-            _skipped = [
-                str(r.get("reason") or "")
-                for r in (_integration.get("results") or [])
-                if isinstance(r, dict) and str(r.get("status") or "").startswith("skipped")
-            ]
-            _status = str(_integration.get("status") or "")
-            if _status in {"failed", "no_patch_admitted"} or _skipped:
-                self.shared_state.record_action_failure(
-                    action="kernel_rewrite_controller",
-                    task_id=str(result.get("run_id") or f"forge-cycle-{cycle}"),
-                    result={
-                        "error_class": _status or "patches_skipped",
-                        "error": "; ".join(x for x in ([str(_integration.get("reason") or "")] + _skipped) if x)[:800],
-                    },
-                )
+        self._file_controller_integration_failure(result)
         self.shared_state.save(self.session_dir)
+        # The summary rides a ``response`` message the inbox dumps raw once.
         await self.bus.append_and_seq(
             Message.new(
                 "kernel_agent",
@@ -4023,14 +4020,10 @@ class KernelPhase(CoordinatorCollaborator):
             # Counted on the session for the same reason as the aborts above.
             withheld_spent = _as_int(self.shared_state.fusion_withheld_retries)
             self.shared_state.fusion_withheld_retries = withheld_spent + 1
-        try:
-            if isinstance(result, dict) and not str(result.get("fusion_run_id") or "").strip():
-                cycle = int(self.shared_state.macro_cycle or 0)
-                result["fusion_run_id"] = f"fusion-c{cycle}-{time.time_ns():x}"
-            self.shared_state.last_fusion = result if isinstance(result, dict) else {"status": status}
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 - state shape tolerant (best-effort idempotency record)
-            pass
+        if isinstance(result, dict) and not str(result.get("fusion_run_id") or "").strip():
+            cycle = int(self.shared_state.macro_cycle or 0)
+            result["fusion_run_id"] = f"fusion-c{cycle}-{time.time_ns():x}"
+        self.shared_state.last_fusion = result if isinstance(result, dict) else {"status": status}
         if isinstance(result, dict):
             self._record_fusion_timeline(result)
         try:
@@ -4053,18 +4046,18 @@ class KernelPhase(CoordinatorCollaborator):
         # A KEPT fusion is handed to integrate for the e2e re-baseline decision.
         if isinstance(result, dict) and result.get("kept") and result.get("requires_e2e_validation"):
             await self._integrate_fusion(result)
+        # One save after the queue is filled: a failed save cannot leave a kept fusion recorded without its siblings.
+        self.shared_state.save(self.session_dir)
 
     async def _integrate_fusion(self, result: dict) -> None:
         """Queue every KEPT forge-fusion sibling for the shared e2e integrate lane."""
         from ..kernel._kernel_decisions import enqueue_nominated_patch
-        from ..kernel.nomination_result import parse_outcome
-
-        from ..kernel.request_handlers import _summarize_dropped_patches
+        from ..kernel.nomination_result import parse_outcome, summarize_dropped_patches
 
         outcome = parse_outcome(result)
         # Counted before the empty check: an all-refused envelope and a run that kept nothing are the same ``queued``
         # figure and differ only in reasons.
-        refused = _summarize_dropped_patches(outcome.dropped)
+        refused = summarize_dropped_patches(outcome.dropped)
         if outcome.is_empty:
             if outcome.schema_error:
                 log.warning(
@@ -4094,10 +4087,6 @@ class KernelPhase(CoordinatorCollaborator):
             len(outcome.patches),
             refused or "none",
         )
-        try:
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 - best-effort persist; drain reloads state
-            pass
 
     def current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed)."""

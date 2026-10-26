@@ -1,6 +1,6 @@
 # Review Coordinator Inbox
 
-Use this action when `request.kind == "coordinator_inbox"`. The host has
+Use this action for every Critic turn. The host has
 forwarded the Coordinator's per-turn prompt verbatim (see
 [references/coordinator_protocol.md](../references/coordinator_protocol.md)).
 

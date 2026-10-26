@@ -268,6 +268,22 @@ def test_the_initial_roofline_wait_stops_at_the_optimization_reserve():
     assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
 
 
+def test_the_phase_block_shows_the_initial_roofline_hold_exactly_while_it_holds():
+    """A spent phase share under the hold must not read as a spent session."""
+
+    def hold_lines(state: SharedState) -> list[str]:
+        return [line for line in phase_state.phase_status_summary(state).splitlines() if line.startswith("hold")]
+
+    state = _prelude_state(usable_sec=10_000.0, baseline_tput=1074.7, auto_roofline_pending_task_id="rl-1")
+    [hold] = hold_lines(state)
+    assert "rl-1" in hold and "4600" in hold
+    state.session_budget_usable_sec = lambda: 5_000.0
+    assert hold_lines(state) == []
+    state.session_budget_usable_sec = lambda: 10_000.0
+    state.auto_roofline_pending_task_id = ""
+    assert hold_lines(state) == []
+
+
 def test_prelude_exit_states_whether_one_optimization_round_still_fits():
     """The plain statement neither field session ever got: preparation spent the run."""
     state = _prelude_state(baseline_tput=1074.7, baseline_runtime_sec=2705.7, usable_sec=2796.0)
@@ -816,7 +832,7 @@ def _enter_framework_for(c, elapsed_sec: float) -> None:
 
 
 async def _phase_block(c) -> str:
-    prompt = await c.conversation.compose_prompt("orchestration")
+    prompt = (await c.conversation.compose_prompt("orchestration")).text
     return prompt.split("=== Phase ===", 1)[1]
 
 

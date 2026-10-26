@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from kernelforge.gemm_tune.cli import _normalize_inline_shapes_json, _safe_is_file
+from kernelforge.gemm_tune.evidence import padded_m
 from kernelforge.gemm_tune.tuners import _aiter_dense_common as ac
 from kernelforge.gemm_tune.tuners._aiter_dense_common import (
     _conform_csv_columns,
@@ -108,15 +109,14 @@ Shape | Pre(us) | Post(us) | Improve | Reason
 
 
 def test_resolve_input_csv_preserves_recorded_shapes_in_fast_mode(tmp_path):
-    # Recorded rows are never rewritten; the guard only appends the decode buckets this capture cannot serve (M=16
-    # already answers 1/4/16).
+    # Recorded rows are never rewritten; the guard only appends the decode buckets this capture lacks.
     csv = tmp_path / "untuned.csv"
     csv.write_text("M,N,K\n16,1536,7168\n", encoding="utf-8")
     ctx = _ctx(tmp_path, untuned_csv=csv)
     out = _resolve_input_csv(ctx, tmp_path)
     rows = out.read_text(encoding="utf-8").strip().splitlines()
     assert rows[:2] == ["M,N,K", "16,1536,7168"]
-    assert rows[2:] == ["32,1536,7168", "64,1536,7168"]
+    assert rows[2:] == ["1,1536,7168", "32,1536,7168", "48,1536,7168", "64,1536,7168"]
 
 
 def test_resolve_input_csv_augments_recorded_shapes_in_thorough_mode(tmp_path):
@@ -147,9 +147,8 @@ def test_resolve_input_csv_covers_decode_m_when_capture_is_prefill_only(tmp_path
     rows = out.read_text(encoding="utf-8").strip().splitlines()
     m_values = {int(r.split(",")[0]) for r in rows[1:]}
     assert 2095 in m_values  # recorded prefill point preserved
-    # One row per decode lookup bucket for conc=64; 16 also answers M=1/4, and nothing above the concurrency cap is
-    # tuned.
-    assert {16, 32, 64}.issubset(m_values)
+    # One row per decode bucket for conc=64, and nothing above the concurrency cap is tuned.
+    assert {1, 16, 32, 48, 64}.issubset(m_values)
     assert 128 not in m_values
     # NK pairs preserved for every M.
     nk_values = {tuple(r.split(",")[1:3]) for r in rows[1:]}
@@ -170,26 +169,20 @@ def test_resolve_input_csv_covers_decode_m_for_prefill_only_manifest(tmp_path, m
     ctx = _ctx(tmp_path, shapes_manifest=manifest, conc=64, tokens=[16, 512])
     out = _resolve_input_csv(ctx, tmp_path)
     m_values = {int(r.split(",")[0]) for r in out.read_text(encoding="utf-8").strip().splitlines()[1:]}
-    assert m_values == {16, 32, 64, 2095}
+    assert m_values == {1, 16, 32, 48, 64, 2095}
 
 
 def test_resolve_input_csv_preserves_capture_that_already_covers_decode(tmp_path):
     """A capture holding every decode bucket is left untouched in fast mode (no needless tuning-time blow-up)."""
     shapes = tmp_path / "forge_shapes.json"
     shapes.write_text(
-        json.dumps(
-            [
-                {"M": 16, "N": 1536, "K": 7168},
-                {"M": 32, "N": 1536, "K": 7168},
-                {"M": 64, "N": 1536, "K": 7168},
-            ]
-        ),
+        json.dumps([{"M": m, "N": 1536, "K": 7168} for m in (1, 16, 32, 48, 64)]),
         encoding="utf-8",
     )
     ctx = _ctx(tmp_path, shapes_json=shapes, conc=64)
     out = _resolve_input_csv(ctx, tmp_path)
     m_values = {int(r.split(",")[0]) for r in out.read_text(encoding="utf-8").strip().splitlines()[1:]}
-    assert m_values == {16, 32, 64}
+    assert m_values == {1, 16, 32, 48, 64}
 
 
 def _rows(csv: Path) -> list[str]:
@@ -210,7 +203,7 @@ def test_decode_coverage_is_decided_per_dispatch_group(tmp_path):
     csv = tmp_path / "untuned.csv"
     csv.write_text(
         "M,N,K\n"
-        "16,8704,3072\n32,8704,3072\n64,8704,3072\n"  # fully covered
+        "1,8704,3072\n16,8704,3072\n32,8704,3072\n48,8704,3072\n64,8704,3072\n"  # fully covered
         "2095,10240,3072\n",  # prefill only
         encoding="utf-8",
     )
@@ -218,8 +211,8 @@ def test_decode_coverage_is_decided_per_dispatch_group(tmp_path):
 
     groups = _group_m(_resolve_input_csv(ctx, tmp_path))
 
-    assert groups[("8704", "3072")] == {16, 32, 64}
-    assert groups[("10240", "3072")] == {16, 32, 64, 2095}
+    assert groups[("8704", "3072")] == {1, 16, 32, 48, 64}
+    assert groups[("10240", "3072")] == {1, 16, 32, 48, 64, 2095}
 
 
 def test_decode_coverage_ignores_m_outside_the_decode_grid(tmp_path):
@@ -230,15 +223,15 @@ def test_decode_coverage_ignores_m_outside_the_decode_grid(tmp_path):
 
     m_values = _group_m(_resolve_input_csv(ctx, tmp_path))[("8704", "3072")]
 
-    assert m_values == {16, 32, 64, 100}
+    assert m_values == {1, 16, 32, 48, 64, 100}
 
 
 @pytest.mark.parametrize(
     ("recorded", "expected_added"),
-    [(64, {16, 32, 128, 256}), (128, {16, 32, 64, 256})],
+    [(64, {1, 16, 32, 48, 128, 256}), (128, {1, 16, 32, 48, 64, 256})],
 )
 def test_one_decode_grid_member_does_not_cover_the_other_buckets(tmp_path, recorded, expected_added):
-    """A tuned M=64 row is never consulted for runtime M=16 or M=32: each probes its own exact/padded keys."""
+    """A tuned M=64 row does not stand in for the other buckets, even those that reach it through aiter's lookups."""
     csv = tmp_path / "untuned.csv"
     csv.write_text(f"M,N,K\n{recorded},8704,3072\n", encoding="utf-8")
     ctx = _ctx(tmp_path, untuned_csv=csv, conc=256)
@@ -249,14 +242,14 @@ def test_one_decode_grid_member_does_not_cover_the_other_buckets(tmp_path, recor
 
 
 def test_decode_bucket_16_serves_the_smaller_grid_members(tmp_path):
-    """M=1/2/4/8 all pad into bucket 16, so a single row covers them -- the guard must not emit one row per small M."""
+    """M=2/4/8 all pad into bucket 16, so a single row covers them; M=1 keeps its own row."""
     csv = tmp_path / "untuned.csv"
     csv.write_text("M,N,K\n2095,8704,3072\n", encoding="utf-8")
     ctx = _ctx(tmp_path, untuned_csv=csv, conc=8)
 
     m_values = _group_m(_resolve_input_csv(ctx, tmp_path))[("8704", "3072")]
 
-    assert m_values == {16, 2095}  # grid [1,4,8] collapses to the one bucket
+    assert m_values == {1, 16, 2095}
 
 
 def test_decode_coverage_preserves_row_order_and_q_dtype(tmp_path):
@@ -275,9 +268,11 @@ def test_decode_coverage_preserves_row_order_and_q_dtype(tmp_path):
     # Original rows survive verbatim, in their original (weight) order.
     assert rows[1] == "2095,10240,3072,torch.float8_e4m3fn"
     assert rows[2] == "2095,8704,3072,torch.bfloat16"
-    # One bucket row per group, each inheriting its own group's dtype.
+    # The band rows per group, each inheriting its own group's dtype.
     assert rows[3:] == [
+        "1,10240,3072,torch.float8_e4m3fn",
         "16,10240,3072,torch.float8_e4m3fn",
+        "1,8704,3072,torch.bfloat16",
         "16,8704,3072,torch.bfloat16",
     ]
 
@@ -341,37 +336,17 @@ _PADDED_M_OBSERVED: tuple[tuple[int, int, int], ...] = (
 )
 
 
-#: ``(M, N, gl=1)`` read off the installed aiter. ``gl=1`` is not a pure power
-#: of two: past M=8192 a wide N collapses the bucket to 8192, so the mirror
-#: needs N to answer at all. Sampled on both sides of the N>4096 branch.
-_PADDED_M_GL1_OBSERVED: tuple[tuple[int, int, int], ...] = (
-    (1025, 8704, 2048),
-    (1025, 2048, 2048),
-    (2049, 8704, 4096),
-    (2049, 2048, 4096),
-    (4097, 8704, 8192),
-    (4097, 2048, 8192),
-    (8192, 8704, 8192),
-    (8192, 2048, 8192),
-    (8193, 8704, 8192),
-    (8193, 2048, 16384),
-    (10000, 8704, 8192),
-    (10000, 2048, 16384),
-    (16384, 8704, 8192),
-    (16384, 2048, 16384),
-)
+def _aiter_lookup_bucket(m: int, gl0: int, pow2: int) -> int:
+    """The bucket demand is tuned at: aiter's gl=0 padding up to 256, its gl=1 power of two above; M=1 stays 1."""
+    if m == 1:
+        return 1
+    return gl0 if m <= 256 else min(pow2, 8192)
 
 
 @pytest.mark.parametrize(("m", "gl0", "pow2"), _PADDED_M_OBSERVED)
-def test_padded_m_mirror_matches_recorded_aiter_behaviour(m, gl0, pow2):
+def test_demand_bucket_is_one_of_aiters_recorded_lookups(m, gl0, pow2):
     """Runs everywhere, including the lane that has no aiter installed."""
-    assert ac._padded_m_gl0(m) == gl0
-    assert ac._next_pow2(m) == pow2
-
-
-@pytest.mark.parametrize(("m", "n", "gl1"), _PADDED_M_GL1_OBSERVED)
-def test_padded_m_gl1_mirror_matches_recorded_aiter_behaviour(m, n, gl1):
-    assert ac._padded_m_gl1(m, n) == gl1
+    assert padded_m(m) == _aiter_lookup_bucket(m, gl0, pow2)
 
 
 def test_the_recorded_buckets_capture_the_granularity_change():
@@ -380,23 +355,15 @@ def test_the_recorded_buckets_capture_the_granularity_change():
     assert recorded[256] == (256, 256) and recorded[257] == (288, 512)
     assert recorded[240] == (240, 256) and recorded[241] == (256, 256)
     assert recorded[129] == (144, 256)
-    # 32 -> 64 at M=1024, and 64 -> 128 at M=4096.
-    assert recorded[1024] == (1024, 1024) and recorded[1025] == (1088, 2048)
-    assert recorded[4096] == (4096, 4096) and recorded[4097] == (4224, 8192)
-    # And the gl=1 table has to straddle the N branch, not just M.
-    gl1 = {(m, n): v for m, n, v in _PADDED_M_GL1_OBSERVED}
-    assert gl1[(8193, 8704)] == 8192 and gl1[(8193, 2048)] == 16384
 
 
-def test_padded_m_mirror_matches_installed_aiter():
-    """The local padded-M mirror must track aiter's own bucketing; drift would silently make the coverage guard judge the wrong lookup keys."""
+def test_demand_bucket_matches_installed_aiter():
+    """Drift from aiter's own padding would tune rows no runtime lookup reaches."""
     gemm_op_common = pytest.importorskip("aiter.ops.gemm_op_common")
-    get_padded_m = gemm_op_common.get_padded_m
     n, k = 8704, 3072
     for m, _gl0, _pow2 in _PADDED_M_OBSERVED:
-        assert ac._padded_m_gl0(m) == get_padded_m(m, n, k, 0), f"gl=0 mismatch at M={m}"
-    for m, n_i, _gl1 in _PADDED_M_GL1_OBSERVED:
-        assert ac._padded_m_gl1(m, n_i) == get_padded_m(m, n_i, k, 1), f"gl=1 mismatch at M={m} N={n_i}"
+        if 1 < m <= 8192:
+            assert padded_m(m) == gemm_op_common.get_padded_m(m, n, k, 0 if m <= 256 else 1), f"mismatch at M={m}"
 
 
 def test_aiter_dtype_str_rejects_a_dtype_outside_aiters_table(monkeypatch):
@@ -438,9 +405,9 @@ def test_manifest_keeps_curated_shapes_in_thorough_mode(tmp_path, monkeypatch):
 
     m_values = _group_m(_resolve_input_csv(ctx, tmp_path))[("8704", "3072")]
 
-    # The one decode bucket for conc=8 plus the curated prefill row -- and nothing from the thorough grid (e.g. the
-    # 8192 high-watermark).
-    assert m_values == {16, 2095}
+    # The decode buckets for conc=8 plus the curated prefill row -- and nothing from the thorough grid (e.g. the 8192
+    # high-watermark).
+    assert m_values == {1, 16, 2095}
 
 
 def _profile(**kw) -> ModelProfile:
@@ -546,3 +513,22 @@ def test_cli_tokens_accepts_bracketed_list():
     tokens_clean = tokens.strip().strip("[](){}")
     parsed = [int(t.strip().strip("'\"")) for t in tokens_clean.split(",") if t.strip().strip("'\"")]
     assert parsed == [4, 8, 64]
+
+
+def test_a_power_of_two_row_does_not_cover_the_16_multiple_bucket(tmp_path):
+    """bs=40 and 48 reach M=64 only through aiter's last lookup, so the band still asks for its own 48 row."""
+    csv = tmp_path / "untuned.csv"
+    csv.write_text("M,N,K\n64,5120,17408\n", encoding="utf-8")
+    ctx = _ctx(tmp_path, untuned_csv=csv, conc=64)
+
+    assert _group_m(_resolve_input_csv(ctx, tmp_path))[("5120", "17408")] == {1, 16, 32, 48, 64}
+
+
+def test_exact_grid_band_holds_every_graph_batch_size(tmp_path):
+    from kernelforge.gemm_tune.dense_shapes import MGrid
+
+    csv = tmp_path / "untuned.csv"
+    csv.write_text("M,N,K\n2095,5120,17408\n", encoding="utf-8")
+    ctx = _ctx(tmp_path, untuned_csv=csv, conc=16, m_grid=MGrid.EXACT)
+
+    assert _group_m(_resolve_input_csv(ctx, tmp_path))[("5120", "17408")] == {1, 2, 4, 8, 12, 16, 2095}

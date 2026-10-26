@@ -1,16 +1,12 @@
 # Coordinator Inbox Protocol
 
 The Coordinator (`hyperloom.orchestrator.loop.coordinator.Coordinator`)
-hands every reactor a prompt with the layout below. Critic must consume
-this format (or the equivalent payload that an A2A host preserves
-verbatim into `request.raw_prompt`).
+hands every reactor a prompt with the layout below; the Critic receives
+it verbatim as `request.raw_prompt`.
 
 ```text
 === Shared session state ===
 session_id=<sess_id>   model=<model>   framework=<framework>   ...
-
-=== Knowledge base hints ===          <-- only for orchestration role
-<free text bullet list>
 
 === Inbox for critic (newest last) ===
   seq=<int> msg_id=<hex> from=<agent> topic=<topic> payload=<python repr dict>
@@ -19,11 +15,8 @@ session_id=<sess_id>   model=<model>   framework=<framework>   ...
 
 The runtime parser (`runtime.inbox_parser.parse_inbox_prompt`) returns:
 
-* `agent_name` — should be `critic` for our turns.
 * `shared_state` — `key=value` tokens from the header.
-* `inbox` — every parsed row.
 * `proposals` — `topic=proposal` rows whose payload parsed as a dict.
-* `kb_hints_text` — preserved (we do not read it for Critic turns).
 
 ## Per-tick contract (matches `MockCriticBackend`)
 

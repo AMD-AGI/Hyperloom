@@ -10,6 +10,7 @@ from pathlib import Path
 
 from hyperloom.orchestrator.source_snapshot import (
     MANIFEST_NAME,
+    SourceLayer,
     _safe_rel,
     snapshot_is_complete,
     snapshot_source_layer,
@@ -42,9 +43,7 @@ def test_snapshot_source_layer_upsert_only_is_complete(tmp_path: Path) -> None:
 
     dest = tmp_path / "snap"
     manifest = snapshot_source_layer(
-        framework_root=fw,
-        base_sha="abc123",
-        rel_paths=["pkg/mod.py"],
+        SourceLayer(framework_root=fw, base_sha="abc123", rel_paths=["pkg/mod.py"]),
         dest_dir=dest,
         provenance="integrate_patch",
     )
@@ -64,13 +63,15 @@ def test_snapshot_source_layer_declared_delete_is_complete(tmp_path: Path) -> No
 
     dest = tmp_path / "snap"
     manifest = snapshot_source_layer(
-        framework_root=fw,
-        base_sha="abc123",
-        rel_paths=["pkg/kept.py", "pkg/removed.py"],
+        SourceLayer(
+            framework_root=fw,
+            base_sha="abc123",
+            rel_paths=["pkg/kept.py", "pkg/removed.py"],
+            declared_ops={"pkg/removed.py": "delete"},
+        ),
         dest_dir=dest,
         provenance="integrate_patch",
         extra={"kernel_id": "k1"},
-        declared_ops={"pkg/removed.py": "delete"},
     )
 
     assert manifest is not None
@@ -88,10 +89,7 @@ def test_snapshot_source_layer_undeclared_absent_becomes_missing(tmp_path: Path)
 
     dest = tmp_path / "snap"
     manifest = snapshot_source_layer(
-        framework_root=fw,
-        base_sha="abc",
-        rel_paths=["pkg/ghost.py"],
-        dest_dir=dest,
+        SourceLayer(framework_root=fw, base_sha="abc", rel_paths=["pkg/ghost.py"]), dest_dir=dest
     )
 
     assert manifest is not None
@@ -109,11 +107,8 @@ def test_snapshot_source_layer_import_root_recorded(tmp_path: Path) -> None:
 
     dest = tmp_path / "snap"
     manifest = snapshot_source_layer(
-        framework_root=fw,
-        base_sha="",
-        rel_paths=["python/sglang/srt/foo.py"],
+        SourceLayer(framework_root=fw, base_sha="", rel_paths=["python/sglang/srt/foo.py"], import_root="python"),
         dest_dir=dest,
-        import_root="python",
     )
 
     assert manifest is not None
@@ -127,10 +122,7 @@ def test_snapshot_source_layer_skips_unsafe_paths(tmp_path: Path) -> None:
     dest = tmp_path / "snap"
 
     manifest = snapshot_source_layer(
-        framework_root=fw,
-        base_sha=None,
-        rel_paths=["../escape.py", ""],
-        dest_dir=dest,
+        SourceLayer(framework_root=fw, base_sha=None, rel_paths=["../escape.py", ""]), dest_dir=dest
     )
 
     assert manifest is None
@@ -144,12 +136,7 @@ def test_snapshot_source_layer_returns_none_when_nothing_capturable(
     fw.mkdir()
     dest = tmp_path / "snap"
 
-    manifest = snapshot_source_layer(
-        framework_root=fw,
-        base_sha="",
-        rel_paths=[],
-        dest_dir=dest,
-    )
+    manifest = snapshot_source_layer(SourceLayer(framework_root=fw, base_sha="", rel_paths=[]), dest_dir=dest)
 
     assert manifest is None
     assert not dest.exists()

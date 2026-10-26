@@ -159,9 +159,10 @@ routes the transition. Emitting this hint is the **correct, expected** move
 when the current phase has no remaining actionable lever — it is strictly
 better than idling until the budget cap is reached, because it returns the
 unspent budget to later phases / macro-cycles. `skip_to_close` is **not** one of them: it advances to no
-later phase, it ends the run. Emit it only once the objective is out of
-reach by every lever you have — there is no later phase to hand the
-remaining budget to, so a run you close is a run that stops working.
+later phase, it ends the run. Once a baseline is measured and the remaining
+budget still funds another cycle it is denied (`skip_to_close_contradicted`),
+so emit it only for a run that cannot measure a baseline at all; GPU work
+that fails after the baseline ends the run through the sweep instead.
 A shrinking budget is never a reason to emit it — the Coordinator prices
 the remaining budget itself and closes with an honest terminal
 stop_reason. Only the closed hint vocab above is valid; there is
@@ -181,18 +182,21 @@ phases' goals are omitted because you cannot act on them from here.
 winners / `=== Untested proposals (current cycle) ===`, (c) mandatory
 ordering (baseline first; `explore` revalidates the stack inline — no
 separate rebench step), (d) the `remaining_sec` in the `=== Phase ===`
-budget line as the urgency signal.
+budget line as the urgency signal — except under a `hold` line, where the
+Coordinator is waiting and that share running out is not urgency.
 
 <!-- phase: PRELUDE -->
 ### PRELUDE — phase goal
 
-Drive `baseline_tput > 0` so the Coordinator advances.
+Drive `baseline_tput > 0` so the Coordinator advances, after any `hold` the
+`=== Phase ===` block shows.
 
 <!-- phase: ENABLEMENT -->
 ### ENABLEMENT — phase goal
 
 The combo (model + backend) cannot run at all. Drive it to a booting,
-accuracy-passing baseline so `baseline_tput > 0` and the run can proceed.
+accuracy-passing baseline so `baseline_tput > 0` and the run can proceed,
+after any `hold` the `=== Phase ===` block shows.
 
 A **KEEP** in ENABLEMENT is graded on runnability and the accuracy floor, not
 throughput. A patch that boots the server and holds accuracy is a valid KEEP
@@ -319,7 +323,8 @@ gives OPTIMIZE another round.
 **Integrate defers while the kernel pipeline runs.** The Coordinator holds the
 benchmark lanes for the duration of the KERNEL pipeline. An `integrate` request
 that arrives while it is running will be returned as `deferred`; re-send it on
-the next turn.
+your next turn. In KERNEL_AGENT you get a turn when kernel progress changes,
+or after 15 minutes without one.
 
 **Never fabricate a measurement.** Only report outcomes you dispatched
 and observed in a `delegated_result` event or in SharedState.

@@ -151,10 +151,8 @@ def test_measure_round_config_disables_eval(tmp_path):
     )
     ex = _bare_executor()
 
-    warm = ex._write_lifecycle_config(base, tmp_path / "warmup", cleanup=False, pid_dir=tmp_path, port=41713)
-    meas = ex._write_lifecycle_config(
-        base, tmp_path / "measure", cleanup=True, pid_dir=tmp_path, port=41713, run_eval=False
-    )
+    warm = ex._write_lifecycle_config(base, tmp_path / "warmup", cleanup=False, port=41713)
+    meas = ex._write_lifecycle_config(base, tmp_path / "measure", cleanup=True, port=41713, run_eval=False)
 
     warm_envs = yaml.safe_load(warm.read_text())["benchmark"]["envs"]
     meas_envs = yaml.safe_load(meas.read_text())["benchmark"]["envs"]

@@ -607,12 +607,22 @@ def _as_int(value: Any) -> int | None:
 
 # Upper bound aiter clamps the gl=1 padding to; beyond it every M shares one row.
 _PADDED_M_CAP = 8192
+# aiter's gl=0 padding rounds M up to a multiple of 16 up to this M.
+_PADDED_M_STEP16_MAX = 256
 
 
 def padded_m(m: int) -> int:
-    """The M a tuned row must be written at to serve ``m``."""
+    """The M a tuned row is written at to serve ``m`` through one of aiter's lookups.
+
+    aiter tries the exact M, then the gl=0 padding, then the gl=1 power of two.
+    Up to 256 the gl=0 multiple of 16 is the bucket, so the CUDA-graph batch
+    sizes keep rows of their own; above it the power of two collapses the many
+    distinct prefill M. M=1 is its own row: its gl=0 bucket is 16.
+    """
     if m <= 1:
         return 1
+    if m <= _PADDED_M_STEP16_MAX:
+        return -(-m // 16) * 16
     return min(1 << (m - 1).bit_length(), _PADDED_M_CAP)
 
 

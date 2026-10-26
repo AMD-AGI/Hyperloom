@@ -16,14 +16,15 @@ import shlex
 import shutil
 import stat
 import sys
+import traceback
 from typing import Any
 
-from kernelforge.llm.workspace_policy import (
+from kernelforge.workspace.edit_policy import (
     PROTECTED_GLOBS,
     is_protected_path,
     protected_path_inventory,
 )
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 from kernelforge.loop.gate_settings import GateMeasurement, GateScope
 from kernelforge.loop.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
 from kernelforge.evaluation.scoring import (
@@ -1252,7 +1253,10 @@ class InSessionGate:
             self.integrity_verdict = "violation"
             self.integrity_reason = f"in-session gate failed: {type(e).__name__}: {e}"
             self.end_reason = "gate_error"
-            self._log(f"gate error ({type(e).__name__}: {e}) -> allow stop, outer loop will reject candidate")
+            self._log(
+                f"gate error ({type(e).__name__}: {e}) -> allow stop, outer loop will reject candidate\n"
+                f"{traceback.format_exc().rstrip()}"
+            )
             return self._allow()
 
     def _log(self, msg: str) -> None:

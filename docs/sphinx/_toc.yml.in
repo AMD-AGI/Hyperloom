@@ -7,6 +7,8 @@ subtrees:
 - entries:
   - file: what-is-hyperloom.md
     title: What is Hyperloom?
+  - file: upstream-results.md
+    title: Upstream optimizations merged into vLLM and SGLang
   - file: release-notes.md
     title: Release notes
   - file: compatibility.rst

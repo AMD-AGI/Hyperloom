@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 from typing import Any
+
+from hyperloom.common.env import env_int
 
 from .external_state import reachable_service_url
 
@@ -16,14 +17,6 @@ _PROBE_TOKENS_ENV = "HYPERLOOM_MN_COMPLETION_PROBE_TOKENS"
 _PROBE_MIN_TOKENS_ENV = "HYPERLOOM_MN_COMPLETION_PROBE_MIN_TOKENS"
 _DEFAULT_PROBE_TOKENS = 8
 _DEFAULT_PROBE_MIN_TOKENS = 2
-
-
-def _int_env(name: str, default: int) -> int:
-    """Read a positive int from the environment, falling back on junk."""
-    try:
-        return int(os.environ.get(name, "") or default)
-    except ValueError:
-        return default
 
 
 def generated_tokens(data: object) -> int:
@@ -57,7 +50,13 @@ def _serving_legs(state: dict[str, Any], pd_mode: str) -> list[str]:
 
 
 def cluster_is_serving(state: dict[str, Any], *, pd_mode: str, timeout_s: int) -> bool:
-    """Whether every leg is up AND the model answers with real tokens, right now."""
+    """Whether every leg is up AND the model answers with real tokens, right now.
+
+    Raises:
+        EnvValueError: A completion-probe token setting is set but is not an integer.
+    """
+    wanted = env_int(_PROBE_TOKENS_ENV, _DEFAULT_PROBE_TOKENS)
+    floor = env_int(_PROBE_MIN_TOKENS_ENV, _DEFAULT_PROBE_MIN_TOKENS)
     legs = _serving_legs(state, pd_mode)
     front = reachable_service_url(state)
     if not legs or not front:
@@ -104,7 +103,6 @@ def cluster_is_serving(state: dict[str, Any], *, pd_mode: str, timeout_s: int) -
 
             # ignore_eos plus several tokens forces the request through the decode leg; prefill alone can answer the
             # first token.
-            wanted = _int_env(_PROBE_TOKENS_ENV, _DEFAULT_PROBE_TOKENS)
             if _left() <= 0:
                 log.info("serving probe: %ds budget spent before /v1/completions was attempted", timeout_s)
                 return False
@@ -124,7 +122,6 @@ def cluster_is_serving(state: dict[str, Any], *, pd_mode: str, timeout_s: int) -
                 log.info("serving probe: /v1/completions returned %s", completion.status_code)
                 return False
             produced = generated_tokens(completion.json())
-            floor = _int_env(_PROBE_MIN_TOKENS_ENV, _DEFAULT_PROBE_MIN_TOKENS)
             if produced < floor:
                 log.info("serving probe: /v1/completions generated %d tokens (need %d)", produced, floor)
                 return False

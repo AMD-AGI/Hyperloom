@@ -101,11 +101,11 @@ def test_resolve_kb_topology_carries_formation_and_backend(monkeypatch, tmp_path
 
     topo = mne.resolve_kb_topology()
 
-    assert topo["nodes"] == 2
-    assert topo["gpus_per_node"] == 8
-    assert topo["tp"] == 8
-    assert topo["ep"] == 4
-    assert topo["backend"] == "infera"
+    assert topo.nodes == 2
+    assert topo.gpus_per_node == 8
+    assert topo.tp == 8
+    assert topo.ep == 4
+    assert topo.backend == "infera"
 
 
 def _kb_env(monkeypatch, tmp_path, **env):
@@ -134,8 +134,8 @@ def test_resolve_kb_topology_carries_the_partition_mode_into_the_key(monkeypatch
 
     topo = mne.resolve_kb_topology()
 
-    assert topo["partition_mode"] == "CPX"
-    assert kb_hardware_slug("MI300X", **topo) == "MI300X_cpx"
+    assert topo.partition_mode == "CPX"
+    assert kb_hardware_slug("MI300X", topo) == "MI300X_cpx"
 
 
 def test_resolve_kb_topology_prefers_persisted_partition_mode_on_resume(monkeypatch, tmp_path):
@@ -143,7 +143,7 @@ def test_resolve_kb_topology_prefers_persisted_partition_mode_on_resume(monkeypa
     _kb_env(monkeypatch, tmp_path, HYPERLOOM_PARTITION_MODE="SPX")
     monkeypatch.setattr(mne, "_read_state", lambda: {"compute_partition": {"mode": "cpx"}})
 
-    assert mne.resolve_kb_topology()["partition_mode"] == "CPX"
+    assert mne.resolve_kb_topology().partition_mode == "CPX"
 
 
 def test_resolve_kb_topology_leaves_the_partition_mode_unset_when_nobody_published_one(monkeypatch, tmp_path):
@@ -155,8 +155,8 @@ def test_resolve_kb_topology_leaves_the_partition_mode_unset_when_nobody_publish
 
     topo = mne.resolve_kb_topology()
 
-    assert topo["partition_mode"] == ""
-    assert kb_hardware_slug("MI300X", **topo) == "MI300X"
+    assert topo.partition_mode == ""
+    assert kb_hardware_slug("MI300X", topo) == "MI300X"
 
 
 def test_resolve_kb_topology_prefers_env_over_state(monkeypatch, tmp_path):
@@ -166,8 +166,8 @@ def test_resolve_kb_topology_prefers_env_over_state(monkeypatch, tmp_path):
 
     topo = mne.resolve_kb_topology()
 
-    assert topo["tp"] == 8
-    assert topo["ep"] == 4
+    assert topo.tp == 8
+    assert topo.ep == 4
 
 
 def test_resolve_kb_topology_falls_back_to_state_on_unparsable_env(monkeypatch, tmp_path):
@@ -177,8 +177,8 @@ def test_resolve_kb_topology_falls_back_to_state_on_unparsable_env(monkeypatch, 
 
     topo = mne.resolve_kb_topology()
 
-    assert topo["tp"] == 4
-    assert topo["ep"] == 8
+    assert topo.tp == 4
+    assert topo.ep == 8
 
 
 def test_resolve_kb_topology_leaves_tp_unspecified_rather_than_inventing_one(monkeypatch, tmp_path):
@@ -190,9 +190,9 @@ def test_resolve_kb_topology_leaves_tp_unspecified_rather_than_inventing_one(mon
 
     topo = mne.resolve_kb_topology()
 
-    assert topo["tp"] == 0
-    assert topo["ep"] == 0
-    assert "_tp" not in kb_hardware_slug("MI300X", **topo)
+    assert topo.tp == 0
+    assert topo.ep == 0
+    assert "_tp" not in kb_hardware_slug("MI300X", topo)
 
 
 def test_resolve_kb_topology_backend_matches_the_handoff_routing(monkeypatch, tmp_path):
@@ -208,7 +208,7 @@ def test_resolve_kb_topology_backend_matches_the_handoff_routing(monkeypatch, tm
         monkeypatch.delenv(f"HYPERLOOM_MN_EXT_{var}", raising=False)
 
     assert ext.build_external_state_from_env()["backend"] == "rayjob"
-    assert mne.resolve_kb_topology()["backend"] == "rayjob"
+    assert mne.resolve_kb_topology().backend == "rayjob"
 
 
 def _pd_legs_probe(lm, monkeypatch, *, healthy: set[str], log_dir: str | None = None):
@@ -1086,6 +1086,42 @@ def test_install_geak_noop_for_rayjob(tmp_path, monkeypatch):
     sp.chmod(0o600)
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
     assert mn_cli.install_geak_on_pods_best_effort() == 0
+
+
+@pytest.mark.parametrize(("raw", "expected"), [(None, 42), (" ", 42), ("0", 1), ("1800", 1800)])
+def test_poll_timeout_is_the_env_value_floored_at_one_else_the_callers_default(monkeypatch, raw, expected):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.delenv("HYPERLOOM_MN_POLL_TIMEOUT_S", raising=False)
+    if raw is not None:
+        monkeypatch.setenv("HYPERLOOM_MN_POLL_TIMEOUT_S", raw)
+
+    assert mn_cli.resolve_poll_timeout_s(42) == expected
+
+
+def test_a_malformed_poll_timeout_is_a_config_error_not_a_retry(monkeypatch, capsys):
+    """Re-running the subcommand cannot fix a typo, and the typo must not quietly become the default budget."""
+    from hyperloom.common.env import EnvValueError
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    class _Dashboard:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def submit_job(self, _entrypoint):
+            return "sub-1"
+
+    monkeypatch.setenv("HYPERLOOM_MN_POLL_TIMEOUT_S", "30m")
+    monkeypatch.setattr(mn_cli, "_require_state", lambda *_keys: {"head_pod_ip": "10.0.0.1"})
+    monkeypatch.setattr(mn_cli, "_ray_dashboard_client", lambda _state=None: _Dashboard())
+
+    with pytest.raises(EnvValueError, match="HYPERLOOM_MN_POLL_TIMEOUT_S"):
+        mn_cli.resolve_poll_timeout_s()
+    assert mn_cli.main(["verify"]) == mn_cli.EXIT_CONFIG_ERROR
+    assert "HYPERLOOM_MN_POLL_TIMEOUT_S='30m' is not an integer" in capsys.readouterr().err
 
 
 # infera_ssh_env_from_state isolation tests (kernel-agent GEAK SSH placement).

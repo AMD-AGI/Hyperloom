@@ -21,6 +21,7 @@ from hyperloom.orchestrator.roles import (
     MockCriticBackend,
     ScriptedPlan,
 )
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 # Far above any real pid on Linux, so the liveness probe proves it dead.
 _DEAD_PID = 2_147_483_646
@@ -56,9 +57,10 @@ async def _running_task_with_dead_lease(
     *,
     kind: str = "baseline",
     key: str,
+    params: dict[str, Any] | None = None,
 ):
     """Create a running task holding a lease from a provably dead process."""
-    task = await coord.tasks.create(kind=kind, params={}, idempotency_key=key)
+    task = await coord.tasks.create(TaskSpec(kind=kind, params=params or {}, idempotency_key=key))
     await coord.tasks.transition(task.task_id, "running")
     coord.db.raw.execute(
         "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
@@ -137,6 +139,29 @@ async def test_accounting_is_idempotent_per_task(session_dir):
         await c.dispatcher._account_dead_holder_failures([task.task_id], reason="dead_holder_pump")
         assert c.shared_state.baseline_failure_streak == 1
         assert len(c.shared_state.last_action_failures) == 1
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("result_owed", "streak"), [(False, 1), (True, 0)])
+async def test_a_reaped_discovery_round_settles_once(session_dir, monkeypatch, result_owed, streak):
+    """An orphaned discovery round settles as failed, or the pump re-fetches it as in flight for the whole phase.
+
+    A round whose execution still owes a result is left to the reap of that result.
+    """
+    c = Coordinator(session_dir, backends=_silent_backends())
+    monkeypatch.setattr(c.dispatcher, "owes_result", lambda _task_id: result_owed)
+    try:
+        task = await _running_task_with_dead_lease(
+            c,
+            kind="specialist",
+            key="candidate-discovery:candidate_pool_empty:r0",
+            params={"candidate_discovery": True, "domain": "candidate_discovery_specialist"},
+        )
+        await c.dispatcher.pump_dispatcher_once()
+        assert (await c.tasks.get(task.task_id)).state == "failed"
+        assert c.shared_state.framework_agent_discover_failures == streak
     finally:
         await c.stop()
 
