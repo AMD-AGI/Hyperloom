@@ -69,22 +69,17 @@ class ValidationMixin:
             from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
             stack_event.record_validation(
-                stack_len=self.shared_state.cumulative_gain_validated_stack_len,
-                baseline_tput=graded.reference,
-                validated_tput=graded.candidate,
-                validated_gain_pct=float(validated_gain),
-                source=source,
-                measurement_basis=measurement_basis,
-                graded_objective=graded.objective,
-                # The figures grading actually read, not the raw measurement: the caller's resolved output
-                # throughput is stamped into it, so the axes recorded here are the ones the verdict was reached on.
-                measurement=graded_source,
-                ts=ts,
-                ttft_mean_ms=measurement.get("ttft_mean_ms"),
-                e2el_mean_ms=measurement.get("e2el_mean_ms"),
-                ttft_e2el_source=str(measurement.get("ttft_e2el_source") or ""),
-                server_launch_flags=str(measurement.get("resolved_server_launch_flags") or ""),
-                workspace=measurement.get("workspace"),
+                stack_event.StackValidation(
+                    stack_len=self.shared_state.cumulative_gain_validated_stack_len,
+                    graded=graded,
+                    validated_gain_pct=float(validated_gain),
+                    # The figures grading actually read, not the raw measurement: the caller's resolved output
+                    # throughput is stamped into it, so the axes recorded here are the ones the verdict was reached on.
+                    measurement=graded_source,
+                    source=source,
+                    measurement_basis=measurement_basis,
+                    ts=ts,
+                )
             )
         except Exception as exc:
             log.debug("stack validation record failed", exc_info=True)

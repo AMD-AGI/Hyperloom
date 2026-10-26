@@ -36,7 +36,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
 from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, VariantResult
+from hyperloom.orchestrator.actions.executors._grid_runner import GridStop, GridVariant, VariantResult
 from hyperloom.orchestrator.kernel.conc_sweep import run_conc_sweep
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -319,9 +319,10 @@ def test_a_rung_the_budget_refused_mid_ladder_is_recorded_as_such(session_dir: P
     calls = []
     clock = {"now": 100.0}
 
-    async def _refuse_reuse(
-        *, grid: list[GridVariant], session_deadline_sec, variant_expected_sec, deadline_stop, **_kw
-    ):
+    async def _refuse_reuse(*, grid: list[GridVariant], stop: GridStop, **_kw):
+        session_deadline_sec = stop.session_deadline_sec
+        variant_expected_sec = stop.variant_expected_sec
+        deadline_stop = stop.deadline_stop
         calls.append((session_deadline_sec, variant_expected_sec, deadline_stop.error_class))
         if len(calls) == 1:
             clock["now"] += 6.0

@@ -12,9 +12,10 @@ from typing import Any
 
 from ..actions.executors._git import _git_head_sha, _run_git_cp
 from ..actions.executors._nogit_patch import _is_git_tree
+from ..actions.executors.baseline import _revert_warm_patch_state
 from ..actions.executors._patch_snapshot import _git_commit_kept, _patch_touched_paths, _patch_touched_paths_split
 from ..enablement.runtime.adapters import get_adapter
-from ..source_snapshot import MANIFEST_NAME, snapshot_source_layer
+from ..source_snapshot import MANIFEST_NAME, SourceLayer, snapshot_source_layer
 
 log = logging.getLogger(__name__)
 
@@ -86,13 +87,15 @@ def warm_replay_source_layer(result: Mapping[str, Any], session_dir: str | Path,
     base_sha = _git_head_sha(root)
     try:
         snap = snapshot_source_layer(
-            framework_root=root,
-            base_sha=base_sha,
-            rel_paths=upserted + deleted,
+            SourceLayer(
+                framework_root=root,
+                base_sha=base_sha,
+                rel_paths=upserted + deleted,
+                declared_ops=declared_ops,
+                import_root=get_adapter(framework).source_import_root(root_text),
+            ),
             dest_dir=Path(session_dir) / "optimization_stack" / "src" / _SNAPSHOT_SLOT,
             provenance="replay_warm_recipe",
-            declared_ops=declared_ops,
-            import_root=get_adapter(framework).source_import_root(root_text),
         )
     except OSError:
         log.exception("warm replay: snapshotting the applied overlays under %s failed", root)
@@ -136,16 +139,61 @@ def commit_warm_replay_overlays(result: Mapping[str, Any]) -> list[str]:
     return failed
 
 
-def uncommit_promoted_overlays(pending: Mapping[str, Any], root: str, pre_sha: str) -> None:
-    """Move ``root`` back to ``pre_sha`` when the promotion committed the overlays on it, leaving them uncommitted.
+def uncommit_promoted_overlays(pending: Mapping[str, Any], root: str, pre_sha: str) -> str:
+    """Move ``root`` back to ``pre_sha`` when the promotion committed the overlays on it; return why it could not.
 
     The restore requires HEAD at ``pre_sha``, and a tree the replay did not write to keeps the overlays it already
     held as uncommitted changes. Only a single commit directly on ``pre_sha`` is undone; any other HEAD is left for
     the restore to refuse.
     """
     if not pending.get(_OVERLAYS_COMMITTED_KEY) or not pre_sha:
-        return
+        return ""
     head = _git_head_sha(root)
+    if not head:
+        return f"recipe:{root}:promotion_commit_state_unreadable:HEAD"
+    if head == pre_sha:
+        return ""
     parent = _run_git_cp(["-C", root, "rev-parse", "HEAD^"], timeout=30.0)
-    if head and head != pre_sha and parent is not None and parent.stdout.strip() == pre_sha:
-        _run_git_cp(["-C", root, "reset", "-q", pre_sha], timeout=30.0)
+    if parent is None:
+        return f"recipe:{root}:promotion_commit_state_unreadable:HEAD^:spawn failed"
+    if parent.returncode != 0:
+        detail = (parent.stderr or "").strip()
+        return f"recipe:{root}:promotion_commit_state_unreadable:HEAD^:{detail}"
+    if parent.stdout.strip() != pre_sha:
+        return ""
+    reset = _run_git_cp(["-C", root, "reset", "-q", pre_sha], timeout=30.0)
+    if reset is None or reset.returncode != 0:
+        detail = "spawn failed" if reset is None else (reset.stderr or "").strip()
+        return f"recipe:{root}:promotion_commit_not_undone:{detail}"
+    return ""
+
+
+def restore_recipe_trees(result: Mapping[str, Any], pending: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Undo the promotion commit and restore every tree the replay patched, one restore report per tree."""
+    restores: list[dict[str, Any]] = []
+    for tree in warm_patch_trees(result, pending):
+        target = str(tree.get("root") or "")
+        if not target:
+            continue
+        if undo_error := uncommit_promoted_overlays(pending, target, str(tree.get("pre_sha") or "")):
+            restores.append({"ok": False, "errors": [undo_error]})
+            continue
+        recipe_manifest = tree.get("snapshot_manifest")
+        backups = list(tree.get("nogit_backups") or [])
+        if not bool(tree.get("mutated", True)):
+            # An overlay the tree already carried applies as a no-op, writing
+            # nothing and so owing nothing. A record predating the flag reads as
+            # written-to, and still has to answer with a channel below.
+            continue
+        if not recipe_manifest and not backups:
+            restores.append({"ok": False, "errors": [f"recipe:{target}:missing_snapshot_manifest"]})
+            continue
+        restores.append(
+            _revert_warm_patch_state(
+                target,
+                pre_sha=str(tree.get("pre_sha") or ""),
+                snapshot_manifest=recipe_manifest,
+                nogit_backups=backups,
+            )
+        )
+    return restores

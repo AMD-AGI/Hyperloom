@@ -18,6 +18,7 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
+from hyperloom.orchestrator.kernel import _forge_lane_budget as forge_lane_budget
 
 
 def _heartbeat() -> Intent:
@@ -92,14 +93,13 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
 @pytest.mark.asyncio
 async def test_a_gemm_lane_the_phase_could_not_fund_is_no_attempt_and_stays_armed(session_dir):
     """The lane never started, so it neither counts as an attempt nor latches GEMM tuning off for a later entry."""
-    from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
     from hyperloom.orchestrator.kernel.lane_budget import LANE_GEMM
 
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.framework = "sglang"
 
-        await c.phase_kernel._handle_gemm_tuning_result(kernel_request_handlers._unfunded_lane_skip(LANE_GEMM))
+        await c.phase_kernel._handle_gemm_tuning_result(forge_lane_budget._unfunded_lane_skip(LANE_GEMM))
 
         assert c.shared_state.last_gemm_tuning == {}
         assert c.shared_state.gemm_tuning_attempts == []

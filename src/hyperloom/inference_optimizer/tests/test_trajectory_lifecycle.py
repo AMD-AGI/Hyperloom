@@ -15,7 +15,7 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.roles import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.inference_optimizer.trace import trajectory_projection as trajmap
 from hyperloom.inference_optimizer.trace import trajectory_trace as tt
 
@@ -42,12 +42,12 @@ async def test_task_rows_follow_the_registry_state_machine(tmp_path):
     registry = TaskRegistry(SqliteConnection(tmp_path / "db.sqlite"))
     try:
         with tt.trajectory_scope(session_dir=tmp_path, parent_span_id="creator"):
-            task = await registry.create(kind="sweep", params={}, idempotency_key="k1", requires_lanes=["a"])
-            again = await registry.create(kind="sweep", params={}, idempotency_key="k1")
+            task = await registry.create(TaskSpec(kind="sweep", params={}, idempotency_key="k1", requires_lanes=["a"]))
+            again = await registry.create(TaskSpec(kind="sweep", params={}, idempotency_key="k1"))
             with tt.trajectory_scope(task_id=task.task_id, parent_span_id=task.task_id):
                 await registry.transition(task.task_id, "running")
                 await registry.transition(task.task_id, "failed", evidence={"reason": "oom", "blob": {"x": 1}})
-            other = await registry.create(kind="profile", params={}, idempotency_key="k2")
+            other = await registry.create(TaskSpec(kind="profile", params={}, idempotency_key="k2"))
             assert await registry.cancel_family(["profile"], reason="prune") == [other.task_id]
     finally:
         registry.db.close()
@@ -79,11 +79,13 @@ async def test_a_queued_task_row_carries_its_dispatch_class(tmp_path):
     try:
         with tt.trajectory_scope(session_dir=tmp_path):
             task = await registry.create(
-                kind="explore",
-                params={},
-                idempotency_key="k1",
-                dispatch_class="llm",
-                dispatch_origin={"phase": "EXPLORE", "macro_cycle": 0, "tick": 3},
+                TaskSpec(
+                    kind="explore",
+                    params={},
+                    idempotency_key="k1",
+                    dispatch_class="llm",
+                    dispatch_origin={"phase": "EXPLORE", "macro_cycle": 0, "tick": 3},
+                ),
             )
     finally:
         registry.db.close()

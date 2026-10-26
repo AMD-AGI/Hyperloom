@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -79,21 +79,26 @@ def _claude_stream_model(obj: dict[str, Any]) -> str | None:
     return model if isinstance(model, str) and model and not model.startswith("<") else None
 
 
+def _json_objects(lines: Iterable[str]) -> Iterator[dict[str, Any]]:
+    """Yield each line that is a JSON object, in order; other lines are skipped."""
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            obj = json.loads(stripped)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, dict):
+            yield obj
+
+
 def _iter_json_events(log_path: str | Path, kind: str) -> Iterator[dict[str, Any]]:
     """Yield each JSON object of a line-delimited ``kind`` log, in stream order."""
     path = Path(log_path)
     try:
         with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    obj = json.loads(stripped)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if isinstance(obj, dict):
-                    yield obj
+            yield from _json_objects(f)
     except FileNotFoundError:
         return
     except OSError as exc:

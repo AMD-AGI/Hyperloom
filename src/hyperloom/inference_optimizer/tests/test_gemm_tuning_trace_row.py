@@ -8,8 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import hyperloom.orchestrator.kernel.request_handlers as krh
 from hyperloom.inference_optimizer.session.session_paths import gemm_tuning_steps_path
+from hyperloom.orchestrator.kernel import _tuning_audit_trace as tuning_audit_trace
 
 
 def _rows(session_dir: Path) -> list[dict]:
@@ -21,7 +21,7 @@ class TestFailureReachesTheAuditRow:
     def test_a_crashed_tuner_is_not_indistinguishable_from_a_barren_one(self, tmp_path):
         # DeepSeek-V4-Pro/20260815T002915Z: 288s of GPU time, an aiter failure and a subprocess_error class, none of
         # which reached the trace.
-        krh._trace_gemm_tuning_run(
+        tuning_audit_trace._trace_gemm_tuning_run(
             {
                 "status": "failed",
                 "backend": "forge",
@@ -58,7 +58,7 @@ class TestFailureReachesTheAuditRow:
     def test_an_argparse_rejection_no_longer_reads_as_a_clean_result(self, tmp_path):
         # Llama-3.1-8B-Instruct/20260812T091612Z: rejected in 10.8s and recorded status "ok" / "no_improvement",
         # identical in the trace to the six runs that really tuned.
-        krh._trace_gemm_tuning_run(
+        tuning_audit_trace._trace_gemm_tuning_run(
             {
                 "status": "ok",
                 "engine": "forge",
@@ -88,7 +88,7 @@ class TestFailureReachesTheAuditRow:
 
 class TestRowStaysCompact:
     def test_a_successful_run_gains_only_status_and_elapsed(self, tmp_path):
-        krh._trace_gemm_tuning_run(
+        tuning_audit_trace._trace_gemm_tuning_run(
             {
                 "status": "ok",
                 "engine": "forge",
@@ -115,7 +115,7 @@ class TestRowStaysCompact:
 
     def test_the_three_original_keys_survive_being_null(self, tmp_path):
         # kept is null on every row observed so far; an absent key would be indistinguishable from false.
-        krh._trace_gemm_tuning_run(
+        tuning_audit_trace._trace_gemm_tuning_run(
             {"status": "ok", "engine": "forge", "tuners_run": [{"tuner": "a8w8"}]},
             session_dir=tmp_path,
         )
@@ -125,7 +125,7 @@ class TestRowStaysCompact:
         assert tuner == {"tuner": "a8w8", "best_micro_speedup": None, "kept": None}
 
     def test_a_long_error_is_truncated(self, tmp_path):
-        krh._trace_gemm_tuning_run(
+        tuning_audit_trace._trace_gemm_tuning_run(
             {
                 "status": "failed",
                 "engine": "forge",
@@ -136,13 +136,13 @@ class TestRowStaysCompact:
 
         (row,) = _rows(tmp_path)
         error = row["tuners_run"][0]["error"]
-        assert len(error) == krh._TRACE_TUNER_ERROR_MAXLEN + 3
+        assert len(error) == tuning_audit_trace._TRACE_TUNER_ERROR_MAXLEN + 3
         assert error.endswith("...")
 
 
 class TestRobustness:
     def test_the_envelope_class_wins_when_it_has_one(self, tmp_path):
-        krh._trace_gemm_tuning_run(
+        tuning_audit_trace._trace_gemm_tuning_run(
             {
                 "status": "failed",
                 "engine": "forge",
@@ -155,7 +155,7 @@ class TestRobustness:
         assert _rows(tmp_path)[0]["error_class"] == "handler_error"
 
     def test_the_first_named_class_is_taken_not_the_last(self, tmp_path):
-        krh._trace_gemm_tuning_run(
+        tuning_audit_trace._trace_gemm_tuning_run(
             {
                 "status": "failed",
                 "engine": "forge",
@@ -171,7 +171,7 @@ class TestRobustness:
         assert _rows(tmp_path)[0]["error_class"] == "unsupported_argument"
 
     def test_non_dict_entries_are_skipped_without_losing_the_rest(self, tmp_path):
-        krh._trace_gemm_tuning_run(
+        tuning_audit_trace._trace_gemm_tuning_run(
             {
                 "status": "ok",
                 "engine": "forge",
@@ -184,7 +184,7 @@ class TestRobustness:
         assert [t["tuner"] for t in rows] == ["a8w8"]
 
     def test_a_non_string_error_is_passed_through_untruncated(self, tmp_path):
-        krh._trace_gemm_tuning_run(
+        tuning_audit_trace._trace_gemm_tuning_run(
             {
                 "status": "failed",
                 "engine": "forge",
