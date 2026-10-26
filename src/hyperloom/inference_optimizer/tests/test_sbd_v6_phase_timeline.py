@@ -17,7 +17,8 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import phase_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import PHASE_EVENT_SECTIONS
 from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
 from hyperloom.inference_optimizer.breakdown.recorder.phase_records import (
     ActionDispatch,
@@ -45,7 +46,7 @@ def _bound_session(tmp_path):
 def _ext(phase: str, macro_cycle: int = 0) -> dict[str, Any]:
     """Assemble one phase event's ``ext`` the way finalize would, since an open event holds only fragments."""
     ext, _status = phase_event.assemble_phase_ext(
-        phase_event_parts(),
+        event_parts(PHASE_EVENT_SECTIONS),
         event=phase_event.phase_event_id(phase, macro_cycle),
     )
     return ext
@@ -53,7 +54,7 @@ def _ext(phase: str, macro_cycle: int = 0) -> dict[str, Any]:
 
 def _status(phase: str, macro_cycle: int = 0) -> str:
     _ext_, status = phase_event.assemble_phase_ext(
-        phase_event_parts(),
+        event_parts(PHASE_EVENT_SECTIONS),
         event=phase_event.phase_event_id(phase, macro_cycle),
     )
     return status

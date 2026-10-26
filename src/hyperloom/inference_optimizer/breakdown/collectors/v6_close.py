@@ -38,32 +38,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.common.coerce import dict_rows, to_mapping
+
 from ..recorder.close_out import SESSION_BREAKDOWN_PATH
-from ._common import (
-    _dict_rows,
-    _mapping,
-)
+from ..workflow_contract import workflow_contract
 
 
-# The step vocabulary the CLOSE sequencer actually emits. ``fact_finalize`` is
-# in the runtime but was missing from the V6 field design, which is a gap in
-# the contract rather than in the producer; unknown names are passed through
-# and warned about so drift surfaces instead of being silently dropped.
-_KNOWN_STEPS = frozenset(
-    {
-        "sequencer_started",
-        "geak_rebench_drain",
-        "stack_revalidation",
-        "post_opt_roofline",
-        "fact_finalize",
-        "report",
-        "session_breakdown",
-        "langfuse_flush",
-        "artifact_package",
-        "ndjson_drain",
-        "done",
-    }
-)
+# The step vocabulary the CLOSE sequencer emits, as the workflow contract
+# publishes it; unknown names are passed through and warned about so drift
+# surfaces instead of being silently dropped.
+_KNOWN_STEPS = frozenset(row["step"] for row in workflow_contract()["close_sequence"]["steps"])
 
 # The status vocabulary the sequencer actually writes.
 _KNOWN_STATUSES = frozenset({"running", "done", "failed", "skipped"})
@@ -130,9 +114,9 @@ def _recorded_close(
     read straight through: each was stated by the step that knew it. Only the
     only the step vocabulary is checked.
     """
-    steps = [_close_step(row) for row in _dict_rows(recorded.get("steps"))]
+    steps = [_close_step(row) for row in dict_rows(recorded.get("steps"))]
     _warn_unknown_vocabulary(steps, warnings)
-    artifacts = _mapping(recorded.get("artifacts"))
+    artifacts = to_mapping(recorded.get("artifacts"))
     write_back = recorded.get("kb_write_back")
     close: dict[str, Any] = {
         # A fragment with no status was opened by a producer that then failed
