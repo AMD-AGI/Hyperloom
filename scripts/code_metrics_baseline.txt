@@ -730,7 +730,7 @@ module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2568
 module-lines src/hyperloom/orchestrator/specialists/runner.py 1465
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1339
-module-lines src/hyperloom/orchestrator/state/shared_state.py 2453
+module-lines src/hyperloom/orchestrator/state/shared_state.py 2447
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1309
 module-lines src/kernelforge/fusion/author.py 1259
 module-lines src/kernelforge/fusion/command.py 1584

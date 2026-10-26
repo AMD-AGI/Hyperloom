@@ -308,3 +308,8 @@ __all__ = [
     "session_dir",
     "workspace_root",
 ]
+
+
+def stop_request_path(session_dir: Path) -> Path:
+    """The file whose presence is an operator's request to stop the run: ``<session>/hosted/control/stop.json``."""
+    return Path(session_dir) / "hosted" / "control" / "stop.json"

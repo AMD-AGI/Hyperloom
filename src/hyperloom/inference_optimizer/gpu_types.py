@@ -47,6 +47,10 @@ def _product_tag_matches(tag: str, text: str) -> bool:
     text = str(text or "").upper()
     if tag == "R9700":
         return re.search(r"(?<![A-Z0-9])R9700(?![A-Z0-9])", text) is not None
+    if tag == "RADEON8060S":
+        # rocm-smi prints "Radeon 8060S Graphics"; the gpu_type cannot hold that
+        # space because it doubles as a Magpie script suffix.
+        return "RADEON 8060S" in text or "RADEON8060S" in text
     return tag in text
 
 
