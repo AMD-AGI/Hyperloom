@@ -27,8 +27,8 @@ from hyperloom.inference_optimizer.breakdown.collectors.v6 import (
     collect_v6_metadata,
     collect_v6_outcome,
 )
-from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, recorder_for, snapshot_metadata
-from hyperloom.inference_optimizer.breakdown.recorder import stack_event
+from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, stack_event
+from hyperloom.inference_optimizer.breakdown.recorder.recorder import recorder_for
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     PRODUCER as BASELINE_PRODUCER,
     BaselineRequest,
@@ -36,7 +36,10 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     make_baseline_recorder,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
-from hyperloom.inference_optimizer.breakdown.recorder.session_metadata import SECTION as METADATA_SECTION
+from hyperloom.inference_optimizer.breakdown.recorder.session_metadata import (
+    SECTION as METADATA_SECTION,
+    snapshot_metadata,
+)
 from hyperloom.inference_optimizer.breakdown.session_facts import grading_block
 from hyperloom.inference_optimizer.cli.bootstrap import seed_grading
 from hyperloom.inference_optimizer.grading import resolved_grading
@@ -189,7 +192,6 @@ def test_the_grading_block_reaches_the_exported_metadata(tmp_path):
             recorded=assemble_parts(tmp_path)[METADATA_SECTION],
         ),
         exported_at_utc="2026-09-01T02:00:05+00:00",
-        warnings=[],
     )
     assert metadata["grading"] == {
         "benchmark_mode": "agentx",

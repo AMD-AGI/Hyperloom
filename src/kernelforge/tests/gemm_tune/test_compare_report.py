@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import time
 import types
 from pathlib import Path
@@ -160,3 +161,51 @@ class TestCompareReportWiring:
         assert result.unverified_shapes == 1
         assert result.shape_results[0]["tuned_unverified"] is True
         assert result.shape_results[0]["default_us"] is None
+
+
+class TestCompareDirFollowsTmpdir:
+    """aiter writes under ``tempfile.gettempdir()``; a set ``TMPDIR`` must not hide its rows."""
+
+    def _set_tmpdir(self, tmp_path, monkeypatch) -> Path:
+        root = tmp_path / "custom_tmp"
+        root.mkdir()
+        monkeypatch.setenv("TMPDIR", str(root))
+        monkeypatch.setattr(tempfile, "tempdir", None)
+        return root
+
+    def test_finders_read_the_tmpdir_root(self, tmp_path, monkeypatch):
+        compare_dir = self._set_tmpdir(tmp_path, monkeypatch) / "aiter_compare"
+        compare_dir.mkdir()
+        start_time = time.time() - 1
+        report = compare_dir / "tuned_a8w8_blockscale.11111.compare.txt"
+        report.write_text(_COMPARE_TABLE)
+        cand = compare_dir / "tuned_a8w8_blockscale.11111.candidate.csv"
+        cand.write_text(_HDR + "\n")
+        assert ac._find_latest_compare_report("a8w8_blockscale", start_time) == report
+        assert ac._find_latest_candidate("a8w8_blockscale", start_time) == cand
+
+    def test_run_pins_the_tuner_to_the_root_it_reads(self, tmp_path, monkeypatch):
+        root = self._set_tmpdir(tmp_path, monkeypatch)
+        find_report, find_candidate = ac._find_latest_compare_report, ac._find_latest_candidate
+        _prep(tmp_path, monkeypatch)
+        monkeypatch.setattr(ac, "_find_latest_compare_report", find_report)
+        monkeypatch.setattr(ac, "_find_latest_candidate", find_candidate)
+        seen: list[dict] = []
+
+        def tuner(cmd, **kw):
+            # Stand-in for aiter: it writes under the child's tempfile.gettempdir().
+            env = kw.get("env_override") or {}
+            seen.append(env)
+            out = Path(env.get("TMPDIR", "/nonexistent")) / "aiter_compare"
+            out.mkdir(parents=True, exist_ok=True)
+            report = out / "tuned_a8w8_blockscale.66666.compare.txt"
+            report.write_text(_COMPARE_TABLE)
+            later = time.time() + 5
+            os.utime(report, (later, later))
+            return 0, "Successfully tuned 2 shapes\n", ""
+
+        monkeypatch.setattr(ac, "run_subprocess", tuner)
+        result = _run(tmp_path)
+        assert seen == [{"TMPDIR": str(root.resolve())}]
+        assert result.status == "ok"
+        assert result.improved_shapes == 2

@@ -14,9 +14,11 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.breakdown.recorder.event_fields import as_dict
+from hyperloom.common.fs_utils import relative_posix
 from hyperloom.inference_optimizer.breakdown.recorder.recorder_warnings import RECORDING_ERRORS, note_failure
 from hyperloom.inference_optimizer.breakdown.session_package import deliverable
+
+from hyperloom.common.coerce import to_mapping
 
 from .attempts import build_attempt_summary
 from .sufficiency import read_status
@@ -96,20 +98,6 @@ def _eg(state: dict, name: str, default: Any = None) -> Any:
     if isinstance(nested, dict):
         return nested.get(name, default)
     return state.get(f"enablement_{name}", default)
-
-
-def _rel(path: Path | None, session_dir: Path) -> str | None:
-    """Express ``path`` relative to ``session_dir`` as a POSIX string.
-
-    Returns ``None`` for ``None``, and falls back to ``str(path)`` when the
-    path is not under the session.
-    """
-    if path is None:
-        return None
-    try:
-        return path.resolve().relative_to(session_dir.resolve()).as_posix()
-    except (ValueError, OSError):
-        return str(path)
 
 
 def _as_int(value: Any, *, default: int = 0) -> int:
@@ -201,7 +189,7 @@ def _recipe_accepted_config(enablement: dict[str, Any], state: dict[str, Any], s
     archived = str(_eg(state, "accepted_config_path", "") or "")
     config_path = archived or str(_eg(state, "probe_config_path", "") or "")
     if config_path:
-        accepted_config["config_path"] = _rel(Path(config_path), session_dir) or config_path
+        accepted_config["config_path"] = relative_posix(Path(config_path), session_dir) or config_path
     return accepted_config
 
 
@@ -374,7 +362,7 @@ def _collect_round_identity(out: dict[str, Any], state: dict[str, Any]) -> None:
 
 def _portable_patch_ref(raw: str, session_dir: Path) -> str:
     """A patch reference that names no directory on the authoring host."""
-    rel = _rel(Path(raw), session_dir)
+    rel = relative_posix(Path(raw), session_dir)
     if not rel:
         return Path(raw).name
     return Path(rel).name if Path(rel).is_absolute() else rel
@@ -405,9 +393,9 @@ def _portable_kept_rounds(rounds: list[Any], session_dir: Path) -> list[dict[str
     paths from this machine into a recipe meant to be replayed on another.
     A round's patches are sourced from the archive by name, so the name is the
     whole linkage and the directory it sat in on this machine is not part of it.
-    Checked explicitly rather than through ``_rel``'s falsy branch: ``_rel``
-    falls back to ``str(path)``, so ``or`` never fires and the absolute path
-    would travel exactly as if nothing had been done.
+    Checked explicitly rather than through an ``or`` fallback:
+    ``relative_posix`` falls back to ``str(path)``, so ``or`` never fires and
+    the absolute path would travel exactly as if nothing had been done.
 
     An artifact travels as its ``rel_target`` where the producer recorded one
     and as the target's own name otherwise; ``target`` verbatim is an install
@@ -466,14 +454,14 @@ def _collect_setup_record(out: dict[str, Any], state: dict[str, Any], *, session
         out["human_review_count"] = len(human_review)
     accepted_cfg = str(_eg(state, "accepted_config_path", "") or "")
     if accepted_cfg:
-        out["accepted_config_path"] = _rel(Path(accepted_cfg), session_dir) or accepted_cfg
+        out["accepted_config_path"] = relative_posix(Path(accepted_cfg), session_dir) or accepted_cfg
     setting_script_path = session_dir / "reports" / "enablement" / "enablement_setting.sh"
     # is_file(), not exists(): a directory at that path is not a script a
     # consumer can source, and emitting it would name a replay input that
     # cannot be replayed.
     if setting_script_path.is_file():
         out["setting_script"] = str(
-            _rel(setting_script_path, session_dir) or "reports/enablement/enablement_setting.sh"
+            relative_posix(setting_script_path, session_dir) or "reports/enablement/enablement_setting.sh"
         )
 
 
@@ -484,9 +472,9 @@ def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session
     kept_patches_raw = _eg(state, "kept_patches")
     if isinstance(kept_patches_raw, list) and kept_patches_raw:
         # Same portability rule as ``kept_rounds`` below, and for the same
-        # reason: ``_rel`` falls back to ``str(path)``, so ``_rel(p) or p`` would
-        # never fall through and a patch outside the session would travel as an
-        # authoring-host absolute path. It would also put the same
+        # reason: ``relative_posix`` falls back to ``str(path)``, so
+        # ``relative_posix(p) or p`` would never fall through and a patch outside
+        # the session would travel as an authoring-host absolute path. It would also put the same
         # patch in the recipe twice under two different names -- one of them
         # naming a directory the consumer does not have.
         out["kept_patches"] = [_portable_patch_ref(str(p), session_dir) for p in kept_patches_raw]
@@ -522,7 +510,7 @@ def _collect_eval_trigger(out: dict[str, Any], state: dict[str, Any], *, session
     out["eval_contract_fingerprint"] = str(_eg(state, "eval_contract_fingerprint", "") or "")
     probe_cfg = str(_eg(state, "probe_config_path", "") or "")
     if probe_cfg:
-        out["probe_config_path"] = _rel(Path(probe_cfg), session_dir) or probe_cfg
+        out["probe_config_path"] = relative_posix(Path(probe_cfg), session_dir) or probe_cfg
     evidence = str(_eg(state, "baseline_eval_evidence", "") or "")
     if evidence:
         out["trigger_evidence_excerpt"] = evidence[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
@@ -668,7 +656,7 @@ def recipe_for(enablement: Any, *, session_dir: str, mode: str = "") -> dict[str
     """
     section: dict[str, Any] = {}
     try:
-        state = asdict(enablement) if is_dataclass(enablement) else dict(as_dict(enablement))
+        state = asdict(enablement) if is_dataclass(enablement) else dict(to_mapping(enablement))
         collected = collect_enablement(
             Path(str(session_dir or ".")), {"enablement": state, "enablement_mode": mode}, []
         )

@@ -129,6 +129,13 @@ def test_close_patch_swallows_a_corrupt_breakdown(tmp_path):
 
 
 # what the consumer actually receives
+def _package_dest(tmp_path: Path, monkeypatch) -> Path:
+    """Point session packaging at a scratch root and return it."""
+    dest_root = tmp_path / "dest"
+    monkeypatch.setenv(session_package.ENV_PACKAGE_DEST_ROOT, str(dest_root))
+    return dest_root
+
+
 def _packaged_close(session_dir: Path, dest_root: Path) -> tuple[dict, dict]:
     """Return the ``close`` key as delivered, from inside the zip and loose."""
     zip_path = dest_root / session_package.PACKAGE_SUBDIR / "sess-1.zip"
@@ -138,14 +145,14 @@ def _packaged_close(session_dir: Path, dest_root: Path) -> tuple[dict, dict]:
     return zipped["close"], loose["close"]
 
 
-def test_the_delivered_package_carries_the_finished_close_section(tmp_path):
+def test_the_delivered_package_carries_the_finished_close_section(tmp_path, monkeypatch):
     session_dir = tmp_path / "session"
-    dest_root = tmp_path / "dest"
+    dest_root = _package_dest(tmp_path, monkeypatch)
     _session_with_step_two_breakdown(session_dir)
 
-    session_package.package_session_artifacts(session_dir, session_id="sess-1", dest_root=dest_root)
+    session_package.package_session_artifacts(session_dir, session_id="sess-1")
     assert exporter.patch_breakdown_close(session_dir) is True
-    session_package.package_session_artifacts(session_dir, session_id="sess-1", dest_root=dest_root)
+    session_package.package_session_artifacts(session_dir, session_id="sess-1")
 
     zipped, loose = _packaged_close(session_dir, dest_root)
     for delivered in (zipped, loose):
@@ -154,12 +161,12 @@ def test_the_delivered_package_carries_the_finished_close_section(tmp_path):
         assert [step["step"] for step in delivered["steps"]] == list(_CLOSE_STEPS)
 
 
-def test_a_package_built_before_the_patch_ships_the_step_two_snapshot(tmp_path):
+def test_a_package_built_before_the_patch_ships_the_step_two_snapshot(tmp_path, monkeypatch):
     session_dir = tmp_path / "session"
-    dest_root = tmp_path / "dest"
+    dest_root = _package_dest(tmp_path, monkeypatch)
     target = _session_with_step_two_breakdown(session_dir)
 
-    session_package.package_session_artifacts(session_dir, session_id="sess-1", dest_root=dest_root)
+    session_package.package_session_artifacts(session_dir, session_id="sess-1")
     exporter.patch_breakdown_close(session_dir)
 
     assert json.loads(target.read_text(encoding="utf-8"))["close"]["status"] == "succeeded"
@@ -169,14 +176,14 @@ def test_a_package_built_before_the_patch_ships_the_step_two_snapshot(tmp_path):
         assert [step["step"] for step in stale["steps"]] == list(_STEPS_AT_BREAKDOWN)
 
 
-def test_the_delivered_manifest_describes_the_rebuilt_bundle(tmp_path):
+def test_the_delivered_manifest_describes_the_rebuilt_bundle(tmp_path, monkeypatch):
     session_dir = tmp_path / "session"
-    dest_root = tmp_path / "dest"
+    dest_root = _package_dest(tmp_path, monkeypatch)
     _session_with_step_two_breakdown(session_dir)
 
-    session_package.package_session_artifacts(session_dir, session_id="sess-1", dest_root=dest_root)
+    session_package.package_session_artifacts(session_dir, session_id="sess-1")
     exporter.patch_breakdown_close(session_dir)
-    session_package.package_session_artifacts(session_dir, session_id="sess-1", dest_root=dest_root)
+    session_package.package_session_artifacts(session_dir, session_id="sess-1")
 
     zip_path = dest_root / session_package.PACKAGE_SUBDIR / "sess-1.zip"
     with zipfile.ZipFile(zip_path) as bundle:
