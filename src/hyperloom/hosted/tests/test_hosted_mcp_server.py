@@ -281,11 +281,7 @@ def test_tokens_are_stored_as_digests_only(server: McpServer) -> None:
     assert token not in repr(server.__dict__.get("_tokens").__dict__)
 
 
-def test_config_from_env_and_validation() -> None:
-    config = McpServerConfig.from_env(
-        {"HYPERLOOM_MCP_HOST": "0.0.0.0", "HYPERLOOM_MCP_PORT": "8123", "HYPERLOOM_MCP_TOKEN": HOST_TOKEN}
-    )
-    assert (config.host, config.port, config.host_token) == ("0.0.0.0", 8123, HOST_TOKEN)
+def test_config_validation() -> None:
     with pytest.raises(ValueError, match="host token"):
         McpServer(McpServerConfig(host_token="short"), campaign="c")
     with pytest.raises(ValueError, match="campaign"):

@@ -20,9 +20,10 @@ tokens. The service keeps one opaque cursor per token for it, starts it empty, a
 that carries the block has been written to the client.
 
 Authentication: ``X-Hyperloom-Token`` or ``Authorization: Bearer``. The host token is the campaign's
-``HYPERLOOM_MCP_TOKEN``; every other token was issued by this server to one specialist and dies with
-:meth:`McpServer.revoke`. Issued tokens are kept as digests only, compared in constant time, and a token is never
-written to a log or an error message.
+MCP token, which the caller reads from :class:`~hyperloom.hosted.host_info.HostInfo` and passes in
+:class:`McpServerConfig`; every other token was issued by this server to one specialist and dies with
+:meth:`McpServer.revoke_specialist`. Issued tokens are kept as digests only, compared in constant time, and a token
+is never written to a log or an error message.
 """
 
 from __future__ import annotations
@@ -35,7 +36,6 @@ import hmac
 import inspect
 import json
 import logging
-import os
 import secrets
 import threading
 import uuid
@@ -58,9 +58,6 @@ TOKEN_KINDS = frozenset({HOST_KIND, SPECIALIST_KIND})
 MAX_BODY_BYTES = 1 << 20
 MIN_TOKEN_LENGTH = 16
 SESSION_HEADER = "Mcp-Session-Id"
-ENV_HOST = "HYPERLOOM_MCP_HOST"
-ENV_PORT = "HYPERLOOM_MCP_PORT"
-ENV_TOKEN = "HYPERLOOM_MCP_TOKEN"
 
 _ERR_PARSE = -32700
 _ERR_INVALID_REQUEST = -32600
@@ -135,18 +132,11 @@ class RegisteredTool:
 
 @dataclass(frozen=True)
 class McpServerConfig:
+    """Plain values from the caller; a hosted run takes ``port`` and ``host_token`` from its ``HostInfo``."""
+
     host: str = "127.0.0.1"
     port: int = 0
     host_token: str = ""
-
-    @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> McpServerConfig:
-        source = os.environ if env is None else env
-        return cls(
-            host=source.get(ENV_HOST, "127.0.0.1"),
-            port=int(source.get(ENV_PORT, "0")),
-            host_token=source.get(ENV_TOKEN, ""),
-        )
 
 
 def _digest(token: str) -> bytes:
