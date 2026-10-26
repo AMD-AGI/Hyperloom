@@ -36,6 +36,7 @@ from kernelforge.agent_backends.base import (
 )
 from kernelforge.agent_backends.gateway import LlmGateway, resolve_openai_gateway
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
+from kernelforge.tools.git import READ_ONLY_GIT_SUBCOMMANDS
 
 log = logging.getLogger(__name__)
 
@@ -70,10 +71,7 @@ def _write_git_guard(directory: Path) -> dict[str, str]:
         raise CodexUnavailableError("git is required for Codex workspace guards")
 
     wrapper = directory / "git"
-    allowed = (
-        '""|blame|cat-file|describe|diff|for-each-ref|grep|help|log|ls-files|'
-        "ls-tree|merge-base|name-rev|rev-parse|shortlog|show|status|version"
-    )
+    allowed = "|".join(['""', *sorted(READ_ONLY_GIT_SUBCOMMANDS)])
     wrapper.write_text(
         "#!/bin/sh\n"
         "cmd=''\n"

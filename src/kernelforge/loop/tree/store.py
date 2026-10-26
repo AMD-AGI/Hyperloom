@@ -132,6 +132,7 @@ def _node(payload: object) -> TreeNode:
         samples=tuple(float(item) for item in data["samples"]),
         wall_ms=_optional_float(data["wall_ms"]),
         case_times={str(key): float(value) for key, value in dict(data["case_times"]).items()},
+        case_spreads={str(key): float(value) for key, value in dict(data["case_spreads"]).items()},
         snr_db=_optional_float(data["snr_db"]),
         plan=str(data["plan"]),
         source=NodeSource(data["source"]),

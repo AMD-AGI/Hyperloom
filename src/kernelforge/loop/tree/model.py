@@ -67,6 +67,8 @@ class TreeNode:
     samples: tuple[float, ...]
     wall_ms: float | None
     case_times: dict[str, float]
+    # Each case's run-to-run spread over the node's own measurements, the noise its per-case wins are read against.
+    case_spreads: dict[str, float]
     snr_db: float | None
     plan: str
     source: NodeSource
