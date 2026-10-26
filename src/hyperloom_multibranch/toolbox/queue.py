@@ -62,6 +62,10 @@ class QueuePolicy:
     ``listed_branches_only`` makes ``branch_k`` the list of branches that may submit at all: a request of a branch
     not in it is refused as ``branch_stopped`` (the scheduler gives every running branch a K and takes it away when it
     stops the branch). The default False keeps ``per_branch_k`` as the K of every branch not listed.
+
+    ``open_branches``, when given, is the set of branches that may submit, apart from the K map: a branch in
+    ``branch_k`` and not in it keeps its K for the tests it already has queued or running, and a new request of it is
+    refused as ``branch_stopped``. ``None`` leaves who may submit to ``branch_k`` and ``listed_branches_only``.
     """
 
     per_branch_k: int | Mapping[str, int] = 2
@@ -71,8 +75,13 @@ class QueuePolicy:
     branch_k: Mapping[str, int] = field(default_factory=dict)
     listed_branches_only: bool = False
     branch_deadline: Mapping[str, float] = field(default_factory=dict)
+    open_branches: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
+        if self.open_branches is not None and (
+            not isinstance(self.open_branches, frozenset) or not all(isinstance(b, str) for b in self.open_branches)
+        ):
+            raise ValueError(f"open_branches must be a frozenset of branch ids, got {self.open_branches!r}")
         if isinstance(self.per_branch_k, Mapping):
             # The board draft: a K per branch, the default under ``DEFAULT_K_KEY``.
             overrides = {k: v for k, v in self.per_branch_k.items() if k != DEFAULT_K_KEY}
@@ -187,6 +196,13 @@ class WorkQueue:
         )
 
     def check_branch_listed(self, request: TestRequest) -> None:
+        """Refuse a request of a branch that may not submit (:class:`QueuePolicy` ``open_branches``, else the listing)."""
+
+        open_branches = self.policy.open_branches
+        if open_branches is not None:
+            if request.branch_id not in open_branches:
+                raise RequestRejected(f"branch {request.branch_id!r} is closed to new tests", code=BRANCH_STOPPED)
+            return
         if self.policy.listed_branches_only and request.branch_id not in self.policy.branch_k:
             raise RequestRejected(f"branch {request.branch_id!r} has no quota", code=BRANCH_STOPPED)
 

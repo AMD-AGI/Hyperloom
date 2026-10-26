@@ -206,6 +206,32 @@ def test_without_the_listed_only_flag_an_unlisted_branch_runs_at_the_default_k()
     _queue(branch_k={"b1": 2}).check_branch_listed(req("b2"))
 
 
+def test_open_branches_say_who_may_submit_apart_from_the_k_map() -> None:
+    queue = _queue(branch_k={"b1": 2, "b2": 3}, open_branches=frozenset({"b2", "b3"}))
+
+    queue.check_branch_listed(req("b2"))
+    queue.check_branch_listed(req("b3"))
+    assert queue.policy.k_for("b3") == queue.policy.per_branch_k, "open with no K entry: the default K"
+    with pytest.raises(RequestRejected) as refused:
+        queue.check_branch_listed(req("b1"))
+    assert refused.value.code == "branch_stopped" and "closed to new tests" in refused.value.reason
+    assert queue.policy.k_for("b1") == 2, "a closed branch keeps its K for the tests it has"
+
+
+def test_open_branches_win_over_the_listing_and_none_keeps_it() -> None:
+    _queue(branch_k={"b1": 2}, listed_branches_only=True, open_branches=frozenset({"b9"})).check_branch_listed(
+        req("b9")
+    )
+    with pytest.raises(RequestRejected):
+        _queue(branch_k={"b1": 2}, listed_branches_only=True, open_branches=None).check_branch_listed(req("b9"))
+
+
+@pytest.mark.parametrize("value", [{"b1"}, frozenset({1})], ids=["a-set", "not-ids"])
+def test_open_branches_that_are_not_a_frozenset_of_ids_are_refused(value: object) -> None:
+    with pytest.raises(ValueError, match="open_branches must be a frozenset"):
+        QueuePolicy(open_branches=value)  # type: ignore[arg-type]
+
+
 def _pending(name: str, branch: str = "b1", **fields: object) -> QueuedTest:
     item = _item(name, branch, **fields)
     item.state = State.PENDING_BUILD
