@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -23,13 +23,20 @@ from hyperloom.common.io import atomic_write_json
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind
-from hyperloom.contracts.recipe import Recipe, RecipeDelta
+from hyperloom.contracts.recipe import PATCH_ROOT, LaunchConfig, PatchRef, Recipe, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import encode
-from hyperloom_multibranch.notebook.knowledge.warm_start import RecipeDownloader, ReplayRefusal
+from hyperloom_multibranch.notebook.knowledge.warm_start import (
+    LAUNCH_ONLY_REASON,
+    PreparedReplay,
+    RecipeDownloader,
+    ReplayRefusal,
+    ReplayTarget,
+    WarmLead,
+)
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -434,6 +441,66 @@ async def test_a_replay_acceptance_refuses_on_the_root_stays_a_lead_named_not_re
         f"; not replayable here under rule pack {version}: online_tuning_unsupported (TunableOp tunes online)"
     )
     assert _warm_start_decision(layout) == {"leads": [lead.describe()], "unread": ""}
+
+
+OTHER_IMAGE = "sha256:" + "b" * 64
+GATE_PATCH = "0099-gate.patch"
+#: What acceptance answers a replay whose patch stack does not apply on the root.
+STACK_REFUSED = RequestRejected(f"{GATE_PATCH} does not apply", "delta_not_applicable")
+
+
+def _patched_replays(source_image: str) -> Callable[..., tuple[WarmLead, ...]]:
+    """``replay_leads`` preparing each lead's champion as the root plus a patch whose variable its launch sets, built
+    on ``source_image`` (the session's own when empty)."""
+
+    def prepared(kb: object, profile: object, found: Sequence[WarmLead], target: ReplayTarget) -> tuple[WarmLead, ...]:
+        root = target.root
+        gate = PatchRef(f"{PATCH_ROOT}/{root.components[0].component}/{GATE_PATCH}", "f" * 64)
+        components = (replace(root.components[0], patches=(*root.components[0].patches, gate)), *root.components[1:])
+        champion = replace(root, launch=LaunchConfig("--enable-expert-parallel", {"GATE": "1"}), components=components)
+        launch = champion.launch
+        return tuple(
+            replace(lead, replay=PreparedReplay(lead.canonical_id, champion, launch, "", (), source_image, ("GATE",)))
+            for lead in found
+        )
+
+    return prepared
+
+
+async def _lead_with_its_patches_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_image: str
+) -> tuple[WarmLead, SessionLayout]:
+    """The one warm lead of a PRELUDE whose champion, built on ``source_image``, adds a patch acceptance refuses."""
+
+    layout = _layout(tmp_path)
+    budget = SessionBudget.from_hours(2.0, NOW)
+    peers = _peers(layout)
+    peers.toolbox.reject_if(lambda request: STACK_REFUSED if request.delta.components else None)
+    monkeypatch.setattr(prelude_module, "replay_leads", _patched_replays(source_image))
+    prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers, recipe_kb=OneChampionKB())
+    [lead] = (await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)).warm_leads
+    return lead, layout
+
+
+async def test_a_champion_from_another_image_whose_patches_acceptance_refuses_keeps_its_launch_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead, layout = await _lead_with_its_patches_refused(tmp_path, monkeypatch, OTHER_IMAGE)
+
+    assert lead.refusal is None and lead.replay is not None and lead.replay.recipe is None
+    assert lead.replay.reason == f"{LAUNCH_ONLY_REASON}: delta_not_applicable"
+    assert (lead.replay.source_image, dict(lead.replay.launch.envs)) == (OTHER_IMAGE, {})
+    assert ("patch", GATE_PATCH) in [(item.kind, item.ref.rsplit("/", 1)[-1]) for item in lead.replay.references]
+    assert _warm_start_decision(layout) == {"leads": [lead.describe()], "unread": ""}
+
+
+async def test_a_champion_from_this_image_whose_patches_acceptance_refuses_is_named_not_replayable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead, _ = await _lead_with_its_patches_refused(tmp_path, monkeypatch, "")
+
+    version = rule_pack_identity()["version"]
+    assert (lead.replay, lead.refusal) == (None, ReplayRefusal("delta_not_applicable", STACK_REFUSED.reason, version))
 
 
 async def test_a_replay_acceptance_has_not_answered_for_in_preludes_time_stays_offered_marked_not_checked(

@@ -13,7 +13,8 @@ specialists, the best of them prepared for replay on the root's image and offere
 champion, which EXPLORE opens on when it beats the baseline; their files are in the session's blob store; no
 Recipe KB, or none of its champions in this session's scope, gives none, and a KB that cannot be read is recorded and
 gives none either. Each replay is checked against the toolbox's acceptance on the root, queueing nothing: one it refuses
-stays a lead with the refusal named in place of the replay, and one acceptance has not answered for when
+stays a lead with the refusal named in place of the replay, unless the champion was built on another image, whose
+launch config alone is checked in its place, and one acceptance has not answered for when
 :data:`PREFLIGHT_SECONDS` run out stays offered, its lead saying it was not checked. The baseline every recorded value
 is anchored to is measured through the toolbox in a second step, once the caller has put the integration branch on the
 roster and given the toolbox its K: as many tests of the root as the rule gate asks for, from which the gate writes the
@@ -60,6 +61,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook.knowledge.warm_start import (
+    LAUNCH_ONLY_REASON,
     PreparedReplay,
     RecipeDownloader,
     ReplayRefusal,
@@ -367,24 +369,32 @@ class Prelude:
 
     async def _preflight(self, leads: tuple[WarmLead, ...], root: Recipe, root_commit: str) -> tuple[WarmLead, ...]:
         """``leads``, each replay checked against the toolbox's acceptance on ``root_commit`` within
-        :data:`PREFLIGHT_SECONDS` in all: a refusal goes on its lead, and a replay acceptance has not answered for by
-        then stays offered, its lead saying it was not checked. The check measures nothing, so it spends no GPU."""
+        :data:`PREFLIGHT_SECONDS` in all (:meth:`_checked`). The check measures nothing, so it spends no GPU."""
 
         deadline = self._clock.now() + PREFLIGHT_SECONDS
-        checked: list[WarmLead] = []
-        for lead in leads:
-            replay = lead.replay.on(root, root_commit) if lead.replay is not None else None
-            if replay is not None:
-                request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, root_commit, replay.delta)
-                try:
-                    await asyncio.wait_for(self._toolbox.check_test(request), max(0.0, deadline - self._clock.now()))
-                except RequestRejected as refused:
-                    refusal = ReplayRefusal(refused.code, refused.reason, rule_pack_identity()["version"])
-                    lead = replace(lead, replay=None, refusal=refusal)
-                except asyncio.TimeoutError:
-                    lead = replace(lead, unchecked=PREFLIGHT_OUT_OF_TIME)
-            checked.append(lead)
-        return tuple(checked)
+        return tuple([await self._checked(lead, root, root_commit, deadline) for lead in leads])
+
+    async def _checked(self, lead: WarmLead, root: Recipe, root_commit: str, deadline: float) -> WarmLead:
+        """``lead`` as acceptance takes its replay on ``root_commit`` by ``deadline``. A refusal goes on the lead in
+        place of the replay, except that a champion built on another image falls back to its launch config
+        (:meth:`PreparedReplay.launch_only`), checked in turn. A replay acceptance has not answered for by then stays
+        offered, the lead saying it was not checked."""
+
+        replay = lead.replay.on(root, root_commit) if lead.replay is not None else None
+        if lead.replay is None or replay is None:
+            return lead
+        request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, root_commit, replay.delta)
+        try:
+            await asyncio.wait_for(self._toolbox.check_test(request), max(0.0, deadline - self._clock.now()))
+        except RequestRejected as refused:
+            if lead.replay.source_image and lead.replay.recipe is not None:
+                launch_only = lead.replay.launch_only(f"{LAUNCH_ONLY_REASON}: {refused.code}")
+                return await self._checked(replace(lead, replay=launch_only), root, root_commit, deadline)
+            refusal = ReplayRefusal(refused.code, refused.reason, rule_pack_identity()["version"])
+            return replace(lead, replay=None, refusal=refusal)
+        except asyncio.TimeoutError:
+            return replace(lead, unchecked=PREFLIGHT_OUT_OF_TIME)
+        return lead
 
     async def _run_child(self, workload: Workload, budget: SessionBudget, hard_stop: HardStop) -> Path:
         try:

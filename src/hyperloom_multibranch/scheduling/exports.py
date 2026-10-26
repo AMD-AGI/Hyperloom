@@ -5,8 +5,9 @@
 and the dashboard.
 
 They read a notebook that no longer changes. The write-back goes first, reading the patch and kernel files of the
-chosen commit's recipe from the session's blob store, then the notebook's knowledge steps (the search tree to the archive;
-the Experiences and the specialists' learnings go nowhere while MB1 runs on no Experience KB, see
+chosen commit's recipe from the session's blob store, then the notebook's knowledge steps (the search tree to the
+archive, marking the replays of the champions PRELUDE prepared from another image; the Experiences and the specialists'
+learnings go nowhere while MB1 runs on no Experience KB, see
 :func:`~hyperloom_multibranch.scheduling.mb_fakes.mb_fake_close_knowledge`), because the breakdown records both
 outcomes next to the chosen commit's recipe and how FINAL chose it; once the search tree is archived, the scheduler's
 LLM writes a generation of frontier scorers into the pool beside the archive (:func:`author_scorers`) and curates the
@@ -47,6 +48,7 @@ from hyperloom_multibranch.notebook.knowledge.breakdown import (
     write_breakdown,
 )
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import SKIPPED, FinalRecipe, publish_final_recipe
+from hyperloom_multibranch.notebook.knowledge.warm_start import WarmLead
 from hyperloom_multibranch.notebook.rsi.authoring import author_scorers
 from hyperloom_multibranch.notebook.rsi.lesson_curation import curate_lessons
 from hyperloom_multibranch.notebook.rsi.session import CloseStep, KnowledgeClose
@@ -117,6 +119,12 @@ def _lost_to(row: Mapping[str, Any]) -> str | None:
     return next((key for key, lost in _LOST_CONFLICTS.items() if reason.startswith(lost)), None)
 
 
+def _cross_image(leads: Sequence[WarmLead]) -> frozenset[str]:
+    """The canonical ids of the champions among ``leads`` whose replay PRELUDE prepared from another image."""
+
+    return frozenset(lead.canonical_id for lead in leads if lead.replay is not None and lead.replay.source_image)
+
+
 def _merge_statistics(merge_log: Sequence[Mapping[str, Any]]) -> dict[str, object]:
     """How the session's merges went, for ``close.merges``, from the integrator's merge log.
 
@@ -177,14 +185,16 @@ class ScorerAuthoring:
 @dataclass(frozen=True)
 class ExportSources:
     """What CLOSE exports from: the scheduler's notebook handle, the repository and the blob store that hold the
-    chosen commit's recipe and its files, the session's dashboard and the image check it ran before its first phase,
-    ``None`` for a FINAL and CLOSE over a session that ended before FINAL, which run none."""
+    chosen commit's recipe and its files, the session's dashboard, the image check it ran before its first phase,
+    ``None`` for a FINAL and CLOSE over a session that ended before FINAL, which run none, and PRELUDE's warm-start
+    leads, none for a session that stopped before them."""
 
     notebook: Notebook
     repo: ExperimentRepo
     blobs: BlobStore
     dashboard: SessionDashboard
     image_check: ImageCheckReport | None
+    warm_leads: tuple[WarmLead, ...]
 
 
 @dataclass(frozen=True)
@@ -222,6 +232,7 @@ class SessionExports:
         self._blobs = sources.blobs
         self._dashboard = sources.dashboard
         self._image_check = sources.image_check
+        self._warm_leads = sources.warm_leads
         self._metric = metric
         self._budget_seconds = budget_seconds
 
@@ -239,6 +250,7 @@ class SessionExports:
             self._metric,
             budget_seconds=self._budget_seconds,
             receipts=self._layout.reports,
+            cross_image=_cross_image(self._warm_leads),
         )
         scorers = await author_scorers(snapshot, self._ask_scorers, model=self._scorers.model)
         curation = await self._curate(snapshot)
