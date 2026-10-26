@@ -314,7 +314,7 @@ def predictor_budget(state: SessionView) -> PhaseBudget:
     )
 
 
-def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any) -> None:
+def _record_run(coord: Any, task: "Task | str", *, role: str, status: str, **fields: Any) -> None:
     """Record one specialist dispatch, or its completion.
 
     ``role`` is one of ``discovery``, ``authoring`` or ``config`` -- not
@@ -333,7 +333,7 @@ def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any)
         ROLE_CONFIG,
     )
 
-    task_id = str(task if isinstance(task, str) else getattr(task, "task_id", "") or "")
+    task_id = task if isinstance(task, str) else task.task_id
     if not task_id:
         return
     fields.setdefault("dispatched_at" if status == "dispatched" else "completed_at", now_iso("seconds"))

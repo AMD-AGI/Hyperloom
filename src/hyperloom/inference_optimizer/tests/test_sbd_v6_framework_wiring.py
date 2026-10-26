@@ -197,6 +197,24 @@ def test_a_dispatched_discovery_round_records_its_run(session_dir: Path):
     assert [(r["run_id"], r["role"], r["status"]) for r in runs] == [(task.task_id, "discovery", "dispatched")]
 
 
+def test_a_run_recorded_for_neither_a_task_nor_an_id_raises(session_dir: Path):
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.phases.framework import _record_run
+
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.phase_framework._open_framework_timeline()
+
+    with pytest.raises(AttributeError):
+        _record_run(
+            coord.phase_framework, (SimpleNamespace(task_id="t-1"), False), role="discovery", status="dispatched"
+        )
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
+
+    assert _events(session_dir)[0]["ext"]["runs"] == []
+
+
 def test_discovery_round_records_its_run_and_both_outcomes(session_dir: Path):
     from types import SimpleNamespace
 
