@@ -11,11 +11,12 @@ change is the one a merge carries: from the candidate's merge base with the head
 parent of the candidate that was never merged. The integration head only grows, so such an answer stands until a
 later merge changes one of the things that change names -- a server argument, an environment variable, a kernel
 artifact, a component's upstream pin or one of the files a component's patches touch -- and then the candidate is
-offered again. Two candidates that patch the
-same component in different files name nothing in common and do not release each other. A merge attempt that
-settled nothing comes back on the next head whatever it named: a
-test whose measurement failed, a regression set that did not run clean, a conflict, and a candidate another of the
-round's merges superseded. The session's base image is fixed, and
+offered again. Two candidates that patch the same component in different files name nothing in common and do not
+release each other. A merge attempt that settled nothing comes back on the next head whatever it named: a regression
+set that did not run clean, a conflict, a candidate another of the round's merges superseded, and a test that ended
+as an infrastructure failure -- the node's, not the candidate's -- up to :data:`MERGE_INFRA_RETRIES` times per
+candidate. Past that such a test holds as an answer, as one the candidate failed does: a merge that ends that way on
+every head costs a test each time. The session's base image is fixed, and
 :func:`~hyperloom_multibranch.repo.merge.carry` refuses a candidate that moves it, so an image is never one of the
 things a change names here.
 
@@ -34,12 +35,15 @@ from collections.abc import Mapping
 from typing import Protocol
 
 from hyperloom.common.unified_diff import touched_paths
-from hyperloom.contracts.measurement import Validity
+from hyperloom.contracts.measurement import FailureClass, Validity
 from hyperloom.contracts.recipe import PatchRef, Recipe, diff
 from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery, RecordSearch
 from hyperloom_multibranch.contracts.notebook.records import CommittedCommit, MergeState
 from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
+
+#: How many times a candidate is offered again after a merge test that ended as an infrastructure failure.
+MERGE_INFRA_RETRIES = 2
 
 
 def _upstreams(recipe: Recipe) -> dict[str, str]:
@@ -123,6 +127,8 @@ class Candidates:
 
     A commit's recipe never changes and a patch's text is fixed by its sha256, so each is read from ``repo`` once:
     the idle merge loop asks on every tick, and both sides of the overlap are changes between commits already read.
+    The notebook keeps only a candidate's latest merge, so the merge tests that ended as infrastructure failures are
+    tallied here as each is read; every retry is offered from a read of the one before it.
     """
 
     def __init__(self, notebook: CandidateNotebook, repo: ExperimentRepo) -> None:
@@ -130,6 +136,7 @@ class Candidates:
         self._repo = repo
         self._recipes: dict[str, Recipe] = {}
         self._patched: dict[str, frozenset[str]] = {}
+        self._infra_ended: dict[str, set[str]] = {}
 
     async def offered_on(self, head: str) -> tuple[CommittedCommit, ...]:
         """The committed commits to test on ``head``, in the order the notebook gives them."""
@@ -150,26 +157,38 @@ class Candidates:
             return True
         if last.integration_head == head or last.outcome is MergeOutcome.ALREADY_ON_HEAD:
             return False
-        if not await self._answered_the_change(last):
+        if not await self._answered_the_change(commit.commit_id, last):
             return True
         own = await self._touched_between(_merge_base(commit, unmerged), commit.commit_id)
         return bool(own & await self._touched_between(last.integration_head, head))
 
-    async def _answered_the_change(self, last: MergeState) -> bool:
-        """Whether ``last`` settled something about the candidate's own change rather than about the head it met.
+    async def _answered_the_change(self, candidate: str, last: MergeState) -> bool:
+        """Whether ``last`` settled something about ``candidate``'s own change rather than about the head it met.
 
         A merge test the candidate failed is such an answer: what the toolbox could not run it does not run again on
-        a head that changes nothing the change names. A measurement that failed is not, and neither is a round that
-        superseded the candidate or a regression set that did not run clean -- they leave the candidate ``PENDING``
-        too.
+        a head that changes nothing the change names. A test that ended as an infrastructure failure is not, until the
+        candidate had more than :data:`MERGE_INFRA_RETRIES` of them, and neither is a round that superseded the
+        candidate or a regression set that did not run clean -- they leave the candidate ``PENDING`` too.
         """
 
         if last.outcome is MergeOutcome.NOT_STACKABLE:
             return True
         if last.outcome is not MergeOutcome.PENDING:
             return False
-        result = (await self._notebook.record(str(last.request_id))).result
-        return result is not None and result.validity is Validity.CANDIDATE_FAILED
+        request_id = str(last.request_id)
+        result = (await self._notebook.record(request_id)).result
+        if result is None:
+            return False
+        if result.failure_class is FailureClass.INFRA:
+            return self._infra_endings(candidate, request_id) > MERGE_INFRA_RETRIES
+        return result.validity is Validity.CANDIDATE_FAILED
+
+    def _infra_endings(self, candidate: str, request_id: str) -> int:
+        """How many of ``candidate``'s merge tests ended as infrastructure failures, ``request_id`` among them."""
+
+        ended = self._infra_ended.setdefault(candidate, set())
+        ended.add(request_id)
+        return len(ended)
 
     async def _touched_between(self, before: str, after: str) -> frozenset[str]:
         old, new = await self._recipe(before), await self._recipe(after)
@@ -194,4 +213,4 @@ class Candidates:
         return self._recipes[commit]
 
 
-__all__ = ["CandidateNotebook", "Candidates", "touched"]
+__all__ = ["MERGE_INFRA_RETRIES", "CandidateNotebook", "Candidates", "touched"]

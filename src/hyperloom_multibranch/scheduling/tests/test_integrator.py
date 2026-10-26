@@ -54,6 +54,7 @@ from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay
 from hyperloom_multibranch.notebook.rsi.stranded import StrandedLead
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, judgement, request, result
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
+from hyperloom_multibranch.scheduling.candidates import MERGE_INFRA_RETRIES
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS
@@ -91,6 +92,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     recipe_effect,
     session_gate,
 )
+from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
 from hyperloom_multibranch.toolbox.fake_model import Fate
 
 COMPONENT = "vllm"
@@ -707,6 +709,47 @@ async def test_a_merge_test_the_candidate_failed_is_not_tried_again_on_a_head_it
     assert rounds[3] is None
     tried = [test for test in bench.merge_tests().values() if f"{TAG_FLAG}apart" in test.delta.config.server_args]
     assert len(tried) == 1
+
+
+#: ``c1`` then ``c2``, then ``e1`` and ``e2``, each committed on a branch of its own, move the head four times; only
+#: ``e2`` sets a variable ``apart`` sets.
+LATER_CURVES: Curves = {
+    **CURVES,
+    frozenset({"c1", "c2", "e1"}): {MAIN_POINT: 1070.0},
+    frozenset({"c1", "c2", "e1", "e2"}): {MAIN_POINT: 1090.0},
+}
+LATER = {
+    "e1": RecipeDelta(config=ConfigDelta(server_args=f"{TAG_FLAG}e1", envs={"HL_E1": "1"})),
+    "e2": RecipeDelta(config=ConfigDelta(server_args=f"{TAG_FLAG}e2", envs={"HL_APART": "2"})),
+}
+
+
+async def test_a_merge_test_ended_by_the_infrastructure_is_retried_on_the_next_heads_up_to_the_cap(
+    tmp_path: Path,
+) -> None:
+    """Past the cap such a test holds as an answer: ``apart`` comes back only on the head ``e2``, which sets what it
+    sets, moved to."""
+
+    bench = await _bench(tmp_path, LATER_CURVES)
+    apart = await _committed_elsewhere(bench, APART, 9.0)
+    for gain, (name, delta) in zip((1.5, 1.0), LATER.items()):
+        await bench.handle(Role.SCHEDULER).record_lineage(
+            LineageEvent(LineageKind.OPEN, name, from_commit=bench.root, reason="refill")
+        )
+        await bench.repo.create_branch(name, bench.root)
+        await _committed_on(bench, name, bench.root, delta, gain, name=name)
+    infra_ending = [Fate.INFRA] * (DEFAULT_MAX_INFRA_RETRIES + 1)
+    bench.toolbox.script(lambda test: f"{TAG_FLAG}apart" in test.delta.config.server_args, infra_ending)
+
+    rounds = [await _one(bench) for _ in range(9)]
+
+    tried = [report for report in rounds if report is not None and report.candidate == apart]
+    heads = [report.merged_commit for report in rounds if report is not None and report.merged_commit is not None]
+    assert len(heads) == 4 and rounds[8] is None
+    assert [report.onto for report in tried] == [bench.root, *heads[:2], heads[3]]
+    assert all(report.outcome is MergeOutcome.PENDING for report in tried)
+    assert all(report.reason.startswith("the merge test failed") for report in tried)
+    assert len(tried) == MERGE_INFRA_RETRIES + 2
 
 
 #: ``parent`` and ``child``, one after the other on ``s1``, and ``across``, on a branch of its own, which sets the
