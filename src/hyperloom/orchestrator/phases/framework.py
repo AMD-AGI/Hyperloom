@@ -12,7 +12,7 @@ from pathlib import Path
 from collections.abc import Collection, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from hyperloom.common.coerce import first_str, to_float, to_list, to_mapping
+from hyperloom.common.coerce import first_str, first_text, to_float, to_list, to_mapping
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer import framework_registry
@@ -723,10 +723,9 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
     run_id = str(getattr(task, "task_id", "") or "")
     discovery_params = getattr(task, "params", None) or {}
     domain = str(discovery_params.get("domain") or "")
+    # Candidates are the rows _candidates_from_discovery_proposals built: keyed, with every field normalized.
     kept = {coord._framework_candidate_key(cand): cand for cand in candidates}
     for cand_id, cand in kept.items():
-        if not cand_id:
-            continue
         _record_kb_exposure(recorder, cand_id, discovery_params)
         recorder.record_proposal(
             cand_id,
@@ -734,23 +733,23 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
             producer=PRODUCER_SPECIALIST,
             producer_ref=domain,
             run_ref=run_id,
-            source_ref=str(cand.get("pr_url") or cand.get("head_sha") or ""),
-            repo=str(cand.get("repo") or ""),
-            title=str(cand.get("title") or ""),
-            reasoning=str(cand.get("reasoning") or cand.get("rationale") or cand.get("why") or ""),
-            changed_files=cand.get("changed_files") or [],
-            gap_canonical_id=str(cand.get("gap_canonical_id") or ""),
-            route=str(cand.get("route") or ""),
-            verdict=str((cand.get("audit") or {}).get("verdict") or ""),
+            source_ref=cand["pr_url"] or cand["head_sha"],
+            repo=cand["repo"],
+            title=cand["title"],
+            reasoning=cand["reasoning"],
+            changed_files=cand["changed_files"],
+            gap_canonical_id=cand["gap_canonical_id"],
+            route=cand["route"],
+            verdict=cand["audit"]["verdict"],
         )
         recorder.record_proposal_step(cand_id, step=STEP_PROPOSED, run_ref=run_id)
     for entry in raw if isinstance(raw, list) else []:
         if not isinstance(entry, dict):
             continue
-        verdict = str(entry.get("verdict") or "").strip().lower()
+        verdict = first_text(entry.get("verdict")).lower()
         if verdict not in {"already_present", "not_applicable"}:
             continue
-        ref = str(entry.get("pr_url") or entry.get("url") or entry.get("head_sha") or "").strip()
+        ref = first_text(entry.get("pr_url"), entry.get("url"), entry.get("head_sha"))
         if not ref or ref in kept:
             continue
         recorder.record_proposal(
@@ -2058,10 +2057,12 @@ class FrameworkPhase(ProposalBench):
             state.framework_agent_phase_progress = progress
         if cand_id in {self._framework_candidate_key(p) for p in progress if isinstance(p, dict)}:
             return False
+        batch_id = str(stamp.batch_id or "")
+        status = str(stamp.status or "")
         row: dict[str, Any] = {
             "candidate_id": cand_id,
-            "batch_id": str(stamp.batch_id or ""),
-            "status": str(stamp.status or ""),
+            "batch_id": batch_id,
+            "status": status,
             "kept": bool(stamp.kept),
             "rationale": str(stamp.rationale or ""),
             "gain_pct": (float(stamp.gain_pct) if isinstance(stamp.gain_pct, (int, float)) else 0.0),
@@ -2081,8 +2082,8 @@ class FrameworkPhase(ProposalBench):
         _settle(
             self,
             cand_id,
-            disposition="attempted" if (stamp.kept or str(stamp.status or "") in {"kept", "reverted"}) else "dropped",
-            reason=str(stamp.status or ""),
+            disposition="attempted" if (stamp.kept or status in {"kept", "reverted"}) else "dropped",
+            reason=status,
         )
         try:
             state.save(self.session_dir)
@@ -2095,7 +2096,7 @@ class FrameworkPhase(ProposalBench):
         log.info(
             "FRAMEWORK: stamped terminal progress candidate=%s batch=%s status=%s",
             cand_id,
-            str(stamp.batch_id or ""),
+            batch_id,
             stamp.status,
         )
         return True
@@ -2525,15 +2526,15 @@ class FrameworkPhase(ProposalBench):
         # Relaxed FRAMEWORK rule (parity with autosubmit): a non-diff tuned artifact deliverable
         # (``artifacts_written`` with a real source file) is a FULL result — autosubmit routes it to integrate_patch,
         # which owns the terminal row.
+        task_id = str(getattr(task, "task_id", "") or "")
         try:
             from hyperloom.inference_optimizer.session.session_paths import (
                 runs_dir as _runs_dir,
             )
             from pathlib import Path as _Path
 
-            _sid_arts = str(getattr(task, "task_id", "") or "")
-            if self.session_dir is not None and _sid_arts:
-                _spec_root = _runs_dir(_Path(self.session_dir), "specialist", _sid_arts)
+            if self.session_dir is not None and task_id:
+                _spec_root = _runs_dir(_Path(self.session_dir), "specialist", task_id)
                 if _resolvable_artifacts_from_done(inner, [_spec_root / "worktree", _spec_root]):
                     return
         except (OSError, ValueError, RuntimeError):
@@ -2542,7 +2543,7 @@ class FrameworkPhase(ProposalBench):
         if not cand_id:
             return
         batch_id = str(params.get("framework_batch_id") or "")
-        reason = str(inner.get("summary") or "").strip()[:500]
+        reason = first_text(inner.get("summary"))[:500]
         recorded = self._stamp_framework_progress(
             ProgressStamp(
                 candidate_id=cand_id,
@@ -2552,7 +2553,7 @@ class FrameworkPhase(ProposalBench):
                 provenance="authored_empty",
                 gain_pct=0.0,
                 extra={
-                    "specialist_task_id": str(getattr(task, "task_id", "") or ""),
+                    "specialist_task_id": task_id,
                     "reauthor_attempt": params.get("reauthor_attempt"),
                 },
             )
@@ -2698,14 +2699,14 @@ class FrameworkPhase(ProposalBench):
         for entry in proposals:
             if not isinstance(entry, dict):
                 continue
-            verdict = str(entry.get("verdict") or "").strip().lower()
+            verdict = first_text(entry.get("verdict")).lower()
             if verdict in {"already_present", "not_applicable"}:
                 continue
-            pr_url = str(entry.get("pr_url") or entry.get("url") or "").strip()
-            head_sha = str(entry.get("head_sha") or "").strip()
+            pr_url = first_text(entry.get("pr_url"), entry.get("url"))
+            head_sha = first_text(entry.get("head_sha"))
             if not pr_url and not head_sha:
                 continue
-            framework = str(entry.get("framework") or "").strip().lower()
+            framework = first_text(entry.get("framework")).lower()
             if framework and not framework_registry.is_supported(framework):
                 log.warning(
                     "FRAMEWORK: dropping discovery proposal %s: framework=%r is not registered",
@@ -2717,21 +2718,21 @@ class FrameworkPhase(ProposalBench):
                 "pr_url": pr_url,
                 "url": pr_url,
                 "head_sha": head_sha,
-                "title": str(entry.get("title") or "").strip(),
-                "diff_url": str(entry.get("diff_url") or "").strip(),
-                "repo": str(entry.get("repo") or "").strip(),
+                "title": first_text(entry.get("title")),
+                "diff_url": first_text(entry.get("diff_url")),
+                "repo": first_text(entry.get("repo")),
                 "pr_number": entry.get("pr_number"),
-                "ref": str(entry.get("ref") or "").strip(),
+                "ref": first_text(entry.get("ref")),
                 "framework": framework,
                 "changed_files": entry.get("changed_files") or [],
-                "gap_canonical_id": str(entry.get("gap_canonical_id") or "").strip(),
+                "gap_canonical_id": first_text(entry.get("gap_canonical_id")),
                 "gap_keywords": entry.get("gap_keywords") or [],
-                "reasoning": str(entry.get("reasoning") or entry.get("rationale") or entry.get("why") or "").strip(),
-                "route": str(entry.get("route") or "author_via_specialist").strip(),
+                "reasoning": first_text(entry.get("reasoning"), entry.get("rationale"), entry.get("why")),
+                "route": first_text(entry.get("route"), "author_via_specialist"),
                 "audit": {
                     "verdict": verdict,
-                    "reason": str(entry.get("reason") or "").strip(),
-                    "recommended_next_step": str(entry.get("route") or "").strip(),
+                    "reason": first_text(entry.get("reason")),
+                    "recommended_next_step": first_text(entry.get("route")),
                 },
             }
             key = self._framework_candidate_key(cand)
@@ -2935,13 +2936,14 @@ class FrameworkPhase(ProposalBench):
         # integrate_patch never reports what its boot did.
         if not config_levers and not is_enablement:
             return
-        sid = str(task.task_id or "").strip()
+        sid = first_text(task.task_id)
         if not sid:
             return
         if config_levers and self._config_lever_known_bad(config_levers):
             return
-        extra_server_args = str(config_levers.get("extra_server_args") or "")
-        extra_envs = dict(config_levers.get("extra_envs") or {})
+        # Empty, or the str args and dict envs _config_lever_from_proposal builds.
+        extra_server_args = config_levers.get("extra_server_args", "")
+        extra_envs = dict(config_levers.get("extra_envs", {}))
         candidate_id = str(spec_params.get("framework_agent_candidate_id") or "")
         pending = await self._submit_integrate_review(
             sid,
