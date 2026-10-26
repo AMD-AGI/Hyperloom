@@ -280,12 +280,13 @@ class _RewriteKb:
                     stop_at_unix=search_stop_unix,
                 )
             )
-        except Exception as error:  # noqa: BLE001 - KB failure must cold-start
+        except Exception as error:  # noqa: BLE001 - isolation boundary: the run's rewrite KB read; it cold-starts
             if kb_seed is None:
                 Path(spec.flydsl_kernel).unlink(missing_ok=True)
             else:
                 Path(spec.flydsl_kernel).write_bytes(kb_seed)
             read_error = sanitize_read_error(error, secrets=kb_store_secrets(self.target.config))
+            # Sanitized message only: a raw traceback would carry the KB store credentials.
             log.warning("rewrite KB read failed, cold start: %s", read_error)
             return RewriteKbReadResult(read_reason="read_error", read_error=read_error)
 
