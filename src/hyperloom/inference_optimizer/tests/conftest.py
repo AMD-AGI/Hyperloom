@@ -67,17 +67,6 @@ def _no_node_power_management(monkeypatch):
     monkeypatch.setattr(gpu_power_settings, "read_node_power_settings", _absent)
 
 
-@pytest.fixture(autouse=True)
-def _no_node_power_sysfs(monkeypatch):
-    """No round recorder reads the host's NPM files in sysfs: the node reads as one without NPM.
-
-    A test of the node reading patches ``_read_node_power`` again, or calls the reader with its own board glob.
-    """
-    from hyperloom.orchestrator.actions.executors import _gpu_power
-
-    monkeypatch.setattr(_gpu_power, "_read_node_power", lambda: None)
-
-
 def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
     """Put the executors in multi-node mode with a no-op per-round server restart."""
     from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl

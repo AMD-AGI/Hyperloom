@@ -95,6 +95,15 @@ def test_the_by_gpu_reading_names_each_serving_card_and_no_idle_one(tmp_path):
     assert by_gpu == {str(g): pytest.approx(800.0) for g in range(4)}
 
 
+@pytest.fixture(autouse=True)
+def _no_node_power_sysfs(monkeypatch):
+    """No recorder here reads the host's NPM files: the node reads as one without NPM.
+
+    A test of the node reading patches ``_read_node_power`` again, or calls the reader with its own board glob.
+    """
+    monkeypatch.setattr(_gpu_power, "_read_node_power", lambda: None)
+
+
 def _board(root, card: int, **files: str) -> None:
     board = root / f"card{card}" / "device" / "board"
     board.mkdir(parents=True)
