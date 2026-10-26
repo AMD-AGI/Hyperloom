@@ -1175,7 +1175,8 @@ def _run_registered_author_once(prompt: str, workspace: AuthorWorkspace, agent: 
     run_error: BaseException | None = None
     try:
         result = _run_author_session(prompt, workspace.workdir, agent, guard, progress)
-    except BaseException as exc:  # noqa: BLE001 - safety restoration must always run
+    except BaseException as exc:  # isolation boundary: one author attempt; restoration must always run
+        log.warning("author agent run failed for %s", workspace.workdir, exc_info=True)
         run_error = exc
     text = str(getattr(result, "text", "") or "")
 
@@ -1203,7 +1204,7 @@ def _run_registered_author_once(prompt: str, workspace: AuthorWorkspace, agent: 
             else "author workspace safety restoration failed"
         )
         return _rejected(f"{heading}: {_safety_detail(exc)}", AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY)
-    except Exception as exc:
+    except OSError as exc:
         detail = f"{type(exc).__name__}: internal workspace guard failure"
         # The agent-facing log stays content-free (a guard defect is not something the author can act on), but the
         # operator needs the traceback to fix it.
