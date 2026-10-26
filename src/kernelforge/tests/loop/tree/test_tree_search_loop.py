@@ -85,6 +85,10 @@ class _Planning:
     """Two BRANCH plans at the root; one DEEPEN plan per direction later."""
 
     async def run(self, context, *, usage=None, lanes=1):
+        # Planning reads the start's own code: its checkout must exist and be on the start commit.
+        workspace = Path(context.workspace)
+        assert workspace.is_dir() and _git(workspace, "rev-parse", "HEAD") == context.analysis_commit
+        assert Path(context.source_map_path).is_relative_to(workspace)
         brief = context.program_context
         if "BRANCH" in brief:
             plans = (

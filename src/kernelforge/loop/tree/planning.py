@@ -154,6 +154,9 @@ class TreePlanningMixin:
         started_at = time.time()
         try:
             groups = _by_start(round_.slots)
+            # One after another: concurrent ``git worktree add`` calls contend for the repository's own locks.
+            for start, _ in groups:
+                self._start_worktrees.ensure(start)
             outcomes = await asyncio.gather(
                 *(self._plan_start(tree, round_, start, slots, orchestration_factory) for start, slots in groups)
             )
