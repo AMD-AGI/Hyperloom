@@ -110,6 +110,37 @@ class ProposalBench(CoordinatorCollaborator):
             )
         return task is not None
 
+    async def enqueue_cycle_batch(self) -> bool:
+        """Enqueue one cycle-bench batch over the patches whose levers await the screen; whether one was enqueued.
+
+        One batch at a time, so a grown set does not re-bench the arms already queued. A lone patch waits for a second
+        while the serving lanes have other work, and is screened alone once they would otherwise idle.
+        """
+        from ..actions.executors import cycle_bench_arm as cba
+
+        arms = cba.cycle_arms(list(self.shared_state.authored_framework_levers or []))
+        if not arms or self._coord.dispatcher.admission_frozen:
+            return False
+        live = [*await self.tasks.queued(), *await self.tasks.running()]
+        if any((t.params or {}).get(cba.CYCLE_ARMS_PARAM) for t in live):
+            return False
+        serving = ("server_lifecycle", "benchmark_lane")
+        if len(arms) < 2 and any(lane in serving for t in live for lane in (getattr(t, "requires_lanes", ()) or ())):
+            return False
+        names = sha1(",".join(arm["name"] for arm in arms).encode(), usedforsecurity=False).hexdigest()[:12]
+        params = {
+            "source": "coordinator_internal",
+            "reason": cba.CYCLE_BATCH_REASON,
+            cba.CYCLE_ARMS_PARAM: arms,
+            "band_pct": cba.CYCLE_BAND_PCT,
+        }
+        task = await self._enqueue_coordinator_explore(
+            params, idempotency_key=f"cycle-batch-c{int(self.shared_state.macro_cycle or 0)}-{names}"
+        )
+        if task is not None:
+            log.info("cycle bench: enqueued batch task_id=%s over %s", task.task_id, [arm["name"] for arm in arms])
+        return task is not None
+
     async def operator_work_pending(self) -> bool:
         """Whether the operator-defined specialist or the bench of its proposals has not run yet."""
         if self._has_operator_work((*await self.tasks.queued(), *await self.tasks.running())):

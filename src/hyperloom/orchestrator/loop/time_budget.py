@@ -136,6 +136,12 @@ def explore_admission_minutes(per_round_minutes: float, params: dict[str, Any] |
     phase queued 23 rounds in 52 minutes and still had every one of them
     waiting 95 minutes later, when the exit cancelled them unmeasured.
     """
+    from ..actions.executors.cycle_bench_arm import CYCLE_ARM_MINUTES, CYCLE_ARMS_PARAM
+
+    arms = (params or {}).get(CYCLE_ARMS_PARAM)
+    if arms:
+        # A cycle batch boots once per candidate and once per bracketing base, each far shorter than a replay round.
+        return CYCLE_ARM_MINUTES * (len(arms) + 2)
     variants = len(((params or {}).get("grid") or ()))
     return per_round_minutes * variants if variants > 1 else per_round_minutes
 

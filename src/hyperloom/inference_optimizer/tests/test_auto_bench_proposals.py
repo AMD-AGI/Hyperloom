@@ -147,3 +147,63 @@ async def test_no_enqueue_when_it_must_not_run():
     for fp in blocked:
         await fp._maybe_bench_untested_proposals()
         assert not _explores(fp)
+
+
+def _awaiting_screen(state, switch: str, patch: str) -> None:
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
+
+    state.record_authored_framework_levers([{"switch": switch}], default_on=False, specialist_task_id=patch)
+    state.record_framework_lever_attribution(switch, gain_pct=None, source=ATTRIBUTION_CYCLE_PENDING)
+
+
+async def test_levers_awaiting_the_screen_are_batched_one_arm_per_patch():
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM, CYCLE_BAND_PCT
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_BATCH_REASON
+
+    fp = _phase()
+    state = fp._coord.shared_state
+    state.record_authored_framework_levers([{"switch": "HL_SCREENED"}], default_on=False, specialist_task_id="t-0")
+    for switch, patch in (("HL_A", "t-1"), ("HL_B", "t-1"), ("HL_C", "t-2")):
+        _awaiting_screen(state, switch, patch)
+
+    assert await fp.enqueue_cycle_batch() is True
+
+    (batch,) = _explores(fp)
+    assert batch["params"]["reason"] == CYCLE_BATCH_REASON
+    assert batch["params"]["band_pct"] == CYCLE_BAND_PCT
+    assert batch["params"][CYCLE_ARMS_PARAM] == [
+        {"name": "t-1", "envs": {"HL_A": "1", "HL_B": "1"}},
+        {"name": "t-2", "envs": {"HL_C": "1"}},
+    ]
+
+
+async def test_a_lone_pending_patch_waits_only_while_the_serving_lanes_have_other_work():
+    busy = SimpleNamespace(kind="integrate_patch", params={}, requires_lanes=("server_lifecycle", "benchmark_lane"))
+    fp = _phase(queued=[busy])
+    _awaiting_screen(fp._coord.shared_state, "HL_A", "t-1")
+    assert await fp.enqueue_cycle_batch() is False
+
+    idle = _phase()
+    _awaiting_screen(idle._coord.shared_state, "HL_A", "t-1")
+    assert await idle.enqueue_cycle_batch() is True
+
+
+async def test_no_second_batch_while_one_is_queued_or_the_phase_is_leaving():
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
+
+    queued = SimpleNamespace(
+        kind="explore", params={CYCLE_ARMS_PARAM: [{"name": "t-0", "envs": {}}]}, requires_lanes=()
+    )
+    for fp in (_phase(queued=[queued]), _phase(frozen=True)):
+        for switch, patch in (("HL_A", "t-1"), ("HL_C", "t-2")):
+            _awaiting_screen(fp._coord.shared_state, switch, patch)
+        assert await fp.enqueue_cycle_batch() is False
+        assert _explores(fp) == []
+
+
+def test_a_cycle_batch_is_priced_per_arm_and_its_two_bases():
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARM_MINUTES
+    from hyperloom.orchestrator.loop.time_budget import explore_admission_minutes
+
+    arms = [{"name": "a"}, {"name": "b"}, {"name": "c"}]
+    assert explore_admission_minutes(78.0, {"cycle_arms": arms}) == 5 * CYCLE_ARM_MINUTES

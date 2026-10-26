@@ -23,6 +23,7 @@ from typing import Any
 from hyperloom.orchestrator.measurement import cycle_bench as cb
 from hyperloom.orchestrator.measurement.cycle_bench import DECODE_LINE, decode_cycles_ms
 
+from ._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
 from .bypass_engine import wait_for_server_ready
 from .bypass_runner import _launch_server, _terminate_server
 
@@ -31,6 +32,16 @@ CYCLE_ARMS_PARAM = "cycle_arms"
 
 #: Batch sizes the bench drives; the baseline replay's running counts are weighted onto them.
 BATCH_GRID: tuple[int, ...] = (1, 2, 4)
+
+#: Weighted cycle band two bases of a batch must agree within, and a candidate must fall past to regress. Fixed-mode
+#: boots on GLM-5.3 differed by a two-boot stdev of about 0.5-1.3% per batch size.
+CYCLE_BAND_PCT = 2.0
+
+#: Admission price of one arm: a warm boot without the host KV cache plus one log window per batch size.
+CYCLE_ARM_MINUTES = 8.0
+
+#: Explore ``reason`` of a Coordinator-enqueued cycle-bench batch.
+CYCLE_BATCH_REASON = "cycle_bench_batch"
 _BASES = ("base", "base2")
 _ENCODING = "utf-8"
 
@@ -48,6 +59,16 @@ class BatchSpec:
     prompt_tokens: int
     vocab_size: int
     band_pct: float
+
+
+def cycle_arms(levers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One arm per patch among *levers* awaiting the screen, each switching all of its patch's levers on."""
+    arms: dict[str, dict[str, str]] = {}
+    for row in levers:
+        if row.get("attribution_source") == ATTRIBUTION_CYCLE_PENDING:
+            patch = str(row.get("specialist_task_id") or row.get("switch") or "")
+            arms.setdefault(patch, {})[str(row["switch"])] = str(row.get("value") or "1")
+    return [{"name": name, "envs": envs} for name, envs in arms.items()]
 
 
 def session_batch(

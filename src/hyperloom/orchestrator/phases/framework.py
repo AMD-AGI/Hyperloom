@@ -2415,6 +2415,7 @@ class FrameworkPhase(ProposalBench):
             await self._pump_framework_agent_phase()
             await self._maybe_bench_untested_proposals()
             await self.enqueue_dormant_lever_bundle()
+            await self.enqueue_cycle_batch()
             await self._coord.phase_internal.maybe_enqueue_explore_research_scout()
             await self._coord.phase_internal.maybe_enqueue_config_plateau_static_recon()
             await self._coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
