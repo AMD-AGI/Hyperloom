@@ -272,3 +272,32 @@ def test_an_excess_that_outlasts_the_settle_time_is_foreign_and_is_read_no_longe
 
     assert _whats(reading, before_test=False) == ["2.6 GiB on card 5 that no process this container sees accounts for"]
     assert sum(clock.sleeps) == pytest.approx(card_occupancy.EXCESS_SETTLE_SEC)
+
+
+def test_the_holders_of_a_card_whose_memory_the_pod_accounts_for_are_remembered_and_not_those_of_one_with_an_excess(
+    pod: KernelTree,
+) -> None:
+    _serve(pod)
+    pod.holds(1845543, 7, vram=_FOREIGN_VRAM, queues=2)
+
+    reading = _read(pod, [_CARD, 7])
+
+    assert reading.accounted_holders() == frozenset({(_CARD, 1827025)})
+
+
+def test_the_memory_of_a_holder_found_accounted_for_before_is_not_foreign_once_its_process_ended_and_another_is(
+    pod: KernelTree,
+) -> None:
+    """The test's server ended: its descriptors are closed and the kernel still lists its memory, with no queue, past the
+    settle time. A holder that was never found accounted for, on the same card, is foreign all the same."""
+    pod.holds(1827025, _CARD, vram=_SERVER_VRAM, queues=0)
+    remembered = frozenset({(_CARD, 1827025)})
+
+    reading = _read(pod)
+
+    assert reading.unaccounted == {_CARD: _SERVER_VRAM}
+    assert reading.intrusions(_NOBODY, before_test=False, accounted=remembered) == ()
+    assert [i.key for i in reading.intrusions(_NOBODY, before_test=False)] == [("unaccounted", _CARD)]
+    pod.holds(1845543, _CARD, vram=_FOREIGN_VRAM, queues=2)
+    found = _read(pod).intrusions(_NOBODY, before_test=False, accounted=remembered)
+    assert [i.key for i in found] == [("crowded", _CARD), ("unaccounted", _CARD)]

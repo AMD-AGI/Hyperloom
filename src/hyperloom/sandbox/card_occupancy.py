@@ -182,17 +182,32 @@ class CardReading:
         """The holders that are not ``own``'s."""
         return tuple(holder for holder in self.holders if not own.owns(holder.pid))
 
-    def intrusions(self, own: OwnProcesses, *, before_test: bool) -> tuple[Intrusion, ...]:
+    def intrusions(
+        self, own: OwnProcesses, *, before_test: bool, accounted: frozenset[tuple[int, int]] = frozenset()
+    ) -> tuple[Intrusion, ...]:
         """What on the cards is not the test's: holders that are not ``own``'s when ids could be matched; otherwise any
         holder before the test starts, and while it runs a card with more than one process holding memory on it or with
-        memory no process this reader sees accounts for."""
+        memory no process this reader sees accounts for, unless every holder of memory on that card is among
+        ``accounted`` (``(card, kernel id)`` pairs an earlier look found accounted for, see :meth:`accounted_holders`)."""
         if self.method == METHOD_PID_MATCH:
             return tuple(
                 Intrusion(("pid", h.pid, h.card), f"pid {h.pid} on card {h.card}", h.command) for h in self.foreign(own)
             )
         if before_test:
             return tuple(_host_holder(holder) for holder in self.holders)
-        return (*self._crowded(), *self._unexplained())
+        return (*self._crowded(), *self._unexplained(accounted))
+
+    def accounted_holders(self) -> frozenset[tuple[int, int]]:
+        """``(card, kernel id)`` of the holders of memory on each card whose memory the processes this reader sees account
+        for, to within the tolerance: processes of this container. When one of them ends, the kernel lists its memory for
+        a while after its descriptors closed; that memory is then unaccounted for, and it is still not a foreign holder's.
+        Empty when the memory could not be set against the processes'."""
+        return frozenset(
+            (holder.card, holder.pid)
+            for holder in self.holders
+            if holder.vram > 0
+            and self.unaccounted.get(holder.card, UNACCOUNTED_VRAM_TOLERANCE + 1) <= UNACCOUNTED_VRAM_TOLERANCE
+        )
 
     def _crowded(self) -> tuple[Intrusion, ...]:
         found = []
@@ -207,10 +222,11 @@ class CardReading:
                 )
         return tuple(found)
 
-    def _unexplained(self) -> tuple[Intrusion, ...]:
+    def _unexplained(self, accounted: frozenset[tuple[int, int]]) -> tuple[Intrusion, ...]:
         found = []
         for card, extra in sorted(self.unaccounted.items()):
-            if extra > UNACCOUNTED_VRAM_TOLERANCE:
+            resident = {(card, holder.pid) for holder in self.holders if holder.card == card and holder.vram > 0}
+            if extra > UNACCOUNTED_VRAM_TOLERANCE and not (resident and resident <= accounted):
                 found.append(
                     Intrusion(
                         ("unaccounted", card),
@@ -460,11 +476,7 @@ def read_holders(cards: Sequence[int], *, kfd: Path = KFD_PATH, procfs: Path = P
             unavailable=f"{procfs} hides the processes of other accounts from this one, so a process on a card may not be seen"
         )
     try:
-        gpus = _gpu_nodes(kfd)
-        missing = [card for card in cards if not 0 <= card < len(gpus)]
-        if missing:
-            return CardReading(unavailable=f"card(s) {missing} are not among the {len(gpus)} GPUs the kernel lists")
-        selected = {card: gpus[card] for card in cards}
+        selected = _selected(kfd, cards)
         if view is _PidView.OWN_NAMESPACE:
             return _census(kfd, procfs, selected)
         return CardReading(
@@ -474,6 +486,19 @@ def read_holders(cards: Sequence[int], *, kfd: Path = KFD_PATH, procfs: Path = P
         return CardReading(unavailable=str(exc))
     except OSError as exc:
         return CardReading(unavailable=f"the kernel's list cannot be read ({type(exc).__name__}: {exc.strerror})")
+
+
+def _selected(kfd: Path, cards: Sequence[int]) -> dict[int, _GpuNode]:
+    """The GPU of the topology each of ``cards`` is.
+
+    Raises:
+        _Unreadable: When a card is not among the GPUs the kernel lists: a card that is not there is not a free one.
+    """
+    gpus = _gpu_nodes(kfd)
+    missing = [card for card in cards if not 0 <= card < len(gpus)]
+    if missing:
+        raise _Unreadable(f"card(s) {missing} are not among the {len(gpus)} GPUs the kernel lists")
+    return {card: gpus[card] for card in cards}
 
 
 def _holders(kfd: Path, procfs: Path, card_of: dict[int, int], *, named: bool) -> tuple[Holder, ...]:

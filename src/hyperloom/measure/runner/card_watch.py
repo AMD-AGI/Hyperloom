@@ -9,6 +9,13 @@ at a fixed interval while it runs, and once more when it has ended. A holder tha
 remembered with the time it was first seen. Before the test, a holder is read again for up to ``EXCESS_SETTLE_SEC`` and
 counts only if it is still there: the previous test's server, as it exits, stays listed for a few seconds.
 
+While the test runs and after it, the test's own server stops: its descriptors close and the kernel still lists its memory
+for as long as the driver takes to free it, which on a GPU pod was seconds and can be longer for hundreds of GiB. In a pod
+that memory is then accounted for by no process the container sees, as a foreign holder's would be. The watch therefore
+remembers every holder a look found accounted for on a card (the test's own) and does not count memory on a card all of
+whose holders it remembers; a holder it never saw accounted for, or a second one, still counts, however long the first one
+takes to go.
+
 What is done about it is the card guard's say. Enforcing, the result is refused as ``foreign_process_on_card``: an
 infrastructure failure, whatever the test itself did, because a failure it showed may be the intruder's doing as much as a
 number may. Observing, which is the default until the probe has been shown right on the machines that run tests, nothing is
@@ -127,33 +134,41 @@ class CardWatch:
         self._unavailable = ""
         self._checks = 0
         self._method: str | None = None
+        self._accounted: frozenset[tuple[int, int]] = frozenset()
 
     def check(self, when: str) -> None:
         """Look at who holds the cards now; ``when`` says which stage of the test this is, for the record."""
         if not self._cards:
             return
         first_seen = self._clock()
-        reading, found = self._look(when)
+        with self._lock:
+            accounted = self._accounted
+        reading, found = self._look(when, accounted)
         if when == BEFORE_TEST:
             reading, found = self._settled(reading, found)
         with self._lock:
             if reading.unavailable is not None:
                 self._unavailable = self._unavailable or reading.unavailable
                 return
+            if when != BEFORE_TEST:
+                self._accounted |= reading.accounted_holders()
             self._checks += 1
             self._method = _weaker(self._method, reading.method)
             for intrusion in found:
                 self._sightings.setdefault(intrusion.key, Sighting(intrusion, first_seen, when))
 
-    def _look(self, when: str) -> tuple[CardReading, tuple[Intrusion, ...]]:
-        """One reading of the cards and what on them is not the test's."""
+    def _look(
+        self, when: str, accounted: frozenset[tuple[int, int]] = frozenset()
+    ) -> tuple[CardReading, tuple[Intrusion, ...]]:
+        """One reading of the cards and what on them is not the test's; ``accounted`` are the holders earlier looks found
+        to be the test's own."""
         try:
             reading = card_occupancy.read_holders(self._cards)
         except Exception as exc:  # noqa: BLE001 - a look that failed must leave the result unknown, never clean
             return CardReading(unavailable=f"a look at the cards failed ({type(exc).__name__})"), ()
         if reading.unavailable is not None:
             return reading, ()
-        return reading, reading.intrusions(self._own, before_test=when == BEFORE_TEST)
+        return reading, reading.intrusions(self._own, before_test=when == BEFORE_TEST, accounted=accounted)
 
     def _settled(self, reading: CardReading, found: tuple[Intrusion, ...]) -> tuple[CardReading, tuple[Intrusion, ...]]:
         """Read the cards again while something is on them, until it is gone or ``EXCESS_SETTLE_SEC`` has passed; the
