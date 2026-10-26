@@ -145,7 +145,7 @@ def generate_tuner(
 
     try:
         result = _run(backend, spec)
-    except Exception as exc:  # per-run boundary: the failure is written to the tier-3 outcome
+    except Exception as exc:  # isolation boundary: one Tier3 authoring session, reported in the outcome
         log.warning("tier-3 authoring session failed", exc_info=True)
         return GeneratedTuner(False, None, f"authoring session failed: {exc!r}")
 
