@@ -76,7 +76,7 @@ Two layers. The **gate** is the `code-metrics` CI job (`scripts/code_metrics.py`
 
 | Gated dimension | Fails when | Why this number | Tool |
 |-----------------|-----------|-----------------|------|
-| Cyclomatic complexity | > 20 | The [Complexity ceiling](#complexity-ceiling): twice McCabe's 10, the point where a function has more paths than a reviewer can hold while reading it | ruff `C901` |
+| Cyclomatic complexity | > 20 | The [Complexity ceiling](#complexity-ceiling): twice McCabe's 10, the point where a function has more paths than a reviewer can hold while reading it. Every `and` / `or`, ternary, comprehension and `assert` counts as a branch, so it reads higher than ruff `C901` | radon `cc` |
 | Cognitive complexity | > 30 | Twice SonarSource's S3776 default of 15, the same step as the ceiling; it weights nesting, so past 30 a function has to be re-read rather than read | complexipy |
 | Function length | > 50 lines | Lines of code in the body, counted as below: past 50 a function rarely does one thing | the script |
 | Nested block depth | > 4 | Past four levels the innermost line depends on five conditions at once | ruff `PLR1702` |
@@ -137,7 +137,7 @@ A10 is limited to the enum's own vocabulary on purpose: matched against every en
 
 | Unit | Trigger | Where the number comes from |
 |------|---------|-----------------------------|
-| Cyclomatic complexity | 10 | McCabe default; measurable on demand with `ruff check --select C901` |
+| Cyclomatic complexity | 10 | McCabe default; measurable on demand with `radon cc` |
 | Module length | ~800 lines | Roughly the tree's 90th percentile |
 
 Neither number identifies a problem on its own. A long function can be one prompt template with a complexity of 1, and a short one can carry a dozen field comparisons that still need semantic review. Crossing a trigger asks the reviewer to look for a responsibility boundary, not to assume there is one — and "this is a single template" is an accepted answer. Split when it improves ownership, data flow, or testability.
@@ -147,7 +147,7 @@ Neither number identifies a problem on its own. A long function can be one promp
 Measure rather than argue:
 
 ```bash
-ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
+radon cc -s -n C src/hyperloom src/kernelforge
 ```
 
 Passing a trigger is not a merge blocker — it means the PR description says why, or the change splits. Passing the ceiling below is, and so is the `code-metrics` gate above.
@@ -163,12 +163,10 @@ The ceiling sits at twice the trigger because the trigger asks a question the ce
 Measure both sides — the head tree, and the same file at the merge base, since the verdict is a comparison:
 
 ```bash
-ruff check --select C901 --config "lint.mccabe.max-complexity=20" --force-exclude \
-  --output-format concise <changed .py files under src/, tests excluded>
+radon cc -s -n D <changed .py files under src/, tests excluded>
 
 git show "$(git merge-base origin/main HEAD)":<path> > /tmp/base.py
-ruff check --select C901 --config "lint.mccabe.max-complexity=20" --isolated \
-  --output-format concise /tmp/base.py
+radon cc -s -n D /tmp/base.py
 ```
 
 The tree carried 124 units above 20 when the ceiling was introduced (2026-10-10). The ceiling is what stops that number growing; it is not a demand to pay the 124 down.

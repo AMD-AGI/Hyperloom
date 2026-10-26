@@ -506,12 +506,6 @@ def test_ruff_rows_map_to_qualified_units(tmp_path: Path) -> None:
     units = FakeUnits(tmp_path, "src/p.py", SOURCE).units
     rows = [
         {
-            "code": "C901",
-            "message": "`pick` is too complex (11 > 10)",
-            "filename": str(tmp_path / "src/p.py"),
-            "location": {"row": 2},
-        },
-        {
             "code": "PLR1702",
             "message": "Too many nested blocks (6 > 5)",
             "filename": str(tmp_path / "src/p.py"),
@@ -523,25 +517,47 @@ def test_ruff_rows_map_to_qualified_units(tmp_path: Path) -> None:
             "filename": str(tmp_path / "src/p.py"),
             "location": {"row": 2},
         },
-        {
-            "code": "C901",
-            "message": "`inner` is too complex (21 > 20)",
-            "filename": str(tmp_path / "src/p.py"),
-            "location": {"row": 14},
-        },
     ]
     got = [(f.metric, f.unit, f.value, f.line) for f in collect.parse_ruff(rows, tmp_path, units)]
     assert got == [
-        (CC, "Planner.pick", 11, 2),
         ("nested-blocks", "Planner.pick", 6, 4),
         (collect.FUNCTION_ARGS, "Planner.pick", 7, 2),
-        (CC, "helper.inner", 21, 14),
     ]
     with pytest.raises(collect.ToolError, match="unexpected ruff diagnostic"):
         collect.parse_ruff([{**rows[0], "message": "reworded"}], tmp_path, units)
     # A rule this gate no longer selects is unexpected output, not a silently dropped row.
-    with pytest.raises(collect.ToolError, match="unexpected ruff diagnostic: PLR0911"):
-        collect.parse_ruff([{**rows[0], "code": "PLR0911"}], tmp_path, units)
+    for code in ("PLR0911", "C901"):
+        with pytest.raises(collect.ToolError, match=f"unexpected ruff diagnostic: {code}"):
+            collect.parse_ruff([{**rows[0], "code": code}], tmp_path, units)
+
+
+def test_radon_blocks_map_functions_and_closures_to_units(tmp_path: Path) -> None:
+    units = FakeUnits(tmp_path, "src/p.py", SOURCE).units
+    pick = {"type": "method", "name": "pick", "classname": "Planner", "lineno": 2, "complexity": 21, "closures": []}
+    size = {"type": "method", "name": "size", "classname": "Planner", "lineno": 9, "complexity": 1, "closures": []}
+    inner = {"type": "function", "name": "inner", "lineno": 14, "complexity": 22, "closures": []}
+    rows = {
+        str(tmp_path / "src/p.py"): [
+            {"type": "class", "name": "Planner", "lineno": 1, "complexity": 30, "methods": [pick, size]},
+            pick,
+            size,
+            {"type": "function", "name": "helper", "lineno": 13, "complexity": 20, "closures": [inner]},
+        ]
+    }
+    got = [(f.metric, f.unit, f.value, f.line) for f in collect.parse_radon(rows, tmp_path, 20, units)]
+    assert got == [(CC, "Planner.pick", 21, 2), (CC, "helper.inner", 22, 14)]
+    with pytest.raises(collect.ToolError, match="radon could not measure"):
+        collect.parse_radon({str(tmp_path / "src/p.py"): {"error": "invalid syntax"}}, tmp_path, 20, units)
+
+
+@pytest.mark.skipif(shutil.which("radon") is None, reason="radon")
+def test_cyclomatic_complexity_counts_boolean_operators(tmp_path: Path) -> None:
+    # McCabe counts this function as 1; every `and` is a branch for the gate.
+    operands = " and ".join(f"x{i}" for i in range(22))
+    path = "src/a.py"
+    FakeUnits(tmp_path, path, f"def f({', '.join(f'x{i}' for i in range(22))}):\n    return {operands}\n")
+    got = collect.radon_findings(tmp_path, [path], 20, collect.Units(tmp_path))
+    assert got == [collect.Finding(CC, path, "f", 22, 1)]
 
 
 def test_complexipy_rows_keep_only_violations_with_their_line(tmp_path: Path) -> None:
@@ -617,10 +633,7 @@ def test_a_pending_metric_may_lack_a_threshold_and_is_then_not_measured(monkeypa
     monkeypatch.setattr(code_metrics, "PENDING", (collect.FUNCTION_ARGS,))
     config = code_metrics.parse_config(without_args)
     assert config is not None and collect.FUNCTION_ARGS not in config.thresholds
-    assert [code for code, (metric, _) in collect.RUFF_RULES.items() if metric in config.thresholds] == [
-        "C901",
-        "PLR1702",
-    ]
+    assert [code for code, (metric, _) in collect.RUFF_RULES.items() if metric in config.thresholds] == ["PLR1702"]
     for broken in (text.replace("nested-blocks = 4\n", ""), text.replace("nested-blocks =", "mccabe =")):
         with pytest.raises(collect.ToolError, match="thresholds must name"):
             code_metrics.parse_config(broken)
@@ -1348,7 +1361,10 @@ def test_a_new_directory_is_not_measured_again_at_the_base_as_a_file(
     assert code == 1 and "| Directory size (entries) | 51 |" in section(report, NEW)
 
 
-@pytest.mark.skipif(shutil.which("ruff") is None or shutil.which("complexipy") is None, reason="ruff/complexipy")
+@pytest.mark.skipif(
+    shutil.which("ruff") is None or shutil.which("complexipy") is None or shutil.which("radon") is None,
+    reason="ruff/complexipy/radon",
+)
 def test_base_values_measures_the_files_as_they_were_at_the_base(tmp_path: Path) -> None:
     branches = "".join(f"    if x == {i}:\n        return {i}\n" for i in range(21))
     (tmp_path / "src").mkdir()

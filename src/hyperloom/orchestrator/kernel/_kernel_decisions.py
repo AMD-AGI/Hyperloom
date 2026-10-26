@@ -647,6 +647,25 @@ def _rank_hot_rows(rows: list[_HotRow], top_n: int) -> list[_HotRow]:
     return [r for r in ranked if not r.order[0]][:top_n] + [r for r in ranked if r.order[0]][:top_n]
 
 
+def _task_group_index(
+    task_groups: list[Any],
+) -> tuple[dict[str, tuple[list[str], str]], dict[str, set[str]]]:
+    """Map each member kernel_id to its group's ``(members, task_group_key)``, and each group key to its aliases."""
+    kid_to_group: dict[str, tuple[list[str], str]] = {}
+    group_key_aliases: dict[str, set[str]] = {}
+    for g in task_groups:
+        if not isinstance(g, dict):
+            continue
+        members = [str(m) for m in (g.get("kernel_ids") or []) if m]
+        group_key = str(g.get("task_group_key") or "")
+        group_key_aliases[group_key] = {
+            str(alias) for alias in [group_key, *(g.get("legacy_task_group_keys") or [])] if str(alias)
+        }
+        for m in members:
+            kid_to_group[m] = (members, group_key)
+    return kid_to_group, group_key_aliases
+
+
 def untried_hot_reusable_kernels(
     state,
     *,
@@ -665,18 +684,7 @@ def untried_hot_reusable_kernels(
         return []
     if min_gpu_pct is None:
         min_gpu_pct = resolve_hot_kernel_min_gpu_pct()
-
-    kid_to_group: dict[str, tuple[list[str], str]] = {}
-    group_key_aliases: dict[str, set[str]] = {}
-    for g in info.get("task_groups") or []:
-        if not isinstance(g, dict):
-            continue
-        members = [str(m) for m in (g.get("kernel_ids") or []) if m]
-        group_key = str(g.get("task_group_key") or "")
-        aliases = {group_key, *[str(alias) for alias in (g.get("legacy_task_group_keys") or []) if str(alias)]}
-        group_key_aliases[group_key] = {alias for alias in aliases if alias}
-        for m in members:
-            kid_to_group[m] = (members, group_key)
+    kid_to_group, group_key_aliases = _task_group_index(info.get("task_groups") or [])
 
     integrated = IntegratedStack.of(state.optimization_stack)
     records = _attempt_records(state)

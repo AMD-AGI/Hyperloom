@@ -240,7 +240,7 @@ def _entry_problems(index: int, entry: Any, seen_ids: set[str]) -> list[str]:
     else:
         seen_ids.add(kernel_id)
     gpu_pct = entry.get("gpu_pct")
-    if gpu_pct is not None and not _is_finite_number(gpu_pct):
+    if gpu_pct is not None and not is_finite_number(gpu_pct):
         problems.append(f"entries[{index}] has invalid gpu_pct {gpu_pct!r}; expected a finite number")
     source_line = entry.get("source_line")
     if source_line is not None and not isinstance(source_line, int):
@@ -253,12 +253,12 @@ def _entry_problems(index: int, entry: Any, seen_ids: set[str]) -> list[str]:
         problems.append(f"entries[{index}] has unknown reason_class {reason_class!r}")
     problems.extend(_source_file_problems(index, entry, method))
     confidence = entry.get("confidence")
-    if confidence is not None and not (_is_finite_number(confidence) and 0.0 <= float(confidence) <= 1.0):
+    if confidence is not None and not (is_finite_number(confidence) and 0.0 <= float(confidence) <= 1.0):
         problems.append(f"entries[{index}] has invalid confidence {confidence!r}; expected a finite number in [0, 1]")
     return problems
 
 
-def _is_finite_number(value: Any) -> bool:
+def is_finite_number(value: Any) -> bool:
     """Whether a value is a real finite number, which ``True`` and ``False`` are not."""
     return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(float(value))
 
