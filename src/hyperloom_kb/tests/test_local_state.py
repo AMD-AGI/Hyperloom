@@ -17,7 +17,10 @@ from hyperloom_kb import (
     Experience,
     ExperienceHTTPService,
     ExperienceStatus,
+    ExportPage,
     HTTPServiceConfig,
+    ListPage,
+    PageQuery,
     Provenance,
     ReadQuery,
     RemoteClient,
@@ -182,6 +185,47 @@ def test_a_label_saves_the_exclusions_with_the_state(tmp_path: Path) -> None:
     assert under_clean == ({_id(0), _id(1)}, [])
     assert under_excluding == {_id(0)}
     assert reason == "crashed the server"
+
+
+def test_a_label_lists_and_exports_the_state_it_saved_without_restoring_it(tmp_path: Path) -> None:
+    def exported(page: ExportPage) -> list[str]:
+        return [str(item["experience"]["id"]) for item in page.items]
+
+    def ids(page: ListPage) -> list[str]:
+        return [str(item["experience_id"]) for item in page.items]
+
+    with _serving(_service(tmp_path / "local")) as client:
+        for seq in range(3):
+            client.write(_experience(seq))
+        client.exclude(_id(2), reason="crashed the server")
+        saved = str(client.create_label(name="three")["label_id"])
+        before = client.export_query(PageQuery(label_id=saved))
+        client.write(_experience(3))
+        client.exclude(_id(0), reason="noisy neighbour")
+        after = client.export_query(PageQuery(label_id=saved))
+        with_excluded = client.list_query(PageQuery(label_id=saved, include_excluded=True))
+        scoped = client.list_query(PageQuery(label_id=saved, scope={"change.knob": ["knob_1"]}))
+        paged: list[list[str]] = []
+        cursor, has_more = 0, True
+        while has_more:
+            page = client.list_query(PageQuery(after=cursor, limit=1, label_id=saved))
+            paged.append(ids(page))
+            cursor, has_more = page.next_cursor, page.has_more
+        labels = client.labels()
+        current = (_listed(client), labels["current_label_id"], labels["modified"])
+        with pytest.raises(RemoteClientError, match="404"):
+            client.list_query(PageQuery(label_id="label-missing"))
+        with pytest.raises(RemoteClientError, match="400.*saves"):
+            client.export_query(PageQuery(label_id=saved, schema_ref="sha256:" + "0" * 64))
+
+    assert exported(before) == [_id(0), _id(1)]
+    assert (exported(after), after.state, after.declaration) == (exported(before), before.state, SCHEMA)
+    assert ids(with_excluded) == [_id(0), _id(1), _id(2)]
+    assert ids(scoped) == [_id(1)]
+    assert [experience_id for page in paged for experience_id in page] == [_id(0), _id(1)]
+    assert all(len(page) <= 1 for page in paged)
+    # Reading the label left the current state where the later write and exclusion put it.
+    assert current == ({_id(1), _id(3)}, saved, True)
 
 
 def test_labels_are_managed_by_id_and_their_names_may_repeat(tmp_path: Path) -> None:

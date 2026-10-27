@@ -29,6 +29,7 @@ from hyperloom_kb import (
     FieldRole,
     HTTPServiceConfig,
     ObjectiveDeclaration,
+    PageQuery,
     Provenance,
     ReadQuery,
     RemoteClient,
@@ -162,6 +163,33 @@ def test_pull_stores_the_global_kb_records_and_never_pushes_them_back(tmp_path: 
     # Reads see what was pulled; list and export name only what was written here.
     assert readable == 4
     assert listed == {_experience(schema, 0).id}
+
+
+def test_list_and_export_name_what_was_pulled_only_when_asked(tmp_path: Path) -> None:
+    schema = _declaration()
+    pulled = {_experience(schema, seq, run_id="teammate-run").id for seq in range(2)}
+    written = _experience(schema, 0)
+    with _serving(_service(tmp_path / "global", schema, GLOBAL_TOKEN)) as global_url:
+        shared = _client(global_url, GLOBAL_TOKEN, tmp_path)
+        for seq in range(2):
+            shared.write(_experience(schema, seq, run_id="teammate-run"))
+        with _serving(_service(tmp_path / "local", schema, LOCAL_TOKEN, global_url)) as local_url:
+            local = _client(local_url, LOCAL_TOKEN, tmp_path)
+            local.pull(schema.schema_ref)
+            local.write(written)
+            exported = local.export_page(schema_ref=schema.schema_ref)
+            everything = local.export_query(PageQuery(schema_ref=schema.schema_ref, include_pulled=True))
+            first = local.list_query(PageQuery(limit=2, include_pulled=True))
+            rest = local.list_query(PageQuery(after=first.next_cursor, limit=2, include_pulled=True))
+            (held,) = local.schemas()["schemas"]
+            pushed = local.push()
+
+    assert [item["experience"]["id"] for item in exported.items] == [written.id]
+    assert {item["experience"]["id"] for item in everything.items} == pulled | {written.id}
+    assert {str(item["experience_id"]) for item in (*first.items, *rest.items)} == pulled | {written.id}
+    assert (len(first.items), first.has_more, rest.has_more) == (2, True, False)
+    assert held["experiences"] == {"stored": 3, "visible": 3, "pulled": 2}
+    assert (pushed["created"], pushed["skipped"]) == (1, 2)
 
 
 def test_a_record_travels_with_its_files_from_one_workspace_through_the_global_kb_to_another(tmp_path: Path) -> None:
@@ -480,8 +508,10 @@ def test_settings_digest_changes_with_what_the_service_does_not_with_spelling() 
     aliased = {**gateway, "ANTHROPIC_AUTH_TOKEN": "key", "ANTHROPIC_MODEL": "m"}
     shared = {**gateway, "HYPERLOOM_GLOBAL_KB_URL": "https://global.example", "HYPERLOOM_GLOBAL_KB_TOKEN": "t"}
     half = {**gateway, "HYPERLOOM_GLOBAL_KB_URL": "https://global.example"}
+    subscribed = {**gateway, "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: s"}
 
     assert ServiceSettings.from_env(aliased).digest() == ServiceSettings.from_env(gateway).digest()
     assert ServiceSettings.from_env(shared).digest() != ServiceSettings.from_env(gateway).digest()
+    assert ServiceSettings.from_env(subscribed).digest() != ServiceSettings.from_env(gateway).digest()
     assert ServiceSettings.from_env(half).global_kb is None
     assert "HYPERLOOM_GLOBAL_KB_TOKEN must be set" in ServiceSettings.from_env(half).global_problem

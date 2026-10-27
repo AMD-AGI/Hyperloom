@@ -11,6 +11,7 @@ import os
 import re
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -34,6 +35,7 @@ from hyperloom_kb import (
     HTTPServiceError,
     LLMQueryPlanner,
     ObjectiveDeclaration,
+    PageQuery,
     PlannerConfiguration,
     Provenance,
     ReadQuery,
@@ -297,6 +299,7 @@ def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
         "schema_ref": schema.schema_ref,
         "experience_count": 1,
         "schemas": {schema.schema_ref: 1},
+        "distills": {},
         "pid": os.getpid(),
         "config_digest": "",
         "code_digest": code_digest(),
@@ -638,6 +641,58 @@ def test_list_pages_in_write_order_and_keeps_them_across_a_restart(tmp_path: Pat
     assert (bad_limit[0], bad_cursor[0]) == (400, 400)
 
 
+def test_list_and_export_name_only_what_a_scope_selects_and_page_through_it(tmp_path: Path) -> None:
+    schema = _declaration()
+    experiences = [
+        replace(
+            _experience(schema, seq=seq, knob=f"knob_{seq}", decision="keep" if seq % 2 else "revert"),
+            identity={"model": "qwen3", "gpu": "mi300x" if seq < 4 else "mi355x"},
+        )
+        for seq in range(6)
+    ]
+    on_mi300x = {"identity.gpu": ["mi300x"]}
+
+    def ids(page: Any) -> list[str]:
+        return [str(item["experience_id"]) for item in page.items]
+
+    with RunningServer(_app(tmp_path / "service", schema)) as url:
+        client = _client(url, tmp_path)
+        for experience in experiences:
+            client.publish(experience)
+        paged: list[list[str]] = []
+        cursor, has_more = 0, True
+        while has_more:
+            page = client.list_experiences(after=cursor, limit=1, schema_ref=schema.schema_ref, scope=on_mi300x)
+            paged.append(ids(page))
+            cursor, has_more = page.next_cursor, page.has_more
+        kept = client.export_page(schema_ref=schema.schema_ref, scope={**on_mi300x, "outcome.decision": ["keep"]})
+        either = client.list_experiences(schema_ref=schema.schema_ref, scope={"identity.gpu": ["mi300x", "mi355x"]})
+        client.exclude(experiences[1].id, reason="measured on a contended GPU")
+        hidden = client.list_experiences(schema_ref=schema.schema_ref, scope=on_mi300x)
+        shown = client.list_experiences(schema_ref=schema.schema_ref, scope=on_mi300x, include_excluded=True)
+        refused = [
+            _http(url, "GET", f"/v1/list?{urllib.parse.urlencode(query)}")
+            for query in (
+                {"scope": json.dumps(on_mi300x)},
+                {"schema_ref": schema.schema_ref, "scope": json.dumps({"identity.cpu": ["epyc"]})},
+                {"schema_ref": schema.schema_ref, "scope": json.dumps({"outcome.value": ["fast"]})},
+                {"schema_ref": schema.schema_ref, "scope": "gpu=mi300x"},
+            )
+        ]
+
+    mi300x = [experience.id for experience in experiences[:4]]
+    assert [experience_id for page in paged for experience_id in page] == mi300x
+    assert all(len(page) <= 1 for page in paged)
+    assert [item["experience"]["id"] for item in kept.items] == [experiences[1].id, experiences[3].id]
+    assert kept.declaration is not None and kept.declaration.schema_ref == schema.schema_ref
+    assert ids(either) == [experience.id for experience in experiences]
+    assert ids(hidden) == [mi300x[0], *mi300x[2:]]
+    assert ids(shown) == mi300x
+    assert [status for status, _ in refused] == [400, 400, 400, 400]
+    assert "needs a schema_ref" in refused[0][1]["detail"]
+    assert "not a declared field" in refused[1][1]["detail"]
+
+
 def test_a_restarted_sqlite_service_exports_a_schema_it_has_not_read_since_without_waiting_on_itself(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -653,7 +708,7 @@ def test_a_restarted_sqlite_service_exports_a_schema_it_has_not_read_since_witho
     )
     restarted = ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), served, None, database=open_database(home))
 
-    page = restarted.export(schema_ref=pulled.schema_ref)
+    page = restarted.export(PageQuery(schema_ref=pulled.schema_ref))
 
     assert page["declaration"] == pulled.to_dict()
     assert [item["experience"]["id"] for item in page["items"]] == [_experience(pulled).id]
@@ -694,12 +749,20 @@ def test_invalid_requests_are_rejected(tmp_path: Path) -> None:
         missing_decision = _http(url, "POST", "/v1/read", {"context": {}})
         bad_file_check = _http(url, "POST", "/v1/files/missing", {"files": [{"sha256": "x"}]})
         unknown_path = _http(url, "GET", "/v1/events")
+        unregistered = (
+            wrong_schema,
+            _http(url, "GET", f"/v1/export?schema_ref={other.schema_ref}"),
+            _http(url, "POST", "/v1/read", {"decision": DECISION, "context": {}, "schema_ref": other.schema_ref}),
+        )
 
+    for status, body in unregistered:
+        assert status == 400
+        assert body["error"] == "unknown_schema"
+        assert f"schema_ref {other.schema_ref} is not registered" in body["detail"]
     for status, body in (
         mismatched,
         unfinished,
         not_declared,
-        wrong_schema,
         unknown_write_field,
         unknown_read_field,
         missing_decision,

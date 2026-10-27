@@ -16,8 +16,10 @@ nothing else.
 
 What a run records, and how an attempt becomes an Experience, is in
 [Framework Experience publication](../experience-kb-framework.md). The record
-itself is in [Experience schema](experience-kb-schema.md), and writing
-Experiences from other logs in [Experience collection](experience-kb-collect.md).
+itself is in [Experience schema](experience-kb-schema.md), writing
+Experiences from other logs in [Experience collection](experience-kb-collect.md),
+and the patterns users draw from groups of Experiences in
+[Distills](experience-kb-distill.md).
 
 ## Configuration
 
@@ -30,7 +32,7 @@ Experiences from other logs in [Experience collection](experience-kb-collect.md)
 | `HYPERLOOM_KB_AUTO_PUSH` | the user | `1` pushes each run's Experiences to the global KB after they are written locally. Default off. |
 | `USER_DATA_PATH` | `hyperloom-setup` | The local service keeps its data under `$USER_DATA_PATH/experience-kb` unless `HYPERLOOM_KB_HOME` is set. |
 | `HYPERLOOM_KB_HOME` | the user | The local service's data home instead of `$USER_DATA_PATH/experience-kb`. One home serves one service at a time, so runs on different hosts that share a `USER_DATA_PATH` each set their own. Optional. |
-| `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_MODEL` | `hyperloom-setup` | The gateway and model the service plans reads with; `LOCAL_KB_PLANNER_MODEL` overrides the model. Without a gateway the service still accepts writes and reads report `unavailable`. |
+| `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_MODEL` | `hyperloom-setup` | The gateway and model the service plans reads with. The key is sent as `x-api-key`; `ANTHROPIC_CUSTOM_HEADERS` adds one `Name: value` header per line to every planner request, such as the `Ocp-Apim-Subscription-Key` an API gateway asks for. The model is `LOCAL_KB_PLANNER_MODEL`, else `CLAUDE_MODEL`, else `ANTHROPIC_MODEL`, else `claude-sonnet-5-5`. Without a gateway the service still accepts writes and reads report `unavailable`. |
 
 All of these live in the workspace `.env`. The service reads them when it
 starts; see [the local service](#the-local-service) for how a change reaches a
@@ -71,18 +73,25 @@ its JSON result.
 | `exclude EXPERIENCE_ID --reason TEXT` | `POST /v1/exclusions` |
 | `include EXPERIENCE_ID` | `DELETE /v1/exclusions/{experience_id}` |
 | `exclusions [--schema REF]` | `GET /v1/exclusions` |
-| `list`, `export` `[--schema REF] [--include-excluded] [--after N] [--limit N]` | one page of `GET /v1/list`, `GET /v1/export` |
+| `list`, `export` `[--schema REF] [--scope JSON] [--label ID] [--include-excluded] [--include-pulled] [--after N] [--limit N]` | one page of `GET /v1/list`, `GET /v1/export` |
+| `schema list` | `GET /v1/schemas` |
+| `schema show [--schema REF]` | `GET /v1/schemas/{schema_ref}` |
+| `experience get EXPERIENCE_ID` | `GET /v1/experiences/{experience_id}` |
+| `distill explore`, `forms`, `add-form`, `preview`, `create`, `update`, `get`, `draft`, `list`, `changes`, `delete`, `restore-entry`, `sync` | the [Distill](experience-kb-distill.md) requests; `draft` prints a read's draft, and `sync` writes the directory from `list` and `get` |
 
-It exits 0 when the command worked, 1 when the service refused the request,
+It exits 0 when the command worked, 1 when the service refused the request, a
+Distill preview found the draft invalid, or a draft file could not be read,
 and 2 when the URL or token is not configured.
 
 A tool embeds the same commands in its own CLI: `add_commands(subparsers,
 schema_ref=...)` registers each one whose name the tool has not registered
 itself, defaulting every command that names no schema to `schema_ref`, and
-`run_command(client, args)` runs one, with the same output and exit status.
-Hyperloom's workspace commands are built this way. The `hyperloom-kb` skill,
-installed beside `hyperloom-setup`,
-describes each command for an agent.
+`run_command(client, args)` runs one, with the same output and exit status;
+`schema`, `experience`, and `distill` each group their subcommands and are
+replaced together. Hyperloom's workspace commands are built this way. The
+`hyperloom-kb` skill, installed beside `hyperloom-setup`, describes each
+command for an agent, and the `hyperloom-kb-distill` skill how to draw a
+Distill from Experiences.
 
 ## The local service
 
@@ -207,8 +216,17 @@ Writing an Experience adds it to the state; nothing is ever deleted.
 A state equals its label again once its changes are undone, such as an
 exclusion lifted. With no label yet, any non-empty state counts as unlabelled.
 
-List and export name the Experiences written here, and of those only what
-reads see unless `include_excluded` asks for the rest.
+A schema's [Distills](experience-kb-distill.md#lifecycle) are part of its
+state too: a label keeps the version each one shows, a restore shows those
+versions again, and an exclusion naming a Distill's id deletes it. Once every
+Experience is sent, a push sends the latest version of each visible Distill the
+global KB does not hold yet, and a pull, once the schema's Experiences have
+arrived, brings the version of each of its Distills the global KB shows.
+
+List and export name the Experiences written here, unless `include_pulled`
+adds the pulled ones, and of those only what reads see unless
+`include_excluded` asks for the rest; with `label` they name what that label
+saved instead, and make nothing current.
 
 ## HTTP API
 
@@ -228,6 +246,10 @@ reads see unless `include_excluded` asks for the rest.
 | `GET /v1/exclusions` | a schema's exclusions and their history | `exclusions()` |
 | `POST /v1/exclusions` | exclude an Experience from reads | `exclude()` |
 | `DELETE /v1/exclusions/{experience_id}` | let reads see an Experience again | `include()` |
+| `GET /v1/schemas` | every schema held, newest first, with its counts and producers | `schemas()` |
+| `GET /v1/schemas/{schema_ref}` | a schema's declaration, scope paths, roles, and counts | `schema()` |
+| `GET /v1/experiences/{id}` | one held Experience | `experience()` |
+| `/v1/distill/...` | explore, forms, preview, create, update, read, list, and the changes inbox; see [Distills](experience-kb-distill.md#http-api) | |
 | `GET /health` | identity, liveness, schemas, corpus size, process, settings digest | `health()` |
 | `GET /livez` | the process answers; no token | |
 | `GET /readyz` | the service can take traffic; no token | |
@@ -241,10 +263,11 @@ is bounded by its schema, each text field holding at most 32 KiB.
 
 | Status | Body `error` | Meaning | Retry? |
 |---|---|---|---|
-| 400 | `invalid_request` | malformed body, unknown field, invalid Experience, unregistered schema, out-of-range parameter | no |
+| 400 | `invalid_request` | malformed body, unknown field, invalid Experience, out-of-range parameter | no |
+| 400 | `unknown_schema` | the request names a `schema_ref`, or writes an Experience of one, the service has not registered | after writing it with its declaration |
 | 401 | `unauthorized` | missing or wrong token | after fixing the token |
-| 404 | `not_found` | unknown path, label, Experience, or file | no |
-| 409 | `conflict` | the id already exists with different content | no |
+| 404 | `not_found` | unknown path, label, Experience, file, Distill, or form | no |
+| 409 | `conflict` | the id, or the Distill version, already exists with different content | no |
 | 409 | `missing_files` | the record names files the service does not hold; `missing` lists their sha256 | after sending them |
 | 500 | `internal_error` | storage or service failure | yes |
 
@@ -340,10 +363,30 @@ empty or `null` where it declares none; reads add `score` and `why_matched`.
 ### `GET /v1/list` and `GET /v1/export`
 
 Query: `after` (the previous page's `next_cursor`, default 0), `limit` (list
-1–500, export 1–100), optional `schema_ref`, and `include_excluded`
-(`true` or `false`, default `false`). Repeat while `has_more` is true. Both name
-only Experiences written to this service; `include_excluded=true` adds the ones
-reads do not see, so a page may hold fewer items than `limit`.
+1–500, export 1–100), optional `schema_ref`, `scope`, and `label`, and
+`include_excluded` and `include_pulled` (`true` or `false`, default `false`).
+Repeat while `has_more` is true. Both name only Experiences written to this
+service; `include_pulled=true` adds the ones pulled from its global KB, and
+`include_excluded=true` the ones reads do not see, so a page may hold fewer
+items than `limit`.
+
+`label` names the state a label saved, with its exclusions, instead of the
+current one, and changes nothing: two readers that name one label get the same
+Experiences however the KB moves on, without a restore. The page is of the
+label's schema; a `schema_ref` naming another is refused with 400, and an
+unknown label with 404. `include_excluded=true` adds what the label excluded,
+and `include_pulled` and `scope` apply as they do to the current state.
+
+`scope`, a JSON object that needs `schema_ref`, keeps only the Experiences that
+meet it, written as a [Distill's scope](experience-kb-distill.md#scope-and-conditions):
+each key is `objective` or a declared single-scalar field as `category.field`,
+each value the list of values one of which it must hold, and every key must
+hold. `scope={"identity.gpu":["mi355x"],"outcome.decision":["KEEP"]}` names the
+KEEP decisions on MI355X. A path the schema does not declare, or a value of
+another kind than its field, is refused with 400. A page with a scope or a
+label reads on until it names `limit` Experiences or the schema ends, and its
+`next_cursor` is the last one it names, so paging is the same; its last page
+may be empty.
 
 ```json
 {"items": [{"sequence": 1, "experience_id": "exp-...", "...": "..."}], "next_cursor": 1, "has_more": false}
@@ -353,9 +396,25 @@ reads do not see, so a page may hold fewer items than `limit`.
 `{"sequence": 1, "experience": <complete Experience>}`. An export page also
 carries `head`, the last write position of what it pages; `after_id` and
 `next_cursor_id`, the Experiences written at `after` and at `next_cursor`, or
-empty where none was; and, with a `schema_ref`, that schema's `declaration` and
-its `state`, an opaque value that changes whenever exclusions or restores change
-which stored Experiences of the schema the service shows.
+empty where none was; and, with a `schema_ref` or a `label`, that schema's
+`declaration` and its `state`, an opaque value that changes whenever exclusions
+or restores change which stored Experiences of the schema the service shows. A
+page that reads a label carries the label's own `state`, which never changes.
+
+### `GET /v1/schemas`
+
+Every schema the service holds, newest registered first, so a reader finds a
+producer's latest schema without knowing its `schema_ref`:
+
+```json
+{"schemas": [{"schema_ref": "schema:sha256:...", "registered_at": "2026-10-23T08:00:00.000000Z", "objectives": ["throughput@v1"], "experiences": {"stored": 8, "visible": 7, "pulled": 2}, "producers": [{"producer": "kernelforge", "producer_version": "0.4.0", "snapshot_version": "", "experiences": 7, "last_completed_at": "2026-10-23T07:55:00Z"}]}]}
+```
+
+`stored` counts every Experience of the schema, `visible` those reads see, and
+`pulled` those of them pulled from the global KB. `producers` groups the
+visible ones by each Experience's `provenance` producer, producer version, and
+snapshot version, latest completed first. A declaration has no name of its own,
+so this is the way to tell schemas apart.
 
 ### Labels and exclusions
 
@@ -380,12 +439,15 @@ for a label a restore made, whose `name` says so with its time.
 ### `GET /health`
 
 ```json
-{"status": "ok", "kb_id": "kb-...", "name": "team-hub", "schema_ref": "schema:sha256:...", "experience_count": 3, "schemas": {"schema:sha256:...": 3}, "pid": 4242, "config_digest": "...", "code_digest": "..."}
+{"status": "ok", "kb_id": "kb-...", "name": "team-hub", "schema_ref": "schema:sha256:...", "experience_count": 3, "schemas": {"schema:sha256:...": 3}, "distills": {"schema:sha256:...": {"visible": 2, "deleted": 0, "needs_attention": 1, "checked_at": "2026-10-13T20:00:00+00:00"}}, "pid": 4242, "config_digest": "...", "code_digest": "..."}
 ```
 
 `kb_id` identifies the KB the service's database holds, and `name` is only for people.
 `schema_ref` is the default read schema;
-`experience_count` and `schemas` count what reads see; `config_digest`
+`experience_count` and `schemas` count what reads see; `distills` counts, for
+each schema with Distills, the visible and deleted ones and how many needed
+attention when a listing or the changes inbox last checked them, and when,
+both `null` until one has since the service started; `config_digest`
 fingerprints the settings the service started with, and `code_digest` the
 Experience KB code it runs.
 
@@ -436,6 +498,11 @@ each scrape.
 | `hyperloom_kb_writes_total` | `schema_ref`, `result` | Writes by result: `created`, `unchanged`, `conflict`, `missing_files`. |
 | `hyperloom_kb_file_writes_total` | `result` | File writes by result: `created`, `unchanged`. |
 | `hyperloom_kb_experiences` | `schema_ref`, `state` | Stored Experiences: `visible`, `excluded`, or `outside` the state after a restore. |
+| `hyperloom_kb_distill_entries` | `schema_ref`, `state` | Distills: `visible`, `deleted`, or `outside` the state after a restore. |
+| `hyperloom_kb_distill_writes_total` | `operation`, `result` | Distill versions stored by `create`, `update`, or `receive` (from a sync), by result. |
+| `hyperloom_kb_distill_evidence_seconds` | `operation` | Histogram of the time to select and classify a group (`explore`, `preview`, `create`, `update`) or check how evidence moved (`check`, `get`). |
+| `hyperloom_kb_distill_changes` | `schema_ref`, `status` | Visible Distills by evidence status, as the last listing or changes inbox found them. |
+| `hyperloom_kb_distill_checked_timestamp_seconds` | `schema_ref` | When that check ran. |
 | `hyperloom_kb_record_bytes`, `hyperloom_kb_database_bytes`, `hyperloom_kb_disk_free_bytes` | | Record files, database, and free disk. |
 | `hyperloom_kb_last_write_timestamp_seconds` | | When the KB last stored a new Experience. |
 | `hyperloom_kb_records_missing` | | Records whose file was missing at start. |
@@ -452,7 +519,7 @@ workspace's service writes them to `service.log`. Every line has `ts`,
 | `event` | When | Fields |
 |---|---|---|
 | `http_request` | every answered request but the probes | `method`, `route`, `status`, `duration_ms`, `bytes_in`, `bytes_out` |
-| `audit` | a schema registered, a label made or deleted, a restore, an exclude, an include | `action` and what it acted on: `schema_ref`, `label_id`, `experience_id`, `reason`, `saved_label_id` |
+| `audit` | a schema registered, a label made or deleted, a restore, an exclude, an include, a Distill form registered, a Distill version stored | `action` and what it acted on: `schema_ref`, `label_id`, `experience_id`, `reason`, `saved_label_id`, `form_ref`, and for `distill_create`, `distill_update`, and `distill_receive` the `entry_id`, `version`, and `result` |
 | `records_verified`, `files_verified` | at start | `records` or `files`, `missing` |
 | `listening`, `stopped` | start and stop | `port`, `home`, `kb_id`, `code_digest` |
 
@@ -463,7 +530,7 @@ Tokens and request bodies are never logged.
 **Which KB sent what.** Every request carries `X-Request-ID`, which the answer
 echoes. The service records every write, refused ones included, with its
 result, the KB that sent it, and its request id, in the database's `writes`
-table.
+table, whose `record_kind` is `experience` or `distill`.
 
 **Log rotation and stopping.** A workspace's `service.log` past 8 MiB is kept
 as `service.log.1`, replacing the one kept before, when the next service

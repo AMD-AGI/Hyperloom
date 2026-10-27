@@ -111,6 +111,7 @@ PLANNER_TOOL_INPUT_SCHEMA: dict[str, JsonValue] = {
 PLANNER_PROMPT_HASH = hashlib.sha256(PLANNER_SYSTEM_PROMPT.encode()).hexdigest()
 # A planner call measured 4-6 s; a gateway slower than this fails the read rather than stalling the decision it feeds.
 DEFAULT_PLANNER_TIMEOUT_SECONDS = 20.0
+DEFAULT_PLANNER_MODEL = "claude-sonnet-5-5"
 _SCHEMA_REF_PREFIX = "schema:sha256:"
 
 
@@ -126,13 +127,29 @@ class QueryPlanValidationError(ValueError):
     """Raised when an LLM plan violates the read contract."""
 
 
+def _custom_headers(text: str) -> tuple[tuple[str, str], ...]:
+    """The headers ``ANTHROPIC_CUSTOM_HEADERS`` names, one ``Name: value`` per line, as Claude Code reads them."""
+
+    headers: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        name, separator, value = line.partition(":")
+        if not separator or not name.strip():
+            raise QueryPlanValidationError("ANTHROPIC_CUSTOM_HEADERS holds one 'Name: value' per line")
+        headers.append((name.strip(), value.strip()))
+    return tuple(headers)
+
+
 @dataclass(frozen=True)
 class PlannerGatewayConfig:
     base_url: str
     api_key: str
-    model: str
+    model: str = DEFAULT_PLANNER_MODEL
     timeout_seconds: float = DEFAULT_PLANNER_TIMEOUT_SECONDS
     max_output_tokens: int = 1_400
+    #: Sent with every request besides the API key, such as the subscription key an API gateway asks for.
+    headers: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -158,7 +175,10 @@ class PlannerGatewayConfig:
         base_url = str(source.get("ANTHROPIC_BASE_URL") or "")
         api_key = str(source.get("ANTHROPIC_API_KEY") or source.get("ANTHROPIC_AUTH_TOKEN") or "")
         model = str(
-            source.get("LOCAL_KB_PLANNER_MODEL") or source.get("CLAUDE_MODEL") or source.get("ANTHROPIC_MODEL") or ""
+            source.get("LOCAL_KB_PLANNER_MODEL")
+            or source.get("CLAUDE_MODEL")
+            or source.get("ANTHROPIC_MODEL")
+            or DEFAULT_PLANNER_MODEL
         )
         return cls(
             base_url,
@@ -166,6 +186,7 @@ class PlannerGatewayConfig:
             model,
             float(source.get("LOCAL_KB_PLANNER_TIMEOUT_SECONDS") or DEFAULT_PLANNER_TIMEOUT_SECONDS),
             int(source.get("LOCAL_KB_PLANNER_MAX_OUTPUT_TOKENS") or 1_400),
+            _custom_headers(str(source.get("ANTHROPIC_CUSTOM_HEADERS") or "")),
         )
 
 
@@ -198,10 +219,9 @@ class AnthropicPlannerBackend:
                         "input_schema": PLANNER_TOOL_INPUT_SCHEMA,
                     }
                 ],
-                "tool_choice": {
-                    "type": "tool",
-                    "name": PLANNER_TOOL_NAME,
-                },
+                # A model that thinks by default, such as claude-sonnet-5-5, refuses a forced tool; it calls the one
+                # tool when free to, and an answer in text is read below.
+                "tool_choice": {"type": "auto"},
             }
         ).encode()
 
@@ -217,6 +237,7 @@ class AnthropicPlannerBackend:
             f"{self.config.base_url}/v1/messages",
             data=body,
             headers={
+                **dict(self.config.headers),
                 "Content-Type": "application/json",
                 "anthropic-version": "2023-06-01",
                 "x-api-key": self.config.api_key,

@@ -293,6 +293,45 @@ def test_planner_rejects_more_than_eight_signals() -> None:
         planner.plan(_request(schema), schema)
 
 
+def test_a_planner_without_a_model_setting_plans_with_sonnet_5_5() -> None:
+    env = {"ANTHROPIC_BASE_URL": "https://planner.example", "ANTHROPIC_API_KEY": "secret"}
+
+    assert PlannerGatewayConfig.from_env(env).model == "claude-sonnet-5-5"
+    assert PlannerGatewayConfig.from_env({**env, "ANTHROPIC_MODEL": "claude-opus-5-5"}).model == "claude-opus-5-5"
+    assert PlannerGatewayConfig.from_env({**env, "CLAUDE_MODEL": "a", "LOCAL_KB_PLANNER_MODEL": "b"}).model == "b"
+
+
+def test_a_planner_request_carries_the_custom_headers_its_gateway_asks_for_and_leaves_the_tool_to_the_model() -> None:
+    seen: dict[str, object] = {}
+
+    def opener(request, **_kwargs):
+        seen.update(request.header_items())
+        seen["tool_choice"] = json.loads(request.data)["tool_choice"]
+        return FakeHTTPResponse(
+            {
+                "content": [
+                    {"type": "tool_use", "name": "submit_query_plan", "input": json.loads(_planner_response())}
+                ],
+                "stop_reason": "tool_use",
+            }
+        )
+
+    env = {
+        "ANTHROPIC_BASE_URL": "https://planner.example/anthropic",
+        "ANTHROPIC_API_KEY": "secret",
+        "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: subscription\n\nX-Team:  kb ",
+    }
+    backend = AnthropicPlannerBackend(PlannerGatewayConfig.from_env(env), opener=opener)
+
+    backend.complete(system_prompt="system", user_payload="payload", temperature=0)
+
+    # urllib capitalizes a header's name as it sends it.
+    assert (seen["Ocp-apim-subscription-key"], seen["X-team"], seen["X-api-key"]) == ("subscription", "kb", "secret")
+    assert seen["tool_choice"] == {"type": "auto"}
+    with pytest.raises(ValueError, match="one 'Name: value' per line"):
+        PlannerGatewayConfig.from_env({**env, "ANTHROPIC_CUSTOM_HEADERS": "a header without its separator"})
+
+
 def test_a_planner_call_gives_up_after_twenty_seconds_unless_configured_otherwise() -> None:
     env = {"ANTHROPIC_BASE_URL": "https://planner.example", "ANTHROPIC_API_KEY": "secret", "CLAUDE_MODEL": "m"}
 

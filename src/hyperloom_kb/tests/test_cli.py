@@ -124,6 +124,25 @@ def test_label_exclude_and_restore_a_state_from_the_command_line(tmp_path: Path,
     assert health["experience_count"] == 3
 
 
+def test_list_and_export_take_a_scope_of_one_schema_and_a_label(tmp_path: Path, kb) -> None:
+    scope = json.dumps({"change.knob": ["knob_1", "knob_2", "knob_3"]})
+    with _serving(tmp_path / "kb") as client:
+        for seq in range(3):
+            client.write(_experience(seq), declaration=SCHEMA)
+        _, label = kb(client, "label", "--name", "three")
+        client.write(_experience(3), declaration=SCHEMA)
+        _, listed = kb(client, "list", "--schema", SCHEMA.schema_ref, "--scope", scope)
+        _, exported = kb(client, "export", "--schema", SCHEMA.schema_ref, "--scope", scope)
+        _, saved = kb(client, "export", "--label", label["label_id"], "--scope", scope)
+        unscoped, _ = kb(client, "list", "--scope", scope)
+
+    assert [item["experience_id"] for item in listed["items"]] == [_experience(seq).id for seq in (1, 2, 3)]
+    assert [item["experience"]["id"] for item in exported["items"]] == [_experience(seq).id for seq in (1, 2, 3)]
+    assert [item["experience"]["id"] for item in saved["items"]] == [_experience(1).id, _experience(2).id]
+    assert saved["declaration"] == SCHEMA.to_dict()
+    assert unscoped == 1
+
+
 def test_pull_names_its_schema_and_reports_the_label_that_undoes_it(tmp_path: Path, kb) -> None:
     with _serving(tmp_path / "global") as global_client:
         for seq in range(2):
@@ -132,12 +151,21 @@ def test_pull_names_its_schema_and_reports_the_label_that_undoes_it(tmp_path: Pa
             local.write(_experience(0), declaration=SCHEMA)
             status, pulled = kb(local, "pull", "--schema", SCHEMA.schema_ref)
             _, exported = kb(local, "export", "--schema", SCHEMA.schema_ref)
+            _, everything = kb(local, "export", "--schema", SCHEMA.schema_ref, "--include-pulled")
+            _, schemas = kb(local, "schema", "list")
 
     assert status == 0
     assert (pulled["status"], pulled["created"], pulled["saved"]["reason"]) == ("completed", 2, "before_pull")
-    # Export names what was written here, never what was pulled.
+    # Export names what was written here unless asked for what was pulled too.
     assert [item["experience"]["id"] for item in exported["items"]] == [_experience(0).id]
     assert exported["declaration"] == SCHEMA.to_dict()
+    assert {item["experience"]["id"] for item in everything["items"]} == {
+        _experience(0).id,
+        *(_experience(seq, run_id="teammate-run").id for seq in range(2)),
+    }
+    assert [(schema["schema_ref"], schema["experiences"]) for schema in schemas["schemas"]] == [
+        (SCHEMA.schema_ref, {"stored": 3, "visible": 3, "pulled": 2})
+    ]
 
 
 def test_a_sync_that_did_not_finish_and_a_refused_request_exit_1(tmp_path: Path, kb) -> None:
@@ -160,11 +188,13 @@ def test_a_tool_embeds_every_command_with_its_own_schema_and_its_own_versions(tm
 
     assert set(commands.choices) == {
         *("health", "push", "pull", "rebind", "labels", "label", "restore", "exclude", "include", "exclusions"),
-        *("list", "export"),
+        *("list", "export", "schema", "experience", "distill"),
     }
     assert parser.parse_args(["push"]).own and not hasattr(parser.parse_args(["push"]), "run")
     for name in ("pull", "labels", "label", "exclusions", "list", "export"):
         assert parser.parse_args([name]).schema_ref == SCHEMA.schema_ref
+    for argv in (["schema", "show"], ["distill", "list"], ["distill", "changes"], ["distill", "sync", "--dir", "d"]):
+        assert parser.parse_args(argv).schema_ref == SCHEMA.schema_ref
     with _serving(tmp_path / "kb") as client:
         client.write(_experience(0), declaration=SCHEMA)
         status = run_command(client, parser.parse_args(["export"]))
@@ -179,18 +209,34 @@ def test_a_tool_embeds_every_command_with_its_own_schema_and_its_own_versions(tm
         main(["pull"])
 
 
-def test_the_skill_describes_every_command_by_how_it_is_run() -> None:
-    skill = (Path(__file__).resolve().parents[1] / "skills/hyperloom-kb/SKILL.md").read_text(encoding="utf-8")
+def _subcommands(parser: argparse.ArgumentParser) -> list[str]:
+    groups = [action for action in parser._actions if isinstance(action, argparse._SubParsersAction)]
+    return [name for group in groups for name in group.choices]
+
+
+def test_the_skills_describe_every_command_by_how_it_is_run() -> None:
+    skills = Path(__file__).resolve().parents[1] / "skills"
+    skill = (skills / "hyperloom-kb/SKILL.md").read_text(encoding="utf-8")
+    distill_skill = (skills / "hyperloom-kb-distill/SKILL.md").read_text(encoding="utf-8")
     commands = argparse.ArgumentParser().add_subparsers(dest="command")
     add_commands(commands)
 
     # The docs name a global KB only by its settings, so the skill leaves out the commands that need one.
     needs_a_global_kb = {"push", "pull", "rebind"}
-    assert [
-        name for name in commands.choices if name not in needs_a_global_kb and f"hyperloom-kb {name}" not in skill
-    ] == []
+    named = [
+        f"hyperloom-kb {name} {sub}".strip()
+        for name, parser in commands.choices.items()
+        if name not in needs_a_global_kb
+        for sub in _subcommands(parser) or [""]
+    ]
+
+    def described(command: str) -> bool:
+        return command in (distill_skill if command.startswith("hyperloom-kb distill ") else skill)
+
+    assert [command for command in named if not described(command)] == []
     for text in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN", "python3 -m hyperloom_kb.cli", "add_commands"):
         assert text in skill
+    assert "hyperloom-kb-distill" in skill
 
 
 def test_without_a_service_to_talk_to_it_exits_2(monkeypatch, capsys) -> None:
