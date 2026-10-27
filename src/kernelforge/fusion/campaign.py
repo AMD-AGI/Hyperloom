@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -29,6 +28,7 @@ from kernelforge.fusion.validate import (
 )
 from kernelforge.tools.git import git
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.loop.api import forge_loop_command
 
 log = logging.getLogger("forge_fusion")
 
@@ -50,14 +50,6 @@ def fused_module_path(recipe: Recipe) -> str:
     stem = Path(recipe.source_file).stem or "model"
     tag = re.sub(r"[^A-Za-z0-9]+", "_", recipe.pattern_id).strip("_").lower()[:48]
     return str(Path(recipe.source_file).parent / f"{stem}_fused_{tag or 'chain'}.py")
-
-
-def _forge_loop_argv() -> list[str]:
-    """Invoke forge-loop with the same interpreter and package as this process."""
-    if sys.executable:
-        return [sys.executable, "-m", "kernelforge.cli"]
-    exe = shutil.which("kernelforge")
-    return [exe] if exe else ["kernelforge"]
 
 
 @dataclass
@@ -280,8 +272,7 @@ def build_forge_loop_command(
             source_files.append(extra)
     if fused_module and fused_module not in source_files:
         source_files.append(fused_module)
-    cmd = _forge_loop_argv() + [
-        "forge-loop",
+    cmd = forge_loop_command(
         "--workspace",
         paths.workspace,
         "--kernel",
@@ -319,7 +310,7 @@ def build_forge_loop_command(
         # A fusion campaign is single-lane, and says so rather than inheriting the loop's default.
         "--lanes",
         "1",
-    ]
+    )
     if runtime.gpu_target:
         cmd += ["--gpu-target", runtime.gpu_target]
     if runtime.model:

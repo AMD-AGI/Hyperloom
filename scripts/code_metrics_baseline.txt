@@ -516,7 +516,7 @@ function-lines src/kernelforge/cli/forge_loop_command.py::_RunReporter.build_res
 function-lines src/kernelforge/cli/forge_loop_command.py::_collect_pr_kb_context 52
 function-lines src/kernelforge/cli/forge_loop_command.py::_prepare_measurement_driver 58
 function-lines src/kernelforge/cli/forge_loop_command.py::_read_kb_warm_start 61
-function-lines src/kernelforge/cli/forge_loop_command.py::forge_loop 259
+function-lines src/kernelforge/cli/forge_loop_command.py::forge_loop 258
 function-lines src/kernelforge/cli/forge_rewrite_command.py::forge_rewrite 59
 function-lines src/kernelforge/config.py::Config.from_env 67
 function-lines src/kernelforge/evaluation/benchmark/baseline.py::check_baseline_against_reference 62
@@ -532,7 +532,6 @@ function-lines src/kernelforge/fusion/author.py::_run_registered_author_once 60
 function-lines src/kernelforge/fusion/author.py::build_author_prompt 79
 function-lines src/kernelforge/fusion/author.py::build_multi_author_prompt 63
 function-lines src/kernelforge/fusion/campaign.py::build_campaign_program_md 132
-function-lines src/kernelforge/fusion/campaign.py::build_forge_loop_command 51
 function-lines src/kernelforge/fusion/campaign.py::run_recipe_campaign 78
 function-lines src/kernelforge/fusion/command.py::_discover_anchored 54
 function-lines src/kernelforge/fusion/command.py::_run_fusion_stages 54
@@ -583,7 +582,7 @@ function-lines src/kernelforge/kernel_backends/hipblaslt/prompts.py::build_syste
 function-lines src/kernelforge/kernel_backends/triton/prompts.py::build_system_prompt 103
 function-lines src/kernelforge/kernel_rewrite_controller/controller.py::run_controller 113
 function-lines src/kernelforge/kernel_rewrite_controller/dispatcher.py::dispatch_single_task 108
-function-lines src/kernelforge/kernel_rewrite_controller/forge_runner.py::build_forge_loop_invocation 56
+function-lines src/kernelforge/kernel_rewrite_controller/forge_runner.py::build_forge_loop_invocation 52
 function-lines src/kernelforge/kernel_rewrite_controller/opportunity_agent.py::OpportunityAnalysisAgent.run 62
 function-lines src/kernelforge/kernel_rewrite_controller/opportunity_agent.py::_system_prompt 178
 function-lines src/kernelforge/kernel_rewrite_controller/recovery.py::recover_task_result 87

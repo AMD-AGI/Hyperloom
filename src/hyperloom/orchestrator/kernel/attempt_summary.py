@@ -14,7 +14,7 @@ from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kernelforge.knowledge.kb_store.identity.implementation import normalize_operator_name
+from kernelforge.knowledge import normalize_operator_name
 
 from hyperloom.common.coerce import to_float
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (

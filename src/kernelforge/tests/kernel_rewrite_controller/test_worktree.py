@@ -21,7 +21,7 @@ from kernelforge.kernel_rewrite_controller.worktree import (
     release_operator_worktree,
     untracked_paths,
 )
-from kernelforge.loop.editable_repo import release_repo_lock
+from kernelforge.tools.editable_repo import release_repo_lock
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,

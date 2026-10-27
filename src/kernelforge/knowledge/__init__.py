@@ -10,6 +10,8 @@ from kernelforge.knowledge.kb_store.config import (
     KnowledgeConfig,
     KnowledgeStoreMode,
 )
+from kernelforge.knowledge.kb_store.identity.implementation import normalize_operator_name
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
 
 __all__ = [
     "build_forge_knowledge",
@@ -17,4 +19,6 @@ __all__ = [
     "read_best_solution",
     "KnowledgeConfig",
     "KnowledgeStoreMode",
+    "KERNEL_RECIPE_PRODUCERS",
+    "normalize_operator_name",
 ]

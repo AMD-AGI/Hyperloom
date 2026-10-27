@@ -35,12 +35,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kernelforge.kernel_rewrite_controller.worktree import (
+from kernelforge.kernel_rewrite_controller import (
     CAMPAIGN_BRANCH_PREFIX,
     reclaim_campaign_branch,
     untracked_paths,
 )
-from kernelforge.loop.editable_repo import acquire_repo_lock, release_repo_lock
+from kernelforge.tools import acquire_repo_lock, release_repo_lock
 
 
 @dataclass(frozen=True)
