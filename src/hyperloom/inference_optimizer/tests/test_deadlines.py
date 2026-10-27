@@ -79,7 +79,7 @@ async def _reap(deadline: Deadline | None, clock: VirtualClock, workspace: Path)
     dispatcher._kill = _kill  # type: ignore[assignment,method-assign]
     return await dispatcher._reap_loop(
         proc,
-        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=workspace / "heartbeat.json", task_id="t"),
+        ReapWatch(workspace=workspace, done_files=(), task_id="t"),
         deadline=deadline,
         started=clock.monotonic(),
     )

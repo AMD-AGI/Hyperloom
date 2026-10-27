@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from . import geak_rebench as _geak_rebench, machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec, rebench_round_sec
+from hyperloom.common.coerce import first_str
 from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.common.io import WriteOptions, atomic_write_json
 from hyperloom.common.jsonio import read_json
@@ -67,9 +68,8 @@ from ..bus.message_bus import Message
 from ..kernel.geak_config import (
     _geak_accepted_kernel_specs,
     _geak_has_accepted_kernel,
+    geak_acceptance_specs,
     geak_spec_name,
-    geak_is_cand_tag,
-    geak_spec_is_env,
     _accepted_config_as_variant,
     _accepted_config_controls,
 )
@@ -163,6 +163,36 @@ def _first_text(mapping: Mapping[str, Any], *keys: str, default: str = "") -> st
     return default
 
 
+def _served_replay_result(path: str, root: Path) -> dict[str, Any] | None:
+    """The orchestrator's own replay result at ``path``, or ``None`` when it is not a served measurement."""
+    # GEAK's own results are not the orchestrator's baseline, and the
+    # overlay probe is not a served measurement. Match path COMPONENTS
+    # below the runs root, never the whole string: a substring test
+    # excludes every result the moment an ancestor directory happens
+    # to contain "geak" (a campaign rooted at .../hlgeak_24h_run/ hits
+    # this), which silently degrades the shape to the 1024 default
+    # this method exists to replace.
+    try:
+        rel_parts = Path(path).relative_to(root).parts
+    except ValueError:
+        return None
+    if "geak" in rel_parts or "_baseline_source_overlay" in rel_parts:
+        return None
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    completed = int(raw.get("completed") or 0)
+    tin = int(raw.get("total_input_tokens") or 0)
+    tout = int(raw.get("total_output_tokens") or 0)
+    tput = float(raw.get("output_throughput") or 0.0)
+    if completed <= 0 or tin <= 0 or tout <= 0 or tput <= 0:
+        return None
+    return raw
+
+
 def _read_dispatch_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     import csv
 
@@ -237,12 +267,6 @@ def _deduplicate_dispatch_rows(
     return list(best.values())
 
 
-def _per_tuner_budget_minutes() -> int:
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
-
-    return max(1, int((resolve_benchmark_timeouts()[1] + 59) // 60))
-
-
 def _integrate_tput_and_gain(verdict: Mapping[str, Any]) -> tuple[float, float]:
     measurement = verdict.get("bench_result") or verdict
     tput = float(measurement.get("output_throughput", verdict.get("new_tput")) or 0.0)
@@ -253,60 +277,6 @@ def _candidate_envs(raw: object) -> dict[str, str]:
     if not isinstance(raw, dict):
         return {}
     return {str(key): str(value) for key, value in raw.items() if str(key).strip() and str(value).strip()}
-
-
-def _legacy_tuner_candidates(result: Mapping[str, Any]) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    for row in result.get("tuners_run") or []:
-        if not isinstance(row, dict):
-            continue
-        # partial_output is a real artifact: the tuner wrote fewer rows than shapes it was given (the grouped
-        # batch budget ran out), but the rows it did write are deployable.
-        if row.get("status") not in ("ok", "partial_output"):
-            continue
-        # improved_shapes can never exceed 0 for tuners with no comparable baseline -- TunableOp never times the
-        # untuned dispatch, the candidate-CSV fallback has no per-shape Pre/Post table, and a hipblaslt-only bf16
-        # run has no torch candidate to measure against.
-        if (
-            not row.get("candidate")
-            and int(row.get("improved_shapes") or 0) <= 0
-            and int(row.get("unverified_shapes") or 0) <= 0
-        ):
-            continue
-        env_var = _first_text(row, "env_var").strip()
-        env_value = _first_text(row, "env_value").strip()
-        envs = _candidate_envs(row.get("env_vars"))
-        if env_var and env_value:
-            envs.setdefault(env_var, env_value)
-        if envs:
-            candidates.append(
-                {
-                    "tuner": row.get("tuner") or "unknown",
-                    "env_var": env_var,
-                    "env_value": env_value,
-                    "envs": envs,
-                    "micro_speedup": _as_float(row.get("best_micro_speedup"), 1.0),
-                }
-            )
-    return candidates
-
-
-def _a8w8_blockscale_candidate(result: Mapping[str, Any]) -> dict[str, Any]:
-    tuned_file = _first_text(result, "tuned_file").strip()
-    micro_speedup = _as_float(result.get("best_speedup"), 0.0)
-    keeps = _first_text(result, "decision").strip().upper() == "KEEP" and _first_text(
-        result, "status"
-    ).strip().lower() in {"ok", "complete", "completed", "succeeded", "success"}
-    if not (tuned_file and micro_speedup > 1.0 and keeps):
-        return {}
-    env_var = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"
-    return {
-        "tuner": "a8w8_blockscale_tuned_gemm",
-        "env_var": env_var,
-        "env_value": tuned_file,
-        "envs": {env_var: tuned_file},
-        "micro_speedup": micro_speedup,
-    }
 
 
 def _observed_identity_digest(declared: str, flags: str, server_identity: Mapping[str, Any]) -> str:
@@ -353,11 +323,16 @@ _AITER_ENV_TO_TABLE: dict[str, str] = {
 }
 
 
+def _integrate_run_name(tuner_name: str) -> str:
+    """Name of the integrate run that serves a tuner's candidate."""
+    return f"integrate-gemm_tune_{tuner_name}"
+
+
 def _integrate_server_logs(session_dir: Path, tuner_name: str) -> list[Path]:
     """Server logs for a tuner's integrate run, retries included, oldest first."""
     from ..kernel.gemm_shape_coverage import integrate_server_logs
 
-    return integrate_server_logs(session_dir, f"integrate-gemm_tune_{tuner_name}")
+    return integrate_server_logs(session_dir, _integrate_run_name(tuner_name))
 
 
 def _candidate_tuned_file(env: Any, env_var: str) -> str:
@@ -773,10 +748,10 @@ class KernelPhase(CoordinatorCollaborator):
         for index, row in enumerate(rows):
             if not isinstance(row, dict):
                 continue
-            kernel_id = str(row.get("operator_id") or "")
+            kernel_id = first_str(row.get("operator_id"))
             if not kernel_id:
                 continue
-            status = str(row.get("status") or "unknown").lower()
+            status = first_str(row.get("status"), "unknown").lower()
             if status == "kept":
                 decision = "KEEP"
             elif status.startswith("reverted"):
@@ -797,7 +772,7 @@ class KernelPhase(CoordinatorCollaborator):
                 {
                     "kernel_id": kernel_id,
                     "kernel_name": kernel_id.split(":")[2] if len(kernel_id.split(":")) > 2 else "",
-                    "run_id": str(result.get("run_id") or f"controller-c{cycle}"),
+                    "run_id": first_str(result.get("run_id"), f"controller-c{cycle}"),
                     "status": status,
                     "attempts": [
                         {
@@ -815,7 +790,7 @@ class KernelPhase(CoordinatorCollaborator):
                             # a reader asking why a candidate did not land had
                             # one field that was empty only for forge.
                             "error_class": "" if status == "kept" else status,
-                            "error": str(row.get("reason") or ""),
+                            "error": first_str(row.get("reason")),
                         }
                     ],
                     "verification": {
@@ -912,27 +887,25 @@ class KernelPhase(CoordinatorCollaborator):
         recorder.record_fusion_run(
             FusionRun(
                 lane=LaneRunFields(
-                    run_id=str(result.get("fusion_run_id") or ""),
-                    status=str(result.get("status") or "unknown"),
-                    micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
-                    integrate_ref=str(result.get("integration_id") or ""),
-                    started_at=str(result.get("started_at") or ""),
-                    ended_at=str(result.get("ended_at") or result.get("ts") or ""),
+                    run_id=first_str(result.get("fusion_run_id")),
+                    status=first_str(result.get("status"), "unknown"),
+                    micro_decision=first_str(result.get("micro_decision"), result.get("decision")),
+                    integrate_ref=first_str(result.get("integration_id")),
+                    started_at=first_str(result.get("started_at")),
+                    ended_at=first_str(result.get("ended_at"), result.get("ts")),
                     duration_sec=result.get("duration_sec"),
-                    error_class=str(result.get("error_class") or ""),
-                    failure_reason=str(
-                        result.get("error") or result.get("skip_reason") or result.get("error_class") or ""
-                    ),
+                    error_class=first_str(result.get("error_class")),
+                    failure_reason=first_str(result.get("error"), result.get("skip_reason"), result.get("error_class")),
                 ),
-                pattern=str(result.get("pattern") or result.get("fusion_pattern") or ""),
-                target_module=str(result.get("target_module") or result.get("kernel_name") or ""),
+                pattern=first_str(result.get("pattern"), result.get("fusion_pattern")),
+                target_module=first_str(result.get("target_module"), result.get("kernel_name")),
                 applied=bool(result.get("kept")),
                 gain_pct=result.get("gain_pct"),
-                patch_path=str(result.get("patch_path") or result.get("source_patch") or ""),
+                patch_path=first_str(result.get("patch_path"), result.get("source_patch")),
             )
         )
         tool_versions.record_tool_version(self.session_dir, tool="forge")
-        agent_backend = str(result.get("agent_backend") or "").lower()
+        agent_backend = first_str(result.get("agent_backend")).lower()
         if agent_backend:
             tool_versions.record_tool_version(self.session_dir, tool=agent_backend)
 
@@ -1212,35 +1185,12 @@ class KernelPhase(CoordinatorCollaborator):
             from hyperloom.inference_optimizer.session.session_paths import runs_root
 
             root = runs_root(self.session_dir)
-            if not Path(root).is_dir():
-                return {}
             best: tuple[float, dict[str, Any], str] | None = None
             for rp in _glob.glob(str(Path(root) / "**" / "inferencex_result.json"), recursive=True):
-                # GEAK's own results are not the orchestrator's baseline, and the
-                # overlay probe is not a served measurement. Match path COMPONENTS
-                # below the runs root, never the whole string: a substring test
-                # excludes every result the moment an ancestor directory happens
-                # to contain "geak" (a campaign rooted at .../hlgeak_24h_run/ hits
-                # this), which silently degrades the shape to the 1024 default
-                # this method exists to replace.
-                try:
-                    rel_parts = Path(rp).relative_to(root).parts
-                except ValueError:
+                raw = _served_replay_result(rp, root)
+                if raw is None:
                     continue
-                if "geak" in rel_parts or "_baseline_source_overlay" in rel_parts:
-                    continue
-                try:
-                    raw = json.loads(Path(rp).read_text(encoding="utf-8")) or {}
-                except (OSError, json.JSONDecodeError, TypeError, ValueError):
-                    continue
-                if not isinstance(raw, dict):
-                    continue
-                completed = int(raw.get("completed") or 0)
-                tin = int(raw.get("total_input_tokens") or 0)
-                tout = int(raw.get("total_output_tokens") or 0)
-                tput = float(raw.get("output_throughput") or 0.0)
-                if completed <= 0 or tin <= 0 or tout <= 0 or tput <= 0:
-                    continue
+                tput = float(raw["output_throughput"])
                 # Prefer the result whose throughput IS the baseline we handed
                 # over, so the shape describes the same measurement.
                 err = abs(tput - target_tput) / target_tput if target_tput > 0 else 1.0
@@ -1394,14 +1344,6 @@ class KernelPhase(CoordinatorCollaborator):
             log.error("geak rebench: GPUs still hold VRAM after GEAK returned: %s%s; measuring anyway", busy, holders)
         elif gpus.unverified:
             log.warning("geak rebench: cannot confirm GPUs %s are free (%s)", cards, gpus.unverified)
-
-    def _session_is_agentx(self) -> bool:
-        """Whether this session measures the AgentX workload."""
-        from hyperloom.common.perf_metric import is_agentx_mode
-        from ..actions.executors._workload_envs import agentx_enabled
-
-        benchmark_mode = str(self.shared_state.benchmark_mode or "").strip()
-        return is_agentx_mode(benchmark_mode) if benchmark_mode else agentx_enabled()
 
     async def _launch_geak_runner(
         self, handoff_path: Path, *, timeouts: tuple[int, int, bool], from_phase: str
@@ -1959,7 +1901,7 @@ class KernelPhase(CoordinatorCollaborator):
     async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
         """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run)."""
         state = self.shared_state
-        agentx = self._session_is_agentx()
+        agentx = not _geak_rebench.geak_harness_replays_workload(state)
         handoff = self._open_geak_handoff(agentx=agentx)
         if handoff is None:
             return
@@ -2095,7 +2037,7 @@ class KernelPhase(CoordinatorCollaborator):
         recorder = self.timeline()
         if recorder is None:
             return
-        recorder.record_geak_claim(self.shared_state.geak_pending, specs=self._geak_acceptance_specs(result))
+        recorder.record_geak_claim(self.shared_state.geak_pending, specs=geak_acceptance_specs(result))
         recorder.record_geak_product(
             GeakProduct(
                 accepted_flags=accepted_flags,
@@ -2200,52 +2142,6 @@ class KernelPhase(CoordinatorCollaborator):
             "ts": datetime.now(timezone.utc).isoformat(),
             **matching_review(self.shared_state, result),
         }
-
-    @staticmethod
-    def _geak_acceptance_specs(result: dict[str, Any]) -> list[dict[str, Any]]:
-        """Return every GEAK acceptance, tagged with the queue that proposed it."""
-        lanes: list[tuple[str, Any]] = [
-            *(("kernelQueue", row) for row in (result.get("accepted_kernels") or [])),
-            *(("headQueue", row) for row in (result.get("accepted_heads") or [])),
-        ]
-        out: list[dict[str, Any]] = []
-        index: dict[tuple[str, str], int] = {}
-        for lane, raw in lanes:
-            if not isinstance(raw, dict):
-                continue
-            stated = raw.get("e2e_delta_pct")
-            try:
-                delta = None if stated is None or stated == "" else float(stated)
-            except (TypeError, ValueError):
-                delta = None
-            name = geak_spec_name(raw)
-            if not name:
-                continue
-            row = {**raw, "lane": lane, "alias_collapsed": False}
-            if geak_spec_is_env(raw):
-                row["kind"] = "env"
-            if delta is None:
-                # Collapsing is a claim that two rows measured the same thing, and an absent or unparseable delta is
-                # no evidence for it.
-                out.append(row)
-                continue
-            twin = (str(raw.get("op_kind") or ""), f"{delta:.4f}")
-            position = index.get(twin)
-            if position is None:
-                index[twin] = len(out)
-                out.append(row)
-                continue
-            kept = out[position]
-            kept["alias_collapsed"] = True
-            # The collapsed twin's name is the one a reader may hold, so it is
-            # carried on the survivor rather than dropped with the row.
-            aliases = {*(kept.get("aliases") or []), geak_spec_name(kept), name}
-            if geak_is_cand_tag(geak_spec_name(kept)) and not geak_is_cand_tag(name):
-                row["alias_collapsed"] = True
-                out[position] = row
-                kept = row
-            kept["aliases"] = sorted({a for a in aliases if a and a != geak_spec_name(kept)})
-        return out
 
     @staticmethod
     def _geak_stack_entry_extra(result: dict[str, Any], *, overlay_loaded: bool | None) -> dict[str, Any]:
@@ -2547,13 +2443,7 @@ class KernelPhase(CoordinatorCollaborator):
         specs = _geak_accepted_kernel_specs(result)
         if not specs:
             return
-        rows = [
-            {
-                "kernel_id": str(k.get("short_name") or k.get("kernel_id") or k.get("cand_tag") or "").strip(),
-                "spec": k,
-            }
-            for k in specs
-        ]
+        rows = [{"kernel_id": geak_spec_name(k), "spec": k} for k in specs]
 
         rebench_gain: float | None = None
         if baseline_tput > 0 and measured_tput > 0:
@@ -2567,13 +2457,14 @@ class KernelPhase(CoordinatorCollaborator):
         ledger = self.shared_state.kernel_integrate_attempts
         if not isinstance(ledger, dict):
             return
+        cycle = int(self.shared_state.macro_cycle or 0)
         measurement = AdoptionMeasurement(
             measured_tput=measured_tput,
             rebench_gain=rebench_gain,
             attributable=attributable,
             provenance=provenance,
             ts=ts,
-            cycle=int(self.shared_state.macro_cycle or 0),
+            cycle=cycle,
             overlay_loaded=overlay_loaded,
             basis=basis,
             alignment_status=alignment_status,
@@ -2595,7 +2486,7 @@ class KernelPhase(CoordinatorCollaborator):
             _record_geak_integration(
                 entry,
                 kernel_id=kid,
-                macro_cycle=int(self.shared_state.macro_cycle or 0),
+                macro_cycle=cycle,
             )
         self.shared_state.kernel_integrate_attempts = ledger
         log.info(
@@ -2629,7 +2520,8 @@ class KernelPhase(CoordinatorCollaborator):
         recovered_from_disk: bool = False,
     ) -> None:
         """Record the delegated GEAK runner's terminal state."""
-        absent = geak_absent_backends(str(result.get("eval_dir") or handoff.get("eval_dir") or ""))
+        eval_dir = str(result.get("eval_dir") or handoff.get("eval_dir") or "")
+        absent = geak_absent_backends(eval_dir)
         if absent:
             result["absent_backends"] = absent
             log.warning(
@@ -2643,12 +2535,12 @@ class KernelPhase(CoordinatorCollaborator):
         versions = versions if isinstance(versions, dict) else {}
         recorder.record_geak_delegation(
             GeakDelegation(
-                runner_status=str(result.get("status") or "unknown"),
-                started_at=facts.started_at or str(result.get("started_at") or ""),
+                runner_status=first_str(result.get("status"), "unknown"),
+                started_at=facts.started_at or first_str(result.get("started_at")),
                 ended_at=str(result.get("ended_at") or datetime.now(timezone.utc).isoformat()),
                 duration_sec=facts.duration_sec if facts.duration_sec is not None else result.get("duration_sec"),
-                error_class=str(result.get("error_class") or ""),
-                error=str(result.get("error") or ""),
+                error_class=first_str(result.get("error_class")),
+                error=first_str(result.get("error")),
                 returncode=result.get("returncode"),
                 runner_timeout_sec=(
                     facts.runner_timeout_sec if facts.runner_timeout_sec is not None else result.get("runner_timeout_s")
@@ -2657,8 +2549,8 @@ class KernelPhase(CoordinatorCollaborator):
                     facts.kill_timeout_sec if facts.kill_timeout_sec is not None else result.get("kill_timeout_s")
                 ),
                 exp_root=str(result.get("exp_root") or handoff.get("exp_root") or ""),
-                eval_dir=str(result.get("eval_dir") or handoff.get("eval_dir") or ""),
-                report_path=str(result.get("report_path") or ""),
+                eval_dir=eval_dir,
+                report_path=first_str(result.get("report_path")),
                 versions=versions,
                 recovered_from_disk=recovered_from_disk,
                 stages_reached=result.get("stages_reached"),
@@ -2828,7 +2720,7 @@ class KernelPhase(CoordinatorCollaborator):
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths:
             return None
-        loaded = read_latest_integrate_server_log(self.session_dir)
+        loaded = read_latest_integrate_server_log(self.session_dir, _integrate_run_name("fmoe_ck"))
         if loaded is None:
             return None
         log_path, log_text = loaded
@@ -2884,7 +2776,6 @@ class KernelPhase(CoordinatorCollaborator):
         candidate: dict[str, Any],
         *,
         config_path: str,
-        budget_minutes: int,
     ):
         """Re-measure the frozen GEMM entry recipe and tuned stack interleaved."""
         from ..kernel.request_handlers import integrate_handler
@@ -2918,7 +2809,6 @@ class KernelPhase(CoordinatorCollaborator):
                     # Measure, do not decide: the verdict comes from the pairs, so a per-round KEEP/REVERT here
                     # would be noise promoted to a decision.
                     "keep_threshold_pct": 100.0,
-                    "budget_minutes": budget_minutes,
                     "mode": "env_only",
                 },
                 session_dir=self.session_dir,
@@ -2949,10 +2839,8 @@ class KernelPhase(CoordinatorCollaborator):
     ) -> dict[str, Any] | None:
         """Did the tuned table reach the server's merge list and get read?"""
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
-        if not csv_paths:
+        if not csv_paths or tuner_name == "fmoe_ck":
             return None
-        if tuner_name == "fmoe_ck":
-            return self._fmoe_apply_verdict(envs, csv_paths)
         from ..kernel.gemm_shape_coverage import aiter_log_tuned_config_enabled
         from ..measurement.apply_verification import verify_applied
 
@@ -2961,7 +2849,7 @@ class KernelPhase(CoordinatorCollaborator):
             # Say so.
             log.warning(
                 "forge gemm E2E: no server.log under %s (retries included); apply verification cannot run for %s",
-                self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}",
+                self.session_dir / "runs" / "integrate" / _integrate_run_name(tuner_name),
                 tuner_name,
             )
             return None
@@ -2980,98 +2868,6 @@ class KernelPhase(CoordinatorCollaborator):
             hit_logging=hit_logging,
             runtime_table_names=table_names,
         ).to_dict()
-
-    def _fmoe_apply_verdict(self, envs: dict[str, str], csv_paths: list[str]) -> dict[str, Any] | None:
-        """Apply verdict for ``fmoe_ck`` based on fused-MoE dispatch, not dense GEMM."""
-        from ..kernel.gemm_shape_coverage import (
-            aiter_log_tuned_config_enabled,
-            fmoe_tuned_config_coverage,
-            log_has_fused_moe_activity,
-            parse_aiter_fused_moe_dispatches,
-            read_latest_integrate_server_log,
-            resolve_fmoe_candidate_csv,
-            tuned_fmoe_csv_rows,
-        )
-
-        loaded = read_latest_integrate_server_log(self.session_dir)
-        if loaded is None:
-            log.warning(
-                "forge gemm E2E: no server.log under %s; apply verification cannot run for fmoe_ck",
-                self.session_dir / "runs" / "integrate" / "integrate-gemm_tune_fmoe_ck",
-            )
-            return None
-        log_text = loaded[1]
-        candidate_path = resolve_fmoe_candidate_csv(csv_paths[0])
-        dispatches = parse_aiter_fused_moe_dispatches(log_text)
-
-        def _verdict(name: str, detail: str, *, hits: int = 0, misses: int = 0, blocks: bool = False) -> dict[str, Any]:
-            attributable = bool(dispatches) and candidate_path is not None
-            return {
-                "verdict": name,
-                "hits": hits,
-                "misses": misses,
-                "blocks_keep": blocks,
-                "conclusive": blocks or hits > 0,
-                "merged_tables": [],
-                "unmerged_artifacts": [] if attributable else list(csv_paths),
-                "detail": detail,
-            }
-
-        if not dispatches:
-            if log_has_fused_moe_activity(log_text):
-                return _verdict(
-                    "fused_moe_parse_inconclusive",
-                    "server.log contains fused-MoE activity but no dispatch lines could be parsed",
-                )
-            # aiter prints a hit line only under this flag, so a zero-hit result means nothing without it.
-            if not aiter_log_tuned_config_enabled(envs):
-                return _verdict(
-                    "fused_moe_logging_disabled",
-                    "AITER_LOG_TUNED_CONFIG is off; fused-MoE dispatch attribution cannot run",
-                )
-            return _verdict(
-                "no_fused_moe_dispatch",
-                "server.log exists but contains no [aiter] [fused_moe] dispatch lines",
-                blocks=True,
-            )
-        if candidate_path is None:
-            return _verdict(
-                "candidate_csv_missing",
-                "env points at a merged fmoe CSV but the sibling bare candidate file is absent; cannot attribute "
-                "runtime kernel names to the tuner candidate",
-                misses=len(dispatches),
-            )
-
-        coverage = fmoe_tuned_config_coverage(tuned_fmoe_csv_rows(candidate_path), dispatches)
-        requested = int(coverage.get("requested") or 0)
-        covered = int(coverage.get("covered") or 0)
-        if covered > 0:
-            return _verdict(
-                "served",
-                f"{covered} fused-MoE dispatch(es) match candidate kernelName1/kernelName2 in {candidate_path.name}",
-                hits=covered,
-                misses=requested - covered,
-            )
-        if coverage.get("runtime_default"):
-            return _verdict(
-                "runtime_default_config",
-                "runtime served default heuristics; tuned candidate kernels were not selected",
-                misses=requested,
-                blocks=True,
-            )
-        if coverage.get("kernel_name_mismatch"):
-            return _verdict(
-                "kernel_name_mismatch",
-                "lookup key matched bundled rows but runtime kernelName1/kernelName2 differ from candidate_fmoe.csv",
-                misses=requested,
-                blocks=True,
-            )
-        return _verdict(
-            "no_shape_key_matched",
-            f"0 of {requested} fused-MoE dispatch(es) resolve to a candidate row",
-            misses=requested,
-            blocks=True,
-        )
 
     def _aiter_config_dirs(self) -> list[Path]:
         import importlib.util
@@ -3358,19 +3154,6 @@ class KernelPhase(CoordinatorCollaborator):
             )
         return candidates
 
-    def _gemm_e2e_candidates(self, result: dict[str, Any]) -> list[dict[str, Any]]:
-        """Reduce a GEMM tuning result to the env sets worth E2E-validating."""
-        candidates = self._gemm_canonical_candidates(result)
-        # The rebuild's status gate cannot see a forced candidate, so it runs only when the producer named none: the
-        # pre-``candidates[]`` envelope and GEAK.
-        if not candidates:
-            candidates = _legacy_tuner_candidates(result)
-        if not candidates and str(result.get("backend") or "").strip().lower() != "forge":
-            fallback = _a8w8_blockscale_candidate(result)
-            if fallback:
-                candidates.append(fallback)
-        return candidates
-
     def _close_gemm_e2e_without_candidates(self, result: dict[str, Any]) -> None:
         log.info("gemm tuning: no candidates to E2E validate")
         result["decision"] = "REVERT"
@@ -3433,7 +3216,7 @@ class KernelPhase(CoordinatorCollaborator):
         return ""
 
     def _gemm_integrate_payload(
-        self, tuner_name: str, test_envs: dict[str, str], *, base_tput: float, budget_minutes: int
+        self, tuner_name: str, test_envs: dict[str, str], *, base_tput: float
     ) -> dict[str, Any]:
         from hyperloom.common.model_paths import resolve_session_model_path
 
@@ -3448,7 +3231,6 @@ class KernelPhase(CoordinatorCollaborator):
             "extra_server_args": self._gemm_candidate_server_args(tuner_name),
             "extra_envs": test_envs,
             "keep_threshold_pct": 1.0,
-            "budget_minutes": budget_minutes,
             "mode": "env_only",
         }
 
@@ -3459,16 +3241,13 @@ class KernelPhase(CoordinatorCollaborator):
         jit_backup_dir: Path,
         *,
         base_tput: float,
-        budget_minutes: int,
     ) -> dict[str, Any] | None:
         # The integrate verdict, a row carrying ``fault``, or ``None`` when the run itself was stopped.
         from ..actions.executors._aiter_jit import drop_serving_so_for_envs, prepare_serving_so_for_csvs
         from ..state.kernel_decision_settings import _MAX_INTEGRATE_FAULT_ATTEMPTS
 
         tuner_name = cand["tuner"]
-        payload = self._gemm_integrate_payload(
-            tuner_name, test_envs, base_tput=base_tput, budget_minutes=budget_minutes
-        )
+        payload = self._gemm_integrate_payload(tuner_name, test_envs, base_tput=base_tput)
         # The native handler reloads both the recipe and grading anchor from disk.
         self.shared_state.save(self.session_dir)
 
@@ -3588,7 +3367,7 @@ class KernelPhase(CoordinatorCollaborator):
     ) -> dict[str, Any] | None:
         from ..measurement.integrate_performance import integrate_measurement_fields
 
-        backend = _first_text(result, "backend").strip().lower() or "geak"
+        backend = _first_text(result, "backend").strip().lower() or "forge"
         tuner_name = cand["tuner"]
         tput, gain_pct = _integrate_tput_and_gain(verdict)
         tuned_file = _candidate_tuned_file(env, cand["env_var"])
@@ -3636,7 +3415,6 @@ class KernelPhase(CoordinatorCollaborator):
                 paired_reference,
                 deepcopy(self.shared_state.current_best),
                 config_path=paired_config_path,
-                budget_minutes=_per_tuner_budget_minutes(),
             )
             if self._coord.writeback.validate(
                 running_tput,
@@ -3684,12 +3462,11 @@ class KernelPhase(CoordinatorCollaborator):
         """Sequentially E2E-validate each tuning candidate's env independently."""
         from ..actions.executors._aiter_jit import drop_serving_so_for_envs
 
-        candidates = self._gemm_e2e_candidates(result)
+        candidates = self._gemm_canonical_candidates(result)
         if not candidates:
             self._close_gemm_e2e_without_candidates(result)
             return
         running_tput = float(self.shared_state.current_best.get("tput") or self.shared_state.baseline_tput or 0.0)
-        budget_minutes = _per_tuner_budget_minutes()
         paired_reference = deepcopy(self.shared_state.current_best)
         paired_reference.setdefault("tput", running_tput)
         paired_config_path = str(self.shared_state.baseline_config_path or "")
@@ -3719,9 +3496,7 @@ class KernelPhase(CoordinatorCollaborator):
             # Merge with previously KEEP'd envs.
             test_envs = {**stacked_envs, **env}
             log.info("gemm E2E: validating tuner=%s env=%s (base_tput=%.1f)", tuner_name, cand["env_var"], running_tput)
-            verdict = await self._integrate_gemm_candidate(
-                cand, test_envs, jit_backup_dir, base_tput=running_tput, budget_minutes=budget_minutes
-            )
+            verdict = await self._integrate_gemm_candidate(cand, test_envs, jit_backup_dir, base_tput=running_tput)
             if verdict is None:
                 break
             if verdict.get("fault"):
@@ -3997,7 +3772,7 @@ class KernelPhase(CoordinatorCollaborator):
 
     async def _handle_fusion_result(self, result: dict) -> None:
         """Record the forge-fusion result + surface it on the bus."""
-        status = str(result.get("status") or "unknown") if isinstance(result, dict) else "failed"
+        status = first_str(result.get("status"), "unknown") if isinstance(result, dict) else "failed"
         if isinstance(result, dict) and result.get("kept") and result.get("requires_e2e_validation"):
             from ..kernel.nomination_result import parse_outcome
 
@@ -4020,7 +3795,7 @@ class KernelPhase(CoordinatorCollaborator):
             # Counted on the session for the same reason as the aborts above.
             withheld_spent = _as_int(self.shared_state.fusion_withheld_retries)
             self.shared_state.fusion_withheld_retries = withheld_spent + 1
-        if isinstance(result, dict) and not str(result.get("fusion_run_id") or "").strip():
+        if isinstance(result, dict) and not first_str(result.get("fusion_run_id")).strip():
             cycle = int(self.shared_state.macro_cycle or 0)
             result["fusion_run_id"] = f"fusion-c{cycle}-{time.time_ns():x}"
         self.shared_state.last_fusion = result if isinstance(result, dict) else {"status": status}

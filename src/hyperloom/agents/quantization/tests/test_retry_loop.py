@@ -11,11 +11,10 @@ from hyperloom.agents.quantization.driver.outcomes import OutcomeId
 from hyperloom.agents.quantization.driver.retry import (
     QuantSkillRunResult,
     _decide_next_step,
-    _read_counter,
     _resolve_interactive,
     quantize_via_prompt,
 )
-from hyperloom.agents.quantization.driver.runner import AttemptContext, AttemptResult
+from hyperloom.agents.quantization.driver.runner import AttemptContext, AttemptResult, _attempt_finished
 
 
 # ───────────────────────────────────────────────────────────────────────────── helpers
@@ -200,24 +199,33 @@ async def test_retry_with_hypothesis_then_recover(tmp_path, quark_root, build_wo
 
 
 @pytest.mark.asyncio
-async def test_counter_persists_and_caps_retries(tmp_path, quark_root, build_workspace):
-    """Even with hypothesis present, counter ≥ max → no retry."""
+async def test_a_retry_does_not_start_with_the_previous_attempts_end(tmp_path, quark_root, build_workspace):
+    """Every attempt shares the workspace, and an attempt's end is judged from the files in it.
+
+    Attempt 1 stops the way SKILL.md section 8 says: ``blocked.md`` plus a fix
+    hypothesis. If those end markers are still there, attempt 2 counts as
+    finished before its session does anything, so a session that stops after
+    one reply is never continued and its outcome is attempt 1's.
+    """
 
     ws = tmp_path / "ws"
-    ws.mkdir()
-    # Pre-seed the counter at the max.
-    (ws / "requantize_attempts.txt").write_text("1", encoding="utf-8")
+    finished_at_start: list[bool] = []
 
-    def fail(workspace: Path, attempt: int) -> str | None:
+    def block_with_hypothesis(workspace: Path, attempt: int) -> str | None:
         build_workspace(
             workspace=workspace,
             include_weights=False,
-            include_validation_report=False,
+            last_phase="export",
+            blocked_md="outcome_id: export_crashed\n",
         )
-        (workspace / "fix_hypothesis_attempt_2.md").write_text("x", encoding="utf-8")
+        (workspace / "fix_hypothesis_attempt_2.md").write_text("## Fix\nExport shard by shard.\n", encoding="utf-8")
         return None
 
-    runner = _StubRunner([fail])
+    def stop_at_once(workspace: Path, attempt: int) -> str | None:
+        finished_at_start.append(_attempt_finished(workspace))
+        return None
+
+    runner = _StubRunner([block_with_hypothesis, stop_at_once])
     result = await quantize_via_prompt(
         "fp8 it",
         workspace=ws,
@@ -226,10 +234,296 @@ async def test_counter_persists_and_caps_retries(tmp_path, quark_root, build_wor
         interactive=False,
         max_requantize_attempts=1,
     )
+
+    assert len(runner.calls) == 2
+    assert finished_at_start == [False]
+    assert result.assessment.attempts[0] == OutcomeId.export_crashed
+    assert result.assessment.attempts[1] != OutcomeId.export_crashed
+    assert "export_crashed" in (ws / "blocked.md.attempt_1").read_text(encoding="utf-8")
+    assert (ws / "last_phase.txt.attempt_1").read_text(encoding="utf-8").strip() == "export"
+
+
+@pytest.mark.asyncio
+async def test_a_retry_that_writes_nothing_does_not_pass_on_the_previous_attempts_model(
+    tmp_path, quark_root, build_workspace
+):
+    """The previous attempt's model and validation report stay for the retry to build on.
+
+    With that attempt's end archived, they are also everything a retry that
+    stops at once leaves behind, and the classifier would grade them as a
+    clean success the retry never produced.
+    """
+
+    ws = tmp_path / "ws"
+
+    def block_after_validation(workspace: Path, attempt: int) -> str | None:
+        build_workspace(
+            workspace=workspace,
+            include_eval_report=False,
+            last_phase="eval",
+            blocked_md="outcome_id: unclassified_failure\n",
+        )
+        (workspace / "fix_hypothesis_attempt_2.md").write_text("## Fix\nPin the eval seed.\n", encoding="utf-8")
+        return None
+
+    runner = _StubRunner([block_after_validation, lambda workspace, attempt: None])
+    result = await quantize_via_prompt(
+        "fp8 it",
+        workspace=ws,
+        quark_root=quark_root,
+        runner_fn=runner,
+        interactive=False,
+        max_requantize_attempts=1,
+    )
+
+    assert len(runner.calls) == 2
+    assert result.assessment.attempts == (OutcomeId.unclassified_failure, OutcomeId.unclassified_failure)
+    assert result.status == "failed"
+    assert result.quantized_model_dir is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "second_attempt,expected",
+    [
+        (lambda workspace, attempt: None, OutcomeId.unclassified_failure),
+        (
+            lambda workspace, attempt: (
+                (workspace / "last_phase.txt").write_text("exec\n", encoding="utf-8") and "CUDA out of memory"
+            ),
+            OutcomeId.exec_oom,
+        ),
+    ],
+)
+async def test_an_unfinished_retry_is_judged_on_what_it_raised_not_on_inherited_reports(
+    tmp_path, quark_root, build_workspace, second_attempt, expected
+):
+    """An inherited validation report with an auto-recover failure would grade the retry ``partial``."""
+
+    ws = tmp_path / "ws"
+
+    def block_after_validation(workspace: Path, attempt: int) -> str | None:
+        build_workspace(
+            workspace=workspace,
+            validation_tag="aux_fail",
+            include_eval_report=False,
+            last_phase="validate",
+            blocked_md="outcome_id: unclassified_failure\n",
+        )
+        (workspace / "fix_hypothesis_attempt_2.md").write_text("## Fix\nCopy the aux files.\n", encoding="utf-8")
+        return None
+
+    runner = _StubRunner([block_after_validation, second_attempt])
+    result = await quantize_via_prompt(
+        "fp8 it",
+        workspace=ws,
+        quark_root=quark_root,
+        runner_fn=runner,
+        interactive=False,
+        max_requantize_attempts=1,
+    )
+
+    assert result.assessment.attempts == (OutcomeId.unclassified_failure, expected)
+    assert result.status == "failed"
+    assert result.quantized_model_dir is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raised",
+    [
+        None,
+        # What a DeepSeek session that keeps replying without tool calls ends on (common/deepseek_task.py).
+        "the owed artifact was still not written after 3 continuations",
+        "CUDA out of memory",
+    ],
+)
+async def test_a_retry_that_only_marks_the_eval_phase_does_not_pass_on_the_previous_model(
+    tmp_path, quark_root, build_workspace, raised
+):
+    """``last_phase.txt`` is written at the start of a phase, so it says nothing about what the attempt produced.
+
+    An error at eval would otherwise map to an auto-recover outcome, which ends
+    the run ``partial`` on the earlier attempt's model.
+    """
+
+    ws = tmp_path / "ws"
+
+    def block_after_validation(workspace: Path, attempt: int) -> str | None:
+        build_workspace(
+            workspace=workspace,
+            include_eval_report=False,
+            last_phase="eval",
+            blocked_md="outcome_id: unclassified_failure\n",
+        )
+        (workspace / "fix_hypothesis_attempt_2.md").write_text("## Fix\nPin the eval seed.\n", encoding="utf-8")
+        return None
+
+    def mark_eval(workspace: Path, attempt: int) -> str | None:
+        (workspace / "last_phase.txt").write_text("eval\n", encoding="utf-8")
+        return raised
+
+    result = await quantize_via_prompt(
+        "fp8 it",
+        workspace=ws,
+        quark_root=quark_root,
+        runner_fn=_StubRunner([block_after_validation, mark_eval]),
+        interactive=False,
+        max_requantize_attempts=1,
+    )
+
+    assert result.assessment.attempts == (OutcomeId.unclassified_failure, OutcomeId.unclassified_failure)
+    assert result.status == "failed"
+    assert result.quantized_model_dir is None
+
+
+@pytest.mark.asyncio
+async def test_a_retry_that_stops_on_opening_eval_is_sent_back_to_finish_it(tmp_path, quark_root, build_workspace):
+    """The owed-end check and the classifier must agree on what ends an attempt.
+
+    A retry that stops right after writing ``last_phase.txt=eval`` has produced
+    no result yet. Counting that as finished stops the session from being
+    continued, and then the classifier fails it for having no end of its own.
+    """
+
+    ws = tmp_path / "ws"
+
+    def block_after_validation(workspace: Path, attempt: int) -> str | None:
+        build_workspace(
+            workspace=workspace,
+            include_eval_report=False,
+            last_phase="validate",
+            blocked_md="outcome_id: unclassified_failure\n",
+        )
+        (workspace / "fix_hypothesis_attempt_2.md").write_text("## Fix\nPin the eval seed.\n", encoding="utf-8")
+        return None
+
+    def stop_on_opening_eval(workspace: Path, attempt: int) -> str | None:
+        build_workspace(workspace=workspace, include_eval_report=False, last_phase="eval")
+        if not _attempt_finished(workspace):
+            # The owed-end check sends the session back, and it finishes eval.
+            build_workspace(workspace=workspace, last_phase="eval")
+        return None
+
+    result = await quantize_via_prompt(
+        "fp8 it",
+        workspace=ws,
+        quark_root=quark_root,
+        runner_fn=_StubRunner([block_after_validation, stop_on_opening_eval]),
+        interactive=False,
+        max_requantize_attempts=1,
+    )
+
+    assert result.assessment.attempts == (OutcomeId.unclassified_failure, None)
+    assert result.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_a_rerun_after_a_run_that_wrote_nothing_does_not_pass_on_an_older_model(
+    tmp_path, quark_root, build_workspace
+):
+    """The run in between leaves no end to archive, yet the workspace still holds the older run's outputs."""
+
+    ws = tmp_path / "ws"
+
+    async def run(side_effect):
+        return await quantize_via_prompt(
+            "fp8 it", workspace=ws, quark_root=quark_root, runner_fn=_StubRunner([side_effect]), interactive=False
+        )
+
+    first = await run(lambda workspace, attempt: build_workspace(workspace=workspace, last_phase="eval") and None)
+    await run(lambda workspace, attempt: None)
+    third = await run(lambda workspace, attempt: None)
+
+    assert first.status == "success"
+    assert third.assessment.attempts == (OutcomeId.unclassified_failure,)
+    assert third.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_rerun_on_the_same_workspace_is_judged_on_its_own_end(tmp_path, quark_root, build_workspace):
+    """The --quantize prelude gives every run of one model the same workspace."""
+
+    ws = tmp_path / "ws"
+    build_workspace(workspace=ws, include_weights=False, last_phase="export", blocked_md="outcome_id: export_crashed\n")
+    (ws / "blocked.md.attempt_1").write_text("outcome_id: exec_oom\n", encoding="utf-8")
+    finished_at_start: list[bool] = []
+
+    def succeed(workspace: Path, attempt: int) -> str | None:
+        finished_at_start.append(_attempt_finished(workspace))
+        build_workspace(workspace=workspace, last_phase="eval")
+        return None
+
+    result = await quantize_via_prompt(
+        "fp8 it", workspace=ws, quark_root=quark_root, runner_fn=_StubRunner([succeed]), interactive=False
+    )
+
+    assert finished_at_start == [False]
+    assert result.status == "success"
+    assert result.assessment.attempts == (None,)
+    assert "exec_oom" in (ws / "blocked.md.attempt_1").read_text(encoding="utf-8")
+    assert "export_crashed" in (ws / "blocked.md.attempt_2").read_text(encoding="utf-8")
+
+
+def _fail_with_hypothesis(build_workspace):
+    def fail(workspace: Path, attempt: int) -> str | None:
+        build_workspace(workspace=workspace, include_weights=False, include_validation_report=False)
+        (workspace / f"fix_hypothesis_attempt_{attempt + 1}.md").write_text("x", encoding="utf-8")
+        return None
+
+    return fail
+
+
+@pytest.mark.asyncio
+async def test_retries_are_capped_per_run_and_a_rerun_gets_its_own(tmp_path, quark_root, build_workspace):
+    """The --quantize prelude reruns a model on the same workspace; the earlier run's retries are not this run's."""
+
+    ws = tmp_path / "ws"
+    fail = _fail_with_hypothesis(build_workspace)
+    for _ in range(2):
+        runner = _StubRunner([fail, fail, fail])
+        logged: list[str] = []
+        result = await quantize_via_prompt(
+            "fp8 it",
+            workspace=ws,
+            quark_root=quark_root,
+            runner_fn=runner,
+            interactive=False,
+            max_requantize_attempts=1,
+            log=logged.append,
+        )
+        assert len(runner.calls) == 2
+        assert any("max_attempts_exhausted:counter=1/1" in n for n in result.assessment.notes)
+        assert [m for m in logged if "retrying after" in m] == [
+            "quantization-agent: retrying after outcome=must_have_weights_missing (retry 1/1)"
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_rerun_does_not_retry_on_a_hypothesis_an_earlier_run_wrote(tmp_path, quark_root, build_workspace):
+    ws = tmp_path / "ws"
+    fail = _fail_with_hypothesis(build_workspace)
+
+    def fail_without_hypothesis(workspace: Path, attempt: int) -> str | None:
+        build_workspace(workspace=workspace, include_weights=False, include_validation_report=False)
+        return None
+
+    await quantize_via_prompt(
+        "fp8 it", workspace=ws, quark_root=quark_root, runner_fn=_StubRunner([fail]), interactive=False
+    )
+    runner = _StubRunner([fail_without_hypothesis, fail])
+    result = await quantize_via_prompt(
+        "fp8 it",
+        workspace=ws,
+        quark_root=quark_root,
+        runner_fn=runner,
+        interactive=False,
+        max_requantize_attempts=1,
+    )
+
     assert len(runner.calls) == 1
-    assert any("max_attempts_exhausted" in n for n in result.assessment.notes)
-    # Counter should still be 1 (no bump beyond the cap).
-    assert _read_counter(ws) == 1
+    assert any("no_fix_hypothesis" in n for n in result.assessment.notes)
+    assert not (ws / "fix_hypothesis_attempt_2.md").exists()
 
 
 @pytest.mark.asyncio

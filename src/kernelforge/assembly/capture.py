@@ -48,6 +48,18 @@ _COMPILE_IMPORTS = {
 }
 
 
+def _header_end(tree: ast.Module) -> int:
+    insertion = 0
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+        ) or (isinstance(node, ast.ImportFrom) and node.module == "__future__"):
+            insertion = node.end_lineno
+        else:
+            break
+    return insertion
+
+
 def bind_compile(source: str, assembly: str, target: str, *, export: bool) -> str:
     """Mechanically wrap one direct compile call, preserving its arguments and launcher."""
     tree = ast.parse(source)
@@ -87,14 +99,7 @@ def bind_compile(source: str, assembly: str, target: str, *, export: bool) -> st
     data = source.encode("utf-8")
     data = data[:start] + replacement.encode("utf-8") + data[end:]
     # Preserve the module docstring and future imports, including their line positions.
-    insertion = 0
-    for node in tree.body:
-        if (
-            isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
-        ) or (isinstance(node, ast.ImportFrom) and node.module == "__future__"):
-            insertion = node.end_lineno
-        else:
-            break
+    insertion = _header_end(tree)
     lines = data.decode("utf-8").splitlines(keepends=True)
     binding = (
         f"\nfrom {adapter} as _forge_assembly_type\n"

@@ -1037,19 +1037,45 @@ and input variables are always required, and a variable that is set is checked e
 | `HYPERLOOM_RUN_CREATED_AT` | Always | Run creation time, ISO 8601 with a UTC offset or `Z`. |
 | `HYPERLOOM_STATE_DIR` | Always | Absolute path of the run's state directory on shared storage; must exist. |
 | `HYPERLOOM_EVENTS_DIR` | No | Directory of the progress-event segments (see "Progress events" below). Default `$HYPERLOOM_STATE_DIR/events`. |
-| `HYPERLOOM_MCP_PORT`<br>`HYPERLOOM_MCP_TOKEN` | When the MCP server runs (default) | Port (1 to 65535) of the run's MCP server and the token the host presents. The token is a credential. |
+| `HYPERLOOM_MCP_PORT`<br>`HYPERLOOM_MCP_TOKEN` | When the MCP server runs (default) | Port (1 to 65535) of the run's MCP server and the token the host presents. The token is a credential and must be at least 16 characters; a shorter one refuses the run. |
+| `HYPERLOOM_MCP_HOST` | No | Address the run's MCP server binds to, no whitespace. Default `127.0.0.1`; a hosted run is given `0.0.0.0`. |
 | `HYPERLOOM_MCP_PUBLIC_URL` | When sub-runs call back into the run | `http(s)` URL under which sub-runs reach the run's MCP server. No credentials, query or fragment. |
 | `HYPERLOOM_SANDBOX_TEMPLATES` | When a sandbox is hosted | JSON object of template names, for example `{"runner": {"1": "t1", "8": "t8"}, "dev": "t"}`. |
 | `E2B_API_URL`<br>`E2B_SANDBOX_URL` | When a sandbox is hosted | Control-plane and data-plane `http(s)` URLs of the sandbox service, without credentials, query or fragment. |
 | `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`<br>`HYPERLOOM_SANDBOX_KEY_SUBRUN`<br>`HYPERLOOM_SANDBOX_KEY_DEV` | Per hosted role | The sandbox API key of each role. Credentials. |
 | `HYPERLOOM_RESULT_ARCHIVE` | No | Unset means results are archived on the shared storage, in a directory the application chooses. Otherwise `s3://<bucket>/<prefix>`; the prefix may be empty and has no empty, `.` or `..` segment. A local path (`/x`, `file://...`) is refused: local means unset. |
 | `AWS_ACCESS_KEY_ID`<br>`AWS_SECRET_ACCESS_KEY` | When `HYPERLOOM_RESULT_ARCHIVE` is `s3://`, and always as a pair | Archive credentials. `AWS_SESSION_TOKEN`, `AWS_ENDPOINT_URL_S3` (an `http(s)` URL) and `AWS_REGION` (not a credential) are optional. |
+| `HYPERLOOM_GRANT_LIMITS` | No | JSON object of the totals the host granted the run: `max_sandboxes`, `max_gpus`, `max_runtime_sec` (whole numbers) and `gpu_hours` (a number), each at least 0 and each optional; other keys are ignored. The legacy `optimize` flow only logs it. Removed from the environment once read. |
+| `HYPERLOOM_SOURCE_REPO`<br>`HYPERLOOM_SOURCE_SHA` | When the run starts measurement sandboxes (the application bootstrap always needs them) | The repository (`OWNER/NAME` or a git URL, no whitespace) and the full lowercase 40-hex commit id of the version the run executes; the sandbox runners fetch the same version. Checked when set; removed from the environment once read (the bootstrap script has already used them). |
 | `NODE_NAME`<br>`CLAW_SESSION_ID` | No | Physical node name and session id, read when set. |
 
 Once read, every host-only input above is removed from the process environment (`take_host_info`), so a child process started
 without an explicit `env=` does not inherit it; `HostInfo` holds the values and code passes them on. `NODE_NAME` and `CLAW_SESSION_ID`
 stay, because other code reads them. The sandbox keys, the MCP token and the archive credentials are held in an object that prints as
 `Secret(<redacted>)`, and are also on the credential list in `hyperloom.common.env_safety`.
+
+### The hosted entry and its bootstrap
+
+`hyperloom hosted run` (`src/hyperloom/hosted/entry.py`) reads the variables above and the campaign spec in
+`HYPERLOOM_INPUT_FILE` (`hyperloom.campaign-spec/v1`, schema `src/hyperloom/contracts/campaign_spec.v1.schema.json`), then runs
+`optimize` in the same process. The session directory is
+`$USER_DATA_PATH/<model directory name>/<HYPERLOOM_RUN_CREATED_AT as YYYYMMDDTHHMMSSZ>-<first 8 hex of sha256(HYPERLOOM_RUN_ID)>`; a
+restart finds the same directory and resumes it when it holds `manifest.json` and `state.json`. The entry writes two files in
+`$HYPERLOOM_STATE_DIR`: `session.json` (`{"session_dir": ...}`, as soon as the directory exists) and `exit.json`
+(`{"final": true, "returncode": N, "stop_reason": ...}` when `optimize` ends for any reason, and `{"final": true, "returncode": 2,
+"error": ...}` when the request is refused). A host restarts the run only when `exit.json` is missing or its `final` is false.
+`HYPERLOOM_IMAGE` is set from the spec's `framework.image`, and the entry needs `USER_DATA_PATH` set to an absolute path. The result
+archive directory of the run is `<session dir>/archive/`, mode 0700, owned by the application user.
+
+`src/hyperloom/hosted/app_bootstrap.sh` starts a hosted run in an image without Hyperloom.
+
+`scripts/hosted_app_image/build.sh --tag <ref> [--base <image>] [--claude-version V] [--push]` builds that image: a framework base image (`--base`), the script as the image's command, the `hl-specialist` account for `HYPERLOOM_SPECIALIST_USER`, and the claude CLI that specialists spawn (`/usr/local/bin/claude` -> `/opt/claude-code`). The CLI's version is `--claude-version`; when it is not passed the build takes `latest`, so two builds of one tag can carry different CLI versions. Pass a version to pin it. The codex CLI is not installed separately: it comes with the wheel (`openai-codex-cli-bin`).
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `HYPERLOOM_SOURCE_REPO` | Yes | `OWNER/NAME` on GitHub, or a git URL or path, of the Hyperloom source to run. |
+| `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built once into `$USER_DATA_PATH/.hyperloom/wheels/<sha>/` and the dependencies are installed with `--require-hashes` from the commit's `requirements/app.lock` into `$HYPERLOOM_STATE_DIR/venv`. |
+| `HYPERLOOM_CODE_REVISION` | Set by the script | The commit id, exported before the entry starts: a wheel has no `.git` to read it from. |
 
 ### Progress events
 

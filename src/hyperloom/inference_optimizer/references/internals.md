@@ -56,7 +56,7 @@ These govern the optimizer, not the launcher; the full contract lives in
 - **Plateau advisory**: both arms' signals are computed every tick and rendered
   as advisory in the orchestration prompt. One arm dry is not a plateau; the
   prompt says so. They do NOT drive phase advance — the LLM may emit
-  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
+  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'}`
   when it judges further effort unproductive. The per-phase budget remains
   the only hard advance gate.
 

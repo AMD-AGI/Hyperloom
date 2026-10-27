@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .event_fields import float_or_none, text_or_none
+from hyperloom.common.coerce import text_or_none, to_float
 
 GAIN_AXIS_KERNEL_MICRO = "kernel_micro"
 GAIN_AXIS_OUTPUT_THROUGHPUT = "output_throughput"
@@ -23,7 +23,7 @@ GAIN_AXIS_OUTPUT_THROUGHPUT = "output_throughput"
 def claimed_gain(e2e: Mapping[str, Any]) -> float | None:
     """GEAK's own e2e gain: a journey states it as ``e2e_gain_pct``, and a row
     already read back from the spool carries it as ``self_reported_e2e_gain_pct``."""
-    return float_or_none(e2e.get("self_reported_e2e_gain_pct", e2e.get("e2e_gain_pct")))
+    return to_float(e2e.get("self_reported_e2e_gain_pct", e2e.get("e2e_gain_pct")))
 
 
 def stamp_rebench_gain(row: dict[str, Any], delta_pct: Any) -> None:
@@ -31,7 +31,7 @@ def stamp_rebench_gain(row: dict[str, Any], delta_pct: Any) -> None:
 
     A rebench that measured no delta leaves both as they were.
     """
-    gain = float_or_none(delta_pct)
+    gain = to_float(delta_pct)
     if gain is None:
         return
     row["gain_pct"] = gain
@@ -46,7 +46,7 @@ def stamp_gate_gain(row: dict[str, Any], measured: Any, axis: Any) -> None:
     A gate that ruled without a number leaves an earlier instrument's gain,
     and its axis, in place: the lane's own timing may be the only measurement.
     """
-    gain = float_or_none(measured)
+    gain = to_float(measured)
     if gain is not None:
         row["gain_pct"] = gain
         row["gain_axis"] = text_or_none(axis)
@@ -74,8 +74,8 @@ def lane_gain_pct(row: Mapping[str, Any]) -> float | None:
     Returns:
         float | None: The gain, or ``None`` when the lane measured none.
     """
-    stated = float_or_none(row.get("gain_pct"))
+    stated = to_float(row.get("gain_pct"))
     if stated is not None:
         return stated
-    speedup = float_or_none(row.get("speedup"))
+    speedup = to_float(row.get("speedup"))
     return round((speedup - 1.0) * 100.0, 4) if speedup is not None else None

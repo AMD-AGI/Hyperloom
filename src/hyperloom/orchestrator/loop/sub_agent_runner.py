@@ -26,7 +26,7 @@ from ..bus.resource_lock import (
     CLEANUP_CONFIRMED_KEY,
     CLEANUP_TREE_PGID_KEY,
     Lease,
-    ResourceLockManager,
+    SqliteLeaseBackend,
 )
 from ..policy.gate import PolicyDenied
 from ..state.task_registry import IllegalTransition, Task, TaskRegistry
@@ -172,17 +172,17 @@ class SubAgentRunner:
 
     def __init__(
         self,
-        locks: ResourceLockManager,
+        locks: SqliteLeaseBackend,
         tasks: TaskRegistry,
         *,
         executor_registry: dict[str, ExecutorFn] | None = None,
         session_dir: Path | None = None,
         links: RunnerLinks = RunnerLinks(),
     ):
-        """Initialise the runner with its lock manager + task registry.
+        """Initialise the runner with its lease store + task registry.
 
         Args:
-            locks (ResourceLockManager): Lane lease manager used to gate
+            locks (SqliteLeaseBackend): Lane lease store used to gate
                 task execution.
             tasks (TaskRegistry): Registry the runner transitions task
                 state through.

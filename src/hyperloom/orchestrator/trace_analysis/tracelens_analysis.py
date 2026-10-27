@@ -17,8 +17,9 @@ import os
 import sys
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
+from hyperloom.common.coerce import first_str
 from hyperloom.common.io import JsonFormat, atomic_write_json
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.framework_paths import (
@@ -29,6 +30,7 @@ from hyperloom.inference_optimizer.framework_paths import (
 from .tracelens_arch_benchmark import internal_extension_arch_json, normalize_platform, populate_gpu_arch_json
 from .tracelens_skill_runner import (
     TraceLensSkillRequest,
+    TraceLensSkillRunResult,
     discover_capture_folder,
     extract_compute_pct_from_analysis_md,
     extract_exposed_comm_pct_from_analysis_md,
@@ -120,6 +122,9 @@ def _default_top_k() -> int:
 # the internal extension is opt-in via TRACELENS_INTERNAL_ROOT.
 DEFAULT_TRACELENS_INTERNAL_ROOT = ""
 
+# The analysis-orchestrator skill entry point, relative to the TraceLens root.
+_ORCHESTRATOR_SKILL = "TraceLens/Agent/Analysis/skills/analysis-orchestrator/SKILL.md"
+
 
 def _trajectory_scope(args: argparse.Namespace) -> contextlib.AbstractContextManager[Any]:
     """Scope the SDK run to the launching session's trajectory ledger, when the launcher named one.
@@ -160,6 +165,384 @@ def _gpu_arch_json(
             env=env,
         ),
         timeout_s=arch_benchmark_timeout_s,
+    )
+
+
+class _TraceLensCheckout(NamedTuple):
+    """A validated TraceLens checkout: its root, the internal-extension root and the orchestrator skill."""
+
+    root: Path
+    internal_root: Path | None
+    skill: Path
+
+
+def _check_tracelens_checkout(args: argparse.Namespace, log_path: Path) -> _TraceLensCheckout:
+    """Return the usable TraceLens root, internal-extension root (None when open-source-only) and skill.
+
+    Raises when the root is missing or incomplete, TraceLens and its splitter do not import, or the
+    analysis-orchestrator skill is absent.
+    """
+    tl_root_arg = args.tracelens_root.strip()
+    if not tl_root_arg:
+        raise SystemExit(
+            "TraceLens root not provided: set TRACELENS_ROOT in env "
+            "(src/hyperloom/inference_optimizer/assets/install.sh writes it to "
+            "kernel-agent.env.sh) or pass --tracelens-root."
+        )
+    tl_root = Path(tl_root_arg)
+    # Internal extension is opt-in (non-empty --tracelens-internal-root / env).
+    internal_root_arg = args.tracelens_internal_root.strip()
+    tl_internal_root: Path | None = Path(internal_root_arg) if internal_root_arg else None
+    if not _tracelens_checkout_complete(tl_root) and _is_default_tracelens_root(tl_root):
+        # The installer-managed pod-local checkout can vanish mid-run;
+        # self-heal the default path. An operator override fails fast below.
+        _ensure_tracelens_checkout(tl_root, log_path=log_path)
+    if not tl_root.exists():
+        raise FileNotFoundError(f"TraceLens root not found: {tl_root} (set TRACELENS_ROOT or pass --tracelens-root)")
+    # A dir that exists but has neither git metadata nor the TraceLens
+    # skill tree is unusable; fail fast.
+    if not _tracelens_checkout_complete(tl_root):
+        raise FileNotFoundError(
+            f"TraceLens root incomplete (not a git checkout): {tl_root} "
+            "(set TRACELENS_ROOT or pass --tracelens-root to a valid checkout)"
+        )
+    if tl_internal_root is not None and not tl_internal_root.exists():
+        append_log(
+            log_path,
+            f"TraceLens-internal root not found: {tl_internal_root}; "
+            "falling back to open-source-only "
+            "(provide an existing internal checkout to enable)",
+        )
+        tl_internal_root = None
+    if tl_internal_root is None:
+        append_log(
+            log_path,
+            "TraceLens-internal: not provided (open-source-only; set TRACELENS_INTERNAL_ROOT to enable)",
+        )
+        os.environ.pop("TL_EXTENSION", None)
+    _check_tracelens_importable(tl_root, args.budget_minutes, log_path)
+    # Read and follow the analysis-orchestrator skill entry point.
+    skill = tl_root / _ORCHESTRATOR_SKILL
+    if not skill.exists():
+        raise FileNotFoundError(f"TraceLens analysis-orchestrator skill not found: {skill}")
+    append_log(log_path, f"TraceLens skill: {skill}")
+    return _TraceLensCheckout(tl_root, tl_internal_root, skill)
+
+
+def _check_tracelens_importable(tl_root: Path, budget_minutes: float, log_path: Path) -> None:
+    """Raise when TraceLens and its splitter do not import in this interpreter."""
+    dependency_rc = run_command(
+        [
+            sys.executable,
+            "-c",
+            "import TraceLens; import TraceLens.TraceUtils.split_trace.main",
+        ],
+        cwd=tl_root,
+        log_path=log_path,
+        timeout_s=max(60, int(budget_minutes * 60)),
+    )
+    if dependency_rc != 0:
+        raise RuntimeError(
+            f"tracelens_dependency_error: TraceLens/splitter import failed in {sys.executable} "
+            f"(exit {dependency_rc}); install TraceLens dependencies in this interpreter before analysis. "
+            f"See {log_path} for subprocess output."
+        )
+
+
+class _ReportGates(NamedTuple):
+    """The idle and low-compute gate verdicts on one TraceLens report."""
+
+    idle_pct: float | None
+    idle_threshold: float
+    high_idle: dict[str, Any] | None
+    compute_pct: float | None
+    compute_threshold: float
+    low_compute: dict[str, Any] | None
+
+    @property
+    def suppressed(self) -> bool:
+        return self.high_idle is not None or self.low_compute is not None
+
+
+def _evaluate_report_gates(
+    report_path: Path, raw_trace_path: Path, warnings: list[dict[str, Any]], log_path: Path
+) -> _ReportGates:
+    """Evaluate the idle and low-compute gates on ``analysis.md``, recording a graph under-recording guard.
+
+    Logs the idle share when it clears the gates.
+    """
+    idle_pct_value = extract_idle_pct_from_analysis_md(report_path)
+    idle_pct_threshold, high_idle_warning, graph_under_recorded_warning = _evaluate_idle_gate_with_graph_guard(
+        idle_pct_value, report_path, raw_trace_path
+    )
+    compute_pct_value = extract_compute_pct_from_analysis_md(report_path)
+    exposed_comm_pct_value = extract_exposed_comm_pct_from_analysis_md(report_path)
+    compute_pct_threshold, low_compute_warning = _evaluate_low_compute_gate(
+        compute_pct_value, exposed_comm_pct_value, report_path
+    )
+    if graph_under_recorded_warning is not None:
+        # Under-recording deflates every recorded share alike, so
+        # the compute share is as unreliable as idle% here.
+        low_compute_warning = None
+        warnings.append(graph_under_recorded_warning)
+        append_log(
+            log_path,
+            "TraceLens high idle% is a graph under-recording "
+            "artifact (profiler captured ~1 of N graph replays); "
+            "skipping the idle/compute gates and keeping hot_kernels[].",
+        )
+    gates = _ReportGates(
+        idle_pct_value,
+        idle_pct_threshold,
+        high_idle_warning,
+        compute_pct_value,
+        compute_pct_threshold,
+        low_compute_warning,
+    )
+    if not gates.suppressed and idle_pct_value is not None and graph_under_recorded_warning is None:
+        append_log(
+            log_path,
+            f"TraceLens Executive Summary: "
+            f"Idle % = {idle_pct_value:.2f}% "
+            f"(threshold {idle_pct_threshold:.2f}%) — "
+            "below gate, continuing with kernel "
+            "candidate extraction",
+        )
+    return gates
+
+
+def _record_gate_suppression(gates: _ReportGates, warnings: list[dict[str, Any]], log_path: Path) -> None:
+    """Record each gate that suppressed hot_kernels[]; both can fire on one window (95% idle AND 3% compute)."""
+    if gates.high_idle is not None:
+        assert gates.idle_pct is not None
+        warnings.append(gates.high_idle)
+        append_log(
+            log_path,
+            f"TraceLens Executive Summary reports "
+            f"Idle % = {gates.idle_pct:.2f}% (threshold "
+            f"{gates.idle_threshold:.2f}%); suppressing "
+            "hot_kernels[] — kernel rewriting cannot move "
+            "end-to-end latency in the high-idle regime. "
+            "Coordinator will see this in "
+            "trace_health_warnings[] and route to "
+            "parameter optimization.",
+        )
+    if gates.low_compute is not None:
+        assert gates.compute_pct is not None
+        warnings.append(gates.low_compute)
+        append_log(
+            log_path,
+            f"TraceLens Executive Summary reports "
+            f"Compute % = {gates.compute_pct:.2f}% "
+            f"(threshold {gates.compute_threshold:.2f}%); "
+            "suppressing hot_kernels[] — a kernel rewrite "
+            "is bounded by the compute share and cannot "
+            "move end-to-end latency here. Coordinator "
+            "will see this in trace_health_warnings[] and "
+            "route to comm/parameter optimization.",
+        )
+
+
+def _report_json_candidates(
+    skill_result: TraceLensSkillRunResult, framework: str, warnings: list[dict[str, Any]], log_path: Path
+) -> tuple[list[dict[str, Any]], str]:
+    """Return the report's candidate rows plus injected collectives, and the label of the sources they came from."""
+    # TraceLens owns the parse/group/prose/impact/order; render
+    # its structured analysis.json beside the md, then read it.
+    analysis_json_path = render_analysis_json(skill_result.report_path)
+    report_cands = load_report_tasks(analysis_json_path, framework=framework)
+    raw_agent_candidates = _inject_collective_candidates(
+        skill_result.output_dir,
+        report_cands,
+        log_path=log_path,
+        health_warnings=warnings,
+    )
+    source_parts = ["analysis.json"]
+    if len(raw_agent_candidates) > len(report_cands):
+        source_parts.append("nccl_summary")
+    return raw_agent_candidates, "+".join(source_parts)
+
+
+def _reject_capture_only_input(trace_input: Path, trace_files: list[Path]) -> None:
+    """Raise when every discovered trace is a CUDA-graph capture sidecar."""
+    capture_root = _capture_classification_root(trace_input)
+    if all(_is_capture_fragment(p, capture_root) for p in trace_files):
+        raise RuntimeError(
+            "trace_input_capture_only: "
+            f"all {len(trace_files)} trace file(s) under {trace_input} "
+            "are CUDA-graph capture sidecars. "
+            "A capture records graph construction rather than "
+            "execution, so it holds no per-iteration annotations for "
+            "the steady-state splitter to cut on. "
+            "The upstream profile produced no annotated workload trace: "
+            "re-profile so the run writes one beside the sidecars. "
+            "Sidecars are a supported auxiliary input -- pass them as "
+            "--capture-folder alongside a real trace, never as "
+            "--trace-input."
+        )
+
+
+class _KernelProbe(NamedTuple):
+    """The trace the CPU-only preflight settled on, and what it read to get there."""
+
+    analysed: Path
+    kernel_event_count: int
+    probed: list[str]
+    spent_bytes: int
+
+
+def _probe_gpu_kernels(trace_files: list[Path]) -> _KernelProbe:
+    """Probe discovered traces in order for GPU kernel events, within the file-count and byte budgets.
+
+    ``analysed`` is the first candidate carrying kernels, else the leading one.
+    """
+    analysis_trace_path = trace_files[0]
+    kernel_event_count = 0
+    probed: list[str] = []
+    spent_bytes = 0
+    for candidate in trace_files[:_KERNEL_PROBE_LIMIT]:
+        # Each probe deserialises the whole file, so a directory of large
+        # empty captures could otherwise turn a fast failure into a slow
+        # one. Ordering puts the likeliest candidate first, so stopping
+        # on a byte budget costs the unlikely tail, not the answer.
+        if probed and spent_bytes >= _KERNEL_PROBE_BYTE_BUDGET:
+            probed.append(f"(stopped after {spent_bytes} bytes probed)")
+            break
+        spent_bytes += _trace_file_size(candidate)
+        readable, kernel_event_count = _count_kernels_if_readable(candidate)
+        if not readable:
+            # Distinct from an empty trace on purpose: "unreadable" sends
+            # a reader to the file, "no kernels" sends them to the
+            # profiler, and conflating them is the misdirection this
+            # whole change exists to remove.
+            probed.append(f"{candidate.name}=unreadable")
+            continue
+        probed.append(f"{candidate.name}={kernel_event_count}")
+        if kernel_event_count:
+            analysis_trace_path = candidate
+            break
+    return _KernelProbe(analysis_trace_path, kernel_event_count, probed, spent_bytes)
+
+
+def _add_model_args(parser: argparse.ArgumentParser) -> None:
+    """Add the model, diffusion-sidecar and report-naming flags; their env defaults are read now."""
+    parser.add_argument(
+        "--num-denoise-steps",
+        type=int,
+        default=int(os.environ.get("HYPERLOOM_NUM_DENOISE_STEPS", "0") or 0),
+        help=(
+            "Denoise steps captured in the profiled window (scriptable/xDiT "
+            "diffusion only). Enables per-denoise-step timings in the workload "
+            "roofline sidecar. Env: HYPERLOOM_NUM_DENOISE_STEPS."
+        ),
+    )
+    parser.add_argument(
+        "--model-path",
+        default=os.environ.get("MODEL_PATH", ""),
+        help=(
+            "Local model directory. Selected config.json fields inform bounded "
+            "kernel source resolution for every framework. For scriptable/xDiT "
+            "diffusion it also enables the config/safetensors-derived analytic "
+            "compute ceiling in the workload roofline sidecar. Falls back to "
+            "resolving --model-name; env: MODEL_PATH."
+        ),
+    )
+    parser.add_argument(
+        "--precision",
+        default="",
+        help="Diffusion analytic-ceiling precision (bf16/fp8/fp16); default bf16.",
+    )
+    parser.add_argument(
+        "--roofline-output-name",
+        default="kernel_roofline.json",
+        help="Report file name under reports/. Pass kernel_roofline_opt.json "
+        "for the post-kernel-opt snapshot so it does not overwrite baseline.",
+    )
+    parser.add_argument(
+        "--capture-folder",
+        default=os.environ.get("TRACELENS_CAPTURE_FOLDER", ""),
+        help=(
+            "Optional graph-capture folder for TraceLens inference graph "
+            "replay analysis. Also accepts env TRACELENS_CAPTURE_FOLDER."
+        ),
+    )
+    parser.add_argument("--budget-minutes", type=float, default=60.0)
+
+
+def _add_split_args(parser: argparse.ArgumentParser) -> None:
+    """Add the steady-state splitter window flags; their env defaults are read now."""
+    parser.add_argument(
+        "--split-num-steps",
+        type=int,
+        default=int(os.environ.get("TRACELENS_SPLIT_NUM_STEPS", "32") or 32),
+        help=(
+            "Number of steady-state iterations for the splitter to extract "
+            "(#127). Maps to --num-steps on TraceLens.TraceUtils.split_trace.main."
+        ),
+    )
+    parser.add_argument(
+        "--split-conc",
+        default=os.environ.get("TRACELENS_SPLIT_CONC", "") or os.environ.get("CONC", ""),
+        help=("Expected peak concurrency for the splitter (#127). Maps to --CONC. Defaults to $CONC when set."),
+    )
+    parser.add_argument(
+        "--split-osl",
+        default=os.environ.get("TRACELENS_SPLIT_OSL", "") or os.environ.get("OSL", ""),
+        help=("Maximum output sequence length hint for the splitter (#127). Maps to --OSL. Defaults to $OSL when set."),
+    )
+    parser.add_argument(
+        "--split-r",
+        default=(os.environ.get("TRACELENS_SPLIT_R", "") or os.environ.get("RANDOM_RANGE_RATIO", "")),
+        help=(
+            "OSL window ratio R for the splitter (#194 §3). Maps to "
+            "--R on TraceLens.TraceUtils.split_trace.main. "
+            "Pairs with --CONC / --OSL so mixed-window selection uses the "
+            "benchmark-contract PD ratio instead of an empirical default. "
+            "Defaults to $RANDOM_RANGE_RATIO when set; leave empty to let "
+            "the splitter fall back to its built-in heuristic."
+        ),
+    )
+
+
+def _add_chunk_selection_args(parser: argparse.ArgumentParser) -> None:
+    """Add the splitter phase-classification and steady-state chunk flags; their env defaults are read now."""
+    parser.add_argument(
+        "--split-llm-inference",
+        action="store_true",
+        help=(
+            "Pass --llm-inference to the TraceLens splitter. Enables "
+            "shape-based phase classification for traces without serving "
+            "annotations. Set automatically for SERVING frameworks."
+        ),
+    )
+    parser.add_argument(
+        "--steady-state-mode",
+        choices=("mixed", "decode_only", "prefilldecode", "generic"),
+        default=(os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "").strip() or "mixed"),
+        help=(
+            "Which steady-state chunk to consume for the perf report. "
+            "For LLM inference (vLLM/SGLang), the splitter produces three "
+            "phase-specific chunks (mixed / decode_only / prefilldecode); "
+            "for scriptable frameworks (xDiT/custom), 'generic' selects "
+            "a single steady_state chunk. "
+            "Defaults to 'mixed' (representative DO:PD mix at ~max "
+            "concurrency) which matches roofline-v2's default profiling "
+            "intent. Switch to 'prefilldecode' when the workload is "
+            "short / batched (NUM_PROMPTS << CONC*OSL) so prefill is "
+            "burst-shaped and the mixed window degenerates to PD=0 -- "
+            "TP=1 + CUDA-graph traces frequently hit this corner case "
+            "because the decode region's GPU work is fully inside the "
+            "graph replay and rocprofiler-sdk doesn't emit aggregate "
+            "Dispatch Task events outside TP-multi-stream contexts, so "
+            "the mixed chunk looks 99%% idle while the prefilldecode "
+            "chunk carries the real GEMM / attention kernels. "
+            "Switch to 'decode_only' when you specifically want the "
+            "longest pure-decode region (decode-perf comparison runs). "
+            "May also be set via env "
+            "INFERENCE_OPTIMIZER_STEADY_STATE_MODE so the coordinator "
+            "can re-issue roofline with a different mode after a "
+            "steady_state_chunk_low_quality warning lands."
+        ),
     )
 
 
@@ -206,47 +589,7 @@ def main() -> int:
         "Rehydration module; plumbed to run_tracelens_skill. "
         "Leave empty for the open-source-only report.",
     )
-    parser.add_argument(
-        "--num-denoise-steps",
-        type=int,
-        default=int(os.environ.get("HYPERLOOM_NUM_DENOISE_STEPS", "0") or 0),
-        help=(
-            "Denoise steps captured in the profiled window (scriptable/xDiT "
-            "diffusion only). Enables per-denoise-step timings in the workload "
-            "roofline sidecar. Env: HYPERLOOM_NUM_DENOISE_STEPS."
-        ),
-    )
-    parser.add_argument(
-        "--model-path",
-        default=os.environ.get("MODEL_PATH", ""),
-        help=(
-            "Local model directory. Selected config.json fields inform bounded "
-            "kernel source resolution for every framework. For scriptable/xDiT "
-            "diffusion it also enables the config/safetensors-derived analytic "
-            "compute ceiling in the workload roofline sidecar. Falls back to "
-            "resolving --model-name; env: MODEL_PATH."
-        ),
-    )
-    parser.add_argument(
-        "--precision",
-        default="",
-        help="Diffusion analytic-ceiling precision (bf16/fp8/fp16); default bf16.",
-    )
-    parser.add_argument(
-        "--roofline-output-name",
-        default="kernel_roofline.json",
-        help="Report file name under reports/. Pass kernel_roofline_opt.json "
-        "for the post-kernel-opt snapshot so it does not overwrite baseline.",
-    )
-    parser.add_argument(
-        "--capture-folder",
-        default=os.environ.get("TRACELENS_CAPTURE_FOLDER", ""),
-        help=(
-            "Optional graph-capture folder for TraceLens inference graph "
-            "replay analysis. Also accepts env TRACELENS_CAPTURE_FOLDER."
-        ),
-    )
-    parser.add_argument("--budget-minutes", type=float, default=60.0)
+    _add_model_args(parser)
     # Join keys of the launching Hyperloom session's trajectory ledger; unset outside a session.
     parser.add_argument("--trajectory-session-dir", default="")
     parser.add_argument("--trajectory-phase", default="")
@@ -279,75 +622,8 @@ def main() -> int:
             "parsers; --dry-run still uses the test-only raw parser."
         ),
     )
-    parser.add_argument(
-        "--split-num-steps",
-        type=int,
-        default=int(os.environ.get("TRACELENS_SPLIT_NUM_STEPS", "32") or 32),
-        help=(
-            "Number of steady-state iterations for the splitter to extract "
-            "(#127). Maps to --num-steps on TraceLens.TraceUtils.split_trace.main."
-        ),
-    )
-    parser.add_argument(
-        "--split-conc",
-        default=os.environ.get("TRACELENS_SPLIT_CONC", "") or os.environ.get("CONC", ""),
-        help=("Expected peak concurrency for the splitter (#127). Maps to --CONC. Defaults to $CONC when set."),
-    )
-    parser.add_argument(
-        "--split-osl",
-        default=os.environ.get("TRACELENS_SPLIT_OSL", "") or os.environ.get("OSL", ""),
-        help=("Maximum output sequence length hint for the splitter (#127). Maps to --OSL. Defaults to $OSL when set."),
-    )
-    parser.add_argument(
-        "--split-r",
-        default=(os.environ.get("TRACELENS_SPLIT_R", "") or os.environ.get("RANDOM_RANGE_RATIO", "")),
-        help=(
-            "OSL window ratio R for the splitter (#194 §3). Maps to "
-            "--R on TraceLens.TraceUtils.split_trace.main. "
-            "Pairs with --CONC / --OSL so mixed-window selection uses the "
-            "benchmark-contract PD ratio instead of an empirical default. "
-            "Defaults to $RANDOM_RANGE_RATIO when set; leave empty to let "
-            "the splitter fall back to its built-in heuristic."
-        ),
-    )
-    parser.add_argument(
-        "--split-llm-inference",
-        action="store_true",
-        help=(
-            "Pass --llm-inference to the TraceLens splitter. Enables "
-            "shape-based phase classification for traces without serving "
-            "annotations. Set automatically for SERVING frameworks."
-        ),
-    )
-    parser.add_argument(
-        "--steady-state-mode",
-        choices=("mixed", "decode_only", "prefilldecode", "generic"),
-        default=(os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "").strip() or "mixed"),
-        help=(
-            "Which steady-state chunk to consume for the perf report. "
-            "For LLM inference (vLLM/SGLang), the splitter produces three "
-            "phase-specific chunks (mixed / decode_only / prefilldecode); "
-            "for scriptable frameworks (xDiT/custom), 'generic' selects "
-            "a single steady_state chunk. "
-            "Defaults to 'mixed' (representative DO:PD mix at ~max "
-            "concurrency) which matches roofline-v2's default profiling "
-            "intent. Switch to 'prefilldecode' when the workload is "
-            "short / batched (NUM_PROMPTS << CONC*OSL) so prefill is "
-            "burst-shaped and the mixed window degenerates to PD=0 -- "
-            "TP=1 + CUDA-graph traces frequently hit this corner case "
-            "because the decode region's GPU work is fully inside the "
-            "graph replay and rocprofiler-sdk doesn't emit aggregate "
-            "Dispatch Task events outside TP-multi-stream contexts, so "
-            "the mixed chunk looks 99%% idle while the prefilldecode "
-            "chunk carries the real GEMM / attention kernels. "
-            "Switch to 'decode_only' when you specifically want the "
-            "longest pure-decode region (decode-perf comparison runs). "
-            "May also be set via env "
-            "INFERENCE_OPTIMIZER_STEADY_STATE_MODE so the coordinator "
-            "can re-issue roofline with a different mode after a "
-            "steady_state_chunk_low_quality warning lands."
-        ),
-    )
+    _add_split_args(parser)
+    _add_chunk_selection_args(parser)
     args = parser.parse_args()
 
     args.target_platform = normalize_platform(args.target_platform)
@@ -356,9 +632,8 @@ def main() -> int:
     run_id = f"tl-{uuid.uuid4().hex[:8]}"
     started_at = now_iso(timespec="auto")
     # Keep each TraceLens invocation's artifacts in its own run subdirectory.
-    ts_compact = started_at.replace("-", "").replace(":", "").split(".")[0]
-    if not ts_compact.endswith("Z"):
-        ts_compact = ts_compact + "Z"
+    # now_iso renders UTC as "+00:00", never "Z", so the suffix is always added.
+    ts_compact = started_at.replace("-", "").replace(":", "").split(".")[0] + "Z"
     sub_dir = f"{ts_compact}_{run_id}"
     root = Path(args.workspace_path) / "kernel-agent"
     run_dir = root / "runs" / session_id / sub_dir
@@ -368,7 +643,6 @@ def main() -> int:
     run_status = RunStatus(status_path, log_path, artifacts, run_id, started_at)
     agent_candidates: list[dict[str, Any]] | None = None
     agent_report_path: Path | None = None
-    allow_empty_candidates = False
     orchestrator_mode = "inline"
     orchestrator_error = ""
     # Structured trace-health findings surfaced to the Coordinator.
@@ -489,60 +763,24 @@ def main() -> int:
         # ``all`` rather than ``any``: a healthy profile writes the annotated
         # trace *beside* its sidecars, and discovery already sorts those first.
         # Only an input with nothing else in it is unanalysable.
-        if not args.dry_run and trace_files:
-            capture_root = _capture_classification_root(trace_input)
-            if all(_is_capture_fragment(p, capture_root) for p in trace_files):
-                raise RuntimeError(
-                    "trace_input_capture_only: "
-                    f"all {len(trace_files)} trace file(s) under {trace_input} "
-                    "are CUDA-graph capture sidecars. "
-                    "A capture records graph construction rather than "
-                    "execution, so it holds no per-iteration annotations for "
-                    "the steady-state splitter to cut on. "
-                    "The upstream profile produced no annotated workload trace: "
-                    "re-profile so the run writes one beside the sidecars. "
-                    "Sidecars are a supported auxiliary input -- pass them as "
-                    "--capture-folder alongside a real trace, never as "
-                    "--trace-input."
-                )
+        if not args.dry_run:
+            _reject_capture_only_input(trace_input, trace_files)
 
-        # Fail-fast on CPU-only traces.
-        #
-        # Probes candidates in discovery order rather than only the first. A
-        # single-file probe reports the capture directory as CPU-only whenever
-        # the leading file happens to be a fragment with no kernels, and the
-        # error it raises then blames the profiler for a capture that is sitting
-        # in the same directory with thirty thousand kernel events in it.
-        #
-        # With size ordering the first candidate is normally the capture, so this
-        # loop exits on one probe and the promotion below stays quiet. It earns
-        # its keep on the layouts where it does not: a multi-rank capture whose
-        # leading rank recorded nothing.
-        if not args.dry_run and trace_files:
-            kernel_event_count = 0
-            probed: list[str] = []
-            spent_bytes = 0
-            for candidate in trace_files[:_KERNEL_PROBE_LIMIT]:
-                # Each probe deserialises the whole file, so a directory of large
-                # empty captures could otherwise turn a fast failure into a slow
-                # one. Ordering puts the likeliest candidate first, so stopping
-                # on a byte budget costs the unlikely tail, not the answer.
-                if probed and spent_bytes >= _KERNEL_PROBE_BYTE_BUDGET:
-                    probed.append(f"(stopped after {spent_bytes} bytes probed)")
-                    break
-                spent_bytes += _trace_file_size(candidate)
-                readable, kernel_event_count = _count_kernels_if_readable(candidate)
-                if not readable:
-                    # Distinct from an empty trace on purpose: "unreadable" sends
-                    # a reader to the file, "no kernels" sends them to the
-                    # profiler, and conflating them is the misdirection this
-                    # whole change exists to remove.
-                    probed.append(f"{candidate.name}=unreadable")
-                    continue
-                probed.append(f"{candidate.name}={kernel_event_count}")
-                if kernel_event_count:
-                    analysis_trace_path = candidate
-                    break
+            # Fail-fast on CPU-only traces.
+            #
+            # Probes candidates in discovery order rather than only the first. A
+            # single-file probe reports the capture directory as CPU-only whenever
+            # the leading file happens to be a fragment with no kernels, and the
+            # error it raises then blames the profiler for a capture that is sitting
+            # in the same directory with thirty thousand kernel events in it.
+            #
+            # With size ordering the first candidate is normally the capture, so this
+            # loop exits on one probe and the promotion below stays quiet. It earns
+            # its keep on the layouts where it does not: a multi-rank capture whose
+            # leading rank recorded nothing.
+            probe = _probe_gpu_kernels(trace_files)
+            analysis_trace_path = probe.analysed
+            kernel_event_count, probed, spent_bytes = probe.kernel_event_count, probe.probed, probe.spent_bytes
             append_log(
                 log_path,
                 f"trace_gpu_kernel_events={kernel_event_count} (probed={', '.join(probed)})",
@@ -600,72 +838,11 @@ def main() -> int:
                     "different problem in the same place."
                 )
 
-        if not args.dry_run:
             run_status.write(
                 state="running",
                 current_step="check_tracelens_dependencies",
             )
-            tl_root_arg = (args.tracelens_root or "").strip()
-            if not tl_root_arg:
-                raise SystemExit(
-                    "TraceLens root not provided: set TRACELENS_ROOT in env "
-                    "(src/hyperloom/inference_optimizer/assets/install.sh writes it to "
-                    "kernel-agent.env.sh) or pass --tracelens-root."
-                )
-            tl_root = Path(tl_root_arg)
-            # Internal extension is opt-in (non-empty --tracelens-internal-root / env).
-            internal_root_arg = (args.tracelens_internal_root or "").strip()
-            tl_internal_root: Path | None = Path(internal_root_arg) if internal_root_arg else None
-            if not _tracelens_checkout_complete(tl_root) and _is_default_tracelens_root(tl_root):
-                # The installer-managed pod-local checkout can vanish mid-run;
-                # self-heal the default path. An operator override fails fast below.
-                _ensure_tracelens_checkout(tl_root, log_path=log_path)
-            if not tl_root.exists():
-                raise FileNotFoundError(
-                    f"TraceLens root not found: {tl_root} (set TRACELENS_ROOT or pass --tracelens-root)"
-                )
-            # A dir that exists but has neither git metadata nor the TraceLens
-            # skill tree is unusable; fail fast.
-            if not _tracelens_checkout_complete(tl_root):
-                raise FileNotFoundError(
-                    f"TraceLens root incomplete (not a git checkout): {tl_root} "
-                    "(set TRACELENS_ROOT or pass --tracelens-root to a valid checkout)"
-                )
-            if tl_internal_root is not None and not tl_internal_root.exists():
-                append_log(
-                    log_path,
-                    f"TraceLens-internal root not found: {tl_internal_root}; "
-                    "falling back to open-source-only "
-                    "(provide an existing internal checkout to enable)",
-                )
-                tl_internal_root = None
-            if tl_internal_root is None:
-                append_log(
-                    log_path,
-                    "TraceLens-internal: not provided (open-source-only; set TRACELENS_INTERNAL_ROOT to enable)",
-                )
-                os.environ.pop("TL_EXTENSION", None)
-            dependency_rc = run_command(
-                [
-                    sys.executable,
-                    "-c",
-                    "import TraceLens; import TraceLens.TraceUtils.split_trace.main",
-                ],
-                cwd=tl_root,
-                log_path=log_path,
-                timeout_s=max(60, int(args.budget_minutes * 60)),
-            )
-            if dependency_rc != 0:
-                raise RuntimeError(
-                    f"tracelens_dependency_error: TraceLens/splitter import failed in {sys.executable} "
-                    f"(exit {dependency_rc}); install TraceLens dependencies in this interpreter before analysis. "
-                    f"See {log_path} for subprocess output."
-                )
-            # Read and follow the analysis-orchestrator skill entry point.
-            skill = tl_root / "TraceLens/Agent/Analysis/skills/analysis-orchestrator/SKILL.md"
-            if not skill.exists():
-                raise FileNotFoundError(f"TraceLens analysis-orchestrator skill not found: {skill}")
-            append_log(log_path, f"TraceLens skill: {skill}")
+            tl_root, tl_internal_root, skill = _check_tracelens_checkout(args, log_path)
 
             tracelens_dir = run_dir / "tracelens"
             tracelens_dir.mkdir(parents=True, exist_ok=True)
@@ -694,7 +871,6 @@ def main() -> int:
             # whole-run property and must be read from the original trace -- the
             # chunk may drop the graph-launch runtime events the detector needs.
             raw_trace_path = analysis_trace_path
-            trace_split_blocked = False
             run_status.write(
                 state="running",
                 current_step="split_trace",
@@ -744,30 +920,38 @@ def main() -> int:
             )
 
             # Graph-capture folder for TraceLens inference graph replay analysis.
-            trace_input_path = Path(args.trace_input).expanduser().resolve()
             capture_folder: Path | None = (
                 Path(args.capture_folder).expanduser().resolve()
                 if args.capture_folder
                 # The analysed trace, not the leading candidate: the helper looks
                 # for capture_traces/ beside the file it is given, and after a
                 # cross-directory promotion those are different places.
-                else discover_capture_folder(trace_input_path, [analysis_trace_path])
-            )
-            _note_step(
-                "discover_capture_folder",
-                category="preflight",
-                status="ok" if capture_folder else "skipped",
-                skip_reason=None if capture_folder else "no capture_traces/ beside the analysed trace",
-                capture_folder=str(capture_folder or ""),
-                exists=bool(capture_folder and capture_folder.is_dir()),
+                else discover_capture_folder(trace_input, [analysis_trace_path])
             )
             if capture_folder:
+                _note_step(
+                    "discover_capture_folder",
+                    category="preflight",
+                    status="ok",
+                    skip_reason=None,
+                    capture_folder=str(capture_folder),
+                    exists=capture_folder.is_dir(),
+                )
                 append_log(
                     log_path,
                     f"capture_folder resolved: {capture_folder} (exists={capture_folder.is_dir()})",
                 )
+            else:
+                _note_step(
+                    "discover_capture_folder",
+                    category="preflight",
+                    status="skipped",
+                    skip_reason="no capture_traces/ beside the analysed trace",
+                    capture_folder="",
+                    exists=False,
+                )
 
-            if args.use_llm_orchestrator and not trace_split_blocked:
+            if args.use_llm_orchestrator:
                 run_status.write(
                     state="running",
                     current_step="run_tracelens_sdk_orchestrator",
@@ -799,111 +983,36 @@ def main() -> int:
                     agent_report_path = skill_result.report_path
                     orchestrator_mode = skill_result.runner
 
-                    raw_agent_candidates = []
-                    report_source = ""
-                    idle_pct_value = extract_idle_pct_from_analysis_md(
-                        skill_result.report_path,
+                    gates = _evaluate_report_gates(
+                        skill_result.report_path, raw_trace_path, trace_health_warnings, log_path
                     )
-                    idle_pct_threshold, high_idle_warning, graph_under_recorded_warning = (
-                        _evaluate_idle_gate_with_graph_guard(
-                            idle_pct_value,
-                            skill_result.report_path,
-                            raw_trace_path,
-                        )
-                    )
-                    compute_pct_value = extract_compute_pct_from_analysis_md(
-                        skill_result.report_path,
-                    )
-                    exposed_comm_pct_value = extract_exposed_comm_pct_from_analysis_md(
-                        skill_result.report_path,
-                    )
-                    compute_pct_threshold, low_compute_warning = _evaluate_low_compute_gate(
-                        compute_pct_value,
-                        exposed_comm_pct_value,
-                        skill_result.report_path,
-                    )
-                    if graph_under_recorded_warning is not None:
-                        # Under-recording deflates every recorded share alike, so
-                        # the compute share is as unreliable as idle% here.
-                        low_compute_warning = None
-                        trace_health_warnings.append(graph_under_recorded_warning)
-                        append_log(
-                            log_path,
-                            "TraceLens high idle% is a graph under-recording "
-                            "artifact (profiler captured ~1 of N graph replays); "
-                            "skipping the idle/compute gates and keeping hot_kernels[].",
-                        )
-                    if high_idle_warning is not None or low_compute_warning is not None:
+                    if gates.suppressed:
                         agent_candidates = []
-                        allow_empty_candidates = True
-                        # Both gates can fire on one window (95% idle AND 3%
-                        # compute is a real shape), so accumulate rather than
-                        # let the second suppression erase the first, matching
-                        # the "+".join the non-suppressed path already uses.
-                        skipped_sources: list[str] = []
-                        if high_idle_warning is not None:
-                            assert idle_pct_value is not None
-                            trace_health_warnings.append(high_idle_warning)
-                            skipped_sources.append("skipped:high_gpu_idle_pct")
-                            append_log(
-                                log_path,
-                                f"TraceLens Executive Summary reports "
-                                f"Idle % = {idle_pct_value:.2f}% (threshold "
-                                f"{idle_pct_threshold:.2f}%); suppressing "
-                                "hot_kernels[] — kernel rewriting cannot move "
-                                "end-to-end latency in the high-idle regime. "
-                                "Coordinator will see this in "
-                                "trace_health_warnings[] and route to "
-                                "parameter optimization.",
-                            )
-                        if low_compute_warning is not None:
-                            assert compute_pct_value is not None
-                            trace_health_warnings.append(low_compute_warning)
-                            skipped_sources.append("skipped:low_gpu_compute_pct")
-                            append_log(
-                                log_path,
-                                f"TraceLens Executive Summary reports "
-                                f"Compute % = {compute_pct_value:.2f}% "
-                                f"(threshold {compute_pct_threshold:.2f}%); "
-                                "suppressing hot_kernels[] — a kernel rewrite "
-                                "is bounded by the compute share and cannot "
-                                "move end-to-end latency here. Coordinator "
-                                "will see this in trace_health_warnings[] and "
-                                "route to comm/parameter optimization.",
-                            )
-                        report_source = "+".join(skipped_sources)
+                        _record_gate_suppression(gates, trace_health_warnings, log_path)
                     else:
-                        if idle_pct_value is not None and graph_under_recorded_warning is None:
+                        raw_agent_candidates, report_source = _report_json_candidates(
+                            skill_result, args.framework, trace_health_warnings, log_path
+                        )
+                        if raw_agent_candidates:
+                            agent_candidates = _finalize_candidates(
+                                raw_agent_candidates,
+                                perf_report_csv_dir=(skill_result.output_dir / "perf_report_csvs"),
+                            )
+                            write_source_resolution_artifact(
+                                agent_candidates,
+                                run_dir / _KSC.SOURCE_RESOLUTION_FILENAME,
+                                framework=args.framework,
+                                model_name=args.model_name,
+                                log_path=log_path,
+                            )
                             append_log(
                                 log_path,
-                                f"TraceLens Executive Summary: "
-                                f"Idle % = {idle_pct_value:.2f}% "
-                                f"(threshold {idle_pct_threshold:.2f}%) — "
-                                "below gate, continuing with kernel "
-                                "candidate extraction",
+                                f"TraceLens SDK orchestrator produced "
+                                f"{len(agent_candidates)} hot kernels "
+                                f"(source={report_source})",
                             )
-                        # TraceLens owns the parse/group/prose/impact/order; render
-                        # its structured analysis.json beside the md, then read it.
-                        analysis_json_path = render_analysis_json(skill_result.report_path)
-                        report_cands = load_report_tasks(
-                            analysis_json_path,
-                            framework=args.framework or "",
-                        )
-                        raw_agent_candidates = _inject_collective_candidates(
-                            skill_result.output_dir,
-                            report_cands,
-                            log_path=log_path,
-                            health_warnings=trace_health_warnings,
-                        )
-                        collective_injected = len(raw_agent_candidates) > len(report_cands)
-                        if raw_agent_candidates:
-                            source_parts = ["analysis.json"]
-                            if collective_injected:
-                                source_parts.append("nccl_summary")
-                            report_source = "+".join(source_parts)
                         else:
                             agent_candidates = []
-                            allow_empty_candidates = True
                             append_log(
                                 log_path,
                                 "TraceLens analysis.json had no compute "
@@ -911,25 +1020,6 @@ def main() -> int:
                                 "hot_kernels[] — downstream Coordinator will "
                                 "route to params/backends.",
                             )
-
-                    if raw_agent_candidates:
-                        agent_candidates = _finalize_candidates(
-                            raw_agent_candidates,
-                            perf_report_csv_dir=(skill_result.output_dir / "perf_report_csvs"),
-                        )
-                        write_source_resolution_artifact(
-                            agent_candidates,
-                            run_dir / _KSC.SOURCE_RESOLUTION_FILENAME,
-                            framework=args.framework or "",
-                            model_name=args.model_name,
-                            log_path=log_path,
-                        )
-                        append_log(
-                            log_path,
-                            f"TraceLens SDK orchestrator produced "
-                            f"{len(agent_candidates)} hot kernels "
-                            f"(source={report_source})",
-                        )
                 except Exception as exc:  # noqa: BLE001
                     orchestrator_error = f"{type(exc).__name__}: {exc}"
                     append_log(
@@ -960,40 +1050,31 @@ def main() -> int:
                 log_path,
                 f"hot kernels from TraceLens SDK orchestrator ({len(candidates)})",
             )
-        if not candidates:
-            if allow_empty_candidates:
-                # Routing signal (high idle / TraceLens failure): keep candidates
-                # empty so the Coordinator pivots to params/backends.
-                candidates = []
-                append_log(
-                    log_path,
-                    "TraceLens produced no kernel candidates; returning "
-                    "empty hot_kernels[] without fallback so params/backends "
-                    "optimization can continue.",
-                )
-            elif args.dry_run:
-                # Test-only path: parse the raw trace so unit tests can exercise extraction.
-                append_log(
-                    log_path,
-                    "dry-run: parsing raw trace for hot kernels (production code path raises here — see #203)",
-                )
-                candidates = analyze_trace_files(trace_files, _default_top_k())
-            else:
-                raise RuntimeError(
-                    "No hot-kernel candidates produced by any TraceLens "
-                    "analysis.md path. Refusing intermediate/CSV/raw-trace "
-                    "fallbacks because analysis.md is the single source of "
-                    "truth. Inspect the TraceLens skill log and report "
-                    "upstream if reproducible."
-                )
+        elif candidates is None:
+            # Dry-run only: a production run without candidates raised above.
+            # Test-only path: parse the raw trace so unit tests can exercise extraction.
+            append_log(
+                log_path,
+                "dry-run: parsing raw trace for hot kernels (production code path raises here — see #203)",
+            )
+            candidates = analyze_trace_files(trace_files, _default_top_k())
+        else:
+            # Routing signal (high idle / TraceLens failure): keep candidates
+            # empty so the Coordinator pivots to params/backends.
+            append_log(
+                log_path,
+                "TraceLens produced no kernel candidates; returning "
+                "empty hot_kernels[] without fallback so params/backends "
+                "optimization can continue.",
+            )
         default_roofline_fields(candidates)
         source_resolution_path = run_dir / _KSC.SOURCE_RESOLUTION_FILENAME
         if not source_resolution_path.is_file():
             write_source_resolution_artifact(
                 candidates,
                 source_resolution_path,
-                framework=args.framework or "",
-                model_name=args.model_name or "",
+                framework=args.framework,
+                model_name=args.model_name,
                 log_path=log_path,
             )
         if source_resolution_path.is_file():
@@ -1011,11 +1092,7 @@ def main() -> int:
         artifacts["status_path"] = str(status_path)
 
         # Surface the contracted ``analysis.md`` exit path alongside hot_kernels.
-        analysis_report_path = ""
-        for cand_key in ("tracelens_agent_report", "trace_report_path"):
-            if artifacts.get(cand_key):
-                analysis_report_path = str(artifacts[cand_key])
-                break
+        analysis_report_path = first_str(artifacts.get("tracelens_agent_report"), artifacts.get("trace_report_path"))
 
         result = {
             "tool": "tracelens_analysis",
@@ -1039,7 +1116,7 @@ def main() -> int:
             "extract_hot_kernels",
             category="emit",
             status="ok",
-            hot_kernel_count=len(candidates) if isinstance(candidates, list) else 0,
+            hot_kernel_count=len(candidates),
             orchestrator_mode=orchestrator_mode,
         )
         atomic_write_json(

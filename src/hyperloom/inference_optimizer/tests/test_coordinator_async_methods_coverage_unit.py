@@ -288,6 +288,7 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
             idempotency_key="bl-mixed",
         )
 
+    coord.shared_state.enablement_mode = "off"
     # Two different outputs: the identical-failure rule must not be what stops the third call.
     subproc_a = _nonzero_result("RuntimeError: HIP out of memory")
     subproc_b = _nonzero_result("ConnectionError: port refused")
@@ -619,10 +620,11 @@ def _escalate(hint: str) -> Intent:
 
 
 @pytest.mark.asyncio
-async def test_escalate_invalid_hint_broadcasts_only(coord: Coordinator) -> None:
-    await coord.router._handle_escalate_strategy_change("orchestration", _escalate("bogus"))
-    # A bogus hint must not be pending (it was neither consumed nor stored).
-    assert coord.shared_state.pending_escalate_hint != "bogus"
+@pytest.mark.parametrize("hint", ["bogus", "skip_to_close"])
+async def test_escalate_hint_outside_the_vocab_is_denied(coord: Coordinator, hint: str) -> None:
+    await coord.router._handle_escalate_strategy_change("orchestration", _escalate(hint))
+    assert coord.shared_state.pending_escalate_hint == ""
+    assert coord.shared_state.policy_denial_history[-1]["rule"] == "escalate_hint_not_in_vocab"
 
 
 @pytest.mark.asyncio
@@ -656,18 +658,6 @@ async def test_escalate_skip_to_kernel_outside_framework_agent_is_dropped(coord:
         _escalate("skip_to_kernel"),
     )
     assert coord.shared_state.pending_escalate_hint == ""
-
-
-@pytest.mark.asyncio
-async def test_escalate_skip_to_close_sets_pending_hint(coord: Coordinator) -> None:
-    """skip_to_close reaches pending_escalate_hint (no suppression guard any more)."""
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.shared_state.baseline_tput = 1234.0
-    await coord.router._handle_escalate_strategy_change(
-        "orchestration",
-        _escalate("skip_to_close"),
-    )
-    assert coord.shared_state.pending_escalate_hint == "skip_to_close"
 
 
 # -- maybe_autosubmit_specialist_patches ----------------------------------
@@ -1278,6 +1268,7 @@ def _baseline_task(task_id: str) -> Task:
 @pytest.mark.asyncio
 async def test_unpromotable_baseline_same_failure_twice_stops_at_two(coord: Coordinator) -> None:
     """Two subprocess_nonzero baselines that printed the same thing (modulo numbers) end the run at two."""
+    coord.shared_state.enablement_mode = "off"
     first = _nonzero_result("RuntimeError: worker 1234 died at t=17")
     second = _nonzero_result("RuntimeError: worker 98 died at t=4")
 
@@ -1291,6 +1282,7 @@ async def test_unpromotable_baseline_same_failure_twice_stops_at_two(coord: Coor
 @pytest.mark.asyncio
 async def test_unpromotable_baseline_different_failures_keep_three_strikes(coord: Coordinator) -> None:
     """Two different failures are not evidence of a third: the three-strike budget still applies."""
+    coord.shared_state.enablement_mode = "off"
     a = _nonzero_result("RuntimeError: HIP out of memory")
     b = _nonzero_result("ConnectionError: port refused")
 
@@ -1358,6 +1350,21 @@ async def test_unpromotable_baseline_same_failure_in_enablement_does_not_stop_ea
 
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-en-1"), result)
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-en-2"), result)
+    assert coord.shared_state.stop_reason != "baseline_failed"
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_same_failure_in_prelude_with_enablement_admitted_does_not_stop_early(
+    coord: Coordinator,
+) -> None:
+    """A retry that settles before the PRELUDE->ENABLEMENT transition is still enablement's input."""
+    from hyperloom.orchestrator.phases.machine_state import PHASE_PRELUDE
+
+    coord.shared_state.phase = PHASE_PRELUDE
+    result = _nonzero_result("ImportError: no module named foo")
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-pre-1"), result)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-pre-2"), result)
     assert coord.shared_state.stop_reason != "baseline_failed"
 
 
@@ -1447,6 +1454,7 @@ async def test_baseline_executor_same_output_modulo_numbers_stops_at_two(
 
     assert first["output_signature"] == second["output_signature"] != ""
 
+    coord.shared_state.enablement_mode = "off"
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-1"), first)
     assert coord.shared_state.stop_reason != "baseline_failed"
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-2"), second)

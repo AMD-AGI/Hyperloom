@@ -124,11 +124,21 @@ can read these directly:
   `quantized_score`, `relative_gap`, `within_threshold`).
 - `eval_gap_threshold.txt` — resolved acceptable gap (single float).
 - `last_phase.txt` — current Quark phase ID (used for classification).
-- `requantize_attempts.txt` — persistent integer retry counter.
 - `fix_hypothesis_attempt_N.md` — diagnosis + concrete fix (precondition for
-  retry N+1).
+  retry N+1). A run starts by deleting the ones an earlier run left, so it
+  retries only on hypotheses its own attempts wrote. Retries are counted per
+  run: every `quantize_via_prompt` call gets its own `max_requantize_attempts`.
 - `blocked.md` — present when the SDK aborted; may carry `outcome_id: <id>`
   to short-circuit classification.
+- `<marker>.attempt_N` — the Nth archived set of markers in this workspace: the
+  `blocked.md`, `last_phase.txt`, `eval_report.json` and `eval_skipped.txt` an
+  earlier attempt or an earlier run left, renamed before the next attempt
+  starts so that attempt is judged on its own files. An attempt on a workspace
+  holding any such archive that stops without writing its own `blocked.md`,
+  `eval_report.json` or `eval_skipped.txt` is judged only on the error it
+  raised (`unclassified_failure` when it raised none, or when the error maps to
+  an auto-recover outcome), never on the earlier model and reports left on
+  disk, so it fails the run rather than ending it `partial`.
 
 ## Environment knobs
 

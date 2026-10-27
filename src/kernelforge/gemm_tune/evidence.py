@@ -692,32 +692,28 @@ def moe_dispatch_keys(report: dict[str, Any]) -> list[dict[str, Any]]:
     return list(keys) if isinstance(keys, list) else []
 
 
+def _token_set(values: Any) -> set[int]:
+    return {token for value in values or [] if (token := _as_int(value)) is not None}
+
+
 def moe_ck_missed_keys(report: dict[str, Any]) -> list[dict[str, Any]]:
     """MoE keys whose missed tokens were actually served by CK 2-stage."""
     moe = ((report or {}).get("dispatch") or {}).get("moe") or {}
-    by_stage = moe.get("by_stage") or {}
-    ck_tokens = {
-        token
-        for stage, rec in by_stage.items()
-        if str(stage).startswith("2stage")
-        for value in (rec.get("tokens") or [])
-        if (token := _as_int(value)) is not None
-    }
-    stage_tokens = {
-        token
-        for rec in by_stage.values()
-        for value in (rec.get("tokens") or [])
-        if (token := _as_int(value)) is not None
-    }
-    has_stage_detail = bool(stage_tokens)
+    ck_tokens: set[int] = set()
+    stage_tokens: set[int] = set()
+    for stage, rec in (moe.get("by_stage") or {}).items():
+        tokens = _token_set(rec.get("tokens"))
+        stage_tokens |= tokens
+        if str(stage).startswith("2stage"):
+            ck_tokens |= tokens
     missed: list[dict[str, Any]] = []
     for key in moe_dispatch_keys(report):
-        untuned = {token for value in (key.get("untuned_tokens") or []) if (token := _as_int(value)) is not None}
+        untuned = _token_set(key.get("untuned_tokens"))
         if not untuned and (_as_int(key.get("miss_count")) or 0) > 0:
             # Compatibility with reports written before untuned_tokens was persisted: all observed tokens are the best
             # available bound.
-            untuned = {token for value in (key.get("tokens") or []) if (token := _as_int(value)) is not None}
-        if has_stage_detail:
+            untuned = _token_set(key.get("tokens"))
+        if stage_tokens:
             untuned &= ck_tokens
         if not untuned:
             continue

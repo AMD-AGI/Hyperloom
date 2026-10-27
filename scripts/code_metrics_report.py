@@ -349,7 +349,7 @@ def _now(key: Key, finding: Finding | None, link_base: str) -> str:
 
 def _how_to_fix(outcome: Outcome) -> str:
     pins = outcome.versions
-    pip = " ".join(f"{name}=={pins[name]}" for name in ("ruff", "complexipy", "vulture") if name in pins)
+    pip = " ".join(f"{name}=={pins[name]}" for name in ("ruff", "complexipy", "radon", "vulture") if name in pins)
     lines = [
         "### How to fix\n",
         (

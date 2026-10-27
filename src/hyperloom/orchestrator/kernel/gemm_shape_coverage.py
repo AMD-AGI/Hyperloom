@@ -118,7 +118,6 @@ def align_shapes_to_aiter_keys(
     shapes: Iterable[Shape],
     *,
     max_shapes: int = 64,
-    max_m: int = 0,
 ) -> tuple[list[Shape], dict[str, Any]]:
     """Re-key observed shapes onto the M values aiter will actually look up."""
     observed = sorted({(int(m), int(n), int(k)) for m, n, k in shapes if min(m, n, k) > 0})
@@ -126,7 +125,7 @@ def align_shapes_to_aiter_keys(
         return [], {"observed": 0, "aligned": 0, "dropped": 0, "unchanged": True}
 
     nk_pairs = sorted({(n, k) for _m, n, k in observed})
-    ladder = _pow2_ladder(max(max(m for m, _, _ in observed), int(max_m or 0)))
+    ladder = _pow2_ladder(max(m for m, _, _ in observed))
 
     ladder_rows = {(m, n, k) for n, k in nk_pairs for m in ladder}
     fine_rows = {(aiter_padded_m_fine(m), n, k) for m, n, k in observed} - ladder_rows
@@ -446,9 +445,6 @@ def resolve_fmoe_candidate_csv(path: str | Path) -> Path | None:
     return resolved
 
 
-FMOE_INTEGRATE_RUN = "integrate-gemm_tune_fmoe_ck"
-
-
 def log_has_fused_moe_activity(log_text: str) -> bool:
     """Return True when server.log shows fused-MoE activity we might parse."""
     text = log_text or ""
@@ -468,20 +464,14 @@ def _safe_mtime(path: Path) -> float:
         return 0.0
 
 
-def integrate_server_logs(
-    session_dir: Path,
-    integrate_name: str = FMOE_INTEGRATE_RUN,
-) -> list[Path]:
+def integrate_server_logs(session_dir: Path, integrate_name: str) -> list[Path]:
     """Server logs for one integrate run, retries included, oldest first."""
     parent = session_dir / "runs" / "integrate"
     run_dirs = [parent / integrate_name, *sorted(parent.glob(f"{integrate_name}-*"))]
     return sorted((log_path for run_dir in run_dirs for log_path in run_dir.rglob("server.log")), key=_safe_mtime)
 
 
-def read_latest_integrate_server_log(
-    session_dir: Path,
-    integrate_name: str = FMOE_INTEGRATE_RUN,
-) -> tuple[Path, str] | None:
+def read_latest_integrate_server_log(session_dir: Path, integrate_name: str) -> tuple[Path, str] | None:
     """Return the newest ``server.log`` under an integrate run, if readable."""
     logs = integrate_server_logs(session_dir, integrate_name)
     if not logs:
@@ -523,13 +513,6 @@ def tuned_fmoe_csv_rows(path: str | Path) -> list[dict[str, str]]:
     return out
 
 
-def _fmoe_candidate_row_for_dispatch(
-    record: dict[str, str],
-    candidate_rows: dict[FmoeDispatchKey, dict[str, str]],
-) -> dict[str, str] | None:
-    return candidate_rows.get(fmoe_dispatch_lookup_key(record))
-
-
 def fmoe_tuned_config_coverage(
     candidate_rows: Iterable[dict[str, str]],
     requested_dispatches: Iterable[dict[str, str]],
@@ -553,7 +536,7 @@ def fmoe_tuned_config_coverage(
             default_count += 1
             uncovered.append(record)
             continue
-        row = _fmoe_candidate_row_for_dispatch(record, by_key)
+        row = by_key.get(fmoe_dispatch_lookup_key(record))
         if row is None:
             uncovered.append(record)
             continue

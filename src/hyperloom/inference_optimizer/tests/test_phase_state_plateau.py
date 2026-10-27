@@ -13,7 +13,6 @@ from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
     DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
-    PHASE_CLOSE,
     PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
     _config_lever_dry,
@@ -23,7 +22,6 @@ from hyperloom.orchestrator.phases.machine_state import (
 )
 from hyperloom.orchestrator.state import shared_state
 from hyperloom.orchestrator.state.shared_state import (
-    ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
     ESCALATE_HINT_SKIP_TO_SWEEP,
     ESCALATE_HINT_VOCAB,
@@ -37,7 +35,6 @@ def test_escalate_hint_vocab_closed():
         {
             "skip_to_kernel",
             "skip_to_sweep",
-            "skip_to_close",
         }
     )
 
@@ -274,30 +271,6 @@ def test_kernel_does_not_exit_on_plateau():
         {"kernel_id": "k0", "patch_path": "/tmp/k0.patch", "target_file": "/repo/op0.py", "decision": "REVERT"}
     )
     assert compute_next_phase(state) is None
-
-
-def test_compute_next_phase_skip_to_close_routes_to_close():
-    state = SharedState(
-        phase="FRAMEWORK_AGENT",
-        phase_started_unix=0.0,
-        max_minutes=0,
-        phase_budget_pct={},
-        explore_search={},
-        specialist_rounds=[],
-        params_no_promote_streak=0,
-        optimization_stack=[],
-        pending_escalate_hint=ESCALATE_HINT_SKIP_TO_CLOSE,
-        stop_reason="",
-        baseline_tput=1000.0,
-        plateau_overrides={},
-    )
-    out = compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True))
-    assert out is not None
-    target, reason, evidence = out
-    assert target == PHASE_CLOSE
-    assert reason == "global_converged"
-    assert evidence.get("terminal") is True
-    assert evidence.get("hint") == ESCALATE_HINT_SKIP_TO_CLOSE
 
 
 def _hot(kernel_id: str, source_file: str, gpu_pct: float = 20.0) -> dict:

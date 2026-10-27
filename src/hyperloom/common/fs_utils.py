@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared filesystem helpers: file classification, and reads and writes that never follow a link a less-privileged process planted."""
+"""Shared filesystem helpers: file classification, path helpers, and reads and writes that never follow a link a less-privileged process planted."""
 
 from __future__ import annotations
 
@@ -234,3 +234,11 @@ def _is_regular(name: str, dir_fd: int) -> bool:
         return stat.S_ISREG(os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode)
     except OSError:
         return False
+
+
+def relative_posix(path: Path, root: Path) -> str:
+    """``path`` relative to ``root`` as a POSIX string, both resolved; ``str(path)`` when it is not under ``root``."""
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except (ValueError, OSError):
+        return str(path)
