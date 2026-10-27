@@ -37,7 +37,9 @@ from hyperloom.measure.runner.native.isolated import staged_record
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
 from hyperloom.measure.spec import Environment
 from hyperloom.measure.tests._recipes import COMMIT, IMAGE, git_patch, put_patch
+from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox import native_builds as native_builds_module
+from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup
 from hyperloom_multibranch.toolbox.build_preflight import PreflightSite
 from hyperloom_multibranch.toolbox.native_builds import (
     BUILD_GFX_ENV,
@@ -50,6 +52,7 @@ from hyperloom_multibranch.toolbox.native_builds import (
 from hyperloom_multibranch.toolbox.pending_builds import BuildEnd, BuildHooks, PendingBuilds
 from hyperloom_multibranch.toolbox.store_builds import BuildSite, StoreBuildDriver
 from hyperloom_multibranch.toolbox.tests import native_support as fake
+from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo
 from hyperloom_multibranch.toolbox.tests import test_short_prompts_option as options_tests
 
 BUILDER = "sha256:" + "c" * 64
@@ -124,6 +127,10 @@ REQUEST = TestRequest(
     kind=TestKind.TEST, purpose=Purpose.EXPLORE, branch_id="b1", parent_commit="c0", delta=RecipeDelta()
 )
 EDITED_CU = "__global__ void act() { /* faster */ }\n"
+OTHER_IMAGE = "sha256:" + "d" * 64
+BASELINE = TestRequest(
+    kind=TestKind.TEST, purpose=Purpose.BASELINE, branch_id="b1", parent_commit="c0", delta=RecipeDelta()
+)
 
 
 @pytest.fixture
@@ -244,6 +251,33 @@ def test_a_runtime_snapshot_beside_a_native_stack_is_refused(rig: Rig) -> None:
 
     with pytest.raises(RuntimeSourcesConflict, match="runtime snapshot .* and native stacks \\(fakepkg\\)"):
         rig.compiler.compile(recipe, RecipeDelta())
+
+
+class CompilingPlanner:
+    """Acceptance's planner over the rig's compiler: no points, the compiled environment only."""
+
+    def __init__(self, rig: Rig) -> None:
+        self.rig, self.blobs = rig, rig.blobs
+
+    def plan(self, request: TestRequest, parent: Recipe) -> AcceptedMeasurement:
+        return AcceptedMeasurement(self.rig.compiler.compile(parent, request.delta), ())
+
+
+async def test_acceptance_refuses_a_runtime_snapshot_beside_a_native_stack_and_takes_one_without(rig: Rig) -> None:
+    def acceptance(recipe: Recipe) -> Acceptance:
+        setup = AcceptanceSetup(FakeRepo(recipe), CompilingPlanner(rig), IMAGE, WorkloadKind.AGENTX)
+        return Acceptance(setup, is_accepted=lambda request_id: False)
+
+    native = rig.recipe(rig.patch({fake.ACT_CU: EDITED_CU}), runtime_snapshot=OTHER_IMAGE)
+    with pytest.raises(RequestRejected, match="runtime snapshot .* and native stacks \\(fakepkg\\)") as refused:
+        await acceptance(native).prepare(BASELINE)
+    assert refused.value.code == "delta_not_applicable"
+
+    python_only = rig.recipe(
+        rig.patch({fake.PY_FILE: "SCALE = 2\n"}, {fake.PY_FILE: fake.BASE_PY}), runtime_snapshot=OTHER_IMAGE
+    )
+    prepared = await acceptance(python_only).prepare(BASELINE)
+    assert prepared.environment.environment.builds == (), "a snapshot of another image is no refusal on its own"
 
 
 async def test_the_farm_refuses_a_build_the_sheet_does_not_name_exactly(rig: Rig) -> None:

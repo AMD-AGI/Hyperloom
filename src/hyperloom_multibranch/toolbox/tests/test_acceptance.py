@@ -61,15 +61,19 @@ async def test_an_unknown_parent_is_refused(tmp_path: Path) -> None:
     await _rejected(rig, request, "unknown_parent")
 
 
-@pytest.mark.parametrize("field", ["base", "snapshot"])
-async def test_a_recipe_on_another_base_image_is_refused(tmp_path: Path, field: str) -> None:
-    recipe = (
-        Recipe(base_image_digest=OTHER_IMAGE)
-        if field == "base"
-        else Recipe(base_image_digest=IMAGE, runtime_snapshot=OTHER_IMAGE)
-    )
-    rig = build(tmp_path, repo=FakeRepo(recipe))
+async def test_a_recipe_on_another_base_image_is_refused(tmp_path: Path) -> None:
+    rig = build(tmp_path, repo=FakeRepo(Recipe(base_image_digest=OTHER_IMAGE, runtime_snapshot=IMAGE)))
+    with pytest.raises(RequestRejected, match=f"recipe base image {OTHER_IMAGE} is not the active framework image"):
+        await rig.toolbox.submit_test(req())
     await _rejected(rig, req(), "base_image_mismatch")
+
+
+async def test_a_runtime_snapshot_is_not_compared_with_the_active_image(tmp_path: Path) -> None:
+    """The runtime is the base image plus signed native builds, which no image digest names: only the base image is
+    compared, as the compile's ``check_base_image`` does."""
+    rig = build(tmp_path, repo=FakeRepo(Recipe(base_image_digest=IMAGE, runtime_snapshot=OTHER_IMAGE)))
+    request_id = await rig.toolbox.submit_test(req())
+    assert request_id in rig.notebook._state().requests
 
 
 async def test_a_retest_of_an_unknown_request_is_refused(tmp_path: Path) -> None:

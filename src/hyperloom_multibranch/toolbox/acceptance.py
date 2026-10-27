@@ -308,12 +308,13 @@ class Acceptance:
             ) from None
 
     def _check_image(self, recipe: Recipe) -> None:
-        if self._image is None:
-            return
-        digests = {recipe.base_image_digest, recipe.runtime_snapshot or recipe.base_image_digest}
-        if digests != {self._image}:
+        """Refuse a recipe on another base image. Only the base image is compared, as the compile does
+        (:func:`~hyperloom.measure.compile.check_base_image`): a ``runtime_snapshot`` names no image to compare, and the
+        compile refuses one beside native stacks (``RuntimeSourcesConflict``, ``delta_not_applicable``)."""
+        if self._image is not None and recipe.base_image_digest != self._image:
             raise RequestRejected(
-                f"recipe image {sorted(digests)} is not the active framework image {self._image}", "base_image_mismatch"
+                f"recipe base image {recipe.base_image_digest} is not the active framework image {self._image}",
+                "base_image_mismatch",
             )
 
     @staticmethod
