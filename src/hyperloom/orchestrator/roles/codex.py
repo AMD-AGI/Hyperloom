@@ -108,9 +108,6 @@ class CodexBackend:
     allowed_intents: frozenset[IntentType]
     model: str = DEFAULT_CODEX_MODEL
     cwd: Path = field(default_factory=Path.cwd)
-    writable_roots: tuple[Path, ...] = ()
-    sandbox_mode: str = ""
-    codex_bin: str = ""
     # An agent turn carries a tool loop, so it needs the orchestration budget,
     # not a completion's 120s.
     call_timeout_s: float = field(
@@ -119,13 +116,11 @@ class CodexBackend:
             default=300.0,
         )
     )
-    env: dict[str, str] | None = None
     # Bounded transient-failure retry/backoff, on the same INFERENCE_OPTIMIZER_LLM_RETRY_* knobs the Claude path
     # reads.
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy.from_env)
 
     name: str = "codex"
-    calls: list[dict[str, Any]] = field(default_factory=list)
 
     # Which prompt modules describe a surface this backend actually has. Read
     # by the prompt builder, which cannot infer it from the role: the
@@ -146,10 +141,6 @@ class CodexBackend:
             self.cwd.chmod(0o700)
         except OSError as exc:
             raise BackendError(f"cannot prepare Codex backend cwd {self.cwd}: {exc}") from exc
-        roots = tuple(Path(root).expanduser().resolve() for root in self.writable_roots)
-        if self.cwd not in roots:
-            roots = (self.cwd, *roots)
-        self.writable_roots = roots
 
     # ------------------------------------------------------------------
     async def run(
@@ -170,18 +161,11 @@ class CodexBackend:
                 CodexTurnRequest(prompt, timeout_sec=self.call_timeout_s, output_schema=output_schema)
             )
 
-        def _note_retry(attempt: int, exc: BaseException, delay: float) -> None:
-            """Record a transient-failure retry warning into the call log."""
-            self.calls.append(
-                {"warn": f"codex SDK transient failure (attempt {attempt}): {exc!r}; retrying in {delay:.2f}s"}
-            )
-
         try:
             sdk_result = await retry_with_backoff(
                 _one_attempt,
                 policy=self.retry_policy,
                 retry_on=(CodexSessionError,),
-                on_retry=_note_retry,
             )
         except CodexSessionError as exc:
             raise LLMCallFailed(f"Codex Agent SDK turn failed: {redact_secret_values(str(exc))}") from exc
@@ -193,21 +177,8 @@ class CodexBackend:
         output_tokens = to_int(usage.get("output_tokens"), 0)
         cache_read_tokens = to_int(usage.get("cache_read_input_tokens"), 0)
         reasoning_tokens = to_int(usage.get("reasoning_output_tokens"), 0)
-        self.calls.append(
-            {
-                "model": self.model,
-                "prompt_chars": len(prompt),
-                "reply_chars": len(sdk_result.text),
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_read_input_tokens": cache_read_tokens,
-                "reasoning_output_tokens": reasoning_tokens,
-                "thread_id": sdk_result.thread_id,
-            }
-        )
         metadata: dict[str, Any] = {
             "model": self.model,
-            "thread_id": sdk_result.thread_id,
             # Pairs this turn's token row with its conversation row. A caller that opened an ``llm.call`` trajectory
             # span owns the id.
             "call_id": current_context().call_id or new_call_id(),
@@ -219,9 +190,6 @@ class CodexBackend:
             # Codex reports per-turn counts, so the input side (uncached + cached) is this request's context size — the
             # figure the checkpoint policy compares against the model's window.
             "context_tokens_peak": input_tokens + cache_read_tokens,
-            # Stated by Codex per turn, and better than any table this side keeps: the compaction trigger is a
-            # fraction of it.
-            "model_context_window": to_int(usage.get("model_context_window"), 0),
             # Full conversation text for conversations.jsonl, handed up for the caller to persist.
             "prompt": prompt,
             "response": sdk_result.text,
@@ -254,10 +222,7 @@ class CodexBackend:
                 CodexSessionConfig(
                     cwd=self.cwd,
                     model=self.model,
-                    writable_roots=self.writable_roots,
-                    sandbox_mode=self.sandbox_mode,
-                    codex_bin=self.codex_bin,
-                    env=self.env,
+                    writable_roots=(self.cwd,),
                 ),
                 developer_instructions=instructions,
                 component="orchestration",

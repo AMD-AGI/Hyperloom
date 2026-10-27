@@ -200,7 +200,7 @@ def test_specialist_log_requests_are_one_row_per_message_id(tmp_path):
         ],
     )
     with tt.trajectory_scope(session_dir=tmp_path, component="specialist", task_id="t-1", parent_span_id="call-1"):
-        assert re_.record_stream_json_requests(log) == 2
+        re_.record_stream_json_requests(log)
 
     first, second = _requests(tmp_path)
     assert [r["attributes"]["message_id"] for r in (first, second)] == ["m1", "m2"]

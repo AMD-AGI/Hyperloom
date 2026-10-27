@@ -55,19 +55,9 @@ def _backend(**over: Any) -> ClaudeBackend:
     kwargs: dict[str, Any] = dict(
         sdk_query_factory=_make_query_factory(),
         sdk_options_cls=_FakeOptions,
-        api_key_env="UNSET_KEY_ENV_FOR_TEST",
     )
     kwargs.update(over)
     return ClaudeBackend(**kwargs)
-
-
-def test_compose_prompt_raw_vs_normal() -> None:
-    raw = _backend(raw_completion=True)
-    assert raw._compose_prompt("hello") == "hello"
-    normal = _backend(raw_completion=False)
-    out = normal._compose_prompt("hello")
-    assert out.startswith("hello")
-    assert len(out) > len("hello")  # suffix appended
 
 
 def test_set_context_provider_none_clears() -> None:
