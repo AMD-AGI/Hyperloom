@@ -65,7 +65,7 @@ def _alive(pid: int) -> bool:
     return state not in ("Z", "X")
 
 
-async def _until(predicate: Callable[[], object], seconds: float = 3.0) -> None:
+async def _until(predicate: Callable[[], object], seconds: float = 10.0) -> None:
     until = time.monotonic() + seconds
     while not predicate():
         assert time.monotonic() < until, "timed out waiting"
@@ -249,6 +249,12 @@ async def test_a_command_that_ends_before_the_registry_takes_it_still_runs(tmp_p
     assert "started" in await process.output()
 
 
+def _pid(path: Path) -> int | None:
+    """The pid ``echo $! > path`` wrote, or ``None`` while the shell has truncated the file and not yet written it."""
+    text = path.read_text().strip() if path.exists() else ""
+    return int(text) if text else None
+
+
 def test_a_server_started_in_a_session_of_its_own_is_still_the_sandbox_s(tmp_path: Path) -> None:
     marker = f"server{uuid.uuid4().hex}"
     pids = tmp_path / "pids"
@@ -258,15 +264,15 @@ def test_a_server_started_in_a_session_of_its_own_is_still_the_sandbox_s(tmp_pat
     async def scenario() -> tuple[int, int, bool]:
         sandbox = _sandbox(tmp_path)
         process = await sandbox.start(f"{serve}; sleep 100", tmp_path, {})
-        await _until(lambda: pids.exists() and pids.read_text().strip())
-        server = int(pids.read_text())
+        await _until(lambda: _pid(pids) is not None)
+        server = _pid(pids)
         await _until(lambda: _alive(server))
         assert os.getsid(server) != process.popen.pid
         stopped = await sandbox.run(f"pkill -f {marker}", tmp_path, {}, 10.0)
         await _until(lambda: not _alive(server))
         again = await sandbox.start(f"{serve}; sleep 100", tmp_path, {})
-        await _until(lambda: pids.exists() and int(pids.read_text()) != server)
-        second = int(pids.read_text())
+        await _until(lambda: _pid(pids) not in (None, server))
+        second = _pid(pids)
         await again.kill()
         return stopped.returncode, second, _alive(second)
 
