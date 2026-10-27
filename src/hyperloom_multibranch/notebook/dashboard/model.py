@@ -47,8 +47,9 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     MERGED_GAIN_COMPONENT,
     STALL_BAR_COMPONENT,
     STALLED_COMPONENT,
+    envelope_hold,
 )
-from hyperloom_multibranch.notebook.rsi.playbook import FALLBACK_KEY, PLAYBOOK_KEY, held_by
+from hyperloom_multibranch.notebook.rsi.playbook import FALLBACK_KEY, PLAYBOOK_KEY
 from hyperloom_multibranch.notebook.rsi.stranded import stranded_leads
 
 SCHEMA_VERSION = "multibranch-dashboard-1"
@@ -67,17 +68,20 @@ def _gain(values: Mapping[str, float], baseline: Mapping[str, float], metric: st
 
 def _evidence(row: BranchProgress) -> dict[str, Any] | None:
     """The stall evidence a scored row carries: the judged tests since its last commit that did not fail to merge
-    against the stop bar, the gain its merged commits brought, the trend, and what holds it or makes it a candidate."""
+    against the stop bar, the gain its merged commits brought, the trend, and what holds it, a candidate waiting for
+    its confirm or the safety envelope (:func:`~.frontier.envelope_hold`), or makes it a candidate; ``None`` for a row
+    without it, as in a session that plays no playbook."""
 
-    if row.frontier is None:
+    if row.frontier is None or STALLED_COMPONENT not in row.frontier.components:
         return None
     components = row.frontier.components
+    held = [what for what in ("pending_confirm" if row.pending else "", envelope_hold(components)) if what]
     return {
         "stalled_tests": components.get(STALLED_COMPONENT),
         "stall_bar": components.get(STALL_BAR_COMPONENT),
         "merged_gain_pct": components.get(MERGED_GAIN_COMPONENT),
         "trend_pct": row.frontier.expected_gain_pct,
-        "held_by": list(held_by(row)),
+        "held_by": held,
         "stop_candidate": bool(components.get(CANDIDATE_COMPONENT)),
     }
 

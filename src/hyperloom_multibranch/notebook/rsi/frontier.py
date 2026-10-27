@@ -30,14 +30,15 @@ and the Amdahl ceiling cap it; and it is never negative.
 The formula is a prototype: what the score means is the scheduler's call (gongzheng's), and it stays here until then.
 :func:`score_at` scores a branch as an archived tree has it, so the live scoring and a replay score alike.
 
-Beside every score of a running branch the scoring writes its stall evidence (:func:`stall_evidence`), the facts the
-judge's stop rule turns on: ``stalled_tests``, its tests judged since its last commit that did not fail to merge,
-against the bar ``stall_bar`` (:class:`StopRule`, the stall odds of :mod:`rsi.history` by default);
-``merged_commits`` and ``merged_gain_pct``, what of it reached the integration branch; ``near_bar_tests`` and
-``stranded_lead_pct``, the leads it holds; and ``stop_candidate``, 1 when it has stalled past the bar with none of
-those, no candidate waiting for its confirm and its grace over. A ``probation_share`` of the candidates is drawn,
-once a stall, to run ``probation_tests`` more first, with ``probation`` 1 meanwhile: what such a branch does next is
-how the stop rule learns whether stopping it was right.
+In a session that plays a scheduling playbook the scoring writes, beside every score of a running branch, its stall
+evidence (:func:`stall_evidence`), the facts the judge's stop rule turns on: ``stalled_tests``, its tests judged
+since its last commit that did not fail to merge, against the bar ``stall_bar`` (:class:`StopRule`, the stall odds of
+:mod:`rsi.history` by default); ``merged_commits`` and ``merged_gain_pct``, what of it reached the integration
+branch; ``near_bar_tests`` and ``stranded_lead_pct``, the leads it holds; and ``stop_candidate``, 1 when it has
+stalled past the bar with nothing of the safety envelope holding it (:func:`envelope_hold`), no candidate waiting for
+its confirm and its grace over. A ``probation_share`` of the candidates is drawn, once a stall, to run
+``probation_tests`` more first, with ``probation`` 1 meanwhile: what such a branch does next is how the stop rule
+learns whether stopping it was right.
 
 Given a ``log`` path, the scoring appends one :data:`FRONTIER_LOG_FORMAT` line per round it scored anything: when, on
 the session clock too, the policy's parameters, the scorer, and each scored branch's spend, head value and score.
@@ -52,7 +53,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from hyperloom_multibranch.contracts.notebook import NotRecorded
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
 from hyperloom_multibranch.contracts.notebook.interfaces import ProgressQuery, SnapshotQuery
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import (
@@ -65,7 +66,13 @@ from hyperloom_multibranch.contracts.notebook.records import (
     TestRecord,
     amdahl_ceiling_pct,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, CommitOrigin, FrontierBasis, LineageKind
+from hyperloom_multibranch.contracts.notebook.vocab import (
+    FAILED_MERGES,
+    ClaimStatus,
+    CommitOrigin,
+    FrontierBasis,
+    LineageKind,
+)
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.local.files import encode_json
 from hyperloom_multibranch.notebook.local.unfinished import near_misses
@@ -77,7 +84,7 @@ from hyperloom_multibranch.notebook.rsi.archive import (
     tree_from_snapshot,
 )
 from hyperloom_multibranch.notebook.rsi.history import HORIZON_TESTS, stall_odds
-from hyperloom_multibranch.notebook.rsi.stranded import stranded_leads
+from hyperloom_multibranch.notebook.rsi.stranded import StrandedLead, stranded_leads
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +132,10 @@ PROBATION_SHARE = 0.25
 #: How many judged tests past the bar a branch drawn for probation runs before it is a stop candidate: the horizon
 #: the stall odds read a commit within, so what it does then measures them.
 PROBATION_TESTS = HORIZON_TESTS
+#: What of the safety envelope holds a branch (:func:`envelope_hold`), named as the scheduler names its holds.
+PROBATION_HOLD = "probation"
+NEAR_BAR_HOLD = "near_bar_lead"
+STRANDED_HOLD = "stranded_lead"
 
 
 @dataclass(frozen=True)
@@ -300,11 +311,13 @@ class StopRule:
     """When a running branch is a stop candidate: ``stall_tests`` judged tests past its last commit that did not fail
     to merge, ``None`` for the bar the stall odds set each round (:func:`~.history.stall_odds`, the session's own
     branches counted in); a ``probation_share`` of the candidates, drawn once a stall, runs ``probation_tests`` more
-    before it is one."""
+    before it is one; and none is one before ``grace_tests`` of its explore tests succeeded and were judged, where the
+    new-branch floor and the judge's grace end."""
 
     stall_tests: int | None = None
     probation_share: float = PROBATION_SHARE
     probation_tests: int = PROBATION_TESTS
+    grace_tests: int = SETTLED_TESTS
 
 
 @dataclass(frozen=True)
@@ -351,6 +364,33 @@ def drawn_for_probation(snapshot: NotebookSnapshot, branch: str, anchor: str, sh
     return int(digest, 16) < share * 16 ** len(digest)
 
 
+def envelope_hold(components: Mapping[str, float]) -> str:
+    """What of the safety envelope holds a branch whose stall evidence is ``components``: its probation, else a
+    near-bar lead, else a stranded lead; ``""`` for none. The one reading of the envelope: the stall evidence makes no
+    such branch a stop candidate, and the scheduler refuses its stop, though not a lower K."""
+
+    if components.get(PROBATION_COMPONENT):
+        return PROBATION_HOLD
+    if components.get(NEAR_BAR_COMPONENT, 0.0) > 0:
+        return NEAR_BAR_HOLD
+    if STRANDED_COMPONENT in components:
+        return STRANDED_HOLD
+    return ""
+
+
+def _lead_released(snapshot: NotebookSnapshot, lead: StrandedLead, stalled: int, bar: int) -> bool:
+    """Whether the stranded ``lead`` no longer holds its branch: the branch stalled ``bar`` more tests past the bar,
+    or its head already failed to merge onto the integration head as it stands, which the integrator does not adopt it
+    onto again."""
+
+    if stalled >= 2 * bar:
+        return True
+    integration = next((row.head_commit for row in snapshot.progress if row.branch == INTEGRATION_BRANCH), "")
+    head = next((item for item in snapshot.committed if item.commit_id == lead.head_commit), None)
+    last = head.last_merge if head is not None else None
+    return last is not None and last.integration_head == integration and last.outcome in FAILED_MERGES
+
+
 def stall_evidence(
     snapshot: NotebookSnapshot, row: BranchProgress, metric: str, stall: StallBar, young: bool
 ) -> dict[str, float]:
@@ -359,8 +399,9 @@ def stall_evidence(
     The stall counts the tests judged since the branch's last commit that did not fail to merge, or since it opened.
     A branch holds a near-bar lead when one of its last ``stall.bar`` judged tests is a near miss
     (:func:`~hyperloom_multibranch.notebook.local.unfinished.near_misses`), and a stranded one when its head leads
-    integration over the bar on commits that did not merge (:func:`~.stranded.stranded_leads`). A branch with either,
-    a candidate waiting for its confirm, or its grace, is no stop candidate however long it stalled.
+    integration over the bar on commits that did not merge (:func:`~.stranded.stranded_leads`), until the lead is
+    released (:func:`_lead_released`). A branch the envelope holds so (:func:`envelope_hold`), one with a candidate
+    waiting for its confirm, or one in its grace, is no stop candidate however long it stalled.
     """
 
     anchor, since = _last_mergeable_commit(snapshot, row.branch)
@@ -368,7 +409,7 @@ def stall_evidence(
     recent = judged[-stall.bar :] if stall.bar > 0 else []
     near = near_misses(recent)
     merged = [item for item in snapshot.committed if item.branch == row.branch and item.merged_into is not None]
-    stranded = next((lead.lead_pct for lead in stranded_leads(snapshot, metric) if lead.branch == row.branch), None)
+    lead = next((lead for lead in stranded_leads(snapshot, metric) if lead.branch == row.branch), None)
     evidence = {
         STALLED_COMPONENT: float(len(judged)),
         STALL_BAR_COMPONENT: float(stall.bar),
@@ -376,9 +417,9 @@ def stall_evidence(
         MERGED_GAIN_COMPONENT: sum(item.gain_pct for item in merged),
         NEAR_BAR_COMPONENT: float(near),
     }
-    if stranded is not None:
-        evidence[STRANDED_COMPONENT] = stranded
-    held = young or bool(row.pending) or near > 0 or stranded is not None
+    if lead is not None and not _lead_released(snapshot, lead, len(judged), stall.bar):
+        evidence[STRANDED_COMPONENT] = lead.lead_pct
+    held = young or bool(row.pending) or bool(envelope_hold(evidence))
     stalled = len(judged) >= stall.bar
     probation = (
         not held
@@ -392,12 +433,10 @@ def stall_evidence(
     return evidence
 
 
-def probation_event(
-    snapshot: NotebookSnapshot, row: BranchProgress, rule: StopRule | None = None
-) -> LineageEvent | None:
+def probation_event(snapshot: NotebookSnapshot, row: BranchProgress, rule: StopRule) -> LineageEvent | None:
     """The ``PROBATION`` event the scheduler records while ``row``'s stall evidence holds it on probation under
-    ``rule``, :class:`StopRule`'s defaults without one; ``None`` otherwise. It is the same event every round of the
-    stall, and the notebook records one a stall."""
+    ``rule``, the one the scoring read; ``None`` otherwise. It is the same event every round of the stall, and the
+    notebook records one a stall."""
 
     if row.frontier is None or not row.frontier.components.get(PROBATION_COMPONENT):
         return None
@@ -407,7 +446,7 @@ def probation_event(
         row.branch,
         commit_id=anchor,
         reason=f"stalled past the stop bar since {anchor or 'it opened'}, drawn for probation",
-        tests=(rule or StopRule()).probation_tests,
+        tests=rule.probation_tests,
     )
 
 
@@ -469,17 +508,22 @@ def _repairing_pct(snapshot: NotebookSnapshot, row: BranchProgress, metric: str)
 def score_progress(
     snapshot: NotebookSnapshot, history: tuple[SearchTree, ...], policy: FrontierPolicy, rule: StopRule | None = None
 ) -> tuple[BranchProgress, ...]:
-    """The notebook's progress, each running branch the judge steers scored, with its stall evidence under ``rule``
-    (:class:`StopRule`'s defaults without one); unscored without a profile or a baseline."""
+    """The notebook's progress, each running branch the judge steers scored; with a ``rule``, the stop rule of the
+    playbook the session plays, its stall evidence beside its score and its floor ending at the rule's grace, and
+    without one, as a session that plays no playbook, no stall evidence. Unscored without a profile or a baseline."""
 
     try:
         tree = tree_from_snapshot(snapshot, policy.metric)
     except (NotRecorded, ValueError):
         return snapshot.progress
     paced_policy = paced(policy, tree.longest_root_test_seconds)
-    stop = rule or StopRule()
-    bar = stop.stall_tests if stop.stall_tests is not None else stall_odds(history, tree.task, session=tree).stall_tests
-    stall = StallBar(stop, bar)
+    stall = None
+    if rule is not None:
+        paced_policy = replace(paced_policy, settled_tests=rule.grace_tests)
+        bar = rule.stall_tests
+        if bar is None:
+            bar = stall_odds(history, tree.task, session=tree).stall_tests
+        stall = StallBar(rule, bar)
     steered = {branch.name for branch in tree.branches if branch.steered}
     return tuple(
         replace(row, frontier=score_branch(snapshot, row, tree, paced_policy, stall))
@@ -524,17 +568,18 @@ def frontier_log_line(
 class FrontierScoring(ProgressQuery):
     """The notebook's progress with frontier scores, against the archived ``history``; ``log`` keeps every round.
     ``stop_rule`` gives the stop rule each round's stall evidence reads: the playbook's the session plays, which a
-    fallback changes."""
+    fallback changes; ``None`` for a session that plays none, whose rows carry no stall evidence."""
 
     notebook: SnapshotQuery
     policy: FrontierPolicy
     history: tuple[SearchTree, ...] = ()
     log: Path | None = None
-    stop_rule: Callable[[], StopRule] = StopRule
+    stop_rule: Callable[[], StopRule] | None = None
 
     async def progress(self) -> tuple[BranchProgress, ...]:
         snapshot = await self.notebook.snapshot()
-        rows = score_progress(snapshot, self.history, self.policy, self.stop_rule())
+        rule = self.stop_rule() if self.stop_rule is not None else None
+        rows = score_progress(snapshot, self.history, self.policy, rule)
         if self.log is not None:
             policy = paced(self.policy, longest_root_test_seconds(snapshot))
             line = frontier_log_line(snapshot, rows, policy)
@@ -566,11 +611,13 @@ __all__ = [
     "MERGED_COMPONENT",
     "MERGED_GAIN_COMPONENT",
     "NEAR_BAR_COMPONENT",
+    "NEAR_BAR_HOLD",
     "NEW_BRANCH_FLOOR_PCT",
     "OBSERVATION_FLOOR_PCT",
     "OBSERVATION_SECONDS",
     "PENDING_COMPONENT",
     "PROBATION_COMPONENT",
+    "PROBATION_HOLD",
     "PROBATION_SHARE",
     "PROBATION_TESTS",
     "REFERENCE_BUDGET_SECONDS",
@@ -579,6 +626,7 @@ __all__ = [
     "STALLED_COMPONENT",
     "STALL_BAR_COMPONENT",
     "STRANDED_COMPONENT",
+    "STRANDED_HOLD",
     "WINDOW_SECONDS",
     "WINDOW_TESTS",
     "Estimate",
@@ -588,6 +636,7 @@ __all__ = [
     "StallBar",
     "StopRule",
     "drawn_for_probation",
+    "envelope_hold",
     "enveloped",
     "frontier_log_line",
     "headroom_pct",

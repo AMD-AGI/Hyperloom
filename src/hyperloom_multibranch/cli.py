@@ -23,7 +23,9 @@ unless that session committed its root on the same workload and on the image ``H
 ``--playbook`` says which scheduling playbook the session plays once ``HYPERLOOM_RSI_ARCHIVE`` names an archive:
 ``champion`` (the default), or ``challenger``, which plays the oldest playbook on trial in the pool beside it and the
 champion while none is; the manifest fingerprint and the session's manifest record the label under ``playbook`` in
-``policy_versions``.
+``policy_versions``, and a challenger's fallback to the champion under ``playbook_fallback``. Without an archive, or
+under ``HYPERLOOM_RSI_WRITE_ONLY=1``, the session plays none and is judged as before the RSI: no stall evidence, safety
+envelope or probation.
 Each ``--autonomous-agent SOURCE`` opens one branch where EXPLORE starts, after the user's directions and within
 ``--max-branches``, whose specialist runs that third-party agent end to end in a sandbox of its own; a source that
 carries credentials in its URL is a usage error. Each ``--specialist-prompt`` file holds a direction the user wrote

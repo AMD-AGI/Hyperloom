@@ -55,7 +55,6 @@ from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
 from hyperloom_multibranch.contracts.notebook.records import (
-    LineageEvent,
     LlmUsage,
     NotebookSnapshot,
     PendingCandidate,
@@ -82,14 +81,10 @@ from hyperloom_multibranch.notebook.rsi.playbook import (
     FALLBACK_KEY,
     H0,
     PLAYBOOK_KEY,
-    Playbook,
-    PlaybookPool,
-    replaced,
 )
 from hyperloom_multibranch.notebook.rsi.authoring import NO_ARCHIVE
 from hyperloom_multibranch.notebook.rsi.frontier import (
     FRONTIER_V1_LABEL,
-    PROBATION_TESTS,
     SETTLED_TESTS,
     FrontierPolicy,
 )
@@ -114,13 +109,12 @@ from hyperloom_multibranch.scheduling.budget import (
     SessionBudget,
     explore_gpu_seconds,
 )
-from hyperloom_multibranch.scheduling import branches, explore
+from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE
 from hyperloom_multibranch.scheduling.explore import (
     EXPLORE_TICK_SECONDS,
     FORK_NOT_LANDED,
     OPEN_CUT_REASON,
-    PLAYBOOK_FALLBACK_REASON,
 )
 from hyperloom_multibranch.scheduling.exports import IMAGE_CHECK_FILE
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL, PRIMARY_POINT_ONLY
@@ -149,7 +143,6 @@ from hyperloom_multibranch.scheduling.reference import ReferenceSource
 from hyperloom_multibranch.scheduling.settings import (
     InferenceXShape,
     KernelOptimizer,
-    PlaybookMode,
     RunSettings,
     Workload,
 )
@@ -162,6 +155,7 @@ from hyperloom_multibranch.scheduling.stops import (
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     MAIN_POINT,
     VIRTUAL_POLL_SECONDS,
+    Curves,
     FakeRegressionCheck,
     HeldGitRepo,
     MbFakeHeldRegistry,
@@ -293,10 +287,11 @@ def no_branch_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(judge, "SETTLED_TESTS", 0)
 
 
-def _measured(repo: Path) -> Callable[[TestRequest], float]:
-    """What a test measures: :data:`EXPLORED` for the specialists' tests and retests, :data:`CURVES` otherwise."""
+def _measured(repo: Path, explored_curves: Curves, measured_curves: Curves) -> Callable[[TestRequest], float]:
+    """What a test measures: ``explored_curves`` for the specialists' tests and retests, ``measured_curves``
+    otherwise."""
 
-    explored, measured = recipe_effect(repo, EXPLORED), recipe_effect(repo, CURVES)
+    explored, measured = recipe_effect(repo, explored_curves), recipe_effect(repo, measured_curves)
 
     def effect(request: TestRequest) -> float:
         return (explored if request.purpose in (Purpose.EXPLORE, Purpose.CONFIRM) else measured)(request)
@@ -343,7 +338,8 @@ class SilentModel(ScriptedCompletion):
 @dataclass
 class Stage:
     """One session on the specialist runtime: ``scripts`` and ``steps`` are what each branch's specialist does,
-    the runtime refuses to stop a branch in ``refusing`` and a run of a branch in ``hanging`` never confirms its stop."""
+    ``explored`` what its tests and retests measure and ``measured`` what every other test does, the runtime refuses
+    to stop a branch in ``refusing`` and a run of a branch in ``hanging`` never confirms its stop."""
 
     layout: SessionLayout
     time: VirtualClock
@@ -351,6 +347,8 @@ class Stage:
     judge: ScriptedCompletion
     pids: list[int]
     scripts: Mapping[str, Sequence[RecipeDelta]] = field(default_factory=dict)
+    explored: Curves = field(default_factory=lambda: EXPLORED)
+    measured: Curves = field(default_factory=lambda: CURVES)
     steps: Mapping[str, SessionStep] = field(default_factory=dict)
     refusing: frozenset[str] = frozenset()
     hanging: frozenset[str] = frozenset()
@@ -382,7 +380,7 @@ class Stage:
         repo = self.repo_type(setup.layout.repo, setup.blobs, self.time)
         toolbox = self.toolbox_type(
             self.handle(Role.TOOLBOX),
-            _measured(setup.layout.repo),
+            _measured(setup.layout.repo, self.explored, self.measured),
             conc=CONC,
             log=setup.layout.toolbox / SUBMISSIONS,
             repo=repo,
@@ -785,46 +783,6 @@ async def test_a_session_with_an_rsi_archive_plays_the_champion_playbook_and_clo
     prompts = _judge_prompts(stage)
     assert prompts and all("Scheduling playbook h0:" in prompt for prompt in prompts)
     assert len(decision_calls(TreeArchive(archive), stage.layout.session_id)) == len(prompts)
-
-
-async def test_a_challenger_session_that_breaks_the_safety_envelope_plays_the_champion_from_then_on(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "rsi"))
-    patient = Playbook("patient", replaced(H0, stall_tests=8).numbers, parent=H0.label, hypothesis="later stops")
-    PlaybookPool.beside(TreeArchive(tmp_path / "rsi")).register(patient)
-    breach = "stop of b02, held by its probation"
-    monkeypatch.setattr(explore, "envelope_breaches", lambda rows, stops: (breach,) if "b02" in stops else ())
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    stage.settings = replace(stage.settings, playbook=PlaybookMode.CHALLENGER)
-    _script(stage)
-
-    outcome = await stage.run()
-
-    assert outcome.exit_code == 0
-    first, fell_back = await stage.handle(Role.OBSERVER).manifest_fingerprints()
-    assert first.policy_versions[PLAYBOOK_KEY] == patient.label and FALLBACK_KEY not in first.policy_versions
-    assert (fell_back.policy_versions[PLAYBOOK_KEY], fell_back.policy_versions[FALLBACK_KEY]) == (patient.label, breach)
-    [event] = [row for row in _decisions(stage) if row["reason"] == PLAYBOOK_FALLBACK_REASON]
-    assert event["detail"] == {"breach": breach, "playing": H0.label}
-    prompts = _judge_prompts(stage)
-    assert "Scheduling playbook patient, on trial in this session:" in prompts[0]
-    assert "Scheduling playbook h0:" in prompts[-1]
-
-
-async def test_a_branch_the_stall_evidence_draws_for_probation_is_recorded_on_probation_once_a_stall(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    drawn = LineageEvent(LineageKind.PROBATION, "b01", reason="drawn for probation", tests=PROBATION_TESTS)
-    monkeypatch.setattr(explore, "probation_event", lambda snapshot, row, rule: drawn if row.branch == "b01" else None)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    _script(stage)
-
-    outcome = await stage.run()
-
-    assert outcome.exit_code == 0
-    [b01] = [item for item in (await stage.handle(Role.OBSERVER).lineage()).branches if item.branch == "b01"]
-    assert [(item.tests, item.since_commit) for item in b01.probations] == [(PROBATION_TESTS, "")]
 
 
 async def test_the_manifest_names_the_lesson_pool_as_the_specialists_recall_read_it(tmp_path: Path) -> None:

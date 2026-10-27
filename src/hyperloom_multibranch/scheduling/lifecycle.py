@@ -51,8 +51,8 @@ from hyperloom_multibranch.notebook.knowledge.reference_leads import (
     ReferenceLead,
     reference_leads,
 )
-from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS, FrontierPolicy, FrontierScoring, StopRule
-from hyperloom_multibranch.notebook.rsi.playbook import PlaybookPlay, PlaybookPool, session_playbook
+from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS, FrontierPolicy, FrontierScoring
+from hyperloom_multibranch.notebook.rsi.playbook import PlaybookChoice, PlaybookPlay, PlaybookPool, session_playbook
 from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG, archived_history
 from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.branches import BranchControl
@@ -68,7 +68,7 @@ from hyperloom_multibranch.scheduling.exports import CloseAuthoring, ExportServi
 from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, choose_candidates
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import Integrator, LlmPatchResolver, MergeRecords
-from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, Judge
+from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, PLAYBOOK_JUDGE_PROMPT_VERSION, Judge
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.contracts.llm import Completion
 from hyperloom_multibranch.scheduling.llm import recorded
@@ -110,10 +110,13 @@ SCHEDULER_WRITER = "scheduler"
 INTEGRATOR_WRITER = "integrator"
 POLICY_VERSIONS = {
     "quota": QUOTA_POLICY_VERSION,
-    "judge_prompt": JUDGE_PROMPT_VERSION,
     "scheduling": policy_version(SCHEDULING_POLICY),
 }
-#: The ``policy_versions`` key of the grace, :data:`SETTLED_TESTS`: two sessions' stops compare only within one grace.
+#: The ``policy_versions`` key of the judge prompt's version: :data:`PLAYBOOK_JUDGE_PROMPT_VERSION` in a session that
+#: plays a scheduling playbook, :data:`JUDGE_PROMPT_VERSION` in one that plays none.
+JUDGE_PROMPT_KEY = "judge_prompt"
+#: The ``policy_versions`` key of the grace, the playbook's ``grace_tests`` or :data:`SETTLED_TESTS` without one: two
+#: sessions' stops compare only within one grace.
 GRACE_KEY = "grace"
 #: The ``policy_versions`` key of the RSI lesson pool's digest as the specialists' recall read it, empty for no pool:
 #: two sessions of one build that were shown different past lessons differ here.
@@ -282,7 +285,7 @@ class Session:
 
         judge = recorded(services.judge_completion, self._notebook, UsageSource.JUDGE)
         self._judge = Judge(judge, self._layout.judge, self._clock)
-        author = recorded(services.author_completion, self._notebook, UsageSource.SCORER)
+        author = recorded(services.author_completion, self._notebook, UsageSource.AUTHOR)
         self._author = CloseAuthoring(author, services.author_model)
         curator = recorded(services.author_completion, self._notebook, UsageSource.CURATOR)
         self._curator = CloseAuthoring(curator, services.author_model)
@@ -406,7 +409,7 @@ class Session:
         except PreludeFailed as exc:
             return SessionOutcome(SessionStopReason.PRELUDE_FAILED, None, None, str(exc))
         start_commit = await self._replay_champion(prelude)
-        self._adopt_playbook()
+        await self._adopt_playbook()
         manifest = read_manifest(self._layout.manifest)
         replace(manifest, policy_versions=self._policy_versions()).write(self._layout.manifest)
         sockets = await asyncio.to_thread(socket_versions)
@@ -470,31 +473,33 @@ class Session:
         self._decisions.record(Decision(DecisionKind.FINAL, final.reason, detail={"chosen": encode(final.chosen)}))
         return SessionOutcome(reason, final, None, "")
 
-    def _adopt_playbook(self) -> None:
-        """Play the scheduling playbook ``--playbook`` asks for from the pool beside the RSI archive, and record it as a
-        scheduler decision: the champion, or in a challenger session the oldest playbook on trial. Without an archive
-        the session plays none, and is judged as one without the RSI."""
+    async def _adopt_playbook(self) -> None:
+        """Play the scheduling playbook ``--playbook`` asks for from the pool beside the RSI archive, read off the event
+        loop, and record it as a scheduler decision: the champion, or in a challenger session the oldest playbook on
+        trial. Without an archive, or under ``HYPERLOOM_RSI_WRITE_ONLY=1``, the session plays none, and runs and is
+        judged as one without the RSI."""
 
-        pool = PlaybookPool.from_env()
-        if pool is None:
+        challenger = self._settings.playbook is PlaybookMode.CHALLENGER
+        choice = await asyncio.to_thread(_pooled_choice, challenger)
+        if choice is None:
             return
-        self._play = PlaybookPlay(session_playbook(pool, challenger=self._settings.playbook is PlaybookMode.CHALLENGER))
-        choice = self._play.choice
+        self._play = PlaybookPlay(choice)
         detail = {"playbook": choice.playbook.label, "champion": choice.champion.label, "challenger": choice.challenger}
         self._decisions.record(Decision(DecisionKind.PRELUDE, "scheduling playbook", detail=detail))
 
     def _policy_versions(self) -> dict[str, str]:
-        learnings = self._briefs.learnings
+        learnings, play = self._briefs.learnings, self._play
         return {
             **POLICY_VERSIONS,
-            GRACE_KEY: str(SETTLED_TESTS),
+            JUDGE_PROMPT_KEY: PLAYBOOK_JUDGE_PROMPT_VERSION if play is not None else JUDGE_PROMPT_VERSION,
+            GRACE_KEY: str(play.choice.playbook.numbers.grace_tests if play is not None else SETTLED_TESTS),
             LESSONS_KEY: learnings.past_revision() if learnings is not None else "",
-            **(self._play.versions() if self._play is not None else {}),
+            **(play.versions() if play is not None else {}),
         }
 
     def _scoring(self) -> FrontierScoring:
         log = self._layout.reports / FRONTIER_LOG
-        rule = self._play.stop_rule if self._play is not None else StopRule
+        rule = self._play.stop_rule if self._play is not None else None
         return FrontierScoring(self._notebook, self._policy, self._history, log, rule)
 
     def _dashboard(self, scoring: FrontierScoring) -> SessionDashboard:
@@ -513,6 +518,7 @@ class Session:
             self._lifecycle,
             self._toolbox,
             self._play,
+            self._layout.manifest,
         )
         return Explorer(self._context, self._branches, self._integrator, steering)
 
@@ -630,6 +636,13 @@ class Session:
         ).write(self._layout.manifest)
 
 
+def _pooled_choice(challenger: bool) -> PlaybookChoice | None:
+    """What a session plays from the pool beside the RSI archive the environment names; ``None`` without one."""
+
+    pool = PlaybookPool.from_env()
+    return session_playbook(pool, challenger=challenger) if pool is not None else None
+
+
 @dataclass(frozen=True)
 class PersistedRun:
     """A session directory that ended without FINAL, as :meth:`Session.finish` takes it again; ``ended`` is the stop
@@ -667,6 +680,7 @@ def persisted_run(root: Path) -> PersistedRun:
 __all__ = [
     "COMPLETED_REASONS",
     "GRACE_KEY",
+    "JUDGE_PROMPT_KEY",
     "LESSONS_KEY",
     "NO_CARDS_LEFT",
     "PersistedRun",

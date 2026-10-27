@@ -44,13 +44,14 @@ import logging
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle, SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, ConflictingWrite
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, NotebookSnapshot, priced_usd
 from hyperloom_multibranch.contracts.toolbox import Toolbox
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierScoring, probation_event
-from hyperloom_multibranch.notebook.rsi.playbook import PlaybookPlay, envelope_breaches
+from hyperloom_multibranch.notebook.rsi.playbook import PlaybookPlay
 from hyperloom_multibranch.notebook.rsi.session import judge_history, judge_open_areas
 from hyperloom_multibranch.notebook.rsi.stranded import stranded_leads
 from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR
@@ -62,7 +63,9 @@ from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.events import SessionEvents, behind_integration_pct
 from hyperloom_multibranch.scheduling.integrator import Integrator
 from hyperloom_multibranch.scheduling.judge import (
+    ENVELOPE_HOLDS,
     HoldReason,
+    HoldRules,
     Judge,
     JudgeDecision,
     JudgeView,
@@ -71,6 +74,7 @@ from hyperloom_multibranch.scheduling.judge import (
     hold_decision,
     queued_intents,
 )
+from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
     BranchKind,
@@ -91,6 +95,7 @@ EXPLORE_TICK_SECONDS = 5.0
 OPEN_CUT_REASON = "branch slots taken"
 FORK_NOT_LANDED = "the rule gate did not land the fork"
 PLAYBOOK_FALLBACK_REASON = "the challenger playbook broke the safety envelope; the champion plays from now on"
+PLAYBOOK_OPEN_CUT_REASON = "the playbook opens no more branches now"
 
 
 def gave_up_reason(status: SpecialistStatus) -> str:
@@ -139,7 +144,8 @@ class Steering:
     later judge call, the signals of whether a branch opened now would still pay off, which running branches made
     much the same change, the events that have the judge asked at once, the specialist lifecycle, which reports
     each running branch's specialist, the toolbox the native builds each branch's tests wait for are read from, and
-    the scheduling playbook the session plays, ``None`` for a session that reads no archive."""
+    the scheduling playbook the session plays, ``None`` for a session that plays none, with the session's manifest a
+    fallback from it is recorded in."""
 
     judge: Judge
     interval_seconds: float
@@ -151,6 +157,7 @@ class Steering:
     specialists: SpecialistLifecycle
     toolbox: Toolbox
     play: PlaybookPlay | None = None
+    manifest: Path | None = None
 
 
 def spent_gpu_seconds(progress: Iterable[BranchProgress]) -> float:
@@ -194,7 +201,9 @@ class Explorer:
         self._specialists = steering.specialists
         self._toolbox = steering.toolbox
         self._play = steering.play
+        self._manifest = steering.manifest
         self._scored: tuple[BranchProgress, ...] = ()
+        self._too_late = False
 
     async def run(self, window: ExploreWindow) -> SessionStopReason:
         """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns.
@@ -366,8 +375,8 @@ class Explorer:
         return decision
 
     def _with_playbook(self, view: JudgeView, snapshot: NotebookSnapshot, window: ExploreWindow) -> JudgeView:
-        """``view`` with the playbook the session plays and where a new branch could open under it; as it is for a
-        session that plays none."""
+        """``view`` with the playbook the session plays and where a new branch could open under it, kept for the
+        round's opens; as it is for a session that plays none."""
 
         if self._play is None:
             return view
@@ -375,7 +384,8 @@ class Explorer:
         areas = judge_open_areas(
             snapshot, self._progress.history, self._metric, budget_seconds=budget, playbook=playbook
         )
-        return replace(view, open_areas=areas, playbook=self._play.render())
+        self._too_late = areas.too_late
+        return replace(view, open_areas=areas.render(), playbook=self._play.render())
 
     async def _specialist_states(self) -> dict[str, SpecialistStatus]:
         """What the specialist lifecycle reports of the specialist of every live specialist branch; a branch it does
@@ -390,22 +400,27 @@ class Explorer:
         return states
 
     async def _held(
-        self, specialists: Mapping[str, SpecialistStatus], scored: Iterable[BranchProgress] = ()
+        self, specialists: Mapping[str, SpecialistStatus], scored: Iterable[BranchProgress]
     ) -> dict[str, HoldReason]:
-        """The held branches (:func:`held_branches`), with those the safety envelope keeps, read off the frontier
-        ``scored`` rows of the round, where a hold of their own does not come first."""
+        """The held branches (:func:`held_branches`), under the grace of the playbook the session plays, with those its
+        safety envelope keeps, read off the frontier ``scored`` rows of the round, where a hold of their own does not
+        come first. A session that plays no playbook has the grace it always had and no envelope."""
 
         snapshot = await self._notebook.snapshot()
-        held = held_branches(
-            self._roster.entries(), snapshot.progress, snapshot.records, specialists, self._clock.now()
-        )
-        return {**envelope_holds(scored, specialists), **held}
+        grace = self._play.playbook.numbers.grace_tests if self._play is not None else None
+        rules = HoldRules(self._clock.now(), grace)
+        held = held_branches(self._roster.entries(), snapshot.progress, snapshot.records, specialists, rules)
+        envelope = envelope_holds(scored, specialists) if self._play is not None else {}
+        return {**envelope, **held}
 
     async def _record_probations(self, snapshot: NotebookSnapshot, scored: Iterable[BranchProgress]) -> None:
-        """Record each branch the round's stall evidence holds on probation, the notebook keeping one a stall; a branch
-        stopped since the round was scored is passed over."""
+        """Record each branch the round's stall evidence holds on probation under the stop rule the scoring read, the
+        notebook keeping one a stall; nothing in a session that plays no playbook, whose rows carry no stall
+        evidence."""
 
-        rule = self._play.stop_rule() if self._play is not None else None
+        if self._progress.stop_rule is None:
+            return
+        rule = self._progress.stop_rule()
         for row in scored:
             event = probation_event(snapshot, row, rule)
             if event is not None:
@@ -421,7 +436,7 @@ class Explorer:
         given_up = [(branch, state) for branch, state in states.items() if state.gave_up]
         if not given_up:
             return False
-        held = await self._held(states)
+        held = await self._held(states, self._scored)
         stopped = False
         for branch, state in given_up:
             if held.get(branch) is not HoldReason.PENDING_CONFIRM:
@@ -436,8 +451,12 @@ class Explorer:
         candidate that started waiting for its confirm while the judge answered holds its branch as well."""
 
         held = await self._held(await self._specialist_states(), self._scored)
-        breaches = envelope_breaches(self._scored, {order.branch for order in decision.stop})
         decision = hold_decision(decision, held, self._roster.entries())
+        breaches = [
+            f"stop of {item.branch} refused for {item.reason.value}"
+            for item in decision.held
+            if item.reason in ENVELOPE_HOLDS
+        ]
         if self._play is not None and self._play.fall_back(breaches):
             await self._fell_back(self._play)
         self._decisions.record(
@@ -461,12 +480,34 @@ class Explorer:
             return True
         self._desk.fill_free_slots()
         focus = await self._focus(decision, start) if start.origin is BranchOrigin.REFILL else ()
-        await self._open_batch(decision.open_count, decision.open_k, start, focus)
+        await self._open_batch(self._playbook_room(decision.open_count, start), decision.open_k, start, focus)
         return False
+
+    def _playbook_room(self, count: int, start: BatchStart) -> int:
+        """How many of the ``count`` branches the judge asks for the playbook the session plays lets open, a cut
+        recorded: no more specialist branches running at once than its ``max_open``, and no refill once the round's
+        open areas found too little time left for a new branch's first commit. The forks and repairs the rule gate asks
+        for are not the judge's opens."""
+
+        if self._play is None or count <= 0:
+            return count
+        cap = self._play.playbook.numbers.max_open
+        room = count
+        if cap is not None:
+            entries = self._roster.entries()
+            running = sum(1 for entry in entries if entry.kind is BranchKind.SPECIALIST and entry.stop is None)
+            room = min(room, max(0, cap - running))
+        if start.origin is BranchOrigin.REFILL and self._too_late:
+            room = 0
+        if room < count:
+            detail = {"requested": count, "opened": room, "max_open": cap, "too_late": self._too_late}
+            self._decisions.record(Decision(DecisionKind.OPEN, PLAYBOOK_OPEN_CUT_REASON, detail=detail))
+        return room
 
     async def _fell_back(self, play: PlaybookPlay) -> None:
         """Record that the challenger playbook broke the safety envelope and the champion plays from now on: in the
-        decisions, and in a manifest fingerprint, which CLOSE reads the session's trial from."""
+        decisions, in a manifest fingerprint, which CLOSE reads the session's trial from, and in the session's
+        manifest."""
 
         detail = {"breach": play.breach, "playing": play.playbook.label}
         self._decisions.record(Decision(DecisionKind.EVENT, PLAYBOOK_FALLBACK_REASON, detail=detail))
@@ -475,6 +516,8 @@ class Explorer:
             latest = fingerprints[-1]
             versions = {**latest.policy_versions, **play.versions()}
             await self._notebook.write_manifest_fingerprint(replace(latest, policy_versions=versions))
+        if self._manifest is not None:
+            await asyncio.to_thread(_record_versions, self._manifest, play.versions())
 
     async def _focus(self, decision: JudgeDecision, start: BatchStart) -> tuple[str, ...]:
         shares = await self._notebook.op_shares(start.start_commit)
@@ -508,10 +551,17 @@ def _hours_or_none(seconds: float) -> float | None:
     return None if seconds == math.inf else seconds / MB_SECONDS_PER_HOUR
 
 
+def _record_versions(path: Path, versions: Mapping[str, str]) -> None:
+    manifest = read_manifest(path)
+    replace(manifest, policy_versions={**manifest.policy_versions, **versions}).write(path)
+
+
 __all__ = [
     "EXPLORE_TICK_SECONDS",
     "FORK_NOT_LANDED",
     "OPEN_CUT_REASON",
+    "PLAYBOOK_FALLBACK_REASON",
+    "PLAYBOOK_OPEN_CUT_REASON",
     "ExploreWindow",
     "Explorer",
     "Steering",

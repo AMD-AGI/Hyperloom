@@ -233,8 +233,8 @@ class SearchTree:
     ``roofline_ceiling_pct`` is the roofline bound PRELUDE recorded for the gain metric, as a gain over the baseline;
     ``None`` when it recorded none, or the tree is older. ``longest_root_test_seconds`` is the longest of the root tests
     the baseline anchored on, start to finish, which paces the frontier's window; ``None`` likewise. ``started_at`` is
-    when the session started, in seconds since the epoch, which tells the frontier scorers registered before it, for
-    which it is evidence, from the ones it could have been fitted to; ``None`` likewise.
+    when the session started, in seconds since the epoch, which tells the playbooks registered before it, for which it
+    is evidence, from the ones it could have been fitted to; ``None`` likewise.
     """
 
     session_id: str

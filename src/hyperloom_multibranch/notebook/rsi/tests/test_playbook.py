@@ -5,19 +5,13 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress, FrontierScore, PendingCandidate
 from hyperloom_multibranch.notebook.rsi.archive import TreeArchive
-from hyperloom_multibranch.notebook.rsi.frontier import (
-    NEAR_BAR_COMPONENT,
-    PROBATION_COMPONENT,
-    STALLED_COMPONENT,
-    STRANDED_COMPONENT,
-    StopRule,
-)
+from hyperloom_multibranch.notebook.rsi.frontier import StopRule
 from hyperloom_multibranch.notebook.rsi.playbook import (
     FALLBACK_KEY,
     H0,
@@ -35,7 +29,6 @@ from hyperloom_multibranch.notebook.rsi.playbook import (
     PlaybookRule,
     Retired,
     changes,
-    envelope_breaches,
     playbook_label,
     problems,
     replaced,
@@ -58,11 +51,15 @@ def test_h0_is_the_evidence_rules_with_every_number_at_its_default() -> None:
 
 def test_the_numbers_and_rules_set_the_stop_rule_and_the_judges_text() -> None:
     ruled = Playbook("ruled", LATER_STOP.numbers, (ALIKE,), parent=H0.label)
+    capped = replaced(H0, grace_tests=7, max_open=3, last_open_minutes=20)
 
     assert ruled.stop_rule() == StopRule(stall_tests=8)
     assert "stalled 8 judged tests past its last commit" in ruled.render()
     assert f"- rule (stop): {ALIKE.text}" in ruled.render()
     assert ruled.render(challenger=True).startswith("Scheduling playbook ruled, on trial in this session:")
+    assert capped.stop_rule() == StopRule(grace_tests=7)
+    assert "at most 3 branches at once; after the opening batch, none in the last 20 min" in capped.render()
+    assert "The scheduler cuts an open past either." in capped.render()
 
 
 def test_a_challenger_session_plays_the_champion_from_its_first_breach_on_and_records_it() -> None:
@@ -156,25 +153,12 @@ def test_a_session_plays_the_champion_or_in_a_challenger_session_the_oldest_play
     assert [item.evidence for item in pool.retired()] == ["behind the champion"]
 
 
-def _row(name: str, *, waiting: bool = False, **evidence: float) -> BranchProgress:
-    pending = (PendingCandidate(f"{name}-x", f"{name}-confirm", "c1", "output_tps", 1050.0, 5.0),) if waiting else ()
-    return BranchProgress(name, True, "c0", "c1", 6, 1, 0.0, {}, FrontierScore(0.0, evidence), pending=pending)
+def test_a_playbook_file_with_numbers_no_code_applies_any_more_still_reads(tmp_path: Path) -> None:
+    pool = PlaybookPool(tmp_path)
+    pool.register(LONGER)
+    stored = pool.root / f"{LONGER.label}.json"
+    document = json.loads(stored.read_text())
+    document["record"]["numbers"] |= {"base_k": 2, "producing_k": 1, "restall_bars": 3.0}
+    stored.write_text(json.dumps(document))
 
-
-def test_the_envelope_forbids_the_stops_of_branches_their_stall_evidence_holds() -> None:
-    rows = (
-        _row("b1", **{STALLED_COMPONENT: 9.0, NEAR_BAR_COMPONENT: 0.0}),
-        _row("b2", waiting=True),
-        _row("b3", **{NEAR_BAR_COMPONENT: 1.0, STRANDED_COMPONENT: 4.2}),
-        _row("b4", **{PROBATION_COMPONENT: 1.0}),
-        _row("b5", **{PROBATION_COMPONENT: 1.0}),
-    )
-
-    found = envelope_breaches(rows, {"b1", "b2", "b3", "b4"})
-
-    assert found == (
-        "stop of b2, held by a candidate waiting for its confirm",
-        "stop of b3, held by a near-bar lead and a stranded lead",
-        "stop of b4, held by its probation",
-    )
-    assert envelope_breaches(rows, ()) == ()
+    assert PlaybookPool(tmp_path).playbooks() == (LONGER,)

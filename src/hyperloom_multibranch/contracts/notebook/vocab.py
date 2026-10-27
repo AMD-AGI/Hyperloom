@@ -153,14 +153,14 @@ class BuildOutcome(str, Enum):
 
 class UsageSource(str, Enum):
     """Whose LLM spent the money: a branch's specialist, or the scheduler's judge, resolver, the rule gate's fix
-    critic, the LLM that proposes a change to the scheduling playbook at CLOSE, recorded as ``scorer`` in every
-    notebook, or the one that curates the RSI lesson pool there."""
+    critic, the LLM that authors a change to the scheduling playbook at CLOSE, or the one that curates the RSI lesson
+    pool there. The author's spend is stored as ``scorer``, the value every notebook holds it under."""
 
     SPECIALIST = "specialist"
     JUDGE = "judge"
     RESOLVER = "resolver"
     CRITIC = "critic"
-    SCORER = "scorer"
+    AUTHOR = "scorer"
     CURATOR = "curator"
 
 
@@ -183,12 +183,13 @@ class LearningKind(str, Enum):
 class FrontierBasis(str, Enum):
     """What a frontier score rests on, so its reader knows how far to trust it.
 
-    ``trend`` is the branch's own recent gain; ``prior`` what similar archived branches still gained; ``observing`` the
-    floor of a branch whose kernel-layer direction may still pay off; ``new`` the floor of a branch too young to have a
-    trend; ``repair`` the gain of the blocked candidate a young repair branch was opened to repair; ``pending`` the gain
-    of a measured candidate waiting for its confirm; ``headroom`` the roofline bound that capped any of them; ``amdahl``
-    the most that speeding up the head's largest op could gain, which capped any of them; ``custom`` the estimate of a
-    scorer other than the built-in formula, whose components say what it read.
+    ``trend`` is the branch's own recent gain; ``observing`` the floor of a branch whose kernel-layer direction may
+    still pay off; ``new`` the floor of a branch too young to have a trend; ``repair`` the gain of the blocked
+    candidate a young repair branch was opened to repair; ``pending`` the gain of a measured candidate waiting for its
+    confirm; ``headroom`` the roofline bound that capped any of them; ``amdahl`` the most that speeding up the head's
+    largest op could gain, which capped any of them. ``prior`` and ``custom`` decode older sessions' scores, which
+    rested on what similar archived branches still gained and on a formula other than the built-in one; no score
+    rests on them now.
     """
 
     TREND = "trend"

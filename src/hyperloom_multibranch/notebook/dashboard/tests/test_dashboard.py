@@ -41,6 +41,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     CANDIDATE_COMPONENT,
     MERGED_GAIN_COMPONENT,
     NEAR_BAR_COMPONENT,
+    NEAR_BAR_HOLD,
     STALL_BAR_COMPONENT,
     STALLED_COMPONENT,
     FrontierPolicy,
@@ -117,12 +118,14 @@ def test_a_scored_branch_shows_its_stall_against_the_bar_what_holds_it_and_the_p
     held = BranchProgress("s1", True, "c0", "c1", 6, 1, 3600.0, {METRIC: 1040.0}, FrontierScore(0.4, near))
     stalled = {STALLED_COMPONENT: 8.0, STALL_BAR_COMPONENT: 6.0, CANDIDATE_COMPONENT: 1.0}
     candidate = BranchProgress("s2", True, "c0", "c0", 8, 0, 3600.0, {}, FrontierScore(0.0, stalled))
-    breach = "stop of s1, held by its probation"
+    unplayed = BranchProgress("s3", True, "c0", "c0", 2, 0, 600.0, {}, FrontierScore(0.5, {"trend_pct": 0.5}))
+    breach = "stop of s1 refused for probation"
     played = dataclasses.replace(
         snapshot.fingerprints[-1], policy_versions={PLAYBOOK_KEY: "patient", FALLBACK_KEY: breach}
     )
 
-    dashboard = build_dashboard(dataclasses.replace(snapshot, fingerprints=(played,)), (held, candidate), metric=METRIC)
+    rows = (held, candidate, unplayed)
+    dashboard = build_dashboard(dataclasses.replace(snapshot, fingerprints=(played,)), rows, metric=METRIC)
     page = render_html(dashboard)
 
     evidence = {row["branch"]: row["evidence"] for row in dashboard["branches"]}
@@ -131,12 +134,13 @@ def test_a_scored_branch_shows_its_stall_against_the_bar_what_holds_it_and_the_p
         "stall_bar": 6.0,
         "merged_gain_pct": 4.0,
         "trend_pct": 0.4,
-        "held_by": ["a near-bar lead"],
+        "held_by": [NEAR_BAR_HOLD],
         "stop_candidate": False,
     }
     assert evidence["s2"]["stop_candidate"] and evidence["s2"]["held_by"] == []
+    assert evidence["s3"] is None
     assert dashboard["playbook"] == {"label": "patient", "fallback": breach}
-    assert "<td>7 of 6</td>" in page and "<td>held: a near-bar lead</td>" in page and "<td>stop candidate</td>" in page
+    assert "<td>7 of 6</td>" in page and f"<td>held: {NEAR_BAR_HOLD}</td>" in page and "<td>stop candidate</td>" in page
     assert f"playbook patient, fell back to the champion on {breach}" in page
     assert build_dashboard(snapshot)["playbook"] is None
 

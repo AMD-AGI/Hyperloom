@@ -4,17 +4,17 @@
 """The scheduling playbook: how the judge stops, sizes and opens branches, and the pool that improves it.
 
 A :class:`Playbook` has two parts. Its numbers (:class:`PlaybookNumbers`) are bounded (:data:`BOUNDS`) and applied by
-code: the stall bar and the probation the stall evidence reads (:meth:`Playbook.stop_rule`), the new-branch grace,
-the K a branch gets, how many branches run at once and how late a new one opens, when an integration jump restarts
-the stalls behind it, and after how many failures an op leaves the open areas. Its rules, at most
+code: the stall bar, the probation and the new-branch grace the stall evidence reads (:meth:`Playbook.stop_rule`),
+which the scheduler's grace reads too, how many branches run at once and how late a new one opens, which the
+scheduler enforces on the judge's opens, and after how many failures an op leaves the open areas. Its rules, at most
 :data:`MAX_RULES`, each say whether they govern stops, K or opening, and hold what numbers cannot, such as which of
 two alike branches to stop.
 
 :data:`H0` is the first champion: the evidence rules, no text rules, every number at its default. A playbook never
 overrides the :data:`SAFETY_ENVELOPE`, which the judge reads beside it and the scheduler enforces: a branch with a
 candidate waiting for its confirm or a near-bar or stranded lead is no stop candidate, a probation draw stands, the
-numbers stay in their bounds, the audit stays on, and a playbook changes one thing at a time. The stops it forbids are
-:func:`envelope_breaches`; a challenger session that ordered one plays the champion from then on.
+numbers stay in their bounds, the audit stays on, and a playbook changes one thing at a time. A challenger session
+whose judge ordered a stop the envelope refused plays the champion from then on.
 :func:`problems` is the static check (R0) every new playbook passes before it is tried.
 
 The pool beside the archive (:class:`PlaybookPool`, ``<root>/playbooks``) keeps every playbook written, the
@@ -29,24 +29,15 @@ import dataclasses
 import json
 import logging
 import re
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.notebook.codec import decode, encode
 from hyperloom_multibranch.notebook.local.files import encode_json, publish_once
 from hyperloom_multibranch.notebook.rsi.archive import TreeArchive, written_by
-from hyperloom_multibranch.notebook.rsi.frontier import (
-    NEAR_BAR_COMPONENT,
-    PROBATION_COMPONENT,
-    PROBATION_SHARE,
-    PROBATION_TESTS,
-    SETTLED_TESTS,
-    STRANDED_COMPONENT,
-    StopRule,
-)
+from hyperloom_multibranch.notebook.rsi.frontier import PROBATION_SHARE, PROBATION_TESTS, SETTLED_TESTS, StopRule
 from hyperloom_multibranch.notebook.rsi.history import MAX_STALL_TESTS, MIN_STALL_TESTS
 
 log = logging.getLogger(__name__)
@@ -91,27 +82,22 @@ class PlaybookRule:
 
 @dataclass(frozen=True)
 class PlaybookNumbers:
-    """The playbook's numbers, applied by code.
+    """The playbook's numbers, each applied by code.
 
     ``stall_tests`` is the stop bar, ``None`` for the one the stall odds set each round; ``probation_share`` of the
     stop candidates run ``probation_tests`` more judged tests first; a new branch keeps its grace until
-    ``grace_tests`` of its explore tests succeeded and were judged. Every branch gets ``base_k``, one whose commit
-    merged within its last stall bar of tests ``producing_k`` more, one on probation 1. ``max_open`` caps the
-    branches running at once, ``None`` for the run's cap; no branch opens in the last ``last_open_minutes`` of
-    EXPLORE, ``None`` for the median time a new branch took to its first commit. An integration jump of
-    ``restall_bars`` bars restarts the stall of the branches behind it from the new head, 0 never; an op that failed
-    ``failed_op_limit`` times this session leaves the open areas.
+    ``grace_tests`` of its explore tests succeeded and were judged. ``max_open`` caps the branches running at once,
+    ``None`` for the run's cap; no branch the judge refills opens in the last ``last_open_minutes`` of the session,
+    ``None`` for the median time a new branch took to its first commit; an op that failed ``failed_op_limit`` times
+    this session leaves the open areas.
     """
 
     stall_tests: int | None = None
     probation_share: float = PROBATION_SHARE
     probation_tests: int = PROBATION_TESTS
     grace_tests: int = SETTLED_TESTS
-    base_k: int = 1
-    producing_k: int = 1
     max_open: int | None = None
     last_open_minutes: float | None = None
-    restall_bars: float = 0.0
     failed_op_limit: int = 2
 
 
@@ -121,11 +107,8 @@ BOUNDS: Mapping[str, tuple[float, float]] = {
     "probation_share": (0.125, 0.5),
     "probation_tests": (2, 8),
     "grace_tests": (3, 8),
-    "base_k": (1, 3),
-    "producing_k": (0, 2),
     "max_open": (1, 16),
     "last_open_minutes": (0, 240),
-    "restall_bars": (0, 10),
     "failed_op_limit": (2, 4),
 }
 
@@ -156,7 +139,7 @@ class Playbook:
         """The stop rule the stall evidence reads under this playbook."""
 
         numbers = self.numbers
-        return StopRule(numbers.stall_tests, numbers.probation_share, numbers.probation_tests)
+        return StopRule(numbers.stall_tests, numbers.probation_share, numbers.probation_tests, numbers.grace_tests)
 
     def render(self, *, challenger: bool = False) -> str:
         """The playbook as the judge reads it every round: its numbers, its rules, then the safety envelope."""
@@ -169,7 +152,6 @@ class Playbook:
             if n.last_open_minutes is not None
             else "the median time a new branch takes to its first commit"
         )
-        restall = f"by {n.restall_bars:g} bars" if n.restall_bars else "never"
         lines = [
             f"Scheduling playbook {self.label}" + (", on trial in this session:" if challenger else ":"),
             f"- stop: a branch whose stop_candidate is 1 has stalled {bar} past its last commit that did not fail to "
@@ -178,10 +160,8 @@ class Playbook:
             "more judged tests first (probation 1); leave them running.",
             f"- grace: a new branch is no stop candidate until {n.grace_tests} of its explore tests succeeded and "
             "were judged.",
-            f"- K: {n.base_k} for every branch, {n.producing_k} more for one whose commit merged within its last "
-            "stall bar of tests, 1 for one on probation.",
-            f"- open: at most {opened} at once; none in the last {late} of EXPLORE.",
-            f"- an integration jump restarts the stalls behind it: {restall}.",
+            f"- open: at most {opened} at once; after the opening batch, none in the last {late} of the session. The "
+            "scheduler cuts an open past either.",
             f"- an op that failed {n.failed_op_limit} times this session leaves the open areas.",
             *(f"- rule ({rule.governs.value}): {rule.text}" for rule in self.rules),
             "Safety envelope, whatever the playbook says:",
@@ -193,8 +173,8 @@ class Playbook:
 H0 = Playbook(
     H0_LABEL,
     hypothesis=(
-        "the evidence rules: stop a branch on its stall, keep leads and probation, give K to what merges, open where "
-        "no branch covers the headroom"
+        "the evidence rules: stop a branch on its stall, keep leads and probation, open where no branch covers the "
+        "headroom while a new branch can still commit"
     ),
 )
 
@@ -437,32 +417,6 @@ class PlaybookPlay:
         return found
 
 
-def held_by(row: BranchProgress) -> tuple[str, ...]:
-    """What holds ``row``'s branch under the :data:`SAFETY_ENVELOPE`, a phrase each: a candidate waiting for its
-    confirm, a near-bar or a stranded lead in its stall evidence, its probation."""
-
-    evidence = row.frontier.components if row.frontier is not None else {}
-    return tuple(
-        what
-        for what, holds in (
-            ("a candidate waiting for its confirm", bool(row.pending)),
-            ("a near-bar lead", evidence.get(NEAR_BAR_COMPONENT, 0.0) > 0),
-            ("a stranded lead", STRANDED_COMPONENT in evidence),
-            ("its probation", PROBATION_COMPONENT in evidence),
-        )
-        if holds
-    )
-
-
-def envelope_breaches(rows: Sequence[BranchProgress], stops: Collection[str]) -> tuple[str, ...]:
-    """The judge's ``stops`` the :data:`SAFETY_ENVELOPE` forbids, a line each: of a running branch of ``rows`` that
-    something holds (:func:`held_by`). The scheduler refuses them; in a challenger session it plays the champion for
-    the rest of the session and records the breach under :data:`FALLBACK_KEY`."""
-
-    held = ((row.branch, held_by(row)) for row in rows if row.branch in stops)
-    return tuple(f"stop of {branch}, held by {' and '.join(what)}" for branch, what in held if what)
-
-
 def replaced(playbook: Playbook, **numbers: float | int | None) -> Playbook:
     """``playbook`` with some numbers changed; raises ``TypeError`` for a name :class:`PlaybookNumbers` lacks."""
 
@@ -505,8 +459,6 @@ __all__ = [
     "PlaybookRule",
     "Retired",
     "changes",
-    "envelope_breaches",
-    "held_by",
     "playbook_label",
     "problems",
     "replaced",

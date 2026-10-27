@@ -41,10 +41,14 @@ from hyperloom_multibranch.scheduling.build_waits import waiting_builds
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, EventKind, SessionEvent
 from hyperloom_multibranch.scheduling.judge import (
+    ENVELOPE_HOLDS,
     JUDGE_PROMPT_VERSION,
     JUDGE_SYSTEM_PROMPT,
+    PLAYBOOK_JUDGE_PROMPT,
+    PLAYBOOK_JUDGE_PROMPT_VERSION,
     HeldOrder,
     HoldReason,
+    HoldRules,
     Judge,
     JudgeDecision,
     JudgeView,
@@ -58,6 +62,7 @@ from hyperloom_multibranch.scheduling.judge import (
     parse_decision,
     queued_intents,
     render_prompt,
+    system_prompt,
 )
 from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
@@ -205,30 +210,49 @@ def test_the_safety_envelope_holds_a_branch_on_probation_or_with_a_near_bar_or_a
     }
 
 
-def test_a_branch_on_probation_keeps_its_stop_refused_while_its_k_is_the_judges_to_lower() -> None:
+@pytest.mark.parametrize("hold", sorted(ENVELOPE_HOLDS))
+def test_a_branch_the_envelope_holds_keeps_its_stop_refused_while_its_k_is_the_judges_to_lower(
+    hold: HoldReason,
+) -> None:
     roster = (_entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION), _entry("b01", k=2), _entry("b02", k=2))
-    decision = JudgeDecision(k=(KOrder("b01", 1), KOrder("b02", 1)), stop=(StopOrder("b01", STOP_REASON),))
+    decision = JudgeDecision(k=(KOrder("b02", 1),), stop=(StopOrder("b01", STOP_REASON),))
 
-    cut = hold_decision(decision, {"b01": HoldReason.PROBATION, "b02": HoldReason.NEAR_BAR}, roster)
+    cut = hold_decision(decision, {"b01": hold, "b02": hold}, roster)
+    graced = hold_decision(decision, {"b01": hold, "b02": HoldReason.GRACE}, roster)
 
-    assert (cut.stop, cut.k) == ((), (KOrder("b01", 1),))
-    assert set(cut.held) == {HeldOrder("b01", HoldReason.PROBATION), HeldOrder("b02", HoldReason.NEAR_BAR)}
+    assert (cut.stop, cut.k, cut.held) == ((), (KOrder("b02", 1),), (HeldOrder("b01", hold),))
+    assert graced.k == () and set(graced.held) == {HeldOrder("b01", hold), HeldOrder("b02", HoldReason.GRACE)}
 
 
 def test_the_prompt_shows_the_open_areas_and_the_playbook_before_the_reply_format_only_when_given() -> None:
     areas = "Open areas for a new branch, from the profile of c1:\n- gemm_a8w8 (gemm): 10.0% of GPU time"
-    prompt = render_prompt(
-        replace(_view(history="Stall odds, from 3 sessions."), open_areas=areas, playbook=H0.render())
-    )
+    played = replace(_view(history="Stall odds, from 3 sessions."), open_areas=areas, playbook=H0.render())
+    prompt = render_prompt(played)
     bare = render_prompt(_view())
-    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
 
     assert prompt.index("Stall odds") < prompt.index(areas) < prompt.index("Scheduling playbook h0:")
     assert prompt.index("Scheduling playbook h0:") < prompt.index("Reply with")
     assert "Scheduling playbook" not in bare and "Open areas" not in bare
-    assert "stop_candidate is 1 when its stall reached the bar and nothing holds it" in prose
-    assert "for stops it replaces the lowest expected gain" in prose
-    assert "near_bar_lead, stranded_lead and probation" in prose
+    assert (system_prompt(played), system_prompt(_view())) == (PLAYBOOK_JUDGE_PROMPT, JUDGE_SYSTEM_PROMPT)
+
+
+def test_a_playbook_session_s_prompt_makes_its_stall_evidence_the_one_stop_rule_for_a_stall() -> None:
+    playbook, today = (" ".join(text.split()) for text in (PLAYBOOK_JUDGE_PROMPT, JUDGE_SYSTEM_PROMPT))
+
+    assert "stop_candidate is 1 when its stall reached the bar and nothing holds it" in playbook
+    assert "stop a branch for stalling only when it is 1" in playbook
+    assert "is a candidate to stop" not in playbook and "is a candidate to stop" in today
+    assert (
+        f"When it reaches {STALL_TESTS}, its specialist is asked to read its brief again and reconsider its direction; "
+        "that is no reason to stop it."
+    ) in playbook
+    assert "context for its stall evidence, and no reason to stop it" in playbook
+    assert "A low expected gain is no reason to stop a branch: its stall evidence is." in playbook
+    assert "the scheduler cuts the opens it does not allow" in playbook
+    assert "as many of its explore tests as the playbook's grace says" in playbook
+    assert "near_bar_lead, stranded_lead and probation" in playbook
+    for name in ("stop_candidate", "stall_bar", "near_bar_lead", "playbook"):
+        assert name not in today
 
 
 def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_dollars_used() -> None:
@@ -474,9 +498,12 @@ def test_prompt_weighs_an_early_stop_against_the_explore_time_left() -> None:
 
 def test_the_prompt_version_is_derived_from_the_prompt_text() -> None:
     prompt = render_prompt(_view())
-    texts = f"{JUDGE_SYSTEM_PROMPT}\n{prompt[prompt.index('Reply with') :]}"
+    reply = prompt[prompt.index("Reply with") :]
 
-    assert JUDGE_PROMPT_VERSION == hashlib.sha256(texts.encode()).hexdigest()[:12]
+    assert JUDGE_PROMPT_VERSION == hashlib.sha256(f"{JUDGE_SYSTEM_PROMPT}\n{reply}".encode()).hexdigest()[:12]
+    assert (
+        PLAYBOOK_JUDGE_PROMPT_VERSION == hashlib.sha256(f"{PLAYBOOK_JUDGE_PROMPT}\n{reply}".encode()).hexdigest()[:12]
+    )
 
 
 def test_a_branch_row_names_what_its_expected_gain_rests_on() -> None:
@@ -674,10 +701,12 @@ async def test_decide_returns_the_capped_decision_and_logs_the_exchange(tmp_path
     judge = Judge(completion, transcript, Clock(now=lambda: NOW))
 
     decision = await judge.decide(_view())
+    played = replace(_view(), playbook=H0.render())
+    await judge.decide(played)
 
     assert decision == JudgeDecision(open_count=3, k=(KOrder("b01", 2),))
-    assert seen == [(JUDGE_SYSTEM_PROMPT, render_prompt(_view()))]
-    (row,) = [json.loads(line) for line in transcript.read_text().splitlines()]
+    assert seen == [(JUDGE_SYSTEM_PROMPT, render_prompt(_view())), (PLAYBOOK_JUDGE_PROMPT, render_prompt(played))]
+    row, _played = [json.loads(line) for line in transcript.read_text().splitlines()]
     assert row["at"] == NOW and row["error"] == "" and row["prompt"] == seen[0][1]
     assert '"open": 3' in row["reply"]
 
@@ -813,9 +842,19 @@ def test_a_specialist_branch_keeps_its_grace_until_enough_of_its_explore_tests_s
     done = [_ended(branch, n) for branch in ("b02", "b04") for n in range(SETTLED_TESTS)]
     integration = [_ended(INTEGRATION_BRANCH, n) for n in range(SETTLED_TESTS)]
 
-    assert held_branches(roster, (), [*early, *not_counted, *done, *integration], {}, NOW) == {
+    assert held_branches(roster, (), [*early, *not_counted, *done, *integration], {}, HoldRules(NOW)) == {
         "b01": HoldReason.GRACE,
         "b05": HoldReason.GRACE,
+    }
+
+
+def test_a_playbook_s_grace_holds_a_specialist_branch_for_as_many_judged_tests_as_it_says() -> None:
+    settled = [_ended("b01", n) for n in range(3)]
+
+    assert held_branches(ROSTER, (), settled, {}, HoldRules(NOW, 3)) == {"b02": HoldReason.GRACE}
+    assert held_branches(ROSTER, (), settled, {}, HoldRules(NOW, 4)) == {
+        "b01": HoldReason.GRACE,
+        "b02": HoldReason.GRACE,
     }
 
 
@@ -823,7 +862,7 @@ def test_a_specialist_branch_keeps_its_grace_until_enough_of_its_explore_tests_s
 def test_a_branch_whose_specialist_is_out_of_service_has_no_grace(state: dict[str, bool]) -> None:
     status = replace(SpecialistStatus(running=False, crashes=3, lost=0, gave_up=False, judge_failed=False), **state)
 
-    assert held_branches(ROSTER, (), [], {"b01": status}, NOW) == {"b02": HoldReason.GRACE}
+    assert held_branches(ROSTER, (), [], {"b01": status}, HoldRules(NOW)) == {"b02": HoldReason.GRACE}
 
 
 def test_a_held_branch_row_names_why_it_is_held_and_the_prompt_explains_each_reason() -> None:
@@ -848,7 +887,7 @@ def test_an_autonomous_branch_is_never_steered_by_the_judge_but_a_pending_confir
     gave_up = SpecialistStatus(running=False, crashes=0, lost=0, gave_up=True, judge_failed=False)
     waiting = (BranchProgress("b05", True, "c-root", "c-b05", 3, 1, 60.0, {}, pending=(CANDIDATE,)),)
 
-    held = held_branches(roster, waiting, settled, {"b04": gave_up}, 0.0)
+    held = held_branches(roster, waiting, settled, {"b04": gave_up}, HoldRules(0.0))
 
     assert (held["b04"], held["b05"]) == (HoldReason.UNSTEERED, HoldReason.PENDING_CONFIRM)
     decision = JudgeDecision(k=(KOrder("b04", 2), KOrder("b05", 3)), stop=(StopOrder("b04", STOP_REASON),))
@@ -872,15 +911,16 @@ def test_a_repair_branch_is_held_for_its_protected_period_whatever_its_tests_rea
     settled = [_ended(branch, n) for branch in ("b01", "b02") for n in range(SETTLED_TESTS)]
     gave_up = SpecialistStatus(running=False, crashes=0, lost=0, gave_up=True, judge_failed=False)
 
-    assert held_branches(roster, (), settled, {}, REPAIR_PROTECTED_SECONDS - 1) == {"b01": HoldReason.REPAIR}
-    assert held_branches(roster, (), settled, {}, REPAIR_PROTECTED_SECONDS) == {}
-    assert held_branches(roster, (), settled, {"b01": gave_up}, 0.0) == {}
+    protected = HoldRules(REPAIR_PROTECTED_SECONDS - 1)
+    assert held_branches(roster, (), settled, {}, protected) == {"b01": HoldReason.REPAIR}
+    assert held_branches(roster, (), settled, {}, HoldRules(REPAIR_PROTECTED_SECONDS)) == {}
+    assert held_branches(roster, (), settled, {"b01": gave_up}, HoldRules(0.0)) == {}
 
 
 def test_a_repair_branch_still_reads_as_held_by_its_grace_while_it_has_one() -> None:
     roster = (_entry("b01", origin=BranchOrigin.REPAIR),)
 
-    assert held_branches(roster, (), [], {}, 0.0) == {"b01": HoldReason.GRACE}
+    assert held_branches(roster, (), [], {}, HoldRules(0.0)) == {"b01": HoldReason.GRACE}
 
 
 CANDIDATE = PendingCandidate("b01-r7", "b01-r7-confirm", "c-b01", METRIC, 116.6, 6.04321)
@@ -899,11 +939,11 @@ def test_a_branch_with_a_pending_candidate_is_held_until_its_confirm_is_judged_u
     gave_up = replace(failed, gave_up=True, judge_failed=False)
     settled = [_ended(branch, n) for branch in ("b01", "b02", "b03") for n in range(SETTLED_TESTS)]
 
-    assert held_branches(roster, progress, settled, {}, NOW) == {
+    assert held_branches(roster, progress, settled, {}, HoldRules(NOW)) == {
         "b01": HoldReason.PENDING_CONFIRM,
         "b04": HoldReason.GRACE,
     }
-    assert held_branches(roster, progress, settled, {"b01": failed, "b04": gave_up}, NOW) == {
+    assert held_branches(roster, progress, settled, {"b01": failed, "b04": gave_up}, HoldRules(NOW)) == {
         "b04": HoldReason.PENDING_CONFIRM
     }
 

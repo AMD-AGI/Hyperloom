@@ -29,8 +29,8 @@ paired differences against the archive, with an interval bootstrapped over sessi
 
 A playbook's rules only a judge reads, so given ``decide``, a judge's answer to a prompt, the replay asks it every
 :data:`ROUND_SECONDS` which running branches to stop, as a session asks its judge, instead of stopping them at the
-stall bar; it refuses the stop of a branch on probation, as the scheduler does. Opening and K follow the numbers
-either way.
+stall bar; it refuses the stop of a branch on probation, as the scheduler does. Opening follows the numbers either
+way, as the scheduler enforces them.
 """
 
 from __future__ import annotations

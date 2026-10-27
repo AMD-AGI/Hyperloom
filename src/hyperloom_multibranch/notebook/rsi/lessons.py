@@ -4,7 +4,7 @@
 """The lesson pool: specialists' learnings kept for the sessions after theirs, revised and retired, never edited (RSI).
 
 A lesson is a learning a session left the sessions after it. ``<archive>/lessons/``, beside the archive's ``trees/``
-and ``scorers/``, holds files each written once:
+and ``playbooks/``, holds files each written once:
 
 * ``revisions/<revision_id>.json``: a :class:`LessonRevision`, one version of a lesson. A revision ``supersedes`` the
   revisions of its lesson it replaces; those nothing supersedes are the lesson's heads, one as a rule, two when two

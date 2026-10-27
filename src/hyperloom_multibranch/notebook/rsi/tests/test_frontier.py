@@ -18,30 +18,41 @@ from hyperloom_multibranch.contracts.notebook.records import (
     BranchProgress,
     FrontierScore,
     LineageEvent,
+    MergeState,
     NotebookSnapshot,
     PendingCandidate,
     TestRecord,
     ToolResultPointer,
     Withdrawal,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver, Conclusion, FrontierBasis, LineageKind
+from hyperloom_multibranch.contracts.notebook.vocab import (
+    BranchDriver,
+    Conclusion,
+    FrontierBasis,
+    LineageKind,
+    MergeOutcome,
+)
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import longest_root_test_seconds
 from hyperloom_multibranch.notebook.rsi.frontier import (
     CANDIDATE_COMPONENT,
+    EVIDENCE_COMPONENTS,
     FRONTIER_LOG_FORMAT,
     FRONTIER_V1_LABEL,
     MERGED_COMPONENT,
     MERGED_GAIN_COMPONENT,
     NEAR_BAR_COMPONENT,
+    NEAR_BAR_HOLD,
     OBSERVATION_SECONDS,
     PROBATION_COMPONENT,
+    PROBATION_HOLD,
     PROBATION_SHARE,
     PROBATION_TESTS,
     SETTLED_TESTS,
     STALL_BAR_COMPONENT,
     STALLED_COMPONENT,
     STRANDED_COMPONENT,
+    STRANDED_HOLD,
     WINDOW_SECONDS,
     Estimate,
     FrontierPolicy,
@@ -50,6 +61,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     StallBar,
     StopRule,
     drawn_for_probation,
+    envelope_hold,
     enveloped,
     is_young,
     paced,
@@ -74,8 +86,10 @@ PAYS_LATE = tree(
 PAYS_SOON = tree("soon", branch("s1", [(1800.0, 3.0)], test_times=(0.0, 900.0, 1800.0)), task=TASK)
 
 
-def _scores(snapshot: NotebookSnapshot, *history: object, policy: FrontierPolicy = POLICY) -> dict[str, object]:
-    return {row.branch: row.frontier for row in score_progress(snapshot, tuple(history), policy)}
+def _scores(
+    snapshot: NotebookSnapshot, *history: object, policy: FrontierPolicy = POLICY, rule: StopRule | None = None
+) -> dict[str, object]:
+    return {row.branch: row.frontier for row in score_progress(snapshot, tuple(history), policy, rule)}
 
 
 def test_a_running_specialist_branch_is_scored_and_the_others_are_not(snapshot: NotebookSnapshot) -> None:
@@ -210,15 +224,67 @@ def _row(snapshot: NotebookSnapshot, name: str = "s1") -> BranchProgress:
     return next(row for row in snapshot.progress if row.branch == name)
 
 
-def test_each_scored_branch_carries_its_stall_evidence(snapshot: NotebookSnapshot) -> None:
-    s1 = _scores(snapshot)["s1"]
+def test_each_scored_branch_carries_its_stall_evidence_under_a_stop_rule_and_none_without(
+    snapshot: NotebookSnapshot,
+) -> None:
+    s1, plain = _scores(snapshot, rule=StopRule())["s1"], _scores(snapshot)["s1"]
 
-    assert s1 is not None
+    assert s1 is not None and plain is not None
     components = s1.components
     assert (components[STALLED_COMPONENT], components[STALL_BAR_COMPONENT]) == (1.0, float(DEFAULT_STALL_TESTS))
     assert (components[MERGED_COMPONENT], components[MERGED_GAIN_COMPONENT]) == (1.0, pytest.approx(4.0))
     assert (components[NEAR_BAR_COMPONENT], components[CANDIDATE_COMPONENT]) == (0.0, 0.0)
     assert PROBATION_COMPONENT not in components and STRANDED_COMPONENT not in components
+    assert not EVIDENCE_COMPONENTS & set(plain.components)
+    assert plain.expected_gain_pct == s1.expected_gain_pct
+
+
+def test_the_stop_rule_s_grace_ends_the_floor_and_holds_a_stall(snapshot: NotebookSnapshot) -> None:
+    eager = StopRule(stall_tests=1, probation_share=0.0, grace_tests=0)
+    patient = dataclasses.replace(eager, grace_tests=8)
+
+    assert _scores(snapshot, rule=eager)["s1"].components[CANDIDATE_COMPONENT] == 1.0
+    assert _scores(snapshot, rule=patient)["s1"].components[CANDIDATE_COMPONENT] == 0.0
+
+
+def test_the_envelope_holds_a_probation_then_a_near_bar_then_a_stranded_lead() -> None:
+    assert envelope_hold({PROBATION_COMPONENT: 1.0, NEAR_BAR_COMPONENT: 1.0}) == PROBATION_HOLD
+    assert envelope_hold({NEAR_BAR_COMPONENT: 2.0, STRANDED_COMPONENT: 4.0}) == NEAR_BAR_HOLD
+    assert envelope_hold({NEAR_BAR_COMPONENT: 0.0, STRANDED_COMPONENT: 4.0}) == STRANDED_HOLD
+    assert envelope_hold({STALLED_COMPONENT: 9.0, NEAR_BAR_COMPONENT: 0.0}) == ""
+
+
+def _stranded(snapshot: NotebookSnapshot, tried_on: str) -> NotebookSnapshot:
+    """``snapshot`` with ``s1``'s commit ``c1`` not stackable on ``tried_on``, the integration head left at the root."""
+
+    failed = MergeState(MergeOutcome.NOT_STACKABLE, tried_on)
+    committed = tuple(
+        dataclasses.replace(item, merged_into=None, last_merge=failed, first_failed_at=1.0)
+        if item.commit_id == "c1"
+        else item
+        for item in snapshot.committed
+    )
+    progress = tuple(
+        dataclasses.replace(row, head_commit="c0", head_value={METRIC: 1000.0})
+        if row.branch == INTEGRATION_BRANCH
+        else row
+        for row in snapshot.progress
+    )
+    return dataclasses.replace(snapshot, committed=committed, progress=progress)
+
+
+def test_a_stranded_lead_holds_its_branch_until_its_head_failed_on_this_head_or_it_stalled_two_bars(
+    snapshot: NotebookSnapshot,
+) -> None:
+    older, here = _stranded(snapshot, "i0"), _stranded(snapshot, "c0")
+    bar = StallBar(StopRule(probation_share=0.0), 6)
+
+    held = stall_evidence(older, _row(older), METRIC, bar, young=False)
+    assert held[STRANDED_COMPONENT] == pytest.approx(4.0) and envelope_hold(held) == STRANDED_HOLD
+    assert STRANDED_COMPONENT not in stall_evidence(here, _row(here), METRIC, bar, young=False)
+    stalled = stall_evidence(older, _row(older), METRIC, StallBar(StopRule(probation_share=0.0), 1), young=False)
+    assert (stalled[STALLED_COMPONENT], stalled[CANDIDATE_COMPONENT]) == (2.0, 1.0)
+    assert STRANDED_COMPONENT not in stalled
 
 
 def test_a_stalled_branch_is_a_stop_candidate_unless_a_candidate_or_its_grace_holds_it(
@@ -272,9 +338,9 @@ def test_a_branch_on_probation_gives_the_scheduler_the_same_event_every_round_of
         reason="stalled past the stop bar since c1, drawn for probation",
         tests=6,
     )
-    assert probation_event(snapshot, held) == probation_event(snapshot, held)
-    assert probation_event(snapshot, held).tests == PROBATION_TESTS
-    assert probation_event(snapshot, dataclasses.replace(held, frontier=None)) is None
+    assert probation_event(snapshot, held, StopRule()) == probation_event(snapshot, held, StopRule())
+    assert probation_event(snapshot, held, StopRule()).tests == PROBATION_TESTS
+    assert probation_event(snapshot, dataclasses.replace(held, frontier=None), StopRule()) is None
 
 
 def test_a_commit_that_failed_to_merge_does_not_end_the_stall(snapshot: NotebookSnapshot) -> None:
@@ -445,9 +511,13 @@ async def test_the_scoring_is_the_notebooks_progress_query(tmp_path: Path) -> No
     scoring = FrontierScoring(notebook, POLICY, (PAYS_LATE, PAYS_SOON))
 
     rows = {row.branch: row for row in await scoring.progress()}
+    ruled = FrontierScoring(notebook, POLICY, (PAYS_LATE, PAYS_SOON), stop_rule=StopRule)
+    played = {row.branch: row for row in await ruled.progress()}
 
     assert rows["s1"].frontier is not None and rows["s1"].frontier.expected_gain_pct == pytest.approx(4.0)
     assert (await scoring.lineage()) == (await notebook.lineage())
+    assert STALLED_COMPONENT not in rows["s1"].frontier.components
+    assert played["s1"].frontier is not None and STALLED_COMPONENT in played["s1"].frontier.components
 
 
 async def test_with_a_log_every_round_that_scored_a_branch_is_appended(tmp_path: Path) -> None:

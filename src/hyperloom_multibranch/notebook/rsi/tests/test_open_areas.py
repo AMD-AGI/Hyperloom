@@ -91,8 +91,21 @@ def test_without_a_profile_the_open_areas_say_so_and_the_judge_reads_them_once_t
     past = (tree("past", branch("s1", [(1800.0, 3.0)])),)
 
     assert bare.render().startswith("Open areas for a new branch: neither the integration head nor a commit")
-    assert judge_open_areas(_worked(snapshot), past, METRIC, budget_seconds=4 * HOUR).startswith(
-        "Open areas for a new branch, from the profile of i1:"
+    assert (
+        judge_open_areas(_worked(snapshot), past, METRIC, budget_seconds=4 * HOUR)
+        .render()
+        .startswith("Open areas for a new branch, from the profile of i1:")
     )
-    assert judge_open_areas(_worked(snapshot), (), METRIC, budget_seconds=4 * HOUR) == ""
-    assert judge_open_areas(dataclasses.replace(snapshot, profile=None), past, METRIC, budget_seconds=HOUR) == ""
+
+
+def test_without_archived_sessions_only_the_playbook_s_last_open_minutes_says_it_is_too_late(
+    snapshot: NotebookSnapshot,
+) -> None:
+    unknown = judge_open_areas(_worked(snapshot), (), METRIC, budget_seconds=0.0)
+    capped = judge_open_areas(
+        _worked(snapshot), (), METRIC, budget_seconds=0.0, playbook=replaced(H0, last_open_minutes=30)
+    )
+
+    assert unknown.first_commit_minutes is None and not unknown.too_late
+    assert unknown.render().startswith("Open areas for a new branch, from the profile of i1:")
+    assert capped.too_late and capped.render().endswith("open no new branch.")
