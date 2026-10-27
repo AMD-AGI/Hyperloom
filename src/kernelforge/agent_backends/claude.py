@@ -530,8 +530,10 @@ class ClaudeBackend:
         if policy.max_turns is not None:
             options["max_turns"] = policy.max_turns
         if _supports_adaptive_thinking(spec.model):
-            # Claude 4.6+ uses adaptive thinking.
-            options["thinking"] = {"type": "adaptive"}
+            # Claude 4.6+ uses adaptive thinking. Without a summarized display the stream carries no bytes until the
+            # thinking ends, and a gateway that drops a silent stream cuts a long planning turn before its first token;
+            # every retry then thinks from the start. Billing counts the full thinking either way.
+            options["thinking"] = {"type": "adaptive", "display": "summarized"}
         elif policy.thinking_budget_tokens > 0:
             options["thinking"] = {"type": "enabled", "budget_tokens": policy.thinking_budget_tokens}
         if policy.bare and spec.hooks is None:

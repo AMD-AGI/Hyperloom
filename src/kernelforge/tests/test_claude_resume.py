@@ -232,7 +232,8 @@ def test_default_model_uses_the_runtime_effort_and_adaptive_thinking():
     # An effort written at a call site is this repository's opinion, and the one
     # on the runtime is the operator's decision about the run in front of them.
     assert kwargs["effort"] == "high"
-    assert kwargs["thinking"] == {"type": "adaptive"}
+    # Summarized display keeps bytes on the stream while the model thinks.
+    assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
 
 
 @pytest.mark.parametrize(
