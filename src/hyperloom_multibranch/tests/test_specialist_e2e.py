@@ -115,6 +115,8 @@ call("notebook_append_branch_log", kind="result", content=f"max_num_seqs 256 on 
 class _Planner:
     """The fake measurer runs no compiled environment, so a request plans to nothing."""
 
+    blobs = None
+
     def plan(self, request, parent):
         return None
 

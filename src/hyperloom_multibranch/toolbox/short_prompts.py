@@ -292,7 +292,7 @@ def _kernel_lines(recipe: Recipe, hashes: frozenset[str]) -> list[str]:
     return [f"kernel {kernel.kind.value} {kernel.target}" for kernel in recipe.kernels if kernel.sha256 in hashes]
 
 
-def touch_lines(parent: Recipe, candidate: Recipe, files: PatchFiles = no_patch_files) -> list[str]:
+def touch_lines(parent: Recipe, candidate: Recipe, files: PatchFiles) -> list[str]:
     """The change from ``parent`` to ``candidate`` as the lines the rule pack's pattern reads; ``files`` reads the files a
     patch changes.
 
@@ -330,7 +330,7 @@ def decide(
     parent: Recipe,
     candidate: Recipe,
     setup: ShortPromptSetup | None,
-    files: PatchFiles = no_patch_files,
+    files: PatchFiles,
 ) -> ShortPromptPlan | None:
     """The check ``request`` runs, or ``None``: its purpose is one the pack always checks, the caller forces it, or the
     change from ``parent`` to ``candidate`` touches what the pack says affects attention, the KV cache or prefill

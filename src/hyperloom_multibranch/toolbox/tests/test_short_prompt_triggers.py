@@ -196,8 +196,7 @@ class _Planner:
     """A planner that compiles from ``blobs`` (or names none)."""
 
     def __init__(self, blobs: LocalBlobStore | None) -> None:
-        if blobs is not None:
-            self.blobs = blobs
+        self.blobs = blobs
 
     def plan(self, request, parent) -> AcceptedMeasurement:  # type: ignore[no-untyped-def]
         return AcceptedMeasurement(None, ())  # type: ignore[arg-type]

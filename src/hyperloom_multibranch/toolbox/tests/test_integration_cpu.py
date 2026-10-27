@@ -26,7 +26,7 @@ import pytest
 
 from hyperloom.contracts.measurement import TestRequest
 from hyperloom.contracts.recipe import RecipeDelta, apply
-from hyperloom.measure.compile import LocalBlobStore, PackageBase
+from hyperloom.measure.compile import BlobStore, LocalBlobStore, PackageBase
 from hyperloom.measure.points import AcceptedMeasurement, default_canonical
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
@@ -76,6 +76,10 @@ class FakeRunnerPlanner:
         self._inner = inner
         self.planned: list[tuple[TestRequest, AcceptedMeasurement]] = []
         self._script = defaultdict(list, {key: list(value) for key, value in SCRIPT.items()})
+
+    @property
+    def blobs(self) -> BlobStore:
+        return self._inner.blobs
 
     def plan(self, request: TestRequest, parent: object) -> AcceptedMeasurement:
         accepted = self._inner.plan(request, parent)  # type: ignore[arg-type]

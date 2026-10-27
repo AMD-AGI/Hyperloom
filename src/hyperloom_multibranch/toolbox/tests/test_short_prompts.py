@@ -276,10 +276,19 @@ def test_touch_lines_render_each_kind_of_change_one_line_each():
     ]
 
 
+def test_the_reader_of_a_patchs_files_is_required_so_no_caller_counts_every_patch_as_touching_by_leaving_it_out():
+    with pytest.raises(TypeError, match="files"):
+        touch_lines(PARENT, PARENT)  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="files"):
+        decide(req(), PARENT, PARENT, SETUP)  # type: ignore[call-arg]
+
+
 # --- acceptance -----------------------------------------------------------------------------------------------------
 
 
 class _Planner:
+    blobs = None
+
     def __init__(self, accepted: object) -> None:
         self.accepted = accepted
 

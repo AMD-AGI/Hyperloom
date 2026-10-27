@@ -19,7 +19,7 @@ from typing import Protocol
 from hyperloom.common.outside_facts import TUNABLEOP_ENABLED_ENV, TUNABLEOP_TABLE_ENV, TUNABLEOP_TUNING_ENV
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError, apply, diff
-from hyperloom.measure.compile import BaseImageMismatchError
+from hyperloom.measure.compile import BaseImageMismatchError, BlobStore
 from hyperloom.measure.eval_context import EvalContextError
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.fake_gain import (
@@ -146,9 +146,14 @@ class MeasurementPlanner(Protocol):
     Raises ``RecipeError`` when it cannot: a ``SurfaceViolation`` means the measurement surface differs, a
     ``BaseImageMismatchError`` a recipe on another image, an ``EvalContextError`` a launch whose context the accuracy
     evaluation cannot run in, any other error a delta or patch that does not build.
-    The returned object is handed to the executor with every attempt. A planner that compiles from a blob store names it
-    as ``blobs``; the short-prompt check reads from it the files a recipe's patch changes.
+    The returned object is handed to the executor with every attempt.
     """
+
+    @property
+    def blobs(self) -> BlobStore | None:
+        """The blob store the planner compiles from, which the short-prompt check reads the files a recipe's patch
+        changes from; ``None`` for a planner that compiles from none, whose every patch then counts as touching."""
+        ...
 
     def plan(self, request: TestRequest, parent: Recipe) -> object: ...
 
@@ -211,7 +216,7 @@ class Acceptance:
         self._live_profile = live_profile
         self._workload = setup.workload_kind
         self._short_prompts = setup.short_prompts
-        blobs = getattr(setup.planner, "blobs", None)  # a planner that compiles reads the patches from its blob store
+        blobs = setup.planner.blobs
         self._patch_files = no_patch_files if blobs is None else blob_patch_files(blobs)
         self._long_context = setup.long_context
         self._explore_accuracy = setup.explore_accuracy

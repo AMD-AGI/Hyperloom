@@ -118,6 +118,8 @@ class _Repo:
 class _NoPlanner:
     """No environment to compile, no measurement points and no surface to check: every request plans to nothing."""
 
+    blobs = None
+
     def plan(self, request: TestRequest, parent: Recipe) -> object:
         return None
 

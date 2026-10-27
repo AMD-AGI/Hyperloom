@@ -53,6 +53,7 @@ class ReportingPlanner:
 
     def __init__(self, inner: HostedPlanner) -> None:
         self._inner = inner
+        self.blobs = inner.blobs
 
     def plan(self, request: TestRequest, parent: object) -> AcceptedMeasurement:
         accepted = self._inner.plan(request, parent)  # type: ignore[arg-type]

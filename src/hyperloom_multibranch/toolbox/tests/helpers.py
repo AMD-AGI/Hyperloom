@@ -81,6 +81,8 @@ class FakePlanner:
     """Refuses the deltas that ask for ``--does-not-compile``, as a patch that does not apply would, and a request
     whose ``surface_error`` is set, as a changed workload would."""
 
+    blobs = None
+
     def __init__(self) -> None:
         self.calls: list[RecipeDelta] = []
         self.mismatch: str | None = None
