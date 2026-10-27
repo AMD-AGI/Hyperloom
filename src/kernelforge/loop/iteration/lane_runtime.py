@@ -411,20 +411,7 @@ class LaneRuntimeMixin:
                 path.unlink(missing_ok=True)
                 return
             path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(
-                path,
-                {
-                    "candidates": [
-                        {
-                            "lane_id": lane.lane_id,
-                            "plan": lane.plan,
-                            "diff": lane.diff,
-                            "agent_profile_id": lane.agent_profile_id,
-                        }
-                        for lane in self._lane_queue
-                    ]
-                },
-            )
+            atomic_write_json(path, {"candidates": [lane.to_dict() for lane in self._lane_queue]})
         except OSError as error:
             print(
                 f"  [lanes] queue not durable ({error}); the "
@@ -437,15 +424,7 @@ class LaneRuntimeMixin:
         path = self._lane_queue_path()
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
-            queued = [
-                LaneResult(
-                    lane_id=str(entry["lane_id"]),
-                    plan=str(entry["plan"]),
-                    diff=str(entry["diff"]),
-                    agent_profile_id=str(entry.get("agent_profile_id") or ""),
-                )
-                for entry in record["candidates"]
-            ]
+            queued = [LaneResult.from_dict(entry) for entry in record["candidates"]]
         except (OSError, ValueError, KeyError, TypeError):
             log.debug("no readable lane queue at %s", path)
             return
