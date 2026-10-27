@@ -800,8 +800,8 @@ def _driver_main(argv: list[str] | None = None) -> int:
 
     try:
         action = TargetedBuildAction.from_state(json.loads(plan_path.read_text(encoding="utf-8")))
-    except Exception as exc:  # noqa: BLE001
-        log.warning("targeted build driver: failed to load plan.json: %s", exc)
+    except Exception as exc:  # outermost process entry: the failure is written to result.json
+        log.warning("targeted build driver: failed to load plan.json: %s", exc, exc_info=True)
         result_path.write_text(
             json.dumps(
                 BuildResult(
@@ -840,8 +840,8 @@ def _driver_main(argv: list[str] | None = None) -> int:
 
     try:
         result = recipe(action, str(root))
-    except Exception as exc:  # noqa: BLE001
-        log.warning("targeted build driver: recipe raised: %s", exc)
+    except Exception as exc:  # outermost process entry: the failure is written to result.json
+        log.warning("targeted build driver: recipe raised: %s", exc, exc_info=True)
         result = BuildResult(
             ok=False,
             attempt_root=str(root),

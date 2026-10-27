@@ -271,7 +271,8 @@ def probe_agent_profile(
             )
             model_available = True
             failure = ""
-        except Exception as error:  # noqa: BLE001 - isolate optional profiles
+        except Exception as error:  # isolation boundary: one agent profile's strict preflight
+            log.warning("Agent profile preflight failed for %s", profile.profile_id, exc_info=True)
             failure = f"{type(error).__name__}: {error}"
             if borrowed:
                 failure = _borrowed_line_failure(profile.provider, strict_config.agent_options, failure)
@@ -314,7 +315,8 @@ def build_search_actor_pool(
         if provider_available and (saved is None or saved.available):
             try:
                 bundle = bundle_factory(profile)
-            except Exception as error:  # noqa: BLE001 - availability must isolate one optional profile
+            except Exception as error:  # isolation boundary: one profile's search-actor build
+                log.warning("search actor build failed for %s", profile.profile_id, exc_info=True)
                 failure = f"{type(error).__name__}: {error}"
         available = bundle is not None
         provider_status[profile.provider] = ProviderAvailability(
@@ -469,7 +471,7 @@ def _provider_is_available(registration) -> tuple[bool, str]:
     try:
         if not registration.availability():
             return False, "provider SDK or CLI is not installed"
-    except Exception as error:  # third-party provider predicate
+    except Exception as error:  # isolation boundary: one provider's third-party availability predicate
         log.warning("Agent provider availability check failed: %s", error, exc_info=True)
         return False, f"{type(error).__name__}: {error}"
     return True, ""

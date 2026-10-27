@@ -7,30 +7,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
-from .local_store import RecipeFilters, RecipeUpsert
+from .local_store import RecipeUpsert
 
 
 log = logging.getLogger(__name__)
-
-
-def _prefer_score(row: dict[str, Any], prefer: dict[str, Any]) -> int:
-    """Count matching workload hints for stable local search reranking."""
-
-    score = 0
-    for key, wanted in prefer.items():
-        if wanted in (None, "", 0):
-            continue
-        actual = row.get(key)
-        if isinstance(wanted, (int, float)) and not isinstance(wanted, bool):
-            try:
-                score += int(float(actual) == float(wanted))
-            except (TypeError, ValueError):
-                continue
-        elif str(actual or "").strip().lower() == str(wanted).strip().lower():
-            score += 1
-    return score
 
 
 @dataclass(frozen=True)
@@ -39,21 +21,18 @@ class _ReadRequest:
 
     canonical_id: str = ""
     label_match: dict[str, Any] | None = None
-    prefer: dict[str, Any] | None = None
 
 
 @dataclass
 class RecipeKB:
     """Facade over one :class:`LocalRecipeStore`."""
 
+    mode: ClassVar[str] = "local"
+    backend_name: ClassVar[str] = "local-json"
+
     local: Any
     audit_hook: Any = None
-    mode: str = "local"
-    backend_name: str = "local-json"
     knowledge_config: Any = None
-
-    def _backend_label(self) -> str:
-        return self.backend_name or "local-json"
 
     def _emit_audit(self, event: dict[str, Any]) -> None:
         hook = self.audit_hook
@@ -84,20 +63,19 @@ class RecipeKB:
             "op": "read",
             "method": method,
             "mode": "local",
-            "backend": self._backend_label(),
+            "backend": self.backend_name,
             "remote": "none",
             "resolution": "local",
             "hit": row is not None,
             "candidates": int(candidates),
             "request": {
                 "canonical_id": request.canonical_id or None,
-                "prefer_keys": sorted((request.prefer or {}).keys()),
                 "label_match": request.label_match or None,
             },
             "result": result,
             "provenance": {
                 "component": "recipe_kb",
-                "backend": self._backend_label(),
+                "backend": self.backend_name,
             },
         }
 
@@ -113,7 +91,7 @@ class RecipeKB:
                     "op": "write",
                     "method": "put_recipe",
                     "mode": "local",
-                    "backend": self._backend_label(),
+                    "backend": self.backend_name,
                     "remote": "none",
                     "resolution": "local_error",
                     "success": False,
@@ -136,7 +114,7 @@ class RecipeKB:
                 "op": "write",
                 "method": "put_recipe",
                 "mode": "local",
-                "backend": self._backend_label(),
+                "backend": self.backend_name,
                 "remote": "none",
                 "resolution": "local_write",
                 "success": True,
@@ -169,65 +147,33 @@ class RecipeKB:
         )
         return result
 
-    def get_recipe(
-        self,
-        *,
-        canonical_id: str,
-        version: int | None = None,
-        prefer: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | None:
+    def get_recipe(self, *, canonical_id: str) -> dict[str, Any] | None:
         """Read one exact local Recipe row."""
 
-        row = self.local.get_recipe(canonical_id=canonical_id, version=version)
-        self._emit_audit(self._read_event("get_recipe", row, _ReadRequest(canonical_id=canonical_id, prefer=prefer)))
+        row = self.local.get_recipe(canonical_id=canonical_id)
+        self._emit_audit(self._read_event("get_recipe", row, _ReadRequest(canonical_id=canonical_id)))
         return row
 
-    def get_authoritative_recipe(
-        self,
-        *,
-        canonical_id: str,
-        version: int | None = None,
-    ) -> dict[str, Any] | None:
+    def get_authoritative_recipe(self, *, canonical_id: str) -> dict[str, Any] | None:
         """Read the exact authoritative local row."""
 
-        row = self.local.get_recipe(canonical_id=canonical_id, version=version)
+        row = self.local.get_recipe(canonical_id=canonical_id)
         self._emit_audit(self._read_event("get_authoritative_recipe", row, _ReadRequest(canonical_id=canonical_id)))
         return row
 
-    def search(
-        self,
-        *,
-        label_match: dict[str, Any] | None = None,
-        limit: int = 50,
-        prefer: dict[str, Any] | None = None,
-        filters: RecipeFilters = RecipeFilters(),
-    ) -> list[dict[str, Any]]:
-        """Search local Recipe rows and optionally rerank by workload hints."""
+    def search(self, *, label_match: dict[str, Any] | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        """Search local Recipe rows, newest first."""
 
-        rows = self.local.search(label_match=label_match, limit=limit, filters=filters)
-        if prefer:
-            rows = sorted(
-                rows,
-                key=lambda row: _prefer_score(row, prefer),
-                reverse=True,
-            )
+        rows = self.local.search(label_match=label_match, limit=limit)
         self._emit_audit(
             self._read_event(
                 "search",
                 rows[0] if rows else None,
-                _ReadRequest(label_match=label_match, prefer=prefer),
+                _ReadRequest(label_match=label_match),
                 candidates=len(rows),
             )
         )
         return rows
-
-    def close(self) -> None:
-        """Close the local store when it exposes a transport."""
-
-        close = getattr(self.local, "close", None)
-        if not callable(close):
-            return
-        close()
 
 
 __all__ = ["RecipeKB"]

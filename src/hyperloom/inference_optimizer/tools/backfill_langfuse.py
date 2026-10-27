@@ -345,6 +345,7 @@ def ingest(plan: dict[str, Any]) -> int:
     if plan["recipe_audit"]:
         _emit_recipe_audit(root, plan["recipe_audit"], last_end, trace_start)
 
+    failed_scores = 0
     for i, drow in enumerate(plan["decisions"]):
         for score in lfmap.decision_to_scores(drow):
             meta = score["metadata"]
@@ -354,12 +355,16 @@ def ingest(plan: dict[str, Any]) -> int:
                     span.score(**score)
                 else:
                     client.create_score(trace_id=trace_id, **score)
-            except Exception:
+            except Exception:  # isolation boundary: one decision Score upload
                 log.exception("create_score failed for decision %d", i)
+                failed_scores += 1
 
     _end_obs(root, last_end)
     client.flush()
     print(f"Backfilled trace_id={trace_id} session_id={plan['session_id']}")
+    if failed_scores:
+        print(f"ERROR: {failed_scores} decision score(s) failed to upload", file=sys.stderr)
+        return 1
     return 0
 
 

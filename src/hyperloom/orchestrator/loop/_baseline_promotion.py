@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_float
@@ -542,7 +543,7 @@ class BaselinePromotionMixin:
                 reason=reason,
                 exclude_task_ids=spared,
             )
-        except Exception:
+        except (sqlite3.Error, ValueError):
             log.exception("baseline drain: cancel_family failed")
             return []
         if not cancelled:

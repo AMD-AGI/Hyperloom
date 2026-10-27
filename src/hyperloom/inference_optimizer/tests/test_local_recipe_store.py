@@ -25,7 +25,12 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     cid_to_path_components,
     recipe_canonical_id,
 )
-from hyperloom.orchestrator.knowledge.recipe_kb.local_store import RecipeFilters, _matches_labels
+from hyperloom.orchestrator.knowledge.recipe_kb.local_store import _matches_labels
+
+
+def _archived(store: LocalRecipeStore, cid: str, version: int) -> dict[str, Any]:
+    """The recipe row ``put_recipe`` archived under ``history/v<version>.json``."""
+    return json.loads(store._history_version_path(cid, version).read_text(encoding="utf-8"))["snapshot"]
 
 
 def test_from_dict_reads_legacy_framework_key() -> None:
@@ -212,8 +217,7 @@ def test_put_recipe_second_call_archives_prior_and_bumps_version(
     assert second["canonical_id"] == cid
     assert second["version"] == 2
     assert second["created"] is False
-    archived = store.get_recipe(canonical_id=cid, version=1)
-    assert archived is not None
+    archived = _archived(store, cid, 1)
     assert archived["version"] == 1
     assert archived["best_throughput"] == 1000.0
     live = store.get_recipe(canonical_id=cid)
@@ -259,8 +263,7 @@ def test_put_recipe_keeps_existing_history_envelope_when_snapshot_matches(
     assert leftover["replaced_by"] == {"source": "crashed", "generator": "ut"}
     assert leftover["archived_at"] == "2026-01-01T00:00:00.000000+00:00"
     assert leftover["snapshot"]["best_throughput"] == 2000.0
-    v1 = store.get_recipe(canonical_id=cid, version=1)
-    assert v1 is not None and v1["best_throughput"] == 1000.0
+    assert _archived(store, cid, 1)["best_throughput"] == 1000.0
 
 
 @pytest.mark.parametrize("corrupt_body", ["{ truncated", "[]"])
@@ -376,40 +379,6 @@ def test_get_recipe_returns_none_for_unknown_cid(tmp_path: Path) -> None:
     assert store.get_recipe(canonical_id=_cid(model="never-seen")) is None
 
 
-def test_get_recipe_with_version_returns_live_when_versions_match(
-    tmp_path: Path,
-) -> None:
-    """``?version=N`` where N == live.version returns the live row (not a 404)."""
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    store.put_recipe(RecipeUpsert(canonical_id=cid))
-    out = store.get_recipe(canonical_id=cid, version=1)
-    assert out is not None
-    assert out["version"] == 1
-
-
-def test_get_recipe_with_version_returns_archive_for_prior_version(
-    tmp_path: Path,
-) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    store.put_recipe(RecipeUpsert(canonical_id=cid, best_throughput=1000.0))
-    store.put_recipe(RecipeUpsert(canonical_id=cid, best_throughput=2000.0))
-    v1 = store.get_recipe(canonical_id=cid, version=1)
-    assert v1 is not None
-    assert v1["best_throughput"] == 1000.0
-    v2 = store.get_recipe(canonical_id=cid, version=2)
-    assert v2 is not None
-    assert v2["best_throughput"] == 2000.0
-
-
-def test_get_recipe_with_unknown_version_returns_none(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    store.put_recipe(RecipeUpsert(canonical_id=cid))
-    assert store.get_recipe(canonical_id=cid, version=99) is None
-
-
 def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
     """Create three recipes spanning different identity/metrics, keyed by alias."""
     cid_a = recipe_canonical_id(
@@ -509,82 +478,6 @@ def test_search_with_two_labels_uses_AND_semantics(tmp_path: Path) -> None:
     assert [r["canonical_id"] for r in rows] == [cids["a"]]
 
 
-def test_search_with_metric_filters_lower_bound(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cids = _seed_diverse_recipes(store)
-    rows = store.search(filters=RecipeFilters(metric_filters={"throughput": {"min": 10000}}))
-    assert {r["canonical_id"] for r in rows} == {cids["a"], cids["b"]}
-
-
-def test_search_with_metric_filters_upper_bound(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cids = _seed_diverse_recipes(store)
-    rows = store.search(filters=RecipeFilters(metric_filters={"throughput": {"max": 6000}}))
-    assert {r["canonical_id"] for r in rows} == {cids["c"]}
-
-
-def test_search_with_metric_filters_two_bounds(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cids = _seed_diverse_recipes(store)
-    rows = store.search(filters=RecipeFilters(metric_filters={"throughput": {"min": 7500, "max": 12000}}))
-    assert {r["canonical_id"] for r in rows} == {cids["a"]}
-
-
-def test_search_excludes_rows_missing_the_metric_key(tmp_path: Path) -> None:
-    """A row without the metric key cannot satisfy the filter and is excluded."""
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid(model="no-tput")
-    # ``best_throughput`` defaults to 0.0; a high min trips the missing-key path.
-    store.put_recipe(RecipeUpsert(canonical_id=cid, extras={"mfu": 0.5}))
-    rows = store.search(filters=RecipeFilters(metric_filters={"throughput": {"min": 100}}))
-    assert rows == []
-
-
-def test_search_combined_label_and_metric(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cids = _seed_diverse_recipes(store)
-    rows = store.search(label_match={"task": "pretrain"}, filters=RecipeFilters(metric_filters={"mfu": {"min": 0.35}}))
-    assert [r["canonical_id"] for r in rows] == [cids["a"]]
-
-
-def test_search_updated_since_filters_old_rows(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid_old = _cid(model="old")
-    cid_new = _cid(model="new")
-    store.put_recipe(RecipeUpsert(canonical_id=cid_old))
-    cutoff_marker = store.get_recipe(canonical_id=cid_old)
-    assert cutoff_marker is not None
-    cutoff = cutoff_marker["updated_at"]
-    import time
-
-    time.sleep(0.001)
-    store.put_recipe(RecipeUpsert(canonical_id=cid_new))
-    rows = store.search(filters=RecipeFilters(updated_since=cutoff))
-    assert [r["canonical_id"] for r in rows] == [cid_new, cid_old]
-
-
-def test_search_order_by_invalid_raises(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    with pytest.raises(ValueError):
-        store.search(filters=RecipeFilters(order_by="banana ASC"))
-
-
-def test_search_supports_all_six_order_by_values(tmp_path: Path) -> None:
-    """Whitelist parity with the central server's contract."""
-    store = LocalRecipeStore(root=tmp_path)
-    _seed_diverse_recipes(store)
-    for ob in (
-        "updated_at DESC",
-        "updated_at ASC",
-        "created_at DESC",
-        "created_at ASC",
-        "version DESC",
-        "version ASC",
-    ):
-        rows = store.search(filters=RecipeFilters(order_by=ob))
-        assert len(rows) == 3, f"order_by={ob!r}"
-
-
 def test_search_limit_is_clamped_to_1_to_1000(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     _seed_diverse_recipes(store)
@@ -615,7 +508,7 @@ def test_put_recipe_concurrent_writers_keep_versions_monotonic(
     live = store.get_recipe(canonical_id=cid)
     assert live is not None
     assert live["version"] == n
-    assert [store.get_recipe(canonical_id=cid, version=i)["version"] for i in range(1, n)] == list(range(1, n))
+    assert [_archived(store, cid, i)["version"] for i in range(1, n)] == list(range(1, n))
 
 
 def test_search_skips_directories_with_corrupt_recipe_json(

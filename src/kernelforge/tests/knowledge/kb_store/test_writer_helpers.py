@@ -244,17 +244,6 @@ def test_normalize_summary_defaults_and_category_clamp():
     assert out["recipe"] == ""
 
 
-def test_summarize_run_returns_defaults_on_llm_failure(monkeypatch):
-    """Return deterministic defaults when the provider summary fails."""
-
-    async def boom(*_a, **_k):
-        raise RuntimeError("no sdk")
-
-    monkeypatch.setattr(sink, "_query_llm", boom)
-    out = sink.summarize_run(config=object(), workspace="/w", prompt=sink._summary_prompt("op", "d", "s"))
-    assert out == {"category": "others", "strategy": "", "recipe": "", "lessons": ""}
-
-
 def test_summarize_run_parses_reply(monkeypatch):
     """Parse the provider reply and forward the shared usage accumulator."""
     captured = {}

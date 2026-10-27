@@ -135,8 +135,8 @@ async def run_specialist_rebench(
             launch=GridLaunch(magpie_python=benchmark.magpie_python or None, server_lifecycle=server_lifecycle),
             stop=GridStop(keep_going_on_failure=False),
         )
-    except Exception as exc:  # noqa: BLE001 — surface as a structured failure
-        log.warning("specialist rebench failed: %s", exc)
+    except Exception as exc:  # outermost CLI command: the failure is printed as an ok=false result
+        log.warning("specialist rebench failed: %s", exc, exc_info=True)
         return {
             "ok": False,
             "error": repr(exc),

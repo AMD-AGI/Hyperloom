@@ -103,7 +103,7 @@ def _gemm_router_targets(
         from kernelforge.gemm_tune.router import select_tuners
 
         specs = select_tuners(analyze_model(model_path), target, evidence)
-    except Exception:
+    except (OSError, ValueError, TypeError, AttributeError):
         log.debug("GEMM: could not consult the tuner router for lane cost estimates", exc_info=True)
         return ()
     return tuple((str(spec.name), max(0, int(spec.estimated_minutes * 60))) for spec in specs if spec.should_run)

@@ -18,6 +18,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from hyperloom.common.env import EnvValueError, env_int
 
 from ..session.paths import mn_profile_trace_root
@@ -275,7 +277,7 @@ def _short_poll(
         attempt += 1
         try:
             obj, summary = fetch()
-        except Exception as exc:  # noqa: BLE001
+        except (httpx.HTTPError, httpx.InvalidURL, ray_dashboard.RayDashboardError, ValueError, AttributeError) as exc:
             warn(f"{label} poll #{attempt} fetch error: {exc}")
             obj, summary = None, str(exc)
 
@@ -1183,7 +1185,7 @@ def _resume_prior_launch(args: argparse.Namespace, state: dict, *, topology: dic
     try:
         with _ray_dashboard_client(state) as probe:
             prev_status = str(probe.get_job(prev_sub).get("status", "")).upper()
-    except Exception as exc:  # noqa: BLE001
+    except (httpx.HTTPError, httpx.InvalidURL, OSError, RuntimeError, ValueError, AttributeError) as exc:
         info(f"resume probe failed: {exc!r}; falling back to KILL+LAUNCH")
     if prev_status == "RUNNING":
         info(
@@ -1791,7 +1793,7 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_CONFIG_ERROR
         err(f"{type(exc).__name__}: {exc}")
         return EXIT_TRANSIENT
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - outermost CLI main: reported as transient with its traceback
         err(traceback.format_exc().rstrip())
         err(f"{type(exc).__name__}: {exc}")
         return EXIT_TRANSIENT

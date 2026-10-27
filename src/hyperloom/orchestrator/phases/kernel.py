@@ -11,6 +11,7 @@ import logging as _logging
 import math
 import os
 import shlex
+import sqlite3
 import subprocess
 import sys
 import time
@@ -660,7 +661,7 @@ class KernelPhase(CoordinatorCollaborator):
         reprofile_task = _covered_step(task_kind, params, idempotency_key=f"internal-analysis-{idempotency_reason}")
         try:
             await self.sub.execute_covered(reprofile_task)
-        except Exception:
+        except Exception:  # isolation boundary: the kernel-entry reprofile step, recorded as dispatch_failed
             log.exception("kernel-entry reprofile failed; the phase proceeds on the existing snapshot")
             _note_reprofile(
                 KernelReprofile(
@@ -1064,7 +1065,7 @@ class KernelPhase(CoordinatorCollaborator):
                 },
                 session_dir=self.session_dir,
             )
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: the kernel-entry GEMM tuning stage, recorded as failed
             log.exception("KERNEL entry GEMM tuning failed")
             result = {
                 "status": "failed",
@@ -1145,9 +1146,9 @@ class KernelPhase(CoordinatorCollaborator):
         Returns ``{}`` for a missing, unreadable or malformed recipe, which each
         caller already treats as "nothing to advertise". Never raises.
         """
-        try:
-            import yaml
+        import yaml
 
+        try:
             if not recipe_path or not Path(recipe_path).is_file():
                 return {}
             cfg = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8")) or {}
@@ -1155,7 +1156,7 @@ class KernelPhase(CoordinatorCollaborator):
                 return {}
             bench = cfg.get("benchmark") or {}
             return bench if isinstance(bench, dict) else {}
-        except Exception:
+        except (OSError, ValueError, yaml.YAMLError):
             log.warning("recipe: could not read %r", recipe_path, exc_info=True)
             return {}
 
@@ -1213,7 +1214,7 @@ class KernelPhase(CoordinatorCollaborator):
                 # best available replay result rather than a confirmed same-run one.
                 "observed_tput_match_err": round(err, 6),
             }
-        except Exception:
+        except (OverflowError, TypeError, ValueError):
             log.warning("workload_spec: could not derive observed replay shape", exc_info=True)
             return {}
 
@@ -1254,7 +1255,7 @@ class KernelPhase(CoordinatorCollaborator):
             if not is_agentx_client_script(str(bench.get("benchmark_script") or "").strip()):
                 return ""
             return resolve_launch_server_script(bench)
-        except Exception:
+        except OSError:
             log.warning("launch_server_script: could not resolve from the recipe", exc_info=True)
             return ""
 
@@ -1797,7 +1798,7 @@ class KernelPhase(CoordinatorCollaborator):
                 facts=facts,
             )
             return GeakRunnerOutcome()
-        except Exception as exc:
+        except (OSError, ValueError) as exc:
             log.exception("GEAK runner crashed")
             self._finish_geak_skip(
                 {"status": "error", "error_class": "runner_crashed", "error": repr(exc)},
@@ -2626,7 +2627,7 @@ class KernelPhase(CoordinatorCollaborator):
         """Report whether the validated aiter CSV was reachable by the server, or ``None`` when undetermined."""
         try:
             return self._gemm_tuned_config_coverage_impl(tuner_name, envs)
-        except Exception:  # parses server logs and tuner CSVs whose format varies by aiter version
+        except (OSError, ValueError):  # parses server logs and tuner CSVs whose format varies by aiter version
             log.warning("tuned-config coverage failed for %s; treating it as undetermined", tuner_name, exc_info=True)
             return None
 
@@ -2970,7 +2971,7 @@ class KernelPhase(CoordinatorCollaborator):
                 merged_path,
             )
             return str(merged_path)
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, ValueError, csv.Error) as exc:
             log.warning("gemm E2E: merge failed (%s); rejecting candidate", exc)
             return None
 
@@ -3024,7 +3025,7 @@ class KernelPhase(CoordinatorCollaborator):
         self.shared_state.record_gemm_tuning(result)
         try:
             await self._validate_gemm_tuning_e2e(result)
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one GEMM campaign's e2e validation, recorded as a REVERT fault
             # Validation spans server restarts, log parsing and CSV merges, and is reached from two entrypoints that
             # only guard the tuning call itself.
             log.exception("gemm E2E validation raised; recording it as a fault")
@@ -3094,7 +3095,7 @@ class KernelPhase(CoordinatorCollaborator):
                     metrics=metrics,
                 )
             )
-        except Exception:
+        except (OSError, TypeError, ValueError):
             log.exception("gemm_tuning journal append failed")
 
     def _writeback_gemm_result_json(self, entry: dict[str, Any]) -> None:
@@ -3269,13 +3270,14 @@ class KernelPhase(CoordinatorCollaborator):
                 integrate_result = await integrate_within_phase(
                     payload, state=self.shared_state, session_dir=self.session_dir
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # isolation boundary: one integrate attempt for one GEMM candidate
                 log.warning(
                     "gemm E2E: integrate raised for %s (fault attempt %d/%d): %s",
                     tuner_name,
                     attempt,
                     _MAX_INTEGRATE_FAULT_ATTEMPTS,
                     exc,
+                    exc_info=True,
                 )
                 if last:
                     return await _fault(attempt, "handler_exception", error=repr(exc))
@@ -3568,22 +3570,19 @@ class KernelPhase(CoordinatorCollaborator):
                     "KERNEL entry: sealed campaign baselines %s",
                     {repo: baseline.commit for repo, baseline in baselines.items()},
                 )
-        except Exception:
+        except (OSError, ValueError, subprocess.SubprocessError):
             log.exception("KERNEL entry: sealing the campaign baseline failed")
-        try:
-            from ..kernel.forge_handoff import write_forge_handoff
+        from ..kernel.forge_handoff import write_forge_handoff
 
-            env_spec = self._coord.writeback.build_env_spec()
-            handoff_dir = write_forge_handoff(
-                self.session_dir,
-                self.shared_state,
-                env_spec=env_spec,
-                handoff_dir=handoff_dir,
-                baselines=baselines,
-            )
-            log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
-        except Exception:
-            log.exception("KERNEL entry: Forge handoff generation failed")
+        env_spec = self._coord.writeback.build_env_spec()
+        handoff_dir = write_forge_handoff(
+            self.session_dir,
+            self.shared_state,
+            env_spec=env_spec,
+            handoff_dir=handoff_dir,
+            baselines=baselines,
+        )
+        log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
         await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
 
     async def _controller_attempt_result(self, handoff_dir: Path, output_dir: Path) -> dict[str, Any]:
@@ -3614,7 +3613,7 @@ class KernelPhase(CoordinatorCollaborator):
                 budget_minutes=budget_minutes,
                 hard_timeout_sec=hard_timeout_sec,
             )
-        except Exception as error:
+        except (OSError, ValueError) as error:
             log.exception("KERNEL entry: kernel rewrite controller failed")
             return {**attempt, "status": "failed", "reason": f"controller invocation failed: {error}"}
         # The four facts the phase owns are re-pinned over the child's own output: the Controller writes
@@ -3644,7 +3643,7 @@ class KernelPhase(CoordinatorCollaborator):
                 admit_round=lambda rounds_run: controller_round_stop(self.shared_state, rounds_run),
             )
             result["integration"] = integration.to_dict()
-        except Exception as error:
+        except Exception as error:  # isolation boundary: the Controller patch integration step, recorded as failed
             log.exception("KERNEL entry: Controller patch integration failed")
             result["integration"] = {"status": "failed", "reason": str(error), "kept_count": 0}
 
@@ -3689,7 +3688,7 @@ class KernelPhase(CoordinatorCollaborator):
             reclaimed = reclaim_campaign_repositories(baselines)
             if reclaimed:
                 result["reclaimed_repositories"] = reclaimed
-        except Exception:
+        except ValueError:
             log.exception("KERNEL entry: reclaiming the campaign repositories failed")
         await self._integrate_controller_output(result, output_dir)
         self._record_kernel_rewrite_controller_timeline(result)
@@ -3759,7 +3758,7 @@ class KernelPhase(CoordinatorCollaborator):
                 {"task_id": "kernel_entry_fusion", "reason": "kernel_entry_auto"},
                 session_dir=self.session_dir,
             )
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: the kernel-entry fusion stage, recorded as failed
             log.exception("KERNEL entry forge-fusion failed")
             result = {
                 "status": "failed",
@@ -3816,7 +3815,7 @@ class KernelPhase(CoordinatorCollaborator):
                     },
                 )
             )
-        except Exception:
+        except (sqlite3.Error, TypeError, ValueError):
             log.exception("failed to post run_fusion_done bus message")
         # A KEPT fusion is handed to integrate for the e2e re-baseline decision.
         if isinstance(result, dict) and result.get("kept") and result.get("requires_e2e_validation"):
@@ -3956,7 +3955,7 @@ class KernelPhase(CoordinatorCollaborator):
                 reason=reason,
                 idem_scope=f"-from{anchor:.0f}" if anchor > 0 else "",
             )
-        except Exception as exc:
+        except (sqlite3.Error, TypeError, ValueError) as exc:
             log.exception(
                 "watermark-roofline (%s): failed to enqueue: %r",
                 reason,
