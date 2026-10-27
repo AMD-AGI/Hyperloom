@@ -43,7 +43,10 @@ from hyperloom.orchestrator.actions.executors.explore import (
     observed_launch_from_state,
 )
 from hyperloom.orchestrator.actions.executors._launch_restatement import (
+    Launch,
     config_launch_restated_by,
+    launch_change,
+    named_settings,
     restates_the_baseline,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -197,10 +200,7 @@ def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
         yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
         encoding="utf-8",
     )
-    kwargs = {
-        "framework": "sglang",
-        "base_yaml_path": base_yaml,
-    }
+    kwargs = {"base_yaml_path": base_yaml}
     kwargs.update(overrides)
     kwargs["recipe"] = GridRecipe(
         base_yaml_path=kwargs.pop("base_yaml_path"),
@@ -287,19 +287,61 @@ def test_variant_that_is_not_known_to_be_the_stack_is_kept(tmp_path, variant, ov
     assert dropped == []
 
 
-def test_a_removal_is_never_a_restatement_of_the_stack(tmp_path):
-    """chaojhou 3: the materialized config cannot show a subtraction, so it must not read as a noop.
-
-    ``unset_envs`` also pops the process env at run time, which the probe's
-    YAML never sees; ``remove_args`` leaves no trace in the merged argv.
-    """
+def test_a_removal_changes_the_launch_only_when_the_stack_passes_what_it_removes(tmp_path):
+    """The materialized argv shows a removal; an unset also pops the process env, which no config shows."""
     grid = [
-        GridVariant("removes-an-arg", remove_args=["--enable-dp-attention"]),
+        GridVariant("removes-a-passed-arg", remove_args=["--mem-fraction-static"]),
+        GridVariant("removes-an-absent-arg", remove_args=["--enable-dp-attention"]),
         GridVariant("unsets-an-env", unset_envs=["HIP_FORCE_DEV_KERNARG"]),
     ]
     kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path))
-    assert [gv.name for gv in kept] == ["removes-an-arg", "unsets-an-env"]
-    assert dropped == []
+    assert [gv.name for gv in kept] == ["removes-a-passed-arg", "unsets-an-env"]
+    assert dropped == [("removes-an-absent-arg", "launches the server the stack already runs (baseline noop)")]
+
+
+def _agentx_noop_filter_kwargs(tmp_path: Path) -> dict:
+    workload = tmp_path / "agentx.yaml"
+    workload.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": "Qwen/Qwen3-0.6B",
+                    "agentx": {"enabled": True, "mode": "canonical"},
+                    "envs": {"TP": "1", "EP_SIZE": "1", "CONC": "8"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    kwargs = _noop_filter_kwargs(
+        tmp_path, observed_server_config={"kv_cache_dtype": "fp8", "max_running_requests": 512}
+    )
+    kwargs["recipe"] = GridRecipe(
+        base_yaml_path=workload,
+        base=LaunchLayer(extra_server_args="--kv-cache-dtype fp8", extra_envs={"SGLANG_TEST": "1"}),
+        target=BenchmarkTarget(model_path=None, gpu_type=None, benchmark_script=None),
+    )
+    return kwargs
+
+
+def test_an_agentx_variant_is_judged_on_its_launch_overrides(tmp_path):
+    """AgentX carries the server argv in ``launch_overrides``, not in ``benchmark.envs``."""
+    grid = [
+        GridVariant("restates-the-stack-arg", "--kv-cache-dtype fp8"),
+        GridVariant("restates-the-engine-default", "--max-running-requests 512"),
+        GridVariant("restates-the-stack-env", extra_envs={"SGLANG_TEST": "1"}),
+        GridVariant("changes-an-arg", "--chunked-prefill-size 2048"),
+        GridVariant("changes-an-env", extra_envs={"SGLANG_TEST": "0"}),
+        GridVariant("removes-a-recipe-arg", remove_args=["--disable-radix-cache"]),
+    ]
+    kept, dropped = filter_baseline_noop_variants(grid, **_agentx_noop_filter_kwargs(tmp_path))
+    assert [gv.name for gv in kept] == ["changes-an-arg", "changes-an-env", "removes-a-recipe-arg"]
+    assert [name for name, _ in dropped] == [
+        "restates-the-stack-arg",
+        "restates-the-engine-default",
+        "restates-the-stack-env",
+    ]
 
 
 def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
@@ -405,7 +447,6 @@ def _vllm_noop_filter_kwargs(tmp_path: Path) -> dict:
     )
     return _noop_filter_kwargs(
         tmp_path,
-        framework="vllm",
         base_yaml_path=base_yaml,
         observed_server_config={"kv_cache_dtype": "fp8", "enable_prefix_caching": True, "max_num_seqs": 64},
         observed_server_env={"VLLM_ROCM_USE_AITER": "1"},
@@ -491,6 +532,32 @@ def test_a_null_baseline_env_is_unset_not_the_string_none(tmp_path):
 def test_restates_the_baseline(argv, envs, base_argv, expected):
     """Only a request every part of which the baseline already sets is a restatement; anything unreadable is not."""
     assert restates_the_baseline(argv, envs, base_argv, {"VLLM_ROCM_USE_AITER": "1"}, "vllm") is expected
+
+
+def test_named_settings_resolve_like_the_engine():
+    """The last spelling of a boolean flag wins, negated or not; an argv it cannot account for raises."""
+    assert named_settings("--enable-prefix-caching --no-enable-prefix-caching", "vllm") == {
+        "enable_prefix_caching": ["false"]
+    }
+    assert named_settings("--no-enable-prefix-caching --enable-prefix-caching", "vllm") == {"enable_prefix_caching": []}
+    for argv in ("fp8 --kv-cache-dtype fp8", "--kv-cache-dtype 'fp8"):
+        with pytest.raises(ValueError):
+            named_settings(argv, "vllm")
+
+
+def test_launch_change_names_every_change_and_discounts_what_the_server_resolved():
+    base = Launch({"enable_x": [], "kv_cache_dtype": ["fp8"]}, {"A": "1"}, {"unset_envs": []})
+    launch = Launch({"enable_x": ["false"], "block_size": ["128"]}, {"B": "2"}, {"unset_envs": ["C"]})
+    assert launch_change(base, launch, ({}, {})) == {
+        "settings": {"enable_x": ["false"], "block_size": ["128"]},
+        "removed": ["kv_cache_dtype"],
+        "envs": {"B": "2"},
+        "unset_envs": ["A"],
+        "controls": ["unset_envs"],
+    }
+    same_server = Launch({**base.settings, "block_size": ["128"], "enable_y": ["false"]}, {"A": "1", "B": "2"}, {})
+    observed = ({"block_size": 128, "no_enable_y": True}, {"B": "2"})
+    assert launch_change(Launch(base.settings, base.envs, {}), same_server, observed) == {}
 
 
 def test_record_explore_accepted_dedup_by_fingerprint():
@@ -744,6 +811,26 @@ async def test_a_stack_revalidation_runs_although_it_restates_the_stack(sub_agen
 
 
 @pytest.mark.asyncio
+async def test_rows_that_launch_the_same_server_are_benched_once(sub_agent_runner, tmp_path, monkeypatch):
+    """Restating the stack's fp8 beside the same change launches the server the first row already measured."""
+    grid = [
+        {"name": "v_seqs", "extra_args": "--max-num-seqs 256", "extra_envs": {}},
+        {"name": "v_fp8_seqs", "extra_args": "--kv-cache-dtype fp8 --max-num-seqs 256", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner,
+        tmp_path,
+        monkeypatch,
+        grid,
+        {"v_seqs": 800.4, "v_fp8_seqs": 800.4},
+        inherited="--kv-cache-dtype fp8",
+    )
+
+    assert launched == ["v_seqs"]
+    assert [(sd["name"], sd["reason"]) for sd in out["skipped_dup"]] == [("v_fp8_seqs", "round_dup")]
+
+
+@pytest.mark.asyncio
 async def test_a_variant_that_was_the_stack_runs_once_a_keep_has_moved_the_stack(
     sub_agent_runner, tmp_path, monkeypatch
 ):
@@ -878,7 +965,10 @@ async def test_a_restatement_left_leading_by_the_skip_list_is_skipped_at_its_tur
 async def test_a_restatement_stays_skipped_after_a_keep_that_switches_the_stack_to_replace_mode(
     sub_agent_runner, tmp_path, monkeypatch
 ):
-    """A KEEP that removes a flag persists the stack's launched args in replace mode, which moves only that flag."""
+    """A KEEP that removes a flag persists the stack's launched args in replace mode, which moves only that flag.
+
+    ``fp8`` then launches the server ``v_drop`` just measured, so it is that round's duplicate.
+    """
     grid = [
         {
             "name": "v_drop",
@@ -900,7 +990,7 @@ async def test_a_restatement_stays_skipped_after_a_keep_that_switches_the_stack_
     assert launched == ["v_drop"]
     (keep,) = out["winners"]
     assert keep["args_mode"] == "replace"
-    assert [(sd["name"], sd["reason"]) for sd in out["skipped_dup"]] == [("v_fp8", "baseline_noop")]
+    assert [(sd["name"], sd["reason"]) for sd in out["skipped_dup"]] == [("v_fp8", "round_dup")]
 
 
 @pytest.mark.asyncio
