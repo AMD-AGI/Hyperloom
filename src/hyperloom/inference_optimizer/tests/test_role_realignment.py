@@ -148,7 +148,7 @@ def test_shared_state_phase_status_summary_renders_compact_block():
     s.phase_budget_pct = {phase: 0.5}
     out = _ps.phase_status_summary(s, now_unix=1_000_120.0)
     assert f"phase     : {phase}" in out
-    assert "entered" in out
+    assert f"entered   : {datetime.fromtimestamp(1_000_000.0, tz=timezone.utc).isoformat(timespec='seconds')}" in out
     assert "elapsed_sec=120" in out
     # Wiring: the rendered remaining must match the budget helper it delegates to.
     expected_rem = int(_ps.phase_budget_remaining_seconds(s, now_unix=1_000_120.0))
@@ -344,7 +344,7 @@ async def test_compose_prompt_keeps_per_tick_values_out_of_the_context(coordinat
         before = await c.conversation.compose_prompt("orchestration")
         c.shared_state.tick = int(c.shared_state.tick or 0) + 7
         c.shared_state.agent_last_active["orchestration"] = 1.0
-        c.shared_state.phase_started_ts = "2026-01-01T00:00:00+00:00"
+        c.shared_state.phase_started_unix = 1_767_225_600.0
         after = await c.conversation.compose_prompt("orchestration")
 
         assert after.context == before.context

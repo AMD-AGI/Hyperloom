@@ -505,12 +505,16 @@ def phase_status_summary(
             f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} "
             f"cumulative_sec={cumulative} remaining_sec={int(remaining)}"
         )
+    from datetime import datetime as _dt, timezone as _tz
+
+    entered_unix = _phase_started_unix(state)
+    entered = _dt.fromtimestamp(entered_unix, _tz.utc).isoformat(timespec="seconds") if entered_unix > 0 else "(unset)"
     actions_in_phase = allowed_actions_for(phase)
     allowed_line = f"allowed   : {', '.join(actions_in_phase) if actions_in_phase else '(none)'}"
     lines = [
         f"phase     : {phase}",
         f"cycle     : {state.macro_cycle}",
-        f"entered   : {state.phase_started_ts or '(unset)'}",
+        f"entered   : {entered}",
         budget_line,
         allowed_line,
     ]
@@ -1774,7 +1778,6 @@ def record_phase_transition(
         history = history[-_PHASE_HISTORY_CAP:]
     state.phase_history = history
     state.phase = row["to_phase"]
-    state.phase_started_ts = now_ts
     state.phase_started_unix = now_unix
     _publish_phase_boundary(
         _PhaseBoundary(

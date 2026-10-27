@@ -48,6 +48,7 @@ from hyperloom.common.profile_args import sanitize_profile_server_args
 from hyperloom.inference_optimizer.grading import resolved_grading
 
 from . import kernel_decision_settings as _kernel_decision_settings
+from .failure_evidence import tail_excerpt
 from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
 from ._shared_state.enablement_round import EnablementRound
 from ._shared_state.phase_state import _control_fields
@@ -860,9 +861,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Phase state machine fields ``phase`` — run-level pipeline phase
     # (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/CLOSE); Coordinator-only writer.
     phase: str = ""
-    # ISO UTC timestamp the current phase was entered (breakdown.phase_segments + budget judge).
-    phase_started_ts: str = ""
-    # Unix epoch matching ``phase_started_ts`` so the budget judge skips ISO re-parsing.
+    # Unix epoch the current phase was entered (budget judge + the prompt's ``entered`` line).
     phase_started_unix: float = 0.0
     # Append-only log of phase transitions (rows from machine_state.make_history_row). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
@@ -994,17 +993,16 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         """Whether the latest profile left a trace; ``recovered`` was salvaged from a run that reported failure."""
         return self.last_profile_status in {"succeeded", "recovered"}
 
-    def profile_trace_matches_workload(self, expected: dict[str, Any] | None = None) -> bool:
-        """Whether the recorded profile trace is fresh for a target workload."""
+    def profile_trace_matches_workload(self) -> bool:
+        """Whether the recorded profile trace is fresh for the current-best workload."""
         recorded = self.last_profile_workload
         if not self.profile_trace_usable() or not isinstance(recorded, dict) or not recorded:
             return False
-        # Default to the *current-best* runtime identity, not the bare context: last_profile_workload is recorded with
-        # the real profile params (actual server_args / extra_envs), while profile_workload_context() with no
+        # Compare against the *current-best* runtime identity, not the bare context: last_profile_workload is recorded
+        # with the real profile params (actual server_args / extra_envs), while profile_workload_context() with no
         # overrides reports server_args="" and skips the current_best runtime backfill, so any workload with server
         # args/extra envs would compare unequal and every fresh profile would be discarded as stale.
-        target = expected if isinstance(expected, dict) and expected else self.current_profile_workload_context()
-        return recorded == target
+        return recorded == self.current_profile_workload_context()
 
     def record_profile_workload(
         self,
@@ -1770,22 +1768,12 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             return text
         return text[:limit]
 
-    @staticmethod
-    def _stderr_tail(value: Any, *, limit: int = 1000) -> str | None:
-        """Pull the last ``limit`` chars from a subprocess error blob (stderr's actionable signal is at the end)."""
-        if value is None:
-            return None
-        text = redact_secret_values(str(value))
-        if not text:
-            return None
-        return text[-limit:] if len(text) > limit else text
-
     def _common_result_fields(self, result: dict[str, Any]) -> dict[str, Any]:
         """Build the failure/diagnostic fields shared by the attempt + failure logs."""
         return {
             "error_class": (str(result.get("error_class")) if result.get("error_class") else None),
             "error_excerpt": self._truncate_excerpt(result.get("error")),
-            "stderr_tail": self._stderr_tail(result.get("error")),
+            "stderr_tail": tail_excerpt(result.get("error"), limit=1000),
             "stderr_log_path": (str(result.get("stderr_log_path")) if result.get("stderr_log_path") else None),
             "workspace": (str(result.get("workspace")) if result.get("workspace") else None),
             "raw_result_path": (str(result.get("raw_result_path")) if result.get("raw_result_path") else None),
@@ -2215,15 +2203,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self.tick = int(self.tick or 0) + 1
         return self.tick
 
-    def append_stack_gain_entry(
-        self,
-        *,
-        action: str,
-        variant_name: str | None,
-        new_tput: float,
-        extra_server_args: str = "",
-        ts: str | None = None,
-    ) -> float | None:
+    def append_stack_gain_entry(self, *, new_tput: float) -> float | None:
         """Mirror an optimization_stack append into gain_per_stack_entry; computes ``(new_tput-baseline_tput)/baseline_tput*100`` and appends. Returns gain_pct (None when baseline_tput is 0 or new_tput non-positive)."""
         try:
             base = float(self.baseline_tput or 0.0)

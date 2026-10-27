@@ -1167,7 +1167,6 @@ def test_sweep_exits_based_on_ladder_status():
         return SharedState(
             last_conc_sweep=last_conc_sweep or {},
             phase="SWEEP",
-            phase_started_ts="2026-06-02T10:00:00+00:00",
             max_minutes=360,
             phase_budget_pct={"SWEEP": 0.50},
         )
@@ -1203,7 +1202,6 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
 
     state = SharedState(
         phase="SWEEP",
-        phase_started_ts="2026-06-02T10:00:00+00:00",
         max_minutes=360,
         phase_budget_pct={"SWEEP": 0.50},
     )

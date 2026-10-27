@@ -58,7 +58,6 @@ def _geak_rebench_params(**extra: object) -> dict:
 def _arm_kernel_to_sweep(st) -> None:
     now = datetime.now(timezone.utc)
     st.phase = ps.PHASE_KERNEL_AGENT
-    st.phase_started_ts = (now - timedelta(minutes=5)).isoformat()
     st.phase_started_unix = (now - timedelta(minutes=5)).timestamp()
     st.start_ts = (now - timedelta(minutes=10)).isoformat()
     st.max_minutes = 96 * 60
@@ -1399,7 +1398,6 @@ async def test_a_spent_kernel_budget_waits_for_the_rebench_and_keeps_the_win(coo
     st.start_ts = (now - timedelta(minutes=30)).isoformat()
     st.max_minutes = 96 * 60
     st.phase_budget_pct = dict(ps.DEFAULT_PHASE_BUDGET_PCT)
-    st.phase_started_ts = (now - timedelta(minutes=20)).isoformat()
     st.phase_started_unix = (now - timedelta(minutes=20)).timestamp()
 
     async def _noop(**_kwargs):
@@ -1436,7 +1434,6 @@ async def test_a_spent_kernel_budget_waits_for_the_rebench_and_keeps_the_win(coo
     await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(measuring.wait(), timeout=2.0)
     spent = now - timedelta(hours=30)
-    st.phase_started_ts = spent.isoformat()
     st.phase_started_unix = spent.timestamp()
 
     await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
