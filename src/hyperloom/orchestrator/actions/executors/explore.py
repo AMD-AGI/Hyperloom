@@ -519,19 +519,8 @@ def _touches_a_multi_value_flag(argv_text: str) -> bool:
     return any(flag in argv_text for flag in _MULTI_VALUE_FLAGS)
 
 
-# Separate from _CONFIG_REPLAY_PROVENANCE (shared with filter_operator_pinned_envs):
-# a revalidation re-measures its own config, so it must always run.
-_NOOP_FILTER_ALWAYS_RUNS = frozenset({"resume_stack_revalidate"})
-
 #: Names the throwaway variant that materializes the unchanged baseline to diff against.
 _NOOP_PROBE_BASE_NAME = "__baseline_noop_probe_base__"
-
-
-def _is_noop_filter_exempt(variant: GridVariant) -> bool:
-    """Whether ``variant`` must skip the baseline-noop probe outright and always run."""
-    if _is_config_replay_variant(variant):
-        return True
-    return str(getattr(variant, "provenance", "") or "").strip() in _NOOP_FILTER_ALWAYS_RUNS
 
 
 def _materialized_launch(recipe: GridRecipe, gv: GridVariant, output_subdir: Path) -> tuple[str, dict[str, str]]:
@@ -626,7 +615,7 @@ def filter_baseline_noop_variants(
             return list(grid), []
         for idx, gv in enumerate(grid):
             args = str(getattr(gv, "extra_server_args", "") or "")
-            if _is_noop_filter_exempt(gv) or _subtracts_from_the_launch(gv) or _touches_a_multi_value_flag(args):
+            if _is_config_replay_variant(gv) or _subtracts_from_the_launch(gv) or _touches_a_multi_value_flag(args):
                 kept.append(gv)
                 continue
             try:
@@ -1161,7 +1150,7 @@ class _ExploreRound:
         # They change nothing while the stack stays as observed, and can only launch on it, so they go before a
         # serving lease is taken; any other is judged at its turn, against the stack a KEEP has moved.
         before = len(self.runnable)
-        if self.runnable:
+        if self.runnable and not is_stack_revalidation(self.params):
             kept, dropped = filter_baseline_noop_variants(
                 self.runnable,
                 framework=self.framework,
@@ -1237,8 +1226,11 @@ class _ExploreRound:
         """Why ``gv`` only restates the launch the stack runs as it stands now, or ``""`` when it changes it.
 
         The observed launch is what the server ran when the round opened; a KEEP since then has made the observed
-        value of whatever it changed stale, and ``observed_launch_after`` leaves that out.
+        value of whatever it changed stale, and ``observed_launch_after`` leaves that out. A stack revalidation
+        re-measures the stack on purpose, so it never restates it.
         """
+        if is_stack_revalidation(self.params):
+            return ""
         _, restated = filter_baseline_noop_variants(
             [gv],
             framework=self.framework,

@@ -684,7 +684,9 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
     assert rejected_provenance == {"llm_direct"}
 
 
-async def _explore_on_an_observed_fp8_stack(sub_agent_runner, tmp_path, monkeypatch, grid, tputs, inherited=""):
+async def _explore_on_an_observed_fp8_stack(
+    sub_agent_runner, tmp_path, monkeypatch, grid, tputs, inherited="", **params
+):
     """Run one explore round whose stack was observed launching with ``--kv-cache-dtype fp8``."""
     sub, tr, _ = sub_agent_runner
     _force_cold_decision(monkeypatch)
@@ -710,7 +712,13 @@ async def _explore_on_an_observed_fp8_stack(sub_agent_runner, tmp_path, monkeypa
     task, _ = await tr.create_or_return_existing(
         TaskSpec(
             kind="explore",
-            params={"config_path": str(base), "output_dir": str(tmp_path / "out"), "base_tput": 800.0, "grid": grid},
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "out"),
+                "base_tput": 800.0,
+                "grid": grid,
+                **params,
+            },
             idempotency_key="ex-noop-stack",
         ),
     )
@@ -721,6 +729,18 @@ async def _explore_on_an_observed_fp8_stack(sub_agent_runner, tmp_path, monkeypa
     ):
         res = await sub.run_task(task)
     return res.result, launched
+
+
+@pytest.mark.asyncio
+async def test_a_stack_revalidation_runs_although_it_restates_the_stack(sub_agent_runner, tmp_path, monkeypatch):
+    """A stack revalidation exists to re-measure the stack, so restating it is the point."""
+    grid = [{"name": "stack_revalidate", "extra_args": "--kv-cache-dtype fp8", "provenance": "stack_revalidate"}]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"stack_revalidate": 800.0}, source="stack_revalidate"
+    )
+
+    assert launched == ["stack_revalidate"]
+    assert out["skipped_dup"] == []
 
 
 @pytest.mark.asyncio
