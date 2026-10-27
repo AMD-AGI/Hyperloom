@@ -622,34 +622,16 @@ def _print_session_skeleton(session_dir: Path) -> None:
 
 
 def _print_export_gate_line(state: SharedState) -> None:
-    """Say whether the declared ahead-of-time export landed, next to the gain figure.
+    """Print the export-gate summary line, next to the gain figure.
 
-    A landed export can still show a negative headline gain, measured against an eager
-    path this workload cannot ship. Silent unless ``aoti.enabled``.
+    The wording lives with the rest of the run summary in ``executors.report``.
+    Silent unless ``aoti.enabled``.
     """
-    from hyperloom.orchestrator.framework.optimization_scope import aoti_config
+    from hyperloom.orchestrator.actions.executors.report import export_gate_summary_line
 
-    try:
-        config = aoti_config()
-    except ValueError:
-        return
-    if config is None or not config.enabled:
-        return
-    attempts = int(getattr(state, "export_attempts", 0) or 0)
-    if getattr(state, "export_landed", False):
-        gain = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
-        tail = (
-            "the artifact is faster than the eager path it replaces"
-            if gain > 0
-            else "it is still behind the eager path, which this workload does not ship; "
-            "optimizing the export is what further budget buys"
-        )
-        print(f"  aoti_export          : landed — {tail}")
-    else:
-        print(
-            f"  aoti_export          : ⚠ NEVER LANDED after {attempts} integrate round(s) — "
-            f"no shippable artifact was produced, whatever else this run kept"
-        )
+    line = export_gate_summary_line(state)
+    if line:
+        print(line)
 
 
 def _print_final_summary(
