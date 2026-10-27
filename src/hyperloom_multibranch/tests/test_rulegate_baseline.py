@@ -30,6 +30,7 @@ from hyperloom_multibranch.rulegate.baseline import (
     write_inferencex_baseline,
 )
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
+from hyperloom_multibranch.tests.short_prompt_checks import short_prompt_check
 
 ROOT = "c0"
 CONC = 64
@@ -44,7 +45,9 @@ class _Session:
         self.toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"))
         self.gate = LocalNotebook(root, Writer(Role.GATE, "gate"))
 
-    async def measured(self, request_id, *, metrics, score=None, change=None, parent=ROOT, purpose=Purpose.BASELINE):
+    async def measured(
+        self, request_id, *, metrics, score=None, change=None, parent=ROOT, purpose=Purpose.BASELINE, check=None
+    ):
         await self.toolbox.write_request(
             TestRequest(
                 kind=TestKind.TEST,
@@ -58,7 +61,8 @@ class _Session:
         )
         rounds = (RoundValue("measure", CONC if score is not None else None, metrics),)
         accuracy = () if score is None else (AccuracyValue("gsm8k", STRICT, score),)
-        await self.toolbox.write_result(dataclasses.replace(result(request_id), rounds=rounds, accuracy=accuracy))
+        measured = dataclasses.replace(result(request_id), rounds=rounds, accuracy=accuracy)
+        await self.toolbox.write_result(dataclasses.replace(measured, short_prompt_consistency=check))
         return await self.gate.record(request_id)
 
     async def inferencex(self, request_id, throughput, score=0.90, **fields):
@@ -70,9 +74,11 @@ def session(tmp_path):
     return _Session(tmp_path / "notebook")
 
 
-async def _prelude(session, throughputs=(1000.0, 1010.0, 990.0), scores=(0.90, 0.91, 0.89)):
+async def _prelude(session, throughputs=(1000.0, 1010.0, 990.0), scores=(0.90, 0.91, 0.89), checks=None):
+    checks = checks or (None,) * len(throughputs)
     baselines = [
-        await session.inferencex(f"b{i}", t, s) for i, (t, s) in enumerate(zip(throughputs, scores, strict=True))
+        await session.inferencex(f"b{i}", t, s, check=c)
+        for i, (t, s, c) in enumerate(zip(throughputs, scores, checks, strict=True))
     ]
     return await write_inferencex_baseline(session.gate, ROOT, baselines, CONC)
 
@@ -88,6 +94,24 @@ async def test_the_prelude_baselines_become_the_record_the_gate_judges_by(sessio
     baseline = await read_inferencex_baseline(session.gate)
     assert baseline.bar_pct == pytest.approx(2.0)
     assert baseline.accuracy == pytest.approx(0.90)
+    assert baseline.short_prompt_floor is None, "no root test ran the short-prompt check"
+
+
+@pytest.mark.parametrize(
+    ("checks", "floor"),
+    [
+        ((short_prompt_check(0, 1, 0, 0, 0, 0), short_prompt_check(0, 0, 2, 0, 0, 0), None), 2),
+        ((short_prompt_check(0, 0, 0, 0, 0, 0), None, short_prompt_check(0, 0, 0, 0, 0, 0)), 0),
+        ((short_prompt_check(0, 3, planned=6), short_prompt_check(1, 0, 0, 0, 0, 0), None), 3),
+        ((short_prompt_check(0, planned=6), None, None), None),
+    ],
+    ids=["largest-of-those-checked", "clean-is-zero", "incomplete-still-counted", "nothing-compared"],
+)
+async def test_the_short_prompt_floor_is_the_largest_inconsistency_a_root_test_measured(session, checks, floor):
+    record = await _prelude(session, checks=checks)
+
+    assert record.short_prompt_floor == floor
+    assert (await read_inferencex_baseline(session.gate)).short_prompt_floor == floor
 
 
 @pytest.mark.parametrize(
@@ -151,6 +175,7 @@ async def test_an_agentx_baseline_read_from_the_child_run_names_it_and_anchors_o
     assert (record.values, record.request_ids, record.dispersion_pct) == (AGENTX, (), {})
     assert record.threshold_pct == {GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT}
     assert (record.source, record.wall_seconds) == ("prelude-child:/runs/baseline/r1", 5287.67)
+    assert record.short_prompt_floor is None, "no BASELINE test ran the short-prompt check"
     assert await session.gate.baseline() == record
 
 
@@ -163,8 +188,9 @@ async def test_a_child_run_without_what_every_comparison_reads_anchors_nothing(s
 
 def test_a_baseline_written_before_it_named_a_source_reads_back_with_none():
     stored = codec.encode(BaselineRecord(ROOT, AGENTX, {}, {GRADED_INTVTY_P50: 1.0}, ("b0",)))
-    del stored["source"], stored["wall_seconds"]
+    del stored["source"], stored["wall_seconds"], stored["short_prompt_floor"]
 
     decoded = codec.decode(BaselineRecord, stored)
 
     assert (decoded.source, decoded.wall_seconds, decoded.request_ids) == ("", None, ("b0",))
+    assert decoded.short_prompt_floor is None
