@@ -34,7 +34,7 @@ from hyperloom_multibranch.notebook.rsi.tests.trees import HOUR, TASK, branch, t
 
 MINUTE = 60.0
 #: Every commit adds 2 points.
-TWO = Gains(0.0, (), (2.0,))
+TWO = Gains.of([(0.0, 2.0)])
 NEVER = Pace((0.0,) * MAX_POSITION, (0.0,) * MAX_POSITION, (0.0,) * MAX_POSITION, TWO, 6, 40 * MINUTE)
 ALWAYS = Pace((1.0,) * MAX_POSITION, (1.0,) * MAX_POSITION, (1.0,) * MAX_POSITION, TWO, 6, 40 * MINUTE)
 #: A bar of four tests past a commit, a grace of three tests, no probation, and no branch opened after the start.
@@ -183,18 +183,23 @@ def test_the_pace_of_a_session_is_read_off_the_others_and_held_or_dropped_beyond
 
     held, dropped = pace_for(own, (own, *others), OPTIMISTIC), pace_for(own, (own, *others), PESSIMISTIC)
 
-    assert held.gains == dropped.gains == Gains(0.0, (), (2.0,) * 20)
+    steps = [(0.0, 2.0)] * 20
+    assert held.gains == Gains.of(steps, OPTIMISTIC) and dropped.gains == Gains.of(steps, PESSIMISTIC)
     assert held.hazard[0] == 0.0 and held.opening_branch[1] == 1.0 and held.new_branch[:3] == (0.0, 0.0, 1.0)
     assert held.new_branch[3:] == (1.0,) * (MAX_POSITION - 3) and dropped.new_branch[3:] == (0.0,) * (MAX_POSITION - 3)
     assert held.first_commit_seconds == 30 * MINUTE
 
 
-def test_a_commit_draws_its_gain_from_the_commits_that_started_on_its_side_of_the_median() -> None:
-    gains = Gains.of([(0.0, 9.0), (1.0, 7.0), (40.0, 3.0), (50.0, 1.0)])
+def test_a_commit_draws_its_gain_from_the_commits_that_started_at_least_as_high() -> None:
+    # Twelve commits starting from 0, 10, ..., 110 points, adding 1, 2, ..., 12.
+    steps = [(10.0 * n, n + 1.0) for n in range(12)]
+    held, dropped = Gains.of(steps, OPTIMISTIC), Gains.of(steps, PESSIMISTIC)
 
-    assert (gains.split, gains.below, gains.above) == (20.5, (7.0, 9.0), (1.0, 3.0))
-    assert (gains.drawn(5.0, 0.0), gains.drawn(5.0, 0.99), gains.drawn(45.0, 0.99)) == (7.0, 9.0, 3.0)
-    assert Gains(10.0, (), (2.0,)).drawn(5.0, 0.5) == 2.0 and Gains().drawn(5.0, 0.5) is None
+    assert (held.drawn(0.0, 0.0), held.drawn(0.0, 0.99)) == (1.0, 12.0)
+    # Nine started at 25 or higher, fewer than ten: optimism reads the ten that started highest.
+    assert (held.drawn(25.0, 0.0), dropped.drawn(25.0, 0.0)) == (3.0, 4.0)
+    assert (held.drawn(115.0, 0.0), dropped.drawn(115.0, 0.0)) == (3.0, None)
+    assert Gains().drawn(5.0, 0.5) is None
 
 
 def test_a_cut_ranks_the_real_outcome_among_replays_that_sample_every_outcome_after_it() -> None:

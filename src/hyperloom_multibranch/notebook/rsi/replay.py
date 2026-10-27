@@ -10,8 +10,8 @@ does not:
 * a branch the playbook stops earlier than the archive did loses what it did after, which is exact;
 * a branch the judge stopped and the playbook keeps goes on with sampled tests, one every interval it kept, each
   committing with ``h(k)`` of the stall odds (``g(i)`` before its first commit) and adding a gain drawn from the
-  commits of the other archived sessions, of the same model type where they are enough, that started from a gain on
-  the branch's side of their median (:class:`Gains`): the big gains come early;
+  commits of the other archived sessions, of the same model type where they are enough, that started at least as high
+  as the branch stands (:class:`Gains`): the big gains come early, and a branch levels off where those sessions did;
 * a slot the playbook frees opens the next branch of the archive not opened yet, its record shifted to start then,
   from the integration gain then, or a sampled branch once the archive runs out, which commits as the branches opened
   mid-session did; none opens in the last ``last_open_minutes`` of the session, by default the median time such a
@@ -35,6 +35,7 @@ either way.
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import heapq
 import json
@@ -123,31 +124,35 @@ class Draws:
 
 @dataclass(frozen=True)
 class Gains:
-    """The gains the other sessions' commits added, split at the median gain they started from: a commit starting
-    below it draws from ``below``, one starting at or above it from ``above``, each sorted."""
+    """The gains the other sessions' commits added, by the gain they started from. A commit starting from a gain draws
+    from the commits that started at least as high, so a branch that is already high gains what such branches did and
+    levels off where the archive's sessions did. Where fewer than :data:`MIN_GAINS` started that high, ``beyond`` the
+    data reads as the :data:`MIN_GAINS` that started highest (:data:`OPTIMISTIC`) or as what there is, none above the
+    highest start (:data:`PESSIMISTIC`).
 
-    split: float = 0.0
-    below: tuple[float, ...] = ()
-    above: tuple[float, ...] = ()
+    ``starts`` holds the starts, the lowest first, and ``pools[i]`` the gains added by the commits from the ``i``-th
+    start on, sorted."""
+
+    starts: tuple[float, ...] = ()
+    pools: tuple[tuple[float, ...], ...] = ()
+    beyond: str = OPTIMISTIC
 
     @classmethod
-    def of(cls, steps: Sequence[tuple[float, float]]) -> Gains:
+    def of(cls, steps: Sequence[tuple[float, float]], beyond: str = OPTIMISTIC) -> Gains:
         """The gains of ``steps``, each the gain a commit started from and the gain it added."""
 
-        if not steps:
-            return cls()
-        split = statistics.median(base for base, _ in steps)
-        return cls(
-            split,
-            tuple(sorted(added for base, added in steps if base < split)),
-            tuple(sorted(added for base, added in steps if base >= split)),
-        )
+        ordered = sorted(steps)
+        pools = tuple(tuple(sorted(added for _, added in ordered[index:])) for index in range(len(ordered)))
+        return cls(tuple(start for start, _ in ordered), pools, beyond)
 
     def drawn(self, base: float, picked: float) -> float | None:
-        """The gain a commit starting from ``base`` adds, at ``picked``, in [0, 1), along its side; ``None`` for no
-        gains at all."""
+        """The gain a commit starting from ``base`` adds, at ``picked`` in [0, 1) along its pool; ``None`` for an
+        empty pool."""
 
-        pool = (self.below if base < self.split else self.above) or self.below or self.above
+        index = bisect.bisect_left(self.starts, base)
+        if len(self.starts) - index < MIN_GAINS and self.beyond == OPTIMISTIC:
+            index = max(0, len(self.starts) - MIN_GAINS)
+        pool = self.pools[index] if index < len(self.pools) else ()
         return pool[min(int(picked * len(pool)), len(pool) - 1)] if pool else None
 
 
@@ -220,7 +225,7 @@ def pace_for(tree: SearchTree, history: Sequence[SearchTree], beyond: str = OPTI
         hazard=_curve(odds.hazard, beyond),
         new_branch=_curve(odds.new_branch, beyond),
         opening_branch=_curve(odds.opening_branch, beyond),
-        gains=Gains.of(drawn if len(drawn) >= MIN_GAINS else steps(alike)),
+        gains=Gains.of(drawn if len(drawn) >= MIN_GAINS else steps(alike), beyond),
         bar=odds.stall_tests,
         first_commit_seconds=minutes * _SECONDS_PER_MINUTE,
     )
