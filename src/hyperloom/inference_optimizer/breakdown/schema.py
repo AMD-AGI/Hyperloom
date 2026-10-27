@@ -1078,16 +1078,17 @@ class V6EnablementAttempt(TypedDict, total=False):
     ``launch_log`` for the whole lane and every advance overwrote it, so the
     export published the newest gap as the reason the lane had opened.
 
-    ``files`` and ``accepted_config_path`` are session-relative and name only
-    copies the round's archive took, which is a weaker claim than "fetchable":
+    ``files`` paths are session-relative and name only copies the round's
+    archive took, which is a weaker claim than "fetchable":
     ``reports/enablement/**`` is packaged outside ``RESERVED_PATHS``, so a
     session that hit the file or byte cap ships a truncated package and a
     consumer must tolerate a miss. ``patches_applied`` and
     ``artifacts_applied[].target`` are the workspace originals the round
     reported, which are never packaged -- they are identity, not a way to
-    fetch. Note the asymmetry with ``V6EnablementResult.accepted_config_path``,
-    which stays absolute because the revalidation baseline opens that one
-    directly."""
+    fetch. The round's accepted config is its ``files`` entry with role
+    ``launch_config``; note the asymmetry with
+    ``V6EnablementResult.accepted_config_path``, which stays absolute because
+    the revalidation baseline opens that one directly."""
 
     attempt: int
     task_id: str
@@ -1109,7 +1110,6 @@ class V6EnablementAttempt(TypedDict, total=False):
     patches_span_multiple_roots: bool
     framework_root: str | None
     files: list[V6ArchivedFile]
-    accepted_config_path: str | None
     effective_config: dict[str, Any] | None
     stack_action: dict[str, Any] | None
     runtime: dict[str, Any] | None

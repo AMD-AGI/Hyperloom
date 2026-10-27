@@ -30,7 +30,7 @@ from .event_fields import (
 )
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink
+from .event_sink import EventSink
 from .event_timeline import EventHeader, finish_event, open_event
 from .sections import ROOFLINE_EVENT_SECTIONS
 
@@ -524,7 +524,7 @@ class RooflineConclusion:
 class RooflineEventRecorder:
     """Records one roofline action's facts into whichever event owns it."""
 
-    def __init__(self, sink: RecordSink, request: RooflineRequest, *, owns_event: bool = True):
+    def __init__(self, sink: EventSink, request: RooflineRequest, *, owns_event: bool = True):
         """Bind a recorder to one action inside one event."""
         self._sink = sink
         self._t0 = time.monotonic()
@@ -974,7 +974,7 @@ def _mark_effective(runs: list[dict[str, Any]], effective_index: int | None) -> 
 
 
 def make_roofline_recorder(
-    sink: RecordSink | None,
+    sink: EventSink | None,
     request: RooflineRequest,
     *,
     owns_event: bool = True,

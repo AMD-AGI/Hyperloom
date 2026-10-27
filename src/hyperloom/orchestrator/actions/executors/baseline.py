@@ -3986,7 +3986,7 @@ class BaselineExecutor(BenchmarkRunExecutor):
     def _resolve_sink(self, ctx: RunnerContext) -> Any:
         """Decide which event this measurement's rows belong to."""
         from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import baseline_event_id
-        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
         from hyperloom.inference_optimizer.session.session_binding import session_is_bound
 
         params = ctx.task.params or {}
@@ -3999,13 +3999,13 @@ class BaselineExecutor(BenchmarkRunExecutor):
             return None
         inline = str(params.get(INLINE_EVENT_PARAM) or "")
         if inline:
-            return make_sink(inline, producer=_RECORDER_PRODUCER)
+            return EventSink(inline, producer=_RECORDER_PRODUCER)
         state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
         event = baseline_event_id(
             str(getattr(state, "phase", "") or "unphased"),
             int(getattr(state, "macro_cycle", 0) or 0),
         )
-        return make_sink(event, producer=_RECORDER_PRODUCER)
+        return EventSink(event, producer=_RECORDER_PRODUCER)
 
     def _failure_counters(self, ctx: RunnerContext) -> tuple[int | None, int | None]:
         """The session's baseline failure counts as this measurement starts.

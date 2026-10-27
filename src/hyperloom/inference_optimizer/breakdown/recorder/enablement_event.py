@@ -33,11 +33,9 @@ from hyperloom.common.coerce import (
 )
 
 from .event_fields import clip as _clip, failure_row as _failure_row, now_iso_seconds as _now
-from ..round_archive import ROLE_LAUNCH_CONFIG
-
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
-from .event_sink import EventSink, make_sink
+from .event_sink import EventSink, bound_sink
 from .enablement_keep_pairing import (
     KEEP_REF_FIELD,
     VALIDATING_KEEP_FIELD,
@@ -126,21 +124,7 @@ def enablement_event_id() -> str:
     return event_id(EVENT_PHASE, EVENT_CYCLE, EVENT_COMPONENT)
 
 
-def _sink() -> EventSink | None:
-    """The sink rows are written through; ``None`` when no session is bound.
-
-    The rows themselves are written best-effort by the sink, so nothing below
-    guards its own writes: a spool that cannot be written drops the row there
-    and the lane carries on.
-    """
-    from ...session.session_binding import bound_session_or_none
-
-    if bound_session_or_none() is None:
-        return None
-    return make_sink(enablement_event_id(), producer=PRODUCER)
-
-
-def _open(*, mode: str = "", origin: str = "", start_time: str = "") -> int | None:
+def _open(*, mode: str = "", origin: str = "") -> int | None:
     """Put the lane on the timeline, once, however many callers ask.
 
     :func:`open_event` returns an earlier open's sequence rather than writing a
@@ -156,11 +140,11 @@ def _open(*, mode: str = "", origin: str = "", start_time: str = "") -> int | No
     if shell:
         # Onto the fragment too: assembly rebuilds ``ext`` from fragments,
         # so a shell-only field dies at the first close.
-        sink = _sink()
+        sink = bound_sink(enablement_event_id(), producer=PRODUCER)
         if sink is not None:
             sink.record(SECTION_EVENT, dict(shell))
     return open_event(
-        EventHeader(EVENT_TYPE, enablement_event_id(), EVENT_KIND, start_time or _now()),
+        EventHeader(EVENT_TYPE, enablement_event_id(), EVENT_KIND, _now()),
         event_section=SECTION_EVENT,
         producer=PRODUCER,
         ext=shell,
@@ -205,7 +189,7 @@ def record_trigger(trigger: LaneTrigger) -> None:
     overwrite the oldest is how an eval-less re-baseline downgrades a measured
     ``accuracy_below_floor`` to an empty ``accuracy_unavailable``.
     """
-    sink = _sink()
+    sink = bound_sink(enablement_event_id(), producer=PRODUCER)
     if sink is None:
         return
     _open(mode=trigger.mode, origin=trigger.origin)
@@ -256,7 +240,7 @@ def record_dispatch(dispatch: AuthoringDispatch) -> None:
     by every advance, and the classified kind only ever existed in the params
     this dispatch built.
     """
-    sink = _sink()
+    sink = bound_sink(enablement_event_id(), producer=PRODUCER)
     if sink is None:
         return
     _open(mode=dispatch.mode, origin=dispatch.origin)
@@ -280,18 +264,16 @@ def record_archive(*, task_id: str, attempt: int, files: Sequence[Mapping[str, s
     Upserts onto the row the dispatch opened, so it wants the same
     ``(task_id, attempt)``.
     """
-    sink = _sink()
+    sink = bound_sink(enablement_event_id(), producer=PRODUCER)
     if sink is None:
         return
     _open()
-    archived = _archived_files(files)
     sink.record(
         SECTION_ATTEMPT,
         {
             "attempt": int(attempt or 0),
             "task_id": str(task_id or ""),
-            "files": archived,
-            "accepted_config_path": _text_or_none(_archived_path(archived, ROLE_LAUNCH_CONFIG)),
+            "files": _archived_files(files),
         },
         row_type="attempt",
         natural_ids=_row_id(task_id, attempt),
@@ -353,7 +335,7 @@ def record_round(round_: AuthoringRound) -> None:
     What the archive took is :func:`record_archive`'s to write, not a field of
     the verdict.
     """
-    sink = _sink()
+    sink = bound_sink(enablement_event_id(), producer=PRODUCER)
     if sink is None:
         return
     _open()
@@ -369,7 +351,7 @@ def record_human_review(*, digest: str, failure_kind: str, reason: str = "", sig
 
     Such a log dispatches nothing, so it leaves no round behind.
     """
-    sink = _sink()
+    sink = bound_sink(enablement_event_id(), producer=PRODUCER)
     if sink is None or not str(digest or "").strip():
         return
     _open()
@@ -389,7 +371,7 @@ def record_human_review(*, digest: str, failure_kind: str, reason: str = "", sig
 
 def record_build(*, task_id: str, entry: Mapping[str, Any] | None = None, novelty_key: str = "") -> None:
     """Record one ``BuildResult.to_state()`` entry, keyed by ``task_id``."""
-    sink = _sink()
+    sink = bound_sink(enablement_event_id(), producer=PRODUCER)
     if sink is None or not str(task_id or "").strip():
         return
     _open()
@@ -433,7 +415,7 @@ def record_revalidation(
     reason: str = "",
 ) -> None:
     """Record a revalidation window opening, keyed by ``generation``."""
-    sink = _sink()
+    sink = bound_sink(enablement_event_id(), producer=PRODUCER)
     if sink is None:
         return
     _open()
@@ -485,7 +467,7 @@ def record_revalidation_outcome(outcome: RevalidationOutcome) -> None:
     under the floor. A window that did not promote is ``rejected``; one the run
     stopped goes through :func:`record_revalidation_stopped`.
     """
-    sink = _sink()
+    sink = bound_sink(enablement_event_id(), producer=PRODUCER)
     if sink is None:
         return
     _open()
@@ -503,7 +485,7 @@ def record_revalidation_cleared(*, generation: int, task_id: str = "") -> None:
 
 
 def _record_window_end(generation: int, verdict: str, reason: str, task_id: str, accuracy_floor: Any) -> None:
-    sink = _sink()
+    sink = bound_sink(enablement_event_id(), producer=PRODUCER)
     if sink is None:
         return
     _open()
@@ -550,7 +532,7 @@ def record_fault(
     rows = _event_rows()
     if not rows or any(_as_dict(row.get("result")) or _as_dict(row.get("failure")) for row in rows):
         return
-    sink = _sink()
+    sink = bound_sink(enablement_event_id(), producer=PRODUCER)
     if sink is None:
         return
     sink.record(
@@ -628,7 +610,7 @@ def finish(terminal: LaneTerminal) -> None:
     """
     from .assembler import event_parts
 
-    sink = _sink()
+    sink = bound_sink(enablement_event_id(), producer=PRODUCER)
     if sink is None:
         return
     sequence = _open()
@@ -658,8 +640,6 @@ def finish(terminal: LaneTerminal) -> None:
         note_failure(section=SECTION_EVENT, error=exc, detail=f"closing enablement event {enablement_event_id()}")
 
 
-#: Every section the enablement event assembles from. Duplicated from the
-#: assembler so :func:`finish` can read its own parts without an import cycle.
 def assemble_enablement_ext(
     parts: Mapping[str, list[dict[str, Any]]],
     *,
@@ -828,14 +808,6 @@ def _archived_files(files: Sequence[Mapping[str, str]]) -> list[dict[str, str]]:
     return [
         {"path": str(f.get("path") or ""), "role": str(f.get("role") or "")} for f in files if isinstance(f, Mapping)
     ]
-
-
-def _archived_path(files: Sequence[Mapping[str, str]], role: str) -> str:
-    """Return the archived path recorded for a single-valued role, or ``""``."""
-    return next(
-        (str(f.get("path") or "") for f in files if isinstance(f, Mapping) and str(f.get("role") or "") == role),
-        "",
-    )
 
 
 def _config_row(config: Any) -> dict[str, Any] | None:

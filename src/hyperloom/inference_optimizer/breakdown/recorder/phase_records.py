@@ -132,7 +132,6 @@ class ActionDispatch:
     dispatch_class: str | None = None
     allowed: bool | None = True
     denial_rule: str | None = None
-    dispatched_at: str = ""
     dispatched_unix: float | None = None
 
     def row(self) -> dict[str, Any]:
@@ -143,7 +142,7 @@ class ActionDispatch:
             "phase": self.at.label(),
             "macro_cycle": int(self.at.macro_cycle or 0),
             "tick": int(self.tick or 0),
-            "dispatched_at": str(self.dispatched_at or "") or _now(),
+            "dispatched_at": _now(),
             "dispatched_unix": _float_or_none(self.dispatched_unix),
         }
         if self.dispatch_class is not None:
@@ -164,7 +163,6 @@ class ActionSettlement:
     decision: str = ""
     error_class: Any = None
     workspace: Any = None
-    settled_at: str = ""
     settled_unix: float | None = None
 
     def row(self) -> dict[str, Any]:
@@ -175,7 +173,7 @@ class ActionSettlement:
             "decision": str(self.decision or ""),
             "error_class": _text_or_none(self.error_class),
             "workspace": _text_or_none(self.workspace),
-            "settled_at": str(self.settled_at or "") or _now(),
+            "settled_at": _now(),
             "settled_unix": _float_or_none(self.settled_unix),
         }
 
@@ -252,7 +250,6 @@ class PhaseProposal:
     predicted_gain_pct: Any = None
     candidate_id: Any = None
     variant_name: Any = None
-    proposed_at: str = ""
 
     def row(self) -> dict[str, Any]:
         """The proposal row this proposal persists as."""
@@ -266,7 +263,7 @@ class PhaseProposal:
             "predicted_gain_pct": _float_or_none(self.predicted_gain_pct),
             "candidate_id": _text_or_none(self.candidate_id),
             "variant_name": _text_or_none(self.variant_name),
-            "proposed_at": str(self.proposed_at or "") or _now(),
+            "proposed_at": _now(),
         }
 
 

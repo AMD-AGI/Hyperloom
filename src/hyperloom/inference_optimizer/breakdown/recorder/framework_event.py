@@ -48,7 +48,7 @@ from .event_fields import (
 )
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink, make_sink
+from .event_sink import EventSink, bound_sink
 from .event_timeline import EventHeader, finish_event, open_event
 from .sections import FRAMEWORK_EVENT_SECTIONS
 
@@ -322,7 +322,7 @@ class FrameworkEventRecorder:
     fragments and not from anything remembered, so an entry recorded across a
     resume assembles from both halves."""
 
-    def __init__(self, sink: RecordSink, *, macro_cycle: int = 0):
+    def __init__(self, sink: EventSink, *, macro_cycle: int = 0):
         """Bind a recorder to the event of one phase entry. ``macro_cycle`` is
         recorded on the event as well as being a segment of its id, because a
         consumer reading the assembled event does not parse the id."""
@@ -962,11 +962,10 @@ def record_review_evidence(
         evidence["kb"] = dict(kb)
     if not key or not evidence:
         return
-    from ...session.session_binding import session_is_bound
-
-    if not session_is_bound():
+    sink = bound_sink(framework_event_id(macro_cycle), producer=PRODUCER)
+    if sink is None:
         return
-    make_sink(framework_event_id(macro_cycle), producer=PRODUCER).record(
+    sink.record(
         SECTION_PROPOSAL,
         {"proposal_id": key, "critic_review": evidence},
         row_type=ROW_PROPOSAL,
@@ -981,7 +980,7 @@ def make_framework_recorder(*, macro_cycle: Any = 0) -> FrameworkEventRecorder |
     if decline_unbound("framework"):
         return None
     recorder = FrameworkEventRecorder(
-        make_sink(framework_event_id(macro_cycle), producer=PRODUCER),
+        EventSink(framework_event_id(macro_cycle), producer=PRODUCER),
         macro_cycle=int(macro_cycle or 0),
     )
     recorder.begin()
