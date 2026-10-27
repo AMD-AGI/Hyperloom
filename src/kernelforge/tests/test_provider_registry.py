@@ -138,6 +138,19 @@ def test_only_a_hook_running_provider_declares_stop_hooks() -> None:
     assert not get_agent_provider("codex").capabilities.stop_hooks
 
 
+def test_only_claude_declares_a_shared_prompt_cache() -> None:
+    """The lane round starts its siblings after the first only when the provider reads a shared prefix back."""
+    assert get_agent_provider("claude").capabilities.shared_prompt_cache
+    assert not get_agent_provider("codex").capabilities.shared_prompt_cache
+
+
+def test_a_built_claude_backend_keeps_the_capabilities_its_class_declares() -> None:
+    """The registry replaces a built backend's capabilities with its own record, so the two must agree."""
+    from kernelforge.agent_backends.claude import ClaudeBackend
+
+    assert get_agent_provider("claude").capabilities == ClaudeBackend.capabilities
+
+
 def test_builtin_model_ownership_predicates() -> None:
     """Recognize each built-in provider's model family without env coupling."""
     claude = get_agent_provider("claude")
