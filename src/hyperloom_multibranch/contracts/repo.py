@@ -114,6 +114,22 @@ class RepoMerge:
         return not self.patch_conflicts
 
 
+@dataclass(frozen=True)
+class BundleMerge:
+    """Several candidates carried onto one head together, for one merge test of them all (#138).
+
+    ``members`` are the candidates ``merge`` carries, in the order they were offered; each is carried onto the head
+    with the members before it applied, so where two set one value the later one's wins and ``merge`` lists it in
+    ``config_conflicts``. ``left_out`` are the candidates that did not join: already on the head, not combining with
+    the head and the members before them, or leaving a patch that does not apply. ``merge.carried`` are the commits
+    of the members' lineages not on the head, each once.
+    """
+
+    merge: RepoMerge
+    members: tuple[str, ...]
+    left_out: tuple[str, ...]
+
+
 class ExperimentRepo(Protocol):
     """A specialist branch takes commits only from the rule gate, and moves onto an integration commit only by its
     runtime's ``reroot``; ``INTEGRATION_BRANCH`` takes commits only from the integrator; every other caller reads.
@@ -148,6 +164,11 @@ class ExperimentRepo(Protocol):
         replaced. The set is the session's, so a head carried into a later session protects nothing until it is
         derived from the merge log.
         """
+
+    async def merge_many(
+        self, candidates: Sequence[str], onto: str, protected: frozenset[str] = frozenset()
+    ) -> BundleMerge:
+        """Carry ``candidates`` onto ``onto`` one after another, as :meth:`merge` carries one, writing nothing."""
 
     async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: Sequence[str]) -> str:
         """``delta`` on ``onto`` as a merge of ``merged_from``, landing on ``INTEGRATION_BRANCH`` as ``commit`` does.

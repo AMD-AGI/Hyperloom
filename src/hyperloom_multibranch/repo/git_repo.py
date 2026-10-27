@@ -39,7 +39,7 @@ from hyperloom.measure.compile import (
     locate_installed_package,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.repo import BranchMoved, RepoMerge
+from hyperloom_multibranch.contracts.repo import BranchMoved, BundleMerge, RepoMerge
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, source_roots
 from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot
 from hyperloom_multibranch.repo.rebase import Files
@@ -151,6 +151,53 @@ class GitExperimentRepo:
         merge = await asyncio.to_thread(carry, onto, *recipes, stored)
         carried = await self._git("rev-list", "--topo-order", "--reverse", resolved, f"^{target}")
         return replace(merge, carried=tuple(carried.split()))
+
+    async def merge_many(
+        self, candidates: Sequence[str], onto: str, protected: frozenset[str] = frozenset()
+    ) -> BundleMerge:
+        target = await self._commit_of(onto)
+        head = await self.read_recipe(target)
+        stored = replace(self._stored(), protected=await self._contributed(target, protected))
+        bundle, steps, members, left_out = head, [], [], []
+        for candidate in candidates:
+            step = await self._carried_onto(candidate, target, bundle, stored)
+            if step is None:
+                left_out.append(candidate)
+                continue
+            bundle = apply(bundle, step.delta)
+            steps.append(step)
+            members.append(candidate)
+            # A later member may not take out an earlier one's patch, as no merge takes out a foundation fix's.
+            stored = replace(stored, protected=stored.protected | _patch_paths(bundle) - _patch_paths(head))
+        whole = await asyncio.to_thread(carry, onto, head, bundle, head, stored)
+        carried = tuple(dict.fromkeys(commit for step in steps for commit in step.carried))
+        merge = RepoMerge(
+            onto,
+            whole.delta,
+            tuple(conflict for step in steps for conflict in step.config_conflicts),
+            rebased_patches=tuple(patch for step in steps for patch in step.rebased_patches),
+            united_tables=tuple(table for step in steps for table in step.united_tables),
+            replaced_patches=tuple(patch for step in steps for patch in step.replaced_patches),
+            carried=carried,
+        )
+        return BundleMerge(merge, tuple(members), tuple(left_out))
+
+    async def _carried_onto(self, candidate: str, onto: str, ours: Recipe, stored: Stored) -> RepoMerge | None:
+        """``candidate``'s change carried onto ``ours``, the recipe ``onto`` becomes with the bundle so far; ``None``
+        when it is on ``onto`` already, does not combine or leaves a patch that does not apply."""
+        resolved = await self._commit_of(candidate)
+        try:
+            base = await self._merge_base(resolved, onto)
+            if base == resolved:
+                return None
+            recipes = [await self.read_recipe(commit) for commit in (base, resolved)]
+            step = await asyncio.to_thread(carry, onto, *recipes, ours, stored)
+        except RecipeError:
+            return None
+        if not step.clean:
+            return None
+        carried = await self._git("rev-list", "--topo-order", "--reverse", resolved, f"^{onto}")
+        return replace(step, carried=tuple(carried.split()))
 
     async def _merge_base(self, candidate: str, onto: str) -> str:
         """The one nearest common ancestor of ``candidate`` and ``onto``; ``RecipeError`` when there are several, since
