@@ -83,11 +83,26 @@ def test_a_gpu_mask_switch_is_dropped(mask):
     assert any("reserved benchmark variable" in p for p in problems)
 
 
-def test_a_credential_shaped_switch_is_dropped():
-    """A manifest is held to the same boundary as a reference recipe."""
-    switches, problems = manifest.parse_manifest([_entry("MY_TOKEN")])
+def test_a_credential_shaped_switch_carrying_a_string_value_is_dropped():
+    """A manifest is held to the same boundary as a reference recipe: no secret is persisted under a switch."""
+    switches, problems = manifest.parse_manifest([_entry("MY_TOKEN", value="sk-live-4f9a")])
     assert switches == []
-    assert any("credential-shaped name" in p for p in problems)
+    assert problems == ["dropped 'MY_TOKEN': credential-shaped name, not a rewrite switch"]
+
+
+def test_a_token_cache_switch_set_to_a_flag_or_a_count_is_kept():
+    """GLM-5.3's chat segment token cache was dropped for the word TOKEN, though a 1 or a size can hold no secret."""
+    switches, problems = manifest.parse_manifest(
+        [
+            _entry("SGLANG_CHAT_SEGMENT_TOKEN_CACHE"),
+            _entry("SGLANG_CHAT_SEGMENT_TOKEN_CACHE_MAX_TOKENS", value="65536"),
+        ]
+    )
+    assert [(s["switch"], s["value"]) for s in switches] == [
+        ("SGLANG_CHAT_SEGMENT_TOKEN_CACHE", "1"),
+        ("SGLANG_CHAT_SEGMENT_TOKEN_CACHE_MAX_TOKENS", "65536"),
+    ]
+    assert problems == []
 
 
 def test_a_switch_colliding_with_benchmark_config_is_dropped():
