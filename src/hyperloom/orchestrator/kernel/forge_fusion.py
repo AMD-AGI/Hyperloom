@@ -153,127 +153,74 @@ def _attempted(loop: dict[str, Any]) -> bool:
         return False
 
 
-def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
-    """Map forge-fusion's ``fusion_manifest.json`` -> Hyperloom result contract."""
-    result: dict[str, Any] = {
-        "status": "failed",
-        "engine": "forge_fusion",
-        "micro_decision": "failed",
-        "decision": "REVERT",
-        "kept": False,
-        "kernel_speedup": None,
-        "env_flags": {},
-        "baseline_env_flags": {},
-        "artifact_files": [],
-        "patch": None,
-        "requires_e2e_validation": False,
-        "workspace": str(output_dir or ""),
+def _llm_unavailable_fields(m: dict[str, Any]) -> dict[str, Any]:
+    """Result fields for a run whose discovery never reached the model, with the reason the manifest gave."""
+    detail = m.get("error") if isinstance(m.get("error"), dict) else {}
+    kind = str(detail.get("kind") or "unknown")
+    attempts = detail.get("attempts")
+    tried = f" after {attempts} attempt(s)" if attempts else ""
+    message = str(detail.get("message") or "no detail reported")
+    return {
+        "verdict": LLM_UNAVAILABLE_VERDICT,
+        "error_class": LLM_UNAVAILABLE_VERDICT,
+        "error": f"forge-fusion never reached the LLM ({kind}{tried}): {message}"[:1500],
     }
-    manifest_path = Path(output_dir or ".") / "fusion_manifest.json"
-    if not manifest_path.is_file():
-        result["error"] = f"no fusion_manifest.json at {manifest_path} (forge-fusion rc={rc})"
-        return result
-    try:
-        m = json.loads(manifest_path.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, json.JSONDecodeError) as exc:
-        result["error"] = f"fusion_manifest.json parse error: {exc!r}"
-        return result
 
-    loop = m.get("fusion_loop") or {}
-    compile_pass = m.get("compile_pass") or {}
-    # The nomination envelope: a list (possibly empty) on the multi-patch path, None on the combine / single-patch
-    # path.
-    patches = m.get("patches")
-    multi_patch = isinstance(patches, list)
-    # KernelForge runs the compile-pass shortcut INSTEAD of the authoring loop, so exactly one of these is populated.
-    kept = bool(patches) if multi_patch else bool(loop.get("kept") or compile_pass.get("kept"))
 
-    if str(m.get("verdict") or "").strip().lower() == LLM_UNAVAILABLE_VERDICT and not kept:
-        # forge-fusion never reached the model, so this run holds no opinion about the kernel.
-        detail = m.get("error") if isinstance(m.get("error"), dict) else {}
-        kind = str(detail.get("kind") or "unknown")
-        attempts = detail.get("attempts")
-        tried = f" after {attempts} attempt(s)" if attempts else ""
-        message = str(detail.get("message") or "no detail reported")
-        result.update(
-            {
-                "verdict": LLM_UNAVAILABLE_VERDICT,
-                "error_class": LLM_UNAVAILABLE_VERDICT,
-                "error": f"forge-fusion never reached the LLM ({kind}{tried}): {message}"[:1500],
-            }
-        )
-        return result
-
-    aborted = str(loop.get("termination_reason") or "").strip().lower()
-    if aborted in INFRA_ABORT_REASONS and not kept and not compile_pass and not _attempted(loop):
-        # The loop stopped on infrastructure, not on a judgement about the kernel: the harness-authoring turn failed,
-        # or there was no git workspace to author in.
-        located = str((m.get("fusion") or {}).get("env_flag") or "")
-        result.update(
-            {
-                "verdict": m.get("verdict"),
-                "error_class": aborted,
-                # Explicit rather than re-deriving the reason set on the consumer side: the orchestrator bounds how
-                # often it re-runs an abort, and a copied constant there would drift from the one above.
-                "infrastructure_abort": True,
-                "error": (
-                    f"forge-fusion aborted on infrastructure ({aborted}); "
-                    f"the loop reported no completed attempts and no result. "
-                    f"Recipe located by discovery: {located or 'unknown'}"
-                )[:1500],
-            }
-        )
-        return result
-
-    artifacts = m.get("artifacts") or {}
-    changed = [c.get("path") for c in (artifacts.get("changes") or []) if c.get("path")]
-    src_file = str((m.get("fusion") or {}).get("source_file") or "")
-    if multi_patch and patches:
+def _fusion_target_file(fusion: dict[str, Any], patches: Any) -> str:
+    """The file the kept fusion patches: the strongest sibling's on the multi-patch path, else the recipe's."""
+    src_file = str(fusion.get("source_file") or "")
+    if isinstance(patches, list) and patches:
         # On the multi-patch path the producer mirrors the STRONGEST sibling into the singular ``artifacts`` slot, but
         # ``fusion.source_file`` still names the top RECIPE -- which may be a compile-pass claim whose file differs
         # from the strongest authored patch.
         src_file = str(patches[0].get("target_file") or patches[0].get("source_file") or src_file)
+    return src_file
 
+
+def _outcome_fields(
+    m: dict[str, Any], loop: dict[str, Any], compile_pass: dict[str, Any], kept: bool, src_file: str
+) -> dict[str, Any]:
+    """Result fields for a run that reached a verdict: its flags, its artifacts and the KEEP or REVERT it implies."""
+    artifacts = m.get("artifacts") or {}
+    changed = [c.get("path") for c in (artifacts.get("changes") or []) if c.get("path")]
     if compile_pass:
         # The win is a flipped default in the framework's own source, so the patch carries it and there is no runtime
         # flag.
         speedup = compile_pass.get("speedup")
-        result.update(
-            {
-                "compile_pass_flag": compile_pass.get("flag"),
-                "serving_speedup": speedup,
-            }
-        )
+        fields: dict[str, Any] = {
+            "compile_pass_flag": compile_pass.get("flag"),
+            "serving_speedup": speedup,
+        }
     else:
         speedup = (loop.get("best") or {}).get("kernel_speedup")
         best_flags = str(loop.get("best_env_flag") or "").split()
-        result.update(
-            {
-                # Fused arm = all confirmed flags ON; baseline arm = same flags OFF.
-                "env_flags": dict.fromkeys(best_flags, "1"),
-                "baseline_env_flags": dict.fromkeys(best_flags, "0"),
-                "best_pattern": loop.get("best_pattern"),
-            }
-        )
+        fields = {
+            # Fused arm = all confirmed flags ON; baseline arm = same flags OFF.
+            "env_flags": dict.fromkeys(best_flags, "1"),
+            "baseline_env_flags": dict.fromkeys(best_flags, "0"),
+            "best_pattern": loop.get("best_pattern"),
+        }
 
     # Integrate applies a fusion from a patch file, its root and a target, and returns without any of them, while
     # ``ok`` satisfies the KERNEL-entry idempotency gate -- so reported as a success such a run is both dropped and
     # never retried.
     patch = artifacts.get("patch")
     if kept:
+        # A falsy patch fails the first entry before the patch-file entry is read.
         for name, present in (
             ("a patch", bool(patch)),
-            ("the patch file it named", bool(patch) and Path(str(patch)).is_file()),
+            ("the patch file it named", Path(str(patch)).is_file()),
             ("a target file", bool(src_file)),
             ("a patch root", bool(artifacts.get("repo_root"))),
         ):
             if not present:
-                # The failed/REVERT defaults above are the retryable shape.
-                result["error_class"] = "fusion_artifact_missing"
-                result["error"] = f"forge-fuse kept a fusion but exported no {name}"
-                return result
+                # The failed/REVERT defaults are the retryable shape.
+                fields["error_class"] = "fusion_artifact_missing"
+                fields["error"] = f"forge-fuse kept a fusion but exported no {name}"
+                return fields
 
-    result.update(
+    fields.update(
         {
             "status": "ok" if kept else "complete",
             "micro_decision": "candidate" if kept else "no_improvement",
@@ -293,12 +240,79 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         }
     )
 
-    if multi_patch:
+    patches = m.get("patches")
+    if isinstance(patches, list):
         # Carry the sibling envelopes through untouched so the consumer can enqueue each independently.
-        result["patches"] = [dict(p) for p in patches]
+        fields["patches"] = [dict(p) for p in patches]
         nomination = m.get("nomination")
-        result["nomination"] = dict(nomination) if isinstance(nomination, dict) else None
+        fields["nomination"] = dict(nomination) if isinstance(nomination, dict) else None
+    return fields
 
+
+def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
+    """Map forge-fusion's ``fusion_manifest.json`` -> Hyperloom result contract."""
+    result: dict[str, Any] = {
+        "status": "failed",
+        "engine": "forge_fusion",
+        "micro_decision": "failed",
+        "decision": "REVERT",
+        "kept": False,
+        "kernel_speedup": None,
+        "env_flags": {},
+        "baseline_env_flags": {},
+        "artifact_files": [],
+        "patch": None,
+        "requires_e2e_validation": False,
+        "workspace": output_dir,
+    }
+    # ``Path("")`` is the current directory.
+    manifest_path = Path(output_dir) / "fusion_manifest.json"
+    if not manifest_path.is_file():
+        result["error"] = f"no fusion_manifest.json at {manifest_path} (forge-fusion rc={rc})"
+        return result
+    try:
+        m = json.loads(manifest_path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError) as exc:
+        result["error"] = f"fusion_manifest.json parse error: {exc!r}"
+        return result
+
+    loop = m.get("fusion_loop") or {}
+    compile_pass = m.get("compile_pass") or {}
+    fusion = m.get("fusion") or {}
+    # The nomination envelope: a list (possibly empty) on the multi-patch path, None on the combine / single-patch
+    # path.
+    patches = m.get("patches")
+    multi_patch = isinstance(patches, list)
+    # KernelForge runs the compile-pass shortcut INSTEAD of the authoring loop, so exactly one of these is populated.
+    kept = bool(patches) if multi_patch else bool(loop.get("kept") or compile_pass.get("kept"))
+
+    if str(m.get("verdict") or "").strip().lower() == LLM_UNAVAILABLE_VERDICT and not kept:
+        # forge-fusion never reached the model, so this run holds no opinion about the kernel.
+        result.update(_llm_unavailable_fields(m))
+        return result
+
+    aborted = str(loop.get("termination_reason") or "").strip().lower()
+    if aborted in INFRA_ABORT_REASONS and not kept and not compile_pass and not _attempted(loop):
+        # The loop stopped on infrastructure, not on a judgement about the kernel: the harness-authoring turn failed,
+        # or there was no git workspace to author in.
+        located = str(fusion.get("env_flag") or "")
+        result.update(
+            {
+                "verdict": m.get("verdict"),
+                "error_class": aborted,
+                # Explicit rather than re-deriving the reason set on the consumer side: the orchestrator bounds how
+                # often it re-runs an abort, and a copied constant there would drift from the one above.
+                "infrastructure_abort": True,
+                "error": (
+                    f"forge-fusion aborted on infrastructure ({aborted}); "
+                    f"the loop reported no completed attempts and no result. "
+                    f"Recipe located by discovery: {located or 'unknown'}"
+                )[:1500],
+            }
+        )
+        return result
+
+    result.update(_outcome_fields(m, loop, compile_pass, kept, _fusion_target_file(fusion, patches)))
     return result
 
 
@@ -427,6 +441,18 @@ def _campaign_patches_on_disk(root: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _salvaged_speedup(
+    ckpt: dict[str, Any], manifest: dict[str, Any], loop: dict[str, Any], compile_pass: dict[str, Any]
+) -> Any:
+    """The checkpointed kernel speedup, else the one the aggregate manifest recorded."""
+    speedup = ckpt.get("kernel_speedup")
+    if manifest:
+        # A checkpointed ``kernel_speedup`` of 0 is a measurement, so the manifest answers
+        # for it only when the manifest is there to answer.
+        speedup = speedup or (loop.get("best") or {}).get("kernel_speedup") or compile_pass.get("speedup")
+    return speedup
+
+
 def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | None:
     """Rebuild a KEEP result from pre-smoke checkpoint + patch after a kill."""
     root = Path(output_dir)
@@ -442,11 +468,7 @@ def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | Non
         manifest.get(block) or {} for block in ("fusion_loop", "compile_pass", "artifacts", "fusion")
     )
     kept = bool(ckpt or loop.get("kept") or compile_pass.get("kept"))
-    speedup = ckpt.get("kernel_speedup")
-    if manifest:
-        # A checkpointed ``kernel_speedup`` of 0 is a measurement, so the manifest answers
-        # for it only when the manifest is there to answer.
-        speedup = speedup or (loop.get("best") or {}).get("kernel_speedup") or compile_pass.get("speedup")
+    speedup = _salvaged_speedup(ckpt, manifest, loop, compile_pass)
     env_flag, source_file, repo_root = (
         str(ckpt.get(key) or fallback or "")
         for key, fallback in (

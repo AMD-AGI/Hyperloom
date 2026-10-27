@@ -268,6 +268,12 @@ class CandidateArchive:
             complete.append((iteration, directory, meta))
 
         expected = [self._index_entry_from_meta(meta, directory) for _iteration, directory, meta in sorted(complete)]
+        return self._reconcile_index_file(expected, uncertain_iterations, scan_unavailable)
+
+    def _reconcile_index_file(
+        self, expected: list[dict], uncertain_iterations: set[int], scan_unavailable: bool
+    ) -> list[dict]:
+        """Keep index lines the scan could not vouch for, and rewrite the index only after a clean scan."""
         try:
             current = self._read_index_file()
         except UnicodeDecodeError:

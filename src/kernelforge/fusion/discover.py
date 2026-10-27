@@ -933,6 +933,18 @@ def _norm_env_flag(flag: str, model_type: str) -> str:
     return f
 
 
+def _field_text(item: dict[str, Any], key: str, default: str = "") -> str:
+    """A proposal field as text, ``default`` when the model left it empty or null."""
+    return str(item.get(key) or default)
+
+
+def _trace_lacks(categories: list[str], category_shares: dict[str, float] | None) -> bool:
+    """Whether the trace measured category shares but none of ``categories``."""
+    if not category_shares or not categories:
+        return False
+    return {category for category, share in category_shares.items() if float(share) > 0.0}.isdisjoint(categories)
+
+
 def _as_sequence(value: Any) -> list[Any]:
     """A proposal field that may arrive as one string or a list of them."""
     if value is None:
@@ -1079,12 +1091,11 @@ def parse_discovered_recipes(
     ``explicit_target``: an operator named the target, so the scope gate keeps, with a warning, what it would drop.
     """
     runtime = resolve_target_runtime(target.install.framework, framework_root=target.install.framework_root)
-    measured = {category for category, share in (category_shares or {}).items() if float(share) > 0.0}
     out: list[Recipe] = []
     for i, item in enumerate(_extract_json_array(text)):
-        name = str(item.get("name") or f"discovered_{i + 1}").strip()
-        op_chain = str(item.get("op_chain") or "")
-        fusion_math = str(item.get("fusion_math") or op_chain or "")
+        name = _field_text(item, "name", f"discovered_{i + 1}").strip()
+        op_chain = _field_text(item, "op_chain")
+        fusion_math = _field_text(item, "fusion_math", op_chain)
         # The fusion-DEFINING fields (name / op-chain / math) -- NOT the free-prose rationale or grep anchors, which
         # can mention an op in passing and would attach a category the fusion does not actually involve.
         defining_text = " ".join([name, op_chain, fusion_math])
@@ -1094,7 +1105,7 @@ def parse_discovered_recipes(
         categories = categories_in_text(" ".join(declared or [defining_text]))
         # Hallucination gate FIRST: a proposal whose ops the trace never measured has nothing to remove, and that is
         # true whether we would author it or claim a framework pass for it.
-        if category_shares and categories and measured.isdisjoint(categories):
+        if _trace_lacks(categories, category_shares):
             log.info("discovery: dropping %s (proposed ops %s absent from the trace)", name, ",".join(categories))
             continue
         edit_files = _proposal_edit_files(item, target, name)
@@ -1113,25 +1124,24 @@ def parse_discovered_recipes(
             continue  # the framework really does fuse this: authoring is a no-op
         # Absent / undecidable / pinned off: the framework is NOT fusing this for us, so keep the proposal as
         # authoring work and record why.
-        pass_note = ""
-        if state is not None and not state.claimable:
-            pass_note = _unclaimable_note(state)
+        pass_note = _unclaimable_note(state)
+        if pass_note:
             log.info("compile pass not claimed for %s: %s", name, pass_note)
-        existing_operator = str(item.get("existing_operator") or "").strip()
-        candidate_kind = str(item.get("candidate_kind") or "").strip().lower()
+        existing_operator = _field_text(item, "existing_operator").strip()
+        candidate_kind = _field_text(item, "candidate_kind").strip().lower()
         # ``integration`` is only meaningful with a named operator: the authoring prompt injects its "benchmark the
         # existing operator first" block only when both fields are set.
         if candidate_kind not in {"new_fusion", "replacement"}:
             candidate_kind = "integration" if existing_operator else "new_fusion"
         recipe = Recipe(
             pattern_id=f"llm:{name}",
-            description=str(item.get("rationale") or op_chain or name)[:300],
-            env_flag=_norm_env_flag(str(item.get("env_flag") or "FUSED"), target.model_type),
+            description=_field_text(item, "rationale", op_chain or name)[:300],
+            env_flag=_norm_env_flag(_field_text(item, "env_flag", "FUSED"), target.model_type),
             source_file=edit_files[0],
             extra_files=edit_files[1:],
             source_hints=[str(a) for a in _as_sequence(item.get("source_anchors") or [])],
             fusion_math=fusion_math,
-            eager_reference_hint=str(item.get("eager_reference") or ""),
+            eager_reference_hint=_field_text(item, "eager_reference"),
             shapes=target.shapes,
             matched_categories=categories,
             trigger_share=to_float(item.get("priority"), max(0.1, 1.0 - 0.1 * i)),  # preserve LLM order when absent

@@ -8,7 +8,8 @@ checks both, picks the session directory, runs ``optimize`` in this process and 
 ``$HYPERLOOM_STATE_DIR/exit.json``.  The host decides whether to restart the run from that file's ``final`` field and
 nothing else:
 
-* ``final: true`` -- the run is over, whatever the return code (budget used, target reached, stop requested,
+* ``final: true`` -- the run is over, whatever the return code (budget used, target reached, stop requested --
+  by signal or by a ``hosted/control/stop.json`` in the session directory, which a restart finds before it starts ``optimize`` --
   ``optimize`` failed), or the request was refused (return code 2, with the reason in ``error``).  Never restarted.
 * no ``exit.json``, or ``final: false`` -- the process died, or a watchdog ended a leg.  Restarted, and the entry
   resumes the same session.
@@ -24,7 +25,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import sys
+import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -32,12 +35,15 @@ from typing import Any
 
 from hyperloom.hosted.campaign import FLOW_MULTIBRANCH, CampaignError, CampaignSpec, optimize_args, parse_campaign
 from hyperloom.hosted.host_info import HostInfo, HostInfoError, Var, read_host_info, take_host_info
+from hyperloom.hosted.mcp_host_tools import register_host_tools
+from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 from hyperloom.inference_optimizer.session.paths import (
     ENV_USER_DATA_PATH,
     SESSION_FILES,
     ensure_archive_root,
     hosted_session_dir,
+    stop_request_path,
 )
 from hyperloom.plugs.errors import ManifestError
 from hyperloom.plugs.manifest import LOCKABLE_SOCKETS, load_builtin_profile
@@ -46,6 +52,9 @@ EXIT_FILE = "exit.json"
 SESSION_FILE = "session.json"
 MULTIBRANCH_COMMAND = "hyperloom-multibranch"
 ENV_IMAGE = "HYPERLOOM_IMAGE"
+#: ``stop_reason`` of a run ended by a stop request before it started; the coordinator's name for an operator stop.
+STOP_REQUEST_REASON = "signal"
+DEFAULT_MCP_HOST = "127.0.0.1"
 RETURNCODE_REFUSED = 2
 ENCODING = "utf-8"
 _USAGE = "usage: hyperloom hosted run"
@@ -86,8 +95,60 @@ def _run() -> int:
     ensure_archive_root(session_dir)
     os.environ[ENV_IMAGE] = spec.framework_image
     _announce_grant(info)
-    with _plug_inputs(lock, info):
+    if stop_request_path(session_dir).is_file():
+        print("[hosted] a stop was requested before this leg started; ending the run", flush=True)
+        _write_exit(info.state_dir, final=True, returncode=0, stop_reason=STOP_REQUEST_REASON)
+        return 0
+    with _plug_inputs(lock, info), _mcp_service(info, session_dir):
         return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
+
+
+@contextmanager
+def _mcp_service(info: HostInfo, session_dir: Path) -> Iterator[None]:
+    """Serve the host tools for the length of ``optimize`` when the host gave a port and a token; otherwise serve nothing."""
+    if info.mcp_port is None or info.mcp_token is None:
+        yield
+        return
+    server = McpServer(
+        McpServerConfig(host=info.mcp_host or DEFAULT_MCP_HOST, port=info.mcp_port, host_token=info.mcp_token.reveal()),
+        campaign=info.run_id,
+    )
+    register_host_tools(server, session_dir, info.events_dir)
+    try:
+        server.start()
+    except OSError as exc:
+        raise Refused(f"the MCP server cannot start: {type(exc).__name__}") from None
+    try:
+        with _stop_request_guard(session_dir):
+            yield
+    finally:
+        server.stop()
+
+
+@contextmanager
+def _stop_request_guard(session_dir: Path) -> Iterator[None]:
+    """Keep a SIGTERM that ``request_stop`` sends from killing the run while no ``SignalDrain`` is armed.
+
+    The drain exists only inside the coordinator's tick loop; before it (preflight) and after it (teardown) SIGTERM
+    would end the process with no ``exit.json``, and the host would restart the run it was asked to stop.  While
+    ``stop.json`` exists the signal is only a nudge: the coordinator reads the file every tick and the entry reads it
+    before every leg.  Any other SIGTERM keeps its default meaning.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def on_term(_signum: int, _frame: object) -> None:
+        if stop_request_path(session_dir).is_file():
+            return
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    previous = signal.signal(signal.SIGTERM, on_term)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
 
 
 @contextmanager
@@ -114,7 +175,9 @@ def _state_dir_from_environment() -> Path | None:
 
 def _read_inputs() -> HostInfo:
     try:
-        return read_host_info(os.environ, require=())  # the MCP server is not hosted by this entry yet
+        return read_host_info(
+            os.environ, require=()
+        )  # the MCP group is optional: the server runs only when the host gives a port and a token
     except HostInfoError as exc:
         raise Refused(str(exc)) from None
 

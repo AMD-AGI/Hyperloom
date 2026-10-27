@@ -12,8 +12,8 @@ import yaml
 
 from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.orchestrator.actions.executors import _server_patcher
-from hyperloom.orchestrator.actions.executors._profile_setup import prepare_profile
-from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
+from hyperloom.orchestrator.actions.executors._profile_setup import prepare_profile, speculative_tokens_per_step
+from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer, materialize_config_with_envs
 from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime, enable_profile, load_benchmark
 
 
@@ -323,3 +323,96 @@ def test_native_patch_preparation_preserves_other_degraded_reasons(tmp_path, mon
     path = _native_config(tmp_path, "sglang", envs={"HYPERLOOM_PROFILE_DEGRADED_REASON": reason})
     enable_profile(path)
     assert load_benchmark(path)["envs"]["HYPERLOOM_PROFILE_DEGRADED_REASON"] == reason
+
+
+_SGLANG_MTP = (
+    "--speculative-algorithm NEXTN --speculative-num-steps 5 --speculative-eagle-topk 1 "
+    "--speculative-num-draft-tokens 6"
+)
+_SGLANG_EAGLE_TREE = (
+    "--speculative-algorithm EAGLE --speculative-num-steps 5 --speculative-eagle-topk 8 "
+    "--speculative-num-draft-tokens 64"
+)
+
+
+@pytest.mark.parametrize(
+    ("server_args", "expected"),
+    [
+        ("", 1),
+        ("--tp 8 --mem-fraction-static 0.8", 1),
+        (_SGLANG_MTP, 6),
+        ("--speculative-algorithm EAGLE --speculative-num-steps=3 --speculative-num-draft-tokens=4", 4),
+        ("--speculative-algorithm EAGLE --speculative-eagle-topk 4 --speculative-num-draft-tokens 8", 8),
+        (_SGLANG_EAGLE_TREE, 6),
+        ("--speculative-algorithm DSPARK --speculative-dspark-block-size 7 --speculative-num-draft-tokens 8", 8),
+        ("--speculative-algorithm NEXTN", 8),
+        ('--speculative-config {"method":"mtp","num_speculative_tokens":3}', 4),
+        ("--speculative-config.method mtp --speculative-config.num_speculative_tokens=2", 3),
+    ],
+)
+def test_speculative_tokens_per_step_reads_the_upper_bound(server_args, expected):
+    assert speculative_tokens_per_step(server_args) == expected
+
+
+def _materialized_profile(tmp_path: Path, framework: str, server_args: str, args_mode: str = "append") -> dict:
+    source = asset_root() / "assets" / "configs" / f"profile_{framework}.yaml"
+    config = yaml.safe_load(source.read_text(encoding="utf-8"))
+    config["benchmark"]["model"] = "Qwen/Qwen3-0.6B"
+    config["benchmark"]["envs"].update({"TP": 1, "CONC": 64, "ISL": 1024, "OSL": 1024})
+    path = tmp_path / f"{framework}.yaml"
+    path.write_text(yaml.safe_dump(config))
+    out = tmp_path / f"{framework}-{args_mode}-{len(server_args)}"
+    launch = LaunchLayer(extra_server_args=server_args, args_mode=args_mode)
+    rendered = materialize_config_with_envs(path, out, launch=launch)
+    return load_benchmark(rendered)["envs"]
+
+
+def _steps_at_full_acceptance(envs: dict, tokens_per_step: int) -> int:
+    """Decode forward steps the run lasts if every draft token is accepted, the shortest it can be."""
+    return int(envs["NUM_PROMPTS"]) * int(envs["OSL"]) // (int(envs["CONC"]) * tokens_per_step)
+
+
+def test_sglang_speculative_launch_reaches_the_profile_window(tmp_path):
+    """W186 shape: 776 prompts x OSL 1024 at CONC 64 put start_step at 6080, past an MTP run's last step."""
+    plain = json.loads(_materialized_profile(tmp_path, "sglang", "")["PROFILE_EXTRA_BODY"])
+    envs = _materialized_profile(tmp_path, "sglang", _SGLANG_MTP)
+    body = json.loads(envs["PROFILE_EXTRA_BODY"])
+    assert plain["start_step"] == 6080
+    assert body["start_step"] == 6080 // 6
+    assert body["num_steps"] == plain["num_steps"] == 128
+    assert body["start_step"] + body["num_steps"] <= _steps_at_full_acceptance(envs, 6) // 2
+
+
+def test_sglang_eagle_tree_launch_is_bounded_by_draft_depth_not_tree_size(tmp_path):
+    """topk 8 verifies 64 tree nodes but accepts at most num_steps + 1 = 6, so the window stays past the first wave."""
+    envs = _materialized_profile(tmp_path, "sglang", _SGLANG_EAGLE_TREE)
+    body = json.loads(envs["PROFILE_EXTRA_BODY"])
+    assert (body["start_step"], body["num_steps"], int(envs["NUM_PROMPTS"])) == (1013, 128, 856)
+
+
+def test_sglang_plain_launch_keeps_its_capture_plan(tmp_path):
+    envs = _materialized_profile(tmp_path, "sglang", "--mem-fraction-static 0.8")
+    body = json.loads(envs["PROFILE_EXTRA_BODY"])
+    assert (body["start_step"], body["num_steps"], int(envs["NUM_PROMPTS"])) == (6080, 128, 776)
+
+
+@pytest.mark.parametrize("args_mode", ["append", "replace"])
+def test_vllm_speculative_launch_reaches_the_profile_window(tmp_path, args_mode):
+    """``replace`` drops the profiler flags, so the delay that ships is the one the restore re-adds."""
+    spec = '--speculative-config {"method":"mtp","num_speculative_tokens":3}'
+    plain = _materialized_profile(tmp_path, "vllm", "")
+    envs = _materialized_profile(tmp_path, "vllm", spec, args_mode)
+    assert "--profiler-config.delay_iterations 6080" in plain["EXTRA_VLLM_ARGS"]
+    assert int(plain["NUM_PROMPTS"]) == 776
+    args = envs["EXTRA_VLLM_ARGS"]
+    assert args.count("delay_iterations") == 1
+    assert f"--profiler-config.delay_iterations {6080 // 4}" in args
+    assert int(envs["NUM_PROMPTS"]) == 824
+    assert 6080 // 4 + 128 <= _steps_at_full_acceptance(envs, 4) // 2
+
+
+def test_an_operator_capture_window_is_left_as_written(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "16")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_DELAY_ITERS", "40")
+    body = json.loads(_materialized_profile(tmp_path, "sglang", _SGLANG_MTP)["PROFILE_EXTRA_BODY"])
+    assert (body["start_step"], body["num_steps"]) == (40, 16)

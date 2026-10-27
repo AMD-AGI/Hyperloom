@@ -20,7 +20,6 @@ from hyperloom.orchestrator.lever import (
 )
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 from ..state.shared_state import (
-    ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
     ESCALATE_HINT_SKIP_TO_SWEEP,
     _LIFECYCLE_CAP,
@@ -556,10 +555,6 @@ def _rows_for_current_cycle(rows: Any, state: Any) -> list[dict[str, Any]]:
     return [row for row in dict_rows if _row_cycle(row) == cycle]
 
 
-# Let SWEEP's recorded closeout outrank an LLM skip_to_close hint.
-_SWEEP_CLOSEOUT_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed", "skipped", "failed"})
-
-
 # per-phase judgments
 def warm_replay_in_flight(state: Any) -> bool:
     """True while the PRELUDE warm-recipe replay task has not finished (PRELUDE must not exit until False — GPU contention)."""
@@ -882,7 +877,7 @@ def per_lever_dryness(state: Any) -> tuple[bool, dict[str, Any]]:
 
 _STOP_TIME_EXHAUSTED = "time_exhausted"
 
-#: SWEEP's close reason per ``reloop_blocked`` value; too little time closes as ``skip_to_close`` would.
+#: SWEEP's close reason per ``reloop_blocked`` value.
 _RELOOP_BLOCK_TERMINALS: dict[str, str] = {
     "global_converged": "global_converged",
     "all_directions_saturated": "global_converged",
@@ -955,20 +950,10 @@ def _base_workflow_predicate_inputs(
     enablement_in_flight: bool,
 ) -> dict[str, Any]:
     hint = _pending_escalate_hint(state) or None
-    last_conc = state.last_conc_sweep or {}
-    sweep_closeout_status = str(last_conc.get("status") or "").lower() if isinstance(last_conc, dict) else ""
     global_inputs: dict[str, Any] = {
         "stop_reason": str(state.stop_reason or "").strip(),
         "closing_phase": bool(state.closing_phase),
         "target_reached_at": str(state.target_reached_at or ""),
-        "sweep_closeout_status": sweep_closeout_status,
-        "session_remaining_sec": (
-            session_remaining_seconds(state, now_unix=now_unix) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None
-        ),
-        "cycle_reloop_min_remaining_sec": (
-            _cycle_reloop_min_remaining_sec(state) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else 0.0
-        ),
-        "baseline_tput": ((_number(state.baseline_tput) or 0.0) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None),
     }
     return {
         "current_phase": current,
@@ -1438,59 +1423,7 @@ def compute_next_phase(
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return the next transition with the primitive inputs it consumed."""
     inputs = workflow_predicate_inputs(state, flags=flags, now_unix=now_unix, live=live)
-    if "baseline_tput" in inputs["global"]:
-        return replay_next_phase(inputs)
-    # The session's contract cannot carry the baseline in the frozen inputs, so
-    # the close decision reads it from state and records it in the evidence.
-    return replay_next_phase(inputs, unrecorded_baseline_tput=_number(state.baseline_tput) or 0.0)
-
-
-def _skip_to_close_reason(
-    global_inputs: dict[str, Any],
-    hint: str,
-    unrecorded_baseline_tput: float | None = None,
-) -> tuple[str, dict[str, Any]]:
-    """Terminal reason and evidence for a close requested by a skip_to_close hint."""
-    evidence: dict[str, Any] = {"evidence": "llm_escalation", "hint": hint}
-    floor = _number(global_inputs.get("cycle_reloop_min_remaining_sec")) or 0.0
-    evidence["min_remaining_sec_effective"] = round(floor, 2)
-    remaining = _number(global_inputs.get("session_remaining_sec"))
-    if remaining is not None:
-        evidence["session_remaining_seconds"] = round(remaining, 2)
-    reason = _STOP_TIME_EXHAUSTED if remaining is not None and remaining < floor else "global_converged"
-    # Both of those read as a normal closeout. A session that never measured a
-    # baseline optimized nothing, so closing it early is a baseline failure
-    # whatever budget is left. A record frozen before this fact existed carries
-    # no value and replays as it was decided. A session whose contract cannot
-    # freeze the fact passes it from state instead.
-    if "baseline_tput" in global_inputs:
-        baseline_tput = _number(global_inputs.get("baseline_tput"))
-    else:
-        baseline_tput = _number(unrecorded_baseline_tput)
-    if baseline_tput is not None and baseline_tput <= 0.0:
-        evidence["baseline_tput"] = baseline_tput
-        evidence["unmeasured_close_reason"] = reason
-        reason = "baseline_failed"
-    return reason, evidence
-
-
-def skip_to_close_contradiction(state: Any) -> str | None:
-    """Why the session's own facts refuse a new ``skip_to_close``, or ``None`` when they admit it.
-
-    Only an unmeasured baseline or a budget that cannot fund another cycle earns that close; anything else would
-    be booked as ``global_converged`` for a run that never converged.
-    """
-    baseline_tput = _number(state.baseline_tput) or 0.0
-    remaining = session_remaining_seconds(state)
-    floor = _cycle_reloop_min_remaining_sec(state)
-    reason, _ = _skip_to_close_reason(
-        {"session_remaining_sec": remaining, "cycle_reloop_min_remaining_sec": floor, "baseline_tput": baseline_tput},
-        ESCALATE_HINT_SKIP_TO_CLOSE,
-    )
-    if reason != "global_converged":
-        return None
-    left = "no deadline bounds the session" if remaining is None else f"{remaining / 60.0:.0f} min remain"
-    return f"baseline_tput={baseline_tput:.2f} is measured and {left}; a new cycle needs {floor / 60.0:.0f} min"
+    return replay_next_phase(inputs)
 
 
 def _holds_for_initial_analysis(baseline: dict[str, Any]) -> bool:
@@ -1529,22 +1462,11 @@ def _initial_analysis_hold_line(state: Any, phase: str) -> str | None:
     )
 
 
-def _terminal_close_transition(
-    inputs: dict[str, Any],
-    unrecorded_baseline_tput: float | None,
-) -> tuple[str, str, dict[str, Any]] | None:
-    """The CLOSE a stop reason, a skip-to-close hint or the closing deadline forces, if one does."""
+def _terminal_close_transition(inputs: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
+    """The CLOSE a stop reason or the closing deadline forces, if one does."""
     if str(inputs["current_phase"]) == PHASE_CLOSE:
         return None
     global_inputs = dict(inputs.get("global") or {})
-    hint = str(inputs.get("hint") or "")
-    sweep_closed_out = (
-        str(inputs["current_phase"]) == PHASE_SWEEP
-        and str(global_inputs.get("sweep_closeout_status") or "") in _SWEEP_CLOSEOUT_STATUSES
-    )
-    if hint == ESCALATE_HINT_SKIP_TO_CLOSE and not sweep_closed_out:
-        reason, evidence = _skip_to_close_reason(global_inputs, hint, unrecorded_baseline_tput)
-        return _transition_result(PHASE_CLOSE, reason, {"terminal": True, **evidence}, inputs)
     stop_reason = str(global_inputs.get("stop_reason") or "")
     if stop_reason:
         evidence = {"reason_origin": "shared_state.stop_reason"}
@@ -1724,18 +1646,9 @@ def _sweep_transition(
     return _transition_result(PHASE_CLOSE, exit_reason, {**exit_evidence, **reloop_evidence}, inputs)
 
 
-def replay_next_phase(
-    inputs: dict[str, Any],
-    *,
-    unrecorded_baseline_tput: float | None = None,
-) -> tuple[str, str, dict[str, Any]] | None:
-    """Recompute a phase decision from persisted primitive facts only.
-
-    ``unrecorded_baseline_tput`` is the baseline for a live decision whose
-    session contract has no ``global.baseline_tput`` slot; it is used only
-    when the frozen inputs lack that fact.
-    """
-    forced = _terminal_close_transition(inputs, unrecorded_baseline_tput)
+def replay_next_phase(inputs: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
+    """Recompute a phase decision from persisted primitive facts only."""
+    forced = _terminal_close_transition(inputs)
     if forced is not None:
         return forced
     current = str(inputs["current_phase"])

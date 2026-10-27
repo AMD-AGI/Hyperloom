@@ -386,11 +386,6 @@ def recipe_snapshot_audit_jsonl(session_dir: Path) -> Path:
     return recipe_snapshot_dir(session_dir) / ".audit.jsonl"
 
 
-def pr_monitor_status_json(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_kb/.pr_monitor_status.json`` — boot-time PR Monitor reachability snapshot."""
-    return recipe_kb_dir(session_dir) / ".pr_monitor_status.json"
-
-
 def _prune_old_workdirs(root: Path, *, keep: int) -> None:
     """Delete all but the newest ``keep`` per-turn workdirs under *root*."""
     try:

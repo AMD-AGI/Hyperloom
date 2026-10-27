@@ -124,9 +124,10 @@ can read these directly:
   `quantized_score`, `relative_gap`, `within_threshold`).
 - `eval_gap_threshold.txt` — resolved acceptable gap (single float).
 - `last_phase.txt` — current Quark phase ID (used for classification).
-- `requantize_attempts.txt` — persistent integer retry counter.
 - `fix_hypothesis_attempt_N.md` — diagnosis + concrete fix (precondition for
-  retry N+1).
+  retry N+1). A run starts by deleting the ones an earlier run left, so it
+  retries only on hypotheses its own attempts wrote. Retries are counted per
+  run: every `quantize_via_prompt` call gets its own `max_requantize_attempts`.
 - `blocked.md` — present when the SDK aborted; may carry `outcome_id: <id>`
   to short-circuit classification.
 - `<marker>.attempt_N` — the Nth archived set of markers in this workspace: the

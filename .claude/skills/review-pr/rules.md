@@ -846,17 +846,16 @@ function that reads long is not the same claim. Run the ceiling against the chan
 head, then against the same paths at `base.txt`, and match per function name:
 
 ```bash
-ruff check --select C901 --config "lint.mccabe.max-complexity=20" --force-exclude \
-  --output-format concise $(cut -f3 "$WORK/numstat.txt" | grep '^src/.*\.py$' | grep -v '/tests/')
+radon cc -s -n D $(cut -f3 "$WORK/numstat.txt" | grep '^src/.*\.py$' | grep -v '/tests/' \
+  | grep -v -e '^src/kernelforge/examples/' -e '/_vendor/' -e '/local_wiki/resources/' -e 'kb_store/remote_client.py')
 
 git show "$(cat "$WORK/base.txt")":<path> > "$WORK/base-<name>.py"
-ruff check --select C901 --config "lint.mccabe.max-complexity=20" --isolated \
-  --output-format concise "$WORK/base-<name>.py"
+radon cc -s -n D "$WORK/base-<name>.py"
 ```
 
-`--force-exclude` keeps Ruff's `extend-exclude` (vendored SDK copies, `src/kernelforge/examples`)
-out when paths are passed explicitly; `--isolated` is what lets the base copy be checked from
-outside the tree. Present at head and absent at base, or a higher number at head than at base,
+radon (6.0.1, as the gate pins) counts every `and` / `or`, ternary, comprehension and `assert` as a
+branch, as the gate and the code-health report do; `-n D` lists the functions above 20, and the
+`grep -v` keeps Ruff's `extend-exclude` trees (vendored SDK copies, `src/kernelforge/examples`) out. Present at head and absent at base, or a higher number at head than at base,
 fires. The same number on both sides is backlog and is silent. The `code-metrics` CI job measures
 the same two cases, but its `baseline-raise` label waives them, so the rule stays for the one
 question CI cannot answer: whether a labelled PR gives the reason. `AGENTS.md` *Size is a design
@@ -868,7 +867,7 @@ above 20 when it was introduced, which is the backlog the comparison exists to k
 finding.
 **Not a finding when:** the base number equals the head number (the unit was already over and
 this diff did not grow it); the file is a test, or sits in `extend-exclude`, which
-`--force-exclude` already settles; the added branches are a flat dispatch or validation table
+the `grep -v` already settles; the added branches are a flat dispatch or validation table
 whose arms share no state and the body says so -- that is the trigger's accepted answer, and it
 survives at the ceiling only when the arms are genuinely independent.
 **Evidence:** both Ruff invocations above, with the head and base numbers quoted; `$WORK/diff.txt`

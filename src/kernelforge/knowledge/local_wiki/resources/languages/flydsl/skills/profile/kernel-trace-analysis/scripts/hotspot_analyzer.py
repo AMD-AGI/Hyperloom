@@ -303,27 +303,32 @@ def read_kernel_metadata(dispatch_dir, kernel_filter=""):
     return {}
 
 
-def detect_arch_and_reg_pressure(instructions, meta=None):
+_GFX950_MFMA = ("v_mfma_scale_f32", "v_mfma_f32_16x16x128", "v_mfma_f32_32x32x64")
+_INSTRUCTION_MIX = {
+    "mfma_count": ("v_mfma_",),
+    "buffer_load": ("buffer_load",),
+    "buffer_store": ("buffer_store",),
+    "ds_read": ("ds_read", "ds_load"),
+    "ds_write": ("ds_write", "ds_store"),
+}
+
+
+def _max_reg_index(isa, prefix):
+    found = re.findall(rf"\b{prefix}(\d+)\b", isa) + re.findall(rf"\b{prefix}\[(\d+)", isa)
+    return max(map(int, found), default=0)
+
+
+def detect_arch_and_reg_pressure(instructions, meta):
     """Detect GPU architecture from ISA and estimate occupancy."""
-    meta = meta or {}
     asms = [inst.asm for inst in instructions]
+    isa = "\n".join(asms)
 
     # Detect architecture from gfx950-specific instructions
-    is_gfx950 = any("v_mfma_scale_f32" in a or "v_mfma_f32_16x16x128" in a or "v_mfma_f32_32x32x64" in a for a in asms)
+    is_gfx950 = any(marker in isa for marker in _GFX950_MFMA)
     arch = "gfx950 (CDNA4)" if is_gfx950 else "gfx942 (CDNA3)"
 
-    # Scan for max VGPR/AccVGPR indices
-    max_vgpr = 0
-    max_agpr = 0
-    for a in asms:
-        for m in re.finditer(r"\bv(\d+)\b", a):
-            max_vgpr = max(max_vgpr, int(m.group(1)))
-        for m in re.finditer(r"\bv\[(\d+)", a):
-            max_vgpr = max(max_vgpr, int(m.group(1)))
-        for m in re.finditer(r"\ba(\d+)\b", a):
-            max_agpr = max(max_agpr, int(m.group(1)))
-        for m in re.finditer(r"\ba\[(\d+)", a):
-            max_agpr = max(max_agpr, int(m.group(1)))
+    max_vgpr = _max_reg_index(isa, "v")
+    max_agpr = _max_reg_index(isa, "a")
 
     # Total VGPR budget consumed (what occupancy divides into 512).
     isa_arch = max_vgpr + 1
@@ -355,12 +360,12 @@ def detect_arch_and_reg_pressure(instructions, meta=None):
     # Round the TOTAL up to allocation granularity of 8 (granularity applies to next_free_vgpr, not to each sub-count
     # separately).
     arch_vgpr_alloc = ((arch_vgpr_count + 7) // 8) * 8
-    accum_vgpr_alloc = ((accum_vgpr_count + 7) // 8) * 8 if accum_vgpr_count > 0 else 0
+    accum_vgpr_alloc = ((accum_vgpr_count + 7) // 8) * 8
     combined_alloc = ((combined_count + 7) // 8) * 8
 
     max_occupancy = 8
     vgpr_total = 512  # combined arch+accum budget per SIMD (CDNA2/3/4)
-    vgpr_limit = min(vgpr_total // combined_alloc, max_occupancy) if combined_alloc > 0 else max_occupancy
+    vgpr_limit = min(vgpr_total // combined_alloc, max_occupancy)
 
     # LDS limiter (waves/SIMD).
     lds_total = 163840 if is_gfx950 else 65536  # 160KB CDNA4, 64KB CDNA3
@@ -392,13 +397,6 @@ def detect_arch_and_reg_pressure(instructions, meta=None):
     next_occ = occupancy + 1
     target_total = (vgpr_total // next_occ) if next_occ <= max_occupancy else None
 
-    # Instruction mix counts
-    mfma_count = sum(1 for a in asms if "v_mfma_" in a)
-    buf_load = sum(1 for a in asms if "buffer_load" in a)
-    buf_store = sum(1 for a in asms if "buffer_store" in a)
-    ds_read = sum(1 for a in asms if "ds_read" in a or "ds_load" in a)
-    ds_write = sum(1 for a in asms if "ds_write" in a or "ds_store" in a)
-
     return {
         "arch": arch,
         "is_gfx950": is_gfx950,
@@ -420,11 +418,7 @@ def detect_arch_and_reg_pressure(instructions, meta=None):
         "target_for_next_occ": target_total,
         "next_occ": next_occ if next_occ <= max_occupancy else None,
         "has_meta": bool(meta),
-        "mfma_count": mfma_count,
-        "buffer_load": buf_load,
-        "buffer_store": buf_store,
-        "ds_read": ds_read,
-        "ds_write": ds_write,
+        **{key: sum(1 for a in asms if any(m in a for m in markers)) for key, markers in _INSTRUCTION_MIX.items()},
     }
 
 

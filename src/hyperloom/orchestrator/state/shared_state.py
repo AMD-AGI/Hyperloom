@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.coerce import to_int, to_str_list, to_unix
+from hyperloom.common.coerce import first_text, to_int, to_str_list
 from hyperloom.common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
@@ -63,17 +63,15 @@ _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = _kernel_decision_settings._DEFAULT_HOT_KERNEL_
 _MAX_INTEGRATE_FAULT_ATTEMPTS = _kernel_decision_settings._MAX_INTEGRATE_FAULT_ATTEMPTS
 resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_min_gpu_pct
 
-# escalate_strategy_change hint vocabulary (closed enum; unknown hints ignored). ``skip_to_kernel`` is the
+# escalate_strategy_change hint vocabulary (closed enum; unknown hints are denied). ``skip_to_kernel`` is the
 # "exhausted the current lever" signal from FRAMEWORK_AGENT; it advances to KERNEL.
 # KERNEL exits automatically when settled with no pending work — the LLM does not self-set a sweep hint.
 ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
 ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
-ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
 ESCALATE_HINT_VOCAB: frozenset[str] = frozenset(
     {
         ESCALATE_HINT_SKIP_TO_KERNEL,
         ESCALATE_HINT_SKIP_TO_SWEEP,
-        ESCALATE_HINT_SKIP_TO_CLOSE,
     }
 )
 
@@ -91,6 +89,17 @@ def first_positive_tput(d: Any) -> float:
         if isinstance(val, (int, float)) and val > 0:
             return float(val)
     return 0.0
+
+
+def _merged_profile_envs(current_best: Mapping[str, Any], incoming: Mapping[str, Any]) -> dict[str, Any]:
+    """The current best's env overrides, with the caller's base and variant envs layered on top."""
+    raw_current_envs = current_best.get("extra_envs")
+    merged_envs = dict(raw_current_envs) if isinstance(raw_current_envs, dict) else {}
+    if isinstance(incoming.get("base_extra_envs"), dict):
+        merged_envs.update(incoming["base_extra_envs"])
+    if isinstance(incoming.get("extra_envs"), dict):
+        merged_envs.update(incoming["extra_envs"])
+    return merged_envs
 
 
 def resolve_anchor_with_drift(snapshot_tput: float, state: Any) -> tuple[float, bool]:
@@ -289,6 +298,25 @@ def _saturation_delta(sat: dict[str, Any], prev_sat: dict[str, Any], key: str) -
     return round(float(current) - float(previous), 2)
 
 
+def _skipped_kernels_top(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The hottest skipped (non-routable) candidates, so the LLM sees the operators it cannot optimize."""
+    skipped = result.get("skipped_kernels")
+    skipped_rows = sorted(
+        (e for e in skipped if isinstance(e, dict)) if isinstance(skipped, list) else (),
+        key=lambda e: float(e.get("gpu_pct") or 0.0),
+        reverse=True,
+    )
+    return [
+        {
+            "kernel_id": e.get("kernel_id"),
+            "name": e.get("name"),
+            "skip_reason": e.get("skip_reason") or "",
+            "gpu_pct": e.get("gpu_pct"),
+        }
+        for e in skipped_rows[:_TRACE_HOT_KERNEL_TOP_N]
+    ]
+
+
 def _hot_kernel_row(entry: dict[str, Any]) -> dict[str, Any]:
     kid = entry.get("kernel_id")
     arithmetic_intensity = entry.get("arithmetic_intensity")
@@ -400,6 +428,7 @@ def timed_teardown_step(state: Any, name: str) -> Iterator[None]:
             recorder(name, time.monotonic() - started)
 
 
+from ._shared_state.elapsed import elapsed_sec_of
 from ._shared_state.render import _RenderMixin
 
 
@@ -1028,13 +1057,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             "base_unset_envs",
             "base_args_mode",
         }
-        has_runtime_override = any(key in current_best for key in runtime_keys) or any(
-            key in incoming for key in runtime_keys
-        )
+        has_runtime_override = any(key in current_best or key in incoming for key in runtime_keys)
         recorded = self.last_profile_workload if isinstance(self.last_profile_workload, dict) else {}
         # A bare baseline/profile ``current_best`` carries no runtime fields, so the only record of what the server
         # actually ran with is the last profile.
-        recorded_action = str(self.last_profile_workload_action or "").strip()
+        recorded_action = first_text(self.last_profile_workload_action)
         if (
             not has_runtime_override
             and current_best.get("action") in {"baseline", "profile"}
@@ -1065,12 +1092,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             if target in incoming:
                 params[target] = incoming[target]
 
-        raw_current_envs = current_best.get("extra_envs")
-        merged_envs = dict(raw_current_envs) if isinstance(raw_current_envs, dict) else {}
-        if isinstance(incoming.get("base_extra_envs"), dict):
-            merged_envs.update(incoming["base_extra_envs"])
-        if isinstance(incoming.get("extra_envs"), dict):
-            merged_envs.update(incoming["extra_envs"])
+        merged_envs = _merged_profile_envs(current_best, incoming)
         if merged_envs:
             params["base_extra_envs"] = merged_envs
 
@@ -1285,7 +1307,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
     def _langfuse_status_summary(self) -> dict[str, Any]:
         """Flatten the state into an OTEL-friendly scalar status snapshot."""
-        last = self.lifecycle[-1] if self.lifecycle else {}
         summary: dict[str, Any] = {
             "phase": self.phase or "",
             "stop_reason": self.stop_reason or "",
@@ -1299,7 +1320,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             "macro_cycle": int(self.macro_cycle or 0),
             "session_id": self.session_id or "",
             "model_name": self.model_name or "",
-            "framework": self.framework or os.environ.get("FRAMEWORK", "") or "",
+            "framework": self.framework or os.environ.get("FRAMEWORK", ""),
             "kb_hit": str((self.warm_start_context or {}).get("status") or ""),
         }
         from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, phase_cumulative_seconds
@@ -1312,6 +1333,13 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         tput = self.current_best.get("tput")
         if isinstance(tput, (int, float)) and not isinstance(tput, bool):
             summary["current_best_tput"] = round(float(tput), 1)
+        summary.update(self._last_lifecycle_summary())
+        return {k: v for k, v in summary.items() if isinstance(v, (str, bool, int, float))}
+
+    def _last_lifecycle_summary(self) -> dict[str, Any]:
+        """The newest lifecycle row's sequence, status and phase, for whichever of them it recorded."""
+        last = self.lifecycle[-1] if self.lifecycle else {}
+        summary: dict[str, Any] = {}
         if isinstance(last, dict):
             if last.get("seq") is not None:
                 summary["last_seq"] = last.get("seq")
@@ -1319,7 +1347,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 summary["last_lifecycle_status"] = str(last.get("status"))
             if last.get("phase"):
                 summary["last_lifecycle_phase"] = str(last.get("phase"))
-        return {k: v for k, v in summary.items() if isinstance(v, (str, bool, int, float))}
+        return summary
 
     # Mutators (Coordinator only — LLM agents go via intents)
     def add_pruned_family(self, family: str) -> bool:
@@ -1985,38 +2013,19 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if not isinstance(result, dict):
             return
         result = dict(result)
-        task = payload or {}
+        # Both callers build the payload as a dict.
+        task = payload
         artifacts = result.get("artifact_paths")
         if not isinstance(artifacts, dict):
             artifacts = {}
-        candidates_path = result.get("candidates_path") or artifacts.get("kernel_candidates") or ""
-        kernel_roofline_path = result.get("kernel_roofline_path") or artifacts.get("kernel_roofline") or ""
-        disk = self._read_session_roofline_report(task, kernel_roofline_path)
-        report: dict[str, Any] = {}
-        if disk:
-            report = disk["payload"]
-            kernel_roofline_path = kernel_roofline_path or str(disk["path"])
-            candidates_path = candidates_path or str(report.get("kernel_candidates_path") or "")
-            result["trace_report_path"] = result.get("trace_report_path") or str(report.get("analysis_md_path") or "")
-            if not (result.get("hot_kernels") or result.get("hot_kernels_top15")):
-                result["hot_kernels"] = disk["kernels"]
-                log.warning(
-                    "record_trace_analyze: envelope carried no hot kernels; "
-                    "recovered %d from %s. The analysis succeeded — the result "
-                    "envelope lost its payload in transit.",
-                    len(disk["kernels"]),
-                    disk["path"],
-                )
+        candidates_path, kernel_roofline_path = self._recover_from_roofline_report(
+            result,
+            task,
+            candidates_path=result.get("candidates_path") or artifacts.get("kernel_candidates") or "",
+            kernel_roofline_path=result.get("kernel_roofline_path") or artifacts.get("kernel_roofline") or "",
+        )
         steady_state_trace = result.get("steady_state_trace") or artifacts.get("tracelens_steady_state_trace") or ""
         summary, kernel_roofline, reusable_ids = self._build_hot_kernel_summaries(result)
-
-        # Project skipped (non-routable) candidates so the LLM sees unoptimizable operators.
-        skipped = result.get("skipped_kernels")
-        skipped_rows = sorted(
-            (e for e in skipped if isinstance(e, dict)) if isinstance(skipped, list) else (),
-            key=lambda e: float(e.get("gpu_pct") or 0.0),
-            reverse=True,
-        )
         warning_rows = result.get("trace_health_warnings")
         warning_rows = warning_rows if isinstance(warning_rows, list) else []
         task_groups = result.get("task_groups")
@@ -2035,15 +2044,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             "kernel_roofline_path": str(kernel_roofline_path),
             "hot_kernels_top15": summary,
             "kernel_roofline_top15": kernel_roofline,
-            "skipped_kernels_top": [
-                {
-                    "kernel_id": e.get("kernel_id"),
-                    "name": e.get("name"),
-                    "skip_reason": e.get("skip_reason") or "",
-                    "gpu_pct": e.get("gpu_pct"),
-                }
-                for e in skipped_rows[:_TRACE_HOT_KERNEL_TOP_N]
-            ],
+            "skipped_kernels_top": _skipped_kernels_top(result),
             "task_groups": task_groups if isinstance(task_groups, list) else [],
             "reusable_native_kernel_ids": reusable_ids,
             "trace_health_warnings": [dict(e) for e in warning_rows if isinstance(e, dict) and e.get("code")],
@@ -2055,6 +2056,33 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         }
 
         self._append_roofline_snapshot_history(payload)
+
+    def _recover_from_roofline_report(
+        self,
+        result: dict[str, Any],
+        task: dict[str, Any],
+        *,
+        candidates_path: Any,
+        kernel_roofline_path: Any,
+    ) -> tuple[Any, Any]:
+        """Fill what the envelope lost from the session roofline report; the candidates and roofline paths after it."""
+        disk = self._read_session_roofline_report(task, kernel_roofline_path)
+        if not disk:
+            return candidates_path, kernel_roofline_path
+        report = disk["payload"]
+        kernel_roofline_path = kernel_roofline_path or str(disk["path"])
+        candidates_path = candidates_path or str(report.get("kernel_candidates_path") or "")
+        result["trace_report_path"] = result.get("trace_report_path") or str(report.get("analysis_md_path") or "")
+        if not (result.get("hot_kernels") or result.get("hot_kernels_top15")):
+            result["hot_kernels"] = disk["kernels"]
+            log.warning(
+                "record_trace_analyze: envelope carried no hot kernels; "
+                "recovered %d from %s. The analysis succeeded — the result "
+                "envelope lost its payload in transit.",
+                len(disk["kernels"]),
+                disk["path"],
+            )
+        return candidates_path, kernel_roofline_path
 
     def _read_session_roofline_report(
         self,
@@ -2308,19 +2336,12 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         Returns:
             float: Minutes consumed; never negative.
         """
-        charged = max(0.0, self.elapsed_charged_sec)
-        anchor = self.leg_anchor_unix
         now_dt = now or datetime.now(timezone.utc)
         if now_dt.tzinfo is None:
             now_dt = now_dt.replace(tzinfo=timezone.utc)
-        if anchor > 0.0:
-            return (charged + max(0.0, now_dt.timestamp() - anchor)) / 60.0
-        if charged > 0.0:
-            return charged / 60.0
-        started = to_unix(self.start_ts.strip())
-        if started is None:
-            return 0.0
-        return max(0.0, now_dt.timestamp() - started) / 60.0
+        return self.elapsed_sec_of(vars(self), now_unix=now_dt.timestamp()) / 60.0
+
+    elapsed_sec_of = staticmethod(elapsed_sec_of)
 
     def extend_budget_minutes(self, minutes: float) -> float:
         """Grant more wall-clock budget to this session.

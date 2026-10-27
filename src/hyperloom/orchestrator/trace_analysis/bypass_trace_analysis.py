@@ -390,6 +390,190 @@ def _should_enable_steady(*, steady_state_mode: str, framework: str, env_steady:
     return bool(env_steady) or (framework or "").lower() == "xdit" or mode not in _STEADY_OFF_VALUES
 
 
+def _analysis_health(analyze: dict[str, Any], warnings: list[dict[str, Any]]) -> tuple[dict[str, Any], bool]:
+    """Append reader-health warnings; return the analysis to report on and whether it is degraded.
+
+    ``analysis_degraded`` distinguishes an analysis failure (bad/unparsable trace) from a genuine empty result. A
+    truncated aggregation is replaced by an empty one so a partial ranking is never reported.
+    """
+    if analyze.get("status") != "ok":
+        warnings.append(
+            {
+                "code": "bypass_trace_parse_failed",
+                "severity": "warning",
+                "message": f"bypass reader could not analyze trace: {analyze.get('error', 'unknown')}",
+            }
+        )
+        return analyze, True
+    if analyze.get("truncated"):
+        warnings.append(
+            {
+                "code": "bypass_trace_aggregation_truncated",
+                "severity": "warning",
+                "message": (
+                    "trace aggregation reached its safety cap; kernel rankings use only "
+                    f"the retained prefix ({analyze.get('truncation_reason', 'unknown')})."
+                ),
+            }
+        )
+        empty = {
+            "status": "ok",
+            "timeline": {},
+            "attribution": {},
+            "kernels": [],
+            "ops": [],
+            "aggregation_scope": "full_trace",
+        }
+        return empty, False
+    analysis_degraded = False
+    stream_errors = analyze.get("stream_errors", [])
+    if stream_errors:
+        analysis_degraded = True
+        warnings.append(
+            {
+                "code": "bypass_trace_stream_incomplete",
+                "severity": "warning",
+                "message": ("bypass reader recovered an incomplete trace stream: " + "; ".join(stream_errors[:3])),
+            }
+        )
+    if not analyze.get("kernels"):
+        warnings.append(
+            {
+                "code": "bypass_no_gpu_kernels",
+                "severity": "warning",
+                "message": "bypass reader found no GPU kernel events in the trace",
+            }
+        )
+    return analyze, analysis_degraded
+
+
+def _stream_overlap_warning(stream_overlap: dict[str, Any]) -> dict[str, Any]:
+    """The health warning for a device stream whose event durations cannot hold on a serial stream."""
+    _severity = stream_overlap["severity"]
+    _share_pct = stream_overlap["excess_share"] * 100.0
+    _advice = (
+        "Kernel ranking is by summed duration, so treat the hot-kernel table as "
+        "unreliable until the trace is recaptured or the durations are repaired."
+        if _severity == "warning"
+        else "Kernel ranking is by summed duration, so the affected entries are "
+        "overstated by this much; the overall ordering is probably still usable."
+    )
+    return {
+        "code": "bypass_impossible_kernel_durations",
+        "severity": _severity,
+        "message": (
+            f"device stream (pid={stream_overlap.get('pid')}, tid={stream_overlap.get('tid')}): "
+            f"{stream_overlap.get('overlapping_events')} event(s) run past the start of the "
+            f"event after them, by {stream_overlap.get('excess_ms')} ms in total -- "
+            f"{_share_pct:.1f}% of the {stream_overlap.get('device_ms')} ms of device time "
+            "booked on that stream. That is impossible on a serial stream, so these "
+            f"durations are corrupt. Worst offender: '{stream_overlap.get('worst_event')}' "
+            f"overruns by {stream_overlap.get('worst_event_excess_ms')} ms. " + _advice
+        ),
+    }
+
+
+def _inferred_denoise_steps(
+    args: argparse.Namespace,
+    analyze: dict[str, Any],
+    steady_window: dict[str, Any] | None,
+    warnings: list[dict[str, Any]],
+) -> int:
+    """Return the denoise-step count present in the analyzed data; warn when ``--num-denoise-steps`` differs."""
+    if steady_window:
+        # select_steady_window only reports a window repeated at least twice.
+        inferred = steady_window["step_count"]
+    else:
+        # Count in the file the reader resolved; a directory input may glob a different one.
+        inferred = count_profiler_steps(str(analyze.get("trace_file") or args.trace_input))
+    requested = args.num_denoise_steps
+    if requested > 0 and inferred > 0 and requested != inferred:
+        warnings.append(
+            {
+                "code": "bypass_denoise_steps_mismatch",
+                "severity": "info",
+                "message": (
+                    f"requested --num-denoise-steps={requested} differs from the "
+                    f"{inferred} step(s) found in the analyzed data; the requested "
+                    "count wins as the per-step divisor."
+                ),
+            }
+        )
+    return inferred
+
+
+def _apply_idle_gate(
+    candidates: dict[str, Any],
+    timeline: dict[str, Any],
+    graph_coverage: dict[str, Any],
+    report_path: Path,
+    warnings: list[dict[str, Any]],
+) -> None:
+    """Suppress every candidate list when GPU idle exceeds the threshold, and say why.
+
+    Above the threshold per-kernel rewriting cannot move end-to-end latency. Graph under-recording makes idle%
+    unreliable, so it skips the gate (keeping candidates ranked by recorded-kernel GPU share) and warns instead.
+    """
+    idle_pct_value = timeline.get("idle_pct")
+    idle_pct_threshold = resolve_idle_pct_threshold()
+    if graph_coverage.get("graph_under_recorded"):
+        # Only the reader's ok result carries graph coverage, and its timeline always has a float idle_pct.
+        warnings.append(
+            build_graph_under_recorded_warning(
+                graph_launch_count=graph_coverage["graph_launch_count"],
+                idle_pct=idle_pct_value,
+            )
+        )
+    elif isinstance(idle_pct_value, (int, float)) and float(idle_pct_value) > idle_pct_threshold:
+        for _cand_key in ("hot_kernels", "routable_kernels", "skipped_kernels", "task_groups"):
+            candidates[_cand_key] = []
+        warnings.append(
+            build_high_idle_warning(
+                idle_pct=float(idle_pct_value),
+                threshold_pct=idle_pct_threshold,
+                report_path=report_path,
+            )
+        )
+
+
+def _write_diffusion_roofline(
+    args: argparse.Namespace,
+    analyze: dict[str, Any],
+    candidates: dict[str, Any],
+    run_dir: Path,
+    inferred_denoise_steps: int,
+) -> str | None:
+    """Write the scriptable workload-level roofline sidecar; return its path, or None when skipped or failed.
+
+    Aggregates the per-kernel analytical roofline into an end-to-end workload roofline + per-denoise-step split.
+    """
+    if not framework_registry.is_scriptable(args.framework):
+        return None
+    try:
+        from .diffusion_roofline import WorkloadTotals, build_report_from_bypass
+
+        _diff_steps = resolve_perstep_divisor(
+            requested_steps=args.num_denoise_steps,
+            inferred_steps=inferred_denoise_steps,
+        )
+        # Workload totals cover all analyzed device kernels (not just top-k).
+        _workload_totals = _report.build_workload_roofline_totals(analyze, target_platform=args.target_platform)
+        _all_kernels = [k for k in analyze.get("kernels", []) if k["gpu_time_us"] > 0]
+        _diff_report = build_report_from_bypass(
+            candidates.get("hot_kernels", []),
+            analyze.get("timeline", {}),
+            _diff_steps,
+            _TOP_K,
+            workload=WorkloadTotals(_workload_totals, kernel_count=len(_all_kernels)),
+        )
+        _diff_path = run_dir / "diffusion_roofline.json"
+        atomic_write_json(_diff_path, _diff_report, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
+        return str(_diff_path)
+    except Exception as exc:  # noqa: BLE001 - best-effort sidecar, never blocks the run
+        log.warning("diffusion roofline sidecar failed: %s", exc)
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point: emit the minimal bypass artifact set and a result JSON."""
     args = _build_arg_parser().parse_args(argv)
@@ -403,7 +587,6 @@ def main(argv: list[str] | None = None) -> int:
     bypass_dir.mkdir(parents=True, exist_ok=True)
 
     trace_health_warnings: list[dict[str, Any]] = []
-    top_k = _TOP_K
 
     # Mirrors the ``run_meta`` block tracelens_analysis.py returns so the caller's SBD V6 roofline event carries one
     # shape for both tools.
@@ -435,12 +618,11 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
-    framework_l = (args.framework or "").lower()
     # Steady-state windowing: opt-in via --steady-state-mode / env, always on for xDiT.
     env_steady = os.environ.get("HYPERLOOM_BYPASS_STEADY_STATE", "").strip().lower() in {"1", "true", "yes", "on"}
     enable_steady = _should_enable_steady(
-        steady_state_mode=args.steady_state_mode or "",
-        framework=args.framework or "",
+        steady_state_mode=args.steady_state_mode,
+        framework=args.framework,
         env_steady=env_steady,
     )
 
@@ -466,7 +648,7 @@ def main(argv: list[str] | None = None) -> int:
         {
             "trace_input": str(args.trace_input),
             "steady_state_requested": bool(enable_steady),
-            "steady_state_mode": str(args.steady_state_mode or ""),
+            "steady_state_mode": args.steady_state_mode,
         }
     )
     _note_step(
@@ -490,57 +672,11 @@ def main(argv: list[str] | None = None) -> int:
         status="ok" if analyze.get("status") == "ok" else "failed",
         reader="bypass_trace_reader",
         steady_state_requested=bool(enable_steady),
-        error=str(analyze.get("error") or ""),
+        error=analyze.get("error", ""),
     )
-    # ``analysis_degraded`` distinguishes an analysis failure (bad/unparsable trace) from a genuine empty result.
-    analysis_degraded = False
-    if analyze.get("status") != "ok":
-        analysis_degraded = True
-        trace_health_warnings.append(
-            {
-                "code": "bypass_trace_parse_failed",
-                "severity": "warning",
-                "message": f"bypass reader could not analyze trace: {analyze.get('error', 'unknown')}",
-            }
-        )
-    elif analyze.get("truncated"):
-        trace_health_warnings.append(
-            {
-                "code": "bypass_trace_aggregation_truncated",
-                "severity": "warning",
-                "message": (
-                    "trace aggregation reached its safety cap; kernel rankings use only "
-                    f"the retained prefix ({analyze.get('truncation_reason', 'unknown')})."
-                ),
-            }
-        )
-        analyze = {
-            "status": "ok",
-            "timeline": {},
-            "attribution": {},
-            "kernels": [],
-            "ops": [],
-            "aggregation_scope": "full_trace",
-        }
-    else:
-        stream_errors = [str(error) for error in (analyze.get("stream_errors") or [])]
-        if stream_errors:
-            analysis_degraded = True
-            trace_health_warnings.append(
-                {
-                    "code": "bypass_trace_stream_incomplete",
-                    "severity": "warning",
-                    "message": ("bypass reader recovered an incomplete trace stream: " + "; ".join(stream_errors[:3])),
-                }
-            )
-        if not analyze.get("kernels"):
-            trace_health_warnings.append(
-                {
-                    "code": "bypass_no_gpu_kernels",
-                    "severity": "warning",
-                    "message": "bypass reader found no GPU kernel events in the trace",
-                }
-            )
+    analyze, analysis_degraded = _analysis_health(analyze, trace_health_warnings)
+    timeline = analyze.get("timeline", {})
+    attribution = analyze.get("attribution", {})
 
     # Aggregation scope is driven by the reader (steady_state vs full_trace).
     scope = analyze.get("aggregation_scope", AGGREGATION_SCOPE_FULL)
@@ -549,6 +685,7 @@ def main(argv: list[str] | None = None) -> int:
     # ``estimated`` marks shares not anchored to a real per-step window (steady windowing requested but fell back to
     # the full trace).
     estimated = enable_steady and scope != AGGREGATION_SCOPE_STEADY
+    framework_l = args.framework.lower()
     if framework_l == "xdit" and estimated:
         trace_health_warnings.append(
             {
@@ -562,14 +699,15 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
     elif framework_l == "xdit":
+        # Not estimated: the reader aggregated over its steady window, so steady_window is set.
         trace_health_warnings.append(
             {
                 "code": "bypass_xdit_steady_anchored",
                 "severity": "info",
                 "message": (
                     f"xDiT analysis anchored to a real per-step denoising window "
-                    f"({(steady_window or {}).get('step_name', 'step')}×"
-                    f"{(steady_window or {}).get('step_count', 0)}); per-step kernel "
+                    f"({steady_window.get('step_name', 'step')}×"
+                    f"{steady_window.get('step_count', 0)}); per-step kernel "
                     "shares are trace-anchored (not estimated)."
                 ),
             }
@@ -578,7 +716,7 @@ def main(argv: list[str] | None = None) -> int:
     # Multi-rank provenance: xDiT TP>1 produces one trace per rank; the reader analyzes one representative rank.
     analyzed_rank = analyze.get("analyzed_rank")
     rank_count = analyze.get("rank_count", 1)
-    if isinstance(rank_count, int) and rank_count > 1:
+    if rank_count > 1:
         trace_health_warnings.append(
             {
                 "code": "bypass_multi_rank_single_analyzed",
@@ -592,51 +730,12 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     # Corrupt durations outrank real kernels, since ranking is by summed time.
-    stream_overlap = (analyze.get("timeline") or {}).get("stream_overlap") or {}
+    stream_overlap = timeline.get("stream_overlap")
     if stream_overlap:
-        _severity = str(stream_overlap.get("severity") or "info")
-        _share_pct = float(stream_overlap.get("excess_share") or 0.0) * 100.0
-        _advice = (
-            "Kernel ranking is by summed duration, so treat the hot-kernel table as "
-            "unreliable until the trace is recaptured or the durations are repaired."
-            if _severity == "warning"
-            else "Kernel ranking is by summed duration, so the affected entries are "
-            "overstated by this much; the overall ordering is probably still usable."
-        )
-        trace_health_warnings.append(
-            {
-                "code": "bypass_impossible_kernel_durations",
-                "severity": _severity,
-                "message": (
-                    f"device stream (pid={stream_overlap.get('pid')}, tid={stream_overlap.get('tid')}): "
-                    f"{stream_overlap.get('overlapping_events')} event(s) run past the start of the "
-                    f"event after them, by {stream_overlap.get('excess_ms')} ms in total -- "
-                    f"{_share_pct:.1f}% of the {stream_overlap.get('device_ms')} ms of device time "
-                    "booked on that stream. That is impossible on a serial stream, so these "
-                    f"durations are corrupt. Worst offender: '{stream_overlap.get('worst_event')}' "
-                    f"overruns by {stream_overlap.get('worst_event_excess_ms')} ms. " + _advice
-                ),
-            }
-        )
+        trace_health_warnings.append(_stream_overlap_warning(stream_overlap))
 
-    # Steps present in the analyzed data.
-    requested_denoise_steps = int(getattr(args, "num_denoise_steps", 0) or 0)
-    inferred_denoise_steps = int((steady_window or {}).get("step_count", 0) or 0)
-    if inferred_denoise_steps <= 0:
-        # Count in the file the reader resolved; a directory input may glob a different one.
-        inferred_denoise_steps = count_profiler_steps(str(analyze.get("trace_file") or args.trace_input))
-    if requested_denoise_steps > 0 and inferred_denoise_steps > 0 and requested_denoise_steps != inferred_denoise_steps:
-        trace_health_warnings.append(
-            {
-                "code": "bypass_denoise_steps_mismatch",
-                "severity": "info",
-                "message": (
-                    f"requested --num-denoise-steps={requested_denoise_steps} differs from the "
-                    f"{inferred_denoise_steps} step(s) found in the analyzed data; the requested "
-                    "count wins as the per-step divisor."
-                ),
-            }
-        )
+    inferred_denoise_steps = _inferred_denoise_steps(args, analyze, steady_window, trace_health_warnings)
+    num_denoise_steps = args.num_denoise_steps or inferred_denoise_steps
 
     # Analysis-quality health signals (observability only; never fatal).
     if analyze.get("kernels"):
@@ -647,7 +746,7 @@ def main(argv: list[str] | None = None) -> int:
         analyze,
         framework=args.framework,
         target_platform=args.target_platform,
-        top_k=top_k,
+        top_k=_TOP_K,
     )
 
     analysis_md_path = bypass_dir / "analysis.md"
@@ -659,31 +758,8 @@ def main(argv: list[str] | None = None) -> int:
     kernel_metrics_csv_path = bypass_dir / "kernel_metrics.csv"
     kernel_summary_csv_path = bypass_dir / "kernel_summary.csv"
 
-    # High-idle gate: when GPU idle exceeds the threshold, per-kernel rewriting cannot move end-to-end latency, so
-    # suppress every candidate list and surface a high_gpu_idle_pct warning for the Coordinator.
-    idle_pct_value = (analyze.get("timeline") or {}).get("idle_pct")
-    idle_pct_threshold = resolve_idle_pct_threshold()
-    # Graph under-recording makes idle% unreliable: skip the idle gate (keep candidates ranked by recorded-kernel GPU
-    # share) and surface a health warning.
-    graph_coverage = analyze.get("graph_coverage") or {}
-    graph_under_recorded = bool(graph_coverage.get("graph_under_recorded"))
-    if graph_under_recorded:
-        trace_health_warnings.append(
-            build_graph_under_recorded_warning(
-                graph_launch_count=int(graph_coverage.get("graph_launch_count", 0) or 0),
-                idle_pct=float(idle_pct_value) if isinstance(idle_pct_value, (int, float)) else None,
-            )
-        )
-    elif isinstance(idle_pct_value, (int, float)) and float(idle_pct_value) > idle_pct_threshold:
-        for _cand_key in ("hot_kernels", "routable_kernels", "skipped_kernels", "task_groups"):
-            candidates[_cand_key] = []
-        trace_health_warnings.append(
-            build_high_idle_warning(
-                idle_pct=float(idle_pct_value),
-                threshold_pct=idle_pct_threshold,
-                report_path=analysis_md_path,
-            )
-        )
+    graph_coverage = analyze.get("graph_coverage", {})
+    _apply_idle_gate(candidates, timeline, graph_coverage, analysis_md_path, trace_health_warnings)
 
     # Stamp the report path onto each candidate (downstream reads it).
     for cand in candidates.get("hot_kernels", []):
@@ -752,33 +828,7 @@ def main(argv: list[str] | None = None) -> int:
     # Kernel-fusion opportunities: launch adjacency -> fusable clusters.
     fusion = _report.build_fusion(analyze)
 
-    # Diffusion / scriptable workload-level roofline: aggregate the per-kernel analytical roofline into an end-to-end
-    # workload roofline + per-denoise-step split.
-    diffusion_roofline_path: str | None = None
-    if framework_registry.is_scriptable(args.framework):
-        try:
-            from .diffusion_roofline import WorkloadTotals, build_report_from_bypass
-
-            _diff_steps = resolve_perstep_divisor(
-                requested_steps=requested_denoise_steps,
-                inferred_steps=inferred_denoise_steps,
-            )
-            # Workload totals cover all analyzed device kernels (not just top-k).
-            _workload_totals = _report.build_workload_roofline_totals(analyze, target_platform=args.target_platform)
-            _all_kernels = [k for k in (analyze.get("kernels") or []) if float(k.get("gpu_time_us") or 0.0) > 0]
-            _diff_report = build_report_from_bypass(
-                candidates.get("hot_kernels", []),
-                analyze.get("timeline") or {},
-                _diff_steps,
-                top_k,
-                workload=WorkloadTotals(_workload_totals, kernel_count=len(_all_kernels)),
-            )
-            _diff_path = run_dir / "diffusion_roofline.json"
-            atomic_write_json(_diff_path, _diff_report, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
-            diffusion_roofline_path = str(_diff_path)
-        except Exception as exc:  # noqa: BLE001 - best-effort sidecar, never blocks the run
-            log.warning("diffusion roofline sidecar failed: %s", exc)
-            diffusion_roofline_path = None
+    diffusion_roofline_path = _write_diffusion_roofline(args, analyze, candidates, run_dir, inferred_denoise_steps)
 
     # Variant-discriminating TraceShapeManifest (P0-A / WP-1).
     shape_manifest = _maybe_build_shape_manifest(args, analyze, bypass_dir, generated_at=now_iso(timespec="seconds"))
@@ -793,7 +843,7 @@ def main(argv: list[str] | None = None) -> int:
         "analysis_degraded": analysis_degraded,
         "analyzed_rank": analyzed_rank,
         "rank_count": rank_count,
-        "num_denoise_steps": requested_denoise_steps or inferred_denoise_steps,
+        "num_denoise_steps": num_denoise_steps,
         "framework": args.framework,
         "target_platform": args.target_platform,
         "hot_kernels": hot_kernels,
@@ -813,9 +863,9 @@ def main(argv: list[str] | None = None) -> int:
             "fusable_time_us": fusion.get("fusable_time_us", 0.0),
         },
         "orchestrator_mode": "bypass",
-        "timeline": analyze.get("timeline") or {},
-        "attribution": analyze.get("attribution") or {},
-        "graph_coverage": analyze.get("graph_coverage") or {},
+        "timeline": timeline,
+        "attribution": attribution,
+        "graph_coverage": graph_coverage,
         "trace_health_warnings": trace_health_warnings,
         "artifact_paths": {
             "trace_report_path": str(analysis_md_path),
@@ -829,7 +879,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     run_meta["selection"].update(
         {
-            "requested_mode": str(args.steady_state_mode or ""),
+            "requested_mode": args.steady_state_mode,
             "steady_window": steady_window,
             "aggregation_scope": scope,
             "fell_back_to_full_trace": bool(estimated),
@@ -837,15 +887,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     # Analysis output that only this reader produces.
     run_meta["route_ext"] = {
-        "target_platform": str(args.target_platform or ""),
+        "target_platform": args.target_platform,
         "analyzed_rank": analyzed_rank,
         "rank_count": rank_count,
-        "num_denoise_steps": requested_denoise_steps or inferred_denoise_steps,
+        "num_denoise_steps": num_denoise_steps,
         "estimated": bool(estimated),
         "analysis_degraded": bool(analysis_degraded),
-        "graph_coverage": analyze.get("graph_coverage") or {},
-        "timeline": analyze.get("timeline") or {},
-        "attribution": analyze.get("attribution") or {},
+        "graph_coverage": graph_coverage,
+        "timeline": timeline,
+        "attribution": attribution,
         "fusion": {
             "launch_count": fusion.get("launch_count", 0),
             "fusable_cluster_count": fusion.get("fusable_cluster_count", 0),
@@ -853,10 +903,10 @@ def main(argv: list[str] | None = None) -> int:
         },
         # Counts rather than the lists: the lists are already in the candidates artifact, and it is the partition that
         # says whether dispatch has anything to work with.
-        "routable_kernel_count": len(candidates.get("routable_kernels", []) or []),
-        "skipped_kernel_count": len(candidates.get("skipped_kernels", []) or []),
-        "task_group_count": len(candidates.get("task_groups", []) or []),
-        "trace_shape_manifest_status": str(shape_manifest.get("status") or ""),
+        "routable_kernel_count": len(candidates["routable_kernels"]),
+        "skipped_kernel_count": len(candidates["skipped_kernels"]),
+        "task_group_count": len(candidates["task_groups"]),
+        "trace_shape_manifest_status": shape_manifest["status"],
         "diffusion_roofline_path": str(diffusion_roofline_path or ""),
     }
     _note_step(
@@ -870,7 +920,7 @@ def main(argv: list[str] | None = None) -> int:
     result["run_meta"] = run_meta
     # Surfaced only when the opt-in manifest was produced (P0-A / WP-1).
     result["trace_shape_manifest"] = shape_manifest
-    if shape_manifest.get("status") == "ok" and shape_manifest.get("path"):
+    if shape_manifest["status"] == "ok":
         result["artifact_paths"]["trace_shape_manifest"] = shape_manifest["path"]
 
     # Surfaced only when produced (xDiT/scriptable).

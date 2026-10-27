@@ -422,9 +422,8 @@ brief:
   other lever. **Both arms dry advances the phase** via
   `optimize_no_more_leverage`. The LLM may also emit
   `escalate_strategy_change{hint='skip_to_kernel'}` when it judges
-  further effort unproductive. `skip_to_close` is not a phase advance: it abandons
-  the remaining budget, so it is denied (`skip_to_close_contradicted`) once a
-  baseline is measured and the remaining budget still funds another cycle.
+  further effort unproductive. No hint ends the run; a hint outside the closed
+  vocabulary is denied (`escalate_hint_not_in_vocab`).
 
 ### FRAMEWORK_AGENT phase — the optimisation phase
 
@@ -1204,7 +1203,8 @@ python3 -m hyperloom optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hour
 GPU_TYPE=mi300x python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
-Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`, `r9700`. **`mi308x` and
+Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`, `r9700`,
+`radeon8060s`. **`mi308x` and
 `mi325x` map to `runner_type=mi300x`** with a warning, since the GPUs share the
 same runner family and Magpie has not shipped `sglang_mi308x.sh` /
 `sglang_mi325x.sh` / `vllm_mi308x.sh` / `vllm_mi325x.sh` yet. If you

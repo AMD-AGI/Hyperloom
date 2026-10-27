@@ -1166,20 +1166,9 @@ class TestEveryTerminalReachesAWrittenReport:
         assert coord.shared_state.phase_history[-1]["reason"] == "max_ticks"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "phase,hint,sweep_status,transition_reason",
-        [
-            ("PRELUDE", "", "", "signal"),
-            # No baseline was measured, so an early close is a baseline failure.
-            ("PRELUDE", "skip_to_close", "", "baseline_failed"),
-            ("SWEEP", "skip_to_close", "completed", "signal"),
-            ("FRAMEWORK_AGENT", "", "", "signal"),
-            ("KERNEL_AGENT", "", "", "signal"),
-        ],
-    )
-    async def test_terminal_close_records_the_phase_before_dispatch(
-        self, tmp_path, phase, hint, sweep_status, transition_reason
-    ):
+    @pytest.mark.parametrize("phase", ["PRELUDE", "FRAMEWORK_AGENT", "KERNEL_AGENT"])
+    async def test_terminal_close_records_the_phase_before_dispatch(self, tmp_path, phase):
+        transition_reason = "signal"
         coord = self._coordinator(tmp_path / "session")
         coord.sub.register_executor("session_breakdown", session_breakdown_executor)
         state = coord.shared_state
@@ -1192,8 +1181,7 @@ class TestEveryTerminalReachesAWrittenReport:
             coord.phase_kernel._open_kernel_timeline(
                 route="forge", route_reason="kernel_optimizer=forge", from_phase="PRELUDE"
             )
-        state.pending_escalate_hint = hint
-        state.last_conc_sweep = {"status": sweep_status}
+        state.pending_escalate_hint = "skip_to_kernel"
         state.set_stop_reason("signal")
         try:
             assert await coord.phase_close.ensure_close_sequence(reason="signal") is True
@@ -1580,8 +1568,6 @@ async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path:
     config = KnowledgeConfig(
         mode=KnowledgeStoreMode.REMOTE,
         local_root=str(tmp_path / "knowledge"),
-        kb_store_url="https://kb-store.example.test",
-        kb_store_token="test-token",
     )
     coord = Coordinator(
         session_dir=session_dir,
@@ -1621,8 +1607,6 @@ async def test_recipe_kb_t4_hook_retries_failed_finalize_after_close(
     config = KnowledgeConfig(
         mode=KnowledgeStoreMode.REMOTE,
         local_root=str(tmp_path / "knowledge"),
-        kb_store_url="https://kb-store.example.test",
-        kb_store_token="test-token",
     )
     coord = Coordinator(
         session_dir=session_dir,

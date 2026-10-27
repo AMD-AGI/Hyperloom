@@ -239,7 +239,7 @@ def _host_env(tmp_path: Path, monkeypatch) -> None:
         Var.STATE_DIR: str(tmp_path / "state"),
         Var.EVENTS_DIR: str(tmp_path / "events"),
         Var.MCP_PORT: "8765",
-        Var.MCP_TOKEN: "tok",
+        Var.MCP_TOKEN: "token-0123456789abcdef",
     }.items():
         monkeypatch.setenv(name, value)
 

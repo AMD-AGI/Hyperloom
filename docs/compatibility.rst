@@ -172,6 +172,14 @@ commit and puts it ahead of site-packages on the server's ``PYTHONPATH``. This
 activates only when the installed wheel's version names that commit; any other
 vLLM image is left on its wheel.
 
+The other framework checkouts an image ships (SGLang, aiter) carry uncommitted
+changes, so ``install.sh`` commits each one's served state, untracked
+non-ignored files included, as a deterministic ``Hyperloom image baseline``
+(``refs/hyperloom/image-baseline``). Candidates, specialist worktrees and
+reverts then start from the code the baseline runs. ``aiter/jit/flydsl_cache/``
+is excluded as a runtime cache; a checkout with unmerged paths or more than
+256 MiB of untracked files stops the install.
+
 ``rocm/atom-dev`` also publishes a ``latest`` tag, which tracks the newest
 nightly build and moves. Pin the versioned tag so a session stays reproducible.
 

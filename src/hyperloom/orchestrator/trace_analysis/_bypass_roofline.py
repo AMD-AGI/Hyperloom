@@ -204,10 +204,8 @@ def _sdpa_flops_bytes(four_d: list[tuple[int, ...]], dbytes: float) -> tuple[flo
 def _estimate_flops_bytes(
     category: str, operands: list[tuple[tuple[int, ...], str]], dbytes: float
 ) -> tuple[float, float, dict[str, Any]] | None:
-    """Estimate ``(flops, bytes, meta)`` for one representative call, or ``None``."""
-    if not operands:
-        return None
-    cat = (category or "").lower()
+    """Estimate ``(flops, bytes, meta)`` for one non-empty operand list, or ``None``."""
+    cat = category.lower()
 
     if cat == "gemm":
         two_d = [d for d, _ in operands if len(d) >= 2]
@@ -292,9 +290,10 @@ def compute_roofline(aggregate: KernelAggregate, *, gpu_type: str = "") -> dict[
     peak_flops = peak_tflops * 1e12
     peak_bw = spec["hbm_bw_gbps"] * 1e9
 
+    # Every spec table carries a positive HBM bandwidth and positive bf16 fallback peak.
     ai = flops / nbytes  # FLOPs/byte
-    machine_balance = (peak_flops / peak_bw) if peak_bw > 0 else 0.0
-    bound_type = "compute_bound" if (machine_balance > 0 and ai >= machine_balance) else "memory_bound"
+    machine_balance = peak_flops / peak_bw
+    bound_type = "compute_bound" if ai >= machine_balance else "memory_bound"
 
     out: dict[str, Any] = {
         "bound_type": bound_type,
@@ -309,13 +308,12 @@ def compute_roofline(aggregate: KernelAggregate, *, gpu_type: str = "") -> dict[
     # Per-call achieved throughput from measured time -> efficiency.
     calls = max(int(call_count or 1), 1)
     per_call_s = (float(gpu_time_us) / calls) / 1e6 if gpu_time_us else 0.0
-    if per_call_s > 0 and peak_flops > 0:
+    if per_call_s > 0:
         raw_eff = (flops / per_call_s) / peak_flops * 100.0
         out["efficiency_percent"] = round(min(raw_eff, 100.0), 3)
         out["compute_utilization_pct"] = out["efficiency_percent"]
         if raw_eff > 100.0:
             out["roofline_estimate_capped"] = True
-    if per_call_s > 0 and peak_bw > 0:
         raw_bw = (nbytes / per_call_s) / peak_bw * 100.0
         out["bandwidth_utilization_pct"] = round(min(raw_bw, 100.0), 3)
         if raw_bw > 100.0:

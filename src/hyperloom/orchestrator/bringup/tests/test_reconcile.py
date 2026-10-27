@@ -479,7 +479,7 @@ async def test_a_round_whose_lane_another_pass_took_is_settled_here(db):
 
 @pytest.mark.asyncio
 async def test_a_revalidation_window_whose_task_is_terminal_is_closed(db):
-    """A window nobody will close holds the guard that drops ``skip_to_close``."""
+    """A window nobody will close holds the guard on the phase exit."""
     state = _State()
     state.enablement.validation_pending = True
     state.enablement.revalidation_task_id = "reval-1"
