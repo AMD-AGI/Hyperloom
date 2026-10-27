@@ -3234,7 +3234,7 @@ class FrameworkPhase(ProposalBench):
                 unset_envs=config_levers.get("unset_envs"),
                 args_mode=str(config_levers.get("args_mode") or ARGS_MODE_APPEND),
             )
-            threshold = _phase_state.resolve_keep_threshold(self.state)
+            threshold = _phase_state.resolve_keep_threshold(self.shared_state)
             for rec in read_pr_ledger():
                 if str(rec.get("applicability") or "") != fingerprint:
                     continue
@@ -3246,7 +3246,7 @@ class FrameworkPhase(ProposalBench):
                         rec.get("pr_url") or "a prior candidate",
                     )
                     return True
-                if _measured_on_this_stack(rec, self.state) and _measured_short_of_keep(rec, threshold):
+                if _measured_on_this_stack(rec, self.shared_state) and _measured_short_of_keep(rec, threshold):
                     log.info(
                         "FRAMEWORK: skipping config lever %s — already measured at %+.2f%% against a %.2f%% bar on %s",
                         fingerprint,
