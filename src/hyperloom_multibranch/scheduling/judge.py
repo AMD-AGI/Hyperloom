@@ -14,7 +14,8 @@ still live. A failed call or an unreadable reply gives ``None``, and the schedul
 never calls a peer; the scheduler applies its decision. The judge may neither stop nor lower the K of a held branch
 (:func:`held_branches`): a specialist branch until :data:`SETTLED_TESTS` of its explore tests measured and a repair
 branch for its protected period, unless its specialist gave up or its judging failed, and a branch with a candidate
-waiting for its confirm, unless its judging failed. The scheduler finds the held branches again as it applies the decision, since a candidate can start waiting
+waiting for its confirm, unless its judging failed; the RSI playbook's safety envelope holds a branch with a near-bar
+or a stranded lead and one drawn for probation (:func:`envelope_holds`). The scheduler finds the held branches again as it applies the decision, since a candidate can start waiting
 while the judge answers, and :func:`hold_decision` refuses their orders and names them in the decision.
 """
 
@@ -38,7 +39,12 @@ from hyperloom_multibranch.contracts.notebook.records import BranchProgress, Pen
 from hyperloom_multibranch.contracts.toolbox import BuildStatus
 from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
-from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS
+from hyperloom_multibranch.notebook.rsi.frontier import (
+    NEAR_BAR_COMPONENT,
+    PROBATION_COMPONENT,
+    SETTLED_TESTS,
+    STRANDED_COMPONENT,
+)
 from hyperloom_multibranch.notebook.rsi.stranded import StrandedLead
 from hyperloom_multibranch.scheduling.branches import REPAIR_BRANCH_SECONDS, REPAIR_PROTECTED_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -96,6 +102,14 @@ which falls back to frontier-v1 for the rest of the session once it has failed t
 A branch's judged_since_commit counts its tests judged since its last commit (since it opened, before any). When it
 reaches {STALL_TESTS}, its specialist is asked to read its brief again and reconsider its direction: a branch whose
 count runs well past that is stalling, a candidate to stop or to lower K unless its frontier still expects a gain.
+A specialist branch's components also carry its stall evidence: stalled_tests, its tests judged since its last commit
+that did not fail to merge; stall_bar, the stall the stop rule stops at this round; merged_commits and merged_gain_pct,
+what of it the integration branch took; near_bar_tests, how many of its last stall_bar judged tests came near the bar;
+stranded_lead_pct, its lead over the integration head on commits that failed to merge. stop_candidate is 1 when its
+stall reached the bar and nothing holds it; probation is 1 for a stop candidate drawn to run more tests first. When the
+prompt shows a scheduling playbook, follow it: it says when to stop, what K to give and when to open, and for stops
+it replaces the lowest expected gain. Open areas, when shown, are where a new branch could open: the integration
+head's largest ops no branch works on or failed on, and whether time is left for a new branch's first commit.
 A branch's similar_to lists the other running branches whose own change since the commit they last followed, their
 start commit or the integration commit they were re-rooted onto, is much the same as its own, with score the share of
 the two changes they have in common; a branch with no commit of its own since then is in no pair. identical is true
@@ -165,7 +179,9 @@ confirm is judged. A branch whose specialist gave up, and one stopped for a fail
 nor its repair period; a repair branch runs at most {REPAIR_BRANCH_SECONDS / 3600:g} hours whatever you decide.
 unsteered: a branch whose steered is false, which runs a third-party agent the user named, by the agent's own logic, one
 test at a time: no stop or K you give it is applied, unless its judging failed: stop it then, as any branch whose
-judging failed. Otherwise weigh the slot it holds as given.
+judging failed. Otherwise weigh the slot it holds as given. near_bar_lead, stranded_lead and probation: the playbook's
+safety envelope keeps a branch whose recent tests came near the bar, one whose head leads the integration head on
+commits that failed to merge, and one drawn for probation, whose K you may still lower.
 A branch's pending_candidates are its measured candidates that beat its head by at least the bar while their confirm
 runs, each with its gain_over_head_pct.
 A branch's queued_intents are its explore tests requested and not measured yet, queued or running, each with the
@@ -197,12 +213,17 @@ JUDGE_PROMPT_VERSION = hashlib.sha256(f"{JUDGE_SYSTEM_PROMPT}\n{_REPLY_FORMAT}".
 class HoldReason(str, Enum):
     """Why the judge may neither stop a branch nor lower its K: a specialist branch in its grace, a repair branch in
     its protected period, a branch with a candidate waiting for its confirm, or a branch no judge steers, whose K the
-    judge may not raise either."""
+    judge may not raise either. The RSI playbook's safety envelope holds three more, read off a branch's stall
+    evidence (:func:`envelope_holds`): a near-bar lead, a stranded lead, and a probation draw, whose K the judge may
+    still lower."""
 
     GRACE = "grace"
     REPAIR = "repair"
     PENDING_CONFIRM = "pending_confirm"
     UNSTEERED = "unsteered"
+    NEAR_BAR = "near_bar_lead"
+    STRANDED = "stranded_lead"
+    PROBATION = "probation"
 
 
 @dataclass(frozen=True)
@@ -231,7 +252,8 @@ class JudgeView:
     ``frontier_scorer`` the label of the scorer that scores now, ``frontier-v1`` once the chosen one fell back.
     ``queued`` maps a branch to its explore tests not measured yet, as :func:`queued_intents` finds them, and
     ``building`` to the native builds not ready yet that its tests in flight wait for; a branch with none is not in
-    either.
+    either. ``open_areas`` says where a new branch could open and ``playbook`` is the scheduling playbook the session
+    plays, as the RSI renders them; both are empty for a session that reads no archive.
     """
 
     now: float
@@ -265,6 +287,8 @@ class JudgeView:
     frontier_scorer: str
     queued: Mapping[str, tuple[QueuedIntent, ...]]
     building: Mapping[str, tuple[BuildStatus, ...]]
+    open_areas: str = ""
+    playbook: str = ""
 
 
 @dataclass(frozen=True)
@@ -337,6 +361,28 @@ def held_branches(
             held[entry.branch] = HoldReason.REPAIR
         elif entry.branch in waiting:
             held[entry.branch] = HoldReason.PENDING_CONFIRM
+    return held
+
+
+def envelope_holds(
+    scored: Iterable[BranchProgress], specialists: Mapping[str, SpecialistStatus]
+) -> dict[str, HoldReason]:
+    """The running branches the safety envelope holds, read off the stall evidence of the frontier ``scored`` rows:
+    drawn for probation, or holding a near-bar or a stranded lead. A branch whose specialist gave up, or was stopped
+    for a failed judging, has nobody to follow its lead and is held by none of them."""
+
+    held: dict[str, HoldReason] = {}
+    for row in scored:
+        state = specialists.get(row.branch)
+        evidence = row.frontier.components if row.frontier is not None else {}
+        if state is not None and (state.gave_up or state.judge_failed):
+            continue
+        if evidence.get(PROBATION_COMPONENT):
+            held[row.branch] = HoldReason.PROBATION
+        elif evidence.get(NEAR_BAR_COMPONENT, 0.0) > 0:
+            held[row.branch] = HoldReason.NEAR_BAR
+        elif STRANDED_COMPONENT in evidence:
+            held[row.branch] = HoldReason.STRANDED
     return held
 
 
@@ -515,7 +561,8 @@ def render_prompt(view: JudgeView) -> str:
         _KEY_BRANCHES: [_branch_row(entry, progress.get(entry.branch), view) for entry in view.roster],
     }
     history = f"How similar past sessions went:\n{view.history}\n\n" if view.history else ""
-    return f"Session state:\n{json.dumps(state, indent=2, sort_keys=True)}\n\n{history}{_REPLY_FORMAT}"
+    sections = "".join(f"{text}\n\n" for text in (view.open_areas, view.playbook) if text)
+    return f"Session state:\n{json.dumps(state, indent=2, sort_keys=True)}\n\n{history}{sections}{_REPLY_FORMAT}"
 
 
 def _int_field(item: Mapping[str, object], key: str) -> int:
@@ -632,18 +679,19 @@ def cap_decision(decision: JudgeDecision, view: JudgeView) -> JudgeDecision:
 def hold_decision(
     decision: JudgeDecision, held: Mapping[str, HoldReason], roster: Iterable[BranchEntry]
 ) -> JudgeDecision:
-    """``decision`` without the stops and the lower K orders of the ``held`` branches, and without any K order for a
-    branch the judge does not steer, held or not, each named in ``held`` once; ``roster`` gives the K a branch runs at
-    now and its origin. Applying it twice changes nothing more."""
+    """``decision`` without the stops and the lower K orders of the ``held`` branches, a branch on probation's K
+    excepted, and without any K order for a branch the judge does not steer, held or not, each named in ``held``
+    once; ``roster`` gives the K a branch runs at now and its origin. Applying it twice changes nothing more."""
 
     entries = tuple(roster)
     running_k = {entry.branch: entry.k for entry in entries}
     unsteered = {entry.branch for entry in entries if not entry.origin.steered_by_judge}
+    narrowed = {branch for branch, reason in held.items() if reason is not HoldReason.PROBATION}
     refused_stops = [order for order in decision.stop if order.branch in held]
     refused_ks = [
         order
         for order in decision.k
-        if order.branch in unsteered or (order.branch in held and order.k < running_k[order.branch])
+        if order.branch in unsteered or (order.branch in narrowed and order.k < running_k[order.branch])
     ]
     named = {item.branch: item for item in decision.held} | {
         order.branch: HeldOrder(order.branch, held.get(order.branch, HoldReason.UNSTEERED))
@@ -698,6 +746,7 @@ __all__ = [
     "QueuedIntent",
     "StopOrder",
     "cap_decision",
+    "envelope_holds",
     "parse_decision",
     "held_branches",
     "queued_intents",

@@ -249,7 +249,7 @@ class SessionExports:
             snapshot,
             self._metric,
             budget_seconds=self._budget_seconds,
-            receipts=self._layout.reports,
+            layout=self._layout,
             cross_image=_cross_image(self._warm_leads),
         )
         scorers = await author_scorers(snapshot, self._ask_scorers, model=self._scorers.model)

@@ -41,6 +41,14 @@ class FrontierPolicyMode(str, Enum):
     DEFAULT = "default"
 
 
+class PlaybookMode(str, Enum):
+    """Which scheduling playbook a session plays once the RSI archive is configured: the champion of the pool beside
+    it, or, in a challenger session, the oldest playbook on trial, the champion while none is."""
+
+    CHAMPION = "champion"
+    CHALLENGER = "challenger"
+
+
 @dataclass(frozen=True)
 class InferenceXShape:
     """The synthetic requests an InferenceX workload sends: input and output sequence lengths."""
@@ -114,7 +122,8 @@ class RunSettings:
     ``frontier_policy`` says how the frontier policy is chosen, and ``frontier_scorer`` names the scorer the session
     scores with instead of choosing one, ``""`` when it chooses. ``references`` are the directories of reference
     material the run copies in before its first phase, each with the commit it was taken at. ``dev_leases`` is how many
-    dev sandboxes the session lends its specialists at once; 0 lends none."""
+    dev sandboxes the session lends its specialists at once; 0 lends none. ``playbook`` says which scheduling playbook
+    the session plays."""
 
     workload: Workload
     max_hours: float
@@ -129,6 +138,7 @@ class RunSettings:
     frontier_scorer: str = ""
     references: tuple[ReferenceSource, ...] = ()
     dev_leases: int = 0
+    playbook: PlaybookMode = PlaybookMode.CHAMPION
 
 
 __all__ = [
@@ -136,6 +146,7 @@ __all__ = [
     "FrontierPolicyMode",
     "InferenceXShape",
     "KernelOptimizer",
+    "PlaybookMode",
     "ReusedPrelude",
     "RunSettings",
     "Workload",

@@ -28,7 +28,15 @@ from hyperloom_multibranch.contracts.toolbox import BuildStatus
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.notebook import STALL_TESTS, LocalNotebook
 from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
-from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, SETTLED_TESTS, FrontierPolicy
+from hyperloom_multibranch.notebook.rsi.frontier import (
+    FRONTIER_V1_LABEL,
+    NEAR_BAR_COMPONENT,
+    PROBATION_COMPONENT,
+    SETTLED_TESTS,
+    STRANDED_COMPONENT,
+    FrontierPolicy,
+)
+from hyperloom_multibranch.notebook.rsi.playbook import H0
 from hyperloom_multibranch.notebook.rsi.stranded import StrandedCommit, StrandedLead
 from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
 from hyperloom_multibranch.scheduling.branches import REPAIR_PROTECTED_SECONDS
@@ -47,6 +55,7 @@ from hyperloom_multibranch.scheduling.judge import (
     QueuedIntent,
     StopOrder,
     cap_decision,
+    envelope_holds,
     held_branches,
     hold_decision,
     parse_decision,
@@ -182,6 +191,54 @@ def _view(
 
 def _text(reply: str) -> CompletionReply:
     return CompletionReply(reply, TokenCounts(), 0.0)
+
+
+def _evidence(branch: str, **components: float) -> BranchProgress:
+    return replace(_view().progress[0], branch=branch, frontier=FrontierScore(1.0, components))
+
+
+def test_the_safety_envelope_holds_a_branch_on_probation_or_with_a_near_bar_or_a_stranded_lead() -> None:
+    scored = (
+        _evidence("b01", **{PROBATION_COMPONENT: 1.0, NEAR_BAR_COMPONENT: 1.0}),
+        _evidence("b02", **{NEAR_BAR_COMPONENT: 2.0}),
+        _evidence("b04", **{STRANDED_COMPONENT: 3.5}),
+        _evidence("b05", **{NEAR_BAR_COMPONENT: 0.0}),
+        _evidence("b06", **{PROBATION_COMPONENT: 1.0}),
+        replace(_evidence("b07"), frontier=None),
+    )
+    gave_up = {"b06": SpecialistStatus(running=False, crashes=4, lost=1, gave_up=True, judge_failed=False)}
+
+    assert envelope_holds(scored, gave_up) == {
+        "b01": HoldReason.PROBATION,
+        "b02": HoldReason.NEAR_BAR,
+        "b04": HoldReason.STRANDED,
+    }
+
+
+def test_a_branch_on_probation_keeps_its_stop_refused_while_its_k_is_the_judges_to_lower() -> None:
+    roster = (_entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION), _entry("b01", k=2), _entry("b02", k=2))
+    decision = JudgeDecision(k=(KOrder("b01", 1), KOrder("b02", 1)), stop=(StopOrder("b01", STOP_REASON),))
+
+    cut = hold_decision(decision, {"b01": HoldReason.PROBATION, "b02": HoldReason.NEAR_BAR}, roster)
+
+    assert (cut.stop, cut.k) == ((), (KOrder("b01", 1),))
+    assert set(cut.held) == {HeldOrder("b01", HoldReason.PROBATION), HeldOrder("b02", HoldReason.NEAR_BAR)}
+
+
+def test_the_prompt_shows_the_open_areas_and_the_playbook_before_the_reply_format_only_when_given() -> None:
+    areas = "Open areas for a new branch, from the profile of c1:\n- gemm_a8w8 (gemm): 10.0% of GPU time"
+    prompt = render_prompt(
+        replace(_view(history="Stall odds, from 3 sessions."), open_areas=areas, playbook=H0.render())
+    )
+    bare = render_prompt(_view())
+    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
+
+    assert prompt.index("Stall odds") < prompt.index(areas) < prompt.index("Scheduling playbook h0:")
+    assert prompt.index("Scheduling playbook h0:") < prompt.index("Reply with")
+    assert "Scheduling playbook" not in bare and "Open areas" not in bare
+    assert "stop_candidate is 1 when its stall reached the bar and nothing holds it" in prose
+    assert "for stops it replaces the lowest expected gain" in prose
+    assert "near_bar_lead, stranded_lead and probation" in prose
 
 
 def test_the_prompt_names_the_frontier_policy_the_evidence_it_was_chosen_on_and_the_scorer_scoring_now() -> None:

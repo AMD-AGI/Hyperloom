@@ -8,7 +8,9 @@ EXPLORE then runs until the longest baseline test and one CLOSE grace are left b
 baseline is established, the session chooses the frontier policy EXPLORE and CLOSE score with: the scorer
 or variation the calibration over sessions like it chooses against the scorer pool's champion, the scorer
 ``--frontier-scorer`` pins, or the defaults under ``--frontier-policy default``; a scorer that keeps failing falls back
-to ``frontier-v1``, recorded as a decision. The FINAL candidates are fixed while every branch still stands, then
+to ``frontier-v1``, recorded as a decision. With an RSI archive it also plays the scheduling playbook ``--playbook``
+asks for, the champion of the pool beside it or a playbook on trial, recorded under ``playbook`` in
+``policy_versions``. The FINAL candidates are fixed while every branch still stands, then
 exploration ends and FINAL validates them. A failed PRELUDE, an EXPLORE that ran out of cards to measure on, a stop
 signal, the session deadline before FINAL starts or an unhandled error skip straight to CLOSE, which always runs and
 kills every process the session started. FINAL waits for the validation tests it started, past the deadline and the hard
@@ -55,7 +57,14 @@ from hyperloom_multibranch.notebook.knowledge.reference_leads import (
 )
 from hyperloom_multibranch.notebook.rsi.authoring import session_challenger
 from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
-from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS, FrontierPolicy, FrontierScoring, ScorerGuard
+from hyperloom_multibranch.notebook.rsi.frontier import (
+    SETTLED_TESTS,
+    FrontierPolicy,
+    FrontierScoring,
+    ScorerGuard,
+    StopRule,
+)
+from hyperloom_multibranch.notebook.rsi.playbook import PlaybookPlay, PlaybookPool, session_playbook
 from hyperloom_multibranch.notebook.rsi.session import (
     FRONTIER_LOG,
     archived_history,
@@ -100,7 +109,7 @@ from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.reference import copy_references
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests
 from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster, final_quota
-from hyperloom_multibranch.scheduling.settings import FrontierPolicyMode, RunSettings
+from hyperloom_multibranch.scheduling.settings import FrontierPolicyMode, PlaybookMode, RunSettings
 from hyperloom_multibranch.scheduling.stops import (
     TOOLBOX_CLOSE_SECONDS,
     SessionStopper,
@@ -282,6 +291,7 @@ class Session:
         archived by every other session."""
 
         self._challenger = False
+        self._play: PlaybookPlay | None = None
         self._choose(
             PolicyChoice(
                 FrontierPolicy.for_budget(self._metric, self._budget_seconds), DEFAULT_POLICY, UNCHOSEN_EVIDENCE
@@ -434,6 +444,7 @@ class Session:
         except PreludeFailed as exc:
             return SessionOutcome(SessionStopReason.PRELUDE_FAILED, None, None, str(exc))
         start_commit = await self._replay_champion(prelude)
+        self._adopt_playbook()
         await self._adopt_frontier_policy()
         sockets = await asyncio.to_thread(socket_versions)
         await self._notebook.write_manifest_fingerprint(
@@ -496,6 +507,19 @@ class Session:
         self._decisions.record(Decision(DecisionKind.FINAL, final.reason, detail={"chosen": encode(final.chosen)}))
         return SessionOutcome(reason, final, None, "")
 
+    def _adopt_playbook(self) -> None:
+        """Play the scheduling playbook ``--playbook`` asks for from the pool beside the RSI archive, and record it as a
+        scheduler decision: the champion, or in a challenger session the oldest playbook on trial. Without an archive
+        the session plays none, and is judged as one without the RSI."""
+
+        pool = PlaybookPool.from_env()
+        if pool is None:
+            return
+        self._play = PlaybookPlay(session_playbook(pool, challenger=self._settings.playbook is PlaybookMode.CHALLENGER))
+        choice = self._play.choice
+        detail = {"playbook": choice.playbook.label, "champion": choice.champion.label, "challenger": choice.challenger}
+        self._decisions.record(Decision(DecisionKind.PRELUDE, "scheduling playbook", detail=detail))
+
     async def _adopt_frontier_policy(self) -> None:
         """Replace the defaults with the frontier policy the session scores with from here on, and record it as a
         scheduler decision and in the manifest: the calibration's choice for the profile PRELUDE recorded, the scorer
@@ -543,6 +567,7 @@ class Session:
             CHALLENGER_KEY: "1" if self._challenger else "0",
             GRACE_KEY: str(SETTLED_TESTS),
             LESSONS_KEY: learnings.past_revision() if learnings is not None else "",
+            **(self._play.versions() if self._play is not None else {}),
         }
 
     def _choose(self, choice: PolicyChoice) -> None:
@@ -554,7 +579,8 @@ class Session:
 
     def _scoring(self) -> FrontierScoring:
         log = self._layout.reports / FRONTIER_LOG
-        return FrontierScoring(self._notebook, self._frontier.policy, self._history, log, self._guard)
+        rule = self._play.stop_rule if self._play is not None else StopRule
+        return FrontierScoring(self._notebook, self._frontier.policy, self._history, log, self._guard, rule)
 
     def _fell_back(self, why: str) -> None:
         self._decisions.record(Decision(DecisionKind.EVENT, SCORER_FALLBACK_REASON, detail={"why": why}))
@@ -575,6 +601,7 @@ class Session:
             self._lifecycle,
             self._frontier,
             self._toolbox,
+            self._play,
         )
         return Explorer(self._context, self._branches, self._integrator, steering)
 

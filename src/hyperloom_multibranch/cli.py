@@ -25,7 +25,10 @@ baseline: ``auto`` (the default) takes the variation the calibration over simila
 its guardrails, and ``default`` keeps the defaults; the manifest fingerprint and the session's manifest record
 the label under ``frontier`` in ``policy_versions``. ``--frontier-scorer LABEL`` pins the scorer the session scores
 with instead: ``frontier-v1``, a variation's label, a scorer in code or an expression in the archive's scorer pool; a
-label none of these has, or one given beside ``--frontier-policy default``, is a usage error.
+label none of these has, or one given beside ``--frontier-policy default``, is a usage error. ``--playbook`` says
+which scheduling playbook the session plays once ``HYPERLOOM_RSI_ARCHIVE`` names an archive: ``champion`` (the
+default), or ``challenger``, which plays the oldest playbook on trial in the pool beside it and the champion while none
+is; ``policy_versions`` records the label under ``playbook``.
 Each ``--autonomous-agent SOURCE`` opens one branch where EXPLORE starts, after the user's directions and within
 ``--max-branches``, whose specialist runs that third-party agent end to end in a sandbox of its own; a source that
 carries credentials in its URL is a usage error. Each ``--specialist-prompt`` file holds a direction the user wrote
@@ -128,6 +131,7 @@ from hyperloom_multibranch.scheduling.settings import (
     FrontierPolicyMode,
     InferenceXShape,
     KernelOptimizer,
+    PlaybookMode,
     RunSettings,
     Workload,
 )
@@ -280,6 +284,15 @@ def _add_frontier_options(run: argparse.ArgumentParser) -> None:
         default="",
         metavar="LABEL",
         help="The frontier scorer the session scores with, instead of the one the calibration chooses.",
+    )
+    run.add_argument(
+        "--playbook",
+        choices=[mode.value for mode in PlaybookMode],
+        default=PlaybookMode.CHAMPION.value,
+        help=(
+            "The scheduling playbook the session plays once the RSI archive is configured: the champion, or, in a "
+            "challenger session, the oldest playbook on trial."
+        ),
     )
 
 
@@ -446,6 +459,7 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         frontier_scorer=args.frontier_scorer,
         references=_references(args.references or []),
         dev_leases=args.dev_leases,
+        playbook=PlaybookMode(args.playbook),
     )
 
 

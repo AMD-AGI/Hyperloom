@@ -55,6 +55,7 @@ from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
 from hyperloom_multibranch.contracts.notebook.records import (
+    LineageEvent,
     LlmUsage,
     NotebookSnapshot,
     PendingCandidate,
@@ -74,12 +75,27 @@ from hyperloom_multibranch.contracts.toolbox import CancelOutcome, MeasurementCa
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
 from hyperloom_multibranch.notebook.knowledge.reference_leads import INFERENCEX_REFERENCE
-from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, SKIPPED
+from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, SKIPPED, TreeArchive
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
+from hyperloom_multibranch.notebook.rsi.decisions import decision_calls
+from hyperloom_multibranch.notebook.rsi.playbook import (
+    FALLBACK_KEY,
+    H0,
+    PLAYBOOK_KEY,
+    Playbook,
+    PlaybookPool,
+    replaced,
+)
 from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
 from hyperloom_multibranch.notebook.rsi import scorers
 from hyperloom_multibranch.notebook.rsi.authoring import NO_ARCHIVE
-from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, SETTLED_TESTS, Estimate, FrontierPolicy
+from hyperloom_multibranch.notebook.rsi.frontier import (
+    FRONTIER_V1_LABEL,
+    PROBATION_TESTS,
+    SETTLED_TESTS,
+    Estimate,
+    FrontierPolicy,
+)
 from hyperloom_multibranch.notebook.rsi.lesson_recall import LessonRecall
 from hyperloom_multibranch.notebook.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
 from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG
@@ -101,9 +117,14 @@ from hyperloom_multibranch.scheduling.budget import (
     SessionBudget,
     explore_gpu_seconds,
 )
-from hyperloom_multibranch.scheduling import branches
+from hyperloom_multibranch.scheduling import branches, explore
 from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE
-from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS, FORK_NOT_LANDED, OPEN_CUT_REASON
+from hyperloom_multibranch.scheduling.explore import (
+    EXPLORE_TICK_SECONDS,
+    FORK_NOT_LANDED,
+    OPEN_CUT_REASON,
+    PLAYBOOK_FALLBACK_REASON,
+)
 from hyperloom_multibranch.scheduling.exports import IMAGE_CHECK_FILE
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL, PRIMARY_POINT_ONLY
 from hyperloom_multibranch.scheduling import judge
@@ -139,6 +160,7 @@ from hyperloom_multibranch.scheduling.settings import (
     FrontierPolicyMode,
     InferenceXShape,
     KernelOptimizer,
+    PlaybookMode,
     RunSettings,
     Workload,
 )
@@ -872,6 +894,66 @@ async def test_a_challenger_session_scores_with_the_challenger_the_notebook_offe
     else:
         assert len(champion) == 1 and manifest[FRONTIER_POLICY_KEY] == CHOSEN_LABEL
         assert (manifest[CHALLENGER_KEY], decided["detail"]["challenger"]) == ("0", False)
+
+
+async def test_a_session_with_an_rsi_archive_plays_the_champion_playbook_and_close_keeps_the_judges_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "rsi"
+    monkeypatch.setenv(ARCHIVE_ENV, str(archive))
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    _script(stage)
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0
+    [fingerprint] = await stage.handle(Role.OBSERVER).manifest_fingerprints()
+    assert fingerprint.policy_versions[PLAYBOOK_KEY] == H0.label and FALLBACK_KEY not in fingerprint.policy_versions
+    [chosen] = [row for row in _decisions(stage) if row["reason"] == "scheduling playbook"]
+    assert chosen["detail"] == {"playbook": H0.label, "champion": H0.label, "challenger": False}
+    prompts = _judge_prompts(stage)
+    assert prompts and all("Scheduling playbook h0:" in prompt for prompt in prompts)
+    assert len(decision_calls(TreeArchive(archive), stage.layout.session_id)) == len(prompts)
+
+
+async def test_a_challenger_session_that_breaks_the_safety_envelope_plays_the_champion_from_then_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "rsi"))
+    patient = Playbook("patient", replaced(H0, stall_tests=8).numbers, parent=H0.label, hypothesis="later stops")
+    PlaybookPool.beside(TreeArchive(tmp_path / "rsi")).register(patient)
+    breach = "stop of b02, held by its probation"
+    monkeypatch.setattr(explore, "envelope_breaches", lambda rows, stops: (breach,) if "b02" in stops else ())
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(stage.settings, playbook=PlaybookMode.CHALLENGER)
+    _script(stage)
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0
+    first, fell_back = await stage.handle(Role.OBSERVER).manifest_fingerprints()
+    assert first.policy_versions[PLAYBOOK_KEY] == patient.label and FALLBACK_KEY not in first.policy_versions
+    assert (fell_back.policy_versions[PLAYBOOK_KEY], fell_back.policy_versions[FALLBACK_KEY]) == (patient.label, breach)
+    [event] = [row for row in _decisions(stage) if row["reason"] == PLAYBOOK_FALLBACK_REASON]
+    assert event["detail"] == {"breach": breach, "playing": H0.label}
+    prompts = _judge_prompts(stage)
+    assert "Scheduling playbook patient, on trial in this session:" in prompts[0]
+    assert "Scheduling playbook h0:" in prompts[-1]
+
+
+async def test_a_branch_the_stall_evidence_draws_for_probation_is_recorded_on_probation_once_a_stall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    drawn = LineageEvent(LineageKind.PROBATION, "b01", reason="drawn for probation", tests=PROBATION_TESTS)
+    monkeypatch.setattr(explore, "probation_event", lambda snapshot, row, rule: drawn if row.branch == "b01" else None)
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    _script(stage)
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0
+    [b01] = [item for item in (await stage.handle(Role.OBSERVER).lineage()).branches if item.branch == "b01"]
+    assert [(item.tests, item.since_commit) for item in b01.probations] == [(PROBATION_TESTS, "")]
 
 
 async def test_the_manifest_names_the_lesson_pool_as_the_specialists_recall_read_it(tmp_path: Path) -> None:

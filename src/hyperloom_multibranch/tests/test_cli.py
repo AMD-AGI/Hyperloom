@@ -66,6 +66,7 @@ from hyperloom_multibranch.scheduling.settings import (
     FrontierPolicyMode,
     InferenceXShape,
     KernelOptimizer,
+    PlaybookMode,
     RunSettings,
     Workload,
 )
@@ -149,6 +150,13 @@ def test_run_defaults() -> None:
 
 def test_frontier_policy_can_keep_the_defaults() -> None:
     assert _settings("--frontier-policy", "default").frontier_policy is FrontierPolicyMode.DEFAULT
+
+
+def test_a_session_plays_the_champion_playbook_unless_it_is_a_challenger_session() -> None:
+    assert _settings().playbook is PlaybookMode.CHAMPION
+    assert _settings("--playbook", "challenger").playbook is PlaybookMode.CHALLENGER
+    with pytest.raises(SystemExit):
+        _settings("--playbook", "favourite")
 
 
 def test_frontier_scorer_pins_the_scorer_the_session_scores_with() -> None:
