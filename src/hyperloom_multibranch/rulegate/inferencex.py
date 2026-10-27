@@ -15,6 +15,7 @@ from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.rulegate.accuracy import inferencex_accuracy_ok
+from hyperloom_multibranch.rulegate.short_prompts import SHORT_PROMPTS_INCONSISTENT
 
 # With the retest, at a 1% spread and three baselines (simulated): about 6% of no-op candidates get committed and about
 # 75% of real +3% gains are confirmed.
@@ -75,11 +76,13 @@ class DispersionThreshold:
 @dataclass(frozen=True)
 class InferenceXReading:
     """One bench-eval-bench test: its graded throughput, the eval score measured in the same sandbox (``None`` for an
-    explore that skipped the eval), and the requests its graded rounds sent but did not complete."""
+    explore that skipped the eval), the requests its graded rounds sent but did not complete, and whether its
+    short-prompt check was more inconsistent than the baseline's."""
 
     throughput: float
     accuracy: float | None
     dropped: int = 0
+    inconsistent: bool = False
 
     def __post_init__(self) -> None:
         _checked(self.throughput)
@@ -90,7 +93,10 @@ class InferenceXReading:
 
     @property
     def defects(self) -> tuple[str, ...]:
-        return (DROPPED_REQUESTS,) if self.dropped else ()
+        return (
+            *((DROPPED_REQUESTS,) if self.dropped else ()),
+            *((SHORT_PROMPTS_INCONSISTENT,) if self.inconsistent else ()),
+        )
 
 
 @dataclass(frozen=True)
@@ -115,8 +121,8 @@ def compare(
     reading: InferenceXReading, baseline: InferenceXBaseline, parent: Mapping[str, float], request_id: str
 ) -> Judgement:
     """The first measurement against the parent's record: past the bar it waits for a retest whatever its accuracy and
-    dropped requests, since the retest settles both whether the gain holds and whether a defect is real. Below it, a
-    measurement that dropped requests is regressed, so a correctness fix measured on it forks rather than landing. A
+    defects, since the retest settles both whether the gain holds and whether a defect is real. Below it, a
+    measurement with a defect is regressed, so a correctness fix measured on it forks rather than landing. A
     measurement that skipped its eval is judged on throughput alone, its accuracy ``NOT_MEASURED``."""
     gain = _gain(reading.throughput, parent)
     bar = baseline.bar_pct
@@ -143,9 +149,9 @@ def confirm(
     eval score the mean of those that ran their eval.
 
     A gain holds when the mean of both measurements clears the bar and the retest is still a gain; one that holds is
-    improved when neither showed a defect (a failed accuracy gate, dropped requests), blocked when both showed the same
-    one, and inconclusive otherwise. After a first measurement that skipped its eval, the retest's eval is the only one,
-    so its failure blocks the gain. A blocked judgement names the performance defects both showed; the accuracy gate is
+    improved when neither showed a defect (a failed accuracy gate, dropped requests, short prompts answered more
+    inconsistently than the baselines), blocked when both showed the same one, and inconclusive otherwise. After a first
+    measurement that skipped its eval, the retest's eval is the only one, so its failure blocks the gain. A blocked judgement names the performance defects both showed; the accuracy gate is
     in ``accuracy``.
     """
     if first.verdict is not Verdict.NEEDS_CONFIRM:
