@@ -60,12 +60,6 @@ def _backend(**over: Any) -> ClaudeBackend:
     return ClaudeBackend(**kwargs)
 
 
-def test_compose_prompt_appends_output_instructions() -> None:
-    out = _backend()._compose_prompt("hello")
-    assert out.startswith("hello")
-    assert len(out) > len("hello")
-
-
 def test_set_context_provider_none_clears() -> None:
     b = _backend()
     b.set_context_provider(None)

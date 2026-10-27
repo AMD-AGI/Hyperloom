@@ -292,7 +292,6 @@ class ClaudeBackend:
     """Production Claude backend. Implements :class:`Backend`."""
 
     model: str | None = None
-    # Nominal budget only: run() floors it at _MIN_MAX_TURNS (8), so values below 8 have no effect.
     max_turns_default: int = 12
     # Role's allowed intent set for the emit_intent tool and the output-format suffix. None = all IntentType values.
     allowed_intents: frozenset[IntentType] | None = None
@@ -341,7 +340,7 @@ class ClaudeBackend:
     _system_prompt_dir: tempfile.TemporaryDirectory[str] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
-        """Resolve the SDK and optionally register the ``emit_intent`` tool."""
+        """Resolve the SDK and register the ``emit_intent`` tool."""
         if self.sdk_query_factory is None or self.sdk_options_cls is None:
             query, opts_cls, mod = _import_sdk()
             if self.sdk_query_factory is None:
@@ -371,12 +370,8 @@ class ClaudeBackend:
         max_turns: int = 1,
     ) -> BackendTurnResult:
         """Run a single backend turn against Claude and parse the result."""
-        full_prompt = self._compose_prompt(prompt)
-        max_turns_use = max_turns or self.max_turns_default
-        # Claude Code counts the model's own text/tool messages as turns, so a literal max_turns=1 trips ("Reached
-        # maximum number of turns (1)") before the model can emit any tool call or intent — newer bundled CLI builds
-        # raise this as an error rather than returning a partial result.
-        max_turns_use = max(max_turns_use, _MIN_MAX_TURNS)
+        full_prompt = f"{prompt}\n\n{_build_output_instructions(self._offered_intents)}"
+        max_turns_use = max(max_turns or self.max_turns_default, _MIN_MAX_TURNS)
         turn_marker = uuid.uuid4().hex
         turn_stop = _TurnStop()
         options = self._build_options(
@@ -470,10 +465,6 @@ class ClaudeBackend:
     def _offered_intents(self) -> frozenset[IntentType]:
         """The intent types the agent is offered: the role's set, or every type when none is given."""
         return self.allowed_intents if self.allowed_intents is not None else frozenset(IntentType)
-
-    def _compose_prompt(self, prompt: str) -> str:
-        """Append the emit_intent output-format suffix."""
-        return f"{prompt}\n\n{_build_output_instructions(self._offered_intents)}"
 
     def set_context_provider(self, provider: ContextProvider | None) -> None:
         """Attach (or clear) the read-only context-pull MCP server."""

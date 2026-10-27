@@ -43,6 +43,7 @@ class OpenAIClientConfig:
     api_key: str
     base_url: str | None
     default_headers: dict[str, str]
+    # The variable ``default_headers`` was parsed from.
     headers_env: str
 
     def as_kwargs(self) -> dict[str, object]:

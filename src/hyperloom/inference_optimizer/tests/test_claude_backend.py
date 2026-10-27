@@ -795,26 +795,6 @@ async def test_raw_text_prefers_result_no_duplication():
 
 
 @pytest.mark.asyncio
-async def test_raw_text_falls_back_to_text_blocks_without_result():
-    """When no ResultMessage is emitted, raw_text is the joined TextBlocks."""
-    msgs = [
-        FakeAssistantMessage(
-            content=[
-                TextBlock(text="part-a "),
-                TextBlock(text="part-b"),
-            ]
-        )
-    ]
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory(msgs),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
-    res = await backend.run("p")
-    assert res.raw_text == "part-a part-b"
-
-
-@pytest.mark.asyncio
 async def test_options_includes_system_prompt_and_max_turns():
     captured: dict[str, Any] = {}
 

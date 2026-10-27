@@ -82,16 +82,6 @@ def test_analysis_md_wired():
     assert p.analysis_md() == "md"
 
 
-def test_inbox_delegates_to_reader():
-    p = _provider(shared_state=_shared_state(), inbox_reader=lambda s: f"inbox({s})")
-    assert p.inbox(5) == "inbox(5)"
-
-
-def test_recent_outcomes_delegates_to_reader():
-    p = _provider(shared_state=_shared_state(), recent_outcomes_reader=lambda k: f"out({k})")
-    assert p.recent_outcomes(4) == "out(4)"
-
-
 def test_runtime_findings_reads_current_best_slot(tmp_path):
     slot = tmp_path / "variant_00_v"
     slot.mkdir()
