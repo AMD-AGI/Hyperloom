@@ -1,7 +1,9 @@
 # Re-review
 
 Consulted from Step 1 of [`../SKILL.md`](../SKILL.md) whenever `comments.txt` holds an earlier card for
-this PR: a `## PR #<n>` heading in a review or comment from an author it trusts. This review settles
+this PR: a `## PR #<n>` heading in any review or comment `comments.txt` carries.
+`pr-review-publish.sh` matches that heading alone, so an author filter here would skip
+`prior_verdicts.txt` and the gate would withhold the verdict. This review settles
 that card's findings before its own, and still reviews the whole diff: an earlier card can have missed
 anything, the PR author's own included.
 

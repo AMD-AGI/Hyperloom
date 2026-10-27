@@ -88,7 +88,8 @@ Open the index at the top of [`rules.md`](rules.md) and take every row whose tri
 `files.txt`, a skim of `diff.txt`, or a `label:` line in `meta.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
 per line, then read only those bodies. **Never read `rules.md` whole** — it holds 74 rules across 11
 families, and a reviewer told to attend to all of them attends to none. Match rows generously: a row
-you are unsure about is taken, never dropped. V1-V8 and X2 are on every list. On a re-review, so are
+you are unsure about is taken, never dropped. V1-V8 and X2 are on every list, V2 and V7 without
+a verdict line. On a re-review, so are
 the rules of the earlier findings that still hold.
 
 ## Step 2 — Semantic understanding
@@ -161,7 +162,9 @@ can trigger, so there is no rule here you may pass over because the list looked 
 must cite a file this PR changes; everything else — the header stating the contract, the prompt
 naming the flag, the doc that did not move — is evidence and welcome beside it.
 
-A rule whose `Severity:` is advisory in every shape it names takes no line here: the contract
+A rule whose `Severity:` is advisory in every shape it names takes no line here, and neither
+does one whose own body says it cannot be a finding -- V2 is the output contract and V7 is Q4,
+both recorded by the step that runs them. The contract
 cannot publish it, so adjudicate it only when it fires, as a note outside the card. Across 23
 recorded reviews 815 verdict lines carried 12 `FIRE`s — spend the `CLEAR` reasons where a finding
 could come out.

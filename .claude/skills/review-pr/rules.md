@@ -1056,7 +1056,7 @@ A review that adjudicated them was re-deciding what a gate had already decided, 
 reviews the whole family produced 119 verdict lines and no finding. Re-flagging a gated rule is a
 defect in the review; see [`references/ci.md`](references/ci.md).
 
-Severity follows a calibration: A2-A14 were replayed on 30 recent merged PRs and every fire was
+Severity follows a calibration: A2-A7, A13 and A14 were replayed on 30 recent merged PRs and every fire was
 judged by an independent adversarial judge (2026-10-11). A rule or a clearly delimited sub-case is
 `blocking` when it measured precision >= 0.8 on at least two real findings and rests on an
 `AGENTS.md` sentence that states it outright: A2 (2/2) and A13's redundant re-check (2/2). Two
