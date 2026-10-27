@@ -850,6 +850,44 @@ async def test_rows_that_launch_the_same_server_are_benched_once(sub_agent_runne
 
 
 @pytest.mark.asyncio
+async def test_rows_answered_without_measuring_leave_the_proposal_queue(sub_agent_runner, tmp_path, monkeypatch):
+    """Restatements and duplicates are decided, so the auto-bench queue moves on to the proposal behind them."""
+    proposals = [
+        {"name": "v_noop_a", "extra_args": "--max-running-requests 512"},
+        {"name": "v_noop_b", "extra_args": "--kv-cache-dtype fp8"},
+        {"name": "v_seqs", "extra_args": "--max-num-seqs 256"},
+        {"name": "v_fp8_seqs", "extra_args": "--kv-cache-dtype fp8 --max-num-seqs 256"},
+        {"name": "v_lpm", "extra_args": "--schedule-policy lpm"},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner,
+        tmp_path,
+        monkeypatch,
+        [{**row, "extra_envs": {}} for row in proposals[:4]],
+        {"v_seqs": 800.4, "v_fp8_seqs": 800.4},
+        inherited="--kv-cache-dtype fp8",
+    )
+    assert launched == ["v_seqs"]
+    tested = out["explore_search_update"]["tested"]
+    seqs_fp = next(fp for fp, row in tested.items() if row["name"] == "v_seqs")
+    skipped = {
+        row["name"]: (row["outcome"], row["reason"], row.get("duplicate_of", ""))
+        for row in tested.values()
+        if row["outcome"] == "SKIPPED_DEDUP"
+    }
+    assert skipped == {
+        "v_noop_a": ("SKIPPED_DEDUP", "baseline_noop", ""),
+        "v_noop_b": ("SKIPPED_DEDUP", "baseline_noop", ""),
+        "v_fp8_seqs": ("SKIPPED_DEDUP", "round_dup", seqs_fp),
+    }
+
+    state = SharedState()
+    state.specialist_rounds = [{"task_id": "s1", "domain": "serving_specialist", "cycle": 0, "proposal_set": proposals}]
+    state.apply_explore_search_update(out["explore_search_update"])
+    assert [row["name"] for row in state.untested_proposal_rows()] == ["v_lpm"]
+
+
+@pytest.mark.asyncio
 async def test_a_variant_that_was_the_stack_runs_once_a_keep_has_moved_the_stack(
     sub_agent_runner, tmp_path, monkeypatch
 ):
@@ -885,7 +923,8 @@ async def test_a_variant_that_is_the_stack_is_skipped_while_the_stack_has_not_mo
     assert launched == ["v_revert"]
     noop = {sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "baseline_noop"}
     assert noop == {"v_noop_first", "v_noop_after"}
-    assert {row["name"] for row in out["explore_search_update"]["tested"].values()} == {"v_revert"}
+    outcomes = {row["name"]: row["outcome"] for row in out["explore_search_update"]["tested"].values()}
+    assert outcomes == {"v_noop_first": "SKIPPED_DEDUP", "v_revert": "REVERT", "v_noop_after": "SKIPPED_DEDUP"}
 
 
 @pytest.mark.asyncio
@@ -1104,6 +1143,32 @@ async def test_a_round_of_measured_and_restated_variants_is_answered_not_failed(
         ("v_fp8", "baseline_noop"),
     }
     assert out["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_a_skip_never_replaces_a_measured_ledger_row(sub_agent_runner, tmp_path, monkeypatch):
+    """fp8 measured before the stack was observed running it; restating it later leaves the measurement in place."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.explore.observed_launch_from_state",
+        lambda _state: (dict(observed), {}),
+    )
+    grid = [{"name": "v_fp8", "extra_args": "--kv-cache-dtype fp8"}]
+    await _run_explore_round(sub, tr, tmp_path, state, key="round-1", grid=grid, base_args="", bench_calls=[])
+    measured = dict(state.explore_search["tested"])
+    assert [row["outcome"] for row in measured.values()] == ["REVERT"]
+
+    observed["kv_cache_dtype"] = "fp8"
+    out = await _run_explore_round(sub, tr, tmp_path, state, key="round-2", grid=grid, base_args="", bench_calls=[])
+
+    assert [(sd["name"], sd["reason"]) for sd in out["skipped_dup"]] == [("v_fp8", "baseline_noop")]
+    assert out["explore_search_update"]["tested"] == {}
+    assert state.explore_search["tested"] == measured
 
 
 @pytest.mark.asyncio

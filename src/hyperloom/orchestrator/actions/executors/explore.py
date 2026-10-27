@@ -125,6 +125,12 @@ STACK_REVALIDATE_SOURCE: str = "stack_revalidate"
 
 # ``skipped_dup`` reason for a variant whose launch the session already measured on the same stack.
 ALREADY_MEASURED: str = "already_measured"
+# ... for one that starts the stack's own server, or a server this round already launched.
+BASELINE_NOOP: str = "baseline_noop"
+ROUND_DUP: str = "round_dup"
+
+#: The provenance of a grid row that names none: the model proposed it directly.
+_DIRECT_PROVENANCE = "llm_direct"
 
 
 def is_stack_revalidation(params: dict | None) -> bool:
@@ -567,12 +573,6 @@ def restates_the_baseline_launch(state: Any, args: str, envs: Mapping[str, Any])
     return bool(dropped)
 
 
-def _skip_baseline_noop(name: str, reason: str, skipped: list[dict[str, Any]]) -> None:
-    """Record a variant skipped because it launches the server the stack is already running."""
-    log.info("explore: skipping baseline-noop variant %s (%s)", name, reason)
-    skipped.append({"name": name, "reason": "baseline_noop", "detail": reason})
-
-
 def filter_operator_pinned_envs(
     grid: list[GridVariant],
     baseline_envs: dict[str, Any] | None,
@@ -896,7 +896,7 @@ class _ExploreRound:
         self.name_index: dict[str, Any] = {}
         # Servers this round launched, and the variants that reached the measured check and were answered by the
         # stack or the ledger instead (a restatement of the stack, or a verdict the session already holds).
-        self.launched: set[str] = set()
+        self.launched: dict[str, str] = {}
         self.judged_without_measuring = 0
         # Set when the loop stops because the run stopped it -- the budget ran out, or the orchestrator cancelled
         # the action -- so the round can say so instead of reporting a bare, unattributed failure: a variant that
@@ -1094,8 +1094,8 @@ class _ExploreRound:
             )
             kept_ids = {id(gv) for gv in kept}
             leading = next((i for i, gv in enumerate(self.runnable) if id(gv) in kept_ids), before)
-            for name, reason in dropped[:leading]:
-                _skip_baseline_noop(name, reason, self.skipped)
+            for gv, (_, reason) in zip(self.runnable[:leading], dropped[:leading]):
+                self._decided_without_measuring(gv, BASELINE_NOOP, detail=reason)
             self.runnable = self.runnable[leading:]
         log.info(
             "explore grid: payload=%d → runnable=%d (leading baseline_noop=%d)",
@@ -1134,17 +1134,44 @@ class _ExploreRound:
     # ----- one variant -----------------------------------------------------
 
     def _refused(self, gv: GridVariant, idx: int) -> bool:
-        if self._launch_identity(gv) in self.launched:
-            self.skipped.append({"name": gv.name, "fingerprint": _variant_fingerprint(gv), "reason": "round_dup"})
+        if twin := self.launched.get(self._launch_identity(gv)):
+            self._decided_without_measuring(gv, ROUND_DUP, duplicate_of=twin)
             return True
         if restated := self._restates_stack(gv):
-            _skip_baseline_noop(gv.name, restated, self.skipped)
+            self._decided_without_measuring(gv, BASELINE_NOOP, detail=restated)
             self.judged_without_measuring += 1
             return True
         if self._already_measured(gv):
             self.judged_without_measuring += 1
             return True
         return self._out_of_budget(idx) or self._refuses_context_copy(gv)
+
+    def _decided_without_measuring(
+        self, gv: GridVariant, reason: str, *, detail: str = "", duplicate_of: str = ""
+    ) -> None:
+        """Record ``gv`` as answered by the stack or by a twin this round launched, not measured.
+
+        Its ledger row marks the proposal decided, so the untested-proposal queue moves past it; a change the ledger
+        already holds keeps its row, since a measurement outranks a skip.
+        """
+        fingerprint = _variant_fingerprint(gv)
+        log.info("explore: skipping %s variant %s (%s)", reason, gv.name, detail or duplicate_of)
+        self.skipped.append(
+            {"name": gv.name, "fingerprint": fingerprint, "reason": reason, "detail": detail or duplicate_of}
+        )
+        known = (getattr(self.ss, "explore_search", None) or {}).get("tested") or {}
+        if not fingerprint or fingerprint in self.tested or fingerprint in known:
+            return
+        self.tested[fingerprint] = {
+            **self._variant_facts(gv),
+            "outcome": TS_SKIPPED_DEDUP,
+            "reason": reason,
+            "duplicate_of": duplicate_of,
+            "round_id": self.round_id,
+            "ts": _now_iso(),
+            "provenance": getattr(gv, "provenance", _DIRECT_PROVENANCE),
+            "workload_signature": self.ws_sig,
+        }
 
     def _launch_identity(self, gv: GridVariant) -> str:
         """The server ``gv`` would launch on the stack as it stands now; its fingerprint when that cannot be read."""
@@ -1272,7 +1299,7 @@ class _ExploreRound:
         return True
 
     async def _measure(self, gv: GridVariant, run_gv: GridVariant, idx: int, slot: Path) -> Any:
-        self.launched.add(self._launch_identity(gv))
+        self.launched[self._launch_identity(gv)] = _variant_fingerprint(gv)
         # The warmup and decision rounds share this slot as the lifecycle pid_dir so the decision round
         # re-attaches to the server the warmup left hot. Ray-managed GPU execution (12 T1): both reuse the
         # round-level lease, and one persistent server, so no GPU process outlives it.
@@ -1344,7 +1371,7 @@ class _ExploreRound:
                 "base_tput": self.running_tput,
                 "round_id": self.round_id,
                 "ts": _now_iso(),
-                "provenance": getattr(gv, "provenance", "llm_direct"),
+                "provenance": getattr(gv, "provenance", _DIRECT_PROVENANCE),
                 "workload_signature": self.ws_sig,
                 "framework": self.framework,
                 "reason": "warmup_failed",
@@ -1391,7 +1418,7 @@ class _ExploreRound:
             "base_tput": self.running_tput,
             "round_id": self.round_id,
             "ts": _now_iso(),
-            "provenance": getattr(gv, "provenance", "llm_direct"),
+            "provenance": getattr(gv, "provenance", _DIRECT_PROVENANCE),
             "scope": str(getattr(gv, "scope", "") or ""),
             "workload_signature": self.ws_sig,
             "framework": self.framework,
