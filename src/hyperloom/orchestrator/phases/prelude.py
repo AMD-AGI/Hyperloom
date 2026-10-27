@@ -47,8 +47,8 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     JournalEntry,
     Verdict,
 )
-from ..actions.executors._launch_restatement import config_launch_restated_by
 from ..actions.executors.baseline import revert_warm_kernel_patches
+from ..actions.executors.explore import restates_the_baseline_launch
 from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
 from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
 from ..state.task_registry import Task, TaskSpec
@@ -1823,15 +1823,15 @@ class PreludePhase(CoordinatorCollaborator):
     ) -> bool:
         """Skip a replay whose launch would be the baseline's own; True when it did.
 
-        Patches and kernel items change the code, which no argv comparison sees,
+        Patches and kernel items change the code, which no launch comparison sees,
         so a replay carrying any of them always runs. So does one under reference
-        launch controls: materialization re-applies them to the baseline config,
-        so the replay's launch is not that config's argv plus the request.
+        launch controls: materialization rebuilds the args from the reference, so
+        the replay's launch is not the baseline config plus the request.
         """
         state = self.shared_state
         if code_changes or state.reference_launch_controls:
             return False
-        if not config_launch_restated_by(str(state.baseline_config_path or ""), args, envs, str(state.framework or "")):
+        if not restates_the_baseline_launch(state, args, envs):
             return False
         log.info("PRELUDE: warm replay skipped: %r %s only restate the baseline launch", args, sorted(envs))
         self._skip_warm_replay(
