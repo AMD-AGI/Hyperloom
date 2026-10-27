@@ -254,6 +254,14 @@ ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
     "Keep *source edits* under the source roots listed below; patching any other "
     "path is outside this mandate. (Environment setup via ENVIRONMENT SETUP below "
     "is separate and allowed.)",
+    "If a patch reads an environment variable to turn its own change on, that "
+    "gate must be armed somewhere the bench can see: declare it in the "
+    "``framework_switches`` manifest of your ``specialist_done`` (one entry per "
+    "switch, fields ``switch`` / ``category`` / ``target`` / ``evidence`` / "
+    "``depends_on`` / ``enables``) or set it in ``proposal_set`` as an "
+    "``extra_envs`` entry. A gate armed nowhere is never set for the bench, so "
+    "the patch stays inert and the round reproduces the same boot failure. "
+    "When the change is safe unconditionally, ship it ungated instead.",
     "Do NOT fabricate throughput/latency/accuracy numbers, and do NOT alter the "
     "eval dataset/task/metric/limit or the result parsing to inflate a score — the "
     "gate here is RUNNABILITY (server boots + minimal inference) or, for an "
