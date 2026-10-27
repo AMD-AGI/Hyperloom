@@ -411,11 +411,8 @@ class GeakRebenchAttempt:
 
     attempt_id: str
     source_kind: str = SOURCE_GEAK_AUTHORED_KERNEL
-    source_ref: str | None = None
     idempotency_key: str | None = None
     task_id: str | None = None
-    dispatched_at: str | None = None
-    settled_at: str | None = None
     base_tput: float | None = None
     measured_tput: float | None = None
     decision: str | None = None
@@ -437,11 +434,8 @@ class GeakRebenchAttempt:
             "attempt_id": str(self.attempt_id or ""),
             "source_kind": str(self.source_kind),
             "ledger": LEDGER_GEAK,
-            "source_ref": _text(self.source_ref),
             "idempotency_key": _text(self.idempotency_key),
             "task_id": _text(self.task_id),
-            "dispatched_at": _text(self.dispatched_at),
-            "settled_at": _text(self.settled_at),
             "base_tput": base,
             "measured_tput": measured,
             "delta_pct": delta,

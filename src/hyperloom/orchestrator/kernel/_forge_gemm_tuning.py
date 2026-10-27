@@ -178,9 +178,8 @@ def _requested_existing_file(payload: dict, key: str) -> str:
 
 
 def _forge_gemm_run(state: Any, payload: dict, session_dir: Path) -> _ForgeGemmRun:
-    from hyperloom.common.model_paths import resolve_serving_model_path
+    from hyperloom.common.model_paths import resolve_local_model_dir, resolve_serving_model_path
     from hyperloom.common.visible_devices import detect_gpu_count
-    from hyperloom.inference_optimizer.model_config_utils import resolve_local_model_dir
 
     workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
     workspace.mkdir(parents=True, exist_ok=True)

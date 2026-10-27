@@ -139,6 +139,22 @@ def test_prompt_summary_renders_current_best_without_stack_or_measurement():
     assert "stacked" not in line and "launch_evidence" not in line
 
 
+def _launch_flags_line(state: SharedState) -> str:
+    return next(ln for ln in state.to_prompt_summary().splitlines() if ln.startswith("current_launch_flags"))
+
+
+def test_prompt_summary_renders_the_flags_the_current_best_launched_with():
+    """Orchestration cannot read the session config, so the summary is its only account of the running launch."""
+    st = SharedState()
+    assert _launch_flags_line(st) == "current_launch_flags(already passed by the running stack)=(unknown)"
+    st.current_best_measurement = {
+        "launch_evidence": {"requested_server_args": "--max-num-seqs 64 --kv-cache-dtype fp8 --max-num-seqs 128"}
+    }
+    assert _launch_flags_line(st) == (
+        "current_launch_flags(already passed by the running stack)=--max-num-seqs 128 --kv-cache-dtype fp8"
+    )
+
+
 def test_format_last_trace_analyze():
     st = SharedState()
     assert st._format_trace_analyze_blob(st.last_trace_analyze) == "(none)"

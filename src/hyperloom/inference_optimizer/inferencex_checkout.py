@@ -108,9 +108,8 @@ def clone(dest: Path) -> str | None:
                 check=True,
                 timeout=600,
             )
-        # ref="" : the tree was just checked out at `ref` by construction, so re-deriving the pin here would only
-        # re-read what we wrote.
-        if not checkout_ok(dest, ref=""):
+        # The tree was just checked out at `ref`, so only its completeness is checked, not the pin.
+        if not has_benchmark_lib(dest):
             raise OSError(f"clone reported success but {dest_str} is missing benchmarks/benchmark_lib.sh")
         log.info("InferenceX cloned into %s at %s", dest_str, head_sha(dest) or ref)
         return dest_str
@@ -129,13 +128,11 @@ def detect() -> str:
     bare dir. A complete checkout at the wrong revision is refused rather than
     accepted silently.
     """
-    from .session.paths import magpie_dir as _magpie_default, resolve_dep_dir as _resolve_dep_dir
+    from .session.paths import magpie_dir, resolve_dep_dir as _resolve_dep_dir
 
-    magpie_env = os.environ.get("MAGPIE_PATH")
-    magpie_root = Path(magpie_env) if magpie_env else _magpie_default()
     want_ref = os.environ.get("INFERENCEX_REF") or DEFAULT_REF
     for candidate in (
-        magpie_root / "InferenceX",
+        magpie_dir() / "InferenceX",
         _resolve_dep_dir(destination_name(want_ref)),
         _resolve_dep_dir("InferenceX"),
     ):
@@ -147,7 +144,7 @@ def detect() -> str:
                 f"InferenceX checkout at {candidate}; cloning a "
                 "writable checkout instead."
             )
-        elif (Path(candidate) / "benchmarks" / "benchmark_lib.sh").is_file():
+        elif has_benchmark_lib(candidate):
             print(
                 f"Preflight: ignoring InferenceX at {candidate}: it is at "
                 f"{head_sha(candidate)[:12] or 'an unreadable ref'}, "

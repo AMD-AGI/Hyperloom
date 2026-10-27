@@ -27,6 +27,7 @@ from . import geak_rebench as _geak_rebench, machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec, rebench_round_sec
 from hyperloom.common.coerce import first_str
 from hyperloom.common.env import env_bool, env_float, env_int
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_NO_PROMOTE
 from hyperloom.common.io import WriteOptions, atomic_write_json
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.launch_log_evidence import recipe_server_launch
@@ -2003,7 +2004,7 @@ class KernelPhase(CoordinatorCollaborator):
         log.warning("geak: 2b declined (%s); validating through the GEAK harness instead", decline_reason)
         fb = await self._coord.writeback.validate_geak_via_geak_harness(reason=decline_reason)
         # Both are verdicts 2a has already recorded.
-        if fb.get("validated") or fb.get("status") == "no_promote":
+        if fb.get("validated") or fb.get("status") == REBENCH_NO_PROMOTE:
             return
         error = str(fb.get("reason") or decline_reason)[:500]
         state.geak_pending = {
@@ -2167,9 +2168,7 @@ class KernelPhase(CoordinatorCollaborator):
         attempt_id: str = "geak_final_validation",
     ) -> None:
         """Close a measured candidate without recording an adoption."""
-        rejected_result = dict(result)
-        rejected_result["revalidation_status"] = "no_promote"
-        rejected_result["revalidation_error"] = reason
+        rejected_result = {**result, "revalidation_status": REBENCH_NO_PROMOTE, "revalidation_error": reason}
         rejected_result["final_validation"] = {
             "decision": "REJECTED",
             "reason": reason,
@@ -2193,12 +2192,12 @@ class KernelPhase(CoordinatorCollaborator):
                     attempt_id=attempt_id,
                     base_tput=current_best_tput,
                     measured_tput=measured_tput if measured_tput > 0 else None,
-                    decision="no_promote",
+                    decision=REBENCH_NO_PROMOTE,
                     decision_reason=reason,
-                    status="no_promote",
+                    status=REBENCH_NO_PROMOTE,
                 )
             )
-            recorder.record_geak_rebench_conclusion(final_status="no_promote", final_error=reason)
+            recorder.record_geak_rebench_conclusion(final_status=REBENCH_NO_PROMOTE, final_error=reason)
 
     def _geak_promotion_measurement(
         self,

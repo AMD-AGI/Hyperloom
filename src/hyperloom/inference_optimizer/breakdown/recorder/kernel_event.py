@@ -53,6 +53,11 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
+    REBENCH_NO_MATERIAL,
+    REBENCH_NO_PROMOTE,
+    REBENCH_VALIDATED,
+)
 from hyperloom.common.coerce import (
     text_or_none as _text,
     to_float as _float_or_none,
@@ -61,6 +66,7 @@ from hyperloom.common.coerce import (
     to_list as _as_list,
 )
 from .assembler import event_parts
+from .construct import event_header
 from .event_fields import clip as _clip, failure_row as _failure_row, now_iso_seconds as _now_iso
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
@@ -192,13 +198,6 @@ STATUS_FAILED = "failed"
 #: from a second list let the two drift.
 LANE_FAULTED_STATUSES = frozenset({"failed", "error", "failure", "faulted", "timeout", "aborted", "crashed"})
 
-# A rebench either validated the candidate, found its win immaterial, measured it truthfully without beating
-# current_best, or could not conclude because the config it was asked to reproduce did not engage.
-REBENCH_VALIDATED = "validated"
-REBENCH_NO_MATERIAL = "no_material"
-REBENCH_NO_PROMOTE = "no_promote"
-REBENCH_FALLBACK = "fallback"
-
 _ACCEPTANCE_AUTHORED = "authored"
 _ACCEPTANCE_ENV = "env"
 
@@ -215,10 +214,6 @@ __all__ = [
     "OUTCOME_REJECTED",
     "PRODUCER",
     "PRODUCER_GEAK",
-    "REBENCH_FALLBACK",
-    "REBENCH_NO_MATERIAL",
-    "REBENCH_NO_PROMOTE",
-    "REBENCH_VALIDATED",
     "ROUTE_FORGE",
     "ROUTE_GEAK",
     "SECTION_EVENT",
@@ -500,19 +495,6 @@ def _write_discovered_kernels(
         )
 
 
-def _write_trace_analyze_run(sink: Any, run: TraceAnalyzeRun, *, trigger: str) -> None:
-    """Write one analysis row and the kernel table it produced."""
-    sink.record(
-        SECTION_TRACE_ANALYZE,
-        run.row(trigger),
-        row_type=ROW_TRACE_ANALYZE,
-        natural_ids=str(run.run_id or ""),
-    )
-    produced = _as_dict(run.snapshot)
-    if produced:
-        _write_discovered_kernels(sink, produced, provenance="trace_analyze_run")
-
-
 def record_trace_analyze_request(*, macro_cycle: Any, run: TraceAnalyzeRun) -> None:
     """Record an analysis an agent requested through the bus, not a phase.
 
@@ -537,7 +519,15 @@ def record_trace_analyze_request(*, macro_cycle: Any, run: TraceAnalyzeRun) -> N
             run.run_id,
         )
         return
-    _write_trace_analyze_run(sink, run, trigger=TRACE_ANALYZE_TRIGGER_BUS_REQUEST)
+    sink.record(
+        SECTION_TRACE_ANALYZE,
+        run.row(TRACE_ANALYZE_TRIGGER_BUS_REQUEST),
+        row_type=ROW_TRACE_ANALYZE,
+        natural_ids=str(run.run_id or ""),
+    )
+    produced = _as_dict(run.snapshot)
+    if produced:
+        _write_discovered_kernels(sink, produced, provenance="trace_analyze_run")
     _republish_closed_event(sink.event_id)
 
 
@@ -938,7 +928,6 @@ class KernelEventRecorder:
             SECTION_EVENT,
             {
                 "macro_cycle": int(macro_cycle or 0),
-                "route": self._route,
                 "in_flight_stage": self._stage,
                 "entry": {
                     "route": self._route,
@@ -1112,10 +1101,6 @@ class KernelEventRecorder:
         """Record how the delegated runner itself ended."""
         self._sink.record(SECTION_EVENT, {"geak_delegation": delegation.block()})
 
-    def record_geak_attempts(self, journey: dict[str, Any] | None) -> None:
-        """Replay what GEAK tried, from the journey it emits."""
-        record_geak_attempts(event=self._event_id, journey=journey)
-
     def record_geak_claim(self, pending: dict[str, Any] | None, *, specs: Any = None) -> None:
         """Record what GEAK reported about itself, before any re-measurement."""
         slot = _as_dict(pending)
@@ -1179,7 +1164,7 @@ class KernelEventRecorder:
         """Record the reproducible configuration GEAK handed back."""
         self._sink.record(SECTION_EVENT, {"geak_product": product.block()})
 
-    def record_geak_rebench_attempt(self, attempt: GeakRebenchAttempt, *, max_attempts: Any = None) -> None:
+    def record_geak_rebench_attempt(self, attempt: GeakRebenchAttempt) -> None:
         """Record one GEAK rebench attempt."""
         row = attempt.row()
         self._sink.record(
@@ -1188,8 +1173,6 @@ class KernelEventRecorder:
             row_type=ROW_REBENCH,
             natural_ids=(LEDGER_GEAK, row["attempt_id"]),
         )
-        if max_attempts is not None:
-            self._sink.record(SECTION_EVENT, {"geak_rebench": {"max_attempts": _int_or_none(max_attempts)}})
 
     def record_geak_rebench_conclusion(
         self,
@@ -1314,16 +1297,6 @@ class KernelEventRecorder:
             },
         )
         self.finish(KernelExit(exit_reason=str(stage or "")), failed=True)
-
-    def finish_crashed(self, exc: BaseException) -> None:
-        """Close an event whose phase raised instead of returning."""
-        if self._closed:
-            return
-        self.finish_failed(
-            stage=self._stage or "kernel",
-            error_class=type(exc).__name__,
-            message=f"kernel phase raised: {exc!r}",
-        )
 
 
 def _merge_acceptances(
@@ -1567,7 +1540,6 @@ def _geak_rebench(rebench_rows: list[dict[str, Any]], stated: Mapping[str, Any])
     decisions = sorted({str(row.get("decision")) for row in settled})
     rebench = {
         "required": bool(ledger) or bool(stated),
-        "max_attempts": _int_or_none(stated.get("max_attempts")),
         "attempts_used": len(ledger),
         "settled_against": str(settled[-1].get("attempt_id") or "") if len(decisions) == 1 else "",
         "final_status": _text(stated.get("final_status")),
@@ -1653,7 +1625,7 @@ def _outcome(header: Mapping[str, Any], attempts: list[dict[str, Any]]) -> dict[
     failure = _as_dict(header.get("failure"))
     verdict, reason = _derive_verdict(attempts, failure=failure)
     return {
-        "route": _text(header.get("route")) or "",
+        "route": _text(_as_dict(header.get("entry")).get("route")) or "",
         "verdict": verdict,
         "reason": reason,
         "error_class": _text(failure.get("error_class")),
@@ -1671,7 +1643,7 @@ def _outcome(header: Mapping[str, Any], attempts: list[dict[str, Any]]) -> dict[
 _ROW_ORDER: dict[str, tuple[str, ...]] = {
     SECTION_TRACE_ANALYZE: ("ts", "run_id"),
     SECTION_LANE_RUN: ("started_at", "run_id"),
-    SECTION_REBENCH: ("dispatched_at", "attempt_id"),
+    SECTION_REBENCH: ("attempt_id",),
     SECTION_GEAK_DISCOVERY: ("ordinal", "source"),
     SECTION_GEAK_ATTEMPT: ("ordinal", "kernel_id"),
     SECTION_GEAK_ACCEPTANCE: ("ordinal", "kernel_id", "selection"),
@@ -1686,8 +1658,7 @@ def assemble_kernel_ext(
     event: str,
 ) -> tuple[dict[str, Any], str]:
     """Assemble one kernel event's ``ext`` out of its recorded rows."""
-    event_rows = rows_for_event(parts[SECTION_EVENT], event)
-    header = event_rows[0] if event_rows else {}
+    header = event_header(parts, SECTION_EVENT, event)
     rows = {
         section: sort_rows(rows_for_event(parts[section], event), keys=keys) for section, keys in _ROW_ORDER.items()
     }

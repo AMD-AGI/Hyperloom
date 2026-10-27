@@ -533,10 +533,9 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "base_extra_args?, base_tput?, accuracy_baseline?, "
             "keep_threshold_pct?: <raise only; floored at the session-cycle bar>}}`. "
             "Variants run serially; a KEEP is graded on its decision "
-            "round. Variant identity is content-based (args+envs+"
-            "remove_args+unset_envs+args_mode); only exact duplicates within "
-            "the same submitted grid are collapsed, so any prior fingerprint "
-            "may be re-proposed. "
+            "round. A row that starts the stack's own server (see "
+            "`current_launch_flags`) is skipped, and rows starting the same server "
+            "are benched once; any prior fingerprint may be re-proposed. "
             "Use remove_args/unset_envs to ablate harmful base flags; "
             "args_mode='replace' to drop inherited server args. "
             "Every variant requires action-time reasoning that names the "
@@ -801,8 +800,7 @@ def _idea_generation_lines() -> list[str]:
         "   be slowing the workload, emit a variant with `remove_args` and/or",
         "   `unset_envs` instead of only adding more knobs.",
         "",
-        "Variant identity is content-based (args+envs+remove_args+",
-        "unset_envs+args_mode); only exact same-grid duplicates are collapsed.",
+        "A row starting the stack's own server is skipped; rows starting the same server run once.",
         "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
         "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
         "",

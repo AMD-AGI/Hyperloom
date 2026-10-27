@@ -2276,23 +2276,20 @@ class TestCompactJsonServerArgs:
     """JSON-valued flags must be space-free to survive Magpie's unquoted ``$EXTRA_VLLM_ARGS`` splice (otherwise spec-decode / compilation-config explore variants always crash the server at boot)."""
 
     def test_compilation_config_separator_space_removed(self):
-        out = compact_json_server_args('--compilation-config {"full_cuda_graph": true}', "vllm")
+        out = compact_json_server_args('--compilation-config {"full_cuda_graph": true}')
         assert out == '--compilation-config {"full_cuda_graph":true}'
         # the JSON value is now a single shell word under bash word-splitting
         assert len(out.split()) == 2
 
     def test_speculative_config_multikey(self):
-        out = compact_json_server_args(
-            '--speculative-config {"method": "eagle", "num_speculative_tokens": 3}',
-            "vllm",
-        )
+        out = compact_json_server_args('--speculative-config {"method": "eagle", "num_speculative_tokens": 3}')
         assert out == ('--speculative-config {"method":"eagle","num_speculative_tokens":3}')
         assert len(out.split()) == 2
 
     def test_compact_json_server_args_internal_space_unsupported(self):
         # Spaces inside JSON string values are not collapsed, so the value is not a single shell word under Magpie's
         # unquoted expansion; this flag shape is unsupported.
-        out = compact_json_server_args('--speculative-config {"model": "draft model name"}', "vllm")
+        out = compact_json_server_args('--speculative-config {"model": "draft model name"}')
         # Value is preserved verbatim (separator space after ':' removed only).
         assert out == '--speculative-config {"model":"draft model name"}'
         # ...but it still splits into MORE than the ideal 2 words: the two internal spaces of "draft model name"
@@ -2305,8 +2302,7 @@ class TestCompactJsonServerArgs:
         # boot (observed: shape_capture server never boots -> shape_capture_failed). compact must repair the barewords
         # back to valid JSON.
         out = compact_json_server_args(
-            "--speculative-config {method:ngram,num_speculative_tokens:7,prompt_lookup_min:2,prompt_lookup_max:8}",
-            "vllm",
+            "--speculative-config {method:ngram,num_speculative_tokens:7,prompt_lookup_min:2,prompt_lookup_max:8}"
         )
         assert out == (
             "--speculative-config "
@@ -2318,8 +2314,7 @@ class TestCompactJsonServerArgs:
     def test_quote_stripped_json_with_path_value_repaired(self):
         # Bareword string values containing ``/``, ``.``, ``-`` (e.g. a model id) must also be re-quoted.
         out = compact_json_server_args(
-            "--speculative-config {method:eagle3,model:RedHatAI/Llama-3.1-8B-Instruct-speculator}",
-            "vllm",
+            "--speculative-config {method:eagle3,model:RedHatAI/Llama-3.1-8B-Instruct-speculator}"
         )
         blob = out.split(" ", 1)[1]
         assert json.loads(blob) == {
@@ -2328,10 +2323,7 @@ class TestCompactJsonServerArgs:
         }
 
     def test_quote_stripped_nested_json_is_repaired(self):
-        out = compact_json_server_args(
-            "--compilation-config {method:ngram,nested:{a:1}}",
-            "vllm",
-        )
+        out = compact_json_server_args("--compilation-config {method:ngram,nested:{a:1}}")
         blob = out.split(" ", 1)[1]
         assert json.loads(blob) == {
             "method": "ngram",
@@ -2339,10 +2331,7 @@ class TestCompactJsonServerArgs:
         }
 
     def test_shell_single_quote_wrappers_are_removed(self):
-        out = compact_json_server_args(
-            """--speculative-config '{"method":"ngram","num_speculative_tokens":7}' """,
-            "vllm",
-        )
+        out = compact_json_server_args("""--speculative-config '{"method":"ngram","num_speculative_tokens":7}' """)
         assert out.strip() == ('--speculative-config {"method":"ngram","num_speculative_tokens":7}')
         json.loads(out.split(" ", 1)[1].strip())
 
@@ -2350,38 +2339,36 @@ class TestCompactJsonServerArgs:
         # Genuinely broken blobs that cannot be repaired to valid JSON are left verbatim (no worse than before), never
         # raising.
         raw = "--compilation-config {this is : not ] json"
-        out = compact_json_server_args(raw, "vllm")
+        out = compact_json_server_args(raw)
         assert "{this is" in out
 
     def test_other_flags_around_json_untouched(self):
-        out = compact_json_server_args('--kv-cache-dtype fp8 --compilation-config {"level": 3}', "vllm")
+        out = compact_json_server_args('--kv-cache-dtype fp8 --compilation-config {"level": 3}')
         assert out == '--kv-cache-dtype fp8 --compilation-config {"level":3}'
 
     def test_sglang_json_is_normalized_for_unquoted_transport(self):
         raw = '--speculative-config {"method": "eagle"}'
-        assert compact_json_server_args(raw, "sglang") == ('--speculative-config {"method":"eagle"}')
+        assert compact_json_server_args(raw) == ('--speculative-config {"method":"eagle"}')
 
-    def test_sglang_and_missing_framework_remove_legacy_shell_wrappers(self):
+    def test_legacy_shell_wrappers_removed(self):
         raw = """--json-model-override-args '{"rope_scaling":null}'"""
-        expected = '--json-model-override-args {"rope_scaling":null}'
-        assert compact_json_server_args(raw, "sglang") == expected
-        assert compact_json_server_args(raw, None) == expected
+        assert compact_json_server_args(raw) == '--json-model-override-args {"rope_scaling":null}'
 
     def test_no_json_is_noop(self):
         raw = "--block-size 128 --no-enable-prefix-caching"
-        assert compact_json_server_args(raw, "vllm") == raw
+        assert compact_json_server_args(raw) == raw
 
     def test_malformed_json_left_verbatim(self):
         raw = "--compilation-config {not json}"
-        assert compact_json_server_args(raw, "vllm") == raw
+        assert compact_json_server_args(raw) == raw
 
     def test_malformed_wrapped_json_keeps_both_shell_wrappers(self):
         raw = "--compilation-config '{not json}'"
-        assert compact_json_server_args(raw, "vllm") == raw
+        assert compact_json_server_args(raw) == raw
 
     def test_empty_is_noop(self):
-        assert compact_json_server_args("", "vllm") == ""
-        assert compact_json_server_args(None, "vllm") == ""
+        assert compact_json_server_args("") == ""
+        assert compact_json_server_args(None) == ""
 
 
 class TestRemoveServerArgsPreservesJson:

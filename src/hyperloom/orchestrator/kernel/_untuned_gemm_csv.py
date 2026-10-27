@@ -6,12 +6,12 @@
 from __future__ import annotations
 
 import functools
-import json
 import logging
 import subprocess
 from pathlib import Path
 
 from hyperloom.common.gpu_identity import is_gfx_arch
+from hyperloom.inference_optimizer.model_config_utils import config_scopes, load_model_config_dict
 
 log = logging.getLogger(__name__)
 
@@ -91,34 +91,12 @@ def _csv_k_values(path: Path) -> set[int]:
     return ks
 
 
-def _read_model_config(model_path: str) -> dict | None:
-    """Load a HF ``config.json`` as a dict; ``None`` when unavailable/unreadable."""
-    if not model_path:
-        return None
-    # ``model_path`` may be an HF repo id; resolve to the local weights dir
-    # (shared resolver) so the config read works for repo-id launches.
-    from hyperloom.inference_optimizer.model_config_utils import (
-        resolve_local_model_dir,
-    )
-
-    cfg = (resolve_local_model_dir(model_path) or Path(model_path)) / "config.json"
-    try:
-        data = json.loads(cfg.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
 def _model_hidden_size(model_path: str) -> int | None:
     """Read ``hidden_size`` from a HF ``config.json``; ``None`` when unavailable."""
-    data = _read_model_config(model_path)
+    data = load_model_config_dict(model_path)
     if data is None:
         return None
-    candidates: list[dict] = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        candidates.append(nested)
-    for cfg_dict in candidates:
+    for cfg_dict in config_scopes(data):
         for key in ("hidden_size", "n_embd", "d_model", "hidden_dim"):
             val = cfg_dict.get(key)
             if isinstance(val, int) and val > 0:
@@ -145,15 +123,11 @@ def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "", framework: str 
       ``kernel_signature_log`` itself (preserves the legacy behaviour and keeps
       the no-readable-config case unchanged).
     """
-    data = _read_model_config(model_path)
+    data = load_model_config_dict(model_path)
     if data is None:
         return "auto"
-    candidates: list[dict] = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        candidates.append(nested)
     is_blockscale = False
-    for cfg_dict in candidates:
+    for cfg_dict in config_scopes(data):
         qc = cfg_dict.get("quantization_config")
         if isinstance(qc, dict):
             if qc.get("weight_block_size"):

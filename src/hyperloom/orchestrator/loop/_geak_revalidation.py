@@ -9,6 +9,12 @@ import logging as _logging
 from typing import Any, Mapping, NamedTuple
 
 from hyperloom.common.env import env_int
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
+    REBENCH_FALLBACK,
+    REBENCH_NO_MATERIAL,
+    REBENCH_NO_PROMOTE,
+    REBENCH_VALIDATED,
+)
 from hyperloom.common.perf_metric import GradedComparison
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GeakRebenchAttempt
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
@@ -61,12 +67,6 @@ class _RebenchDecision(NamedTuple):
 class _ReplayRuling(NamedTuple):
     decision: str
     promoted: bool
-
-
-#: The 2b rebench ruled the stack validated: its config identity held and the optimization engaged.
-VALIDATED = "validated"
-#: The 2b rebench could not rule, so the round replays through GEAK's own harness (2a).
-FALLBACK = "fallback"
 
 
 class _RebenchEngagement(NamedTuple):
@@ -198,7 +198,7 @@ class GeakRevalidation(CoordinatorCollaborator):
     def settle_geak_no_material(self) -> None:
         """Close a GEAK candidate that adds nothing to ``current_best``, revoking its provisional journey KEEPs."""
         state = self.shared_state
-        state.geak_result = {**state.geak_result, "revalidation_status": "no_material"}
+        state.geak_result = {**state.geak_result, "revalidation_status": REBENCH_NO_MATERIAL}
         self._coord.phase_kernel.reject_geak_kernel_journey(
             state.geak_result,
             measured_tput=0.0,
@@ -206,7 +206,7 @@ class GeakRevalidation(CoordinatorCollaborator):
             provenance="geak_no_material",
             rejection_reason="geak_no_material_product",
         )
-        self._record_geak_rebench_conclusion(final_status="no_material")
+        self._record_geak_rebench_conclusion(final_status=REBENCH_NO_MATERIAL)
         state.geak_pending = {}
 
     def _accepted_geak_product(self, accepted: Mapping[str, Any]) -> _GeakProduct | None:
@@ -343,22 +343,22 @@ class GeakRevalidation(CoordinatorCollaborator):
         expected_overlay, overlay_loaded = overlay.expected, overlay.loaded
         got_digest, decision = overlay.digest, overlay.decision
         if native_rejection:
-            decision = "no_promote"
+            decision = REBENCH_NO_PROMOTE
 
         pending_status = self._geak_candidate_slot_status()
-        if decision == VALIDATED:
+        if decision == REBENCH_VALIDATED:
             # Only an overlay that was dispatched AND still matches its
             # manifest proves a kernel was in the measurement.
             promoted = self._promote_validated_rebench(
                 rebench, overlay_loaded=bool(expected_overlay) and overlay_loaded
             )
             if not promoted:
-                decision = "no_promote"
-        if decision in {"no_promote", "accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}:
+                decision = REBENCH_NO_PROMOTE
+        if decision in {REBENCH_NO_PROMOTE, "accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}:
             await self._refuse_rebench(
                 result, task=task, rebench=rebench, decision=decision, native_rejection=native_rejection
             )
-        elif decision == FALLBACK:
+        elif decision == REBENCH_FALLBACK:
             replay = await self._replay_via_geak_harness(result, task=task, rebench=rebench)
             decision, promoted = replay.decision, replay.promoted
         expected_hash = str((task.params or {}).get("expected_cfg_hash") or "")
@@ -379,7 +379,7 @@ class GeakRevalidation(CoordinatorCollaborator):
             attempt=ActionAttempt(
                 task_id=task.task_id,
                 status=str(result.get("status") or "succeeded"),
-                decision="promoted" if promoted else "no_promote" if decision == "no_promote" else "discarded",
+                decision="promoted" if promoted else "no_promote" if decision == REBENCH_NO_PROMOTE else "discarded",
                 result=result,
                 extras={"revalidation_decision": decision, "output_throughput": rebench.measured},
             ),
@@ -434,7 +434,7 @@ class GeakRevalidation(CoordinatorCollaborator):
             expected_digest = str((task.params or {}).get("expected_overlay_digest") or "")
             got_digest = _geak_overlay_digest(expected_overlay)
             overlay_loaded = geak_overlay_is_loadable(expected_overlay) and (got_digest == expected_digest)
-            if not overlay_loaded and decision == VALIDATED:
+            if not overlay_loaded and decision == REBENCH_VALIDATED:
                 log.warning(
                     "geak 2b: overlay %r did not survive the run "
                     "(loadable=%r digest expected=%r got=%r) -> 2a fallback",
@@ -443,7 +443,7 @@ class GeakRevalidation(CoordinatorCollaborator):
                     expected_digest,
                     got_digest,
                 )
-                decision = FALLBACK
+                decision = REBENCH_FALLBACK
         return _OverlayReading(expected=expected_overlay, loaded=overlay_loaded, digest=got_digest, decision=decision)
 
     def _geak_rebench_decision(
@@ -465,18 +465,18 @@ class GeakRevalidation(CoordinatorCollaborator):
             current_best=current_grade.reference,
         )
         if not _grades_can_rule(result, measured, baseline_grade, current_grade):
-            decision = FALLBACK
+            decision = REBENCH_FALLBACK
         elif (not expected_hash or got_hash == expected_hash) and any(
             grade.graded_on_intvty and grade.verdict != "KEEP" for grade in (baseline_grade, current_grade)
         ):
-            decision = "no_promote"
+            decision = REBENCH_NO_PROMOTE
         native_rejection = _native_rejection_reason(result, expected_hash)
         if (
             measured > 0
             and got_hash == expected_hash
             and (not baseline_grade.comparable or not current_grade.comparable)
         ):
-            decision = "no_promote"
+            decision = REBENCH_NO_PROMOTE
         return _RebenchDecision(decision=decision, native_rejection=native_rejection)
 
     async def _refuse_rebench(
@@ -518,7 +518,7 @@ class GeakRevalidation(CoordinatorCollaborator):
             reason=native_rejection or "graded_comparison_rejected",
             attempt_id=str(task.idempotency_key or task.task_id),
         )
-        result["status"] = "no_promote"
+        result["status"] = REBENCH_NO_PROMOTE
 
     def _promote_validated_rebench(self, rebench: _GeakRebench, *, overlay_loaded: bool) -> bool:
         measurement, variant = rebench.measurement, rebench.variant
@@ -560,11 +560,8 @@ class GeakRevalidation(CoordinatorCollaborator):
         recorder.record_geak_rebench_attempt(
             GeakRebenchAttempt(
                 attempt_id=str(task.idempotency_key or task.task_id or ""),
-                source_ref=None,
                 idempotency_key=str(task.idempotency_key or ""),
                 task_id=str(task.task_id or ""),
-                dispatched_at=None,
-                settled_at=None,
                 base_tput=params.get("base_tput"),
                 measured_tput=measured,
                 decision=decision,
@@ -646,7 +643,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         accuracy_failure = self._replay_accuracy_failure(_promotion_measurement(res))
         if accuracy_failure:
             self._refuse_replay_on_accuracy(accepted, res, accuracy_failure)
-            return {"validated": False, "status": "no_promote", "reason": accuracy_failure}
+            return {"validated": False, "status": REBENCH_NO_PROMOTE, "reason": accuracy_failure}
         if str(res.get("status") or "") == "succeeded":
             return self._promote_replayed_geak_win(accepted, res, overlay, reason=reason)
         if res.get("error"):
@@ -757,7 +754,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         if not promoted:
             return {
                 "validated": False,
-                "status": "no_promote",
+                "status": REBENCH_NO_PROMOTE,
                 "reason": str(self.shared_state.geak_result.get("revalidation_error") or "promotion_rejected"),
             }
         return {"validated": True, "gain": float(self.shared_state.cumulative_gain_validated), "reason": reason}
@@ -771,7 +768,7 @@ class GeakRevalidation(CoordinatorCollaborator):
     ) -> _ReplayRuling:
         measured, got_hash = rebench.measured, rebench.got_hash
         promoted = False
-        decision = FALLBACK
+        decision = REBENCH_FALLBACK
         log.warning(
             "geak 2b revalidation inconclusive (measured=%r got_hash=%r expected=%r) -> GEAK-harness 2a fallback",
             measured,
@@ -799,7 +796,9 @@ class GeakRevalidation(CoordinatorCollaborator):
             # reason text is for the report, and a later KERNEL entry
             # needs to know the replay is settled, not merely broken.
             refusal = str(fallback_result.get("status") or "")
-            geak_result["revalidation_status"] = "no_promote" if refusal == "no_promote" else "fallback_failed"
+            geak_result["revalidation_status"] = (
+                REBENCH_NO_PROMOTE if refusal == REBENCH_NO_PROMOTE else "fallback_failed"
+            )
             geak_result["revalidation_error_class"] = refusal
             geak_result["revalidation_error"] = str(
                 fallback_result.get("reason") or refusal or "GEAK harness fallback did not validate"
@@ -810,8 +809,8 @@ class GeakRevalidation(CoordinatorCollaborator):
                 final_error=str(geak_result.get("revalidation_error") or ""),
             )
             self.shared_state.geak_pending = {}
-            result["status"] = refusal if refusal in {INCOMPARABLE_REVALIDATION, "no_promote"} else "failed"
+            result["status"] = refusal if refusal in {INCOMPARABLE_REVALIDATION, REBENCH_NO_PROMOTE} else "failed"
         else:
             promoted = True
-            decision = VALIDATED
+            decision = REBENCH_VALIDATED
         return _ReplayRuling(decision=decision, promoted=promoted)

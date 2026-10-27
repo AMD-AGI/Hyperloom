@@ -9,7 +9,7 @@ import sqlite3
 from itertools import chain
 from pathlib import Path
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, NamedTuple
 from hyperloom.common.coerce import to_float
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradingAnchor, constraint_fields, graded_axes_of
 from hyperloom.common.timeutil import now_iso
@@ -47,8 +47,8 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     JournalEntry,
     Verdict,
 )
-from ..actions.executors._launch_restatement import config_launch_restated_by
 from ..actions.executors.baseline import revert_warm_kernel_patches
+from ..actions.executors.explore import restates_the_baseline_launch
 from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
 from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
 from ..state.task_registry import Task, TaskSpec
@@ -99,6 +99,15 @@ _WARM_REPLAY_DONOR_FIELDS = (
     "donor_gain_pct",
     "donor_breakdown_link",
 )
+
+
+class _KernelLaunchOverlay(NamedTuple):
+    """The launch config a kernel plan contributes, with the envs and targets of each contributing entry by index."""
+
+    extra_server_args: str
+    extra_envs: dict[str, str]
+    entry_envs: dict[int, dict[str, str]]
+    entry_targets: dict[int, list[str]]
 
 
 def _merge_named_current_recipe_configs(owners: list[tuple[str, Mapping[str, Any]]]) -> tuple[str, dict[str, str]]:
@@ -642,29 +651,36 @@ class PreludePhase(CoordinatorCollaborator):
         self.shared_state.warm_replay_outcome = combined
         return kernel_outcome
 
-    def _preview_current_kernel_config(self, kb: Any) -> dict[str, Any]:
-        """Resolve the kernel launch overlay without mutating target files."""
+    def _kernel_launch_overlay(self, plan: list[dict[str, Any]]) -> _KernelLaunchOverlay:
+        """Resolve the launch overlay of the plan entries that contribute one, without mutating target files.
+
+        A GEMM entry contributes only with an env bundle; any other entry only when its patch targets resolve.
+        """
+        entry_envs: dict[int, dict[str, str]] = {}
+        entry_targets: dict[int, list[str]] = {}
         configs: list[tuple[str, Mapping[str, Any]]] = []
-        for index, entry in enumerate(self._collect_warm_kernel_plan(kb)):
+        for index, entry in enumerate(plan):
             envs = self._warm_kernel_extra_envs(entry)
             if entry.get("column") == "gemm":
                 if not envs:
                     continue
             else:
                 targets = self._resolve_kernel_target_paths(entry)
-                if not any(targets):
+                if not targets:
                     continue
+                entry_targets[index] = targets
+            entry_envs[index] = envs
             configs.append(
                 (
                     f"kernel[{index}]",
                     {
-                        "extra_server_args": str((entry.get("meta") or {}).get("extra_server_args") or "").strip(),
+                        "extra_server_args": str(entry["meta"].get("extra_server_args") or "").strip(),
                         "extra_envs": envs,
                     },
                 )
             )
         args, envs = _merge_named_current_recipe_configs(configs)
-        return {"extra_server_args": args, "extra_envs": envs}
+        return _KernelLaunchOverlay(args, envs, entry_envs, entry_targets)
 
     async def _prepare_warm_kernel_kb(self, kb: Any = None) -> dict[str, Any]:
         """Prepare the Recipe's kernel section for the combined replay benchmark."""
@@ -704,30 +720,7 @@ class PreludePhase(CoordinatorCollaborator):
         state = self.shared_state
         applied: list[dict[str, Any]] = []
         kernel_snapshots: list[dict[str, Any]] = []
-        prepared_envs: dict[int, dict[str, str]] = {}
-        prepared_targets: dict[int, list[str]] = {}
-        kernel_configs: list[tuple[str, Mapping[str, Any]]] = []
-        for index, entry in enumerate(plan):
-            envs = self._warm_kernel_extra_envs(entry)
-            if entry.get("column") == "gemm":
-                if not envs:
-                    continue
-            else:
-                targets = self._resolve_kernel_target_paths(entry)
-                if not targets:
-                    continue
-                prepared_targets[index] = targets
-            prepared_envs[index] = envs
-            kernel_configs.append(
-                (
-                    f"kernel[{index}]",
-                    {
-                        "extra_server_args": str(entry["meta"].get("extra_server_args") or "").strip(),
-                        "extra_envs": envs,
-                    },
-                )
-            )
-        kernel_args, merged_envs = _merge_named_current_recipe_configs(kernel_configs)
+        overlay = self._kernel_launch_overlay(plan)
         state.warm_replay_pending = {
             **state.warm_replay_pending,
             "status": "preparing_kernel",
@@ -736,19 +729,16 @@ class PreludePhase(CoordinatorCollaborator):
         }
         state.save(self.session_dir)
         for index, entry in enumerate(plan):
-            if not (entry.get("source_paths") or entry.get("patch_path")):
-                entry["decision"] = "DEFERRED"
-                continue
             # Every column carries its env bundle: a fusion needs its switches to activate the patched path, and a
             # GEMM is nothing but its bundle.
-            envs = prepared_envs.get(index, {})
+            envs = overlay.entry_envs.get(index, {})
             if envs:
                 entry["extra_envs"] = envs
             # GEMM is parameter-shaped: its env bundle is the whole deliverable, so there is nothing to stage on disk.
             if entry.get("column") == "gemm":
                 entry["decision"] = "PENDING" if envs else "DEFERRED"
                 continue
-            targets = prepared_targets.get(index, [])
+            targets = overlay.entry_targets.get(index, [])
             if not targets:
                 entry["decision"] = "DEFERRED"
                 if entry.get("resolution_error"):
@@ -756,7 +746,9 @@ class PreludePhase(CoordinatorCollaborator):
                 continue
             if not self._land_warm_kernel_entry(entry, targets, kernel_snapshots, applied):
                 break
-        return self._settle_warm_kernel_preparation(plan, applied, kernel_snapshots, kernel_args, merged_envs)
+        return self._settle_warm_kernel_preparation(
+            plan, applied, kernel_snapshots, overlay.extra_server_args, overlay.extra_envs
+        )
 
     def _land_warm_kernel_entry(
         self, entry: dict[str, Any], targets: list[str], snapshots: list[dict[str, Any]], applied: list[dict[str, Any]]
@@ -918,7 +910,8 @@ class PreludePhase(CoordinatorCollaborator):
         config = config_kb.read()
         args = str(config.get("extra_server_args") or "")
         envs = dict(config.get("extra_envs") or {})
-        kernel_config = self._preview_current_kernel_config(kernel)
+        kernel_overlay = self._kernel_launch_overlay(self._collect_warm_kernel_plan(kernel))
+        kernel_config = {"extra_server_args": kernel_overlay.extra_server_args, "extra_envs": kernel_overlay.extra_envs}
         combined_args, combined_envs = _merge_named_current_recipe_configs(
             [
                 ("config", config),
@@ -1301,12 +1294,10 @@ class PreludePhase(CoordinatorCollaborator):
         try:
             from hyperloom.inference_optimizer.grid_server_args import validate_warm_replay_context_length
 
-            validated_args, workload_compatibility = validate_warm_replay_context_length(
+            workload_compatibility = validate_warm_replay_context_length(
                 combined_args, state.framework, int(state.isl or 0), int(state.osl or 0), state.max_model_len or None
             )
-            if validated_args != combined_args:
-                raise RuntimeError("warm replay context preflight must not mutate config")
-        except (ValueError, RuntimeError) as exc:
+        except ValueError as exc:
             rollback = self._unwind_warm_kernel_half(overlay)
             target_workload_shape = {
                 "conc": int(state.conc or 0),
@@ -1823,15 +1814,15 @@ class PreludePhase(CoordinatorCollaborator):
     ) -> bool:
         """Skip a replay whose launch would be the baseline's own; True when it did.
 
-        Patches and kernel items change the code, which no argv comparison sees,
+        Patches and kernel items change the code, which no launch comparison sees,
         so a replay carrying any of them always runs. So does one under reference
-        launch controls: materialization re-applies them to the baseline config,
-        so the replay's launch is not that config's argv plus the request.
+        launch controls: materialization rebuilds the args from the reference, so
+        the replay's launch is not the baseline config plus the request.
         """
         state = self.shared_state
         if code_changes or state.reference_launch_controls:
             return False
-        if not config_launch_restated_by(str(state.baseline_config_path or ""), args, envs, str(state.framework or "")):
+        if not restates_the_baseline_launch(state, args, envs):
             return False
         log.info("PRELUDE: warm replay skipped: %r %s only restate the baseline launch", args, sorted(envs))
         self._skip_warm_replay(
@@ -2398,14 +2389,12 @@ class PreludePhase(CoordinatorCollaborator):
             streak = 0
         return f"-a{streak}" if streak > 0 else ""
 
-    async def enqueue_internal_analysis_task(
-        self, *, reason: str, inline_event: str = "", idem_scope: str = ""
-    ) -> "Task | None":
+    async def enqueue_internal_analysis_task(self, *, reason: str, idem_scope: str = "") -> "Task | None":
         """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key
         internal-analysis-<reason><idem_scope>; ``idem_scope`` separates repeated triggers that share a reason.
         Returns None when the stack cannot produce a GPU trace for it to analyze.
         """
-        params = self.internal_analysis_params(reason=reason, inline_event=inline_event)
+        params = self.internal_analysis_params(reason=reason)
         if params is None:
             return None
         kind = self.internal_analysis_kind()

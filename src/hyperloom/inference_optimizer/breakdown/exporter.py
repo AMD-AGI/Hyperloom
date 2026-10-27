@@ -17,7 +17,7 @@ from hyperloom.common.jsonio import read_json, read_json_strict
 from . import collectors
 from .recorder.event_finalize import finalize_events
 from .recorder.recorder_warnings import RECORDING_ERRORS
-from .schema import SCHEMA_VERSION_V6
+from ..session.sbd_v6 import SCHEMA_VERSION_V6
 from ..session.session_paths import BREAKDOWN_FILENAME, manifest_path, state_path
 
 log = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ def build(session_dir: Path | str) -> dict[str, Any]:
     workload = _safe_collect("workload", lambda: collectors.collect_workload(state, manifest), warnings)
     # Model basics -- verbatim mirror of ``state.model_info``. Empty {} on
     # non-transformers models.
-    model_info = _safe_collect("model_info", lambda: collectors.collect_model_info(state), warnings, default={})
+    model_info = _safe_collect("model_info", lambda: collectors.collect_model_info(state), warnings)
     # Live-Langfuse push receipt (opt-in second sink). Prefers the post-flush
     # ``langfuse_receipt.json``; falls back to a live emitter read. Authored by
     # the emitter, so it is read here rather than derived.
@@ -122,7 +122,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
             warnings,
         ),
         warnings,
-        default={},
     )
     # Events whose phase was killed before it could close them are closed here,
     # before the timeline is read: their fragments are on disk, and an event
@@ -152,7 +151,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
             recorded=assembled.get("close"),
         ),
         warnings,
-        default={},
     )
     outcome = _safe_collect(
         "outcome",
@@ -167,7 +165,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
             warnings,
         ),
         warnings,
-        default={},
     )
     metadata = _safe_collect(
         "metadata",
@@ -183,7 +180,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
             exported_at_utc=exported_at,
         ),
         warnings,
-        default={},
     )
     v6_critic = collectors.collect_v6_critic(assembled.get("critic"))
     # Snapshot last: every collector above feeds this one list, and this is the
@@ -428,16 +424,12 @@ def _json_default(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
-def write_minimal_final_report(
-    session_dir: Path | str,
-    *,
-    output_path: Path | str | None = None,
-) -> Path:
+def write_minimal_final_report(session_dir: Path | str) -> Path:
     """cli.finally safety-net for ``reports/final.md`` when the CLOSE sequencer never reached step 1."""
     from ..session.session_paths import reports_dir
 
     sd = Path(session_dir).resolve()
-    target = Path(output_path).resolve() if output_path else reports_dir(sd) / "final.md"
+    target = reports_dir(sd) / "final.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and target.stat().st_size > 0:
         return target
@@ -509,13 +501,6 @@ def write_minimal_final_report(
     return target
 
 
-def _crash_safe_platform(gpu_type: str | None) -> dict[str, Any]:
-    """Platform record for the crash-safe path."""
-    from hyperloom.common.platform_probe import platform_fingerprint
-
-    return platform_fingerprint(gpu_type)
-
-
 #: Value of ``producer`` in a crash-safe ``final.json``.
 FINAL_PRODUCER_COORDINATOR = "coordinator"
 
@@ -538,18 +523,16 @@ _CRASH_SAFE_STATE_FIELDS: dict[str, type] = {
 }
 
 
-def write_minimal_final_json(
-    session_dir: Path | str,
-    *,
-    output_path: Path | str | None = None,
-) -> Path:
+def write_minimal_final_json(session_dir: Path | str) -> Path:
     """Crash-safe ``reports/final.json`` fallback for any non-graceful exit."""
     from datetime import datetime, timezone
+
+    from hyperloom.common.platform_probe import platform_fingerprint
 
     from ..session.session_paths import reports_dir
 
     sd = Path(session_dir).resolve()
-    target = Path(output_path).resolve() if output_path else reports_dir(sd) / "final.json"
+    target = reports_dir(sd) / "final.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     # Keep a full report (``safety_net`` absent/false); refresh an earlier fallback;
     # preserve a corrupt file as ``final.json.corrupt`` and overwrite it.
@@ -578,7 +561,7 @@ def write_minimal_final_json(
         "optimization_stack_len": len(state.get("optimization_stack") or []),
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
         # A run that died unattended is exactly when the host record is most useful, since nobody was watching.
-        "platform": _crash_safe_platform(copied["gpu_type"]),
+        "platform": platform_fingerprint(copied["gpu_type"]),
     }
     atomic_write_json(target, summary)
     log.info("crash-safe final.json: wrote %s", target)
@@ -586,7 +569,6 @@ def write_minimal_final_json(
 
 
 __all__ = [
-    "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
     "FINAL_PRODUCER_COORDINATOR",
     "build",

@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hyperloom.common.checkpoint_quant import WeightDeclaration, weight_declarations
-from hyperloom.inference_optimizer.model_config_utils import _merge_config_scopes, resolve_local_model_dir
+from hyperloom.common.model_paths import resolve_local_model_dir
+from hyperloom.inference_optimizer.grid_server_args import server_arg_value
+from hyperloom.inference_optimizer.model_config_utils import load_model_config_dict, _merge_config_scopes
 
 log = logging.getLogger(__name__)
 
@@ -159,18 +161,6 @@ def _resolve_quant_config_weight_bytes(quant_cfg: Any) -> float:
     return _bits_to_bytes(quant_cfg.get("bits") or quant_cfg.get("w_bit"))
 
 
-def _parse_server_arg(args: str, flag: str) -> str:
-    """Return the value following ``--flag`` (space or ``=`` form), else ``\"\"``."""
-    if not args:
-        return ""
-    toks = str(args).replace("=", " ").split()
-    value = ""
-    for i, tok in enumerate(toks):
-        if tok == flag and i + 1 < len(toks):
-            value = toks[i + 1].strip()
-    return value
-
-
 #: Magpie ``benchmark.envs`` keys that carry the runtime server args for the
 #: text-serving frameworks. The baseline yaml only ever sets the one matching
 #: its framework, so reading these and concatenating is safe.
@@ -242,7 +232,7 @@ def _server_args_from_envs(envs: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def _read_baseline_yaml_server_args(state: Any) -> str:
+def read_baseline_server_args(state: Any) -> str:
     """Read the runtime server args from the materialized baseline yaml."""
     return _server_args_from_envs(_benchmark_envs(_read_baseline_yaml_benchmark(state)))
 
@@ -278,7 +268,7 @@ def _achieved_arm_source(state: Any) -> str:
 
 def _collect_runtime_server_args(state: Any, *, arm: str | None = None) -> str:
     """Server args for the arm the ceiling is actually compared against."""
-    base_args = _read_baseline_yaml_server_args(state)
+    base_args = read_baseline_server_args(state)
     resolved_arm = arm or _achieved_arm_source(state)
     if resolved_arm == "current_best":
         current_best = getattr(state, "current_best", None)
@@ -348,8 +338,8 @@ def resolve_runtime_dtype(
     """Resolve the runtime weight/activation dtype from the actual run."""
     runtime = resolve_runtime_workload(state, arm=arm)
     args = runtime.server_args
-    quant = _parse_server_arg(args, "--quantization").lower()
-    dtype_arg = _parse_server_arg(args, "--dtype").lower()
+    quant = server_arg_value(args, "--quantization").lower()
+    dtype_arg = server_arg_value(args, "--dtype").lower()
 
     act_bytes = max(_resolve_dtype_bytes(dtype_arg) if dtype_arg else 2.0, 2.0)
 
@@ -417,10 +407,7 @@ def apply_runtime_dtype(meta: "ModelMeta", rt: RuntimeDtype) -> "ModelMeta":
     """Rescale runtime weights; experts stored at a precision of their own keep it."""
     import dataclasses as _dc
 
-    # Safe degrade for non-dataclass / fake meta (test doubles).
-    if not _dc.is_dataclass(meta):
-        return meta
-    cfg_b = float(getattr(meta, "weight_dtype_bytes", 0.0) or 0.0)
+    cfg_b = float(meta.weight_dtype_bytes or 0.0)
     rt_b = float(rt.weight_dtype_bytes or 0.0)
     if cfg_b <= 0 or rt_b <= 0 or abs(cfg_b - rt_b) < 1e-9:
         return _dc.replace(meta, weight_dtype_bytes=rt_b or cfg_b)
@@ -450,9 +437,13 @@ def _resolve_tflops(specs: dict[str, dict[str, Any]], gpu_type: str | None, prec
     return float(table.get(str(precision_tag).strip().lower(), 0.0))
 
 
-def _resolve_peak_tflops(gpu_type: str | None, precision_tag: str | None) -> float:
-    """``(gpu, precision)`` → vendor dense peak TFLOPS; 0.0 on miss (safe-degrade signal → T_cmp unavailable, fall back to T_mem)."""
-    return _resolve_tflops(HW_SPECS, gpu_type, precision_tag)
+def _compute_peak(gpu_type: str | None, precision_tag: str | None) -> tuple[float, str]:
+    """``(gpu, precision)`` → ``(TFLOPS, convention)``: max-achievable, else vendor dense peak, else ``(0.0, "unknown")``."""
+    achievable = _resolve_tflops(HW_SPECS_ACHIEVABLE, gpu_type, precision_tag)
+    if achievable > 0:
+        return achievable, "achievable"
+    vendor = _resolve_tflops(HW_SPECS, gpu_type, precision_tag)
+    return (vendor, "vendor") if vendor > 0 else (0.0, "unknown")
 
 
 @dataclass(frozen=True)
@@ -508,24 +499,6 @@ def _sum_weight_file_sizes(model_path: Path, pattern: str) -> int | None:
     except OSError:
         return None
     return int(total) if total > 0 else None
-
-
-def _read_hf_config(model_path: Path) -> dict[str, Any] | None:
-    """Read and parse ``config.json`` from a local HF model directory."""
-    cfg = model_path / "config.json"
-    if not cfg.is_file():
-        return None
-    try:
-        data = json.loads(cfg.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    # Multimodal wrappers (e.g. Kimi-K2 kimi_k25) nest the real decoder shape / MoE config under
-    # text_config/llm_config/language_config; flatten it (nested wins) so num_experts / hidden_size /
-    # moe_intermediate_size / kv-heads reach the ceiling readers instead of degrading to a dense full-weight roofline
-    # (num_experts=0 -> active_weight_bytes = full weight_bytes; PerfModel falls back to the legacy top-down formula).
-    return _merge_config_scopes(data)
 
 
 _HIDDEN_SIZE_KEY = "hidden_size"
@@ -661,9 +634,14 @@ def load_model_meta(
         if resolved is None:
             return None
         p = resolved
-    cfg = _read_hf_config(p)
-    if cfg is None:
+    data = load_model_config_dict(str(p))
+    if data is None:
         return None
+    # Multimodal wrappers (e.g. Kimi-K2 kimi_k25) nest the real decoder shape / MoE config under
+    # text_config/llm_config/language_config; flatten it (nested wins) so num_experts / hidden_size /
+    # moe_intermediate_size / kv-heads reach the ceiling readers instead of degrading to a dense full-weight roofline
+    # (num_experts=0 -> active_weight_bytes = full weight_bytes; PerfModel falls back to the legacy top-down formula).
+    cfg = _merge_config_scopes(data)
     weight_bytes = _read_total_size(p)
     if not weight_bytes:
         return None
@@ -783,9 +761,7 @@ def compute_compute_bound_ceiling_tok_per_sec(
     target: ComputeTarget, *, active_weight_bytes: int, weight_bytes: int, weight_dtype_bytes: float
 ) -> float:
     """Decode-only compute-bound ceiling for ``output_throughput``."""
-    peak_tflops = _resolve_achievable_tflops(target.gpu_type, target.precision_tag) or _resolve_peak_tflops(
-        target.gpu_type, target.precision_tag
-    )
+    peak_tflops, _ = _compute_peak(target.gpu_type, target.precision_tag)
     if peak_tflops <= 0 or weight_dtype_bytes <= 0:
         return 0.0
     # B=1 per-token figure; fall back to dense weight_bytes when active is missing.
@@ -951,9 +927,7 @@ def _diffusion_latent_tokens_from_resolution(
 
 def compute_diffusion_compute_img_per_sec(target: ComputeTarget, dit: DitGeometry, *, num_steps: int) -> float:
     """Compute-roofline ceiling for diffusion image throughput (images/sec)."""
-    peak_tflops = _resolve_achievable_tflops(target.gpu_type, target.precision_tag) or _resolve_peak_tflops(
-        target.gpu_type, target.precision_tag
-    )
+    peak_tflops, _ = _compute_peak(target.gpu_type, target.precision_tag)
     latent_tokens = dit.latent_tokens
     if peak_tflops <= 0 or dit.params <= 0 or latent_tokens <= 0 or num_steps <= 0:
         return 0.0
@@ -975,9 +949,7 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
     height, width = _read_diffusion_resolution(state)
     # ``model_path`` may be an HF repo id; resolve to the local diffusers dir so the DiT/VAE config reads work
     # (load_model_meta re-resolves internally, so passing the resolved dir is harmless).
-    from hyperloom.inference_optimizer.model_config_utils import (
-        resolve_local_model_dir,
-    )
+    from hyperloom.common.model_paths import resolve_local_model_dir
 
     _resolved = resolve_local_model_dir(runtime.model_path)
     model_dir = str(_resolved) if _resolved is not None else runtime.model_path
@@ -1075,11 +1047,6 @@ def compute_roofline_breakdown_from_state(
     return legacy
 
 
-def read_baseline_server_args(state: Any) -> str:
-    """Public accessor for the baseline arm's runtime server args."""
-    return _read_baseline_yaml_server_args(state)
-
-
 # TraceLens PerfModel per-op (bottom-up) roofline breakdown.
 
 #: Max-achievable (sustained) TFLOPS from TraceLens arch JSON files (same HBM
@@ -1121,25 +1088,20 @@ HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
 }
 
 
-def _resolve_achievable_tflops(gpu_type: str | None, precision_tag: str | None) -> float:
-    """Max-achievable TFLOPS from ``HW_SPECS_ACHIEVABLE``; 0.0 on miss."""
-    return _resolve_tflops(HW_SPECS_ACHIEVABLE, gpu_type, precision_tag)
+_COMPUTE_PEAK_SOURCES = {
+    "achievable": "TraceLens arch JSON (max-achievable sustained)",
+    "vendor": "vendor dense peak (achievable-table miss fallback)",
+    "unknown": "unavailable",
+}
 
 
 def resolve_compute_peak_provenance(gpu_type: str | None, precision_tag: str | None) -> dict[str, Any]:
     """Provenance for the compute-peak TFLOPS used by every compute ceiling."""
-    ach = _resolve_achievable_tflops(gpu_type, precision_tag)
-    if ach > 0:
-        return {
-            "compute_peak_convention": "achievable",
-            "compute_peak_tflops": ach,
-            "compute_peak_source": "TraceLens arch JSON (max-achievable sustained)",
-        }
-    vendor = _resolve_peak_tflops(gpu_type, precision_tag)
+    tflops, convention = _compute_peak(gpu_type, precision_tag)
     return {
-        "compute_peak_convention": "vendor" if vendor > 0 else "unknown",
-        "compute_peak_tflops": vendor,
-        "compute_peak_source": ("vendor dense peak (achievable-table miss fallback)" if vendor > 0 else "unavailable"),
+        "compute_peak_convention": convention,
+        "compute_peak_tflops": tflops,
+        "compute_peak_source": _COMPUTE_PEAK_SOURCES[convention],
     }
 
 
@@ -1262,8 +1224,6 @@ def compute_roofline_from_perfmodel(
     *, meta: "ModelMeta", target: ComputeTarget, shape: DecodeShape
 ) -> "PerfModelBreakdown | None":
     """Bottom-up decode + prefill roofline using inlined GEMM/SDPA formulas."""
-    if meta is None:
-        return None
     gpu_key = (target.gpu_type or "").strip().lower()
     spec = HW_SPECS_ACHIEVABLE.get(gpu_key) or HW_SPECS.get(gpu_key)
     if spec is None:
@@ -1272,7 +1232,7 @@ def compute_roofline_from_perfmodel(
     n_gpus = max(target.num_gpus, 1)
     bw_gbps = spec["hbm_bw_gbps"] * n_gpus
     tag = (target.precision_tag or "bf16").strip().lower()
-    f_peak_tflops = (_resolve_achievable_tflops(gpu_key, tag) or _resolve_peak_tflops(gpu_key, tag)) * n_gpus
+    f_peak_tflops = _compute_peak(gpu_key, tag)[0] * n_gpus
     if f_peak_tflops <= 0:
         return None
     bpe = float(meta.weight_dtype_bytes or 2.0)
