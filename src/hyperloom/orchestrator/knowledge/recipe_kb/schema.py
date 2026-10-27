@@ -237,8 +237,6 @@ class Recipe:
     stack_fingerprint: StackFingerprint = field(default_factory=StackFingerprint)
     sessions: list[SessionSummary] = field(default_factory=list)
 
-    # ----- hyperloom superset: KEEP'd kernel optimizations ----- Kernel-level wins + their E2E verification outcome.
-
     # ----- v2 audit / wire-compat fields -----
     authority: str = "EXPERIENTIAL"
     confidence: float = 0.85
