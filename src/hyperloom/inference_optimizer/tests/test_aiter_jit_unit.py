@@ -617,11 +617,11 @@ def test_serving_modules_cover_csv_ignores_asm_kernel_names(tmp_path):
     )
 
 
-def test_serving_modules_cover_csv_finds_cktile_in_blockscale_cktile_so(tmp_path):
+def test_serving_modules_cover_csv_finds_cktile_in_bpreshuffle_cktile_so(tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
     (jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so").write_bytes(b"a8w8_blockscale_bpreshuffle_ck")
-    (jit_dir / "module_gemm_a8w8_blockscale_cktile.so").write_bytes(
+    (jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle_cktile.so").write_bytes(
         b"a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_1"
     )
     csv_path = tmp_path / "merged.csv"
@@ -642,7 +642,7 @@ def test_serving_modules_cover_csv_false_when_cktile_only_in_tune_so(tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
     (jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so").write_bytes(b"a8w8_blockscale_bpreshuffle_ck")
-    (jit_dir / "module_gemm_a8w8_blockscale_cktile.so").write_bytes(b"other_cktile")
+    (jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle_cktile.so").write_bytes(b"other_cktile")
     (jit_dir / "module_gemm_a8w8_blockscale_cktile_tune.so").write_bytes(
         b"a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_1"
     )
@@ -693,7 +693,7 @@ def test_prepare_serving_so_skips_when_only_asm_names_are_outside_so(tmp_path, m
 
 
 @pytest.mark.parametrize("override_leaf", ["jit", "jit/build"])
-def test_prepare_serving_so_skips_when_cktile_lives_in_blockscale_cktile_so(tmp_path, monkeypatch, override_leaf):
+def test_prepare_serving_so_skips_when_cktile_lives_in_bpreshuffle_cktile_so(tmp_path, monkeypatch, override_leaf):
     monkeypatch.chdir(tmp_path)
     ambient = tmp_path / "site" / "aiter"
     (ambient / "configs").mkdir(parents=True)
@@ -713,7 +713,7 @@ def test_prepare_serving_so_skips_when_cktile_lives_in_blockscale_cktile_so(tmp_
         encoding="utf-8",
     )
     bp = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
-    cktile = jit_dir / "module_gemm_a8w8_blockscale_cktile.so"
+    cktile = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle_cktile.so"
     bp.write_bytes(b"a8w8_blockscale_bpreshuffle_ck")
     cktile.write_bytes(b"a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_1")
     csv_path = tmp_path / "merged.csv"
@@ -1122,3 +1122,52 @@ def test_drop_keeps_the_prewarm_s_modules_unless_a_registry_mismatch_names_them(
     result = aj.drop_serving_so_for_envs(None, backup_dir=tmp_path / "backup1", also_modules=(_BP_CK,))
     assert result["removed"] == [str(prewarmed / f"{_BP_CK}.so")]
     assert (prewarmed / f"{_BP_CKTILE}.so").is_file()
+
+
+#: A row of aiter's own bpreshuffle table: ``model_configs/a8w8_blockscale_bpreshuffle_tuned_gemm_dsv3.csv``,
+#: sha256 8ec8ffce..., the same file the image ships.
+_DSV3_BPRESHUFFLE_CKTILE_ROW = (
+    "gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio\n"
+    "gfx950,256,8192,7168,4608,cktile,27,0,299.1261,"
+    "a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_2,1809.16,0.62923,0.0\n"
+)
+_DSV3_CKTILE_KERNEL = b"a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_2"
+
+
+def test_a_bpreshuffle_table_s_cktile_row_maps_to_the_bpreshuffle_cktile_module(tmp_path):
+    csv_path = tmp_path / "a8w8_blockscale_bpreshuffle_tuned_gemm_dsv3.csv"
+    csv_path.write_text(_DSV3_BPRESHUFFLE_CKTILE_ROW, encoding="utf-8")
+    [(name, libtype)] = aj.csv_jit_kernel_rows(csv_path)
+    assert aj.serving_module_for_kernel(name, libtype, _BP_MODULES) == _BP_CKTILE
+    plain = aj.AITER_ENV_TO_SERVING_MODULES["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"]
+    assert aj.serving_module_for_kernel(name, libtype, plain) == "module_gemm_a8w8_blockscale_cktile"
+
+
+@pytest.mark.parametrize("built_into", [_BP_CKTILE, "module_gemm_a8w8_blockscale_cktile"])
+def test_prepare_reads_a_bpreshuffle_cktile_row_from_the_bpreshuffle_cktile_module(tmp_path, monkeypatch, built_into):
+    """The bpreshuffle build carrying the row is kept; one lacking it is moved aside, whatever the other module holds."""
+    monkeypatch.chdir(tmp_path)
+    jit = tmp_path / "aiter" / "jit"
+    (jit / "build").mkdir(parents=True)
+    (jit.parent / "configs").mkdir()
+    (jit.parent / "configs" / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv").write_text(
+        _DSV3_BPRESHUFFLE_CKTILE_ROW, encoding="utf-8"
+    )
+    for module in (_BP_CKTILE, "module_gemm_a8w8_blockscale_cktile"):
+        (jit / f"{module}.so").write_bytes(_DSV3_CKTILE_KERNEL if module == built_into else b"other_cktile")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
+
+    result = aj.prepare_serving_so_for_csvs({}, backup_dir=tmp_path / "backup")
+
+    assert (jit / "module_gemm_a8w8_blockscale_cktile.so").is_file()
+    if built_into == _BP_CKTILE:
+        assert result["action"] == "skip"
+        assert (jit / f"{_BP_CKTILE}.so").is_file()
+    else:
+        assert result["action"] == "invalidate"
+        assert result["removed"] == [str(jit / f"{_BP_CKTILE}.so")]
+
+
+def test_a_shared_cktile_name_in_a_registry_mismatch_names_both_blockscale_cktile_modules():
+    observed = f"gemm_a8w8_blockscale_cktile kernel '{_DSV3_CKTILE_KERNEL.decode()}' is not present"
+    assert set(aj.registry_mismatch_modules(observed)) == {"module_gemm_a8w8_blockscale_cktile", _BP_CKTILE}
