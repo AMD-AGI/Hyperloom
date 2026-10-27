@@ -288,7 +288,10 @@ class KeepCheckpointMixin:
         iteration = int(pending["iteration"])
         existing = self.archive.load_meta(iteration)
         if existing:
-            if existing.get("decision") != DecisionLabel.KEEP.value or existing.get("commit_hash") != result.commit_hash:
+            if (
+                existing.get("decision") != DecisionLabel.KEEP.value
+                or existing.get("commit_hash") != result.commit_hash
+            ):
                 raise ValueError(f"candidate archive conflicts with pending KEEP iteration {iteration}")
             return
         archived = self.archive.record(
