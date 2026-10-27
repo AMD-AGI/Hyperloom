@@ -770,3 +770,22 @@ def test_a_confirmation_that_is_refused_ends_the_run_finally_with_the_reason(run
     document = _exit(run)
     assert document["final"] is True and document["returncode"] == 2
     assert "previous container's work cannot be confirmed gone" in document["error"]
+
+
+# -- where the results go ----------------------------------------------------------------------------------------
+def test_the_session_package_is_written_into_the_archive_not_the_container(run, monkeypatch):
+    from hyperloom.inference_optimizer.breakdown.session_package import PACKAGE_SUBDIR, package_session_artifacts
+
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", "/workspace")  # a host or image default must not win
+    packaged = []
+
+    def optimize(argv):
+        session = Path(_session_json(run))
+        (session / "state.json").write_text("{}")
+        packaged.append(package_session_artifacts(session, session_id="s1"))
+        return 0
+
+    monkeypatch.setattr(entry, "_optimize_main", optimize)
+    entry.main(["run"])
+    archive = Path(_session_json(run)) / "archive"
+    assert packaged == [archive / PACKAGE_SUBDIR / "s1.zip"] and packaged[0].is_file()

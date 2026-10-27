@@ -42,6 +42,7 @@ from hyperloom.hosted.campaign import FLOW_MULTIBRANCH, CampaignError, CampaignS
 from hyperloom.hosted.host_info import HostInfo, HostInfoError, Var, read_host_info, take_host_info
 from hyperloom.hosted.mcp_host_tools import register_host_tools
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
+from hyperloom.inference_optimizer.breakdown.session_package import ENV_PACKAGE_DEST_ROOT
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 from hyperloom.inference_optimizer.session.paths import (
     ENV_USER_DATA_PATH,
@@ -116,7 +117,7 @@ def _run() -> int:
     # From here on the host-only inputs live in ``info`` only: no child process may inherit them.
     info = take_host_info(os.environ, require=())
     session_dir = _prepare_session_dir(spec, info)
-    ensure_archive_root(session_dir)
+    os.environ[ENV_PACKAGE_DEST_ROOT] = str(ensure_archive_root(session_dir))  # the package outlives the container
     os.environ[ENV_IMAGE] = spec.framework_image
     _announce_grant(info)
     if stop_request_path(session_dir).is_file():
