@@ -130,15 +130,8 @@ class RemoteWarmRecipeAdapter:
                 self._cache[canonical_id] = row
         return self._cache[canonical_id]
 
-    def get_recipe(
-        self,
-        *,
-        canonical_id: str,
-        version: int | None = None,
-        prefer: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | None:
+    def get_recipe(self, *, canonical_id: str) -> dict[str, Any] | None:
         """Return the exact record; degraded tiers are ranked by T0 via ``search``."""
-        del version, prefer
         return self._read(canonical_id)
 
     @staticmethod

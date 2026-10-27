@@ -384,7 +384,7 @@ function-lines src/hyperloom/orchestrator/knowledge/recipe_kb/dispatcher.py::Rec
 function-lines src/hyperloom/orchestrator/knowledge/recipe_kb/local_store.py::LocalRecipeStore.put_recipe 62
 function-lines src/hyperloom/orchestrator/knowledge/recipe_kb/schema.py::Recipe.from_dict 60
 function-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_build_warm_start_context 57
-function-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::run_t0_anchor 53
+function-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::run_t0_anchor 51
 function-lines src/hyperloom/orchestrator/knowledge/remote_recipe/client.py::RemoteRecipeClient.read 75
 function-lines src/hyperloom/orchestrator/knowledge/remote_recipe/client.py::RemoteRecipeClient.write_if_better 68
 function-lines src/hyperloom/orchestrator/knowledge/remote_recipe/models.py::KBSelectionProfile.from_state 59
@@ -399,7 +399,6 @@ function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._run_
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator._admit_gpu_specialist 56
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator._reconcile_cancelled_policy_denied_integrate_tasks 54
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.reap_dispatched_task 61
-function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.run_task_registered 70
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._create_delegated_task 59
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_request 57
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_single_verdict 75

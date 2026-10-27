@@ -175,8 +175,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
     async def close_db_after_executions(self) -> None:
         """Drain physical cleanup and completion before the entry-point loop exits.
 
-        An unconfirmed execution retains its database and capacity. In particular,
-        cancelling an asyncio task cannot establish that its worker thread stopped.
+        An execution that has not settled keeps its database: it may still write
+        through it. In particular, cancelling an asyncio task cannot establish
+        that its worker thread stopped.
         """
         for entry in self._inflight_actions.values():
             entry.scope.cancel(reason="dispatcher_shutdown")
@@ -317,8 +318,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         -- the channel the blocking side polls -- and work that is listening on
         it is given :data:`_COOPERATIVE_CANCEL_GRACE_SEC` to stop itself and
         return through its own ``finally`` blocks. Past that bound only the
-        caller is cancelled; shielded execution retains capacity until cleanup
-        actually returns.
+        caller is cancelled; the shielded execution runs on and keeps its
+        capacity until it settles a terminal row of its own.
 
         Every scope is cancelled before the first await, so a caller that is
         itself being cancelled still leaves no action running unattended: the
@@ -733,6 +734,36 @@ class DispatcherCollaborator(CoordinatorCollaborator):
 
         return _report
 
+    async def _record_dispatch_evidence(
+        self, task: Task, lease: Any, release_resources: Callable[[], Awaitable[bool]]
+    ) -> None:
+        """Record a task's dispatch evidence, or give back what it holds and refuse.
+
+        Args:
+            task: The task row about to run.
+            lease: The lane lease the dispatch holds, if any.
+            release_resources: The execution's slot release, which reports
+                whether the worker confirmed its physical cleanup.
+
+        Raises:
+            RuntimeError: The evidence was not durably recorded, in which case
+                nothing ran and the row is left queued.
+        """
+        from hyperloom.orchestrator.state.task_registry import record_task_dispatch
+
+        try:
+            record_task_dispatch(task)
+        except Exception as exc:
+            # Nothing ran under this lease and the row stays queued, so its
+            # lanes go back whatever cleanup says: holding them would make
+            # the task's own next dispatch find them busy, for good.
+            if not await release_resources():
+                log.warning("dispatcher: task=%s refused with cleanup unconfirmed", task.task_id)
+            if lease is not None:
+                await self.locks.release(lease)
+            self._inflight_actions.pop(task.task_id, None)
+            raise RuntimeError(f"refusing to start task {task.task_id!r}: dispatch evidence write failed") from exc
+
     async def run_task_registered(
         self,
         task: Task,
@@ -789,44 +820,13 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 self._inflight_actions[task.task_id] = _InflightAction(task.kind, handle, cancel_scope)
 
         async def release_resources() -> bool:
-            if held.gpu_specialist_lease is not None:
-                closed = await asyncio.to_thread(held.gpu_specialist_lease.close)
-                if closed is not True:
-                    log.warning("dispatcher: task=%s GPU cleanup unconfirmed; retaining capacity", task.task_id)
-                    return False
-            if held.gpu_lease is not None:
-                await self.gpu_specialist_pool.release(held.gpu_lease)
-            return True
+            if held.gpu_lease is None and held.gpu_specialist_lease is None:
+                return True
+            return await self.gpu_specialist_pool.release_execution(
+                held.gpu_lease, held.gpu_specialist_lease, task.task_id
+            )
 
-        # Fresh tasks carry the phase coordinates frozen when their row was
-        # authored. Legacy rows have no record and remain legacy on resume.
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ActionDispatch, PhaseCycle
-        from hyperloom.orchestrator.state.task_registry import task_dispatch_record
-
-        dispatch_record = task_dispatch_record(task)
-        if dispatch_record is not None:
-            try:
-                recorded = phase_event.record_dispatch(
-                    ActionDispatch(
-                        at=PhaseCycle(str(dispatch_record["phase"]), int(dispatch_record["macro_cycle"])),
-                        action=str(task.kind or ""),
-                        task_id=str(task.task_id or ""),
-                        tick=int(dispatch_record["tick"]),
-                        dispatch_class=str(dispatch_record["dispatch_class"]),
-                        allowed=bool(dispatch_record["allowed"]),
-                        denial_rule=dispatch_record["denial_rule"],
-                        dispatched_unix=time.time(),
-                    )
-                )
-                if not recorded:
-                    raise RuntimeError("dispatch evidence was not durably recorded")
-            except Exception as exc:
-                cleanup_confirmed = await release_resources()
-                if cleanup_confirmed and lease is not None:
-                    await self.locks.release(lease)
-                self._inflight_actions.pop(task.task_id, None)
-                raise RuntimeError(f"refusing to start task {task.task_id!r}: dispatch evidence write failed") from exc
+        await self._record_dispatch_evidence(task, lease, release_resources)
 
         async def execute_and_complete() -> SubAgentResult:
             result = await self.sub.run_task(

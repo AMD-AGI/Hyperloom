@@ -114,11 +114,13 @@ class ReconcileReport:
     Attributes:
         leases_reaped: Lease rows the pass swept.
         leases_unverifiable: Lane rows still held after the sweep by a holder
-            that ended without confirming its cleanup. Nothing decides these:
-            no probe here can tell a lane in use from one merely abandoned, so
-            they are retained by contract rather than left over by accident.
-            Not a failure count -- but the number an operator needs to see
-            climb, and the maintenance summary carries it out of here.
+            that ended. A holder releases its lanes where it writes its
+            terminal row, so each row here is one that release never reached:
+            the coordinator died in between, or the task was failed from the
+            outside. Nothing decides these: no probe here can tell a lane in
+            use from one merely abandoned. Not a failure count -- but the
+            number an operator needs to see climb, and the maintenance summary
+            carries it out of here.
         settled: ``(round_id, outcome)`` for every round this pass ended.
         handed_off: Rounds moved onto the successor that owes their result.
         failed_tasks: Task ids marked failed on proof their process is gone.
@@ -310,21 +312,22 @@ class Reconciler:
         work without releasing -- the pid on the lane row is this process.
         2026-09-21: six lanes were held that way for two hours, starving 19
         queued tasks, by holders that had already ended and whose processes had
-        gone with them. The same thing would happen under this code, and is
-        meant to: nothing here decides that a lane is free. What changed is that
-        it announces itself within a tick, naming the lane and the statement
-        that clears it, instead of taking an hour of py-spy and sqlite to find.
+        gone with them. Nothing here would decide those lanes were free either;
+        what keeps them from getting this far is that a holder now releases its
+        lanes where it writes its terminal row. Whatever still arrives announces
+        itself within a tick, naming the lane and the statement that clears it,
+        instead of taking an hour of py-spy and sqlite to find.
 
-        A holder that ended with its cleanup unconfirmed keeps its lane, and
-        nothing here takes it back. Seven rounds of review each proposed a
-        cheaper proof that the lane was free -- the holder is terminal, its
-        recorded process group is empty, no pidfile names a live server -- and
-        each was shown by probe to be a proxy a real process can slip out of. A
+        What arrives is the residue: a lane whose release never ran at all, the
+        coordinator having died between the row and the release, or the task
+        having been failed from the outside. Nothing here takes those back.
+        Every cheaper proof that such a lane is free -- the holder is terminal,
+        its recorded process group is empty, no pidfile names a live server --
+        was shown by probe to be a proxy a real process can slip out of. A
         served process is setsid'd by design, its pidfile appears only after it
         answers, and a cmdline is a guess. Releasing a lane wrongly puts two
-        rounds on the same cards, which corrupts quietly; holding one wrongly
-        stalls a queue until an operator spends 90 seconds. The asymmetry
-        decides it.
+        rounds on the same cards, which corrupts quietly, so these are counted
+        and handed to an operator instead.
 
         So this pass reclaims only what liveness alone settles
         (:meth:`reap_dead_holders`), and everything else is counted and handed

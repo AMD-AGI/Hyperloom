@@ -26,7 +26,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     cid_to_path_components,
     recipe_canonical_id,
 )
-from hyperloom.orchestrator.knowledge.workload_tags import WORKLOAD_SHAPE_FIELDS, workload_shape_tags
+from hyperloom.orchestrator.knowledge.workload_tags import workload_shape_tags
 from hyperloom.inference_optimizer.breakdown.recorder import warm_start_event as _warm_start_event
 from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     RecipeIdentity,
@@ -52,36 +52,16 @@ def _default_status_emitter(line: str) -> None:
     log.info("%s", line)
 
 
-def _build_warm_prefer(shared_state: Any, framework_version: str) -> dict[str, Any]:
-    """Assemble the ``prefer`` similarity hints from SharedState so a closer-workload recipe is reranked first."""
-    prefer: dict[str, Any] = {}
-    for attr in WORKLOAD_SHAPE_FIELDS:
-        val = getattr(shared_state, attr, None)
-        if val not in (None, "", 0):
-            prefer[attr] = val
-    fv = str(framework_version or "").strip()
-    if fv:
-        prefer["framework_version"] = fv
-    wl_extra = getattr(shared_state, "baseline_workload_extra", None) or {}
-    if isinstance(wl_extra, Mapping):
-        for key in ("quant_scheme", "workload_mode"):
-            v = str(wl_extra.get(key) or "").strip()
-            if v:
-                prefer[key] = v
-    return prefer
-
-
-def _warm_recipe_source(row: Mapping[str, Any] | None, kb: Any) -> str:
+def _warm_recipe_source(kb: Any) -> str:
     """Return the source tag for a Recipe warm-start row."""
-    del row
     return str(getattr(kb, "backend_name", "") or "recipe-kb")
 
 
 def _experience_rows(raw: Any, required_key: str, label: str) -> list[dict[str, Any]]:
     """Normalise a recipe row's ``lessons`` / ``pitfalls`` into flat rows.
 
-    The stored shape is flat — ``Recipe.to_dict`` and the ``_normalise_*``
-    helpers write ``{statement, ...}`` / ``{description, ...}``. The remote
+    The stored shape is flat — ``Recipe.to_dict`` writes ``{statement, ...}`` /
+    ``{description, ...}``. The remote
     projection (``knowledge_to_warm_recipe``) copies rows out of the record
     without going through ``Recipe.from_dict``, so a wrapped row can still arrive
     that way; this is the single place it is unwrapped, and no reader downstream
@@ -563,13 +543,10 @@ def _warm_search_tiers(
 
 def _candidate_dimension(row: Mapping[str, Any], key: str) -> str:
     """Read one seven-tuple dimension from metadata or canonical id."""
-    alias = "framework_name" if key == "framework" else key
     value = row.get(key)
-    if value in (None, ""):
-        value = row.get(alias)
     if value not in (None, ""):
         return str(value).strip().lower()
-    return str(_cid_dimensions(str(row.get("canonical_id") or "")).get(alias) or "").strip().lower()
+    return str(_cid_dimensions(str(row.get("canonical_id") or "")).get(key) or "").strip().lower()
 
 
 def _rank_warm_candidates(
@@ -681,14 +658,10 @@ def _cascade_warm_start_search(
     cid: str,
     identity: Mapping[str, Any],
     shape: Mapping[str, Any],
-    warm_prefer: Any,
 ) -> WarmMatch:
     """Resolve exact plus cumulative four-tier seven-tuple fallbacks."""
     exact_history: Mapping[str, Any] | None = None
-    exact = kb.get_recipe(
-        canonical_id=cid,
-        prefer=warm_prefer or None,
-    )
+    exact = kb.get_recipe(canonical_id=cid)
     if isinstance(exact, Mapping) and exact and str(exact.get("canonical_id") or "") == cid:
         if _recipe_is_actionable(exact):
             return WarmMatch(dict(exact), "exact", 1.0)
@@ -903,13 +876,7 @@ def _warm_start_lookup(
     # An agentx identity pins no sequence lengths, so a donor's are not compared against it.
     if not cid.startswith("agentx:"):
         shape.update(isl=getattr(shared_state, "isl", None), osl=getattr(shared_state, "osl", None))
-    recipe, tier, confidence = _cascade_warm_start_search(
-        kb,
-        cid=cid,
-        identity=identity,
-        shape=shape,
-        warm_prefer=_build_warm_prefer(shared_state, identity["framework_version"]),
-    )
+    recipe, tier, confidence = _cascade_warm_start_search(kb, cid=cid, identity=identity, shape=shape)
     # A bare T0 anchor (no best_config) demotes to seed_only.
     if recipe and not _recipe_is_actionable(recipe):
         tier, confidence = "seed_only", 0.0
@@ -927,7 +894,7 @@ def _warm_start_lookup(
     return match, _build_warm_start_context(
         match=identity_match,
         canonical_id=cid,
-        source=_warm_recipe_source(recipe, kb),
+        source=_warm_recipe_source(kb),
         config_donor=donor,
     )
 
@@ -950,11 +917,9 @@ def run_t0_anchor(
     request: T0AnchorRequest,
     *,
     on_status: Callable[[str], None] = _default_status_emitter,
-    session_dir: Path | None = None,
+    session_dir: Path,
 ) -> None:
     """Run the T0 recipe-snapshot anchor and seven-tuple warm-start search."""
-    if session_dir is None:
-        raise ValueError("run_t0_anchor requires an explicit session_dir")
     # The local JSON store remains inference-only.
     if getattr(kb, "mode", "") != "remote" and agentx_active(
         benchmark_mode=getattr(shared_state, "benchmark_mode", "")
