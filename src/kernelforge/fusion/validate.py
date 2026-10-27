@@ -1102,8 +1102,7 @@ def eager_trace_alignment(
     anchor = str(evidence.get("anchor") or "").strip()
     if not anchor:
         return None, "no anchored trace evidence to check the eager arm against"
-    seen = [str(n) for n in (observed or []) if str(n).strip()]
-    if not seen:
+    if not observed:
         return None, "harness reported no eager kernel names; alignment unchecked"
 
     neighbours: list[str] = []
@@ -1113,12 +1112,12 @@ def eager_trace_alignment(
             if text and text != anchor and text not in neighbours:
                 neighbours.append(text)
 
-    if not any(_same_kernel(anchor, name) for name in seen):
+    if not any(_same_kernel(anchor, name) for name in observed):
         return False, (
             f"eager arm never launched the anchor kernel ({_tail(anchor, 120)}); "
-            f"it issued {len(seen)} other kernel(s), so it is a different code path"
+            f"it issued {len(observed)} other kernel(s), so it is a different code path"
         )
-    matched = [n for n in neighbours if any(_same_kernel(n, name) for name in seen)]
+    matched = [n for n in neighbours if any(_same_kernel(n, name) for name in observed)]
     if neighbours and not matched:
         return False, (
             f"eager arm launched the anchor but none of its {len(neighbours)} recorded "

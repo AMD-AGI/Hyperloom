@@ -994,16 +994,14 @@ def build_fallback_document(
 ) -> str:
     """Compose a lesson document from what the loop itself observed."""
     end_reason, turns, summary_failure, plan = session.end_reason, session.turns, session.summary_failure, observed.plan
-    blocks = [line.strip() for line in (observed.findings or "").split("\n---\n") if line.strip()]
+    blocks = [line.strip() for line in observed.findings.split("\n---\n") if line.strip()]
     progress = []
     for entry in observed.progress_log or []:
         compact = " ".join(str(entry).split())
         if not compact or compact.lower().startswith("progress: not supported"):
             continue
         progress.append(compact[:240])
-    diff_summary = (observed.diff_summary or "").strip()
-    if not blocks and not diff_summary and not progress:
-        return ""
+    diff_summary = observed.diff_summary.strip()
 
     # Lead with a machine-authored provenance marker so the record cannot be mistaken for the resumed Implementer's
     # own account.
@@ -1011,8 +1009,10 @@ def build_fallback_document(
         opening = f"(no agent summary) session hit {len(blocks)} gate rejection(s): {blocks[-1].splitlines()[0][:80]}"
     elif diff_summary:
         opening = "(no agent summary) net change recorded without gate findings"
-    else:
+    elif progress:
         opening = f"(no agent summary) last observed: {progress[-1][:90]}"
+    else:
+        return ""
 
     out = [opening, ""]
     out.append(

@@ -76,7 +76,8 @@ from kernelforge.tracker.schema import ExperimentSubject
 
 if TYPE_CHECKING:
     from kernelforge.loop.campaign_config import CampaignConfig, CampaignConfigStore
-    from kernelforge.loop.runner import IterationConfig
+    from kernelforge.loop.campaign_setup import CampaignResolution
+    from kernelforge.loop.runner import IterationConfig, IterationLoop
     from kernelforge.loop.task_preparer import PrepareResult
     from kernelforge.roofline_ceiling.command import AnalystAgent
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator
@@ -396,6 +397,21 @@ class _RunReporter:
             result=status,
         )
         return status
+
+    def publish_final_best(self, *, llm_summary: bool) -> dict:
+        """Upgrade the per-run solution page for the final best, and return the run's KB read/write report.
+
+        A publication still pending after the summarised attempt is retried once without the LLM summary.
+        """
+        final_best_commit = str(getattr(self.loop_runner.run_state.best, "commit_hash", "") or "")
+        kb_write = self.attempt_remote_publication(commit=final_best_commit, llm_summary=llm_summary)
+        if self.remote_publication["pending_commit"]:
+            kb_write = self.attempt_remote_publication(commit=final_best_commit, llm_summary=False)
+        return {
+            "read": kb_read_status(self.warm_start.warm),
+            "write": kb_write,
+            "publication": _remote_publication_view(self.remote_publication, final_best_commit),
+        }
 
     def publish_remote_best(self, result) -> None:
         """Publish the KEEP the runner just made durable.
@@ -908,6 +924,15 @@ class _ForgeDeadline:
     deadline_unix: float
     finalize_reserve_sec: float
 
+    @classmethod
+    def for_budget(cls, budget: TimeBudget) -> _ForgeDeadline:
+        """The caller's absolute deadline, else ``--max-hours`` from now, and the env's finalization reserve."""
+        deadline_unix = budget.deadline_unix
+        if deadline_unix <= 0:
+            deadline_unix = time.time() + budget.max_hours * 3600.0
+        finalize_reserve_sec = max(30.0, float(os.environ.get("FORGE_FINALIZE_RESERVE_SEC", "120") or 120))
+        return cls(deadline_unix, finalize_reserve_sec)
+
     def remaining(self, *, reserve: float = 0.0) -> float:
         """Seconds left before the deadline, less whatever reserve the caller must leave."""
         return max(0.0, self.deadline_unix - time.time() - reserve)
@@ -937,19 +962,20 @@ def _resumed_profile_id(state_path: Path) -> str:
         raise click.ClickException(str(error)) from error
 
 
-def _check_workspace_matches_resume(
-    *,
-    resume: bool,
-    state_path,
-    campaign_store,
-    has_run_artifacts: bool,
-) -> None:
+def _check_workspace_matches_resume(*, resume: bool, campaign_store) -> None:
     """Refuse a workspace that does not match what ``--resume`` says about it.
 
     Resuming needs the records a prior campaign left; starting fresh needs a
     workspace that has none, so a second campaign cannot be read as a
     continuation of the first.
     """
+    campaign_root = campaign_store.root
+    state_path = campaign_root / "run_state.json"
+    has_run_artifacts = (
+        state_path.exists()
+        or (campaign_root / "events.jsonl").exists()
+        or any((campaign_root / "candidates").glob("iter_*"))
+    )
     if resume and not state_path.is_file():
         raise click.ClickException("--resume requires <workspace>/forge_experiments/run_state.json")
     if resume and not campaign_store.exists():
@@ -1019,6 +1045,164 @@ def _program_context(
         if reference_pointer:
             program_md = program_md + "\n\n" + reference_pointer
     return program_md
+
+
+def _resolve_campaign(request: ForgeLoopRequest, workspace: Path, agent_relay) -> CampaignResolution:
+    """The stored campaign on resume, else one created from this invocation's options."""
+    from kernelforge.loop.campaign_config import CampaignInputs
+    from kernelforge.loop.campaign_setup import resolve_campaign
+
+    try:
+        return resolve_campaign(
+            str(workspace),
+            CampaignInputs(
+                kernel=request.campaign.kernel,
+                driver=request.campaign.driver,
+                snr_threshold=request.campaign.snr_threshold,
+                source_files=request.identity.source_files,
+                program_md_file=request.task_context.program_md_file,
+                target_functions=request.identity.target_functions,
+                operator_name=request.identity.operator_name,
+                producer=request.knowledge.producer,
+                kernel_backend=request.task_context.kernel_backend or "",
+                git_branch=request.git_branch or "",
+                gpu_target=request.gpu.gpu_target or "",
+                gpu_type=request.gpu.gpu_type,
+                task_type=request.identity.task_type,
+                framework=request.identity.framework,
+                nproc_per_node=request.loop_shape.nproc_per_node,
+                bench_repeat=request.loop_shape.bench_repeat,
+                commit_new_paths=tuple(request.loop_shape.commit_new_paths),
+                agent_relay=agent_relay,
+            ),
+            resume=request.resume,
+            prepare_task=request.prepare_task,
+        )
+    except (OSError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+
+
+def _session_config(
+    probe: SpecialistProbeOptions,
+    campaign: CampaignConfig,
+    workspace: Path,
+    knowledge_config: KnowledgeConfig,
+    agent_runtime_overrides: dict,
+) -> Config:
+    """The Config this session runs under: the campaign's GPU and producer, plus only the overrides asked for."""
+    overrides = {"gpu_target": campaign.gpu_target, "gpu_type": campaign.gpu_type, "producer": campaign.producer}
+    # Only what was actually asked for: an override present with a None value still wins over ``Config.from_env``'s
+    # environment lookup, which is what made the FORGE_SPECIALIST_PROBE* variables dead on this path.
+    for _name, _value in (
+        ("specialist_probe", probe.specialist_probe),
+        ("specialist_probe_max", probe.specialist_probe_max),
+        ("specialist_probe_budget_sec", probe.specialist_probe_budget_sec),
+        ("specialist_probe_scratch_root", probe.specialist_probe_scratch_root),
+    ):
+        if _value is not None:
+            overrides[_name] = _value
+    overrides.update(agent_runtime_overrides)
+    if campaign.gpu_target:
+        os.environ["GPU_TARGET"] = campaign.gpu_target
+    return Config.from_env(workspace=str(workspace), knowledge_config=knowledge_config, **overrides)
+
+
+def _isolate_aiter_cache(experiments_dir: Path, max_cache_gb: float, source_files: list[str]) -> None:
+    """Give this attempt its own AITER runtime-build cache, so parallel forge processes never evict its kernels.
+
+    The pristine BASELINE shard is seeded with the package's prebuilt .so so the task-preparation preflight imports
+    warm modules instead of cold-compiling the CK instance-factory TU (>26 min on gfx950, past the preflight timeout).
+    """
+    from kernelforge.tools.aiter_cache import (
+        activate_aiter_cache_for_sources,
+        configure_aiter_cache_isolation,
+        seed_prebuilt_modules,
+    )
+
+    aiter_cache = configure_aiter_cache_isolation(experiments_dir, max_cache_bytes=int(max_cache_gb * 1024**3))
+    print(f"  [aiter-cache] isolated runtime builds under {aiter_cache.cache_root}")
+    baseline_cache = activate_aiter_cache_for_sources(source_files)
+    if baseline_cache is not None:
+        seed_stats = seed_prebuilt_modules(baseline_cache.aiter_jit_dir)
+        print(
+            f"  [aiter-cache] seeded {seed_stats['seeded']} prebuilt module(s)"
+            f" (skipped {seed_stats['skipped']}, errors {seed_stats['errors']})"
+            f" from {seed_stats['src'] or 'n/a'}"
+        )
+
+
+def _persist_prepared_campaign(run: _ForgeRun, workspace: Path, program_text: str | None) -> _ForgeRun:
+    """Fix a fresh campaign's driver digest and pristine base commit from the post-preparation tree, and save it."""
+    import dataclasses
+    import hashlib
+
+    from kernelforge.loop.campaign_config import derive_campaign_implementation_contract
+
+    campaign = run.campaign
+    iter_config = run.iter_config
+    prepared_driver_sha256 = hashlib.sha256(Path(iter_config.driver_script).read_bytes()).hexdigest()
+    prepared_base_commit = git_head(str(workspace)) or campaign.base_commit
+    prepared_signature, prepared_identity = derive_campaign_implementation_contract(
+        workspace_dir=str(workspace),
+        kernel_path=campaign.kernel_path,
+        source_files=campaign.source_files,
+        framework=campaign.framework,
+        base_commit=prepared_base_commit,
+    )
+    campaign = dataclasses.replace(
+        campaign,
+        driver_sha256=prepared_driver_sha256,
+        base_commit=prepared_base_commit,
+        implementation_signature=prepared_signature,
+        implementation_identity=prepared_identity,
+    )
+    iter_config.canonical_driver_sha256 = campaign.driver_sha256
+    iter_config.campaign_base_commit = campaign.base_commit
+    iter_config.implementation_signature = campaign.implementation_signature
+    iter_config.implementation_identity = dict(campaign.implementation_identity)
+    try:
+        run.campaign_store.save(campaign, program_md=program_text)
+    except (OSError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    return dataclasses.replace(run, campaign=campaign)
+
+
+def _build_loop_runner(run: _ForgeRun, source_files: list[str], session_timeout_sec: int) -> IterationLoop:
+    """Construct the IterationLoop, refusing a resume whose stored state it cannot continue."""
+    from kernelforge.loop.runner import IterationLoop
+    from kernelforge.roofline_ceiling.command import AnalystAgent
+
+    request = run.request
+    loop_runner = IterationLoop(
+        run.iter_config,
+        run.tracker,
+        run.config,
+        resume=request.resume,
+        ceiling_estimator=(
+            _make_ceiling_estimator(
+                workspace_dir=request.campaign.workspace_dir,
+                driver_script=run.iter_config.driver_script,
+                source_files=source_files,
+                # The runtime the implementer lanes settle on is resolved further down, after this point, and the
+                # analyst is a different role anyway: it reads the same provider/model ladder the standalone command
+                # reads, so the raw selection is what it needs and an empty one means "take the default".
+                analyst=AnalystAgent(
+                    provider=request.agent.agent_backend or "",
+                    model=request.agent.model or "",
+                    timeout_sec=session_timeout_sec,
+                    sandbox_mode=run.config.agent_sandbox_mode,
+                ),
+            )
+            if request.roofline_ceiling.enabled
+            else None
+        ),
+    )
+    if request.resume:
+        try:
+            loop_runner.validate_resume_preflight()
+        except (OSError, ValueError) as error:
+            raise click.ClickException(str(error)) from error
+    return loop_runner
 
 
 @dataclass(frozen=True)
@@ -1501,28 +1685,13 @@ def forge_loop(request: ForgeLoopRequest):
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    import dataclasses as _dataclasses
-    import hashlib as _hashlib
-
     _reject_incompatible_loop_options(producer=request.knowledge.producer)
 
-    from kernelforge.loop.campaign_config import (
-        CampaignConfigStore,
-        CampaignInputs,
-        derive_campaign_implementation_contract,
-    )
+    from kernelforge.loop.campaign_config import CampaignConfigStore
     from kernelforge.loop.run_state import WorkspaceLock, WorkspaceLockError
 
     # Absolute deadline shared by task preparation and optimization.
-    deadline_unix = request.budget.deadline_unix
-    if deadline_unix <= 0:
-        deadline_unix = time.time() + max_hours * 3600.0
-    finalize_reserve_sec = max(
-        30.0,
-        float(os.environ.get("FORGE_FINALIZE_RESERVE_SEC", "120") or 120),
-    )
-
-    deadline = _ForgeDeadline(deadline_unix, finalize_reserve_sec)
+    deadline = _ForgeDeadline.for_budget(request.budget)
 
     if request.roles.profile_timeout_sec <= 0:
         raise click.ClickException("--profile-timeout-sec must be positive")
@@ -1535,61 +1704,18 @@ def forge_loop(request: ForgeLoopRequest):
         raise click.ClickException(str(error)) from error
     click.get_current_context().call_on_close(workspace_lock.release)
 
-    from kernelforge.loop.campaign_setup import resolve_campaign
-
     campaign_store = CampaignConfigStore(str(workspace))
     campaign_root = campaign_store.root
     state_path = campaign_root / "run_state.json"
-    has_run_artifacts = (
-        state_path.exists()
-        or (campaign_root / "events.jsonl").exists()
-        or any((campaign_root / "candidates").glob("iter_*"))
-    )
-    _check_workspace_matches_resume(
-        resume=resume,
-        state_path=state_path,
-        campaign_store=campaign_store,
-        has_run_artifacts=has_run_artifacts,
-    )
+    _check_workspace_matches_resume(resume=resume, campaign_store=campaign_store)
     from kernelforge.cli.relay import resolve_relay_policy
 
     agent_runtime_overrides = _agent_runtime_overrides(request.agent)
     requested_relay_policy = resolve_relay_policy(
         Config.from_env(workspace=str(workspace), knowledge_config=knowledge_config, **agent_runtime_overrides)
     )
-
-    try:
-        resolution = resolve_campaign(
-            str(workspace),
-            CampaignInputs(
-                kernel=request.campaign.kernel,
-                driver=request.campaign.driver,
-                snr_threshold=request.campaign.snr_threshold,
-                source_files=request.identity.source_files or "",
-                program_md_file=request.task_context.program_md_file,
-                target_functions=request.identity.target_functions or "",
-                operator_name=request.identity.operator_name or "",
-                producer=request.knowledge.producer or "",
-                kernel_backend=request.task_context.kernel_backend or "",
-                git_branch=request.git_branch or "",
-                gpu_target=request.gpu.gpu_target or "",
-                gpu_type=request.gpu.gpu_type,
-                task_type=request.identity.task_type or "",
-                framework=request.identity.framework or "",
-                nproc_per_node=request.loop_shape.nproc_per_node,
-                bench_repeat=request.loop_shape.bench_repeat,
-                commit_new_paths=tuple(request.loop_shape.commit_new_paths),
-                agent_relay=requested_relay_policy,
-            ),
-            resume=resume,
-            prepare_task=request.prepare_task,
-        )
-    except (OSError, ValueError) as error:
-        raise click.ClickException(str(error)) from error
-
+    resolution = _resolve_campaign(request, workspace, requested_relay_policy)
     campaign = resolution.campaign
-    program_text = resolution.program_text
-    campaign_save_deferred = resolution.save_deferred
 
     # Resume tooling may override the complete Analysis workflow deadline via FORGE_PROFILE_TIMEOUT_SEC;
     # --profile-timeout-sec is the default when the env is unset.
@@ -1601,13 +1727,10 @@ def forge_loop(request: ForgeLoopRequest):
     source_files_list = [str((workspace / path).resolve()) for path in campaign.source_files]
     target_functions_list = list(campaign.target_functions)
     snr_threshold = campaign.snr_threshold
-    gpu_target = campaign.gpu_target
-    gpu_type = campaign.gpu_type
     kernel_backend = campaign.kernel_backend
     task_type = campaign.task_type
     git_branch = campaign.git_branch
     operator_name = campaign.operator_name
-    producer = campaign.producer
     # Measurement semantics come from the campaign, never from this invocation's defaults.
     nproc_per_node = campaign.nproc_per_node
     bench_repeat = campaign.bench_repeat
@@ -1616,28 +1739,7 @@ def forge_loop(request: ForgeLoopRequest):
     commit_new_paths = list(campaign.commit_new_paths)
     profiling_enabled = bool(request.roles.profiling and long_horizon)
 
-    overrides = {"gpu_target": gpu_target}
-    overrides["gpu_type"] = gpu_type
-    overrides["producer"] = producer
-    # Only what was actually asked for: an override present with a None value still wins over ``Config.from_env``'s
-    # environment lookup, which is what made the FORGE_SPECIALIST_PROBE* variables dead on this path.
-    probe = request.probe
-    for _name, _value in (
-        ("specialist_probe", probe.specialist_probe),
-        ("specialist_probe_max", probe.specialist_probe_max),
-        ("specialist_probe_budget_sec", probe.specialist_probe_budget_sec),
-        ("specialist_probe_scratch_root", probe.specialist_probe_scratch_root),
-    ):
-        if _value is not None:
-            overrides[_name] = _value
-    overrides.update(agent_runtime_overrides)
-    if gpu_target:
-        os.environ["GPU_TARGET"] = gpu_target
-    config = Config.from_env(
-        workspace=str(workspace),
-        knowledge_config=knowledge_config,
-        **overrides,
-    )
+    config = _session_config(request.probe, campaign, workspace, knowledge_config, agent_runtime_overrides)
     from kernelforge.cli.relay import probe_agent_profiles, resolve_session_relay
 
     try:
@@ -1651,39 +1753,13 @@ def forge_loop(request: ForgeLoopRequest):
     experiments_dir = request.artifacts.experiments_dir
     config.experiments_dir = Path(experiments_dir).resolve() if experiments_dir else campaign_root
     config.experiments_dir.mkdir(parents=True, exist_ok=True)
+    _isolate_aiter_cache(config.experiments_dir, request.artifacts.aiter_cache_max_gb, source_files_list)
 
-    # AITER cache isolation: give this attempt its own runtime-build cache so parallel forge processes never
-    # share/evict each other's kernels.
-    from kernelforge.tools.aiter_cache import (
-        activate_aiter_cache_for_sources,
-        configure_aiter_cache_isolation,
-        seed_prebuilt_modules,
-    )
-
-    aiter_cache = configure_aiter_cache_isolation(
-        config.experiments_dir,
-        max_cache_bytes=int(request.artifacts.aiter_cache_max_gb * 1024**3),
-    )
-    print(f"  [aiter-cache] isolated runtime builds under {aiter_cache.cache_root}")
-    baseline_cache = activate_aiter_cache_for_sources(source_files_list)
-
-    # Seed the pristine BASELINE shard with the package's prebuilt .so so the task-preparation preflight imports warm
-    # modules instead of cold-compiling the CK instance-factory TU (>26 min on gfx950, which blows the preflight
-    # timeout and leaves the driver stuck as a placeholder).
-    if baseline_cache is not None:
-        seed_stats = seed_prebuilt_modules(baseline_cache.aiter_jit_dir)
-        print(
-            f"  [aiter-cache] seeded {seed_stats['seeded']} prebuilt module(s)"
-            f" (skipped {seed_stats['skipped']}, errors {seed_stats['errors']})"
-            f" from {seed_stats['src'] or 'n/a'}"
-        )
-
-    from kernelforge.loop.runner import IterationLoop, LoopAgents, LoopCallbacks
+    from kernelforge.loop.runner import LoopAgents, LoopCallbacks
     from kernelforge.loop.runner import IterationConfig
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.loop.gate_settings import GateMeasurement
     from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions
-    from kernelforge.roofline_ceiling.command import AnalystAgent
 
     iter_config = IterationConfig(
         kernel_file=kernel,
@@ -1692,12 +1768,12 @@ def forge_loop(request: ForgeLoopRequest):
         campaign_base_commit=campaign.base_commit,
         snr_threshold=snr_threshold,
         max_time_hours=max(0.05, max_hours),
-        deadline_unix=deadline_unix - finalize_reserve_sec,
+        deadline_unix=deadline.deadline_unix - deadline.finalize_reserve_sec,
         git_branch=git_branch,
         workspace_dir=workspace_dir,
         experiment_id=request.artifacts.experiment_id or "",
-        backend=(kernel_backend or "").split("-", 1)[0],
-        kernel_backend=kernel_backend or "",
+        backend=kernel_backend.split("-", 1)[0],
+        kernel_backend=kernel_backend,
         task_type=task_type,
         source_files=source_files_list,
         target_functions=target_functions_list,
@@ -1760,34 +1836,8 @@ def forge_loop(request: ForgeLoopRequest):
     if request.prepare_task and not resume:
         _prepare_measurement_driver(run, program_md)
 
-    # Fix the fresh campaign's canonical driver digest and pristine base_commit from the POST-preparation state and
-    # persist the immutable config now.
-    if campaign_save_deferred:
-        prepared_driver_sha256 = _hashlib.sha256(Path(driver).read_bytes()).hexdigest()
-        prepared_base_commit = git_head(str(workspace)) or campaign.base_commit
-        prepared_signature, prepared_identity = derive_campaign_implementation_contract(
-            workspace_dir=str(workspace),
-            kernel_path=campaign.kernel_path,
-            source_files=campaign.source_files,
-            framework=campaign.framework,
-            base_commit=prepared_base_commit,
-        )
-        campaign = _dataclasses.replace(
-            campaign,
-            driver_sha256=prepared_driver_sha256,
-            base_commit=prepared_base_commit,
-            implementation_signature=prepared_signature,
-            implementation_identity=prepared_identity,
-        )
-        iter_config.canonical_driver_sha256 = campaign.driver_sha256
-        iter_config.campaign_base_commit = campaign.base_commit
-        iter_config.implementation_signature = campaign.implementation_signature
-        iter_config.implementation_identity = dict(campaign.implementation_identity)
-        run = _dataclasses.replace(run, campaign=campaign)
-        try:
-            campaign_store.save(campaign, program_md=program_text)
-        except (OSError, ValueError) as error:
-            raise click.ClickException(str(error)) from error
+    if resolution.save_deferred:
+        run = _persist_prepared_campaign(run, workspace, resolution.program_text)
 
     assembly = _prepare_assembly_task(run, program_md)
     assembly_preparation = assembly.preparation
@@ -1800,39 +1850,9 @@ def forge_loop(request: ForgeLoopRequest):
 
     # Construct the loop only after task preparation has resolved the profiling contract; IterationLoop snapshots that
     # readiness in its runtime state.
-    loop_runner = IterationLoop(
-        iter_config,
-        tracker,
-        config,
-        resume=resume,
-        ceiling_estimator=(
-            _make_ceiling_estimator(
-                workspace_dir=workspace_dir,
-                driver_script=iter_config.driver_script,
-                source_files=source_files_list,
-                # The runtime the implementer lanes settle on is resolved further down, after this point, and the
-                # analyst is a different role anyway: it reads the same provider/model ladder the standalone command
-                # reads, so the raw selection is what it needs and an empty one means "take the default".
-                analyst=AnalystAgent(
-                    provider=request.agent.agent_backend or "",
-                    model=request.agent.model or "",
-                    timeout_sec=session_timeout_sec,
-                    sandbox_mode=config.agent_sandbox_mode,
-                ),
-            )
-            if request.roofline_ceiling.enabled
-            else None
-        ),
-    )
-
-    if resume:
-        try:
-            loop_runner.validate_resume_preflight()
-        except (OSError, ValueError) as error:
-            raise click.ClickException(str(error)) from error
+    loop_runner = _build_loop_runner(run, source_files_list, session_timeout_sec)
 
     warm_start = _read_kb_warm_start(run, program_md, kb_warmstart_enabled)
-    warm = warm_start.warm
     program_md = warm_start.program_md
 
     # Source mapping, profiling, profile analysis, and potential analysis are produced together by the commit-bound
@@ -1933,9 +1953,7 @@ def forge_loop(request: ForgeLoopRequest):
         assembly_preparation=assembly_preparation,
         implementer=_Implementer(effective_implementer, effective_implementer_model),
     )
-    remote_publication = reporter.remote_publication
     _build_result = reporter.build_result
-    _attempt_remote_publication = reporter.attempt_remote_publication
     _publish_remote_best = reporter.publish_remote_best
     _checkpoint_on_best_committed = reporter.checkpoint_on_best_committed
 
@@ -1958,27 +1976,8 @@ def forge_loop(request: ForgeLoopRequest):
         )
     )
 
-    # Final graceful write: upgrade the (possibly interim) per-run solution page with the precise LLM-generated
-    # summary.
-    final_best_commit = str(getattr(loop_runner.run_state.best, "commit_hash", "") or "")
-    kb_write = _attempt_remote_publication(
-        commit=final_best_commit,
-        llm_summary=deadline.remaining(reserve=30.0) >= 60.0,
-    )
-    if remote_publication["pending_commit"]:
-        kb_write = _attempt_remote_publication(
-            commit=final_best_commit,
-            llm_summary=False,
-        )
+    kb_experience = reporter.publish_final_best(llm_summary=deadline.remaining(reserve=30.0) >= 60.0)
     loop_runner._checkpoint_llm_usage()
-    kb_experience = {
-        "read": kb_read_status(warm),
-        "write": kb_write,
-        "publication": _remote_publication_view(
-            remote_publication,
-            final_best_commit,
-        ),
-    }
     experiment_id = getattr(loop_runner.experiment, "experiment_id", None)
     loop_runner.llm_usage = usage.totals()
     _record_experiment_accounting(

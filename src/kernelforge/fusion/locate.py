@@ -454,8 +454,10 @@ def vllm_compile_pass_state(
     ).get(flag)
 
 
-def _unclaimable_note(state: PassState) -> str:
-    """Why a matched compile pass was not claimed, for the manifest."""
+def _unclaimable_note(state: Optional[PassState]) -> str:
+    """Why a matched compile pass was not claimed, for the manifest; ``""`` when there is nothing to note."""
+    if state is None or state.claimable or state.enabled is True:
+        return ""
     if not state.present:
         return (
             f"vLLM compile pass `{state.flag}` does not exist in this install "
@@ -540,7 +542,7 @@ def build_recipes(
     # LFM2_FUSED_RESIDUAL, zaya -> ZAYA_FUSED_QK).
     prefix = f"{model_type.upper()}_" if model_type else ""
 
-    bytes_share = diagnosis.category_bytes_share or {}
+    bytes_share = diagnosis.category_bytes_share
     recipes: list[Recipe] = []
     for pat, trigger_share in matched:
         confirmed = _source_confirms(pat, source_text) if source_text else None
@@ -561,7 +563,7 @@ def build_recipes(
         state = vllm_compile_pass_state(compile_pass, probe=install.pass_probe, runtime=runtime)
         # ONLY an enabled pass makes the candidate a no-op.
         covered = state is not None and state.enabled is True
-        pass_note = "" if state is None or state.claimable or covered else _unclaimable_note(state)
+        pass_note = _unclaimable_note(state)
         if pass_note:
             log.info("compile pass not claimed for %s: %s", pat.id, pass_note)
         already = covered or (_already_fused(pat, source_text) if source_text else False)

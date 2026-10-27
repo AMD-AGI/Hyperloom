@@ -44,6 +44,7 @@ class Var:
     RUN_CREATED_AT = "HYPERLOOM_RUN_CREATED_AT"
     STATE_DIR = "HYPERLOOM_STATE_DIR"
     EVENTS_DIR = "HYPERLOOM_EVENTS_DIR"
+    MCP_HOST = "HYPERLOOM_MCP_HOST"
     MCP_PORT = "HYPERLOOM_MCP_PORT"
     MCP_TOKEN = "HYPERLOOM_MCP_TOKEN"
     MCP_PUBLIC_URL = "HYPERLOOM_MCP_PUBLIC_URL"
@@ -65,6 +66,9 @@ class Var:
     NODE_NAME = "NODE_NAME"
     CLAW_SESSION_ID = "CLAW_SESSION_ID"
 
+
+#: Shortest accepted ``HYPERLOOM_MCP_TOKEN``; the MCP server refuses a shorter host token.
+MIN_MCP_TOKEN_LENGTH = 16
 
 #: Every variable whose value is a credential.  Removed from the environment by :func:`take_host_info`.
 SECRET_VARS: tuple[str, ...] = (
@@ -207,6 +211,7 @@ class HostInfo:
     run_created_at: datetime
     state_dir: Path
     events_dir: Path
+    mcp_host: str | None
     mcp_port: int | None
     mcp_token: Secret | None
     mcp_public_url: str | None
@@ -288,8 +293,14 @@ class _Reader:
     def commit_sha(self, name: str) -> str | None:
         return self._parsed(name, _commit_sha)
 
-    def secret(self, name: str, *, force: bool = False) -> Secret | None:
-        value = self._parsed(name, _plain_text, force=force)
+    def secret(self, name: str, *, force: bool = False, min_length: int = 0) -> Secret | None:
+        def parse(value: str) -> str:
+            text = _plain_text(value)
+            if len(text) < min_length:
+                raise ValueError(f"must be at least {min_length} characters")
+            return text
+
+        value = self._parsed(name, parse, force=force)
         return None if value is None else Secret(value)
 
 
@@ -456,8 +467,9 @@ def _build(reader: _Reader) -> HostInfo:
         run_created_at=reader.timestamp(Var.RUN_CREATED_AT),  # type: ignore[arg-type]
         state_dir=state_dir,  # type: ignore[arg-type]
         events_dir=events_dir or (state_dir / "events" if state_dir else None),  # type: ignore[arg-type]
+        mcp_host=reader.text(Var.MCP_HOST),
         mcp_port=reader.port(Var.MCP_PORT),
-        mcp_token=reader.secret(Var.MCP_TOKEN),
+        mcp_token=reader.secret(Var.MCP_TOKEN, min_length=MIN_MCP_TOKEN_LENGTH),
         mcp_public_url=reader.url(Var.MCP_PUBLIC_URL),
         sandbox_templates=reader.templates(Var.SANDBOX_TEMPLATES),
         e2b_api_url=reader.url(Var.E2B_API_URL),

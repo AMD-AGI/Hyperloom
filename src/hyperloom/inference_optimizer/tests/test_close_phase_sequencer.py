@@ -1568,8 +1568,6 @@ async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path:
     config = KnowledgeConfig(
         mode=KnowledgeStoreMode.REMOTE,
         local_root=str(tmp_path / "knowledge"),
-        kb_store_url="https://kb-store.example.test",
-        kb_store_token="test-token",
     )
     coord = Coordinator(
         session_dir=session_dir,
@@ -1609,8 +1607,6 @@ async def test_recipe_kb_t4_hook_retries_failed_finalize_after_close(
     config = KnowledgeConfig(
         mode=KnowledgeStoreMode.REMOTE,
         local_root=str(tmp_path / "knowledge"),
-        kb_store_url="https://kb-store.example.test",
-        kb_store_token="test-token",
     )
     coord = Coordinator(
         session_dir=session_dir,

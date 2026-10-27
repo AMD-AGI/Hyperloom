@@ -322,15 +322,12 @@ def _git_commit_all(
     workspace_dir: str,
     message: str,
     *,
-    allowed_paths: set[str] | None = None,
+    allowed_paths: set[str],
 ) -> str:
     """Commit exactly the approved non-protected paths, raising on failure."""
     before = git_head(workspace_dir)
     if not before:
         raise RuntimeError("could not resolve HEAD before warm-start commit")
-    if allowed_paths is None:
-        changed = git("diff", "--name-only", "HEAD", cwd=workspace_dir)
-        allowed_paths = {line.strip() for line in changed.stdout.splitlines() if line.strip()}
     git("add", "-A", "-f", "--", *sorted(allowed_paths), cwd=workspace_dir)
     staged = git("diff", "--cached", "--name-only", cwd=workspace_dir)
     staged_paths = {line.strip() for line in staged.stdout.splitlines() if line.strip()}

@@ -20,12 +20,7 @@ from .remote_recipe._vendor.kb_store_client import (
     KBStoreError,
     KnowledgeSections,
 )
-from .remote_recipe.models import (
-    CONFIG_SECTION,
-    KERNEL_SECTION,
-    PATCH_SECTION,
-    RECIPE_SECTIONS,
-)
+from .remote_recipe.models import CONFIG_SECTION, KERNEL_SECTION, PATCH_SECTION
 from .remote_recipe.sanitize import HOST_ORIGIN_KEY
 
 log = logging.getLogger(__name__)
@@ -114,9 +109,8 @@ class DraftArtifactSink:
         self._sources[source_key] = ref
         return ref
 
-    def write(self, text: str, *, rel: str, kind: str) -> str:
+    def write(self, text: str, *, rel: str) -> str:
         """Stage a document the builder synthesised rather than found on disk."""
-        del kind  # the ref already carries the column and kind
         self._members[rel] = text.encode("utf-8")
         return rel
 
@@ -462,12 +456,7 @@ def _stack_index(value: Any) -> int:
 
 
 __all__ = [
-    "CONFIG_SECTION",
-    "KERNEL_SECTION",
-    "PATCH_SECTION",
-    "RECIPE_SECTIONS",
     "ConfigKB",
-    "DraftArtifactSink",
     "KernelAgentKB",
     "OverlayProvenance",
     "PatchKB",

@@ -5,10 +5,8 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -36,15 +34,6 @@ def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
         "KB_STORE_TOKEN",
     ):
         monkeypatch.delenv(key, raising=False)
-
-
-def _ns(**overrides: Any) -> argparse.Namespace:
-    """Helper to build a CLI Namespace with the KB-related fields plus overrides."""
-    fields: dict[str, Any] = {
-        "degraded_kb": False,
-    }
-    fields.update(overrides)
-    return argparse.Namespace(**fields)
 
 
 def test_item1_canonical_id_is_5tuple_with_inference_prefix() -> None:
@@ -76,7 +65,7 @@ def test_item2_default_local_kb_root_is_user_data_path_knowledge(
 ) -> None:
     """Default resolution lands at ``${USER_DATA_PATH}/knowledge``."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    kb = _build_recipe_kb_dispatcher(_ns())
+    kb = _build_recipe_kb_dispatcher()
     assert kb.local.root == tmp_path / "knowledge"
 
 
@@ -88,7 +77,7 @@ def test_item2_explicit_root_wins_over_user_data_path(
     """``KNOWLEDGE_LOCAL_ROOT`` is the highest-priority tier."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path / "alt-root"))
-    kb = _build_recipe_kb_dispatcher(_ns())
+    kb = _build_recipe_kb_dispatcher()
     assert kb.local.root == tmp_path / "alt-root"
 
 
@@ -98,8 +87,7 @@ def test_item3_no_central_url_reads_and_writes_go_local(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path))
-    args = _ns()
-    kb = _build_recipe_kb_dispatcher(args)
+    kb = _build_recipe_kb_dispatcher()
     assert kb.mode == "local"
 
     cid = recipe_canonical_id(
@@ -148,7 +136,7 @@ def test_item4_local_mode_ignores_central_credentials(
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path))
     monkeypatch.setenv("KB_STORE_URL", "https://ambient.invalid")
     monkeypatch.setenv("KB_STORE_TOKEN", "ambient-secret")
-    kb = _build_recipe_kb_dispatcher(_ns())
+    kb = _build_recipe_kb_dispatcher()
     assert kb.mode == "local"
 
     kb.put_recipe(

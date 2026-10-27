@@ -27,6 +27,7 @@ from kernelforge.orchestrator.agent_response import (
     validated_agent_text,
 )
 from kernelforge.orchestrator.contracts import (
+    CaseEvidence,
     DispatchIntent,
     DispatchPlan,
     EvidenceRef,
@@ -93,6 +94,46 @@ def _as_bool(value: object) -> tuple[bool, bool]:
     if value is None or isinstance(value, bool):
         return bool(value), True
     return False, False
+
+
+_GLOBAL_EVIDENCE_KINDS = {
+    "analysis_artifact_catalog",
+    "analysis_bundle",
+    "analysis_cumulative_diff",
+    "analysis_summary",
+    "analysis_source_map",
+    "analysis_workflow",
+    "latest_lesson",
+    "supervisor_guidance",
+}
+_PROFILED_CASE_FLAGS = {
+    "analysis_profiled",
+    "analysis_profile_incremental",
+    "analysis_checkpoint_profile_interpretation",
+    "analysis_checkpoint_normalized_only",
+    "analysis_checkpoint_raw_profile_only",
+}
+
+
+def _case_evidence_refs(case: CaseEvidence) -> dict[str, EvidenceRef]:
+    """The evidence one scored case hands every specialist assigned to it, keyed by path."""
+    measurement = EvidenceRef(
+        kind="measurement",
+        path=f"case:{case.case_id}",
+        summary=(f"Canonical timing and Analysis flags for {case.case_id}."),
+    )
+    refs = {measurement.path: measurement}
+    if case.profile_summary_path:
+        if _PROFILED_CASE_FLAGS.isdisjoint(case.flags):
+            kind, label = "analysis_interpretation", "Analysis interpretation"
+        else:
+            kind, label = "profile", "Measured profile"
+        refs[case.profile_summary_path] = EvidenceRef(
+            kind=kind,
+            path=case.profile_summary_path,
+            summary=label + f" for {case.case_id}. Flags: " + f"{', '.join(case.flags) or '(none)'}.",
+        )
+    return refs
 
 
 @dataclass(frozen=True)
@@ -444,14 +485,14 @@ class OrchestrationAgent:
         intents: Sequence[DispatchIntent],
         notes: list[str],
     ) -> DispatchPlan:
-        case_ids = tuple(case.case_id for case in context.cases)
-        allowed_cases = set(case_ids)
+        case_evidence = {case.case_id: _case_evidence_refs(case) for case in context.cases}
+        case_ids = tuple(case_evidence)
         merged: dict[str, dict[str, object]] = {}
         for intent in intents:
             if intent.role_id not in definitions:
                 notes.append(f"dropped unknown role {intent.role_id!r}")
                 continue
-            selected_cases = [case_id for case_id in intent.target_case_ids if case_id in allowed_cases]
+            selected_cases = [case_id for case_id in intent.target_case_ids if case_id in case_evidence]
             if not selected_cases:
                 selected_cases = list(case_ids)
                 notes.append(f"bound role {intent.role_id!r} to all scored cases")
@@ -464,22 +505,18 @@ class OrchestrationAgent:
                 "reason": (intent.reason or f"Framework-assigned {intent.role_id} analysis"),
             }
 
-        required_roles = (
-            len(definitions) if context.search_mode == "DIVERSIFY" else min(self.min_assignments, len(definitions))
-        )
-        for role_id in sorted(definitions):
-            if len(merged) >= required_roles:
-                break
-            if role_id not in merged:
-                merged[role_id] = {
-                    "case_ids": list(case_ids),
-                    "reason": "Framework-completed dispatch coverage",
-                }
-                notes.append(f"added default role {role_id!r}")
+        required_roles = len(definitions) if context.search_mode == "DIVERSIFY" else self.min_assignments
+        for role_id in sorted(definitions.keys() - merged.keys())[: max(required_roles - len(merged), 0)]:
+            merged[role_id] = {
+                "case_ids": list(case_ids),
+                "reason": "Framework-completed dispatch coverage",
+            }
+            notes.append(f"added default role {role_id!r}")
 
+        # merged is never empty: plan_dispatch rejects empty definitions and at least one role is required.
         covered = {case_id for item in merged.values() for case_id in item["case_ids"]}
         missing = [case_id for case_id in case_ids if case_id not in covered]
-        if missing and merged:
+        if missing:
             first_role = next(iter(merged))
             merged[first_role]["case_ids"] = [
                 *merged[first_role]["case_ids"],
@@ -487,56 +524,20 @@ class OrchestrationAgent:
             ]
             notes.append(f"added missing cases to {first_role!r}: {', '.join(missing)}")
 
-        global_kinds = {
-            "analysis_artifact_catalog",
-            "analysis_bundle",
-            "analysis_cumulative_diff",
-            "analysis_summary",
-            "analysis_source_map",
-            "analysis_workflow",
-            "latest_lesson",
-            "supervisor_guidance",
+        global_refs = {
+            reference.path: reference for reference in context.evidence_refs if reference.kind in _GLOBAL_EVIDENCE_KINDS
         }
-        global_refs = [reference for reference in context.evidence_refs if reference.kind in global_kinds]
         source_ref = EvidenceRef(
             kind="source_map",
             path=context.source_map_path,
             summary="Current source map or anchor source.",
         )
-        case_by_id = {case.case_id: case for case in context.cases}
         assignments = []
         for index, (role_id, item) in enumerate(merged.items(), start=1):
-            refs = {reference.path: reference for reference in global_refs}
-            refs[source_ref.path] = source_ref
+            refs = {**global_refs, source_ref.path: source_ref}
             target_cases = tuple(item["case_ids"])
             for case_id in target_cases:
-                case = case_by_id[case_id]
-                measurement = EvidenceRef(
-                    kind="measurement",
-                    path=f"case:{case_id}",
-                    summary=(f"Canonical timing and Analysis flags for {case_id}."),
-                )
-                refs[measurement.path] = measurement
-                if case.profile_summary_path:
-                    profiled = any(
-                        flag
-                        in {
-                            "analysis_profiled",
-                            "analysis_profile_incremental",
-                            "analysis_checkpoint_profile_interpretation",
-                            "analysis_checkpoint_normalized_only",
-                            "analysis_checkpoint_raw_profile_only",
-                        }
-                        for flag in case.flags
-                    )
-                    reference = EvidenceRef(
-                        kind=("profile" if profiled else "analysis_interpretation"),
-                        path=case.profile_summary_path,
-                        summary=("Measured profile" if profiled else "Analysis interpretation")
-                        + f" for {case_id}. Flags: "
-                        + f"{', '.join(case.flags) or '(none)'}.",
-                    )
-                    refs[reference.path] = reference
+                refs.update(case_evidence[case_id])
             assignments.append(
                 SpecialistAssignment(
                     assignment_id=f"{role_id}-{index}",
@@ -1257,35 +1258,18 @@ class OrchestrationService:
                 "describe": specialist_run.reaped.describe(),
                 "pids": list(specialist_run.reaped.blockers),
             }
-        if (
-            specialist_outcomes
-            and not any(outcome.succeeded for outcome in specialist_outcomes)
-            and any(
-                outcome.failure is not None and outcome.failure.kind in {"backend_failure", "timeout"}
-                for outcome in specialist_outcomes
-            )
+        any_succeeded = any(outcome.succeeded for outcome in specialist_outcomes)
+        if not any_succeeded and any(
+            outcome.failure is not None and outcome.failure.kind in {"backend_failure", "timeout"}
+            for outcome in specialist_outcomes
         ):
             raise OrchestrationInfrastructureError("specialist infrastructure failed before any analysis was produced")
-        assignment_by_id = {assignment.assignment_id: assignment for assignment in dispatch_plan.assignments}
-        successful_assignments = [
-            assignment_by_id[outcome.assignment_id]
-            for outcome in specialist_outcomes
-            if outcome.succeeded and outcome.assignment_id in assignment_by_id
-        ]
-        covered_cases = sorted(
-            {case_id for assignment in successful_assignments for case_id in assignment.target_case_ids}
-        )
-        coverage = {
-            "successful_roles": sorted({assignment.role_id for assignment in successful_assignments}),
-            "covered_cases": covered_cases,
-            "missing_cases": sorted(context.case_ids - set(covered_cases)),
-            "failed_roles": sorted(outcome.role_id for outcome in specialist_outcomes if not outcome.succeeded),
-        }
+        coverage = self._round_coverage(context.case_ids, dispatch_plan, specialist_outcomes)
         diagnostics["coverage"] = coverage
         specialists = SpecialistRound(dispatch_plan, specialist_outcomes, coverage)
 
         synthesized_plans: list[SynthesizedPlan] = []
-        if any(outcome.succeeded for outcome in specialist_outcomes):
+        if any_succeeded:
             try:
                 synthesized_plans = await self._agent.synthesize_lane_plan_results(
                     context, specialists, lanes=lanes, usage=usage
@@ -1303,12 +1287,11 @@ class OrchestrationService:
         else:
             plans = [self._render_framework_plan(context, specialists)]
         planned_lanes = len(plans)
-        # Every round a synthesis produced is reviewed, at any width.
-        critic_eligible = bool(self._plan_critic is not None and optimization_plan_executable)
         draft_plan = ""
         critic_outcome = None
         plan_revised = False
-        if critic_eligible:
+        # Every round a synthesis produced is reviewed, at any width.
+        if self._plan_critic is not None and optimization_plan_executable:
             critic_outcome = await self._plan_critic.review(
                 context=context,
                 drafts=synthesized_plans,
@@ -1372,6 +1355,23 @@ class OrchestrationService:
             plan_critic=critic_outcome,
             plan_revised=plan_revised,
         )
+
+    @staticmethod
+    def _round_coverage(
+        case_ids: frozenset[str], dispatch_plan: DispatchPlan, outcomes: Sequence[SpecialistOutcome]
+    ) -> dict[str, list[str]]:
+        """The roles that succeeded or failed this round and the scored cases their analyses cover."""
+        assignment_by_id = {assignment.assignment_id: assignment for assignment in dispatch_plan.assignments}
+        successful_assignments = [assignment_by_id[outcome.assignment_id] for outcome in outcomes if outcome.succeeded]
+        covered_cases = sorted(
+            {case_id for assignment in successful_assignments for case_id in assignment.target_case_ids}
+        )
+        return {
+            "successful_roles": sorted({assignment.role_id for assignment in successful_assignments}),
+            "covered_cases": covered_cases,
+            "missing_cases": sorted(case_ids - set(covered_cases)),
+            "failed_roles": sorted(outcome.role_id for outcome in outcomes if not outcome.succeeded),
+        }
 
     @staticmethod
     def _narrow_round(

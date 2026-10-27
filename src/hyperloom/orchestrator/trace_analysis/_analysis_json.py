@@ -88,7 +88,6 @@ def _member_to_candidate(task: dict[str, Any], member: dict[str, Any]) -> dict[s
 
     pct_e2e = safe_float(member.get("pct_e2e"), None)
     time_ms = safe_float(member.get("time_ms"), None)
-    impact = task.get("impact") if isinstance(task.get("impact"), dict) else {}
 
     candidate: dict[str, Any] = {
         "name": name,
@@ -112,8 +111,6 @@ def _member_to_candidate(task: dict[str, Any], member: dict[str, Any]) -> dict[s
         "identification": first_str(task.get("identification")),
         "reasoning_for_slowdown": first_str(task.get("reasoning")),
         "resolution": first_str(task.get("resolution")),
-        "impact_low_e2e_pct": safe_float(impact.get("low"), None),
-        "impact_high_e2e_pct": safe_float(impact.get("high"), None),
     }
     if candidate["shapes"]:
         candidate["shape_provenance"] = "torch_trace"
