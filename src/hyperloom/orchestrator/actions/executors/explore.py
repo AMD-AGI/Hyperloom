@@ -63,7 +63,7 @@ from ._accuracy_gate import (
 )
 from . import _framework_switch_manifest as _switch_manifest
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
-from ._proposal_identity import BaseControls, effective_fingerprint, normalize_proposal
+from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
 from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_variant_filter import ServingStack
 from ._grid_base import (
@@ -83,6 +83,7 @@ from ._grid_runner import (
     SessionDirField,
     _build_variant_yaml,
     _num_gpus_for_config,
+    _safe,
     apply_aiter_moe_pin_filter,
     apply_compatibility_filter,
     apply_multi_node_invalid_variants,
@@ -190,21 +191,6 @@ def _carry_variant_metadata(src: Any, dst: Any) -> Any:
 def _variant_fingerprint(variant: Any) -> str:
     """The canonical fingerprint stamped on a variant before the round launched it."""
     return str(getattr(variant, "canonical_fp", "") or "")
-
-
-def _variant_control_fields(variant: Any) -> dict[str, Any]:
-    """Return non-default remove/unset/replace controls for identity and ledger rows."""
-    remove_args = to_str_list(getattr(variant, "remove_args", []))
-    unset_envs = to_str_list(getattr(variant, "unset_envs", []))
-    args_mode = str(getattr(variant, "args_mode", "append") or "append").strip().lower()
-    out: dict[str, Any] = {}
-    if remove_args:
-        out["remove_args"] = remove_args
-    if unset_envs:
-        out["unset_envs"] = unset_envs
-    if args_mode == "replace":
-        out["args_mode"] = "replace"
-    return out
 
 
 def _keep_uses_effective_args(
@@ -333,8 +319,6 @@ def _atom_default_grid(
     *,
     model_class: str,
     conc: int,
-    isl: int = 0,
-    osl: int = 0,
 ) -> list[GridVariant]:
     """Atom default explore grid, seeded from atom's known perf knobs."""
     mc_l = (model_class or "").strip().lower()
@@ -392,7 +376,7 @@ def _atom_default_grid(
     return variants
 
 
-def _xdit_default_grid(*, model_class: str) -> list[GridVariant]:
+def _xdit_default_grid() -> list[GridVariant]:
     """xDiT (diffusion) default explore grid, seeded from the empirical KB."""
     variants: list[GridVariant] = []
 
@@ -605,20 +589,13 @@ def _default_grid_for_framework(
     *,
     model_class: str,
     conc: int = 0,
-    isl: int = 0,
-    osl: int = 0,
 ) -> list[GridVariant]:
     """Framework-keyed default grid dispatch."""
     fw = (framework or "").strip().lower()
     if fw == "atom":
-        return _atom_default_grid(
-            model_class=model_class,
-            conc=conc,
-            isl=isl,
-            osl=osl,
-        )
+        return _atom_default_grid(model_class=model_class, conc=conc)
     if fw == "xdit":
-        return _xdit_default_grid(model_class=model_class)
+        return _xdit_default_grid()
     return []
 
 
@@ -698,11 +675,8 @@ def _lever_seeded_payload(payload: list[Any], levers: list[dict[str, Any]]) -> l
 
 def _seed_grid_payload(params: dict[str, Any], framework: str, yaml_envs: dict[str, Any]) -> list[Any]:
     model_class = str(params.get("model_class") or "").strip() or os.environ.get("MODEL_CLASS", "").strip()
-    conc, isl, osl = (
-        to_int(params.get(key.lower()) or yaml_envs.get(key) or os.environ.get(key) or 0, 0) or 0
-        for key in ("CONC", "ISL", "OSL")
-    )
-    seed = _default_grid_for_framework(framework, model_class=model_class, conc=conc, isl=isl, osl=osl)
+    conc = to_int(params.get("conc") or yaml_envs.get("CONC") or os.environ.get("CONC") or 0, 0) or 0
+    seed = _default_grid_for_framework(framework, model_class=model_class, conc=conc)
     if not seed:
         return []
     log.info(
@@ -830,7 +804,7 @@ class _ExploreRound:
         self.ctx = ctx
         self.params = params
         self.output_root = output_root
-        self.ss = extra.get("shared_state") or extra.get("state")
+        self.ss = extra.get("shared_state")
         self.phase_deadline = extra.get("phase_deadline")
         script, self.result_dir = _sanitized_overrides(params)
         self.target = BenchmarkTarget(
@@ -1027,7 +1001,7 @@ class _ExploreRound:
             gv.canonical_fp = effective_fingerprint(  # type: ignore[attr-defined]
                 gv.extra_server_args,
                 gv.extra_envs,
-                controls=_variant_control_fields(gv),
+                controls=controls_of(vars(gv)),
                 base=BaseControls(self.base_remove_args, self.base_unset_envs, self.args_mode),
             )
         self.grid = grid
@@ -1207,7 +1181,7 @@ class _ExploreRound:
         prior = measured_verdict(
             getattr(self.ss, "explore_search", None),
             fingerprint,
-            variant={"extra_args": gv.extra_server_args, "extra_envs": gv.extra_envs, **_variant_control_fields(gv)},
+            variant={"extra_args": gv.extra_server_args, "extra_envs": gv.extra_envs, **controls_of(vars(gv))},
             now=MeasuredOn(stack_of_measured(self.measured_against()), self.ws_sig, self.keep_threshold_pct),
         )
         if prior is None:
@@ -1324,10 +1298,6 @@ class _ExploreRound:
                 session_deadline_sec=self.session_deadline_sec, variant_expected_sec=self.decision_expected_sec
             ),
         )
-        if not results:
-            # run_grid returns one result per grid entry.
-            log.warning("explore: variant %s produced no result", gv.name)
-            return None
         return None if self._stopped_by_the_run(results[0], gv, idx, "decision") else results[0]
 
     async def _warmup(self, gv: GridVariant, run_gv: GridVariant, idx: int, slot: Path, lifecycle: Any) -> Any:
@@ -1439,7 +1409,7 @@ class _ExploreRound:
             "name": gv.name,
             "extra_server_args": gv.extra_server_args,
             "extra_envs": dict(gv.extra_envs),
-            **_variant_control_fields(gv),
+            **controls_of(vars(gv)),
             **_decision_fields(gv),
         }
 
@@ -1565,7 +1535,7 @@ class _ExploreRound:
                 "gain_pct": row["gain_pct"],
                 "extra_args": row["extra_server_args"],
                 "extra_envs": row["extra_envs"],
-                **_variant_control_fields(gv),
+                **controls_of(vars(gv)),
                 "provenance": row["provenance"],
                 "scope": row["scope"],
                 "ts": row["ts"],
@@ -1573,7 +1543,7 @@ class _ExploreRound:
         )
 
     def _keep(self, gv: GridVariant, run_gv: GridVariant, r: Any, row: dict[str, Any], meas: dict[str, Any]) -> dict:
-        control_fields = _variant_control_fields(gv)
+        control_fields = controls_of(vars(gv))
         run_remove_args = self._run_remove_args(gv)
         next_effective_args = compose_server_args(
             inherited_args=self.inherited_args,
@@ -1776,11 +1746,6 @@ class ExploreExecutor:
             return await _ExploreRound(ctx, params, output_root).run()
         except _RoundRefused as refusal:
             return refusal.result
-
-
-def _safe(name: str) -> str:
-    """Filesystem-safe slug for variant directory names."""
-    return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
 
 
 explore_executor = ExploreExecutor()

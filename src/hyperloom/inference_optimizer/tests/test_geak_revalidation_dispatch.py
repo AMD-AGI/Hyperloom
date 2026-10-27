@@ -335,15 +335,13 @@ async def test_geak_launch_controls_reach_materialized_rebench(
             output_subdir=output,
         )
         calls.append(yaml.safe_load(path.read_text())["benchmark"]["envs"])
-        if len(calls) > 1:
-            return []
         return [
             VariantResult(
                 name="geak_revalidate",
                 extra_server_args=kwargs["grid"][0].extra_server_args,
                 extra_envs=dict(kwargs["grid"][0].extra_envs),
-                status="succeeded",
-                output_throughput=120.0,
+                status="succeeded" if len(calls) == 1 else "failed",
+                output_throughput=120.0 if len(calls) == 1 else None,
             )
         ]
 
@@ -1152,7 +1150,7 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     import yaml
 
     from hyperloom.orchestrator.actions.executors import ExploreExecutor
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult, _build_variant_yaml
 
     baseline = tmp_path / "baseline.yaml"
     baseline.write_text(
@@ -1215,7 +1213,8 @@ async def test_internal_stack_rebench_preserves_baseline_script(
             output_subdir=output,
         )
         calls.append((kwargs, yaml.safe_load(variant_path.read_text())["benchmark"]))
-        return []
+        variant = kwargs["grid"][0]
+        return [VariantResult(variant.name, variant.extra_server_args, dict(variant.extra_envs), status="failed")]
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", capture_grid)
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease", lambda **_kwargs: None)

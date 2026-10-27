@@ -3196,8 +3196,6 @@ def test_atom_default_grid_mla_moe_model_emits_all_gated_variants():
     grid = _atom_default_grid(
         model_class="moe_mla",
         conc=64,
-        isl=1024,
-        osl=1024,
     )
     names = _names(grid)
     assert len(grid) >= 5, f"too few variants: {names}"
@@ -3216,8 +3214,6 @@ def test_atom_default_grid_dense_model_omits_moe_mla_mtp():
     grid = _atom_default_grid(
         model_class="dense",
         conc=8,
-        isl=512,
-        osl=512,
     )
     names = _names(grid)
     assert "atom_ep" not in names
@@ -3233,8 +3229,6 @@ def test_atom_default_grid_fp8_model_emits_kv_fp8():
     grid = _atom_default_grid(
         model_class="moe_fp8",
         conc=16,
-        isl=512,
-        osl=512,
     )
     names = _names(grid)
     assert "atom_kv_fp8" in names
@@ -3280,8 +3274,6 @@ def test_default_grid_for_framework_atom_returns_seeded_grid():
         "atom",
         model_class="moe_mla",
         conc=64,
-        isl=1024,
-        osl=1024,
     )
     assert grid, "atom framework should produce a non-empty default grid"
     assert any(v.name == "atom_level_2" for v in grid)

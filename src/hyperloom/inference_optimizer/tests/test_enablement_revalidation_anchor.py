@@ -18,7 +18,7 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors import BaselineExecutor, ExploreExecutor
 from hyperloom.orchestrator.actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
-from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml, GridRecipe
+from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml, GridRecipe, VariantResult
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
@@ -224,7 +224,8 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
             timeout=10,
         )
         child_receipts.append(json.loads((output / "child_receipt.json").read_text()))
-        return []
+        variant_row = kwargs["grid"][0]
+        return [VariantResult(variant_row.name, variant_row.extra_server_args, dict(variant_row.extra_envs), "failed")]
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", launch_grid)
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease", lambda **_kwargs: None)
