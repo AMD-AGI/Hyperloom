@@ -103,7 +103,12 @@ def load_records(backup_root: Path | str) -> list[dict[str, Any]]:
 
 
 def _backup_of(record: Mapping[str, Any]) -> Any:
-    """The copy a record names, under whichever field name its writer used."""
+    """The copy a record names.
+
+    ``backup_path`` is the name no-git records carried before they were written as ``backup``. The fallback
+    retires once no backup ledger or persisted warm-tree ``nogit_backups`` record written under that name can
+    still be resumed or restored.
+    """
     return record.get("backup_path", record.get("backup"))
 
 
@@ -136,12 +141,6 @@ def _validate_restore_record(record: Mapping[str, Any]) -> None:
     backup = _backup_of(record)
     if backup is not None and not _names_absolute_path(backup):
         raise ValueError(f"invalid backup path: {target}")
-    action = record.get("revert_action")
-    # ``restore_old`` is no longer written; a ledger an older build left behind still has to restore.
-    if action not in (None, "restore", "restore_old", "delete"):
-        raise ValueError(f"invalid restore action: {target}")
-    if (action == "delete" and existed) or (action in ("restore", "restore_old") and not existed):
-        raise ValueError(f"contradictory restore action: {target}")
     mode = record.get("mode")
     if mode is not None and not _is_file_mode(mode):
         raise ValueError(f"invalid backup mode: {target}")
