@@ -435,7 +435,7 @@ class PlanCriticAgent:
                 ),
                 timeout=watchdog_timeout_sec(budget_sec),
             )
-        except Exception as error:  # noqa: BLE001 - provider boundary
+        except Exception as error:  # noqa: BLE001 - isolation boundary: one round's plan-critic review
             return self._fail_open(error, started_at=started_at)
 
         try:
@@ -544,7 +544,7 @@ class PlanCriticAgent:
                 role=_WIDTH_BLOCK_LABEL,
                 allow_incomplete=True,
             )
-        except Exception as error:  # provider boundary
+        except Exception as error:  # isolation boundary: one width-block repair call
             log.warning("plan critic width repair pass failed: %s", error, exc_info=True)
             return self._unrepaired(
                 ruling,
@@ -626,6 +626,7 @@ class PlanCriticAgent:
             "plan critic failed open to the draft after %.3fs: %s",
             duration_sec,
             detail,
+            exc_info=error,
         )
         return PlanCriticOutcome(
             verdict="NOT_REVIEWED",

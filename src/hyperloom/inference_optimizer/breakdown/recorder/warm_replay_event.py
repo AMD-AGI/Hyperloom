@@ -36,7 +36,7 @@ from hyperloom.common.coerce import (
 from .event_fields import failure_row as _failure_row, now_iso_seconds as _now
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink, make_sink
+from .event_sink import EventSink
 from .event_timeline import EventHeader, finish_event, open_event
 from .sections import WARM_REPLAY_EVENT_SECTIONS
 
@@ -231,7 +231,7 @@ class WarmReplayEventRecorder:
     from both halves.
     """
 
-    def __init__(self, sink: RecordSink, request: WarmReplayRequest):
+    def __init__(self, sink: EventSink, request: WarmReplayRequest):
         """Bind a recorder to one replay's event.
 
         A warm recipe has no single id: it takes ``tier``, the record
@@ -630,7 +630,7 @@ def make_warm_replay_recorder(
 
     if decline_unbound("warm replay"):
         return None
-    recorder = WarmReplayEventRecorder(make_sink(warm_replay_event_id(phase, macro_cycle), producer=PRODUCER), request)
+    recorder = WarmReplayEventRecorder(EventSink(warm_replay_event_id(phase, macro_cycle), producer=PRODUCER), request)
     if open_event_on_timeline:
         recorder.begin()
     else:

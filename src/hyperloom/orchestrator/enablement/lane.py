@@ -152,7 +152,7 @@ class EnablementLane(CoordinatorCollaborator):
         try:
             await self._coord.enablement_build.maybe_enqueue_specialist_requested_build()
             await self._coord.enablement_build.maybe_escalate_to_targeted_build(launch_log, attempt=stalled)
-        except Exception:
+        except Exception:  # isolation boundary: the build escalation step, kept apart from the dispatch
             log.exception("enablement: build escalation failed")
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
@@ -620,7 +620,7 @@ class EnablementLane(CoordinatorCollaborator):
         ):
             try:
                 await pump()
-            except Exception as exc:
+            except Exception as exc:  # isolation boundary: one enablement pump of the tick
                 log.exception("ENABLEMENT %s failed", pump.__name__)
                 stage = f"enablement_pump:{pump.__name__}"
                 # Named here rather than by the coordinator's generic handler:
@@ -861,7 +861,7 @@ def _archive_round(state: Any, res: dict[str, Any], session_dir: str | Path, att
                     gpu_type=state.gpu_type or os.environ.get("GPU_TYPE") or None,
                 ),
             )
-    except Exception:
+    except (OSError, ValueError):
         log.warning("enablement: artifact write failed", exc_info=True)
     # Absolute and not the session-relative path the archive records: the
     # revalidation baseline opens this file directly. Only a copy that

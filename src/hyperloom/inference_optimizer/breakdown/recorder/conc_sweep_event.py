@@ -43,7 +43,7 @@ from .event_fields import (
 )
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink
+from .event_sink import EventSink
 from .event_timeline import EventHeader, finish_event, open_event
 from .sections import CONC_SWEEP_EVENT_SECTIONS
 
@@ -380,7 +380,7 @@ class ConcSweepEventRecorder:
 
     def __init__(
         self,
-        sink: RecordSink,
+        sink: EventSink,
         *,
         task_id: str = "",
         task_kind: str = "",
@@ -1019,7 +1019,7 @@ def assemble_conc_sweep_ext(
 
 
 def make_conc_sweep_recorder(
-    sink: RecordSink | None,
+    sink: EventSink | None,
     *,
     task_id: str = "",
     task_kind: str = "",

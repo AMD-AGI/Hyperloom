@@ -54,7 +54,7 @@ def _sweep_integrate_aiter_locks(*, reason: str) -> dict[str, Any]:
 
     try:
         stats = sweep_stale_aiter_locks_if_dead()
-    except Exception as exc:  # noqa: BLE001 - cache hygiene must not hide benchmark results
+    except (OSError, RuntimeError) as exc:
         log.warning("integrate_handler: aiter lock sweep failed before %s: %r", reason, exc)
         return {"errors": 1, "exception": repr(exc)}
     if stats.get("skipped_live"):

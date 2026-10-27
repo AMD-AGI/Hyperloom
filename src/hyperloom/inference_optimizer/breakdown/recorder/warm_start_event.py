@@ -30,7 +30,7 @@ from hyperloom.common.coerce import text_or_none as _text_or_none, to_float as _
 from .event_fields import bool_or_none as _bool_or_none, failure_row as _failure_row, now_iso_seconds as _now
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink, make_sink
+from .event_sink import EventSink
 from .event_timeline import EventHeader, finish_event, open_event
 from .sections import WARM_START_EVENT_SECTIONS
 
@@ -149,7 +149,7 @@ class WarmStartEventRecorder:
 
     def __init__(
         self,
-        sink: RecordSink,
+        sink: EventSink,
         *,
         requested_canonical_id: str,
         scope: Mapping[str, Any] | None,
@@ -314,7 +314,7 @@ def make_warm_start_recorder(
     if decline_unbound("warm_start"):
         return None
     recorder = WarmStartEventRecorder(
-        make_sink(warm_start_event_id(macro_cycle), producer=PRODUCER),
+        EventSink(warm_start_event_id(macro_cycle), producer=PRODUCER),
         requested_canonical_id=requested_canonical_id,
         scope=scope,
         start_time=start_time or _now(),

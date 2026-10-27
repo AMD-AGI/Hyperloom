@@ -615,8 +615,6 @@ def test_the_archive_merges_onto_the_round_the_dispatch_opened(_bound_session):
         {"path": "reports/enablement/spec-1/launch_config.yaml", "role": "launch_config"},
         {"path": "reports/enablement/spec-1/server.log", "role": "server_log"},
     ]
-    # Read out of the manifest, so it cannot name a copy the manifest lacks.
-    assert rows[0]["accepted_config_path"] == "reports/enablement/spec-1/launch_config.yaml"
     # The round's own paths stay, as identity rather than as a way to fetch.
     assert rows[0]["patches_applied"] == ["/s/patches/moe.diff"]
 
@@ -638,7 +636,6 @@ def test_a_copy_the_archive_refused_is_named_nowhere(_bound_session):
 
     row = _ext(_bound_session)["attempts"]["rows"][0]
     assert row["files"] == []
-    assert row["accepted_config_path"] is None
 
 
 def test_an_unreadable_spool_on_finish_does_not_raise(_bound_session, monkeypatch):

@@ -15,12 +15,17 @@ window opens and closes, so a round under a power cap reports how much of it the
 and at what graphics clock they actually ran. The serving cards are the ones holding a serving-sized share of VRAM
 during that phase, so a TP4 round on an unpinned eight-card host is averaged over the four cards it runs on.
 
+On a node with Node Power Management enabled, each sample also reads the node's power and the limit firmware enforces
+on it. Firmware meets that limit by lowering every card's power, which the cards' own throttle accumulators do not count,
+so a round held back by the node limit reports how much of the phase it spent there.
+
 Nothing here raises: telemetry that fails must cost the round nothing, and a round with no reading reports ``None``
 rather than zero.
 """
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import subprocess  # nosec B404 - fixed read-only amd-smi invocation.
@@ -30,7 +35,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from hyperloom.common.env import EnvValueError, env_float
-from hyperloom.common.gpu_power_settings import gfx_clock_limits, gpu_power_sampling_unavailable, single_clock_limit
+from hyperloom.common.gpu_power_settings import (
+    NPM_ENABLED,
+    gfx_clock_limits,
+    gpu_power_sampling_unavailable,
+    single_clock_limit,
+)
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +72,15 @@ _SERVING_VRAM_FRACTION = 0.10
 #: A serving card held back by its power limit for at least this share of the measured phase is reported as power
 #: throttled: its throughput was set by the power cap, not by the clock limit.
 _POWER_THROTTLE_REPORT_FRACTION = 0.10
+_FRACTION_DIGITS = 4
+
+#: A node sample at or above this share of the NPM limit is one firmware is holding at that limit. A held node reads at
+#: the limit, or above it once every card is down at its minimum power; a node the limit is not holding reads below.
+_NODE_AT_LIMIT_FRACTION = 0.99
+
+#: The card directories whose ``board`` may hold the node's NPM files. amdgpu creates them on a card whose XGMI physical
+#: node id is 0 (``smu_v13_0_6_ppt.c``): one card of a hive, so one card on an MI350 node, and every card without a hive.
+_BOARD_GLOB = "/sys/class/drm/card*/device/board"
 
 #: The ``amd-smi metric`` fields each power sample reads, and those read at each measured window's open and close.
 _SAMPLE_METRICS = ("--power", "--mem-usage", "--clock")
@@ -142,6 +161,49 @@ def parse_throttle_sample(payload: Any) -> dict[int, tuple[float, float]]:
     return out
 
 
+def _read_node_power() -> tuple[float, float] | None:
+    """``(node power W, enforced node limit W)`` while NPM is enabled; ``None`` on a node without it, or with it off.
+
+    Read from sysfs rather than ``amd-smi``, which reports the limit but not the node's power.
+
+    Raises:
+        OSError, ValueError: the node's files exist but cannot be read, or report no limit.
+    """
+    for board in sorted(glob.glob(_BOARD_GLOB)):
+        try:
+            status = _read_board(board, "npm_status").strip()
+        except FileNotFoundError:
+            continue
+        if status != NPM_ENABLED:
+            # Without an XGMI hive every card publishes its own copy; one reading disabled says nothing of the others.
+            continue
+        limit = float(_read_board(board, "cur_node_power_limit"))
+        if limit <= 0:
+            raise ValueError(f"{board}: NPM is enabled with a node power limit of {limit:g} W")
+        return float(_read_board(board, "node_power")), limit
+    return None
+
+
+def _read_board(board: str, name: str) -> str:
+    return Path(board, name).read_bytes().decode()
+
+
+def _node_fields(samples: list[tuple[float, float]]) -> dict[str, Any] | None:
+    """The node's measured-phase power under NPM and the share of samples held at its limit; ``None`` with none."""
+    if not samples:
+        return None
+    powers = [power for power, _ in samples]
+    limits = {limit for _, limit in samples}
+    held = sum(1 for power, limit in samples if power >= limit * _NODE_AT_LIMIT_FRACTION)
+    return {
+        "limit_w": limits.pop() if len(limits) == 1 else None,
+        "avg_power_w": round(sum(powers) / len(powers), 2),
+        "max_power_w": round(max(powers), 2),
+        "samples": len(samples),
+        "limited_fraction": round(held / len(samples), _FRACTION_DIGITS),
+    }
+
+
 def _query_amd_smi(run: Callable[..., subprocess.CompletedProcess], *metrics: str) -> Any:
     done = run(
         ["amd-smi", "metric", *metrics, "--json"],  # nosec B603 B607
@@ -162,7 +224,7 @@ def _clock_fields(
     return {
         "sclk_mean_mhz": round(sum(clocks) / len(clocks), 1) if clocks else None,
         "sclk_max_mhz": single_clock_limit(limits or ()),
-        "power_throttle_fraction": round(delta[1] / delta[0], 4) if delta and delta[0] > 0 else None,
+        "power_throttle_fraction": round(delta[1] / delta[0], _FRACTION_DIGITS) if delta and delta[0] > 0 else None,
     }
 
 
@@ -172,7 +234,7 @@ def _power_fields(watts: list[float], peak_vram: float) -> dict[str, Any]:
         "avg_power_w": round(sum(watts) / len(watts), 2),
         "max_power_w": round(max(watts), 2),
         "samples": len(watts),
-        "peak_vram_fraction": round(peak_vram, 4),
+        "peak_vram_fraction": round(peak_vram, _FRACTION_DIGITS),
     }
 
 
@@ -211,6 +273,8 @@ class GpuPowerRecorder:
         self._gpus = None if gpus is None else set(gpus)
         self._interval = max(_MIN_INTERVAL_SEC, float(interval_sec))
         self._query = query or (lambda *metrics: _query_amd_smi(subprocess.run, *metrics))
+        self._node: list[tuple[float, float]] = []
+        self._node_errors = 0
         self._clocks: dict[int, list[float]] = {}
         self._clock_limits: dict[int, set[float]] = {}
         # Throttle counters at the open of the current measured window; per card ``[ticks, ppt, windows read]`` over
@@ -253,6 +317,7 @@ class GpuPowerRecorder:
             if self._phase == "measured":
                 # Sampled first: the counter read takes about a second and must not delay the first power sample.
                 self._sample_once()
+                self._sample_node()
                 if self._window_open is None:
                     self._window_open = self._read_throttle()
             elif self._window_open is not None:
@@ -287,7 +352,7 @@ class GpuPowerRecorder:
         try:
             payload = self._query(*_SAMPLE_METRICS)
             reading = parse_power_sample(payload)
-        except Exception as exc:
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError, TypeError) as exc:
             log.debug("gpu_power: amd-smi query failed", exc_info=True)
             with self._lock:
                 self._errors += 1
@@ -305,6 +370,22 @@ class GpuPowerRecorder:
                     if current is not None:
                         self._clocks.setdefault(gpu, []).append(current)
                     self._clock_limits.setdefault(gpu, set()).update(limits)
+
+    def _sample_node(self) -> None:
+        try:
+            sample = _read_node_power()
+        except (OSError, ValueError):
+            log.debug("gpu_power: node power read failed", exc_info=True)
+            with self._lock:
+                self._node_errors += 1
+            return
+        if sample is not None and self._phase == "measured":
+            with self._lock:
+                self._node.append(sample)
+
+    def _node_summary(self) -> dict[str, Any]:
+        with self._lock:
+            return {"node": _node_fields(list(self._node)), "node_query_errors": self._node_errors}
 
     def _complete_throttle_totals(self) -> dict[int, tuple[float, float]]:
         """Each card's ``(ticks, power-limited ticks)`` summed over every measured window, for the cards read across
@@ -346,7 +427,6 @@ class GpuPowerRecorder:
             }
             for gpu in sorted(watts)
         }
-        throttled = _power_throttled(per_gpu, serving)
         avg = (
             round(sum(per_gpu[str(g)]["avg_power_w"] for g in serving) / len(serving), 2)
             if serving and not unread
@@ -365,11 +445,12 @@ class GpuPowerRecorder:
             "avg_power_w": avg,
             "max_power_w": peak,
             "per_gpu": per_gpu,
-            "power_throttled_gpus": throttled,
+            "power_throttled_gpus": _power_throttled(per_gpu, serving),
             "query_errors": errors,
             "last_error": last_error,
             "throttle_query_errors": throttle_errors,
             "throttle_last_error": throttle_last_error,
+            **self._node_summary(),
             "aborted": bool(aborted),
         }
 
@@ -396,6 +477,13 @@ class GpuPowerRecorder:
                 ", ".join(
                     _mhz(payload["per_gpu"][str(gpu)]["sclk_mean_mhz"]) for gpu in payload["power_throttled_gpus"]
                 ),
+            )
+        node = payload["node"]
+        if node and node["limited_fraction"] >= _POWER_THROTTLE_REPORT_FRACTION and not self._closed:
+            log.warning(
+                "gpu_power: the node was held at its NPM power limit (%s W) for %.0f%% of the measured phase",
+                node["limit_w"] if node["limit_w"] is not None else "changing",
+                node["limited_fraction"] * 100,
             )
         if self._closed or not self._output_path:
             self._closed = True

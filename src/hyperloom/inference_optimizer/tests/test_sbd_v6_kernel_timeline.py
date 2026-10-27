@@ -1383,12 +1383,12 @@ def test_attempts_are_ordered_by_when_they_started(tmp_path):
 
 def _record_inline_reprofile(recorder, *, task_id: str = "rp-1") -> None:
     """Dispatch a re-profile inline, the way the entry hook does."""
-    from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+    from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
     from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import RooflineRequest, make_roofline_recorder
 
     recorder.record_reprofile(KernelReprofile(ran=True, task_kind="roofline", trigger="gain", task_id=task_id))
     inline = make_roofline_recorder(
-        make_sink(recorder.event_id, producer="orchestrator"),
+        EventSink(recorder.event_id, producer="orchestrator"),
         RooflineRequest(task_id=task_id, task_kind="roofline", reason="kernel_entry_reprofile"),
         owns_event=False,
     )
@@ -1429,11 +1429,11 @@ def test_the_visits_own_measurements_are_held_by_the_event_that_asked_for_them(t
     and the measurement behind it in one place.
     """
     from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import BaselineRequest, make_baseline_recorder
-    from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+    from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
 
     recorder = _forge_recorder()
     guest = make_baseline_recorder(
-        make_sink(recorder.event_id, producer="orchestrator"),
+        EventSink(recorder.event_id, producer="orchestrator"),
         BaselineRequest(
             task_id="integrate-k001",
             task_kind="baseline",
@@ -1460,7 +1460,7 @@ def test_a_measurement_that_lands_after_the_visit_closed_is_still_published(tmp_
     The verdict they settle republishes the event, and that is what carries the measurement in.
     """
     from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import BaselineRequest, make_baseline_recorder
-    from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+    from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
     from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
 
     recorder = _forge_recorder()
@@ -1468,7 +1468,7 @@ def test_a_measurement_that_lands_after_the_visit_closed_is_still_published(tmp_
     assert _kernel_events(tmp_path)[0]["ext"]["measurements"] == []
 
     guest = make_baseline_recorder(
-        make_sink(recorder.event_id, producer="orchestrator"),
+        EventSink(recorder.event_id, producer="orchestrator"),
         BaselineRequest(
             task_id="integrate-stack-k001+k004",
             task_kind="baseline",

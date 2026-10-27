@@ -261,24 +261,22 @@ def test_summarize_without_a_resumable_provider(tmp_path):
     assert store.existing_iterations() == []
 
 
-def test_summarize_reports_why_a_failing_session_produced_nothing(tmp_path):
-    """The reason reaches the caller: a live run needs it to diagnose."""
+def test_summarize_propagates_a_failing_session_to_the_recording_caller(tmp_path):
+    """The loop's lesson step records the failure with its traceback, so it must reach it."""
     store = _store(tmp_path)
 
     async def broken(prompt: str) -> str:
         raise RuntimeError("backend exploded")
 
-    outcome = asyncio.run(
-        summarize_iteration(
-            store=store,
-            iteration=2,
-            end_reason="",
-            summarizer=broken,
+    with pytest.raises(RuntimeError, match="^backend exploded$"):
+        asyncio.run(
+            summarize_iteration(
+                store=store,
+                iteration=2,
+                end_reason="",
+                summarizer=broken,
+            )
         )
-    )
-    assert not outcome
-    assert "RuntimeError" in outcome.reason
-    assert "backend exploded" in outcome.reason
     assert store.existing_iterations() == []
 
 

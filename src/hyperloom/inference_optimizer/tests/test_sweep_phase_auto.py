@@ -9,6 +9,7 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 from types import SimpleNamespace
@@ -937,7 +938,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     """If conc_sweep enqueue raises, the hook records a terminal skip."""
 
     async def _boom(*args, **kwargs):
-        raise RuntimeError("simulated DB outage")
+        raise sqlite3.OperationalError("simulated DB outage")
 
     monkeypatch.setattr(coord.phase_sweep, "_enqueue_internal_conc_sweep_task", _boom)
     coord.shared_state.phase_history = [

@@ -1279,7 +1279,7 @@ def _record_model_gate_check(
             skip_reason=str(ext.get("skip_reason") or "") or None,
         )
         _write_model_gate_event(session_dir, event)
-    except Exception as exc:
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("failed to record SBD V6 model-gate check", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.check", exc=exc)
 
@@ -1290,7 +1290,7 @@ def _start_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
         event = _new_model_gate_event(args)
         setattr(args, _MODEL_GATE_EVENT_ATTR, event)
         _write_model_gate_event(session_dir, event)
-    except Exception as exc:
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("failed to initialize SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.start", exc=exc)
 
@@ -1306,7 +1306,7 @@ def _finish_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
         )
         event["end_time"] = now_iso(timespec="seconds")
         _write_model_gate_event(session_dir, event)
-    except Exception as exc:
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("failed to finalize SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.finish", exc=exc)
 
@@ -1340,7 +1340,7 @@ def _record_resumed_model_gate(
         ]
         setattr(args, _MODEL_GATE_EVENT_ATTR, event)
         _write_model_gate_event(session_dir, event)
-    except Exception as exc:
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("failed to record resumed SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.resume", exc=exc)
 
@@ -1355,7 +1355,8 @@ def _write_model_gate_breakdown(
         from ..breakdown import write_breakdown_json
 
         write_breakdown_json(session_dir)
-    except Exception as exc:  # noqa: BLE001 — never mask the gate failure
+    except Exception as exc:  # isolation boundary: the fail-fast session_breakdown.json
+        log.warning("session_breakdown.json write failed on %s fail-fast", failure_label, exc_info=True)
         print(
             f"WARNING: failed to write session_breakdown.json on {failure_label} fail-fast: {exc!r}",
             file=sys.stderr,
@@ -1396,7 +1397,8 @@ def _emit_breakdown_to_langfuse(session_dir: Path) -> None:
         flush_session(session_dir)
         patch_breakdown_langfuse(session_dir)
         record_session_breakdown(session_dir)
-    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
+    except Exception as exc:  # outermost telemetry sink: never masks the gate failure
+        log.warning("session_breakdown Langfuse push failed on fail-fast", exc_info=True)
         print(
             f"WARNING: failed to emit session_breakdown to Langfuse on fail-fast: {exc!r}",
             file=sys.stderr,
@@ -1420,7 +1422,8 @@ def _persist_gate_stop_report(session_dir: Path, *, stop_reason: str, reason: st
         state.closing_phase = True
         state.save(session_dir)
         write_stop_report(session_dir, state, stop_detail=reason)
-    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
+    except Exception as exc:  # isolation boundary: the gate stop report
+        log.warning("%s stop report persist failed", warning_label, exc_info=True)
         print(
             f"WARNING: failed to persist {warning_label} stop report: {exc!r}",
             file=sys.stderr,

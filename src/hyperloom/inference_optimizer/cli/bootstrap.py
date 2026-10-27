@@ -1029,14 +1029,14 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
         if int(disk_state.crash_count or 0) < live:
             disk_state.crash_count = live
             disk_state.save(session_dir)
-    except Exception:
+    except (OSError, ValueError, TypeError):
         log.exception("crash_count reconcile (state.json) failed (non-fatal)")
 
     try:
         from hyperloom.orchestrator.actions.executors.report import reconcile_final_crash_count
 
         reconcile_final_crash_count(session_dir, live)
-    except Exception:
+    except (OSError, ValueError, TypeError, AttributeError):
         log.exception("crash_count reconcile (final.json) failed (non-fatal)")
 
 

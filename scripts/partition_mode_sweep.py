@@ -830,7 +830,7 @@ def _restore_entry_mode(gpu_id: int, entry_mode: str, *, sudo: bool) -> bool:
     try:
         print(f"\nrestoring {entry_mode} on GPU {gpu_id}")
         set_mode(gpu_id, entry_mode, sudo=sudo)
-    except Exception as exc:  # noqa: BLE001 - operator script barrier
+    except Exception as exc:  # noqa: BLE001 - isolation boundary: the entry-mode restore; main exits 3
         traceback.print_exc()
         print(
             f"ERROR: could not restore {entry_mode} on GPU {gpu_id}: {exc}\n"
@@ -976,7 +976,7 @@ def _sweep_modes(args: argparse.Namespace, card: _Card, *, workload: BenchmarkWo
             except (SweepError, PartitionError) as exc:
                 result.error = str(exc)
                 print(f"  failed: {exc}")
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001 - isolation boundary: the mode in flight; restore and report still run
                 # Everything this script anticipates arrives as a SweepError or a PartitionError.
                 unexpected = f"{type(exc).__name__}: {exc}"
                 result.error = f"unexpected error: {unexpected}"
@@ -1056,7 +1056,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (SweepError, PartitionError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - outermost CLI main: card inspection before any change
         # Nothing has been set at this point, so there is no card to restore -- but the exit code still has to mean
         # something. 2 is for a refusal this script decided on, so an unmodelled failure gets its own code rather than
         # borrowing that one.

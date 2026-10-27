@@ -410,8 +410,8 @@ class ClaudeBackend:
                     server_factory=self.mcp_server_factory,
                     allowed_intents=self._offered_intents,
                 )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("emit_intent MCP setup failed: %s", exc)
+            except Exception as exc:  # isolation boundary: the emit_intent MCP server, recorded as setup_error
+                log.warning("emit_intent MCP setup failed: %s", exc, exc_info=True)
                 self.calls.append({"warn": f"emit_intent MCP setup failed: {exc!r}"})
                 self._mcp_setup_error = f"{type(exc).__name__}: {exc}"
                 cfg = None
@@ -605,8 +605,8 @@ class ClaudeBackend:
                 tool_factory=self.mcp_tool_factory,
                 server_factory=self.mcp_server_factory,
             )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("context tools MCP setup failed: %s", exc)
+        except Exception as exc:  # isolation boundary: the context-tools MCP server, recorded as a calls warning
+            log.warning("context tools MCP setup failed: %s", exc, exc_info=True)
             self.calls.append({"warn": f"context tools MCP setup failed: {exc!r}"})
             self._context_server_config = None
 
@@ -1060,7 +1060,7 @@ class ClaudeBackend:
             return
         try:
             await aclose()
-        except Exception:  # cleanup must not mask the turn result
+        except Exception:  # outermost finalizer: stream cleanup, which must not mask the turn result
             log.debug("claude SDK stream aclose failed", exc_info=True)
 
     @staticmethod

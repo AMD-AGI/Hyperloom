@@ -12,6 +12,7 @@ from typing import Any
 __all__ = [
     "EVENT_ID_FIELD",
     "SCOPE_FIELDS",
+    "fold_header",
     "group_rows",
     "rows_for_event",
     "sort_rows",
@@ -33,6 +34,16 @@ def rows_for_event(rows: Iterable[Any], event: str) -> list[dict[str, Any]]:
     if not wanted:
         return []
     return [dict(row) for row in rows if isinstance(row, Mapping) and str(row.get(EVENT_ID_FIELD) or "") == wanted]
+
+
+def fold_header(rows: Iterable[Any]) -> dict[str, Any]:
+    """Fold an event's event-level fragments into one header, later fragments
+    winning, without the event id."""
+    header: dict[str, Any] = {}
+    for row in rows:
+        if isinstance(row, Mapping):
+            header.update({k: v for k, v in row.items() if k != EVENT_ID_FIELD})
+    return header
 
 
 def _sort_token(value: Any) -> tuple[int, float, str]:

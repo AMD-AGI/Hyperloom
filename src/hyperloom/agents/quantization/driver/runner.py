@@ -6,6 +6,7 @@ import atexit
 import os
 import shutil
 import tempfile
+import traceback
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -315,11 +316,11 @@ async def run_one_attempt(
                 chunks.append(text)
                 if log:
                     log(f"[claude-sdk] {text[:1000]}")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - isolation boundary: one SDK quantization attempt
         # Capture but don't raise: valid artifacts may exist before the abort.
         sdk_error = f"{type(exc).__name__}: {exc}"
         if log:
-            log(f"[claude-sdk] WARNING: {sdk_error}")
+            log(f"[claude-sdk] WARNING: {sdk_error}\n{traceback.format_exc()}")
 
     return AttemptResult(
         workspace=workspace,

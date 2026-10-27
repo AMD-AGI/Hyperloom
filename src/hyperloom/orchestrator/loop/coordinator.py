@@ -134,7 +134,7 @@ def reap_orphaned_servers_best_effort(session_dir: Path, *, phase: str) -> None:
                 phase,
                 reaped,
             )
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         log.exception("coordinator: orphan server reaper failed at %s (ignored)", phase)
 
 
@@ -1131,8 +1131,7 @@ class Coordinator:
             await self._record_no_intent_turn(agent_name, str(exc)[:500])
             await self.conversation.advance_rendered_cursor(agent_name)
             return None
-        except Exception as exc:
-            # Catch-all so one agent's bad turn never stops the loop.
+        except Exception as exc:  # isolation boundary: one agent's reactor turn
             log.exception("reactor pass for %s raised", agent_name)
             await self.bus.record_observation(
                 "coordinator",

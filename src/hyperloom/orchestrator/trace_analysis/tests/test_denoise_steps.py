@@ -95,14 +95,19 @@ class TestCallSiteBinding:
         from hyperloom.orchestrator.trace_analysis import _trace_inputs as trace_inputs
 
         seen: dict = {}
+        resolve = ds.resolve_perstep_divisor
 
         def _recorder(*, requested_steps=None, inferred_steps=None):
             seen.update(requested_steps=requested_steps, inferred_steps=inferred_steps)
-            return ds.resolve_perstep_divisor(requested_steps=requested_steps, inferred_steps=inferred_steps)
+            return resolve(requested_steps=requested_steps, inferred_steps=inferred_steps)
 
         # The call site imports from the module at call time, so patch the source.
         monkeypatch.setattr(ds, "resolve_perstep_divisor", _recorder)
-        monkeypatch.setattr(dr, "build_report", lambda *a, **k: {"totals": {}})
+        monkeypatch.setattr(
+            dr,
+            "build_report",
+            lambda *a, **k: {"totals": {"kernel_roofline_efficiency": 0.0, "sigma_actual_kernel_us": 0.0}},
+        )
 
         trace = self._trace(tmp_path)
         run_dir = tmp_path / "run"

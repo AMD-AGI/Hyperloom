@@ -635,8 +635,8 @@ class _PreflightWork:
                 return True
             self.reasons.append(f"correctness mode produced no SNR/allclose metric ({cres.get('message')})")
             _record_stage_output(self.diagnostics, "correctness", cres)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("preflight correctness run raised: %s", exc)
+        except Exception as exc:  # isolation boundary: one correctness-stage run of the authored driver
+            log.warning("preflight correctness run raised: %s", exc, exc_info=True)
             self.reasons.append(f"correctness run raised {type(exc).__name__}: {exc}")
             self.diagnostics["correctness"] = "".join(traceback.format_exception(exc))[-DIAG_TAIL_CHARS:]
         return False
@@ -683,8 +683,8 @@ class _PreflightWork:
                 return True
             self.reasons.append(reason)
             _record_stage_output(self.diagnostics, "bench", bres)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("preflight bench run raised: %s", exc)
+        except Exception as exc:  # isolation boundary: one bench-stage run of the authored driver
+            log.warning("preflight bench run raised: %s", exc, exc_info=True)
             self.reasons.append(f"bench run raised {type(exc).__name__}: {exc}")
             self.diagnostics["bench"] = "".join(traceback.format_exception(exc))[-DIAG_TAIL_CHARS:]
         return False
