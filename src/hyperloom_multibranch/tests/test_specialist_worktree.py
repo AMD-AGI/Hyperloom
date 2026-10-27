@@ -177,3 +177,33 @@ def test_a_change_to_the_native_tree_is_in_the_component_s_diff_and_names_its_co
     assert f"b/{AOT}/csrc/gemm.cu" in patch and f"b/{AOT}/python/sgl_kernel/gemm.py" in patch
     assert worktree.native_upstream("sgl_kernel") == Upstream(SGLANG, "2" * 40)
     assert worktree.native_upstream("vllm") is None
+
+
+def test_a_native_tree_inside_the_framework_s_tree_is_the_native_component_s_alone(tmp_path):
+    """SGLang's develop install holds sgl-kernel's tree, so the framework lays it out first: a change there is
+    sgl_kernel's, and the framework's diff leaves it out."""
+    sglang = tmp_path / "checkout" / "python" / "sglang"
+    for path in ("srt/server.py", "kernels/aot/csrc/gemm.cu", "kernels/aot/python/sgl_kernel/gemm.py"):
+        (sglang / path).parent.mkdir(parents=True, exist_ok=True)
+        (sglang / path).write_bytes(b"checkout = 1\n")
+    kernel = tmp_path / "site-packages" / "sgl_kernel"
+    kernel.mkdir(parents=True)
+    (kernel / "gemm.py").write_bytes(b"installed = True\n")
+    installed = {
+        "sglang": PackageBase("sglang", sglang, None, None),
+        "sgl_kernel": PackageBase("sgl_kernel", kernel, None, None),
+    }
+    tree = NativeTree(SourceRoot(AOT, sglang / "kernels" / "aot"), SGLANG, "2" * 40)
+    base = SourceBase(
+        tmp_path / "source", locator=lambda layout: installed[layout.import_name], native={"sgl_kernel": tree}
+    )
+    base.build(["sglang", "sgl_kernel"])
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    (worktree.path / AOT / "csrc" / "gemm.cu").write_bytes(b"tile = 128\n")
+    (worktree.path / "python" / "sglang" / "srt" / "server.py").write_bytes(b"checkout = 2\n")
+
+    assert (worktree.path / AOT / "python" / "sgl_kernel" / "gemm.py").read_bytes() == b"installed = True\n"
+    framework, native = worktree.diff("sglang"), worktree.diff("sgl_kernel")
+    assert "srt/server.py" in framework and "kernels/aot" not in framework
+    assert f"b/{AOT}/csrc/gemm.cu" in native and "srt/server.py" not in native

@@ -144,7 +144,12 @@ class SourceBase:
         for component in components:
             layout = self._layout(component)
             package, *metas = source_roots(layout, _with_checkout(component, self._locator(layout), layout))
-            shutil.copytree(package.path, self.path / package.prefix, ignore=_ignore(package.path, layout.generated))
+            target = self.path / package.prefix
+            # An earlier component's tree may hold this one's (SGLang's checkout holds sgl-kernel's); the package a test
+            # loads is the installed one.
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(package.path, target, ignore=_ignore(package.path, layout.generated))
             excluded += [f"/{package.prefix}/{built}/" for built in layout.generated]
             for meta in (meta for meta in metas if meta.path.is_dir()):
                 shutil.copytree(meta.path, self.path / meta.prefix, ignore=_ignore(meta.path, ()))
@@ -316,7 +321,8 @@ class BranchWorktree:
         return _git(self.path, _DIFF, _CACHED, *options, _HEAD, "--", *paths)
 
     def _paths(self, component: str) -> tuple[str, ...]:
-        """``component``'s package, the meta trees the source base laid out beside it, and its native tree."""
+        """``component``'s package, the meta trees the source base laid out beside it, and its native tree, less the
+        trees of other components inside them."""
         layout = self._layouts.get(component)
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout")
@@ -324,7 +330,15 @@ class BranchWorktree:
         trees = [section.prefix for section in meta_sections(layout)] + ([native.root.prefix] if native else [])
         # A pathspec that names nothing fails the stage, and an install may ship no meta tree.
         held = _git(self.path, "ls-tree", "--name-only", BASE_BRANCH, "--", *trees).splitlines() if trees else []
-        return (layout.upstream_prefix, *held)
+        own = (layout.upstream_prefix, *held)
+        return (*own, *(f":(exclude){tree}" for tree in self._nested(component, own)))
+
+    def _nested(self, component: str, own: Sequence[str]) -> list[str]:
+        """The trees of the other components that lie inside ``own``: a change there is theirs."""
+        others = [other.upstream_prefix for name, other in self._layouts.items() if name != component]
+        others += [tree.root.prefix for name, tree in self._native.items() if name != component]
+        inside = [PurePosixPath(path) for path in own]
+        return [tree for tree in others if any(root in PurePosixPath(tree).parents for root in inside)]
 
 
 __all__ = [
