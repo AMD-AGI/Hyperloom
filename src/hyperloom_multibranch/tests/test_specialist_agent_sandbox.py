@@ -266,8 +266,8 @@ def test_a_server_started_in_a_session_of_its_own_is_still_the_sandbox_s(tmp_pat
         process = await sandbox.start(f"{serve}; sleep 100", tmp_path, {})
         await _until(lambda: _pid(pids) is not None)
         server = _pid(pids)
-        await _until(lambda: _alive(server))
-        assert os.getsid(server) != process.popen.pid
+        # $! is setsid's pid before it has called setsid(), so its session moves only once it has run.
+        await _until(lambda: _alive(server) and os.getsid(server) != process.popen.pid)
         stopped = await sandbox.run(f"pkill -f {marker}", tmp_path, {}, 10.0)
         await _until(lambda: not _alive(server))
         again = await sandbox.start(f"{serve}; sleep 100", tmp_path, {})
