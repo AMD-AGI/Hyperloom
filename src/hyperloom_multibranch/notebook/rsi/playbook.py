@@ -282,9 +282,10 @@ class PlaybookPool:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> PlaybookPool | None:
-        """The pool beside the archive the environment names; ``None`` when it names none."""
+        """The pool a running session plays from, beside the archive the environment names; ``None`` when it names
+        none or the session reads nothing from it (:meth:`TreeArchive.read_from_env`)."""
 
-        archive = TreeArchive.from_env(env)
+        archive = TreeArchive.read_from_env(env)
         return None if archive is None else cls.beside(archive)
 
     def _ledger(self, folder: str, kind: type, fmt: str) -> list:

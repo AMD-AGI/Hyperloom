@@ -344,11 +344,13 @@ class CloseTargets:
         return self.receipts / name if self.receipts is not None else None
 
     def lesson_pool(self) -> LessonPool | None:
-        """``lessons``; else the pool beside ``archive``, or beside the environment's archive."""
+        """``lessons``; else the pool beside ``archive``, or beside the environment's archive, which CLOSE writes to
+        even when the session read nothing from it."""
 
         if self.lessons is not None:
             return self.lessons
-        return LessonPool.beside(self.archive) if self.archive is not None else LessonPool.from_env()
+        archive = self.archive if self.archive is not None else TreeArchive.from_env()
+        return LessonPool.beside(archive) if archive is not None else None
 
     def multibranch(self) -> CollectionTarget | None:
         """``multibranch_kb``; else the environment's beside the environment's ``experience_kb``, and nowhere beside
@@ -462,9 +464,10 @@ def _standings(snapshot: NotebookSnapshot, pool: LessonPool | None, log_path: Pa
 
 
 def archived_history(archive: TreeArchive | None = None) -> tuple[SearchTree, ...]:
-    """Every search tree ``archive`` holds, by default the environment's archive; none without one."""
+    """Every search tree ``archive`` holds, by default the archive a running session reads
+    (:meth:`TreeArchive.read_from_env`); none without one."""
 
-    target = archive if archive is not None else TreeArchive.from_env()
+    target = archive if archive is not None else TreeArchive.read_from_env()
     if target is None:
         return ()
     try:
@@ -475,11 +478,11 @@ def archived_history(archive: TreeArchive | None = None) -> tuple[SearchTree, ..
 
 
 def session_menus(metric: str, reports: Path | None, archive: TreeArchive | None = None) -> DirectionMenus | None:
-    """The session's direction menus, for ``SessionBriefs(menus=...)``: over ``archive``, by default the
-    environment's, read once, each menu logged to ``<reports>/menus.jsonl`` for CLOSE to read; ``None`` without an
+    """The session's direction menus, for ``SessionBriefs(menus=...)``: over ``archive``, by default the one a running
+    session reads, read once, each menu logged to ``<reports>/menus.jsonl`` for CLOSE to read; ``None`` without an
     archive, so a session that reads none is briefed as one without the RSI."""
 
-    target = archive if archive is not None else TreeArchive.from_env()
+    target = archive if archive is not None else TreeArchive.read_from_env()
     if target is None:
         return None
     log_to = MenuLog(reports / MENU_LOG) if reports is not None else None

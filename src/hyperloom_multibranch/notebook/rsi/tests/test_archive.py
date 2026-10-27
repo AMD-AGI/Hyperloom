@@ -21,6 +21,7 @@ from hyperloom_multibranch.notebook.rsi.archive import (
     ARCHIVED,
     SINGLE_HOST,
     SKIPPED,
+    WRITE_ONLY_ENV,
     ArchiveResult,
     TreeArchive,
     TreeDirection,
@@ -342,6 +343,18 @@ def test_the_archive_lives_where_the_deployment_says(tmp_path: Path) -> None:
 
     assert archive is not None and archive.root == tmp_path / "trees"
     assert TreeArchive.from_env({}) is None
+
+
+def test_a_write_only_session_reads_no_archive_and_still_archives_into_it(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    env = {ARCHIVE_ENV: str(tmp_path), WRITE_ONLY_ENV: "1"}
+    written = TreeArchive.from_env(env)
+
+    assert TreeArchive.read_from_env(env) is None and written is not None
+    assert TreeArchive.read_from_env({**env, WRITE_ONLY_ENV: "0"}) is not None
+    assert archive_session(snapshot, METRIC, written).status == ARCHIVED
+    assert [item.session_id for item in written.load()] == ["sess-1"]
 
 
 def test_similar_trees_leave_out_the_unrelated_and_put_the_closest_first() -> None:

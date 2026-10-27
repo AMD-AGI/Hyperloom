@@ -255,10 +255,11 @@ class LessonPool:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> LessonPool | None:
-        """The pool a session uses unless it is given one: beside the archive
-        :data:`~hyperloom_multibranch.notebook.rsi.archive.ARCHIVE_ENV` names, ``None`` when it names none."""
+        """The pool a running session recalls past lessons from unless it is given one: beside the archive
+        :data:`~hyperloom_multibranch.notebook.rsi.archive.ARCHIVE_ENV` names, ``None`` when it names none or the
+        session reads nothing from it (:meth:`TreeArchive.read_from_env`)."""
 
-        archive = TreeArchive.from_env(env)
+        archive = TreeArchive.read_from_env(env)
         return None if archive is None else cls.beside(archive)
 
     def revisions(self) -> tuple[LessonRevision, ...]:

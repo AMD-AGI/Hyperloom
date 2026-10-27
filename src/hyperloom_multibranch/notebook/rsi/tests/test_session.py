@@ -26,6 +26,7 @@ from hyperloom_multibranch.notebook.rsi.archive import (
     ARCHIVED,
     NO_ARCHIVE,
     SKIPPED,
+    WRITE_ONLY_ENV,
     TreeArchive,
     archive_session,
 )
@@ -450,6 +451,20 @@ async def test_frontier_scoring_sizes_its_windows_to_the_budget_reads_the_archiv
     assert scoring.policy == policy
     assert [item.session_id for item in scoring.history] == ["past"]
     assert len(path.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_a_write_only_session_reads_no_history_menu_lesson_or_playbook_and_close_still_writes_its_learnings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    TreeArchive(tmp_path / "archive").put(PAST)
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
+    monkeypatch.setenv(WRITE_ONLY_ENV, "1")
+
+    pool = CloseTargets().lesson_pool()
+
+    assert session.archived_history() == () and session_menus(METRIC, tmp_path / "reports") is None
+    assert LessonPool.from_env() is None and PlaybookPool.from_env() is None
+    assert pool is not None and pool.root == LessonPool.beside(TreeArchive(tmp_path / "archive")).root
 
 
 @pytest.mark.usefixtures("unconfigured")

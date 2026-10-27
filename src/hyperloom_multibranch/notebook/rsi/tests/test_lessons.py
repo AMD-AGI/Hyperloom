@@ -15,7 +15,7 @@ import pytest
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import LESSON_ID
 from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
-from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, TreeArchive
+from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, WRITE_ONLY_ENV, TreeArchive
 from hyperloom_multibranch.notebook.rsi.lessons import (
     REVISION_ID,
     LessonEvidence,
@@ -161,6 +161,7 @@ def test_a_session_uses_the_pool_beside_the_archive_the_environment_names_by_def
     assert found is not None and found.root == LessonPool.beside(TreeArchive(tmp_path / "archive")).root
     assert found.root == tmp_path / "archive" / "lessons"
     assert LessonPool.from_env({}) is None
+    assert LessonPool.from_env({ARCHIVE_ENV: str(tmp_path / "archive"), WRITE_ONLY_ENV: "1"}) is None
 
 
 def test_an_unreadable_record_is_skipped_with_a_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:

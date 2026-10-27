@@ -10,7 +10,8 @@ session's task conditions, its roofline bound, its baseline's dispersion and whe
 version wrote, or one backfilled from a session that recorded no intents, reads with no stop reasons, no directions,
 no probations and no roofline bound, and with every commit merged. Trees are written once, under
 ``<archive>/trees/<session_id>.json``; the archive is a shared folder the deployment names. CLOSE archives its session
-with :func:`archive_session`, which says why when it archives nothing.
+with :func:`archive_session`, which says why when it archives nothing. A no-KB run beside the KB runs reads none of
+the archive (:data:`WRITE_ONLY_ENV`, :meth:`TreeArchive.read_from_env`) and still archives its own tree.
 """
 
 from __future__ import annotations
@@ -62,6 +63,9 @@ ARCHIVE_ENV = "HYPERLOOM_RSI_ARCHIVE"
 #: The time the archive is read as of, so that sessions run as repeats or as pairs start from one state: what was
 #: written after it, trees, lessons and playbooks alike, is not read.
 AS_OF_ENV = "HYPERLOOM_RSI_AS_OF"
+#: Set to 1, the session is a no-KB run beside the KB runs on one archive: it reads nothing the archive holds, not its
+#: trees, lessons, menus or playbooks, while CLOSE still writes the session's own outcomes into it.
+WRITE_ONLY_ENV = "HYPERLOOM_RSI_WRITE_ONLY"
 SINGLE_HOST = "local"
 _FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}")
 
@@ -554,6 +558,15 @@ class TreeArchive:
         root = str((os.environ if env is None else env).get(ARCHIVE_ENV) or "").strip()
         return cls(Path(root), as_of_from_env(env)) if root else None
 
+    @classmethod
+    def read_from_env(cls, env: Mapping[str, str] | None = None) -> TreeArchive | None:
+        """The archive a running session reads: the one :meth:`from_env` gives, ``None`` when :data:`WRITE_ONLY_ENV`
+        makes it write-only."""
+
+        if str((os.environ if env is None else env).get(WRITE_ONLY_ENV) or "").strip() == "1":
+            return None
+        return cls.from_env(env)
+
     def put(self, tree: SearchTree) -> None:
         """Archive ``tree`` once; archiving it again is a no-op, another tree under its session id is an error.
 
@@ -650,6 +663,7 @@ __all__ = [
     "SKIPPED",
     "SOURCE_NOTEBOOK",
     "TREE_FORMAT",
+    "WRITE_ONLY_ENV",
     "ArchiveResult",
     "MeasurementNoise",
     "SearchTree",
