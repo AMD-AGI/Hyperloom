@@ -108,7 +108,34 @@ def build_scriptable_env(
             run_scoped["VLLM_TORCH_PROFILER_DIR"] = profile_dir
             run_scoped["SGLANG_TORCH_PROFILER_DIR"] = profile_dir
             run_scoped["HYPERLOOM_PROFILE_TRACE_DIR"] = profile_dir
+        _enable_aoti_kernel_profile(run_scoped)
     return build_benchmark_env(defaults, bench.get("envs"), run_scoped)
+
+
+def _enable_aoti_kernel_profile(run_scoped: dict[str, str]) -> None:
+    """Ask Inductor for per-launch profiling scopes, on AOTI profiling runs only.
+
+    An AOTI module compiles its launches into a ``.so``, and without this the
+    trace loses roughly half its kernels -- measured 767 vs 1466 events and 7.2
+    vs 13.1 ms of captured GPU time on SmolVLA/gfx1151, at identical end-to-end
+    latency. The missing ones are the Inductor-generated kernels, so the blind
+    spot is exactly the exported region. Overhead is below noise (under ~1.5%,
+    n=3 per arm), so this is not a speed/visibility trade.
+
+    Profiling runs only: a benchmark run must compile the same way the
+    deliverable will, so the accepted number describes what ships.
+
+    Fails *open*, unlike the export gate -- an unreadable scope costs trace
+    richness, which is not worth failing a run over.
+    """
+    from hyperloom.orchestrator.framework.optimization_scope import aoti_config
+
+    try:
+        config = aoti_config()
+    except ValueError:
+        return
+    if config is not None and config.enabled:
+        run_scoped["TORCHINDUCTOR_CPP_ENABLE_KERNEL_PROFILE"] = "1"
 
 
 def run_scriptable(
