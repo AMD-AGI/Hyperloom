@@ -2692,6 +2692,7 @@ class KernelPhase(CoordinatorCollaborator):
             parse_aiter_consulted_tables,
             parse_aiter_shape_lookups,
             parse_aiter_shape_lookups_for_tables,
+            server_hit_logging,
             tuned_config_coverage,
             tuned_csv_shapes,
         )
@@ -2737,6 +2738,8 @@ class KernelPhase(CoordinatorCollaborator):
             _unreadable("dense")
             return None
         report = tuned_config_coverage(tuned, requested, known_covered=hit)
+        # Without hit lines a served key leaves the log, so an uncovered table proves nothing.
+        report["conclusive"] = server_hit_logging(logs[-1]) or bool(report.get("covered"))
         report["server_log"] = str(logs[-1])
         report["runtime_lookup_miss"] = len(missed)
         report["runtime_lookup_hit"] = len(hit)
@@ -2891,7 +2894,7 @@ class KernelPhase(CoordinatorCollaborator):
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths or tuner_name == "fmoe_ck":
             return None
-        from ..kernel.gemm_shape_coverage import aiter_log_tuned_config_enabled
+        from ..kernel.gemm_shape_coverage import server_hit_logging
         from ..measurement.apply_verification import verify_applied
 
         logs = _integrate_server_logs(self.session_dir, tuner_name)
@@ -2908,14 +2911,10 @@ class KernelPhase(CoordinatorCollaborator):
         # arrival check compares merged_tuned_dense_bf16.csv against bf16_tuned_gemm.csv and concludes the artifact
         # never landed.
         table_names = [name for key in envs if (name := _AITER_ENV_TO_TABLE.get(key))]
-        # aiter prints a hit line only under this flag; every serving run now sets it by default, but an operator
-        # value in the candidate env wins, and then a zero-hit result means nothing.
-        hit_logging = aiter_log_tuned_config_enabled(envs)
-
         return verify_applied(
             logs[-1],
             csv_paths,
-            hit_logging=hit_logging,
+            hit_logging=server_hit_logging(logs[-1]),
             runtime_table_names=table_names,
         ).to_dict()
 
