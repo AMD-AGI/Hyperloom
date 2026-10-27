@@ -58,7 +58,7 @@ from kernelforge.loop.lessons import (
 )
 from kernelforge.loop.archive import CandidateArchive, CandidateRecord
 from kernelforge.loop.handoffs import HandoffStore, IterationHandoff
-from kernelforge.loop.jit_rebuild import (
+from kernelforge.evaluation.jit_rebuild import (
     force_jit_rebuild,
     tracked_source_changes,
 )
@@ -135,7 +135,7 @@ from kernelforge.loop.new_path_allowlist import (
     matches_commit_new_paths,
     normalize_commit_new_paths,
 )
-from kernelforge.tools.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_json, atomic_write_text
 from kernelforge.evaluation.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
     KEEP_MEASUREMENT_COUNT,
@@ -4505,8 +4505,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
 
     def _persist_lane_queue(self) -> None:
         """Publish what this round has bought and not yet measured."""
-        from kernelforge.loop.recovery import atomic_write_json
-
         path = self._lane_queue_path()
         try:
             if not self._lane_queue:
@@ -4569,8 +4567,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         analysis_commit: str,
     ) -> Path:
         """Atomically publish every lane's plan and return lane 1's path."""
-        from kernelforge.loop.recovery import atomic_write_json
-
         published = [str(plan).strip() for plan in plans]
         if not published or not published[0]:
             raise ValueError("optimization plan must not be empty")
@@ -4664,8 +4660,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
 
     def _persist_orchestration_result(self, iteration, context, result) -> None:
         """Persist planning diagnostics before publishing the executable plan."""
-        from kernelforge.loop.recovery import atomic_write_json
-
         root = self._orchestration_root(iteration)
         atomic_write_json(
             root / "context.json",
@@ -4713,8 +4707,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         plan_path: Path,
     ) -> None:
         """Publish the final-plan pointer only after the plan exists."""
-        from kernelforge.loop.recovery import atomic_write_json
-
         diagnostics_path = self._orchestration_root(iteration) / "structured_output.json"
         if not diagnostics_path.is_file():
             return

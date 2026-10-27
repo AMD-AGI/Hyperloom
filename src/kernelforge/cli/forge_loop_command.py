@@ -57,7 +57,6 @@ from kernelforge.loop.knowledge_integration import (
     ExperiencePublication,
     WarmStartHarness,
     WarmStartRollbackError,
-    git_head,
     kb_reference_program_md,
     kb_read_status,
     kb_warmstart,
@@ -66,12 +65,13 @@ from kernelforge.loop.knowledge_integration import (
 )
 from kernelforge.loop.recovery import (
     CallerRecovery,
-    atomic_write_json,
     load_published_best,
     publish_warm_start_recovery,
     rollback_unpublished_warm_start,
 )
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, warm_start_improvement_flags
+from kernelforge.tools.durable_io import atomic_write_json
+from kernelforge.tools.git import git_head
 from kernelforge.tracker.schema import ExperimentSubject
 
 if TYPE_CHECKING:

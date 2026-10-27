@@ -621,8 +621,7 @@ def test_a_queue_that_cannot_be_written_costs_durability_only(tmp_path, monkeypa
     def _no_room(*_args, **_kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(runner_module, "atomic_write_json", _no_room, raising=False)
-    monkeypatch.setattr("kernelforge.loop.recovery.atomic_write_json", _no_room)
+    monkeypatch.setattr(runner_module, "atomic_write_json", _no_room)
 
     loop._persist_lane_queue()
 

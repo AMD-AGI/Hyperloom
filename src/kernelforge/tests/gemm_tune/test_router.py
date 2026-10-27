@@ -298,7 +298,7 @@ class TestGpuTypeAutoDetect:
     """gpu_type='auto'/'' probes the local host via rocminfo, then gates FP4."""
 
     def test_auto_detects_gfx942_and_skips_fp4(self, monkeypatch):
-        monkeypatch.setattr(router, "_detect_local_gfx_arch", lambda: "gfx942")
+        monkeypatch.setattr(router, "detect_arch", lambda: "gfx942")
         profile = _make_profile(is_moe=False)
         specs = select_tuners(
             profile,
@@ -317,7 +317,7 @@ class TestGpuTypeAutoDetect:
         assert "gfx942" in a4w4.skip_reason
 
     def test_auto_detects_gfx950_and_runs_fp4(self, monkeypatch):
-        monkeypatch.setattr(router, "_detect_local_gfx_arch", lambda: "gfx950")
+        monkeypatch.setattr(router, "detect_arch", lambda: "gfx950")
         profile = _make_profile(is_moe=False)
         specs = select_tuners(
             profile,
@@ -335,7 +335,7 @@ class TestGpuTypeAutoDetect:
         assert a4w4.should_run
 
     def test_auto_fails_open_when_undetectable(self, monkeypatch):
-        monkeypatch.setattr(router, "_detect_local_gfx_arch", lambda: "")
+        monkeypatch.setattr(router, "detect_arch", lambda: "")
         profile = _make_profile(is_moe=False)
         specs = select_tuners(
             profile,
@@ -353,29 +353,13 @@ class TestGpuTypeAutoDetect:
         assert a4w4.should_run
 
     def test_resolve_gfx_arch_auto_and_empty(self, monkeypatch):
-        monkeypatch.setattr(router, "_detect_local_gfx_arch", lambda: "gfx942")
+        monkeypatch.setattr(router, "detect_arch", lambda: "gfx942")
         assert router._resolve_gfx_arch("auto") == "gfx942"
         assert router._resolve_gfx_arch("") == "gfx942"
         assert router._resolve_gfx_arch("  AUTO ") == "gfx942"
         # explicit values bypass detection
         assert router._resolve_gfx_arch("mi355x") == "gfx950"
         assert router._resolve_gfx_arch("gfx942") == "gfx942"
-
-    def test_detect_local_gfx_arch_parses_rocminfo(self, monkeypatch):
-        sample = "  Name:                    AMD EPYC\n  Name:                    gfx942\n"
-
-        class _Completed:
-            stdout = sample
-
-        monkeypatch.setattr(router.subprocess, "run", lambda *a, **k: _Completed())
-        assert router._detect_local_gfx_arch() == "gfx942"
-
-    def test_detect_local_gfx_arch_failopen_on_missing_binary(self, monkeypatch):
-        def _raise(*a, **k):
-            raise FileNotFoundError("rocminfo")
-
-        monkeypatch.setattr(router.subprocess, "run", _raise)
-        assert router._detect_local_gfx_arch() == ""
 
     @pytest.mark.parametrize(
         ("detected", "expected"),
@@ -393,7 +377,7 @@ class TestGpuTypeAutoDetect:
             calls.append(True)
             return detected
 
-        monkeypatch.setattr(router, "_detect_local_gfx_arch", detect)
+        monkeypatch.setattr(router, "detect_arch", detect)
 
         assert router.resolve_gpu_type("auto") == expected
         assert calls == [True]
@@ -419,14 +403,14 @@ class TestGpuTypeAutoDetect:
         assert router.resolve_gpu_type(raw) == expected
 
     def test_public_resolver_fails_closed_when_detection_fails(self, monkeypatch):
-        monkeypatch.setattr(router, "_detect_local_gfx_arch", lambda: "")
+        monkeypatch.setattr(router, "detect_arch", lambda: "")
 
         with pytest.raises(ValueError, match="--gpu-type"):
             router.resolve_gpu_type("auto")
 
     def test_auto_resolves_each_architecture_to_its_own_canonical_name(self, monkeypatch):
         detected = iter(("gfx942", "gfx950"))
-        monkeypatch.setattr(router, "_detect_local_gfx_arch", lambda: next(detected))
+        monkeypatch.setattr(router, "detect_arch", lambda: next(detected))
 
         gpu_types = [router.resolve_gpu_type("auto") for _ in range(2)]
 
