@@ -120,6 +120,34 @@ async def test_an_agentx_optimizing_patch_is_marked_for_the_cycle_screen_only_wh
         await coord.stop()
 
 
+_TOKENIZER_FIX = """\
+--- a/python/sglang/srt/managers/tokenizer_manager.py
++++ b/python/sglang/srt/managers/tokenizer_manager.py
+@@ -400,3 +400,4 @@
+ def _tokenize_one_request(self, obj):
++    cached = self._segment_cache.get(obj.text)
+"""
+
+
+@pytest.mark.parametrize(("diff", "screen"), [(_TOKENIZER_FIX, None), (_FIX_A, "cycle")])
+@pytest.mark.asyncio
+async def test_a_patch_the_decode_cycle_cannot_see_goes_to_its_own_replay_round(
+    session_dir: Path, monkeypatch, diff: str, screen: str | None
+) -> None:
+    """Tokenizer, API and KV-cache paths stay out of steady decode, so the cycle screen would read them flat."""
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    coord = _coordinator(session_dir)
+    coord.shared_state.benchmark_mode = "agentx"
+    try:
+        await _specialist_wrote(coord, "s1", diff)
+        await coord.reactor_pass("critic")
+
+        (task,) = [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
+        assert (task.params or {}).get("screen") == screen
+    finally:
+        await coord.stop()
+
+
 @pytest.mark.asyncio
 async def test_a_repeat_of_a_queued_patch_is_not_submitted(session_dir: Path) -> None:
     coord = _coordinator(session_dir)

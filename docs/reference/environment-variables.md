@@ -939,7 +939,9 @@ faster join the dormant-lever bundle that is replayed against the KEEP rule.
 Before the first batch on a stack, and after each KEEP, two bases are measured
 alone; each batch's base is held to the previous batch's last base, and a tree
 that moved with every switch off closes the screen for the rest of the session.
-Off, a switched patch takes its own replay round as before.
+A patch touching a path steady decode never exercises (tokenization, the API front
+end, the prefix and hierarchical KV caches) is not screened and takes its own
+replay round. Off, a switched patch takes its own replay round as before.
 
 | Variable                 | Default | Description |
 |--------------------------|---------|-------------|

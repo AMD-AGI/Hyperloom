@@ -117,6 +117,23 @@ def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, o
     )
 
 
+#: Source paths a steady-decode batch without the host KV cache never exercises: tokenization, the API front end,
+#: and the prefix / hierarchical KV caches. A patch touching one is measured by its replay round instead.
+_UNSEEN_PATHS = (
+    "/srt/entrypoints/",
+    "/srt/mem_cache/",
+    "/srt/managers/tokenizer_manager",
+    "/srt/managers/detokenizer_manager",
+    "/srt/managers/template_manager",
+    "/srt/managers/multi_tokenizer",
+)
+
+
+def cycle_bench_sees(files: list[str]) -> bool:
+    """Whether every file a patch touches runs inside the steady decode the cycle bench measures."""
+    return not any(marker in f"/{path}" for path in files for marker in _UNSEEN_PATHS)
+
+
 def cycle_bench_enabled() -> bool:
     """Whether the operator switched the cycle screen on; off, switched patches are benched as before."""
     return env_bool(CYCLE_BENCH_ENV)
