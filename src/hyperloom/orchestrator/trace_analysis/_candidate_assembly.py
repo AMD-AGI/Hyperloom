@@ -478,7 +478,7 @@ def _apply_vendor_operator_playbook_grouping(top: list[dict[str, Any]]) -> None:
             member["vendor_playbook_group_kernel_ids"] = list(member_ids)
             if floor is not None:
                 # Consumed by effective_hot_kernel_min_gpu_pct() in the
-                # orchestrator's hot-kernel gate (_kernel_decisions.py /
+                # orchestrator's hot-kernel gate (kernel_decisions.py /
                 # request_handlers.py) so a heavier forge-loop-session
                 # playbook isn't dispatched below its own floor even when
                 # HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT is loosened elsewhere.

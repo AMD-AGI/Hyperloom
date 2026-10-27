@@ -390,7 +390,7 @@ class TestPolicyDenialAndPruned:
 
 class TestKernelPatchIdentity:
     def test_resolves_explicit_payload(self):
-        from hyperloom.orchestrator.kernel._kernel_decisions import _resolve_kernel_patch_identity
+        from hyperloom.orchestrator.kernel.kernel_decisions import _resolve_kernel_patch_identity
 
         kid, patch, target, args = _resolve_kernel_patch_identity(
             {
@@ -408,11 +408,13 @@ class TestKernelPatchIdentity:
         )
 
     def test_a_payload_without_a_patch_path_has_no_patch_identity(self):
-        from hyperloom.orchestrator.kernel._kernel_decisions import kernel_patch_key
+        from hyperloom.orchestrator.kernel.kernel_decisions import kernel_patch_key
 
         assert kernel_patch_key({"kernel_id": "k1"}) == ""
 
     def test_find_rejected_kernel_patch_lookup(self):
+        from hyperloom.orchestrator.kernel.kernel_decisions import find_rejected_kernel_patch
+
         s = SharedState()
         s.rejected_kernel_patches.append(
             {
@@ -420,17 +422,20 @@ class TestKernelPatchIdentity:
                 "reason": "no_e2e_gain",
             }
         )
-        hit = s.find_rejected_kernel_patch(
+        hit = find_rejected_kernel_patch(
+            s,
             {
                 "kernel_id": "k1",
                 "patch_path": "/srv/k1.py",
                 "extra_server_args": "--a 1",
-            }
+            },
         )
         assert hit and hit["reason"] == "no_e2e_gain"
 
     def test_find_rejected_kernel_patch_missing_returns_none(self):
-        assert SharedState().find_rejected_kernel_patch({"kernel_id": "x"}) is None
+        from hyperloom.orchestrator.kernel.kernel_decisions import find_rejected_kernel_patch
+
+        assert find_rejected_kernel_patch(SharedState(), {"kernel_id": "x"}) is None
 
 
 class TestPersistence:

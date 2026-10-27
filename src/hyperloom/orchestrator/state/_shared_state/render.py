@@ -256,6 +256,7 @@ class _RenderMixin:
         else:
             geak_pending_tag = ""
         from hyperloom.inference_optimizer import framework_registry
+        from ...kernel import kernel_decisions
 
         lines = [
             f"baseline  : {framework_registry.format_primary_metric(self.framework, self.baseline_tput)}",
@@ -266,8 +267,7 @@ class _RenderMixin:
             f"{unvalidated_tag}{geak_pending_tag}",
         ]
         # Surface reusable hot kernels no backend has produced a patch for yet.
-        untried_hot = self.untried_hot_reusable_kernels()
-        if untried_hot:
+        if untried_hot := kernel_decisions.untried_hot_reusable_kernels(self):
             lines.append(f"untried_hot_kernels: {', '.join(untried_hot)}")
         lines.append(budget_line)
         return "\n".join(lines)
@@ -479,6 +479,8 @@ class _RenderMixin:
 
     def to_prompt_summary(self) -> str:
         """Compact, human-readable snapshot for prompt injection."""
+        from ...kernel import kernel_decisions
+
         lines = [
             f"session_id={self.session_id or '(unset)'}",
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
@@ -510,8 +512,8 @@ class _RenderMixin:
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"explore_search={self._format_search_state(self.explore_search)}",
             # Pending KEEPs the integrate gate will drain.
-            (f"pending_keep_kernels={self.pending_keep_kernel_ids() or '(none)'}"),
-            (f"has_keep_pending_integrate={'true' if self.has_keep_pending_integrate else 'false'}"),
+            (f"pending_keep_kernels={kernel_decisions.pending_keep_kernel_ids(self) or '(none)'}"),
+            (f"has_keep_pending_integrate={'true' if kernel_decisions.has_keep_pending_integrate(self) else 'false'}"),
             f"rejected_kernel_patches={self._format_rejected_kernel_patches()}",
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
             f"last_baseline={self._format_attempt(self.last_baseline)}",

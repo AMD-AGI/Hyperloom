@@ -19,6 +19,7 @@ from hyperloom.orchestrator.lever import (
     LEVER_UPSTREAM_PR,
 )
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
+from ..kernel import kernel_decisions
 from ..state.shared_state import (
     ESCALATE_HINT_SKIP_TO_KERNEL,
     ESCALATE_HINT_SKIP_TO_SWEEP,
@@ -653,13 +654,12 @@ def compute_kernel_progress_fingerprint(
 
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
-    if state.has_keep_pending_integrate:
+    if kernel_decisions.has_keep_pending_integrate(state):
         return True
-
     if _controller_phase_terminal(state) or _geak_phase_terminal(state):
         return False
 
-    return bool(state.untried_hot_reusable_kernels())
+    return bool(kernel_decisions.untried_hot_reusable_kernels(state))
 
 
 def measured_seconds(state: Any, field: str) -> float | None:

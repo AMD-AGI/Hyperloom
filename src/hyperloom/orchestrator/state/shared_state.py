@@ -1600,15 +1600,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self.last_tick_exception = entry
         return entry
 
-    def find_rejected_kernel_patch(
-        self,
-        payload: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.find_rejected_kernel_patch(self, payload)
-
     @staticmethod
     def _is_integrate_fault(result: dict[str, Any]) -> bool:
         """True when an integrate result is an integration *fault*, not a verdict."""
@@ -1619,13 +1610,13 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return err_class in _INTEGRATE_FAULT_ERROR_CLASSES
 
     def record_kernel_integrate_result(self, result: dict[str, Any]) -> dict[str, Any] | None:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`.
+        """Forwarding shim — implementation in :mod:`.kernel_decisions`.
 
         Also the one seam every integrate settlement passes through, so the
         author-time capture of the gate's verdict is taken here rather than at
         each of the three callers.
         """
-        from ..kernel import _kernel_decisions as _m
+        from ..kernel import kernel_decisions as _m
 
         entry = _m.record_kernel_integrate_result(self, result)
         self._record_integrate_verdict_on_timeline(entry)
@@ -1672,55 +1663,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             macro_cycle=cycle, integration_id=integration_id, graded_objective=str(last.get("graded_objective") or "")
         )
 
-    def record_gemm_tuning(self, result: dict[str, Any]) -> None:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        _m.record_gemm_tuning(self, result)
-
-    # Multi-KEEP integrate queue helpers.
-    def next_pending_keep_kernel_id(self) -> str:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.next_pending_keep_kernel_id(self)
-
-    def pending_keep_kernel_ids(self) -> list[str]:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.pending_keep_kernel_ids(self)
-
-    def pending_kernel_integration_records(self) -> list[dict[str, Any]]:
-        """Return immutable pending KEEP snapshots in integration priority order."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.pending_kernel_integration_records(self)
-
     @property
     def roofline_snapshot_id(self) -> int:
         """Counter of the newest roofline snapshot, or 0 before the first one."""
         raw = (self.last_trace_analyze or {}).get("roofline_snapshot_id")
         return int(raw) if isinstance(raw, int) else 0
-
-    @property
-    def has_keep_pending_integrate(self) -> bool:
-        """True when kernel KEEP results still await kernel ``integrate``."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.has_keep_pending_integrate(self)
-
-    # Reusable hot kernels no backend has produced a patch for yet.
-    def untried_hot_reusable_kernels(
-        self,
-        *,
-        min_gpu_pct: float | None = None,
-        top_n: int | None = None,
-    ) -> list[str]:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.untried_hot_reusable_kernels(self, min_gpu_pct=min_gpu_pct, top_n=top_n)
 
     # Per-action audit (kernel parity for non-kernel actions)
     @staticmethod

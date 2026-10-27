@@ -509,12 +509,6 @@ def _kernel_trace_impact_pct(state, kernel_id: str) -> float:
     return 0.0
 
 
-def next_pending_keep_kernel_id(state) -> str:
-    """Return next KEEP kernel_id awaiting integrate (\"\" if drained)."""
-    pending = pending_keep_kernel_ids(state)
-    return pending[0] if pending else ""
-
-
 def pending_keep_kernel_ids(state) -> list[str]:
     """All KEEP kernel_ids awaiting integrate, sorted impact-first."""
     return [
@@ -526,7 +520,7 @@ def pending_keep_kernel_ids(state) -> list[str]:
 
 def has_keep_pending_integrate(state) -> bool:
     """Whether any KEEP kernel is still awaiting integrate."""
-    return bool(next_pending_keep_kernel_id(state))
+    return bool(pending_keep_kernel_ids(state))
 
 
 def _attempt_records(state) -> list[dict[str, Any]]:
@@ -557,14 +551,13 @@ class _HotRow(NamedTuple):
     identity: tuple[str, str, float]
 
 
-def _resolve_hot_kernel_top_n(top_n: int | None) -> int:
-    """The gate's per-ranking cap: the caller's, else ``HYPERLOOM_KERNEL_OPT_GATE_TOP_N``, never below one."""
-    if top_n is None:
-        try:
-            top_n = int(os.environ.get("HYPERLOOM_KERNEL_OPT_GATE_TOP_N", _DEFAULT_HOT_KERNEL_GATE_TOP_N))
-        except (TypeError, ValueError):
-            top_n = _DEFAULT_HOT_KERNEL_GATE_TOP_N
-    return max(1, int(top_n))
+def _resolve_hot_kernel_top_n() -> int:
+    """The gate's per-ranking cap, ``HYPERLOOM_KERNEL_OPT_GATE_TOP_N``, never below one."""
+    try:
+        top_n = int(os.environ.get("HYPERLOOM_KERNEL_OPT_GATE_TOP_N", _DEFAULT_HOT_KERNEL_GATE_TOP_N))
+    except ValueError:
+        top_n = _DEFAULT_HOT_KERNEL_GATE_TOP_N
+    return max(1, top_n)
 
 
 def _hot_rows(
@@ -652,15 +645,10 @@ def _task_group_index(
     return kid_to_group, group_key_aliases
 
 
-def untried_hot_reusable_kernels(
-    state,
-    *,
-    min_gpu_pct: float | None = None,
-    top_n: int | None = None,
-) -> list[str]:
-    """Reusable hot kernels (gpu_pct >= min_gpu_pct) no backend has produced a patch for yet.
+def untried_hot_reusable_kernels(state) -> list[str]:
+    """Reusable hot kernels (gpu_pct >= the configured minimum) no backend has produced a patch for yet.
 
-    Capped to ``top_n`` by TraceLens rank, one kernel_id per task_group. A kernel counts as tried once a patch for
+    Capped by TraceLens rank, one kernel_id per task_group. A kernel counts as tried once a patch for
     it was queued for integration, gated end to end, landed on the optimization stack, or published by the rewrite
     controller.
     """
@@ -668,8 +656,6 @@ def untried_hot_reusable_kernels(
     hot = info.get("hot_kernels_top15") or info.get("hot_kernels") or []
     if not isinstance(hot, list):
         return []
-    if min_gpu_pct is None:
-        min_gpu_pct = resolve_hot_kernel_min_gpu_pct()
     kid_to_group, group_key_aliases = _task_group_index(info.get("task_groups") or [])
 
     integrated = IntegratedStack.of(state.optimization_stack)
@@ -677,7 +663,9 @@ def untried_hot_reusable_kernels(
     tried_operators = _attempted_operators(state, records) | _forge_loop_operators_in_optimization_stack(state)
 
     untried: list[str] = []
-    for row in _rank_hot_rows(_hot_rows(hot, kid_to_group, min_gpu_pct), _resolve_hot_kernel_top_n(top_n)):
+    for row in _rank_hot_rows(
+        _hot_rows(hot, kid_to_group, resolve_hot_kernel_min_gpu_pct()), _resolve_hot_kernel_top_n()
+    ):
         aliases = group_key_aliases.get(row.group_key)
         if integrated.covers(
             kernel_ids=row.members,

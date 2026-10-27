@@ -355,8 +355,6 @@ function-lines src/hyperloom/orchestrator/kernel/_forge_fusion_run.py::_run_forg
 function-lines src/hyperloom/orchestrator/kernel/_forge_gemm_tuning.py::_persist_forge_gemm_csv_durably 55
 function-lines src/hyperloom/orchestrator/kernel/_forge_gemm_tuning.py::_run_forge_gemm_tuning 88
 function-lines src/hyperloom/orchestrator/kernel/_integrate_rebaseline.py::_run_integrate_rebaseline_with_lock_retry 85
-function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::enqueue_nominated_patch 68
-function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::record_kernel_integrate_result 82
 function-lines src/hyperloom/orchestrator/kernel/_shape_capture.py::_capture_tunableop_recording 61
 function-lines src/hyperloom/orchestrator/kernel/_shape_capture.py::_reuse_vllm_block_fp8_roofline_shapes 68
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_invalidate_aiter_cpp_itfs_cache 74
@@ -367,6 +365,8 @@ function-lines src/hyperloom/orchestrator/kernel/conc_sweep_plot.py::_render 59
 function-lines src/hyperloom/orchestrator/kernel/controller_patch_integration.py::_ControllerIntegration._apply_and_validate 62
 function-lines src/hyperloom/orchestrator/kernel/forge_fusion.py::salvage_forge_fusion_from_workspace 58
 function-lines src/hyperloom/orchestrator/kernel/geak_runner.py::call_geak 51
+function-lines src/hyperloom/orchestrator/kernel/kernel_decisions.py::enqueue_nominated_patch 68
+function-lines src/hyperloom/orchestrator/kernel/kernel_decisions.py::record_kernel_integrate_result 82
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::integrate_handler 107
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._publish_remote_recipe 60
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._record_fact_impl 55
