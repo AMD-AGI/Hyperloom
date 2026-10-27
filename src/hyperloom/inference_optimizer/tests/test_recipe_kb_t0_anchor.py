@@ -185,6 +185,33 @@ def test_t0_anchor_sets_warm_start_recipe_on_state(
     assert state.warm_start_context.get("status") == "seed_only"
 
 
+def test_t0_anchor_closes_its_warm_start_event_failed_when_the_lookup_raises(
+    kb: RecipeKB,
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising lookup still propagates, and its event names the exception instead of being left open."""
+    from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+    from hyperloom.orchestrator.knowledge import recipe_kb_t0
+
+    def _broken_lookup(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("kb offline")
+
+    monkeypatch.setattr(recipe_kb_t0, "_warm_start_lookup", _broken_lookup)
+    with session_scope(session_dir), pytest.raises(RuntimeError, match="kb offline"):
+        run_t0_anchor(
+            kb,
+            _FakeSharedState(),
+            T0AnchorRequest(workload="m", hw="mi300x", extra_attrs={"framework_name": "sglang"}),
+            session_dir=session_dir,
+        )
+
+    (event,) = [event for event in read_timeline_events(session_dir) if event.get("type") == "warm_start"]
+    assert event["status"] == "failed"
+    assert event["ext"]["failure"]["error_class"] == "RuntimeError"
+
+
 # warm-start surfacing pitfalls / lessons embedded in the recipe row
 def test_t0_anchor_surfaces_pitfalls_and_lessons_from_existing_row(
     kb: RecipeKB,
