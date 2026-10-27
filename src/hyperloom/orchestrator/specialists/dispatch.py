@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 from hyperloom.common.env import env_flag
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from kernelforge.decode_modules import decode_module_lines
 
 from ..collaborator import CoordinatorCollaborator
 from ..measurement.runtime_findings import render_runtime_findings
@@ -202,14 +203,23 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         self._warm_gap_anchors(params)
         self._warm_progress(params)
 
-        # Pack bottleneck signals into roofline_evidence for the specialist.
-        # Hot kernels alone are enough: a trace whose quality gate withheld
-        # analysis.md still names where device time goes.
-        last_ta = getattr(state, "last_trace_analyze", None) or {}
-        has_evidence = isinstance(last_ta, dict) and bool(
-            last_ta.get("analysis_md_text") or last_ta.get("hot_kernels_top15")
-        )
-        if has_evidence and "roofline_evidence" not in params:
+        if "roofline_evidence" not in params:
+            await self._warm_roofline_evidence(params)
+
+        measurement = getattr(state, "current_best_measurement", None)
+        if measurement and "runtime_findings" not in params:
+            params["runtime_findings"] = await asyncio.to_thread(render_runtime_findings, measurement)
+
+        await self._warm_experience_kb(params)
+
+    async def _warm_roofline_evidence(self, params: dict[str, Any]) -> None:
+        """Pack the TraceLens snapshot and the decode steps' time by module into ``roofline_evidence``.
+
+        Hot kernels alone are enough: a trace whose quality gate withheld analysis.md still names where device time
+        goes, and the raw capture's module table stands even without a TraceLens snapshot.
+        """
+        last_ta = getattr(self.shared_state, "last_trace_analyze", None) or {}
+        if isinstance(last_ta, dict) and (last_ta.get("analysis_md_text") or last_ta.get("hot_kernels_top15")):
             from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
 
             analysis_path = str(last_ta.get("analysis_md_path") or "")
@@ -218,25 +228,16 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 try:
                     executive_summary = extract_workload_summary(analysis_path)
                 except (ValueError, csv.Error) as exc:
-                    log.warning(
-                        "specialist warmup: extract_workload_summary(%s) failed: %r",
-                        analysis_path,
-                        exc,
-                    )
-                    executive_summary = {}
-            hot_kernels = list(last_ta.get("hot_kernels_top15") or [])[:8]
+                    log.warning("specialist warmup: extract_workload_summary(%s) failed: %r", analysis_path, exc)
             params["roofline_evidence"] = {
                 "analysis_md_path": analysis_path,
                 "roofline_snapshot_id": last_ta.get("roofline_snapshot_id"),
                 "executive_summary": executive_summary,
-                "hot_kernels_top15": hot_kernels,
+                "hot_kernels_top15": list(last_ta.get("hot_kernels_top15") or [])[:8],
             }
-
-        measurement = getattr(state, "current_best_measurement", None)
-        if measurement and "runtime_findings" not in params:
-            params["runtime_findings"] = await asyncio.to_thread(render_runtime_findings, measurement)
-
-        await self._warm_experience_kb(params)
+        lines = await asyncio.to_thread(decode_module_lines, getattr(self.shared_state, "last_profile_trace", ""))
+        if lines:
+            params.setdefault("roofline_evidence", {})["decode_modules"] = lines
 
     def _warm_framework_context(self, params: dict[str, Any]) -> None:
         """Warm the runtime framework version and the local framework source roots."""

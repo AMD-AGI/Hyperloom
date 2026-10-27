@@ -1776,6 +1776,20 @@ def _section_runtime_findings(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
+def _decode_module_rows(table: Any) -> list[str]:
+    """The decode steps' time by module, ahead of the TraceLens kernels, or nothing without a table."""
+    if not table:
+        return []
+    return [
+        "**Decode step time by module** (summed per step off the raw profile capture's step windows, so it covers "
+        "the graph-replayed VERIFY step TraceLens cannot split; profiling inflates every figure by about a tenth, "
+        "the shares hold):",
+        "",
+        *(str(line) for line in table),
+        "",
+    ]
+
+
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section from ``inp.roofline_evidence``;
     empty evidence renders a heading + ``(none)`` placeholder.
@@ -1797,10 +1811,10 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
         )
         return rows
 
+    rows.extend(_decode_module_rows(ev.get("decode_modules")))
     snap_id = ev.get("roofline_snapshot_id")
     if snap_id is not None:
-        rows.append(f"**TraceLens snapshot #{snap_id}**")
-        rows.append("")
+        rows.extend([f"**TraceLens snapshot #{snap_id}**", ""])
 
     summary = ev.get("executive_summary")
     if summary:

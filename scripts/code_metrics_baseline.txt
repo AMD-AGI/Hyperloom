@@ -456,7 +456,6 @@ function-lines src/hyperloom/orchestrator/roles/critic_agent.py::CriticAgentBack
 function-lines src/hyperloom/orchestrator/specialists/agent_cli_config.py::_codex_mcp_config 63
 function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.maybe_auto_retry_specialist 101
 function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.maybe_force_stalled_domain_specialist 56
-function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 51
 function-lines src/hyperloom/orchestrator/specialists/patch_safety.py::vet_patches 75
 function-lines src/hyperloom/orchestrator/specialists/rebench.py::run_specialist_rebench 72
 function-lines src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunner._finalize 51

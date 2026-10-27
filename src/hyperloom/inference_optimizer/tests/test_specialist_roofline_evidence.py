@@ -164,6 +164,47 @@ async def test_warm_specialist_params_respects_existing_evidence(tmp_path):
     assert params["roofline_evidence"] == {"sentinel": True}
 
 
+def _verify_capture(tmp_path: Path) -> Path:
+    from kernelforge.tests.trace_fixtures import kernel, step, write_trace
+
+    events = [
+        step("step[VERIFY bs=2]", 0.0, 100.0),
+        kernel("mfma_moe1_silu_mul_afp4_wfp4", 1.0, 60.0),
+        kernel("ck_gemm_a8w8_blockscale_b_preshuffle", 62.0, 40.0),
+    ]
+    return write_trace(tmp_path / "r-TP-0-EP-0.trace.json.gz", events)
+
+
+@pytest.mark.asyncio
+async def test_warm_specialist_params_reads_the_decode_modules_off_the_raw_capture(tmp_path):
+    """The VERIFY graph replay TraceLens cannot split still reaches the specialist, by module, from the capture."""
+    state = SharedState(last_trace_analyze={}, last_profile_trace=str(_verify_capture(tmp_path)))
+    coord = _make_coord(tmp_path, state=state)
+    params: dict[str, Any] = {"domain": "framework_rewrite_specialist"}
+
+    await coord.specialist_dispatch.warm_specialist_params(params)
+
+    assert params["roofline_evidence"] == {
+        "decode_modules": [
+            "| module | VERIFY bs=2 | top kernel |",
+            "|---|---:|---|",
+            "| moe | 0.060 ms (60.0%) | `mfma_moe1_silu_mul_afp4_wfp4` |",
+            "| gemm | 0.040 ms (40.0%) | `ck_gemm_a8w8_blockscale_b_preshuffle` |",
+        ]
+    }
+
+
+def test_section_renders_the_decode_modules_ahead_of_the_tracelens_kernels():
+    table = ["| module | VERIFY bs=2 | top kernel |", "|---|---:|---|", "| moe | 0.060 ms (60.0%) | `m` |"]
+    inp = _make_inp({"decode_modules": table, "hot_kernels_top15": [{"kernel_id": "k1", "name": "topk"}]})
+
+    section = _section_roofline_evidence(inp)
+
+    start = section.index(table[0])
+    assert section[start : start + 3] == table
+    assert start < section.index("| kernel_id | name | gpu_pct | bottleneck | source_file |")
+
+
 def _make_inp(roofline_evidence: dict[str, Any]) -> SpecialistPromptInputs:
     return SpecialistPromptInputs(
         task_id="t-1",
