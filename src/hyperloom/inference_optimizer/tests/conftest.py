@@ -622,6 +622,9 @@ class RayDouble:
         class RayActorError(RayError):
             pass
 
+        class OutOfMemoryError(RayError):
+            pass
+
         class RayTaskError(RayError):
             pass
 
