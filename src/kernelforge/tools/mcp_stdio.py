@@ -114,6 +114,6 @@ async def serve(
             write_error(request_id, -32601, str(exc))
         except InvalidParamsError as exc:
             write_error(request_id, -32602, str(exc))
-        except Exception as exc:  # noqa: BLE001 - convert failures to JSON-RPC
-            log.warning("MCP request %s failed: %s", method, exc)
+        except Exception as exc:  # outermost JSON-RPC dispatcher: one request becomes a -32603 error
+            log.warning("MCP request %s failed: %s", method, exc, exc_info=True)
             write_error(request_id, -32603, f"{type(exc).__name__}: {exc}")

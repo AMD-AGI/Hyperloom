@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -201,7 +202,7 @@ def test_the_exported_launch_env_masks_a_generic_custom_headers_env(tmp_path):
 
 
 def test_a_re_export_masks_a_credential_a_legacy_fragment_recorded_in_plaintext(tmp_path):
-    from hyperloom.inference_optimizer.breakdown.recorder import recorder_for
+    from hyperloom.inference_optimizer.breakdown.recorder.recorder import recorder_for
 
     _write_json(
         tmp_path / "state.json",
@@ -712,7 +713,6 @@ def test_timeline_writer_does_not_migrate_flat_files(tmp_path):
 
 
 def _stub_preflight_steps(tmp_path, monkeypatch):
-    from hyperloom.agents.framework import kb as framework_kb
     from hyperloom.inference_optimizer.cli import preflight
     from hyperloom.orchestrator.actions.executors import benchmark_backend
 
@@ -728,9 +728,8 @@ def _stub_preflight_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight, "_restore_provider_only_mode", lambda *_args: None)
     monkeypatch.setattr(preflight, "_normalize_legacy_deepseek_env", lambda: None)
     monkeypatch.setattr(preflight, "_validate_credentials", lambda: None)
-    monkeypatch.setattr(framework_kb, "prepare_kb_environment", lambda: None)
     monkeypatch.setattr(preflight, "_ensure_python_sdks", lambda *_args: None)
-    monkeypatch.setattr(preflight, "_resolve_llm_endpoints", lambda: ("", ""))
+    monkeypatch.setattr(preflight, "_export_llm_endpoints", lambda: ("", ""))
     monkeypatch.setattr(preflight, "_normalize_hip_visible_devices", lambda: None)
     monkeypatch.setattr(preflight, "_check_gpu_visibility", lambda: None)
     monkeypatch.setattr(preflight, "_check_shm_disk", lambda: None)
@@ -738,7 +737,6 @@ def _stub_preflight_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight, "_ensure_ray", lambda *_args: None)
     monkeypatch.setattr(preflight, "_ensure_bench_serving_deps", lambda *_args: None)
     monkeypatch.setattr(preflight, "_ensure_lm_eval_dep", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(preflight, "_ensure_framework_deps", lambda *_args: None)
     monkeypatch.setattr(preflight, "_check_serving_framework", lambda *_args: None)
     monkeypatch.setattr(preflight.inferencex_checkout, "checkout_ok", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(preflight.inferencex_checkout, "head_sha", lambda *_args: "abc123")
@@ -780,7 +778,6 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         "validate_server_args",
         "normalize_legacy_deepseek_env",
         "validate_credentials",
-        "prepare_kb_environment",
         "ensure_python_sdks",
         "check_gpu_visibility",
         "check_shm_disk",
@@ -788,7 +785,6 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         "ensure_ray",
         "ensure_bench_serving_deps",
         "ensure_lm_eval",
-        "framework_deps",
         "check_serving_framework",
         "ensure_magpie",
         "clone_inferencex",
@@ -800,8 +796,6 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         "diagnostics_snapshot",
     ]
     steps = {step["step_id"]: step for step in event["ext"]["steps"]}
-    assert steps["prepare_kb_environment"]["status"] == "skipped"
-    assert steps["prepare_kb_environment"]["skip_reason"] == "explicit_flag"
     assert steps["check_kernel_tuning_clis"]["status"] == "skipped"
     assert steps["check_kernel_tuning_clis"]["skip_reason"] == "no_kernel"
     assert steps["ensure_magpie"]["message"] == "benchmark backend is 'bypass'"
@@ -1006,6 +1000,78 @@ def test_model_gate_event_write_failure_does_not_change_gate_result(tmp_path, mo
     assert model_gate._preflight_unsupported_model_arch(args, tmp_path) is False
     breakdown = exporter.build(tmp_path)
     assert any("sbd_v6.write.model_gate.start" in warning for warning in breakdown["metadata"]["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("record_event", "component", "message"),
+    [
+        ("_finish_model_gate", "model_gate.finish", "failed to finalize SBD V6 model-gate event"),
+        ("_record_resumed_model_gate", "model_gate.resume", "failed to record resumed SBD V6 model-gate event"),
+    ],
+)
+def test_a_model_gate_event_the_disk_refuses_is_kept_as_a_v6_warning(
+    tmp_path, monkeypatch, caplog, record_event, component, message
+):
+    from hyperloom.inference_optimizer.cli import model_gate
+    from hyperloom.inference_optimizer.session import sbd_v6
+
+    full = OSError(28, "No space left on device")
+
+    def disk_full(*_args, **_kwargs):
+        raise full
+
+    monkeypatch.setattr(sbd_v6, "write_timeline_event_at", disk_full)
+    with caplog.at_level(logging.WARNING, logger=model_gate.log.name):
+        getattr(model_gate, record_event)(_gate_args(tmp_path / "model"), tmp_path)
+
+    assert sbd_v6.read_write_warnings(tmp_path) == [
+        f"sbd_v6.write.{component}: OSError: [Errno 28] No space left on device"
+    ]
+    (record,) = [r for r in caplog.records if r.getMessage() == message]
+    assert record.exc_info[1] is full
+
+
+def test_fail_fast_writers_that_raise_do_not_mask_the_context_gate(tmp_path, monkeypatch, capsys, caplog):
+    from hyperloom.inference_optimizer import breakdown
+    from hyperloom.inference_optimizer.cli import model_gate
+    from hyperloom.inference_optimizer.session import sbd_v6
+    from hyperloom.orchestrator.actions.executors import report
+
+    monkeypatch.setattr(model_gate, "_emit_breakdown_to_langfuse", lambda _session_dir: None)
+    model = tmp_path / "short-context"
+    _write_model_config(
+        model,
+        {"architectures": ["LlamaForCausalLM"], "model_type": "llama", "max_position_embeddings": 2048},
+    )
+    session_dir = tmp_path / "session"
+    _seed_state(session_dir, monkeypatch, model)
+    stop_report_failed = OSError(28, "No space left on device")
+    breakdown_failed = OSError(5, "Input/output error")
+
+    def write_stop_report(*_args, **_kwargs):
+        raise stop_report_failed
+
+    def write_breakdown_json(_session_dir):
+        raise breakdown_failed
+
+    monkeypatch.setattr(report, "write_stop_report", write_stop_report)
+    monkeypatch.setattr(breakdown, "write_breakdown_json", write_breakdown_json)
+    args = _gate_args(model)
+    with caplog.at_level(logging.WARNING, logger=model_gate.log.name):
+        assert model_gate._preflight_context_window(args, session_dir) is True
+
+    stderr = capsys.readouterr().err.splitlines()
+    assert stderr[:2] == [
+        "WARNING: failed to persist context-window stop report: OSError(28, 'No space left on device')",
+        "WARNING: failed to write session_breakdown.json on context fail-fast: OSError(5, 'Input/output error')",
+    ]
+    assert stderr[2].startswith("ERROR: model max_position_embeddings=2048 < required ")
+    assert sbd_v6.read_write_warnings(session_dir) == [
+        "sbd_v6.write.model_gate.context.breakdown: OSError: [Errno 5] Input/output error"
+    ]
+    traced = {r.getMessage(): r.exc_info[1] for r in caplog.records if r.exc_info}
+    assert traced["context-window stop report persist failed"] is stop_report_failed
+    assert traced["session_breakdown.json write failed on context fail-fast"] is breakdown_failed
 
 
 def test_model_gate_fail_fast_writes_breakdown_once(tmp_path, monkeypatch):

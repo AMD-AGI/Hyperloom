@@ -18,6 +18,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..collaborator import CoordinatorCollaborator
 from ..measurement.runtime_findings import render_runtime_findings
 from ..state.shared_state import KbInjection
+from ..state.task_registry import TaskSpec
 from ..phases import machine_state as _phase_state
 from ..policy.gate import (
     PolicyDenied,
@@ -102,6 +103,38 @@ class ClassifiedFailure(NamedTuple):
     error: str
 
 
+def _round_entry_extras(
+    done_payload: dict[str, Any], task_params: dict[str, Any], *, run_error: str, source_phase: str
+) -> dict[str, Any]:
+    """The optional specialist-round fields: carried keys, lane flags, status, phase, GPUs and notes."""
+    extras: dict[str, Any] = {}
+    for key in _ROUND_CARRIED_KEYS:
+        value = done_payload.get(key)
+        if value in (None, "", [], {}):
+            value = task_params.get(key)
+        if value not in (None, "", [], {}):
+            extras[key] = value
+    for key in ("candidate_discovery", "framework_agent_authoring"):
+        if done_payload.get(key) or task_params.get(key):
+            extras[key] = True
+    if run_error:
+        extras["status"] = "failed"
+        extras["error"] = extras["run_error"] = str(run_error)[:1000]
+    elif done_payload.get("status") not in (None, ""):
+        extras["status"] = str(done_payload.get("status"))
+    if source_phase:
+        extras["source_phase"] = source_phase
+    gpu_ids = done_payload.get("allocated_gpu_ids")
+    if isinstance(gpu_ids, list) and gpu_ids:
+        extras["allocated_gpu_ids"] = [
+            int(g) for g in gpu_ids if isinstance(g, (int, str)) and str(g).strip().lstrip("-").isdigit()
+        ]
+    specialist_notes = done_payload.get("_specialist_notes")
+    if isinstance(specialist_notes, list) and specialist_notes:
+        extras["notes"] = list(map(str, specialist_notes))
+    return extras
+
+
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     """Specialist dispatch: warmup, auto-retry, wave fan-out, stalled-domain forcing, and round-entry construction."""
 
@@ -164,11 +197,56 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             value = convert(getattr(state, attr))
             if value:
                 params.setdefault(key, value)
+        self._warm_framework_context(params)
+        self._warm_prompt_hints(params, domain)
+        self._warm_gap_anchors(params)
+        self._warm_progress(params)
+
+        # Pack bottleneck signals into roofline_evidence for the specialist.
+        # Hot kernels alone are enough: a trace whose quality gate withheld
+        # analysis.md still names where device time goes.
+        last_ta = getattr(state, "last_trace_analyze", None) or {}
+        has_evidence = isinstance(last_ta, dict) and bool(
+            last_ta.get("analysis_md_text") or last_ta.get("hot_kernels_top15")
+        )
+        if has_evidence and "roofline_evidence" not in params:
+            from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
+
+            analysis_path = str(last_ta.get("analysis_md_path") or "")
+            executive_summary: dict[str, Any] = {}
+            if analysis_path:
+                try:
+                    executive_summary = extract_workload_summary(analysis_path)
+                except (ValueError, csv.Error) as exc:
+                    log.warning(
+                        "specialist warmup: extract_workload_summary(%s) failed: %r",
+                        analysis_path,
+                        exc,
+                    )
+                    executive_summary = {}
+            hot_kernels = list(last_ta.get("hot_kernels_top15") or [])[:8]
+            params["roofline_evidence"] = {
+                "analysis_md_path": analysis_path,
+                "roofline_snapshot_id": last_ta.get("roofline_snapshot_id"),
+                "executive_summary": executive_summary,
+                "hot_kernels_top15": hot_kernels,
+            }
+
+        measurement = getattr(state, "current_best_measurement", None)
+        if measurement and "runtime_findings" not in params:
+            params["runtime_findings"] = await asyncio.to_thread(render_runtime_findings, measurement)
+
+        await self._warm_experience_kb(params)
+
+    def _warm_framework_context(self, params: dict[str, Any]) -> None:
+        """Warm the runtime framework version and the local framework source roots."""
+        state = self.shared_state
+        # Runs after the ``_STATE_PARAMS`` warmup, whose ``str.strip`` requires ``state.framework`` to be a str.
         # runtime framework version for version-mismatch annotation.
         if "framework_version" not in params:
             fp_meta = getattr(state, "stack_fingerprint_meta", None) or {}
             if isinstance(fp_meta, dict):
-                fw = str(params.get("framework") or getattr(state, "framework", "") or "").lower()
+                fw = str(params.get("framework") or state.framework).lower()
                 if fw in ("sglang", "vllm"):
                     v = str(fp_meta.get(fw) or "").strip()
                     if v and v != "unknown":
@@ -185,7 +263,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 roots = resolve_kernel_search_roots()
                 if roots:
                     params["framework_source_roots"] = list(roots)
-                tree = resolve_framework_tree(str(getattr(state, "framework", "") or ""))
+                tree = resolve_framework_tree(state.framework)
                 if tree:
                     params["session_framework_tree"] = tree
             except (KeyError, OSError) as exc:
@@ -194,6 +272,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     exc,
                 )
 
+    def _warm_prompt_hints(self, params: dict[str, Any], domain: str) -> None:
+        """Warm the hardware, model-architecture and advisory prompt hints ``domain`` reads."""
+        state = self.shared_state
         # Hardware + workload hints from SharedState; else dataclass defaults win.
         params.setdefault("gpu_type", state.gpu_type or "")
 
@@ -234,6 +315,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             if _hints_block:
                 params["research_hints"] = _hints_block
 
+    def _warm_gap_anchors(self, params: dict[str, Any]) -> None:
+        """Warm the targeted gap's symptom, layer and recent attempts from the gaps[] ledger."""
+        state = self.shared_state
         # Fill gap-specific anchors from the gaps[] ledger.
         gap_cid = str(params.get("gap_canonical_id") or "").strip() or str(params.get("gap") or "").strip()
         if gap_cid:
@@ -252,8 +336,11 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                             "severity": str(gap.get("severity") or ""),
                         }
 
+    def _warm_progress(self, params: dict[str, Any]) -> None:
+        """Warm the session's current throughput, keep threshold and applied stack."""
+        state = self.shared_state
         if "current_tput" not in params:
-            _ct = float((getattr(state, "current_best", None) or {}).get("tput") or 0.0)
+            _ct = float(state.current_best.get("tput") or 0.0)
             if _ct > 0:
                 params["current_tput"] = _ct
         if "keep_threshold_pct" not in params:
@@ -266,42 +353,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     for e in _stack
                     if isinstance(e, dict)
                 ]
-
-        # Pack bottleneck signals into roofline_evidence for the specialist.
-        # Hot kernels alone are enough: a trace whose quality gate withheld
-        # analysis.md still names where device time goes.
-        last_ta = getattr(state, "last_trace_analyze", None) or {}
-        has_evidence = isinstance(last_ta, dict) and bool(
-            last_ta.get("analysis_md_text") or last_ta.get("hot_kernels_top15")
-        )
-        if has_evidence and "roofline_evidence" not in params:
-            from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
-
-            analysis_path = str(last_ta.get("analysis_md_path") or "")
-            executive_summary: dict[str, Any] = {}
-            if analysis_path:
-                try:
-                    executive_summary = extract_workload_summary(analysis_path)
-                except (ValueError, csv.Error) as exc:
-                    log.warning(
-                        "specialist warmup: extract_workload_summary(%s) failed: %r",
-                        analysis_path,
-                        exc,
-                    )
-                    executive_summary = {}
-            hot_kernels = list(last_ta.get("hot_kernels_top15") or [])[:8]
-            params["roofline_evidence"] = {
-                "analysis_md_path": analysis_path,
-                "roofline_snapshot_id": last_ta.get("roofline_snapshot_id"),
-                "executive_summary": executive_summary,
-                "hot_kernels_top15": hot_kernels,
-            }
-
-        measurement = getattr(state, "current_best_measurement", None)
-        if measurement and "runtime_findings" not in params:
-            params["runtime_findings"] = await asyncio.to_thread(render_runtime_findings, measurement)
-
-        await self._warm_experience_kb(params)
 
     async def _warm_experience_kb(self, params: dict[str, Any]) -> None:
         """Inject this dispatch's Experience KB block into a FRAMEWORK_AGENT specialist and record the injection."""
@@ -416,12 +467,14 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         with trajectory_scope(parent_span_id=task.task_id):
             new_task, was_existing = await self.tasks.create_or_return_existing(
-                kind="specialist",
-                params=retry_params,
-                idempotency_key=retry_key,
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind="specialist",
+                    params=retry_params,
+                    idempotency_key=retry_key,
+                    requires_lanes=lanes,
+                    lease_ttl_sec=ttl,
+                    dispatch_class="coordinator",
+                )
             )
         if was_existing:
             # Retry slot already taken: let normal bookkeeping record this attempt.
@@ -738,7 +791,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         entry: dict[str, Any] = {
             "round_id": str(task_params.get("round_id") or task.task_id),
             "task_id": task.task_id,
-            "source": source or "coordinator",
+            "source": source,
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "domain": str(done_payload.get("domain") or task_params.get("domain") or ""),
             # Knowledge-domain tags; reported tags win over dispatch params.
@@ -752,30 +805,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             "new_findings": list(done_payload.get("new_findings") or []),
             "residual_questions": list(done_payload.get("residual_questions") or []),
         }
-        for key in _ROUND_CARRIED_KEYS:
-            value = done_payload.get(key)
-            if value in (None, "", [], {}):
-                value = task_params.get(key)
-            if value not in (None, "", [], {}):
-                entry[key] = value
-        for key in ("candidate_discovery", "framework_agent_authoring"):
-            if done_payload.get(key) or task_params.get(key):
-                entry[key] = True
-        if run_error:
-            entry["status"] = "failed"
-            entry["error"] = entry["run_error"] = str(run_error)[:1000]
-        elif done_payload.get("status") not in (None, ""):
-            entry["status"] = str(done_payload.get("status"))
-        if source_phase:
-            entry["source_phase"] = source_phase
-        gpu_ids = done_payload.get("allocated_gpu_ids")
-        if isinstance(gpu_ids, list) and gpu_ids:
-            entry["allocated_gpu_ids"] = [
-                int(g) for g in gpu_ids if isinstance(g, (int, str)) and str(g).strip().lstrip("-").isdigit()
-            ]
-        specialist_notes = done_payload.get("_specialist_notes")
-        if isinstance(specialist_notes, list) and specialist_notes:
-            entry["notes"] = list(map(str, specialist_notes))
+        entry.update(_round_entry_extras(done_payload, task_params, run_error=run_error, source_phase=source_phase))
         return entry
 
     def _record_specialist_round_product(self, *, task: Task, round_entry: dict[str, Any]) -> None:

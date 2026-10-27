@@ -20,7 +20,7 @@ from hyperloom.orchestrator.actions.executors.roofline import (
     make_roofline_executor,
 )
 from hyperloom.inference_optimizer.trace.task_progress import progress_scope
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import ActionAttempt, SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -895,11 +895,13 @@ def test_record_action_attempt_populates_last_roofline_and_history():
     s = SharedState()
     s.record_action_attempt(
         action="roofline",
-        task_id="t-rf-1",
-        status="succeeded",
-        decision="promoted",
-        result={"snapshot_id": 3},
-        extras={"analysis_md_path": "/p/analysis.md"},
+        attempt=ActionAttempt(
+            task_id="t-rf-1",
+            status="succeeded",
+            decision="promoted",
+            result={"snapshot_id": 3},
+            extras={"analysis_md_path": "/p/analysis.md"},
+        ),
     )
     assert s.last_roofline
     assert s.last_roofline.get("status") == "succeeded"
@@ -915,10 +917,7 @@ def test_record_action_attempt_caps_roofline_history():
     for i in range(25):
         s.record_action_attempt(
             action="roofline",
-            task_id=f"t-{i}",
-            status="succeeded",
-            decision="promoted",
-            result={"snapshot_id": i},
+            attempt=ActionAttempt(task_id=f"t-{i}", status="succeeded", decision="promoted", result={"snapshot_id": i}),
         )
     assert len(s.roofline_attempts) == 20
     assert s.roofline_attempts[-1].get("task_id") == "t-24"
@@ -1006,100 +1005,7 @@ async def test_promote_roofline_does_not_remutate_state(session_dir):
     assert s.last_profile_status == "succeeded"
 
 
-# N11: strip base64 image data URLs from analysis.md.
-def test_strip_passes_text_through_when_no_base64_url():
-    md = "# Analysis\n\nNo images here, just text.\nSome markdown link: [foo](https://example.com/bar)\n"
-    out = SharedState._strip_base64_data_urls(md)
-    assert out == md
-
-
-def test_strip_empty_input_returns_empty():
-    assert SharedState._strip_base64_data_urls("") == ""
-
-
-def test_strip_handles_none_gracefully():
-    assert SharedState._strip_base64_data_urls(None) is None or SharedState._strip_base64_data_urls(None) == ""
-
-
-def test_strip_replaces_data_image_png_payload():
-    md = (
-        "## Section\n"
-        "![Performance Improvement](data:image/png;base64,"
-        "iVBORw0KGgoAAAANSUhEUgAACB8AAAN8CAYAAAAa5)\n"
-        "Trailing text\n"
-    )
-    out = SharedState._strip_base64_data_urls(md)
-    assert "data:image/png;base64" not in out
-    assert "iVBORw0KGgo" not in out
-    assert "stripped" in out.lower()
-    assert "Performance Improvement" in out
-    assert "Trailing text" in out
-    assert "## Section" in out
-
-
-def test_strip_replaces_data_image_jpeg_too():
-    md = "![Foo](data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/)\n"
-    out = SharedState._strip_base64_data_urls(md)
-    assert "data:image/" not in out
-    assert "stripped" in out.lower()
-    assert "Foo" in out
-
-
-def test_strip_replaces_data_image_svg_xml_base64():
-    md = "![chart](data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53)\n"
-    out = SharedState._strip_base64_data_urls(md)
-    assert "data:image/" not in out
-    assert "chart" in out
-
-
-def test_strip_replaces_multiple_images_independently():
-    md = "![a](data:image/png;base64,AAA)\ntext\n![b](data:image/png;base64,BBB)\n"
-    out = SharedState._strip_base64_data_urls(md)
-    assert "AAA" not in out and "BBB" not in out
-    assert out.count("stripped") == 2
-    assert "stripped: base64 image — a" in out
-    assert "stripped: base64 image — b" in out
-
-
-def test_strip_does_not_touch_regular_image_urls():
-    md = "![chart](https://example.com/perf.png)\n![fig](./local/figure.svg)\n"
-    out = SharedState._strip_base64_data_urls(md)
-    assert out == md
-
-
-def test_strip_preserves_empty_alt_text():
-    md = "![](data:image/png;base64,iVBOR)\n"
-    out = SharedState._strip_base64_data_urls(md)
-    assert "data:image/" not in out
-    assert "image" in out
-
-
-def test_format_analysis_md_full_strips_base64_before_injection(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", "1")
-    s = SharedState()
-    s.last_trace_analyze = {
-        "roofline_snapshot_id": 1,
-        "roofline_baseline_gain_at_snapshot": 0.0,
-        "analysis_md_text": (
-            "# Test\n\n"
-            "## Executive Summary\nGPU idle 64%\n"
-            "![chart](data:image/png;base64,iVBORw0KGgoAAAANSUhEUg)\n"
-            "## Recommendations\nP1: kernel_opt fmoe\n"
-        ),
-        "analysis_md_path": "/p/analysis.md",
-    }
-    rendered = s._format_analysis_md_full()
-    assert "data:image/" not in rendered
-    assert "iVBORw0KGgo" not in rendered
-    assert "Executive Summary" in rendered
-    assert "GPU idle 64%" in rendered
-    assert "P1: kernel_opt fmoe" in rendered
-    assert "=== TraceLens Analysis (snapshot #1" in rendered
-    assert "=== End TraceLens Analysis ===" in rendered
-
-
-def test_format_analysis_md_full_defaults_to_pointer_not_inline(monkeypatch):
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", raising=False)
+def test_format_analysis_md_pointer_points_at_the_tool_instead_of_inlining():
     s = SharedState()
     s.last_trace_analyze = {
         "roofline_snapshot_id": 7,
@@ -1107,46 +1013,10 @@ def test_format_analysis_md_full_defaults_to_pointer_not_inline(monkeypatch):
         "analysis_md_text": "# Report\nverbatim body text\n",
         "analysis_md_path": "/p/analysis.md",
     }
-    rendered = s._format_analysis_md_full()
+    rendered = s._format_analysis_md_pointer()
     assert "verbatim body text" not in rendered
     assert "show_analysis_md" in rendered
     assert "snapshot #7" in rendered
-
-
-def test_format_analysis_md_full_no_strip_when_no_image(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", "1")
-    s = SharedState()
-    s.last_trace_analyze = {
-        "roofline_snapshot_id": 1,
-        "roofline_baseline_gain_at_snapshot": 0.0,
-        "analysis_md_text": "# Report\nText only\n",
-        "analysis_md_path": "/p/analysis.md",
-    }
-    rendered = s._format_analysis_md_full()
-    assert "# Report" in rendered
-    assert "Text only" in rendered
-
-
-def test_strip_keeps_surrounding_markdown_intact():
-    md = (
-        "# H1\n\n"
-        "## H2\n"
-        "Some text\n\n"
-        "![chart](data:image/png;base64,xxxxxxxxxxxxxxxxxxxxxxxxxxxxx)\n\n"
-        "## H2-2\n"
-        "| col | val |\n"
-        "|-----|-----|\n"
-        "| a   | 1   |\n\n"
-        "```python\nprint('hi')\n```\n"
-    )
-    out = SharedState._strip_base64_data_urls(md)
-    assert "# H1" in out
-    assert "## H2" in out
-    assert "## H2-2" in out
-    assert "| col | val |" in out
-    assert "```python" in out
-    assert "print('hi')" in out
-    assert "xxxxxxxxxxxxxxxxxxxxxxxxxxxxx" not in out
 
 
 # N26: RooflineExecutor auto-retries trace_analyze on steady_state_chunk_{empty,missing} with an alternate mode.

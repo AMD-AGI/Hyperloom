@@ -820,6 +820,26 @@ def test_nogit_still_serves_the_legacy_list(tmp_path, output_dir):
     assert (output_dir / "warm_patches" / "patch_backups").is_dir()
 
 
+def test_nogit_replay_reports_a_patch_the_tree_already_holds_as_already_present(tmp_path, output_dir):
+    """The applier's presence check, not an empty backup set, names the patch already present."""
+    _require_patch_cli()
+    install_root = tmp_path / "dist-packages"
+    target = install_root / "vllm" / "fp8.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# fp8 module\noriginal = True\npatched = True\n")
+    params = {
+        "patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}],
+        "required_patch_timeline": True,
+    }
+
+    result = _apply_warm_patches(params, str(install_root), output_dir)
+
+    assert result["status"] == "prepared"
+    assert [entry["status"] for entry in result["applied"]] == ["already_present"]
+    assert target.read_text() == "# fp8 module\noriginal = True\npatched = True\n"
+    assert result["trees"][0]["nogit_backups"] == []
+
+
 def test_nogit_apply_hands_teardown_the_backups_it_needs(tmp_path, output_dir):
     """A nogit apply has no sha, so its backups are the only way back."""
     _require_patch_cli()
@@ -856,7 +876,7 @@ def test_teardown_undoes_a_nogit_apply(tmp_path, output_dir, backup_intact, capl
     backups = result["trees"][0]["nogit_backups"]
     patched = target.read_bytes()
     if not backup_intact:
-        Path(backups[0]["backup_path"]).write_text("# fp8 module\ncorrupt = True\n")
+        Path(backups[0]["backup"]).write_text("# fp8 module\ncorrupt = True\n")
     caplog.clear()
 
     restore = _revert_warm_patch_state(str(install_root), nogit_backups=backups)

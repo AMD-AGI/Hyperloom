@@ -9,12 +9,14 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.phases.machine import Transition
 
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_INTVTY_P50
@@ -32,6 +34,7 @@ from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 from .conftest import seed_kernel_keep
+from hyperloom.orchestrator.kernel import integrate_accuracy as integrate_accuracy
 
 
 # Fixtures
@@ -60,37 +63,24 @@ class _StubTaskRegistry:
     def __init__(self):
         self._tasks: dict[str, Any] = {}
 
-    async def create_or_return_existing(
-        self,
-        *,
-        kind: str,
-        params: dict,
-        idempotency_key: str,
-        requires_lanes: list | None = None,
-        allowed_tools: list | None = None,
-        side_effects: list | None = None,
-        lease_ttl_sec: int = 0,
-        task_id: str | None = None,
-        dispatch_class: str | None = None,
-        dispatch_origin: dict | None = None,
-    ):
+    async def create_or_return_existing(self, spec):
         from hyperloom.orchestrator.state.task_registry import Task
 
-        self.last_lease_ttl_sec = lease_ttl_sec
-        existing = self._tasks.get(idempotency_key)
+        self.last_lease_ttl_sec = spec.lease_ttl_sec
+        existing = self._tasks.get(spec.idempotency_key)
         if existing is not None:
             return existing, True
         import uuid as _uuid
 
         task = Task(
-            task_id=task_id or _uuid.uuid4().hex,
-            kind=kind,
+            task_id=spec.task_id or _uuid.uuid4().hex,
+            kind=spec.kind,
             state="queued",
-            params=dict(params),
-            idempotency_key=idempotency_key,
-            requires_lanes=list(requires_lanes) if requires_lanes else [],
+            params=dict(spec.params),
+            idempotency_key=spec.idempotency_key,
+            requires_lanes=list(spec.requires_lanes) if spec.requires_lanes else [],
         )
-        self._tasks[idempotency_key] = task
+        self._tasks[spec.idempotency_key] = task
         return task, False
 
 
@@ -148,7 +138,7 @@ async def test_drain_pending_keep_integrates_records_result_once(
 
     assert calls == ["k004"]
     assert c.shared_state.kernel_integrate_attempts
-    assert c.shared_state.next_pending_keep_kernel_id() == ""
+    assert kd.pending_keep_kernel_ids(c.shared_state) == []
     assert c.shared_state.current_best["action"] == "integrate"
     assert c.shared_state.current_best["variant_name"] == "k004"
 
@@ -165,8 +155,7 @@ def test_pending_keep_kernel_ids_prioritize_trace_impact_over_micro():
     seed_kernel_keep(state, "k004", micro=4.21, source_file="/tmp/rmsnorm.cu", artifact="/tmp/k004_opt.cu")
     seed_kernel_keep(state, "k001", micro=1.51, source_file="/tmp/moe.cu", artifact="/tmp/k001_opt.cu")
 
-    assert state.pending_keep_kernel_ids() == ["k001", "k004"]
-    assert state.next_pending_keep_kernel_id() == "k001"
+    assert kd.pending_keep_kernel_ids(state) == ["k001", "k004"]
 
 
 def test_pending_keep_kernel_ids_do_not_retry_needs_review():
@@ -187,8 +176,7 @@ def test_pending_keep_kernel_ids_do_not_retry_needs_review():
         }
     )
 
-    assert state.pending_keep_kernel_ids() == ["k001"]
-    assert state.next_pending_keep_kernel_id() == "k001"
+    assert kd.pending_keep_kernel_ids(state) == ["k001"]
 
 
 def _patch_stack_validation_internals(monkeypatch, *, new_tput: float, revert_status: str = "ok"):
@@ -785,7 +773,7 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
                 "workspace": f"/tmp/integrate-{kid}",
             }
         )
-    assert not c.shared_state.has_keep_pending_integrate
+    assert not kd.has_keep_pending_integrate(c.shared_state)
 
     validation_calls = []
 
@@ -949,7 +937,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     """If conc_sweep enqueue raises, the hook records a terminal skip."""
 
     async def _boom(*args, **kwargs):
-        raise RuntimeError("simulated DB outage")
+        raise sqlite3.OperationalError("simulated DB outage")
 
     monkeypatch.setattr(coord.phase_sweep, "_enqueue_internal_conc_sweep_task", _boom)
     coord.shared_state.phase_history = [
@@ -1265,6 +1253,7 @@ class _SweepPhaseState:
 
     def __init__(self, phase_history=None):
         self.phase_history = list(phase_history or [])
+        self.tp = 0
 
 
 def _sweep_phase_row(*, auto_sweep_task_id: str = "") -> dict:
@@ -1440,7 +1429,6 @@ async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
     monkeypatch,
 ):
     """An accuracy regression on a stack KEEP must drop decision to NEEDS_REVIEW."""
-    from hyperloom.orchestrator.kernel import request_handlers as krh
 
     seen: dict[str, object] = {}
 
@@ -1460,7 +1448,7 @@ async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
             "source_file": "/tmp/result.json",
         }
 
-    monkeypatch.setattr(krh, "_grade_integrate_accuracy", _fake_accuracy_gate)
+    monkeypatch.setattr(integrate_accuracy, "grade_integrate_accuracy", _fake_accuracy_gate)
 
     c = _stack_validation_coordinator(tmp_path)
     stack = _ledger_rows(c, ["k001", "k004"])
@@ -1480,17 +1468,17 @@ async def test_integrate_handler_revert_partial_becomes_failed(
     monkeypatch,
 ):
     """Non-KEEP + partial revert must set top-level status='failed'."""
-    from hyperloom.orchestrator.kernel import request_handlers as krh
+    from hyperloom.orchestrator.kernel import _integrate_outcomes as integrate_outcomes
     import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
     import hyperloom.orchestrator.actions.executors.benchmark_result as br
 
     monkeypatch.setattr(
-        krh,
+        integrate_outcomes,
         "_maybe_revert_kernel_patch",
         lambda apply_result: {"status": "partial", "reason": "mn_revert_failed"},
     )
     monkeypatch.setattr(
-        krh,
+        integrate_outcomes,
         "_maybe_apply_kernel_patch",
         lambda payload, *, session_dir, kernel_id=None: {
             "status": "ok",
@@ -1717,7 +1705,7 @@ async def test_stack_members_selected_patch_ignores_other_patch_history(historic
 @pytest.mark.asyncio
 async def test_stack_members_checkpoint_selects_exact_patch_among_history(historical_stack_coord, monkeypatch):
     from hyperloom.inference_optimizer.session.session_binding import session_scope
-    from hyperloom.orchestrator.kernel import request_handlers as krh
+    from hyperloom.orchestrator.kernel import _integrate_outcomes as integrate_outcomes
 
     c = historical_stack_coord
     selected = c.phase_kernel_stack._positive_needs_review_integrates()
@@ -1747,8 +1735,8 @@ async def test_stack_members_checkpoint_selects_exact_patch_among_history(histor
     c.shared_state = SharedState.from_dict(c.shared_state.to_dict())
     apply = Mock(side_effect=AssertionError("recovery must not apply patches"))
     revert = Mock(side_effect=AssertionError("completed validation must not revert"))
-    monkeypatch.setattr(krh, "_maybe_apply_kernel_patch", apply)
-    monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", revert)
+    monkeypatch.setattr(integrate_outcomes, "_maybe_apply_kernel_patch", apply)
+    monkeypatch.setattr(integrate_outcomes, "_maybe_revert_kernel_patch", revert)
 
     with session_scope(c.session_dir):
         assert await c.phase_kernel_stack.recover_interrupted_stack_validation() is True
@@ -1826,13 +1814,13 @@ def test_stack_members_invalid_refused_before_marking(tmp_path, monkeypatch, cas
 @pytest.mark.asyncio
 async def test_stack_members_legacy_display_id_is_not_split_during_selection(tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
-    from hyperloom.orchestrator.kernel import request_handlers as krh
+    from hyperloom.orchestrator.kernel import _integrate_outcomes as integrate_outcomes
 
     monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
     c = _stack_validation_coordinator(tmp_path)
     c.shared_state.optimization_stack = [{"action": "integrate", "kernel_id": "a+b", "tput": 110.0}]
-    monkeypatch.setattr(krh, "_maybe_apply_kernel_patch", Mock(return_value={"status": "failed"}))
-    monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", Mock(return_value={"status": "ok"}))
+    monkeypatch.setattr(integrate_outcomes, "_maybe_apply_kernel_patch", Mock(return_value={"status": "failed"}))
+    monkeypatch.setattr(integrate_outcomes, "_maybe_revert_kernel_patch", Mock(return_value={"status": "ok"}))
     monkeypatch.setattr(baseline_mod, "BaselineExecutor", Mock(side_effect=AssertionError("unexpected benchmark")))
     before = deepcopy(c.shared_state.to_dict())
     with pytest.raises(ValueError, match="(?i)stack|member"):

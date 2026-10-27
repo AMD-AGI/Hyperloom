@@ -43,14 +43,16 @@ def test_the_round_declaration_scopes_the_harvest() -> None:
 
 
 def test_an_uncommitted_worktree_edit_is_still_harvested(tmp_path: Path) -> None:
-    worktree = tmp_path / "wt"
-    (worktree / "pkg").mkdir(parents=True)
-    (worktree / "pkg" / "mod.py").write_text("base\n", encoding="utf-8")
-    _git(worktree, "init", "-q")
-    _git(worktree, "config", "user.email", "t@example.invalid")
-    _git(worktree, "config", "user.name", "t")
-    _git(worktree, "add", "-A")
-    _git(worktree, "commit", "-qm", "base")
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "wt"  # a linked worktree, as the dispatcher makes it
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg" / "mod.py").write_text("base\n", encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@example.invalid")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "worktree", "add", "-q", "-b", "sp", str(worktree))
     base = subprocess.run(
         ["git", "-C", str(worktree), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
@@ -82,8 +84,8 @@ def test_the_non_git_channel_records_every_backup_before_it_mutates(tmp_path: Pa
     )
     backup_root = tmp_path / "backups"
 
-    ok, err, backups, _ = _apply_patch_no_git(root, patch, backup_root)
-    assert ok, err
+    result = _apply_patch_no_git(root, patch, backup_root)
+    assert result.ok, result.error
     assert target.read_text(encoding="utf-8") == "two\n"
 
     # The record is on disk, not only in the list the caller happens to hold.
@@ -134,8 +136,7 @@ def test_a_revert_that_leaves_a_patched_file_behind_is_named(tmp_path: Path) -> 
         {
             "target": str(target),
             "existed": True,
-            "backup_path": str(backup),
-            "revert_action": "restore",
+            "backup": str(backup),
             "pre_image_sha256": file_digest(target),
         },
     )

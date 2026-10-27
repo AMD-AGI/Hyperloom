@@ -11,6 +11,7 @@ from typing import Any
 
 from hyperloom.common.env import env_bool
 
+from ..actions.executors.explore import TS_SKIPPED_DEDUP
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
 from ..loop.maintenance import run_lease_and_db_reclaim
@@ -68,7 +69,8 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
                 rows.extend(rejected)
         counts: dict[str, int] = {}
         for row in rows:
-            if not isinstance(row, dict):
+            # A row the round answered without measuring rejects nothing.
+            if not isinstance(row, dict) or row.get("outcome") == TS_SKIPPED_DEDUP:
                 continue
             try:
                 cycle = int(row.get("cycle", cur_cycle) or 0)

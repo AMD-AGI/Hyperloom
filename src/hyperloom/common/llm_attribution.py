@@ -13,6 +13,8 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Iterator, Mapping, MutableMapping, Sequence
 
+from hyperloom.common.llm_headers import format_custom_headers
+
 #: Selects the gateway whose headers to emit; unset emits nothing.
 ATTRIBUTION_ENV = "HYPERLOOM_LLM_ATTRIBUTION"
 #: PrimusClaw session id, already exported by the session bootstrap.
@@ -123,18 +125,11 @@ def _render_raw(fields: Sequence[str], context: Mapping[str, str]) -> str:
     return next((context[field] for field in fields if context.get(field)), "")
 
 
-def _render_json(fields: Sequence[str], context: Mapping[str, str]) -> str:
-    """Emit the selected fields as a compact JSON object."""
-    selected = {field: context[field] for field in fields if context.get(field)}
-    return json.dumps(selected, separators=(",", ":")) if selected else ""
-
-
 #: Value shape by name. This is the whole of the gateway-specific knowledge;
 #: everything else a preset states is which header carries which fields.
 _RENDERERS: dict[str, Callable[[Sequence[str], Mapping[str, str]], str]] = {
     "combined": _render_combined,
     "raw": _render_raw,
-    "json": _render_json,
 }
 
 
@@ -153,22 +148,10 @@ def _parse_raw(fields: Sequence[str], value: str) -> dict[str, str]:
     return {fields[0]: value.strip()} if len(fields) == 1 and value.strip() else {}
 
 
-def _parse_json(fields: Sequence[str], value: str) -> dict[str, str]:
-    """Recover the declared fields from a JSON object value."""
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    return {key: str(item).strip() for key, item in parsed.items() if key in fields and str(item).strip()}
-
-
 #: Reverse of :data:`_RENDERERS`, for reading a tag a parent already wrote.
 _PARSERS: dict[str, Callable[[Sequence[str], str], dict[str, str]]] = {
     "combined": _parse_combined,
     "raw": _parse_raw,
-    "json": _parse_json,
 }
 
 #: Fields a child may take from the tag its parent wrote. They describe *where*
@@ -311,7 +294,7 @@ def _merge_raw(raw: str | None, headers: Mapping[str, str]) -> str:
     lines = [
         line for line in text.splitlines() if line.strip() and line.partition(":")[0].strip().lower() not in replaced
     ]
-    lines.extend(f"{name}: {value}" for name, value in headers.items())
+    lines.append(format_custom_headers(headers))
     return "\n".join(lines)
 
 

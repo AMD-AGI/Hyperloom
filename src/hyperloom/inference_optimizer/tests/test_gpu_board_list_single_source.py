@@ -150,7 +150,7 @@ def test_the_aiter_per_token_gate_is_every_gfx942_board():
 
 
 def test_the_fp8_dense_quant_type_reads_gfx950_from_the_table():
-    from hyperloom.orchestrator.kernel.request_handlers import _is_gfx950
+    from hyperloom.orchestrator.kernel._untuned_gemm_csv import _is_gfx950
 
     for product, board in AMD_GPU_BOARDS.items():
         assert _is_gfx950(product) is (board.gfx == "gfx950"), product
@@ -160,22 +160,21 @@ def test_the_fp8_dense_quant_type_reads_gfx950_from_the_table():
 def test_the_roofline_vendor_specs_are_the_board_facts():
     from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS
 
-    assert set(HW_SPECS) == set(AMD_GPU_BOARDS)
-    for product, board in AMD_GPU_BOARDS.items():
-        spec = HW_SPECS[product]
+    published = {product for product, board in AMD_GPU_BOARDS.items() if board.hbm_bw_gbps is not None}
+    assert set(HW_SPECS) == published
+    assert "radeon8060s" not in HW_SPECS
+    for product in published:
+        board, spec = AMD_GPU_BOARDS[product], HW_SPECS[product]
         assert (spec["hbm_gb"], spec["hbm_bw_gbps"]) == (board.hbm_gb, board.hbm_bw_gbps)
         for precision, peak in board.vendor_peak_tflops.items():
             assert spec["peak_tflops"][precision] == peak, (product, precision)
 
 
-def test_the_bypass_vendor_specs_are_the_board_facts():
-    from hyperloom.orchestrator.trace_analysis._bypass_roofline import _VENDOR_HW_SPECS
+def test_the_bypass_roofline_reads_the_same_specs():
+    from hyperloom.inference_optimizer import roofline_ceiling
+    from hyperloom.orchestrator.trace_analysis import _bypass_roofline
 
-    assert set(_VENDOR_HW_SPECS) == set(AMD_GPU_BOARDS)
-    for product, board in AMD_GPU_BOARDS.items():
-        assert _VENDOR_HW_SPECS[product]["hbm_bw_gbps"] == board.hbm_bw_gbps
-        for precision, peak in board.vendor_peak_tflops.items():
-            assert _VENDOR_HW_SPECS[product]["peak_tflops"][precision] == peak, (product, precision)
+    assert _bypass_roofline.HW_SPECS is roofline_ceiling.HW_SPECS
 
 
 def test_server_reuse_covers_the_vllm_script_of_every_boards_runner():

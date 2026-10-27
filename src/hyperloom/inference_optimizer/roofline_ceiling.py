@@ -14,7 +14,9 @@ from typing import Any, NamedTuple
 
 from hyperloom.common.checkpoint_quant import WeightDeclaration, weight_declarations
 from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
-from hyperloom.inference_optimizer.model_config_utils import _merge_config_scopes
+from hyperloom.common.model_paths import resolve_local_model_dir
+from hyperloom.inference_optimizer.grid_server_args import server_arg_value
+from hyperloom.inference_optimizer.model_config_utils import load_model_config_dict, _merge_config_scopes
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +40,7 @@ HW_SPECS: dict[str, dict[str, Any]] = {
         "peak_tflops": board.vendor_peaks_by_tag(_PRECISION_TAGS),
     }
     for product, board in AMD_GPU_BOARDS.items()
+    if board.hbm_bw_gbps is not None
 }
 
 
@@ -131,18 +134,6 @@ def _resolve_quant_config_weight_bytes(quant_cfg: Any) -> float:
     return _bits_to_bytes(quant_cfg.get("bits") or quant_cfg.get("w_bit"))
 
 
-def _parse_server_arg(args: str, flag: str) -> str:
-    """Return the value following ``--flag`` (space or ``=`` form), else ``\"\"``."""
-    if not args:
-        return ""
-    toks = str(args).replace("=", " ").split()
-    value = ""
-    for i, tok in enumerate(toks):
-        if tok == flag and i + 1 < len(toks):
-            value = toks[i + 1].strip()
-    return value
-
-
 #: Magpie ``benchmark.envs`` keys that carry the runtime server args for the
 #: text-serving frameworks. The baseline yaml only ever sets the one matching
 #: its framework, so reading these and concatenating is safe.
@@ -214,7 +205,7 @@ def _server_args_from_envs(envs: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def _read_baseline_yaml_server_args(state: Any) -> str:
+def read_baseline_server_args(state: Any) -> str:
     """Read the runtime server args from the materialized baseline yaml."""
     return _server_args_from_envs(_benchmark_envs(_read_baseline_yaml_benchmark(state)))
 
@@ -250,7 +241,7 @@ def _achieved_arm_source(state: Any) -> str:
 
 def _collect_runtime_server_args(state: Any, *, arm: str | None = None) -> str:
     """Server args for the arm the ceiling is actually compared against."""
-    base_args = _read_baseline_yaml_server_args(state)
+    base_args = read_baseline_server_args(state)
     resolved_arm = arm or _achieved_arm_source(state)
     if resolved_arm == "current_best":
         current_best = getattr(state, "current_best", None)
@@ -320,8 +311,8 @@ def resolve_runtime_dtype(
     """Resolve the runtime weight/activation dtype from the actual run."""
     runtime = resolve_runtime_workload(state, arm=arm)
     args = runtime.server_args
-    quant = _parse_server_arg(args, "--quantization").lower()
-    dtype_arg = _parse_server_arg(args, "--dtype").lower()
+    quant = server_arg_value(args, "--quantization").lower()
+    dtype_arg = server_arg_value(args, "--dtype").lower()
 
     act_bytes = max(_resolve_dtype_bytes(dtype_arg) if dtype_arg else 2.0, 2.0)
 
@@ -389,10 +380,7 @@ def apply_runtime_dtype(meta: "ModelMeta", rt: RuntimeDtype) -> "ModelMeta":
     """Rescale runtime weights; experts stored at a precision of their own keep it."""
     import dataclasses as _dc
 
-    # Safe degrade for non-dataclass / fake meta (test doubles).
-    if not _dc.is_dataclass(meta):
-        return meta
-    cfg_b = float(getattr(meta, "weight_dtype_bytes", 0.0) or 0.0)
+    cfg_b = float(meta.weight_dtype_bytes or 0.0)
     rt_b = float(rt.weight_dtype_bytes or 0.0)
     if cfg_b <= 0 or rt_b <= 0 or abs(cfg_b - rt_b) < 1e-9:
         return _dc.replace(meta, weight_dtype_bytes=rt_b or cfg_b)
@@ -422,9 +410,13 @@ def _resolve_tflops(specs: dict[str, dict[str, Any]], gpu_type: str | None, prec
     return float(table.get(str(precision_tag).strip().lower(), 0.0))
 
 
-def _resolve_peak_tflops(gpu_type: str | None, precision_tag: str | None) -> float:
-    """``(gpu, precision)`` → vendor dense peak TFLOPS; 0.0 on miss (safe-degrade signal → T_cmp unavailable, fall back to T_mem)."""
-    return _resolve_tflops(HW_SPECS, gpu_type, precision_tag)
+def _compute_peak(gpu_type: str | None, precision_tag: str | None) -> tuple[float, str]:
+    """``(gpu, precision)`` → ``(TFLOPS, convention)``: max-achievable, else vendor dense peak, else ``(0.0, "unknown")``."""
+    achievable = _resolve_tflops(HW_SPECS_ACHIEVABLE, gpu_type, precision_tag)
+    if achievable > 0:
+        return achievable, "achievable"
+    vendor = _resolve_tflops(HW_SPECS, gpu_type, precision_tag)
+    return (vendor, "vendor") if vendor > 0 else (0.0, "unknown")
 
 
 @dataclass(frozen=True)
@@ -482,36 +474,27 @@ def _sum_weight_file_sizes(model_path: Path, pattern: str) -> int | None:
     return int(total) if total > 0 else None
 
 
-def _read_hf_config(model_path: Path) -> dict[str, Any] | None:
-    """Read and parse ``config.json`` from a local HF model directory."""
-    cfg = model_path / "config.json"
-    if not cfg.is_file():
-        return None
-    try:
-        data = json.loads(cfg.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    # Multimodal wrappers (e.g. Kimi-K2 kimi_k25) nest the real decoder shape / MoE config under
-    # text_config/llm_config/language_config; flatten it (nested wins) so num_experts / hidden_size /
-    # moe_intermediate_size / kv-heads reach the ceiling readers instead of degrading to a dense full-weight roofline
-    # (num_experts=0 -> active_weight_bytes = full weight_bytes; PerfModel falls back to the legacy top-down formula).
-    return _merge_config_scopes(data)
+_HIDDEN_SIZE_KEY = "hidden_size"
+_NUM_HIDDEN_LAYERS_KEY = "num_hidden_layers"
 
 
-def _derive_experts_per_tok(cfg: dict[str, Any]) -> int:
-    """Routed experts activated per token, across the naming variants in use."""
-    for key in ("num_experts_per_tok", "num_experts_per_token", "top_k_experts", "moe_topk"):
+def _config_int(cfg: dict[str, Any], *keys: str) -> int:
+    """The first set value among the alias ``keys``, as an ``int``; ``0`` when none is set."""
+    for key in keys:
         value = cfg.get(key)
         if value:
             return int(value)
     return 0
 
 
+def _derive_experts_per_tok(cfg: dict[str, Any]) -> int:
+    """Routed experts activated per token, across the naming variants in use."""
+    return _config_int(cfg, "num_experts_per_tok", "num_experts_per_token", "top_k_experts", "moe_topk")
+
+
 def _derive_moe_hidden_size(cfg: dict[str, Any]) -> int:
     """The routed experts' input dimension, which need not be ``hidden_size``."""
-    return int(cfg.get("routed_expert_hidden_size") or cfg.get("moe_hidden_size") or cfg.get("hidden_size") or 0)
+    return _config_int(cfg, "routed_expert_hidden_size", "moe_hidden_size", _HIDDEN_SIZE_KEY)
 
 
 def _derive_kv_heads(cfg: dict[str, Any]) -> int:
@@ -527,7 +510,7 @@ def _derive_head_dim(cfg: dict[str, Any]) -> int:
     head_dim = cfg.get("head_dim")
     if head_dim:
         return int(head_dim)
-    hidden = cfg.get("hidden_size")
+    hidden = cfg.get(_HIDDEN_SIZE_KEY)
     heads = cfg.get("num_attention_heads")
     if hidden and heads:
         return int(hidden) // int(heads)
@@ -546,7 +529,7 @@ def _derive_moe_layer_counts(cfg: dict[str, Any], num_layers: int, num_experts: 
         moe = sum(1 for v in freq if v)
         return moe, num_layers - moe
 
-    first_dense = int(cfg.get("first_k_dense_replace") or 0)
+    first_dense = _config_int(cfg, "first_k_dense_replace")
     first_dense = max(0, min(first_dense, num_layers))
 
     # The stride is phased differently by the two upstream implementations, and both phase it on the ABSOLUTE layer
@@ -572,13 +555,13 @@ def _compute_expert_decomposition(
     expert_bpe: float,
 ) -> tuple[int, int, int, int]:
     """MoE decomposition for the batch-aware roofline; returns ``(active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok)``. Safe-degrades to ``(weight_bytes, 0, 0, 0)``. Handles num_experts / n_routed_experts / num_local_experts aliases, the per-token aliases in :func:`_derive_experts_per_tok`, and the latent-MoE expert width in :func:`_derive_moe_hidden_size`."""
-    num_experts = int(cfg.get("num_experts") or cfg.get("n_routed_experts") or cfg.get("num_local_experts") or 0)
+    num_experts = _config_int(cfg, "num_experts", "n_routed_experts", "num_local_experts")
     experts_per_tok = _derive_experts_per_tok(cfg)
     if num_experts <= 0 or experts_per_tok <= 0:
         return int(weight_bytes), 0, 0, 0
     hidden_size = _derive_moe_hidden_size(cfg)
-    num_layers = int(cfg.get("num_hidden_layers") or 0)
-    moe_inter = int(cfg.get("moe_intermediate_size") or cfg.get("intermediate_size") or 0)
+    num_layers = _config_int(cfg, _NUM_HIDDEN_LAYERS_KEY)
+    moe_inter = _config_int(cfg, "moe_intermediate_size", "intermediate_size")
     if hidden_size <= 0 or num_layers <= 0 or moe_inter <= 0 or expert_bpe <= 0:
         return int(weight_bytes), 0, 0, 0
     # Only the MoE layers hold expert weights.
@@ -620,17 +603,18 @@ def load_model_meta(
     if not p.is_dir():
         # ``model_path`` may be an HF repo id (the CLI ``--model`` is persisted verbatim); resolve it to the engine's
         # local HF cache dir via the shared resolver so the decode ceiling isn't null for repo-id launches.
-        from hyperloom.inference_optimizer.model_config_utils import (
-            resolve_local_model_dir,
-        )
-
         resolved = resolve_local_model_dir(model_path)
         if resolved is None:
             return None
         p = resolved
-    cfg = _read_hf_config(p)
-    if cfg is None:
+    data = load_model_config_dict(str(p))
+    if data is None:
         return None
+    # Multimodal wrappers (e.g. Kimi-K2 kimi_k25) nest the real decoder shape / MoE config under
+    # text_config/llm_config/language_config; flatten it (nested wins) so num_experts / hidden_size /
+    # moe_intermediate_size / kv-heads reach the ceiling readers instead of degrading to a dense full-weight roofline
+    # (num_experts=0 -> active_weight_bytes = full weight_bytes; PerfModel falls back to the legacy top-down formula).
+    cfg = _merge_config_scopes(data)
     weight_bytes = _read_total_size(p)
     if not weight_bytes:
         return None
@@ -654,16 +638,15 @@ def load_model_meta(
         weight_bytes=weight_bytes,
         expert_bpe=expert_dtype_bytes,
     )
-    n_moe_layers, n_dense_ffn_layers = _derive_moe_layer_counts(
-        cfg, int(cfg.get("num_hidden_layers") or 0), num_experts
-    )
-    intermediate_size = int(cfg.get("intermediate_size") or 0)
-    moe_intermediate_size = int(cfg.get("moe_intermediate_size") or 0)
+    num_layers = _config_int(cfg, _NUM_HIDDEN_LAYERS_KEY)
+    n_moe_layers, n_dense_ffn_layers = _derive_moe_layer_counts(cfg, num_layers, num_experts)
+    intermediate_size = _config_int(cfg, "intermediate_size")
+    moe_intermediate_size = _config_int(cfg, "moe_intermediate_size")
     if num_experts > 0 and moe_intermediate_size <= 0:
         moe_intermediate_size = intermediate_size
     return ModelMeta(
         weight_bytes=weight_bytes,
-        num_layers=int(cfg.get("num_hidden_layers") or 0),
+        num_layers=num_layers,
         num_kv_heads=_derive_kv_heads(cfg),
         head_dim=_derive_head_dim(cfg),
         weight_dtype_bytes=dtype_bytes,
@@ -672,12 +655,12 @@ def load_model_meta(
         num_experts=num_experts,
         experts_per_tok=experts_per_tok,
         expert_weight_bytes=total_expert_bytes,
-        hidden_size=int(cfg.get("hidden_size") or 0),
+        hidden_size=_config_int(cfg, _HIDDEN_SIZE_KEY),
         intermediate_size=intermediate_size,
         moe_intermediate_size=moe_intermediate_size,
         moe_hidden_size=(_derive_moe_hidden_size(cfg) if num_experts > 0 else 0),
-        vocab_size=int(cfg.get("vocab_size") or 0),
-        num_attention_heads=int(cfg.get("num_attention_heads") or 0),
+        vocab_size=_config_int(cfg, "vocab_size"),
+        num_attention_heads=_config_int(cfg, "num_attention_heads"),
         moe_layers=n_moe_layers,
         dense_ffn_layers=n_dense_ffn_layers,
     )
@@ -751,9 +734,7 @@ def compute_compute_bound_ceiling_tok_per_sec(
     target: ComputeTarget, *, active_weight_bytes: int, weight_bytes: int, weight_dtype_bytes: float
 ) -> float:
     """Decode-only compute-bound ceiling for ``output_throughput``."""
-    peak_tflops = _resolve_achievable_tflops(target.gpu_type, target.precision_tag) or _resolve_peak_tflops(
-        target.gpu_type, target.precision_tag
-    )
+    peak_tflops, _ = _compute_peak(target.gpu_type, target.precision_tag)
     if peak_tflops <= 0 or weight_dtype_bytes <= 0:
         return 0.0
     # B=1 per-token figure; fall back to dense weight_bytes when active is missing.
@@ -825,7 +806,7 @@ def _read_vae_geometry(model_path: str) -> tuple[int, int]:
         return 8, 0
     boc = cfg.get("block_out_channels")
     vae_scale = 2 ** (len(boc) - 1) if isinstance(boc, list) and boc else 8
-    latent_channels = int(cfg.get("latent_channels") or 0)
+    latent_channels = _config_int(cfg, "latent_channels")
     return vae_scale, latent_channels
 
 
@@ -862,24 +843,20 @@ def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0
     # Every field below is attacker-shaped JSON, so a non-numeric value must degrade to "unreadable" rather than
     # escape as TypeError past the caller.
     try:
-        num_layers = int(cfg.get("num_layers") or cfg.get("num_hidden_layers") or 0)
-        num_single_layers = int(cfg.get("num_single_layers") or 0)
-        hidden = int(cfg.get("hidden_size") or cfg.get("inner_dim") or 0)
+        num_layers = _config_int(cfg, "num_layers", _NUM_HIDDEN_LAYERS_KEY)
+        num_single_layers = _config_int(cfg, "num_single_layers")
+        hidden = _config_int(cfg, _HIDDEN_SIZE_KEY, "inner_dim")
         if hidden <= 0:
-            heads = int(cfg.get("num_attention_heads") or 0)
-            head_dim = int(cfg.get("attention_head_dim") or cfg.get("head_dim") or 0)
-            hidden = heads * head_dim
+            hidden = _config_int(cfg, "num_attention_heads") * _config_int(cfg, "attention_head_dim", "head_dim")
         _ps = cfg.get("patch_size")
+        patch = (_ps if isinstance(_ps, (list, tuple)) else [_ps]) or [1]
         # A 3-element patch is (temporal, h, w): a video denoiser, whose token count needs the frame axis nothing in
         # this module models.
-        video_patch = isinstance(_ps, (list, tuple)) and len(_ps) >= 3
-        if isinstance(_ps, (list, tuple)):
-            # A 2-element patch is (h, w) and need not be square, so keep both.
-            patch_h = int((_ps[0] if _ps else 0) or 1) or 1
-            patch_w = int((_ps[-1] if _ps else 0) or 1) or 1
-        else:
-            patch_h = patch_w = int(_ps or 1) or 1
-        sample = int(cfg.get("sample_size") or 0)
+        video_patch = len(patch) >= 3
+        # A 2-element patch is (h, w) and need not be square, so keep both.
+        patch_h = int(patch[0] or 1) or 1
+        patch_w = int(patch[-1] or 1) or 1
+        sample = _config_int(cfg, "sample_size")
     except (TypeError, ValueError):
         return None
     if num_layers <= 0 or hidden <= 0:
@@ -898,8 +875,6 @@ def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0
     total_layers = num_layers + num_single_layers
     param_layer_units = 2 * num_layers + num_single_layers if num_single_layers > 0 else num_layers
     dit_params = 12 * param_layer_units * hidden * hidden
-    if dit_params <= 0:
-        return None
     return DitGeometry(dit_params, latent_tokens, total_layers, hidden)
 
 
@@ -910,7 +885,7 @@ def _diffusion_latent_tokens_from_resolution(
     if height <= 0 or width <= 0:
         return 0
     vae_scale, latent_channels = _read_vae_geometry(model_path)
-    in_ch = int(transformer_cfg.get("in_channels") or 0)
+    in_ch = _config_int(transformer_cfg, "in_channels")
     pack = 2
     if in_ch > 0 and latent_channels > 0 and in_ch % latent_channels == 0:
         ratio = in_ch // latent_channels
@@ -925,9 +900,7 @@ def _diffusion_latent_tokens_from_resolution(
 
 def compute_diffusion_compute_img_per_sec(target: ComputeTarget, dit: DitGeometry, *, num_steps: int) -> float:
     """Compute-roofline ceiling for diffusion image throughput (images/sec)."""
-    peak_tflops = _resolve_achievable_tflops(target.gpu_type, target.precision_tag) or _resolve_peak_tflops(
-        target.gpu_type, target.precision_tag
-    )
+    peak_tflops, _ = _compute_peak(target.gpu_type, target.precision_tag)
     latent_tokens = dit.latent_tokens
     if peak_tflops <= 0 or dit.params <= 0 or latent_tokens <= 0 or num_steps <= 0:
         return 0.0
@@ -949,10 +922,6 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
     height, width = _read_diffusion_resolution(state)
     # ``model_path`` may be an HF repo id; resolve to the local diffusers dir so the DiT/VAE config reads work
     # (load_model_meta re-resolves internally, so passing the resolved dir is harmless).
-    from hyperloom.inference_optimizer.model_config_utils import (
-        resolve_local_model_dir,
-    )
-
     _resolved = resolve_local_model_dir(runtime.model_path)
     model_dir = str(_resolved) if _resolved is not None else runtime.model_path
     dit = _read_diffusion_dit_meta(model_dir, height=height, width=width)
@@ -1049,11 +1018,6 @@ def compute_roofline_breakdown_from_state(
     return legacy
 
 
-def read_baseline_server_args(state: Any) -> str:
-    """Public accessor for the baseline arm's runtime server args."""
-    return _read_baseline_yaml_server_args(state)
-
-
 # TraceLens PerfModel per-op (bottom-up) roofline breakdown.
 
 #: Max-achievable (sustained) TFLOPS from TraceLens arch JSON files (same HBM
@@ -1095,25 +1059,20 @@ HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
 }
 
 
-def _resolve_achievable_tflops(gpu_type: str | None, precision_tag: str | None) -> float:
-    """Max-achievable TFLOPS from ``HW_SPECS_ACHIEVABLE``; 0.0 on miss."""
-    return _resolve_tflops(HW_SPECS_ACHIEVABLE, gpu_type, precision_tag)
+_COMPUTE_PEAK_SOURCES = {
+    "achievable": "TraceLens arch JSON (max-achievable sustained)",
+    "vendor": "vendor dense peak (achievable-table miss fallback)",
+    "unknown": "unavailable",
+}
 
 
 def resolve_compute_peak_provenance(gpu_type: str | None, precision_tag: str | None) -> dict[str, Any]:
     """Provenance for the compute-peak TFLOPS used by every compute ceiling."""
-    ach = _resolve_achievable_tflops(gpu_type, precision_tag)
-    if ach > 0:
-        return {
-            "compute_peak_convention": "achievable",
-            "compute_peak_tflops": ach,
-            "compute_peak_source": "TraceLens arch JSON (max-achievable sustained)",
-        }
-    vendor = _resolve_peak_tflops(gpu_type, precision_tag)
+    tflops, convention = _compute_peak(gpu_type, precision_tag)
     return {
-        "compute_peak_convention": "vendor" if vendor > 0 else "unknown",
-        "compute_peak_tflops": vendor,
-        "compute_peak_source": ("vendor dense peak (achievable-table miss fallback)" if vendor > 0 else "unavailable"),
+        "compute_peak_convention": convention,
+        "compute_peak_tflops": tflops,
+        "compute_peak_source": _COMPUTE_PEAK_SOURCES[convention],
     }
 
 
@@ -1236,8 +1195,6 @@ def compute_roofline_from_perfmodel(
     *, meta: "ModelMeta", target: ComputeTarget, shape: DecodeShape
 ) -> "PerfModelBreakdown | None":
     """Bottom-up decode + prefill roofline using inlined GEMM/SDPA formulas."""
-    if meta is None:
-        return None
     gpu_key = (target.gpu_type or "").strip().lower()
     spec = HW_SPECS_ACHIEVABLE.get(gpu_key) or HW_SPECS.get(gpu_key)
     if spec is None:
@@ -1246,7 +1203,7 @@ def compute_roofline_from_perfmodel(
     n_gpus = max(target.num_gpus, 1)
     bw_gbps = spec["hbm_bw_gbps"] * n_gpus
     tag = (target.precision_tag or "bf16").strip().lower()
-    f_peak_tflops = (_resolve_achievable_tflops(gpu_key, tag) or _resolve_peak_tflops(gpu_key, tag)) * n_gpus
+    f_peak_tflops = _compute_peak(gpu_key, tag)[0] * n_gpus
     if f_peak_tflops <= 0:
         return None
     bpe = float(meta.weight_dtype_bytes or 2.0)

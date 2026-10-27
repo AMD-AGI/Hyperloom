@@ -20,7 +20,7 @@ import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
-from ...source_snapshot import snapshot_source_layer
+from ...source_snapshot import SourceLayer, snapshot_source_layer
 from .projections import root_id_for, select_linked_build
 
 if TYPE_CHECKING:
@@ -187,13 +187,15 @@ def capture_root_snapshots(
         # target no longer in the accepted stack.
         shutil.rmtree(dest, ignore_errors=True)
         manifest = snapshot_source_layer(
-            framework_root=root,
-            base_sha=str(record.get("base_sha") or ""),
-            rel_paths=sorted(declared),
+            SourceLayer(
+                framework_root=root,
+                base_sha=str(record.get("base_sha") or ""),
+                rel_paths=sorted(declared),
+                declared_ops=declared,
+                import_root=import_root,
+            ),
             dest_dir=dest,
             provenance="enablement_keep",
-            declared_ops=declared,
-            import_root=import_root,
         )
         if not manifest:
             continue

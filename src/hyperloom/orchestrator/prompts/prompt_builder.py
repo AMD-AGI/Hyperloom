@@ -221,9 +221,9 @@ def _section_session_context(session: SessionContext) -> list[str]:
         ]
     lines += [
         "",
-        "Per-tick dynamic context (Phase, Mission progress, Time budget,",
-        "Shared session state, KB hints, inbox tail) is appended below the",
-        "system prompt every tick by the Coordinator.",
+        "The Coordinator supplies the session context (Shared session state, KB hints,",
+        "advisories) and the per-tick blocks (Phase, Mission progress, Time budget,",
+        "Tick, inbox tail) every tick.",
         "The Time-budget block carries `remaining=X.Xmin`.",
         "See PHASE CONTRACT below for the phase chain, per-phase allowed",
         "actions, and phase-transition rules.",
@@ -287,22 +287,18 @@ def _section_phase_semantics(
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
             "are: `baseline_tput > 0` (+ revalidation settled + build drain)",
-            "exits ENABLEMENT; `baseline_tput > 0` exits PRELUDE; the per-phase",
-            "budget cap or a terminal stop_reason exits FRAMEWORK_AGENT /",
-            "KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes",
-            "to CLOSE.",
+            "exits ENABLEMENT and `baseline_tput > 0` exits PRELUDE, each after",
+            "the initial roofline it enqueued completes (the Phase block's `hold` line);",
+            "the per-phase budget cap or a terminal stop_reason exits FRAMEWORK_AGENT",
+            "/ KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
             "You may also emit `escalate_strategy_change{next_action_hint=",
             "'skip_to_kernel'}` in FRAMEWORK_AGENT when you judge",
             "the current phase exhausted; the Coordinator validates the hint",
-            "vocab and routes the transition on the next tick. `skip_to_close`",
-            "is not in that set — see the exception below for when it applies.",
-            "`skip_to_close` is reserved, in EVERY phase, for genuine early",
-            "abandonment (e.g. infra is dead and the sweep cannot run at all):",
-            "it closes the run instead of advancing a phase. Running low on",
-            "budget is not abandonment — the",
-            "Coordinator prices the remaining budget itself and exits with an",
-            "honest terminal stop_reason (`sweep_done` / `global_converged` /",
-            "`time_exhausted`) once a further cycle cannot be funded.",
+            "vocab and routes the transition on the next tick. No hint ends the",
+            "run: the Coordinator prices the remaining budget itself and exits",
+            "with an honest terminal stop_reason (`sweep_done` /",
+            "`global_converged` / `time_exhausted`) once a further cycle cannot",
+            "be funded.",
         ]
     )
     return lines
@@ -537,10 +533,9 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "base_extra_args?, base_tput?, accuracy_baseline?, "
             "keep_threshold_pct?: <raise only; floored at the session-cycle bar>}}`. "
             "Variants run serially; a KEEP is graded on its decision "
-            "round. Variant identity is content-based (args+envs+"
-            "remove_args+unset_envs+args_mode); only exact duplicates within "
-            "the same submitted grid are collapsed, so any prior fingerprint "
-            "may be re-proposed. "
+            "round. A row that starts the stack's own server (see "
+            "`current_launch_flags`) is skipped, and rows starting the same server "
+            "are benched once; any prior fingerprint may be re-proposed. "
             "Use remove_args/unset_envs to ablate harmful base flags; "
             "args_mode='replace' to drop inherited server args. "
             "Every variant requires action-time reasoning that names the "
@@ -706,8 +701,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "   the next phase-compute, while one arm dry means work the other.",
             "   When you judge FRAMEWORK_AGENT exhausted,",
             "   emit ``escalate_strategy_change{next_action_hint=",
-            "   'skip_to_kernel'}``. `skip_to_close` is not a",
-            "   phase advance -- see PHASE CONTRACT before emitting it.",
+            "   'skip_to_kernel'}``. No hint ends the run.",
             "",
             "If you cannot move forward, emit",
             "`send_message{topic='observation', body_md='blocked: <reason>'}`.",
@@ -806,8 +800,7 @@ def _idea_generation_lines() -> list[str]:
         "   be slowing the workload, emit a variant with `remove_args` and/or",
         "   `unset_envs` instead of only adding more knobs.",
         "",
-        "Variant identity is content-based (args+envs+remove_args+",
-        "unset_envs+args_mode); only exact same-grid duplicates are collapsed.",
+        "A row starting the stack's own server is skipped; rows starting the same server run once.",
         "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
         "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
         "",

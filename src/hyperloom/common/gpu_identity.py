@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -19,12 +19,15 @@ class GpuBoard:
     #: Architecture the board dispatches to.
     gfx: str
     compute_units: int
-    hbm_gb: float
-    #: Vendor peak memory bandwidth.
-    hbm_bw_gbps: float
+    #: ``None`` when Hyperloom carries no published figure for the board.
+    hbm_gb: float | None = None
+    #: Vendor peak memory bandwidth, ``None`` like ``hbm_gb``.
+    hbm_bw_gbps: float | None = None
     #: Vendor dense peak by precision (``bf16``, ``fp16``, ``fp8``, ``fp4``, ``fp32``), for the precisions AMD
     #: publishes a peak for on this board.
-    vendor_peak_tflops: Mapping[str, float]
+    vendor_peak_tflops: Mapping[str, float] = field(default_factory=dict)
+    #: Other spellings probe output uses for the board (rocm-smi prints ``Radeon 8060S Graphics``).
+    aliases: tuple[str, ...] = ()
 
     def vendor_peaks_by_tag(self, tags: Mapping[str, tuple[str, ...]]) -> dict[str, float]:
         """``vendor_peak_tflops`` under each spelling a caller reads, from ``tags``: precision -> its spellings."""
@@ -32,7 +35,11 @@ class GpuBoard:
 
     def named_in(self, text: str) -> bool:
         """Whether ``text`` names this board as a whole word; a longer name such as ``MI300XL`` is another product."""
-        return re.search(rf"(?<![A-Z0-9]){re.escape(self.product.upper())}(?![A-Z0-9])", text.upper()) is not None
+        upper = text.upper()
+        return any(
+            re.search(rf"(?<![A-Z0-9]){re.escape(name.upper())}(?![A-Z0-9])", upper) is not None
+            for name in (self.product, *self.aliases)
+        )
 
 
 def _matrix_peaks(*, bf16: float, fp8: float, fp32: float, fp4: float | None = None) -> dict[str, float]:
@@ -57,6 +64,8 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
         ),
         # https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9700.html
         GpuBoard("r9700", "gfx1201", 64, 32.0, 640.0, _matrix_peaks(bf16=191.0, fp8=383.0, fp32=47.8)),
+        # The roofline reads TraceLens's bundled Radeon_8060S.json; Hyperloom carries no peaks for it.
+        GpuBoard("radeon8060s", "gfx1151", 40, aliases=("Radeon 8060S",)),
     )
 }
 

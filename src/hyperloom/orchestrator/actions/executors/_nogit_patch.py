@@ -17,6 +17,8 @@ from typing import Any, NamedTuple
 
 from ...delivery.ledger import append_record, mark_prepared
 from ...delivery import file_digest as _file_digest
+from ...specialists.patch_safety import patch_file_targets, path_resolves_at
+from ._apply_feedback import ApplyFeedback, PatchApplyResult, PresenceCheck, read_patch_source_context
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +27,9 @@ log = logging.getLogger(__name__)
 _P_LEVELS: tuple[int, ...] = (1, 0, 2, 3, 4, 5, 6, 7, 8)
 
 _PATCH_DEV_NULL = "/dev/null"
+
+# Patch and reject files are read leniently: one undecodable byte must not hide the rest.
+_DECODE_ERRORS = "replace"
 
 # Characters unsafe in filenames (replaced with ``_`` in rel_flat).
 _UNSAFE_NAME_RE = re.compile(r"[/\\:<>\"?*|]")
@@ -84,6 +89,31 @@ def _is_git_tree(path: Path) -> bool:
         return False
 
 
+def _reverse_probe_levels(framework_root: Path, patch_path: Path) -> tuple[int, ...]:
+    """The ``-p`` levels at which a clean reverse check shows ``patch_path`` is already applied.
+
+    Undoing a file deletion creates the file, which succeeds at any level where
+    the stripped path happens to be absent, so a level counts only when some
+    file the patch names resolves at it, read from the ``---``/``+++`` headers
+    as the target preflight reads them. A deletion already carried out leaves
+    nothing to resolve, and then every level counts.
+
+    Args:
+        framework_root: The source-tree root the patch targets.
+        patch_path: The unified-diff patch file to probe.
+
+    Returns:
+        The levels to probe, in priority order; none when the patch cannot be read.
+    """
+    try:
+        pairs = patch_file_targets(patch_path.read_text(encoding="utf-8", errors=_DECODE_ERRORS))
+    except OSError:
+        return ()
+    paths = {path for pair in pairs for path in pair if path != _PATCH_DEV_NULL}
+    anchored = tuple(lvl for lvl in _P_LEVELS if any(path_resolves_at(framework_root, p, lvl) for p in paths))
+    return anchored or _P_LEVELS
+
+
 def _reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool:
     """True when ``patch_path`` is already fully applied in ``framework_root``.
 
@@ -97,7 +127,7 @@ def _reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool:
     the post-image even though every hunk found a home.
 
     Strictly a probe: ``--dry-run`` is passed at every level, so the tree is
-    never mutated.
+    never mutated. Only the levels :func:`_reverse_probe_levels` names are tried.
 
     Args:
         framework_root: The source-tree root the patch targets.
@@ -106,7 +136,7 @@ def _reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool:
     Returns:
         ``True`` when the tree exactly holds the patch's post-state.
     """
-    for lvl in _P_LEVELS:
+    for lvl in _reverse_probe_levels(framework_root, patch_path):
         try:
             cp = subprocess.run(
                 # ``--fuzz=0``: an approximate context match would answer yes
@@ -177,15 +207,13 @@ def _nogit_failure(
     *,
     tried_levels: list[int],
     records: list[dict[str, Any]] | None = None,
-) -> "tuple[bool, str, list[dict[str, Any]], Any]":
+) -> PatchApplyResult:
     """The canonical no-git failure: the message, whatever was backed up, and the author's feedback."""
-    from ._apply_feedback import ApplyFeedback
-
-    return (
-        False,
-        message,
-        records or [],
-        ApplyFeedback(patch=str(patch_path), channel="nogit", tried_levels=tried_levels, stderr=message),
+    return PatchApplyResult(
+        ok=False,
+        error=message,
+        backups=records or [],
+        feedback=ApplyFeedback(patch=str(patch_path), channel="nogit", tried_levels=tried_levels, stderr=message),
     )
 
 
@@ -215,8 +243,7 @@ def _back_up_existing_file(abs_path: Path, bak: Path) -> tuple[dict[str, Any] | 
     return {
         "target": str(abs_path),
         "existed": True,
-        "backup_path": str(bak),
-        "revert_action": "restore",
+        "backup": str(bak),
         "mode": mode,
         "pre_image_sha256": _file_digest(abs_path),
     }, ""
@@ -226,7 +253,7 @@ def _rejected_hunks(reject_path: Path) -> str:
     """The hunk bodies ``patch`` could not apply; empty when it failed before rejecting any."""
     if not reject_path.exists():
         return ""
-    return reject_path.read_text(encoding="utf-8", errors="replace").strip()
+    return reject_path.read_text(encoding="utf-8", errors=_DECODE_ERRORS).strip()
 
 
 def _apply_patch_no_git(
@@ -235,12 +262,10 @@ def _apply_patch_no_git(
     backup_root: Path,
     *,
     seq_offset: int = 0,
-) -> "tuple[bool, str, list[dict[str, Any]], Any]":
+) -> PatchApplyResult:
     """Apply ``patch_path`` into ``framework_root`` without git, backing up targets."""
-    from ._apply_feedback import ApplyFeedback, read_patch_source_context
-
     try:
-        patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
+        patch_text = patch_path.read_text(encoding="utf-8", errors=_DECODE_ERRORS)
     except OSError as exc:
         return _nogit_failure(patch_path, f"cannot read patch file: {exc}", tried_levels=[])
 
@@ -277,9 +302,9 @@ def _apply_patch_no_git(
         # A clean *reverse* dry-run is the unambiguous already-applied probe: it
         # succeeds only when every hunk's post-state is already present in the
         # tree, which is exactly the state a forward apply would produce. In that
-        # case the apply is a satisfied no-op -- report success with no backups
-        # (the patch that really made those edits owns the backups needed for a
-        # correct revert).
+        # case the apply is a satisfied no-op -- report it as present, with no
+        # backups (the patch that really made those edits owns the backups needed
+        # for a correct revert).
         if _reverse_applies_cleanly(framework_root, patch_input):
             if not mark_prepared(backup_root):
                 return _nogit_failure(
@@ -289,7 +314,7 @@ def _apply_patch_no_git(
                 "nogit patch: %s is already fully applied (clean reverse dry-run); treating as a no-op",
                 patch_path.name,
             )
-            return True, "", [], None
+            return PatchApplyResult(ok=True, present_by=PresenceCheck.PATCH_REVERSE_DRY_RUN)
         combined_stderr = "\n".join(probe.stderrs)
         err_msg = f"patch --dry-run failed at all strip levels for {patch_path.name}"
         source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
@@ -300,7 +325,7 @@ def _apply_patch_no_git(
             stderr=combined_stderr,
             source_context=source_ctx,
         )
-        return False, err_msg, [], feedback
+        return PatchApplyResult(ok=False, error=err_msg, feedback=feedback)
 
     framework_root_resolved = framework_root.resolve()
     backup_root.mkdir(parents=True, exist_ok=True)
@@ -323,8 +348,7 @@ def _apply_patch_no_git(
             record: dict[str, Any] = {
                 "target": str(abs_path),
                 "existed": False,
-                "backup_path": None,
-                "revert_action": "delete",
+                "backup": None,
             }
         else:
             bak = backup_root / _bak_name(patch_stem, rel, seq_offset + len(backups))
@@ -369,8 +393,8 @@ def _apply_patch_no_git(
             rejected_hunks=rejected_hunks,
             source_context=source_ctx,
         )
-        return False, apply_stderr, backups, feedback
-    return True, "", backups, None
+        return PatchApplyResult(ok=False, error=apply_stderr, backups=backups, feedback=feedback)
+    return PatchApplyResult(ok=True, backups=backups)
 
 
 __all__ = [

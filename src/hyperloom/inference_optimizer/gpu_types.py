@@ -32,6 +32,8 @@ class BoardPolicy:
     targeted_build_validated: bool = True
     #: Whether the GEAK handoff names the product and ISA instead of leaving them to GEAK's device probe.
     geak_identity_pinned: bool = False
+    #: Whether a bare arch (``gcnArchName``, rocminfo) stands for this board; other boards need their product name.
+    names_its_arch: bool = False
 
 
 _VLLM_ONLY = frozenset({"vllm"})
@@ -42,19 +44,20 @@ _GFX12_RUNNER = MagpieRunner("gfx12", _VLLM_ONLY, validated_frameworks=_VLLM_ONL
 
 #: Keyed by ``AMD_GPU_BOARDS``: every board has exactly one policy row.
 _BOARD_POLICIES: dict[str, BoardPolicy] = {
-    "mi300x": BoardPolicy(_MI300X_RUNNER),
+    "mi300x": BoardPolicy(_MI300X_RUNNER, names_its_arch=True),
     "mi308x": BoardPolicy(_MI300X_RUNNER),
     "mi325x": BoardPolicy(_MI300X_RUNNER),
-    "mi355x": BoardPolicy(_MI355X_RUNNER),
+    "mi355x": BoardPolicy(_MI355X_RUNNER, names_its_arch=True),
     "r9700": BoardPolicy(_GFX12_RUNNER, targeted_build_validated=False, geak_identity_pinned=True),
+    "radeon8060s": BoardPolicy(MagpieRunner("radeon8060s", frozenset())),
 }
 
 _RUNNERS: dict[str, MagpieRunner] = {policy.runner.name: policy.runner for policy in _BOARD_POLICIES.values()}
 
-#: A bare arch resolves to the board its runner is named after (gfx942 to mi300x, gfx950 to mi355x). An arch whose
-#: runner serves a product family, such as gfx12, resolves through the product name instead.
+#: A bare arch resolves only to a board marked ``names_its_arch`` (gfx942 to mi300x, gfx950 to mi355x); gfx12 and
+#: gfx1151 cover several products, so those resolve through the product name.
 _GFX_REFERENCE_BOARDS: dict[str, str] = {
-    AMD_GPU_BOARDS[product].gfx: product for product, policy in _BOARD_POLICIES.items() if policy.runner.name == product
+    AMD_GPU_BOARDS[product].gfx: product for product, policy in _BOARD_POLICIES.items() if policy.names_its_arch
 }
 
 
@@ -94,6 +97,12 @@ def reference_gpu_type_for_gfx(text: str | None) -> str | None:
     """Return the board a bare gfx arch in ``text`` (``gcnArchName``, rocminfo) stands for, or ``None``."""
     lower = str(text or "").lower()
     return next((product for gfx, product in _GFX_REFERENCE_BOARDS.items() if gfx in lower), None)
+
+
+def parse_gpu_type(text: str | None) -> str | None:
+    """Map rocm-smi / gcnArchName output, possibly mixed into other log text, to a supported board name."""
+    board = board_named_in(text)
+    return board.product if board else reference_gpu_type_for_gfx(text)
 
 
 def _runner_framework_error(gpu_type: str, framework: str) -> str | None:
@@ -157,9 +166,9 @@ def _autodetect_gpu_type() -> str | None:
             text=True,
             timeout=5,
         ).stdout
-        board = board_named_in(out)
-        if board:
-            return board.product
+        detected = parse_gpu_type(out)
+        if detected:
+            return detected
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
         # rocm-smi missing / slow / not permitted; fall through to the torch gcnArchName probe below (autodetect is
         # best-effort).
@@ -167,8 +176,7 @@ def _autodetect_gpu_type() -> str | None:
     try:
         import torch
 
-        arch = torch.cuda.get_device_properties(0).gcnArchName
-        return reference_gpu_type_for_gfx(arch.split(":", 1)[0])
+        return parse_gpu_type(str(torch.cuda.get_device_properties(0).gcnArchName))
     except (ImportError, OSError, RuntimeError, AssertionError, AttributeError):
         return None
 

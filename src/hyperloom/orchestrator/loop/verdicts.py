@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from ..specialists.patch_safety import (
@@ -30,6 +31,29 @@ _VERDICT_ADVISORY_TEXT_KEYS: tuple[str, ...] = (
     "advice_text",
     "alternative_action",
 )
+
+
+@dataclass(frozen=True)
+class CriticRuling:
+    """The Critic's collapsed ruling on one proposal, with what it wrote alongside."""
+
+    verdict: str
+    reasoning: str
+    authored_verdict: str = ""
+    advisory: dict[str, Any] | None = None
+    approved_variant_names: set[str] | None = None
+    payload: Mapping[str, Any] | None = None
+    variant_verdicts: list[dict[str, Any]] | None = None
+
+    @property
+    def authored(self) -> str:
+        """The verdict the Critic wrote before any hold to a cited rule; defaults to ``verdict``."""
+        return str(self.authored_verdict or self.verdict).strip()
+
+    @property
+    def effective(self) -> str:
+        """The verdict the loop acts on."""
+        return str(self.verdict or "").strip()
 
 
 def serialize_verdict_advisory(payload: dict[str, Any]) -> dict[str, Any]:

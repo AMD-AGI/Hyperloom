@@ -700,7 +700,7 @@ def render(results: Sequence[ModeResult], *, entry_mode: str) -> list[str]:
     lines = ["", "=" * 78, "Compute-partition sweep", "=" * 78, ""]
     measured = [r for r in results if r.measured and r.total() is not None]
     baseline = next((r for r in measured if r.mode == entry_mode), None)
-    best = max(measured, key=lambda r: r.total() or 0.0, default=None)
+    best = max(measured, key=lambda r: r.total(), default=None)
 
     lines.append(f"{'mode':<6} {'parts':>5} {'CU':>5} {'throughput':>13} {'vs entry':>9} {'worst lat':>11}")
     lines.append("-" * 78)
@@ -710,14 +710,14 @@ def render(results: Sequence[ModeResult], *, entry_mode: str) -> list[str]:
             lines.append(f"{result.mode:<6} {'-':>5} {'-':>5} {'-':>13} {'-':>9} {'-':>11}   {why}")
             continue
         layout = result.layout
-        total = result.total() or 0.0
+        total = result.total()
         rel = ""
-        if baseline is not None and (baseline.total() or 0.0) > 0:
-            rel = f"{total / (baseline.total() or 1.0):.2f}x"
+        if baseline is not None and baseline.total() > 0:
+            rel = f"{total / baseline.total():.2f}x"
         latency = result.worst_latency_ms()
         lines.append(
-            f"{result.mode:<6} {layout.partitions if layout else '-':>5} "
-            f"{layout.cu_per_partition if layout else '-':>5} "
+            f"{result.mode:<6} {layout.partitions:>5} "
+            f"{layout.cu_per_partition:>5} "
             f"{total:>13.1f} {rel:>9} {(f'{latency:.1f} ms' if latency else '-'):>11}"
         )
     lines.append("")
@@ -729,7 +729,7 @@ def render(results: Sequence[ModeResult], *, entry_mode: str) -> list[str]:
 
     lines.append(f"Fastest measured mode: {best.mode} at {best.total():.1f} aggregate throughput.")
     if baseline is not None and best.mode != baseline.mode:
-        gain = (best.total() or 0.0) / (baseline.total() or 1.0)
+        gain = best.total() / (baseline.total() or 1.0)
         best_lat = best.worst_latency_ms()
         base_lat = baseline.worst_latency_ms()
         lines.append(
@@ -830,7 +830,8 @@ def _restore_entry_mode(gpu_id: int, entry_mode: str, *, sudo: bool) -> bool:
     try:
         print(f"\nrestoring {entry_mode} on GPU {gpu_id}")
         set_mode(gpu_id, entry_mode, sudo=sudo)
-    except Exception as exc:  # noqa: BLE001 - operator script barrier
+    except Exception as exc:  # noqa: BLE001 - isolation boundary: the entry-mode restore; main exits 3
+        traceback.print_exc()
         print(
             f"ERROR: could not restore {entry_mode} on GPU {gpu_id}: {exc}\n"
             f"The card is NOT in the mode it started in. Anything that runs on it now "
@@ -975,7 +976,7 @@ def _sweep_modes(args: argparse.Namespace, card: _Card, *, workload: BenchmarkWo
             except (SweepError, PartitionError) as exc:
                 result.error = str(exc)
                 print(f"  failed: {exc}")
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001 - isolation boundary: the mode in flight; restore and report still run
                 # Everything this script anticipates arrives as a SweepError or a PartitionError.
                 unexpected = f"{type(exc).__name__}: {exc}"
                 result.error = f"unexpected error: {unexpected}"
@@ -1055,7 +1056,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (SweepError, PartitionError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - outermost CLI main: card inspection before any change
         # Nothing has been set at this point, so there is no card to restore -- but the exit code still has to mean
         # something. 2 is for a refusal this script decided on, so an unmodelled failure gets its own code rather than
         # borrowing that one.

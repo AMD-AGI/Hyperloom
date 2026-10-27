@@ -12,10 +12,15 @@ import os
 import shlex
 import tempfile
 import time
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+
+import httpx
+
+from hyperloom.common.env import EnvValueError, env_int
 
 from ..session.paths import mn_profile_trace_root
 from ._internal import ray_dashboard
@@ -36,15 +41,9 @@ _DEFAULT_POLL_INTERVAL_S = 6
 _DEFAULT_POLL_TIMEOUT_S = 110
 
 
-def _resolve_poll_timeout_s() -> int:
-    """Poll budget (seconds): ``HYPERLOOM_MN_POLL_TIMEOUT_S`` env else ``_DEFAULT_POLL_TIMEOUT_S``."""
-    raw = (os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S") or "").strip()
-    if raw:
-        try:
-            return max(1, int(raw))
-        except ValueError:
-            warn(f"invalid HYPERLOOM_MN_POLL_TIMEOUT_S={raw!r}; using {_DEFAULT_POLL_TIMEOUT_S}")
-    return _DEFAULT_POLL_TIMEOUT_S
+def resolve_poll_timeout_s(default: int = _DEFAULT_POLL_TIMEOUT_S) -> int:
+    """Poll budget (seconds): ``HYPERLOOM_MN_POLL_TIMEOUT_S`` else *default*, never below one second."""
+    return max(1, env_int("HYPERLOOM_MN_POLL_TIMEOUT_S", default))
 
 
 def _poll_timeout_from_args(args: argparse.Namespace) -> int:
@@ -52,7 +51,7 @@ def _poll_timeout_from_args(args: argparse.Namespace) -> int:
     pt = getattr(args, "poll_timeout", None)
     if pt is not None:
         return max(1, int(pt))
-    return _resolve_poll_timeout_s()
+    return resolve_poll_timeout_s()
 
 
 # Ray dashboard job status strings.
@@ -278,7 +277,7 @@ def _short_poll(
         attempt += 1
         try:
             obj, summary = fetch()
-        except Exception as exc:  # noqa: BLE001
+        except (httpx.HTTPError, httpx.InvalidURL, ray_dashboard.RayDashboardError, ValueError, AttributeError) as exc:
             warn(f"{label} poll #{attempt} fetch error: {exc}")
             obj, summary = None, str(exc)
 
@@ -311,7 +310,7 @@ def install_geak_on_pods_best_effort() -> int:
         geak_src=None,
         print_logs=False,
         poll_interval=_DEFAULT_POLL_INTERVAL_S,
-        poll_timeout=_resolve_poll_timeout_s(),
+        poll_timeout=resolve_poll_timeout_s(),
     )
     return cmd_install_geak(ns)
 
@@ -600,7 +599,7 @@ def _build_multinode_launch_entrypoint(
     wait_flag = "--no-wait-health" if args.no_wait_health else ""
     try:
         extra_args = prepare_shell_safe_extra_args(
-            args.extra_args or "",
+            args.extra_args,
             context="rayjob restart-server --extra-args",
         )
     except ServerArgsRejected as exc:
@@ -622,22 +621,17 @@ def _build_multinode_launch_entrypoint(
             info(f"profile-traces dir derived from rayjob_id: {profiler_dir}")
     profiler_arg = f"--torch-profiler-dir {shlex.quote(str(profiler_dir))} " if profiler_dir else ""
     # Expert-parallel size; ep <= 1 emits no flag.
-    try:
-        ep_val = int(getattr(args, "ep", 1) or 1)
-    except (TypeError, ValueError):
-        ep_val = 1
-    ep_arg = f"--ep {ep_val} " if ep_val > 1 else ""
+    ep_arg = f"--ep {args.ep} " if args.ep > 1 else ""
     # Forward PD knobs only when disaggregated (else keep the aggregated default).
-    pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
     pd_args = ""
-    if pd_mode == "disaggregated":
-        pn = int(getattr(args, "pd_prefill_nodes", 0) or 0)
-        dn = int(getattr(args, "pd_decode_nodes", 0) or 0)
-        ptp = int(getattr(args, "pd_prefill_tp", 0) or 0)
-        dtp = int(getattr(args, "pd_decode_tp", 0) or 0)
-        tb = (getattr(args, "pd_transfer_backend", "") or "").strip()
-        ib = (getattr(args, "pd_ib_device", "") or "").strip()
-        bp = int(getattr(args, "pd_bootstrap_port", 0) or 0)
+    if args.pd_mode == "disaggregated":
+        pn = args.pd_prefill_nodes
+        dn = args.pd_decode_nodes
+        ptp = args.pd_prefill_tp
+        dtp = args.pd_decode_tp
+        tb = args.pd_transfer_backend.strip()
+        ib = args.pd_ib_device.strip()
+        bp = args.pd_bootstrap_port
         chunks = [
             "--pd-mode disaggregated",
             f"--pd-prefill-nodes {pn}",
@@ -1191,7 +1185,7 @@ def _resume_prior_launch(args: argparse.Namespace, state: dict, *, topology: dic
     try:
         with _ray_dashboard_client(state) as probe:
             prev_status = str(probe.get_job(prev_sub).get("status", "")).upper()
-    except Exception as exc:  # noqa: BLE001
+    except (httpx.HTTPError, httpx.InvalidURL, OSError, RuntimeError, ValueError, AttributeError) as exc:
         info(f"resume probe failed: {exc!r}; falling back to KILL+LAUNCH")
     if prev_status == "RUNNING":
         info(
@@ -1465,7 +1459,7 @@ def kill_inference_for_kernel_agent_best_effort() -> None:
         pid_file=None,
         print_logs=False,
         poll_interval=_DEFAULT_POLL_INTERVAL_S,
-        poll_timeout=_resolve_poll_timeout_s(),
+        poll_timeout=resolve_poll_timeout_s(),
     )
     try:
         cmd_kill_inference(ns)
@@ -1779,7 +1773,7 @@ def main(argv: list[str] | None = None) -> int:
     except TransientFailure as tf:
         err(str(tf))
         return EXIT_TRANSIENT
-    except ConfigurationError as cfg:
+    except (ConfigurationError, EnvValueError) as cfg:
         # Retrying cannot fix the environment, so never report it as transient.
         err(f"{type(cfg).__name__}: {cfg}")
         return EXIT_CONFIG_ERROR
@@ -1799,6 +1793,7 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_CONFIG_ERROR
         err(f"{type(exc).__name__}: {exc}")
         return EXIT_TRANSIENT
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - outermost CLI main: reported as transient with its traceback
+        err(traceback.format_exc().rstrip())
         err(f"{type(exc).__name__}: {exc}")
         return EXIT_TRANSIENT

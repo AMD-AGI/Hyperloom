@@ -30,6 +30,7 @@ from hyperloom_kb import (
     QueryViewBuilder,
     ReadLeaseManager,
     RetrievalCapability,
+    RetrievalResult,
     derive_experience_id,
 )
 from hyperloom_kb.retrieval import render_complete_experience
@@ -137,14 +138,16 @@ def test_exact_filter_organize_and_explicit_render() -> None:
         lease_id=lease.lease_id,
     )
     result = read.result(
-        groups,
-        rendered,
-        view=ref,
-        lease_id=lease.lease_id,
-        executed_capabilities=(
-            RetrievalCapability.EXACT,
-            RetrievalCapability.FILTER,
-        ),
+        RetrievalResult(
+            view=ref,
+            lease_id=lease.lease_id,
+            groups=groups,
+            rendered=rendered,
+            executed_capabilities=(
+                RetrievalCapability.EXACT,
+                RetrievalCapability.FILTER,
+            ),
+        )
     )
 
     assert {hit.experience_id for hit in exact} == {first.id, repeated.id}

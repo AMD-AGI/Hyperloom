@@ -72,6 +72,15 @@ class PartitionLayout:
         return f"{self.mode} ({self.partitions} x {self.cu_per_partition} CU{mem}){source}"
 
 
+@dataclass(frozen=True)
+class PartitionModel:
+    """The model a partition shape must fit: its path and precision, and the session state holding its identity."""
+
+    model_path: str | None = None
+    precision: str | None = None
+    shared_state: Any = None
+
+
 def parse_mode(raw: str | None) -> str:
     """Parse an operator-supplied mode name into its canonical form."""
     name = str(raw or "").strip().upper()
@@ -349,6 +358,7 @@ __all__ = [
     "PARTITION_TOTAL_STREAMS_ENV",
     "PartitionError",
     "PartitionLayout",
+    "PartitionModel",
     "fits_in_partition",
     "layout_for",
     "observe_partition",

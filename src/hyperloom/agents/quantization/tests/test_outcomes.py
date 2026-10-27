@@ -9,7 +9,6 @@ from hyperloom.agents.quantization.driver.outcomes import (
     AUTO_RECOVER,
     OutcomeId,
     SUCCESS_TAGS,
-    UNCLASSIFIED_FAILURE,
 )
 
 
@@ -64,9 +63,9 @@ def test_partition_is_disjoint():
     assert AUTO_RECOVER.isdisjoint(AUTO_FAIL)
     assert AUTO_RECOVER.isdisjoint(ASK)
     assert AUTO_FAIL.isdisjoint(ASK)
-    assert UNCLASSIFIED_FAILURE not in AUTO_RECOVER
-    assert UNCLASSIFIED_FAILURE not in AUTO_FAIL
-    assert UNCLASSIFIED_FAILURE not in ASK
+    assert OutcomeId.unclassified_failure not in AUTO_RECOVER
+    assert OutcomeId.unclassified_failure not in AUTO_FAIL
+    assert OutcomeId.unclassified_failure not in ASK
 
 
 def test_category_names_match_design():
@@ -75,9 +74,8 @@ def test_category_names_match_design():
     assert {o.value for o in ASK} == _ASK_NAMES
 
 
-def test_unclassified_failure_is_sentinel():
-    assert UNCLASSIFIED_FAILURE == OutcomeId.unclassified_failure
-    assert UNCLASSIFIED_FAILURE.value == "unclassified_failure"
+def test_unclassified_failure_serializes_by_name():
+    assert OutcomeId.unclassified_failure.value == "unclassified_failure"
 
 
 def test_success_tags_include_none_and_eval_accepted():

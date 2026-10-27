@@ -18,7 +18,7 @@ globs:
 
 A single JSON file: **`<session_dir>/session_breakdown.json`**.
 
-- Schema:   `hyperloom.session_breakdown.v6.1` (hardcoded; see `SCHEMA_VERSION` in `breakdown/schema.py`).
+- Schema:   `hyperloom.session_breakdown.v6.1` (hardcoded; see `SCHEMA_VERSION_V6` in `session/sbd_v6.py`).
 - Producer: `src/hyperloom/inference_optimizer/breakdown/exporter.py`
 - Filename: `BREAKDOWN_FILENAME` (= `session_breakdown.json`)
 

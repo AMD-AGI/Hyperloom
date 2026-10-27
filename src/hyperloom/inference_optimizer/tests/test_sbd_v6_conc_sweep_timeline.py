@@ -17,7 +17,8 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.breakdown import schema
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import conc_sweep_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import CONC_SWEEP_EVENT_SECTIONS
 from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     ARM_BASELINE,
     ARM_OPTIMIZED,
@@ -43,7 +44,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     make_conc_sweep_recorder,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
-from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
 from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EVENT_STATUS_INTERRUPTED
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -74,7 +75,7 @@ def _recorder(
 ):
     """Build a recorder the way a dispatched sweep gets one."""
     recorder = make_conc_sweep_recorder(
-        make_sink(conc_sweep_event_id(phase=phase, macro_cycle=macro_cycle), producer=PRODUCER),
+        EventSink(conc_sweep_event_id(phase=phase, macro_cycle=macro_cycle), producer=PRODUCER),
         task_id=task_id,
         task_kind="conc_sweep",
         reason=reason,
@@ -138,12 +139,8 @@ def _plan(recorder) -> None:
     recorder.record_budget(
         SweepBudget(
             declared_total_sec=9000,
-            granted_total_sec=21600,
             rung_cost_sec=10800.0,
-            raised=True,
-            gate_active=True,
             deadline=1780000000.0,
-            session_soft_deadline_sec=10800.0,
         )
     )
     recorder.record_environment(
@@ -263,18 +260,18 @@ def test_an_anchor_with_no_throughput_reports_no_per_gpu_number(_bound_session):
     assert anchor["input_throughput_tok_s_per_gpu"] is None
 
 
-def test_the_budget_reports_both_the_number_asked_for_and_the_number_spent(_bound_session):
+def test_the_budget_records_what_was_declared(_bound_session):
     recorder = _recorder()
     _plan(recorder)
     recorder.finish(_final())
 
     budget = _ext(_bound_session)["budget"]
-    assert budget["declared_total_sec"] == 9000
-    assert budget["granted_total_sec"] == 21600
-    assert budget["raised"] is True
-    assert budget["rung_cost_sec"] == 10800.0
-    assert budget["gate_active"] is True
-    assert budget["session_soft_deadline_sec"] == 10800.0
+    assert budget == {
+        "declared_total_sec": 9000,
+        "rung_cost_sec": 10800.0,
+        "gate_active": True,
+        "deadline": 1780000000.0,
+    }
 
 
 def test_the_sweeps_own_task_id_is_recorded_apart_from_the_dispatched_one(_bound_session):
@@ -855,7 +852,7 @@ def test_rows_of_another_event_are_not_pulled_in(_bound_session):
     second.record_variant(ARM_OPTIMIZED, SweepRung(stage=STAGE_BOOT, conc=8, point=_point(8)))
     second.finish(_final())
 
-    parts = conc_sweep_event_parts()
+    parts = event_parts(CONC_SWEEP_EVENT_SECTIONS)
     first_ext, _ = assemble_conc_sweep_ext(parts, event="sweep:1:conc_sweep")
     second_ext, _ = assemble_conc_sweep_ext(parts, event="sweep:2:conc_sweep")
     assert [point["conc"] for point in first_ext["arms"][ARM_OPTIMIZED]["points"]] == [64]
@@ -868,7 +865,7 @@ def test_a_second_sweep_in_one_cycle_is_named_rather_than_dropped(_bound_session
     second = _recorder(task_id="cs-2")
     second.finish(_final(elapsed_sec=20.0))
 
-    ext, _ = assemble_conc_sweep_ext(conc_sweep_event_parts(), event="sweep:2:conc_sweep")
+    ext, _ = assemble_conc_sweep_ext(event_parts(CONC_SWEEP_EVENT_SECTIONS), event="sweep:2:conc_sweep")
     assert ext["request"]["task_id"] == "cs-2"
     assert ext["superseded_sweeps"] == ["cs-1"]
 
@@ -879,7 +876,7 @@ def test_a_recorder_with_no_sink_declines_instead_of_raising(_bound_session):
 
 def test_a_malformed_event_id_declines_instead_of_breaking_the_sweep(_bound_session):
     with pytest.raises(ValueError):
-        make_sink("not-an-event-id", producer=PRODUCER)
+        EventSink("not-an-event-id", producer=PRODUCER)
 
 
 def _ceiling() -> dict[str, Any]:

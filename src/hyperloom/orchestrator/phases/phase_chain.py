@@ -103,11 +103,7 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
 }
 
 
-# Dispatched by the Coordinator.
-_NOT_LLM_PROPOSABLE: frozenset[str] = COORDINATOR_INTERNAL_ACTIONS
-
-
-# Actions a single phase reserves for the Coordinator. The global set above
+# Actions a single phase reserves for the Coordinator. COORDINATOR_INTERNAL_ACTIONS
 # cannot say this: ``baseline`` is what PRELUDE exists to propose, while
 # ENABLEMENT runs it only as the revalidation that closes a KEEP.
 PHASE_COORDINATOR_RESERVED: dict[str, frozenset[str]] = {
@@ -119,7 +115,7 @@ def allowed_actions_for(phase: str) -> tuple[str, ...]:
     """Return the phase's LLM-proposable actions as a sorted tuple (deterministic)."""
     key = (phase or "").strip().upper()
     actions = PHASE_ALLOWED_ACTIONS.get(key, frozenset())
-    return tuple(sorted(actions - _NOT_LLM_PROPOSABLE - PHASE_COORDINATOR_RESERVED.get(key, frozenset())))
+    return tuple(sorted(actions - COORDINATOR_INTERNAL_ACTIONS - PHASE_COORDINATOR_RESERVED.get(key, frozenset())))
 
 
 def render_phase_action_bullets(
@@ -216,11 +212,11 @@ class LifecycleMark:
 
     step: str
     status: str
-    phase: str | None
-    label: str | None
-    artifacts: dict[str, str] | None
-    detail: str
-    duration_s: float | None
+    phase: str | None = None
+    label: str | None = None
+    artifacts: dict[str, str] | None = None
+    detail: str = ""
+    duration_s: float | None = None
 
 
 def make_lifecycle_event(mark: LifecycleMark, *, seq: int, ts: str) -> dict[str, Any]:

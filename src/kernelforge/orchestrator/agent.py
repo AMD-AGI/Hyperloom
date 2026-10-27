@@ -102,13 +102,42 @@ def _gate_scope(
         target_files=(source_files or None),
         # Combine repo reference/test globs (repo tasks) with any caller-supplied protected globs (e.g. the
         # rewrite port loop protects the source kernel it ports FROM, which is also the correctness oracle).
-        extra_protected_globs=(
-            (_REPO_EXTRA_PROTECTED_GLOBS if is_repo_task else []) + list(extra_protected_globs or [])
-        )
-        or None,
+        extra_protected_globs=(_REPO_EXTRA_PROTECTED_GLOBS if is_repo_task else []) + list(extra_protected_globs or []),
         # Exact-path measurement files (e.g. the PORT phase's source kernel, which the driver imports as the
         # oracle).
         extra_protected_paths=extra_protected_paths,
+    )
+
+
+def _backend_expertise_section(config: Config, task: ImplementerTask, source_files: list[str]) -> str:
+    """The kernel backend's prompt framed for this loop, or "" for a backend without one."""
+    # Load the kernel backend's prompt as extra domain context; without it the agent gets only the generic
+    # instructions below and misses backend discipline (e.g. ck's tile/pipeline tuning + stale-.cuda.o cleaning).
+    from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
+
+    kernel_backend_context = build_single_kernel_backend_prompt(
+        config, task.kernel_backend_name, task_type=task.task_type, source_paths=source_files
+    )
+    if not kernel_backend_context:
+        return ""
+    # The backend prompts name the STEPS (build, run the driver, profile) but not the mechanism, because only this
+    # loop knows it: this agent has Bash and the driver documented above, and no build/test/bench/pmc tools. So this
+    # framing covers only what is specific to this loop.
+    # Profiling off means the loop hands the session no profiler, so this framing must not promise one. (The loaded
+    # kernel_backend_context is backend domain knowledge and is left as-is.)
+    self_verbs = (
+        "build, run, and profile the kernel YOURSELF via Bash"
+        if task.profiling_enabled
+        else "build and run the kernel YOURSELF via Bash"
+    )
+    return (
+        f"{chr(10)}## Backend Expertise ({task.kernel_backend_name}){chr(10)}"
+        "Backend guidance for choosing and implementing your edit. In this "
+        f"loop you {self_verbs} to verify every change before finishing. "
+        "After you finish, the loop also runs an SNR pre-filter + benchmark "
+        "pass on your final kernel, and accepts it only if the task's own "
+        "correctness suite passes too."
+        f"{chr(10)}{chr(10)}{kernel_backend_context}"
     )
 
 
@@ -243,8 +272,8 @@ async def _run_outer_gate_turns(gate, backend, run_spec: AgentRunSpec, run_resul
                 feedback,
                 usage=usage,
             )
-        except Exception as exc:  # noqa: BLE001 - SDK errors are unbounded; the outer gate stays final
-            log.warning("outer-gate resume failed: %s", exc)
+        except Exception as exc:  # isolation boundary: one continuation turn; the outer gate stays final
+            log.warning("outer-gate resume failed: %s", exc, exc_info=True)
             if getattr(exc, "agent_safety_rejection", False):
                 integrity_error = exc
             gate.end_reason = "resume_error"
@@ -289,7 +318,7 @@ def _parse_output_tag(text: str, tag: str, cap: int, *, last: bool = False) -> s
     return found
 
 
-def _session_end_reason(*, submitted: bool, gate, run_result, result_subtype: str) -> str:
+def _session_end_reason(*, gate, run_result) -> str:
     """Why this session ended, for per-iteration analysis.
 
     The gate allowing a safe candidate handoff is ``candidate_submitted``;
@@ -297,16 +326,16 @@ def _session_end_reason(*, submitted: bool, gate, run_result, result_subtype: st
     ``max_turns``), another SDK error, or the agent voluntarily stopping
     ("success").
     """
-    if submitted:
+    if any(line.strip().upper() == "SUBMIT_CANDIDATE" for line in run_result.text.splitlines()):
         return "candidate_submitted"
     if gate is not None and gate.end_reason:
         return gate.end_reason
     if run_result.end_reason and run_result.end_reason != "agent_stopped":
         return run_result.end_reason
-    if "max_turns" in result_subtype:
+    if "max_turns" in run_result.subtype:
         return "turn_cap"
-    if result_subtype and result_subtype != "success":
-        return f"sdk_{result_subtype}"
+    if run_result.subtype and run_result.subtype != "success":
+        return f"sdk_{run_result.subtype}"
     return "agent_stopped"
 
 
@@ -404,65 +433,32 @@ def make_agent_fn(
     """Create an agent_fn callback for the autonomous iteration loop."""
     task, measurement, session = setup.task, setup.measurement, setup.session
     program_md, kernel_backend_name, pre_task_context = task.program_md, task.kernel_backend_name, task.pre_task_context
-    pr_kb_repo, task_type, profiling_enabled = task.pr_kb_repo, task.task_type, task.profiling_enabled
-    extra_protected_globs, extra_protected_paths = task.extra_protected_globs, task.extra_protected_paths
-    commit_new_paths = task.commit_new_paths
-    driver_script, max_blocks, correctness_only = (
-        measurement.driver_script,
-        measurement.max_blocks,
-        measurement.correctness_only,
-    )
-    session_timeout_sec, permission_mode = session.session_timeout_sec, session.permission_mode
+    pr_kb_repo, profiling_enabled = task.pr_kb_repo, task.profiling_enabled
+    extra_protected_globs = task.extra_protected_globs
+    extra_protected_paths = list(task.extra_protected_paths or [])
+    commit_new_paths = list(task.commit_new_paths or [])
+    driver_script, max_blocks = measurement.driver_script, measurement.max_blocks
+    permission_mode = session.permission_mode
     backend, requested_backend = _resolve_implementer_backend(config, session.agent_backend, usage)
-    backend_model = backend.runtime.model
 
     # Multi-file / repository awareness.
-    source_files = [f for f in (task.source_files or []) if f]
-    target_functions = [f for f in (task.target_functions or []) if f]
-    is_repo_task = (task_type or "").strip().lower() in _REPO_TASK_TYPES
-    assembly_session = kernel_backend_name == "assembly" and not correctness_only
+    source_files = list(task.source_files or [])
+    target_functions = list(task.target_functions or [])
+    is_repo_task = task.task_type.strip().lower() in _REPO_TASK_TYPES
+    # Assembly preparation has already verified the session's single .s source.
+    assembly_session = kernel_backend_name == "assembly"
     if assembly_session:
         from kernelforge.assembly.prepare import frozen_paths
 
-        assembly_files = [path for path in source_files if Path(path).suffix.lower() in {".s", ".asm"}]
-        if not assembly_files:
-            raise ValueError("assembly optimization requires a verified .s target from preparation")
-        extra_protected_paths = list(extra_protected_paths or []) + frozen_paths(config.workspace, assembly_files)
+        extra_protected_paths += frozen_paths(config.workspace, source_files)
         preparation_dir = Path(config.workspace) / "forge_experiments" / "assembly_preparation"
         extra_protected_paths.extend(str(path) for path in preparation_dir.glob("*") if path.is_file())
         commit_new_paths = []
-        source_files = assembly_files
         is_repo_task = False
 
-    # Load the kernel backend's prompt as extra domain context; without it the agent gets only the generic
-    # instructions below and misses backend discipline (e.g. ck's tile/pipeline tuning + stale-.cuda.o cleaning).
-    from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
+    kernel_backend_section = _backend_expertise_section(config, task, source_files)
 
-    kernel_backend_context = build_single_kernel_backend_prompt(
-        config, kernel_backend_name, task_type=task_type, source_paths=source_files
-    )
-
-    # The backend prompts name the STEPS (build, run the driver, profile) but not the mechanism, because only this
-    # loop knows it: this agent has Bash and the driver documented above, and no build/test/bench/pmc tools. So this
-    # framing covers only what is specific to this loop.
-    kernel_backend_section = ""
-    if kernel_backend_context:
-        # Profiling off means the loop hands the session no profiler, so this framing must not promise one. (The loaded
-        # kernel_backend_context is backend domain knowledge and is left as-is.)
-        _self_verbs = (
-            "build, run, and profile the kernel YOURSELF via Bash"
-            if profiling_enabled
-            else "build and run the kernel YOURSELF via Bash"
-        )
-        kernel_backend_section = (
-            f"{chr(10)}## Backend Expertise ({kernel_backend_name}){chr(10)}"
-            "Backend guidance for choosing and implementing your edit. In this "
-            f"loop you {_self_verbs} to verify every change before finishing. "
-            "After you finish, the loop also runs an SNR pre-filter + benchmark "
-            "pass on your final kernel, and accepts it only if the task's own "
-            "correctness suite passes too."
-            f"{chr(10)}{chr(10)}{kernel_backend_context}"
-        )
+    prior_knowledge_section = f"{chr(10)}## Prior Knowledge{chr(10)}{pre_task_context}" if pre_task_context else ""
 
     workspace_hygiene_rule = (
         "Do NOT create or leave new non-ignored files outside the campaign's "
@@ -550,7 +546,7 @@ explain your rationale in one sentence.
 
 ## Program (what to optimize and how)
 {program_md}
-{f"{chr(10)}## Prior Knowledge{chr(10)}{pre_task_context}" if pre_task_context else ""}
+{prior_knowledge_section}
 {kernel_backend_section}
 
 ## Instructions
@@ -609,7 +605,7 @@ repeat until the kernel is CORRECT and FASTER than the current best.
 
 ## Program (what to optimize and how)
 {program_md}
-{f"{chr(10)}## Prior Knowledge{chr(10)}{pre_task_context}" if pre_task_context else ""}
+{prior_knowledge_section}
 {kernel_backend_section}
 
 ## The measurement driver ({driver_base}) — you run it, you never edit it
@@ -702,6 +698,26 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
 Never `cat` a whole file — use the Read tool.
 """
 
+    # One value drives both the run spec's hard deadline and the deadline the session is told, so the enforced cut
+    # and the stated cut can never disagree.
+    session_deadline_sec = (
+        session.session_timeout_sec
+        if session.session_timeout_sec is not None
+        else max(backend.runtime.timeout_sec, _DEFAULT_SESSION_TIMEOUT_SEC)
+    )
+    session_deadline_min = max(1, round(session_deadline_sec / 60))
+
+    # Tell the session its own wall-clock bound.
+    deadline_section = (
+        "## Session deadline\n"
+        f"You have about {session_deadline_min} minutes of wall-clock for "
+        "THIS session before it is cut off; a session cut off mid-turn hands "
+        "off nothing. Well before then, stop improving and submit the best "
+        "candidate you actually have through the clean handoff "
+        "(candidate_submitted) — do not reach for a larger gain you cannot "
+        "land in time.\n"
+    )
+
     async def agent_fn(
         kernel_path: str,
         experiment_history: str,
@@ -709,13 +725,15 @@ Never `cat` a whole file — use the Read tool.
         baseline_case_times: dict | None = None,
         best_mean_case_speedup: float | None = None,
     ) -> str:
+        # A caller that reads nothing back still gets a sink, so the session records into one place unconditionally.
+        if session_sink is None:
+            session_sink = {}
         # Mark the session before entering the provider.
         progress_log: list[str] = []
-        if session_sink is not None:
-            # IterationLoop sets this before invoking arbitrary agent callbacks; setdefault provides the same contract
-            # when make_agent_fn is used standalone without obscuring the outer loop's earlier marker.
-            session_sink.setdefault("session_started", True)
-            session_sink["progress_log"] = progress_log
+        # IterationLoop sets this before invoking arbitrary agent callbacks; setdefault provides the same contract
+        # when make_agent_fn is used standalone without obscuring the outer loop's earlier marker.
+        session_sink.setdefault("session_started", True)
+        session_sink["progress_log"] = progress_log
 
         target_section = _target_section(
             kernel_path,
@@ -723,26 +741,6 @@ Never `cat` a whole file — use the Read tool.
             source_files=source_files,
             target_functions=target_functions,
             assembly_session=assembly_session,
-        )
-
-        # One value drives both the run spec's hard deadline and the deadline the session is told, so the enforced cut
-        # and the stated cut can never disagree.
-        session_deadline_sec = (
-            session_timeout_sec
-            if session_timeout_sec is not None
-            else max(backend.runtime.timeout_sec, _DEFAULT_SESSION_TIMEOUT_SEC)
-        )
-        session_deadline_min = max(1, round(session_deadline_sec / 60))
-
-        # Tell the session its own wall-clock bound.
-        deadline_section = (
-            "## Session deadline\n"
-            f"You have about {session_deadline_min} minutes of wall-clock for "
-            "THIS session before it is cut off; a session cut off mid-turn hands "
-            "off nothing. Well before then, stop improving and submit the best "
-            "candidate you actually have through the clean handoff "
-            "(candidate_submitted) — do not reach for a larger gain you cannot "
-            "land in time.\n"
         )
 
         prompt = f"""\
@@ -766,8 +764,11 @@ Make your change(s) now.
         ):
             run_cwd = str(configured_workspace.resolve())
 
-        gate = (
-            InSessionGate(
+        gate = None
+        system_prompt = base_system_prompt
+        hooks = None
+        if gate_enabled:
+            gate = InSessionGate(
                 measurement,
                 # The declared tree, not one guessed from the driver's location: forge-fuse keeps its driver in the
                 # run's output dir, which is outside the workspace and is not a repository.
@@ -775,14 +776,17 @@ Make your change(s) now.
                 baseline_case_times=baseline_case_times,
                 best_mean_case_speedup=best_mean_case_speedup,
             )
-            if gate_enabled
-            else None
-        )
-        system_prompt = (
-            gate_system_prompt + _gate_scoring_context(baseline_case_times, best_mean_case_speedup)
-            if gate is not None and gate_stop_check
-            else base_system_prompt
-        )
+            if gate_stop_check:
+                system_prompt = gate_system_prompt + _gate_scoring_context(baseline_case_times, best_mean_case_speedup)
+            # Built only for a provider that runs them. A backend which ignores
+            # ``AgentRunSpec.hooks`` drops the whole group without a word, so
+            # attaching one anyway makes this call site read as protection the
+            # session does not have -- the confusion the outer gate below
+            # exists to answer. Keyed on the backend that was resolved rather
+            # than the one that was asked for, so a provider fallback carries
+            # the decision with it.
+            if backend.capabilities.stop_hooks:
+                hooks = gate.make_agent_hooks(stop_check=gate_stop_check)
 
         run_spec = AgentRunSpec(
             system_prompt=system_prompt,
@@ -802,26 +806,15 @@ Make your change(s) now.
                 thinking_budget_tokens=3000,
             ),
             target_files=(source_files or [kernel_path]),
-            commit_new_paths=list(commit_new_paths or []),
+            commit_new_paths=list(commit_new_paths),
             driver_script=driver_script or "",
-            protected_globs=((_REPO_EXTRA_PROTECTED_GLOBS if is_repo_task else []) + list(extra_protected_globs or [])),
+            protected_globs=list(gate_scope.extra_protected_globs),
             # The loop writes its own ledger into the workspace it hands the implementer, and the kernel's runtime
             # leaves a JIT cache there, so every iteration starts from a worktree the caller already dirtied.
             allow_dirty_baseline=True,
             ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),
-            protected_paths=list(extra_protected_paths or []),
-            # Built only for a provider that runs them. A backend which ignores
-            # ``AgentRunSpec.hooks`` drops the whole group without a word, so
-            # attaching one anyway makes this call site read as protection the
-            # session does not have -- the confusion the outer gate below
-            # exists to answer. Keyed on the backend that was resolved rather
-            # than the one that was asked for, so a provider fallback carries
-            # the decision with it.
-            hooks=(
-                gate.make_agent_hooks(stop_check=gate_stop_check)
-                if gate is not None and backend.capabilities.stop_hooks
-                else None
-            ),
+            protected_paths=list(extra_protected_paths),
+            hooks=hooks,
             mcp_servers=pr_mcp_servers,
             progress_log=progress_log,
         )
@@ -838,11 +831,10 @@ Make your change(s) now.
                 finding = f"Protected workspace integrity violation: {reason}"
                 if finding not in gate.findings:
                     gate.findings.append(finding[:1200])
-            if session_sink is not None:
-                session_sink["integrity_verdict"] = gate.integrity_verdict
-                session_sink["integrity_violation"] = gate.integrity_violation
-                session_sink["integrity_reason"] = gate.integrity_reason
-                session_sink["integrity_restore"] = gate.restore_protected_files
+            session_sink["integrity_verdict"] = gate.integrity_verdict
+            session_sink["integrity_violation"] = gate.integrity_violation
+            session_sink["integrity_reason"] = gate.integrity_reason
+            session_sink["integrity_restore"] = gate.restore_protected_files
 
         # A candidate Session is expensive: by the time the gateway drops it, the agent has usually already read the
         # kernel, edited it, and paid for a build+bench.
@@ -855,13 +847,13 @@ Make your change(s) now.
         except BaseException as error:
             _finalize_integrity(error)
             raise
-        continuation_turns = 1
+        num_turns = run_result.num_turns
         integrity_error: BaseException | None = None
         # A backend that does not run our hooks gets the same Stop decision driven from out here, between explicit
         # resume turns.
         uses_outer_gate = gate_stop_check and not backend.capabilities.stop_hooks
         if uses_outer_gate:
-            run_result, continuation_turns, integrity_error = await _run_outer_gate_turns(
+            run_result, num_turns, integrity_error = await _run_outer_gate_turns(
                 gate, backend, run_spec, run_result, usage
             )
 
@@ -869,55 +861,52 @@ Make your change(s) now.
         # first.
         _finalize_integrity(integrity_error)
 
-        full = run_result.text
-        result_subtype = run_result.subtype
-        num_turns = continuation_turns if uses_outer_gate else run_result.num_turns
+        end_reason = _session_end_reason(gate=gate, run_result=run_result)
 
-        submitted = any(line.strip().upper() == "SUBMIT_CANDIDATE" for line in full.splitlines())
-        end_reason = _session_end_reason(
-            submitted=submitted,
-            gate=gate,
-            run_result=run_result,
-            result_subtype=result_subtype,
-        )
-
+        edit_count, passed = run_result.edit_count, "-"
+        text = run_result.text or "no rationale provided"
+        if gate is not None:
+            edit_count, passed = gate.edit_count, gate.passed
+            text = f"{_gate_outcome_tag(gate, end_reason, num_turns)} {text}"
         # One structured line per session (stdout is captured by the caller's logs) so a run's end-reason distribution
         # is analyzable without the LLM.
-        edit_count = gate.edit_count if gate is not None else run_result.edit_count
         print(
             f"  [session-end] backend={backend.name} reason={end_reason} "
             f"edits={edit_count if edit_count else '-'} "
             f"turns={num_turns if num_turns is not None else '?'} "
-            f"pass={gate.passed if gate is not None else '-'}",
+            f"pass={passed}",
             flush=True,
         )
 
-        text = full or "no rationale provided"
-        if gate is not None:
-            text = f"{_gate_outcome_tag(gate, end_reason, num_turns)} {text}"
-
         # Hand back structured session info so the runner can feed the ExperienceLedger with the gate's objective
         # findings, and (via ``summarize``) ask this exact session to record what it explored.
-        if session_sink is not None:
-            _fill_session_sink(
-                session_sink,
-                gate=gate,
-                run_result=run_result,
-                ending=SessionEnd(end_reason, turns=num_turns),
-                summarize=_make_session_summarizer(
-                    backend=backend,
-                    spec=run_spec,
-                    session_id=run_result.session_id,
-                    usage=usage,
-                ),
-            )
+        _fill_session_sink(
+            session_sink,
+            gate=gate,
+            run_result=run_result,
+            ending=SessionEnd(end_reason, turns=num_turns),
+            summarize=_make_session_summarizer(
+                backend=backend,
+                spec=run_spec,
+                session_id=run_result.session_id,
+                usage=usage,
+            ),
+        )
 
         return text[:200]
 
-    setattr(agent_fn, "backend_name", backend.name)
-    setattr(agent_fn, "backend_model", backend_model)
-    setattr(agent_fn, "requested_backend", requested_backend)
+    _describe_agent_fn(agent_fn, backend, requested_backend)
     return agent_fn
+
+
+def _describe_agent_fn(agent_fn: Callable[..., Awaitable[str]], backend, requested_backend: str) -> None:
+    """Expose the backend serving ``agent_fn`` and the way to release it to the callers that build actors from it."""
+    setattr(agent_fn, "backend_name", backend.name)
+    setattr(agent_fn, "backend_model", backend.runtime.model)
+    setattr(agent_fn, "requested_backend", requested_backend)
+    # Only a backend that keeps processes between sessions defines close(); the rest, out-of-tree providers included,
+    # have nothing to release.
+    setattr(agent_fn, "close", getattr(backend, "close", lambda: None))
 
 
 def _make_session_summarizer(

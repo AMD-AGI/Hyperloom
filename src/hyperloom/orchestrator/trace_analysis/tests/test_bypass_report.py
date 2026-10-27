@@ -119,6 +119,7 @@ def test_shape_provenance_capture_backfill():
         }
     )
     assert c["shape_provenance"] == "capture_backfill"
+    assert c["shape_dispatchable"] is True
     assert c["shapes"] and "17,7168" in c["shapes"][0]["shape"]
 
 
@@ -775,7 +776,7 @@ def test_routable_candidate_carries_shapes_for_dispatch():
     assert isinstance(shapes, list) and shapes, (
         "a routable candidate with trace-captured dims must expose a non-empty 'shapes'"
     )
-    assert cand["shape_provenance"] in {"torch_trace", "tuning_csv"}
+    assert cand["shape_provenance"] == "torch_trace"
     # shapes mirrors input_shapes in the harness-consumable contract form.
     assert cand["shapes"] == cand["input_shapes"] == [{"call_num": 1, "shape": "(8,16) bf16"}]
     # each entry is a dict the harness can parse (not a raw dim list).

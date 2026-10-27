@@ -19,6 +19,7 @@ from typing import Any
 
 from hyperloom.common import llm_config
 from hyperloom.common.env import EnvValueError, env_bool
+from hyperloom.common.gpu_partition import PartitionModel
 from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
 from hyperloom.common.llm_headers import parse_custom_headers
 from .executors import (
@@ -69,6 +70,10 @@ from .bootstrap import (
     _print_final_summary,
     _print_session_skeleton,
     _reconcile_crash_count,
+    open_plug_host,
+    resolve_plug_manifest,
+    warn_without_target_gpu,
+    running_plug_host,
     _seed_shared_state,
     _snapshot_system_prompts,
     agentx_state_is_stale,
@@ -93,6 +98,7 @@ from .credentials import (
 )
 from .multi_node import (
     _prepare_multi_node_state as _prepare_multi_node_state,
+    _resolve_gpus_per_node,
     _resolve_mn_backend as _resolve_mn_backend,
 )
 from .quantization import (
@@ -111,7 +117,7 @@ from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinato
 from hyperloom.orchestrator.collaborator import OrchestrationPrompt as _OrchestrationPrompt
 from hyperloom.inference_optimizer.framework_paths import resolve_framework_tree, resolve_kernel_search_roots
 from hyperloom.orchestrator.state.objective import AnyObjective, Objective, build_objective
-from hyperloom.orchestrator.state.shared_state import SharedState, timed_teardown_step
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.prompts.prompt_builder import (
     TRANSPORT_TOOLS,
     build_orchestration_prompt,
@@ -123,11 +129,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 
 from ..session.lock import SessionAlreadyRunning, SessionLock, SessionLockPathError
-from ..session.paths import (
-    ENV_USER_DATA_PATH,
-    asset_system_prompts_dir,
-    make_session_dir,
-)
+from ..session.paths import ENV_USER_DATA_PATH, asset_system_prompts_dir, make_session_dir
 
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
@@ -622,7 +624,7 @@ def _reject_unusable_claude_model(chosen: str, *, allow_custom: bool) -> None:
 
 
 def _catalog_probe_candidates(
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
     *,
     claude_follows_codex: bool,
 ) -> list[tuple[str, str]]:
@@ -633,9 +635,9 @@ def _catalog_probe_candidates(
     """
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
-    if not anthropic_url and resolved_urls is not None:
+    if not anthropic_url:
         anthropic_url = resolved_urls[0]
-    if not openai_url and resolved_urls is not None:
+    if not openai_url:
         openai_url = resolved_urls[1]
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
     # OpenAI-side key only.
@@ -659,7 +661,7 @@ def _catalog_probe_candidates(
 
 
 def _probe_claude_catalog(
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
     *,
     chosen: str,
     claude_follows_codex: bool,
@@ -700,7 +702,7 @@ def _probe_claude_catalog(
 
 def _validate_and_resolve_claude_model(
     args: argparse.Namespace,
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
     *,
     claude_follows_codex: bool | None = None,
 ) -> set[str] | None:
@@ -779,7 +781,7 @@ def _validate_and_resolve_claude_model(
 
 def _resolve_models_for_run(
     args: argparse.Namespace,
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
     *,
     claude_follows_codex: bool | None = None,
     codex_follows_claude: bool | None = None,
@@ -857,8 +859,8 @@ def _probe_critic_review_model(
                     messages=messages,
                     max_completion_tokens=16,
                 )
-        except Exception as exc:  # noqa: BLE001 — any failure means the review path is unusable
-            log.warning("critic model %r probe failed over the %s protocol: %s", model, protocol, exc)
+        except Exception as exc:  # any failure means the review path is unusable; exits 2 after the last retry
+            log.warning("critic model %r probe failed over the %s protocol: %s", model, protocol, exc, exc_info=True)
             last_error = exc
             continue
         print(f"Preflight: critic model {model!r} answered over the {protocol} protocol")
@@ -875,7 +877,7 @@ def _probe_critic_review_model(
 
 def _smoke_test_codex_model(
     args: argparse.Namespace,
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
 ) -> None:
     """WARN-only catalog check for ``--codex-model`` on an OpenAI-only launch, where it becomes the orchestration model.
 
@@ -884,7 +886,7 @@ def _smoke_test_codex_model(
     openai_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
     if not openai_url:
         openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
-    if not openai_url and resolved_urls is not None:
+    if not openai_url:
         openai_url = resolved_urls[1]
     # OpenAI-side key only.
     openai_key = os.environ.get("OPENAI_API_KEY", "")
@@ -1334,15 +1336,6 @@ class PartitionRequest:
     streams_per_partition: int | None = None
 
 
-@dataclass(frozen=True)
-class PartitionModel:
-    """The model a partition shape must fit: its path and precision, and the session state holding its identity."""
-
-    model_path: str | None = None
-    precision: str | None = None
-    shared_state: Any = None
-
-
 def _export_partition_shape(
     request: PartitionRequest,
     *,
@@ -1422,11 +1415,7 @@ def _export_partition_shape(
         declared_mode=mode,
         streams=streams,
         gpu_type=gpu_type,
-        params={
-            "model_path": str(model.model_path or ""),
-            "precision": str(model.precision or ""),
-        },
-        shared_state=model.shared_state,
+        model=model,
         # The footprint refusal is arithmetic about streams sharing a partition.
         fanout_expected=fanout or bool(mode) or streams_named,
     )
@@ -1545,8 +1534,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
     try:
         from ..breakdown import write_minimal_final_json
 
-        with timed_teardown_step(state, "final_json"):
-            final_json = write_minimal_final_json(session_dir)
+        final_json = write_minimal_final_json(session_dir)
         print(f"Final summary     : {final_json}")
     except Exception:
         log.exception("crash-safe final.json write failed (non-fatal)")
@@ -1556,28 +1544,25 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
         try:
             from ..breakdown import write_breakdown_json
 
-            with timed_teardown_step(state, "session_breakdown"):
-                breakdown_path = write_breakdown_json(session_dir)
+            breakdown_path = write_breakdown_json(session_dir)
             print(f"Session breakdown : {breakdown_path}")
         except Exception:
             log.exception("session_breakdown finalize failed (non-fatal)")
         try:
             from ..breakdown import write_minimal_final_report
 
-            with timed_teardown_step(state, "final_md"):
-                final_md = write_minimal_final_report(session_dir)
+            final_md = write_minimal_final_report(session_dir)
             print(f"Final report      : {final_md}")
         except Exception:
             log.exception("emergency final report write failed (non-fatal)")
     try:
         from hyperloom.inference_optimizer.trace.langfuse_emitter import flush_session, record_session_breakdown
 
-        with timed_teardown_step(state, "langfuse"):
-            flush_session(session_dir)
-            from ..breakdown import patch_breakdown_langfuse
+        flush_session(session_dir)
+        from ..breakdown import patch_breakdown_langfuse
 
-            patch_breakdown_langfuse(session_dir)
-            record_session_breakdown(session_dir)
+        patch_breakdown_langfuse(session_dir)
+        record_session_breakdown(session_dir)
     except Exception:
         log.debug("langfuse flush_session failed", exc_info=True)
     # Safety net for paths that leave close_sequence_done False and never run
@@ -1585,8 +1570,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
     try:
         from ..breakdown import package_session_artifacts
 
-        with timed_teardown_step(state, "artifact_package"):
-            pkg_path = package_session_artifacts(session_dir, session_id=str(getattr(state, "session_id", "") or ""))
+        pkg_path = package_session_artifacts(session_dir, session_id=str(getattr(state, "session_id", "") or ""))
         if pkg_path is not None:
             print(f"Artifact package  : {pkg_path}")
     except Exception:
@@ -1637,7 +1621,7 @@ def _persist_preflight_failure_artifacts(
                 if not getattr(manifest_args, "model", None):
                     manifest_args.model = os.environ.get("MODEL_PATH", "")
                 write_manifest(session_dir, args=manifest_args)
-            except Exception as write_exc:
+            except Exception as write_exc:  # isolation boundary: the preflight-failure manifest write
                 log.warning("failed to write manifest for SBD V6 preflight failure", exc_info=True)
                 from ..session.sbd_v6 import record_write_warning
 
@@ -1829,7 +1813,7 @@ def _reexport_session_environment(
         session_id=session_id,
         run_log=os.environ.get("INFERENCE_OPTIMIZER_RUN_LOG", ""),
         gpu_type=state.gpu_type or "",
-        framework=state.framework or "",
+        framework=state.framework,
         model=str(state.model_path or ""),
     )
     _emit_launch_info(info, launch_info_file=getattr(args, "launch_info_file", None))
@@ -1841,10 +1825,7 @@ def _reexport_session_environment(
     _resolve_precision(args, state)
     # Same ladder as the knobs above; the environment rung is what lets a re-passed pin change it.
     _resume_max_model_len = (
-        getattr(args, "max_model_len", None)
-        or _positive_env_int("MAX_MODEL_LEN")
-        or getattr(state, "max_model_len", 0)
-        or 0
+        getattr(args, "max_model_len", None) or _positive_env_int("MAX_MODEL_LEN") or getattr(state, "max_model_len", 0)
     )
     for env_name, val in (
         ("TP", args.tp),
@@ -1864,9 +1845,8 @@ def _reexport_session_environment(
         os.environ["PROFILE_OSL"] = str(int(_resume_profile_osl))
         state.profile_osl = int(_resume_profile_osl)
         print(f"  re-exported PROFILE_OSL   : {int(_resume_profile_osl)}")
-    if args.precision:
-        os.environ["PRECISION"] = args.precision
-        print(f"  re-exported PRECISION     : {args.precision}")
+    os.environ["PRECISION"] = args.precision
+    print(f"  re-exported PRECISION     : {args.precision}")
     if getattr(state, "framework_version", ""):
         os.environ["FRAMEWORK_VERSION"] = state.framework_version
         print(f"  re-exported FRAMEWORK_VERSION: {state.framework_version}")
@@ -1881,7 +1861,7 @@ def _reexport_session_environment(
     # Custom-workload paths: an explicit --framework-path / --benchmark-scripts-dir on this resume wins, else the
     # persisted value.
     _restore_operator_supplied_paths_from_state(args, state)
-    _apply_operator_supplied_paths(args, state.framework or "sglang")
+    _apply_operator_supplied_paths(args, state.framework)
     _require_custom_entrypoint(
         state.framework,
         gpu_type=os.environ.get("GPU_TYPE") or state.gpu_type,
@@ -1898,6 +1878,9 @@ def _open_resumed_session(args: argparse.Namespace) -> _SessionStart:
 
     ws = workspace_root()
     session_dir = Path(args.resume_from).expanduser().resolve()
+    if getattr(args, "session_dir", None):
+        print("ERROR: --session-dir names a new session; it cannot be combined with --resume-from.", file=sys.stderr)
+        sys.exit(2)
     if not is_path_within(session_dir, ws):
         print(
             f"ERROR: --resume-from {session_dir!r} is not under $USER_DATA_PATH={ws}. Move USER_DATA_PATH to the "
@@ -2075,8 +2058,9 @@ def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
 
 def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_resolved: int) -> _SessionStart:
     """Create and lock the session directory, then write its manifest, launch info and seeded state."""
-    # session_dir defaults to <workspace_root>/<model>/<UTC ts>-<rand8>/.
-    session_dir = make_session_dir(model_name=resolve_model_display_name(args))
+    session_dir = make_session_dir(
+        model_name=resolve_model_display_name(args), target=getattr(args, "session_dir", None)
+    )
     # Single-optimizer guard: take the lock so the contract holds uniformly and the owner pid is published for the
     # session diagnostics.
     session_lock = _acquire_session_lock_or_exit(session_dir)
@@ -2090,7 +2074,7 @@ def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_res
         from hyperloom.inference_optimizer.trace.langfuse_emitter import record_session_start
 
         record_session_start(session_dir)
-    except Exception:
+    except Exception:  # outermost telemetry sink: the Langfuse session_start marker
         log.debug("langfuse record_session_start failed (non-fatal)", exc_info=True)
     print(f"Session dir     : {session_dir}")
     print(f"Session id      : {manifest['session_id']}  (manifest label only)")
@@ -2224,12 +2208,7 @@ def _resolve_run_topology(args: argparse.Namespace) -> int:
         _resolve_workload_knobs(args)
     tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
     ep_resolved = max(1, int(getattr(args, "ep", 1) or 1))
-    # Resolve gpus_per_node from the explicit CLI flag or the policy default.
-    gpn_attr = getattr(args, "gpus_per_node", None)
-    if gpn_attr is not None:
-        gpus_per_node_resolved = int(gpn_attr)
-    else:
-        gpus_per_node_resolved = 8
+    gpus_per_node_resolved = _resolve_gpus_per_node(args)
 
     # Project before ``_preflight``: ``check_gpu_visibility`` reads ``$TP`` to warn when the run asks for more
     # shards than rocm-smi can see.
@@ -2397,6 +2376,76 @@ def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
     )
 
 
+def _install_system_prompts(
+    coordinator: Coordinator,
+    args: argparse.Namespace,
+    objective: Objective,
+    lineup: _AgentLineup,
+    *,
+    macro_cycle: int,
+) -> dict[str, str]:
+    """Install each role's boot system prompt on ``coordinator``, an operator override winning, and return them.
+
+    The Coordinator has already entered the session's phase; it re-scopes the prompt at every later phase seam.
+    """
+    state = coordinator.shared_state
+    directive = str((dict(getattr(state, "orchestration_memory", {}) or {})).get("next_cycle_directive", "") or "")
+    prompt_context = OrchestrationPromptContext(
+        no_kernel=lineup.no_kernel,
+        no_framework_agent=lineup.no_framework_agent,
+        framework=os.environ["FRAMEWORK"],
+        objective=objective,
+        max_minutes=int(round(float(args.max_hours) * 60)),
+        # The role record always names Claude; the deployment's provider shape is what actually decides, so read the
+        # transport off the built backend.
+        transport=getattr(coordinator.backends.get("orchestration"), "transport", TRANSPORT_TOOLS),
+        benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
+        agentx_corpus_shape=state.agentx_corpus_shape,
+        agentx_grading=state.grading,
+        agentx_backend=state.agentx_backend,
+    )
+    prompts = {
+        "orchestration": args.orch_prompt
+        or _build_orchestration_prompt(
+            prompt_context, macro_cycle=macro_cycle, cycle_directive=directive, phase=state.phase
+        ),
+        "critic": args.critic_prompt or _load_critic_prompt(),
+    }
+    import functools as _functools
+
+    coordinator.orch_prompt = _OrchestrationPrompt(
+        overrides=prompts,
+        is_user_supplied=bool(args.orch_prompt),
+        rebuild=_functools.partial(_build_orchestration_prompt, prompt_context),
+    )
+    return prompts
+
+
+def _print_backend_banner(args: argparse.Namespace, backends: dict[str, Any], lineup: _AgentLineup) -> None:
+    """Print the backend each role runs on and the run's tick limits."""
+    orchestration_str = _orchestration_banner(
+        backends.get("orchestration"),
+        claude_model=args.claude_model,
+        codex_model=args.codex_model,
+    )
+    kernel_str = "DISABLED" if lineup.no_kernel else "programmatic"
+    if lineup.critic_choice == "mock":
+        critic_str = "mock"
+    else:  # "agent"
+        # Read off the backend rather than re-derived from the environment: --critic-protocol can override that
+        # derivation, and the banner would then report the model of a transport this run is not using.
+        _review_protocol = backends["critic"].protocol
+        _review_model = args.claude_model if _review_protocol == "anthropic" else args.codex_model
+        critic_str = (
+            f"critic-agent(kb={lineup.critic_kb_mode}, protocol={_review_protocol}, "
+            f"model={_review_model}, root={lineup.critic_agent_root})"
+        )
+    print(f"Backends        : orchestration={orchestration_str}, kernel={kernel_str}, critic={critic_str}")
+    print(f"Max ticks       : {args.max_ticks or 'unlimited'} (budget = {args.max_hours}h)")
+    print(f"Tick interval   : {args.tick_interval_sec}s")
+    print()
+
+
 def _settle_custom_specialist_only(args: argparse.Namespace) -> None:
     """Read only mode once the operator's pins are in the environment, and refuse a fresh launch's custom conflicts.
 
@@ -2415,6 +2464,7 @@ def _settle_custom_specialist_only(args: argparse.Namespace) -> None:
 
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
+    plug_manifest = resolve_plug_manifest(args)  # first: a refused flag must leave any session as it was
     nodes_resolved = _resolve_run_topology(args)
     _settle_custom_specialist_only(args)
 
@@ -2471,17 +2521,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # A fresh launch has nothing to restore, so settle the budget before the
     # manifest and the workload env read it. A resume keeps ``None`` until
     # ``_restore_budget_and_objective`` has had its chance at the session's own.
-    if not args.resume_from and args.max_hours is None:
-        args.max_hours = DEFAULT_MAX_HOURS
-
-    session = (
-        await _resume_session(args)
-        if args.resume_from
-        else await _seed_fresh_session(args, nodes_resolved=nodes_resolved)
-    )
+    if args.resume_from:
+        session = await _resume_session(args)
+    else:
+        if args.max_hours is None:
+            args.max_hours = DEFAULT_MAX_HOURS
+        session = await _seed_fresh_session(args, nodes_resolved=nodes_resolved)
     session_dir = session.session_dir
     session_lock = session.session_lock
     manifest = session.manifest
+    plug_host = open_plug_host(plug_manifest, session_dir)
 
     # Recipe KB T0 anchor (after seed/restore for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
     recipe_kb_client = _bootstrap_recipe_kb(
@@ -2491,11 +2540,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         resume=bool(args.resume_from),
     )
     # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
-    knowledge_plane = _bootstrap_knowledge_plane(
-        args,
-        recipe_kb_client=recipe_kb_client,
-        session_dir=session_dir,
-    )
+    knowledge_plane = _bootstrap_knowledge_plane(args, recipe_kb_client=recipe_kb_client)
 
     from ..multi_node.state_paths import bind_state_file_to_session
 
@@ -2503,22 +2548,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if nodes_resolved >= 2:
         await asyncio.to_thread(_prepare_multi_node_state, args)
 
-    objective = build_objective(
-        {
-            "MAX_HOURS": str(args.max_hours),
-            "TARGET_GAIN_PCT": str(args.target_gain) if args.target_gain else "",
-            "TARGET_TPUT_PER_GPU": str(args.target_tput) if args.target_tput else "",
-            "TARGET_DIR": args.target_baseline_dir or "",
-            "TARGET_WITHIN_ROOFLINE_PCT": str(args.target_roofline) if args.target_roofline else "",
-        }
-    )
+    objective_env = {"MAX_HOURS": str(args.max_hours)}
+    for env_name, target in (
+        ("TARGET_GAIN_PCT", args.target_gain),
+        ("TARGET_TPUT_PER_GPU", args.target_tput),
+        ("TARGET_DIR", args.target_baseline_dir),
+        ("TARGET_WITHIN_ROOFLINE_PCT", args.target_roofline),
+    ):
+        objective_env[env_name] = str(target) if target else ""
+    objective = build_objective(objective_env)
     print(f"Objective       : kind={objective.kind()} {objective.describe()}")
     lineup = _resolve_agent_lineup(args)
-    no_kernel = lineup.no_kernel
-    no_framework_agent = lineup.no_framework_agent
-    critic_choice = lineup.critic_choice
-    critic_agent_root = lineup.critic_agent_root
-    critic_kb_mode = lineup.critic_kb_mode
 
     # T0 may have persisted warm-start state; preserve it before constructing the Coordinator.
     state = SharedState.load_or_init(session_dir)
@@ -2532,9 +2572,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             deepseek_model=llm_config.resolve_forge_llm_model(llm_config.AGENT_BACKEND_DEEPSEEK),
         ),
         CriticSetup(
-            choice=critic_choice,
-            agent_root=critic_agent_root,
-            kb_mode=critic_kb_mode,
+            choice=lineup.critic_choice,
+            agent_root=lineup.critic_agent_root,
+            kb_mode=lineup.critic_kb_mode,
             protocol=args.critic_protocol,
         ),
         session_dir=session_dir,
@@ -2547,15 +2587,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
     if getattr(args, "reset_state", False):
         _reset_state_file(session_dir, framework=state.framework)
-    # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
-    phase_budget_pct = _build_phase_budget_pct(args)
 
     coordinator = Coordinator(
         session_dir,
         backends=backends,
         settings=CoordinatorSettings(
-            model_class=getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or "",
-            phase_budget_pct=phase_budget_pct or None,
+            model_class=getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS", ""),
+            phase_budget_pct=_build_phase_budget_pct(args),
         ),
         advisory=AdvisoryServices(
             # KnowledgePlane facade (None when --degraded-pr).
@@ -2564,54 +2602,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             proposal_scorer=_build_proposal_scorer(args, session_dir),
         ),
     )
-    framework_for_prompt = os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
-    max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
     _initial_macro_cycle = int(getattr(coordinator.shared_state, "macro_cycle", 0) or 0)
-    _initial_directive = str(
-        (dict(getattr(coordinator.shared_state, "orchestration_memory", {}) or {})).get("next_cycle_directive", "")
-        or ""
-    )
-    # A fresh session has no phase recorded yet and always begins at PRELUDE; the Coordinator re-scopes the prompt at
-    # every later phase seam.
-    from hyperloom.orchestrator.phases.machine_state import PHASE_PRELUDE as _PHASE_PRELUDE
-
-    _initial_phase = coordinator.shared_state.phase or _PHASE_PRELUDE
-    # The role record always names Claude; the deployment's provider shape is what actually decides, so read the
-    # transport off the built backend.
-    _orch_transport = getattr(coordinator.backends.get("orchestration"), "transport", TRANSPORT_TOOLS)
-    prompt_context = OrchestrationPromptContext(
-        no_kernel=no_kernel,
-        no_framework_agent=no_framework_agent,
-        framework=framework_for_prompt,
-        objective=objective,
-        max_minutes=max_minutes_for_prompt,
-        transport=_orch_transport,
-        benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
-        agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
-        agentx_grading=coordinator.shared_state.grading,
-        agentx_backend=coordinator.shared_state.agentx_backend,
-    )
-    prompts: dict[str, str] = {
-        "orchestration": args.orch_prompt
-        or _build_orchestration_prompt(
-            prompt_context,
-            macro_cycle=_initial_macro_cycle,
-            cycle_directive=_initial_directive,
-            phase=_initial_phase,
-        ),
-        "critic": args.critic_prompt or _load_critic_prompt(),
-    }
-    import functools as _functools
-
-    coordinator.orch_prompt = _OrchestrationPrompt(
-        overrides=prompts,
-        is_user_supplied=bool(args.orch_prompt),
-        rebuild=_functools.partial(_build_orchestration_prompt, prompt_context),
-    )
+    prompts = _install_system_prompts(coordinator, args, objective, lineup, macro_cycle=_initial_macro_cycle)
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
-    specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
     specialist_executor: "Any" = None
-    if specialist_capacity > 0:
+    if args.research_lane_capacity > 0:
         specialist_executor = _build_specialist_executor(
             args,
             session_dir=session_dir,
@@ -2625,67 +2620,41 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     )
     # Persist effective system prompts for resume / drift inspection.
     _snapshot_system_prompts(
-        session_dir, prompts=prompts, orchestration_phase=_initial_phase, macro_cycle=_initial_macro_cycle
+        session_dir,
+        prompts=prompts,
+        orchestration_phase=coordinator.shared_state.phase,
+        macro_cycle=_initial_macro_cycle,
     )
+    _print_backend_banner(args, backends, lineup)
 
-    orchestration_str = _orchestration_banner(
-        backends.get("orchestration"),
-        claude_model=args.claude_model,
-        codex_model=args.codex_model,
-    )
-    kernel_str = "DISABLED" if no_kernel else "programmatic"
-    if critic_choice == "mock":
-        critic_str = "mock"
-    else:  # "agent"
-        # Read off the backend rather than re-derived from the environment: --critic-protocol can override that
-        # derivation, and the banner would then report the model of a transport this run is not using.
-        _review_protocol = str(getattr(backends.get("critic"), "protocol", "") or "openai")
-        _review_model = args.claude_model if _review_protocol == "anthropic" else args.codex_model
-        critic_str = (
-            f"critic-agent(kb={critic_kb_mode}, protocol={_review_protocol}, "
-            f"model={_review_model}, root={critic_agent_root})"
-        )
-    print(f"Backends        : orchestration={orchestration_str}, kernel={kernel_str}, critic={critic_str}")
-    print(f"Max ticks       : {args.max_ticks or 'unlimited'} (budget = {args.max_hours}h)")
-    print(f"Tick interval   : {args.tick_interval_sec}s")
-    print()
-
-    if not (getattr(args, "compare_against_gpu", None) or "").strip():
-        print(
-            "[target_analysis] no --compare-against-gpu set; will write a "
-            "marker JSON at $SESSION_DIR/target_analysis/target_baseline.json "
-            "(reason=no_target_gpu_configured) — set --compare-against-gpu "
-            "to fetch real InferenceX reference data.",
-            file=sys.stderr,
-        )
+    warn_without_target_gpu(args)
 
     stop_reason: str | None = None
     try:
-        stop_reason = await coordinator.run(
-            objective=objective,
-            options=RunOptions(
-                max_minutes=args.max_hours * 60.0,
-                tick_interval_sec=args.tick_interval_sec,
-                max_ticks=args.max_ticks,
-                install_signal_handlers=True,
-                closing_grace_sec=args.closing_grace_sec,
-            ),
-        )
+        with running_plug_host(plug_host):
+            stop_reason = await coordinator.run(
+                objective=objective,
+                options=RunOptions(
+                    max_minutes=args.max_hours * 60.0,
+                    tick_interval_sec=args.tick_interval_sec,
+                    max_ticks=args.max_ticks,
+                    install_signal_handlers=True,
+                    closing_grace_sec=args.closing_grace_sec,
+                ),
+            )
     finally:
         state = coordinator.shared_state
         effective_stop_reason = stop_reason or coordinator.stop_classification
-        with timed_teardown_step(state, "coordinator_stop"):
-            await coordinator.stop()
+        await coordinator.stop()
         # Drop the single-optimizer session lock once the
         # coordinator has released its leases. The OS would drop it on process
         # exit anyway; this just frees it promptly for an intentional resume.
-        with timed_teardown_step(state, "session_lock"):
-            session_lock.release()
+        session_lock.release()
         _write_cli_terminal_artifacts(session_dir, state, effective_stop_reason)
         try:
             state.save(session_dir)
         except Exception:
-            log.exception("failed to persist teardown timings (non-fatal)")
+            log.exception("failed to persist post-stop state (non-fatal)")
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.

@@ -18,6 +18,7 @@ _COMMANDS: dict[str, tuple[str, tuple[str, ...], str]] = {
     "recover": (f"{_IO}.cli", ("recover",), "Rebuild a crashed session's artifacts, or confirm cleanup for a resume"),
     "quantize": ("hyperloom.agents.quantization.cli", (), "Quantize a model with AMD Quark"),
     "multi-node": (f"{_IO}.multi_node.cli", (), "Operate the multi-node cluster of a session"),
+    "hosted": ("hyperloom.hosted.entry", (), "Run a campaign that a hosting platform handed over ('hosted run')"),
 }
 
 _SESSION_COMMANDS: dict[str, tuple[str, str]] = {

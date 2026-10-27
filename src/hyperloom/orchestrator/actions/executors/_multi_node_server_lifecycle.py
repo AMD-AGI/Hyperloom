@@ -14,17 +14,19 @@ import shlex
 import subprocess
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 from hyperloom.common.timeutil import format_exc_brief
-from hyperloom.common.env import env_flag, env_int
+from hyperloom.common.env import EnvValueError, env_flag
 from hyperloom.inference_optimizer.multi_node._internal.env_safety import filter_forward_env
 from hyperloom.inference_optimizer.multi_node._internal.server_args_safety import (
     ServerArgsRejected,
     validate_server_args,
 )
 from ._multi_node_env import _read_state, is_multi_node
+from ._multi_node_restart_settings import RestartSettings
 
 # Scoped env flag (set by the roofline compute-bound re-profile) that tells this restart to strip DP-attention /
 # dp-size from prefill+decode+shared server args, so the profiled server runs single-rank full-batch (compute-bound).
@@ -89,8 +91,6 @@ def _strip_dp_parallel_flags(extra_args: str) -> str:
 log = logging.getLogger(__name__)
 
 
-# Default /health poll timeout; override per-run via HYPERLOOM_MN_HEALTH_WAIT_S.
-DEFAULT_HEALTH_TIMEOUT_S = 900  # 15 min.
 _POLL_INTERVAL_S = 6
 
 # Magpie's sglang_mi*x.sh DEFAULT_ARGS, re-applied in multi-node so tput stays comparable to single-node.
@@ -196,22 +196,39 @@ def _resolve_pd_args(*, tp_int: int) -> dict:
     return out
 
 
-def _resolve_round_args(
-    framework: str | None,
-    model_path: str | None,
-    tp: int | None,
-    ep: int | None = None,
-) -> tuple[str, str, int, int]:
+@dataclass(frozen=True)
+class RoundServer:
+    """The server one multi-node round restarts; unset identity fields fall back to state.json, then env."""
+
+    extra_server_args: str = ""
+    framework: str | None = None
+    model_path: str | None = None
+    tp: int | None = None
+    ep: int | None = None
+
+    @classmethod
+    def from_env(cls, extra_server_args: str, model_path: str | None) -> RoundServer:
+        """This round's args and model on the framework, TP and EP the launch environment names."""
+        return cls(
+            extra_server_args,
+            framework=os.environ.get("FRAMEWORK") or None,
+            model_path=model_path,
+            tp=int(os.environ.get("TP") or 0) or None,
+            ep=int(os.environ.get("EP") or 0) or None,
+        )
+
+
+def _resolve_round_args(server: RoundServer) -> tuple[str, str, int, int]:
     """Resolve (framework, model, tp, ep) for the restart, with state fallback."""
     state = _read_state()
-    fw = (framework or _state_or_env(state, "last_restart_framework", "FRAMEWORK", "sglang")).strip().lower()
-    mdl = (model_path or _state_or_env(state, "last_restart_model", "MODEL_PATH")).strip()
+    fw = (server.framework or _state_or_env(state, "last_restart_framework", "FRAMEWORK", "sglang")).strip().lower()
+    mdl = (server.model_path or _state_or_env(state, "last_restart_model", "MODEL_PATH")).strip()
     try:
-        tp_int = int(tp if tp is not None else _state_or_env(state, "last_restart_tp", "TP", "0"))
+        tp_int = int(server.tp if server.tp is not None else _state_or_env(state, "last_restart_tp", "TP", "0"))
     except (TypeError, ValueError):
         tp_int = 0
     try:
-        ep_int = int(ep if ep is not None else _state_or_env(state, "last_restart_ep", "EP", "1"))
+        ep_int = int(server.ep if server.ep is not None else _state_or_env(state, "last_restart_ep", "EP", "1"))
     except (TypeError, ValueError):
         ep_int = 1
     if ep_int < 1:
@@ -283,13 +300,15 @@ def _restart_env_scope(extra_env: dict[str, str] | None, unset_env, torch_profil
 # Multi-node TraceLens SGLang patch fan-out (fail-soft). The patch set (roofline vs sglang_gc_patch) follows
 # this controller's shape mode; sglang_gc_patch only matters while capturing, so it waits for a profiling round.
 async def _apply_tracelens_patch_fanout(patch_set: str, torch_profiler_dir: str, poll_timeout_s: int) -> None:
-    from ._workload_envs import _tracelens_patch_enabled
+    from ._profile_setup import _tracelens_patch_enabled
 
     if patch_set == "graph-capture" and not torch_profiler_dir:
         log.info("restart_server_for_round: not a profiling round; skipping sglang_gc_patch fan-out")
         return
     if not _tracelens_patch_enabled() or not os.environ.get("TRACELENS_ROOT", "").strip():
         return
+    import httpx
+
     try:
         from hyperloom.inference_optimizer.multi_node.cli import cmd_apply_tracelens_patch
 
@@ -310,24 +329,32 @@ async def _apply_tracelens_patch_fanout(patch_set: str, torch_profiler_dir: str,
                 ">= 0.5.18, until patches succeed)",
                 patch_rc,
             )
-    except Exception as exc:  # noqa: BLE001 - fail-soft envelope
+    except (RuntimeError, ValueError, OSError, KeyError, httpx.HTTPError, httpx.InvalidURL) as exc:
         log.warning(
             "restart_server_for_round: TraceLens patch fan-out raised (%s); proceeding with restart (fail-soft)",
             exc,
         )
 
 
+def _read_restart_settings() -> RestartSettings:
+    """The restart's settings; a malformed one fails the restart before it touches the cluster."""
+    try:
+        return RestartSettings.from_env()
+    except EnvValueError as exc:
+        raise ServerRestartFailed(f"invalid multi-node restart setting: {exc}") from exc
+
+
 def _health_wait_budget(
-    poll_timeout_s: int, extra_server_args: str, pd: dict, extra_env: dict[str, str] | None
+    settings: RestartSettings, extra_server_args: str, pd: dict, extra_env: dict[str, str] | None
 ) -> tuple[int, int]:
-    health_wait_s = env_int("HYPERLOOM_MN_HEALTH_WAIT_S", DEFAULT_HEALTH_TIMEOUT_S)
+    poll_timeout_s, health_wait_s = settings.poll_timeout_s, settings.health_wait_s
     # aiter kernels JIT-compile + autotune on first use (server log: "not found tuned config in
     # /tmp/aiter_configs"); a cold compile can exceed the default 900s gate and false-fail an
     # otherwise-healthy variant (the doomed attempt then burns a reclaim+retry cycle before the now-warm
     # relaunch succeeds).
-    if "HYPERLOOM_MN_HEALTH_WAIT_S" in os.environ or not _uses_aiter(extra_server_args, pd, extra_env):
+    if settings.health_wait_explicit or not _uses_aiter(extra_server_args, pd, extra_env):
         return poll_timeout_s, health_wait_s
-    aiter_wait = env_int("HYPERLOOM_MN_HEALTH_WAIT_AITER_S", 1800)
+    aiter_wait = settings.health_wait_aiter_s
     if aiter_wait <= health_wait_s:
         return poll_timeout_s, health_wait_s
     log.info(
@@ -376,15 +403,11 @@ def _restart_namespace(
 
 
 async def restart_server_for_round(
+    server: RoundServer,
     *,
-    extra_server_args: str = "",
     extra_env: dict[str, str] | None = None,
     unset_env: list[str] | tuple[str, ...] | set[str] | None = None,
     torch_profiler_dir: str = "",
-    framework: str | None = None,
-    model_path: str | None = None,
-    tp: int | None = None,
-    ep: int | None = None,
     force_full_restart: bool = False,
 ) -> None:
     """Restart the multi-node inference server for the next Magpie round."""
@@ -404,7 +427,7 @@ async def restart_server_for_round(
         )
         return
 
-    round_args = _resolve_round_args(framework, model_path, tp, ep)
+    round_args = _resolve_round_args(server)
     fw, mdl, tp_int, ep_int = round_args
     pd = _resolve_pd_args(tp_int=tp_int)
 
@@ -418,8 +441,7 @@ async def restart_server_for_round(
         )
 
     # Apply Magpie's sglang DEFAULT_ARGS only for sglang (vllm has its own).
-    if fw == "sglang":
-        extra_server_args = _merge_sglang_defaults(extra_server_args)
+    extra_server_args = _merge_sglang_defaults(server.extra_server_args) if fw == "sglang" else server.extra_server_args
 
     # Compute-bound profile override (multi-node only; already gated by the is_multi_node() no-op above).
     if os.environ.get(_COMPUTE_BOUND_PROFILE_ENV, "").strip() == "1":
@@ -437,6 +459,7 @@ async def restart_server_for_round(
         validate_server_args(extra_server_args, context="restart_server_for_round")
     except ServerArgsRejected as exc:
         raise ServerRestartFailed(str(exc)) from exc
+    settings = _read_restart_settings()
 
     async with _get_restart_lock():
         if torch_profiler_dir:
@@ -447,16 +470,13 @@ async def restart_server_for_round(
         with _restart_env_scope(extra_env, unset_env, torch_profiler_dir):
             from ._server_patcher import resolve_sglang_patch_set
 
-            poll_timeout_s = env_int("HYPERLOOM_MN_POLL_TIMEOUT_S", DEFAULT_HEALTH_TIMEOUT_S)
-            await _apply_tracelens_patch_fanout(resolve_sglang_patch_set(), torch_profiler_dir, poll_timeout_s)
+            await _apply_tracelens_patch_fanout(resolve_sglang_patch_set(), torch_profiler_dir, settings.poll_timeout_s)
 
             # Local import to keep httpx out of the single-node import path.
-            from hyperloom.inference_optimizer.multi_node.cli import cmd_restart_server, _resolve_poll_timeout_s
+            from hyperloom.inference_optimizer.multi_node.cli import cmd_restart_server
 
             # Align launch-driver poll with /health wait for JIT-heavy MoE runs.
-            poll_timeout_s, health_wait_s = _health_wait_budget(
-                max(poll_timeout_s, _resolve_poll_timeout_s()), extra_server_args, pd, extra_env
-            )
+            poll_timeout_s, health_wait_s = _health_wait_budget(settings, extra_server_args, pd, extra_env)
             ns = _restart_namespace(round_args, extra_server_args, poll_timeout_s, pd)
             from ._multi_node_env import log_mn_banner
 
@@ -506,16 +526,13 @@ async def restart_server_for_round(
                 # before /health flips; poll it here so the downstream baseline doesn't fire against a not-yet-ready
                 # server.
                 try:
-                    poll_s = env_int("HYPERLOOM_MN_HEALTH_POLL_S", 10)
                     # PD restart: ensure BOTH prefill+decode legs are /health-ready (mooncake init done) before the
                     # frontend completions probe, so its grace does not expire against a half-ready pair.
-                    await _wait_for_workers_ready_async(timeout_s=health_wait_s, poll_every_s=poll_s)
-                    await _wait_for_server_health_async(timeout_s=health_wait_s, poll_every_s=poll_s)
+                    await _wait_for_workers_ready_async(settings, timeout_s=health_wait_s)
+                    await _wait_for_server_health_async(settings, timeout_s=health_wait_s)
                     # The reachable /health above can be a pod-pinned head address; the benchmark dials the published
                     # ClusterIP Service, whose endpoints lag readiness after a restart.
-                    await _wait_for_published_service_ready_async(
-                        timeout_s=_published_ready_timeout_s(), poll_every_s=poll_s
-                    )
+                    await _wait_for_published_service_ready_async(settings)
                 except ServerRestartFailed as exc:
                     _collect_worker_server_logs(_read_state(), str(exc))
                     raise
@@ -534,11 +551,13 @@ async def restart_server_for_round(
                     "best-effort remote kill-inference + one retry",
                     first_exc,
                 )
+                import httpx
+
                 try:
                     from hyperloom.inference_optimizer.multi_node.cli import kill_inference_for_kernel_agent_best_effort
 
                     await asyncio.to_thread(kill_inference_for_kernel_agent_best_effort)
-                except Exception as reclaim_exc:  # noqa: BLE001 - reclaim is best-effort
+                except (ValueError, KeyError, httpx.HTTPError, httpx.InvalidURL) as reclaim_exc:
                     log.warning(
                         "restart_server_for_round: remote kill-inference reclaim raised (%s); retrying restart anyway",
                         reclaim_exc,
@@ -773,24 +792,24 @@ def _worker_fastfail_reason(
     return None
 
 
-async def _wait_for_workers_ready_async(timeout_s: int, poll_every_s: int = 10) -> None:
+async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: int) -> None:
     """Wait for every prefill/decode worker's own /health to return 200 before the frontend serving probe runs."""
     import time as _t
 
     import httpx as _httpx
 
-    port = env_int("HYPERLOOM_MN_WORKER_PORT", 30000)
+    port = settings.worker_port
     targets = _worker_health_targets(_read_state())
     if not targets:
         return
     started = _t.monotonic()
     ready: set[str] = set()
     # Detokenizer-wedge fast-fail: bail early on a wedged worker instead of burning the full timeout.
-    wedge_grace = env_int("HYPERLOOM_MN_WORKER_WEDGE_GRACE_S", 420)
+    wedge_grace = settings.worker_wedge_grace_s
     fastfail = env_flag("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", default=True)
     # Startup-crash fast-fail: an argparse rejection / fatal exit is terminal, so bail within seconds instead of the
     # full gate.
-    crash_grace = env_int("HYPERLOOM_MN_WORKER_CRASH_GRACE_S", 45)
+    crash_grace = settings.worker_crash_grace_s
     log.info("waiting for %d worker(s) /health on port %d before frontend probe", len(targets), port)
     async with _httpx.AsyncClient(timeout=10.0) as client:
         while True:
@@ -831,7 +850,7 @@ async def _wait_for_workers_ready_async(timeout_s: int, poll_every_s: int = 10) 
             )
             if reason:
                 raise ServerRestartFailed(reason)
-            await asyncio.sleep(poll_every_s)
+            await asyncio.sleep(settings.health_poll_s)
 
 
 def _shared_server_log_dir() -> str:
@@ -925,10 +944,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
                 continue
 
 
-async def _wait_for_server_health_async(
-    timeout_s: int = 1800,
-    poll_every_s: int = 10,
-) -> None:
+async def _wait_for_server_health_async(settings: RestartSettings, timeout_s: int) -> None:
     """Poll the multi_node service_url /health until 200 or timeout."""
     import time as _time
 
@@ -950,7 +966,7 @@ async def _wait_for_server_health_async(
         "post-restart /health wait: url=%s timeout_s=%d poll_every_s=%d",
         health_url,
         timeout_s,
-        poll_every_s,
+        settings.health_poll_s,
     )
     # Infera-ONLY serving-readiness extension. When it is on, also do a 1-token completion probe to confirm workers
     # actually serve traffic (Infera registers models in /v1/models before the worker is ready to accept requests;
@@ -961,19 +977,19 @@ async def _wait_for_server_health_async(
     models_ready_at = None
     consecutive_completion_ok = 0
     # require N consecutive successful completions before declaring ready
-    completion_probe_required = env_int("HYPERLOOM_MN_COMPLETION_PROBE_COUNT", 2)
+    completion_probe_required = settings.completion_probe_count
     # Probe with >1 token + ignore_eos so the request must traverse the decode leg (prefill alone can serve the first
     # token): a PD run with an unready or KV-broken decode then fails the probe instead of passing on a prefill-only
     # 200.
-    completion_probe_tokens = env_int("HYPERLOOM_MN_COMPLETION_PROBE_TOKENS", 8)
-    completion_probe_min_tokens = env_int("HYPERLOOM_MN_COMPLETION_PROBE_MIN_TOKENS", 2)
+    completion_probe_tokens = settings.completion_probe_tokens
+    completion_probe_min_tokens = settings.completion_probe_min_tokens
     # Fast-fail grace: if /health is up but /v1/models never registers within this many seconds, the GPU workers
     # crashed on launch (e.g. an unrecognized server flag) rather than slowly loading — bail early instead of burning
     # the full timeout_s.
-    models_empty_grace_s = env_int("HYPERLOOM_MN_MODELS_EMPTY_GRACE_S", 600)
+    models_empty_grace_s = settings.models_empty_grace_s
     # Fast-fail when /v1/models is populated but /v1/completions never serves within this window (PD prefill<->decode
     # KV handoff broken on restart -> HTTP 503 every probe).
-    completions_grace_s = env_int("HYPERLOOM_MN_COMPLETIONS_GRACE_S", 480)
+    completions_grace_s = settings.completions_grace_s
     async with _httpx.AsyncClient(timeout=15.0) as client:
         while True:
             elapsed = int(_time.monotonic() - started)
@@ -1055,13 +1071,13 @@ async def _wait_for_server_health_async(
                 raise ServerRestartFailed(
                     f"server /health did not return 200 within {timeout_s}s (url={health_url}, last_err={last_err})"
                 )
-            if elapsed % 60 < poll_every_s:
+            if elapsed % 60 < settings.health_poll_s:
                 log.info(
                     "post-restart /health still waiting t=%ds last_err=%s",
                     elapsed,
                     last_err,
                 )
-            await asyncio.sleep(poll_every_s)
+            await asyncio.sleep(settings.health_poll_s)
 
 
 def _is_name_resolution_error(exc: BaseException) -> bool:
@@ -1087,24 +1103,11 @@ def _is_name_resolution_error(exc: BaseException) -> bool:
     return False
 
 
-def _published_ready_timeout_s() -> int:
-    """Resolve the published-service gate budget from the environment."""
-    return env_int("HYPERLOOM_MN_PUBLISHED_READY_S", 300)
-
-
-def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
-    """Read a poll-count knob whose smallest meaningful value is *minimum*, not zero."""
-    return max(minimum, env_int(name, default))
-
-
-async def _wait_for_published_service_ready_async(
-    timeout_s: int = 300,
-    poll_every_s: int = 10,
-) -> None:
+async def _wait_for_published_service_ready_async(settings: RestartSettings) -> None:
     """Gate on the published ``service_url`` the benchmark dials, not only the reachable address :func:`_wait_for_server_health_async` proves."""
     import time as _time
 
-    if timeout_s <= 0:
+    if settings.published_ready_s <= 0:
         log.info("post-restart published-service gate disabled (HYPERLOOM_MN_PUBLISHED_READY_S<=0)")
         return
 
@@ -1124,18 +1127,18 @@ async def _wait_for_published_service_ready_async(
     health_url = published + "/health"
     # Consecutive 200s required so a single endpoint-list flap does not pass us (override:
     # HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK).
-    required_ok = _env_int("HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK", 2)
+    required_ok = settings.published_ready_ok_streak
     ok_streak = 0
     # Skip only after this many CONSECUTIVE name-resolution failures, so a CoreDNS blip inside the readiness window
     # (which resolves on a later poll) does not disable the gate exactly when it is needed.
-    dns_skip_after = _env_int("HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER", 6)
+    dns_skip_after = settings.published_dns_skip_after
     dns_failures = 0
     started = _time.monotonic()
     last_err = ""
     log.info(
         "post-restart published-service /health wait: url=%s timeout_s=%d",
         health_url,
-        timeout_s,
+        settings.published_ready_s,
     )
     async with _httpx.AsyncClient(timeout=15.0) as client:
         while True:
@@ -1168,7 +1171,7 @@ async def _wait_for_published_service_ready_async(
                             "completed=0 / ECONNREFUSED likely traces back to this skip.",
                             health_url,
                             dns_failures,
-                            dns_failures * poll_every_s,
+                            dns_failures * settings.health_poll_s,
                         )
                         return
                     ok_streak = 0
@@ -1177,17 +1180,17 @@ async def _wait_for_published_service_ready_async(
                     dns_failures = 0  # reached the host: a real refuse/5xx, keep waiting
                     ok_streak = 0
                     last_err = format_exc_brief(exc, limit=120)
-            if elapsed > timeout_s:
+            if elapsed > settings.published_ready_s:
                 raise ServerRestartFailed(
-                    f"published service /health did not return 200 within {timeout_s}s "
+                    f"published service /health did not return 200 within {settings.published_ready_s}s "
                     f"(url={health_url}, last_err={last_err}); the endpoint the benchmark "
                     f"dials had no ready backend (post-restart readiness window did not close)"
                 )
-            await asyncio.sleep(poll_every_s)
+            await asyncio.sleep(settings.health_poll_s)
 
 
 __all__ = [
-    "DEFAULT_HEALTH_TIMEOUT_S",
+    "RoundServer",
     "ServerRestartFailed",
     "_merge_sglang_defaults",
     "restart_server_for_round",

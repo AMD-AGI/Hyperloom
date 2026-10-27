@@ -15,9 +15,7 @@ from typing import Any
 
 import httpx
 
-from hyperloom.common.gpu_identity import board_named_in
-
-from ...gpu_types import reference_gpu_type_for_gfx
+from ...gpu_types import parse_gpu_type
 from . import ray_dashboard, ssh_client, ssh_known_hosts
 from .external_state import build_external_state_from_env, external_service_url
 
@@ -33,12 +31,6 @@ _PROBE_CMD = (
 
 # Ray Dashboard job terminal states (mirror multi_node.cli).
 _TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "STOPPED"}
-
-
-def _parse_gpu_type(text: str) -> str | None:
-    """Map rocm-smi / gcnArchName output to a known AMD board."""
-    board = board_named_in(text)
-    return board.product if board else reference_gpu_type_for_gfx(text)
 
 
 def remote_autodetect_gpu_type(*, timeout_s: int = 60) -> str | None:
@@ -78,7 +70,7 @@ def _probe_via_ray_head(state: dict[str, Any], *, timeout_s: int) -> str | None:
             # logs are parsed either way and an unparsable result already degrades to None.
             log.warning("remote GPU probe: ray job %s ended %r", sub_id, status or "no terminal status")
         logs = ray.get_job_logs(sub_id)
-    return _parse_gpu_type(logs)
+    return parse_gpu_type(logs)
 
 
 def _first_gpu_pod(state: dict[str, Any]) -> dict[str, Any] | None:
@@ -123,4 +115,4 @@ def _probe_via_infera_ssh(state: dict[str, Any], *, timeout_s: int) -> str | Non
         # Logged, not fatal: _PROBE_CMD's `||` fallback can print a usable name and still exit non-zero, so the output
         # is parsed either way and an unparsable result already degrades to None.
         log.warning("remote GPU probe: ssh to %s exited %s", host, cp.returncode)
-    return _parse_gpu_type(f"{cp.stdout or ''}\n{cp.stderr or ''}")
+    return parse_gpu_type(f"{cp.stdout or ''}\n{cp.stderr or ''}")

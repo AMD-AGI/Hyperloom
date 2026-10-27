@@ -16,8 +16,9 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALO
 from hyperloom.inference_optimizer.session.session_paths import reports_dir
 from hyperloom.orchestrator.actions.executors import baseline as bl
 from hyperloom.orchestrator.bringup import load_boot_observation
-from hyperloom.orchestrator.bringup.reconcile import ReconcileLimits, Reconciler, ReconcileStores
-from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+from hyperloom.orchestrator.bringup import reconcile
+from hyperloom.orchestrator.bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
+from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 from hyperloom.orchestrator.enablement.build import EnablementBuild
@@ -27,6 +28,7 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
 from hyperloom.orchestrator.policy.gate import PolicyGate
+from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.rehearsal import (
     COMPLETED,
     CRASHED,
@@ -46,6 +48,7 @@ from hyperloom.orchestrator.state.round_store import (
     RoundRequest,
     RoundStore,
 )
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
 #: The round: two blockers peeled one per attempt, then a boot that serves.
@@ -96,7 +99,7 @@ def registry(tmp_path):
     """A real ``TaskRegistry``, round store and lock manager over one database."""
     db = SqliteConnection(tmp_path / "coordinator.db")
     ensure_schema(db.raw)
-    yield TaskRegistry(db), RoundStore(db), ResourceLockManager(SqliteLeaseBackend(db))
+    yield TaskRegistry(db), RoundStore(db), SqliteLeaseBackend(db)
     db.close()
 
 
@@ -115,16 +118,18 @@ async def _bringup_attempt(session: Path, slot: Path, *, task_id: str) -> dict:
     config = session / "bench.yaml"
     config.write_text("benchmark:\n  framework: vllm\n  model: scripted/Model\n", encoding="utf-8")
     return await executor._run_single_benchmark(
+        bl.BenchmarkAttempt(
+            timeout_sec=1800,
+            override_result_dir=None,
+            resolved_model="scripted/Model",
+            materialized_config_path=config,
+            inferencex_path="",
+            effective_extra_server_args="",
+            params={"framework": "vllm"},
+            ctx=_ctx(task_id),
+        ),
         config_path=config,
         output_dir=slot,
-        timeout_sec=1800,
-        override_result_dir=None,
-        resolved_model="scripted/Model",
-        materialized_config_path=config,
-        inferencex_path="",
-        effective_extra_server_args="",
-        params={"framework": "vllm"},
-        ctx=_ctx(task_id),
     )
 
 
@@ -146,6 +151,8 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         model_path="",
         reference_model="",
         gpu_type="mi300x",
+        tp=1,
+        max_model_len=0,
         enablement_mode="all",
         enablement=EnablementRound(launch_log=launch_log),
         baseline_tput=0.0,
@@ -271,7 +278,7 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
         loaded = load_boot_observation(result.get("boot_observation_path"))
         assert loaded.observation is not None, loaded.degraded
         observations.append(loaded.observation)
-        if loaded.observation.booted:
+        if loaded.observation.stage_failed is None and loaded.observation.stage_reached >= LadderStage.HTTP_READY:
             break
 
         # The excerpt is what the round recorded off the server's own log, and
@@ -281,10 +288,17 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
         # specialist crashed without settling anything, and the lane will not
         # open a second round while the first is still held: the repair pass is
         # what ends it, and it runs before anything is admitted.
+        monkeypatch.setattr(reconcile, "TERMINAL_HOLDER_CAP_SEC", 0.0)
         await Reconciler(
-            ReconcileStores(rounds=rounds, tasks=tasks, locks=ResourceLockManager(SqliteLeaseBackend(rounds.db))),
-            None,
-            limits=ReconcileLimits(terminal_holder_cap_sec=0.0),
+            ReconcileStores(rounds=rounds, tasks=tasks, locks=SqliteLeaseBackend(rounds.db)),
+            SharedState(),
+            links=ReconcileLinks(
+                resources=ResourceFacts(),
+                proposals=dict,
+                drop_proposal=lambda _pending, _reason: None,
+                session_dir=session,
+                result_pending=lambda _task_id: False,
+            ),
         ).run(time.time())
         # A confirmed kill keeps excluding until the reap grace passes: the
         # kernel has not torn the address space down when the signal returns,
@@ -324,7 +338,8 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
     assert stages == sorted(stages), stages
     assert stages[0] == LadderStage.ARGV_PARSE
     assert stages[1] == LadderStage.CONFIG_VALIDATE
-    assert observations[-1].booted
+    assert observations[-1].stage_failed is None
+    assert observations[-1].stage_reached >= LadderStage.HTTP_READY
 
     # Two repair dispatches under two different ids: the lane minted a fresh
     # idempotency key for the retry rather than reopening the crashed task,

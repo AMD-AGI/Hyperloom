@@ -13,10 +13,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors import _subprocess_kill
+from hyperloom.orchestrator.actions.executors import _gpu_power, _subprocess_kill
 from hyperloom.orchestrator.actions.executors._gpu_power import (
     GPU_POWER_ARTIFACT_NAME,
     GpuPowerRecorder,
+    _read_node_power,
     build_gpu_power_recorder,
     parse_power_sample,
     read_measured_gpu_power,
@@ -92,6 +93,91 @@ def test_the_by_gpu_reading_names_each_serving_card_and_no_idle_one(tmp_path):
     found, by_gpu = read_measured_gpu_power_by_gpu(tmp_path)
     assert found is True
     assert by_gpu == {str(g): pytest.approx(800.0) for g in range(4)}
+
+
+@pytest.fixture(autouse=True)
+def _no_node_power_sysfs(monkeypatch):
+    """No recorder here reads the host's NPM files: the node reads as one without NPM.
+
+    A test of the node reading patches ``_read_node_power`` again, or calls the reader with its own board glob.
+    """
+    monkeypatch.setattr(_gpu_power, "_read_node_power", lambda: None)
+
+
+def _board(root, card: int, **files: str) -> None:
+    board = root / f"card{card}" / "device" / "board"
+    board.mkdir(parents=True)
+    for name, text in {"gpuboard_temp": "", **files}.items():
+        (board / name).write_text(text)
+
+
+def test_the_node_power_is_read_from_the_npm_master_cards_board(tmp_path, monkeypatch):
+    """Every card has a board directory; only the cards that publish the node's files have them in it."""
+    monkeypatch.setattr(_gpu_power, "_BOARD_GLOB", str(tmp_path / "card*" / "device" / "board"))
+    no_boards = _read_node_power()
+    _board(tmp_path, 1)
+    _board(tmp_path, 57, npm_status="enabled\n", node_power="3492\n", cur_node_power_limit="2600\n")
+    enabled = _read_node_power()
+    (tmp_path / "card57" / "device" / "board" / "npm_status").write_text("disabled\n")
+    disabled = _read_node_power()
+    _board(tmp_path, 9, npm_status="enabled\n", node_power="5200\n", cur_node_power_limit="8000\n")
+    behind_a_disabled_copy = _read_node_power()
+    assert (no_boards, enabled, disabled) == (None, (3492.0, 2600.0), None)
+    assert behind_a_disabled_copy == (5200.0, 8000.0)
+
+
+def _node_summary(monkeypatch, read_node) -> dict:
+    monkeypatch.setattr(_gpu_power, "_read_node_power", read_node)
+    query = _Replay(_tp4_on_eight(800.0))
+    recorder = GpuPowerRecorder(output_path=None, query=query, interval_sec=0.5)
+    recorder._interval = 0.01
+    _run_measured(recorder, query, samples=4)
+    return recorder.close()
+
+
+def test_a_node_held_at_its_npm_limit_is_reported_though_no_card_counts_it(monkeypatch, caplog):
+    """Measured on MI350X: under a 2600 W node limit every card ran near 430 W against a 1000 W cap, the node read
+    above the limit, and the cards' own PPT counters moved for under 1% of the phase."""
+    out = _node_summary(monkeypatch, lambda: (3492.0, 2600.0))
+    assert out["power_throttled_gpus"] == []
+    assert out["node"]["limit_w"] == 2600.0
+    assert out["node"]["limited_fraction"] == 1.0
+    assert out["node"]["avg_power_w"] == 3492.0
+    assert "held at its NPM power limit (2600.0 W) for 100% of the measured phase" in caplog.text
+
+
+@pytest.mark.parametrize(("power", "held"), [(2587.0, 1.0), (2573.0, 0.0)], ids=["99.5%", "99.0%-"])
+def test_a_sample_counts_as_held_from_99_percent_of_the_limit(monkeypatch, caplog, power, held):
+    out = _node_summary(monkeypatch, lambda: (power, 2600.0))
+    warned = "NPM power limit" in caplog.text
+    assert (out["node"]["limited_fraction"], warned) == (held, held > 0)
+
+
+def test_a_limit_that_changed_during_the_phase_is_unread(monkeypatch):
+    readings = iter([(2600.0, 2600.0), (2600.0, 8000.0)] * 8)
+    out = _node_summary(monkeypatch, lambda: next(readings))
+    assert out["node"]["limit_w"] is None
+
+
+def test_npm_enabled_with_no_limit_is_a_failed_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(_gpu_power, "_BOARD_GLOB", str(tmp_path / "card*" / "device" / "board"))
+    _board(tmp_path, 57, npm_status="enabled\n", node_power="900\n", cur_node_power_limit="0\n")
+    out = _node_summary(monkeypatch, _read_node_power)
+    assert out["node"] is None and out["node_query_errors"] > 0
+
+
+def test_a_node_without_npm_has_no_node_reading(monkeypatch):
+    out = _node_summary(monkeypatch, lambda: None)
+    assert (out["node"], out["node_query_errors"]) == (None, 0)
+
+
+def test_a_node_read_that_fails_is_counted_and_costs_the_cards_nothing(monkeypatch):
+    def _unreadable():
+        raise OSError("permission denied")
+
+    out = _node_summary(monkeypatch, _unreadable)
+    assert out["node"] is None and out["node_query_errors"] > 0
+    assert out["avg_power_w"] == 800.0
 
 
 def _summary_of(tmp_path, payload, *, gpus=None) -> dict:

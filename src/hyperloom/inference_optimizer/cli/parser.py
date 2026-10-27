@@ -16,7 +16,8 @@ from .. import framework_registry
 from .constraint_args import add_constraint_arguments
 from .gpu_power_args import add_gpu_power_arguments
 from .backends import CRITIC_PROTOCOL_CHOICES
-from .recover import RECOVER_DESCRIPTION, RECOVER_HELP, add_cleanup_confirmation_arguments
+from .recover import add_recover_subparser
+from .session_target import add_session_dir_argument
 from hyperloom.common import predictor_config
 from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
@@ -174,6 +175,70 @@ def _add_custom_specialist_args(opt: argparse.ArgumentParser) -> None:
         help="One line (max 200 chars) describing custom_specialist in its own prompt. Requires "
         "--custom-specialist-prompt-file.",
     )
+
+
+def _add_resume_arguments(opt: argparse.ArgumentParser) -> None:
+    """The ``--resume-from`` and ``--force-resume`` flags of ``optimize``."""
+    opt.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Per-session subdir to resume; the only way to resume a session. "
+        "Skips the SharedState seed and lets the Coordinator replay the "
+        "prior event log + state.json. Must be an absolute path under "
+        "$USER_DATA_PATH (workspace_root), which MUST stay at workspace "
+        "level (/shared/hyperloom-sessions, not the per-session subdir) so "
+        "runtime/ resolution works.",
+    )
+    opt.add_argument(
+        "--force-resume",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow ``--resume-from`` to push past a terminal "
+            "``stop_reason='target_reached'``. "
+            "Without this flag the resume aborts (Issue-G guard, per "
+            "SKILL.md 'Run-time signals': that terminal requires an "
+            "operator-side workload / strategy change before resuming). "
+            "No-op without ``--resume-from``."
+        ),
+    )
+
+
+def _add_plug_arguments(opt: argparse.ArgumentParser) -> None:
+    """Add the flags that select which implementation fills each plug socket; absent, every socket stays local."""
+    opt.add_argument(
+        "--plug-profile",
+        dest="plug_profile",
+        default=None,
+        metavar="NAME",
+        help="Built-in plug profile to load (local, hosted-gpu, hosted-cpu). Without it, and without the other plug "
+        "flags, nothing changes from a plain local run.",
+    )
+    opt.add_argument(
+        "--manifest",
+        dest="plug_manifest",
+        default=None,
+        metavar="PATH",
+        help="Custom plug manifest (JSON) laid over the profile. Falls back to $HYPERLOOM_MANIFEST.",
+    )
+    for flag, dest, metavar, text in (
+        (
+            "--plug",
+            "plug",
+            "SOCKET=IMPL",
+            "Choose the implementation of one socket; repeatable. The last layer, over profile, manifest and "
+            "$HYPERLOOM_MANIFEST_OVERRIDES.",
+        ),
+        (
+            "--plug-config",
+            "plug_config",
+            "SOCKET.KEY=VALUE",
+            "Set one configuration key of a socket's implementation; repeatable. VALUE is read as JSON when it "
+            "parses as JSON, as text otherwise.",
+        ),
+    ):
+        opt.add_argument(flag, dest=dest, action="append", default=[], metavar=metavar, help=text)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -593,30 +658,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     add_constraint_arguments(opt)
     add_gpu_power_arguments(opt)
-    opt.add_argument(
-        "--resume-from",
-        type=str,
-        default=None,
-        help="Per-session subdir to resume; the only way to resume a session. "
-        "Skips the SharedState seed and lets the Coordinator replay the "
-        "prior event log + state.json. Must be an absolute path under "
-        "$USER_DATA_PATH (workspace_root), which MUST stay at workspace "
-        "level (/shared/hyperloom-sessions, not the per-session subdir) so "
-        "runtime/ resolution works.",
-    )
-    opt.add_argument(
-        "--force-resume",
-        action="store_true",
-        default=False,
-        help=(
-            "Allow ``--resume-from`` to push past a terminal "
-            "``stop_reason='target_reached'``. "
-            "Without this flag the resume aborts (Issue-G guard, per "
-            "SKILL.md 'Run-time signals': that terminal requires an "
-            "operator-side workload / strategy change before resuming). "
-            "No-op without ``--resume-from``."
-        ),
-    )
+    _add_resume_arguments(opt)
+    _add_plug_arguments(opt)
     opt.add_argument(
         "--model-class",
         type=str,
@@ -1117,23 +1160,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
 
-    rec = sub.add_parser(
-        "recover",
-        parents=[common],
-        help=RECOVER_HELP,
-        description=RECOVER_DESCRIPTION,
-    )
-    rec.add_argument(
-        "--session-dir",
-        type=Path,
-        required=True,
-        help="Session directory of the crashed run (contains state.json / reports/trace/ and the recorder fragments).",
-    )
-    rec.add_argument(
-        "--force",
-        action="store_true",
-        help="Re-run even when the session already looks complete (close_sequence_done / breakdown already recorded).",
-    )
-    add_cleanup_confirmation_arguments(rec)
+    add_session_dir_argument(opt)
+    add_recover_subparser(sub, common)
 
     return p

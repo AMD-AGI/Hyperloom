@@ -26,7 +26,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import AGENTX_PRE
 from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.proposals import PendingProposal
-from hyperloom.orchestrator.loop.writeback import _authorable_launch_log
+from hyperloom.orchestrator.loop._baseline_failures import _authorable_launch_log
 from hyperloom.orchestrator.enablement.lane import bind_integrate_to_lane
 from hyperloom.orchestrator.enablement.params import EnablementParams
 
@@ -190,10 +190,9 @@ def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch, tmp_
     from hyperloom.agents.framework.models import Candidate
 
     cands = [
-        Candidate(ref="PR:1", repo="r", title="minor perf tweak", html_url="http://x/1"),
+        Candidate(ref="PR:1", title="minor perf tweak", html_url="http://x/1"),
         Candidate(
             ref="PR:2",
-            repo="r",
             title="Add support to enable GLM architecture on ROCm",
             html_url="http://x/2",
         ),
@@ -407,8 +406,8 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch, tmp_p
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     cands = [
-        Candidate(ref="PR:1", repo="r", title="enable GLM arch on ROCm", html_url="http://x/1"),
-        Candidate(ref="PR:2", repo="r", title="add GLM support fix", html_url="http://x/2"),
+        Candidate(ref="PR:1", title="enable GLM arch on ROCm", html_url="http://x/1"),
+        Candidate(ref="PR:2", title="add GLM support fix", html_url="http://x/2"),
     ]
     _stub_enumerate(monkeypatch, cands)
     fake = _enqueue_self(tmp_path)
@@ -460,22 +459,12 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     """
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
-    from hyperloom.orchestrator.bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
-    from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
-
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-stuck", holder_state="succeeded")
-    reconciler = Reconciler(
-        ReconcileStores(
-            rounds=fake.rounds, tasks=fake.tasks, locks=ResourceLockManager(SqliteLeaseBackend(fake.rounds.db))
-        ),
-        fake.shared_state,
-        links=ReconcileLinks(proposals=lambda: fake.state.pending_proposals),
-    )
 
-    await reconciler.run(time.time() + 3600.0)
+    await fake.reconciler.run(time.time() + 3600.0)
 
     settled = await fake.rounds.get("enablement-spec-stuck")
     assert settled.state == "settled"

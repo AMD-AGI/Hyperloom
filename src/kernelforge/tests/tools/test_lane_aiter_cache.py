@@ -97,6 +97,7 @@ def _implementer_through(backend):
             )
             return plan
 
+        agent.close = lambda: None
         return agent
 
     return make_agent
