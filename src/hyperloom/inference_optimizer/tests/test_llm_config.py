@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import sys
 import types
@@ -19,10 +20,8 @@ from hyperloom.common.llm_config import (
     DEFAULT_ANTHROPIC_BASE_URL,
     DEFAULT_ANTHROPIC_VERSION,
     LLMConfigError,
-    aanthropic_messages,
     achat_completion,
     chat_completion,
-    anthropic_messages,
     apply_reasoning_effort,
     build_http_timeout,
     claude_sdk_env_options,
@@ -856,49 +855,8 @@ def test_get_anthropic_client_raises_clearly_without_httpx(monkeypatch):
         get_async_anthropic_client(env={_ANTHROPIC_KEY: "k"})
 
 
-# ---- anthropic_messages / aanthropic_messages ----
-class _FakeAnthropicResponse:
-    """One canned reply; ``error`` makes ``json()`` fail as a non-JSON body would."""
-
-    def __init__(
-        self,
-        *,
-        status_code: int = 200,
-        body: Any = None,
-        text: str = "",
-        error: BaseException | None = None,
-    ) -> None:
-        self.status_code = status_code
-        self._body = {} if body is None else body
-        self._error = error
-        self.text = text
-
-    def json(self) -> Any:
-        if self._error is not None:
-            raise self._error
-        return self._body
-
-
-class _FakeAnthropicTransport:
-    """Records ``/v1/messages`` POSTs; the async twin awaits the same recorder."""
-
-    def __init__(self, response: Any = None, *, error: BaseException | None = None) -> None:
-        self._response = response
-        self._error = error
-        self.calls: list[dict[str, Any]] = []
-
-    def post(self, path: str, *, json: Any) -> Any:
-        self.calls.append({"path": path, "json": json})
-        if self._error is not None:
-            raise self._error
-        return self._response
-
-
-class _FakeAsyncAnthropicTransport(_FakeAnthropicTransport):
-    async def post(self, path: str, *, json: Any) -> Any:  # type: ignore[override]
-        return _FakeAnthropicTransport.post(self, path, json=json)
-
-
+# ---- anthropic_completion / aanthropic_completion over the HTTP transport ----
+# The streamed reply itself is read in src/hyperloom/common/tests/test_anthropic_messages.py.
 _MESSAGE_BODY = {
     "content": [
         {"type": "text", "text": "hello "},
@@ -910,67 +868,64 @@ _MESSAGE_BODY = {
 }
 
 
-def test_anthropic_messages_posts_to_the_messages_path_and_flattens():
-    client = _FakeAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
-    result = anthropic_messages(client, model="claude", messages=[{"role": "user", "content": "hi"}], max_tokens=8)
-    assert result.text == "hello world"
-    assert result.stop_reason == "end_turn"
-    assert result.usage == {"input_tokens": 21, "output_tokens": 7}
-    assert client.calls[0]["path"] == "/v1/messages"
-    assert client.calls[0]["json"] == {
-        "model": "claude",
-        "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 8,
-    }
+def _events(body: dict[str, Any]) -> bytes:
+    """``body``, a whole Messages reply, as the server-sent events that stream it."""
+    events: list[dict[str, Any]] = [{"type": "message_start", "message": {"content": [], "usage": {}}}]
+    for index, block in enumerate(body["content"]):
+        text = block["type"] == "text"
+        events.append(
+            {"type": "content_block_start", "index": index, "content_block": {**block, "text": ""} if text else block}
+        )
+        if text:
+            delta = {"type": "text_delta", "text": block["text"]}
+            events.append({"type": "content_block_delta", "index": index, "delta": delta})
+    events.append({"type": "message_delta", "delta": {"stop_reason": body["stop_reason"]}, "usage": body["usage"]})
+    events.append({"type": "message_stop"})
+    return b"".join(b"data: " + json.dumps(event).encode() + b"\n\n" for event in events)
 
 
-@pytest.mark.asyncio
-async def test_aanthropic_messages_flattens_the_same_way():
-    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
-    result = await aanthropic_messages(client, model="claude", system="sys")
-    assert (result.text, result.stop_reason) == ("hello world", "end_turn")
-    assert client.calls[0]["json"] == {"model": "claude", "system": "sys"}
+class _FakeAnthropicResponse:
+    """One canned reply, streamed as the events of ``body``; a failed ``status_code`` carries ``text`` instead."""
+
+    def __init__(self, *, status_code: int = 200, body: Any = None, text: str = "") -> None:
+        self.status_code = status_code
+        self._content = text.encode() if status_code >= 400 else _events(body)
+
+    def read(self) -> bytes:
+        return self._content
+
+    async def aread(self) -> bytes:
+        return self._content
+
+    def iter_bytes(self) -> Any:
+        yield self._content
+
+    async def aiter_bytes(self) -> Any:
+        yield self._content
+
+    def __enter__(self) -> "_FakeAnthropicResponse":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    async def __aenter__(self) -> "_FakeAnthropicResponse":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
 
 
-@pytest.mark.asyncio
-async def test_aanthropic_messages_raises_on_non_2xx_with_status_and_body():
-    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(status_code=401, body={}, text="unauthorized"))
-    with pytest.raises(RuntimeError, match="status=401") as excinfo:
-        await aanthropic_messages(client, model="claude")
-    assert "unauthorized" in str(excinfo.value)
+class _FakeAnthropicTransport:
+    """Records ``/v1/messages`` streams; the reply serves ``with`` and ``async with`` alike."""
 
+    def __init__(self, response: Any = None) -> None:
+        self._response = response
+        self.calls: list[dict[str, Any]] = []
 
-@pytest.mark.asyncio
-async def test_aanthropic_messages_raises_on_non_json_body():
-    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(error=ValueError("not json")))
-    with pytest.raises(RuntimeError, match="non-JSON body"):
-        await aanthropic_messages(client, model="claude")
-
-
-@pytest.mark.asyncio
-async def test_aanthropic_messages_propagates_transport_errors():
-    client = _FakeAsyncAnthropicTransport(error=RuntimeError("gateway down"))
-    with pytest.raises(RuntimeError, match="gateway down"):
-        await aanthropic_messages(client, model="claude")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("body", [{}, {"content": "nope"}])
-async def test_aanthropic_messages_tolerates_unreadable_reply_shapes(body):
-    """An unreadable reply (dict with missing/wrong-typed fields) yields empty text."""
-    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(body=body))
-    result = await aanthropic_messages(client, model="claude")
-    assert result.text == ""
-    assert result.stop_reason is None
-    assert result.usage is None
-
-
-@pytest.mark.asyncio
-async def test_aanthropic_messages_raises_on_non_dict_body():
-    """A JSON response whose top-level type is not dict raises RuntimeError."""
-    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(body=["not", "a", "dict"]))
-    with pytest.raises(RuntimeError, match="non-object"):
-        await aanthropic_messages(client, model="claude")
+    def stream(self, method: str, path: str, *, json: Any, **_kw: Any) -> Any:
+        self.calls.append({"method": method, "path": path, "json": json})
+        return self._response
 
 
 class _FakeClosingTransport(_FakeAnthropicTransport):
@@ -981,7 +936,7 @@ class _FakeClosingTransport(_FakeAnthropicTransport):
         return None
 
 
-class _FakeAsyncClosingTransport(_FakeAsyncAnthropicTransport):
+class _FakeAsyncClosingTransport(_FakeAnthropicTransport):
     async def __aenter__(self) -> Any:
         return self
 
@@ -1219,8 +1174,8 @@ _OAUTH_VALUE = "sk-ant-oat01-fake"
 class _ClosingAnthropicTransport(_FakeAnthropicTransport):
     """Sync transport that records whether the caller closed it."""
 
-    def __init__(self, response: Any = None, *, error: BaseException | None = None) -> None:
-        super().__init__(response, error=error)
+    def __init__(self, response: Any = None) -> None:
+        super().__init__(response)
         self.closed = False
 
     def __enter__(self) -> "_ClosingAnthropicTransport":
@@ -1232,9 +1187,6 @@ class _ClosingAnthropicTransport(_FakeAnthropicTransport):
 
 
 class _ClosingAsyncAnthropicTransport(_ClosingAnthropicTransport):
-    async def post(self, path: str, *, json: Any) -> Any:  # type: ignore[override]
-        return _FakeAnthropicTransport.post(self, path, json=json)
-
     async def __aenter__(self) -> "_ClosingAsyncAnthropicTransport":
         return self
 
@@ -1402,6 +1354,7 @@ def test_anthropic_completion_posts_to_the_messages_api_when_a_key_is_configured
         "messages": [{"role": "user", "content": "hi"}],
         "max_tokens": 64,
         "system": "sys",
+        "stream": True,
     }
     assert client.closed, "the HTTP client must be closed once the completion returns"
 

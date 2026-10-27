@@ -5,11 +5,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import sys
+import time
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from hyperloom.common.env import is_truthy
@@ -782,7 +786,8 @@ class AnthropicMessageResult:
 class AnthropicCompletionRequest:
     """One single-shot Anthropic completion: the Messages body and the time budget it may take.
 
-    ``timeout`` is the HTTP client timeout (``timeout_s`` when unset); the Claude CLI transport uses ``timeout_s``.
+    ``timeout_s`` bounds the whole call on both transports. ``timeout`` is the HTTP client's (``timeout_s`` when unset):
+    it bounds connecting and each wait for the next event of the streamed reply, not the reply as a whole.
     """
 
     model: str
@@ -805,24 +810,91 @@ class AnthropicCompletionRequest:
 
 
 def _attribution_tag_kwargs(component: str, operation: str = "") -> dict[str, object]:
-    """Build the ``post`` keyword carrying the attribution header, if any."""
+    """Build the request keyword carrying the attribution header, if any."""
     headers = _headers_for(component, operation)
     return {"headers": headers} if headers else {}
 
 
-def _anthropic_message_body(resp: object) -> dict[str, object]:
-    """Check one Messages response for failure and return its JSON object."""
-    status = int(getattr(resp, "status_code", 200) or 200)
-    if status >= 400:
-        detail = str(getattr(resp, "text", ""))[:200]
-        raise RuntimeError(f"anthropic messages status={status} body={detail}")
-    try:
-        body = resp.json()  # type: ignore[attr-defined]
-    except ValueError as exc:
-        raise RuntimeError(f"anthropic messages returned a non-JSON body: {exc!r}") from exc
-    if not isinstance(body, dict):
-        raise RuntimeError(f"anthropic messages returned a non-object JSON body: {type(body).__name__}")
-    return body
+def _observed_messages(
+    component: str, operation: str, params: Mapping[str, object]
+) -> AbstractContextManager[RequestObservation]:
+    return observed_request(
+        protocol=PROTOCOL_ANTHROPIC_MESSAGES,
+        component=component,
+        operation=operation,
+        model=params.get("model"),
+        streamed=True,
+    )
+
+
+def _anthropic_failure(status: int, body: bytes) -> RuntimeError:
+    return RuntimeError(f"anthropic messages status={status} body={body.decode(errors='replace')[:200]}")
+
+
+class _AnthropicStream:
+    """A streamed Messages reply, folded back into the body a whole reply carries.
+
+    A line ends only at CR, LF or CRLF, as server-sent events end it: httpx's ``iter_lines`` also ends one at U+0085,
+    U+2028 and U+2029, which JSON carries unescaped. A last line with no LF yet waits for more bytes, since its CR may
+    be the first half of a CRLF. Bytes that arrive after ``deadline`` (``time.monotonic``) raise ``TimeoutError``.
+    """
+
+    def __init__(self, observation: RequestObservation, deadline: float | None = None) -> None:
+        self._observation = observation
+        self._deadline = deadline
+        self._pending = b""
+        self._data: list[bytes] = []
+        self._body: dict[str, Any] = {}
+        self._stopped = False
+
+    def feed(self, chunk: bytes) -> None:
+        if self._deadline is not None and time.monotonic() > self._deadline:
+            raise TimeoutError("anthropic messages reply outlasted its timeout_s")
+        lines = (self._pending + chunk).splitlines(keepends=True)
+        self._pending = lines.pop() if lines and not lines[-1].endswith(b"\n") else b""
+        for line in lines:
+            self._line(line.rstrip(b"\r\n"))
+
+    def finish(self) -> dict[str, Any]:
+        """Take the last line and return the reply's body; a stream that ended before ``message_stop`` raises."""
+        self._line(self._pending.rstrip(b"\r\n"))
+        self._line(b"")
+        if not self._stopped:
+            raise RuntimeError("anthropic messages stream ended before message_stop")
+        return self._body
+
+    def _line(self, line: bytes) -> None:
+        if line.startswith(b"data:"):
+            self._data.append(line[len(b"data:") :].strip())
+        elif not line and self._data:
+            data, self._data = b"\n".join(self._data), []
+            try:
+                event = json.loads(data)
+            except ValueError as exc:
+                raise RuntimeError(f"anthropic messages stream carried a non-JSON event: {exc!r}") from exc
+            try:
+                self._fold(event)
+            except (KeyError, IndexError, TypeError) as exc:
+                raise RuntimeError(f"anthropic messages stream carried a malformed event: {data[:200]!r}") from exc
+
+    def _fold(self, event: Mapping[str, Any]) -> None:
+        kind = event["type"]
+        if kind == "message_start":
+            self._body = event["message"]
+        elif kind == "content_block_start":
+            self._body["content"].append(event["content_block"])
+        elif kind == "content_block_delta" and event["delta"]["type"] == "text_delta":
+            self._body["content"][event["index"]]["text"] += event["delta"]["text"]
+            self._observation.mark_first_token()
+        elif kind == "message_delta":
+            self._body.update(event["delta"])
+            self._body["usage"] = {**self._body["usage"], **event["usage"]}
+        elif kind == "message_stop":
+            self._stopped = True
+        elif kind == "error":
+            raise RuntimeError(
+                f"anthropic messages stream error: {event['error']['type']}: {event['error']['message']}"
+            )
 
 
 def _anthropic_body_result(body: Mapping[str, object]) -> AnthropicMessageResult:
@@ -833,9 +905,8 @@ def _anthropic_body_result(body: Mapping[str, object]) -> AnthropicMessageResult
     )
 
 
-def _observe_anthropic(observation: RequestObservation, resp: object) -> AnthropicMessageResult:
-    """Fold one Messages response onto ``observation``, then flatten it."""
-    body = _anthropic_message_body(resp)
+def _observe_anthropic(observation: RequestObservation, body: Mapping[str, object]) -> AnthropicMessageResult:
+    """Fold one Messages reply body onto ``observation``, then flatten it."""
     result = _anthropic_body_result(body)
     observation.update(
         response_id=body.get("id"),
@@ -851,15 +922,21 @@ def anthropic_messages(
     *,
     component: str = "",
     operation: str = "",
+    timeout_s: float | None = None,
     **params: object,
 ) -> AnthropicMessageResult:
-    """POST one Anthropic Messages request; returns text, stop_reason and usage."""
+    """POST one Anthropic Messages request and read its reply as server-sent events; returns text, stop_reason and
+    usage. A streamed reply starts while it is written, so a gateway that cuts a request whose reply has not come does
+    not cut a long one; ``timeout_s`` bounds the whole reply."""
     tag = _attribution_tag_kwargs(component, operation)
-    with observed_request(
-        protocol=PROTOCOL_ANTHROPIC_MESSAGES, component=component, operation=operation, model=params.get("model")
-    ) as observation:
-        resp = client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
-        return _observe_anthropic(observation, resp)
+    with _observed_messages(component, operation, params) as observation:
+        stream = _AnthropicStream(observation, None if timeout_s is None else time.monotonic() + timeout_s)
+        with client.stream("POST", _ANTHROPIC_MESSAGES_PATH, json={**params, "stream": True}, **tag) as resp:  # type: ignore[union-attr]
+            if resp.status_code >= 400:
+                raise _anthropic_failure(resp.status_code, resp.read())
+            for chunk in resp.iter_bytes():
+                stream.feed(chunk)
+        return _observe_anthropic(observation, stream.finish())
 
 
 async def aanthropic_messages(
@@ -867,15 +944,23 @@ async def aanthropic_messages(
     *,
     component: str = "",
     operation: str = "",
+    timeout_s: float | None = None,
     **params: object,
 ) -> AnthropicMessageResult:
     """Async twin of :func:`anthropic_messages`; see it for the full contract."""
     tag = _attribution_tag_kwargs(component, operation)
-    with observed_request(
-        protocol=PROTOCOL_ANTHROPIC_MESSAGES, component=component, operation=operation, model=params.get("model")
-    ) as observation:
-        resp = await client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
-        return _observe_anthropic(observation, resp)
+
+    async def read() -> AnthropicMessageResult:
+        with _observed_messages(component, operation, params) as observation:
+            stream = _AnthropicStream(observation)
+            async with client.stream("POST", _ANTHROPIC_MESSAGES_PATH, json={**params, "stream": True}, **tag) as resp:  # type: ignore[union-attr]
+                if resp.status_code >= 400:
+                    raise _anthropic_failure(resp.status_code, await resp.aread())
+                async for chunk in resp.aiter_bytes():
+                    stream.feed(chunk)
+            return _observe_anthropic(observation, stream.finish())
+
+    return await asyncio.wait_for(read(), timeout_s)
 
 
 # Single-shot Anthropic transports. "http" is the Messages API; "sdk" drives the Claude CLI, the only channel that
@@ -955,7 +1040,13 @@ def anthropic_completion(
         env=dict(env) if env is not None else None, timeout=request.timeout or request.timeout_s
     )
     with http_client:  # type: ignore[attr-defined]
-        return anthropic_messages(http_client, component=component, operation=operation, **request.http_params())
+        return anthropic_messages(
+            http_client,
+            component=component,
+            operation=operation,
+            timeout_s=request.timeout_s,
+            **request.http_params(),
+        )
 
 
 async def aanthropic_completion(
@@ -981,7 +1072,13 @@ async def aanthropic_completion(
         env=dict(env) if env is not None else None, timeout=request.timeout or request.timeout_s
     )
     async with http_client:  # type: ignore[attr-defined]
-        return await aanthropic_messages(http_client, component=component, operation=operation, **request.http_params())
+        return await aanthropic_messages(
+            http_client,
+            component=component,
+            operation=operation,
+            timeout_s=request.timeout_s,
+            **request.http_params(),
+        )
 
 
 async def astream_chat_completion_text(
