@@ -402,10 +402,11 @@ def test_item8_history_archives_prior_version(tmp_path: Path) -> None:
             best_throughput=2.0,
         )
     )
-    archived = store.get_recipe(canonical_id=cid, version=1)
-    assert archived is not None
+    archive_path = tmp_path.joinpath(*cid_to_path_components(cid), "history", "v1.json")
+    archived = json.loads(archive_path.read_text(encoding="utf-8"))["snapshot"]
     assert archived["version"] == 1
     assert archived["best_throughput"] == 1.0
+    assert store.get_recipe(canonical_id=cid)["best_throughput"] == 2.0
 
 
 def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:

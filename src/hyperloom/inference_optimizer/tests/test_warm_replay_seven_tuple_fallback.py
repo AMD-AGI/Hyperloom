@@ -86,7 +86,7 @@ class _RemoteKB:
         self.search_calls: list[dict[str, Any]] = []
         self.selected: list[str] = []
 
-    def get_recipe(self, **_kwargs: Any) -> dict[str, Any] | None:
+    def get_recipe(self, *, canonical_id: str) -> dict[str, Any] | None:
         return self.exact
 
     def search(self, **kwargs: Any) -> list[dict[str, Any]]:
@@ -104,7 +104,6 @@ def _cascade(kb: _RemoteKB) -> tuple[dict[str, Any], str, float]:
         cid=TARGET_CID,
         identity={**TARGET, "canonical_id": TARGET_CID},
         shape=TARGET_SHAPE,
-        warm_prefer=None,
     )
 
 

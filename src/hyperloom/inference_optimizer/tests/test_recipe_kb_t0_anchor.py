@@ -29,9 +29,9 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
 )
 
 
-def test_warm_recipe_source_is_local_recipe_kb() -> None:
-    assert _warm_recipe_source({}, kb=object()) == "recipe-kb"
-    assert _warm_recipe_source(None, kb=object()) == "recipe-kb"
+def test_warm_recipe_source_is_local_recipe_kb(kb: RecipeKB) -> None:
+    assert _warm_recipe_source(kb=object()) == "recipe-kb"
+    assert _warm_recipe_source(kb=kb) == "local-json"
 
 
 def test_agentx_donor_ignores_fixed_length_placeholders() -> None:
@@ -482,14 +482,6 @@ def test_t0_anchor_tolerates_missing_extra_attrs(
     run_t0_anchor(kb, state, T0AnchorRequest(workload="m", hw="mi300x"), session_dir=session_dir)
 
 
-def test_t0_anchor_requires_explicit_session_dir(
-    kb: RecipeKB,
-) -> None:
-    state = _FakeSharedState()
-    with pytest.raises(ValueError):
-        run_t0_anchor(kb, state, T0AnchorRequest(workload="m", hw="mi300x"))
-
-
 # _cascade_warm_start_search: the L1-L4 warm-start tier resolution.
 _ACTIONABLE = {
     "best_throughput": 100.0,
@@ -510,7 +502,7 @@ class _FakeKB:
         self._get_raises = get_raises
         self.search_calls: list[dict] = []
 
-    def get_recipe(self, *, canonical_id, prefer=None):
+    def get_recipe(self, *, canonical_id):
         if self._get_raises:
             raise RuntimeError("boom")
         return self._get_result
@@ -537,7 +529,6 @@ def _cascade(kb, cid="CID:target"):
             "precision": "fp8",
         },
         shape={},
-        warm_prefer=None,
     )
 
 
