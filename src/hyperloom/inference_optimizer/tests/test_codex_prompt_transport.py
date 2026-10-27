@@ -36,7 +36,7 @@ from hyperloom.orchestrator.roles.mcp_context_tools import (
     qualified_context_tool_name,
 )
 from hyperloom.orchestrator.roles.mcp_emit_intent import EMIT_INTENT_TOOL_NAME, EMIT_INTENT_TOOL_QUALIFIED
-from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
+from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir, asset_system_prompts_dir
 
 
 # The tool surface the system prompt actually documents, under the names the
@@ -109,14 +109,26 @@ def test_every_tool_the_prompt_names_is_one_policy_gate_grants() -> None:
     assert set(CONTEXT_TOOL_QUALIFIED_NAMES) <= granted
 
 
-def test_tool_prompt_names_every_mcp_tool_under_its_registered_name() -> None:
-    """A bare MCP name in the prompt advertises a tool the agent cannot call."""
-    prompt = _prompt(TRANSPORT_TOOLS)
+def _assert_mcp_tools_named_as_registered(text: str, where: str) -> None:
+    """Fail when ``text`` names an MCP tool by anything but its registered name."""
     pairs = [(EMIT_INTENT_TOOL_NAME, EMIT_INTENT_TOOL_QUALIFIED)]
     pairs += [(name, qualified_context_tool_name(name)) for name in CONTEXT_TOOL_NAMES]
     for bare, qualified in pairs:
         # Every mention of the bare name is part of the qualified one.
-        assert prompt.count(bare) == prompt.count(qualified), bare
+        assert text.count(bare) == text.count(qualified), f"{bare} in {where}"
+
+
+def test_tool_prompt_names_every_mcp_tool_under_its_registered_name() -> None:
+    """A bare MCP name in the prompt advertises a tool the agent cannot call."""
+    _assert_mcp_tools_named_as_registered(_prompt(TRANSPORT_TOOLS), "the tools prompt")
+
+
+def test_reference_docs_name_every_mcp_tool_under_its_registered_name() -> None:
+    """read_reference serves these verbatim, on the paths taken after a failure."""
+    docs = sorted(asset_prompt_references_dir().glob("*.md"))
+    assert docs, "no reference document to scan; read_reference serves this directory"
+    for doc in docs:
+        _assert_mcp_tools_named_as_registered(doc.read_text(encoding="utf-8"), doc.name)
 
 
 def test_transport_defaults_to_the_tool_surface() -> None:
