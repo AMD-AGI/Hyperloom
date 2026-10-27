@@ -58,7 +58,6 @@ def _geak_rebench_params(**extra: object) -> dict:
 def _arm_kernel_to_sweep(st) -> None:
     now = datetime.now(timezone.utc)
     st.phase = ps.PHASE_KERNEL_AGENT
-    st.phase_started_ts = (now - timedelta(minutes=5)).isoformat()
     st.phase_started_unix = (now - timedelta(minutes=5)).timestamp()
     st.start_ts = (now - timedelta(minutes=10)).isoformat()
     st.max_minutes = 96 * 60
@@ -335,15 +334,13 @@ async def test_geak_launch_controls_reach_materialized_rebench(
             output_subdir=output,
         )
         calls.append(yaml.safe_load(path.read_text())["benchmark"]["envs"])
-        if len(calls) > 1:
-            return []
         return [
             VariantResult(
                 name="geak_revalidate",
                 extra_server_args=kwargs["grid"][0].extra_server_args,
                 extra_envs=dict(kwargs["grid"][0].extra_envs),
-                status="succeeded",
-                output_throughput=120.0,
+                status="succeeded" if len(calls) == 1 else "failed",
+                output_throughput=120.0 if len(calls) == 1 else None,
             )
         ]
 
@@ -1152,7 +1149,7 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     import yaml
 
     from hyperloom.orchestrator.actions.executors import ExploreExecutor
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult, _build_variant_yaml
 
     baseline = tmp_path / "baseline.yaml"
     baseline.write_text(
@@ -1215,7 +1212,8 @@ async def test_internal_stack_rebench_preserves_baseline_script(
             output_subdir=output,
         )
         calls.append((kwargs, yaml.safe_load(variant_path.read_text())["benchmark"]))
-        return []
+        variant = kwargs["grid"][0]
+        return [VariantResult(variant.name, variant.extra_server_args, dict(variant.extra_envs), status="failed")]
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", capture_grid)
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease", lambda **_kwargs: None)
@@ -1400,7 +1398,6 @@ async def test_a_spent_kernel_budget_waits_for_the_rebench_and_keeps_the_win(coo
     st.start_ts = (now - timedelta(minutes=30)).isoformat()
     st.max_minutes = 96 * 60
     st.phase_budget_pct = dict(ps.DEFAULT_PHASE_BUDGET_PCT)
-    st.phase_started_ts = (now - timedelta(minutes=20)).isoformat()
     st.phase_started_unix = (now - timedelta(minutes=20)).timestamp()
 
     async def _noop(**_kwargs):
@@ -1437,7 +1434,6 @@ async def test_a_spent_kernel_budget_waits_for_the_rebench_and_keeps_the_win(coo
     await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(measuring.wait(), timeout=2.0)
     spent = now - timedelta(hours=30)
-    st.phase_started_ts = spent.isoformat()
     st.phase_started_unix = spent.timestamp()
 
     await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)

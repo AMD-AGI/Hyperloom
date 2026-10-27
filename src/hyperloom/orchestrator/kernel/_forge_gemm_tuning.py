@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from hyperloom.common.coerce import optional_positive_int
 from kernelforge.gemm_tune import RoutingEvidence, RoutingTarget
 
 from . import forge_gemm_tuning
@@ -31,7 +32,6 @@ from ._forge_gemm_probe import (
 from ._forge_lane_budget import (
     _gemm_tuning_timeout_sec,
     _gemm_tuning_workspace,
-    _positive_int,
     _priced_gemm_lane,
     _unfunded_lane_skip,
 )
@@ -583,7 +583,7 @@ async def _run_forge_gemm_tuning(
         )
         sources = sources._replace(shapes_json=aligned_shapes)
 
-    requested_tuners = _positive_int(payload.get("max_tuners"))
+    requested_tuners = optional_positive_int(payload.get("max_tuners"), 0)
     tuner_ceiling = 0 if str(payload.get("tuner") or "").strip() else (requested_tuners or gemm_lane.max_targets)
     result = await _invoke_forge_gemm_tune(
         _forge_gemm_tune_input(payload, run, sources, timeout, tuner_ceiling), timeout

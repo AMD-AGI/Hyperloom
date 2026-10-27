@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_int
 from hyperloom.common.env import EnvValueError, env_bool, env_int
 
 log = logging.getLogger(__name__)
@@ -206,7 +207,7 @@ def _blank_moe() -> dict[str, Any]:
 
 def _moe_token_offset(parts: list[str]) -> int:
     """Index of ``token`` in a dispatch tuple."""
-    return 2 if parts and _as_int(parts[0]) is None else 1
+    return 2 if parts and to_int(parts[0]) is None else 1
 
 
 def _record_moe_key(moe: dict[str, Any], parts: list[str], *, miss: bool) -> int | None:
@@ -214,7 +215,7 @@ def _record_moe_key(moe: dict[str, Any], parts: list[str], *, miss: bool) -> int
     offset = _moe_token_offset(parts)
     if len(parts) <= offset:
         return None
-    token = _as_int(parts[offset])
+    token = to_int(parts[offset])
     key_parts = parts[offset:]
     if len(key_parts) != len(MOE_KEY_FIELDS):
         # A truncated tuple still tells us which token counts were dispatched, which is all the stage-coverage
@@ -273,11 +274,11 @@ def _moe_demand(report: dict[str, Any]) -> Demand | None:
         for token in rec.get("untuned_tokens") or []:
             row: dict[str, Any] = {f: str(rec.get(f, "")) for f in MOE_KEY_FIELDS}
             row["token"] = str(token)
-            row["requests"] = _as_int(counts.get(str(token))) or 0
+            row["requests"] = to_int(counts.get(str(token))) or 0
             keys.append(row)
     if not keys:
         return None
-    keys.sort(key=lambda r: (-r["requests"], _as_int(r["token"]) or 0))
+    keys.sort(key=lambda r: (-r["requests"], to_int(r["token"]) or 0))
 
     tuner, env_var = TABLE_TO_TUNER[MOE_TABLE]
     return Demand(
@@ -479,7 +480,7 @@ def _settle_moe_keys(moe: dict[str, Any]) -> None:
             "untuned_token_counts": dict(
                 sorted(
                     (record.get("untuned_token_counts") or {}).items(),
-                    key=lambda kv: _as_int(kv[0]) or 0,
+                    key=lambda kv: to_int(kv[0]) or 0,
                 )
             ),
         }
@@ -598,13 +599,6 @@ def demand_for_tuner(report: dict[str, Any], tuner_name: str) -> dict[str, Any] 
     return None
 
 
-def _as_int(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 # Upper bound aiter clamps the gl=1 padding to; beyond it every M shares one row.
 _PADDED_M_CAP = 8192
 # aiter's gl=0 padding rounds M up to a multiple of 16 up to this M.
@@ -643,10 +637,10 @@ def demand_shapes(
 
     shapes: list[dict[str, Any]] = []
     for key in entry.get("keys") or []:
-        m, n, k = _as_int(key.get("M")), _as_int(key.get("N")), _as_int(key.get("K"))
+        m, n, k = to_int(key.get("M")), to_int(key.get("N")), to_int(key.get("K"))
         if m is None or n is None or k is None:
             continue
-        shape = {"M": m, "N": n, "K": k, "requests": _as_int(key.get("requests")) or 0}
+        shape = {"M": m, "N": n, "K": k, "requests": to_int(key.get("requests")) or 0}
         for extra in ("dtype", "otype", "bias", "scaleAB", "bpreshuffle"):
             if key.get(extra) is not None:
                 shape[extra] = key[extra]
@@ -679,7 +673,7 @@ def demand_shapes(
 def _moe_demand_shapes(entry: dict[str, Any], *, limit: int | None = None) -> list[dict[str, Any]]:
     """Return exact fused-MoE shape/token keys without dense M bucketing."""
     shapes = [dict(key) for key in entry.get("keys") or []]
-    shapes.sort(key=lambda s: (-(_as_int(s.get("requests")) or 0), _as_int(s.get("token")) or 0))
+    shapes.sort(key=lambda s: (-(to_int(s.get("requests")) or 0), to_int(s.get("token")) or 0))
     if limit is not None and limit > 0:
         shapes = shapes[:limit]
     return shapes
@@ -693,7 +687,7 @@ def moe_dispatch_keys(report: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _token_set(values: Any) -> set[int]:
-    return {token for value in values or [] if (token := _as_int(value)) is not None}
+    return {token for value in values or [] if (token := to_int(value)) is not None}
 
 
 def moe_ck_missed_keys(report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -709,7 +703,7 @@ def moe_ck_missed_keys(report: dict[str, Any]) -> list[dict[str, Any]]:
     missed: list[dict[str, Any]] = []
     for key in moe_dispatch_keys(report):
         untuned = _token_set(key.get("untuned_tokens"))
-        if not untuned and (_as_int(key.get("miss_count")) or 0) > 0:
+        if not untuned and (to_int(key.get("miss_count")) or 0) > 0:
             # Compatibility with reports written before untuned_tokens was persisted: all observed tokens are the best
             # available bound.
             untuned = _token_set(key.get("tokens"))

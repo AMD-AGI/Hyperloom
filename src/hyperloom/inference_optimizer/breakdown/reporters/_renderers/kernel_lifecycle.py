@@ -196,7 +196,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         for kind, subject, said in _VERDICT_DECISIONS
         if verdicts[kind]
     ]
-    if not decisions and not verdicts["attempted"]:
+    if verdicts["not_optimized"] == len(detected):
         decisions.append(
             Decision(
                 kind="not_attempted",

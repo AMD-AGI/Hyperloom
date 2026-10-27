@@ -35,9 +35,6 @@ from ._task_group_contract import (
     legacy_operator_identity_keys,
     operator_identity_key,
 )
-from hyperloom.common.kernel_shape_contract import (
-    DISPATCHABLE_SHAPE_PROVENANCE as _DISPATCHABLE_SHAPE_PROVENANCE,
-)
 
 # Category-appropriate optimization guidance (structured, not LLM prose).
 _ACTION_BY_CATEGORY: dict[str, str] = {
@@ -57,6 +54,8 @@ _ACTION_BY_CATEGORY: dict[str, str] = {
 }
 
 _UNKNOWN_BOUND = "\u2014"  # em dash "unknown bound" marker.
+# Shape provenances read out of the trace, which the kernel-opt dispatch gate accepts.
+_DISPATCHABLE_SHAPE_PROVENANCE = frozenset({"torch_trace", "capture_backfill"})
 _REUSABLE_BACKENDS = ["forge", "geak"]
 
 # Bound-type display prefixes for the (deterministic) per-kernel suggestion.

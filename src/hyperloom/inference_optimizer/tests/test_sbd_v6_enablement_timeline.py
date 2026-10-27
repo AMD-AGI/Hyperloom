@@ -992,9 +992,9 @@ def test_the_same_patch_is_named_the_same_way_everywhere_in_the_recipe(_bound_se
         },
         "enablement_mode": "all",
     }
-    collected = collect_enablement(_Path(str(_bound_session)), state, [])
+    collected = collect_enablement(_Path(str(_bound_session)), state)
 
-    assert collected["kept_patches"] == ["a.patch"]
+    assert [st["path"] for st in collected["recipe_steps"] if st["kind"] == "patch"] == ["a.patch"]
     assert collected["kept_rounds"][0]["patches"] == ["a.patch"]
 
 
@@ -1035,14 +1035,12 @@ def test_no_surface_of_the_recipe_names_the_authoring_host(_bound_session):
         },
         "enablement_mode": "all",
     }
-    collected = collect_enablement(_Path(str(_bound_session)), state, [])
+    collected = collect_enablement(_Path(str(_bound_session)), state)
 
     blob = _json.dumps(collected)
     assert "/authoring/ws" not in blob, blob
-    # ``framework_root`` stays: it is the recipe's declared subject, and the
-    # setting script exports it. What may not carry a host path is a field with
-    # no use for one -- the step's resolved root and the artifact's install
-    # target, both of which the rules reach through ``root_id`` instead.
+    # No field carries a host path it has no use for -- the step's resolved root
+    # and the artifact's install target are both reached through ``root_id``.
     steps = collected["recipe_steps"]
     assert all("root" not in st for st in steps if st.get("kind") == "patch"), steps
     assert all("target" not in a for a in collected["kept_artifacts"]), collected["kept_artifacts"]

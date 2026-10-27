@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
+from hyperloom.common.coerce import optional_positive_int, to_float
+
 #: How many patches one nomination round may land by default. The integrate lane
 #: is serial -- benchmark capacity one, ~25 minutes modelled per patch -- so this
 #: is a wall-clock ceiling, not a preference. Three patches ~= 75 minutes of
@@ -103,23 +105,9 @@ class IntegratedStack:
         )
 
 
-def patch_budget(configured: object = None, *, default: int = DEFAULT_PATCH_BUDGET) -> int:
+def patch_budget(configured: object) -> int:
     """Resolve the per-round patch ceiling, never below one."""
-    value = _positive_int(configured)
-    if value is not None:
-        return value
-    resolved = _positive_int(default)
-    return resolved if resolved is not None else DEFAULT_PATCH_BUDGET
-
-
-def clamp_by_budget(
-    records: Iterable[Mapping[str, Any]],
-    budget: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split ranked pending records into the ones that fit and the deferred rest."""
-    rows = [dict(row) for row in records if isinstance(row, Mapping)]
-    ceiling = max(0, int(budget))
-    return rows[:ceiling], rows[ceiling:]
+    return optional_positive_int(configured, DEFAULT_PATCH_BUDGET)
 
 
 def evict_terminal(
@@ -147,7 +135,7 @@ def evict_terminal(
     keep = max(0, int(budget)) * max(0, int(retention_multiple))
     if len(terminal) > keep:
         # Weakest first, so the strongest survivors are the most informative.
-        terminal.sort(key=lambda item: _micro(item[1]))
+        terminal.sort(key=lambda item: to_float(item[1].get("micro_speedup"), 0.0))
         terminal = terminal[len(terminal) - keep :] if keep else []
     for integration_id, record in terminal:
         live[integration_id] = record
@@ -163,23 +151,3 @@ def bundle_belongs_to(bundle: Mapping[str, Any], integration_id: object) -> bool
     if not resolved_id or not bundle_id:
         return True
     return bundle_id == resolved_id
-
-
-def _micro(record: Mapping[str, Any]) -> float:
-    """A record's micro speedup for ranking; unusable values sort weakest."""
-    try:
-        value = float(record.get("micro_speedup") or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-    return value
-
-
-def _positive_int(value: object) -> int | None:
-    """Coerce to a positive int, or ``None`` when that is not possible."""
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        number = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    return number if number > 0 else None

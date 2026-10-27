@@ -185,6 +185,16 @@ class TestDemandConsumption:
         assert [s["M"] for s in ev.demand_shapes(entry, limit=1)] == [512]
         assert [s["M"] for s in ev.demand_shapes(entry, limit=1, bucket=False)] == [64]
 
+    def test_a_key_with_an_infinite_or_boolean_dim_is_skipped(self):
+        entry = {
+            "keys": [
+                {"M": float("inf"), "N": "4096", "K": "4096", "requests": 9},
+                {"M": True, "N": "4096", "K": "4096", "requests": 8},
+                {"M": "64", "N": "4096", "K": "4096", "requests": float("inf")},
+            ]
+        }
+        assert [(s["M"], s["requests"]) for s in ev.demand_shapes(entry, bucket=False)] == [(64, 0)]
+
     def test_padding_is_aiters_multiple_of_16_up_to_256_then_a_capped_power_of_two(self):
         ms = (1, 2, 3, 12, 15, 16, 17, 40, 56, 64, 100, 256, 257, 513, 3000)
         assert [ev.padded_m(m) for m in ms] == [1, 16, 16, 16, 16, 16, 32, 48, 64, 64, 112, 256, 512, 1024, 4096]

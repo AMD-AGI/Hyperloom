@@ -300,6 +300,16 @@ def test_prelude_exit_states_whether_one_optimization_round_still_fits():
     assert out2[2]["fits_one_optimization_round"] is False
 
 
+def test_an_infinite_baseline_runtime_prices_no_optimization_round():
+    state = _prelude_state(baseline_tput=1074.7, baseline_runtime_sec=float("inf"), usable_sec=2796.0)
+    out = phase_state.compute_next_phase(state)
+    assert out is not None
+    _next, reason, evidence = out
+    assert reason == "prelude_done"
+    assert "fits_one_optimization_round" not in evidence
+    assert evidence["predicate_inputs"]["baseline"]["runtime_sec"] is None
+
+
 # The workload the cold-anchor cases below are priced against: a 900s cold round whose last 550s was the benchmark, so
 # the boot took 350s, and a 400s hot pass.
 _COLD_ANCHOR_WORKLOAD = {
@@ -612,7 +622,6 @@ def test_shared_state_phase_fields_default_to_empty():
     s = SharedState()
     assert s.phase == ""
     assert s.phase_history == []
-    assert s.phase_started_ts == ""
     assert s.phase_started_unix == 0.0
     assert s.phase_budget_pct == {}
 
@@ -627,7 +636,6 @@ def test_record_phase_transition_writes_row_and_updates_phase():
         at=phase_state.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=1747600000.0),
     )
     assert s.phase == "PRELUDE"
-    assert s.phase_started_ts == "2026-05-19T00:00:00+00:00"
     assert s.phase_started_unix == 1747600000.0
     assert s.phase_history == [row]
     assert row["from_phase"] == "" and row["to_phase"] == "PRELUDE"

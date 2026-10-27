@@ -163,7 +163,6 @@ def test_llm_config_parse_and_derive_edges() -> None:
     from hyperloom.common.llm_config import (
         claude_sdk_env_options,
         derive_openai_base_url,
-        resolve_openai_client_config,
     )
     from hyperloom.common.llm_headers import parse_custom_headers
 
@@ -177,20 +176,6 @@ def test_llm_config_parse_and_derive_edges() -> None:
     assert derive_openai_base_url("https://gw.example/Unified") == "https://gw.example/Unified/v1"
     assert derive_openai_base_url("https://gw.example/custom") == "https://gw.example/custom"
 
-    cfg = resolve_openai_client_config(
-        api_key_env="CUSTOM_KEY",
-        base_url_env="CUSTOM_BASE",
-        env={
-            "CUSTOM_KEY": " key ",
-            "CUSTOM_BASE": " https://base.example/v1 ",
-            "OPENAI_CUSTOM_HEADERS": '{"X-Trace": " 1 "}',
-        },
-    )
-    assert cfg.as_kwargs() == {
-        "api_key": "key",
-        "base_url": "https://base.example/v1",
-        "default_headers": {"X-Trace": "1"},
-    }
     assert claude_sdk_env_options(env={}) == {}
 
 
@@ -1058,55 +1043,6 @@ def test_retry_policy_env_and_on_retry_error(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(base.random, "uniform", lambda _lo, _hi: 0.25)
     assert RetryPolicy(base_delay_s=2.0, max_delay_s=3.0, multiplier=10.0, jitter_s=0.5).delay_for(2) == 3.25
-
-
-# orchestrator.roles._runtime_bridge
-
-
-def test_runtime_bridge_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from hyperloom.orchestrator.roles import _runtime_bridge as rb
-    from hyperloom.orchestrator.roles.base import BackendError
-
-    def fake_run(cmd, **kwargs):
-        raise rb.subprocess.TimeoutExpired(cmd=cmd, timeout=5.0)
-
-    monkeypatch.setattr(rb.subprocess, "run", fake_run)
-    call = rb.RuntimeCall(
-        phase="prepare-review",
-        request_path=tmp_path / "req.json",
-        out_path=tmp_path / "out.json",
-        cwd=tmp_path,
-        env={},
-    )
-    with pytest.raises(BackendError):
-        rb.invoke_runtime_cli(call, module="runtime.cli", agent_label="critic", timeout_sec=5.0)
-
-
-def test_runtime_bridge_not_found_and_nonzero(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from hyperloom.orchestrator.roles import _runtime_bridge as rb
-    from hyperloom.orchestrator.roles.base import BackendError
-
-    call = rb.RuntimeCall(
-        phase="tick",
-        request_path=tmp_path / "req.json",
-        out_path=tmp_path / "out.json",
-        cwd=tmp_path,
-        env={},
-    )
-
-    def fake_run_missing(cmd, **kwargs):
-        raise FileNotFoundError("python gone")
-
-    monkeypatch.setattr(rb.subprocess, "run", fake_run_missing)
-    with pytest.raises(BackendError):
-        rb.invoke_runtime_cli(call, module="runtime.cli", agent_label="a", timeout_sec=1.0)
-
-    def fake_run_rc(cmd, **kwargs):
-        return SimpleNamespace(returncode=3, stderr="boom")
-
-    monkeypatch.setattr(rb.subprocess, "run", fake_run_rc)
-    with pytest.raises(BackendError):
-        rb.invoke_runtime_cli(call, module="runtime.cli", agent_label="a", timeout_sec=1.0)
 
 
 # orchestrator.state.objective

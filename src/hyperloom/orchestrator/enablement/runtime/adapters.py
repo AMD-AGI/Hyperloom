@@ -15,7 +15,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable
 
 from hyperloom.agents.framework.isolation import checkout_ref, create_venv
-from hyperloom.common.failure_signature import CapabilityGap
+from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.inference_optimizer import framework_registry
 
 from .build_actions import resolve_build_ref
@@ -202,7 +202,7 @@ class BaseAdapter:
 
     def build_localization_action(
         self,
-        gap: CapabilityGap,
+        signature: FailureSignature,
         *,
         candidate_ref: str,
         repo_url: str,
@@ -216,9 +216,9 @@ class BaseAdapter:
         return EnablementStackAction(
             kind="pr_backport",
             framework=self.framework,
-            gap_id=f"gap.enablement.{gap.kind}",
-            capability=gap.kind,
-            reason=f"{self.framework} PR backport #{pr_number} for {gap.kind}",
+            gap_id=f"gap.enablement.{signature.kind}",
+            capability=signature.kind,
+            reason=f"{self.framework} PR backport #{pr_number} for {signature.kind}",
             acquisition_method="none",
             repo_url=repo_url,
             pr_number=pr_number,

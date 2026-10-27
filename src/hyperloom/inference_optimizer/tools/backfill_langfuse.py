@@ -111,10 +111,10 @@ UNPHASED = lfmap.UNPHASED
 def build_plan(session_dir: Path) -> dict[str, Any]:
     """Parse the trace files into a Langfuse-shaped plan dict (pure)."""
     tdir = session_dir / TRACE_SUBDIR
-    llm = read_jsonl(tdir / LLM_CALLS, require_dict=True, skip_malformed=True)
-    conv = read_jsonl(tdir / CONVERSATIONS, require_dict=True, skip_malformed=True)
-    decisions = read_jsonl(tdir / DECISION_TRACE, require_dict=True, skip_malformed=True)
-    recipe_audit = read_jsonl(recipe_snapshot_audit_jsonl(session_dir), require_dict=True, skip_malformed=True)
+    llm = read_jsonl(tdir / LLM_CALLS)
+    conv = read_jsonl(tdir / CONVERSATIONS)
+    decisions = read_jsonl(tdir / DECISION_TRACE)
+    recipe_audit = read_jsonl(recipe_snapshot_audit_jsonl(session_dir))
     manifest = read_json(session_dir / MANIFEST, default={}, require_dict=True)
 
     conv_by_key: dict[tuple, dict[str, Any]] = {}

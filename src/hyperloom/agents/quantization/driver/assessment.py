@@ -289,10 +289,10 @@ def classify_attempt(
 
 
 def classify_unfinished_attempt(sdk_error: str | None, *, phase: str | None) -> OutcomeId:
-    """Classify an attempt that reached no end on a workspace holding an earlier attempt's outputs.
+    """Classify an attempt that wrote no end: no ``blocked.md``, eval report or eval-skipped reason.
 
     Only what the attempt raised can say why it stopped: the model, manifest
-    and reports on disk may all be the earlier attempt's. That is also why the
+    and reports on disk may all be an earlier attempt's. That is also why the
     outcome is never an auto-recover one: those end the run ``partial`` and
     hand back the model on disk as this run's result.
     """

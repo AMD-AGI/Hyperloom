@@ -2000,7 +2000,7 @@ class TestForgeGemmHelperCoverage:
         )
         state.save(tmp_path)
         monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
-        monkeypatch.setattr(forge_shapes, "_profile_shapes_are_fresh", lambda _state: True)
+        monkeypatch.setattr(SharedState, "profile_trace_matches_workload", lambda _self: True)
 
         captured = {"ran": False}
 

@@ -116,6 +116,7 @@ def test_resolve_serving_model_path_prefers_hl_model_base(tmp_path, monkeypatch)
 def test_resolve_session_model_path_honors_params_then_env_then_state(monkeypatch):
     from hyperloom.common.model_paths import resolve_session_model_path
 
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
     monkeypatch.setenv("MODEL_PATH", "/env/model")
     assert resolve_session_model_path(params={"model_path": "/params/model"}) == "/params/model"
     assert resolve_session_model_path(state_model_path="/state/model") == "/env/model"

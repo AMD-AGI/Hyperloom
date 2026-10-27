@@ -13,7 +13,7 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES
-from hyperloom.common.timeutil import parse_iso_unix_or_zero
+from hyperloom.common.coerce import to_unix
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -148,7 +148,7 @@ def test_shared_state_phase_status_summary_renders_compact_block():
     s.phase_budget_pct = {phase: 0.5}
     out = _ps.phase_status_summary(s, now_unix=1_000_120.0)
     assert f"phase     : {phase}" in out
-    assert "entered" in out
+    assert "entered   : 1970-01-12T13:46:40Z" in out
     assert "elapsed_sec=120" in out
     # Wiring: the rendered remaining must match the budget helper it delegates to.
     expected_rem = int(_ps.phase_budget_remaining_seconds(s, now_unix=1_000_120.0))
@@ -344,7 +344,7 @@ async def test_compose_prompt_keeps_per_tick_values_out_of_the_context(coordinat
         before = await c.conversation.compose_prompt("orchestration")
         c.shared_state.tick = int(c.shared_state.tick or 0) + 7
         c.shared_state.agent_last_active["orchestration"] = 1.0
-        c.shared_state.phase_started_ts = "2026-01-01T00:00:00+00:00"
+        c.shared_state.phase_started_unix = 1_767_225_600.0
         after = await c.conversation.compose_prompt("orchestration")
 
         assert after.context == before.context
@@ -691,9 +691,9 @@ async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
         assert [r["lane"] for r in rows] == ["research_lane"]
         # The lane must expire at the REMAINING budget (cumulative TTL minus the elapsed run time), not at now + the
         # full cumulative TTL.
-        expires_in = parse_iso_unix_or_zero(str(rows[0]["expires_at"])) - time.time()
+        expires_in = to_unix(str(rows[0]["expires_at"]), 0.0) - time.time()
         assert expires_in <= 2400
-        started = parse_iso_unix_or_zero(updated.updated_at)
+        started = to_unix(updated.updated_at, 0.0)
         remaining_budget = 2400 - (time.time() - started)
         assert abs(expires_in - remaining_budget) < 5
     finally:
@@ -740,7 +740,7 @@ async def test_extend_lease_does_not_regrant_elapsed_time(coordinator_with_mocks
         )
 
         rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
-        expires_in = parse_iso_unix_or_zero(str(rows[0]["expires_at"])) - time.time()
+        expires_in = to_unix(str(rows[0]["expires_at"]), 0.0) - time.time()
         # 1800 + 600 cumulative, 1000 already spent -> ~1400s left, not 2400.
         assert 1300 < expires_in < 1450
     finally:
@@ -781,7 +781,7 @@ async def test_extend_lease_late_grant_keeps_new_increment_for_lanes(coordinator
         )
 
         rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
-        expires_in = parse_iso_unix_or_zero(str(rows[0]["expires_at"])) - time.time()
+        expires_in = to_unix(str(rows[0]["expires_at"]), 0.0) - time.time()
         assert 550 < expires_in < 650
     finally:
         await c.stop()
@@ -961,7 +961,7 @@ async def test_extend_lease_survives_unreadable_running_age(coordinator_with_moc
         # Lane still moved — falling back to the full TTL is the safe direction (a lease that outlives the task beats
         # one reaped mid-run).
         rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
-        assert parse_iso_unix_or_zero(str(rows[0]["expires_at"])) > time.time()
+        assert to_unix(str(rows[0]["expires_at"]), 0.0) > time.time()
         updated = await c.tasks.get(task.task_id)
         assert updated.lease_ttl_sec == 2400
     finally:

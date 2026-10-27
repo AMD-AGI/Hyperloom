@@ -398,8 +398,7 @@ def test_recovery_reverts_the_patches_when_the_artifact_phase_never_started(tmp_
         {
             "target": str(target),
             "existed": True,
-            "backup_path": str(backup),
-            "revert_action": "restore",
+            "backup": str(backup),
             "pre_image_sha256": ledger.file_digest(backup),
         },
     )
@@ -461,7 +460,7 @@ def test_recovery_refuses_a_witnessed_artifact_ledger_that_lost_its_evidence(tmp
     assert backup.read_text(encoding="utf-8") == "A"
 
 
-@pytest.mark.parametrize("damage", ["unknown_action", "bad_mode", "bad_backup", "relative_target"])
+@pytest.mark.parametrize("damage", ["bad_mode", "bad_backup", "relative_target"])
 def test_recovery_refuses_an_invalid_record_inside_the_committed_prefix(tmp_path, damage):
     """A checkpoint certifies the bytes, not that they describe a restore."""
     target = tmp_path / "fw" / "cfg.json"
@@ -480,9 +479,7 @@ def test_recovery_refuses_an_invalid_record_inside_the_committed_prefix(tmp_path
         "mode": 0o644,
     }
     record.update(
-        {"revert_action": "erase"}
-        if damage == "unknown_action"
-        else {"mode": "777"}
+        {"mode": "777"}
         if damage == "bad_mode"
         else {"backup": []}
         if damage == "bad_backup"
@@ -559,9 +556,8 @@ def test_non_git_recovery_ignores_an_unproven_ledger_tail(tmp_path, checkpoint):
     record = {
         "target": str(target),
         "existed": True,
-        "backup_path": str(backup),
+        "backup": str(backup),
         "pre_image_sha256": ledger.file_digest(backup),
-        "revert_action": "restore",
     }
     assert ledger.append_record(backup_root, record)
     pending = {
@@ -599,7 +595,7 @@ def test_restore_never_follows_a_replaced_target_symlink(tmp_path, existed):
     record = {
         "target": str(target),
         "existed": existed,
-        "backup_path": str(backup) if existed else None,
+        "backup": str(backup) if existed else None,
         "pre_image_sha256": ledger.file_digest(backup) if existed else "",
     }
     restored, errors = ledger.restore_records([record])
