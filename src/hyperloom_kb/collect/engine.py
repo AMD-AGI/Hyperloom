@@ -316,21 +316,9 @@ def _project(mapping: CollectMapping, scope: Mapping[str, Any], base: Path) -> _
     return _Projected(experience, files)
 
 
-def _code_files(mapping: CollectMapping) -> set[str]:
-    """File fields the declaration marks as code, screened with the token formats only."""
-
-    return {
-        f"{category}.{field.name}"
-        for category in DECLARED_CATEGORIES
-        for field in mapping.declaration.fields(category)
-        if field.code
-    }
-
-
 def _screen(mapping: CollectMapping, projected: _Projected) -> None:
     summary = mapping.declaration.role_field("change", FieldRole.SUMMARY)
     free_text = FREE_TEXT_FIELDS | ({f"change.{summary.name}"} if summary is not None else set())
-    code_files = _code_files(mapping)
     experience = projected.experience
     declared = {
         f"{category}.{field.name}"
@@ -343,7 +331,9 @@ def _screen(mapping: CollectMapping, projected: _Projected) -> None:
     for category in DECLARED_CATEGORIES:
         for name, value in getattr(experience, category).items():
             path = f"{category}.{name}"
-            prose = path in code_files or any(path == item or path.startswith(f"{item}.") for item in free_text)
+            prose = path in mapping.code_fields or any(
+                path == item or path.startswith(f"{item}.") for item in free_text
+            )
             for ref in value if isinstance(value, tuple) else (value,):
                 if isinstance(ref, FileRef):
                     finding = find_sensitive_in_file(projected.files[ref.sha256], free_text=prose)

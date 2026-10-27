@@ -22,8 +22,8 @@
 # it an Experience carries none of the profiler's output: the only run files it links are the plan, the measured
 # kernel, and the archived diff of every file the commit touched (candidates/iter_NNN/change.diff). The diff and the
 # kernel file are different records: the diff has every file the commit touched and not the kernel's unchanged lines,
-# and the kernel file has none of the other files. Both are code, so collection screens them with the token formats
-# only. The only Analysis output an Experience holds is the report its plan
+# and the kernel file has none of the other files. The kernelforge-v1 mapping names both as code, so collection
+# screens them with the token formats only. The only Analysis output an Experience holds is the report its plan
 # was built on, as text. The lesson is rationale.reasoning, not a second copy under reflection.
 # The objective and every identity field always form the repeat group, with the schema: Hyperloom groups Experiences
 # that way by itself (hyperloom_kb/query_view.py repeat_group_key) and accepts group: true only on baseline and change
@@ -108,7 +108,6 @@ change:
       the file by its name, size, and SHA-256, and the knowledge base stores the file once. This is the anchor kernel
       only. A wrapper or config edit is in change_diff_file, and the unchanged lines of this file are not in that diff.
     kind: file
-    code: true
   - name: change_diff_file
     description: >-
       The unified diff of every file the commit touched, as KernelForge archived it beside the kernel in
@@ -117,7 +116,6 @@ change:
       and the kernel file does not contain the other files the commit touched. Optional: absent when the candidate
       archived no diff.
     kind: file
-    code: true
     required: false
 
 outcome:

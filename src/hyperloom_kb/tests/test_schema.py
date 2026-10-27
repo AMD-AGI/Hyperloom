@@ -230,24 +230,11 @@ def test_a_text_field_holds_at_most_32_kib_and_points_larger_content_to_a_file()
         ({"role": FieldRole.MEASUREMENT}, "the measurement is a number field"),
         ({"kind": FieldKind.FILE, "role": FieldRole.SUMMARY}, "string or text field"),
         ({"kind": FieldKind.TEXT, "many": True, "role": FieldRole.SUMMARY}, "holds one value"),
-        ({"code": True}, "only a file field is code"),
     ],
 )
 def test_field_declaration_rejects_attribute_combinations_no_kb_function_reads(attributes, message) -> None:
     with pytest.raises(SchemaValidationError, match=message):
         FieldDeclaration("x", "X.", **attributes)
-
-
-def test_code_is_recorded_only_on_a_file_field_that_sets_it() -> None:
-    """A false flag is omitted, so a declaration that marks no file as code keeps its schema_ref."""
-
-    plain = FieldDeclaration("summary", "What changed.")
-    code = FieldDeclaration("source", "The kernel.", kind=FieldKind.FILE, code=True)
-
-    assert "code" not in plain.to_dict()
-    assert code.to_dict()["code"] is True
-    assert FieldDeclaration.from_dict(plain.to_dict()) == plain
-    assert FieldDeclaration.from_dict(code.to_dict()) == code
 
 
 def test_declaration_places_roles_and_groups_only_where_kb_functions_read_them() -> None:

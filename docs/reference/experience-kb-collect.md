@@ -111,6 +111,13 @@ record names the file by its `FileRef`, and publishing sends the file to the
 service with the record (see [Files](experience-kb.md#files)). A unit whose
 file does not exist is skipped with `mapping evaluation failed: ...`.
 
+`code_fields` is an optional list of `category.field` entries. Each must name a
+file field of this mapping's declaration. Collection screens those files with
+the token formats only, the way it screens a raw log, so a kernel line such as
+`offs_token = tl.load(...)` is kept and an `sk-` key is still skipped. A file
+field the list does not name keeps the configuration rules. The list is not
+part of the declaration, so it never reaches the knowledge base.
+
 Names are bound in order -- `doc`, each unit step, each lookup, each `let` --
 and an expression may read only names bound before it. Every problem with the
 mapping itself (unknown keys, an unknown built-in, a wrong argument count, a
@@ -167,9 +174,9 @@ A mapping cannot turn these off:
   `rationale.reasoning`, `rationale.alternatives`, every `reflection` field,
   `notes`, `raw_logs`, and the change field with the `summary` role, get only
   the token formats, so prose, plan files, and raw logs are not mistaken for an
-  assignment. A file field marked `code: true` is screened the same way, which
-  is how a kernel and its diff keep a name such as `offs_token` and still
-  reject an `sk-` key.
+  assignment. A file field the mapping lists in `code_fields` is screened the
+  same way, which is how a kernel and its diff keep a name such as `offs_token`
+  and still reject an `sk-` key. The list only narrows a file to that screen.
   `rationale.preconditions` is checked in full, since it may restate the
   configuration measured against. Every text file a record names is screened
   line by line the same way; a binary file is not.

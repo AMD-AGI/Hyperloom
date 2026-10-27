@@ -13,6 +13,11 @@ producer:
   # format, or the archive layout.
   version: "10"
 
+# A kernel names offsets such as offs_token, which the configuration screen reads as a credential assignment.
+code_fields:
+  - change.source_code
+  - change.change_diff_file
+
 units:
   - each: $doc.runs
     as: run

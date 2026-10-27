@@ -105,16 +105,17 @@ def test_the_mapping_produces_the_packaged_kernelforge_declaration() -> None:
         ("driver_sha256", "string", False),
     ]
     linked = [
-        (category, field.name, field.code)
+        (category, field.name)
         for category in CATEGORIES
         for field in declaration.fields(category)
         if field.kind is FieldKind.FILE
     ]
     assert linked == [
-        ("rationale", "plan_file", False),
-        ("change", "source_code", True),
-        ("change", "change_diff_file", True),
+        ("rationale", "plan_file"),
+        ("change", "source_code"),
+        ("change", "change_diff_file"),
     ]
+    assert mapping.code_fields == frozenset({"change.source_code", "change.change_diff_file"})
     assert [(field.name, field.kind.value, field.required) for field in declaration.fields("reflection")] == [
         ("analysis_report", "text", False),
     ]
