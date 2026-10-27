@@ -73,6 +73,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     machine_parallel_tests,
     measurement_host,
     model_backed_sessions,
+    native_trees,
     require_framework_package,
     specialist_command,
     specialist_recall,
@@ -842,6 +843,7 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
             toolbox=None,
             notebooks=None,
             dev_leases=held,
+            native={},
         )
         model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
 
@@ -913,6 +915,7 @@ def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_
         toolbox=None,
         notebooks=None,
         dev_leases=None,
+        native={},
     )
 
     model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
@@ -967,3 +970,74 @@ async def test_the_specialist_notebook_handle_briefs_a_branch_after_stall_tests_
 
     assert await judged(STALL_TESTS - 1) == []
     assert [summary.split(":")[0] for summary in await judged(1)] == ["stall"]
+
+
+def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_and_names_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hyperloom_multibranch.toolbox import build_preflight
+    from hyperloom_multibranch.toolbox.build_preflight import ImageUpstream
+
+    installed = {
+        "sglang": _package(tmp_path / "site", "sglang", "sglang", "0.5.0"),
+        "sgl_kernel": _package(tmp_path / "site", "sgl_kernel", "sglang-kernel", "0.4.10"),
+    }
+    checkout = tmp_path / "build" / "sources" / "sgl_kernel"
+    _package(
+        checkout / "pending",
+        "python/sglang/kernels/aot/python/sgl_kernel",
+        "",
+        "",
+        "python/sglang/kernels/aot/csrc/gemm.cu",
+    )
+    ref = _git_checkout_of(checkout / "pending")
+    (checkout / "pending").rename(checkout / ref)
+    monkeypatch.setattr(build_preflight, "image_upstreams", lambda root: [ImageUpstream("sgl_kernel", ref, None)])
+    environ = {
+        "HYPERLOOM_BUILD_STORE": str(tmp_path / "build" / "store"),
+        "HYPERLOOM_BUILD_SOURCES": str(tmp_path / "build" / "sources"),
+        "HYPERLOOM_BUILD_IMAGE_ROOT": str(tmp_path / "site"),
+    }
+    roles: list[str] = []
+
+    def locate(layout: ComponentLayout) -> PackageBase:
+        if layout.import_name not in installed:
+            raise UnsupportedComponentError(f"package {layout.import_name} is not installed in this image")
+        return installed[layout.import_name]
+
+    monkeypatch.setattr(worktree_module, "SourceBase", partial(worktree_module.SourceBase, locator=locate))
+    real = model_sessions_module.model_sessions
+
+    def sessions(setup: AgentSetup, **kwargs: object) -> ModelSessions:
+        roles.append(setup.role)
+        return real(setup, **kwargs)
+
+    monkeypatch.setattr(model_sessions_module, "model_sessions", sessions)
+    for native, source in ((native_trees(environ), "with"), (native_trees({}), "without")):
+        layout = SimpleNamespace(
+            logs=tmp_path / "logs", source=tmp_path / source, branch_dir=lambda branch: tmp_path / branch
+        )
+        wiring = SimpleNamespace(
+            setup=SimpleNamespace(layout=layout, workload=WORKLOAD, references={}, processes=None, agents=()),
+            tokens=None,
+            repo=None,
+            briefs=SimpleNamespace(text=None),
+            toolbox=None,
+            notebooks=None,
+            dev_leases=None,
+            native=native,
+        )
+        model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
+
+    laid = {
+        source: subprocess.run(
+            ["git", "ls-files"], cwd=tmp_path / source, check=True, capture_output=True, text=True
+        ).stdout.split()
+        for source in ("with", "without")
+    }
+    assert "python/sglang/kernels/aot/csrc/gemm.cu" in laid["with"]
+    assert "python/sglang/kernels/aot/python/sgl_kernel/__init__.py" in laid["with"]
+    assert laid["without"] == ["python/sglang/__init__.py"]
+    with_native, without = roles[0], roles[-1]
+    assert "python/sglang/kernels/aot" in with_native and "pending_build" in with_native
+    assert without == role_prompt(_specialist_role(WORKLOAD), references={})

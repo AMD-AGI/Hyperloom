@@ -55,6 +55,7 @@ from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, CommitQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
+from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot
 from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
 from hyperloom_multibranch.notebook import BriefTriggers, LocalNotebook
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
@@ -118,7 +119,8 @@ class SessionWiring:
     """What a session's specialist sessions are built on: the peer setup, the repository the branches use, the
     tokens that grant a branch's specialist the MCP service's tools (a grant names the service's URL, so it is issued
     when a specialist starts), each branch's log, the session's briefs, its dev sandboxes, ``None`` when it lends
-    none, and the canonical configuration the toolbox rendered, which the gate's benchmark client is read from."""
+    none, the canonical configuration the toolbox rendered, which the gate's benchmark client is read from, and the
+    native trees the branches edit (:func:`native_trees`)."""
 
     setup: PeerSetup
     repo: ExperimentRepo
@@ -128,6 +130,7 @@ class SessionWiring:
     toolbox: RealToolbox
     dev_leases: DevLeases | None
     canonical: Path
+    native: Mapping[str, NativeTree]
 
 
 #: Builds the specialist runtime's session factory, and the worktree of each branch the worktree tools serve, on a
@@ -299,7 +302,8 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
 
     layout, workload = setup.layout, setup.workload
     _export_workload(workload, layout.toolbox, host.image.ref)
-    repo = GitExperimentRepo(layout.repo, setup.blobs)
+    native = native_trees(os.environ)
+    repo = GitExperimentRepo(layout.repo, setup.blobs, native=native)
     canonical_dir = layout.toolbox / CANONICAL_DIR
     toolbox = _toolbox(host, setup, repo, _canonical(canonical_dir, workload, host))
     gate_notebook = LocalNotebook(layout.notebook, Writer(Role.GATE, GATE_WRITER))
@@ -317,7 +321,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     leases = _lend_dev_sandboxes(mcp, setup, toolbox, runtime_notebook, lambda branch: built.worktrees(branch))
     tokens = McpSpecialistTokens(mcp)
     rendered = canonical_dir / RENDERED_CANONICAL
-    built = sessions(SessionWiring(setup, repo, tokens, runtime_notebook, briefs, toolbox, leases, rendered))
+    built = sessions(SessionWiring(setup, repo, tokens, runtime_notebook, briefs, toolbox, leases, rendered, native))
     register_worktree_tools(mcp, repo=repo, worktrees=built.worktrees)
     gate = RuleGate(gate_notebook, repo, setup.desk, toolbox)
     register_blocked_tools(mcp, blocked=BlockedCandidates(gate_notebook, gate), home=asyncio.get_running_loop())
@@ -624,6 +628,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
                 _specialist_role(workload),
                 references=wiring.setup.references,
                 dev_leases=wiring.dev_leases.limits.cap if wiring.dev_leases else 0,
+                native=wiring.native,
             ),
             env=build_specialist_env(),
             runner=LocalAgentRunner(
@@ -638,11 +643,12 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
         open_sessions = partial(
             model_sessions,
             agent,
-            base=SourceBase(layout.source),
+            base=SourceBase(layout.source, native=wiring.native),
             branch_dir=layout.branch_dir,
             notebook_for=wiring.notebooks,
         )
-        sessions = _sessions_over_source(open_sessions, layout.source, workload.framework)
+        native = tuple(component for component in wiring.native if component != workload.framework)
+        sessions = _sessions_over_source(open_sessions, layout.source, workload.framework, native)
         agents = AgentSessions(
             _agent_spec(workload),
             command,
@@ -657,19 +663,59 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
     return build
 
 
-def _sessions_over_source(open_sessions: Callable[..., ModelSessions], source: Path, framework: str) -> ModelSessions:
-    """The sessions ``open_sessions`` opens over a source base laid out at ``source`` from ``framework`` and aiter, or
-    from ``framework`` alone when the base refuses aiter: not installed in the image, or installed from a wheel, whose
-    version names only an abbreviated commit. :func:`peers_on` checked the framework, so a refusal is aiter's."""
+def _sessions_over_source(
+    open_sessions: Callable[..., ModelSessions], source: Path, framework: str, native: tuple[str, ...]
+) -> ModelSessions:
+    """The sessions ``open_sessions`` opens over a source base laid out at ``source`` from ``framework``, aiter and the
+    ``native`` components, or without aiter when the base refuses it: not installed in the image, or installed from a
+    wheel, whose version names only an abbreviated commit. :func:`peers_on` checked the framework, and the toolbox's
+    build preflight the native checkouts, so a refusal is aiter's. The native components come last: one may lie
+    inside the framework's tree."""
 
     from hyperloom.measure.compile import UnsupportedComponentError
 
     try:
-        return open_sessions(components=(framework, AITER))
+        return open_sessions(components=(framework, AITER, *native))
     except UnsupportedComponentError as refused:
         logger.warning("the specialists' source base leaves aiter out, so they cannot change it: %s", refused)
         shutil.rmtree(source)
-        return open_sessions(components=(framework,))
+        return open_sessions(components=(framework, *native))
+
+
+def native_trees(environ: Mapping[str, str]) -> dict[str, NativeTree]:
+    """The tree each native component's build compiles, in the build sources' checkout of the commit the image
+    installs (#125), by component; none on a host that builds no native code (``HYPERLOOM_BUILD_STORE`` unset).
+
+    The toolbox refuses to start on a host whose checkouts are not in place, so they are read as they are. A recipe
+    that builds from the repository root (vLLM's) has no tree to lay out beside the framework's and is left out.
+    """
+
+    from pathlib import Path
+
+    from hyperloom.measure.jit.native.config import BUILD_STORE_ENV
+    from hyperloom.measure.runner.native.recipes import native_recipes
+    from hyperloom_multibranch.toolbox.build_preflight import image_upstreams
+    from hyperloom_multibranch.toolbox.native_builds import BUILD_IMAGE_ROOT_ENV, BUILD_SOURCES_ENV
+
+    if not environ.get(BUILD_STORE_ENV, "").strip():
+        return {}
+    sources, recipes = Path(environ[BUILD_SOURCES_ENV]), native_recipes()
+    trees = {}
+    for upstream in image_upstreams(Path(environ[BUILD_IMAGE_ROOT_ENV])):
+        checkout, source_dir = sources / upstream.component / upstream.ref, recipes[upstream.component].source_dir
+        if not source_dir:
+            logger.warning(
+                "%s builds from its repository root, so its native sources are not laid out", upstream.component
+            )
+            continue
+        origin = subprocess.run(
+            ["git", "-C", str(upstream.checkout or checkout), "remote", "get-url", "origin"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        trees[upstream.component] = NativeTree(SourceRoot(source_dir, checkout / source_dir), origin, upstream.ref)
+    return trees
 
 
 def _agent_spec(workload: Workload) -> AgentSpec:
