@@ -21,6 +21,7 @@ from hyperloom.inference_optimizer.cli import bootstrap
 from hyperloom.inference_optimizer.cli.bootstrap import set_hosted_plug_inputs
 from hyperloom.plugs.manifest import LOCKABLE_SOCKETS, load_builtin_profile
 
+INSTALL_REAL = Path(entry.INSTALL_SCRIPT)
 _SECRETS = {name: f"sentinel-secret-{index}" for index, name in enumerate(host_info.SECRET_VARS)}
 _IMAGE = "registry.example/sglang:v0.5.4-rocm"
 
@@ -56,8 +57,13 @@ def run(tmp_path, monkeypatch):
         for name, value in values.items():
             monkeypatch.setenv(name, value)
 
+    installer = tmp_path / "install.sh"
+    installer.write_text("#!/bin/bash\necho stub installer ran\n")
+    monkeypatch.setattr(entry, "INSTALL_SCRIPT", installer)  # the real installer is never run by a unit test
     inject()
-    yield type("Run", (), {"state": state, "work": work, "spec": spec, "restart": staticmethod(inject)})
+    yield type(
+        "Run", (), {"state": state, "work": work, "spec": spec, "restart": staticmethod(inject), "installer": installer}
+    )
     set_hosted_plug_inputs(None)
 
 
@@ -554,3 +560,83 @@ def test_a_host_token_shorter_than_the_server_minimum_refuses_the_run(run, monke
     assert entry.main(["run"]) == entry.RETURNCODE_REFUSED
     assert fake.calls == [] and _exit(run)["final"] is True
     assert Var.MCP_TOKEN in _exit(run)["error"] and "x" * MIN_TOKEN_LENGTH not in _exit(run)["error"]
+
+
+# -- the installer -----------------------------------------------------------------------------------------------
+def _recording_installer(run, events, *, exit_code=0):
+    run.installer.write_text(
+        f'#!/bin/bash\necho "installer $#" >> {run.work}/order\necho install-output\necho install-error >&2\nexit {exit_code}\n'
+    )
+
+
+def _record_optimize(run, monkeypatch):
+    def fake(argv):
+        with (run.work / "order").open("a") as order:
+            order.write("optimize\n")
+        return 0
+
+    monkeypatch.setattr(entry, "_optimize_main", fake)
+
+
+def _order(run):
+    return (run.work / "order").read_text().split("\n")[:-1]
+
+
+def test_the_installer_runs_before_optimize_on_a_fresh_leg_and_on_a_resume_leg(run, monkeypatch):
+    _recording_installer(run, None)
+    _record_optimize(run, monkeypatch)
+    entry.main(["run"])
+    assert _order(run) == ["installer 0", "optimize"]  # no flags, like the legacy launchers
+    session = Path(_session_json(run))
+    for name in entry.SESSION_FILES:
+        (session / name).write_text("{}")
+    run.restart()
+    entry.main(["run"])
+    assert _order(run) == ["installer 0", "optimize", "installer 0", "optimize"]
+
+
+def test_the_installer_output_goes_to_a_log_in_the_state_dir(run, monkeypatch):
+    _recording_installer(run, None)
+    _record_optimize(run, monkeypatch)
+    entry.main(["run"])
+    assert set((run.state / entry.INSTALL_LOG).read_text().split()) == {"install-output", "install-error"}
+
+
+def test_a_failing_installer_ends_the_run_finally_and_optimize_never_starts(run, monkeypatch, capsys):
+    _recording_installer(run, None, exit_code=7)
+    _record_optimize(run, monkeypatch)
+    assert entry.main(["run"]) == 2
+    assert _order(run) == ["installer 0"]
+    log = run.state / entry.INSTALL_LOG
+    assert _exit(run) == {
+        "final": True,
+        "returncode": 2,
+        "error": f"install.sh failed with exit code 7; see {log}",
+    }
+    assert "install-error" in log.read_text()
+
+
+def test_the_installer_sees_no_host_only_input(run, monkeypatch):
+    run.installer.write_text(f"#!/bin/bash\nenv > {run.work}/seen\n")
+    FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    seen = (run.work / "seen").read_text()
+    assert "sentinel-secret" not in seen
+    assert not [name for name in host_info.HOST_ONLY_VARS if f"\n{name}=" in "\n" + seen]
+
+
+def test_a_missing_installer_ends_the_run_finally(run, monkeypatch):
+    run.installer.unlink()
+    monkeypatch.setattr(entry, "INSTALL_SCRIPT", run.installer)
+    FakeOptimize(monkeypatch)
+    monkeypatch.setattr(
+        entry.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError(2, "No such file"))
+    )
+    assert entry.main(["run"]) == 2
+    assert _exit(run)["final"] is True
+    assert "install.sh" in _exit(run)["error"]
+
+
+def test_the_installer_the_entry_names_is_the_packaged_asset_beside_the_optimizer():
+    assert INSTALL_REAL.is_file()
+    assert INSTALL_REAL.parent.parts[-3:] == ("hyperloom", "inference_optimizer", "assets")
