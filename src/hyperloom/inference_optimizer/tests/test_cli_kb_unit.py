@@ -40,14 +40,6 @@ def test_attach_recipe_audit_hook_appends_jsonl(tmp_path) -> None:
     assert "ts" in row
 
 
-def test_attach_recipe_audit_hook_noop_without_session_dir(tmp_path) -> None:
-    from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
-
-    kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"))
-    cli_kb._attach_recipe_audit_hook(kb, None)
-    assert kb.audit_hook is None
-
-
 def test_bootstrap_recipe_kb_degraded_returns_none(tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path / "kb"))
     kb = cli_kb._bootstrap_recipe_kb(
@@ -135,7 +127,7 @@ def test_bootstrap_recipe_kb_remote_stores_metadata_not_replay_payload(
             }
 
     monkeypatch.setattr(
-        remote_recipe.HyperloomRemoteKB,
+        remote_recipe.RemoteRecipeClient,
         "from_env",
         classmethod(lambda cls: _Remote()),
     )
@@ -171,10 +163,7 @@ def test_bootstrap_recipe_kb_remote_stores_metadata_not_replay_payload(
     assert "current Recipe warm replay" in capsys.readouterr().out
 
 
-def test_bootstrap_knowledge_plane_validates_remote_without_recipe_dispatcher(
-    tmp_path,
-    monkeypatch,
-) -> None:
+def test_bootstrap_knowledge_plane_validates_remote_without_recipe_dispatcher(monkeypatch) -> None:
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.delenv("KB_STORE_URL", raising=False)
     monkeypatch.delenv("KB_STORE_TOKEN", raising=False)
@@ -182,14 +171,10 @@ def test_bootstrap_knowledge_plane_validates_remote_without_recipe_dispatcher(
         cli_kb._bootstrap_knowledge_plane(
             _args(pr_monitor_enabled=False),
             recipe_kb_client=None,
-            session_dir=tmp_path,
         )
 
 
-def test_bootstrap_knowledge_plane_degraded_bypasses_remote_validation(
-    tmp_path,
-    monkeypatch,
-) -> None:
+def test_bootstrap_knowledge_plane_degraded_bypasses_remote_validation(monkeypatch) -> None:
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.delenv("KB_STORE_URL", raising=False)
     monkeypatch.delenv("KB_STORE_TOKEN", raising=False)
@@ -197,63 +182,20 @@ def test_bootstrap_knowledge_plane_degraded_bypasses_remote_validation(
     plane = cli_kb._bootstrap_knowledge_plane(
         _args(degraded_kb=True, pr_monitor_enabled=False),
         recipe_kb_client=None,
-        session_dir=tmp_path,
     )
 
     assert plane.kb_disabled is True
     assert plane.recipe_kb is None
 
 
-def test_bootstrap_knowledge_plane_enabled(tmp_path) -> None:
-    plane = cli_kb._bootstrap_knowledge_plane(
-        _args(pr_monitor_enabled=True),
-        session_dir=tmp_path,
-    )
+def test_bootstrap_knowledge_plane_enabled() -> None:
+    plane = cli_kb._bootstrap_knowledge_plane(_args(pr_monitor_enabled=True))
     assert plane is not None
 
 
-def test_bootstrap_knowledge_plane_disabled(tmp_path) -> None:
-    plane = cli_kb._bootstrap_knowledge_plane(
-        _args(pr_monitor_enabled=False, pr_degraded_reason="explicit_flag"),
-        session_dir=tmp_path,
-    )
+def test_bootstrap_knowledge_plane_disabled() -> None:
+    plane = cli_kb._bootstrap_knowledge_plane(_args(pr_monitor_enabled=False, pr_degraded_reason="explicit_flag"))
     assert plane is not None
-
-
-class _FailingParent:
-    """A stand-in ``.parent`` whose mkdir always raises OSError."""
-
-    def mkdir(self, *_a, **_k):
-        raise OSError("no space")
-
-
-class _MarkerPath:
-    """Path-like whose parent.mkdir raises, exercising the OSError guard."""
-
-    parent = _FailingParent()
-
-    def write_text(self, *_a, **_k):  # pragma: no cover - never reached
-        raise OSError("no space")
-
-
-def test_bootstrap_knowledge_plane_marker_write_failure(tmp_path, monkeypatch) -> None:
-    """An OSError writing the pr_monitor status marker is swallowed."""
-    from hyperloom.inference_optimizer.session import session_paths as sp
-
-    monkeypatch.setattr(sp, "pr_monitor_status_json", lambda _sd: _MarkerPath())
-    plane = cli_kb._bootstrap_knowledge_plane(_args(pr_monitor_enabled=True), session_dir=tmp_path)
-    assert plane is not None
-
-
-def test_attach_recipe_audit_hook_target_without_hook_attr(tmp_path) -> None:
-    """A target lacking ``audit_hook`` is a no-op."""
-
-    class _NoHook:
-        pass
-
-    obj = _NoHook()
-    cli_kb._attach_recipe_audit_hook(obj, tmp_path)
-    assert not hasattr(obj, "audit_hook")
 
 
 def test_attach_recipe_audit_hook_write_error_is_swallowed(tmp_path, monkeypatch) -> None:

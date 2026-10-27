@@ -38,7 +38,6 @@ from hyperloom.common.deepseek_task import DeepSeekTaskRequest
 from hyperloom.common.llm_config import claude_sdk_env_options
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 from ._capture_shapes import is_capture_dir_name
-from ._io_utils import safe_float
 from ._literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
 from ._literal_utils import safe_literal_eval as _safe_literal_eval
 from ._task_group_contract import (
@@ -1182,8 +1181,6 @@ def _pitem_prose(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "identification": str(row.get("identification") or "").strip(),
             "reasoning_for_slowdown": str(row.get("reasoning_for_slowdown") or "").strip(),
             "resolution": str(row.get("resolution") or "").strip(),
-            "impact_low_e2e_pct": safe_float(row.get("impact_low_e2e_pct")),
-            "impact_high_e2e_pct": safe_float(row.get("impact_high_e2e_pct")),
         }
     ordered = sorted(entries.values(), key=lambda e: (e["rank"], e["title"]))
     return [e for e in ordered if e["rank"] or e["identification"] or e["reasoning_for_slowdown"] or e["resolution"]]

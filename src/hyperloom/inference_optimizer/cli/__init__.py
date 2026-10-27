@@ -2504,11 +2504,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         resume=bool(args.resume_from),
     )
     # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
-    knowledge_plane = _bootstrap_knowledge_plane(
-        args,
-        recipe_kb_client=recipe_kb_client,
-        session_dir=session_dir,
-    )
+    knowledge_plane = _bootstrap_knowledge_plane(args, recipe_kb_client=recipe_kb_client)
 
     from ..multi_node.state_paths import bind_state_file_to_session
 

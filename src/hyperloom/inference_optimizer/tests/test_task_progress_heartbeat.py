@@ -238,15 +238,17 @@ async def test_worker_cleanup_precedes_lane_release(tmp_path, monkeypatch, confi
         assert row.state == ("failed" if fails else "succeeded")
         if fails:
             assert "executor failed" in row.history[-1]["evidence"]["error"]
-        assert bool(await sub.locks.lane_holders()) is not confirmed
+        # Cleanup runs first and its answer lands on the row, but the row is
+        # terminal either way, so the lane goes back either way.
+        assert not await sub.locks.lane_holders()
         retained = await sub.tasks.db.fetchone("SELECT task_id FROM leases WHERE task_id=?", (task.task_id,))
-        assert (retained is not None) is not confirmed
+        assert retained is None
     finally:
         sub.tasks.db.close()
 
 
 @pytest.mark.asyncio
-async def test_direct_cancel_during_cleanup_retains_capacity(tmp_path, monkeypatch, caplog):
+async def test_direct_cancel_during_cleanup_releases_capacity_and_warns(tmp_path, monkeypatch, caplog):
     sub = _runner(tmp_path, monkeypatch)
     task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(kind="explore", params={}, idempotency_key="cancel-cleanup", requires_lanes=["research_lane"])
@@ -274,7 +276,11 @@ async def test_direct_cancel_during_cleanup_retains_capacity(tmp_path, monkeypat
     try:
         running.cancel()
         await _await_cancelled(running)
-        assert (await sub.locks.lane_holders())["research_lane"] == 1
+        # The cancel proves nothing about the thread still in close(), but the
+        # task is terminal, so the lane is returned and the warning is what
+        # tells an operator a worker may be running without one.
+        assert (await sub.tasks.get(task.task_id)).state == "succeeded"
+        assert not await sub.locks.lane_holders()
         assert "cleanup cancelled" in caplog.text
     finally:
         finish.set()
