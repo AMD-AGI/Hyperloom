@@ -102,19 +102,14 @@ def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
     out["idle_pct"] = _parse_pct(rows.get("Idle %"))
     out["comm_pct"] = _parse_pct(rows.get("Exposed Communication %") or rows.get("Communication %"))
     out["top_bottleneck"] = _parse_top_bottleneck(rows.get("Top Bottleneck Category"))
-    out["memcpy_pct"] = _exposed_memcpy_pct(_tracelens_dir_for_analysis_md(path))
+    out["memcpy_pct"] = _exposed_memcpy_pct(path.parent)
     return out
-
-
-def _tracelens_dir_for_analysis_md(analysis_md_path: Path) -> Path:
-    """Return the TraceLens output directory containing an ``analysis.md``."""
-    return analysis_md_path.parent
 
 
 def extract_top_kernel(analysis_md_path: str | Path) -> dict[str, Any] | None:
     """Return the highest ``percent_of_total`` operation across category metrics."""
     md_path = Path(analysis_md_path)
-    cat_dir = _tracelens_dir_for_analysis_md(md_path) / "category_data"
+    cat_dir = md_path.parent / "category_data"
     if not cat_dir.is_dir():
         return None
 
@@ -441,19 +436,6 @@ _CEILING_LABELS: dict[str, str] = {
 }
 
 
-def _single_ceiling(baseline: dict[str, Any], latest: dict[str, Any]) -> tuple[str, float] | None:
-    """Pick the one ceiling to render when both sides share it."""
-    for snap in (baseline, latest):
-        peak = snap.get("theoretical_peak_tok_per_sec")
-        if isinstance(peak, (int, float)) and peak > 0:
-            return "tok/s", float(peak)
-    for snap in (baseline, latest):
-        ideal = snap.get("roofline_ideal_ms")
-        if isinstance(ideal, (int, float)) and ideal > 0:
-            return "ms", float(ideal)
-    return None
-
-
 def _ceiling_lines(
     baseline: dict[str, Any],
     latest: dict[str, Any],
@@ -475,7 +457,7 @@ def _ceiling_lines(
                 "column is withheld._",
                 "",
             ]
-    chosen = _single_ceiling(baseline, latest)
+    chosen = base_ceiling or latest_ceiling
     if chosen is None:
         return []
     unit, value = chosen
@@ -493,10 +475,7 @@ _UNCAPPED_KEY = "within_roofline_pct_uncapped"
 
 def _ceiling_exceeded(snapshot: dict[str, Any]) -> bool:
     """Whether a snapshot measured above its own modelled ceiling."""
-    if snapshot.get("roofline_ceiling_exceeded"):
-        return True
-    uncapped = snapshot.get(_UNCAPPED_KEY)
-    return isinstance(uncapped, (int, float)) and float(uncapped) > 100.0
+    return bool(snapshot.get("roofline_ceiling_exceeded"))
 
 
 def _ceiling_exceeded_lines(
@@ -580,7 +559,6 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
 #: profiler digest and the coordinator's bottleneck-redirect advisory.
 BOTTLENECK_DOMAIN_HINTS: dict[str, tuple[str, str]] = {
     "comm": ("comm_specialist", "communication"),
-    "host_overhead": ("system_specialist", "systems"),
     "idle": ("system_specialist", "systems"),
     "compute": ("kernel_switch_specialist", "kernel_agent"),
     "memory": ("serving_specialist", "framework"),

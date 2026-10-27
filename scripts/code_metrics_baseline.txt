@@ -153,7 +153,7 @@ duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integra
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_coverage_unit.py 52
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_helpers_unit.py 12
 duplicated-lines src/hyperloom/orchestrator/enablement/runtime/tests/test_targeted_build_recipes.py 34
-duplicated-lines src/hyperloom/orchestrator/kernel/tests/test_forge_server_log_evidence.py 48
+duplicated-lines src/hyperloom/orchestrator/kernel/tests/test_forge_server_log_evidence.py 46
 duplicated-lines src/hyperloom/orchestrator/tests/_helpers.py 53
 duplicated-lines src/hyperloom/orchestrator/trace_analysis/tests/test_tracelens_csv.py 37
 duplicated-lines src/kernelforge/tests/evaluation/benchmark/test_measurement_guards.py 38
@@ -261,9 +261,9 @@ function-lines src/hyperloom/inference_optimizer/multi_node/scripts/launch_multi
 function-lines src/hyperloom/inference_optimizer/multi_node/scripts/launch_multinode.py::_spawn_rank_actors 67
 function-lines src/hyperloom/inference_optimizer/multi_node/scripts/launch_router.py::main 66
 function-lines src/hyperloom/inference_optimizer/reference_script.py::render_reference_script 59
-function-lines src/hyperloom/inference_optimizer/roofline_ceiling.py::compute_roofline_from_perfmodel 61
+function-lines src/hyperloom/inference_optimizer/roofline_ceiling.py::compute_roofline_from_perfmodel 59
 function-lines src/hyperloom/inference_optimizer/roofline_ceiling.py::compute_roofline_from_perfmodel._forward 65
-function-lines src/hyperloom/inference_optimizer/roofline_ceiling.py::load_model_meta 60
+function-lines src/hyperloom/inference_optimizer/roofline_ceiling.py::load_model_meta 59
 function-lines src/hyperloom/inference_optimizer/roofline_snapshot.py::attach_perfmodel_breakdown 59
 function-lines src/hyperloom/inference_optimizer/roofline_snapshot.py::build_roofline_comparison_from_history 51
 function-lines src/hyperloom/inference_optimizer/session/manifest.py::build_manifest 56
@@ -427,7 +427,6 @@ function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validat
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.record_geak_adopted_kernels 53
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.run_agent 59
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._apply_warm_kernel_patch 61
-function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._apply_warm_kernel_plan 53
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._enqueue_warm_replay 66
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._grade_warm_replay 51
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._judge_warm_replay_accuracy 68
@@ -475,7 +474,7 @@ function-lines src/hyperloom/orchestrator/trace_analysis/_analysis_reports.py::w
 function-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py::_build_task_groups 68
 function-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py::_candidate 63
 function-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py::_optimization_sections 67
-function-lines src/hyperloom/orchestrator/trace_analysis/_bypass_roofline.py::compute_roofline 53
+function-lines src/hyperloom/orchestrator/trace_analysis/_bypass_roofline.py::compute_roofline 52
 function-lines src/hyperloom/orchestrator/trace_analysis/_bypass_trace_reader.py::_finalize 62
 function-lines src/hyperloom/orchestrator/trace_analysis/_bypass_trace_reader.py::analyze_trace 51
 function-lines src/hyperloom/orchestrator/trace_analysis/_nccl_summary_candidates.py::extract_collective_candidates 85
@@ -695,13 +694,13 @@ function-lines src/kernelforge/tools/aiter_cache.py::prune_aiter_cache_shards 68
 module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 1755
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2612
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2719
-module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1762
+module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1748
 module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2523
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1804
-module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1417
+module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1374
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2052
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1591
-module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 1685
+module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 1679
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4052
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1793
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1388
@@ -716,7 +715,7 @@ module-lines src/hyperloom/orchestrator/loop/intent_router.py 1358
 module-lines src/hyperloom/orchestrator/phases/framework.py 3046
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4003
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 1928
-module-lines src/hyperloom/orchestrator/phases/prelude.py 2488
+module-lines src/hyperloom/orchestrator/phases/prelude.py 2477
 module-lines src/hyperloom/orchestrator/policy/gate.py 1565
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2568
