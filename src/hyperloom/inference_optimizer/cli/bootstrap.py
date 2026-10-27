@@ -980,7 +980,6 @@ def _begin_resume_leg(state: SharedState) -> str:
     state.close_sequence_done = False
     state.target_reached_at = ""
     state.crash_count = 0
-    state.teardown_timings_sec = {}
     state.begin_leg()
     return state.resumed_ts
 

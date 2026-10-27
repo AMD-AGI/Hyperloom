@@ -327,18 +327,10 @@ def test_levers_are_registered_with_their_state():
     """A registered lever records whether it is currently on."""
     state = _state()
     switches = _chain()
-    assert state.record_authored_framework_levers(
-        switches,
-        default_on=False,
-        specialist_task_id="t-1",
-        stack_delta_pct=-0.4,
-    )
+    assert state.record_authored_framework_levers(switches, default_on=False)
     rows = state.authored_framework_levers
     assert [r["switch"] for r in rows] == ["HL_HOIST", "HL_CACHE", "HL_DERIVED", "HL_STANDALONE"]
     assert all(r["default_on"] is False for r in rows)
-    assert rows[0]["specialist_task_id"] == "t-1"
-    assert rows[0]["stack_delta_pct"] == pytest.approx(-0.4)
-    assert rows[0]["enabler"] is True
     assert rows[0]["attributed_gain_pct"] is None
 
 
@@ -355,11 +347,10 @@ def test_re_registering_preserves_a_measured_attribution():
     """A measurement outranks a re-registration; losing it would re-bench the lever."""
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=False)
-    state.record_framework_lever_attribution("HL_CACHE", gain_pct=7.5, source="additive")
+    state.record_framework_lever_attribution("HL_CACHE", gain_pct=7.5)
     state.record_authored_framework_levers(_chain(), default_on=True)
     row = next(r for r in state.authored_framework_levers if r["switch"] == "HL_CACHE")
     assert row["attributed_gain_pct"] == pytest.approx(7.5)
-    assert row["attribution_source"] == "additive"
 
 
 def test_registering_nothing_is_a_noop():
@@ -372,7 +363,7 @@ def test_registering_nothing_is_a_noop():
 def test_attribution_of_an_unknown_switch_is_ignored():
     """A stale attribution cannot invent a lever row."""
     state = _state()
-    assert state.record_framework_lever_attribution("HL_GHOST", gain_pct=1.0, source="additive") is False
+    assert state.record_framework_lever_attribution("HL_GHOST", gain_pct=1.0) is False
 
 
 def _entry_parsed(switch: str) -> dict[str, Any]:
@@ -415,7 +406,7 @@ def test_already_attributed_levers_are_not_re_benched():
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=False)
     for row in state.authored_framework_levers:
-        state.record_framework_lever_attribution(row["switch"], gain_pct=1.0, source="additive")
+        state.record_framework_lever_attribution(row["switch"], gain_pct=1.0)
     assert framework_lever_grid(state) == []
 
 

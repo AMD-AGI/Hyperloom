@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
 from hyperloom.common.perf_metric import GradedComparison, VERDICT_KEEP, VERDICT_REVERT
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+from ..kernel import kernel_decisions
 from ..kernel.keep_thresholds import KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
 from ..kernel.patch_lifecycle import (
     CLEANUP_ACTION_NONE,
@@ -313,7 +314,7 @@ class KernelStackPhase(CoordinatorCollaborator):
         drained = 0
         max_drain = 10
         while drained < max_drain:
-            pending_records = state.pending_kernel_integration_records()
+            pending_records = kernel_decisions.pending_kernel_integration_records(state)
             if not pending_records:
                 break
             pending = pending_records[0]

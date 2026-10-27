@@ -14,7 +14,7 @@ from typing import Any, NamedTuple
 from kernelforge.knowledge.kb_store.identity.implementation import normalize_operator_name
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
 
-from hyperloom.common.coerce import to_float
+from hyperloom.common.coerce import to_float, to_int
 from hyperloom.common.env import env_flag
 
 from .patch_landing import (
@@ -30,6 +30,7 @@ from hyperloom.common.timeutil import now_iso as _now_iso
 from ..state.kernel_decision_settings import (
     _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_HOT_KERNEL_GATE_TOP_N,
+    _MAX_INTEGRATE_E2E_ATTEMPTS,
     _MAX_INTEGRATE_FAULT_ATTEMPTS,
     effective_hot_kernel_gpu_pct,
     effective_hot_kernel_min_gpu_pct,
@@ -106,7 +107,7 @@ def enqueue_nominated_patch(state, *, patch, keep_threshold_pct: float = 3.0) ->
         return None
     env_flag = _text(getattr(patch, "env_flag", "")).strip()
     fusion_env_flags = {flag: "1" for flag in env_flag.split() if flag}
-    micro_speedup = to_float(getattr(patch, "micro_speedup", 0.0)) or 0.0
+    micro_speedup = patch.micro_speedup
     queue = state.pending_kernel_integrations
     # The lane owns its own task_key / kernel_id namespace so its integration_ids and kernel-rejection identities
     # stay distinct; the prefix is a state key only -- no consumer reads it (they gate on the ``source`` field), so
@@ -324,9 +325,7 @@ def _record_integration_keep(result: dict[str, Any], pending_record) -> None:
         pending_record["validation_tier"] = validation_tier
 
 
-def _reject_integration(
-    state, entry: dict[str, Any], *, reason: str, keep_threshold_pct: float, pending_record
-) -> None:
+def _reject_integration(state, entry: dict[str, Any], *, reason: str, pending_record) -> None:
     """Record a patch's rejection against its attempt entry, the rejection ledger and its queued record."""
     rejected = {
         "key": entry["key"],
@@ -338,7 +337,6 @@ def _reject_integration(
         "attempt_count": entry["attempt_count"],
         "fault_count": entry["fault_count"],
         "best_gain_pct": entry["best_gain_pct"],
-        "keep_threshold_pct": keep_threshold_pct,
         "last_decision": entry["last_decision"],
         "last_error_class": entry["last_error_class"],
         "reason": reason,
@@ -359,17 +357,8 @@ def _reject_integration(
         pending_record.update(status="rejected", rejected_at=_now_iso(), rejected_reason=reason)
 
 
-def record_kernel_integrate_result(
-    state,
-    result: dict[str, Any],
-    *,
-    max_attempts: int = 3,
-    keep_threshold_pct: float = 1.0,
-    max_fault_attempts: int | None = None,
-) -> dict[str, Any] | None:
+def record_kernel_integrate_result(state, result: dict[str, Any]) -> dict[str, Any] | None:
     """Persist one integrate E2E result and reject exhausted patch attempts."""
-    if max_fault_attempts is None:
-        max_fault_attempts = _MAX_INTEGRATE_FAULT_ATTEMPTS
     if not isinstance(result, dict):
         return None
     result, pending_record = _bind_result_to_pending(state, result)
@@ -439,22 +428,22 @@ def record_kernel_integrate_result(
 
     # Integration fault: never measured fairly.
     if is_fault:
-        if fault_count < max_fault_attempts:
+        if fault_count < _MAX_INTEGRATE_FAULT_ATTEMPTS:
             entry["retryable"] = True
             state.kernel_integrate_attempts[key] = entry
             return entry
-        reason = f"fault_attempts_exhausted_{max_fault_attempts}"
+        reason = f"fault_attempts_exhausted_{_MAX_INTEGRATE_FAULT_ATTEMPTS}"
     else:
         # Gate verdict path: a genuine REVERT, or too many non-fault attempts without a KEEP.
-        should_reject = result.get("decision") == "REVERT" or verdict_attempt_count >= max_attempts
+        should_reject = result.get("decision") == "REVERT" or verdict_attempt_count >= _MAX_INTEGRATE_E2E_ATTEMPTS
         if not should_reject:
             return entry
         reason = (
-            "revert_decision" if result.get("decision") == "REVERT" else f"max_e2e_attempts_{max_attempts}_without_keep"
+            "revert_decision"
+            if result.get("decision") == "REVERT"
+            else f"max_e2e_attempts_{_MAX_INTEGRATE_E2E_ATTEMPTS}_without_keep"
         )
-    _reject_integration(
-        state, entry, reason=reason, keep_threshold_pct=keep_threshold_pct, pending_record=pending_record
-    )
+    _reject_integration(state, entry, reason=reason, pending_record=pending_record)
     return entry
 
 
@@ -513,17 +502,8 @@ def _kernel_trace_impact_pct(state, kernel_id: str) -> float:
             continue
         if str(row.get("kernel_id") or "").strip() != kid:
             continue
-        try:
-            return float(row.get("gpu_pct") or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
+        return to_float(row.get("gpu_pct"), 0.0)
     return 0.0
-
-
-def next_pending_keep_kernel_id(state) -> str:
-    """Return next KEEP kernel_id awaiting integrate (\"\" if drained)."""
-    pending = pending_keep_kernel_ids(state)
-    return pending[0] if pending else ""
 
 
 def pending_keep_kernel_ids(state) -> list[str]:
@@ -537,7 +517,7 @@ def pending_keep_kernel_ids(state) -> list[str]:
 
 def has_keep_pending_integrate(state) -> bool:
     """Whether any KEEP kernel is still awaiting integrate."""
-    return bool(next_pending_keep_kernel_id(state))
+    return bool(pending_keep_kernel_ids(state))
 
 
 def _attempt_records(state) -> list[dict[str, Any]]:
@@ -568,14 +548,9 @@ class _HotRow(NamedTuple):
     identity: tuple[str, str, float]
 
 
-def _resolve_hot_kernel_top_n(top_n: int | None) -> int:
-    """The gate's per-ranking cap: the caller's, else ``HYPERLOOM_KERNEL_OPT_GATE_TOP_N``, never below one."""
-    if top_n is None:
-        try:
-            top_n = int(os.environ.get("HYPERLOOM_KERNEL_OPT_GATE_TOP_N", _DEFAULT_HOT_KERNEL_GATE_TOP_N))
-        except (TypeError, ValueError):
-            top_n = _DEFAULT_HOT_KERNEL_GATE_TOP_N
-    return max(1, int(top_n))
+def _resolve_hot_kernel_top_n() -> int:
+    """The gate's per-ranking cap, ``HYPERLOOM_KERNEL_OPT_GATE_TOP_N``, never below one."""
+    return max(1, to_int(os.environ.get("HYPERLOOM_KERNEL_OPT_GATE_TOP_N"), _DEFAULT_HOT_KERNEL_GATE_TOP_N))
 
 
 def _hot_rows(
@@ -598,10 +573,7 @@ def _hot_rows(
         kid = str(k.get("kernel_id") or "")
         if not kid:
             continue
-        try:
-            gpu_pct = float(k.get("gpu_pct") or 0.0)
-        except (TypeError, ValueError):
-            gpu_pct = 0.0
+        gpu_pct = to_float(k.get("gpu_pct"), 0.0)
         src = str(k.get("source_file") or "")
         group_info = kid_to_group.get(kid)
         rank = int(k.get("tracelens_pitem_rank") or 0)
@@ -663,15 +635,10 @@ def _task_group_index(
     return kid_to_group, group_key_aliases
 
 
-def untried_hot_reusable_kernels(
-    state,
-    *,
-    min_gpu_pct: float | None = None,
-    top_n: int | None = None,
-) -> list[str]:
-    """Reusable hot kernels (gpu_pct >= min_gpu_pct) no backend has produced a patch for yet.
+def untried_hot_reusable_kernels(state) -> list[str]:
+    """Reusable hot kernels (gpu_pct >= the configured minimum) no backend has produced a patch for yet.
 
-    Capped to ``top_n`` by TraceLens rank, one kernel_id per task_group. A kernel counts as tried once a patch for
+    Capped by TraceLens rank, one kernel_id per task_group. A kernel counts as tried once a patch for
     it was queued for integration, gated end to end, landed on the optimization stack, or published by the rewrite
     controller.
     """
@@ -679,8 +646,6 @@ def untried_hot_reusable_kernels(
     hot = info.get("hot_kernels_top15") or info.get("hot_kernels") or []
     if not isinstance(hot, list):
         return []
-    if min_gpu_pct is None:
-        min_gpu_pct = resolve_hot_kernel_min_gpu_pct()
     kid_to_group, group_key_aliases = _task_group_index(info.get("task_groups") or [])
 
     integrated = IntegratedStack.of(state.optimization_stack)
@@ -688,7 +653,9 @@ def untried_hot_reusable_kernels(
     tried_operators = _attempted_operators(state, records) | _forge_loop_operators_in_optimization_stack(state)
 
     untried: list[str] = []
-    for row in _rank_hot_rows(_hot_rows(hot, kid_to_group, min_gpu_pct), _resolve_hot_kernel_top_n(top_n)):
+    for row in _rank_hot_rows(
+        _hot_rows(hot, kid_to_group, resolve_hot_kernel_min_gpu_pct()), _resolve_hot_kernel_top_n()
+    ):
         aliases = group_key_aliases.get(row.group_key)
         if integrated.covers(
             kernel_ids=row.members,

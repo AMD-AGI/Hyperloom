@@ -540,10 +540,8 @@ class TestE2EValidationFailsOpen:
 
         from hyperloom.orchestrator.phases.kernel import KernelPhase
 
-        recorded: list[dict] = []
         saved: list[object] = []
         state = SimpleNamespace(
-            record_gemm_tuning=recorded.append,
             save=saved.append,
             macro_cycle=0,
             gemm_tuning_attempts=[],
@@ -566,7 +564,7 @@ class TestE2EValidationFailsOpen:
             "timeline",
         ):
             setattr(phase, name, MethodType(getattr(KernelPhase, name), phase))
-        return phase, recorded
+        return phase, state
 
     @pytest.mark.asyncio
     async def test_exception_is_recorded_as_a_fault_not_raised(self, tmp_path):
@@ -575,12 +573,12 @@ class TestE2EValidationFailsOpen:
         async def _boom(_result):
             raise RuntimeError("e2e exploded")
 
-        phase, recorded = self._phase(tmp_path, _boom)
+        phase, state = self._phase(tmp_path, _boom)
         result: dict = {"backend": "forge"}
 
         await KernelPhase._handle_gemm_tuning_result(phase, result)
 
-        assert recorded == [result]
+        assert [attempt["backend"] for attempt in state.gemm_tuning_attempts] == ["forge"]
         fault = result["e2e_results"]["faults"][0]
         assert fault["error_class"] == "e2e_validation_exception"
         assert "RuntimeError: e2e exploded" in fault["error"]
@@ -640,10 +638,10 @@ class TestE2EValidationFailsOpen:
         async def _ok(_result):
             return None
 
-        phase, recorded = self._phase(tmp_path, _ok)
+        phase, state = self._phase(tmp_path, _ok)
         result: dict = {"backend": "forge"}
 
         await KernelPhase._handle_gemm_tuning_result(phase, result)
 
-        assert recorded == [result]
+        assert [attempt["backend"] for attempt in state.gemm_tuning_attempts] == ["forge"]
         assert "e2e_results" not in result

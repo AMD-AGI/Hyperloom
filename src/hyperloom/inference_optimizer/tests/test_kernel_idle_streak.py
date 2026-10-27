@@ -48,7 +48,6 @@ def _arm_kernel_phase(st):
     """Park the session mid-KERNEL with plenty of budget and session time left."""
     now = datetime.now(timezone.utc)
     st.phase = ps.PHASE_KERNEL_AGENT
-    st.phase_started_ts = (now - timedelta(minutes=20)).isoformat()
     st.phase_started_unix = (now - timedelta(minutes=20)).timestamp()
     st.start_ts = (now - timedelta(minutes=30)).isoformat()
     st.max_minutes = 96 * 60

@@ -1700,8 +1700,6 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
             await coord.stop()
         assert reason == "time_exhausted"
         assert time.monotonic() - started < 15.0
-        assert "close_backends" in coord.shared_state.teardown_timings_sec
-        assert coord.shared_state.teardown_timings_sec["total"] >= 0.0
 
     @pytest.mark.asyncio
     async def test_a_server_still_up_at_exit_is_reaped_by_teardown(self, coord: Coordinator):
@@ -1757,6 +1755,5 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
                 proc.kill()
                 proc.wait(timeout=10)
 
-        assert "reap_orphaned_servers" in coord.shared_state.teardown_timings_sec
         assert reaped, "teardown left the serving process alive"
         assert not pidfile.exists()
