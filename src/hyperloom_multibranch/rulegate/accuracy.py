@@ -8,7 +8,7 @@ from __future__ import annotations
 import statistics
 from collections.abc import Sequence
 
-from hyperloom.common.accuracy import (
+from hyperloom.common.gain_math import (
     AGENTX_ERROR_RATE_THRESHOLD_PCT,
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     accuracy_meets_floor,

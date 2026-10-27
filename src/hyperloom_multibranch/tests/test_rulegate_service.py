@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.accuracy import ACCURACY_METRICS
+from hyperloom.common.gain_math import ACCURACY_METRICS
 from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_DURATION,

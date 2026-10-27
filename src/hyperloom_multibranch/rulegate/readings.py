@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import statistics
 
-from hyperloom.common.accuracy import ACCURACY_METRICS
+from hyperloom.common.gain_math import ACCURACY_METRICS
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom.contracts.measurement import RequestClasses, RoundValue, TestResult, Validity
 from hyperloom_multibranch.rulegate.inferencex import InferenceXReading

@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from hyperloom.common.accuracy import ACCURACY_METRICS
+from hyperloom.common.gain_math import ACCURACY_METRICS
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from statistics import fmean
 from typing import Any
 
-from hyperloom.common.accuracy import ACCURACY_METRICS
+from hyperloom.common.gain_math import ACCURACY_METRICS
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import AccuracyValue, Purpose, TestKind, TestRequest, TestResult, Validity
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta, apply

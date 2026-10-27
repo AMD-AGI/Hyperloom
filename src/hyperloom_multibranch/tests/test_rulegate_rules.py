@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from hyperloom.common.accuracy import ACCURACY_METRICS, AGENTX_ERROR_RATE_THRESHOLD_PCT
+from hyperloom.common.gain_math import ACCURACY_METRICS, AGENTX_ERROR_RATE_THRESHOLD_PCT
 from hyperloom.common.perf_metric import GRADED_ERROR_RATE, GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom.contracts.measurement import AccuracyValue, Purpose, RoundValue
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, Verdict

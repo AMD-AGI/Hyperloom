@@ -10,7 +10,7 @@ import statistics
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from hyperloom.common.accuracy import finite_score
+from hyperloom.common.gain_math import finite_score
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, AccuracyVerdict, Judgement, Verdict

@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.accuracy import (
+from hyperloom.common.gain_math import (
     ACCURACY_METRICS,
     ACCURACY_THRESHOLD,
     AGENTX_ERROR_RATE_THRESHOLD_PCT,

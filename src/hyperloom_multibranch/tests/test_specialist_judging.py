@@ -7,7 +7,7 @@ from dataclasses import replace
 
 import pytest
 
-from hyperloom.common.accuracy import ACCURACY_METRICS
+from hyperloom.common.gain_math import ACCURACY_METRICS
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import (
     NOT_REPRODUCED,

@@ -63,13 +63,12 @@ cyclomatic-complexity src/hyperloom/orchestrator/trace_analysis/bypass_trace_ana
 cyclomatic-complexity src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::main 44
 dead-code src/hyperloom/orchestrator/actions/executors/_grid_runner.py::SessionDirField.__get__:objtype 1
 dead-code src/kernelforge/loop/run_state.py::WorkspaceLock.__exit__:exc_value 1
-# src/hyperloom/common: 57 on main, 59 on multibranch-dev. One entry is toolbox's common/outside_facts/, which goes to
-# main in AMD-AGI/Hyperloom#2155 (PR-3); the other is specialist's common/accuracy.py, which folds into
-# common/gain_math.py in the PR that takes the accuracy bars to main. Lower this line as each lands (#121 c2544, c2545).
-directory-entries src/hyperloom/common 59
+# src/hyperloom/common: 57 on main, 58 on multibranch-dev. The extra entry is toolbox's common/outside_facts/, which
+# goes to main in AMD-AGI/Hyperloom#2155 (PR-3); lower this line when it lands (#121 c2544, c2545).
+directory-entries src/hyperloom/common 58
 # src/hyperloom/orchestrator/actions/executors: 84 on main, 85 on multibranch-dev. The extra entry is specialist's
-# executors/magpie_confined.py; it goes, and this line drops back to 84, once Magpie scopes its leftover-server sweep
-# to the caller's sandbox (#121 c2544, c2553).
+# executors/magpie_confined.py; it goes, and this line drops back to 84, once multibranch measures in the sandbox
+# service, where no leftover server outlives its sandbox (#121 c2544, c2553).
 directory-entries src/hyperloom/orchestrator/actions/executors 85
 duplicated-lines src/hyperloom/inference_optimizer/breakdown/collectors/sessions.py 19
 duplicated-lines src/hyperloom/inference_optimizer/breakdown/recorder/recorder.py 28

@@ -12,7 +12,7 @@ import sys
 
 import pytest
 
-from hyperloom.common.accuracy import ACCURACY_METRICS
+from hyperloom.common.gain_math import ACCURACY_METRICS
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe, RecipeDelta
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig

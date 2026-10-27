@@ -15,7 +15,7 @@ import json
 import math
 from pathlib import Path
 
-from hyperloom.common.accuracy import ACCURACY_METRICS
+from hyperloom.common.gain_math import ACCURACY_METRICS
 from hyperloom.contracts.measurement import AccuracyValue
 
 __all__ = ["DISCARDED_DIRS", "RESULT_METRICS", "read_accuracy"]
