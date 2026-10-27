@@ -680,6 +680,21 @@ def test_the_dormant_lever_bundle_goes_ahead_of_queued_integrates():
     assert order == ["bundle", "patch-1", "patch-2", "explore"]
 
 
+def test_a_cycle_batch_goes_ahead_of_queued_integrates():
+    """GLM-5.3: 17 integrates queued behind the reference batch would each take a full replay before the screen opened."""
+    queued = [
+        _task("patch-1", "integrate_patch"),
+        _task("patch-2", "integrate_patch"),
+        _task("explore", "explore", grid=[]),
+        _task("reference", "explore", reason="cycle_bench_batch", cycle_arms=[]),
+        _task("screen", "explore", reason="cycle_bench_batch", cycle_arms=[{"name": "HL_ONE"}]),
+    ]
+
+    order = [t.task_id for t in in_dispatch_order(queued, "FRAMEWORK_AGENT")]
+
+    assert order == ["reference", "screen", "patch-1", "patch-2", "explore"]
+
+
 # Bench of custom proposals
 class _BenchTasks:
     def __init__(self, queued=(), running=()) -> None:

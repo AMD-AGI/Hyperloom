@@ -43,13 +43,24 @@ def _is_lever_bundle(kind: str, params: dict[str, Any] | None) -> bool:
     return kind == "explore" and str((params or {}).get("reason") or "") == LEVER_BUNDLE_REASON
 
 
+def _is_cycle_batch(kind: str, params: dict[str, Any] | None) -> bool:
+    """Whether a task is a cycle-bench batch; the integrates queued behind it are admitted dormant only once it ran."""
+    from ..actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
+
+    return kind == "explore" and CYCLE_ARMS_PARAM in (params or {})
+
+
 def in_dispatch_order(queued: list[Task], phase: str) -> list[Task]:
-    """Return ``queued`` grouped as operator work and the dormant-lever bundle, then ``phase``'s dispatch-first kinds,
-    then the rest, each in order."""
+    """Return ``queued`` grouped as operator work, the dormant-lever bundle and cycle batches, then ``phase``'s
+    dispatch-first kinds, then the rest, each in order."""
     first = PHASE_DISPATCH_FIRST.get(phase, frozenset())
 
     def tier(task: Task) -> int:
-        if is_operator_work(task.kind, task.params) or _is_lever_bundle(task.kind, task.params):
+        if (
+            is_operator_work(task.kind, task.params)
+            or _is_lever_bundle(task.kind, task.params)
+            or _is_cycle_batch(task.kind, task.params)
+        ):
             return 0
         return 1 if task.kind in first else 2
 
