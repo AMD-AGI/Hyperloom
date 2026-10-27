@@ -177,9 +177,10 @@ def test_the_bypass_roofline_reads_the_same_specs():
     assert _bypass_roofline.HW_SPECS is roofline_ceiling.HW_SPECS
 
 
-def test_server_reuse_covers_the_vllm_script_of_every_boards_runner():
+def test_server_reuse_covers_the_vllm_script_of_every_reusing_runner():
     from hyperloom.orchestrator.actions.executors._server_lifecycle import MAGPIE_BUILTIN_SCRIPTS
 
     assert MAGPIE_BUILTIN_SCRIPTS == gpu_types.magpie_reuse_scripts()
     for product in AMD_GPU_BOARDS:
-        assert f"vllm_{gpu_types.gpu_runner_type(product)}.sh" in MAGPIE_BUILTIN_SCRIPTS, product
+        if gpu_types._board_policy(product).runner.reuse_frameworks:
+            assert f"vllm_{gpu_types.gpu_runner_type(product)}.sh" in MAGPIE_BUILTIN_SCRIPTS, product
