@@ -9,6 +9,7 @@ import pytest
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe, RecipeDelta, apply
 from hyperloom.hosted.mcp_server import InvalidParamsError, ToolError
 from hyperloom.measure.compile import LocalBlobStore, PackageBase
+from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.specialist.tools import register_worktree_tools
 from hyperloom_multibranch.specialist.worktree import SourceBase
@@ -167,3 +168,36 @@ async def test_a_new_component_whose_install_names_no_commit_is_said_so_with_the
     change = RecipeDelta.from_document(taken["delta"]).components[0]
     assert change.upstream_ref is None and change.add_patches
     assert "set upstream_repo and upstream_ref" in taken["note"]
+
+
+async def test_a_patch_to_a_component_with_a_native_tree_names_the_commit_that_tree_was_laid_out_from(tmp_path):
+    installed = _installed_checkout(tmp_path, version_suffix="0.11.0")
+    checkout = tmp_path / "sources" / "vllm" / ("2" * 40)
+    (checkout / "csrc").mkdir(parents=True)
+    (checkout / "csrc" / "cache.cu").write_bytes(b"int block = 16;\n")
+    tree = NativeTree(SourceRoot("csrc", checkout / "csrc"), "https://github.com/vllm-project/vllm.git", "2" * 40)
+    bare = Recipe(ROOT.base_image_digest, ROOT.launch)
+    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed, native={"vllm": tree})
+    base.build(["vllm"])
+    repo = GitExperimentRepo(
+        tmp_path / "experiments.git",
+        LocalBlobStore(tmp_path / "blobs"),
+        lambda _layout: installed,
+        native={"vllm": tree},
+    )
+    await repo.create_branch(BRANCH, await repo.init_root(bare))
+    server = _Server()
+
+    def worktrees(branch):
+        return base.worktree(branch, tmp_path / "worktrees" / branch)
+
+    register_worktree_tools(server, repo=repo, worktrees=worktrees, locator=lambda _layout: installed)
+    await server.call("worktree_sync")
+    (worktrees(BRANCH).path / "csrc" / "cache.cu").write_bytes(b"int block = 32;\n")
+
+    taken = await server.call("worktree_patch", component="vllm")
+
+    component = apply(bare, RecipeDelta.from_document(taken["delta"])).component("vllm")
+    assert (component.upstream_repo, component.upstream_ref) == ("https://github.com/vllm-project/vllm.git", "2" * 40)
+    assert "note" not in taken
+    assert b"b/csrc/cache.cu" in LocalBlobStore(tmp_path / "blobs").get(component.patches[0].sha256)

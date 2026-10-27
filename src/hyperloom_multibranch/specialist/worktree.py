@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The code a specialist edits: the installed packages, with the source beside them they build from (aiter's csrc), as
-a git repository, one worktree per branch.
+"""The code a specialist edits: the installed packages, with the source beside them they build from (aiter's csrc) and,
+where the host builds native code, the tree that build compiles (sgl-kernel's C++), as a git repository, one worktree
+per branch.
 
 The toolbox applies a recipe's patches to the packages installed in the image, so a specialist writes its change
 against those same files. The session's source base commits them laid out as their upstream repositories lay them out,
@@ -19,7 +20,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
@@ -29,7 +30,7 @@ from hyperloom.measure.compile import (
     UnsupportedComponentError,
     locate_installed_package,
 )
-from hyperloom_multibranch.contracts.sources import meta_sections, source_roots
+from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
 
 #: Built files a text patch can never change.
 SKIPPED = ("__pycache__", "*.pyc", "*.pyo", "*.so", "*.a", "*.o", "*.co", "*.hsaco")
@@ -111,7 +112,8 @@ def _commit_all(cwd: Path, message: str) -> None:
 
 
 class SourceBase:
-    """The session's base repository at ``path``; its ``installed`` branch holds every component's installed package."""
+    """The session's base repository at ``path``; its ``installed`` branch holds every component's installed package,
+    and the native tree of each component in ``native``."""
 
     def __init__(
         self,
@@ -119,10 +121,12 @@ class SourceBase:
         *,
         locator: PackageLocator = locate_installed_package,
         layouts: Mapping[str, ComponentLayout] = COMPONENT_LAYOUTS,
+        native: Mapping[str, NativeTree] | None = None,
     ) -> None:
         self.path = path
         self._locator = locator
         self._layouts = layouts
+        self._native = dict(native or {})
 
     def build(self, components: Sequence[str]) -> None:
         """Copy each component's installed package and meta trees to their upstream paths and commit them; a session
@@ -144,6 +148,9 @@ class SourceBase:
             excluded += [f"/{package.prefix}/{built}/" for built in layout.generated]
             for meta in (meta for meta in metas if meta.path.is_dir()):
                 shutil.copytree(meta.path, self.path / meta.prefix, ignore=_ignore(meta.path, ()))
+            native = self._native.get(component)
+            if native is not None:
+                self._lay_native(native.root, (package, *metas))
         (self.path / ".git" / "info").mkdir(exist_ok=True)
         (self.path / ".git" / "info" / "exclude").write_text("".join(f"{line}\n" for line in excluded))
         _commit_all(self.path, BASE_BRANCH)
@@ -152,7 +159,15 @@ class SourceBase:
         """The worktree of ``branch`` at ``path``, added at the installed packages the first time."""
         if not path.exists():
             _git(self.path, "worktree", "add", "-b", f"mb/{branch}", str(path), BASE_BRANCH)
-        return BranchWorktree(path, self._layouts)
+        return BranchWorktree(path, self._layouts, self._native)
+
+    def _lay_native(self, native: SourceRoot, laid: Sequence[SourceRoot]) -> None:
+        """Copy ``native`` to its upstream path, but for what ``laid`` already put there: the package a test loads is
+        the installed one, whatever the checkout holds at its path."""
+        inside = PurePosixPath(native.prefix)
+        held = [PurePosixPath(root.prefix) for root in laid]
+        kept = [path.relative_to(inside).as_posix() for path in held if inside in path.parents]
+        shutil.copytree(native.path, self.path / native.prefix, ignore=_ignore(native.path, kept), dirs_exist_ok=True)
 
     def _layout(self, component: str) -> ComponentLayout:
         layout = self._layouts.get(component)
@@ -199,14 +214,22 @@ class BranchWorktree:
         self,
         path: Path,
         layouts: Mapping[str, ComponentLayout] = COMPONENT_LAYOUTS,
+        native: Mapping[str, NativeTree] | None = None,
     ) -> None:
         self.path = path
         self._layouts = layouts
+        self._native = dict(native or {})
 
     def holds(self, component: str) -> bool:
         """Whether the source base laid out ``component``; a recipe's patches to any other component are not here."""
         layout = self._layouts.get(component)
         return layout is not None and (self.path / layout.upstream_prefix).is_dir()
+
+    def native_upstream(self, component: str) -> Upstream | None:
+        """The commit ``component``'s native tree was laid out from, which a change to it is a diff against; ``None``
+        when the base laid none."""
+        native = self._native.get(component)
+        return None if native is None else Upstream(native.upstream_repo, native.upstream_ref)
 
     def head(self) -> str | None:
         """The experiment commit HEAD holds, or ``None`` while it holds the installed packages alone."""
@@ -293,13 +316,14 @@ class BranchWorktree:
         return _git(self.path, _DIFF, _CACHED, *options, _HEAD, "--", *paths)
 
     def _paths(self, component: str) -> tuple[str, ...]:
-        """``component``'s package and the meta trees the source base laid out beside it."""
+        """``component``'s package, the meta trees the source base laid out beside it, and its native tree."""
         layout = self._layouts.get(component)
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout")
-        metas = [section.prefix for section in meta_sections(layout)]
+        native = self._native.get(component)
+        trees = [section.prefix for section in meta_sections(layout)] + ([native.root.prefix] if native else [])
         # A pathspec that names nothing fails the stage, and an install may ship no meta tree.
-        held = _git(self.path, "ls-tree", "--name-only", BASE_BRANCH, "--", *metas).splitlines() if metas else []
+        held = _git(self.path, "ls-tree", "--name-only", BASE_BRANCH, "--", *trees).splitlines() if trees else []
         return (layout.upstream_prefix, *held)
 
 

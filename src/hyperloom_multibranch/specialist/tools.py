@@ -132,7 +132,9 @@ def _patch(
         change = ComponentChange(component, add_patches=(ref,))
         taken: dict[str, Any] = {"parent_commit": head, "patch": ref.to_document()}
         if all(present.component != component for present in (await repo.read_recipe(head)).components):
-            upstream = await asyncio.to_thread(installed_upstream, locator(COMPONENT_LAYOUTS[component]))
+            upstream = worktree.native_upstream(component) or await asyncio.to_thread(
+                installed_upstream, locator(COMPONENT_LAYOUTS[component])
+            )
             if upstream is None:
                 taken["note"] = (
                     f"{component} is new on your head and its installed package names no commit it was built from: "

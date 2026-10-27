@@ -7,7 +7,8 @@ import pytest
 
 from hyperloom.contracts.recipe import ComponentPatches, PatchRef
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, LocalBlobStore, PackageBase, apply_patch_stack
-from hyperloom_multibranch.specialist.worktree import SourceBase
+from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot
+from hyperloom_multibranch.specialist.worktree import SourceBase, Upstream
 
 VLLM = "https://github.com/vllm-project/vllm"
 CONFIG, SCHEDULER = b"max_num_seqs = 128\n", b"policy = 'fcfs'\n"
@@ -129,3 +130,50 @@ def test_a_diff_from_a_commit_holds_new_files_under_a_nested_package_and_leaves_
 
     assert "b/python/sglang/srt/tuned.csv" in patch and "b/python/sglang/srt/kernel.py" in patch
     assert ".pyc" not in patch and "ops.so" not in patch
+
+
+AOT = "python/sglang/kernels/aot"
+SGLANG = "https://github.com/sgl-project/sglang.git"
+
+
+def _native_base(tmp_path):
+    """sgl-kernel installed as a wheel, and the native build's checkout of its sources at the image's commit."""
+    package = tmp_path / "site-packages" / "sgl_kernel"
+    package.mkdir(parents=True)
+    (package / "gemm.py").write_bytes(b"installed = True\n")
+    checkout = tmp_path / "sources" / "sgl_kernel" / ("2" * 40)
+    for path, text in {
+        "csrc/gemm.cu": b"int tile = 64;\n",
+        "python/sgl_kernel/gemm.py": b"installed = False\n",
+        "python/sgl_kernel/common_ops.so": b"\x7fELF",
+        "CMakeLists.txt": b"project(sgl)\n",
+    }.items():
+        (checkout / AOT / path).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / AOT / path).write_bytes(text)
+    tree = NativeTree(SourceRoot(AOT, checkout / AOT), SGLANG, "2" * 40)
+    installed = PackageBase("sgl_kernel", package, None, None)
+    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed, native={"sgl_kernel": tree})
+    base.build(["sgl_kernel"])
+    return base
+
+
+def test_the_base_lays_the_native_tree_beside_the_installed_package_without_replacing_it(tmp_path):
+    base = _native_base(tmp_path)
+
+    assert (base.path / AOT / "csrc" / "gemm.cu").read_bytes() == b"int tile = 64;\n"
+    assert (base.path / AOT / "python" / "sgl_kernel" / "gemm.py").read_bytes() == b"installed = True\n"
+    assert not (base.path / AOT / "python" / "sgl_kernel" / "common_ops.so").exists()
+
+
+def test_a_change_to_the_native_tree_is_in_the_component_s_diff_and_names_its_commit(tmp_path):
+    base = _native_base(tmp_path)
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    (worktree.path / AOT / "csrc" / "gemm.cu").write_bytes(b"int tile = 128;\n")
+    (worktree.path / AOT / "python" / "sgl_kernel" / "gemm.py").write_bytes(b"installed = 2\n")
+
+    patch = worktree.diff("sgl_kernel")
+
+    assert f"b/{AOT}/csrc/gemm.cu" in patch and f"b/{AOT}/python/sgl_kernel/gemm.py" in patch
+    assert worktree.native_upstream("sgl_kernel") == Upstream(SGLANG, "2" * 40)
+    assert worktree.native_upstream("vllm") is None
