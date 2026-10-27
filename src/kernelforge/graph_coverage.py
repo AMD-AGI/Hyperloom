@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from kernelforge.serving_windows import StepWindow, step_windows
 from kernelforge.trace_events import KERNEL_CAT, load_trace_events
@@ -40,6 +40,35 @@ def _launch_correlations(events: list[dict[str, Any]]) -> set[Any]:
     }
 
 
+class _KernelTime(NamedTuple):
+    kernels: int
+    eager: int
+    total_us: float
+    eager_us: float
+
+
+def _kernel_time_in(events: list[dict[str, Any]], spans: list[tuple[float, float]], launched: set[Any]) -> _KernelTime:
+    """Kernel counts and time of the kernels starting inside *spans*, and the eagerly launched share of them."""
+    kernels = eager = 0
+    total_us = eager_us = 0.0
+    for event in events:
+        if event.get("cat") != KERNEL_CAT:
+            continue
+        start, duration = event.get("ts"), event.get("dur")
+        if isinstance(start, bool) or not isinstance(start, (int, float)):
+            continue
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0:
+            continue
+        if not any(lo <= start < hi for lo, hi in spans):
+            continue
+        kernels += 1
+        total_us += float(duration)
+        if (event.get("args") or {}).get("correlation") in launched:
+            eager += 1
+            eager_us += float(duration)
+    return _KernelTime(kernels, eager, total_us, eager_us)
+
+
 def graph_coverage(trace_path: str | Path | None) -> dict[str, dict[str, Any]]:
     """Per window class, how much of its kernel time replays a graph rather than launching per kernel."""
     if not str(trace_path or "").strip():
@@ -57,23 +86,7 @@ def graph_coverage(trace_path: str | Path | None) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for window_class, members in by_class.items():
         spans = sorted((w.start_us, w.end_us) for w in members)
-        kernels = eager = 0
-        total_us = eager_us = 0.0
-        for event in events:
-            if event.get("cat") != KERNEL_CAT:
-                continue
-            start, duration = event.get("ts"), event.get("dur")
-            if isinstance(start, bool) or not isinstance(start, (int, float)):
-                continue
-            if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0:
-                continue
-            if not any(lo <= start < hi for lo, hi in spans):
-                continue
-            kernels += 1
-            total_us += float(duration)
-            if (event.get("args") or {}).get("correlation") in launched:
-                eager += 1
-                eager_us += float(duration)
+        kernels, eager, total_us, eager_us = _kernel_time_in(events, spans, launched)
         if not kernels:
             continue
         eager_time_share = eager_us / total_us if total_us else 0.0

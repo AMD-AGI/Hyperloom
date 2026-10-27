@@ -88,10 +88,8 @@ def _measured_on_this_stack(rec: dict[str, Any], state: Any) -> bool:
     )
 
 
-def _config_lever_from_proposal(entry: Mapping[str, Any]) -> dict[str, Any]:
-    """The server args and env overrides one lever proposal carries, dropping args Magpie cannot transport."""
-    extra_envs = {str(k).strip(): str(v) for k, v in to_mapping(entry.get("extra_envs")).items() if str(k).strip()}
-    args = entry.get("extra_args")
+def _lever_server_args(args: Any) -> tuple[Any, str]:
+    """``(parsed server args or None, fault)`` for a lever's ``extra_args``; *fault* is empty when they transport."""
     tokens = [str(a) for a in args if str(a).strip()] if isinstance(args, (list, tuple)) else []
     if any(ch.isspace() for token in tokens for ch in token):
         text, fault = "", "has a whitespace-bearing argv token"
@@ -104,6 +102,13 @@ def _config_lever_from_proposal(entry: Mapping[str, Any]) -> dict[str, Any]:
             if isinstance(args, str)
             else "has unparsable server args"
         )
+    return parsed_args, fault
+
+
+def _config_lever_from_proposal(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """The server args and env overrides one lever proposal carries, dropping args Magpie cannot transport."""
+    extra_envs = {str(k).strip(): str(v) for k, v in to_mapping(entry.get("extra_envs")).items() if str(k).strip()}
+    parsed_args, fault = _lever_server_args(entry.get("extra_args"))
     if fault:
         log.warning(
             "FRAMEWORK config lever %r %s; dropping the args%s",

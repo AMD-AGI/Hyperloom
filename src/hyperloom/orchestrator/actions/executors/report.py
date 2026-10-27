@@ -459,6 +459,31 @@ def _cumulative_validation_status(summary: dict[str, Any]) -> str:
     return "current"
 
 
+def _performance_comparison(state: SharedState, graded: Any) -> dict[str, Any]:
+    """The summary's comparison of the current best against the reference run."""
+    from hyperloom.common.gain_math import gain_pct
+
+    best_workspace = (state.current_best or {}).get("workspace")
+    return {
+        "objective": graded.objective,
+        "reference": graded.reference,
+        "candidate": graded.candidate,
+        "gain_pct": gain_pct(graded.candidate, graded.reference),
+        # Read off the two runs' per-request exports; absent when either run no longer has them.
+        "interval": comparison_interval(best_workspace, _reference_workspace(state), graded.objective),
+        "regimes": comparison_regimes(best_workspace, _reference_workspace(state)),
+        # Read off the current best's own requests: a front-end cost is a property of one run, not of a pair.
+        "input_cost": input_cost(best_workspace or _reference_workspace(state)),
+        "comparable": graded.comparable,
+        "degrade_reason": graded.degrade_reason,
+        "verdict": graded.verdict,
+        # Total is snapshotted alongside the objective so a re-rendered report reads the figures the round
+        # actually measured, instead of a ``current_best`` that has since moved on.
+        "tput_reference": graded.tput_reference,
+        "tput_candidate": graded.tput_candidate,
+    }
+
+
 def _build_summary_dict(
     state: SharedState,
     ev_counts: dict[str, int],
@@ -468,8 +493,6 @@ def _build_summary_dict(
     session_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Assemble the machine-readable session summary dict."""
-    from hyperloom.common.gain_math import gain_pct
-
     from ...state.shared_state import resolve_graded_comparison
 
     graded = resolve_graded_comparison(state, state.current_best, against_baseline=True)
@@ -494,31 +517,7 @@ def _build_summary_dict(
         "grading": dict(getattr(state, "grading", None) or {}),
         "baseline_accuracy": state.baseline_accuracy,
         "current_best": state.current_best,
-        "performance_comparison": {
-            "objective": graded.objective,
-            "reference": graded.reference,
-            "candidate": graded.candidate,
-            "gain_pct": gain_pct(graded.candidate, graded.reference),
-            # Read off the two runs' per-request exports; absent when either run no longer has them.
-            "interval": comparison_interval(
-                (state.current_best or {}).get("workspace"),
-                _reference_workspace(state),
-                graded.objective,
-            ),
-            "regimes": comparison_regimes(
-                (state.current_best or {}).get("workspace"),
-                _reference_workspace(state),
-            ),
-            # Read off the current best's own requests: a front-end cost is a property of one run, not of a pair.
-            "input_cost": input_cost((state.current_best or {}).get("workspace") or _reference_workspace(state)),
-            "comparable": graded.comparable,
-            "degrade_reason": graded.degrade_reason,
-            "verdict": graded.verdict,
-            # Total is snapshotted alongside the objective so a re-rendered report reads the figures the round
-            # actually measured, instead of a ``current_best`` that has since moved on.
-            "tput_reference": graded.tput_reference,
-            "tput_candidate": graded.tput_candidate,
-        },
+        "performance_comparison": _performance_comparison(state, graded),
         # Preserve the historical validation stamp, even when it disagrees with today's diagnostic.
         "cumulative_gain_validated": state.cumulative_gain_validated,
         "cumulative_gain_validated_ts": state.cumulative_gain_validated_ts,

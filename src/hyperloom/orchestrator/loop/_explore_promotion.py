@@ -24,10 +24,8 @@ from ..state.task_registry import Task
 log = logging.getLogger(__name__)
 
 
-def _cycle_attribution(valid: bool, verdict: Mapping[str, Any]) -> tuple[float | None, str]:
-    """The ``(gain, source)`` a cycle verdict records; a void batch and a broken arm fall back to replay attribution."""
-    if not valid:
-        return None, ATTRIBUTION_CYCLE_INCONCLUSIVE
+def _cycle_attribution(verdict: Mapping[str, Any]) -> tuple[float | None, str]:
+    """The ``(gain, source)`` one arm's verdict in a valid batch records; a broken arm falls back to replay."""
     if verdict.get("verdict") == VERDICT_BROKEN or "gain_pct" not in verdict:
         return None, ATTRIBUTION_CYCLE_BROKEN
     return float(verdict["gain_pct"]), ATTRIBUTION_CYCLE_BENCH
@@ -131,9 +129,12 @@ class ExplorePromotionMixin:
 
     def _record_cycle_batch(self, result: Mapping[str, Any]) -> None:
         """Write a cycle batch's verdict onto every lever its arms switched on."""
+        if not result.get("valid"):
+            self._release_unscreened_levers(result)
+            return
         verdicts = result.get("verdicts") or {}
         for arm in result.get(CYCLE_ARMS_PARAM) or []:
-            gain, source = _cycle_attribution(bool(result.get("valid")), verdicts.get(str(arm.get("name") or "")) or {})
+            gain, source = _cycle_attribution(verdicts.get(str(arm.get("name") or "")) or {})
             for switch in arm.get("envs") or {}:
                 self.shared_state.record_framework_lever_attribution(str(switch), gain_pct=gain, source=source)
 
