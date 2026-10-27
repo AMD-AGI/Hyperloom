@@ -224,6 +224,30 @@ def test_native_power_reaches_baseline_and_keep_budgets(report, tmp_path, watts,
         assert measurement["gpu_power_by_gpu_w"] == {"0": watts}
 
 
+def test_the_rounds_aiperf_export_gives_the_corpus_shape_its_sequence_lengths(report, tmp_path):
+    """Magpie's report carries no sequence lengths; aiperf's own summary in the round's artifacts does."""
+    from hyperloom.inference_optimizer.agentx.mapping import map_corpus_shape
+
+    artifacts = tmp_path / "benchmark_sglang_round" / "aiperf_artifacts"
+    artifacts.mkdir(parents=True)
+    isl = {"unit": "tokens", "avg": 153732.5, "p50": 108140.0, "p75": 180420.5, "p90": 362330.6, "p99": 557494.0}
+    osl = {"unit": "tokens", "avg": 773.4, "p50": 378.5, "p75": 775.25, "p90": 1404.2, "p99": 7313.2}
+    export = {"input_sequence_length": isl, "output_sequence_length": osl}
+    (artifacts / "profile_export_aiperf.json").write_text(json.dumps(export))
+
+    measured = extract_benchmark_measurement(report, workspace=artifacts.parent)
+
+    shape = map_corpus_shape(measured)
+    assert shape["isl"] == {"avg": 153732, "p50": 108140, "p75": 180420, "p90": 362330, "p99": 557494}
+    assert shape["osl"] == {"avg": 773, "p50": 378, "p75": 775, "p90": 1404, "p99": 7313}
+
+
+def test_a_round_without_an_aiperf_export_reports_no_sequence_lengths(report, tmp_path):
+    measured = extract_benchmark_measurement(report, workspace=tmp_path)
+
+    assert ("isl_distribution" in measured, "osl_distribution" in measured) == (False, False)
+
+
 def test_public_metrics_and_identity_reach_keep_guards(report):
     measured = extract_benchmark_measurement(report)
     assert measured["e2e_norm_intvty_p50"] == 25

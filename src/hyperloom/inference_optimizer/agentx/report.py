@@ -123,6 +123,34 @@ def native_launch_evidence(
     }
 
 
+_SHAPE_PERCENTILES = ("avg", "p50", "p75", "p90", "p99")
+_SEQUENCE_LENGTHS = (("isl_distribution", "input_sequence_length"), ("osl_distribution", "output_sequence_length"))
+
+
+def aiperf_sequence_lengths(workspace: Path | None) -> dict[str, dict[str, int]]:
+    """The round's ISL/OSL percentiles from aiperf's own summary, which Magpie's report does not carry."""
+    if workspace is None:
+        return {}
+    exports = sorted(
+        Path(workspace).glob("**/aiperf_artifacts/profile_export_aiperf.json"), key=lambda p: p.stat().st_mtime
+    )
+    if not exports:
+        return {}
+    try:
+        export = json.loads(exports[-1].read_text())
+    except (OSError, ValueError):
+        return {}
+    metrics = export.get("metrics") if isinstance(export.get("metrics"), dict) else export
+    lengths: dict[str, dict[str, int]] = {}
+    for field, name in _SEQUENCE_LENGTHS:
+        metric = metrics.get(name) if isinstance(metrics, dict) else None
+        if isinstance(metric, dict):
+            shape = {key: int(metric[key]) for key in _SHAPE_PERCENTILES if isinstance(metric.get(key), (int, float))}
+            if shape:
+                lengths[field] = shape
+    return lengths
+
+
 def read_agentx_report(workspace: Path) -> dict[str, Any] | None:
     """Read the latest public AgentX report for the shared correctness gate."""
     paths = list(workspace.rglob("benchmark_report.json"))
