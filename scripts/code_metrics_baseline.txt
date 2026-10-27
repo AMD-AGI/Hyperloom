@@ -583,7 +583,6 @@ function-lines src/kernelforge/cli/forge_loop_command.py::_collect_pr_kb_context
 function-lines src/kernelforge/cli/forge_loop_command.py::_prepare_measurement_driver 58
 function-lines src/kernelforge/cli/forge_loop_command.py::_read_kb_warm_start 61
 function-lines src/kernelforge/cli/forge_loop_command.py::forge_loop 420
-function-lines src/kernelforge/cli/forge_rewrite_command.py::forge_rewrite 59
 function-lines src/kernelforge/config.py::Config.from_env 67
 function-lines src/kernelforge/evaluation/benchmark/baseline.py::check_baseline_against_reference 62
 function-lines src/kernelforge/evaluation/benchmark/runner.py::_sweep_cli 58

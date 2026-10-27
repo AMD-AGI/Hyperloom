@@ -218,27 +218,44 @@ def test_optimize_leaves_the_loop_on_its_own_baseline_when_not_given_one(tmp_pat
     assert not (tmp_path / "forge_loop_baseline.json").exists()
 
 
-@pytest.mark.parametrize(("requested", "passed"), [({}, "off"), ({"roofline_ceiling": True}, "on")])
-def test_optimize_spells_the_roofline_switch_out_for_the_nested_loop(tmp_path, monkeypatch, requested, passed):
-    """Spelled out even when off, so the loop never falls back on a default this caller did not choose."""
+def _nested_loop_command(tmp_path, monkeypatch, request: optimize.OptimizeRequest) -> list[str]:
+    """The forge-loop command line ``run_optimize`` launches for ``request``."""
     captured = {}
 
     def fake_popen(command, **_kwargs):
         captured["command"] = command
-        return _FakeProc(["Experiment: EXP-ROOFLINE\n"])
+        return _FakeProc(["Experiment: EXP-NESTED\n"])
 
     monkeypatch.setattr(optimize.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
-    optimize.run_optimize(
-        _spec(tmp_path),
-        "driver.py",
-        Config.from_env(workspace=str(tmp_path)),
-        optimize.OptimizeRequest(str(tmp_path), **requested),
-    )
+    optimize.run_optimize(_spec(tmp_path), "driver.py", Config.from_env(workspace=str(tmp_path)), request)
+    return captured["command"]
 
-    command = captured["command"]
+
+@pytest.mark.parametrize(("requested", "passed"), [({}, "off"), ({"roofline_ceiling": True}, "on")])
+def test_optimize_spells_the_roofline_switch_out_for_the_nested_loop(tmp_path, monkeypatch, requested, passed):
+    """Spelled out even when off, so the loop never falls back on a default this caller did not choose."""
+    command = _nested_loop_command(tmp_path, monkeypatch, optimize.OptimizeRequest(str(tmp_path), **requested))
+
     assert command.count("--roofline-ceiling") == 1
     assert command[command.index("--roofline-ceiling") + 1] == passed
+
+
+def test_optimize_hands_the_requested_loop_shape_to_the_nested_loop(tmp_path, monkeypatch):
+    """A caller comparing search strategies gets the lanes and strategy it named, not the nested loop's defaults."""
+    options = optimize.OptimizeOptions(lanes=3, search_strategy="tree")
+    command = _nested_loop_command(tmp_path, monkeypatch, optimize.OptimizeRequest(str(tmp_path), options=options))
+
+    assert command[command.index("--lanes") + 1] == "3"
+    assert command[command.index("--search-strategy") + 1] == "tree"
+
+
+def test_optimize_leaves_an_unrequested_loop_shape_to_the_nested_loop(tmp_path, monkeypatch):
+    """Nothing asked, nothing spelled: the nested loop keeps its own lane count and strategy."""
+    command = _nested_loop_command(tmp_path, monkeypatch, optimize.OptimizeRequest(str(tmp_path)))
+
+    assert "--lanes" not in command
+    assert "--search-strategy" not in command
 
 
 def test_run_rewrite_hands_the_source_timings_to_optimize(tmp_path, monkeypatch):

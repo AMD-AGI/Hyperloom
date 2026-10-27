@@ -12,6 +12,10 @@ import click
 from kernelforge.loop.campaign_config import CampaignConfig, SearchStrategy
 from kernelforge.option_groups import option_group
 
+#: The values ``--lanes`` and ``--search-strategy`` accept, shared by every command that runs or nests a forge-loop.
+LANE_COUNTS = click.IntRange(min=1, max=8)
+SEARCH_STRATEGIES = click.Choice([item.value for item in SearchStrategy])
+
 
 @dataclass(frozen=True)
 class LoopShape:
@@ -47,11 +51,16 @@ def loop_class_for(shape: LoopShape, campaign: CampaignConfig) -> type:
         from kernelforge.loop.runner import IterationLoop
 
         return IterationLoop
-    if shape.lanes < 2:
-        raise click.UsageError("--search-strategy tree expands several nodes each round and needs --lanes 2 or more")
+    require_lanes_for(strategy, shape.lanes)
     from kernelforge.loop.tree.search_loop import TreeSearchLoop
 
     return TreeSearchLoop
+
+
+def require_lanes_for(strategy: SearchStrategy, lanes: int) -> None:
+    """Refuse a lane count the search strategy cannot run with."""
+    if strategy is SearchStrategy.TREE and lanes < 2:
+        raise click.UsageError("--search-strategy tree expands several nodes each round and needs --lanes 2 or more")
 
 
 LOOP_SHAPE_OPTIONS = option_group(
@@ -70,7 +79,7 @@ LOOP_SHAPE_OPTIONS = option_group(
     click.option(
         "--lanes",
         default=3,
-        type=click.IntRange(min=1, max=8),
+        type=LANE_COUNTS,
         help="Implementer lanes per round. Above 1 the round's analysis is "
         "partitioned into that many non-overlapping plans, each run "
         "concurrently in its own workspace copy, and each candidate is "
@@ -119,7 +128,7 @@ LOOP_SHAPE_OPTIONS = option_group(
     ),
     click.option(
         "--search-strategy",
-        type=click.Choice([item.value for item in SearchStrategy]),
+        type=SEARCH_STRATEGIES,
         default=None,
         help="How each iteration chooses what it builds on. 'linear' (the default for a fresh campaign) builds every "
         "round on the current best. 'tree' keeps every measured correct candidate as a node of a search tree, and "
@@ -131,4 +140,12 @@ LOOP_SHAPE_OPTIONS = option_group(
 )
 
 
-__all__ = ["LOOP_SHAPE_OPTIONS", "LoopShape", "campaign_loop_inputs", "loop_class_for"]
+__all__ = [
+    "LANE_COUNTS",
+    "LOOP_SHAPE_OPTIONS",
+    "SEARCH_STRATEGIES",
+    "LoopShape",
+    "campaign_loop_inputs",
+    "loop_class_for",
+    "require_lanes_for",
+]
