@@ -27,7 +27,8 @@ from typing import Any
 
 from hyperloom.common.coerce import text_or_none as _text_or_none, to_float as _float_or_none, to_mapping as _as_dict
 
-from .event_fields import bool_or_none as _bool_or_none, failure_row as _failure_row, now_iso_seconds as _now
+from .construct import event_header
+from .event_fields import bool_or_none as _bool_or_none, now_iso_seconds as _now
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink
@@ -67,7 +68,6 @@ MATCH_MISS = "miss"
 # ``seed_only``, a miss -- is a lookup that ran and answered, so all three are
 # ``succeeded`` and the finding is read off ``match_status``.
 STATUS_SUCCEEDED = "succeeded"
-STATUS_FAILED = "failed"
 
 #: Match statuses that mean the event should carry a ``matched`` block.
 MATCHED_STATUSES = frozenset({MATCH_HIT, MATCH_SEED_ONLY})
@@ -180,11 +180,6 @@ class WarmStartEventRecorder:
         """str: The event every row this recorder writes is tagged with."""
         return self._sink.event_id
 
-    @property
-    def closed(self) -> bool:
-        """bool: Whether the lookup has settled."""
-        return self._closed
-
     def next_read_ordinal(self) -> int:
         """Claim the next read's position in service order."""
         self._reads += 1
@@ -225,40 +220,24 @@ class WarmStartEventRecorder:
         )
         self._token = _ACTIVE.set(self)
 
-    def finish(
-        self,
-        *,
-        match_status: str,
-        matched: Mapping[str, Any] | None = None,
-        error: str = "",
-        exc: BaseException | None = None,
-    ) -> None:
+    def finish(self, *, match_status: str, matched: Mapping[str, Any] | None = None) -> None:
         """Settle the lookup on one of ``hit`` / ``seed_only`` / ``miss``.
 
-        ``exc`` (or ``error`` as a bare class name) carries the exception when
-        the lookup itself failed, which is not the same as having looked and
-        found nothing. The failure block is the canonical
-        ``{stage, error_class, message}`` shape every other event uses.
+        A miss is ``succeeded``: the KB was asked and it answered. A lookup
+        that raised never reaches here and leaves its event open.
         """
         if self._closed:
             return
         self._closed = True
         self._release()
         end_time = _now()
-        found = str(match_status or "").strip().lower()
-        failed = exc is not None or bool(error)
-        status = _status_for(found, error="failed" if failed else "")
         payload: dict[str, Any] = {
-            "status": status,
-            "match_status": found,
+            "status": STATUS_SUCCEEDED,
+            "match_status": str(match_status or "").strip().lower(),
             "end_time": end_time,
         }
         if matched:
             payload["matched"] = dict(matched)
-        if exc is not None:
-            payload["failure"] = _failure_row(stage="lookup", exc=exc)
-        elif error:
-            payload["failure"] = _failure_row(stage="lookup", error_class=str(error))
         self._sink.record(SECTION_EVENT, payload)
 
         from .assembler import event_parts
@@ -271,7 +250,7 @@ class WarmStartEventRecorder:
             finish_event(
                 EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
-                status=derived or status,
+                status=derived or STATUS_SUCCEEDED,
                 ext=ext,
                 end_time=end_time,
             )
@@ -287,14 +266,6 @@ class WarmStartEventRecorder:
             _ACTIVE.reset(token)
         except ValueError:
             _ACTIVE.set(None)
-
-
-def _status_for(match_status: str, *, error: str = "") -> str:
-    """The lookup's own outcome, which is independent of what it found.
-
-    A miss is ``succeeded``: the KB was asked and it answered.
-    """
-    return STATUS_FAILED if error else STATUS_SUCCEEDED
 
 
 def make_warm_start_recorder(
@@ -335,8 +306,7 @@ def assemble_warm_start_ext(
     other than ``event`` are ignored. The returned status is empty when no
     write has closed the event, which leaves the caller's own reading standing.
     """
-    event_rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
-    header = event_rows[0] if event_rows else {}
+    header = event_header(parts, SECTION_EVENT, event)
     reads = wire_rows(
         sort_rows(rows_for_event(parts.get(SECTION_READ) or [], event), keys=("ordinal", "ts")),
         drop=("event_id", "ordinal"),
@@ -441,7 +411,6 @@ __all__ = [
     "PRODUCER",
     "SECTION_EVENT",
     "SECTION_READ",
-    "STATUS_FAILED",
     "STATUS_SUCCEEDED",
     "WarmStartEventRecorder",
     "assemble_warm_start_ext",

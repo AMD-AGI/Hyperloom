@@ -458,7 +458,7 @@ def _record_review_outcome(
 
 
 def _settle(coord: Any, proposal_id: str, *, disposition: str, reason: str = "") -> None:
-    """Record where a candidate ended up: ``attempted``, ``dropped`` or ``pending``."""
+    """Record where a candidate ended up: ``attempted`` or ``dropped``."""
     recorder = _recorder(coord)
     if recorder is None or not proposal_id:
         return

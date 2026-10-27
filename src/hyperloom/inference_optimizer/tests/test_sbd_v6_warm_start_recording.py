@@ -154,18 +154,6 @@ def test_a_seed_only_match_is_a_third_state_and_not_a_bad_status(_bound_session)
     assert event["ext"]["matched"]["canonical_id"] == CID
 
 
-def test_a_lookup_that_broke_is_separated_from_one_that_found_nothing(_bound_session):
-    _recorder().finish(match_status=MATCH_MISS, error="RecipeStoreTimeout")
-
-    event = _event(_bound_session)
-    assert event["status"] == "failed"
-    assert event["ext"]["failure"] == {
-        "stage": "lookup",
-        "error_class": "RecipeStoreTimeout",
-        "message": "",
-    }
-
-
 def test_a_degraded_tier_is_not_reported_as_exact(_bound_session):
     recorder = _recorder()
     recorder.finish(match_status=MATCH_HIT, matched=_matched(tier="compatible_framework_version"))

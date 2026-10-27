@@ -85,7 +85,6 @@ def _geak_visit(*, rebench: str | None, specs: list[dict[str, Any]]):
                 decision=rebench,
                 status="settled",
             ),
-            max_attempts=4,
         )
     recorder.finish(KernelExit(tput_after=950.0))
 
