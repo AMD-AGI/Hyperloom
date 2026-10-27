@@ -111,10 +111,20 @@ def test_a_test_silent_before_ready_ends_as_hung_before_ready_long_before_its_ti
     assert rig.provider.find({}, role="measurement") == [], "the hung sandbox is closed"
 
 
-def test_a_test_silent_after_its_server_is_ready_is_left_to_the_silence_gate_and_the_timeout(
-    rig, tmp_path: Path
-) -> None:
-    call = make_call(tmp_path, timeout_sec=4, point=point_yaml(tmp_path, fake_mode="hang", fake_ready="true"))
-    with pytest.raises(subprocess.TimeoutExpired):
-        rig.backend.run_test(call)
-    assert rig.backend.journal.latest("req-1").extra["verdict"] == "timeout"
+#: The bound of the test below: longer than the stand-in runner takes to start and stamp its server ready (4.5 to
+#: 7.7 s measured on a loaded dev pod, where a 1 s bound ended the test as hung before the runner wrote anything).
+_STARTUP_BOUND_SEC = 15.0
+#: Its timeout: past the bound counted from the ready stamp, so the bound would end the test first were it still armed.
+_AFTER_READY_TIMEOUT_SEC = 25
+
+
+def test_a_test_silent_after_its_server_is_ready_is_left_to_the_silence_gate_and_the_timeout(tmp_path: Path) -> None:
+    made = make_rig(tmp_path, pre_ready_silence_sec=_STARTUP_BOUND_SEC)
+    point = point_yaml(tmp_path, fake_mode="hang", fake_ready="true")
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            made.backend.run_test(make_call(tmp_path, timeout_sec=_AFTER_READY_TIMEOUT_SEC, point=point))
+        assert made.backend.journal.latest("req-1").extra["verdict"] == "timeout"
+    finally:
+        made.backend.close()
+        made.provider.close()
