@@ -169,7 +169,9 @@ gh api --paginate --slurp "repos/$REPO/pulls/$PR/comments" | jq -s '[.[][][]]' >
 gh api --paginate --slurp "repos/$REPO/issues/$PR/comments" | jq -s '[.[][][]]' > "$raw/issue.json"
 
 PR_AUTHOR=$(sed -n 's/^author: //p' "$WORK/meta.txt")
-jq -r '.[].user.login' "$raw"/{reviews,inline,issue}.json | sort -u | while IFS= read -r login; do
+# jq writes CRLF on some platforms; a login carrying CR matches no author and makes the
+# permission URL below unparseable, which empties comments.txt without failing the fetch.
+jq -r '.[].user.login' "$raw"/{reviews,inline,issue}.json | tr -d '\015' | sort -u | while IFS= read -r login; do
   if [ "$login" = "$PR_AUTHOR" ] || [ "$login" = 'github-actions[bot]' ]; then
     echo "$login"
     continue
