@@ -370,6 +370,12 @@ class PolicyGate:
     def allowed_tools_for_agent(self, agent_name: str) -> list[str]:
         """Return the Claude tool list a reactor may use (Codex → []; Claude → emit_intent; orchestration also gets context-pull tools + sandboxed Read + web search).
 
+        Every name is the one the runtime registers, so MCP tools carry their
+        ``mcp__<server>__<tool>`` prefix (as :data:`PR_MONITOR_TOOL_NAMES`
+        already does). This list is both the SDK allow-list and the grant the
+        prompt snapshot records: a bare name here names a tool that exists
+        nowhere, and the agent is left to guess the prefix.
+
         Args:
             agent_name (str): the name of the agent whose tool list is
                 requested.
@@ -383,11 +389,13 @@ class PolicyGate:
             return []
         if role.no_tools:
             return []
-        tools = ["emit_intent"]
-        if agent_name == "orchestration":
-            from ..roles.mcp_context_tools import CONTEXT_TOOL_NAMES
+        from ..roles.mcp_emit_intent import EMIT_INTENT_TOOL_QUALIFIED
 
-            tools.extend(CONTEXT_TOOL_NAMES)
+        tools = [EMIT_INTENT_TOOL_QUALIFIED]
+        if agent_name == "orchestration":
+            from ..roles.mcp_context_tools import CONTEXT_TOOL_QUALIFIED_NAMES
+
+            tools.extend(CONTEXT_TOOL_QUALIFIED_NAMES)
             tools.append("Read")
             tools.extend(["WebSearch", "WebFetch"])
         return tools

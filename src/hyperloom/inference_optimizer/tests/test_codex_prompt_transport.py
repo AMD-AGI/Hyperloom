@@ -30,23 +30,36 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 from hyperloom.orchestrator.roles.agent_role import _ORCHESTRATION_INTENTS, default_role_registry
 from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed, RetryPolicy
 from hyperloom.orchestrator.roles.codex import CodexBackend
-from hyperloom.orchestrator.roles.mcp_context_tools import CONTEXT_TOOL_NAMES
+from hyperloom.orchestrator.roles.mcp_context_tools import (
+    CONTEXT_TOOL_NAMES,
+    CONTEXT_TOOL_QUALIFIED_NAMES,
+    qualified_context_tool_name,
+)
+from hyperloom.orchestrator.roles.mcp_emit_intent import EMIT_INTENT_TOOL_NAME, EMIT_INTENT_TOOL_QUALIFIED
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
 
-# The tool surface the system prompt actually documents.
+# The tool surface the system prompt actually documents, under the names the
+# runtime registers them with: a bare MCP name is a tool nothing answers to.
 _TOOL_SURFACE_TOKENS: tuple[str, ...] = (
-    "emit_intent",
+    EMIT_INTENT_TOOL_QUALIFIED,
     "tool_use",
     "WebSearch",
     "WebFetch",
-    "get_recent_outcomes",
-    "get_running_tasks",
-    "read_reference",
+    qualified_context_tool_name("get_recent_outcomes"),
+    qualified_context_tool_name("get_running_tasks"),
+    qualified_context_tool_name("read_reference"),
 )
 
-# Anything a tool-less transport must never be told to call.
-_FORBIDDEN_WITHOUT_TOOLS: tuple[str, ...] = (*_TOOL_SURFACE_TOKENS, *CONTEXT_TOOL_NAMES)
+# Anything a tool-less transport must never be told to call. The bare names
+# cover both spellings, a qualified name containing the bare one.
+_FORBIDDEN_WITHOUT_TOOLS: tuple[str, ...] = (
+    EMIT_INTENT_TOOL_NAME,
+    "tool_use",
+    "WebSearch",
+    "WebFetch",
+    *CONTEXT_TOOL_NAMES,
+)
 
 
 def _prompt(transport: str, *, phase: str = "") -> str:
@@ -93,7 +106,17 @@ def test_every_tool_the_prompt_names_is_one_policy_gate_grants() -> None:
     prompt = _prompt(TRANSPORT_TOOLS)
     named = {token for token in _TOOL_SURFACE_TOKENS if token != "tool_use" and token in prompt}
     assert named <= granted
-    assert set(CONTEXT_TOOL_NAMES) <= granted
+    assert set(CONTEXT_TOOL_QUALIFIED_NAMES) <= granted
+
+
+def test_tool_prompt_names_every_mcp_tool_under_its_registered_name() -> None:
+    """A bare MCP name in the prompt advertises a tool the agent cannot call."""
+    prompt = _prompt(TRANSPORT_TOOLS)
+    pairs = [(EMIT_INTENT_TOOL_NAME, EMIT_INTENT_TOOL_QUALIFIED)]
+    pairs += [(name, qualified_context_tool_name(name)) for name in CONTEXT_TOOL_NAMES]
+    for bare, qualified in pairs:
+        # Every mention of the bare name is part of the qualified one.
+        assert prompt.count(bare) == prompt.count(qualified), bare
 
 
 def test_transport_defaults_to_the_tool_surface() -> None:

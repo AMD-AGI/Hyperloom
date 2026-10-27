@@ -364,14 +364,20 @@ def test_allowed_tools_claude_returns_emit_intent(gate):
     assert gate.allowed_tools_for_agent("robustness") == []
     from hyperloom.orchestrator.roles.mcp_context_tools import (
         CONTEXT_TOOL_NAMES,
+        CONTEXT_TOOL_QUALIFIED_NAMES,
     )
+    from hyperloom.orchestrator.roles.mcp_emit_intent import EMIT_INTENT_TOOL_QUALIFIED
 
     orch = gate.allowed_tools_for_agent("orchestration")
-    assert orch[0] == "emit_intent"
+    # The grant is both the SDK allow-list and what the prompt advertises, so
+    # every MCP tool is named the way the runtime registers it.
+    assert orch[0] == EMIT_INTENT_TOOL_QUALIFIED
     assert "Read" in orch
-    for name in CONTEXT_TOOL_NAMES:
+    for name in CONTEXT_TOOL_QUALIFIED_NAMES:
         assert name in orch
-    assert "get_recent_outcomes" in orch
+    for name in CONTEXT_TOOL_NAMES:
+        assert name not in orch
+    assert "mcp__inference_optimizer_context__get_recent_outcomes" in orch
     assert "run_action_now" not in orch
     assert "WebSearch" in orch
     assert "WebFetch" in orch

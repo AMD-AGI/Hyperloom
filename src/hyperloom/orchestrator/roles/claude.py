@@ -86,11 +86,13 @@ def _build_output_instructions(allowed_intents: frozenset[IntentType]) -> str:
     constraints_line = f"\n-{constraints}" if constraints else ""
     return f"""
 ==== OUTPUT FORMAT (REQUIRED) ====
-You MUST communicate with the system by calling the `{EMIT_INTENT_TOOL_NAME}`
-tool. Each call carries exactly one intent; call multiple times to emit
-several intents in the same turn. Free-text replies are dropped.
+You MUST communicate with the system by calling the
+`{EMIT_INTENT_TOOL_QUALIFIED}` tool, under that exact name including its
+`mcp__` prefix; it is the only tool that carries an intent. Each call carries
+exactly one intent; call multiple times to emit several intents in the same
+turn. Free-text replies are dropped.
 
-Tool input shape:
+Tool input shape — these two keys only, nothing beside them:
 
   {{
     "intent_type": "<one of {", ".join(sorted(t.value for t in allowed_intents))}>",
@@ -98,6 +100,10 @@ Tool input shape:
   }}
 
 - Required keys per intent_type: {contract}.{constraints_line}
+- The `name{{key='value'}}` shorthand used elsewhere in these instructions
+  names an intent, not a tool: call the tool above with
+  intent_type="name" and the braced fields inside `payload`, never as
+  top-level tool input keys and never as a tool of their own.
 
 Keep payload bodies focused on NEW information. Do not restate context already
 in SharedState, your inbox, or analysis.md — reference it and summarize only

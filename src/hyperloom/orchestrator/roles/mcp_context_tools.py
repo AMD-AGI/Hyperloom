@@ -316,6 +316,22 @@ CONTEXT_TOOL_NAMES: tuple[str, ...] = tuple(s[0] for s in CONTEXT_TOOL_SPECS)
 CONTEXT_TOOL_QUALIFIED_NAMES: tuple[str, ...] = tuple(_qualified(n) for n in CONTEXT_TOOL_NAMES)
 
 
+def qualified_context_tool_name(tool_name: str) -> str:
+    """Return the name the runtime registers for a context tool, for prompts.
+
+    This module owns the ``mcp__<server>__<tool>`` naming, so anything that
+    shows a context tool to an agent asks for the name here instead of
+    spelling it out; a bare name in a prompt names a tool the agent cannot
+    call.
+
+    Raises:
+        KeyError: if ``tool_name`` is not one of :data:`CONTEXT_TOOL_NAMES`.
+    """
+    if tool_name not in CONTEXT_TOOL_NAMES:
+        raise KeyError(f"unknown context tool: {tool_name!r}")
+    return _qualified(tool_name)
+
+
 def _resolve_sdk(sdk_module: Any | None) -> Any | None:
     """Resolve the Claude Agent SDK module."""
     if sdk_module is not None:
@@ -402,4 +418,5 @@ __all__ = [
     "ContextProvider",
     "MCP_SERVER_NAME",
     "build_context_tools_server",
+    "qualified_context_tool_name",
 ]

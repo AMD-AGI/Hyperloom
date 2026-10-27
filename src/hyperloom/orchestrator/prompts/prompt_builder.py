@@ -736,13 +736,16 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
     Returns:
         list[str]: Markdown lines for the failure-recovery block.
     """
+    from ..roles.mcp_context_tools import qualified_context_tool_name
+
     baseline_scoped = _renders_in(phase, _BASELINE_RECOVERY_PHASES)
+    read_reference = qualified_context_tool_name("read_reference")
     detail = (
         "/ `last_action_failures` for the error detail."
         if transport == TRANSPORT_STRUCTURED_OUTPUT
         else (
             "/ `last_action_failures` for the error detail. Full diagnostic surfaces,\n"
-            "fingerprint semantics, and examples: ``read_reference('failure_recovery')``."
+            f"fingerprint semantics, and examples: ``{read_reference}('failure_recovery')``."
         )
     )
     lines = [
@@ -1040,6 +1043,8 @@ def _section_reference_index(
     Returns:
         Markdown lines, or ``[]`` when the directory is absent or empty.
     """
+    from ..roles.mcp_context_tools import qualified_context_tool_name
+
     if not references_dir.is_dir():
         return []
     # Only filter AgentX-only docs when a concrete mode is set; unscoped renders all.
@@ -1069,10 +1074,11 @@ def _section_reference_index(
         entries.append((path.stem, when_text or "see document"))
     if not entries:
         return []
+    read_reference = qualified_context_tool_name("read_reference")
     lines: list[str] = [
         "## 8. ON-DEMAND REFERENCE INDEX",
         "",
-        "Use ``read_reference(name='<name>')`` to pull the full document.",
+        f"Use ``{read_reference}(name='<name>')`` to pull the full document.",
         "",
     ]
     for stem, when in entries:
