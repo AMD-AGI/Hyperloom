@@ -10,8 +10,8 @@ import logging
 import os
 import time
 import traceback
-from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager, suppress
+from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -417,18 +417,6 @@ def effective_closing_grace_sec(
     return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
 
 
-@contextmanager
-def timed_teardown_step(state: Any, name: str) -> Iterator[None]:
-    """Record how long one post-deadline teardown step took on ``state``."""
-    started = time.monotonic()
-    try:
-        yield
-    finally:
-        recorder = getattr(state, "record_teardown_timing", None)
-        if callable(recorder):
-            recorder(name, time.monotonic() - started)
-
-
 from ._shared_state.elapsed import elapsed_sec_of
 from ._shared_state.render import _RenderMixin
 
@@ -665,8 +653,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # ``0.0`` means unset or unbounded.
     elapsed_charged_sec: float = 0.0
     leg_anchor_unix: float = 0.0
-    # Wall-clock seconds spent in post-deadline teardown, keyed by step.
-    teardown_timings_sec: dict[str, float] = field(default_factory=dict)
     # Operator's ``--closing-grace-sec``; ``None`` derives it from max_minutes.
     closing_grace_sec: float | None = None
     last_profile_trace: str = ""
@@ -2327,18 +2313,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         spent_min = self.elapsed_minutes(now=now)
         return Deadline.after((float(self.max_minutes) - spent_min) * 60.0)
 
-    def record_teardown_timing(self, step: str, elapsed_sec: float) -> None:
-        """Record one post-deadline teardown step's duration."""
-        name = str(step or "").strip()
-        if not name:
-            return
-        timings = self.teardown_timings_sec
-        if not isinstance(timings, dict):
-            self.teardown_timings_sec = {}
-            timings = self.teardown_timings_sec
-        timings[name] = round(max(0.0, float(elapsed_sec)), 3)
-        timings["total"] = round(sum(v for k, v in timings.items() if k != "total"), 3)
-
     def closing_reserve_sec(self) -> float:
         """Seconds held back from every unit of work so CLOSE can still report."""
         return max(0.0, effective_closing_grace_sec(float(self.max_minutes or 0), self.closing_grace_sec))
@@ -2382,4 +2356,4 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         ) != int(self.validated_recipe_generation)
 
 
-__all__ = ["SharedState", "timed_teardown_step"]
+__all__ = ["SharedState"]

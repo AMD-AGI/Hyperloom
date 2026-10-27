@@ -117,7 +117,7 @@ from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinato
 from hyperloom.orchestrator.collaborator import OrchestrationPrompt as _OrchestrationPrompt
 from hyperloom.inference_optimizer.framework_paths import resolve_framework_tree, resolve_kernel_search_roots
 from hyperloom.orchestrator.state.objective import AnyObjective, Objective, build_objective
-from hyperloom.orchestrator.state.shared_state import SharedState, timed_teardown_step
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.prompts.prompt_builder import (
     TRANSPORT_TOOLS,
     build_orchestration_prompt,
@@ -1534,8 +1534,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
     try:
         from ..breakdown import write_minimal_final_json
 
-        with timed_teardown_step(state, "final_json"):
-            final_json = write_minimal_final_json(session_dir)
+        final_json = write_minimal_final_json(session_dir)
         print(f"Final summary     : {final_json}")
     except Exception:
         log.exception("crash-safe final.json write failed (non-fatal)")
@@ -1545,28 +1544,25 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
         try:
             from ..breakdown import write_breakdown_json
 
-            with timed_teardown_step(state, "session_breakdown"):
-                breakdown_path = write_breakdown_json(session_dir)
+            breakdown_path = write_breakdown_json(session_dir)
             print(f"Session breakdown : {breakdown_path}")
         except Exception:
             log.exception("session_breakdown finalize failed (non-fatal)")
         try:
             from ..breakdown import write_minimal_final_report
 
-            with timed_teardown_step(state, "final_md"):
-                final_md = write_minimal_final_report(session_dir)
+            final_md = write_minimal_final_report(session_dir)
             print(f"Final report      : {final_md}")
         except Exception:
             log.exception("emergency final report write failed (non-fatal)")
     try:
         from hyperloom.inference_optimizer.trace.langfuse_emitter import flush_session, record_session_breakdown
 
-        with timed_teardown_step(state, "langfuse"):
-            flush_session(session_dir)
-            from ..breakdown import patch_breakdown_langfuse
+        flush_session(session_dir)
+        from ..breakdown import patch_breakdown_langfuse
 
-            patch_breakdown_langfuse(session_dir)
-            record_session_breakdown(session_dir)
+        patch_breakdown_langfuse(session_dir)
+        record_session_breakdown(session_dir)
     except Exception:
         log.debug("langfuse flush_session failed", exc_info=True)
     # Safety net for paths that leave close_sequence_done False and never run
@@ -1574,8 +1570,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
     try:
         from ..breakdown import package_session_artifacts
 
-        with timed_teardown_step(state, "artifact_package"):
-            pkg_path = package_session_artifacts(session_dir, session_id=str(getattr(state, "session_id", "") or ""))
+        pkg_path = package_session_artifacts(session_dir, session_id=str(getattr(state, "session_id", "") or ""))
         if pkg_path is not None:
             print(f"Artifact package  : {pkg_path}")
     except Exception:
@@ -2654,18 +2649,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     finally:
         state = coordinator.shared_state
         effective_stop_reason = stop_reason or coordinator.stop_classification
-        with timed_teardown_step(state, "coordinator_stop"):
-            await coordinator.stop()
+        await coordinator.stop()
         # Drop the single-optimizer session lock once the
         # coordinator has released its leases. The OS would drop it on process
         # exit anyway; this just frees it promptly for an intentional resume.
-        with timed_teardown_step(state, "session_lock"):
-            session_lock.release()
+        session_lock.release()
         _write_cli_terminal_artifacts(session_dir, state, effective_stop_reason)
         try:
             state.save(session_dir)
         except Exception:
-            log.exception("failed to persist teardown timings (non-fatal)")
+            log.exception("failed to persist post-stop state (non-fatal)")
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.

@@ -216,25 +216,6 @@ class TestSessionBudget:
         assert state.extend_budget_minutes(30.0) == 0.0
         assert state.remaining_minutes() is None
 
-    def test_teardown_timings_accumulate_and_keep_a_total(self):
-        state = SharedState(session_id="s")
-        state.record_teardown_timing("final_json", 1.25)
-        state.record_teardown_timing("langfuse", 0.5)
-        assert state.teardown_timings_sec["final_json"] == 1.25
-        assert state.teardown_timings_sec["langfuse"] == 0.5
-        assert state.teardown_timings_sec["total"] == pytest.approx(1.75)
-
-    def test_timed_teardown_step_records_the_elapsed_wall(self, monkeypatch):
-        from hyperloom.orchestrator.state import shared_state as ss_mod
-        from hyperloom.orchestrator.state.shared_state import timed_teardown_step
-
-        clock = {"t": 0.0}
-        monkeypatch.setattr(ss_mod.time, "monotonic", lambda: clock["t"])
-        state = SharedState(session_id="s")
-        with timed_teardown_step(state, "final_md"):
-            clock["t"] = 2.5
-        assert state.teardown_timings_sec["final_md"] == 2.5
-
 
 class TestProfileWorkloadContext:
     def test_normalizes_state_and_payload_overrides(self):

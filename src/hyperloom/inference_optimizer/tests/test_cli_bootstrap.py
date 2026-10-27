@@ -467,7 +467,6 @@ def test_a_resume_clears_the_previous_leg_terminal_without_touching_the_budget()
     state.closing_phase = True
     state.closing_report_task_id = "r-1"
     state.elapsed_charged_sec = 120 * 60.0
-    state.teardown_timings_sec = {"close_backends": 0.2, "total": 0.2}
     state.target_reached_at = "2026-08-01T02:00:00+00:00"
 
     cb._begin_resume_leg(state)
@@ -479,7 +478,6 @@ def test_a_resume_clears_the_previous_leg_terminal_without_touching_the_budget()
     assert state.closing_phase is False
     assert state.closing_report_task_id == ""
     assert state.crash_count == 0
-    assert state.teardown_timings_sec == {}
     assert state.target_reached_at == ""
     # The budget survives the boundary; only an operator extend can move it.
     assert state.elapsed_charged_sec == 120 * 60.0
