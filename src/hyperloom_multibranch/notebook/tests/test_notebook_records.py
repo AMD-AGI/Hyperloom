@@ -272,6 +272,38 @@ async def test_a_commit_keeps_the_recipe_digest_it_was_recorded_with(open_as: Op
     assert {node.commit_id: node.recipe_digest for node in lineage.commits} == {"c0": ROOT_RECIPE, "c1": CHILD_RECIPE}
 
 
+async def test_a_commit_no_tool_profiled_has_the_op_shares_of_the_last_profiled_commit_of_its_recipe(
+    open_as: Open,
+) -> None:
+    scheduler, gate, toolbox = open_as(Role.SCHEDULER), open_as(Role.GATE), open_as(Role.TOOLBOX)
+    await scheduler.record_lineage(
+        LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0", recipe_digest=ROOT_RECIPE)
+    )
+    for n in (1, 2, 3):
+        await _tested(open_as, f"r{n}", branch=f"s{n}")
+        await gate.write_judgement(
+            f"r{n}", judgement(3.0, (f"r{n}",)), Conclusion.COMMITTED, f"c{n}", recipe_digest=CHILD_RECIPE
+        )
+
+    async def profiled(job: str, commit: str) -> None:
+        await toolbox.notify_tool_result(
+            ToolResultPointer("s1", job, "/a", "trace analysed", commit, "", {"gemm": 30.0})
+        )
+
+    await profiled("job-1", "c1")
+    await profiled("job-0", "c0")
+    await profiled("job-3", "c3")
+
+    shared = await toolbox.op_shares("c2")
+    assert shared is not None and (shared.commit_id, shared.job_id) == ("c3", "job-3")
+    assert (await toolbox.snapshot()).op_shares["c2"] == shared
+    root = await toolbox.op_shares("c0")
+    assert root is not None and root.job_id == "job-0"
+    await profiled("job-2", "c2")
+    own = await toolbox.op_shares("c2")
+    assert own is not None and own.job_id == "job-2"
+
+
 async def test_a_branch_starts_once_and_stops_once(open_as: Open) -> None:
     scheduler, gate = open_as(Role.SCHEDULER), open_as(Role.GATE)
     stopped = LineageEvent(LineageKind.STOP, "s1", reason="no progress")

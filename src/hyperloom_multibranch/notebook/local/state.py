@@ -208,6 +208,8 @@ class NotebookState:
     def _tool_result(self, _entry: Entry, pointer: ToolResultPointer) -> None:
         if pointer.op_shares:
             shares = OpShares(pointer.commit_id, pointer.job_id, pointer.profile_request_id, pointer.op_shares)
+            # Re-inserted, so the shares of the commit profiled last come last.
+            self.op_shares.pop(pointer.commit_id, None)
             self.op_shares[pointer.commit_id] = shares
 
     def latest_judgement(self, request_id: str) -> JudgementWrite | None:
@@ -239,6 +241,36 @@ class NotebookState:
         """Every test record, in the order the requests were written."""
 
         return [self.record(request_id) for request_id in self.requests]
+
+    def recipe_digests(self) -> dict[str, str]:
+        """Each commit's recipe digest where its writer named one: the root's, and that of every commit a judgement
+        made, a merge's included."""
+
+        found = {
+            event.commit_id: event.recipe_digest
+            for event in self.lineage
+            if event.kind is LineageKind.ROOT and event.commit_id and event.recipe_digest
+        }
+        found.update(
+            (commit, write.recipe_digest) for commit, write in self.commit_writes.items() if write.recipe_digest
+        )
+        return found
+
+    def shares_by_commit(self) -> dict[str, OpShares]:
+        """Every commit's op shares: the latest a tool reported on it, else the latest reported on a commit of the
+        same recipe, which runs the same ops, as an integration commit that took a branch's head as it was does; a
+        commit whose recipe no profiled commit has gets none."""
+
+        digests = self.recipe_digests()
+        by_recipe = {digests[commit]: shares for commit, shares in self.op_shares.items() if commit in digests}
+        shared = {commit: by_recipe[digest] for commit, digest in digests.items() if digest in by_recipe}
+        return {**shared, **self.op_shares}
+
+    def shares_of(self, commit_id: str) -> OpShares | None:
+        """The op shares of ``commit_id``, as :meth:`shares_by_commit` gives them."""
+
+        own = self.op_shares.get(commit_id)
+        return own if own is not None else self.shares_by_commit().get(commit_id)
 
     def split_branches(self) -> dict[str, str]:
         """The branch each split's fix commit opened."""

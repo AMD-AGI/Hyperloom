@@ -668,8 +668,8 @@ class UnfinishedLead:
 class StartupBrief:
     """What a fill specialist reads at start; ``leads`` and ``lessons`` come from cross-session recall (MB2).
 
-    ``op_shares`` are the latest op shares a tool reported on the start commit, which bound what speeding each op up
-    can gain; ``None`` while the commit was not profiled. ``unfinished`` are this session's results worth finishing,
+    ``op_shares`` are the latest op shares a tool reported on the start commit, or on a commit of the same recipe,
+    which bound what speeding each op up can gain; ``None`` while no commit of its recipe was profiled. ``unfinished`` are this session's results worth finishing,
     on any branch. ``focus`` is the bottleneck the scheduler opened the branch on, empty when it named none. ``menu``
     is the direction families ranked for the branch, a line each, a family's note indented under its line; none for a
     branch of the menu's control.
@@ -771,7 +771,9 @@ def _environment_changes(records: Iterable[TestRecord]) -> tuple[EnvironmentChan
 @dataclass(frozen=True)
 class NotebookSnapshot:
     """Everything the notebook held at ``taken_at``, read at once: what the RSI, the dashboard and the exports use.
-    ``resolved_patches`` are the model-written patches of every merge recorded, in the order the merges were."""
+    ``resolved_patches`` are the model-written patches of every merge recorded, in the order the merges were.
+    ``op_shares`` holds, by commit, the op shares :meth:`RecordSearch.op_shares` gives it: a commit no tool profiled
+    has those of the last profiled commit of the same recipe."""
 
     taken_at: float
     profile: SessionProfile | None

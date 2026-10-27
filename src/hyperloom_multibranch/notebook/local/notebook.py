@@ -255,7 +255,7 @@ def _ceiling_refusal(state: NotebookState, intent: Intent, bar_pct: float | None
     ceiling = _ceiling_pct(intent)
     if ceiling is None or bar_pct is None or ceiling >= bar_pct:
         return None
-    return CeilingTooLow(intent, ceiling, bar_pct, state.op_shares.get(intent.parent_commit))
+    return CeilingTooLow(intent, ceiling, bar_pct, state.shares_of(intent.parent_commit))
 
 
 def _released(claim: Claim, now: float) -> Claim:
@@ -923,7 +923,7 @@ class LocalNotebook(
         return feeds.profiles(self._state(), commit_id)
 
     async def op_shares(self, commit_id: str) -> OpShares | None:
-        return self._state().op_shares.get(commit_id)
+        return self._state().shares_of(commit_id)
 
     # --- session records and snapshots ----------------------------------------------------------------------------
 

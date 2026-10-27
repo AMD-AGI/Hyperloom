@@ -331,7 +331,8 @@ class RecordSearch(Protocol):
         """The profile tests of ``commit_id`` that produced an artifact."""
 
     async def op_shares(self, commit_id: str) -> OpShares | None:
-        """The latest TraceLens op shares a tool reported on ``commit_id``; ``None`` when none was analysed there."""
+        """The latest TraceLens op shares a tool reported on ``commit_id``, else on a commit of the same recipe digest,
+        which runs the same ops; ``None`` when no commit of its recipe was analysed."""
 
 
 class Notebook(

@@ -388,7 +388,7 @@ def startup_brief(state: NotebookState, view: LineageView, start_commit: str) ->
     ]
     nearest = sorted(range(len(found)), key=lambda index: (steps[found[index].request.parent_commit], -index))
     tried = tuple(_tried(state, found[index]) for index in nearest)
-    return StartupBrief(start_commit=start_commit, tried=tried, op_shares=state.op_shares.get(start_commit))
+    return StartupBrief(start_commit=start_commit, tried=tried, op_shares=state.shares_of(start_commit))
 
 
 def _steps_from(view: LineageView, commit: str) -> dict[str, int]:
@@ -458,7 +458,7 @@ def snapshot(state: NotebookState, claims: tuple[Claim, ...], taken_at: float) -
         quarantined=quarantined(state),
         branch_logs={branch: tuple(records) for branch, records in state.branch_logs.items()},
         learnings=tuple(state.learnings),
-        op_shares=dict(state.op_shares),
+        op_shares=state.shares_by_commit(),
         llm_usage=tuple(state.llm_usage),
         resolved_patches=tuple(patch for attempt in state.merge_attempts for patch in attempt.resolved_patches),
         agent_manifests=dict(state.agent_manifests),
