@@ -36,6 +36,11 @@ COMPILER = """\
 import hashlib, os, pathlib, sys
 print(" ".join(sorted(os.environ)))
 src = pathlib.Path("src/kernel.c").read_text()
+if "#fork" in src:  # a compiler driver whose job outlives it: it starts a sleeper, says its pid and waits
+    import subprocess, time
+    sleeper = subprocess.Popen(["sleep", "300"])
+    pathlib.Path(src.split("#fork ", 1)[1].split()[0]).write_text(str(sleeper.pid))
+    time.sleep(300)
 out = pathlib.Path("python/fakepkg/kernel.so")
 hip, cu = pathlib.Path("src/act.hip"), pathlib.Path("src/act.cu")
 if cu.exists() and not hip.exists():
@@ -87,7 +92,7 @@ class CountingPreflight:
         return Preflight(self.problem, {"compiler": "stand-in"})
 
 
-def fake_recipe(preflight: CountingPreflight) -> NativeRecipe:
+def fake_recipe(preflight: CountingPreflight, budget_sec: int = 120) -> NativeRecipe:
     return NativeRecipe(
         component=COMPONENT,
         import_name=COMPONENT,
@@ -96,7 +101,7 @@ def fake_recipe(preflight: CountingPreflight) -> NativeRecipe:
         package_dir="python",
         outputs=(f"{COMPONENT}/*.so",),
         command=("{python}", "build.py"),
-        budget_sec=120,
+        budget_sec=budget_sec,
         max_jobs=1,
         max_output_bytes=MAX_OUTPUT_BYTES,
         preflight=preflight,
@@ -128,6 +133,7 @@ class Bench:
 
     tmp: Path
     preflight: CountingPreflight = field(default_factory=CountingPreflight)
+    budget_sec: int = 120
 
     def __post_init__(self) -> None:
         self.blobs = LocalBlobStore(self.tmp / "recipe-blobs")
@@ -147,7 +153,7 @@ class Bench:
     def request(self, *patches: PatchRef, image_digest: str = IMAGE) -> BuildRequest:
         stack = ComponentPatches(COMPONENT, "https://example.invalid/fake.git", COMMIT, tuple(patches))
         machine = BuildMachine(image_digest, BUILDER_IMAGE, "gfx942")
-        return BuildRequest(fake_recipe(self.preflight), stack, self.upstream, self.image, machine)
+        return BuildRequest(fake_recipe(self.preflight, self.budget_sec), stack, self.upstream, self.image, machine)
 
     def build(self, *patches: PatchRef) -> Ensured:
         """Plan, compile and publish in this one process: a test composition only, since the compile and the key would

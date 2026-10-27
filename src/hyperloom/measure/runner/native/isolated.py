@@ -49,6 +49,7 @@ from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.measure.jit.store import SnapshotInvalid, read_bounded
 from hyperloom.measure.runner.native.builder import LaidTree, lay_tree
 from hyperloom.measure.runner.native.planning import NativePlanner, Planned
+from hyperloom.measure.runner.native.process_group import run_in_group
 from hyperloom.measure.runner.native.service import Build, Staged
 
 __all__ = [
@@ -196,7 +197,7 @@ class IsolatedBuilds:
             _give(work, isolation.uid)
         started, cpu_before = time.monotonic(), _children_cpu_seconds()
         try:
-            done = subprocess.run(
+            done = run_in_group(
                 [*isolation.prefix, *self._child.command(work)],
                 cwd=work,
                 env=_child_environment(work),

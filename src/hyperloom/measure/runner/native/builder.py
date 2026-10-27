@@ -37,6 +37,7 @@ from typing import Any
 from hyperloom.contracts.recipe import ComponentPatches
 from hyperloom.measure.compile import BlobStore, EnvRoot, PackageBase, apply_patch_stack
 from hyperloom.measure.runner.native.harvest import HarvestError, harvest
+from hyperloom.measure.runner.native.process_group import run_in_group
 from hyperloom.measure.jit.native.key import BuildInputs, native_digest
 from hyperloom.measure.jit.native.record import EXECUTABLE, FAILED, READY
 from hyperloom.measure.runner.native.recipes import NativeRecipe
@@ -192,11 +193,12 @@ def compile_laid(laid: LaidTree, scratch: Path, *, against_image: bool = True) -
 
 
 def _keeping_errors(errors: list[str], tree_prefix: str) -> Callable[..., subprocess.CompletedProcess[str]]:
-    """A ``subprocess.run`` that also collects the compiler's distinct error lines from the whole output, paths made
+    """A ``subprocess.run`` in a session of its own (a timeout kills every process the compile started, see
+    :mod:`.process_group`) that also collects the compiler's distinct error lines from the whole output, paths made
     relative to the tree."""
 
     def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        done = subprocess.run(argv, **kwargs)
+        done = run_in_group(argv, **kwargs)
         for stream in (done.stdout or "", done.stderr or ""):
             for line in _COMPILER_ERROR.findall(stream):
                 error = line.replace(tree_prefix, "")[:_MAX_ERROR_CHARS]
