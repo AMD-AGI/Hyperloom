@@ -37,7 +37,7 @@ can infer from the prompt is what gets used.
 ```text
 Quantize Qwen/Qwen3-8B with mxfp4 as the global scheme; override
 self_attn modules to fp8, and use fp8 for the kv_cache. Export the result
-to <workspace>/quantized.
+to quantized/ in your workspace.
 Use gsm8k as the benchmark and accept up to a 5% relative eval gap.
 No human interaction at any point.
 ```
@@ -47,7 +47,7 @@ No human interaction at any point.
 ```bash
 python -m hyperloom quantize \
     --prompt "$PROMPT" \                       # natural-language request
-    --workspace /scratch/run-1/wks \           # per-run scratch dir
+    --workspace /scratch/qwen3-8b \            # model workspace; each run writes under runs/<run_id>/
     --quark-root /path/to/Quark \              # or $QUARK_ROOT
     --interactive off \                        # auto | on | off
     --acceptable-eval-gap 0.05 \               # max relative quality gap
@@ -73,7 +73,7 @@ from hyperloom.agents.quantization import quantize_via_prompt
 async def main():
     result = await quantize_via_prompt(
         PROMPT,
-        workspace="/scratch/run-1/wks",
+        workspace="/scratch/qwen3-8b",
         quark_root="/path/to/Quark",
         interactive=False,
         acceptable_eval_gap=0.05,
