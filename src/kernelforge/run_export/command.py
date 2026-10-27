@@ -51,12 +51,9 @@ def export_runs(log_roots: tuple[Path, ...], output: Path) -> None:
     """
 
     from kernelforge.run_export.document import NO_RAW_LOGS, normalize
-    from kernelforge.run_export.forge_loop import AmbiguousOwnership
 
     try:
         document = normalize(log_roots)
-    except AmbiguousOwnership as error:
-        raise click.ClickException(str(error)) from error
     except OSError as error:
         raise click.ClickException(_unreadable(error)) from error
     output.parent.mkdir(parents=True, exist_ok=True)

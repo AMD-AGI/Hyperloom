@@ -25,13 +25,14 @@ from hyperloom_kb.schema import TEXT_MAX_BYTES
 from kernelforge.cli import main
 from kernelforge.loop.experiments_layout import CANDIDATE_META, ROUND_CONTEXT, ExperimentsLayout, lane_plan_name
 from kernelforge.loop.fanout import LANE_ROOT_PREFIX, lane_rationale
-from kernelforge.loop.loop_log import LOOP_BANNER, iteration_header, kb_write_line, kernel_line
+from kernelforge.loop.loop_log import LOOP_BANNER, experiment_line, iteration_header, kb_write_line
 from kernelforge.loop.run_state import ITERATION_RESULT, ITERATION_STARTED
 from kernelforge.orchestrator.critic_fallback import render_critic_fallback
 from kernelforge.orchestrator.gate_tag import gate_outcome_tag
 from kernelforge.run_export.document import normalize
 
 CAMPAIGN = "5f1c0a9e2b7d4c38a6e0f1b2c3d4e5f6"
+EXPERIMENT = "a1b2c3d4"
 WORKSPACE = "forge_loop_triton_softmax_1760500000"
 GATE_TAG = gate_outcome_tag(
     SimpleNamespace(edit_count=2, passed=True, last_mean_case_speedup=1.18, last_wall_ms=0.041), "agent_stopped", 17
@@ -127,6 +128,7 @@ def _plain_run(
     *,
     round_plan: str = ROUND_PLAN,
     lane_plan: str = LANE_PLAN,
+    experiment: str = EXPERIMENT,
 ) -> ExperimentsLayout:
     """A workspace after a short forge-loop: a session that kept, a lane that reverted, and a merge."""
 
@@ -143,10 +145,22 @@ def _plain_run(
     events = [
         {"ts": "2026-10-15 09:58:00", "type": ITERATION_STARTED, "iter": 1},
         {"ts": "2026-10-15 10:00:00", "type": ITERATION_STARTED, "iter": 1},
-        {"ts": "2026-10-15 10:04:30", "type": ITERATION_RESULT, "iter": 1, "decision": "KEEP"},
+        {
+            "ts": "2026-10-15 10:04:30",
+            "type": ITERATION_RESULT,
+            "iter": 1,
+            "decision": "KEEP",
+            "experiment_id": experiment,
+        },
         {"ts": "2026-10-15 10:05:00", "type": ITERATION_STARTED, "iter": 2},
         {"ts": "2026-10-15 10:06:00", "type": "merge_attempt_staged", "iter": 2},
-        {"ts": "2026-10-15 10:09:00", "type": ITERATION_RESULT, "iter": 2, "decision": "REVERT_PERF"},
+        {
+            "ts": "2026-10-15 10:09:00",
+            "type": ITERATION_RESULT,
+            "iter": 2,
+            "decision": "REVERT_PERF",
+            "experiment_id": experiment,
+        },
     ]
     _write(layout.events, "".join(json.dumps(event) + "\n" for event in events) + "{torn line\n")
     plan = _write(layout.round(1) / lane_plan_name(1), round_plan)
@@ -190,16 +204,15 @@ def _plain_run(
     return layout
 
 
-def _loop_log(path: Path, workspace: str, kb_record: str = KB_RECORD, *, kernel: str | None = None) -> Path:
-    """A forge-loop stdout log of the fixture's three iterations; it names the kernel by the absolute path the run
-    had, and the KB record written after the KEEP and rewritten after the loop."""
+def _loop_log(path: Path, experiment: str = EXPERIMENT, kb_record: str = KB_RECORD) -> Path:
+    """A forge-loop stdout log of the fixture's three iterations. It names the session by the experiment id the run
+    recorded, and the KB record written after the KEEP and rewritten after the loop."""
 
     written = kb_write_line({"written": True, "solution": kb_record, "speedup": 1.18})
-    kernel_file = kernel or f"/home/someone/kernelforge-runs/{workspace}/softmax_kernel.py"
     lines = (
         "  Agent profile: claude / Claude-Opus-5: available",
         LOOP_BANNER,
-        kernel_line(kernel_file),
+        experiment_line(experiment),
         iteration_header(1, 1.0, 110 * 60),
         "  [KEEP] mean case speedup=1.180000x — NEW BEST (+18.0% vs previous best)",
         written,
@@ -291,7 +304,7 @@ def _round_after_the_keep(layout: ExperimentsLayout) -> None:
 
 def test_a_single_session_candidate_becomes_a_complete_unit(tmp_path: Path) -> None:
     layout = _plain_run(tmp_path)
-    _loop_log(tmp_path / "forge-loop.log", WORKSPACE)
+    _loop_log(tmp_path / "forge-loop.log")
     unit = _units(tmp_path)[f"{WORKSPACE}/iteration-1"]
 
     candidate = layout.candidate(1)
@@ -421,11 +434,11 @@ def test_a_candidate_without_an_archived_diff_links_no_diff_file(tmp_path: Path)
     assert "change_diff_file" not in units[f"{WORKSPACE}/iteration-3"]
 
 
-def test_each_log_attaches_to_the_run_whose_kernel_it_announces(tmp_path: Path) -> None:
-    _plain_run(tmp_path / "a", name="softmax-a", campaign_id="campaign-a")
-    _plain_run(tmp_path / "b", name="softmax-b", campaign_id="campaign-b")
-    _loop_log(tmp_path / "a" / "forge-loop.log", "softmax-a", kb_record="record-a")
-    _loop_log(tmp_path / "b" / "forge-loop.log", "softmax-b", kb_record="record-b")
+def test_each_log_attaches_to_the_run_whose_experiment_it_announces(tmp_path: Path) -> None:
+    _plain_run(tmp_path / "a", name="softmax-a", campaign_id="campaign-a", experiment="exp-a")
+    _plain_run(tmp_path / "b", name="softmax-b", campaign_id="campaign-b", experiment="exp-b")
+    _loop_log(tmp_path / "a" / "forge-loop.log", "exp-a", kb_record="record-a")
+    _loop_log(tmp_path / "b" / "forge-loop.log", "exp-b", kb_record="record-b")
 
     units = _units(tmp_path)
 
@@ -435,12 +448,11 @@ def test_each_log_attaches_to_the_run_whose_kernel_it_announces(tmp_path: Path) 
 
 
 def test_runs_whose_workspaces_share_a_name_keep_their_own_logs(tmp_path: Path) -> None:
-    """Both runs' workspaces are ``ws``, and their logs name the paths the run directories had in a container, so only
-    the run directory tells their logs apart."""
+    """Both runs' workspaces are ``ws``. The experiment id each session printed tells their logs apart."""
 
     for run in ("a", "b"):
-        _plain_run(tmp_path / run, name="ws", campaign_id=f"campaign-{run}")
-        _loop_log(tmp_path / run / "forge-loop.log", f"{run}/ws", kb_record=f"record-{run}")
+        _plain_run(tmp_path / run, name="ws", campaign_id=f"campaign-{run}", experiment=f"exp-{run}")
+        _loop_log(tmp_path / run / "forge-loop.log", f"exp-{run}", kb_record=f"record-{run}")
 
     units = {(unit["run_id"], unit["seq"]): unit for unit in normalize([tmp_path])["runs"]}
 
@@ -448,48 +460,48 @@ def test_runs_whose_workspaces_share_a_name_keep_their_own_logs(tmp_path: Path) 
     assert [provenance["kb_record"] for provenance in kept] == ["record-a", "record-b"]
 
 
-def test_an_archived_run_keeps_the_kb_record_its_kernel_path_names(tmp_path: Path) -> None:
-    """The controller moves forge_experiments out of the workspace, so the archive's parent shares no trailing
-    component with the path the log names. The kernel line still names that run's kernel_path."""
+def test_a_controller_task_keeps_the_kb_record_its_session_printed(tmp_path: Path) -> None:
+    """The controller writes the log under tasks/<op> and moves forge_experiments to workspaces/<op>."""
 
-    kernel = "/srv/containers/run-9/workspace/src/softmax_kernel.py"
-    layout = _plain_run(tmp_path / "kept-campaigns" / "op-42", name="bookkeeping")
-    config = json.loads(layout.campaign_config.read_text(encoding="utf-8"))
-    _write_json(layout.campaign_config, {**config, "kernel_path": "src/softmax_kernel.py"})
-    _loop_log(tmp_path / "forge-loop.log", "unused", kernel=kernel)
+    op = "op-42"
+    root = tmp_path / "controller"
+    layout = _plain_run(root / "workspaces", name=op)
+    _loop_log(root / "tasks" / op / "forge-loop.stdout.log")
 
-    unit = _units(tmp_path)["bookkeeping/iteration-1"]
+    unit = _units(root)[f"{op}/iteration-1"]
 
-    assert layout.root.parent.name != Path(kernel).parents[1].name
+    assert layout.root.parent != (root / "tasks" / op)
     assert unit["provenance"]["kb_record"] == KB_RECORD
-    assert "forge-loop.log" not in json.dumps(unit)
+    dumped = json.dumps(unit)
+    assert "forge-loop.log" not in dumped
+    assert "forge-loop.stdout.log" not in dumped
 
 
-def test_two_archived_runs_with_the_same_kernel_path_stop_the_export(tmp_path: Path) -> None:
-    """Two runs that record one kernel, and whose archives share no trail with the path the log names, cannot be
-    given the log."""
+def test_two_controller_tasks_on_one_kernel_file_each_keep_their_own_record(tmp_path: Path) -> None:
+    """Two in-place controller tasks record one kernel_path. Each kept candidate takes its own session's record, and
+    the export writes the document."""
 
-    kernel = "/srv/containers/run-9/workspace/src/softmax_kernel.py"
-    logs = tmp_path / "logs"
+    logs = tmp_path / "controller"
+    output = tmp_path / "runs.json"
     for run in ("a", "b"):
-        layout = _plain_run(logs / run, name=f"bookkeeping-{run}", campaign_id=f"campaign-{run}")
+        op = f"op-{run}"
+        layout = _plain_run(logs / "workspaces", name=op, campaign_id=f"campaign-{run}", experiment=f"exp-{run}")
         config = json.loads(layout.campaign_config.read_text(encoding="utf-8"))
         _write_json(layout.campaign_config, {**config, "kernel_path": "src/softmax_kernel.py"})
-    log = _loop_log(logs / "forge-loop.log", "unused", kernel=kernel)
-    output = tmp_path / "runs.json"
+        _loop_log(logs / "tasks" / op / "forge-loop.stdout.log", f"exp-{run}", kb_record=f"record-{run}")
 
     result = CliRunner().invoke(main, ["export-runs", str(logs), "-o", str(output)])
 
-    assert result.exit_code == 1
-    assert f"Error: {log} names {kernel}" in result.output
-    assert "export them from separate log roots" in result.output
-    assert all(str(logs / run / f"bookkeeping-{run}") in result.output for run in ("a", "b"))
-    assert not output.exists()
+    assert result.exit_code == 0, result.output
+    units = {
+        unit["run_id"]: unit for unit in json.loads(output.read_text(encoding="utf-8"))["runs"] if unit["seq"] == 1
+    }
+    assert [units[f"campaign-{run}"]["provenance"]["kb_record"] for run in ("a", "b")] == ["record-a", "record-b"]
 
 
 def test_only_a_kept_candidate_carries_the_kb_record_its_iteration_wrote(tmp_path: Path) -> None:
     _plain_run(tmp_path)
-    _loop_log(tmp_path / "forge-loop.log", WORKSPACE)
+    _loop_log(tmp_path / "forge-loop.log")
 
     units = _units(tmp_path)
 
@@ -672,7 +684,7 @@ def test_export_runs_writes_the_document_and_an_empty_raw_log_beside_it(tmp_path
 
 def test_the_exported_document_collects_through_the_packaged_mapping(tmp_path: Path) -> None:
     layout = _plain_run(tmp_path / "logs")
-    _loop_log(tmp_path / "logs" / "forge-loop.log", WORKSPACE)
+    _loop_log(tmp_path / "logs" / "forge-loop.log")
     output = tmp_path / "runs.json"
     assert CliRunner().invoke(main, ["export-runs", str(tmp_path / "logs"), "-o", str(output)]).exit_code == 0
 
@@ -783,7 +795,7 @@ def test_export_runs_stops_naming_a_path_it_cannot_read(tmp_path: Path, unreadab
     layout = _plain_run(logs)
     paths = {
         "plan": layout.round(1) / lane_plan_name(1),
-        "log": _loop_log(logs / "forge-loop.log", WORKSPACE),
+        "log": _loop_log(logs / "forge-loop.log"),
         "candidate record": layout.candidate(1) / CANDIDATE_META,
         "events log": layout.events,
         "best bundle": layout.root / "best" / "iter_001",
@@ -803,21 +815,67 @@ def test_export_runs_stops_naming_a_path_it_cannot_read(tmp_path: Path, unreadab
     assert not output.exists()
 
 
-def test_export_runs_stops_on_a_log_two_runs_fit_equally_naming_both(tmp_path: Path) -> None:
-    """The log names only the workspace ``ws``, which both runs have, so it cannot be given to either."""
+def test_a_log_from_a_run_that_was_not_exported_attaches_to_no_run(tmp_path: Path) -> None:
+    """The log names the same kernel_path and workspace as the exported run, and announces a session that run did not
+    record. The kernel line does not decide, so the candidate keeps no record and the export still writes."""
 
     logs = tmp_path / "logs"
-    for run in ("a", "b"):
-        _plain_run(logs / run, name="ws", campaign_id=f"campaign-{run}")
-    log = _loop_log(logs / "forge-loop.log", "ws")
+    layout = _plain_run(logs, name="ws", campaign_id="campaign-a", experiment="exp-exported")
+    config = json.loads(layout.campaign_config.read_text(encoding="utf-8"))
+    _write_json(layout.campaign_config, {**config, "kernel_path": "k.py"})
+    _write(
+        logs / "orphan.log",
+        "\n".join(
+            [
+                LOOP_BANNER,
+                "  Kernel: /srv/other/ws/k.py",
+                experiment_line("exp-other"),
+                iteration_header(1, 1.0, 110 * 60),
+                kb_write_line({"written": True, "solution": "record-other", "speedup": 1.18}),
+                "",
+            ]
+        ),
+    )
     output = tmp_path / "runs.json"
 
     result = CliRunner().invoke(main, ["export-runs", str(logs), "-o", str(output)])
 
-    assert result.exit_code == 1
-    assert f"Error: {log} names" in result.output and "export them from separate log roots" in result.output
-    assert all(str(logs / run / "ws") in result.output for run in ("a", "b"))
-    assert not output.exists()
+    assert result.exit_code == 0, result.output
+    kept = next(unit for unit in json.loads(output.read_text(encoding="utf-8"))["runs"] if unit["seq"] == 1)
+    assert "kb_record" not in kept["provenance"]
+
+
+def test_a_resumed_session_keeps_the_record_its_own_session_printed(tmp_path: Path) -> None:
+    """An interrupted session and the session that resumed it both print a record under iteration 2. The candidate
+    takes the record of the session its iteration_result names."""
+
+    layout = _plain_run(tmp_path, experiment="exp-new")
+    _write_json(layout.candidate(2) / CANDIDATE_META, {**_meta(layout, 2), "kept": True})
+    sessions = (
+        LOOP_BANNER,
+        experiment_line("exp-old"),
+        iteration_header(2, 1.0, 90 * 60),
+        kb_write_line({"written": True, "solution": "record-old", "speedup": 1.02}),
+        LOOP_BANNER,
+        experiment_line("exp-new"),
+        iteration_header(2, 1.18, 70 * 60),
+        kb_write_line({"written": True, "solution": "record-new", "speedup": 1.18}),
+    )
+    _write(tmp_path / "forge-loop.log", "".join(f"{line}\n" for line in sessions))
+
+    unit = _units(tmp_path)[f"{WORKSPACE}/iteration-2"]
+
+    assert unit["provenance"]["kb_record"] == "record-new"
+
+
+def test_two_logs_that_disagree_on_one_session_leave_the_record_unset(tmp_path: Path) -> None:
+    _plain_run(tmp_path)
+    _loop_log(tmp_path / "a.log", kb_record="record-a")
+    _loop_log(tmp_path / "b.log", kb_record="record-b")
+
+    unit = _units(tmp_path)[f"{WORKSPACE}/iteration-1"]
+
+    assert "kb_record" not in unit["provenance"]
 
 
 def test_export_runs_refuses_a_missing_root_or_output(tmp_path: Path) -> None:

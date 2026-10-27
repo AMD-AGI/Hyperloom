@@ -539,15 +539,17 @@ benchmark driver's SHA-256 from `campaign_config.json`. The run's
 `forge-loop.log` gives the record KernelForge's own experience KB filed a kept
 candidate under; the log is only read, and no entry names it or records its path.
 
-A log belongs to the run whose `campaign_config.json` `kernel_path` the kernel
-line names, when only that run records it, including a run whose
-`forge_experiments` was moved out of that workspace. When several runs record
-that kernel, the log belongs to the run whose workspace path ends most like
-the kernel path it announces, which may differ in its leading directories, as
-for a run made in a container. The export stops with an error and writes
-nothing when it cannot list a directory under the log roots or read a file it
-needs, such as a JSON record, a plan, a lesson, or a log, naming that path, or
-when a log fits two runs equally well.
+A kept candidate's record is the one its own session printed. Each session
+prints `Experiment: <id>`, and the run's `events.jsonl` records that
+`experiment_id` on the `iteration_result` of every iteration the session
+measured. The id is new for each session, and `events.jsonl` moves with
+`forge_experiments`, so the record is found after the controller moves the
+archive out of the workspace and when two runs share one kernel file. No path
+is compared. A log whose experiment no exported run recorded, and two logs
+that disagree on one session's record, leave `kb_record` unset. The export
+stops with an error and writes nothing when it cannot list a directory under
+the log roots or read a file it needs, such as a JSON record, a plan, a
+lesson, or a log, naming that path.
 
 The document names the empty file, relative to itself, as the raw log of every
 Experience collected from it, and no run log goes with an Experience: the

@@ -8,17 +8,14 @@ The run is a workspace's ``forge_experiments/`` directory, recognized by its ``c
 exists but is not readable JSON, and a candidate whose ``meta.json`` is missing or malformed, is one entry saying
 why. Every attempt that produced a diff is archived as ``candidates/iter_NNN/meta.json``, and each one is a unit:
 seq N, the candidate iteration N measured and Kernel Forge's decision on it, under the run's ``campaign_id`` as
-``run_id``. The forge-loop's stdout log has no timestamps, so a unit's times come from the run's ``events.jsonl``,
-and the log is read only for the kernel it announces and the record of Kernel Forge's own experience KB each kept
-candidate was written as.
-
-A log belongs to the run whose ``campaign_config.json`` ``kernel_path`` the kernel line names, when only that run
-records it: the same path, or an absolute line that ends with the relative path the config stores. That still finds
-a run whose ``forge_experiments`` was moved out of the workspace it was made in. When several runs record that
-kernel, the log belongs to the run whose workspace path shares the most trailing components with the path the line
-announces, so a run made in a container is still found when only the leading directories differ, and a path two runs
-fit equally stops the export rather than giving both runs the log. A log is read for what it records, and a unit
-does not name it: the only files a unit names are its plan, its kernel, and the diff of every file the commit touched.
+``run_id``. The forge-loop's stdout log has no timestamps, so a unit's times come from the run's ``events.jsonl``.
+The log is read only for the experiment each session announces and the record of Kernel Forge's own experience KB a
+kept candidate was written as. Each ``iteration_result`` event records the ``experiment_id`` of the session that
+measured that iteration, and a kept candidate takes the record that session printed under its iteration. A log whose
+experiment no exported run recorded, and two logs that disagree on one session's record, leave ``kb_record`` unset.
+Nothing about a log stops the export, and no path is compared, so two runs on one kernel file each keep their own
+record, as does a run whose ``forge_experiments`` was moved out of the workspace it was made in. A unit does not
+name the log: the only files a unit names are its plan, its kernel, and the diff of every file the commit touched.
 
 Kernel Forge writes naive local times, and the units carry them as it wrote them; collection reads a naive time as
 UTC. That is right for a run made in a container, which normally runs in UTC, and shifts the times of a run made on a
@@ -30,7 +27,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from kernelforge.loop.experiments_layout import (
@@ -42,7 +39,7 @@ from kernelforge.loop.experiments_layout import (
     tagged_iteration,
 )
 from kernelforge.loop.fanout import LANE_ROOT_PREFIX, is_lane_rationale
-from kernelforge.loop.loop_log import ITERATION_HEADER, KB_WRITTEN, KERNEL_LINE, LOOP_BANNER
+from kernelforge.loop.loop_log import EXPERIMENT_LINE, ITERATION_HEADER, KB_WRITTEN, LOOP_BANNER
 from kernelforge.loop.merge_candidates import MERGE_PLAN_PREFIX
 from kernelforge.loop.run_state import ITERATION_RESULT, ITERATION_STARTED
 from kernelforge.orchestrator.gate_tag import strip_gate_outcome_tag
@@ -58,134 +55,49 @@ from kernelforge.run_export.units import CandidateOrigin, Run, read_error
 from kernelforge.workspace.edit_policy import FORGE_LOOP_OUTPUT_DIRNAME
 
 
-@dataclass(frozen=True)
-class _LoopLog:
-    """One forge-loop stdout log: the kernels its runs announced, and the KB records its iterations wrote."""
+def _session_records(text: str) -> dict[tuple[str, int], str]:
+    """The first record of Kernel Forge's own experience KB each session printed, by experiment id and iteration.
 
-    path: Path
-    kernels: tuple[str, ...]
-    kb_records: dict[int, str]
-
-
-class AmbiguousOwnership(Exception):
-    """A log names a path that fits more than one run's workspace equally well."""
-
-
-def _refuse_ambiguous(evidence: Path, named: str, owners: list[Path]) -> None:
-    """Stop the export: ``named`` fits every run in ``owners`` and no trail separates them."""
-
-    workspaces = " and ".join(str(owner.parent) for owner in owners)
-    raise AmbiguousOwnership(
-        f"{evidence} names {named}, which fits the runs in {workspaces} equally well; "
-        "export them from separate log roots"
-    )
-
-
-def _shared_tail(named: tuple[str, ...], workspace: Path) -> int:
-    """How many of ``workspace``'s trailing path components ``named`` ends with."""
-
-    shared = 0
-    for mine, theirs in zip(reversed(named), reversed(workspace.parts)):
-        if mine != theirs:
-            break
-        shared += 1
-    return shared
-
-
-def _owner(evidence: Path, named: str, candidates: dict[Path, tuple[str, ...]]) -> Path | None:
-    """The ``forge_experiments`` directory of the run that ``evidence``, which names the path ``named``, belongs to.
-
-    ``candidates`` maps each run it can belong to onto the workspace ``named`` would put that run in, and the run whose
-    workspace shares the most trailing components with it owns it.
+    A banner opens a session and the first experiment line after it names that session. The forge-loop writes a record
+    after each KEEP and may write the best one again after its last iteration, so the first record for a key wins, and
+    only a kept candidate's unit takes its iteration's record. A line before the session's experiment line, or before
+    its first iteration header, is not attributed.
     """
 
-    scores = {experiments: _shared_tail(workspace, experiments.parent) for experiments, workspace in candidates.items()}
-    best = max(scores.values(), default=0)
-    owners = sorted(experiments for experiments, score in scores.items() if score == best) if best else []
-    if len(owners) > 1:
-        _refuse_ambiguous(evidence, named, owners)
-    return owners[0] if owners else None
-
-
-def _names_kernel(announced: PurePosixPath, recorded: str) -> bool:
-    """Whether ``announced`` is the file ``recorded`` stores, as the same path or as its absolute form."""
-
-    kernel = PurePosixPath(recorded)
-    if announced == kernel:
-        return True
-    parts = kernel.parts
-    return len(announced.parts) > len(parts) and announced.parts[-len(parts) :] == parts
-
-
-def _owner_of_kernel(evidence: Path, named: str, kernel_paths: dict[Path, str]) -> Path | None:
-    """The run whose ``kernel_path`` ``named`` is.
-
-    One run that records that path owns the log even when its archive sits outside the workspace. Several runs that
-    record it are still separated by the workspace path the line announces.
-    """
-
-    announced = PurePosixPath(named)
-    exact = sorted(
-        experiments for experiments, path in kernel_paths.items() if path and PurePosixPath(path) == announced
-    )
-    if len(exact) > 1:
-        _refuse_ambiguous(evidence, named, exact)
-    if len(exact) == 1:
-        return exact[0]
-    matches = sorted(
-        experiments for experiments, path in kernel_paths.items() if path and _names_kernel(announced, path)
-    )
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) < 2:
-        return None
-    candidates = {
-        experiments: announced.parts[: -len(PurePosixPath(kernel_paths[experiments]).parts)] for experiments in matches
-    }
-    owner = _owner(evidence, named, candidates)
-    if owner is None:
-        _refuse_ambiguous(evidence, named, matches)
-    return owner
-
-
-def _log_owners(log: _LoopLog, kernel_paths: dict[Path, str]) -> set[Path]:
-    """The runs whose kernel ``log`` announces; ``kernel_paths`` holds each run's kernel path in its workspace."""
-
-    owners: set[Path] = set()
-    for kernel in log.kernels:
-        owner = _owner_of_kernel(log.path, kernel.strip(), kernel_paths)
-        if owner is not None:
-            owners.add(owner)
-    return owners
-
-
-def _kb_records(text: str) -> dict[int, str]:
-    """The first record of Kernel Forge's own experience KB written during each iteration, by iteration.
-
-    The forge-loop writes one after each KEEP and may write the best one again after its last iteration, which is why
-    only a kept candidate's unit takes its iteration's record.
-    """
-
-    records: dict[int, str] = {}
+    records: dict[tuple[str, int], str] = {}
+    experiment: str | None = None
     iteration: int | None = None
+    in_session = False
     for line in text.splitlines():
-        if (header := ITERATION_HEADER.match(line)) is not None:
+        if line.strip() == LOOP_BANNER:
+            in_session = True
+            experiment = None
+            iteration = None
+        elif in_session and experiment is None and (announced := EXPERIMENT_LINE.match(line)) is not None:
+            experiment = announced.group(1)
+        elif (header := ITERATION_HEADER.match(line)) is not None:
             iteration = int(header.group(1))
-        elif iteration is not None and (written := KB_WRITTEN.match(line)) is not None:
-            records.setdefault(iteration, written.group(1))
+        elif experiment is not None and iteration is not None and (written := KB_WRITTEN.match(line)) is not None:
+            records.setdefault((experiment, iteration), written.group(1))
     return records
 
 
-def _loop_logs(records: list[FileRecord]) -> list[_LoopLog]:
-    logs: list[_LoopLog] = []
+def _kb_records(records: list[FileRecord]) -> dict[tuple[str, int], str]:
+    """Every banner-bearing log's records. A key whose logs disagree is left out, so neither record is guessed."""
+
+    found: dict[tuple[str, int], str | None] = {}
     for record in records:
         if record.path.suffix != ".log" or record.size == 0:
             continue
         text = read_text(record.path)
         if LOOP_BANNER not in text:
             continue
-        logs.append(_LoopLog(record.path, tuple(KERNEL_LINE.findall(text)), _kb_records(text)))
-    return logs
+        for key, value in _session_records(text).items():
+            if key not in found:
+                found[key] = value
+            elif found[key] != value:
+                found[key] = None
+    return {key: value for key, value in found.items() if value is not None}
 
 
 def _experiments_dirs(records: list[FileRecord], root: Path) -> list[Path]:
@@ -209,10 +121,19 @@ def _iso(stamp: Any) -> str | None:
         return None
 
 
-def _event_times(path: Path) -> dict[tuple[str, int], str]:
-    """When each iteration last started and when it reported its result, keyed by event type and iteration."""
+@dataclass(frozen=True)
+class _RunEvents:
+    """When each iteration last started and reported its result, and which session measured it."""
+
+    times: dict[tuple[str, int], str]
+    experiments: dict[int, str]
+
+
+def _run_events(path: Path) -> _RunEvents:
+    """The times and the measuring session ``events.jsonl`` records for each iteration."""
 
     times: dict[tuple[str, int], str] = {}
+    experiments: dict[int, str] = {}
     lines = read_text(path).splitlines() if path.is_file() else []
     for raw in lines:
         try:
@@ -221,10 +142,15 @@ def _event_times(path: Path) -> dict[tuple[str, int], str]:
             continue
         if not isinstance(event, dict) or event.get("type") not in (ITERATION_STARTED, ITERATION_RESULT):
             continue
-        stamp, iteration = _iso(event.get("ts")), event.get("iter")
-        if stamp and isinstance(iteration, int):
+        iteration = event.get("iter")
+        if not isinstance(iteration, int):
+            continue
+        if (stamp := _iso(event.get("ts"))) is not None:
             times[(event["type"], iteration)] = stamp
-    return times
+        experiment = event.get("experiment_id")
+        if event.get("type") == ITERATION_RESULT and isinstance(experiment, str) and experiment:
+            experiments[iteration] = experiment
+    return _RunEvents(times, experiments)
 
 
 def _origin(meta: dict[str, Any]) -> CandidateOrigin:
@@ -297,8 +223,8 @@ class _PlainRun:
         return unit
 
 
-def _run_units(experiments: Path, logs: list[_LoopLog]) -> list[dict[str, Any]]:
-    """The units of one run, given the logs that belong to it."""
+def _run_units(experiments: Path, kb_records: dict[tuple[str, int], str]) -> list[dict[str, Any]]:
+    """The units of one run. A kept candidate takes the record its own session printed, when the logs agree on it."""
 
     layout = ExperimentsLayout(experiments)
     workspace = experiments.parent
@@ -312,14 +238,18 @@ def _run_units(experiments: Path, logs: list[_LoopLog]) -> list[dict[str, Any]]:
             else f"{RUN_STATE} names no campaign_id"
         )
         return [read_error(f"{workspace.name}/session", problem)]
-    times = _event_times(layout.events)
+    events = _run_events(layout.events)
     run = Run(
         label=workspace.name,
         run_id=campaign_id,
         identity=campaign_identity(config),
     )
-    kb_records = {seq: record for log in logs for seq, record in log.kb_records.items()}
-    plain = _PlainRun(run, layout, times, kb_records)
+    records = {
+        seq: kb_records[(experiment, seq)]
+        for seq, experiment in events.experiments.items()
+        if (experiment, seq) in kb_records
+    }
+    plain = _PlainRun(run, layout, events.times, records)
     candidates = layout.candidates
     numbers = sorted(
         number
@@ -327,20 +257,6 @@ def _run_units(experiments: Path, logs: list[_LoopLog]) -> list[dict[str, Any]]:
         if path.is_dir() and (number := tagged_iteration(path.name)) is not None
     )
     return [plain.candidate_unit(seq) for seq in numbers]
-
-
-def _logs_by_run(logs: list[_LoopLog], runs: list[Path]) -> dict[Path, list[_LoopLog]]:
-    """Each run's forge-loop logs: those announcing its kernel."""
-
-    kernel_paths = {
-        experiments: str((read_json(ExperimentsLayout(experiments).campaign_config) or {}).get("kernel_path") or "")
-        for experiments in runs
-    }
-    owned: dict[Path, list[_LoopLog]] = {experiments: [] for experiments in runs}
-    for log in logs:
-        for owner in _log_owners(log, kernel_paths):
-            owned[owner].append(log)
-    return owned
 
 
 def forge_loop_runs(root: Path) -> list[dict[str, Any]]:
@@ -351,5 +267,5 @@ def forge_loop_runs(root: Path) -> list[dict[str, Any]]:
     runs = _experiments_dirs(records, root)
     if not runs:
         return []
-    logs = _logs_by_run(_loop_logs(records), runs)
-    return [unit for experiments in runs for unit in _run_units(experiments, logs[experiments])]
+    kb_records = _kb_records(records)
+    return [unit for experiments in runs for unit in _run_units(experiments, kb_records)]

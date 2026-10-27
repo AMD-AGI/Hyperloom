@@ -5,7 +5,7 @@
 
 This module owns those lines end to end: the loop prints them through the renderers here, and ``kernelforge
 export-runs`` reads a log with the patterns compiled from the same pieces. A log has no timestamps, so it is read only
-for the kernel its run announces and for the record of Kernel Forge's own experience KB each iteration wrote.
+for the experiment each session announces and for the record of Kernel Forge's own experience KB each iteration wrote.
 """
 
 from __future__ import annotations
@@ -16,18 +16,18 @@ from typing import Any
 
 LOOP_BANNER = "Starting autonomous iteration loop"
 
-_KERNEL_LABEL = "  Kernel: "
+_EXPERIMENT_LABEL = "  Experiment: "
 _ITERATION_LABEL = "--- Iteration "
 _KB_WRITTEN_LABEL = "[kb] experience written: "
 
-KERNEL_LINE = re.compile(rf"^{re.escape(_KERNEL_LABEL)}(.+)$", re.M)
+EXPERIMENT_LINE = re.compile(rf"^{re.escape(_EXPERIMENT_LABEL)}(\S+)\s*$", re.M)
 ITERATION_HEADER = re.compile(rf"^{re.escape(_ITERATION_LABEL)}(\d+)\b")
 KB_WRITTEN = re.compile(rf"^\s*{re.escape(_KB_WRITTEN_LABEL)}(\S+)")
 
 
-def kernel_line(kernel_file: str) -> str:
-    """The line that names the kernel a run optimizes."""
-    return f"{_KERNEL_LABEL}{kernel_file}"
+def experiment_line(experiment_id: str) -> str:
+    """The line that names the experiment id of the session now running."""
+    return f"{_EXPERIMENT_LABEL}{experiment_id}"
 
 
 def iteration_header(iteration: int, best_mean_case_speedup: float | None, remaining_s: float) -> str:
