@@ -976,7 +976,7 @@ class _RequestWindow(NamedTuple):
     #: limit) a surviving ``max_iterations`` is rejected rather than trusted.
     vllm_profiler_cap: int
     atom_caps: _AtomTracelensCaps | None
-    xdit_profiler_args: str = ""
+    xdit_profiler_args: tuple[str, ...] = ()
 
 
 def _pin_benchmark_target(bench: dict[str, Any], target: BenchmarkTarget) -> None:
@@ -1071,6 +1071,24 @@ def _pin_workload_shape_envs(envs: dict[str, Any]) -> None:
         envs["ROCR_VISIBLE_DEVICES"] = derived
 
 
+def _apply_xdit_profile(envs: dict[str, Any]) -> tuple[str, ...]:
+    """Set xDiT profiler flags and write patch status; return the flags for restore."""
+    from ._server_patcher import ensure_xdit_patched_for_tracelens
+    from ._profile_setup import _tracelens_patch_enabled, write_tracelens_patch_status
+
+    xdit_patch_attempted = _tracelens_patch_enabled()
+    xdit_patched = xdit_patch_attempted and ensure_xdit_patched_for_tracelens()
+    needed = ["--profile_wait 1"]
+    if xdit_patched:
+        needed += ["--profile_capture_phase", "--profile_with_stack"]
+    existing = str(envs.get(_XDIT_EXTRA_ARGS_ENV, "")).strip()
+    missing = [f for f in needed if f not in existing]
+    if missing:
+        envs[_XDIT_EXTRA_ARGS_ENV] = f"{existing} {' '.join(missing)}".strip()
+    write_tracelens_patch_status(envs, attempted=xdit_patch_attempted, patched=xdit_patched, fw="xdit")
+    return tuple(needed)
+
+
 def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     from hyperloom.inference_optimizer import framework_registry
 
@@ -1098,24 +1116,7 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     # window, so the OSL/steady-floor math below is a serving concept they never consume.
     serves_requests = not framework_registry.is_scriptable(bench.get("framework"))
     _is_xdit_profile = is_profile and framework_registry.extra_args_env(bench.get("framework")) == _XDIT_EXTRA_ARGS_ENV
-    xdit_saved_args = ""
-    if _is_xdit_profile:
-        from ._server_patcher import ensure_xdit_patched_for_tracelens
-
-        from ._profile_setup import _tracelens_patch_enabled, write_tracelens_patch_status
-
-        xdit_patch_attempted = _tracelens_patch_enabled()
-        xdit_patched = xdit_patch_attempted and ensure_xdit_patched_for_tracelens()
-        needed = ["--profile_wait 1"]
-        if xdit_patched:
-            needed += ["--profile_capture_phase", "--profile_with_stack"]
-        existing = str(envs.get(_XDIT_EXTRA_ARGS_ENV, "")).strip()
-        existing_tokens = existing.split()
-        missing = [f for f in needed if f.split()[0] not in existing_tokens]
-        if missing:
-            envs[_XDIT_EXTRA_ARGS_ENV] = f"{existing} {' '.join(missing)}".strip()
-        write_tracelens_patch_status(envs, attempted=xdit_patch_attempted, patched=xdit_patched, fw="xdit")
-        xdit_saved_args = " ".join(needed)
+    xdit_saved_args = _apply_xdit_profile(envs) if _is_xdit_profile else ()
     profile_num_prompts: int | None = None
     atom_caps: _AtomTracelensCaps | None = None
     vllm_flags: list[tuple[str, str]] = []
@@ -1526,7 +1527,7 @@ def _restate_profile_capture(
     if window.xdit_profiler_args and framework_env == _XDIT_EXTRA_ARGS_ENV:
         current = str(envs.get(framework_env, "")).strip()
         current_tokens = current.split()
-        lost = [f for f in window.xdit_profiler_args.split() if f not in current_tokens]
+        lost = [f for f in window.xdit_profiler_args if f.split()[0] not in current_tokens]
         if lost:
             log.warning(
                 "profile server args lost xDiT profiler flags %r (replace_args=%s); restoring.",

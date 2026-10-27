@@ -450,10 +450,8 @@ def patch_for_profile(envs: dict[str, Any], framework: str) -> tuple[bool, bool]
         patch_ok = ensure_vllm_patched_for_tracelens()
     else:
         patch_ok = ensure_sglang_patched_for_tracelens()
-    envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok" if patch_ok else "unavailable"
     if sitecustomize:
-        # Shapes come from kernel_shape_tool, but the per-batch-size capture trace still needs
-        # sglang_gc_patch or it IndexErrors. Only profiling captures traces, so patch only here.
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok" if patch_ok else "unavailable"
         if not patch_ok:
             log.warning(
                 "SGLang graph-capture patch (sglang_gc_patch) not applied; profiling "
@@ -463,14 +461,7 @@ def patch_for_profile(envs: dict[str, Any], framework: str) -> tuple[bool, bool]
                 "examples/custom_workflows/inference_analysis/sglang_gc_patch/sglang_<X_Y_Z> dir."
             )
         return False, sitecustomize
-    if not patch_ok:
-        envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
-        log.warning(
-            "TraceLens runtime patch unavailable for framework=%s; "
-            "profile will omit annotation-only flags and roofline "
-            "analysis may be degraded.",
-            framework or "<unset>",
-        )
+    write_tracelens_patch_status(envs, attempted=True, patched=patch_ok, fw=framework)
     return patch_ok, sitecustomize
 
 

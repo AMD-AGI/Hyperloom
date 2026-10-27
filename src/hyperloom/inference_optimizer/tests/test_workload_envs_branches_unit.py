@@ -847,3 +847,39 @@ def test_xdit_profile_flags_survive_replace_mode(monkeypatch, tmp_path):
     assert "--profile_capture_phase" in args
     assert "--use_cfg_parallel" in args
     assert "--num_inference_steps" not in args
+
+
+def test_xdit_profile_replace_with_existing_profile_wait(monkeypatch, tmp_path):
+    """Source already carries --profile_wait; replace must still restore all flags."""
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
+    monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: True)
+    src = tmp_path / "cfg.yaml"
+    src.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "xdit",
+                    "model": "/m",
+                    "envs": {
+                        "PROFILE": "1",
+                        "EXTRA_XDIT_ARGS": "--profile_wait 1 --profile_capture_phase --profile_with_stack",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        launch=we.LaunchLayer(extra_server_args="--use_cfg_parallel", args_mode="replace"),
+    )
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert "--profile_wait 1" in args
+    assert "--profile_capture_phase" in args
+    assert "--profile_with_stack" in args
+    assert "--use_cfg_parallel" in args
