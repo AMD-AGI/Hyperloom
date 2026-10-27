@@ -27,6 +27,7 @@ from ..bringup import ARGV_INVALID
 from ..bus.message_bus import Message
 from ..phases.machine_state import PHASE_ENABLEMENT
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
+from ..state.failure_evidence import MAGPIE_NONZERO_INVALID_MEASUREMENT
 from ..state.shared_state import ActionAttempt
 from ..state.round_store import ABANDONED, FAILED
 from ..state.task_registry import Task
@@ -48,6 +49,9 @@ _STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
     # The server booted and measured a cold cache. The next attempt launches the same server and no framework patch
     # changes the operator's flag; ``_authorable_launch_log`` keeps it out of enablement.
     PREFIX_CACHE_OFF_ERROR_CLASS: _BASELINE_FAILED_STOP_REASON,
+    # The round served its whole protocol and the harness around it still refused the result. The next
+    # attempt runs the same harness over the same workload, so it is refused the same way.
+    MAGPIE_NONZERO_INVALID_MEASUREMENT: _BASELINE_FAILED_STOP_REASON,
 }
 
 

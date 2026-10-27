@@ -8,12 +8,12 @@ from __future__ import annotations
 from hyperloom.orchestrator.actions.executors.report import (
     _build_failure_summary,
     _build_summary_dict,
-    _classify_root_cause_type,
     _format_md,
     _highlight_is_benign,
     _is_benign_failure_text,
     _partition_benign_lines,
 )
+from hyperloom.orchestrator.state.failure_evidence import classify_root_cause_type
 from hyperloom.orchestrator.state.shared_state import ActionAttempt, SharedState
 
 _BENIGN_WARN = (
@@ -87,11 +87,11 @@ def test_partition_benign_lines_keeps_real_lines():
 
 
 def test_classify_root_cause_type():
-    assert _classify_root_cause_type("server_init_dead", "HIP out of memory") == "oom"
-    assert _classify_root_cause_type("timeout", "baseline benchmark exceeded 600s") == "benchmark_timeout"
-    assert _classify_root_cause_type("server_init_dead", "EngineCore failed to start") == "engine_core_init"
-    assert _classify_root_cause_type("subprocess_nonzero", "boom") == "unknown"
-    assert _classify_root_cause_type("unknown", "") == "unknown"
+    assert classify_root_cause_type("server_init_dead", "HIP out of memory") == "oom"
+    assert classify_root_cause_type("timeout", "baseline benchmark exceeded 600s") == "benchmark_timeout"
+    assert classify_root_cause_type("server_init_dead", "EngineCore failed to start") == "engine_core_init"
+    assert classify_root_cause_type("subprocess_nonzero", "boom") == "unknown"
+    assert classify_root_cause_type("unknown", "") == "unknown"
 
 
 def test_classify_root_cause_type_needs_evidence_of_a_death():
@@ -101,12 +101,12 @@ def test_classify_root_cause_type_needs_evidence_of_a_death():
         "power validation failed: expected 4 GPUs, sampled 8\n"
         "INFO: server received SIGTERM, worker 3 of 4 shutting down\n"
     )
-    assert _classify_root_cause_type("subprocess_nonzero", clean_shutdown) == "unknown"
+    assert classify_root_cause_type("subprocess_nonzero", clean_shutdown) == "unknown"
     assert (
-        _classify_root_cause_type("subprocess_nonzero", "RuntimeError: NCCL error: unhandled system error")
+        classify_root_cause_type("subprocess_nonzero", "RuntimeError: NCCL error: unhandled system error")
         == "worker_crash"
     )
-    assert _classify_root_cause_type("subprocess_nonzero", "rank 3 killed by signal 11 (core dumped)") == "worker_crash"
+    assert classify_root_cause_type("subprocess_nonzero", "rank 3 killed by signal 11 (core dumped)") == "worker_crash"
 
 
 def test_classify_root_cause_type_benign_nccl_warn_is_not_a_crash():
@@ -115,38 +115,38 @@ def test_classify_root_cause_type_benign_nccl_warn_is_not_a_crash():
         "ip-10-0-0-4:142:367 [0] NCCL WARN Missing ncclnet symbol, using internal network plugin\n"
         "replay finished: 4097/4097 requests served in 4486.0s\n"
     )
-    assert _classify_root_cause_type("subprocess_nonzero", warn) == "unknown"
+    assert classify_root_cause_type("subprocess_nonzero", warn) == "unknown"
 
 
 def test_classify_root_cause_type_hardware_deaths():
     """The ways a worker dies on this hardware each count as evidence of a death."""
     assert (
-        _classify_root_cause_type(
+        classify_root_cause_type(
             "subprocess_nonzero",
             "Memory access fault by GPU node-2 on address 0x7f1c00000000. Reason: Page not present",
         )
         == "worker_crash"
     )
-    assert _classify_root_cause_type("subprocess_nonzero", "Fatal Python error: Aborted") == "worker_crash"
+    assert classify_root_cause_type("subprocess_nonzero", "Fatal Python error: Aborted") == "worker_crash"
     assert (
-        _classify_root_cause_type("subprocess_nonzero", "CUDA error: an illegal memory access was encountered")
+        classify_root_cause_type("subprocess_nonzero", "CUDA error: an illegal memory access was encountered")
         == "worker_crash"
     )
     assert (
-        _classify_root_cause_type(
+        classify_root_cause_type(
             "subprocess_nonzero", "terminate called after throwing an instance of 'c10::DistBackendError'"
         )
         == "worker_crash"
     )
     # A negative exit status is a signal, however the launcher spaces it out.
-    assert _classify_root_cause_type("subprocess_nonzero", "  exitcode  : -6 (pid: 118231)") == "worker_crash"
-    assert _classify_root_cause_type("subprocess_nonzero", "exitcode: -11") == "worker_crash"
+    assert classify_root_cause_type("subprocess_nonzero", "  exitcode  : -6 (pid: 118231)") == "worker_crash"
+    assert classify_root_cause_type("subprocess_nonzero", "exitcode: -11") == "worker_crash"
 
 
 def test_classify_root_cause_type_death_outranks_the_harness_class():
     """A crash after the last request is a crash, not the harness refusing the measurement."""
     assert (
-        _classify_root_cause_type(
+        classify_root_cause_type(
             "magpie_nonzero_invalid_measurement", "Memory access fault by GPU node-2 on address 0x7f1c00000000"
         )
         == "worker_crash"
@@ -156,7 +156,7 @@ def test_classify_root_cause_type_death_outranks_the_harness_class():
 def test_classify_root_cause_type_harness_class():
     """A class the attribution table calls harness-side is reported as such."""
     assert (
-        _classify_root_cause_type("magpie_nonzero_invalid_measurement", "benchmark exited 3 after the last request")
+        classify_root_cause_type("magpie_nonzero_invalid_measurement", "benchmark exited 3 after the last request")
         == "benchmark_harness"
     )
 
@@ -285,14 +285,14 @@ def test_format_md_surfaces_root_cause():
 
 def test_classify_root_cause_type_kv_cache_oom():
     assert (
-        _classify_root_cause_type(
+        classify_root_cause_type(
             "kv_cache_oom",
             "Loaded weights leave no GPU memory for the KV cache",
         )
         == "kv_cache_oom"
     )
     assert (
-        _classify_root_cause_type(
+        classify_root_cause_type(
             "subprocess_nonzero",
             "Raise --mem-fraction-static above 0.737",
         )
@@ -303,7 +303,7 @@ def test_classify_root_cause_type_kv_cache_oom():
 def test_classify_root_cause_ignores_mem_fraction_static_in_argv():
     # A generic failure whose text merely echoes --mem-fraction-static in the launch command must not be mislabeled
     # kv_cache_oom.
-    result = _classify_root_cause_type(
+    result = classify_root_cause_type(
         "subprocess_nonzero",
         "server cmd: python -m sglang.launch_server --mem-fraction-static 0.9 --tp 8; exited 1 with a segfault",
     )
@@ -314,7 +314,7 @@ def test_classify_root_cause_kv_cache_oom_specific_phrase_still_matches():
     # The "Raise --mem-fraction-static above" remediation line is a genuine KV-cache OOM signal even when error_class
     # is generic.
     assert (
-        _classify_root_cause_type(
+        classify_root_cause_type(
             "subprocess_nonzero",
             "ValueError: ... Raise --mem-fraction-static above 0.737",
         )

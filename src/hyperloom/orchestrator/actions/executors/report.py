@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import re
 from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -28,44 +27,11 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import (
 from hyperloom.inference_optimizer.session.optimization_journal import read_journal_entries
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from ...measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
-from ...state.failure_evidence import FAILURE_ATTRIBUTION_HARNESS, classify_failure_attribution
+from ...state.failure_evidence import classify_root_cause_type
 from ...state.shared_state import SharedState
 
 
 log = logging.getLogger(__name__)
-
-# Text in which a process says it died. Each marker names the death itself, not
-# the subsystem around it: ranks, collectives and worker ids are printed by every
-# healthy multi-GPU launch, so matching those reports a crash for a run that only
-# exited nonzero. A WARN is chatter even when NCCL prints it; only an error, a
-# timeout, a fault or an abort is a death.
-_WORKER_DEATH_MARKERS = (
-    "nccl error",
-    "nccl timeout",
-    "unhandled system error",
-    "watchdog caught",
-    "worker crashed",
-    "worker died",
-    "worker exited",
-    "worker process died",
-    "killed by signal",
-    "terminated by signal",
-    "segmentation fault",
-    "sigsegv",
-    "sigabrt",
-    "core dumped",
-    # How a death ends up worded on this hardware: a GPU page fault from the ROCm
-    # runtime, an aborted interpreter, an invalid access reported by the device
-    # runtime, and an unhandled C++ exception, each of which ends the process.
-    "memory access fault",
-    "illegal memory access",
-    "fatal python error",
-    "terminate called after throwing",
-)
-
-# A negative exit status is how a launcher reports that a signal ended the process
-# (torchrun prints ``exitcode: -6`` for SIGABRT), whichever signal it was.
-_SIGNAL_EXIT_RE = re.compile(r"exit\s*code\s*[:=]\s*-\d+")
 
 
 def _count_server_boot_failures(session_dir: Path | None) -> int:
@@ -111,40 +77,6 @@ def _partition_benign_lines(text: str) -> tuple[list[str], list[str]]:
         else:
             kept.append(line)
     return kept, suppressed
-
-
-def _classify_root_cause_type(error_class: str, error_text: str) -> str:
-    """Map a baseline attempt's ``error_class`` + message to a coarse enum.
-
-    Every branch names what the attempt left evidence of. ``subprocess_nonzero``
-    is the producer's name for an exit it did not recognise, and a line that
-    merely mentions a worker or NCCL is startup chatter, so neither is a crash:
-    without evidence of a process dying the answer is ``unknown``, which leaves
-    the excerpt as the headline rather than replacing it with a diagnosis the
-    run then acts on.
-    """
-    from .baseline import _KV_CACHE_OOM_MARKERS
-
-    blob = f"{error_class} {error_text}".lower()
-    if error_class == "kv_cache_oom" or any(m in blob for m in _KV_CACHE_OOM_MARKERS):
-        return "kv_cache_oom"
-    if "out of memory" in blob or "hip oom" in blob:
-        return "oom"
-    if error_class == "timeout" or "benchmark exceeded" in blob:
-        return "benchmark_timeout"
-    if (
-        error_class == "server_init_dead"
-        or "engine core" in blob
-        or "enginecore" in blob
-        or "workerproc" in blob
-        or "engine process failed" in blob
-    ):
-        return "engine_core_init"
-    if any(marker in blob for marker in _WORKER_DEATH_MARKERS) or _SIGNAL_EXIT_RE.search(blob):
-        return "worker_crash"
-    if classify_failure_attribution(error_class=error_class) == FAILURE_ATTRIBUTION_HARNESS:
-        return "benchmark_harness"
-    return "unknown"
 
 
 def _pick_failure_headline(text: str) -> str:
@@ -243,7 +175,7 @@ def _build_failure_summary(
 
         summary: dict[str, Any] = {
             "root_cause": root_cause[:500],
-            "root_cause_type": _classify_root_cause_type(error_class, error_text),
+            "root_cause_type": classify_root_cause_type(error_class, error_text),
             "error_class": error_class,
             "last_attempt_id": str(attempt.get("task_id") or ""),
             "server_log": server_log_rel,

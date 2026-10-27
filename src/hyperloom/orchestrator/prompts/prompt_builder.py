@@ -768,11 +768,9 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
         )
     lines.extend(
         [
-            "* **RULE F3** — repeated `error_class='subprocess_nonzero'` or"
-            " `'magpie_nonzero_invalid_measurement'` on `baseline` → the benchmark exited"
-            " nonzero for a cause Hyperloom did not recognise, so stop retrying baseline;"
-            " send observation 'blocked: …' quoting the failure excerpt rather than a"
-            " diagnosis. Explore variants may be re-proposed; read the failure log first.",
+            "* **RULE F3** — repeated `error_class='subprocess_nonzero'` or `'magpie_nonzero_invalid_measurement'`"
+            " on `baseline` → stop retrying baseline; send observation 'blocked: …' quoting the failure excerpt."
+            " Explore variants may be re-proposed; read the failure log first.",
             "* **RULE F4** — `policy_denial_streak` is information only."
             " Change something substantive; re-emitting the identical intent wastes a tick.",
         ]

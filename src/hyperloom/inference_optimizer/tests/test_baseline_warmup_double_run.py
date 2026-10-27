@@ -1821,8 +1821,64 @@ def test_baseline_nonzero_rc_after_complete_protocol_is_named_harness_side(tmp_p
     assert result["status"] == "failed", result
     assert result["error_class"] == "magpie_nonzero_invalid_measurement", result
     assert result["returncode"] == 3
-    # Still identified by its output, so two identical attempts stop the baseline at two.
+    # The attempt is still signed for the record; the stop comes on this first occurrence.
     assert result.get("output_signature"), result
+
+
+@pytest.mark.asyncio
+async def test_harness_side_refusal_stops_the_baseline_on_its_first_occurrence(tmp_path, session_dir):
+    """A second attempt runs the same harness over the same workload, so one refusal ends the run."""
+    from hyperloom.orchestrator.phases import machine_state
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    coord = make_coordinator(session_dir)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+
+    def fake_run(cmd, *args, **kwargs):
+        ws = Path(cmd[cmd.index("--output-dir") + 1]) / "benchmark_vllm_20260602_010101"
+        ws.mkdir(parents=True)
+        (ws / "benchmark_report.json").write_text(
+            json.dumps(
+                {
+                    "success": False,
+                    "framework": "vllm",
+                    "throughput": {
+                        "num_prompts": 4097,
+                        "completed_requests": 4097,
+                        "duration_seconds": 4486.0,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 3, "replay finished: 4097/4097", "power validation failed")
+
+    task = Task(task_id="harness-refusal-1", kind="baseline", state="running", params={}, idempotency_key="1")
+    ctx = _make_ctx(
+        {
+            "baseline_double_run": False,
+            "output_dir": str(tmp_path / task.task_id),
+            "timeout_sec": 600,
+            "gpu_type": "mi300x",
+        }
+    )
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = await _executor(base, tmp_path)(ctx)
+
+    assert result["error_class"] == "magpie_nonzero_invalid_measurement", result
+    await coord.writeback.handle_unpromotable_result(task, result)
+    # No streak is spent: the class stops the run where it is first seen.
+    assert coord.shared_state.baseline_failure_streak == 0
+    assert coord.shared_state.stop_reason == "baseline_failed"
+
+    transition = machine_state.compute_next_phase(coord.shared_state)
+    assert transition is not None
+    assert transition[:2] == (machine_state.PHASE_CLOSE, "baseline_failed")
 
 
 def test_baseline_rejects_stale_workspace_on_crash(tmp_path, monkeypatch):
