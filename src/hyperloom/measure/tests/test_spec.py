@@ -137,7 +137,7 @@ def test_a_sheet_with_no_build_leaves_the_key_out_so_its_bytes_and_fingerprint_a
     ("change", "reason"),
     [
         (lambda d: (_built(d), d["environment"].pop("builds")), "each runtime root needs exactly one build"),
-        (lambda d: (_built(d), d["environment"]["roots"][0].update(kind="package")), "each build a runtime root"),
+        (lambda d: (_built(d), d["environment"]["builds"][0].update(root_id="nowhere")), "each build names a root"),
         (
             lambda d: (_built(d), d["environment"]["builds"].append(dict(d["environment"]["builds"][0]))),
             "each runtime root needs exactly one build",
@@ -146,13 +146,23 @@ def test_a_sheet_with_no_build_leaves_the_key_out_so_its_bytes_and_fingerprint_a
         (lambda d: d["environment"].update(builds=[]), "an empty list"),
         (lambda d: (_built(d), d["environment"]["builds"][0].update(extra=1)), "extra"),
     ],
-    ids=["runtime-root-without-build", "build-without-runtime-root", "two-builds", "bad-key", "empty", "unknown-field"],
+    ids=["runtime-root-without-build", "build-of-no-root", "two-builds", "bad-key", "empty", "unknown-field"],
 )
 def test_a_build_that_does_not_name_exactly_one_runtime_root_is_refused(change: Any, reason: str) -> None:
     document = _edit(change)
 
     with pytest.raises(DocumentError, match=reason):
         MeasurementSpec.from_document(document)
+
+
+def test_a_package_root_may_name_the_build_of_its_jit_modules() -> None:
+    """#125 stage 2b: aiter's package root names the CPU build of the modules its patch touches; which package may have
+    one is the runner's to say."""
+    document = _edit(lambda d: (_built(d), d["environment"]["roots"][0].update(kind="package")))
+
+    spec = MeasurementSpec.from_document(document)
+
+    assert [b.root_id for b in spec.environment.builds] == [spec.environment.roots[0].id]
 
 
 def test_duplicate_json_keys_and_non_finite_numbers_are_refused() -> None:

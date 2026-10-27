@@ -46,6 +46,7 @@ from hyperloom.measure.jit.store import (
 
 __all__ = [
     "Contribution",
+    "GivenModules",
     "JitCacheReport",
     "JitCacheSession",
     "KindPlan",
@@ -64,6 +65,15 @@ _Form = Callable[[bytes], bytes]
 
 
 @dataclass(frozen=True)
+class GivenModules:
+    """aiter modules a CPU build made for this test before it started (#125 stage 2b): their ``names`` and ``lay``,
+    which copies their files, each proven against the signed build, into a directory."""
+
+    names: frozenset[str]
+    lay: Callable[[Path], None]
+
+
+@dataclass(frozen=True)
 class KindPlan:
     """A kind this test uses and the key it is stored under; ``prebuilt`` is a directory of compiled modules the image
     ships, which the test's own directory links to so the redirected cache does not hide them.
@@ -72,13 +82,15 @@ class KindPlan:
     code in the server can write any file into the directory the compiler uses, which no test sharing the key may load.
 
     ``touched`` are the modules a patch to aiter's sources, or a tuned table they are generated from, makes stale: the
-    test's directory does not link the image's copy of them, so the server builds each when it first calls it."""
+    test's directory does not link the image's copy of them, so the server builds each when it first calls it, unless
+    ``given`` (a CPU build of them) puts it there first."""
 
     kind: CacheKind
     key: str
     prebuilt: Path | None = None
     read_only: str | None = None
     touched: frozenset[str] = frozenset()
+    given: GivenModules | None = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +151,7 @@ class _Seeded:
     snapshot: Snapshot | None = None
     seed_bytes: int = 0
     contribution: Contribution | None = None
+    given: frozenset[str] = frozenset()
 
     @property
     def files(self) -> Mapping[str, StoredFile]:
@@ -195,6 +208,8 @@ class JitCacheSession:
             content = self._content(seeded.plan.kind)
             os.makedirs(content, mode=_DIR_MODE, exist_ok=True)
             self._seed_kind(seeded, content)
+            if seeded.plan.given is not None:
+                self._seed_given(seeded, seeded.plan.given, content)
             if seeded.plan.prebuilt is not None:
                 link_prebuilt(seeded.plan.prebuilt, content, seeded.plan.touched)
 
@@ -215,6 +230,26 @@ class JitCacheSession:
             seeded.state = VERIFY_FAILED if fetched.problems else MISS
             return
         seeded.state, seeded.snapshot, seeded.seed_bytes = HIT, fetched.snapshot, fetched.bytes
+
+    def _seed_given(self, seeded: _Seeded, given: GivenModules, content: Path) -> None:
+        """Put each module the CPU build made, that the snapshot did not give already, into the kind's directory."""
+        landing = self._private / f".given-{seeded.plan.kind.name}"
+        try:
+            given.lay(landing)
+            for name in sorted(given.names):
+                target = content / f"{name}{_PREBUILT_SUFFIX}"
+                if not os.path.lexists(target):
+                    os.replace(landing / target.name, target)
+        except (OSError, ValueError) as exc:
+            self._notes.problem(
+                f"jit cache: {seeded.plan.kind.name}: the modules of their CPU build could not be laid "
+                f"({type(exc).__name__}); the server builds them"
+            )
+            return
+        finally:
+            shutil.rmtree(landing, ignore_errors=True)
+        seeded.given = given.names
+        self._notes.fact(_given_note(seeded.plan.kind.name, given.names))
 
     # -- after a successful test ------------------------------------------------------------------------------------
 
@@ -276,13 +311,16 @@ class JitCacheSession:
     def gave(self, module: str) -> bool:
         """Whether the cache gave this test the compiled ``module``: built under this test's key, which covers the tuned
         tables the module is generated from."""
-        return any(f"{module}{_PREBUILT_SUFFIX}" in seeded.files for seeded in self._kinds.values())
+        return any(
+            f"{module}{_PREBUILT_SUFFIX}" in seeded.files or module in seeded.given for seeded in self._kinds.values()
+        )
 
     def stale_modules(self, built: BuildLog) -> list[str]:
         """The touched modules the test ran from a stale copy; call it once the server has stopped.
 
         A touched module has no copy of the image's in the directory, so one the server called is there as a file it built
-        (the log names it) or one the cache gave (the snapshot names it). A module that is there as anything else, or that
+        (the log names it), one the cache gave (the snapshot names it) or one its CPU build made (``given``). A module
+        that is there as anything else, or that
         is there when the log of what was built is not, ran as the image built it, or cannot be told from that: either way
         its numbers are not the patch's. A module the server never called is not there, and nothing of it was measured.
         """
@@ -293,7 +331,9 @@ class JitCacheSession:
                 path = content / f"{name}.so"
                 if not os.path.lexists(path):
                     continue
-                fresh = not path.is_symlink() and (name in built.started or f"{name}.so" in seeded.files)
+                fresh = not path.is_symlink() and (
+                    name in built.started or f"{name}.so" in seeded.files or name in seeded.given
+                )
                 if not fresh:
                     stale.append(name)
         return stale
@@ -330,6 +370,11 @@ def _touched_note(plan: KindPlan) -> str:
         f"jit cache: {plan.kind.name}: the patch or the tuned tables touch {len(names)} aiter modules, "
         f"built when first called ({listed})"
     )
+
+
+def _given_note(kind: str, names: frozenset[str]) -> str:
+    listed = ", ".join(sorted(names)[:LISTED]) + (f", and {len(names) - LISTED} more" if len(names) > LISTED else "")
+    return f"jit cache: {kind}: {len(names)} touched aiter modules come from their CPU build ({listed})"
 
 
 def link_prebuilt(prebuilt: Path, content: Path, skip: frozenset[str]) -> None:

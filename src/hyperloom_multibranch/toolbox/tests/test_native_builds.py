@@ -33,6 +33,7 @@ from hyperloom.measure.jit.native.laying import NamedBuild, SheetBuilds, manifes
 from hyperloom.measure.jit.native.store import BuildInfraError, BuildStore
 from hyperloom.measure.jit.native.trust import Signer, Trust, TrustedKey
 from hyperloom.measure.points import AcceptedMeasurement
+from hyperloom.measure.runner.native.aiter_modules import AiterModules
 from hyperloom.measure.runner.native.builder import BuildMachine
 from hyperloom.measure.runner.native.isolated import STAGED_FILE, IsolatedBuilds, Isolation
 from hyperloom.measure.runner.native.isolated import staged_record
@@ -53,6 +54,7 @@ from hyperloom_multibranch.toolbox.native_builds import (
     native_builds,
 )
 from hyperloom_multibranch.toolbox.pending_builds import BuildEnd, BuildHooks, PendingBuilds
+from hyperloom_multibranch.toolbox.planner import HostedPlanner
 from hyperloom_multibranch.toolbox.store_builds import BuildSite, StoreBuildDriver
 from hyperloom_multibranch.toolbox.tests import native_support as fake
 from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo, build, req
@@ -452,6 +454,9 @@ def test_a_configured_store_gives_the_driver_the_plan_and_the_runners_the_store(
     }
     assert native.plan.site.machine.image_digest == IMAGE and native.plan.site.machine.builder_image_digest == IMAGE
     assert set(native.plan.site.recipes) == {"sgl_kernel", "vllm"}, "every recipe, vLLM's included"
+    planner = HostedPlanner(EnvironmentCompiler(LocalBlobStore(tmp_path / "blobs"), IMAGE), None, tmp_path)  # type: ignore[arg-type]
+    compiler = planner.with_native(native.plan, native.modules)._compiler.compiler
+    assert compiler.native is native.plan and isinstance(compiler.modules, AiterModules), "aiter's modules build on CPU"
 
 
 def test_a_configured_store_checks_the_host_with_what_it_was_given_and_refuses_with_its_answer(

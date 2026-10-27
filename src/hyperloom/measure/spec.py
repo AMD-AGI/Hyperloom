@@ -348,9 +348,9 @@ class BuildRef:
 
 @dataclass(frozen=True)
 class Environment:
-    """The overlay a runner rebuilds. ``builds`` name the ready native build of each ``runtime`` root, one each; a sheet
-    with none leaves the key out, so a runner that does not know it reads every other sheet as before and refuses one
-    that has builds."""
+    """The overlay a runner rebuilds. ``builds`` name the ready native build of each ``runtime`` root, one each, and of
+    a package root whose JIT modules a CPU build made (aiter's, #125 stage 2b); a sheet with none leaves the key out, so a
+    runner that does not know it reads every other sheet as before and refuses one that has builds."""
 
     roots: tuple[EnvRoot, ...] = ()
     runtime: RuntimeSnapshot | None = None
@@ -374,12 +374,13 @@ class Environment:
         ids = [root.id for root in environment.roots]
         if len(set(ids)) != len(ids):
             raise DocumentError(f"{path}.roots: an id appears twice")
-        runtime_ids = sorted(root.id for root in environment.roots if root.kind == _RUNTIME)
+        kinds = {root.id: root.kind for root in environment.roots}
+        runtime_ids = sorted(root_id for root_id, kind in kinds.items() if kind == _RUNTIME)
         built = [ref.root_id for ref in environment.builds]
-        if sorted(built) != runtime_ids:
+        if len(set(built)) != len(built) or not set(runtime_ids) <= set(built) <= set(kinds):
             raise DocumentError(
-                f"{path}.builds: each runtime root needs exactly one build and each build a runtime root "
-                f"(runtime roots {runtime_ids}, builds {built})"
+                f"{path}.builds: each runtime root needs exactly one build, a package root may have one (of the "
+                f"modules its JIT builds), and each build names a root (runtime roots {runtime_ids}, builds {built})"
             )
         return environment
 

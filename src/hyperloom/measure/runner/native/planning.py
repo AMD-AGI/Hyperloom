@@ -21,6 +21,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
+from typing import Protocol
 
 from hyperloom.contracts.recipe import ComponentPatches
 from hyperloom.measure.compile import (
@@ -36,10 +37,10 @@ from hyperloom.measure.compile import (
 from hyperloom.measure.jit.native.needs import NativeStack
 from hyperloom.measure.jit.native.key import BuildInputs
 from hyperloom.measure.jit.native.store import BuildInfraError
-from hyperloom.measure.runner.native.builder import BuildMachine, BuildRequest, plan
+from hyperloom.measure.runner.native.builder import BuildMachine, BuildRequest, LaidTree, lay_tree, plan
 from hyperloom.measure.runner.native.recipes import NATIVE_BUILD_REFUSE, NativeRecipe
 
-__all__ = ["NativePlanner", "NativeSite", "Planned"]
+__all__ = ["NativePlanner", "NativeSite", "Planned", "PlannedBuild"]
 
 #: A directory whose files are build definition, whatever their names.
 _BUILD_DEFINITION_DIRS = frozenset({"cmake"})
@@ -57,12 +58,22 @@ class NativeSite:
     image_root: Path
 
 
+class PlannedBuild(Protocol):
+    """A planned build as a build runner takes it: :meth:`lay` lays its tree below ``work`` (nothing of the candidate
+    runs then) for the child that compiles it."""
+
+    def lay(self, blobs: BlobStore, work: Path) -> LaidTree: ...
+
+
 @dataclass(frozen=True)
 class Planned:
     """A planned build: the request a build runner compiles and the stack's changed files over the upstream tree."""
 
     request: BuildRequest
     root: EnvRoot
+
+    def lay(self, blobs: BlobStore, work: Path) -> LaidTree:
+        return lay_tree(self.request, self.root, blobs, work)
 
 
 class NativePlanner:
@@ -73,7 +84,7 @@ class NativePlanner:
         self, site: NativeSite, blobs: BlobStore, layouts: Mapping[str, ComponentLayout] = COMPONENT_LAYOUTS
     ) -> None:
         self._site, self._blobs, self._layouts = site, blobs, layouts
-        self._planned: dict[str, Planned] = {}
+        self._planned: dict[str, PlannedBuild] = {}
 
     @property
     def site(self) -> NativeSite:
@@ -92,10 +103,14 @@ class NativePlanner:
             )
         request = BuildRequest(recipe, component, upstream, self._site.image_root, self._site.machine)
         inputs, root = plan(request, self._blobs)
-        self._planned[inputs.key] = Planned(request, root)
+        self.remember(inputs, Planned(request, root))
         return NativeStack(inputs, _package_entries(root, recipe))
 
-    def planned(self, inputs: BuildInputs) -> Planned:
+    def remember(self, inputs: BuildInputs, planned: PlannedBuild) -> None:
+        """Keep ``planned`` under ``inputs``' key, for the build runner of the key (:meth:`planned`)."""
+        self._planned[inputs.key] = planned
+
+    def planned(self, inputs: BuildInputs) -> PlannedBuild:
         """What was planned under ``inputs``' key.
 
         Raises:

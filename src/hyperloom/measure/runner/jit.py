@@ -16,7 +16,8 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from functools import partial
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -35,6 +36,7 @@ from hyperloom.measure.jit.builds import BuildLog, scan_builds, server_logs
 from hyperloom.measure.jit.key import (
     AITER_PACKAGE,
     REBUILD_VARIABLE,
+    BuildSurface,
     Machine,
     aiter_key,
     build_surface,
@@ -54,7 +56,10 @@ from hyperloom.measure.jit.modules import (
     touched_entries,
     touched_modules,
 )
-from hyperloom.measure.jit.session import JitCacheSession, KindPlan
+from hyperloom.measure.jit.native.config import BuildStoreConfigError, store_from_environment
+from hyperloom.measure.jit.native.laying import NamedBuild, NativeLayError, SheetBuilds, sheet_builds
+from hyperloom.measure.jit.native.record import COMPILE_ENV_PREFIX, BuildRecord
+from hyperloom.measure.jit.session import GivenModules, JitCacheSession, KindPlan
 from hyperloom.measure.framework.table_modules import file_identity, stale_table_modules
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.round_marks import boot_parts
@@ -71,6 +76,10 @@ _PYTHONPATH, _FRAMEWORK_PYTHON = "PYTHONPATH", "HYPERLOOM_FRAMEWORK_PYTHON"
 _DIRECTORY = "dir"
 _UTF8 = "utf-8"
 _PREFLIGHT_MISMATCH = "preflight_mismatch"
+_SPEC_REJECTED = "spec_rejected"
+_RUNTIME_KIND = "runtime"
+_GPU_ARCHS, _NATIVE = "GPU_ARCHS", "native"
+_MODULE_SUFFIX = ".so"
 _NEEDS_JIT_DIR = (
     "the patch changes aiter's csrc or hsa, which is measured only by building the modules it touches in the test's own "
     "aiter JIT directory, and this runner cannot give one: {why}"
@@ -102,6 +111,16 @@ class _Inputs:
     around: Surroundings
     #: The environment of the server of each point: what the tuned tables of that point resolve under.
     servers: tuple[Mapping[str, str], ...] = ()
+    #: The CPU build of aiter's touched modules the sheet names, proven.
+    modules: _ModuleBuild | None = None
+
+
+@dataclass(frozen=True)
+class _ModuleBuild:
+    """The signed record of a CPU build of aiter's modules, and how to copy its files out of the store."""
+
+    record: BuildRecord
+    lay: Callable[[Path], None]
 
 
 def build_session(
@@ -129,7 +148,7 @@ def build_session(
     servers = (environment, *({**inherited, **_sheet_environment(spec, _point(path))} for path in points[1:]))
     machine = Machine(spec.image.digest, arch, spec.hardware.gpu_type, spec.hardware.partition_mode)
     python = server_python(config, default="python3")
-    inputs = _Inputs(spec, machine, environment, sheet, farm, python, around, servers)
+    inputs = _Inputs(spec, machine, environment, sheet, farm, python, around, servers, _module_build(spec, around))
     plans, disabled = _plans(inputs)
     if needs_jit_dir:
         _require_jit_dir(plans, disabled, environment)
@@ -138,6 +157,37 @@ def build_session(
     return JitCacheSession(
         DirJitStore(Path(root)), plans, private_root=around.private_root, staging=around.staging, disabled=disabled
     )
+
+
+def _module_build(spec: MeasurementSpec, around: Surroundings) -> _ModuleBuild | None:
+    """The CPU build of aiter's modules the sheet names for its aiter package root, proven; ``None`` when it names none.
+
+    Raises:
+        RunnerFailure: ``spec_rejected`` when it names one for another package, or one this runner cannot prove.
+    """
+    roots = {root.id: root for root in spec.environment.roots}
+    named = [ref for ref in spec.environment.builds if roots[ref.root_id].kind != _RUNTIME_KIND]
+    if not named:
+        return None
+    foreign = [ref.root_id for ref in named if roots[ref.root_id].import_name != AITER_PACKAGE]
+    if foreign:
+        raise RunnerFailure(_SPEC_REJECTED, f"{foreign[0]}: a package root whose modules no CPU build makes")
+    try:
+        store = store_from_environment(around.environ)
+        builds = sheet_builds(
+            tuple(NamedBuild(r.root_id, r.key, r.manifest_sha256) for r in named), store, spec.image.digest
+        )
+        record = builds.module_record(named[0].root_id)  # type: ignore[union-attr]  # sheet_builds refused None
+    except (BuildStoreConfigError, NativeLayError) as exc:
+        raise RunnerFailure(_SPEC_REJECTED, str(exc)) from None
+    return _ModuleBuild(record, partial(_fetch, builds, record))
+
+
+def _fetch(builds: SheetBuilds, record: BuildRecord, directory: Path) -> None:
+    try:
+        builds.fetch(record, directory)
+    except NativeLayError as exc:
+        raise ValueError(str(exc)) from None
 
 
 def _point(path: Path) -> dict:
@@ -212,16 +262,55 @@ def _aiter_plans(inputs: _Inputs, kinds: list[CacheKind]) -> list[KindPlan] | st
     touched = _touched(inputs, base, effective)
     if isinstance(touched, str):
         return touched
+    given = _given(inputs, surface, effective, touched.names)
     return [
-        KindPlan(
-            kind,
-            key,
-            effective / "jit" if kind is AITER_JIT else None,
-            read_only,
-            touched.names if kind is AITER_JIT else frozenset(),
-        )
+        KindPlan(kind, key, effective / "jit", read_only, touched.names, given)
+        if kind is AITER_JIT
+        else KindPlan(kind, key, None, read_only)
         for kind in kinds
     ]
+
+
+def _given(inputs: _Inputs, surface: BuildSurface, effective: Path, touched: frozenset[str]) -> GivenModules | None:
+    """The touched modules the sheet's CPU build made that this server may load: built for this GPU, under the variables
+    this server's build would read, from tables none of its variables change. Whatever is left out the server builds."""
+    built = inputs.modules
+    if built is None:
+        return None
+    names = frozenset(PurePosixPath(o.path).name.removesuffix(_MODULE_SUFFIX) for o in built.record.outputs) & touched
+    problem = _build_differs(built.record, inputs.machine.gfx_arch, surface)
+    if problem is not None:
+        inputs.around.notes.append(f"jit cache: the CPU build of aiter's modules is not used: {problem}")
+        return None
+    try:
+        tabled = stale_table_modules(read_config(config_path(effective)), effective, effective, inputs.servers)
+    except (OSError, ValueError):
+        tabled = names
+    if names & tabled:
+        inputs.around.notes.append(
+            f"jit cache: {', '.join(sorted(names & tabled))} not taken from their CPU build: the server's tuned tables differ"
+        )
+    names -= tabled
+    return GivenModules(names, built.lay) if names else None
+
+
+def _build_differs(record: BuildRecord, gfx_arch: str, surface: BuildSurface) -> str | None:
+    """How the CPU build's target and variables differ from what this server's build would have, ``None`` when not."""
+    if record.inputs.gfx_arch != gfx_arch:
+        return f"it was built for {record.inputs.gfx_arch} and this GPU is {gfx_arch}"
+    built = {
+        name.removeprefix(COMPILE_ENV_PREFIX): value
+        for name, value in record.toolchain.items()
+        if name.startswith(COMPILE_ENV_PREFIX)
+    }
+    # The interpreter and the import path are the image's on both sides; what they could change is in the farm.
+    server = {k: v for k, v in surface.environment.items() if k not in (_PYTHONPATH, _FRAMEWORK_PYTHON)}
+    if server.get(_GPU_ARCHS) in (_NATIVE, gfx_arch):
+        del server[_GPU_ARCHS]
+    differing = sorted(name for name in set(built) | set(server) if built.get(name) != server.get(name))
+    if differing:
+        return f"the server's {', '.join(differing)} differ from its build's"
+    return None
 
 
 def _touched(inputs: _Inputs, base: Path, effective: Path) -> Touched | str:

@@ -20,7 +20,7 @@ from typing import Any
 from hyperloom.measure.docs import Reader, canonical_json, parse_json_object, relative_path, string_map
 from hyperloom.measure.jit.native.key import BuildInputs
 
-__all__ = ["FAILED", "LOG_NAME", "READY", "RECORD_FILES", "BuildRecord", "OutputFile"]
+__all__ = ["COMPILE_ENV_PREFIX", "FAILED", "LOG_NAME", "READY", "RECORD_FILES", "BuildRecord", "OutputFile"]
 
 RECORD_SCHEMA = "hyperloom.native-build-record/v1"
 READY = "ready"
@@ -31,6 +31,9 @@ RECORD_FILES: Mapping[str, tuple[str, str]] = {
     FAILED: ("failed.json", "failed.sig"),
 }
 LOG_NAME = "log.txt"
+#: A toolchain entry ``env_<NAME>`` is a variable the planner gave the compile, as the build service (never the compile)
+#: wrote it: a reader compares it with the environment the outputs will run under.
+COMPILE_ENV_PREFIX = "env_"
 EXECUTABLE, PLAIN = "0755", "0644"
 _HEX = re.compile(r"[0-9a-f]{64}")
 _OUTPUTS = "outputs"

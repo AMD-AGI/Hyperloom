@@ -27,13 +27,14 @@ import os
 import secrets
 import shutil
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 from hyperloom.measure import fsafe
 from hyperloom.measure.archive import fsync_dir
 from hyperloom.measure.docs import DocumentError
 from hyperloom.measure.jit.native.key import BuildInputs
-from hyperloom.measure.jit.native.record import EXECUTABLE, LOG_NAME, RECORD_FILES, BuildRecord
+from hyperloom.measure.jit.native.record import EXECUTABLE, LOG_NAME, READY, RECORD_FILES, BuildRecord
 from hyperloom.measure.jit.native.trust import BuildRefused, Refusal, Signer, Trust
 from hyperloom.measure.jit.store import BLOBS_DIR, SnapshotInvalid, StoredFile, copy_blob, read_bounded, store_blob
 
@@ -42,6 +43,8 @@ __all__ = ["BUILDS_DIR", "BuildInfraError", "BuildStore"]
 BUILDS_DIR = "builds"
 #: The log kept beside a record is the compiler's tail, capped so a noisy build cannot fill the store.
 MAX_LOG_BYTES = 256 * 1024
+#: A record larger than this is not one the service wrote; it is skipped when listing ready builds.
+_MAX_RECORD_BYTES = 1 << 20
 _ENTRY_FILE_MODE = 0o644
 _FETCHED_EXECUTABLE, _FETCHED_PLAIN = 0o700, 0o600
 
@@ -126,6 +129,25 @@ class BuildStore:
                 os.chmod(target, _FETCHED_EXECUTABLE if output.mode == EXECUTABLE else _FETCHED_PLAIN)
         finally:
             os.close(root_fd)
+
+    def ready_records(self, component: str, image_digest: str) -> Iterator[BuildRecord]:
+        """The verified ready records of ``component`` built for ``image_digest``: what a build of it took before. An
+        entry that cannot be read or proven is passed over; it tells nothing of how long a build takes."""
+        component_dir = self._root / BUILDS_DIR / component
+        if not component_dir.is_dir():
+            return
+        for entry in component_dir.iterdir():
+            record = self._ready(entry / RECORD_FILES[READY][0])
+            if record is not None and record.inputs.image_digest == image_digest:
+                yield record
+
+    def _ready(self, manifest: Path) -> BuildRecord | None:
+        try:
+            if not manifest.is_file() or manifest.stat().st_size > _MAX_RECORD_BYTES:
+                return None
+            return self.read(BuildRecord.parse(manifest.read_bytes()).inputs)
+        except (OSError, DocumentError, BuildRefused):
+            return None
 
     # -- writing ---------------------------------------------------------------------------------------------------
 

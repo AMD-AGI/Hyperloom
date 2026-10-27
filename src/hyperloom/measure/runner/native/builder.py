@@ -29,8 +29,8 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -127,13 +127,15 @@ class LaidTree:
     """A tree laid for one compile (:func:`lay_tree`): what :func:`compile_laid` needs, and nothing of the stack's.
 
     ``tracked`` is the upstream build directory (a ``.hip`` it holds is a source, not hipify's output), ``laid`` the
-    paths the stack wrote over it."""
+    paths the stack wrote over it; ``environment`` holds variables the planner chose for this compile, under the recipe's
+    own (which win)."""
 
     recipe: NativeRecipe
     machine: BuildMachine
     tracked: Path
     image_root: Path
     laid: frozenset[str]
+    environment: Mapping[str, str] = field(default_factory=dict)
 
 
 def lay_tree(request: BuildRequest, root: EnvRoot, blobs: BlobStore, scratch: Path) -> LaidTree:
@@ -172,7 +174,7 @@ def compile_laid(laid: LaidTree, scratch: Path, *, against_image: bool = True) -
     result = run_argv(
         recipe.argv(machine.python),
         cwd=tree,
-        env=recipe.environment(machine.gfx_arch, Path(scratch)),
+        env={**laid.environment, **recipe.environment(machine.gfx_arch, Path(scratch))},
         timeout_sec=recipe.budget_sec,
         run=_keeping_errors(errors, f"{tree}{os.sep}"),
     )
@@ -184,7 +186,7 @@ def compile_laid(laid: LaidTree, scratch: Path, *, against_image: bool = True) -
     if result.returncode != 0:
         exited = f"{COMPILE_ERROR}: the compile exited {result.returncode}"
         return _failed(f"{exited}: {errors[0]}" if errors else exited, toolchain, timing, log, scratch)
-    image = laid.image_root if against_image else None
+    image = laid.image_root if against_image and recipe.against_image else None
     try:
         outputs = harvest(tree / recipe.package_dir, recipe.outputs, image, recipe.max_output_bytes, Path(scratch))
     except HarvestError as exc:

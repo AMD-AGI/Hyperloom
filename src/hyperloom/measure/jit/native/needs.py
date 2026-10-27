@@ -8,23 +8,29 @@ package are laid like a package root's, and its native outputs come from a build
 (:mod:`hyperloom.measure.jit.native`). The compile names each such build by the inputs whose hash is its key
 (:class:`BuildNeed`); the build is made while the test waits without a card, and the sheet names it once it is ready, by
 its key and the SHA-256 of its signed manifest (:class:`BuildRef`, ``environment.builds``).
+
+aiter's touched modules (#125 stage 2b) are built the same way but stay a package root's: :class:`ModulePlan` says which
+of them a CPU build makes (:class:`ModuleBuild`), and the sheet names that build on aiter's package root.
 """
 
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from hyperloom.contracts.recipe import ComponentPatches, Recipe, RecipeError
 
 if TYPE_CHECKING:
-    from hyperloom.measure.compile import EnvEntry
+    from hyperloom.measure.compile import EnvEntry, EnvRoot
     from hyperloom.measure.jit.native.key import BuildInputs
 
 __all__ = [
     "BuildNeed",
     "BuildNotReady",
     "BuildRef",
+    "ModuleBuild",
+    "ModulePlan",
     "NativePlan",
     "NativeStack",
     "RuntimeSourcesConflict",
@@ -46,6 +52,26 @@ class NativePlan(Protocol):
     native recipe), and a :class:`CompileError` when it changes one that cannot be built."""
 
     def __call__(self, component: ComponentPatches) -> NativeStack | None: ...
+
+
+@dataclass(frozen=True)
+class ModuleBuild:
+    """The CPU build of aiter's modules that a stack touches (#125 stage 2b): the inputs whose hash is the store's key,
+    and the modules it makes, which the test's server then loads instead of building them on its card."""
+
+    inputs: BuildInputs
+    modules: frozenset[str]
+
+
+class ModulePlan(Protocol):
+    """Which of the touched modules ``candidates`` of aiter's stack (its ``roots``, the module config ``config`` they
+    leave) a CPU build makes, ``None`` when it makes none; and how long building ``modules`` on CPU takes."""
+
+    def __call__(
+        self, roots: tuple[EnvRoot, ...], config: Mapping[str, Any], candidates: Collection[str]
+    ) -> ModuleBuild | None: ...
+
+    def seconds(self, modules: Collection[str]) -> float: ...
 
 
 @dataclass(frozen=True)

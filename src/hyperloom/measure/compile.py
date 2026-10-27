@@ -58,6 +58,8 @@ from hyperloom.measure.jit.native.needs import (
     BuildNeed,
     BuildNotReady,
     BuildRef,
+    ModuleBuild,
+    ModulePlan,
     NativePlan,
     NativeStack,
     check_runtime_sources,
@@ -68,6 +70,7 @@ from hyperloom.measure.jit.modules import (
     ESTIMATED_MODULE_SECONDS,
     MAX_REBUILD_SECONDS,
     SourceTree,
+    Touched,
     config_path,
     image_aiter_meta,
     prebuilt_names,
@@ -587,19 +590,19 @@ def _patched_config(entries: tuple[EnvEntry, ...], blobs: BlobStore) -> dict | N
     return None
 
 
-def refuse_costly_rebuild(
-    roots: tuple[EnvRoot, ...],
-    bases: Mapping[str, PackageBase],
-    blobs: BlobStore,
-    table_variables: Collection[str] = (),
-) -> None:
-    """Refuse a stack that touches so many of aiter's modules that their first build would not fit the time given to it.
+@dataclass(frozen=True)
+class _AiterTouch:
+    """What a stack of aiter touches: the module config it leaves, the touched modules, and those whose tuned tables a
+    variable the test sets names (``tabled``), which only its server can build from them."""
 
-    The modules are the prebuilt ones the patch leaves stale (:func:`~hyperloom.measure.jit.modules.touched_modules`),
-    with the ones generated from a tuned table that the patch (below ``configs``) or one of ``table_variables`` (the
-    ``AITER_CONFIG_*`` the test sets) may change; the first test of the stack builds them on its card, when its server
-    calls them.
-    """
+    config: dict
+    found: Touched
+    tabled: frozenset[str]
+
+
+def _aiter_touch(
+    roots: tuple[EnvRoot, ...], bases: Mapping[str, PackageBase], blobs: BlobStore, table_variables: Collection[str]
+) -> _AiterTouch | None:
     package, meta = bases[PACKAGE_BASE], bases[META_BASE]
     by_id = {root.import_name: root for root in roots}
     meta_entries = by_id[meta.import_name].entries if meta.import_name in by_id else ()
@@ -611,17 +614,51 @@ def refuse_costly_rebuild(
         raise PatchApplyError(f"cannot tell which of aiter's modules the patch touches: {exc}") from exc
     tables = named_table_modules(after, package.path, table_variables, [entry.path for entry in package_entries])
     if not meta_entries and after == before and not tables:
-        return
+        return None
     overlay = {entry.path: blobs.get(entry.blob or "") if entry.op == _UPSERT else None for entry in meta_entries}
-    tree = SourceTree(meta.path, overlay)
     prebuilt = prebuilt_names(package.path)
-    found = touched_modules(before, after, tree, overlay, prebuilt) | touched_entries(tables, after, prebuilt)
-    seconds = len(found.rebuilt) * ESTIMATED_MODULE_SECONDS
+    found = touched_modules(before, after, SourceTree(meta.path, overlay), overlay, prebuilt) | touched_entries(
+        tables, after, prebuilt
+    )
+    tabled = named_table_modules(after, package.path, table_variables, ()) if table_variables else frozenset()
+    return _AiterTouch(after, found, tabled)
+
+
+def refuse_costly_rebuild(
+    roots: tuple[EnvRoot, ...],
+    bases: Mapping[str, PackageBase],
+    blobs: BlobStore,
+    table_variables: Collection[str] = (),
+    modules: ModulePlan | None = None,
+) -> ModuleBuild | None:
+    """Refuse a stack that touches so many of aiter's modules that their first build would not fit the time given to it.
+
+    The modules are the prebuilt ones the patch leaves stale (:func:`~hyperloom.measure.jit.modules.touched_modules`),
+    with the ones generated from a tuned table that the patch (below ``configs``) or one of ``table_variables`` (the
+    ``AITER_CONFIG_*`` the test sets) may change; the first test of the stack builds them on its card, when its server
+    calls them. With ``modules`` (a host that builds natively, #125 stage 2b) a CPU build makes the ones it can before the
+    test, and only the rest are built on the card; that build, returned, is refused when it would not fit its own time.
+    A module generated from a table the test's variables name is left to the card: only its server reads those tables.
+    """
+    touch = _aiter_touch(roots, bases, blobs, table_variables)
+    if touch is None:
+        return None
+    candidates = touch.found.rebuilt - touch.tabled
+    built = modules(roots, touch.config, candidates) if modules is not None and candidates else None
+    on_cpu = frozenset() if built is None else built.modules
+    _refuse_slow_build(sorted(touch.found.rebuilt - on_cpu), ESTIMATED_MODULE_SECONDS * 1.0, "on the first test's card")
+    if modules is not None and on_cpu:
+        _refuse_slow_build(sorted(on_cpu), modules.seconds(on_cpu) / len(on_cpu), "on a CPU build runner")
+    return built
+
+
+def _refuse_slow_build(names: list[str], each: float, where: str) -> None:
+    seconds = round(len(names) * each)
     if seconds > MAX_REBUILD_SECONDS:
-        examples = ", ".join(sorted(found.rebuilt)[:5])
+        examples = ", ".join(names[:5])
         raise TooManyModulesError(
-            f"the patch touches {len(found.rebuilt)} of aiter's prebuilt modules (for example {examples}), which take about "
-            f"{seconds} s to build again on the first test's card; more than {MAX_REBUILD_SECONDS} s is refused. "
+            f"the patch touches {len(names)} of aiter's prebuilt modules (for example {examples}), which take about "
+            f"{seconds} s to build again {where}; more than {MAX_REBUILD_SECONDS} s is refused. "
             "Change fewer modules at a time: a header that many modules include touches all of them"
         )
 
@@ -730,6 +767,8 @@ class EnvironmentCompiler:
     layouts: Mapping[str, ComponentLayout] = field(default_factory=lambda: COMPONENT_LAYOUTS)
     #: The native builds a stack needs; without one a stack that changes a native source is refused by its layout.
     native: NativePlan | None = None
+    #: The CPU build of aiter's touched modules; without one the test's server builds them on its card.
+    modules: ModulePlan | None = None
     _cache: dict[tuple[str, str], CompiledEnvironment] = field(default_factory=dict, init=False, repr=False)
 
     def compile(self, recipe: Recipe, action: RecipeDelta) -> CompiledEnvironment:
@@ -752,7 +791,9 @@ class EnvironmentCompiler:
         for component in (component for component in target.components if component.patches):
             native = self.native(component) if self.native is not None else None
             if native is None:
-                roots.extend(self._roots(component, tables))
+                component_roots, needs = self._roots(component, tables)
+                roots.extend(component_roots)
+                builds.extend(needs)
             else:
                 roots.append(self._runtime_root(component, native))
                 builds.append(BuildNeed(component.component, native.inputs))
@@ -782,7 +823,10 @@ class EnvironmentCompiler:
             kind="runtime",
         )
 
-    def _roots(self, component: ComponentPatches, table_variables: Collection[str] = ()) -> tuple[EnvRoot, ...]:
+    def _roots(
+        self, component: ComponentPatches, table_variables: Collection[str] = ()
+    ) -> tuple[tuple[EnvRoot, ...], tuple[BuildNeed, ...]]:
+        """The component's roots, and the CPU build of the aiter modules they touch when one makes any."""
         layout = self.layouts.get(component.component)
         if layout is None:
             raise UnsupportedComponentError(
@@ -795,9 +839,10 @@ class EnvironmentCompiler:
                 AITER_META_WHEEL_DIR, image_aiter_meta(package.path), package.dist_name, package.dist_version
             )
         roots = apply_component_stack(component, layout, bases, self.blobs)
-        if META_BASE in bases:
-            refuse_costly_rebuild(roots, bases, self.blobs, table_variables)
-        return roots
+        if META_BASE not in bases:
+            return roots, ()
+        built = refuse_costly_rebuild(roots, bases, self.blobs, table_variables, self.modules)
+        return roots, () if built is None else (BuildNeed(component.component, built.inputs),)
 
 
 def compile_environment(

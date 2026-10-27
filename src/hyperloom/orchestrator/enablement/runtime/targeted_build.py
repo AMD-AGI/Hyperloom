@@ -854,6 +854,8 @@ def _driver_main(argv: list[str] | None = None) -> int:
     return 0 if result.ok else 1
 
 
+#: Public name of the aiter recipe, whose preflight and budgets the native build store reuses.
+AiterBuild = _AiterBuild
 #: Public name of the sgl-kernel recipe, whose preflight and budgets the native build store reuses.
 SglKernelBuild = _SglKernelBuild
 #: Public name of the vLLM-from-source recipe, whose preflight and budgets the native build store reuses.
@@ -865,6 +867,7 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "AiterBuild",
     "BuildHandle",
     "SglKernelBuild",
     "VllmBuild",

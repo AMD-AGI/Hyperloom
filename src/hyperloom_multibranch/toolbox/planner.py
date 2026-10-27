@@ -19,7 +19,7 @@ from hyperloom.common.outside_facts import AITER_LOG_TUNED_CONFIG_ENV
 from hyperloom.contracts.measurement import TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError
 from hyperloom.measure.compile import BlobStore, CompiledEnvironment, EnvironmentCompiler
-from hyperloom.measure.jit.native.needs import NativePlan
+from hyperloom.measure.jit.native.needs import ModulePlan, NativePlan
 from hyperloom.measure.points import AcceptedMeasurement, CanonicalMeasurement, accept_measurement
 
 #: What every measured point sets ``AITER_LOG_TUNED_CONFIG`` to. aiter reads the variable as an integer and logs the hits
@@ -73,10 +73,12 @@ class HostedPlanner:
         """The blob store the recipes' patches and kernels are read from."""
         return self._compiler.compiler.blobs
 
-    def with_native(self, plan: NativePlan) -> HostedPlanner:
+    def with_native(self, plan: NativePlan, modules: ModulePlan | None = None) -> HostedPlanner:
         """This planner compiling with ``plan``, so a stack that changes native sources needs a build instead of being
-        refused; the compile cache starts empty, since a native stack compiles differently."""
-        return HostedPlanner(replace(self._compiler.compiler, native=plan), self._canonical, self._root)
+        refused, and with ``modules``, so aiter's touched modules are built on CPU before the test; the compile cache
+        starts empty, since a native stack compiles differently."""
+        compiler = replace(self._compiler.compiler, native=plan, modules=modules)
+        return HostedPlanner(compiler, self._canonical, self._root)
 
     def plan(self, request: TestRequest, parent: Recipe) -> AcceptedMeasurement:
         out_dir = self._root / uuid.uuid4().hex

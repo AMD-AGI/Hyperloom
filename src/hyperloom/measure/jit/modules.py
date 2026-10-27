@@ -5,7 +5,8 @@
 
 An image ships aiter's compiled modules (``aiter/jit/*.so``) and aiter builds a module only when its ``.so`` is missing.
 A patch to ``csrc`` or ``hsa`` changes what a module would build to, so the test's own JIT directory must not link the
-image's copy of a module the patch touches: the server then builds it on its first call, from the patched sources.
+image's copy of a module the patch touches: the server then builds it on its first call, from the patched sources, unless a CPU
+build made it before the test (:mod:`hyperloom.measure.runner.native.aiter_modules`).
 
 ``optCompilerConfig.json`` says what each module is built from. Its values are Python expressions that aiter evaluates
 (``f'{AITER_CSRC_DIR}/pybind/x.cu'``); the ones that name a path are expanded here, and an entry that cannot be

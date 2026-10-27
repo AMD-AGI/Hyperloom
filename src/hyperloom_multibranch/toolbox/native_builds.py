@@ -6,6 +6,8 @@
 A host turns them on with the build store and its trust, which the runners read too (``HYPERLOOM_BUILD_STORE`` and
 ``HYPERLOOM_BUILD_TRUST``, :mod:`hyperloom.measure.jit.native.config`). This process is then the build service: it plans
 each stack's build at acceptance, drives it while the test waits without a card, and signs what the build runner staged.
+It also builds the aiter modules a stack touches before its test (#125 stage 2b,
+:mod:`hyperloom.measure.runner.native.aiter_modules`), with the variables of its own environment that aiter's build reads.
 So it also needs:
 
 - ``HYPERLOOM_BUILD_SIGNING_KEY``: the service's Ed25519 private key, a file of this user with mode 0600 (the compile
@@ -30,6 +32,7 @@ import logging
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 
 from hyperloom.contracts.measurement import TestRequest
@@ -41,6 +44,12 @@ from hyperloom.measure.jit.native.config import (
     store_from_environment,
 )
 from hyperloom.measure.jit.native.trust import Signer
+from hyperloom.measure.runner.native.aiter_modules import (
+    AITER_COMPONENT,
+    AITER_RECIPE_FACTORY,
+    AiterModules,
+    aiter_module_recipe,
+)
 from hyperloom.measure.runner.native.builder import BuildMachine
 from hyperloom.measure.runner.native.isolated import (
     ISOLATION_UID_NETNS,
@@ -80,10 +89,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class NativeBuilds:
-    """A toolbox's native builds: the queue's driver, the compile's plan, and what its runners are told."""
+    """A toolbox's native builds: the queue's driver, the compile's plans (of native stacks, and of aiter's touched
+    modules), and what its runners are told."""
 
     driver: StoreBuildDriver
     plan: NativePlanner
+    modules: AiterModules
     runner_envs: Mapping[str, str]
 
 
@@ -148,11 +159,13 @@ def native_builds(
     recipes = native_recipes()
     site = NativeSite(machine, recipes, sources, image_root)
     planner, isolated = NativePlanner(site, blobs), isolation()
-    runner = IsolatedBuilds(planner, blobs, isolated, RECIPE_FACTORIES)
+    modules = AiterModules(planner, history=partial(store.ready_records, AITER_COMPONENT, machine.image_digest))
+    runner = IsolatedBuilds(planner, blobs, isolated, {**RECIPE_FACTORIES, AITER_COMPONENT: AITER_RECIPE_FACTORY})
     _log_isolation(isolated)
-    build_site = BuildSite(machine.image_digest, machine.builder_image_digest, machine.gfx_arch, recipes)
+    built = {**recipes, AITER_COMPONENT: aiter_module_recipe()}
+    build_site = BuildSite(machine.image_digest, machine.builder_image_digest, machine.gfx_arch, built)
     driver = StoreBuildDriver(store, signer, build_site, compiled_needs, runner)
-    return NativeBuilds(driver, planner, runner_envs)
+    return NativeBuilds(driver, planner, modules, runner_envs)
 
 
 def _log_isolation(isolated: Isolation | None) -> None:
@@ -172,9 +185,9 @@ def _log_isolation(isolated: Isolation | None) -> None:
 
 
 def with_native_plan(acceptance: AcceptanceSetup, native: NativeBuilds | None) -> AcceptanceSetup:
-    """``acceptance`` whose planner compiles with ``native``'s plan; as it is without one, or with a planner that takes
-    no plan (its native stacks stay refused by their layouts)."""
+    """``acceptance`` whose planner compiles with ``native``'s plans; as it is without one, or with a planner that takes
+    no plan (its native stacks stay refused by their layouts, and aiter's touched modules are built on the card)."""
     with_native = getattr(acceptance.planner, "with_native", None)
     if native is None or with_native is None:
         return acceptance
-    return replace(acceptance, planner=with_native(native.plan))
+    return replace(acceptance, planner=with_native(native.plan, native.modules))

@@ -220,9 +220,9 @@ class Rig:
         manifest = ResultManifest.from_bytes((run / "out" / "manifest.json").read_bytes())
         return manifest, json.loads((run / "out" / "status.json").read_text()), run
 
-    def refused(self, name: str, make_sheet, *, cache: bool = True) -> dict:
+    def refused(self, name: str, make_sheet, *, cache: bool = True, extra_env: dict | None = None) -> dict:
         """Run one whole test that the runner refuses before it starts a server; give its status."""
-        run, environ = self._start(name, cache=cache, fail=False, extra_env=None)
+        run, environ = self._start(name, cache=cache, fail=False, extra_env=extra_env)
         assert _go(run, environ, make_sheet(run)) != 0
         assert not (run / "out" / "manifest.json").exists()
         return json.loads((run / "out" / "status.json").read_text())

@@ -43,6 +43,7 @@ def _laid(job: dict) -> LaidTree:
         tracked=Path(job["tracked"]),
         image_root=Path(job["image_root"]),
         laid=frozenset(job["laid"]),
+        environment=dict(job.get("environment", {})),
     )
 
 

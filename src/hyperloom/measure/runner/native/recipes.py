@@ -37,6 +37,7 @@ __all__ = [
     "Preflight",
     "native_recipes",
     "rocm_variables",
+    "runner_preflight",
     "sgl_kernel_recipe",
     "vllm_recipe",
 ]
@@ -89,6 +90,9 @@ class NativeRecipe:
     gfx_variable: str = "AMDGPU_TARGET"
     #: The recipe's own variables of the compile, read when the compile starts.
     variables: Callable[[], Mapping[str, str]] = dict
+    #: Whether an output equal to the image's own file is left out of the record (the farm then lays the image's); a
+    #: recipe whose outputs replace no file of the image keeps every one.
+    against_image: bool = True
 
     def layout(self) -> ComponentLayout:
         """The native section: the build directory of the upstream tree, the build definition refused."""
@@ -128,7 +132,7 @@ def sgl_kernel_recipe() -> NativeRecipe:
         budget_sec=default_budget_sec(_SGL_KERNEL),
         max_jobs=SglKernelBuild.default_max_jobs,
         max_output_bytes=_MAX_OUTPUT_BYTES,
-        preflight=partial(_runner_preflight, SglKernelBuild, "sglang", _SGL_KERNEL),
+        preflight=partial(runner_preflight, SglKernelBuild, "sglang", _SGL_KERNEL),
     )
 
 
@@ -184,14 +188,14 @@ def rocm_variables(environ: Mapping[str, str] | None = None) -> dict[str, str]:
 def _vllm_preflight(scratch: Path, gfx_arch: str) -> Preflight:
     """The single-lineage vLLM recipe's preflight, then the build tools vLLM's ``setup.py`` runs, which the build cannot
     fetch: a missing one is the machine's, never the candidate's compile error."""
-    checked = _runner_preflight(VllmBuild, _VLLM, _VLLM_SOURCE, scratch, gfx_arch)
+    checked = runner_preflight(VllmBuild, _VLLM, _VLLM_SOURCE, scratch, gfx_arch)
     missing = [tool for tool in _VLLM_BUILD_TOOLS if shutil.which(tool) is None]
     if checked.problem is None and missing:
         return Preflight(f"preflight_toolchain: {', '.join(missing)} not on PATH; vLLM's build runs them", {})
     return checked
 
 
-def _runner_preflight(
+def runner_preflight(
     recipe_class: type[SglKernelBuild] | type[VllmBuild], framework: str, component: str, scratch: Path, gfx_arch: str
 ) -> Preflight:
     """A single-lineage recipe's own preflight: disk for one candidate, the ROCm toolchain, a ROCm torch, the arch."""

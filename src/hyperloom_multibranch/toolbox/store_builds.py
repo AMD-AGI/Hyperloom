@@ -21,22 +21,16 @@ import logging
 import statistics
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from pathlib import Path
 
 from hyperloom.contracts.measurement import TestRequest
-from hyperloom.measure.docs import DocumentError
 from hyperloom.measure.jit.native.key import BuildInputs
-from hyperloom.measure.jit.native.record import READY, RECORD_FILES, BuildRecord
+from hyperloom.measure.jit.native.record import BuildRecord
 from hyperloom.measure.jit.native.store import BuildStore
 from hyperloom.measure.jit.native.trust import BuildRefused, Signer
 from hyperloom.measure.runner.native.recipes import NativeRecipe
 from hyperloom.measure.runner.native.service import Build, Ensured, ensure_build
 
 logger = logging.getLogger(__name__)
-
-#: A record larger than this is not one the service wrote; it is skipped when estimating.
-_MAX_RECORD_BYTES = 1024 * 1024
-_MANIFEST = RECORD_FILES[READY][0]
 
 #: The native digest of each component an accepted request's stack changes, given what acceptance prepared.
 Plan = Callable[[TestRequest, object], Mapping[str, str]]
@@ -103,21 +97,7 @@ class StoreBuildDriver:
     def _prior(self, inputs: BuildInputs) -> Iterator[BuildRecord]:
         """The verified ready records of ``inputs``' component built for its image."""
 
-        component_dir = self._store.entry_dir(inputs).parent
-        if not component_dir.is_dir():
-            return
-        for entry in component_dir.iterdir():
-            record = self._verified(entry / _MANIFEST)
-            if record is not None and record.inputs.image_digest == inputs.image_digest:
-                yield record
-
-    def _verified(self, manifest: Path) -> BuildRecord | None:
-        try:
-            if not manifest.is_file() or manifest.stat().st_size > _MAX_RECORD_BYTES:
-                return None
-            return self._store.read(BuildRecord.parse(manifest.read_bytes()).inputs)
-        except (OSError, DocumentError, BuildRefused):
-            return None  # an entry that cannot be read or proven tells nothing of how long a build takes
+        return self._store.ready_records(inputs.component, inputs.image_digest)
 
 
 __all__ = ["BuildSite", "Plan", "StoreBuildDriver"]

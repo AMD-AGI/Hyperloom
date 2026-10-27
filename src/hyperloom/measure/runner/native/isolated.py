@@ -44,11 +44,11 @@ from hyperloom.measure import fsafe
 from hyperloom.measure.compile import BlobStore
 from hyperloom.measure.docs import DocumentError, Reader, parse_json_object, string_map
 from hyperloom.measure.jit.native.key import BuildInputs
-from hyperloom.measure.jit.native.record import FAILED, READY, OutputFile
+from hyperloom.measure.jit.native.record import COMPILE_ENV_PREFIX, FAILED, READY, OutputFile
 from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.measure.jit.store import SnapshotInvalid, read_bounded
-from hyperloom.measure.runner.native.builder import LaidTree, lay_tree
-from hyperloom.measure.runner.native.planning import NativePlanner, Planned
+from hyperloom.measure.runner.native.builder import LaidTree
+from hyperloom.measure.runner.native.planning import NativePlanner, PlannedBuild
 from hyperloom.measure.runner.native.process_group import run_in_group
 from hyperloom.measure.runner.native.service import Build, Staged
 
@@ -160,6 +160,7 @@ def job_document(laid: LaidTree, factory: str) -> dict[str, Any]:
         "tracked": str(laid.tracked),
         "image_root": str(laid.image_root),
         "laid": sorted(laid.laid),
+        "environment": dict(laid.environment),
     }
 
 
@@ -182,7 +183,7 @@ class IsolatedBuilds:
     def __call__(self, inputs: BuildInputs) -> Build:
         return partial(self._build, self._planner.planned(inputs))
 
-    def _build(self, planned: Planned, scratch: Path) -> Staged:
+    def _build(self, planned: PlannedBuild, scratch: Path) -> Staged:
         isolation = self._isolation
         if isolation is None:
             raise BuildInfraError(
@@ -191,7 +192,7 @@ class IsolatedBuilds:
             )
         work = Path(scratch) / _WORK
         work.mkdir()
-        laid = lay_tree(planned.request, planned.root, self._blobs, work)
+        laid = planned.lay(self._blobs, work)
         _write_job(work, job_document(laid, self._factories[laid.recipe.component]))
         if isolation.uid is not None:
             _give(work, isolation.uid)
@@ -212,7 +213,15 @@ class IsolatedBuilds:
             tail = done.stderr.strip()[-_STDERR_TAIL:]
             raise BuildInfraError(f"the build runner exited {done.returncode}: {tail}")
         staged = staged_record(work, timing)
-        return replace(staged, toolchain={**staged.toolchain, ISOLATION_KEY: isolation.level})
+        return replace(staged, toolchain=_service_toolchain(staged.toolchain, laid, isolation.level))
+
+
+def _service_toolchain(child: Mapping[str, str], laid: LaidTree, level: str) -> dict[str, str]:
+    """The record's toolchain: the child's facts, less any it wrote under the names this process writes (the variables of
+    the compile and its isolation), which a compile running candidate code must not be able to claim."""
+    own = {f"{COMPILE_ENV_PREFIX}{name}": value for name, value in laid.environment.items()}
+    kept = {name: value for name, value in child.items() if not name.startswith(COMPILE_ENV_PREFIX)}
+    return {**kept, **own, ISOLATION_KEY: level}
 
 
 def _write_job(work: Path, job: Mapping[str, Any]) -> None:
