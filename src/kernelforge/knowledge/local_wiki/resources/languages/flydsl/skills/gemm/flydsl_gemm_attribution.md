@@ -179,8 +179,11 @@ probes that cut one LDS read stream by 17–33%. Decide with a halve-the-reads p
 
 - rocprof's `VGPR_Count` reports half the true value, and `Accum_VGPR_Count` reports 0. Read registers from
   the ISA (`flydsl_gemm_mainloop.md` §10).
-- `MfmaUtil` accumulates per wave: a kernel with two waves per SIMD reads twice the value of a one-wave
-  kernel doing the same work.
+- `MfmaUtil` (`SQ_VALU_MFMA_BUSY_CYCLES` over `GRBM_GUI_ACTIVE`·SIMDs) is not reliably comparable across wave counts.
+  *(field)* A 1-wave-per-SIMD kernel read 32.2% against 63.8% for a 2-wave-per-SIMD kernel with the same MFMA
+  count and wall time 4% apart, while one kernel built at 1 and 2 waves per SIMD reported identical MFMA busy
+  cycles for the same work. Before comparing kernels with different waves per SIMD, check busy cycles against
+  `SQ_INSTS_MFMA`, or compare time per K iteration.
 - `SQ_LEVEL_WAVES` and `SQ_ACCUM_PREV_HIRES` read 0 in rocprofv3 on gfx950. Wait counters cannot
   separate `vmcnt` waits from barrier waits there; use probes.
 - In an ATT trace, an MFMA waiting for its operand is charged to the MFMA, not to an `s_waitcnt`. *(field)*

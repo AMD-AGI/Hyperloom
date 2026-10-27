@@ -109,8 +109,11 @@ When a search stalls, change the family of the dimension you search (split-K, MF
 - **Time on production-magnitude data.** fp8 wall time depends on operand magnitude through power and
   clock, so race on the caller's operands, as Turbo's dense race does (`_bench_dense_args`, FP8:3008-3013).
   Zero operands are a false ruler: *(field)* 155 µs against 205 µs for the same build and shape.
-- **Rank at the caller's beta.** Race beta=1 configurations on scratch and rebuild the winner with the
-  accumulate epilogue (`flydsl_gemm_epilogue.md` §7).
+- **Choose the beta the race ranks at.** Turbo's dense races time the beta=0 build on a scratch output and
+  rebuild the winner with the accumulate epilogue (`flydsl_gemm_epilogue.md` §7), so beta=0 and beta=1 callers
+  of a shape share one configuration. Ranking at the caller's beta costs one more build per candidate and can
+  pick a different configuration for beta=1 (measured on a grouped per-tensor wgrad:
+  `../grouped_gemm/flydsl_grouped_wgrad.md` §10).
 - **Check numerics, not only finiteness, for candidates that change arithmetic order** (split-K, different
   atoms). Compare each against the base configuration's output.
 

@@ -132,10 +132,14 @@ At one wave per SIMD nothing overlaps the epilogue unless you put it inside MFMA
 
 ## 5. Cache policy on the store
 
-- **C is write-once: store it non-temporal** (`nt`, aux=2). Caching it evicts the A/B band that the L2 tile
-  order is keeping (FP8:72-73).
-- For a beta=1 burst too large for L2, use system scope `sc0|sc1|nt` (aux=19; agent scope is `sc1` alone).
-  Turbo switches at 26 MB (`_cstore_aux`, FP8:74-77, 1885). That threshold is a measured value.
+- **C is write-once: store it non-temporal (`nt`, aux=2) when each store writes whole 128 B lines.** Caching
+  it evicts the A/B band that the L2 tile order is keeping (FP8:72-73). *(field)* On a dense MXFP4 NT whose A
+  and B fitted the LLC and C did not, `nt` was the best of the four aux values 0–3. Sub-line stores (2 bytes
+  per lane) rely on L2 to merge their 32 B pieces into 64 B writes, so `nt` and `sc0` both cost there.
+- **Scope bits send even whole-line writes past the per-XCD L2 that merges them** (measured:
+  `../grouped_gemm/flydsl_grouped_lowprec.md` §7). Turbo uses system scope `sc0|sc1|nt` (aux=19; agent scope is `sc1` alone)
+  only for a beta=1 burst from one tile per workgroup that is too large for L2, switching at 26 MB
+  (`_cstore_aux`, FP8:74-77, 1885). That threshold is a measured value.
 - **The sign is shape-dependent, so race it.** *(field)* In the MXFP8 GEMM, `nt` cut the wide shapes by 4.6%
   and 3.0% and cost 0.9–1.9% on narrow shapes whose slabs were already L2-resident. It is raced at a 1%
   margin, not pinned (MX8:968-974).

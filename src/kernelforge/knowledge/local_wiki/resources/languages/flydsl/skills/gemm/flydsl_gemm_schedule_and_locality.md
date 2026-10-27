@@ -63,7 +63,10 @@ The GEMM-specific rules:
 
 **Decide by what co-resident workgroups reuse.**
 - Each group of tiles streams **a slab of its own** (shared inside the group, not across the grid) that is larger
-  than one XCD's L2: keep the group's workgroups on the same XCD at the same time — cluster across all 8 XCDs.
+  than one XCD's L2: keeping the group's workgroups on the same XCD at the same time (cluster across all 8 XCDs)
+  is K-dependent: *(field)* on a grouped fp8 NN dgrad it paid at K = 2944 and lost at K = 5760, both slabs
+  larger than the L2 slice (`../grouped_gemm/flydsl_grouped_scheduling.md` §2). Key the choice on K too, and
+  sweep.
 - All tiles read a **shared slice**: clustering by XCD only fragments the
   sharing; the hardware round-robin (`block_id % 8`) with a narrow group-major band wins.
 
@@ -114,7 +117,9 @@ the band; a 1D band is steadier there. Use 2D only when `GM · GN` is much large
 `TCC_HIT`, `TCC_REQ` and `TCP_TCC_READ_REQ` unchanged; the gain showed in `MemUnitStalled` (12.4% →
 10.7%), i.e. TCP→TCC request queueing. Elsewhere hit rate rose sharply with no wall change. Use
 `SQ_WAIT_ANY` and `MemUnitStalled`. Differences of 1–2% on this axis flipped sign between back-to-back
-sweeps; 10%-scale effects reproduced.
+sweeps; 10%-scale effects reproduced. *(field)* That reading was on a grouped NN dgrad; a later band sweep on the same
+pass improved `MemUnitStalled` in both the winning and the losing cell, and only on a grouped NT did it rank the
+band axis both ways. Decide by wall time.
 
 ## 3. Scheduling hints and fences
 
