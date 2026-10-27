@@ -718,6 +718,7 @@ class HostedMeasurementBackend:
             failure_class=failure.failure_class if failure.disposition is Disposition.FAILED else None,
             failure_reason=failure.failure_reason if failure.disposition is Disposition.FAILED else None,
             phases=result.timing.phases,
+            notes=result.notes,
         )
         self._finish_record(
             attempt,

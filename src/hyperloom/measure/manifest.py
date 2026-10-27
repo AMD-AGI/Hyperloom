@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,6 +39,8 @@ FAILURE_CLASSES = ("infra", "unclear", "candidate")
 #: Names the bundle itself owns; a manifest never lists them as result files.
 RESERVED_NAMES = ("manifest.json", "manifest.sig")
 _FINGERPRINT_RE = re.compile(r"[0-9a-f]{16}")
+#: How many of the runner's notes a manifest carries, and how long each may be.
+MAX_NOTES, MAX_NOTE_CHARS = 64, 2000
 
 
 @dataclass(frozen=True)
@@ -340,6 +343,9 @@ class ResultManifest:
     timing: Timing
     files: tuple[ManifestFile, ...]
     jit_cache: JitCacheFacts | None = None
+    #: What the runner noted of the test that the rest of the result does not say (a check it could not make, a CPU build
+    #: of aiter's modules it used or why not), in its order; none in a manifest an older runner signed.
+    notes: tuple[str, ...] = ()
 
     @classmethod
     def from_document(cls, document: Any) -> "ResultManifest":
@@ -357,6 +363,7 @@ class ResultManifest:
             timing=r.section("timing", Timing.parse),
             files=r.sequence("files", ManifestFile.parse),
             jit_cache=_optional(r, "jit_cache", JitCacheFacts.parse),
+            notes=_optional(r, "notes", _notes) or (),
         )
         r.done()
         paths = [entry.path for entry in manifest.files]
@@ -376,6 +383,20 @@ class ResultManifest:
 def _optional(reader: Reader, key: str, parse: Any) -> Any:
     value = reader.optional(key)
     return None if value is None else parse(value, reader.at(key))
+
+
+def manifest_notes(notes: Sequence[str]) -> list[str]:
+    """The runner's notes as its manifest carries them: the first :data:`MAX_NOTES`, each cut to :data:`MAX_NOTE_CHARS`."""
+    return [note[:MAX_NOTE_CHARS] for note in notes[:MAX_NOTES] if note]
+
+
+def _notes(value: Any, path: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or len(value) > MAX_NOTES:
+        raise DocumentError(f"{path}: expected an array of at most {MAX_NOTES} notes")
+    notes = tuple(_name(item, f"{path}[{index}]") for index, item in enumerate(value))
+    if any(len(note) > MAX_NOTE_CHARS for note in notes):
+        raise DocumentError(f"{path}: a note is longer than {MAX_NOTE_CHARS} characters")
+    return notes
 
 
 def _name(value: Any, path: str) -> str:

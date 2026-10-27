@@ -310,6 +310,25 @@ async def test_a_failed_result_that_records_warnings_is_named(tmp_path: Path, ri
     assert reason == "nonfatal_warnings: recorded ['invented'], the bundle has []"
 
 
+RUNNER_NOTES = [
+    "jit cache: aiter_jit: 1 touched aiter modules come from their CPU build (module_rmsnorm_quant)",
+    "ECC counts could not be read after the test; there is no ECC verdict",
+]
+
+
+async def test_the_runners_signed_notes_reach_the_result_after_the_rounds_warnings_and_reverify(
+    tmp_path: Path, rig
+) -> None:
+    executor, result = await _accepted(tmp_path, rig, fake_warnings=WARNINGS, fake_notes=json.dumps(RUNNER_NOTES))
+
+    assert result.nonfatal_warnings == ("warmup_round_seed:1", "other", *RUNNER_NOTES)
+    assert executor.difference(result) is None
+    difference = executor.difference(replace(result, nonfatal_warnings=result.nonfatal_warnings[:2]))
+    assert (
+        difference is not None and "the bundle has ['warmup_round_seed:1', 'other', 'jit cache: aiter_jit" in difference
+    )
+
+
 FOREIGN_REASON = (
     "1 held the test's cards: pid 900 on card 0, first seen 2026-10-24T04:05:06Z during the test: python3 x.py"
 )

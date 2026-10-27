@@ -294,6 +294,7 @@ class HostedExecutor:
             nonfatal_warnings=(
                 *_warnings_of(outcome.rounds),
                 *_card_warnings(facts.card_occupancy, facts.card_occupancy_reason),
+                *outcome.notes,
             )
             if failure is None
             else (),
@@ -432,7 +433,8 @@ def _unlike_bundle(result: TestResult, derived: Reverified, landed: Path) -> str
     """The first field of ``result`` that the verified bundle does not support.
 
     The warnings are checked on every path: a result that did not succeed records none, any other lists those of the
-    bundle's rounds and the one its signed card occupancy asks for, whatever kind of test it was.
+    bundle's rounds, the one its signed card occupancy asks for and its runner's signed notes, whatever kind of test it
+    was.
     """
     difference = _unlike_values(result, derived, landed)
     if difference:
@@ -441,7 +443,7 @@ def _unlike_bundle(result: TestResult, derived: Reverified, landed: Path) -> str
         return first_warning_difference(result, ())
     occupancy = derived.manifest.runner.card_occupancy
     card = _card_warnings(occupancy.state, occupancy.reason) if occupancy else ()
-    return first_warning_difference(result, (*_warnings_of(derived.rounds), *card))
+    return first_warning_difference(result, (*_warnings_of(derived.rounds), *card, *derived.manifest.notes))
 
 
 def _unlike_classes(result: TestResult, derived: Reverified, landed: Path) -> str | None:

@@ -34,7 +34,7 @@ from hyperloom.measure.failures import (
 )
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.magpie_launchers import install_launchers
-from hyperloom.measure.manifest import encode_manifest, ManifestFile, RESULT_SCHEMA
+from hyperloom.measure.manifest import encode_manifest, manifest_notes, ManifestFile, RESULT_SCHEMA
 from hyperloom.measure.phases import (
     BOOTSTRAP,
     ENV_REBUILD,
@@ -477,6 +477,8 @@ def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Finding
     )
     if found.jit_cache is not None:
         document["jit_cache"] = found.jit_cache
+    if ctx.notes:
+        document["notes"] = manifest_notes(ctx.notes)
     manifest = encode_manifest(document)
     (ctx.out_dir / "manifest.json").write_bytes(manifest)
     (ctx.out_dir / "manifest.sig").write_text(signing.sign(manifest, key), encoding="ascii")

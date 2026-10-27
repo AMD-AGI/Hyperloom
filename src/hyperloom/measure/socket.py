@@ -181,6 +181,8 @@ class TestOutcome:
     """What a test produced; ``failure_class`` is empty on success.
 
     ``phases`` are the phases of the test the backend stamped, in order; a backend that stamps none leaves it empty.
+    ``notes`` are what the test's runner noted of it beyond the rest (a check it could not make, a CPU build of aiter's
+    modules it used or why not), as its signed result states them; a backend whose runner signs none leaves it empty.
     """
 
     __test__ = False
@@ -194,6 +196,7 @@ class TestOutcome:
     failure_class: FailureClass | Literal["infra", "unclear", "candidate"] | None = None
     failure_reason: str | None = None
     phases: tuple[PhaseTiming, ...] = ()
+    notes: tuple[str, ...] = ()
 
 
 class MeasurementTimeout(subprocess.TimeoutExpired):

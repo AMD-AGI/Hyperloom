@@ -23,7 +23,7 @@ attachment placement and ``run_case``) against no server, and lists the verdict 
 every file in the directory it is in (``directory``; a directory attachment beside it is left out).
 ``fake_foreign_cards: [card, ...]`` fails as the runner does when a process outside the test holds one of those cards, if the
 sandbox was given any of them (``status.json`` says ``foreign_process_on_card``); ``fake_card_occupancy: {state, reason,
-checks}`` signs what the runner says of its cards into the manifest.
+checks}`` signs what the runner says of its cards into the manifest; ``fake_notes: [note, ...]`` signs those notes.
 ``fake_phases: [[name, seconds], ...]`` states those phases, back to back, in the manifest's timing (``fake_phases_at``
 is the unix time the first begins, on this fake runner's own clock: 9000 by default); a runner that states none is
 the default. ``fake_legacy_decode: true`` lists the ``decode/outputs.jsonl`` that a runner of the removed decode pass left, so a
@@ -298,6 +298,8 @@ def _manifest(
         document["outcome"]["failure_reason"] = "import_error"
     if "fake_card_occupancy" in config:
         document["runner"]["card_occupancy"] = config["fake_card_occupancy"]
+    if "fake_notes" in config:
+        document["notes"] = config["fake_notes"]
     return document
 
 
