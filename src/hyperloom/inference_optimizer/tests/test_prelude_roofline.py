@@ -502,6 +502,35 @@ async def test_kernel_agent_skips_gemm_but_still_runs_fusion(coord: Coordinator,
 
 
 @pytest.mark.asyncio
+async def test_kernel_entry_does_not_launch_the_controller_without_a_handoff(
+    coord: Coordinator,
+    monkeypatch,
+) -> None:
+    import hyperloom.orchestrator.kernel.forge_handoff as forge_handoff
+
+    async def _skip() -> None:
+        return None
+
+    launched: list[Path] = []
+
+    async def _controller(handoff_dir: Path, output_dir: Path, baseline_pins: dict[str, str] | None = None) -> None:
+        launched.append(handoff_dir)
+
+    def _unwritable(*_args: Any, **_kwargs: Any) -> Path:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(campaign_baseline, "seal_campaign_baseline", lambda _state, **_kwargs: {})
+    monkeypatch.setattr(forge_handoff, "write_forge_handoff", _unwritable)
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip)
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_run_forge_fusion_before_kernel_opt", _skip)
+    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_rewrite_controller", _controller)
+
+    with pytest.raises(OSError, match="No space left on device"):
+        await coord.phase_kernel._finish_kernel_entry()
+    assert launched == []
+
+
+@pytest.mark.asyncio
 async def test_kernel_entry_always_hands_rewrite_control_to_controller(
     coord: Coordinator,
     monkeypatch,
@@ -524,10 +553,11 @@ async def test_kernel_entry_always_hands_rewrite_control_to_controller(
 
     # Sealing commits, and it finds its repositories from the interpreter, so it
     # would reach whatever framework this host has installed.
+    sealed = campaign_baseline.RepoBaseline(commit="a" * 40)
     monkeypatch.setattr(
         campaign_baseline,
         "seal_campaign_baseline",
-        lambda _state, **_kwargs: {"/repo": "a" * 40},
+        lambda _state, **_kwargs: {"/repo": sealed},
     )
     monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip)
     monkeypatch.setattr(coord.phase_kernel, "_maybe_run_forge_fusion_before_kernel_opt", _skip)
@@ -545,7 +575,7 @@ async def test_kernel_entry_always_hands_rewrite_control_to_controller(
     ]
     # The base each repository was sealed at travels with the handoff, because
     # reclaiming a repository after a killed controller needs to know it.
-    assert pins_seen == [{"/repo": "a" * 40}, {"/repo": "a" * 40}]
+    assert pins_seen == [{"/repo": sealed}, {"/repo": sealed}]
     for handoff_dir, _output_dir in handed_off:
         assert (handoff_dir / "workload.md").is_file()
         assert (handoff_dir / "serving-context.md").is_file()

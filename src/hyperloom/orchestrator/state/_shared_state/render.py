@@ -12,6 +12,7 @@ from typing import Any, NamedTuple
 from hyperloom.common.env import env_bool
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
+from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
 from . import gap_rows, proposal_scores, variant_line, warm_start
 from .attempt_audit import _AUDIT_ACTIONS
 from .phase_state import GAP_SEVERITY_RANK
@@ -481,6 +482,7 @@ class _RenderMixin:
             f"baseline_tput={self.baseline_tput}  baseline_acc={self.baseline_accuracy}",
             f"baseline_failure_streak={self.baseline_failure_streak}",
             f"current_best={self._format_current_best()}",
+            f"current_launch_flags(already passed by the running stack)={self._format_current_launch_flags()}",
             f"optimization_stack={self._format_optimization_stack()}",
             (
                 f"cumulative_gain_validated={self.cumulative_gain_validated}% "
@@ -668,6 +670,13 @@ class _RenderMixin:
         if not self.current_best:
             return "(none)"
         return str({k: v for k, v in self.current_best.items() if k not in ("optimization_stack", "measurement")})
+
+    def _format_current_launch_flags(self) -> str:
+        """The server flags ``current_best`` launched with, as its measurement recorded them."""
+        measurement = getattr(self, "current_best_measurement", None)
+        evidence = measurement.get("launch_evidence") if isinstance(measurement, dict) else None
+        flags = str(evidence.get("requested_server_args") or "") if isinstance(evidence, dict) else ""
+        return _flatten_for_prompt(dedupe_extra_server_args(flags.strip())) or "(unknown)"
 
     def _format_optimization_stack(self) -> str:
         """Render the optimization stack as ``action:variant`` parts."""

@@ -158,7 +158,7 @@ class ResumeReplayMixin:
         resume_state_durable = True
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             resume_state_durable = False
             log.exception("Coordinator: pre-outbox resume save failed")
             report["warnings"].append({"kind": "resume_pre_outbox_save_failed"})

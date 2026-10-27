@@ -340,7 +340,7 @@ class ClosePhase(CoordinatorCollaborator):
         """
         try:
             await coro
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one CLOSE step of the sequence
             log.exception("CLOSE step %r failed", step_name)
             await self._record_close_step(step_name, status="failed", detail=repr(exc)[:240])
 
@@ -516,7 +516,7 @@ class ClosePhase(CoordinatorCollaborator):
         pkg_path: Path | None = None
         try:
             pkg_path = await self._do_artifact_package()
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: the artifact_package CLOSE step
             log.exception("CLOSE step %r failed", "artifact_package")
             await self._record_close_step("artifact_package", status="failed", detail=repr(exc)[:240])
 
@@ -543,9 +543,9 @@ class ClosePhase(CoordinatorCollaborator):
 
         # Refresh the breakdown's ``close`` key now that the sequence is on
         # disk: step 2 wrote the breakdown, so the copy it produced describes
-        # only the close-out up to itself. Splices one key; best-effort and
-        # last, after stop_reason and close_sequence_done are settled, so it
-        # cannot affect the run.
+        # only the close-out up to itself. Splices one key, last, after stop_reason
+        # and close_sequence_done are settled; an unreadable breakdown is logged below,
+        # any other failure leaves the close entry.
         #
         # Re-package when that changed something: ``session_breakdown.json`` is
         # bundled into the zip and the package is what external sync ships. The

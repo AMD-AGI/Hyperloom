@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 import logging as _logging
+import sqlite3
 from typing import TYPE_CHECKING, Any
 from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec
 from ..state.orchestration_memory import CYCLE_DIRECTIVE_REQUEST, build_cycle_memory
@@ -126,7 +127,7 @@ class SweepPhase(CoordinatorCollaborator):
             task = await self._enqueue_internal_conc_sweep_task(
                 reason="phase_entry",
             )
-        except Exception as exc:
+        except (sqlite3.Error, TypeError, ValueError) as exc:
             log.exception(
                 "SWEEP entry hook: failed to enqueue auto-conc-sweep: %r",
                 exc,

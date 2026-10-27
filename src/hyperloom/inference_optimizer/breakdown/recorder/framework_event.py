@@ -47,8 +47,9 @@ from .event_fields import (
     worst_status as _worst_status,
 )
 from .event_ids import event_id
-from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink, make_sink
+from .construct import event_header
+from .event_rows import blocking_gate, group_rows, rows_for_event, sort_rows, wire_rows
+from .event_sink import EventSink, bound_sink
 from .event_timeline import EventHeader, finish_event, open_event
 from .sections import FRAMEWORK_EVENT_SECTIONS
 
@@ -118,7 +119,6 @@ STEP_DROPPED = "dropped"
 #: never reached a measurement; the row's ``reason`` says which.
 DISPOSITION_ATTEMPTED = "attempted"
 DISPOSITION_DROPPED = "dropped"
-DISPOSITION_PENDING = "pending"
 
 #: Who authored a review. A proposal blocked because the Critic had no manifest
 #: to read must not be reported as one the Critic examined and refused.
@@ -130,7 +130,6 @@ __all__ = [
     "ARM_SOURCE",
     "DISPOSITION_ATTEMPTED",
     "DISPOSITION_DROPPED",
-    "DISPOSITION_PENDING",
     "EVENT_COMPONENT",
     "EVENT_KIND",
     "EVENT_PHASE",
@@ -322,7 +321,7 @@ class FrameworkEventRecorder:
     fragments and not from anything remembered, so an entry recorded across a
     resume assembles from both halves."""
 
-    def __init__(self, sink: RecordSink, *, macro_cycle: int = 0):
+    def __init__(self, sink: EventSink, *, macro_cycle: int = 0):
         """Bind a recorder to the event of one phase entry. ``macro_cycle`` is
         recorded on the event as well as being a segment of its id, because a
         consumer reading the assembled event does not parse the id."""
@@ -371,9 +370,6 @@ class FrameworkEventRecorder:
                     ARM_SOURCE: {
                         "no_keep_streak_threshold": _int_or_none(source.get("no_keep_streak_threshold")),
                         "discovery_retry_limit": _int_or_none(source.get("discovery_retry_limit")),
-                        "authoring_enabled": None
-                        if source.get("authoring_enabled") is None
-                        else bool(source.get("authoring_enabled")),
                     },
                 },
             },
@@ -635,8 +631,7 @@ class FrameworkEventRecorder:
         reason: str = "",
     ) -> None:
         """Record where a proposal ended up. ``disposition`` is a
-        ``DISPOSITION_*`` value; ``pending`` is one the phase never resolved,
-        the honest reading of a session killed mid-review."""
+        ``DISPOSITION_*`` value."""
         key = str(proposal_id or "")
         if not key:
             return
@@ -761,40 +756,9 @@ class FrameworkEventRecorder:
     ) -> None:
         """Close the event on the phase's own exit evidence.
 
-        Takes no failure of its own: a task that failed is on its run row, a
-        fault the entry survived came through :meth:`record_fault`, and an
-        entry that raised out closes through :meth:`finish_crashed`.
+        Takes no failure of its own: a task that failed is on its run row, and
+        a fault the entry survived came through :meth:`record_fault`.
         """
-        self._close(
-            status="",
-            payload={
-                "exit": {
-                    "reason": str(exit_reason or ""),
-                    "trigger": str(trigger or ""),
-                    "hint": str(hint or ""),
-                    "switch_bottleneck": None if switch_bottleneck is None else bool(switch_bottleneck),
-                },
-            },
-        )
-
-    def finish_crashed(self, exc: BaseException) -> None:
-        """Close an event whose phase raised instead of exiting."""
-        if self._closed:
-            return
-        self._close(
-            status="failed",
-            payload={
-                "failure": _failure_row(
-                    stage=EVENT_TYPE,
-                    error_class=type(exc).__name__,
-                    message=f"framework agent phase raised: {exc!r}",
-                )
-            },
-        )
-
-    def _close(self, *, status: str, payload: Mapping[str, Any]) -> None:
-        """Record the terminal facts and close the event. ``status`` is used
-        only when assembly derives nothing of its own."""
         if self._closed:
             return
         self._closed = True
@@ -802,7 +766,12 @@ class FrameworkEventRecorder:
         self._sink.record(
             SECTION_EVENT,
             {
-                **payload,
+                "exit": {
+                    "reason": str(exit_reason or ""),
+                    "trigger": str(trigger or ""),
+                    "hint": str(hint or ""),
+                    "switch_bottleneck": None if switch_bottleneck is None else bool(switch_bottleneck),
+                },
                 "end_time": end_time,
                 "duration_sec": round(time.monotonic() - self._t0, 3),
             },
@@ -817,7 +786,7 @@ class FrameworkEventRecorder:
             finish_event(
                 EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
-                status=derived or status or "succeeded",
+                status=derived or "succeeded",
                 ext=ext,
                 end_time=end_time,
             )
@@ -834,8 +803,7 @@ def assemble_framework_ext(
     rows, out of the sections read back from the spool. Rows of every other
     event are ignored, and the status is empty when the event holds no work,
     which leaves the caller's own reading standing."""
-    event_rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
-    header = event_rows[0] if event_rows else {}
+    header = event_header(parts, SECTION_EVENT, event)
 
     plateau = wire_rows(
         sort_rows(rows_for_event(parts.get(SECTION_PLATEAU) or [], event), keys=("evaluated_at", "arm")),
@@ -854,7 +822,7 @@ def assemble_framework_ext(
     for row in wire_rows(attempt_rows, drop=("event_id",)):
         key = str(row.get("attempt_id") or "")
         row["gates"] = wire_rows(gates_by_attempt.get(key, []), drop=("event_id", "attempt_id", "ordinal"))
-        row["blocked_by"] = _text_or_none(_blocking_gate(row["gates"]))
+        row["blocked_by"] = _text_or_none(blocking_gate(row["gates"]))
         attempts.append(row)
 
     steps_by_proposal = group_rows(
@@ -925,20 +893,6 @@ def _derived_status(
     return _worst_status(row.get("status") for row in runs)
 
 
-def _blocking_gate(gates: list[dict[str, Any]]) -> str:
-    """Name the first gate that did not pass, or ``""`` when all of them did. A
-    gate that ruled ``None`` blocks only if nothing after it failed outright,
-    so an attempt rejected on the keep threshold reports that threshold."""
-    unresolved = ""
-    for row in gates:
-        passed = row.get("passed")
-        if passed is False:
-            return str(row.get("gate") or "")
-        if passed is None and not unresolved:
-            unresolved = str(row.get("gate") or "")
-    return unresolved
-
-
 def record_review_evidence(
     *,
     macro_cycle: Any,
@@ -962,11 +916,10 @@ def record_review_evidence(
         evidence["kb"] = dict(kb)
     if not key or not evidence:
         return
-    from ...session.session_binding import session_is_bound
-
-    if not session_is_bound():
+    sink = bound_sink(framework_event_id(macro_cycle), producer=PRODUCER)
+    if sink is None:
         return
-    make_sink(framework_event_id(macro_cycle), producer=PRODUCER).record(
+    sink.record(
         SECTION_PROPOSAL,
         {"proposal_id": key, "critic_review": evidence},
         row_type=ROW_PROPOSAL,
@@ -981,7 +934,7 @@ def make_framework_recorder(*, macro_cycle: Any = 0) -> FrameworkEventRecorder |
     if decline_unbound("framework"):
         return None
     recorder = FrameworkEventRecorder(
-        make_sink(framework_event_id(macro_cycle), producer=PRODUCER),
+        EventSink(framework_event_id(macro_cycle), producer=PRODUCER),
         macro_cycle=int(macro_cycle or 0),
     )
     recorder.begin()

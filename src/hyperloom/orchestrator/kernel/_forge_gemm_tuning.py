@@ -620,8 +620,8 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     ephemeral ``runs/gemm_tuning`` workspace, which would be cleaned away and
     defeat the cross-environment recipe-portability this exists for.
 
-    Best-effort: on any error the env is returned unchanged (never breaks the KEEP).
-    Returns ``(extra_envs, source_snapshot_dir)``.
+    A failed durable copy raises; a failed snapshot keeps the copy and returns no
+    snapshot dir. Returns ``(extra_envs, source_snapshot_dir)``.
     """
     # Below model_configs/, out of reach of aiter's non-recursive auto-merge glob.
     _FORGE_DURABLE_SUBDIR = "hyperloom"
@@ -651,24 +651,20 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     # Step 1 -- commit durable copies + env repoints. This is what makes the
     # KEEP survive: each CSV lands in aiter's config dir and the env points
     # there instead of the ephemeral tuner workspace.
-    try:
-        import importlib.util
+    import importlib.util
 
-        spec = importlib.util.find_spec("aiter")
-        if spec is None or not spec.origin:
-            return extra_envs, ""
-        aiter_pkg = Path(spec.origin).resolve().parent
-        updated = dict(extra_envs)
-        rel_paths: list[str] = []
-        for env_key, rel, src_path in pending:
-            dst = aiter_pkg / rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_path, dst)
-            updated[env_key] = str(dst)
-            rel_paths.append(rel)
-    except Exception:
-        log.exception("forge gemm CSV durable-copy failed; keeping workspace path")
+    spec = importlib.util.find_spec("aiter")
+    if spec is None or not spec.origin:
         return extra_envs, ""
+    aiter_pkg = Path(spec.origin).resolve().parent
+    updated = dict(extra_envs)
+    rel_paths: list[str] = []
+    for env_key, rel, src_path in pending:
+        dst = aiter_pkg / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_path, dst)
+        updated[env_key] = str(dst)
+        rel_paths.append(rel)
 
     # Step 2 -- recipe-portability snapshot. Separate best-effort concern: a
     # snapshot failure must NOT discard the copy + repoint committed above.
@@ -690,6 +686,6 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
             },
         )
         snap_dir = str((snap or {}).get("snapshot_dir") or "")
-    except Exception:
+    except OSError:
         log.exception("forge gemm CSV snapshot failed; durable copy + repoint kept")
     return updated, snap_dir

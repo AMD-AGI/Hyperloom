@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -927,7 +928,7 @@ def _try_apply_candidate(sol: dict, trial: _CandidateField, *, pre_untracked) ->
         pristine_ms = pristine_bench.get("median_ms")
     except WarmStartRestoreError:
         raise
-    except Exception as exc:  # scoring is third-party; worktree is discarded
+    except Exception as exc:  # isolation boundary: one KB warm-start candidate; worktree is discarded
         log.warning("warm-start candidate probe failed: %s", exc, exc_info=True)
         _git_discard_worktree(
             workspace_dir,
@@ -1321,15 +1322,17 @@ def kb_warmstart(
         return attempt.final_result()
     except WarmStartRestoreError:
         raise
-    except Exception as e:  # noqa: BLE001 - warm-start must never break the run
+    except Exception as e:  # noqa: BLE001 - isolation boundary: the run's KB warm-start; it cold-starts instead
         from kernelforge.knowledge.kb_store.errors import (
             kb_store_secrets,
             sanitize_read_error,
         )
 
         error = sanitize_read_error(e, secrets=kb_store_secrets(config))
-        # Sanitized message only: a raw traceback would carry the KB store credentials.
-        log.warning("KB warm-start failed: %s", error)
+        # Sanitized reason and stack frames only: the raw message may carry the KB store credentials.
+        log.warning(
+            "KB warm-start failed: %s (%s)\n%s", error, type(e).__name__, "".join(traceback.format_tb(e.__traceback__))
+        )
         print(f"  [kb] warm-start skipped ({error})", flush=True)
         return {
             "candidate": False,

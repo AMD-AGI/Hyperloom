@@ -151,6 +151,8 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         model_path="",
         reference_model="",
         gpu_type="mi300x",
+        tp=1,
+        max_model_len=0,
         enablement_mode="all",
         enablement=EnablementRound(launch_log=launch_log),
         baseline_tput=0.0,

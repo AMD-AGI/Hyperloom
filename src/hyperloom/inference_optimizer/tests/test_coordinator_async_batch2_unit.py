@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -1683,7 +1684,7 @@ async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
     coord.shared_state.pending_integrate = dict(sentinel)
 
     async def _boom(*_args, **_kwargs):
-        raise RuntimeError("database disk image is malformed")
+        raise sqlite3.DatabaseError("database disk image is malformed")
 
     monkeypatch.setattr(coord.bus, "tail", _boom)
 

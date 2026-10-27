@@ -30,6 +30,17 @@ def _is_type(value: Any, name: str) -> bool:
     return isinstance(value, _TYPES.get(name, ()))
 
 
+def _json_equal(left: Any, right: Any) -> bool:
+    """Equality as JSON Schema defines it: a boolean never equals a number, at any depth."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left == right
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(map(_json_equal, left, right))
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(_json_equal(left[key], right[key]) for key in left)
+    return left == right
+
+
 def _bounds(value: Any, schema: Mapping[str, Any], where: str) -> str | None:
     if isinstance(value, str) and len(value) < schema.get("minLength", 0):
         return f"{where} is shorter than {schema['minLength']}"
@@ -63,7 +74,7 @@ def first_problem(value: Any, schema: Mapping[str, Any], where: str = "arguments
         names = [types] if isinstance(types, str) else list(types)
         if not any(_is_type(value, name) for name in names):
             return f"{where} must be of type {' or '.join(names)}"
-    if "enum" in schema and value not in schema["enum"]:
+    if "enum" in schema and not any(_json_equal(value, option) for option in schema["enum"]):
         return f"{where} must be one of {schema['enum']}"
     if isinstance(value, dict):
         return _members(value, schema, where)

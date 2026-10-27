@@ -80,15 +80,11 @@ def test_audit_is_local_and_best_effort(kb: RecipeKB) -> None:
     assert kb.get_recipe(canonical_id=_cid()) is not None
 
 
-def test_close_propagates_local_store_close_failure(kb: RecipeKB) -> None:
-    def _boom() -> None:
-        raise OSError("close failed")
+def test_mode_and_backend_are_fixed_local_labels(kb: RecipeKB) -> None:
+    assert (kb.mode, kb.backend_name) == ("local", "local-json")
 
-    kb.local.close = _boom
-    with pytest.raises(OSError, match="close failed"):
-        kb.close()
-
-
-def test_close_without_local_close_is_a_noop(kb: RecipeKB) -> None:
-    result = kb.close()
-    assert result is None
+    events: list[dict] = []
+    kb.audit_hook = events.append
+    kb.search(label_match={"model": "m"})
+    assert events[0]["backend"] == events[0]["provenance"]["backend"] == "local-json"
+    assert events[0]["request"] == {"canonical_id": None, "label_match": {"model": "m"}}

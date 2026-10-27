@@ -43,7 +43,7 @@ from .event_fields import (
 )
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink
+from .event_sink import EventSink
 from .event_timeline import EventHeader, finish_event, open_event
 from .sections import CONC_SWEEP_EVENT_SECTIONS
 
@@ -260,23 +260,16 @@ class SweepBudget:
     """
 
     declared_total_sec: Any = None
-    granted_total_sec: Any = None
     rung_cost_sec: Any = None
-    raised: bool = False
-    gate_active: bool = True
     deadline: Any = None
-    session_soft_deadline_sec: Any = None
 
     def block(self) -> dict[str, Any]:
-        """The ``budget`` block this record persists as."""
+        """The ``budget`` block this record persists as; the gate is active whenever a total was declared."""
         return {
             "declared_total_sec": _int_or_none(self.declared_total_sec),
-            "granted_total_sec": _int_or_none(self.granted_total_sec),
             "rung_cost_sec": _float_or_none(self.rung_cost_sec),
-            "raised": bool(self.raised),
-            "gate_active": bool(self.gate_active),
+            "gate_active": self.declared_total_sec is not None,
             "deadline": _float_or_none(self.deadline),
-            "session_soft_deadline_sec": _float_or_none(self.session_soft_deadline_sec),
         }
 
 
@@ -380,7 +373,7 @@ class ConcSweepEventRecorder:
 
     def __init__(
         self,
-        sink: RecordSink,
+        sink: EventSink,
         *,
         task_id: str = "",
         task_kind: str = "",
@@ -496,12 +489,7 @@ class ConcSweepEventRecorder:
         self._record_action({"plan": plan.block()})
 
     def record_budget(self, budget: SweepBudget) -> None:
-        """Record the budget the ladder was admitted under.
-
-        Current sweeps keep declared and granted totals equal and do not raise
-        the budget to fit the per-process hard cap. The fields also preserve
-        historical records that raised the budget.
-        """
+        """Record the budget the ladder was admitted under."""
         self._record_action({"budget": budget.block()})
 
     def record_environment(self, environment: SweepEnvironment) -> None:
@@ -997,9 +985,7 @@ def assemble_conc_sweep_ext(
     if len(action_rows) > 1:
         # One phase and cycle enqueue one sweep, so this cannot happen through
         # the dispatcher; saying so is cheaper than a silent drop if it does.
-        ext["superseded_sweeps"] = [_text(other.get("task_id")) for other in action_rows[:-1] if other is not row]
-    ext["arms"][ARM_BASELINE]["arm"] = ARM_BASELINE
-    ext["arms"][ARM_OPTIMIZED]["arm"] = ARM_OPTIMIZED
+        ext["superseded_sweeps"] = [_text(other.get("task_id")) for other in action_rows[:-1]]
     status = _text(row.get("status")) or "running"
     if status == "cancelled":
         # The timeline has no word for a sweep stopped from outside. It ran and fell short of its ladder without
@@ -1019,7 +1005,7 @@ def assemble_conc_sweep_ext(
 
 
 def make_conc_sweep_recorder(
-    sink: RecordSink | None,
+    sink: EventSink | None,
     *,
     task_id: str = "",
     task_kind: str = "",

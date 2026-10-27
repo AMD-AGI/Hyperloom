@@ -37,6 +37,11 @@ CHECKS = {
         "say on the `# noqa: BLE001` line why the handler may catch every exception (an outermost boundary "
         "that logs it); otherwise catch the exceptions the block can raise",
     ),
+    "broad-unrecorded": (
+        "Broad catch that records nothing",
+        "re-raise, or log the error with its traceback at the outermost boundary or the one-item isolation "
+        "boundary that owns it; otherwise catch the exceptions the block can raise or let them propagate",
+    ),
     "english": ("English only", "English text only (no CJK characters) in files, PR title, body and commits"),
     "test-imports": (
         "Production code imports test code",

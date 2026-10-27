@@ -332,6 +332,26 @@ def test_string_results_pass_through_and_tool_errors_are_error_results(server: M
     }
 
 
+def test_a_result_that_cannot_be_serialized_is_an_internal_error_with_its_stack(
+    server: McpServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    def cyclic(args: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        result["self"] = result
+        return result
+
+    server.register("cyclic", schema={"type": "object"}, handler=cyclic, scopes={"host"})
+    with caplog.at_level(logging.WARNING, logger="hyperloom.hosted.mcp_server"):
+        status, _, reply = Client(server).call(HOST_TOKEN, "cyclic")
+
+    assert (status, reply) == (
+        200,
+        {"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "ValueError: Circular reference detected"}},
+    )
+    (record,) = [r for r in caplog.records if r.getMessage().startswith("request failed: ValueError\n")]
+    assert ", in _call_tool\n" in record.getMessage()
+
+
 def _server_with_beat(beats: list[str], seconds: float = 0.1) -> McpServer:
     server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp", heartbeat_seconds=seconds)
 

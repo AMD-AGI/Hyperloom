@@ -365,8 +365,8 @@ class _StreamCapture:
             return
         try:
             self._on_output()
-        except Exception as exc:  # noqa: BLE001 - liveness reporting never breaks capture
-            log.debug("_subprocess_kill: liveness callback failed: %s", exc)
+        except Exception as exc:  # outermost liveness sink: reporting never breaks capture
+            log.debug("_subprocess_kill: liveness callback failed: %s", exc, exc_info=True)
 
     def _join(self, chunks: list[str | bytes]) -> str | bytes:
         """Concatenate captured chunks using the appropriate empty separator."""

@@ -372,7 +372,7 @@ class PerfGateMixin:
                 evidence["source_realized_patch"] = harvest_realized_diff(
                     framework_root, rel_paths, Path(snapshot_dir) / "realized.patch"
                 )
-        except Exception:
+        except (OSError, RuntimeError, KeyError):
             log.exception("integrate_patch: source-layer snapshot failed")
         return evidence
 

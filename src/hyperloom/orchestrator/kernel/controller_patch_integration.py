@@ -426,8 +426,8 @@ class _ControllerIntegration:
         self._rounds_run += 1
         try:
             validation = await self._validate(publication)
-        except Exception as error:  # noqa: BLE001 - translated into a reverted_e2e_failed result
-            log.warning("E2E validation raised for %s: %s", publication.operator_id, error)
+        except Exception as error:  # isolation boundary: one publication's E2E validation
+            log.warning("E2E validation raised for %s: %s", publication.operator_id, error, exc_info=True)
             reason = f"E2E validation raised: {error}" + _revert_note(repo, publication.patch_path)
             return _refusal(publication, "reverted_e2e_failed", reason, head_before)
         kept = (
@@ -511,8 +511,8 @@ async def integrate_controller_patches(
             )
             await session.record_keep({**_keep_result(publication, validation, keep_commit), **layer})
             session.shared_state.save(Path(session.session_dir))
-        except Exception as error:  # noqa: BLE001 - KEEP is already committed to Git; record_keep runs the whole writeback
-            log.warning("KEEP %s committed but recording it failed: %s", publication.operator_id, error)
+        except Exception as error:  # isolation boundary: one committed publication's KEEP recording
+            log.warning("KEEP %s committed but recording it failed: %s", publication.operator_id, error, exc_info=True)
             return f"Git KEEP committed; SharedState recording failed: {error}"
         return ""
 

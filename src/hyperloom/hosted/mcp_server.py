@@ -38,6 +38,7 @@ import json
 import logging
 import secrets
 import threading
+import traceback
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -200,8 +201,11 @@ class _ReplyNotes:
             note = self._annotator(call, self._now)
             if inspect.isawaitable(note):
                 note = await note
-        except Exception as exc:  # noqa: BLE001 - a failing annotator must not take the tool's reply with it
-            logger.warning("reply annotator failed: %s", type(exc).__name__)
+        except Exception as exc:  # noqa: BLE001 - isolation boundary: one reply annotation; the cursor stays put
+            # The stack only: the message may carry a token.
+            logger.warning(
+                "reply annotator failed: %s\n%s", type(exc).__name__, "".join(traceback.format_tb(exc.__traceback__))
+            )
             return None
         self._now = note.cursor
         return note
@@ -370,8 +374,10 @@ class McpServer:
             raise
         except ToolError as exc:
             return _tool_result(self.scrub(str(exc), presented), is_error=True)
-        except Exception as exc:  # noqa: BLE001 - a failing tool is a tool error, not a transport error
-            logger.warning("tool %s failed: %s", name, type(exc).__name__)
+        except Exception as exc:  # noqa: BLE001 - isolation boundary: one tool call, answered as a tool error
+            logger.warning(
+                "tool %s failed: %s\n%s", name, type(exc).__name__, "".join(traceback.format_tb(exc.__traceback__))
+            )
             return _tool_result(self.scrub(f"{type(exc).__name__}: {exc}", presented), is_error=True)
         text = outcome if isinstance(outcome, str) else json.dumps(outcome, default=str)
         return _tool_result(text, is_error=False)
@@ -415,8 +421,10 @@ class McpServer:
             return _rpc_error(request_id, _ERR_PARAMS, str(exc))
         except ToolForbidden as exc:
             return _rpc_error(request_id, _ERR_FORBIDDEN, str(exc))
-        except Exception as exc:  # noqa: BLE001 - convert failures to JSON-RPC
-            logger.warning("request failed: %s", type(exc).__name__)
+        except Exception as exc:  # noqa: BLE001 - outermost per-request boundary: a JSON-RPC internal error
+            logger.warning(
+                "request failed: %s\n%s", type(exc).__name__, "".join(traceback.format_tb(exc.__traceback__))
+            )
             return _rpc_error(request_id, _ERR_INTERNAL, self.scrub(f"{type(exc).__name__}: {exc}", presented))
         return {"jsonrpc": JSONRPC_VERSION, "id": request_id, "result": result}
 
@@ -444,8 +452,12 @@ class McpServer:
             while not done.wait(self._heartbeat_seconds):
                 try:
                     hook()
-                except Exception as exc:  # noqa: BLE001 - a failing beat must not break the call
-                    logger.warning("heartbeat beat failed: %s", type(exc).__name__)
+                except Exception as exc:  # noqa: BLE001 - outermost heartbeat thread: a failing beat must not break the call
+                    logger.warning(
+                        "heartbeat beat failed: %s\n%s",
+                        type(exc).__name__,
+                        "".join(traceback.format_tb(exc.__traceback__)),
+                    )
 
         thread = threading.Thread(target=beat, name="hyperloom-mcp-heartbeat", daemon=True)
         thread.start()

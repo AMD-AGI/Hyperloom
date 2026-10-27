@@ -830,8 +830,8 @@ async def test_extend_lease_grants_live_subprocess_extension(coordinator_with_mo
 
 
 @pytest.mark.asyncio
-async def test_extend_lease_survives_wall_budget_grant_failure(coordinator_with_mocks):
-    """A wall-budget failure retains DB changes but reports a degraded extension."""
+async def test_extend_lease_wall_budget_grant_failure_is_recorded_as_an_intent_exception(coordinator_with_mocks):
+    """A wall-budget failure retains DB changes and reaches the intent boundary's exception record."""
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
     from hyperloom.orchestrator.loop import intent_router as _sub
 
@@ -874,8 +874,40 @@ async def test_extend_lease_survives_wall_budget_grant_failure(coordinator_with_
         # The DB-side extension still stands.
         updated = await c.tasks.get(task.task_id)
         assert updated.lease_ttl_sec == 2400
-        degraded = next(r for r in recorded if r.get("kind") == "extend_lease_degraded")
-        assert "registry unavailable" in degraded["wall_budget_extension_error"]
+        failures = [r for r in recorded if r.get("kind") == "handle_intent_exception"]
+        assert [(r["intent_type"], r["error"]) for r in failures] == [
+            ("extend_lease", "RuntimeError: registry unavailable")
+        ]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_enablement_rearm_failure_on_critic_reject_reaches_the_router(coordinator_with_mocks, monkeypatch):
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
+    from hyperloom.orchestrator.loop.verdicts import CriticRuling
+
+    c = coordinator_with_mocks
+    try:
+
+        async def _rearm_broke(_result):
+            raise RuntimeError("enablement lane unavailable")
+
+        monkeypatch.setattr(c.enablement_lane, "maybe_rearm_enablement", _rearm_broke)
+        pending = PendingProposal(
+            proposal_msg_id="m-reject",
+            from_agent="orchestration",
+            action_name="integrate_patch",
+            predicted_gain_pct=0.0,
+            payload={"params": {"enablement": True}},
+        )
+        with pytest.raises(RuntimeError, match="enablement lane unavailable"):
+            await c.router._apply_verdict_outcome(
+                pending,
+                ruling=CriticRuling(verdict="reject", reasoning="regresses accuracy"),
+                pa_params={"enablement": True},
+                sid_candidate="t-enable",
+            )
     finally:
         await c.stop()
 

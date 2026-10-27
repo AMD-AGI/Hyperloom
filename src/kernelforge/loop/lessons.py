@@ -966,11 +966,7 @@ async def summarize_iteration(
         pr_references=references.labels,
         pr_reference_context=references.context,
     )
-    try:
-        text = await summarizer(prompt)
-    except Exception as error:  # noqa: BLE001 - never break the loop over this
-        log.debug("lessons: summarizer failed for iter %s: %s", iteration, error)
-        return SummaryOutcome(reason=f"{type(error).__name__}: {str(error)[:200]}")
+    text = await summarizer(prompt)
     text = (text or "").strip()
     if not text:
         return SummaryOutcome(reason="session replied with no text")

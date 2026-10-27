@@ -20,7 +20,6 @@ chain at every boundary.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -35,15 +34,13 @@ from hyperloom.common.perf_metric import GradedComparison
 
 from .event_fields import graded_axes as _graded_axes, now_iso_seconds as _now
 from .event_ids import event_id
-from .event_rows import rows_for_event, sort_rows, wire_rows
-from .event_sink import EventSink, make_sink
+from .event_rows import fold_header, rows_for_event, sort_rows, wire_rows
+from .event_sink import bound_sink
 from .event_timeline import EventHeader, finish_event, open_event
 
 # Every section a stack event assembles from. Named from the leaf module the
 # assembler shares, so this writer reads its parts without an import cycle.
 from .sections import STACK_EVENT_SECTIONS
-
-log = logging.getLogger(__name__)
 
 EVENT_TYPE = "stack"
 EVENT_KIND = "stack"
@@ -135,21 +132,7 @@ def source_for(action: str) -> str:
     return _SOURCE_BY_ACTION.get(str(action or "").strip(), SOURCE_UNATTRIBUTED)
 
 
-def _sink() -> EventSink | None:
-    """The sink rows are written through; ``None`` when no session is bound.
-
-    The rows themselves are written best-effort by the sink, so nothing below
-    guards its own writes: a spool that cannot be written drops the row there
-    and the ledger carries on.
-    """
-    from ...session.session_binding import bound_session_or_none
-
-    if bound_session_or_none() is None:
-        return None
-    return make_sink(stack_event_id(), producer=PRODUCER)
-
-
-def _open(*, baseline_tput: Any = None, objective: str = "", start_time: str = "") -> int | None:
+def _open(*, baseline_tput: Any = None, objective: str = "") -> int | None:
     """Put the ledger on the timeline, once, however many callers ask.
 
     ``None`` means the shell write failed; the fragments land either way and
@@ -164,11 +147,11 @@ def _open(*, baseline_tput: Any = None, objective: str = "", start_time: str = "
     if shell:
         # Onto the fragment too: assembly rebuilds ``ext`` from fragments and
         # never re-reads the shell.
-        sink = _sink()
+        sink = bound_sink(stack_event_id(), producer=PRODUCER)
         if sink is not None:
             sink.record(SECTION_EVENT, dict(shell))
     return open_event(
-        EventHeader(EVENT_TYPE, stack_event_id(), EVENT_KIND, start_time or _now()),
+        EventHeader(EVENT_TYPE, stack_event_id(), EVENT_KIND, _now()),
         event_section=SECTION_EVENT,
         producer=PRODUCER,
         ext=shell,
@@ -189,7 +172,7 @@ def record_adoption(
     refused to accept the winner without beating, and this same call overwrites
     the anchor.
     """
-    sink = _sink()
+    sink = bound_sink(stack_event_id(), producer=PRODUCER)
     if sink is None:
         return
     objective = graded.objective
@@ -278,7 +261,7 @@ def record_validation(validation: StackValidation) -> None:
     flags are read off it here because the run that produced
     ``graded.candidate`` resolves them and they cannot be recovered afterwards.
     """
-    sink = _sink()
+    sink = bound_sink(stack_event_id(), producer=PRODUCER)
     if sink is None:
         return
     graded = validation.graded
@@ -307,7 +290,7 @@ def record_validation(validation: StackValidation) -> None:
     )
 
 
-def finish(*, end_time: str = "") -> None:
+def finish() -> None:
     """Close the ledger on the rows recorded against it. Never raises.
 
     Called at close, where the stack stops changing. A run that ended without
@@ -321,11 +304,11 @@ def finish(*, end_time: str = "") -> None:
     from .assembler import event_parts
     from .recorder_warnings import RECORDING_ERRORS, note_failure
 
-    sink = _sink()
+    sink = bound_sink(stack_event_id(), producer=PRODUCER)
     if sink is None:
         return
     sequence = _open()
-    closed = str(end_time or "") or _now()
+    closed = _now()
     sink.record(SECTION_EVENT, {"end_time": closed})
 
     try:
@@ -357,8 +340,6 @@ def _pct(value: Any, against: Any, denominator: Any) -> float | None:
     return round((hi - lo) / base * 100.0, 6)
 
 
-#: Every section the stack event assembles from. Duplicated from the assembler
-#: so :func:`finish` can read its own parts without an import cycle.
 def assemble_stack_ext(
     parts: Mapping[str, list[dict[str, Any]]],
     *,
@@ -368,7 +349,7 @@ def assemble_stack_ext(
 
     ``parts`` maps section name to rows read back from the spool.
     """
-    header = _header(rows_for_event(parts.get(SECTION_EVENT) or [], event))
+    header = fold_header(rows_for_event(parts.get(SECTION_EVENT) or [], event))
     adoptions = wire_rows(
         sort_rows(
             rows_for_event(parts.get(SECTION_ADOPTION) or [], event), keys=("ts", "stack_entry_id", "stack_index")
@@ -518,15 +499,6 @@ def _status_for(adoptions: Sequence[Mapping[str, Any]], chain_total: float | Non
     if not adoptions:
         return STATUS_SKIPPED
     return STATUS_SUCCEEDED if chain_total is not None else STATUS_DEGRADED
-
-
-def _header(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Fold the event-level fragments into one header."""
-    header: dict[str, Any] = {}
-    for row in rows:
-        if isinstance(row, Mapping):
-            header.update({k: v for k, v in row.items() if k != "event_id"})
-    return header
 
 
 __all__ = [

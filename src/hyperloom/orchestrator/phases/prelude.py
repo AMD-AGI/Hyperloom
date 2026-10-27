@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 import logging as _logging
+import sqlite3
 from itertools import chain
 from pathlib import Path
 from collections.abc import Mapping, Sequence
@@ -46,8 +47,8 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     JournalEntry,
     Verdict,
 )
-from ..actions.executors._launch_restatement import config_launch_restated_by
 from ..actions.executors.baseline import revert_warm_kernel_patches
+from ..actions.executors.explore import restates_the_baseline_launch
 from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
 from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
 from ..state.task_registry import Task, TaskSpec
@@ -244,7 +245,7 @@ class PreludePhase(CoordinatorCollaborator):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("PRELUDE: failed to persist the dropped-arm record for %r", arm)
 
     def warm_recipe_proven_items(self) -> list[dict[str, str]]:
@@ -678,19 +679,13 @@ class PreludePhase(CoordinatorCollaborator):
         # resume.
         try:
             state.save(self.session_dir)
-        except Exception as exc:
+        except OSError as exc:
             log.warning("warm-kernel KB: one-shot state save failed", exc_info=True)
             return self._set_warm_kernel_outcome(
                 {"status": "error", "reason": (f"kernel_attempt_state_persist_failed:{type(exc).__name__}")}
             )
         if kb is None:
-            try:
-                kb = self._open_warm_kernel_section()
-            except Exception as exc:
-                log.warning("warm-kernel KB: opening Recipe section failed", exc_info=True)
-                return self._set_warm_kernel_outcome(
-                    {"status": "skipped", "reason": f"recipe_section_unavailable:{type(exc).__name__}"}
-                )
+            kb = self._open_warm_kernel_section()
         if kb is None or not kb.active:
             return self._set_warm_kernel_outcome({"status": "skipped", "reason": "no_kernel_section"})
         plan = self._collect_warm_kernel_plan(kb)
@@ -700,7 +695,7 @@ class PreludePhase(CoordinatorCollaborator):
             outcome = self._set_warm_kernel_outcome({"status": "empty"})
             try:
                 state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.debug("warm-kernel KB: empty-state save failed", exc_info=True)
             return outcome
         return self._apply_warm_kernel_plan(plan)
@@ -778,14 +773,14 @@ class PreludePhase(CoordinatorCollaborator):
                 "kernel_apply_results": list(applied),
             }
             state.save(self.session_dir)
-        except Exception as exc:
+        except (OSError, ValueError) as exc:
             log.warning("warm-kernel KB: pre-mutation snapshot persist failed for %s", targets, exc_info=True)
             entry["decision"] = "ERROR"
             entry["apply_result"] = {"exception": f"{type(exc).__name__}: {exc}"[:300]}
             return False
         try:
             apply_result = self._apply_warm_kernel_patch(entry, targets[0])
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one warm-kernel entry's apply, marked ERROR and unwound
             log.warning("warm-kernel KB: apply failed for %s", targets[0], exc_info=True)
             entry["decision"] = "ERROR"
             entry["apply_result"] = {"exception": f"{type(exc).__name__}: {exc}"[:300]}
@@ -870,7 +865,7 @@ class PreludePhase(CoordinatorCollaborator):
         )
         try:
             state.save(self.session_dir)
-        except Exception as exc:
+        except OSError as exc:
             log.warning("warm-kernel KB: prepared state save failed", exc_info=True)
             return self._warm_kernel_persist_failure(outcome, exc, applied, snapshots, pending)
         return outcome
@@ -899,7 +894,7 @@ class PreludePhase(CoordinatorCollaborator):
         self._set_warm_kernel_outcome(failed)
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.warning("warm-kernel KB: rollback state save failed", exc_info=True)
         return failed
 
@@ -994,7 +989,7 @@ class PreludePhase(CoordinatorCollaborator):
                 if current_remote
                 else await self._prepare_warm_kernel_kb()
             )
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: the warm-kernel preparation, recorded as the kernel outcome
             log.warning("PRELUDE: warm-kernel preparation failed", exc_info=True)
             kernel = {"status": "error", "errors": 1, "reason": f"{type(exc).__name__}: {exc}"[:300]}
         if self._refused_dirty_warm_kernel(kernel):
@@ -1428,7 +1423,7 @@ class PreludePhase(CoordinatorCollaborator):
         }
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.debug("combined warm replay pending save failed", exc_info=True)
         # Opened after the outcome is persisted so the request block reads the
         # donor identity the outcome just stamped, and a session killed between
@@ -1623,7 +1618,7 @@ class PreludePhase(CoordinatorCollaborator):
             else:
                 try:
                     eval_out = parse_eval_results(root)
-                except Exception as exc:  # noqa: BLE001 — an unreadable eval is "no verdict"
+                except (OSError, AttributeError, TypeError, ValueError) as exc:  # an unreadable eval is "no verdict"
                     eval_out = {"error": f"eval parse raised: {type(exc).__name__}"}
                 parsed = eval_out.get("accuracy")
                 if isinstance(parsed, (int, float)):
@@ -1828,15 +1823,15 @@ class PreludePhase(CoordinatorCollaborator):
     ) -> bool:
         """Skip a replay whose launch would be the baseline's own; True when it did.
 
-        Patches and kernel items change the code, which no argv comparison sees,
+        Patches and kernel items change the code, which no launch comparison sees,
         so a replay carrying any of them always runs. So does one under reference
-        launch controls: materialization re-applies them to the baseline config,
-        so the replay's launch is not that config's argv plus the request.
+        launch controls: materialization rebuilds the args from the reference, so
+        the replay's launch is not the baseline config plus the request.
         """
         state = self.shared_state
         if code_changes or state.reference_launch_controls:
             return False
-        if not config_launch_restated_by(str(state.baseline_config_path or ""), args, envs, str(state.framework or "")):
+        if not restates_the_baseline_launch(state, args, envs):
             return False
         log.info("PRELUDE: warm replay skipped: %r %s only restate the baseline launch", args, sorted(envs))
         self._skip_warm_replay(
@@ -2302,7 +2297,7 @@ class PreludePhase(CoordinatorCollaborator):
                     tick=int(state.tick or 0),
                 )
             )
-        except Exception:
+        except (OSError, TypeError, ValueError):
             log.exception("warm-replay journal append failed")
 
     def _reject_warm_replay_as_drift(
@@ -2387,7 +2382,7 @@ class PreludePhase(CoordinatorCollaborator):
                 rl_task.kind,
                 rl_task.task_id,
             )
-        except Exception as exc:
+        except (sqlite3.Error, TypeError, ValueError) as exc:
             log.exception(
                 "PRELUDE: failed to enqueue initial analysis task after baseline: %r",
                 exc,

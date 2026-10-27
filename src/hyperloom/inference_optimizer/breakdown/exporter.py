@@ -17,7 +17,7 @@ from hyperloom.common.jsonio import read_json, read_json_strict
 from . import collectors
 from .recorder.event_finalize import finalize_events
 from .recorder.recorder_warnings import RECORDING_ERRORS
-from .schema import SCHEMA_VERSION_V6
+from ..session.sbd_v6 import SCHEMA_VERSION_V6
 from ..session.session_paths import BREAKDOWN_FILENAME, manifest_path, state_path
 
 log = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ def build(session_dir: Path | str) -> dict[str, Any]:
     workload = _safe_collect("workload", lambda: collectors.collect_workload(state, manifest), warnings)
     # Model basics -- verbatim mirror of ``state.model_info``. Empty {} on
     # non-transformers models.
-    model_info = _safe_collect("model_info", lambda: collectors.collect_model_info(state), warnings, default={})
+    model_info = _safe_collect("model_info", lambda: collectors.collect_model_info(state), warnings)
     # Live-Langfuse push receipt (opt-in second sink). Prefers the post-flush
     # ``langfuse_receipt.json``; falls back to a live emitter read. Authored by
     # the emitter, so it is read here rather than derived.
@@ -122,7 +122,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
             warnings,
         ),
         warnings,
-        default={},
     )
     # Events whose phase was killed before it could close them are closed here,
     # before the timeline is read: their fragments are on disk, and an event
@@ -152,7 +151,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
             recorded=assembled.get("close"),
         ),
         warnings,
-        default={},
     )
     outcome = _safe_collect(
         "outcome",
@@ -167,7 +165,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
             warnings,
         ),
         warnings,
-        default={},
     )
     metadata = _safe_collect(
         "metadata",
@@ -183,7 +180,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
             exported_at_utc=exported_at,
         ),
         warnings,
-        default={},
     )
     v6_critic = collectors.collect_v6_critic(assembled.get("critic"))
     # Snapshot last: every collector above feeds this one list, and this is the
@@ -236,7 +232,7 @@ def _safe_collect(
     """
     try:
         return fn()
-    except Exception as exc:
+    except Exception as exc:  # isolation boundary: one breakdown collector
         log.exception("collector %s failed", name)
         warnings.append(f"collector:{name} failed: {type(exc).__name__}: {exc}")
         if default is not None:
@@ -276,17 +272,21 @@ def write_breakdown_json(
     # session from it. Only the trigger is here, because every path that writes
     # a session's artifacts goes through this function and the file has to land
     # before any flush reads it.
+    trace_failure = ""
     try:
         from ..trace.decision_trace import write_session_decision_trace
 
         for warning in write_session_decision_trace(sd):
             log.debug("decision_trace: %s", warning)
-    except Exception:
+    except Exception as exc:  # isolation boundary: the decision_trace side artifact
         # The trace is a side artifact; losing it must not fail the breakdown
         # write, but it is scored downstream so a silent loss has to be visible.
         log.warning("decision_trace write failed for %s; trace artifacts will be missing", sd, exc_info=True)
+        trace_failure = f"decision_trace failed: {type(exc).__name__}: {exc}"
 
     breakdown = build(sd)
+    if trace_failure and isinstance(breakdown["metadata"], dict):
+        breakdown["metadata"]["warnings"].append(trace_failure)
     payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
     atomic_write_text(target, payload)
     log.info("session_breakdown: wrote %s (%d bytes)", target, len(payload))
@@ -304,20 +304,16 @@ def _patch_breakdown(
     """Rewrite one section of an already-written breakdown, atomically."""
     sd = Path(session_dir).resolve()
     target = sd / BREAKDOWN_FILENAME
-    try:
-        if not target.exists():
-            return False
-        breakdown = json.loads(target.read_text(encoding="utf-8"))
-        if not isinstance(breakdown, dict):
-            return False
-        if not revise(sd, breakdown):
-            return False
-        atomic_write_text(target, json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default))
-        log.info("session_breakdown: refreshed %s section in %s", section, target)
-        return True
-    except Exception:
-        log.debug("session_breakdown: %s patch failed (non-fatal)", section, exc_info=True)
+    if not target.exists():
         return False
+    breakdown = json.loads(target.read_text(encoding="utf-8"))
+    if not isinstance(breakdown, dict):
+        return False
+    if not revise(sd, breakdown):
+        return False
+    atomic_write_text(target, json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default))
+    log.info("session_breakdown: refreshed %s section in %s", section, target)
+    return True
 
 
 def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
@@ -330,9 +326,9 @@ def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
     splice in the post-flush ``langfuse_receipt.json`` (final counts) without
     rebuilding the whole file.
 
-    Best-effort and self-skipping: returns False (no-op) when no breakdown or
-    no receipt exists yet, when live push was disabled, or on any error. Never
-    raises -- it must not mask the session's stop_reason at shutdown.
+    Self-skipping: returns False (no-op) when no breakdown or no receipt exists
+    yet, or when live push was disabled. A failure to read, revise or write the
+    breakdown raises to the caller.
 
     Args:
         session_dir: The hyperloom session directory holding the breakdown.
@@ -372,11 +368,9 @@ def patch_breakdown_close(session_dir: Path | str) -> bool:
     then the full sequence, the artifact paths and the verdict are all on disk
     and the re-read key is the real one.
 
-    Best-effort and self-skipping, exactly like
-    :func:`patch_breakdown_langfuse`: returns False on a missing breakdown, an
-    unchanged section, or any error. Never raises — it runs after
-    ``stop_reason`` and ``close_sequence_done`` are settled and must not mask
-    them at shutdown.
+    Self-skipping, exactly like :func:`patch_breakdown_langfuse`: returns False
+    on a missing breakdown or an unchanged section. A failure to read, revise or
+    write the breakdown raises to the caller.
 
     Args:
         session_dir: The hyperloom session directory holding the breakdown.
@@ -430,16 +424,12 @@ def _json_default(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
-def write_minimal_final_report(
-    session_dir: Path | str,
-    *,
-    output_path: Path | str | None = None,
-) -> Path:
+def write_minimal_final_report(session_dir: Path | str) -> Path:
     """cli.finally safety-net for ``reports/final.md`` when the CLOSE sequencer never reached step 1."""
     from ..session.session_paths import reports_dir
 
     sd = Path(session_dir).resolve()
-    target = Path(output_path).resolve() if output_path else reports_dir(sd) / "final.md"
+    target = reports_dir(sd) / "final.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and target.stat().st_size > 0:
         return target
@@ -511,29 +501,20 @@ def write_minimal_final_report(
     return target
 
 
-def _crash_safe_platform(gpu_type: str | None) -> dict[str, Any]:
-    """Platform record for the crash-safe path."""
-    from hyperloom.common.platform_probe import platform_fingerprint
-
-    return platform_fingerprint(gpu_type)
-
-
 #: Value of ``producer`` in a crash-safe ``final.json``.
 FINAL_PRODUCER_COORDINATOR = "coordinator"
 
 
-def write_minimal_final_json(
-    session_dir: Path | str,
-    *,
-    output_path: Path | str | None = None,
-) -> Path:
+def write_minimal_final_json(session_dir: Path | str) -> Path:
     """Crash-safe ``reports/final.json`` fallback for any non-graceful exit."""
     from datetime import datetime, timezone
+
+    from hyperloom.common.platform_probe import platform_fingerprint
 
     from ..session.session_paths import reports_dir
 
     sd = Path(session_dir).resolve()
-    target = Path(output_path).resolve() if output_path else reports_dir(sd) / "final.json"
+    target = reports_dir(sd) / "final.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     # Keep a full report (``safety_net`` absent/false); refresh an earlier fallback;
     # preserve a corrupt file as ``final.json.corrupt`` and overwrite it.
@@ -575,7 +556,7 @@ def write_minimal_final_json(
         "max_minutes": state.get("max_minutes") or 0,
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
         # A run that died unattended is exactly when the host record is most useful, since nobody was watching.
-        "platform": _crash_safe_platform(gpu_type),
+        "platform": platform_fingerprint(gpu_type),
     }
     atomic_write_json(target, summary)
     log.info("crash-safe final.json: wrote %s", target)
@@ -583,7 +564,6 @@ def write_minimal_final_json(
 
 
 __all__ = [
-    "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
     "FINAL_PRODUCER_COORDINATOR",
     "build",

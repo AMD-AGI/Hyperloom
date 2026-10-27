@@ -1251,10 +1251,13 @@ async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed
             await execution
         on_complete.assert_not_awaited()
         await coord.dispatcher.close_db_after_executions()
-        assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is not None
-    assert events == (["close", "gpu_release"] if confirmed else ["close"])
-    holders = await coord.locks.lane_holders()
-    assert bool(holders) is not confirmed
+        # The unconfirmed close is reported to the caller and recorded on the
+        # row; the slot still goes back, because the task it was held for is over.
+        assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is None
+    # Cleanup is asked first either way -- its answer is evidence, so it has to
+    # be in hand before the row is written -- and the capacity follows it back.
+    assert events == ["close", "gpu_release"]
+    assert not await coord.locks.lane_holders()
 
 
 class TestTheRunnerRecordsACancellation:

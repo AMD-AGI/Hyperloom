@@ -49,7 +49,7 @@ async def _served_capture_workload(
     }
     try:
         benchmark_result = await executor(ctx)
-    except Exception as exc:  # per-run boundary: the fault becomes the run's recorded capture verdict
+    except Exception as exc:  # isolation boundary: one shape-capture serving run, recorded as its capture verdict
         log.warning("vLLM TunableOp shape capture raised", exc_info=True)
         return {}, _shape_capture_failure(f"vLLM TunableOp shape capture raised {exc!r}", run.capture_dir)
     return (benchmark_result if isinstance(benchmark_result, dict) else {}), None

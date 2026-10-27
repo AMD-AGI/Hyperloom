@@ -765,8 +765,8 @@ async def prepare_task(
                 audit.text(f"{attempt_dir}/agent_output.txt", agent_output)
             except asyncio.TimeoutError:
                 status = "timeout"
-            except Exception as exc:  # noqa: BLE001
-                log.warning("task preparation agent attempt %d failed: %s", attempts, exc)
+            except Exception as exc:  # isolation boundary: one task-preparation agent attempt
+                log.warning("task preparation agent attempt %d failed: %s", attempts, exc, exc_info=True)
                 status = "error"
                 exception_detail = {"exception_type": type(exc).__name__, "exception": str(exc)}
                 retry_note = RetryNote(f"Agent invocation error: {type(exc).__name__}: {exc}")

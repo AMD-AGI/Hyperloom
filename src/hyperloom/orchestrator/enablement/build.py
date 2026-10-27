@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.coerce import first_text
@@ -268,7 +269,7 @@ class EnablementBuild(CoordinatorCollaborator):
                     action.ref or "(autoselect)",
                     build_task_id,
                 )
-        except Exception:
+        except (OSError, sqlite3.Error, TypeError, ValueError):
             log.debug("enablement: specialist-requested build enqueue failed", exc_info=True)
 
     def _specialist_build_action(self, req: dict[str, Any], capability: str) -> TargetedBuildAction | None:

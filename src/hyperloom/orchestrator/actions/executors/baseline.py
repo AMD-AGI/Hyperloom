@@ -1568,7 +1568,7 @@ def revert_warm_kernel_patches(
                         or f"kernel revert status={reverted.get('status')}"
                     )
                 )
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one applied warm-kernel patch revert
             log.warning("warm-kernel KB: revert failed", exc_info=True)
             errors.append(f"{type(exc).__name__}:{exc}")
     if snapshots:
@@ -1735,19 +1735,12 @@ class BenchmarkRunExecutor:
 
     def _consume_eager_fallback(self, shared_state: Any | None = None) -> bool:
         """Consume the one-shot cuda-graph eager fallback flag from SharedState."""
-        try:
-            state = self._resolve_shared_state(shared_state)
-            if not getattr(state, "baseline_eager_fallback", False):
-                return False
-            state.baseline_eager_fallback = False
-            state.save(self.session_dir)
-            return True
-        except Exception:
-            log.debug(
-                "baseline_executor: eager-fallback flag check failed",
-                exc_info=True,
-            )
+        state = self._resolve_shared_state(shared_state)
+        if not getattr(state, "baseline_eager_fallback", False):
             return False
+        state.baseline_eager_fallback = False
+        state.save(self.session_dir)
+        return True
 
     def _measurement_succeeded(self, measurement: dict[str, Any]) -> bool:
         return measurement.get("valid_measurement") is True
@@ -2276,7 +2269,7 @@ class BenchmarkRunExecutor:
             from ._accuracy_gate import _finite_score, parse_eval_results
 
             eval_data = parse_eval_results(runs_root, framework=framework)
-        except Exception:
+        except (OSError, ValueError, AttributeError, TypeError):
             log.debug("baseline_executor: sibling-accuracy salvage scan failed", exc_info=True)
             return None
         if _finite_score(eval_data.get("accuracy")) is None:
@@ -2512,7 +2505,7 @@ class BenchmarkRunExecutor:
         state.warm_replay_pending = {**(state.warm_replay_pending or {}), **fields}
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.warning("baseline_executor: warm replay pending state persist failed", exc_info=True)
             return False
         return True
@@ -3126,7 +3119,7 @@ class BenchmarkRunExecutor:
         except subprocess.TimeoutExpired as exc:
             log.warning("baseline_executor: MN warmup pass hit its own hang backstop (ignored): %r", exc)
             round_warnings.append(_MN_WARMUP_DID_NOT_WARM_WARNING)
-        except Exception as exc:  # noqa: BLE001 - a warmup that fails on its own is best-effort
+        except (OSError, ValueError) as exc:
             log.warning("baseline_executor: MN warmup pass failed (ignored): %r", exc)
             round_warnings.append(_MN_WARMUP_DID_NOT_WARM_WARNING)
         return _stopped_round_result(
@@ -3995,7 +3988,7 @@ class BaselineExecutor(BenchmarkRunExecutor):
     def _resolve_sink(self, ctx: RunnerContext) -> Any:
         """Decide which event this measurement's rows belong to."""
         from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import baseline_event_id
-        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
         from hyperloom.inference_optimizer.session.session_binding import session_is_bound
 
         params = ctx.task.params or {}
@@ -4008,13 +4001,13 @@ class BaselineExecutor(BenchmarkRunExecutor):
             return None
         inline = str(params.get(INLINE_EVENT_PARAM) or "")
         if inline:
-            return make_sink(inline, producer=_RECORDER_PRODUCER)
+            return EventSink(inline, producer=_RECORDER_PRODUCER)
         state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
         event = baseline_event_id(
             str(getattr(state, "phase", "") or "unphased"),
             int(getattr(state, "macro_cycle", 0) or 0),
         )
-        return make_sink(event, producer=_RECORDER_PRODUCER)
+        return EventSink(event, producer=_RECORDER_PRODUCER)
 
     def _failure_counters(self, ctx: RunnerContext) -> tuple[int | None, int | None]:
         """The session's baseline failure counts as this measurement starts.

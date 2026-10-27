@@ -6,6 +6,7 @@
 from __future__ import annotations
 import hashlib
 import logging as _logging
+import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -562,7 +563,7 @@ def _record_review_outcome(
 
 
 def _settle(coord: Any, proposal_id: str, *, disposition: str, reason: str = "") -> None:
-    """Record where a candidate ended up: ``attempted``, ``dropped`` or ``pending``."""
+    """Record where a candidate ended up: ``attempted`` or ``dropped``."""
     recorder = _recorder(coord)
     if recorder is None or not proposal_id:
         return
@@ -1989,7 +1990,7 @@ class FrameworkPhase(ProposalBench):
                 cand_id,
                 candidate.get("batch_id") or "",
             )
-        except Exception as exc:  # noqa: BLE001 — defensive
+        except (RuntimeError, sqlite3.Error, TypeError, ValueError) as exc:
             log.warning(
                 "FRAMEWORK: failed to enqueue candidate=%s: %r",
                 cand_id,
@@ -2170,10 +2171,11 @@ class FrameworkPhase(ProposalBench):
                     candidate,
                     audit=audit if isinstance(audit, dict) else {},
                 )
-            except Exception as exc:  # noqa: BLE001 — never wedge the phase
+            except Exception as exc:  # isolation boundary: one approved candidate's authoring dispatch
                 log.warning(
                     "FRAMEWORK: authoring specialist dispatch failed: %r",
                     exc,
+                    exc_info=True,
                 )
                 # Author-only route (no raw track to own a terminal row): stamp materialize_failed so an
                 # approved-but-undispatchable candidate is not re-selected every tick.
@@ -2431,7 +2433,7 @@ class FrameworkPhase(ProposalBench):
             # Last, as at entry, so a predictor fault is filed here after the phase's own work has run.
             stage = "framework_predictor"
             await self._predictor_pump().step(self.shared_state)
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: the FRAMEWORK pump within one tick
             log.exception("FRAMEWORK pump failed at %s", stage)
             self._coord.record_exception(stage=stage, exc=exc)
 
@@ -3222,7 +3224,7 @@ class FrameworkPhase(ProposalBench):
                         rec.get("pr_url") or "a prior candidate",
                     )
                     return True
-        except Exception:
+        except OSError:
             # Warning, not debug: swallowing this re-dispatches config levers
             # that already lost an accuracy gate, so it must be visible.
             log.warning("FRAMEWORK: config-lever ledger check failed", exc_info=True)
