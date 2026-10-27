@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from . import geak_rebench as _geak_rebench, machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec, rebench_round_sec
-from hyperloom.common.coerce import first_str
+from hyperloom.common.coerce import first_str, to_float, to_int
 from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_NO_PROMOTE
 from hyperloom.common.io import WriteOptions, atomic_write_json
@@ -124,14 +124,6 @@ MAX_FUSION_INFRA_RETRIES = 2
 
 # One lane ceiling covers both fusion pipelines, so a round can leave targets unfunded.
 MAX_FUSION_WITHHELD_RETRIES = 2
-
-
-def _as_int(value: object) -> int:
-    """Read a counter that round-tripped through JSON, defaulting to 0."""
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
 
 
 def _record_gemm_e2e_envelope(
@@ -303,14 +295,6 @@ def _withheld_targets(result: object) -> int:
         return 0
     withheld = nomination.get("withheld")
     return max(0, withheld) if isinstance(withheld, int) and not isinstance(withheld, bool) else 0
-
-
-def _as_float(value: object, default: float) -> float:
-    """Read a measurement that round-tripped through JSON, defaulting on junk."""
-    try:
-        return float(value or default)
-    except (TypeError, ValueError):
-        return default
 
 
 # Which table each aiter config env var is resolved under at serving time.
@@ -2073,7 +2057,7 @@ class KernelPhase(CoordinatorCollaborator):
         )
         self._record_geak_claim_and_product(result, accepted_flags, parsed_envs)
         # Surface a large cross-harness measurement divergence as a warning only.
-        divergence = _as_float(basis_facts.get("measurement_divergence_pct"), 0.0)
+        divergence = to_float(basis_facts.get("measurement_divergence_pct"), 0.0)
         if abs(divergence) > _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT:
             log.warning(
                 "geak candidate: large cross-harness measurement divergence %.2f%% (|.|>%.1f%%) - candidate held "
@@ -2350,11 +2334,11 @@ class KernelPhase(CoordinatorCollaborator):
         """Promote a measured GEAK candidate and return whether the lift succeeded."""
         if not isinstance(result, dict):
             return False
-        measured = _as_float(measured_tput, 0.0)
+        measured = to_float(measured_tput, 0.0)
         if measured <= 0:
             return False
         # Read before the lift overwrites ``current_best``; see :meth:`_record_geak_lift_attribution`.
-        pre_geak_tput = _as_float(self.shared_state.current_best.get("tput"), 0.0)
+        pre_geak_tput = to_float(self.shared_state.current_best.get("tput"), 0.0)
         try:
             accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
         except ValueError as exc:
@@ -3149,7 +3133,7 @@ class KernelPhase(CoordinatorCollaborator):
                     "env_var": env_var,
                     "env_value": env_value,
                     "envs": envs,
-                    "micro_speedup": _as_float(row.get("best_micro_speedup"), 1.0),
+                    "micro_speedup": to_float(row.get("best_micro_speedup")) or 1.0,
                 }
             )
         return candidates
@@ -3225,9 +3209,7 @@ class KernelPhase(CoordinatorCollaborator):
             "kernel_id": f"gemm_tune_{tuner_name}",
             "source": "forge_gemm_tuning",
             "base_tput": base_tput,
-            "model_path": resolve_session_model_path(
-                state_model_path=str(self.shared_state.model_path or ""), for_serving=True
-            ),
+            "model_path": resolve_session_model_path(state_model_path=str(self.shared_state.model_path or "")),
             "extra_server_args": self._gemm_candidate_server_args(tuner_name),
             "extra_envs": test_envs,
             "keep_threshold_pct": 1.0,
@@ -3726,11 +3708,11 @@ class KernelPhase(CoordinatorCollaborator):
             # A round that kept nothing and left targets unfunded answers only for the ones it ran, so it re-arms
             # fusion until the retry cap is spent.
             if not last.get("kept") and _withheld_targets(last) > 0:
-                return _as_int(self.shared_state.fusion_withheld_retries) < MAX_FUSION_WITHHELD_RETRIES
+                return to_int(self.shared_state.fusion_withheld_retries, 0) < MAX_FUSION_WITHHELD_RETRIES
             return False
         if isinstance(last, dict) and last.get("infrastructure_abort"):
             # An abort judged nothing, so it must stay retryable -- but not forever.
-            spent = _as_int(self.shared_state.fusion_infra_aborts)
+            spent = to_int(self.shared_state.fusion_infra_aborts, 0)
             if spent >= MAX_FUSION_INFRA_RETRIES:
                 log.info(
                     "KERNEL entry: skip forge-fusion (aborted on infrastructure %d time(s): %s)",
@@ -3787,11 +3769,11 @@ class KernelPhase(CoordinatorCollaborator):
             # Counted on the session, not on the record: ``last_fusion`` is replaced by every run, so a timeout or a
             # handler crash landing between two aborts would carry no count forward and hand the cap back a clean
             # slate on every other entry.
-            spent = _as_int(self.shared_state.fusion_infra_aborts)
+            spent = to_int(self.shared_state.fusion_infra_aborts, 0)
             self.shared_state.fusion_infra_aborts = spent + 1
         if isinstance(result, dict) and not result.get("kept") and _withheld_targets(result) > 0:
             # Counted on the session for the same reason as the aborts above.
-            withheld_spent = _as_int(self.shared_state.fusion_withheld_retries)
+            withheld_spent = to_int(self.shared_state.fusion_withheld_retries, 0)
             self.shared_state.fusion_withheld_retries = withheld_spent + 1
         if isinstance(result, dict) and not first_str(result.get("fusion_run_id")).strip():
             cycle = int(self.shared_state.macro_cycle or 0)

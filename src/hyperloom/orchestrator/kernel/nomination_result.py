@@ -9,6 +9,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from hyperloom.common.coerce import to_int
+
 log = logging.getLogger(__name__)
 
 #: Dropping an entry is a contract problem worth surfacing, so every drop
@@ -133,9 +135,9 @@ def parse_outcome(payload: Any) -> NominationOutcome:
     return NominationOutcome(
         patches=tuple(ordered),
         dropped=tuple(dropped),
-        candidates_seen=_int_or_zero(summary.get("candidates_seen")),
-        resolved=_int_or_zero(summary.get("resolved")),
-        selected=_int_or_zero(summary.get("selected")),
+        candidates_seen=to_int(summary.get("candidates_seen"), 0),
+        resolved=to_int(summary.get("resolved"), 0),
+        selected=to_int(summary.get("selected"), 0),
         schema_error=schema_error,
     )
 
@@ -178,14 +180,6 @@ def _finite_float(value: Any) -> float:
         return 0.0
     number = float(value)
     return number if math.isfinite(number) else 0.0
-
-
-def _int_or_zero(value: Any) -> int:
-    """A missing or unparsable count reports zero; counts are advisory."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
 
 
 def _string_tuple(value: Any) -> tuple[str, ...]:

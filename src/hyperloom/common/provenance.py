@@ -16,6 +16,7 @@ from importlib import metadata as _im
 from pathlib import Path
 from typing import Any, Mapping
 
+from hyperloom.common.coerce import to_int
 from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
 
 PROVENANCE_VERSION = 1
@@ -96,16 +97,6 @@ def _arg_first(args: Any, *names: str) -> Any:
         if v is not None and v != "":
             return v
     return None
-
-
-def _int_or_none(value: Any) -> int | None:
-    """Coerce to int, or ``None`` when unset/blank/non-numeric."""
-    if value is None:
-        return None
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return None
 
 
 def detect_gfx_arch(env: Mapping[str, str], *, gpu_type: str | None = None, probe: bool = True) -> str | None:
@@ -373,15 +364,15 @@ def build_provenance(
         # hardware / parallelism / graph
         "gpu_type": gpu_type,
         "gfx_arch": detect_gfx_arch(env, gpu_type=gpu_type, probe=probe),
-        "tp": _int_or_none(_arg_first(args, "tp") or _env_first(env, "TP")),
-        "ep": _int_or_none(_arg_first(args, "ep") or _env_first(env, "EP")),
+        "tp": to_int(_arg_first(args, "tp") or _env_first(env, "TP")),
+        "ep": to_int(_arg_first(args, "ep") or _env_first(env, "EP")),
         "graph_mode": (_arg_first(args, "graph_mode") or detect_graph_mode(env)),
         # dtype / workload
         "dtype": (_arg_first(args, "precision", "dtype") or _env_first(env, "PRECISION")),
-        "concurrency": _int_or_none(_arg_first(args, "conc", "concurrency") or _env_first(env, "CONC", "CONCURRENCY")),
-        "isl": _int_or_none(_arg_first(args, "isl") or _env_first(env, "ISL")),
-        "osl": _int_or_none(_arg_first(args, "osl") or _env_first(env, "OSL")),
-        "max_model_len": _int_or_none(_arg_first(args, "max_model_len") or _env_first(env, "MAX_MODEL_LEN")),
+        "concurrency": to_int(_arg_first(args, "conc", "concurrency") or _env_first(env, "CONC", "CONCURRENCY")),
+        "isl": to_int(_arg_first(args, "isl") or _env_first(env, "ISL")),
+        "osl": to_int(_arg_first(args, "osl") or _env_first(env, "OSL")),
+        "max_model_len": to_int(_arg_first(args, "max_model_len") or _env_first(env, "MAX_MODEL_LEN")),
         # full server args + fingerprint
         "server_args": server_args,
         "server_args_hash": server_args_hash(server_args),

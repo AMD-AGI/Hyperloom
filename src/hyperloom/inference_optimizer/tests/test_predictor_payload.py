@@ -17,13 +17,12 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.trace_analysis import _analysis_md
 
 
-def build_request(state: SharedState, *, session_id: str) -> dict:
+def build_request(state: SharedState) -> dict:
     """The body the pump sends: source sites and sidecars from the session's own analysis run, FRAMEWORK's clock."""
     path = state.last_trace_analyze.get("analysis_md_path")
     budget = predictor_budget(state)
     return _build_request(
         state,
-        session_id=session_id,
         sites=load_source_sites(path),
         sidecars=load_sidecars(path),
         budget=budget,
@@ -107,7 +106,7 @@ def _state(tmp_path: Path) -> SharedState:
 
 
 def test_the_body_carries_exactly_the_fields_the_service_reads(tmp_path):
-    body = build_request(_state(tmp_path), session_id="s1")
+    body = build_request(_state(tmp_path))
 
     assert set(body) == {"schema", "session_id", "identification", "workload", "phase", "performance", "evidence"}
     assert body["schema"].startswith("hyperloom.predictor_request.")
@@ -132,7 +131,7 @@ def test_the_body_carries_exactly_the_fields_the_service_reads(tmp_path):
 
 
 def test_evidence_blocks_come_from_the_report_the_roofline_and_the_source_artifact(tmp_path):
-    ev = build_request(_state(tmp_path), session_id="s1")["evidence"]
+    ev = build_request(_state(tmp_path))["evidence"]
 
     assert ev["profile_available"] and 0 <= ev["profile_age_sec"] < 60
     assert ev["window"] == {
@@ -159,7 +158,7 @@ def test_evidence_blocks_come_from_the_report_the_roofline_and_the_source_artifa
 def test_a_source_artifact_of_another_major_is_ignored(tmp_path):
     state = _state(tmp_path)
     (tmp_path / "kernel_source_resolution.json").write_text(json.dumps({"schema_version": "2.0.0", "entries": []}))
-    mm = build_request(state, session_id="")["evidence"]["hot_kernels"][0]
+    mm = build_request(state)["evidence"]["hot_kernels"][0]
     assert (mm["source_file"], mm["source_line"]) == ("tuned_gemm.py", None)
 
 
@@ -211,7 +210,7 @@ def test_a_tracelens_route_report_takes_window_operators_and_counts_from_the_sid
     state.last_trace_analyze["analysis_md_text"] = AGENTIC_REPORT
     _write_sidecars(report_path.parent)
 
-    ev = build_request(state, session_id="s1")["evidence"]
+    ev = build_request(state)["evidence"]
 
     assert ev["window"] == {"total_gpu_time_ms": 340.93, "gpu_busy_pct": 99.49, "gpu_idle_pct": 0.51,
                             "exposed_comm_pct": 0.92}  # fmt: skip
@@ -230,7 +229,7 @@ def test_a_report_in_the_bypass_layout_wins_over_the_sidecars(tmp_path):
     state = _state(tmp_path)
     _write_sidecars(Path(state.last_trace_analyze["analysis_md_path"]).parent)
 
-    ev = build_request(state, session_id="s1")["evidence"]
+    ev = build_request(state)["evidence"]
 
     assert ev["window"]["total_gpu_time_ms"] == 263.98
     assert ev["operators"]["category_pct"] == {"gemm": 50.1, "attention": 25.0}
@@ -247,4 +246,4 @@ def test_missing_or_malformed_sidecars_add_nothing(tmp_path):
 
 
 def test_no_profile_sends_only_the_flag():
-    assert build_request(SharedState(), session_id="")["evidence"] == {"profile_available": False}
+    assert build_request(SharedState())["evidence"] == {"profile_available": False}
