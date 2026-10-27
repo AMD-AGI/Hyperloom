@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 from functools import partial
@@ -18,6 +19,7 @@ import pytest
 from hyperloom.measure.jit.native.config import trust_from_file
 from hyperloom.measure.jit.native.trust import Signer
 from hyperloom_multibranch.toolbox import build_preflight as preflight
+from hyperloom_multibranch.toolbox import build_setup
 from hyperloom_multibranch.toolbox.build_preflight import git_head, unreachable
 from hyperloom_multibranch.toolbox.build_setup import BuildSetup, SetupError, main, set_up
 from hyperloom_multibranch.toolbox.tests.test_build_preflight import git_repo, sglang_dist, stat_open_above
@@ -137,11 +139,24 @@ def test_a_ref_and_repo_given_override_what_the_image_says(tmp_path: Path) -> No
     assert git_head(tmp_path / "root" / "sources" / "sgl_kernel" / ref) == ref
 
 
-def test_an_image_that_names_no_sglang_commit_asks_for_one(tmp_path: Path) -> None:
+def test_an_image_that_names_no_sglang_commit_asks_for_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The host this runs on may keep a checkout where the framework image does: only the image's checkouts are read.
+    host = {"sgl_kernel": tmp_path / "host" / "sglang"}
+    git_repo(host["sgl_kernel"], {"python/pyproject.toml": "[project]\n"})
+    monkeypatch.setattr(build_setup, "IMAGE_CHECKOUTS", host)
     (tmp_path / "bare-image").mkdir()
-    setup = BuildSetup(tmp_path / "root", tmp_path / "bare-image", "gfx950", "python3", sglang_repo=str(tmp_path / "x"))
+    no_checkout = {"sgl_kernel": tmp_path / "bare-image-sglang"}
+    setup = BuildSetup(
+        tmp_path / "root",
+        tmp_path / "bare-image",
+        "gfx950",
+        "python3",
+        sglang_repo=str(tmp_path / "x"),
+        image_checkouts=no_checkout,
+    )
 
-    with pytest.raises(SetupError, match="pass --sglang-ref and --sglang-repo"):
+    asked = f"read from {tmp_path / 'bare-image'} or {no_checkout['sgl_kernel']}: pass --sglang-ref and --sglang-repo"
+    with pytest.raises(SetupError, match=re.escape(asked)):
         set_up(setup)
 
 

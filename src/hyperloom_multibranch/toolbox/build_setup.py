@@ -40,6 +40,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 from hyperloom.measure import signing
 from hyperloom.measure.jit.native.config import BUILD_STORE_ENV, BUILD_TRUST_ENV, BuildStoreConfigError, trust_from_file
@@ -83,7 +84,8 @@ class SetupError(Exception):
 @dataclass(frozen=True)
 class BuildSetup:
     """What to set up: under ``root``, for the image whose packages are ``image_root``, built for ``gfx`` with the image
-    interpreter ``python``; ``sglang_ref`` and ``sglang_repo`` override what is read from the image."""
+    interpreter ``python``; ``sglang_ref`` and ``sglang_repo`` override what is read from the image, and
+    ``image_checkouts`` are where the image keeps its upstream checkouts (by default where the framework image does)."""
 
     root: Path
     image_root: Path
@@ -92,6 +94,8 @@ class BuildSetup:
     builder_image: str | None = None
     sglang_ref: str | None = None
     sglang_repo: str | None = None
+    #: The image's own checkout of each component's upstream, read when its install names no commit.
+    image_checkouts: Mapping[str, Path] = MappingProxyType(IMAGE_CHECKOUTS)
 
 
 def _directory(path: Path) -> Path:
@@ -157,7 +161,7 @@ class _Clone:
 
 def _clones(setup: BuildSetup) -> list[_Clone]:
     """The checkout of each upstream the image installs (``--sglang-ref`` and ``--sglang-repo`` override sglang's)."""
-    own = dict(IMAGE_CHECKOUTS)
+    own = dict(setup.image_checkouts)
     if setup.sglang_repo and Path(setup.sglang_repo).is_dir():
         own[_SGL_KERNEL] = Path(setup.sglang_repo)
     clones = {
@@ -171,7 +175,8 @@ def _clones(setup: BuildSetup) -> list[_Clone]:
     if not any(clone.repo for clone in clones.values()):
         raise SetupError(
             f"no upstream commit with a checkout to clone it from can be read from {setup.image_root} or "
-            f"{IMAGE_SGLANG_CHECKOUT}: pass --sglang-ref and --sglang-repo"
+            f"{', '.join(str(path) for path in setup.image_checkouts.values()) or 'an image checkout'}: pass "
+            "--sglang-ref and --sglang-repo"
         )
     return list(clones.values())
 
