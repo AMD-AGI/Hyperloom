@@ -7,6 +7,7 @@ as ``pending_build``, is built out of process, signed, named on the sheet, laid 
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import sys
 from dataclasses import dataclass, field
@@ -15,7 +16,7 @@ from types import ModuleType
 
 import pytest
 
-from hyperloom.contracts.measurement import FailureClass, Purpose, TestKind, TestRequest
+from hyperloom.contracts.measurement import BuildPayment, FailureClass, Purpose, TestKind, TestRequest, Validity
 from hyperloom.contracts.recipe import ComponentPatches, Recipe, RecipeDelta
 from hyperloom.measure import signing
 from hyperloom.measure.compile import EnvironmentCompiler, LocalBlobStore, PatchApplyError, UnsupportedComponentError
@@ -27,6 +28,7 @@ from hyperloom.measure.jit.native.config import (
     BuildStoreConfigError,
     trust_from_file,
 )
+from hyperloom.measure.jit.native.key import BuildInputs
 from hyperloom.measure.jit.native.laying import NamedBuild, SheetBuilds, manifest_sha256
 from hyperloom.measure.jit.native.store import BuildInfraError, BuildStore
 from hyperloom.measure.jit.native.trust import Signer, Trust, TrustedKey
@@ -35,6 +37,7 @@ from hyperloom.measure.runner.native.builder import BuildMachine
 from hyperloom.measure.runner.native.isolated import STAGED_FILE, IsolatedBuilds, Isolation
 from hyperloom.measure.runner.native.isolated import staged_record
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
+from hyperloom.measure.runner.native.service import Ensured
 from hyperloom.measure.spec import Environment
 from hyperloom.measure.tests._recipes import COMMIT, IMAGE, git_patch, put_patch
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
@@ -52,7 +55,7 @@ from hyperloom_multibranch.toolbox.native_builds import (
 from hyperloom_multibranch.toolbox.pending_builds import BuildEnd, BuildHooks, PendingBuilds
 from hyperloom_multibranch.toolbox.store_builds import BuildSite, StoreBuildDriver
 from hyperloom_multibranch.toolbox.tests import native_support as fake
-from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo
+from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo, build, req
 from hyperloom_multibranch.toolbox.tests import test_short_prompts_option as options_tests
 
 BUILDER = "sha256:" + "c" * 64
@@ -88,23 +91,33 @@ class Rig:
     ``FACTORY``, ``ACT_CU`` and ``BASE_CU``, its ``image``, ``upstream`` and ``stand_in_recipe``."""
 
     def __init__(self, tmp: Path, isolation: Isolation | None = SAME_PROCESS_USER, kit: ModuleType = fake) -> None:
-        self.tmp, self.blobs, self.kit = tmp, LocalBlobStore(tmp / "blobs"), kit
+        self.tmp, self.blobs, self.kit, self._isolation = tmp, LocalBlobStore(tmp / "blobs"), kit, isolation
         self.image = kit.image(tmp / "image")
         kit.upstream(tmp / "sources" / kit.COMPONENT / COMMIT)
-        key = signing.generate_private_key()
-        self.trust = Trust((TrustedKey(signing.public_key_pem(key), 1),), 1)
+        self._key = signing.generate_private_key()
+        self.trust = Trust((TrustedKey(signing.public_key_pem(self._key), 1),), 1)
         self.store = BuildStore(tmp / "store", self.trust)
-        recipe = kit.stand_in_recipe()
+        self._wire()
+        self._patches = 0
+
+    def _wire(self) -> None:
+        """What lives in the service's process: the planner, the compiler and the driver."""
+        kit, recipe = self.kit, self.kit.stand_in_recipe()
         machine = BuildMachine(IMAGE, BUILDER, "gfx942", sys.executable)
-        site = NativeSite(machine, {kit.COMPONENT: recipe}, tmp / "sources", self.image.site)
+        site = NativeSite(machine, {kit.COMPONENT: recipe}, self.tmp / "sources", self.image.site)
         self.planner = NativePlanner(site, self.blobs, {kit.COMPONENT: kit.LAYOUT})
-        runner = IsolatedBuilds(self.planner, self.blobs, isolation, {kit.COMPONENT: kit.FACTORY})
+        runner = IsolatedBuilds(self.planner, self.blobs, self._isolation, {kit.COMPONENT: kit.FACTORY})
         build_site = BuildSite(IMAGE, BUILDER, "gfx942", {kit.COMPONENT: recipe})
-        self.driver = StoreBuildDriver(self.store, Signer(key), build_site, compiled_needs, runner)
+        self.driver = StoreBuildDriver(self.store, Signer(self._key), build_site, compiled_needs, runner)
         self.compiler = EnvironmentCompiler(
             self.blobs, IMAGE, lambda layout: self.image.package(), {kit.COMPONENT: kit.LAYOUT}, self.planner
         )
-        self._patches = 0
+
+    def restarted(self) -> Rig:
+        """The same host after the service's process restarted: its store, key, sources and blobs, nothing planned."""
+        again = copy.copy(self)
+        again._wire()
+        return again
 
     def patch(self, after: dict[str, str | None], before: dict[str, str] | None = None):
         self._patches += 1
@@ -261,6 +274,43 @@ class CompilingPlanner:
 
     def plan(self, request: TestRequest, parent: Recipe) -> AcceptedMeasurement:
         return AcceptedMeasurement(self.rig.compiler.compile(parent, request.delta), ())
+
+
+class GatedDriver:
+    """``driver`` whose builds wait for ``gate``: a build still running when the service's process dies."""
+
+    def __init__(self, driver: StoreBuildDriver) -> None:
+        self.driver, self.gate = driver, asyncio.Event()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.driver, name)
+
+    async def ensure(self, inputs: BuildInputs) -> Ensured:
+        await self.gate.wait()
+        return await self.driver.ensure(inputs)
+
+
+async def test_a_test_waiting_for_its_build_when_the_service_restarts_is_planned_again_built_and_measured(
+    rig: Rig,
+) -> None:
+    repo = FakeRepo(rig.recipe(rig.patch({fake.ACT_CU: EDITED_CU})))
+    before = build(
+        rig.tmp / "box", repo=repo, active_image=IMAGE, planner=CompilingPlanner(rig), builds=GatedDriver(rig.driver)
+    )
+    request_id = await before.toolbox.submit_test(req(purpose=Purpose.BASELINE, change=RecipeDelta()))
+    assert (await before.toolbox.progress(request_id)).state == "pending_build"  # type: ignore[union-attr]
+    await before.toolbox.close()  # the process dies before the build ran: nothing was stored
+
+    again = rig.restarted()
+    after = build(rig.tmp / "box", repo=repo, active_image=IMAGE, planner=CompilingPlanner(again), builds=again.driver)
+    await after.toolbox.start()
+    await asyncio.wait_for(after.toolbox.drain(), 120)
+
+    result = (await after.notebook.record(request_id)).result
+    assert result is not None and result.validity is Validity.SUCCEEDED, result
+    assert after.executor.started == [request_id]
+    assert [charge.payment for charge in result.builds] == [BuildPayment.PAID], "built once, by this process"
+    await after.toolbox.close()
 
 
 async def test_acceptance_refuses_a_runtime_snapshot_beside_a_native_stack_and_takes_one_without(rig: Rig) -> None:

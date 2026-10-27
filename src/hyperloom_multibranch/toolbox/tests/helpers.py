@@ -28,6 +28,7 @@ from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
+from hyperloom_multibranch.toolbox.pending_builds import BuildDriver
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox, ToolboxStores, ToolboxTuning
@@ -186,9 +187,10 @@ def build(
     planner: object | None = None,
     tools: Callable[[LocalNotebook], object] | None = None,
     workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
+    builds: BuildDriver | None = None,
 ) -> Rig:
     """A toolbox over a notebook directory and a submit log under ``tmp_path``; building again over the same
-    ``tmp_path`` is a restart."""
+    ``tmp_path`` is a restart. ``builds`` drives the native builds a test waits for."""
 
     from hyperloom_multibranch.notebook.tests.factories import FakeClock
 
@@ -203,6 +205,7 @@ def build(
         health=notebook,
         claims=notebook if with_claims else None,
         records=notebook,
+        builds=builds,
     )
     toolbox = RealToolbox(
         stores,

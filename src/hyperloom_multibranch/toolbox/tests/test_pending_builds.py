@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -248,3 +249,71 @@ async def test_a_deadline_does_not_refuse_a_test_whose_builds_are_ready() -> Non
     request_id = await box.submit_test(_request(server_args="--native a"))
     await box.drain()
     assert box.results[request_id].builds[0].payment is BuildPayment.REUSED
+
+
+# --- a restart while a test waits for its build ------------------------------------------------------------------------
+
+
+def _restartable(log: Path, driver: FakeBuildDriver, notebook: MemoryNotebook) -> FakeToolbox:
+    """A toolbox over ``log``; a second one over the same log, driver (the shared store) and notebook is a restart."""
+    return FakeToolbox(FakeToolboxConfig(), notebook=notebook, wiring=FakeWiring(builds=driver, log_path=log))
+
+
+async def _died_waiting(tmp_path: Path) -> tuple[FakeBuildDriver, MemoryNotebook, str, str]:
+    """A test accepted and waiting for its build when the toolbox dies; the build never got past the gate."""
+    driver, notebook = FakeBuildDriver(eta=ETA), MemoryNotebook()
+    driver.need(_native, KERNEL, source="stack-a")
+    box = _restartable(tmp_path / "submissions.jsonl", driver, notebook)
+    (request_id,) = await _submit_held(box, driver, _request(server_args="--native a"))
+    await box.close()
+    assert driver.ensured == [] and box.results == {}
+    return driver, notebook, request_id, driver.needs(_request(server_args="--native a"), None)[0].key
+
+
+async def _restart(tmp_path: Path, driver: FakeBuildDriver, notebook: MemoryNotebook) -> FakeToolbox:
+    again = _restartable(tmp_path / "submissions.jsonl", driver, notebook)
+    await again.check_test(_request())  # the fake toolbox starts, and recovers its log, on first use
+    await _let_builds_start()
+    return again
+
+
+async def test_a_test_waiting_for_a_build_nobody_ran_builds_it_after_a_restart(tmp_path: Path) -> None:
+    driver, notebook, request_id, key = await _died_waiting(tmp_path)
+    driver.gate.set()  # nothing builds the key while the toolbox is down
+
+    again = await _restart(tmp_path, driver, notebook)
+    await again.drain()
+
+    assert driver.ensured == [key], "planned again from the logged request and built once"
+    result = again.results[request_id]
+    assert result.validity is Validity.SUCCEEDED
+    assert result.builds == (BuildCharge(key, KERNEL, CPU, BuildPayment.PAID),)
+
+
+async def test_a_test_whose_build_is_still_running_waits_for_it_after_a_restart(tmp_path: Path) -> None:
+    driver, notebook, request_id, key = await _died_waiting(tmp_path)
+
+    again = await _restart(tmp_path, driver, notebook)  # the gate is still closed: the key is being built
+    progress = await again.progress(request_id)
+    assert progress == TestProgress("pending_build", builds=(BuildStatus(key, KERNEL, BuildState.BUILDING, ETA),))
+    assert again.results == {}
+
+    await _release(again, driver)
+    assert again.results[request_id].validity is Validity.SUCCEEDED
+    assert driver.ensured == [key]
+
+
+async def test_a_test_whose_build_landed_while_the_toolbox_was_down_is_queued_at_once(tmp_path: Path) -> None:
+    driver, notebook, request_id, key = await _died_waiting(tmp_path)
+    driver.gate.set()
+    (inputs,) = driver.needs(_request(server_args="--native a"), None)
+    await driver.ensure(inputs)  # another toolbox on the store finished the key meanwhile
+    ensured = list(driver.ensured)
+
+    again = await _restart(tmp_path, driver, notebook)
+    await again.drain()
+
+    assert driver.ensured == ensured, "a ready key is read from the store, not built again"
+    result = again.results[request_id]
+    assert result.validity is Validity.SUCCEEDED
+    assert result.builds == (BuildCharge(key, KERNEL, 0.0, BuildPayment.REUSED),)
