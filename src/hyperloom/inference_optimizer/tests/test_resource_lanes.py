@@ -512,17 +512,20 @@ def _remedies(caplog) -> list[str]:
 
 @pytest.mark.asyncio
 async def test_an_incident_shaped_row_stays_held_and_hands_the_operator_the_remedy(conn, locks, caplog):
-    """2026-09-21's own rows are not auto-healed, and are not meant to be.
+    """A row whose release never ran is not auto-healed, and is not meant to be.
 
-    The code that wrote them recorded ``cleanup_confirmed=False`` and no group
-    id, so they take the unverifiable path and keep their lanes -- for the life
-    of the session if need be, because no age or TTL may break the tie and a
-    row like this reads exactly like a holder still on the machine.
+    A holder gives its lanes back where it writes its terminal row, so a row
+    still held by a terminal task -- ``cleanup_confirmed=False``, no group id --
+    is one that release never reached: the coordinator died between the row and
+    the release, or the task was failed from the outside. It takes the
+    unverifiable path and keeps its lane for the life of the session if need be,
+    because no age or TTL may break the tie and a row like this reads exactly
+    like a holder still on the machine.
 
     What the operator gets instead is this warning: the lane, the holder, why it
     could not be settled, and the statement that releases that one row, with the
-    check that makes running it safe. On the day it took an hour of ``py-spy``
-    and sqlite spelunking to arrive at the same command.
+    check that makes running it safe. On 2026-09-21 it took an hour of
+    ``py-spy`` and sqlite spelunking to arrive at the same command.
     """
     _seed_task(conn, "tincident", "failed", evidence={"cleanup_confirmed": False})
     await locks.acquire_many(

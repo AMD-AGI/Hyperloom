@@ -342,8 +342,8 @@ def _local_tree_pgid(proc: Any) -> int | None:
     Nothing probes this number. A served process is setsid'd by design, so it
     leaves the group its spawn created, and every attempt to decide from such an
     identity whether a lane was free was refuted in review. What the number is
-    still worth is a starting point for the human who has to clear a retained
-    lane by hand.
+    still worth is a starting point for the human who has to go looking for
+    work a task may have left running.
 
     A local specialist is spawned with ``start_new_session=True``, so its root
     pid is also the id of the group and session it leads, and that number keeps
@@ -360,8 +360,8 @@ def _local_tree_pgid(proc: Any) -> int | None:
 
     Returns:
         int | None: A local process group to record for an operator's benefit,
-        or None when there is none to name. Either way the lane is retained:
-        nothing reclaims it from this number.
+        or None when there is none to name. Either way it decides nothing:
+        no lane is held or released on the strength of this number.
     """
     if proc is None or isinstance(proc, _RayLeaseProcess):
         return None

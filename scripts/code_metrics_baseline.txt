@@ -399,7 +399,6 @@ function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._run_
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator._admit_gpu_specialist 56
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator._reconcile_cancelled_policy_denied_integrate_tasks 54
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.reap_dispatched_task 61
-function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.run_task_registered 70
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._create_delegated_task 59
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_request 57
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_single_verdict 75

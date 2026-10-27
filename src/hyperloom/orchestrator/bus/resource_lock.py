@@ -162,11 +162,13 @@ def _expand_lanes(lanes: list[str]) -> list[str]:
 #: terminal transition; the process-group id is recorded only on the unconfirmed
 #: path, and only when the raise site knew which group it had failed to confirm.
 #:
-#: Neither is probed. Nothing reclaims a lane from them: a served process is
-#: setsid'd by design and leaves the group its spawn created, so three attempts
-#: to decide from such an identity whether a lane was free were refuted in
-#: review. They are read only to tell an operator WHY a lane is retained and
-#: where to start looking -- see :func:`_report_unverifiable`.
+#: Neither is probed, and neither decides a lane any more: the lanes of a
+#: terminal row go back where the row is written, confirmed or not
+#: (``loop/sub_agent_runner._settle_execution``). They are read only to tell an
+#: operator WHY a row that never reached that release is still holding one, and
+#: where to start looking -- a served process is setsid'd by design and leaves
+#: the group its spawn created, so the recorded group is a lead, not proof. See
+#: :func:`_report_unverifiable`.
 #:
 #: Writer and reader still take both names from here so they cannot drift apart:
 #: a reader looking for a key the writer stopped writing would print a diagnostic
@@ -177,14 +179,15 @@ CLEANUP_TREE_PGID_KEY = "cleanup_tree_pgid"
 #: Why a retained row could not be verified. Logged verbatim to the operator,
 #: so each one reads as a cause rather than a code.
 UNVERIFIABLE_FOREIGN_SCOPE = "the row was acquired in another boot, PID namespace or container"
-#: The ordinary case: the holder ended without confirming its cleanup, so the
-#: release was skipped on purpose and its work may still be running. Nothing
-#: this process can observe settles it -- every cheaper proof tried during
-#: review (terminal state, an empty spawn process group, no pidfile naming a
-#: live server) turned out to be a proxy a real process slips out of, because a
-#: served process is setsid'd by design and its pidfile appears only after it
-#: answers. The lane stays held and an operator decides.
-UNVERIFIABLE_CLEANUP_UNCONFIRMED = "the holder ended without confirming its cleanup"
+#: A terminal row whose release never ran. An unconfirmed cleanup no longer
+#: retains anything by itself -- the runner releases the lanes where it writes
+#: the row -- so a row that reaches here got as far as the write and no further:
+#: the coordinator died in between, or :meth:`TaskRegistry.reclaim_dead_running`
+#: failed the task from the outside and releases no lane. Nothing here reclaims
+#: it either: the release that would have run belonged to the holder, and this
+#: process has no identity that survives a setsid'd descendant to put in its
+#: place. An operator decides.
+UNVERIFIABLE_CLEANUP_UNCONFIRMED = "the holder's lane was never released and its cleanup was never confirmed"
 #: The odd one: cleanup WAS confirmed, which means the release ran -- so this
 #: row should not exist. It is reported rather than reclaimed because nothing
 #: here can tell a release that half-happened from one whose row simply
@@ -241,12 +244,14 @@ def _last_cleanup_evidence(history_json: str) -> dict:
 def cleanup_confirmation_rate(cur: sqlite3.Cursor) -> tuple[int, int]:
     """How often an ended task confirmed its teardown, this session.
 
-    ``leases_unverifiable`` says how many lanes are held right now. It cannot
-    say whether that is a rare accident or the ordinary outcome, and that is the
-    number which decides whether an automatic release mechanism is worth its
-    risk at all: every portable one was refuted, and the only candidate left
-    (a sealed descriptor behind a seccomp filter) is safety-critical to get
-    right. Measure before building it.
+    ``leases_unverifiable`` says how many lanes are held right now; this says
+    how often an ended task left its teardown unproven. Those lanes go back with
+    the terminal row now, so the rate no longer counts stuck lanes -- it counts
+    rounds that may have left a process running on the machine, which is the
+    number deciding whether real containment is worth its risk: every portable
+    way to prove a tree stopped was refuted, and the only candidate left (a
+    sealed descriptor behind a seccomp filter) is safety-critical to get right.
+    Measure before building it.
 
     Reads what :meth:`SubAgentRunner._write_terminal` already records, so it
     costs one query and writes nothing.
@@ -257,7 +262,7 @@ def cleanup_confirmation_rate(cur: sqlite3.Cursor) -> tuple[int, int]:
     Returns:
         tuple[int, int]: Ended tasks whose cleanup was NOT confirmed, and ended
         tasks in total. A task whose history carries no cleanup evidence at all
-        counts as unconfirmed: it is exactly the shape that strands a lane.
+        counts as unconfirmed: it proved nothing either way.
     """
     unconfirmed = total = 0
     for (history,) in cur.execute("SELECT history FROM tasks WHERE state IN (?,?,?)", tuple(sorted(TERMINAL_STATES))):
@@ -340,17 +345,13 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
             row["reason"] = UNVERIFIABLE_NO_LOCAL_SCOPE if not scope else UNVERIFIABLE_FOREIGN_SCOPE
             stuck.append(row)
             continue
-        # Nothing here tries to decide whether the lane is free. Seven rounds of
-        # review established that this process cannot know: a served process is
-        # setsid'd by design (:mod:`actions.executors._server_lifecycle` says so
-        # where it reads a pidfile), so it leaves the group recorded at spawn;
-        # its pidfile is written only after the server answers, so the whole
-        # model-load window has a live server nothing names; and matching a
-        # cmdline is the same kind of guess as matching a group. Each candidate
-        # proof turned out to be a proxy with a way around it, and releasing a
-        # lane wrongly lets two rounds onto the same cards -- silent corruption,
-        # against a deadlock an operator clears in 90 seconds. So the lane is
-        # kept and the operator is told; that asymmetry is the design.
+        # The release this row was waiting for is the holder's own, and it runs where the
+        # terminal row is written -- confirmed or not. So a row that gets here never reached
+        # it, and nothing here decides its lane free instead: a served process is setsid'd by
+        # design, so the group recorded at spawn no longer names it, and its pidfile is written
+        # only once the server answers; matching a cmdline is the same kind of guess. Releasing
+        # a lane wrongly lets two rounds onto the same cards -- silent corruption -- so this
+        # residue is kept and the operator is told.
         row["reason"] = UNVERIFIABLE_CLEANUP_UNCONFIRMED
         stuck.append(row)
     return stuck
@@ -364,10 +365,10 @@ def _report_unverifiable(rows: list[dict], *, db_path: str = "") -> None:
     ``py-spy`` and sqlite spelunking to work that out on 2026-09-21; it should
     take reading one log line now.
 
-    The caution is not decoration. Reclamation is deliberately refused here
-    exactly because nothing could prove the task's processes stopped, so an
-    operator deleting the row without checking is doing the one thing the
-    retention exists to prevent.
+    The caution is not decoration. These are the rows the holder's own release
+    never reached, so nothing here has ever been in a position to prove the
+    task's processes stopped; an operator deleting one without checking can put
+    a second round on cards the first is still using.
 
     Args:
         rows: What :func:`_unverifiable_holders` returned.
@@ -382,8 +383,9 @@ def _report_unverifiable(rows: list[dict], *, db_path: str = "") -> None:
         _DIAGNOSED.add(key)
         log.warning(
             "resource_lock: lane %s is held by ended task %s (holder %s) and cannot be verified free: %s. "
-            "It is retained on purpose -- nothing observable proves that task's processes stopped, and "
-            "releasing it would let conflicting work onto the machine. To release it by hand, FIRST confirm "
+            "Nothing here reclaims it: the release that frees a lane runs with the holder's terminal row, "
+            "so a lane still held is one that release never reached, and nothing observable proves that "
+            "task's processes stopped. To release it by hand, FIRST confirm "
             "no process of task %s is still running%s, then run: "
             'sqlite3 "%s" '
             "\"DELETE FROM leases WHERE lane='%s' AND holder_id='%s';\"",
