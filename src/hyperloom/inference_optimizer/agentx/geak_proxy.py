@@ -81,12 +81,14 @@ def seed_native_geak_proxy(
     flags = _tunable_flags(argv, str(handoff.get("framework") or ""))
     runtime = dict(evidence.get("runtime_environment") or {})
     explicit_env = evidence.get("effective_env") or {}
+    cleared: set[str] = set()
     for name, value in explicit_env.items():
         if value is None:
             runtime.pop(name, None)
+            cleared.add(name)
         else:
             runtime[name] = value
-    if argv and Path(argv[0]).is_absolute():
+    if Path(argv[0]).is_absolute():
         executable_dir = str(Path(argv[0]).parent)
         runtime["PATH"] = ":".join(part for part in (executable_dir, runtime.get("PATH", "")) if part)
     for name in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
@@ -94,8 +96,7 @@ def seed_native_geak_proxy(
     spec = copy.deepcopy(handoff.get("baseline_env_spec") or {})
     config = spec.setdefault("config", {})
     config.update({"server_launch_flags": flags, "extra_server_args": "", "extra_envs": runtime})
-    unset = set(config.get("unset_envs") or []) - explicit_env.keys()
-    unset.update(name for name, value in explicit_env.items() if value is None)
+    unset = (set(config.get("unset_envs") or []) - explicit_env.keys()) | cleared
     config["unset_envs"] = sorted(unset)
     handoff["baseline_env_spec"] = spec
     handoff["accepted_flags"] = ""

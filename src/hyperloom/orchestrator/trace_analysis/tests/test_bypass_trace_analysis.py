@@ -83,7 +83,7 @@ def _assert_artifacts(result):
 
 
 def test_dry_run_emits_valid_artifacts(tmp_path, capsys, monkeypatch):
-    rc, result, _ = _run(_base_argv(tmp_path, "/tmp/whatever", extra=["--dry-run"]), capsys)
+    rc, result, _ = _run(_base_argv(tmp_path, str(tmp_path / "trace.json"), extra=["--dry-run"]), capsys)
     assert rc == 0
     assert result["status"] == "ok" and result["route"] == "bypass"
     _assert_artifacts(result)
@@ -92,7 +92,7 @@ def test_dry_run_emits_valid_artifacts(tmp_path, capsys, monkeypatch):
 def test_num_denoise_steps_accepted_and_recorded(tmp_path, capsys, monkeypatch):
     # bypass must accept --num-denoise-steps and surface it in the result.
     rc, result, _ = _run(
-        _base_argv(tmp_path, "/tmp/whatever", extra=["--dry-run", "--num-denoise-steps", "20"]),
+        _base_argv(tmp_path, str(tmp_path / "trace.json"), extra=["--dry-run", "--num-denoise-steps", "20"]),
         capsys,
     )
     assert rc == 0
@@ -732,7 +732,7 @@ def test_a_manifest_that_cannot_be_built_fails_the_analysis(tmp_path, monkeypatc
 
     monkeypatch.setattr(bta._tsm, "build_shape_manifest", _disk_full)
     with pytest.raises(OSError, match="No space left on device"):
-        bta.main(_base_argv(tmp_path, "/tmp/whatever", extra=["--dry-run"]))
+        bta.main(_base_argv(tmp_path, str(tmp_path / "trace.json"), extra=["--dry-run"]))
 
 
 def test_maybe_build_shape_manifest_enabled_by_default(tmp_path, monkeypatch):

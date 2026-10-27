@@ -195,7 +195,7 @@ def test_a_pruned_gap_sorts_last_but_is_not_dropped():
 
 def test_overflow_is_truncated_and_counted():
     proposals = [{"name": f"v{i}", "extra_args": f"--flag {i}"} for i in range(20)]
-    out = _state([_round(proposals)]).to_untested_proposals_summary(max_entries=12)
+    out = _state([_round(proposals)]).to_untested_proposals_summary()
     assert out.count("•") == 12
     assert "(+8 more not shown)" in out
 

@@ -2314,7 +2314,6 @@ class BenchmarkRunExecutor:
         resolved_model = resolve_session_model_path(
             params=params,
             state_model_path=str(getattr(shared_state, "model_path", "") or ""),
-            for_serving=True,
         )
         await _prepare_aiter_serving_so(base_extra_envs)
         try:

@@ -246,7 +246,7 @@ def test_a_second_promotion_appends_rather_than_replaces() -> None:
 
 
 def test_best_gain_is_the_max_over_attempts_not_the_last_one() -> None:
-    # ``_kernel_decisions.py`` writes ``best_gain_pct`` as a max; this writer must agree.
+    # ``kernel_decisions.py`` writes ``best_gain_pct`` as a max; this writer must agree.
     phase = _phase()
     result = {"accepted_kernels": [_spec("k", 5.0)]}
     _record(phase, result, measured_tput=150.0)  # +50%

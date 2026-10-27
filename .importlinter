@@ -339,6 +339,7 @@ ignore_imports =
     hyperloom.orchestrator.actions.executors.report -> hyperloom.orchestrator.kernel.attempt_summary
     hyperloom.orchestrator.actions.executors.report -> hyperloom.orchestrator.kernel.conc_sweep
     hyperloom.orchestrator.actions.executors.report -> hyperloom.orchestrator.kernel.conc_sweep_plot
+    hyperloom.orchestrator.actions.executors.report -> hyperloom.orchestrator.kernel.kernel_decisions
     hyperloom.orchestrator.actions.executors.roofline -> hyperloom.orchestrator.loop.sub_agent_runner
     hyperloom.orchestrator.actions.executors.roofline -> hyperloom.orchestrator.phases.machine_state
     hyperloom.orchestrator.actions.executors.target_analysis -> hyperloom.orchestrator.loop.sub_agent_runner
@@ -392,7 +393,8 @@ ignore_imports =
     hyperloom.orchestrator.state._shared_state.phase_state -> hyperloom.orchestrator.specialists.domains
     hyperloom.orchestrator.state._shared_state.render -> hyperloom.orchestrator.actions.executors._proposal_identity
     hyperloom.orchestrator.state.gaps -> hyperloom.orchestrator.specialists.domains
-    hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.kernel._kernel_decisions
+    hyperloom.orchestrator.state._shared_state.render -> hyperloom.orchestrator.kernel.kernel_decisions
+    hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.kernel.kernel_decisions
     hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.phases.machine_state
     hyperloom.orchestrator.trace_analysis.tracelens_skill_runner -> hyperloom.orchestrator.roles.claude_requests
     kernelforge.agent_backends.workspace_guard -> kernelforge.loop.new_path_allowlist

@@ -77,7 +77,8 @@ from kernelforge.tracker.schema import ExperimentSubject
 if TYPE_CHECKING:
     from kernelforge.loop.campaign_config import CampaignConfig, CampaignConfigStore
     from kernelforge.loop.campaign_setup import CampaignResolution
-    from kernelforge.loop.runner import IterationConfig, IterationLoop
+    from kernelforge.loop.iteration.iteration_types import IterationConfig
+    from kernelforge.loop.runner import IterationLoop
     from kernelforge.loop.task_preparer import PrepareResult
     from kernelforge.roofline_ceiling.command import AnalystAgent
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator
@@ -1755,8 +1756,7 @@ def forge_loop(request: ForgeLoopRequest):
     config.experiments_dir.mkdir(parents=True, exist_ok=True)
     _isolate_aiter_cache(config.experiments_dir, request.artifacts.aiter_cache_max_gb, source_files_list)
 
-    from kernelforge.loop.runner import LoopAgents, LoopCallbacks
-    from kernelforge.loop.runner import IterationConfig
+    from kernelforge.loop.iteration.iteration_types import IterationConfig, LoopAgents, LoopCallbacks
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.loop.gate_settings import GateMeasurement
     from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions

@@ -239,8 +239,8 @@ async def test_a_retry_does_not_start_with_the_previous_attempts_end(tmp_path, q
     assert finished_at_start == [False]
     assert result.assessment.attempts[0] == OutcomeId.export_crashed
     assert result.assessment.attempts[1] != OutcomeId.export_crashed
-    assert "export_crashed" in (ws / "blocked.md.attempt_1").read_text(encoding="utf-8")
-    assert (ws / "last_phase.txt.attempt_1").read_text(encoding="utf-8").strip() == "export"
+    assert "export_crashed" in (result.run_dir / "blocked.md.attempt_1").read_text(encoding="utf-8")
+    assert (result.run_dir / "last_phase.txt.attempt_1").read_text(encoding="utf-8").strip() == "export"
 
 
 @pytest.mark.asyncio
@@ -422,7 +422,7 @@ async def test_a_retry_that_stops_on_opening_eval_is_sent_back_to_finish_it(tmp_
 async def test_a_rerun_after_a_run_that_wrote_nothing_does_not_pass_on_an_older_model(
     tmp_path, quark_root, build_workspace
 ):
-    """The run in between leaves no end to archive, yet the workspace still holds the older run's outputs."""
+    """The first run's model stays in its own run directory; a later run that writes nothing does not pass on it."""
 
     ws = tmp_path / "ws"
 
@@ -441,12 +441,12 @@ async def test_a_rerun_after_a_run_that_wrote_nothing_does_not_pass_on_an_older_
 
 
 @pytest.mark.asyncio
-async def test_a_rerun_on_the_same_workspace_is_judged_on_its_own_end(tmp_path, quark_root, build_workspace):
-    """The --quantize prelude gives every run of one model the same workspace."""
+async def test_a_rerun_does_not_read_files_left_directly_in_the_model_workspace(tmp_path, quark_root, build_workspace):
+    """Runs before per-run directories wrote straight into the model workspace; a new run neither reads nor moves them."""
 
     ws = tmp_path / "ws"
     build_workspace(workspace=ws, include_weights=False, last_phase="export", blocked_md="outcome_id: export_crashed\n")
-    (ws / "blocked.md.attempt_1").write_text("outcome_id: exec_oom\n", encoding="utf-8")
+    (ws / "fix_hypothesis_attempt_2.md").write_text("x", encoding="utf-8")
     finished_at_start: list[bool] = []
 
     def succeed(workspace: Path, attempt: int) -> str | None:
@@ -461,8 +461,47 @@ async def test_a_rerun_on_the_same_workspace_is_judged_on_its_own_end(tmp_path, 
     assert finished_at_start == [False]
     assert result.status == "success"
     assert result.assessment.attempts == (None,)
-    assert "exec_oom" in (ws / "blocked.md.attempt_1").read_text(encoding="utf-8")
-    assert "export_crashed" in (ws / "blocked.md.attempt_2").read_text(encoding="utf-8")
+    assert "export_crashed" in (ws / "blocked.md").read_text(encoding="utf-8")
+    assert (ws / "fix_hypothesis_attempt_2.md").is_file()
+
+
+@pytest.mark.asyncio
+async def test_an_attempt_that_writes_no_end_does_not_succeed(tmp_path, quark_root):
+    """A session that stops before writing anything leaves an empty run directory, which is no quantized model."""
+
+    result = await quantize_via_prompt(
+        "fp8 it",
+        workspace=tmp_path / "ws",
+        quark_root=quark_root,
+        runner_fn=_StubRunner([lambda workspace, attempt: None]),
+        interactive=False,
+    )
+
+    assert result.assessment.attempts == (OutcomeId.unclassified_failure,)
+    assert result.status == "failed"
+    assert result.quantized_model_dir is None
+
+
+@pytest.mark.asyncio
+async def test_an_exported_model_without_an_eval_end_does_not_succeed(tmp_path, quark_root, build_workspace):
+    """SKILL.md owes an eval report or the reason eval was skipped; a model nobody evaluated is not a success."""
+
+    def export_without_eval(workspace: Path, attempt: int) -> str | None:
+        build_workspace(workspace=workspace, include_eval_report=False, last_phase="eval")
+        return None
+
+    result = await quantize_via_prompt(
+        "fp8 it",
+        workspace=tmp_path / "ws",
+        quark_root=quark_root,
+        runner_fn=_StubRunner([export_without_eval]),
+        interactive=False,
+    )
+
+    assert (result.run_dir / "run_manifest.yaml").is_file()
+    assert result.assessment.attempts == (OutcomeId.unclassified_failure,)
+    assert result.status == "failed"
+    assert result.quantized_model_dir is None
 
 
 def _fail_with_hypothesis(build_workspace):
@@ -508,7 +547,7 @@ async def test_a_rerun_does_not_retry_on_a_hypothesis_an_earlier_run_wrote(tmp_p
         build_workspace(workspace=workspace, include_weights=False, include_validation_report=False)
         return None
 
-    await quantize_via_prompt(
+    first = await quantize_via_prompt(
         "fp8 it", workspace=ws, quark_root=quark_root, runner_fn=_StubRunner([fail]), interactive=False
     )
     runner = _StubRunner([fail_without_hypothesis, fail])
@@ -523,7 +562,63 @@ async def test_a_rerun_does_not_retry_on_a_hypothesis_an_earlier_run_wrote(tmp_p
 
     assert len(runner.calls) == 1
     assert any("no_fix_hypothesis" in n for n in result.assessment.notes)
-    assert not (ws / "fix_hypothesis_attempt_2.md").exists()
+    assert (first.run_dir / "fix_hypothesis_attempt_2.md").is_file()
+
+
+@pytest.mark.asyncio
+async def test_each_run_quantizes_in_its_own_run_directory(tmp_path, quark_root, build_workspace):
+    """A rerun of the same model must not overwrite the model an earlier session may still be serving."""
+
+    ws = tmp_path / "ws"
+    attempt_dirs: list[Path] = []
+
+    def succeed(workspace: Path, attempt: int) -> str | None:
+        attempt_dirs.append(workspace)
+        build_workspace(workspace=workspace, last_phase="eval")
+        return None
+
+    first = await quantize_via_prompt(
+        "fp8 it", workspace=ws, quark_root=quark_root, runner_fn=_StubRunner([succeed]), interactive=False
+    )
+    second = await quantize_via_prompt(
+        "fp8 it", workspace=ws, quark_root=quark_root, runner_fn=_StubRunner([succeed]), interactive=False
+    )
+
+    assert attempt_dirs == [first.run_dir, second.run_dir]
+    assert first.run_dir != second.run_dir
+    assert {run_dir.parent for run_dir in attempt_dirs} == {ws.resolve() / "runs"}
+    assert first.quantized_model_dir.is_relative_to(first.run_dir)
+    assert second.quantized_model_dir.is_relative_to(second.run_dir)
+
+
+@pytest.mark.asyncio
+async def test_a_rerun_does_not_take_the_eval_threshold_an_earlier_prompt_set(tmp_path, quark_root, build_workspace):
+    """SKILL.md writes ``eval_gap_threshold.txt`` from the prompt it was given, so it belongs to that run only."""
+
+    ws = tmp_path / "ws"
+    gap = {"metric_name": "gsm8k", "source_score": 0.5, "quantized_score": 0.4, "relative_gap": 0.2}
+
+    def accept_a_wide_gap(workspace: Path, attempt: int) -> str | None:
+        build_workspace(workspace=workspace, last_phase="eval", eval_report=gap, eval_gap_threshold=0.5)
+        return None
+
+    def measure_the_same_gap(workspace: Path, attempt: int) -> str | None:
+        build_workspace(workspace=workspace, last_phase="eval", eval_report=gap)
+        return None
+
+    first = await quantize_via_prompt(
+        "fp8 it, a 50% gap is fine",
+        workspace=ws,
+        quark_root=quark_root,
+        runner_fn=_StubRunner([accept_a_wide_gap]),
+        interactive=False,
+    )
+    second = await quantize_via_prompt(
+        "fp8 it", workspace=ws, quark_root=quark_root, runner_fn=_StubRunner([measure_the_same_gap]), interactive=False
+    )
+
+    assert first.status == "success"
+    assert second.assessment.final == OutcomeId.eval_gap_exceeded
 
 
 @pytest.mark.asyncio

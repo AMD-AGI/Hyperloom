@@ -625,8 +625,8 @@ def _ray_smoke(python_exe: str, ray_version: str = "", click_max_version: str = 
 
 def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     """Probe-then-install Ray using the interpreter that will import it."""
-    ray_version = os.environ.get("RAY_VERSION") or ""
-    click_override = os.environ.get("RAY_CLI_CLICK_MAX_VERSION") or ""
+    ray_version = os.environ.get("RAY_VERSION", "")
+    click_override = os.environ.get("RAY_CLI_CLICK_MAX_VERSION", "")
     ray_spec = f"ray[default]=={ray_version or _RAY_MIN_VERSION}"
     click_spec = f"click<{click_override or _RAY_CLI_CLICK_MAX_VERSION}"
     check = _ray_smoke(python_exe, ray_version, click_override)
@@ -638,7 +638,7 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
             "target": "ray",
             "interpreter": python_exe,
             "spec": ray_spec,
-            "version_after": (check.stdout or "").strip() or ray_version or _RAY_MIN_VERSION,
+            "version_after": check.stdout.strip() or ray_version or _RAY_MIN_VERSION,
             "message": None,
         }
     reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip().splitlines()[-1]

@@ -18,7 +18,7 @@ from . import apply_kernel_patch
 from ..actions.executors._kernel_agent_tool import HandlerResult
 from ._integrate_outcomes import _FRAMEWORK_APPLYBACK_ARTIFACT_KIND, _integrate_failure
 from ._integrate_payload import _is_paired_gemm_measurement
-from ._kernel_decisions import _honest_flag
+from .kernel_decisions import _honest_flag
 
 log = logging.getLogger(__name__)
 

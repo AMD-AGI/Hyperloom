@@ -52,31 +52,19 @@ def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> No
     path_prefix = str(override.get("path_prefix") or "").strip()
     if path_prefix:
         prepend_launch_path(envs, "PATH", path_prefix)
-    entrypoint_bin = str(override.get("entrypoint_bin_dir") or "").strip()
-    if entrypoint_bin:
-        if is_safe_path_entry(entrypoint_bin):
-            prepend_launch_path(envs, "PATH", entrypoint_bin)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe entrypoint_bin_dir %r", entrypoint_bin)
-    pp_prefix = str(override.get("pythonpath_prefix") or "").strip()
-    if pp_prefix:
-        if is_safe_path_entry(pp_prefix):
-            prepend_launch_path(envs, "PYTHONPATH", pp_prefix)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe pythonpath_prefix %r", pp_prefix)
-    # Multi-entry prefixes: prepend in order so the first entry wins, ahead of any single-dir pythonpath_prefix and
-    # the inherited value.
-    for entry in reversed(_coerce_prefix_list(override.get("pythonpath_prefixes"))):
-        if is_safe_path_entry(entry):
-            prepend_launch_path(envs, "PYTHONPATH", entry)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe pythonpath entry %r", entry)
-    # Native loader path: prepend attempt entries while preserving any inherited entries (e.g. /opt/rocm/lib).
-    for entry in reversed(_coerce_prefix_list(override.get("ld_library_path_prefix"))):
-        if is_safe_path_entry(entry):
-            prepend_launch_path(envs, "LD_LIBRARY_PATH", entry)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe ld_library_path entry %r", entry)
+    # Each list prepends in reverse so its first entry wins, and a later row lands ahead of earlier ones
+    # (pythonpath_prefixes ahead of pythonpath_prefix).
+    for var, entries, label in (
+        ("PATH", _coerce_prefix_list(str(override.get("entrypoint_bin_dir") or "")), "entrypoint_bin_dir"),
+        ("PYTHONPATH", _coerce_prefix_list(str(override.get("pythonpath_prefix") or "")), "pythonpath_prefix"),
+        ("PYTHONPATH", _coerce_prefix_list(override.get("pythonpath_prefixes")), "pythonpath entry"),
+        ("LD_LIBRARY_PATH", _coerce_prefix_list(override.get("ld_library_path_prefix")), "ld_library_path entry"),
+    ):
+        for entry in reversed(entries):
+            if is_safe_path_entry(entry):
+                prepend_launch_path(envs, var, entry)
+            else:
+                log.warning("apply_runtime_override: dropping unsafe %s %r", label, entry)
     _runtime_env = override.get("runtime_env")
     if isinstance(_runtime_env, dict):
         for raw_k, raw_v in _runtime_env.items():
