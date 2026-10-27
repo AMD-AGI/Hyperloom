@@ -49,7 +49,7 @@ def _worked(snapshot: NotebookSnapshot) -> NotebookSnapshot:
 def test_the_open_areas_are_the_heads_largest_ceilings_less_the_families_worked_on_or_failed(
     snapshot: NotebookSnapshot,
 ) -> None:
-    found = open_areas(_worked(snapshot), budget_seconds=4 * HOUR, first_commit_minutes=42.0)
+    found = open_areas(_worked(snapshot), seconds_left=4 * HOUR, first_commit_minutes=42.0)
 
     assert found.profiled == "i1" and not found.too_late
     assert found.ops == (
@@ -70,12 +70,12 @@ def test_the_open_areas_are_the_heads_largest_ceilings_less_the_families_worked_
 def test_too_little_time_left_for_a_first_commit_says_to_open_no_branch(snapshot: NotebookSnapshot) -> None:
     worked = _worked(snapshot)
 
-    late = open_areas(worked, budget_seconds=60.0, first_commit_minutes=42.0)
+    late = open_areas(worked, seconds_left=60.0, first_commit_minutes=42.0)
     quick = open_areas(
-        worked, budget_seconds=60.0, first_commit_minutes=42.0, playbook=replaced(H0, last_open_minutes=0.5)
+        worked, seconds_left=60.0, first_commit_minutes=42.0, playbook=replaced(H0, last_open_minutes=0.5)
     )
     strict = open_areas(
-        worked, budget_seconds=4 * HOUR, first_commit_minutes=42.0, playbook=replaced(H0, failed_op_limit=3)
+        worked, seconds_left=4 * HOUR, first_commit_minutes=42.0, playbook=replaced(H0, failed_op_limit=3)
     )
 
     assert late.too_late and late.render().endswith(
@@ -87,12 +87,12 @@ def test_too_little_time_left_for_a_first_commit_says_to_open_no_branch(snapshot
 def test_without_a_profile_the_open_areas_say_so_and_the_judge_reads_them_once_the_session_has_one(
     snapshot: NotebookSnapshot,
 ) -> None:
-    bare = open_areas(snapshot, budget_seconds=4 * HOUR, first_commit_minutes=None)
+    bare = open_areas(snapshot, seconds_left=4 * HOUR, first_commit_minutes=None)
     past = (tree("past", branch("s1", [(1800.0, 3.0)])),)
 
     assert bare.render().startswith("Open areas for a new branch: neither the integration head nor a commit")
     assert (
-        judge_open_areas(_worked(snapshot), past, METRIC, budget_seconds=4 * HOUR)
+        judge_open_areas(_worked(snapshot), past, METRIC, seconds_left=4 * HOUR)
         .render()
         .startswith("Open areas for a new branch, from the profile of i1:")
     )
@@ -101,9 +101,9 @@ def test_without_a_profile_the_open_areas_say_so_and_the_judge_reads_them_once_t
 def test_without_archived_sessions_only_the_playbook_s_last_open_minutes_says_it_is_too_late(
     snapshot: NotebookSnapshot,
 ) -> None:
-    unknown = judge_open_areas(_worked(snapshot), (), METRIC, budget_seconds=0.0)
+    unknown = judge_open_areas(_worked(snapshot), (), METRIC, seconds_left=0.0)
     capped = judge_open_areas(
-        _worked(snapshot), (), METRIC, budget_seconds=0.0, playbook=replaced(H0, last_open_minutes=30)
+        _worked(snapshot), (), METRIC, seconds_left=0.0, playbook=replaced(H0, last_open_minutes=30)
     )
 
     assert unknown.first_commit_minutes is None and not unknown.too_late

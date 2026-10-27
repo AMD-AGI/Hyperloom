@@ -87,7 +87,7 @@ class PlaybookNumbers:
     ``stall_tests`` is the stop bar, ``None`` for the one the stall odds set each round; ``probation_share`` of the
     stop candidates run ``probation_tests`` more judged tests first; a new branch keeps its grace until
     ``grace_tests`` of its explore tests succeeded and were judged. ``max_open`` caps the branches running at once,
-    ``None`` for the run's cap; no branch the judge refills opens in the last ``last_open_minutes`` of the session,
+    ``None`` for the run's cap; no branch the judge refills opens in the last ``last_open_minutes`` of EXPLORE,
     ``None`` for the median time a new branch took to its first commit; an op that failed ``failed_op_limit`` times
     this session leaves the open areas.
     """
@@ -160,7 +160,7 @@ class Playbook:
             "more judged tests first (probation 1); leave them running.",
             f"- grace: a new branch is no stop candidate until {n.grace_tests} of its explore tests succeeded and "
             "were judged.",
-            f"- open: at most {opened} at once; after the opening batch, none in the last {late} of the session. The "
+            f"- open: at most {opened} at once; after the opening batch, none in the last {late} of EXPLORE. The "
             "scheduler cuts an open past either.",
             f"- an op that failed {n.failed_op_limit} times this session leaves the open areas.",
             *(f"- rule ({rule.governs.value}): {rule.text}" for rule in self.rules),

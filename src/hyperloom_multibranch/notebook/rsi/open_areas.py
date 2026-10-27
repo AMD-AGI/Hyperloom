@@ -6,8 +6,8 @@
 :func:`open_areas` lists the ops of the integration head's profile, or of the nearest commit it builds on that was
 profiled, with the largest Amdahl ceilings, leaving out the op families a running branch works on (a claim it holds, or
 its last explore test) and those this session's tests failed the playbook's ``failed_op_limit`` times or more. With too
-little time left for a new branch's first commit, the playbook's ``last_open_minutes`` or else the median time a new
-branch took to it, it says that no branch should open. The direction families' odds are the specialists' menu
+little of EXPLORE left for a new branch's first commit, the playbook's ``last_open_minutes`` or else the median time a
+new branch took to it, it says that no branch should open. The direction families' odds are the specialists' menu
 (:mod:`rsi.menu`), not the judge's: a family has too few tests to rank ops by.
 """
 
@@ -21,7 +21,6 @@ from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, amdahl_ceiling_pct
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
 from hyperloom_multibranch.notebook.families import OP_FAMILIES, family_of, op_family
-from hyperloom_multibranch.notebook.rsi.archive import session_start
 from hyperloom_multibranch.notebook.rsi.menu import explored, record_family
 from hyperloom_multibranch.notebook.rsi.playbook import H0, Playbook
 
@@ -48,7 +47,7 @@ class OpenOp:
 class OpenAreas:
     """Where a new branch could open: the ``ops`` of the profile of ``profiled`` left open, the op families left out
     because running branches work on them (``covered``, by family, the branches) or this session failed them
-    (``failed``, by family, how often), the minutes left of the budget and those a new branch takes to its first
+    (``failed``, by family, how often), the minutes left of EXPLORE and those a new branch takes to its first
     commit."""
 
     profiled: str = ""
@@ -60,7 +59,7 @@ class OpenAreas:
 
     @property
     def too_late(self) -> bool:
-        """Whether a branch opened now would not reach its first commit before the budget runs out."""
+        """Whether a branch opened now would not reach its first commit before EXPLORE ends."""
 
         left, needed = self.minutes_left, self.first_commit_minutes
         return left is not None and needed is not None and left < needed
@@ -124,12 +123,13 @@ def _failed(snapshot: NotebookSnapshot) -> Counter[str]:
 def open_areas(
     snapshot: NotebookSnapshot,
     *,
-    budget_seconds: float,
+    seconds_left: float,
     first_commit_minutes: float | None,
     playbook: Playbook = H0,
 ) -> OpenAreas:
-    """The open areas of the session as it stands: ``first_commit_minutes`` is the median time a new branch took to
-    its first commit, which the ``playbook``'s ``last_open_minutes`` overrides when it sets one."""
+    """The open areas of the session as it stands, with ``seconds_left`` of EXPLORE: ``first_commit_minutes`` is the
+    median time a new branch took to its first commit, which the ``playbook``'s ``last_open_minutes`` overrides when it
+    sets one."""
 
     numbers = playbook.numbers
     integration = next((node for node in snapshot.lineage.branches if node.branch == INTEGRATION_BRANCH), None)
@@ -139,7 +139,7 @@ def open_areas(
     shares = snapshot.op_shares[profiled].largest(len(snapshot.op_shares[profiled].shares)) if profiled else ()
     ops = [OpenOp(op, op_family(op), share) for op, share in shares if share > 0]
     held = {*covered, *failed}
-    left = max(0.0, budget_seconds - (snapshot.taken_at - session_start(snapshot))) / _MINUTE
+    left = max(0.0, seconds_left) / _MINUTE
     needed = numbers.last_open_minutes if numbers.last_open_minutes is not None else first_commit_minutes
     shown_covered = {family: branches for family, branches in covered.items() if any(op.family == family for op in ops)}
     return OpenAreas(

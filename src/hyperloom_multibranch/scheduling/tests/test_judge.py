@@ -33,7 +33,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     SETTLED_TESTS,
     STRANDED_COMPONENT,
 )
-from hyperloom_multibranch.notebook.rsi.playbook import H0
+from hyperloom_multibranch.notebook.rsi.playbook import H0, Playbook, PlaybookChoice, PlaybookPlay, replaced
 from hyperloom_multibranch.notebook.rsi.stranded import StrandedCommit, StrandedLead
 from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
 from hyperloom_multibranch.scheduling.branches import REPAIR_PROTECTED_SECONDS
@@ -42,10 +42,6 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, EventKind, SessionEvent
 from hyperloom_multibranch.scheduling.judge import (
     ENVELOPE_HOLDS,
-    JUDGE_PROMPT_VERSION,
-    JUDGE_SYSTEM_PROMPT,
-    PLAYBOOK_JUDGE_PROMPT,
-    PLAYBOOK_JUDGE_PROMPT_VERSION,
     HeldOrder,
     HoldReason,
     HoldRules,
@@ -62,7 +58,14 @@ from hyperloom_multibranch.scheduling.judge import (
     parse_decision,
     queued_intents,
     render_prompt,
+    session_grace,
     system_prompt,
+)
+from hyperloom_multibranch.scheduling.judge_prompt import (
+    JUDGE_PROMPT_VERSION,
+    JUDGE_SYSTEM_PROMPT,
+    PLAYBOOK_JUDGE_PROMPT,
+    PLAYBOOK_JUDGE_PROMPT_VERSION,
 )
 from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
@@ -842,7 +845,9 @@ def test_a_specialist_branch_keeps_its_grace_until_enough_of_its_explore_tests_s
     done = [_ended(branch, n) for branch in ("b02", "b04") for n in range(SETTLED_TESTS)]
     integration = [_ended(INTEGRATION_BRANCH, n) for n in range(SETTLED_TESTS)]
 
-    assert held_branches(roster, (), [*early, *not_counted, *done, *integration], {}, HoldRules(NOW)) == {
+    assert held_branches(
+        roster, (), [*early, *not_counted, *done, *integration], {}, HoldRules(NOW, SETTLED_TESTS)
+    ) == {
         "b01": HoldReason.GRACE,
         "b05": HoldReason.GRACE,
     }
@@ -858,11 +863,20 @@ def test_a_playbook_s_grace_holds_a_specialist_branch_for_as_many_judged_tests_a
     }
 
 
+def test_the_grace_follows_the_playbook_played_now_and_is_the_settled_tests_without_one() -> None:
+    longer = Playbook("grace-8", replaced(H0, grace_tests=8).numbers, parent=H0.label)
+    play = PlaybookPlay(PlaybookChoice(longer, H0, challenger=True))
+
+    assert (session_grace(None), session_grace(play)) == (SETTLED_TESTS, 8)
+    assert play.fall_back(("stop of b01 refused for near_bar_lead",))
+    assert session_grace(play) == H0.numbers.grace_tests
+
+
 @pytest.mark.parametrize("state", [{"gave_up": True}, {"judge_failed": True}])
 def test_a_branch_whose_specialist_is_out_of_service_has_no_grace(state: dict[str, bool]) -> None:
     status = replace(SpecialistStatus(running=False, crashes=3, lost=0, gave_up=False, judge_failed=False), **state)
 
-    assert held_branches(ROSTER, (), [], {"b01": status}, HoldRules(NOW)) == {"b02": HoldReason.GRACE}
+    assert held_branches(ROSTER, (), [], {"b01": status}, HoldRules(NOW, SETTLED_TESTS)) == {"b02": HoldReason.GRACE}
 
 
 def test_a_held_branch_row_names_why_it_is_held_and_the_prompt_explains_each_reason() -> None:
@@ -887,7 +901,7 @@ def test_an_autonomous_branch_is_never_steered_by_the_judge_but_a_pending_confir
     gave_up = SpecialistStatus(running=False, crashes=0, lost=0, gave_up=True, judge_failed=False)
     waiting = (BranchProgress("b05", True, "c-root", "c-b05", 3, 1, 60.0, {}, pending=(CANDIDATE,)),)
 
-    held = held_branches(roster, waiting, settled, {"b04": gave_up}, HoldRules(0.0))
+    held = held_branches(roster, waiting, settled, {"b04": gave_up}, HoldRules(0.0, SETTLED_TESTS))
 
     assert (held["b04"], held["b05"]) == (HoldReason.UNSTEERED, HoldReason.PENDING_CONFIRM)
     decision = JudgeDecision(k=(KOrder("b04", 2), KOrder("b05", 3)), stop=(StopOrder("b04", STOP_REASON),))
@@ -911,16 +925,16 @@ def test_a_repair_branch_is_held_for_its_protected_period_whatever_its_tests_rea
     settled = [_ended(branch, n) for branch in ("b01", "b02") for n in range(SETTLED_TESTS)]
     gave_up = SpecialistStatus(running=False, crashes=0, lost=0, gave_up=True, judge_failed=False)
 
-    protected = HoldRules(REPAIR_PROTECTED_SECONDS - 1)
+    protected = HoldRules(REPAIR_PROTECTED_SECONDS - 1, SETTLED_TESTS)
     assert held_branches(roster, (), settled, {}, protected) == {"b01": HoldReason.REPAIR}
-    assert held_branches(roster, (), settled, {}, HoldRules(REPAIR_PROTECTED_SECONDS)) == {}
-    assert held_branches(roster, (), settled, {"b01": gave_up}, HoldRules(0.0)) == {}
+    assert held_branches(roster, (), settled, {}, HoldRules(REPAIR_PROTECTED_SECONDS, SETTLED_TESTS)) == {}
+    assert held_branches(roster, (), settled, {"b01": gave_up}, HoldRules(0.0, SETTLED_TESTS)) == {}
 
 
 def test_a_repair_branch_still_reads_as_held_by_its_grace_while_it_has_one() -> None:
     roster = (_entry("b01", origin=BranchOrigin.REPAIR),)
 
-    assert held_branches(roster, (), [], {}, HoldRules(0.0)) == {"b01": HoldReason.GRACE}
+    assert held_branches(roster, (), [], {}, HoldRules(0.0, SETTLED_TESTS)) == {"b01": HoldReason.GRACE}
 
 
 CANDIDATE = PendingCandidate("b01-r7", "b01-r7-confirm", "c-b01", METRIC, 116.6, 6.04321)
@@ -939,11 +953,11 @@ def test_a_branch_with_a_pending_candidate_is_held_until_its_confirm_is_judged_u
     gave_up = replace(failed, gave_up=True, judge_failed=False)
     settled = [_ended(branch, n) for branch in ("b01", "b02", "b03") for n in range(SETTLED_TESTS)]
 
-    assert held_branches(roster, progress, settled, {}, HoldRules(NOW)) == {
+    assert held_branches(roster, progress, settled, {}, HoldRules(NOW, SETTLED_TESTS)) == {
         "b01": HoldReason.PENDING_CONFIRM,
         "b04": HoldReason.GRACE,
     }
-    assert held_branches(roster, progress, settled, {"b01": failed, "b04": gave_up}, HoldRules(NOW)) == {
+    assert held_branches(roster, progress, settled, {"b01": failed, "b04": gave_up}, HoldRules(NOW, SETTLED_TESTS)) == {
         "b04": HoldReason.PENDING_CONFIRM
     }
 

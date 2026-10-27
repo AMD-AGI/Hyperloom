@@ -517,17 +517,18 @@ def judge_open_areas(
     history: Sequence[SearchTree],
     metric: str,
     *,
-    budget_seconds: float,
+    seconds_left: float,
     playbook: Playbook = H0,
 ) -> OpenAreas:
     """Where a new branch could open this round, for the judge of a session that plays ``playbook``
-    (:mod:`rsi.open_areas`), and whether one should open at all: the time a new branch takes to its first commit is
-    the playbook's ``last_open_minutes``, else the median the stall odds of the archived ``history`` read, and unknown
-    without either. Pass the scoring's own history, as to :func:`judge_history`."""
+    (:mod:`rsi.open_areas`), and whether one should open at all in the ``seconds_left`` of EXPLORE: the time a new
+    branch takes to its first commit is the playbook's ``last_open_minutes``, else the median the stall odds of the
+    archived ``history`` read, and unknown without either. Pass the scoring's own history, as to
+    :func:`judge_history`."""
 
     odds = session_stall_odds(snapshot, history, metric) if history else None
     first_commit = odds.first_commit_minutes if odds is not None else None
-    return open_areas(snapshot, budget_seconds=budget_seconds, first_commit_minutes=first_commit, playbook=playbook)
+    return open_areas(snapshot, seconds_left=seconds_left, first_commit_minutes=first_commit, playbook=playbook)
 
 
 __all__ = [

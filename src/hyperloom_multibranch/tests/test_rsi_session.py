@@ -11,7 +11,8 @@ stop audit. A challenger the command line asks for plays the oldest playbook on 
 the envelope refuses, then the champion. A session without an archive, or under ``HYPERLOOM_RSI_WRITE_ONLY=1``, plays
 none and runs as one without the RSI. Where the playbook meets the judge's own rules, its grace holds a stalled
 branch, a branch behind integration whose commits merge is no stop candidate, and a branch the judge stopped is scored
-no more while its tests run on.
+no more while its tests run on. With too little of EXPLORE left for a new branch's first commit, every refill the
+judge asks for is cut.
 """
 
 from __future__ import annotations
@@ -59,15 +60,15 @@ from hyperloom_multibranch.notebook.rsi.playbook import (
 )
 from hyperloom_multibranch.notebook.rsi.session import NO_PLAYBOOK_PLAYED, STOP_AUDIT_REPORT, WRITTEN
 from hyperloom_multibranch.notebook.tools import MENU_TITLE
-from hyperloom_multibranch.scheduling.explore import PLAYBOOK_FALLBACK_REASON
-from hyperloom_multibranch.scheduling.judge import (
+from hyperloom_multibranch.scheduling.explore import PLAYBOOK_FALLBACK_REASON, PLAYBOOK_OPEN_CUT_REASON
+from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
+from hyperloom_multibranch.scheduling.judge_prompt import (
     JUDGE_PROMPT_VERSION,
     JUDGE_SYSTEM_PROMPT,
     PLAYBOOK_JUDGE_PROMPT,
     PLAYBOOK_JUDGE_PROMPT_VERSION,
-    HoldReason,
 )
-from hyperloom_multibranch.scheduling.lifecycle import GRACE_KEY, JUDGE_PROMPT_KEY
+from hyperloom_multibranch.scheduling.lifecycle import JUDGE_PROMPT_KEY
 from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.settings import PlaybookMode
 from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_patch
@@ -116,10 +117,11 @@ def no_archive(monkeypatch: pytest.MonkeyPatch) -> None:
 @dataclass
 class PlaybookJudge(ScriptedCompletion):
     """A judge that plays the playbook as written: the opening call opens ``opening`` branches at K 2, and every call
-    after it stops each live specialist branch its stall evidence makes a stop candidate, and asks to stop each one of
-    ``insist`` whatever holds it; a test double, not a placeholder."""
+    after it asks for ``refill`` more, stops each live specialist branch its stall evidence makes a stop candidate,
+    and asks to stop each one of ``insist`` whatever holds it; a test double, not a placeholder."""
 
     opening: int = 2
+    refill: int = 0
     insist: frozenset[str] = frozenset()
 
     async def __call__(self, system: str, user: str) -> CompletionReply:
@@ -134,7 +136,7 @@ class PlaybookJudge(ScriptedCompletion):
             and "stopped" not in row
             and (_candidate(row) or row["branch"] in self.insist)
         ]
-        return self._answer({"open": 0, "branches": [], "stop": stops})
+        return self._answer({"open": self.refill, "open_k": 2, "branches": [], "stop": stops})
 
     def _answer(self, document: dict[str, object]) -> CompletionReply:
         return CompletionReply(json.dumps(document), self.tokens, self.cost_usd)
@@ -300,7 +302,9 @@ async def test_a_challenger_the_command_line_asks_for_plays_until_its_judge_brea
     first, fell_back = await stage.handle(Role.OBSERVER).manifest_fingerprints()
     assert first.policy_versions[PLAYBOOK_KEY] == "stall-4" and FALLBACK_KEY not in first.policy_versions
     assert (fell_back.policy_versions[PLAYBOOK_KEY], fell_back.policy_versions[FALLBACK_KEY]) == ("stall-4", breach)
-    assert read_manifest(stage.layout.manifest).policy_versions[FALLBACK_KEY] == breach
+    assert fell_back.policy_versions[GRACE_KEY] == str(H0.numbers.grace_tests)
+    manifest = read_manifest(stage.layout.manifest).policy_versions
+    assert (manifest[FALLBACK_KEY], manifest[GRACE_KEY]) == (breach, str(H0.numbers.grace_tests))
     [event] = [row for row in _decisions(stage) if row["reason"] == PLAYBOOK_FALLBACK_REASON]
     assert event["detail"] == {"breach": breach, "playing": H0.label}
     prompts = _judge_prompts(stage)
@@ -416,3 +420,23 @@ async def test_a_branch_behind_integration_is_no_stop_candidate_while_its_commit
     assert failed.get("behind_integration_pct", 0.0) > 0
     stops = await _stops(stage)
     assert stops["b02"].startswith("session_end") and stops["b03"] == f"judge: {STALLED}"
+
+
+async def test_with_too_little_of_explore_left_for_a_first_commit_every_refill_the_judge_asks_for_is_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = _archive(tmp_path, monkeypatch)
+    _crowned(archive, Playbook("open-early", replaced(H0, last_open_minutes=240.0).numbers, parent=H0.label))
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.judge = PlaybookJudge(refill=1)
+    stage.scripts = {"b01": (tagged("c1"),), "b02": FLAT[:2]}
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0
+    for prompt in _judge_prompts(stage):
+        left = _judge_state(prompt)["explore_remaining_seconds"] / 60
+        assert f"Time left: {left:.0f} min, short of the 240 min a new branch takes to its first commit" in prompt
+    cuts = [row["detail"] for row in _decisions(stage) if row["reason"] == PLAYBOOK_OPEN_CUT_REASON]
+    assert cuts and all(detail["too_late"] and (detail["requested"], detail["opened"]) == (1, 0) for detail in cuts)
+    assert "b03" not in await _stops(stage)

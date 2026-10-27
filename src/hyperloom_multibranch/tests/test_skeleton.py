@@ -119,13 +119,13 @@ from hyperloom_multibranch.scheduling.explore import (
 from hyperloom_multibranch.scheduling.exports import IMAGE_CHECK_FILE
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL, PRIMARY_POINT_ONLY
 from hyperloom_multibranch.scheduling import judge
-from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, HoldReason
+from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
+from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.integrator import ADOPTING_LEAD
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.lifecycle import (
     CUT_SHORT,
-    GRACE_KEY,
     LESSONS_KEY,
     NO_CARDS_LEFT,
     Session,
@@ -562,7 +562,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     [fingerprint] = await observer.manifest_fingerprints()
     assert fingerprint.policy_versions["judge_prompt"] == JUDGE_PROMPT_VERSION
     assert fingerprint.policy_versions["scheduling"] == policy_version(SCHEDULING_POLICY)
-    assert fingerprint.policy_versions[GRACE_KEY] == str(SETTLED_TESTS)
+    assert fingerprint.policy_versions[GRACE_KEY] == str(judge.session_grace(None))
     assert fingerprint.policy_versions[LESSONS_KEY] == ""
     [policy] = [row for row in _decisions(stage) if row["kind"] == "prelude" and row["reason"] == "scheduling policy"]
     assert policy["detail"] == {"values": dict(SCHEDULING_POLICY)}

@@ -51,7 +51,7 @@ from hyperloom_multibranch.notebook.knowledge.reference_leads import (
     ReferenceLead,
     reference_leads,
 )
-from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS, FrontierPolicy, FrontierScoring
+from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.notebook.rsi.playbook import PlaybookChoice, PlaybookPlay, PlaybookPool, session_playbook
 from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG, archived_history
 from hyperloom_multibranch.rulegate.critic import FixReviewer
@@ -68,7 +68,8 @@ from hyperloom_multibranch.scheduling.exports import CloseAuthoring, ExportServi
 from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, choose_candidates
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import Integrator, LlmPatchResolver, MergeRecords
-from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, PLAYBOOK_JUDGE_PROMPT_VERSION, Judge
+from hyperloom_multibranch.scheduling.judge import GRACE_KEY, Judge, session_grace
+from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION, PLAYBOOK_JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.contracts.llm import Completion
 from hyperloom_multibranch.scheduling.llm import recorded
@@ -115,9 +116,6 @@ POLICY_VERSIONS = {
 #: The ``policy_versions`` key of the judge prompt's version: :data:`PLAYBOOK_JUDGE_PROMPT_VERSION` in a session that
 #: plays a scheduling playbook, :data:`JUDGE_PROMPT_VERSION` in one that plays none.
 JUDGE_PROMPT_KEY = "judge_prompt"
-#: The ``policy_versions`` key of the grace, the playbook's ``grace_tests`` or :data:`SETTLED_TESTS` without one: two
-#: sessions' stops compare only within one grace.
-GRACE_KEY = "grace"
 #: The ``policy_versions`` key of the RSI lesson pool's digest as the specialists' recall read it, empty for no pool:
 #: two sessions of one build that were shown different past lessons differ here.
 LESSONS_KEY = "lessons"
@@ -492,7 +490,7 @@ class Session:
         return {
             **POLICY_VERSIONS,
             JUDGE_PROMPT_KEY: PLAYBOOK_JUDGE_PROMPT_VERSION if play is not None else JUDGE_PROMPT_VERSION,
-            GRACE_KEY: str(play.choice.playbook.numbers.grace_tests if play is not None else SETTLED_TESTS),
+            GRACE_KEY: str(session_grace(play)),
             LESSONS_KEY: learnings.past_revision() if learnings is not None else "",
             **(play.versions() if play is not None else {}),
         }
@@ -679,7 +677,6 @@ def persisted_run(root: Path) -> PersistedRun:
 
 __all__ = [
     "COMPLETED_REASONS",
-    "GRACE_KEY",
     "JUDGE_PROMPT_KEY",
     "LESSONS_KEY",
     "NO_CARDS_LEFT",
