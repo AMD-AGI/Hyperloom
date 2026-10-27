@@ -587,6 +587,7 @@ async def _run_rewrite_integrate(
     patch_body: str | None = None,
     extra_params: "dict[str, Any] | None" = None,
     kb_lessons: "list[Any] | None" = None,
+    shared_state: Any = None,
 ):
     """Run integrate_patch on a switch-gated rewrite patch with a faked bench."""
     import json as _json
@@ -666,8 +667,18 @@ async def _run_rewrite_integrate(
         idempotency_key="t-int-rw",
         requires_lanes=tuple(),
     )
-    result = await executor(RunnerContext(task=task, lease=None, extra={}))
+    extra = {} if shared_state is None else {"shared_state": shared_state}
+    result = await executor(RunnerContext(task=task, lease=None, extra=extra))
     return result, repo, benched_envs, legs
+
+
+def _screen_state(*, reference: bool = True, refused: str = "") -> Any:
+    """A session whose cycle screen admits dormant patches: a reference on the current stack, nothing refused."""
+    state = _state()
+    state.record_specialist_patch_verdict("t-spec-rw", "approve")
+    state.cycle_reference = {"stack_len": 0, "cycle_ms": {"1": 10.0}} if reference else {}
+    state.cycle_screen_refused = refused
+    return state
 
 
 @pytest.mark.asyncio
@@ -1137,7 +1148,7 @@ async def test_a_switched_patch_marked_for_the_cycle_screen_is_committed_dormant
     from hyperloom.orchestrator.actions.executors._integrate_vocabulary import SCREEN_CYCLE, SCREEN_PARAM
 
     result, repo, _, legs = await _run_rewrite_integrate(
-        tmp_path, monkeypatch, delta_pct=0.2, extra_params={SCREEN_PARAM: SCREEN_CYCLE}
+        tmp_path, monkeypatch, delta_pct=0.2, extra_params={SCREEN_PARAM: SCREEN_CYCLE}, shared_state=_screen_state()
     )
 
     assert legs == []
@@ -1150,6 +1161,28 @@ async def test_a_switched_patch_marked_for_the_cycle_screen_is_committed_dormant
     status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True)
     assert status.stdout.strip() == ""
     assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.parametrize("screen", [{"reference": False}, {"refused": "the switched-off tree moved"}])
+@pytest.mark.asyncio
+async def test_a_switched_patch_is_benched_while_the_screen_cannot_hold_it_to_a_reference(
+    tmp_path, monkeypatch, screen
+):
+    """No reference on this stack, or a screen closed by a moved tree: admitting it dormant would go unchecked."""
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import SCREEN_CYCLE, SCREEN_PARAM
+
+    kb: list[Any] = []
+    result, _, _, legs = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=0.2,
+        extra_params={SCREEN_PARAM: SCREEN_CYCLE},
+        shared_state=_screen_state(**screen),
+        kb_lessons=kb,
+    )
+
+    assert [bool(leg.get("unset_envs")) for leg in legs] == [False, True]
+    assert (result["status"], SCREEN_PARAM in result, len(kb)) == ("kept_inert", False, 1)
 
 
 @pytest.mark.asyncio
@@ -1238,7 +1271,7 @@ async def test_a_screened_admission_registers_its_levers_pending_and_enqueues_no
     from .conftest import make_coordinator
 
     result, _, _, _ = await _run_rewrite_integrate(
-        tmp_path, monkeypatch, delta_pct=0.2, extra_params={SCREEN_PARAM: SCREEN_CYCLE}
+        tmp_path, monkeypatch, delta_pct=0.2, extra_params={SCREEN_PARAM: SCREEN_CYCLE}, shared_state=_screen_state()
     )
     state = _state()
     state.baseline_tput = 100.0
@@ -1421,6 +1454,7 @@ async def test_only_a_screened_admission_skips_the_kept_inert_lesson(tmp_path, m
         delta_pct=0.2,
         kb_lessons=screened,
         extra_params={SCREEN_PARAM: SCREEN_CYCLE},
+        shared_state=_screen_state(),
     )
 
     assert (len(benched), screened) == (1, [])

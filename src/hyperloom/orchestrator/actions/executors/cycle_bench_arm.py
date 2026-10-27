@@ -112,6 +112,11 @@ def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, o
     )
 
 
+def screen_open(state: Any) -> bool:
+    """Whether a switched patch may be admitted dormant now: the screen is open and the stack has a reference."""
+    return state is not None and not getattr(state, "cycle_screen_refused", "") and _reference(state) is not None
+
+
 def _reference(state: Any) -> dict[int, float] | None:
     """The previous valid batch's base2 cycle, when it ran the stack the session holds now."""
     ref = getattr(state, "cycle_reference", None) or {}

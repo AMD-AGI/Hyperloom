@@ -93,6 +93,27 @@ async def test_a_relative_patch_path_is_fingerprinted_on_the_integrate_task(sess
         await coord.stop()
 
 
+@pytest.mark.parametrize(
+    ("mode", "params", "screen"),
+    [("agentx", _FREEFORM, "cycle"), ("", _FREEFORM, None), ("agentx", {**_FREEFORM, "enablement": True}, None)],
+)
+@pytest.mark.asyncio
+async def test_an_agentx_optimizing_patch_is_marked_for_the_cycle_screen(
+    session_dir: Path, mode: str, params: dict, screen: str | None
+) -> None:
+    """Enablement climbs to a booting model, so its patch is measured as before rather than admitted dormant."""
+    coord = _coordinator(session_dir)
+    coord.shared_state.benchmark_mode = mode
+    try:
+        await _specialist_wrote(coord, "s1", _FIX_A, params=params)
+        await coord.reactor_pass("critic")
+
+        (task,) = [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
+        assert (task.params or {}).get("screen") == screen
+    finally:
+        await coord.stop()
+
+
 @pytest.mark.asyncio
 async def test_a_repeat_of_a_queued_patch_is_not_submitted(session_dir: Path) -> None:
     coord = _coordinator(session_dir)

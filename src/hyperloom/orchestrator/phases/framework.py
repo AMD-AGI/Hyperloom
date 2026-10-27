@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from hyperloom.common.coerce import first_str, first_text, to_float, to_list, to_mapping
 from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.common.perf_metric import agentx_active
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer import framework_registry
 
@@ -3008,10 +3009,7 @@ class FrameworkPhase(ProposalBench):
         if round_args or round_envs:
             deliverable["extra_server_args"] = round_args
             deliverable["extra_envs"] = round_envs
-        if spec_params.get("framework_agent_authoring"):
-            deliverable["framework_agent_authoring"] = True
-        if identity["line_keys"]:
-            deliverable["patch_identity"] = identity
+        deliverable.update(self._integrate_markers(spec_params, identity, enablement=is_enablement_round))
         await self._submit_integrate_review(
             sid,
             spec_params,
@@ -3031,6 +3029,20 @@ class FrameworkPhase(ProposalBench):
                 overlaps_measured=self._measured_patch_overlaps(identity["line_keys"]),
             ),
         )
+
+    def _integrate_markers(
+        self, spec_params: Mapping[str, Any], identity: dict[str, Any], *, enablement: bool
+    ) -> dict[str, Any]:
+        """The integrate params that say how a specialist patch is to be measured rather than what it applies."""
+        markers: dict[str, Any] = {}
+        if spec_params.get("framework_agent_authoring"):
+            markers["framework_agent_authoring"] = True
+        if identity["line_keys"]:
+            markers["patch_identity"] = identity
+        if not enablement and agentx_active(benchmark_mode=self.shared_state.benchmark_mode):
+            # Admitted dormant only if switched and the screen can hold it to a reference when it runs.
+            markers[_integrate_vocabulary.SCREEN_PARAM] = _integrate_vocabulary.SCREEN_CYCLE
+        return markers
 
     async def maybe_autosubmit_framework_config(
         self,
