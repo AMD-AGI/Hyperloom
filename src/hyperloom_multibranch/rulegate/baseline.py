@@ -10,7 +10,8 @@ is held to the same bar; judging reads them back from the record, so nothing it 
 from __future__ import annotations
 
 import statistics
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
@@ -61,21 +62,39 @@ async def write_agentx_baseline(
     """Each metric every baseline reports, averaged; the P50 bar is fixed, and its spread is kept for the record when
     there are two baselines or more to spread."""
     readings = [agentx_reading(_root_result(record, root_commit)) for record in baselines]
+    record = _agentx_record(root_commit, readings, tuple(record.request_id for record in baselines))
+    await store.write_baseline(record)
+    return record
+
+
+async def write_agentx_prelude_baseline(
+    store: GateRecords, root_commit: str, result: TestResult, *, source: str, wall_seconds: float
+) -> BaselineRecord:
+    """The baseline read from the PRELUDE child's own run of the root, ``result``; it anchors on no root test, so
+    ``source`` names the run and ``wall_seconds`` is how long it took."""
+    record = replace(
+        _agentx_record(root_commit, [agentx_reading(result)], ()), source=source, wall_seconds=wall_seconds
+    )
+    await store.write_baseline(record)
+    return record
+
+
+def _agentx_record(
+    root_commit: str, readings: Sequence[Mapping[str, float]], request_ids: tuple[str, ...]
+) -> BaselineRecord:
     shared = set(readings[0]).intersection(*readings[1:]) if readings else set()
     missing = [key for key in _AGENTX_REQUIRED if key not in shared]
     if missing:
         raise UnreadableResult(f"the AgentX baselines do not all report {', '.join(missing)}")
     p50s = tuple(reading[GRADED_INTVTY_P50] for reading in readings)
     spread = {GRADED_INTVTY_P50: DispersionThreshold(p50s).spread_pct} if len(p50s) >= MIN_BASELINES else {}
-    record = BaselineRecord(
+    return BaselineRecord(
         root_commit,
         values={key: statistics.fmean(reading[key] for reading in readings) for key in sorted(shared)},
         dispersion_pct=spread,
         threshold_pct={GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT},
-        request_ids=tuple(record.request_id for record in baselines),
+        request_ids=request_ids,
     )
-    await store.write_baseline(record)
-    return record
 
 
 def _root_result(record: TestRecord, root_commit: str) -> TestResult:
@@ -89,5 +108,6 @@ def _root_result(record: TestRecord, root_commit: str) -> TestResult:
 __all__ = [
     "read_inferencex_baseline",
     "write_agentx_baseline",
+    "write_agentx_prelude_baseline",
     "write_inferencex_baseline",
 ]

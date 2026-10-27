@@ -212,13 +212,19 @@ class LineageEvent:
 
 @dataclass(frozen=True)
 class BaselineRecord:
-    """The PRELUDE baseline the rule gate measured, per metric; every recorded value is anchored to it."""
+    """The PRELUDE baseline the rule gate measured, per metric; every recorded value is anchored to it.
+
+    ``request_ids`` are the root tests it anchored on. A baseline read from the PRELUDE child's own run has none:
+    ``source`` names that run instead, and ``wall_seconds`` is how long it took.
+    """
 
     root_commit: str
     values: Mapping[str, float]
     dispersion_pct: Mapping[str, float]
     threshold_pct: Mapping[str, float]
     request_ids: tuple[str, ...]
+    source: str = ""
+    wall_seconds: float | None = None
 
 
 @dataclass(frozen=True)

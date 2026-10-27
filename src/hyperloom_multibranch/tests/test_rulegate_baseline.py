@@ -19,12 +19,14 @@ from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.contracts.notebook.records import BaselineRecord
+from hyperloom_multibranch.notebook import LocalNotebook, codec
 from hyperloom_multibranch.notebook.tests.factories import delta, result
 from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
 from hyperloom_multibranch.rulegate.baseline import (
     read_inferencex_baseline,
     write_agentx_baseline,
+    write_agentx_prelude_baseline,
     write_inferencex_baseline,
 )
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
@@ -135,3 +137,34 @@ async def test_an_agentx_baseline_needs_what_every_comparison_reads(session):
     baselines = [await session.measured("b0", metrics=AGENTX), await session.measured("b1", metrics=partial)]
     with pytest.raises(UnreadableResult, match=GRADED_DURATION):
         await write_agentx_baseline(session.gate, ROOT, baselines)
+
+
+def _child_run(metrics):
+    return dataclasses.replace(result("prelude-child"), rounds=(RoundValue("measure", 10, metrics),))
+
+
+async def test_an_agentx_baseline_read_from_the_child_run_names_it_and_anchors_on_no_root_test(session):
+    record = await write_agentx_prelude_baseline(
+        session.gate, ROOT, _child_run(AGENTX), source="prelude-child:/runs/baseline/r1", wall_seconds=5287.67
+    )
+
+    assert (record.values, record.request_ids, record.dispersion_pct) == (AGENTX, (), {})
+    assert record.threshold_pct == {GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT}
+    assert (record.source, record.wall_seconds) == ("prelude-child:/runs/baseline/r1", 5287.67)
+    assert await session.gate.baseline() == record
+
+
+@pytest.mark.parametrize("dropped", [GRADED_INTVTY_P50, GRADED_DURATION, GRADED_ERROR_RATE])
+async def test_a_child_run_without_what_every_comparison_reads_anchors_nothing(session, dropped):
+    partial = {key: value for key, value in AGENTX.items() if key != dropped}
+    with pytest.raises(UnreadableResult, match=dropped):
+        await write_agentx_prelude_baseline(session.gate, ROOT, _child_run(partial), source="s", wall_seconds=1.0)
+
+
+def test_a_baseline_written_before_it_named_a_source_reads_back_with_none():
+    stored = codec.encode(BaselineRecord(ROOT, AGENTX, {}, {GRADED_INTVTY_P50: 1.0}, ("b0",)))
+    del stored["source"], stored["wall_seconds"]
+
+    decoded = codec.decode(BaselineRecord, stored)
+
+    assert (decoded.source, decoded.wall_seconds, decoded.request_ids) == ("", None, ("b0",))

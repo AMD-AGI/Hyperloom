@@ -23,6 +23,7 @@ from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok, inferenc
 from hyperloom_multibranch.rulegate.baseline import (
     read_inferencex_baseline,
     write_agentx_baseline,
+    write_agentx_prelude_baseline,
     write_inferencex_baseline,
 )
 from hyperloom_multibranch.rulegate.readings import (
@@ -38,7 +39,8 @@ from hyperloom_multibranch.rulegate.readings import (
 class Rule(Protocol):
     """How the session's workload is judged; ``accuracy_round`` says whether its tests run the eval it reads.
 
-    PRELUDE submits ``baseline_tests`` root tests, and the baseline needs ``min_baselines`` of them measured.
+    PRELUDE submits ``baseline_tests`` root tests, and the baseline needs ``min_baselines`` of them measured. A rule
+    that asks for none takes the PRELUDE child's own run of the root as the baseline (:meth:`prelude_baseline`).
     """
 
     accuracy_round: bool
@@ -46,6 +48,10 @@ class Rule(Protocol):
     min_baselines: int
 
     async def baseline(self, store: GateRecords, root_commit: str, records: Sequence[TestRecord]) -> BaselineRecord: ...
+
+    async def prelude_baseline(
+        self, store: GateRecords, root_commit: str, result: TestResult, *, source: str, wall_seconds: float
+    ) -> BaselineRecord: ...
 
     async def first(self, record: TestRecord, parent: Mapping[str, float]) -> Judgement: ...
 
@@ -71,6 +77,11 @@ class InferenceXRule(Rule):
 
     async def baseline(self, store: GateRecords, root_commit: str, records: Sequence[TestRecord]) -> BaselineRecord:
         return await write_inferencex_baseline(store, root_commit, records, self.concurrency)
+
+    async def prelude_baseline(
+        self, store: GateRecords, root_commit: str, result: TestResult, *, source: str, wall_seconds: float
+    ) -> BaselineRecord:
+        raise ValueError(f"an InferenceX baseline is measured by {self.baseline_tests} root tests, not the child's run")
 
     async def first(self, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
         reading = self._candidate(record)
@@ -105,6 +116,11 @@ class AgentXRule(Rule):
 
     async def baseline(self, store: GateRecords, root_commit: str, records: Sequence[TestRecord]) -> BaselineRecord:
         return await write_agentx_baseline(store, root_commit, records)
+
+    async def prelude_baseline(
+        self, store: GateRecords, root_commit: str, result: TestResult, *, source: str, wall_seconds: float
+    ) -> BaselineRecord:
+        return await write_agentx_prelude_baseline(store, root_commit, result, source=source, wall_seconds=wall_seconds)
 
     async def first(self, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
         return agentx.compare(agentx_reading(_result(record)), parent, record.request_id)
