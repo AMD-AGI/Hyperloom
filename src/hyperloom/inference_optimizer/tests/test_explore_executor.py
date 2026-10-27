@@ -41,14 +41,9 @@ from hyperloom.orchestrator.actions.executors.explore import (
     _default_grid_for_framework,
     filter_baseline_noop_variants,
     observed_launch_from_state,
+    restates_the_baseline_launch,
 )
-from hyperloom.orchestrator.actions.executors._launch_restatement import (
-    Launch,
-    config_launch_restated_by,
-    launch_change,
-    named_settings,
-    restates_the_baseline,
-)
+from hyperloom.orchestrator.actions.executors._launch_restatement import Launch, launch_change, named_settings
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.env import is_truthy
 from hyperloom.common.perf_metric import perf_snapshot_from_mapping
@@ -493,16 +488,29 @@ def test_restated_args_with_a_kernel_overlay_are_not_a_restatement(tmp_path):
     assert dropped == []
 
 
-def test_a_null_baseline_env_is_unset_not_the_string_none(tmp_path):
-    """The launch leaves a null env unset, so a request for the string ``None`` sets something new."""
+def _vllm_baseline_state(tmp_path: Path, base_argv: str = _VLLM_BASE_ARGV, **envs: object) -> SimpleNamespace:
     config = tmp_path / "baseline.yaml"
     config.write_text(
-        yaml.safe_dump({"benchmark": {"framework": "vllm", "envs": {"FOO": None, "EXTRA_VLLM_ARGS": _VLLM_BASE_ARGV}}}),
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "envs": {"VLLM_ROCM_USE_AITER": "1", **envs, "EXTRA_VLLM_ARGS": base_argv},
+                }
+            }
+        ),
         encoding="utf-8",
     )
-    assert config_launch_restated_by(str(config), "", {"FOO": "None"}, "vllm") is False
-    assert config_launch_restated_by(str(config), "--kv-cache-dtype fp8", {}, "vllm") is True
-    assert config_launch_restated_by(str(tmp_path / "missing.yaml"), "--kv-cache-dtype fp8", {}, "vllm") is False
+    return SimpleNamespace(baseline_config_path=str(config), current_best_measurement={})
+
+
+def test_a_null_baseline_env_is_unset_not_the_string_none(tmp_path):
+    """The launch leaves a null env unset, so a request for the string ``None`` sets something new."""
+    state = _vllm_baseline_state(tmp_path, FOO=None)
+    assert restates_the_baseline_launch(state, "", {"FOO": "None"}) is False
+    assert restates_the_baseline_launch(state, "--kv-cache-dtype fp8", {}) is True
+    missing = SimpleNamespace(baseline_config_path=str(tmp_path / "missing.yaml"), current_best_measurement={})
+    assert restates_the_baseline_launch(missing, "--kv-cache-dtype fp8", {}) is False
 
 
 @pytest.mark.parametrize(
@@ -511,27 +519,38 @@ def test_a_null_baseline_env_is_unset_not_the_string_none(tmp_path):
         pytest.param("--kv-cache-dtype fp8", {}, _VLLM_BASE_ARGV, True, id="restated_flag"),
         pytest.param("--enable-prefix-caching", {}, _VLLM_BASE_ARGV, True, id="restated_bare_flag"),
         pytest.param("", {"VLLM_ROCM_USE_AITER": "1"}, _VLLM_BASE_ARGV, True, id="restated_env"),
-        pytest.param("", {}, _VLLM_BASE_ARGV, False, id="empty_request"),
+        pytest.param("", {}, _VLLM_BASE_ARGV, True, id="empty_request"),
         pytest.param("--kv-cache-dtype auto", {}, _VLLM_BASE_ARGV, False, id="different_value"),
         pytest.param("--block-size 128", {}, _VLLM_BASE_ARGV, False, id="setting_the_baseline_lacks"),
         pytest.param("", {"VLLM_ROCM_USE_AITER": "0"}, _VLLM_BASE_ARGV, False, id="different_env"),
         pytest.param("", {"NEW_ENV": "1"}, _VLLM_BASE_ARGV, False, id="env_the_baseline_lacks"),
         pytest.param("fp8 --kv-cache-dtype fp8", {}, _VLLM_BASE_ARGV, False, id="positional_token"),
         pytest.param("--kv-cache-dtype 'fp8", {}, _VLLM_BASE_ARGV, False, id="unparsable"),
+        pytest.param("--no-enable-prefix-caching", {}, _VLLM_BASE_ARGV, False, id="negates_a_baseline_flag"),
         pytest.param(
             "--enable-prefix-caching",
             {},
             "--enable-prefix-caching --no-enable-prefix-caching",
-            False,
-            id="negated_spelling_in_the_baseline",
+            True,
+            id="dedupe_keeps_the_negation_last",
         ),
         pytest.param("--cuda-graph-bs 1 2 4", {}, "--cuda-graph-bs 1 2 4", True, id="list_restated_in_full"),
         pytest.param("--cuda-graph-bs 1 2", {}, "--cuda-graph-bs 1 2 4", False, id="list_restated_in_part"),
     ],
 )
-def test_restates_the_baseline(argv, envs, base_argv, expected):
-    """Only a request every part of which the baseline already sets is a restatement; anything unreadable is not."""
-    assert restates_the_baseline(argv, envs, base_argv, {"VLLM_ROCM_USE_AITER": "1"}, "vllm") is expected
+def test_restates_the_baseline_launch(tmp_path, argv, envs, base_argv, expected):
+    """Only a request that leaves the materialized launch as it was restates it; anything unreadable does not."""
+    assert restates_the_baseline_launch(_vllm_baseline_state(tmp_path, base_argv), argv, envs) is expected
+
+
+def test_the_baseline_observation_counts_only_for_the_config_it_was_made_on(tmp_path):
+    """``--max-num-seqs 256`` is the observed engine default, but only on the launch that was observed."""
+    state = _vllm_baseline_state(tmp_path)
+    observed = {"launch_evidence": {"observed_server_config": {"max_num_seqs": 64, "block_size": 16}}}
+    state.current_best_measurement = observed
+    assert restates_the_baseline_launch(state, "--block-size 16", {}) is False
+    observed["launch_evidence"]["materialized_config_path"] = state.baseline_config_path
+    assert restates_the_baseline_launch(state, "--block-size 16", {}) is True
 
 
 def test_named_settings_resolve_like_the_engine():

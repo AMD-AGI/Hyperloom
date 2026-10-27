@@ -547,6 +547,26 @@ def filter_baseline_noop_variants(
     return kept, dropped
 
 
+def restates_the_baseline_launch(state: Any, args: str, envs: Mapping[str, Any]) -> bool:
+    """Whether ``args`` and ``envs`` laid onto the baseline's materialized config start the baseline's own server.
+
+    Judged as a variant on that config is. The observed launch discounts settings only when ``current_best`` was
+    observed running that very config.
+    """
+    config_path = str(getattr(state, "baseline_config_path", "") or "")
+    if not config_path:
+        return False
+    measurement = getattr(state, "current_best_measurement", None)
+    evidence = measurement.get("launch_evidence") if isinstance(measurement, Mapping) else None
+    observed_here = isinstance(evidence, Mapping) and evidence.get("materialized_config_path") == config_path
+    _, dropped = filter_baseline_noop_variants(
+        [GridVariant("warm_replay", str(args or ""), {str(k): str(v) for k, v in envs.items()})],
+        observed=observed_launch_from_state(state) if observed_here else ({}, {}),
+        recipe=GridRecipe(base_yaml_path=Path(config_path)),
+    )
+    return bool(dropped)
+
+
 def _skip_baseline_noop(name: str, reason: str, skipped: list[dict[str, Any]]) -> None:
     """Record a variant skipped because it launches the server the stack is already running."""
     log.info("explore: skipping baseline-noop variant %s (%s)", name, reason)

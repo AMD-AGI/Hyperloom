@@ -11,7 +11,6 @@ candidate whose launch equals the stack's measures the stack again.
 from __future__ import annotations
 
 import json
-import logging
 import shlex
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -25,9 +24,7 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.launch_log_evidence import launch_flag_setting_name
 from hyperloom.inference_optimizer.grid_server_args import server_args_env_name
 
-from ._server_argv import ConfigUnreadable, config_server_argv
-
-log = logging.getLogger(__name__)
+from ._server_argv import config_server_argv
 
 
 def config_envs(config_path: Path) -> dict[str, str]:
@@ -218,55 +215,3 @@ def setting_already_holds(proposed: list[str], observed: Any) -> bool:
     if observed is None:
         return False
     return text == str(observed)
-
-
-def _names_only_flags(argv_text: str) -> bool:
-    """Whether ``argv_text`` parses and opens on a flag, so ``named_settings`` accounts for every token."""
-    try:
-        tokens = shlex.split(argv_text)
-    except ValueError:
-        return False
-    return not tokens or tokens[0].startswith("-")
-
-
-def restates_the_baseline(
-    argv_text: str,
-    envs: Mapping[str, Any],
-    base_argv: str,
-    base_envs: Mapping[str, str],
-    framework: str,
-) -> bool:
-    """Whether appending ``argv_text`` and ``envs`` to the baseline launch would change nothing.
-
-    True only when every setting the request names is already in ``base_argv``
-    with the same value tokens, and every env already carries that value in
-    ``base_envs``. A request this cannot read in full -- an unparsable argv, a
-    positional token, a flag whose negated spelling the baseline also names --
-    is never a restatement, and neither is an empty one.
-    """
-    text = str(argv_text or "").strip()
-    requested_envs = {str(k): str(v) for k, v in (envs or {}).items()}
-    if (not text and not requested_envs) or not _names_only_flags(text):
-        return False
-    base_settings = named_settings(base_argv, framework)
-    for name, values in named_settings(text, framework).items():
-        if base_settings.get(name) != values or _opposite_setting(name) in base_settings:
-            return False
-    return all(base_envs.get(name) == value for name, value in requested_envs.items())
-
-
-def config_launch_restated_by(config_path: str, argv_text: str, envs: Mapping[str, Any], framework: str) -> bool:
-    """Whether appending ``argv_text`` and ``envs`` to the config at ``config_path`` would change nothing.
-
-    False when the config is absent or unreadable: the launch to compare
-    against is then unknown.
-    """
-    if not str(config_path or "").strip():
-        return False
-    try:
-        base_argv = config_server_argv(config_path).text
-        base_envs = config_envs(Path(config_path))
-    except (ConfigUnreadable, OSError, ValueError, yaml.YAMLError) as exc:
-        log.warning("baseline config %s unreadable for the restatement check (%s)", config_path, exc)
-        return False
-    return restates_the_baseline(argv_text, envs, base_argv, base_envs, framework)
