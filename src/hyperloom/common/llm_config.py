@@ -5,11 +5,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import sys
-import time
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
@@ -328,10 +326,8 @@ DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 # The Anthropic Messages API version, defined once for the whole repository.
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 _ANTHROPIC_MESSAGES_PATH = "/v1/messages"
-# The OpenAI protocol path gets its re-dial from the SDK (``max_retries``); the Messages path is plain ``httpx``,
-# which never re-dials, so it re-dials here instead. Both protocols owe their callers the same transport.
-ANTHROPIC_CONNECT_ATTEMPTS = 3
-_ANTHROPIC_CONNECT_BACKOFF_S = 0.5
+# The OpenAI path re-dials through the SDK (``max_retries``); on the Messages path the httpx transport owes the same.
+ANTHROPIC_CONNECT_RETRIES = 2
 
 
 def _is_dual_protocol_host(url: str | None) -> bool:
@@ -587,6 +583,16 @@ def _httpx_module() -> object:
     return httpx
 
 
+def _anthropic_transports(cls: object) -> dict[str, object]:
+    """Client kwargs whose transports re-dial a connection that never came up, env-configured proxies included."""
+    # A client built with a ``transport`` stops reading the proxy environment, so its mounts are rebuilt here.
+    from httpx._utils import get_environment_proxies
+
+    proxies = get_environment_proxies().items()
+    mounts = {pat: None if url is None else cls(proxy=url, retries=ANTHROPIC_CONNECT_RETRIES) for pat, url in proxies}
+    return {"transport": cls(retries=ANTHROPIC_CONNECT_RETRIES), "mounts": mounts}
+
+
 def _anthropic_client_kwargs(
     *,
     api_key_env: str,
@@ -638,7 +644,8 @@ def get_anthropic_client(
             base_url_env=base_url_env,
             env=env,
             timeout=timeout,
-        )
+        ),
+        **_anthropic_transports(httpx.HTTPTransport),  # type: ignore[attr-defined]
     )
 
 
@@ -657,7 +664,8 @@ def get_async_anthropic_client(
             base_url_env=base_url_env,
             env=env,
             timeout=timeout,
-        )
+        ),
+        **_anthropic_transports(httpx.AsyncHTTPTransport),  # type: ignore[attr-defined]
     )
 
 
@@ -939,52 +947,6 @@ def _observe_anthropic(observation: RequestObservation, resp: object) -> Anthrop
     return result
 
 
-def _is_connect_failure(exc: BaseException) -> bool:
-    """Whether ``exc`` says the connection never came up, so nothing of the request was sent."""
-    try:
-        import httpx
-    except ImportError:
-        return False
-    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
-
-
-def _connect_retry_delay(attempt: int) -> float | None:
-    """Seconds to wait before re-dialing after attempt ``attempt``, or ``None`` when it was the last one."""
-    if attempt >= ANTHROPIC_CONNECT_ATTEMPTS:
-        return None
-    return _ANTHROPIC_CONNECT_BACKOFF_S * attempt
-
-
-def _post_anthropic_messages(client: object, tag: dict[str, object], params: dict[str, object]) -> object:
-    """POST the Messages request, re-dialing while the gateway connection itself does not come up."""
-    attempt = 1
-    while True:
-        try:
-            return client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
-        except Exception as exc:
-            delay = _connect_retry_delay(attempt) if _is_connect_failure(exc) else None
-            if delay is None:
-                raise
-            log.warning("llm_config: anthropic connect failed (attempt %d), retrying: %r", attempt, exc)
-            time.sleep(delay)
-            attempt += 1
-
-
-async def _apost_anthropic_messages(client: object, tag: dict[str, object], params: dict[str, object]) -> object:
-    """Async twin of :func:`_post_anthropic_messages`."""
-    attempt = 1
-    while True:
-        try:
-            return await client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
-        except Exception as exc:
-            delay = _connect_retry_delay(attempt) if _is_connect_failure(exc) else None
-            if delay is None:
-                raise
-            log.warning("llm_config: anthropic connect failed (attempt %d), retrying: %r", attempt, exc)
-            await asyncio.sleep(delay)
-            attempt += 1
-
-
 def anthropic_messages(
     client: object,
     *,
@@ -997,7 +959,7 @@ def anthropic_messages(
     with observed_request(
         protocol=PROTOCOL_ANTHROPIC_MESSAGES, component=component, operation=operation, model=params.get("model")
     ) as observation:
-        resp = _post_anthropic_messages(client, tag, params)
+        resp = client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
         return _observe_anthropic(observation, resp)
 
 
@@ -1013,7 +975,7 @@ async def aanthropic_messages(
     with observed_request(
         protocol=PROTOCOL_ANTHROPIC_MESSAGES, component=component, operation=operation, model=params.get("model")
     ) as observation:
-        resp = await _apost_anthropic_messages(client, tag, params)
+        resp = await client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
         return _observe_anthropic(observation, resp)
 
 
@@ -1175,7 +1137,7 @@ __all__ = [
     "AGENT_BACKEND_CODEX",
     "AGENT_BACKEND_DEEPSEEK",
     "AGENT_BACKEND_ENV",
-    "ANTHROPIC_CONNECT_ATTEMPTS",
+    "ANTHROPIC_CONNECT_RETRIES",
     "ANTHROPIC_CREDENTIAL_ENV_ORDER",
     "ANTHROPIC_SYNTHESIZABLE_KEY_ENVS",
     "ANTHROPIC_TRANSPORT_HTTP",

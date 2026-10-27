@@ -776,12 +776,29 @@ class _FakeAsyncHttpxClient(_FakeHttpxClient):
     kind = "AsyncClient"
 
 
-def _install_fake_httpx(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point the lazy ``import httpx`` at recording stand-ins."""
+class _FakeSyncHttpxTransport(_FakeHttpxClient):
+    kind = "HTTPTransport"
+
+
+class _FakeAsyncHttpxTransport(_FakeHttpxClient):
+    kind = "AsyncHTTPTransport"
+
+
+def _install_fake_httpx(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    proxies: dict[str, str | None] | None = None,
+) -> None:
+    """Point the lazy ``import httpx`` at recording stand-ins, with ``proxies`` as the environment's proxy map."""
     module = types.ModuleType("httpx")
     module.Client = _FakeSyncHttpxClient
     module.AsyncClient = _FakeAsyncHttpxClient
+    module.HTTPTransport = _FakeSyncHttpxTransport
+    module.AsyncHTTPTransport = _FakeAsyncHttpxTransport
+    utils = types.ModuleType("httpx._utils")
+    utils.get_environment_proxies = lambda: dict(proxies or {})
     monkeypatch.setitem(sys.modules, "httpx", module)
+    monkeypatch.setitem(sys.modules, "httpx._utils", utils)
 
 
 _ANTHROPIC_KEY = "_".join(("ANTHROPIC", "API", "KEY"))
@@ -841,6 +858,36 @@ def test_get_anthropic_client_timeout_plumbing(monkeypatch):
     assert "timeout" not in get_anthropic_client(env={_ANTHROPIC_KEY: "k"}).kwargs
     sentinel = object()
     assert get_async_anthropic_client(env={_ANTHROPIC_KEY: "k"}, timeout=sentinel).kwargs["timeout"] is sentinel
+
+
+def test_anthropic_clients_redial_a_connection_that_never_came_up(monkeypatch):
+    """The OpenAI protocol path gets its re-dial from the SDK; the Messages path gets it from its transport."""
+    _install_fake_httpx(monkeypatch)
+    retries = {"retries": llm_config.ANTHROPIC_CONNECT_RETRIES}
+    transport = get_anthropic_client(env={_ANTHROPIC_KEY: "k"}).kwargs["transport"]
+    assert (transport.kind, transport.kwargs) == ("HTTPTransport", retries)
+    transport = get_async_anthropic_client(env={_ANTHROPIC_KEY: "k"}).kwargs["transport"]
+    assert (transport.kind, transport.kwargs) == ("AsyncHTTPTransport", retries)
+
+
+def test_anthropic_clients_redial_through_env_configured_proxies(monkeypatch):
+    """A client given a ``transport`` stops mounting env proxies itself, so the mounts are rebuilt with the retries."""
+    _install_fake_httpx(monkeypatch, proxies={"https://": "http://proxy.invalid:8080", "all://gw.invalid": None})
+    mounts = get_anthropic_client(env={_ANTHROPIC_KEY: "k"}).kwargs["mounts"]
+    assert mounts["https://"].kind == "HTTPTransport"
+    assert mounts["https://"].kwargs == {
+        "proxy": "http://proxy.invalid:8080",
+        "retries": llm_config.ANTHROPIC_CONNECT_RETRIES,
+    }
+    # ``None`` is httpx's "reach this one directly"; turning it into a transport would proxy a bypassed host.
+    assert mounts["all://gw.invalid"] is None
+    amounts = get_async_anthropic_client(env={_ANTHROPIC_KEY: "k"}).kwargs["mounts"]
+    assert amounts["https://"].kind == "AsyncHTTPTransport"
+
+
+def test_anthropic_clients_mount_nothing_when_no_proxy_is_configured(monkeypatch):
+    _install_fake_httpx(monkeypatch)
+    assert get_anthropic_client(env={_ANTHROPIC_KEY: "k"}).kwargs["mounts"] == {}
 
 
 def test_get_anthropic_client_is_never_cached(monkeypatch):
@@ -960,77 +1007,6 @@ async def test_aanthropic_messages_propagates_transport_errors():
     client = _FakeAsyncAnthropicTransport(error=RuntimeError("gateway down"))
     with pytest.raises(RuntimeError, match="gateway down"):
         await aanthropic_messages(client, model="claude")
-
-
-class _FlakyAnthropicTransport(_FakeAnthropicTransport):
-    """Raises ``error`` for the first ``failures`` POSTs, then answers normally."""
-
-    def __init__(self, response: Any = None, *, error: BaseException, failures: int) -> None:
-        super().__init__(response)
-        self._connect_error = error
-        self._failures = failures
-
-    def post(self, path: str, *, json: Any) -> Any:
-        self.calls.append({"path": path, "json": json})
-        if len(self.calls) <= self._failures:
-            raise self._connect_error
-        return self._response
-
-
-class _FlakyAsyncAnthropicTransport(_FlakyAnthropicTransport):
-    async def post(self, path: str, *, json: Any) -> Any:  # type: ignore[override]
-        return _FlakyAnthropicTransport.post(self, path, json=json)
-
-
-@pytest.fixture
-def no_connect_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Re-dial without the waits, so the retry tests cost no wall clock."""
-    monkeypatch.setattr(llm_config, "_ANTHROPIC_CONNECT_BACKOFF_S", 0.0)
-
-
-def test_anthropic_messages_redials_while_the_connection_does_not_come_up(no_connect_backoff):
-    """The OpenAI protocol path gets this from the SDK; the Messages path owes its callers the same."""
-    import httpx
-
-    client = _FlakyAnthropicTransport(
-        _FakeAnthropicResponse(body=_MESSAGE_BODY), error=httpx.ConnectTimeout("connect timed out"), failures=2
-    )
-    result = anthropic_messages(client, model="claude")
-    assert result.text == "hello world"
-    assert len(client.calls) == 3
-
-
-@pytest.mark.asyncio
-async def test_aanthropic_messages_redials_while_the_connection_does_not_come_up(no_connect_backoff):
-    import httpx
-
-    client = _FlakyAsyncAnthropicTransport(
-        _FakeAnthropicResponse(body=_MESSAGE_BODY), error=httpx.ConnectError("connection refused"), failures=1
-    )
-    result = await aanthropic_messages(client, model="claude")
-    assert result.text == "hello world"
-    assert len(client.calls) == 2
-
-
-@pytest.mark.asyncio
-async def test_aanthropic_messages_gives_up_after_the_connect_attempt_budget(no_connect_backoff):
-    import httpx
-
-    client = _FlakyAsyncAnthropicTransport(error=httpx.ConnectError("connection refused"), failures=99)
-    with pytest.raises(httpx.ConnectError):
-        await aanthropic_messages(client, model="claude")
-    assert len(client.calls) == llm_config.ANTHROPIC_CONNECT_ATTEMPTS
-
-
-@pytest.mark.asyncio
-async def test_aanthropic_messages_does_not_redial_once_the_request_is_on_the_wire(no_connect_backoff):
-    """Only a connection that never came up is replayed; a request already sent may have produced a completion."""
-    import httpx
-
-    client = _FlakyAsyncAnthropicTransport(error=httpx.ReadTimeout("read timed out"), failures=99)
-    with pytest.raises(httpx.ReadTimeout):
-        await aanthropic_messages(client, model="claude")
-    assert len(client.calls) == 1
 
 
 @pytest.mark.asyncio
