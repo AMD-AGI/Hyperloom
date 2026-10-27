@@ -522,9 +522,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # reported axes the summary renders.
     baseline_perf: dict[str, Any] = field(default_factory=dict)
     baseline_accuracy: float = 0.0
-    # Standalone baseline-arm roofline ceiling computed right after baseline lands; backs up snapshot ceiling so the
-    # frontend has data even when the roofline (profile + trace_analyze) step fails.
-    baseline_roofline_ceiling: dict[str, Any] = field(default_factory=dict)
     baseline_failure_streak: int = 0
     baseline_arg_error_streak: int = 0
     # Signature of the last failure counted in ``baseline_failure_streak``; two in a row that match end the run.
@@ -1955,38 +1952,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
         framework = str(getattr(self, "framework", "") or "").strip().lower()
         return framework_registry.throughput_unit(framework)
-
-    def record_baseline_roofline_ceiling(self) -> dict[str, Any]:
-        """Compute a standalone baseline-arm roofline ceiling and cache it."""
-        from hyperloom.inference_optimizer.roofline_ceiling import compute_roofline_breakdown_from_state
-        from hyperloom.inference_optimizer.roofline_snapshot import (
-            RooflineReading,
-            attach_perfmodel_breakdown,
-            build_roofline_snapshot,
-        )
-
-        achieved = self._resolve_baseline_achieved_tput()
-        breakdown = compute_roofline_breakdown_from_state(self, arm="baseline")
-        peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
-        if peak_tput <= 0:
-            return {}
-
-        ts_iso = now_iso()
-        ceiling = build_roofline_snapshot(
-            snapshot_id=None,
-            ts=ts_iso,
-            analysis_md_path="",
-            reading=RooflineReading(breakdown, achieved, self._roofline_throughput_unit()),
-            framework=str(getattr(self, "framework", "") or ""),
-        )
-        # Mark provenance: this is the baseline-arm ceiling backup, not a trace-derived snapshot.
-        ceiling["ceiling_arm"] = "baseline"
-
-        # Per-op PerfModel breakdown + provenance (mirrors record_trace_analyze).
-        attach_perfmodel_breakdown(ceiling, self, arm="baseline")
-
-        self.baseline_roofline_ceiling = ceiling
-        return ceiling
 
     def record_trace_analyze(
         self,
