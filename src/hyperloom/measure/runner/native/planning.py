@@ -113,7 +113,7 @@ class NativePlanner:
         for ref in component.patches:
             text = self._blobs.get(ref.sha256).decode("utf-8", errors="replace")
             for relative in patch_targets(text, recipe.source_dir, ref.path):
-                path = f"{recipe.source_dir}/{relative}"
+                path = PurePosixPath(recipe.source_dir, relative).as_posix()
                 _refuse_build_definition(path, relative, component.component, ref.path)
                 native = native or layout.spec.refused_by(path) is not None
         return native
@@ -132,7 +132,9 @@ def _refuse_build_definition(path: str, relative: str, component: str, patch: st
 
 def _package_entries(root: EnvRoot, recipe: NativeRecipe) -> tuple[EnvEntry, ...]:
     """The stack's files inside the installed package, package-relative: the farm lays them over the image's package."""
-    prefix = f"{recipe.package_dir}/{recipe.import_name}/"
+    package = PurePosixPath(recipe.package_dir, recipe.import_name).parts
     return tuple(
-        replace(entry, path=entry.path[len(prefix) :]) for entry in root.entries if entry.path.startswith(prefix)
+        replace(entry, path=PurePosixPath(*parts[len(package) :]).as_posix())
+        for entry in root.entries
+        if (parts := PurePosixPath(entry.path).parts)[: len(package)] == package and len(parts) > len(package)
     )

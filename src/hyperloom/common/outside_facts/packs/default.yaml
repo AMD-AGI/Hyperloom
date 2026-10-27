@@ -20,7 +20,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "14"
+version: "15"
 facts:
   aiter_merged_view:
     kind: names
@@ -937,17 +937,51 @@ facts:
     kind: component_layout
     project: vllm
     reason: >-
-      vLLM's package is vllm at the top of its repository and lies over the installed vllm.
+      vLLM's package is vllm at the top of its repository and lies over the installed vllm. Its operators are native
+      extensions beside the package (vllm/_C, vllm/_moe_C and vllm/_rocm_C on ROCm, *.so), which its setup.py builds with
+      CMake from csrc at the top of the repository: a Python patch cannot change them, so a patch that names a native file
+      is refused with its path, and the build definition (CMakeLists.txt, setup.py, cmake/) with it.
     import_name: vllm
     sections:
       - {prefix: vllm, base: package}
-    refuse: []
+    refuse:
+      - "*.so"
+      - "*.so.*"
+      - "*.a"
+      - "*.o"
+      - "*.bc"
+      - "*.co"
+      - "*.hsaco"
+      - "*.cubin"
+      - "*.pyd"
+      - "*.c"
+      - "*.cc"
+      - "*.cpp"
+      - "*.cxx"
+      - "*.h"
+      - "*.hh"
+      - "*.hpp"
+      - "*.cu"
+      - "*.cuh"
+      - "*.hip"
+      - "*.inc"
+      - "CMakeLists.txt"
+      - "*.cmake"
+      - "setup.py"
+      - "pyproject.toml"
+      - "Makefile"
     generated: []
     examples:
       place:
         - "vllm/envs.py -> package:envs.py"
       refuse:
         - "csrc/cache_kernels.cu"
+        - "csrc/rocm/attention.cu"
+        - "csrc/ops.h"
+        - "vllm/_C.abi3.so"
+        - "CMakeLists.txt"
+        - "setup.py"
+        - "cmake/utils.cmake"
 
   component_layout_aiter:
     kind: component_layout

@@ -856,6 +856,8 @@ def _driver_main(argv: list[str] | None = None) -> int:
 
 #: Public name of the sgl-kernel recipe, whose preflight and budgets the native build store reuses.
 SglKernelBuild = _SglKernelBuild
+#: Public name of the vLLM-from-source recipe, whose preflight and budgets the native build store reuses.
+VllmBuild = _VllmBuild
 
 
 if __name__ == "__main__":
@@ -865,6 +867,7 @@ if __name__ == "__main__":
 __all__ = [
     "BuildHandle",
     "SglKernelBuild",
+    "VllmBuild",
     "_driver_main",
     "_load_result_json",
     "classify_build_exit",

@@ -59,7 +59,6 @@ __all__ = [
     "JOB_FILE",
     "SOURCE_ROOT",
     "STAGED_FILE",
-    "SGL_KERNEL_FACTORY",
     "IsolatedBuilds",
     "Isolation",
     "job_document",
@@ -69,8 +68,6 @@ __all__ = [
 
 JOB_FILE = "job.json"
 STAGED_FILE = "staged.json"
-#: The recipe factory of sgl-kernel, as the child imports it.
-SGL_KERNEL_FACTORY = "hyperloom.measure.runner.native.recipes:sgl_kernel_recipe"
 NOBODY = 65534
 #: The toolchain entry of a build's record that says how its compile was isolated, and the two levels it names.
 ISOLATION_KEY = "isolation"

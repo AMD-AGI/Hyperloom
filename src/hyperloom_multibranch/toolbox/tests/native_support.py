@@ -69,7 +69,7 @@ def module_name() -> str:
     return f"{COMPONENT}.{extension().name.split('.', 1)[0]}"
 
 
-def _preflight(scratch: Path, gfx_arch: str) -> Preflight:
+def preflight(scratch: Path, gfx_arch: str) -> Preflight:
     """No machine check; it records the names of the variables the build runner's child was given."""
     return Preflight(None, {"compiler": "stand-in", "variables": " ".join(sorted(os.environ))})
 
@@ -87,7 +87,7 @@ def stand_in_recipe() -> NativeRecipe:
         budget_sec=120,
         max_jobs=1,
         max_output_bytes=64 * 1024 * 1024,
-        preflight=_preflight,
+        preflight=preflight,
     )
 
 
@@ -100,18 +100,23 @@ def compiled(cu: str) -> bytes:
 
 @dataclass(frozen=True)
 class Image:
-    """The image's site-packages with the unpatched ``fakepkg``, and an interpreter that finds it by default."""
+    """The image's site-packages with the unpatched package (``fakepkg``), and an interpreter that finds it by default."""
 
     site: Path
     python: str
+    name: str = COMPONENT
 
     def package(self) -> PackageBase:
-        return PackageBase(COMPONENT, self.site / COMPONENT, COMPONENT, "1.0")
+        return PackageBase(self.name, self.site / self.name, self.name, "1.0")
 
 
-def image(root: Path) -> Image:
-    site = write_tree(root / "site", {f"{COMPONENT}/__init__.py": "", f"{COMPONENT}/ops.py": BASE_PY})
-    (site / COMPONENT / extension().name).write_bytes(compiled(BASE_CU))
+def image(root: Path, name: str = COMPONENT, files: dict[str, str] | None = None) -> Image:
+    """The image of package ``name`` (its files, package-relative; ``ops.py`` by default), built from ``BASE_CU``."""
+    package = files if files is not None else {"ops.py": BASE_PY}
+    site = write_tree(
+        root / "site", {f"{name}/__init__.py": "", **{f"{name}/{p}": text for p, text in package.items()}}
+    )
+    (site / name / extension().name).write_bytes(compiled(BASE_CU))
     python = root / "python"
     python.write_text(
         f"#!{sys.executable}\n"
@@ -120,7 +125,7 @@ def image(root: Path) -> Image:
         "os.execv(sys.executable, [sys.executable, *[a for a in sys.argv[1:] if a != '-I']])\n"
     )
     python.chmod(0o755)
-    return Image(site, str(python))
+    return Image(site, str(python), name)
 
 
 def upstream(root: Path) -> Path:

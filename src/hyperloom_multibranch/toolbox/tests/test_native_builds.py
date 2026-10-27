@@ -11,6 +11,7 @@ import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -76,34 +77,37 @@ class Hooks:
 
 
 class Rig:
-    """One session: blobs, the image, the upstream checkout, the store and its key, the compiler and the driver."""
+    """One session: blobs, the image, the upstream checkout, the store and its key, the compiler and the driver.
 
-    def __init__(self, tmp: Path, isolation: Isolation | None = SAME_PROCESS_USER) -> None:
-        self.tmp, self.blobs = tmp, LocalBlobStore(tmp / "blobs")
-        self.image = fake.image(tmp / "image")
-        fake.upstream(tmp / "sources" / fake.COMPONENT / COMMIT)
+    ``kit`` is the stand-in component (:mod:`native_support`'s ``fakepkg`` by default): its ``COMPONENT``, ``LAYOUT``,
+    ``FACTORY``, ``ACT_CU`` and ``BASE_CU``, its ``image``, ``upstream`` and ``stand_in_recipe``."""
+
+    def __init__(self, tmp: Path, isolation: Isolation | None = SAME_PROCESS_USER, kit: ModuleType = fake) -> None:
+        self.tmp, self.blobs, self.kit = tmp, LocalBlobStore(tmp / "blobs"), kit
+        self.image = kit.image(tmp / "image")
+        kit.upstream(tmp / "sources" / kit.COMPONENT / COMMIT)
         key = signing.generate_private_key()
         self.trust = Trust((TrustedKey(signing.public_key_pem(key), 1),), 1)
         self.store = BuildStore(tmp / "store", self.trust)
-        recipe = fake.stand_in_recipe()
+        recipe = kit.stand_in_recipe()
         machine = BuildMachine(IMAGE, BUILDER, "gfx942", sys.executable)
-        site = NativeSite(machine, {fake.COMPONENT: recipe}, tmp / "sources", self.image.site)
-        self.planner = NativePlanner(site, self.blobs, {fake.COMPONENT: fake.LAYOUT})
-        runner = IsolatedBuilds(self.planner, self.blobs, isolation, {fake.COMPONENT: fake.FACTORY})
-        build_site = BuildSite(IMAGE, BUILDER, "gfx942", {fake.COMPONENT: recipe})
+        site = NativeSite(machine, {kit.COMPONENT: recipe}, tmp / "sources", self.image.site)
+        self.planner = NativePlanner(site, self.blobs, {kit.COMPONENT: kit.LAYOUT})
+        runner = IsolatedBuilds(self.planner, self.blobs, isolation, {kit.COMPONENT: kit.FACTORY})
+        build_site = BuildSite(IMAGE, BUILDER, "gfx942", {kit.COMPONENT: recipe})
         self.driver = StoreBuildDriver(self.store, Signer(key), build_site, compiled_needs, runner)
         self.compiler = EnvironmentCompiler(
-            self.blobs, IMAGE, lambda layout: self.image.package(), {fake.COMPONENT: fake.LAYOUT}, self.planner
+            self.blobs, IMAGE, lambda layout: self.image.package(), {kit.COMPONENT: kit.LAYOUT}, self.planner
         )
         self._patches = 0
 
     def patch(self, after: dict[str, str | None], before: dict[str, str] | None = None):
         self._patches += 1
-        data = git_patch(self.tmp / f"patch-{self._patches}", before or {fake.ACT_CU: fake.BASE_CU}, after)
+        data = git_patch(self.tmp / f"patch-{self._patches}", before or {self.kit.ACT_CU: self.kit.BASE_CU}, after)
         return put_patch(self.blobs, f"{self._patches:04d}.patch", data)
 
     def recipe(self, *patches, **fields) -> Recipe:
-        stack = ComponentPatches(fake.COMPONENT, "https://example.invalid/fake.git", COMMIT, tuple(patches))
+        stack = ComponentPatches(self.kit.COMPONENT, "https://example.invalid/fake.git", COMMIT, tuple(patches))
         return Recipe(base_image_digest=IMAGE, components=(stack,), **fields)
 
     async def wait(self, accepted: AcceptedMeasurement, hooks: Hooks) -> PendingBuilds:
@@ -125,7 +129,7 @@ def rig(tmp_path: Path) -> Rig:
     return Rig(tmp_path)
 
 
-def _laid(rig: Rig, accepted: AcceptedMeasurement):
+def farm_of(rig: Rig, accepted: AcceptedMeasurement):
     """The sheet's environment as a runner reads it, and the farm it lays."""
     environment = Environment.parse(accepted.environment.to_document(), "environment")
     named = {b.root_id: NamedBuild(b.root_id, b.key, b.manifest_sha256) for b in environment.builds}
@@ -156,7 +160,7 @@ async def test_a_cu_edit_waits_for_its_build_and_is_laid_in_the_farm_and_importe
     assert hooks.ready == ["r1"] and hooks.ended == []
     accepted = builds.resolved(AcceptedMeasurement(compiled, ()))
 
-    environment, farm = _laid(rig, accepted)
+    environment, farm = farm_of(rig, accepted)
     record = rig.store.read(compiled.builds[0].inputs)
     assert [(b.key, b.manifest_sha256) for b in environment.builds] == [(record.key, manifest_sha256(record))]
     output = farm.site / fake.COMPONENT / fake.extension().name
@@ -265,7 +269,7 @@ async def test_the_farm_refuses_a_build_the_sheet_does_not_name_exactly(rig: Rig
 async def test_verify_farm_refuses_a_native_module_loaded_from_elsewhere(rig: Rig) -> None:
     compiled = rig.compiler.compile(rig.recipe(rig.patch({fake.ACT_CU: EDITED_CU})), RecipeDelta())
     builds = await rig.wait(AcceptedMeasurement(compiled, ()), Hooks())
-    _, farm = _laid(rig, builds.resolved(AcceptedMeasurement(compiled, ())))
+    _, farm = farm_of(rig, builds.resolved(AcceptedMeasurement(compiled, ())))
     (module,) = farm.native
     (module.path).unlink()  # the package is the farm's, its native module now the image's
 
@@ -353,6 +357,7 @@ def test_a_configured_store_gives_the_driver_the_plan_and_the_runners_the_store(
         BUILD_TRUST_ENV: environ[BUILD_TRUST_ENV],
     }
     assert native.plan.site.machine.image_digest == IMAGE and native.plan.site.machine.builder_image_digest == IMAGE
+    assert set(native.plan.site.recipes) == {"sgl_kernel", "vllm"}, "every recipe, vLLM's included"
 
 
 @pytest.mark.parametrize(

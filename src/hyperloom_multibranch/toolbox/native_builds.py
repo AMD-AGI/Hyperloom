@@ -10,7 +10,8 @@ So it also needs:
 
 - ``HYPERLOOM_BUILD_SIGNING_KEY``: the service's Ed25519 private key, a file of this user with mode 0600 (the compile
   runs as another user on this host); its public key must be in the trust file;
-- ``HYPERLOOM_BUILD_SOURCES``: the upstream checkouts, ``<dir>/<component>/<upstream_ref>``;
+- ``HYPERLOOM_BUILD_SOURCES``: the upstream checkouts, ``<dir>/<component>/<upstream_ref>`` (``<dir>/sgl_kernel/<ref>``
+  is the SGLang repository, ``<dir>/vllm/<ref>`` vLLM's);
 - ``HYPERLOOM_BUILD_IMAGE_ROOT``: the image's directory of installed packages (``site-packages``);
 - ``HYPERLOOM_BUILD_GFX``: the GPU architecture the outputs are built for;
 - ``HYPERLOOM_BUILD_PYTHON`` (``python3`` when unset): the image's interpreter, which runs the compile;
@@ -42,13 +43,12 @@ from hyperloom.measure.jit.native.trust import Signer
 from hyperloom.measure.runner.native.builder import BuildMachine
 from hyperloom.measure.runner.native.isolated import (
     ISOLATION_UID_NETNS,
-    SGL_KERNEL_FACTORY,
     IsolatedBuilds,
     Isolation,
     local_isolation,
 )
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
-from hyperloom.measure.runner.native.recipes import sgl_kernel_recipe
+from hyperloom.measure.runner.native.recipes import RECIPE_FACTORIES, native_recipes
 from hyperloom_multibranch.toolbox.store_builds import BuildSite, StoreBuildDriver
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
@@ -146,13 +146,12 @@ def native_builds(
         _required(environ, BUILD_GFX_ENV),
         environ.get(BUILD_PYTHON_ENV, "").strip() or _DEFAULT_PYTHON,
     )
-    recipe = sgl_kernel_recipe()
-    recipes = {recipe.component: recipe}
+    recipes = native_recipes()
     site = NativeSite(
         machine, recipes, Path(_required(environ, BUILD_SOURCES_ENV)), Path(_required(environ, BUILD_IMAGE_ROOT_ENV))
     )
     planner, isolated = NativePlanner(site, blobs), isolation()
-    runner = IsolatedBuilds(planner, blobs, isolated, {recipe.component: SGL_KERNEL_FACTORY})
+    runner = IsolatedBuilds(planner, blobs, isolated, RECIPE_FACTORIES)
     _log_isolation(isolated)
     build_site = BuildSite(machine.image_digest, machine.builder_image_digest, machine.gfx_arch, recipes)
     driver = StoreBuildDriver(store, signer, build_site, compiled_needs, runner)
