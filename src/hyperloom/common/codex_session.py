@@ -79,8 +79,6 @@ class CodexHomeCleanupError(CodexSessionError):
     """Raised when a private CODEX_HOME cannot be removed within the bound."""
 
     def __init__(self, path: Path, status: str) -> None:
-        self.path = path
-        self.status = status
         super().__init__(f"CODEX_HOME cleanup failed for {path}: {status}")
 
 
@@ -90,7 +88,6 @@ class CodexSessionResult:
 
     text: str = ""
     usage: dict[str, int] = field(default_factory=dict)
-    thread_id: str = ""
     error: str = ""
 
 
@@ -473,19 +470,12 @@ def normalize_codex_usage(usage: Any) -> dict[str, int]:
     if not isinstance(breakdown, dict):
         return {}
     cached = _usage_int(breakdown, "cached_input_tokens")
-    normalized = {
+    return {
         "input_tokens": uncached_input_tokens(_usage_int(breakdown, "input_tokens"), cached),
         "output_tokens": _usage_int(breakdown, "output_tokens"),
         "cache_read_input_tokens": cached,
         "reasoning_output_tokens": _usage_int(breakdown, "reasoning_output_tokens"),
     }
-    window_source = usage if isinstance(usage, dict) else getattr(usage, "__dict__", {}) or {}
-    if hasattr(usage, "model_dump"):
-        window_source = usage.model_dump()
-    window = _usage_int(window_source, "model_context_window")
-    if window > 0:
-        normalized["model_context_window"] = window
-    return normalized
 
 
 def _turn_error_message(result: Any) -> str:
@@ -496,26 +486,22 @@ def _turn_error_message(result: Any) -> str:
     return str(getattr(error, "message", None) or error)
 
 
-def normalize_codex_result(result: Any, thread_id: str) -> CodexSessionResult:
+def normalize_codex_result(result: Any) -> CodexSessionResult:
     """Normalize one completed SDK turn into a :class:`CodexSessionResult`."""
     return CodexSessionResult(
         text=str(getattr(result, "final_response", "") or "").strip(),
         usage=normalize_codex_usage(getattr(result, "usage", None)),
-        thread_id=thread_id,
         error=_turn_error_message(result),
     )
 
 
 @dataclass(frozen=True)
 class CodexSessionConfig:
-    """The runtime one Codex session runs in: workspace, model, sandbox, binary and environment."""
+    """The runtime one Codex session runs in: workspace, model and the roots it may write."""
 
     cwd: Path
     model: str
     writable_roots: Sequence[Path] = ()
-    sandbox_mode: str = ""
-    codex_bin: str = ""
-    env: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cwd", Path(self.cwd))
@@ -554,7 +540,6 @@ class CodexSession:
         self._sandbox: Any = None
         self._client: Any = None
         self._thread: Any = None
-        self._thread_id: str = ""
 
     async def __aenter__(self) -> "CodexSession":
         """Start the session and return it."""
@@ -569,7 +554,7 @@ class CodexSession:
         """Resolve policy and credentials, then open the SDK client."""
         if self._stack is not None:
             return
-        effective_env = _effective_env(self.config.env)
+        effective_env = _effective_env()
         # Tag before provider resolution so the header is mapped into ``env_http_headers`` with the gateway's own.
         if self.component:
             inject_attribution_env(
@@ -577,10 +562,7 @@ class CodexSession:
                 component=self.component,
                 operation=self.operation,
             )
-        resolved_sandbox_mode = _resolve_codex_sandbox_mode(
-            sandbox_mode=self.config.sandbox_mode,
-            source=effective_env,
-        )
+        resolved_sandbox_mode = _resolve_codex_sandbox_mode(sandbox_mode="", source=effective_env)
         if resolved_sandbox_mode != "bypass" and not _probe_codex_sandbox_capability(source=effective_env):
             raise CodexSessionUnavailableError(
                 f"Codex sandbox mode {resolved_sandbox_mode!r} requires a working bubblewrap sandbox, "
@@ -614,7 +596,6 @@ class CodexSession:
             child_env.update(provider_config.env_additions)
             child_env["CODEX_HOME"] = str(codex_home)
             config = sdk.CodexConfig(
-                codex_bin=self.config.codex_bin or None,
                 config_overrides=config_overrides,
                 cwd=str(self.config.cwd),
                 env=child_env,
@@ -636,7 +617,6 @@ class CodexSession:
     def reset_thread(self) -> None:
         """Drop the open conversation; the next turn opens a fresh thread."""
         self._thread = None
-        self._thread_id = ""
 
     async def aclose(self) -> None:
         """Close the SDK client and remove the private state directory."""
@@ -661,7 +641,6 @@ class CodexSession:
                 model_provider=CODEX_PROVIDER_NAME,
                 sandbox=self._sandbox,
             )
-            self._thread_id = str(getattr(self._thread, "id", "") or "")
         return self._thread
 
     async def turn(self, request: CodexTurnRequest) -> CodexSessionResult:
@@ -701,7 +680,7 @@ class CodexSession:
                 turn_task.cancel()
                 # Let the cancellation settle.
                 await asyncio.gather(turn_task, return_exceptions=True)
-        return normalize_codex_result(sdk_result, self._thread_id)
+        return normalize_codex_result(sdk_result)
 
 
 async def run_codex_turn(
