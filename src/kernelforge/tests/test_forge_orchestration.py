@@ -15,6 +15,7 @@ import pytest
 from kernelforge.tools.process_reaping import ReapReport
 
 from kernelforge.orchestrator import orchestration as orchestration_module
+from kernelforge.orchestrator.lane_prompts import lane_last_prompt
 from kernelforge.agent_backends import (
     AgentCapabilities,
     AgentProviderUnavailableError,
@@ -2963,3 +2964,84 @@ async def test_diversify_partial_coverage_still_produces_plan() -> None:
     assert coverage["missing_cases"] == ["case-b"]
     assert result.optimization_plan_executable is True
     assert len(orchestration_backend.specs) == 2
+
+
+# ── lanes sharing the round's cached prefix ───────────────────────────────────
+
+
+class _PrefixCachingBackend:
+    """Reports each session's response start, and records when every session started and ended."""
+
+    capabilities = AgentCapabilities(shared_prompt_cache=True)
+
+    def __init__(self, replies: list[str], *, lead_answers: bool = True) -> None:
+        self.replies = list(replies)
+        self.lead_answers = lead_answers
+        self.specs: list = []
+        self.events: list[tuple[str, str]] = []
+
+    async def run(self, spec, usage=None) -> AgentRunResult:
+        self.specs.append(spec)
+        reply = self.replies[len(self.specs) - 1]
+        self.events.append(("start", spec.role))
+        await asyncio.sleep(0)
+        if spec.on_response_started is not None:
+            if not self.lead_answers:
+                raise RuntimeError("the lead lane ended before it answered")
+            self.events.append(("response", spec.role))
+            spec.on_response_started()
+        await asyncio.sleep(0.01)
+        self.events.append(("end", spec.role))
+        return AgentRunResult(text=reply, end_reason="agent_stopped")
+
+
+def test_the_lane_block_comes_last_and_everything_before_it_is_shared() -> None:
+    payload = {"task": "plan", "context": {"b": 1, "a": 2}, "lane": {"ground": "mine"}, "specialist_analyses": ["x"]}
+
+    prompt, shared = lane_last_prompt(payload)
+
+    assert list(json.loads(prompt)) == ["context", "specialist_analyses", "task", "lane"]
+    assert json.loads(prompt) == payload
+    assert prompt.startswith(shared)
+    assert "mine" not in shared and "specialist_analyses" in shared
+
+
+@pytest.mark.asyncio
+async def test_sibling_lanes_start_once_the_first_lane_is_answering() -> None:
+    """Started together, every lane writes the round's prefix; started after the first answers, they read it."""
+    backend = _PrefixCachingBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    specialists = await _compute_and_memory_round()
+
+    results = await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
+
+    assert [result.text for result in results] == ["# Lane A", "# Lane B"]
+    lead, sibling = "orchestration lane 1 synthesis", "orchestration lane 2 synthesis"
+    events = backend.events
+    assert events.index(("response", lead)) < events.index(("start", sibling)) < events.index(("end", lead))
+    lanes = backend.specs[1:]
+    assert lanes[0].shared_prompt_prefix == lanes[1].shared_prompt_prefix
+    assert all(spec.user_prompt.startswith(spec.shared_prompt_prefix) for spec in lanes)
+    assert lanes[1].on_response_started is None
+
+
+@pytest.mark.asyncio
+async def test_siblings_still_run_when_the_first_lane_never_answers() -> None:
+    backend = _PrefixCachingBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"], lead_answers=False)
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    specialists = await _compute_and_memory_round()
+
+    results = await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
+
+    assert [result.text for result in results] == ["# Lane B"]
+
+
+@pytest.mark.asyncio
+async def test_a_backend_without_a_shared_prompt_cache_starts_every_lane_at_once() -> None:
+    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    specialists = await _compute_and_memory_round()
+
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
+
+    assert all(spec.on_response_started is None for spec in backend.specs)

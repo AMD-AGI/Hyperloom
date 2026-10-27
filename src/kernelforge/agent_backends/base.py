@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -89,6 +89,9 @@ class AgentCapabilities:
     requires_workspace_cwd: bool = False
     # Whether the provider applies ``AgentRunSpec.env`` over the environment it spawns the session with.
     session_env: bool = False
+    # Whether ``AgentRunSpec.shared_prompt_prefix`` becomes a cache entry of its own that a later session sending the
+    # same prefix reads, and whether the provider reports ``on_response_started``.
+    shared_prompt_cache: bool = False
 
 
 @dataclass(frozen=True)
@@ -267,6 +270,13 @@ class AgentRunSpec:
     # cached prefix every earlier turn was billed against; ``tool_policy`` alone still decides what it may run.
     # Appended for the same reason as the fields above.
     declared_tool_policy: AgentToolPolicy | None = None
+    # A leading part of ``user_prompt`` that sibling sessions send verbatim. ``user_prompt`` stays the whole prompt;
+    # a provider with ``shared_prompt_cache`` caches this part on its own, so a sibling started after the first reads
+    # it instead of writing it again. Appended for the same reason as the fields above.
+    shared_prompt_prefix: str = ""
+    # Called once, when the model starts answering this session's first request: from then on a prefix that request
+    # wrote can be read by another session. A provider without ``shared_prompt_cache`` never calls it.
+    on_response_started: Callable[[], None] | None = None
 
     def resolved(self, runtime: AgentRuntimeConfig) -> AgentRunSpec:
         """Settle this session's model, effort and environment.

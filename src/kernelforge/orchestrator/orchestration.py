@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Iterator, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -44,6 +44,7 @@ from kernelforge.orchestrator.contracts import (
     SpecialistRound,
 )
 from kernelforge.orchestrator.critic_fallback import render_critic_fallback
+from kernelforge.orchestrator.lane_prompts import lane_prompts, run_lanes_after_the_first_starts
 from kernelforge.orchestrator.specialists import (
     SpecialistAgent,
     SpecialistPool,
@@ -166,6 +167,8 @@ class _Turn:
     timeout_sec: int | None = None
     tools: bool = True
     max_reasoning_effort: str = ""
+    shared_prompt_prefix: str = ""
+    on_response_started: Callable[[], None] | None = None
 
 
 _DISPATCH_SYSTEM_PROMPT = """\
@@ -502,41 +505,18 @@ class OrchestrationAgent:
             with _phase_timer(self.phase_durations_sec, "synthesis"):
                 return [await self._synthesize_optimization_plan_result(context, specialists, usage=usage)]
         width = len(grounds)
+        prompts = lane_prompts(context, specialists, grounds)
 
-        async def _lane(index: int) -> SynthesizedPlan | None:
-            payload = {
-                "task": (
-                    "Produce the optimization plan this lane's Implementer "
-                    "should execute on the ground this lane owns. Judge the "
-                    "analyses rather than copying them, and choose a clear "
-                    "implementation sequence."
-                ),
-                "context": context.to_prompt_dict(),
-                "dispatch_plan": specialists.dispatch_plan.to_dict(),
-                "specialist_coverage": dict(specialists.coverage),
-                "lane": {
-                    "ground": grounds[index].ground,
-                    "joint": grounds[index].joint,
-                    "fallback": grounds[index].fallback,
-                    "ground_owned_by_other_lanes": [
-                        other.ground for position, other in enumerate(grounds) if position != index
-                    ],
-                },
-                "specialist_analyses": [
-                    {
-                        "assignment_id": outcome.assignment_id,
-                        "role_id": outcome.role_id,
-                        "analysis": outcome.content,
-                    }
-                    for outcome in analyses
-                ],
-            }
+        async def _lane(index: int, on_response_started: Callable[[], None] | None = None) -> SynthesizedPlan | None:
+            prompt, shared = prompts[index]
             result = await self._run_result(
                 context,
                 _Turn(
                     LANE_SYNTHESIS_SYSTEM_PROMPT,
-                    json.dumps(payload, indent=2, sort_keys=True),
+                    prompt,
                     role=f"orchestration lane {index + 1} synthesis",
+                    shared_prompt_prefix=shared,
+                    on_response_started=on_response_started,
                 ),
                 usage=usage,
             )
@@ -557,9 +537,9 @@ class OrchestrationAgent:
 
         # Each lane is an independent call, so one that fails is one lane lost and not the round.
         with _phase_timer(self.phase_durations_sec, "synthesis"):
-            answers = await asyncio.gather(
-                *(_lane(index) for index in range(width)),
-                return_exceptions=True,
+            capabilities = getattr(self.backend, "capabilities", None)
+            answers = await run_lanes_after_the_first_starts(
+                _lane, width, shared_prompt_cache=getattr(capabilities, "shared_prompt_cache", False)
             )
         plans: list[SynthesizedPlan] = []
         for index, answer in enumerate(answers):
@@ -1032,6 +1012,8 @@ class OrchestrationAgent:
             ),
             protected_path_rules=FORGE_PROTECTED_PATHS,
             protected_globs=["*"],
+            shared_prompt_prefix=turn.shared_prompt_prefix,
+            on_response_started=turn.on_response_started,
         )
 
     def _backend_supports_resume(self) -> bool:

@@ -561,3 +561,72 @@ def test_a_session_that_stays_in_its_target_reports_what_it_changed(tmp_path):
 
 def test_the_backend_declares_the_guard_it_now_runs():
     assert ClaudeBackend.capabilities.workspace_guard is True
+
+
+# ── a prefix shared with sibling sessions ─────────────────────────────────────
+
+
+async def _first_message(prompt) -> dict:
+    return [message async for message in prompt][0]
+
+
+def test_a_shared_prefix_is_sent_as_its_own_cached_block():
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="s")], captured)
+    spec = _spec(user_prompt='{\n  "shared": 1,\n  "lane": 2\n}', shared_prompt_prefix='{\n  "shared": 1,')
+
+    asyncio.run(backend.run(spec))
+
+    message = asyncio.run(_first_message(captured["prompt"]))
+    blocks = message["message"]["content"]
+    assert blocks[0] == {"type": "text", "text": '{\n  "shared": 1,', "cache_control": {"type": "ephemeral"}}
+    assert blocks[1] == {"type": "text", "text": '\n  "lane": 2\n}'}
+    assert "".join(block["text"] for block in blocks) == spec.user_prompt
+
+
+def test_a_shared_prefix_must_lead_the_prompt():
+    backend = _backend([_result_message(session_id="s")], {})
+
+    with pytest.raises(ClaudeBackendError, match="leading part"):
+        asyncio.run(backend.run(_spec(user_prompt="the whole prompt", shared_prompt_prefix="not its start")))
+
+
+def test_a_resumed_session_sends_its_feedback_as_plain_text():
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="s")], captured)
+    spec = _spec(user_prompt="shared tail", shared_prompt_prefix="shared")
+
+    asyncio.run(backend.resume(spec, "s", "revise it"))
+
+    assert captured["prompt"] == "revise it"
+
+
+class StreamEvent(SimpleNamespace):
+    """Named like the SDK's partial-message event, which the backend recognises by class name."""
+
+
+def test_the_response_start_is_reported_once_from_partial_events():
+    captured: dict = {}
+    calls: list[str] = []
+    backend = _backend(
+        [
+            StreamEvent(event={"type": "message_start"}),
+            StreamEvent(event={"type": "content_block_delta"}),
+            _result_message("s"),
+        ],
+        captured,
+    )
+
+    asyncio.run(backend.run(_spec(on_response_started=lambda: calls.append("started"))))
+
+    assert calls == ["started"]
+    assert captured["options"].kwargs["include_partial_messages"] is True
+
+
+def test_partial_events_are_off_without_a_response_start_listener():
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="s")], captured)
+
+    asyncio.run(backend.run(_spec()))
+
+    assert "include_partial_messages" not in captured["options"].kwargs

@@ -253,7 +253,7 @@ def _record_progress(sink: list[str] | None, message: Any) -> None:
         return
     try:
         for block in getattr(message, "content", None) or ():
-            if hasattr(block, "text"):
+            if hasattr(block, _TEXT):
                 text = " ".join(str(block.text).split())
                 if text:
                     sink.append(f"say: {text[:_PROGRESS_TEXT_CHARS]}")
@@ -295,6 +295,8 @@ def _prepare_claude_environment() -> None:
 # traffic includes a session-title request that resends the first prompt, uncached, at the session model's price; no
 # Forge session reads that title.
 _SESSION_ENV_DEFAULTS = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+# The content-block type of plain text, and the attribute an SDK text block carries it in.
+_TEXT = "text"
 
 
 def _builtin_tools(names: list[str]) -> list[str]:
@@ -305,6 +307,57 @@ def _builtin_tools(names: list[str]) -> list[str]:
     server declaration -- must not be forwarded here.
     """
     return [name for name in dict.fromkeys(names) if not name.startswith("mcp__")]
+
+
+def _shared_prefix_prompt(spec: AgentRunSpec):
+    """The first user message as two text blocks, the shared prefix closed by a cache breakpoint of its own.
+
+    The CLI caches a prompt at the end of the system prompt and of the last message only, so a prefix several
+    sessions share inside one text block is written again by every one of them.
+    """
+    prefix = spec.shared_prompt_prefix
+    if not spec.user_prompt.startswith(prefix):
+        raise ClaudeBackendError("shared_prompt_prefix must be a leading part of user_prompt")
+    parts = [prefix, spec.user_prompt[len(prefix) :]]
+    blocks: list[dict[str, Any]] = [{"type": _TEXT, _TEXT: part} for part in parts if part]
+    blocks[0]["cache_control"] = {"type": "ephemeral"}
+    message = {
+        "type": "user",
+        "message": {"role": "user", "content": blocks},
+        "parent_tool_use_id": None,
+        "session_id": "default",
+    }
+
+    async def single_message():
+        yield message
+
+    return single_message()
+
+
+def _first_prompt(spec: AgentRunSpec):
+    """What a fresh session sends first: the user prompt, split around its shared prefix when it has one."""
+    return _shared_prefix_prompt(spec) if spec.shared_prompt_prefix else spec.user_prompt
+
+
+def _with_response_start(stream, callback):
+    """``stream``, calling ``callback`` once at the first sign the model is answering: a partial event, or failing
+    that a whole message."""
+    if callback is None:
+        return stream
+
+    async def reporting():
+        pending = callback
+        try:
+            async for message in stream:
+                if pending is not None and message.__class__.__name__ in ("StreamEvent", "AssistantMessage"):
+                    pending, notify = None, pending
+                    notify()
+                yield message
+        finally:
+            # Closing this wrapper must still tear down the CLI behind the SDK stream.
+            await stream.aclose()
+
+    return reporting()
 
 
 class _StreamTranscript:
@@ -332,7 +385,7 @@ class _StreamTranscript:
         if not hasattr(message, "content"):
             return
         for block in message.content:
-            if hasattr(block, "text"):
+            if hasattr(block, _TEXT):
                 self.text_parts.append(block.text)
             elif block.__class__.__name__ == "ToolUseBlock":
                 self.tool_calls.append((getattr(block, "name", "?"), getattr(block, "input", {}) or {}))
@@ -386,6 +439,7 @@ class ClaudeBackend:
         probe=True,
         session_env=True,
         workspace_guard=True,
+        shared_prompt_cache=True,
     )
 
     def __init__(
@@ -604,6 +658,9 @@ class ClaudeBackend:
             self._apply_subagents(options, spec.subagents)
         if spec.mcp_servers:
             self._apply_mcp_servers(options, spec.mcp_servers)
+        if spec.on_response_started is not None:
+            # Partial events report the response starting; whole messages only arrive as each block completes.
+            options["include_partial_messages"] = True
         options.update(self.runtime.options)
         options.update(spec.provider_options)
         if spec.env:
@@ -632,7 +689,7 @@ class ClaudeBackend:
     async def run(self, spec: AgentRunSpec, usage: Any = None) -> AgentRunResult:
         """Run one Claude SDK query and normalize its streamed messages."""
         spec = spec.resolved(self.runtime)
-        return await self._query_once(spec, spec.user_prompt, usage=usage)
+        return await self._query_once(spec, _first_prompt(spec), usage=usage)
 
     async def resume(
         self,
@@ -691,7 +748,7 @@ class ClaudeBackend:
         rollback_on_exit = False
         # What the reap could not clear out of the workspace.
         contention = ""
-        agen = self._query(prompt=prompt, options=options)
+        agen = _with_response_start(self._query(prompt=prompt, options=options), spec.on_response_started)
         # ``asyncio.timeout(None)`` applies no bound, so a spec without a budget keeps the previous unbounded
         # behaviour; ``expired()`` tells our own deadline apart from a bare TimeoutError surfacing from the transport.
         deadline = _session_deadline(spec.timeout_sec)
