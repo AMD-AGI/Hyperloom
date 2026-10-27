@@ -63,6 +63,10 @@ FOREIGN_PROCESS_ON_CARD = "foreign_process_on_card"
 DISK_FULL = "disk_full"
 _DISK_FULL_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT})
 
+#: The runner process exited without writing ``status.json`` (it died importing, say): the host stops waiting at once
+#: instead of polling until the test's timeout. Retried like any infrastructure failure.
+RUNNER_EXITED = "runner_exited"
+
 #: ``error_class`` values a runner, the hosted backend or the platform reports that are not about the candidate.
 INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
     {
@@ -81,6 +85,7 @@ INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
         "archive_failed",
         # The test went silent before its server was ready (``boot_watch``): a hang a new sandbox does not repeat.
         HUNG_BEFORE_READY,
+        RUNNER_EXITED,
     }
 )
 #: ``error_class`` values that mean the framework or the result is wrong, not the measurement or the candidate.

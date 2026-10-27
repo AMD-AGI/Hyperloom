@@ -93,6 +93,8 @@ class LocalSandbox:
         self._lock = threading.RLock()
         self._ended = False
         self._procs: list[subprocess.Popen[bytes]] = []
+        self._startup: tuple[subprocess.Popen[bytes], StatusPipe] | None = None
+        self._startup_exit: int | None = None
         self._timer: threading.Timer | None = None
         self._bg_count = 0
         self.set_timeout(plan.timeout_sec)
@@ -163,6 +165,8 @@ class LocalSandbox:
             self._ended = True
             if self._timer is not None:
                 self._timer.cancel()
+            if self._startup is not None:
+                self._startup[1].close()
             reaped = reap_sandbox_processes(self._procs, self.sandbox_id)
             shutil.rmtree(self.directory, ignore_errors=True)
             self._on_end(self, reaped)
@@ -311,11 +315,23 @@ class LocalSandbox:
             raise FileNotFoundError(f"startup command {self.template.command[0]!r} not found or not executable")
         log_file = (self.private / "runner.log").open("ab")
         try:
-            self.spawn(
+            self._startup = self.spawn_watched(
                 list(self.template.command), env={}, cwd=self.fs / WORK_DIR, stdout=log_file, stderr=subprocess.STDOUT
             )
         finally:
             log_file.close()
+
+    def startup_exit_code(self) -> int | None:
+        """The exit code of the template's startup command once it has exited; ``None`` while it runs, when the template
+        has none, or when its launcher died without reporting one."""
+        with self._lock:
+            if self._startup is not None and self._startup_exit is None and not self._ended:
+                proc, status = self._startup
+                try:
+                    self._startup_exit = status.wait_exit(proc, 0)
+                except TimeoutError:
+                    pass
+            return self._startup_exit
 
     def _check_run_args(self, envs: Mapping[str, str] | None) -> dict[str, str]:
         self._require_alive()

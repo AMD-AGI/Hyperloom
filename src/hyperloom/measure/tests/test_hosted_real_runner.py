@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from hyperloom.measure.hosted_log import STATE_FINISHED
+from hyperloom.measure.local_templates import image_env
 from hyperloom.measure.returncodes import HOSTED_SPEC_REJECTED_RC
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_call, make_rig
 from hyperloom.sandbox.local import LocalTemplate
@@ -81,7 +82,7 @@ def _rigs(tmp_path: Path, command: tuple[str, ...]):
             gpus=1,
             sealed=True,
             signing=True,
-            envs={"INFERENCEX_REPO": str(repo), **(envs or {})},
+            envs={**image_env(), "INFERENCEX_REPO": str(repo), **(envs or {})},
         )
         r = make_rig(
             tmp_path,

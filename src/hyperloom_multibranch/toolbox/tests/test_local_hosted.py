@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -28,6 +29,7 @@ from hyperloom.measure.tests.framework_fixtures import make_framework
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.rule_pack_fixtures import identity_of, other_pack, reading_pack  # noqa: F401
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
+from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
@@ -35,6 +37,7 @@ from hyperloom_multibranch.toolbox.local_hosted import (
     LocalHostedToolbox,
     LocalOptions,
     LocalSession,
+    _runner_template,
     build_local_toolbox,
     max_parallel_tests,
 )
@@ -52,6 +55,39 @@ def test_at_most_eight_over_tp_tests_run_at_once(cards: int, tp: int, expected: 
 def test_a_test_that_needs_more_cards_than_the_pool_is_refused() -> None:
     with pytest.raises(ValueError, match="cannot run a test of TP=4"):
         max_parallel_tests(2, 4)
+
+
+def test_runner_envs_add_to_the_image_variables_rather_than_replace_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the image's ``ROCM_PATH`` and ``LD_LIBRARY_PATH`` the runner dies importing torch on an image whose ROCm
+    libraries are not in the loader's path; a runner given ``runner_envs`` keeps them, and the process sees them."""
+    monkeypatch.setenv("ROCM_PATH", "/opt/rocm")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/opt/rocm/lib")
+    options = LocalOptions(runner_envs={"INFERENCEX_REPO": "/repo", "ROCM_PATH": "/opt/rocm-own"})
+    template = _runner_template(LocalSession(tmp_path, "run-1", [0]), options)
+    assert template.envs["LD_LIBRARY_PATH"] == "/opt/rocm/lib"
+    assert template.envs["INFERENCEX_REPO"] == "/repo"
+    assert template.envs["ROCM_PATH"] == "/opt/rocm-own", "runner_envs win over the image's value"
+    probe = ("/bin/sh", "-c", 'printf "%s|%s" "$ROCM_PATH" "$LD_LIBRARY_PATH" > "$HYPERLOOM_SANDBOX_ROOT/out/env"')
+    provider = LocalSandboxProvider([replace(template, command=probe)], gpus=(0,), base_dir=tmp_path / "sandboxes")
+    sandbox = provider.create(template.name, role="measurement", timeout_sec=60, metadata={})
+    try:
+        seen = _wait_for_file(sandbox, "/out/env")
+    finally:
+        sandbox.kill()
+    assert seen == b"/opt/rocm-own|/opt/rocm/lib"
+
+
+def _wait_for_file(sandbox: Any, path: str, limit_sec: float = 30) -> bytes:
+    end = time.monotonic() + limit_sec
+    while True:
+        try:
+            return sandbox.read_file(path)
+        except FileNotFoundError:
+            if time.monotonic() > end:
+                raise
+            time.sleep(0.05)
 
 
 def _write(path: Path, text: str, written: float) -> None:

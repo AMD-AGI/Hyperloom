@@ -42,7 +42,7 @@ from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.live_log import last_output
 from hyperloom.measure.local import SUPPORTED_KINDS
 from hyperloom.measure.framework.base import DEFAULT_CONFIGS, framework_envs
-from hyperloom.measure.local_templates import local_runner_template
+from hyperloom.measure.local_templates import image_env, local_runner_template
 from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
@@ -231,8 +231,8 @@ class LocalOptions:
     """What :func:`build_local_toolbox` may be told besides the session, the notebook, acceptance and the spec.
 
     ``policy`` is the quota and priority policy; its ``global_concurrency`` is lowered to ``8 // tp`` when higher.
-    ``runner_envs`` is the environment the runner template carries (for example ``INFERENCEX_REPO``). ``archive`` is
-    the result archive, a directory archive below ``session_dir`` when omitted. ``python`` is the interpreter the
+    ``runner_envs`` add to the image's variables the runner template carries (for example ``INFERENCEX_REPO``).
+    ``archive`` is the result archive, a directory archive below ``session_dir`` when omitted. ``python`` is the interpreter the
     runner and the measurement run with. ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the
     infrastructure retries per test before it ends as ``measurement_failed`` and ``poll_interval_sec`` how often the
     backend polls a runner for its result. ``tools`` are the asynchronous tools ``start_analysis`` may reach; ``None``
@@ -300,10 +300,11 @@ def jit_store_root(options: LocalOptions, environ: Mapping[str, str] | None = No
 
 
 def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTemplate:
-    """The runner template: ``runner_envs`` plus the variable that names the session's rule pack."""
-    template = local_runner_template(
-        f"runner-{session.tp}", gpus=session.tp, python=options.python, envs=options.runner_envs
-    )
+    """The runner template: the image's variables, ``runner_envs`` over them, and the variable that names the session's
+    rule pack. ``runner_envs`` add to the image's variables, never replace them: without ``ROCM_PATH`` and
+    ``LD_LIBRARY_PATH`` the runner cannot import torch on an image whose ROCm libraries are not in the loader's path."""
+    envs = {**image_env(), **(options.runner_envs or {})}
+    template = local_runner_template(f"runner-{session.tp}", gpus=session.tp, python=options.python, envs=envs)
     pack = rule_pack_envs(Path(session.session_dir) / _RULE_PACK)
     return replace(template, envs={**template.envs, **pack})
 

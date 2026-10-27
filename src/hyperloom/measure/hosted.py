@@ -26,7 +26,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from hyperloom.common.env import env_bool
 from hyperloom.contracts.measurement import AccuracyValue, FailureClass, SandboxFacts
@@ -40,7 +40,7 @@ from hyperloom.measure.bundle import (
     ResultRejected,
     VerifiedBundle,
 )
-from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure
+from hyperloom.measure.failures import RUNNER_EXITED, Disposition, FailureClassification, classify_test_failure
 from hyperloom.measure.hosted_live import LiveOutputs, finite_number
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, MeasurementJournal, Record
 from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
@@ -515,7 +515,11 @@ class HostedMeasurementBackend:
         unreachable_since: float | None = None
         silence = PreReadySilence(self._clock(), config.pre_ready_silence_sec)
         while True:
+            exited = None
             try:
+                # Asked before the read: a runner writes status.json before it exits, so one that has exited and left
+                # none never will.
+                exited = _startup_exit(handle)
                 status = _read_status(handle)
                 last_output = self._report_progress(handle, call, last_output, silence)
                 unreachable_since = None
@@ -526,6 +530,12 @@ class HostedMeasurementBackend:
                 status = None
             if status is not None:
                 return status
+            if exited is not None:
+                self._save_logs(handle, Path(call.output_dir))
+                detail = f"the runner exited with code {exited} without writing status.json"
+                return _infra(
+                    call, HOSTED_INFRA_FAILURE_RC, RUNNER_EXITED, detail, facts=_facts_of(attempt.runner, None)
+                )
             if config.should_stop() or attempt.stop.is_set():
                 self._save_logs(handle, Path(call.output_dir))
                 return _refusal(call, STOPPED_RETURNCODE, STOPPED_REASON, "the run is stopping")
@@ -878,6 +888,18 @@ def _handle(runner: RunnerSandbox) -> Sandbox:
     if runner.handle is None:
         raise SandboxGone(f"sandbox {runner.sandbox_id} has no handle")
     return runner.handle
+
+
+@runtime_checkable
+class _WatchesStartup(Protocol):
+    """A sandbox that can tell when its template's startup command, the runner, has exited (the local one can)."""
+
+    def startup_exit_code(self) -> int | None: ...
+
+
+def _startup_exit(handle: Sandbox) -> int | None:
+    """The runner's exit code once it has exited, where the sandbox can tell; else ``None``."""
+    return handle.startup_exit_code() if isinstance(handle, _WatchesStartup) else None
 
 
 def _read_status(handle: Sandbox) -> dict[str, Any] | None:
