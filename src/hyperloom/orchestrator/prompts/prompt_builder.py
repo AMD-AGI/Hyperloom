@@ -221,9 +221,11 @@ def _section_session_context(session: SessionContext) -> list[str]:
         ]
     lines += [
         "",
-        "The Coordinator supplies the session context (resource pools, KB hints,",
-        "advisories) first, then the per-tick blocks (Phase, Mission progress,",
-        "Time budget, Tick, Shared session state, inbox tail) every tick.",
+        "The Coordinator supplies the session context (resource pools,",
+        "constraints, advisories) first, then the per-tick blocks (Phase,",
+        "Mission progress, Time budget, Tick, Shared session state, recent",
+        "policy denials, Untested proposals, KB hints, Plateau advisory,",
+        "inbox tail) every tick.",
         "The Time-budget block carries `remaining=X.Xmin`.",
         "See PHASE CONTRACT below for the phase chain, per-phase allowed",
         "actions, and phase-transition rules.",

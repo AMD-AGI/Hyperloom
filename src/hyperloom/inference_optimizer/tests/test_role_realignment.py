@@ -377,6 +377,53 @@ async def test_compose_prompt_keeps_the_session_ledger_out_of_the_context(coordi
 
 
 @pytest.mark.asyncio
+async def test_compose_prompt_keeps_the_denial_and_proposal_blocks_out_of_the_context(coordinator_with_mocks):
+    """A denial lands and a proposal is benched between two ticks; the cached prefix has to survive both."""
+    from hyperloom.orchestrator.actions.executors._proposal_identity import controls_of, normalize_proposal
+    from hyperloom.orchestrator.phases.machine_state import PHASE_FRAMEWORK_AGENT
+
+    c = coordinator_with_mocks
+    tried = {"name": "proposal-alpha", "extra_args": "--enable-fused-rmsnorm"}
+    waiting = {"name": "proposal-beta", "extra_args": "--chunked-prefill-size 8192"}
+    try:
+        c.shared_state.phase = PHASE_FRAMEWORK_AGENT
+        c.shared_state.macro_cycle = 0
+        c.shared_state.specialist_rounds = [
+            {"cycle": 0, "domain": "serving_specialist", "gap_canonical_id": "", "proposal_set": [tried, waiting]}
+        ]
+        first = await c.conversation.compose_prompt("orchestration")
+        assert "=== Untested proposals (current cycle) ===" in first.turn
+        assert tried["name"] in first.turn
+
+        c.shared_state.record_policy_denial(
+            action_name="explore",
+            rule="phase_gate",
+            hint="wait for the bench slot",
+            intent_type="DISPATCH_TASK",
+        )
+        fields = normalize_proposal(tried)
+        tested_row = {
+            "extra_server_args": fields["extra_args"],
+            "extra_envs": fields["extra_envs"],
+            **controls_of(fields),
+        }
+        c.shared_state.explore_search = {"tested": {"explore-1": dict(tested_row, outcome="REVERT")}}
+        c.shared_state.tick = int(c.shared_state.tick or 0) + 1
+        second = await c.conversation.compose_prompt("orchestration")
+
+        assert second.context == first.context
+        assert "=== Recent policy denials" in second.turn
+        assert "=== Recent policy denials" not in second.context
+        assert "=== Untested proposals (current cycle) ===" not in second.context
+        # The benched proposal left the queue; the prefix above it did not move.
+        queue = second.turn.split("=== Untested proposals (current cycle) ===", 1)[1]
+        assert tried["name"] not in queue
+        assert waiting["name"] in queue
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cached", [True, False])
 async def test_reactor_turn_hands_a_caching_backend_the_context_as_its_system_prompt(coordinator_with_mocks, cached):
     c = coordinator_with_mocks

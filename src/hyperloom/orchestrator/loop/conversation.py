@@ -239,8 +239,8 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
 #: A prompt section: the heading it goes under, or ``None`` for a block that carries its own, and what renders it.
 _AdvisoryRow = tuple[str | None, Callable[["ConversationCollaborator"], str]]
 
-#: The orchestration advisories that precede the plateau pair. Row order is the order the model reads the
-#: sections in, so it is content.
+#: The orchestration advisories that hold for the session, so they ride in the cached context. Row order is the
+#: order the model reads the sections in, so it is content; the per-tick blocks follow them, in the turn.
 _ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
     ("=== Warm start (Recipe KB T0) ===", lambda c: c.shared_state.to_warm_start_summary()),
     ("=== Current gaps ===", lambda c: c.shared_state.to_gaps_summary()),
@@ -249,10 +249,6 @@ _ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
     ("=== Specialist proposal scores (advisory) ===", lambda c: c.shared_state.to_proposal_scores_summary()),
     ("=== Priors-match (advisory ordering) ===", lambda c: c._priors_match_advisory_block()),
     ("=== Intervention mix (telemetry) ===", lambda c: c.shared_state.to_intervention_mix_summary()),
-)
-
-#: The orchestration advisories that follow the plateau pair; see :data:`_ADVISORY_BLOCKS`.
-_POST_PLATEAU_ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
     ("=== Bottleneck redirect (advisory) ===", lambda c: c._bottleneck_redirect_advisory_block()),
     ("=== Acceptance threshold (advisory) ===", lambda c: c._acceptance_threshold_advisory_block()),
     ("=== Discarded escalation hint (advisory) ===", lambda c: c._discarded_escalate_hint_advisory_block()),
@@ -534,8 +530,14 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if isinstance(variant, dict)
         }
 
-    async def _orchestration_sections(self) -> list[str]:
-        """The denial summary, proposal queue and advisories only the orchestration agent reads."""
+    def _orchestration_context_sections(self) -> list[str]:
+        """The advisories only the orchestration agent reads, all of them session-stable."""
+        return _advisory_sections(self, _ADVISORY_BLOCKS)
+
+    async def _orchestration_turn_sections(self) -> list[str]:
+        """The denial summary, proposal queue and plateau pair: only the orchestration agent reads them, and each
+        moves with the session, so they are rendered per tick.
+        """
         from ..predictor.prompt import queue_block
         from ..predictor.rows import PROVENANCE
 
@@ -556,7 +558,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
             kb_block = await self._kb_prompt_block(untested_block)
             if kb_block:
                 sections.append(kb_block)
-        sections.extend(_advisory_sections(self, _ADVISORY_BLOCKS))
         plateau_block = self.plateau_advisory_block()
         if plateau_block:
             sections.append("=== Plateau advisory ===")
@@ -575,7 +576,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if trajectory_block:
                 sections.append("=== Trajectory review (advisory) ===")
                 sections.append(trajectory_block)
-        sections.extend(_advisory_sections(self, _POST_PLATEAU_ADVISORY_BLOCKS))
         return sections
 
     async def _render_inbox_sections(self, agent_name: str) -> list[str]:
@@ -653,7 +653,11 @@ class ConversationCollaborator(CoordinatorCollaborator):
         context.append("=== Resource pools ===")
         context.append(resource_pools_summary(self.shared_state))
         if agent_name == "orchestration":
-            context.extend(await self._orchestration_sections())
+            context.extend(self._orchestration_context_sections())
+            # A denial, a proposal leaving the queue or a plateau count lands between
+            # two ticks, so these blocks follow the ledger into the turn: the cached
+            # prefix ends above them and holds for the session.
+            turn.extend(await self._orchestration_turn_sections())
 
         turn.extend(await self._render_inbox_sections(agent_name))
 
