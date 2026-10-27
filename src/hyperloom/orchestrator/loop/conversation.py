@@ -639,10 +639,13 @@ class ConversationCollaborator(CoordinatorCollaborator):
                     )
         turn.append("=== Tick ===")
         turn.append(self.shared_state.to_tick_summary())
+        # The session ledger moves with every action that lands, so it belongs to
+        # the turn: carried in ``context`` it would rewrite the cached prefix the
+        # stable blocks below sit in, on nearly every tick.
+        turn.append("=== Shared session state ===")
+        turn.append(self.shared_state.to_prompt_summary())
+        turn.append(f"target_gap_pct={self._coord.target_gap_pct():.2f}")
 
-        context.append("=== Shared session state ===")
-        context.append(self.shared_state.to_prompt_summary())
-        context.append(f"target_gap_pct={self._coord.target_gap_pct():.2f}")
         # Not wrapped, unlike the advisory blocks below: a latency budget changes
         # what a KEEP means, so losing it silently would have the model route as
         # if the session were unconstrained. Pure string assembly, no I/O.

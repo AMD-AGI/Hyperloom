@@ -356,6 +356,27 @@ async def test_compose_prompt_keeps_per_tick_values_out_of_the_context(coordinat
 
 
 @pytest.mark.asyncio
+async def test_compose_prompt_keeps_the_session_ledger_out_of_the_context(coordinator_with_mocks):
+    """The ledger moves whenever an action lands, so it must not sit in the cached prefix."""
+    c = coordinator_with_mocks
+    try:
+        before = await c.conversation.compose_prompt("orchestration")
+        c.shared_state.crash_count = int(c.shared_state.crash_count or 0) + 1
+        after = await c.conversation.compose_prompt("orchestration")
+
+        assert after.context == before.context
+        assert after.turn != before.turn
+        assert "=== Shared session state ===" not in after.context
+        assert "target_gap_pct=" not in after.context
+        assert "=== Resource pools ===" in after.context
+        # Stable blocks first, then the per-tick ones, ledger just above the inbox tail.
+        assert after.turn.index("=== Tick ===") < after.turn.index("=== Shared session state ===")
+        assert after.turn.index("=== Shared session state ===") < after.turn.index("=== Inbox for orchestration")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cached", [True, False])
 async def test_reactor_turn_hands_a_caching_backend_the_context_as_its_system_prompt(coordinator_with_mocks, cached):
     c = coordinator_with_mocks
@@ -367,7 +388,9 @@ async def test_reactor_turn_hands_a_caching_backend_the_context_as_its_system_pr
         (call,) = backend.calls
 
         assert (composed.context in call["system_prompt"]) is cached
-        assert ("=== Shared session state ===" in call["prompt"]) is not cached
+        # The ledger is a per-tick block, so it rides the prompt and never the cached half.
+        assert "=== Shared session state ===" in call["prompt"]
+        assert "=== Shared session state ===" not in call["system_prompt"]
         assert "=== Phase ===" in call["prompt"]
         assert call["prompt"].endswith("ASK")
     finally:
