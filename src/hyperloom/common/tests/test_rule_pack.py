@@ -63,16 +63,21 @@ _SGLANG_CUDA_GRAPH_DECODE_BS = r"""(?x)
 \s* [:=] \s* \[ (?P<sizes>\d+ (?: \s*,\s* \d+ )* ) \]"""
 
 _SHORT_PROMPT_TOUCH = r"""(?ix) ^ (?:
-    arg \s+ --(?: [a-z-]*attention-backend | kv-cache-dtype | page-size | block-size | chunked-prefill-size
-                 | max-prefill-tokens | max-num-batched-tokens | enable-prefix-caching | disable-radix-cache
-                 | enable-chunked-prefill | num-continuous-decode-steps ) \b
+    arg \s+ --(?: block-size | max-num-batched-tokens | num-continuous-decode-steps ) \b
+  | arg \s+ --(?! mm- ) [a-z0-9-]*? (?<![a-z0-9])
+               (?: atten | attn | f?mha | mla | kv | prefill | radix | prefix-cach | page | hicache
+                 | hierarchical-cache | hisparse | nsa | dsa | kda | swa | sliding-window | rotary | rope )
   | env \s+ \S*? (?: ATTN | ATTENTION | FLASH | MHA | MLA | KV | PREFILL | RADIX ) \S*? =
   | env \s+ (?: SGLANG_USE_AITER | VLLM_ROCM_USE_AITER | VLLM_USE_AITER ) =
   | (?: arg | env ) \s .* vectorized_5d
   | ref \s+ (?: aiter | sglang | vllm | flash-attention | flash_attn | triton ) \b
-  | patch \s+ aiter \b
-  | patch-file \s+ \S+ \s+ \S* (?: attn | attention | mha | mla | prefill | kv | flash | radix | mem_cache )
-  | kernel \s+ (?: fusion | rewrite ) \s+ \S* (?: attn | attention | mha | mla | prefill | kv | flash )
+  | patch-file \s+ \S+ \s+ (?! \S*? vision ) \S*? (?<![a-z0-9])
+               (?: atten | attn | f?mha | mla | flash(?!infer) | kv | prefill | radix[_-]?(?:cache|tree)
+                 | mem_cache | paged | pa(?=[_./-]) | asm_pa | rotary | rope | forward_batch_info | schedule_batch
+                 | model_runner | cuda_graph | cache_kernels | block_pool | models/ )
+  | patch-file \s+ \S+ \s+ (?! \S*? (?: vision | moe | gemm(?!a) ) ) \S*? (?<![a-z0-9]) decode(?!r)
+  | kernel \s+ (?: fusion | rewrite ) \s+ \S*? (?<![a-z0-9])
+               (?: atten | attn | f?mha | mla | flash | kv | prefill | paged | pa(?=[_./-]) | rotary | rope )
   | image \s+ changed
   | unexpressed \s
 )"""

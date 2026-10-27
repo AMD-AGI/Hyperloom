@@ -40,6 +40,7 @@ from hyperloom_multibranch.toolbox.short_prompts import (
     decide,
     record_reference,
     short_prompt_rules,
+    no_patch_files,
     touch_lines,
 )
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
@@ -82,10 +83,6 @@ def _plan(request, candidate: Recipe, parent: Recipe = PARENT, files=_no_files) 
         (_recipe("--max-running-requests 128 --attention-backend triton"), "arg --attention-backend triton"),
         (_recipe("--max-running-requests 128 --kv-cache-dtype fp8_e4m3"), "arg --kv-cache-dtype fp8_e4m3"),
         (_recipe("--max-running-requests 128", envs={"SGLANG_USE_AITER_ATTN": "1"}), "env SGLANG_USE_AITER_ATTN=1"),
-        (
-            _recipe("--max-running-requests 128", components=_aiter(_patch("patch/aiter/0001-fix.patch"))),
-            "patch aiter patch/aiter/0001-fix.patch",
-        ),
         (
             _recipe(
                 "--max-running-requests 128",
@@ -144,10 +141,12 @@ def test_dropping_a_patch_or_a_kernel_the_parent_had_touches_attention_as_much_a
         kernels=(KernelArtifact(KernelKind.REWRITE, "mha_batch_prefill", "kernel/mha.py", "3" * 64),),
     )
 
-    plan = _plan(req(), _recipe("--max-running-requests 128", components=_aiter()), parent)
+    candidate = _recipe("--max-running-requests 128", components=_aiter())
+
+    plan = _plan(req(), candidate, parent, lambda patch: ("aiter/ops/mha.py",))
 
     assert plan is not None
-    assert plan.trigger == ("patch aiter patch/aiter/0001-mha.patch", "kernel rewrite mha_batch_prefill")
+    assert plan.trigger == ("patch-file aiter aiter/ops/mha.py", "kernel rewrite mha_batch_prefill")
 
 
 def test_a_component_moved_to_another_upstream_commit_touches_what_the_pack_names_and_one_it_does_not_name_does_not():
@@ -248,7 +247,7 @@ def test_no_other_test_runs_it_an_integration_test_that_is_not_an_adoption_inclu
 
 
 def test_a_toolbox_given_no_prompt_set_runs_no_check_and_refuses_nothing():
-    assert decide(req(purpose=Purpose.FINAL), PARENT, PARENT, None) is None
+    assert decide(req(purpose=Purpose.FINAL), PARENT, PARENT, None, no_patch_files) is None
 
 
 def test_the_rules_come_from_the_rule_pack():

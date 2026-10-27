@@ -20,11 +20,13 @@ from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.tests._recipes import git_patch, put_patch
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup
-from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, blob_patch_files, decide
+from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, blob_patch_files, decide, no_patch_files
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
 
 SETUP = ShortPromptSetup("short-prompts-test", "a" * 64)
 SGLANG = ("sglang", "https://example.invalid/sglang", "4" * 40)
+VLLM = ("vllm", "https://example.invalid/vllm", "5" * 40)
+AITER = ("aiter", "https://example.invalid/aiter", "6" * 40)
 ATTENTION_FILE = "python/sglang/srt/layers/attention/aiter_backend.py"
 MOE_FILE = "python/sglang/srt/layers/moe/fused_moe_triton/layer.py"
 PARENT = Recipe(base_image_digest=IMAGE, launch=LaunchConfig("--max-running-requests 128", {}))
@@ -42,11 +44,11 @@ def _with_envs(envs: dict[str, str]) -> Recipe:
         ("SGLANG_USE_AITER_ATTN", "1"),
         ("AITER_ENABLE_PREFILL_VSKIP", "1"),
         ("SGLANG_AITER_MLA_PERSIST", "1"),
-        ("LAYOUT", "vectorized_5d"),
+        ("SGLANG_AITER_KV_CACHE_LAYOUT", "vectorized_5d"),
     ],
 )
 def test_an_attention_kv_layout_or_aiter_backend_variable_runs_the_check(name: str, value: str) -> None:
-    plan = decide(req(), PARENT, _with_envs({name: value}), SETUP)
+    plan = decide(req(), PARENT, _with_envs({name: value}), SETUP, no_patch_files)
 
     assert plan is not None and plan.trigger == (f"env {name}={value}",)
 
@@ -63,15 +65,18 @@ def test_an_attention_kv_layout_or_aiter_backend_variable_runs_the_check(name: s
     ],
 )
 def test_aiters_all_reduce_gemm_table_and_moe_sorting_variables_do_not(name: str) -> None:
-    assert decide(req(), PARENT, _with_envs({name: "/configs/tuned.csv"}), SETUP) is None
+    assert decide(req(), PARENT, _with_envs({name: "/configs/tuned.csv"}), SETUP, no_patch_files) is None
 
 
-def _sglang(blobs: LocalBlobStore, tmp_path: Path, path: str) -> tuple[Recipe, Recipe, PatchRef]:
-    """A parent with sglang and no patch, and a candidate with one patch, stored in ``blobs``, that edits ``path``."""
+def _sglang(
+    blobs: LocalBlobStore, tmp_path: Path, path: str, component: tuple[str, str, str] = SGLANG
+) -> tuple[Recipe, Recipe, PatchRef]:
+    """A parent with ``component`` (sglang) and no patch, and a candidate with one patch, stored in ``blobs``, that edits
+    ``path``."""
     data = git_patch(tmp_path / "patch", {path: "x = 1\n"}, {path: "x = 2\n"})
-    patch = PatchRef(f"patch/sglang/{blobs.put(data)}.patch", blobs.put(data))
-    parent = Recipe(base_image_digest=IMAGE, components=(ComponentPatches(*SGLANG),))
-    return parent, Recipe(base_image_digest=IMAGE, components=(ComponentPatches(*SGLANG, (patch,)),)), patch
+    patch = PatchRef(f"patch/{component[0]}/{blobs.put(data)}.patch", blobs.put(data))
+    parent = Recipe(base_image_digest=IMAGE, components=(ComponentPatches(*component),))
+    return parent, Recipe(base_image_digest=IMAGE, components=(ComponentPatches(*component, (patch,)),)), patch
 
 
 def test_an_sglang_patch_runs_the_check_by_an_attention_file_it_changes(tmp_path: Path) -> None:
@@ -87,6 +92,57 @@ def test_an_sglang_patch_runs_the_check_by_an_attention_file_it_changes(tmp_path
 def test_an_sglang_patch_that_changes_no_attention_file_does_not(tmp_path: Path) -> None:
     blobs = LocalBlobStore(tmp_path / "blobs")
     parent, candidate, _ = _sglang(blobs, tmp_path, MOE_FILE)
+
+    assert decide(req(), parent, candidate, SETUP, blob_patch_files(blobs)) is None
+
+
+#: Files whose patch changes what attention, the KV cache or prefill computes: a model's attention forward, the
+#: batch and graph the attention runs in, the KV cache's blocks, aiter's attention kernels.
+_TOUCHING_FILES = [
+    (SGLANG, "python/sglang/srt/models/deepseek_v2.py"),
+    (SGLANG, "python/sglang/srt/models/llama.py"),
+    (SGLANG, "python/sglang/srt/model_executor/forward_batch_info.py"),
+    (SGLANG, "python/sglang/srt/model_executor/model_runner.py"),
+    (SGLANG, "python/sglang/srt/managers/schedule_batch.py"),
+    (SGLANG, "python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py"),
+    (SGLANG, "python/sglang/srt/layers/rotary_embedding/base.py"),
+    (VLLM, "csrc/cache_kernels.cu"),
+    (VLLM, "vllm/v1/core/block_pool.py"),
+    (AITER, "aiter/ops/triton/attention/lean_atten_paged.py"),
+    (AITER, "aiter/ops/triton/attention/pa_decode.py"),
+    (AITER, "csrc/py_itfs_cu/asm_pa.cu"),
+]
+#: Files whose names hold an attention word inside another word (point 1), and aiter's GEMM and MoE (the optional point).
+_OTHER_FILES = [
+    (SGLANG, "python/sglang/srt/function_call/deepseekv3_detector.py"),
+    (VLLM, "vllm/tool_parsers/deepseekv3_tool_parser.py"),
+    (SGLANG, "python/sglang/srt/configs/deepseekvl2.py"),
+    (SGLANG, "python/sglang/srt/speculative/dflash_info.py"),
+    (SGLANG, "python/sglang/kernels/aot/csrc/cpu/qkv_proj.cpp"),
+    (SGLANG, "python/sglang/kernels/ops/moe/moe_route_radix.py"),
+    (AITER, "aiter/ops/gemm_op_a8w8.py"),
+    (AITER, "aiter/fused_moe.py"),
+]
+
+
+@pytest.mark.parametrize(("component", "path"), _TOUCHING_FILES, ids=[path for _, path in _TOUCHING_FILES])
+def test_a_patch_to_a_model_batch_graph_kv_block_or_aiter_attention_file_runs_the_check(
+    tmp_path: Path, component: tuple[str, str, str], path: str
+) -> None:
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    parent, candidate, _ = _sglang(blobs, tmp_path, path, component)
+
+    plan = decide(req(), parent, candidate, SETUP, blob_patch_files(blobs))
+
+    assert plan is not None and plan.trigger == (f"patch-file {component[0]} {path}",)
+
+
+@pytest.mark.parametrize(("component", "path"), _OTHER_FILES, ids=[path for _, path in _OTHER_FILES])
+def test_a_patch_to_a_tool_parser_vision_config_draft_model_gemm_or_moe_file_does_not(
+    tmp_path: Path, component: tuple[str, str, str], path: str
+) -> None:
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    parent, candidate, _ = _sglang(blobs, tmp_path, path, component)
 
     assert decide(req(), parent, candidate, SETUP, blob_patch_files(blobs)) is None
 
@@ -131,7 +187,7 @@ def test_a_patch_whose_files_cannot_be_read_runs_the_check_and_says_why(
     ids=["final", "baseline", "lead-adoption"],
 )
 def test_final_baseline_and_lead_adoption_still_run_it_with_no_change(purpose, fields, trigger) -> None:
-    plan = decide(req(purpose=purpose, **fields), PARENT, PARENT, SETUP)
+    plan = decide(req(purpose=purpose, **fields), PARENT, PARENT, SETUP, no_patch_files)
 
     assert plan is not None and plan.trigger == (trigger,)
 
