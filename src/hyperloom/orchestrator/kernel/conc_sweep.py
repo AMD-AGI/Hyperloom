@@ -1217,10 +1217,7 @@ async def _sweep_arms(run: _SweepRun, grid_source: str) -> None:
         recorder.record_budget(
             SweepBudget(
                 declared_total_sec=total_budget_sec,
-                granted_total_sec=total_budget_sec,
                 rung_cost_sec=run.variant_expected_sec,
-                raised=False,
-                gate_active=total_budget_sec is not None,
                 deadline=run.started_at + total_budget_sec if total_budget_sec is not None else None,
             )
         )

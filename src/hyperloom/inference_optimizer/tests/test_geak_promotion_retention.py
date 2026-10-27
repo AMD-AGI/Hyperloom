@@ -13,7 +13,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_GEAK, make_kernel_recorder
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
+    ROUTE_GEAK,
+    make_kernel_recorder,
+    record_geak_attempts,
+)
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelExit
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -371,7 +375,7 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(
     assert integrated_count(event["ext"]) == 0
     restored = make_kernel_recorder(macro_cycle=0, route=ROUTE_GEAK, resumed=True)
     assert restored is not None
-    restored.record_geak_attempts(journey)
+    record_geak_attempts(event=restored.event_id, journey=journey)
     refreshed = next(event for event in read_timeline_events(coord.session_dir) if event.get("type") == "kernel")
     assert integrated_count(refreshed["ext"]) == 0
     assert settled_e2e(refreshed["ext"])["decision"] == "REVERT"

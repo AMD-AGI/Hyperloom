@@ -139,12 +139,8 @@ def _plan(recorder) -> None:
     recorder.record_budget(
         SweepBudget(
             declared_total_sec=9000,
-            granted_total_sec=21600,
             rung_cost_sec=10800.0,
-            raised=True,
-            gate_active=True,
             deadline=1780000000.0,
-            session_soft_deadline_sec=10800.0,
         )
     )
     recorder.record_environment(
@@ -264,18 +260,18 @@ def test_an_anchor_with_no_throughput_reports_no_per_gpu_number(_bound_session):
     assert anchor["input_throughput_tok_s_per_gpu"] is None
 
 
-def test_the_budget_reports_both_the_number_asked_for_and_the_number_spent(_bound_session):
+def test_the_budget_records_what_was_declared(_bound_session):
     recorder = _recorder()
     _plan(recorder)
     recorder.finish(_final())
 
     budget = _ext(_bound_session)["budget"]
-    assert budget["declared_total_sec"] == 9000
-    assert budget["granted_total_sec"] == 21600
-    assert budget["raised"] is True
-    assert budget["rung_cost_sec"] == 10800.0
-    assert budget["gate_active"] is True
-    assert budget["session_soft_deadline_sec"] == 10800.0
+    assert budget == {
+        "declared_total_sec": 9000,
+        "rung_cost_sec": 10800.0,
+        "gate_active": True,
+        "deadline": 1780000000.0,
+    }
 
 
 def test_the_sweeps_own_task_id_is_recorded_apart_from_the_dispatched_one(_bound_session):

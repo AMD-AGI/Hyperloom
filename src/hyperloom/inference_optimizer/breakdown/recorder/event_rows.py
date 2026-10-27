@@ -12,6 +12,7 @@ from typing import Any
 __all__ = [
     "EVENT_ID_FIELD",
     "SCOPE_FIELDS",
+    "blocking_gate",
     "fold_header",
     "group_rows",
     "rows_for_event",
@@ -97,3 +98,20 @@ def wire_rows(
 ) -> list[dict[str, Any]]:
     """Strip recording-side bookkeeping off every row."""
     return [wire_row(row, drop=drop) for row in rows if isinstance(row, Mapping)]
+
+
+def blocking_gate(gates: Iterable[Mapping[str, Any]]) -> str:
+    """Name the first gate that did not pass, or ``""`` when all of them did.
+
+    A gate that ruled ``None`` blocks only if nothing after it failed outright,
+    so a candidate admitted on an unscored eval and then rejected on the keep
+    threshold reports that threshold.
+    """
+    unresolved = ""
+    for row in gates:
+        passed = row.get("passed")
+        if passed is False:
+            return str(row.get("gate") or "")
+        if passed is None and not unresolved:
+            unresolved = str(row.get("gate") or "")
+    return unresolved

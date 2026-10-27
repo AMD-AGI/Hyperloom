@@ -560,11 +560,8 @@ class GeakRevalidation(CoordinatorCollaborator):
         recorder.record_geak_rebench_attempt(
             GeakRebenchAttempt(
                 attempt_id=str(task.idempotency_key or task.task_id or ""),
-                source_ref=None,
                 idempotency_key=str(task.idempotency_key or ""),
                 task_id=str(task.task_id or ""),
-                dispatched_at=None,
-                settled_at=None,
                 base_tput=params.get("base_tput"),
                 measured_tput=measured,
                 decision=decision,
