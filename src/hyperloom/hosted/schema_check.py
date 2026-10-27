@@ -30,6 +30,11 @@ def _is_type(value: Any, name: str) -> bool:
     return isinstance(value, _TYPES.get(name, ()))
 
 
+def _in_enum(value: Any, choices: list[Any]) -> bool:
+    # Python's True == 1 and False == 0; JSON keeps booleans and numbers apart.
+    return any(value == choice and isinstance(value, bool) == isinstance(choice, bool) for choice in choices)
+
+
 def _bounds(value: Any, schema: Mapping[str, Any], where: str) -> str | None:
     if isinstance(value, str) and len(value) < schema.get("minLength", 0):
         return f"{where} is shorter than {schema['minLength']}"
@@ -63,7 +68,7 @@ def first_problem(value: Any, schema: Mapping[str, Any], where: str = "arguments
         names = [types] if isinstance(types, str) else list(types)
         if not any(_is_type(value, name) for name in names):
             return f"{where} must be of type {' or '.join(names)}"
-    if "enum" in schema and value not in schema["enum"]:
+    if "enum" in schema and not _in_enum(value, schema["enum"]):
         return f"{where} must be one of {schema['enum']}"
     if isinstance(value, dict):
         return _members(value, schema, where)

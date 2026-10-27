@@ -51,3 +51,13 @@ def test_a_fitting_value_has_no_problem() -> None:
 )
 def test_each_violation_is_named(value: dict[str, Any], needle: str) -> None:
     assert needle in (first_problem(value, SCHEMA) or "")
+
+
+@pytest.mark.parametrize(("value", "choices"), [(True, [1]), (False, [0]), (1, [True]), (0, [False])])
+def test_an_enum_keeps_booleans_and_numbers_apart(value: Any, choices: list[Any]) -> None:
+    assert "must be one of" in (first_problem(value, {"enum": choices}) or "")
+
+
+@pytest.mark.parametrize(("value", "choices"), [(1, [1]), (1.0, [1]), (True, [True]), (None, [None])])
+def test_an_enum_still_accepts_its_own_members(value: Any, choices: list[Any]) -> None:
+    assert first_problem(value, {"enum": choices}) is None
