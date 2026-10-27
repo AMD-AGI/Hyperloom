@@ -160,8 +160,8 @@ class Playbook:
             "more judged tests first (probation 1); leave them running.",
             f"- grace: a new branch is no stop candidate until {n.grace_tests} of its explore tests succeeded and "
             "were judged.",
-            f"- open: at most {opened} at once; after the opening batch, none in the last {late} of EXPLORE. The "
-            "scheduler cuts an open past either.",
+            f"- open: at most {opened} at once; after the opening batch, none once less of EXPLORE is left than {late}. "
+            "The scheduler cuts an open past either.",
             f"- an op that failed {n.failed_op_limit} times this session leaves the open areas.",
             *(f"- rule ({rule.governs.value}): {rule.text}" for rule in self.rules),
             "Safety envelope, whatever the playbook says:",

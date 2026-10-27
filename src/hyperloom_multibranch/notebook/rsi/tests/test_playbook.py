@@ -58,7 +58,12 @@ def test_the_numbers_and_rules_set_the_stop_rule_and_the_judges_text() -> None:
     assert f"- rule (stop): {ALIKE.text}" in ruled.render()
     assert ruled.render(challenger=True).startswith("Scheduling playbook ruled, on trial in this session:")
     assert capped.stop_rule() == StopRule(grace_tests=7)
-    assert "at most 3 branches at once; after the opening batch, none in the last 20 min" in capped.render()
+    assert "at most 3 branches at once; after the opening batch, none once less of EXPLORE is left than 20 min" in (
+        capped.render()
+    )
+    assert "none once less of EXPLORE is left than the median time a new branch takes to its first commit" in (
+        H0.render()
+    )
     assert "The scheduler cuts an open past either." in capped.render()
 
 
