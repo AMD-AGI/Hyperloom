@@ -236,7 +236,7 @@ def _safe_collect(
     """
     try:
         return fn()
-    except Exception as exc:
+    except Exception as exc:  # isolation boundary: one breakdown collector
         log.exception("collector %s failed", name)
         warnings.append(f"collector:{name} failed: {type(exc).__name__}: {exc}")
         if default is not None:
@@ -276,17 +276,21 @@ def write_breakdown_json(
     # session from it. Only the trigger is here, because every path that writes
     # a session's artifacts goes through this function and the file has to land
     # before any flush reads it.
+    trace_failure = ""
     try:
         from ..trace.decision_trace import write_session_decision_trace
 
         for warning in write_session_decision_trace(sd):
             log.debug("decision_trace: %s", warning)
-    except Exception:
+    except Exception as exc:  # isolation boundary: the decision_trace side artifact
         # The trace is a side artifact; losing it must not fail the breakdown
         # write, but it is scored downstream so a silent loss has to be visible.
         log.warning("decision_trace write failed for %s; trace artifacts will be missing", sd, exc_info=True)
+        trace_failure = f"decision_trace failed: {type(exc).__name__}: {exc}"
 
     breakdown = build(sd)
+    if trace_failure and isinstance(breakdown["metadata"], dict):
+        breakdown["metadata"]["warnings"].append(trace_failure)
     payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
     atomic_write_text(target, payload)
     log.info("session_breakdown: wrote %s (%d bytes)", target, len(payload))
@@ -304,20 +308,16 @@ def _patch_breakdown(
     """Rewrite one section of an already-written breakdown, atomically."""
     sd = Path(session_dir).resolve()
     target = sd / BREAKDOWN_FILENAME
-    try:
-        if not target.exists():
-            return False
-        breakdown = json.loads(target.read_text(encoding="utf-8"))
-        if not isinstance(breakdown, dict):
-            return False
-        if not revise(sd, breakdown):
-            return False
-        atomic_write_text(target, json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default))
-        log.info("session_breakdown: refreshed %s section in %s", section, target)
-        return True
-    except Exception:
-        log.debug("session_breakdown: %s patch failed (non-fatal)", section, exc_info=True)
+    if not target.exists():
         return False
+    breakdown = json.loads(target.read_text(encoding="utf-8"))
+    if not isinstance(breakdown, dict):
+        return False
+    if not revise(sd, breakdown):
+        return False
+    atomic_write_text(target, json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default))
+    log.info("session_breakdown: refreshed %s section in %s", section, target)
+    return True
 
 
 def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
@@ -330,9 +330,9 @@ def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
     splice in the post-flush ``langfuse_receipt.json`` (final counts) without
     rebuilding the whole file.
 
-    Best-effort and self-skipping: returns False (no-op) when no breakdown or
-    no receipt exists yet, when live push was disabled, or on any error. Never
-    raises -- it must not mask the session's stop_reason at shutdown.
+    Self-skipping: returns False (no-op) when no breakdown or no receipt exists
+    yet, or when live push was disabled. A failure to read, revise or write the
+    breakdown raises to the caller.
 
     Args:
         session_dir: The hyperloom session directory holding the breakdown.
@@ -372,11 +372,9 @@ def patch_breakdown_close(session_dir: Path | str) -> bool:
     then the full sequence, the artifact paths and the verdict are all on disk
     and the re-read key is the real one.
 
-    Best-effort and self-skipping, exactly like
-    :func:`patch_breakdown_langfuse`: returns False on a missing breakdown, an
-    unchanged section, or any error. Never raises — it runs after
-    ``stop_reason`` and ``close_sequence_done`` are settled and must not mask
-    them at shutdown.
+    Self-skipping, exactly like :func:`patch_breakdown_langfuse`: returns False
+    on a missing breakdown or an unchanged section. A failure to read, revise or
+    write the breakdown raises to the caller.
 
     Args:
         session_dir: The hyperloom session directory holding the breakdown.

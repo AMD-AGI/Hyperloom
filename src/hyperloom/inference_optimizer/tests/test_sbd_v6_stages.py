@@ -120,14 +120,6 @@ def test_close_patch_leaves_a_payload_that_never_carried_close_alone(tmp_path):
     assert "close" not in json.loads(target.read_text(encoding="utf-8"))
 
 
-def test_close_patch_swallows_a_corrupt_breakdown(tmp_path):
-    target = tmp_path / exporter.BREAKDOWN_FILENAME
-    target.write_text("{not json", encoding="utf-8")
-
-    assert exporter.patch_breakdown_close(tmp_path) is False
-    assert target.read_text(encoding="utf-8") == "{not json"
-
-
 # what the consumer actually receives
 def _package_dest(tmp_path: Path, monkeypatch) -> Path:
     """Point session packaging at a scratch root and return it."""

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import json
+import sqlite3
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -499,7 +500,7 @@ class TestQueueFusionSiblings:
 
         class BadBus:
             async def append_and_seq(self, *_args, **_kwargs):
-                raise RuntimeError("bus down")
+                raise sqlite3.OperationalError("bus down")
 
         coord.bus = BadBus()
         phase = KernelPhase(coord)

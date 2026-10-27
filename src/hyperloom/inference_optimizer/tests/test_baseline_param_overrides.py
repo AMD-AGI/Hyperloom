@@ -572,6 +572,23 @@ def test_baseline_eager_fallback_records_effective_task_args(tmp_path):
     assert shared_state.baseline_eager_fallback is False
 
 
+def test_baseline_eager_fallback_save_failure_is_not_reported_as_unarmed(tmp_path, monkeypatch):
+    shared_state = SharedState(baseline_eager_fallback=True, model_path="/models/qwen")
+
+    def _disk_full(session_dir):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(shared_state, "save", _disk_full)
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=tmp_path / "base.yaml",
+        session_dir=tmp_path,
+        shared_state=shared_state,
+    )
+    with pytest.raises(OSError, match="No space left on device"):
+        executor._consume_eager_fallback(shared_state)
+
+
 def test_baseline_executor_falls_back_to_shared_state_model_path(tmp_path, monkeypatch):
     # params has no model_path and MODEL_PATH is unset: without the SharedState fallback the bare YAML model name
     # leaks into --model-path.

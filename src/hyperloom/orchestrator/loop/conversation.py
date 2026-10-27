@@ -534,7 +534,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
         try:
             return trajectory_reviewer.build_trajectory_digest(self.session_dir, self.shared_state)
-        except Exception:
+        except (OSError, ValueError, TypeError):
             log.exception("Coordinator: trajectory review digest failed")
             return ""
 
@@ -935,26 +935,19 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return "\n".join(lines)
 
     def _priors_match_advisory_block(self) -> str:
-        """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering).
+        """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering)."""
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
-        A failure is logged and the prompt goes out without this block.
-        """
-        try:
-            from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
-
-            variants = self._recent_proposed_variants()
-            if not variants:
-                return ""
-            hints = _research_hints.load_hints(self.session_dir)
-            primary_gap = self._current_primary_gap()
-            return _research_hints.priors_match_summary(
-                variants,
-                hints,
-                primary_gap=primary_gap,
-            )
-        except Exception:
-            log.exception("Coordinator: priors-match advisory failed")
+        variants = self._recent_proposed_variants()
+        if not variants:
             return ""
+        hints = _research_hints.load_hints(self.session_dir)
+        primary_gap = self._current_primary_gap()
+        return _research_hints.priors_match_summary(
+            variants,
+            hints,
+            primary_gap=primary_gap,
+        )
 
     def _discarded_escalate_hint_advisory_block(self) -> str:
         """Render the advisory for an escalate_strategy_change hint that was discarded.

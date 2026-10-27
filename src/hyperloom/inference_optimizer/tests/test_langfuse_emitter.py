@@ -2080,3 +2080,17 @@ def test_record_status_send_failure_is_swallowed(tmp_path, monkeypatch):
     em.record_status(_status())  # must not raise
     assert em._counts["errors"] >= 1
     assert em._counts["status_updates_sent"] == 0
+
+
+def test_a_failed_span_end_is_counted_as_an_error(tmp_path):
+    em = lfe.LangfuseEmitter(tmp_path / "SID")
+
+    class _UnendableSpan:
+        def end(self):
+            raise RuntimeError("span already exported")
+
+    em._unended_spans.append(_UnendableSpan())
+    em._close_spans()
+
+    assert em._counts["errors"] == 1
+    assert em._unended_spans == []

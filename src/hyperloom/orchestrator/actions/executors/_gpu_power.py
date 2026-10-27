@@ -287,7 +287,7 @@ class GpuPowerRecorder:
         try:
             payload = self._query(*_SAMPLE_METRICS)
             reading = parse_power_sample(payload)
-        except Exception as exc:
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError, TypeError) as exc:
             log.debug("gpu_power: amd-smi query failed", exc_info=True)
             with self._lock:
                 self._errors += 1

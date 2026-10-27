@@ -752,7 +752,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("geak 2a: SharedState.save failed")
         if not promoted:
             return {
@@ -784,7 +784,7 @@ class GeakRevalidation(CoordinatorCollaborator):
             # ``coordinator._validate_geak_via_geak_harness`` still wins
             # (bare-name delegation resolves it back onto this class).
             fallback_result = await self.validate_geak_via_geak_harness(reason="2b_inconclusive")
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one GEAK candidate's harness fallback
             log.exception("geak 2a GEAK-harness fallback failed")
             fallback_result = {
                 "validated": False,

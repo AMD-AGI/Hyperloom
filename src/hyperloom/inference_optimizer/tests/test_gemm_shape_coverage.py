@@ -501,14 +501,14 @@ class TestCoverageGateDoesNotBlockOnMissingEvidence:
         assert report["runtime_lookup_hit"] == 0
         assert report["runtime_lookup_miss"] == 1
 
-    def test_unexpected_failure_is_undetermined(self, tmp_path):
-        """The wrapper swallows anything the body throws (it can block a KEEP)."""
+    def test_unreadable_evidence_is_undetermined(self, tmp_path):
+        """A log or CSV the body cannot read is undetermined rather than a block on the KEEP."""
         from types import SimpleNamespace
 
         from hyperloom.orchestrator.phases.kernel import KernelPhase
 
         def _boom(*_args, **_kwargs):
-            raise RuntimeError("coverage exploded")
+            raise PermissionError("server.log is not readable")
 
         phase = SimpleNamespace(
             session_dir=tmp_path,
