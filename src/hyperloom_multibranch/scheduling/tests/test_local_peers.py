@@ -339,6 +339,24 @@ def test_an_agentx_host_refuses_a_checkout_off_the_magpie_pin_and_a_magpie_witho
         measurement_host(env, AGENTX, LOCAL)
 
 
+def test_an_agentx_host_refuses_a_checkout_whose_tracked_files_differ_from_its_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "InferenceX"
+    commit = _git_checkout(root)
+    env = {IMAGE_VARS[0]: IMAGE.ref, IMAGE_VARS[1]: IMAGE.digest}
+    _magpie(monkeypatch, root, INFERENCEX_DEFAULT_REF=commit)
+    (root / "inferencex-e2e" / "untracked-output.txt").write_text("results\n")
+    assert measurement_host(env, AGENTX, LOCAL).inferencex == InferenceXCheckout(commit, str(root / "inferencex-e2e"))
+
+    tracked = next(
+        path for path in (root / "inferencex-e2e").rglob("*") if path.is_file() and path.name != "untracked-output.txt"
+    )
+    tracked.write_text(tracked.read_text() + "# a local recipe\n")
+    with pytest.raises(PeersUnavailable, match=f"modified.*{tracked.relative_to(root)}"):
+        measurement_host(env, AGENTX, LOCAL)
+
+
 @pytest.mark.parametrize("mask", ["ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"])
 def test_the_cards_are_the_ids_the_visible_device_mask_names(mask: str, monkeypatch: pytest.MonkeyPatch) -> None:
     for name in COUNTING_VISIBLE_DEVICE_VARS:

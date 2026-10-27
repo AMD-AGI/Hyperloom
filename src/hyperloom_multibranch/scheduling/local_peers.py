@@ -41,6 +41,7 @@ import logging
 import os
 import secrets
 import shutil
+import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import cache, partial
@@ -509,7 +510,27 @@ def _agentx_checkout(env: Mapping[str, str], tools: ToolCommits) -> InferenceXCh
             f"no InferenceX checkout at {commit}, the commit Magpie pins for AgentX, is writable at {path}: "
             "set MAGPIE_INFERENCEX_PATH to one"
         )
+    modified = _modified_tracked_files(root)
+    if modified:
+        # A test fetches a clean checkout at the pinned commit, so a local edit (such as a recipe entry) would be
+        # what PRELUDE and the preflight resolve while every test resolves the commit's own files.
+        raise PeersUnavailable(
+            f"the InferenceX checkout at {root} has modified tracked files ({', '.join(modified[:5])}); "
+            f"tests run a clean checkout at {commit}, so commit nothing locally and revert them"
+        )
     return InferenceXCheckout(commit, root)
+
+
+def _modified_tracked_files(root: str) -> list[str]:
+    """Tracked files of the git repository holding ``root`` that differ from its HEAD, as git names them."""
+
+    result = subprocess.run(
+        ["git", "-C", root, "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return [line[3:] for line in result.stdout.splitlines() if line.strip()]
 
 
 def machine_parallel_tests(tp: int) -> int:
