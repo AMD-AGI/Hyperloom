@@ -294,6 +294,15 @@ def test_a_removal_changes_the_launch_only_when_the_stack_passes_what_it_removes
     assert dropped == [("removes-an-absent-arg", "launches the server the stack already runs (baseline noop)")]
 
 
+def test_a_row_claiming_a_revalidation_provenance_is_still_judged(tmp_path):
+    """Only a stack revalidation round is exempt; a grid row's own provenance cannot buy it a measurement."""
+    variant = _variant(_RESTATES_ARGV)
+    variant.provenance = "geak_revalidate"  # type: ignore[attr-defined]
+    kept, dropped = filter_baseline_noop_variants([variant], **_noop_filter_kwargs(tmp_path))
+    assert kept == []
+    assert dropped == [(_CANDIDATE, "launches the server the stack already runs (baseline noop)")]
+
+
 def _agentx_noop_filter_kwargs(tmp_path: Path) -> dict:
     workload = tmp_path / "agentx.yaml"
     workload.write_text(

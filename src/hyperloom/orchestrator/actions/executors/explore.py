@@ -518,8 +518,8 @@ def filter_baseline_noop_variants(
 
     The baseline and each variant are materialized through ``_build_variant_yaml`` and read back whole, so a
     removal, a replaced argv, an overlay or an AgentX launch override shows as the change it is; ``launch_change``
-    then discounts what the observed server already resolved. A config replay always runs, and so does a variant
-    whose launch cannot be read.
+    then discounts what the observed server already resolved. A variant whose launch cannot be read always runs;
+    a stack revalidation round never reaches this filter.
 
     Returns the variants still to run, plus ``(name, reason)`` for each drop.
     """
@@ -537,9 +537,6 @@ def filter_baseline_noop_variants(
             )
             return list(grid), []
         for idx, gv in enumerate(grid):
-            if _is_config_replay_variant(gv):
-                kept.append(gv)
-                continue
             try:
                 launch = _probe_launch(recipe, gv, tmp_root / f"v{idx}")
             except _UNREADABLE_LAUNCH as exc:
