@@ -44,8 +44,8 @@ from hyperloom.contracts.recipe import DIGEST_PREFIX
 from hyperloom.measure.compile import BlobStore, EnvRoot
 from hyperloom.measure.docs import canonical_json
 from hyperloom.measure.farm import FarmError, build_farm, image_aiter_meta, locate_package
-from hyperloom.measure.jit.key import AITER_PACKAGE, build_surface, scan_env_names
-from hyperloom.measure.jit.modules import ESTIMATED_MODULE_SECONDS
+from hyperloom.measure.jit.key import AITER_PACKAGE, build_surface
+from hyperloom.measure.jit.modules import ESTIMATED_MODULE_SECONDS, build_env_names
 from hyperloom.measure.jit.native.key import BuildInputs
 from hyperloom.measure.jit.native.needs import ModuleBuild
 from hyperloom.measure.jit.native.record import READY, BuildRecord
@@ -164,7 +164,7 @@ class AiterModules:
         self._planner, self._history = planner, history
         self._environ = os.environ if environ is None else environ
         self._recipe = aiter_module_recipe()
-        self._variables: dict[str, str] | None = None
+        self._package: Path | None = None
 
     def __call__(
         self, roots: tuple[EnvRoot, ...], config: Mapping[str, Any], candidates: Collection[str]
@@ -174,7 +174,7 @@ class AiterModules:
             return None
         machine = self._planner.site.machine
         aiter = tuple(root for root in roots if root.import_name in (AITER_PACKAGE, AITER_META_WHEEL_DIR))
-        variables = self._build_variables(machine.python)
+        variables = self._build_variables(machine.python, config, modules)
         digest = _digest(aiter, modules, variables)
         inputs = BuildInputs(
             machine.image_digest,
@@ -199,20 +199,24 @@ class AiterModules:
             return float(len(modules) * ESTIMATED_MODULE_SECONDS)
         return len(modules) * statistics.median(per_module) / self._recipe.max_jobs
 
-    def _build_variables(self, python: str) -> dict[str, str]:
-        """The variables of the service's environment that aiter's build path reads, less locations, the tuned tables
-        and what the build sets itself, and the interpreter the compile runs: what the compile gets and its record
-        states."""
-        if self._variables is None:
+    def _build_variables(self, python: str, config: Mapping[str, Any], modules: Collection[str]) -> dict[str, str]:
+        """The variables of the service's environment that the build of ``modules`` reads (``build_env_names``, the
+        runner compares the same ones), less locations, the tuned tables and what the build sets itself, and the
+        interpreter the compile runs: what the compile gets and its record states."""
+        package = self._image_package(python)
+        names = build_env_names(package, image_aiter_meta(package), config, modules)
+        surface = build_surface(names, self._environ, {})
+        variables = {k: v for k, v in surface.environment.items() if k not in _SET_BY_BUILD}
+        variables[FRAMEWORK_PYTHON_ENV] = interpreter_identity(python)
+        return variables
+
+    def _image_package(self, python: str) -> Path:
+        if self._package is None:
             try:
-                package = locate_package(AITER_PACKAGE, python, Path.cwd())
+                self._package = locate_package(AITER_PACKAGE, python, Path.cwd())
             except FarmError as exc:
                 raise BuildInfraError(f"the image's aiter cannot be found: {exc}") from None
-            names = scan_env_names([package], [image_aiter_meta(package)])
-            surface = build_surface(names, self._environ, {})
-            self._variables = {k: v for k, v in surface.environment.items() if k not in _SET_BY_BUILD}
-            self._variables[FRAMEWORK_PYTHON_ENV] = interpreter_identity(python)
-        return dict(self._variables)
+        return self._package
 
 
 def _blob(blobs: BlobStore, address: str) -> bytes:

@@ -46,6 +46,7 @@ from hyperloom.common.outside_facts import (
     AITER_META_MARKER_DIR,
     AITER_META_WHEEL_DIR,
 )
+from hyperloom.measure.jit.key import env_names_in
 
 __all__ = [
     "CONFIG_FILE",
@@ -53,6 +54,7 @@ __all__ = [
     "MAX_REBUILD_SECONDS",
     "SourceTree",
     "Touched",
+    "build_env_names",
     "config_path",
     "image_aiter_meta",
     "prebuilt_names",
@@ -62,6 +64,8 @@ __all__ = [
 ]
 
 CONFIG_FILE = "optCompilerConfig.json"
+#: The directory of the aiter package that holds its builder, its module config and its prebuilt modules.
+_JIT_DIR = "jit"
 #: What one module takes to build: the 63 to 66 s that the heaviest modules (mha_batch_prefill, module_moe_ck2stages) took in
 #: earlier tests' server logs. The single-lineage flow gives aiter 40 minutes to build in (``targeted_build``); a patch that
 #: would take longer than that to rebuild before its test starts is refused when the test is accepted.
@@ -79,6 +83,8 @@ _STRING = re.compile(r"""f?(?:'([^']*)'|"([^"]*)")""")
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_]+)\}")
 _INCLUDE = re.compile(r'^[ \t]*#[ \t]*include[ \t]+[<"]([^>"]+)[>"]', re.MULTILINE)
 _CODEGEN = "hsa/codegen.py"
+#: The code below the meta directory that builds a module whose own code cannot be told: every generator there is.
+_ALL_GENERATORS = (AITER_META_MARKER_DIR, "hsa")
 _MODULE_OPTION = re.compile(r"(?:^|\s)-m\s+(\S+)")
 _MODULE_PREFIX = "module_"
 _MAX_SOURCE_BYTES = 4 * 1024**2
@@ -141,7 +147,7 @@ def image_aiter_meta(package: Path) -> Path:
 
 def config_path(package: Path) -> Path:
     """Where the aiter package at ``package`` keeps its module config."""
-    return package / "jit" / CONFIG_FILE
+    return package / _JIT_DIR / CONFIG_FILE
 
 
 def read_config(path: Path | bytes) -> dict[str, Any]:
@@ -156,7 +162,7 @@ def read_config(path: Path | bytes) -> dict[str, Any]:
 def prebuilt_names(package: Path) -> frozenset[str]:
     """The modules the aiter package at ``package`` ships built (the ``.so`` files of its ``jit`` directory)."""
     try:
-        return frozenset(path.stem for path in (package / "jit").iterdir() if path.suffix == ".so")
+        return frozenset(path.stem for path in (package / _JIT_DIR).iterdir() if path.suffix == ".so")
     except OSError:
         return frozenset()
 
@@ -343,3 +349,26 @@ def touched_entries(keys: Collection[str], config: Mapping[str, Any], prebuilt: 
         if (owner in keys) or (owner is None and keys):
             names.add(name)
     return Touched(frozenset(names), frozenset(names & set(prebuilt)))
+
+
+def build_env_names(package: Path, meta: Path, config: Mapping[str, Any], modules: Collection[str]) -> frozenset[str]:
+    """The environment variables the build of ``modules`` (entries of ``config``) reads, from the aiter package at
+    ``package`` and the meta directory at ``meta``.
+
+    That is aiter's builder, the package's ``jit`` directory (``core.py`` and the helpers it imports), and each module's
+    own Python: a source that is a Python file or a directory, and the directory of each code generator script (a
+    generator imports what is beside it; ``hsa/codegen.py``'s is ``hsa``). A module that is no entry of ``config``, or
+    whose entry cannot be expanded, reads every generator of ``csrc`` and ``hsa``. The rest of the tree (``setup.py``, the
+    Triton kernels below ``aiter/ops``) is not the build's and is not read: a variable only it reads cannot change the
+    module. Both sides of a CPU build of aiter's modules compare the variables this names, so they compare the same ones.
+    """
+    places: set[str] = set()
+    for name in modules:
+        try:
+            inputs = _inputs(config[name])
+        except (KeyError, _Unexpandable):
+            places.update(_ALL_GENERATORS)
+            continue
+        places.update(inputs.sources)
+        places.update(posixpath.dirname(script) or script for script in inputs.scripts)
+    return env_names_in([package / _JIT_DIR, *(meta / place for place in sorted(places) if place)])

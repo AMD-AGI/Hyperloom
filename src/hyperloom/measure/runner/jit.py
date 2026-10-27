@@ -37,7 +37,6 @@ from hyperloom.measure.jit.builds import BuildLog, scan_builds, server_logs
 from hyperloom.measure.jit.key import (
     AITER_PACKAGE,
     REBUILD_VARIABLE,
-    BuildSurface,
     Machine,
     aiter_key,
     build_surface,
@@ -51,6 +50,7 @@ from hyperloom.measure.jit.modules import (
     CONFIG_FILE,
     SourceTree,
     Touched,
+    build_env_names,
     config_path,
     prebuilt_names,
     read_config,
@@ -272,7 +272,7 @@ def _aiter_plans(inputs: _Inputs, kinds: list[CacheKind]) -> list[KindPlan] | st
     touched = _touched(inputs, base, effective)
     if isinstance(touched, str):
         return touched
-    given = _given(inputs, surface, effective, touched.names)
+    given = _given(inputs, environment, (base, effective), touched.names)
     return [
         KindPlan(kind, key, effective / "jit", read_only, touched.names, given)
         if kind is AITER_JIT
@@ -281,19 +281,29 @@ def _aiter_plans(inputs: _Inputs, kinds: list[CacheKind]) -> list[KindPlan] | st
     ]
 
 
-def _given(inputs: _Inputs, surface: BuildSurface, effective: Path, touched: frozenset[str]) -> GivenModules | None:
+def _given(
+    inputs: _Inputs, environment: Mapping[str, str], packages: tuple[Path, Path], touched: frozenset[str]
+) -> GivenModules | None:
     """The touched modules the sheet's CPU build made that this server may load: built for this GPU, under the variables
-    this server's build would read, from tables none of its variables change. Whatever is left out the server builds."""
+    this server's build of them would read, from tables none of its variables change. Whatever is left out the server
+    builds. ``packages`` are the image's aiter package and the one the test runs."""
     built = inputs.modules
     if built is None:
         return None
+    base, effective = packages
     names = frozenset(PurePosixPath(o.path).name.removesuffix(_MODULE_SUFFIX) for o in built.record.outputs) & touched
-    problem = _build_differs(built.record, inputs.machine.gfx_arch, surface, inputs.python)
+    try:
+        config = read_config(config_path(effective))
+    except (OSError, ValueError):
+        config = {}
+    meta = _meta_dir(inputs.farm, base)
+    read = build_surface(build_env_names(effective, meta, config, names), environment, {}).environment
+    problem = _build_differs(built.record, inputs.machine.gfx_arch, read, inputs.python)
     if problem is not None:
         inputs.around.notes.append(f"jit cache: the CPU build of aiter's modules is not used: {problem}")
         return None
     try:
-        tabled = stale_table_modules(read_config(config_path(effective)), effective, effective, inputs.servers)
+        tabled = stale_table_modules(config, effective, effective, inputs.servers) if config else names
     except (OSError, ValueError):
         tabled = names
     if names & tabled:
@@ -304,15 +314,20 @@ def _given(inputs: _Inputs, surface: BuildSurface, effective: Path, touched: fro
     return GivenModules(names, built.lay) if names else None
 
 
+def _meta_dir(farm: Farm | None, base: Path) -> Path:
+    """The meta directory the test's aiter builds from: the farm's copy, else the image's."""
+    return farm.aiter_meta if farm is not None and farm.aiter_meta else image_aiter_meta(base)
+
+
 def interpreter_identity(python: str) -> str:
     """The interpreter ``python`` names, as the file it runs: the same Python, torch and HIP build on both sides of a
     CPU build of aiter's modules is the same file in the same image."""
     return os.path.realpath(shutil.which(python) or python)
 
 
-def _build_differs(record: BuildRecord, gfx_arch: str, surface: BuildSurface, python: str) -> str | None:
+def _build_differs(record: BuildRecord, gfx_arch: str, read: Mapping[str, str], python: str) -> str | None:
     """How the CPU build's target, interpreter and variables differ from what this server's build would have, ``None``
-    when not."""
+    when not. ``read`` is the server's value of each variable the build of the modules reads (``build_env_names``)."""
     if record.inputs.gfx_arch != gfx_arch:
         return f"it was built for {record.inputs.gfx_arch} and this GPU is {gfx_arch}"
     built = {
@@ -321,7 +336,7 @@ def _build_differs(record: BuildRecord, gfx_arch: str, surface: BuildSurface, py
         if name.startswith(COMPILE_ENV_PREFIX)
     }
     # The import path is the image's on both sides; what a patch could change on it is in the farm.
-    server = {k: v for k, v in surface.environment.items() if k != _PYTHONPATH}
+    server = {k: v for k, v in read.items() if k != _PYTHONPATH}
     server[_FRAMEWORK_PYTHON] = interpreter_identity(python)
     if server.get(_GPU_ARCHS) in (_NATIVE, gfx_arch):
         del server[_GPU_ARCHS]
@@ -347,8 +362,7 @@ def _touched(inputs: _Inputs, base: Path, effective: Path) -> Touched | str:
     )
     if not patched and not config_patched and not tables:
         return Touched()
-    farm = inputs.farm
-    meta = farm.aiter_meta if farm is not None and farm.aiter_meta else image_aiter_meta(base)
+    meta = _meta_dir(inputs.farm, base)
     try:
         before, after = read_config(config_path(base)), read_config(config_path(effective))
     except (OSError, ValueError) as exc:

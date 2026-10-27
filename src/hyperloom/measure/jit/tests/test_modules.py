@@ -13,7 +13,14 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.measure.jit.modules import SourceTree, config_path, prebuilt_names, touched_entries, touched_modules
+from hyperloom.measure.jit.modules import (
+    SourceTree,
+    build_env_names,
+    config_path,
+    prebuilt_names,
+    touched_entries,
+    touched_modules,
+)
 from hyperloom.measure.tests._recipes import write_tree
 
 CSRC = "f'{AITER_CSRC_DIR}/"
@@ -218,3 +225,61 @@ def test_the_config_shape_the_expansion_reads_is_the_shape_the_json_has(tmp_path
     document = json.loads(json.dumps(CONFIG))
 
     assert document["module_gemm_a8w8"]["blob_gen_cmd"].startswith("f'{AITER_CSRC_DIR}/")
+
+
+def _reads(name: str) -> str:
+    return f'import os\nVALUE = os.environ.get("{name}")\n'
+
+
+#: A develop checkout: the builder below ``aiter/jit``, each generator reading a variable of its own, and code no build
+#: runs (``setup.py``, a Triton kernel below ``aiter/ops``, a generator of another module) reading others.
+ENV_TREE = {
+    **FILES,
+    "aiter/jit/core.py": _reads("BUILDER_VAR"),
+    "aiter/jit/utils/cpp_extension.py": _reads("BUILDER_HELPER_VAR"),
+    "csrc/ck_gemm_a8w8/gen_instances.py": _reads("GEMM_GEN_VAR"),
+    "csrc/ck_gemm_a8w8/gen_helpers.py": _reads("GEMM_HELPER_VAR"),
+    "csrc/kernels/topk_gating/gen_topk.py": _reads("TOPK_SOURCE_VAR"),
+    "hsa/codegen.py": _reads("HSA_GEN_VAR"),
+    "csrc/elsewhere/gen.py": _reads("OTHER_GEN_VAR"),
+    "setup.py": _reads("AITER_USE_SYSTEM_TRITON"),
+    "aiter/ops/triton/gluon/__init__.py": _reads("AITER_USE_SYSTEM_TRITON"),
+}
+BUILDER = {"BUILDER_VAR", "BUILDER_HELPER_VAR"}
+
+
+@pytest.fixture()
+def checkout(tmp_path: Path) -> Path:
+    return write_tree(tmp_path / "checkout", ENV_TREE)
+
+
+@pytest.mark.parametrize(
+    ("modules", "expected"),
+    [
+        ({"module_activation"}, set()),
+        ({"module_gemm_a8w8"}, {"GEMM_GEN_VAR", "GEMM_HELPER_VAR"}),
+        ({"module_moe_topk"}, {"TOPK_SOURCE_VAR"}),
+        ({"module_pa"}, {"HSA_GEN_VAR"}),
+        ({"module_gemm_a8w8", "module_pa"}, {"GEMM_GEN_VAR", "GEMM_HELPER_VAR", "HSA_GEN_VAR"}),
+    ],
+    ids=["no-generator", "generator-and-beside", "source-directory", "hsa-codegen", "two"],
+)
+def test_the_build_reads_the_builders_variables_and_the_modules_own_generators_and_nothing_else(
+    checkout, modules, expected
+):
+    names = build_env_names(checkout / "aiter", checkout, CONFIG, modules)
+
+    assert names == BUILDER | expected
+    assert "AITER_USE_SYSTEM_TRITON" not in names and "OTHER_GEN_VAR" not in names
+
+
+@pytest.mark.parametrize(
+    "config",
+    [{}, {"module_x": {"srcs": "eval_at_run_time()", "blob_gen_cmd": "''"}}],
+    ids=["no-entry", "unexpandable"],
+)
+def test_a_module_whose_code_cannot_be_told_reads_every_generator_of_csrc_and_hsa_but_not_the_rest(checkout, config):
+    names = build_env_names(checkout / "aiter", checkout, config, {"module_x"})
+
+    assert {"GEMM_GEN_VAR", "TOPK_SOURCE_VAR", "HSA_GEN_VAR", "OTHER_GEN_VAR"} | BUILDER <= names
+    assert "AITER_USE_SYSTEM_TRITON" not in names

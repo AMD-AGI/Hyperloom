@@ -179,6 +179,54 @@ def test_a_build_the_service_made_under_the_servers_variables_is_used(image, tmp
     assert manifest.jit_cache.builds_seen == 0 and manifest.outcome.failure_class is None
 
 
+#: What the real image has outside aiter's build path: its ``setup.py`` and the Triton kernels below ``aiter/ops`` read a
+#: variable the build of a module never reads (``AITER_USE_SYSTEM_TRITON``, set to 1 on the GPU pod).
+OUTSIDE_THE_BUILD = {
+    "setup.py": 'import os\nSYSTEM = os.environ.get("AITER_USE_SYSTEM_TRITON", "0")\n',
+    "aiter/ops/triton/gluon/__init__.py": 'import os\nUSE = os.getenv("AITER_USE_SYSTEM_TRITON")\n',
+}
+#: ``module_gemm``'s code generator script (its ``blob_gen_cmd``), which reads a variable of its own.
+GENERATOR_READS = {"csrc/kernels/gen.py": 'import os\nFLAVOR = os.environ.get("AITER_GEN_FLAVOR", "a")\n'}
+
+
+def _with_files(rig: Rig, files: dict[str, str]) -> None:
+    for relative, text in files.items():
+        path = rig.bases / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
+def test_a_variable_only_code_outside_the_build_reads_does_not_keep_the_cpu_build_from_the_server(
+    image, tmp_path, monkeypatch
+) -> None:
+    _with_files(image, OUTSIDE_THE_BUILD)
+    built = Built(image, tmp_path, monkeypatch)
+    sheet = _sheet(image, built, envs={"AITER_USE_SYSTEM_TRITON": "1"})
+
+    manifest, status, _ = image.run("unrelated-env", sheet, extra_env=built.environ())
+
+    assert "not used" not in status["message"], status["message"]
+    assert manifest.jit_cache.builds_seen == 0, "the server loads module_gemm from its CPU build"
+    assert "1 touched aiter modules come from their CPU build (module_gemm)" in " ".join(manifest.notes)
+
+
+@pytest.mark.parametrize(("service", "used"), [("b", True), ("a", False)], ids=["same", "other"])
+def test_a_variable_the_modules_generator_reads_decides_whether_the_cpu_build_is_used(
+    image, tmp_path, monkeypatch, service, used
+) -> None:
+    _with_files(image, GENERATOR_READS)
+    built = Built(image, tmp_path, monkeypatch, environ={"AITER_GEN_FLAVOR": service})
+
+    manifest, status, _ = image.run(
+        "generator-env", _sheet(image, built, envs={"AITER_GEN_FLAVOR": "b"}), extra_env=built.environ()
+    )
+
+    assert manifest.jit_cache.builds_seen == (0 if used else 1)
+    refused = "the CPU build of aiter's modules is not used: the server's AITER_GEN_FLAVOR differ from its build's"
+    assert (refused in status["message"]) is not used
+    assert (f"jit cache: {refused}" in manifest.notes) is not used, "the signed result carries the runner's note"
+
+
 def test_a_build_by_another_interpreter_than_the_servers_is_not_used(image, tmp_path, monkeypatch) -> None:
     """Another interpreter can be another Python, torch or HIP: the module it would build is not the build's."""
     built = Built(image, tmp_path, monkeypatch)

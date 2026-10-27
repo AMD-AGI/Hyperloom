@@ -57,6 +57,7 @@ __all__ = [
     "Machine",
     "aiter_key",
     "build_surface",
+    "env_names_in",
     "scan_env_names",
     "touches_build_surface",
     "tree_identity",
@@ -102,6 +103,7 @@ _BUILD_PATH = ("jit", "../csrc", "../hsa", "../aiter_meta")
 #: The same, below a meta directory itself (the farm's copy, which holds the patched ``csrc`` and ``hsa``).
 _META_BUILD_PATH = (AITER_META_MARKER_DIR, "hsa")
 _MAX_SCANNED_BYTES = 2 * 1024**2
+_PYTHON_SUFFIX = ".py"
 #: Text of a patch that can change what aiter builds from inside the server process, other than by naming a variable.
 _BUILD_SURFACE_WORDS = ("AITER_", "aiter.jit", "build_module", "compile_ops", "putenv", "unsetenv")
 _ENV_WRITE = re.compile(
@@ -191,19 +193,26 @@ def scan_env_names(package_dirs: Iterable[Path], meta_dirs: Iterable[Path] = ())
     the build never reads only makes the key finer. ``meta_dirs`` are meta directories to read the same ``csrc`` and ``hsa``
     code of, for a test that carries patches to them.
     """
-    names: set[str] = set()
     places = [(package, _BUILD_PATH) for package in package_dirs] + [(meta, _META_BUILD_PATH) for meta in meta_dirs]
-    for directory, relatives in places:
-        for relative in relatives:
-            for path in _python_files((Path(directory) / relative).resolve()):
-                names.update(_names_in(path))
+    return env_names_in(Path(directory) / relative for directory, relatives in places for relative in relatives)
+
+
+def env_names_in(paths: Iterable[Path]) -> frozenset[str]:
+    """The environment variables the Python code at ``paths`` reads: a ``.py`` file's own, every ``.py`` file's below a
+    directory; a path that is neither adds none."""
+    names: set[str] = set()
+    for path in paths:
+        for found in _python_files(Path(path).resolve()):
+            names.update(_names_in(found))
     return frozenset(names)
 
 
-def _python_files(directory: Path) -> Iterable[Path]:
-    if not directory.is_dir():
+def _python_files(path: Path) -> Iterable[Path]:
+    if path.is_file():
+        return (path,) if path.suffix == _PYTHON_SUFFIX else ()
+    if not path.is_dir():
         return ()
-    return (path for path in directory.rglob("*.py") if path.is_file())
+    return (found for found in path.rglob(f"*{_PYTHON_SUFFIX}") if found.is_file())
 
 
 def _names_in(path: Path) -> set[str]:
