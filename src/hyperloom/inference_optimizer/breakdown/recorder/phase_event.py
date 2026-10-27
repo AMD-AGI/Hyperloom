@@ -434,7 +434,7 @@ def assemble_phase_ext(
 ) -> tuple[dict[str, Any], str]:
     """Assemble a phase event's ``ext``, and the status it reports, out of the
     sections read back from the spool."""
-    header = fold_header(rows_for_event(parts.get(SECTION_EVENT) or [], event))
+    header = fold_header(rows_for_event(parts[SECTION_EVENT], event))
     segments = wire_rows(
         sort_rows(rows_for_event(parts[SECTION_SEGMENT], event), keys=("sequence",)), drop=("event_id",)
     )
