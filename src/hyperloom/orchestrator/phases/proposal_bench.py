@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 
 log = _logging.getLogger(__name__)
 
+_COORDINATOR_SOURCE = "coordinator_internal"
+
 __all__ = ["CUSTOM_PROPOSAL_DOMAIN", "ProposalBench", "kb_exposure_of"]
 
 # ``untested_proposal_rows`` names a round's domain without the ``_specialist`` suffix.
@@ -108,7 +110,7 @@ class ProposalBench(CoordinatorCollaborator):
             return False
         switches = sha1(",".join(variant["framework_lever_bundle"]).encode(), usedforsecurity=False).hexdigest()[:12]
         task = await self._enqueue_coordinator_explore(
-            {"source": "coordinator_internal", "reason": LEVER_BUNDLE_REASON, "grid": [variant]},
+            {"source": _COORDINATOR_SOURCE, "reason": LEVER_BUNDLE_REASON, "grid": [variant]},
             idempotency_key=f"lever-bundle-c{int(self.shared_state.macro_cycle or 0)}-{switches}",
         )
         if task is not None:
@@ -144,7 +146,7 @@ class ProposalBench(CoordinatorCollaborator):
             return False
         names = sha1(",".join(arm["name"] for arm in arms).encode(), usedforsecurity=False).hexdigest()[:12]
         params = {
-            "source": "coordinator_internal",
+            "source": _COORDINATOR_SOURCE,
             "reason": cba.CYCLE_BATCH_REASON,
             cba.CYCLE_ARMS_PARAM: arms,
         }
@@ -173,7 +175,7 @@ class ProposalBench(CoordinatorCollaborator):
             return False
         if _holds_cycle_batch([*await self.tasks.queued(), *await self.tasks.running()]):
             return False
-        params = {"source": "coordinator_internal", "reason": cba.CYCLE_BATCH_REASON, cba.CYCLE_ARMS_PARAM: []}
+        params = {"source": _COORDINATOR_SOURCE, "reason": cba.CYCLE_BATCH_REASON, cba.CYCLE_ARMS_PARAM: []}
         key = f"cycle-reference-c{int(state.macro_cycle or 0)}-s{stack_len}"
         task = await self._enqueue_coordinator_explore(params, idempotency_key=key)
         if task is not None:

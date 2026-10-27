@@ -23,6 +23,9 @@ from ..state.task_registry import Task
 
 log = logging.getLogger(__name__)
 
+_OBSERVER = "coordinator"
+_OBSERVATION = "observation"
+
 
 def _cycle_attribution(verdict: Mapping[str, Any]) -> tuple[float | None, str]:
     """The ``(gain, source)`` one arm's verdict in a valid batch records; a broken arm falls back to replay."""
@@ -153,9 +156,7 @@ class ExplorePromotionMixin:
         """Stop admitting patches dormant: one already admitted moved the tree with its switches off."""
         self.shared_state.cycle_screen_refused = reason
         log.warning("cycle bench: dormant admission closed for the session: %s", reason)
-        await self.bus.record_observation(
-            "coordinator", "observation", {"kind": "cycle_screen_closed", "reason": reason}
-        )
+        await self.bus.record_observation(_OBSERVER, _OBSERVATION, {"kind": "cycle_screen_closed", "reason": reason})
 
     def _release_unscreened_levers(self, params: Mapping[str, Any] | None) -> None:
         """Hand a cycle batch's levers back to replay attribution when the batch ended without verdicts."""
@@ -190,8 +191,8 @@ class ExplorePromotionMixin:
             working_generation,
         )
         await self.bus.record_observation(
-            "coordinator",
-            "observation",
+            _OBSERVER,
+            _OBSERVATION,
             {
                 "kind": "stale_stack_revalidation",
                 "task_id": task.task_id,
@@ -216,8 +217,8 @@ class ExplorePromotionMixin:
         if float(measured) >= float(recorded) * floor / 100.0:
             return
         await self.bus.record_observation(
-            "coordinator",
-            "observation",
+            _OBSERVER,
+            _OBSERVATION,
             {
                 "kind": "current_best_drift",
                 "severity": "high",
