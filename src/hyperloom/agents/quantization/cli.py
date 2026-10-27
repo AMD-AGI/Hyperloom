@@ -38,7 +38,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--workspace",
         required=True,
-        help="Per-run scratch dir for session_context.json, manifest, reports, eval_report.json.",
+        help="Model workspace; each run writes its manifest, reports and quantized model under runs/<run_id>/ in it.",
     )
     p.add_argument(
         "--quark-root",
@@ -58,7 +58,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         metavar="FLOAT",
         help="Max relative quality gap (e.g. 0.03 = 3%%). "
-        "Falls back to <workspace>/eval_gap_threshold.txt or 0.03 if unset.",
+        "Falls back to the gap the prompt states (eval_gap_threshold.txt in the run directory) or 0.03 if unset.",
     )
     p.add_argument(
         "--max-requantize-attempts",
@@ -102,6 +102,7 @@ async def _run(args: argparse.Namespace) -> int:
     summary: dict[str, Any] = {
         "status": result.status,
         "quantized_model_dir": (str(result.quantized_model_dir) if result.quantized_model_dir else None),
+        "run_dir": (str(result.run_dir) if result.run_dir else None),
         "assessment": result.assessment.to_dict(),
     }
     print(json.dumps(summary, indent=2, sort_keys=True))

@@ -61,7 +61,7 @@ operator-rejected checkpoint is not a distinct code — it surfaces as `partial`
 (exit 0) or `failed` (exit 1) with the reason in `assessment.notes`
 (`eval_gap_exceeded_rejected` / `operator_declined_retry`).
 
-The CLI prints a JSON summary (`status` + `quantized_model_dir` +
+The CLI prints a JSON summary (`status` + `quantized_model_dir` + `run_dir` +
 `assessment`) on stdout.
 
 ### Python (async)
@@ -81,6 +81,7 @@ async def main():
     )
     print(result.status)                       # success | partial | failed
     print(result.quantized_model_dir)          # Path | None
+    print(result.run_dir)                      # Path | None
     print(result.assessment.final)             # OutcomeId | None
 
 asyncio.run(main())
@@ -95,6 +96,7 @@ asyncio.run(main())
 | `status`              | `str`               | `"success"` / `"partial"` / `"failed"`                                    |
 | `quantized_model_dir` | `Path` or `None`    | absolute path to the exported model (HF format); `None` on failure        |
 | `assessment`          | `Assessment`        | structured per-attempt verdict                                            |
+| `run_dir`             | `Path` or `None`    | this run's directory under `<workspace>/runs/`; `None` if the run never started |
 
 `Assessment` (frozen dataclass):
 
@@ -111,8 +113,13 @@ The full 30-outcome enumeration lives in `driver/outcomes.py` (`OutcomeId`,
 
 ## Workspace artifacts
 
-The agent writes a small, stable set of files under `--workspace`. Callers
-can read these directly:
+Every `quantize_via_prompt` call is one run, and each run gets its own
+directory, `<workspace>/runs/<utc-timestamp>-<random>/` (`run_dir` in the
+result). Every attempt of the run uses it as the agent's workspace, so all the
+files below, the exported model included, belong to that run: a rerun of the
+same model writes a new run directory and never reads or overwrites an earlier
+run's files. Files written directly under `<workspace>` by runs before this
+layout are left in place and not read. Callers can read these directly:
 
 - `session_context.json` — handshake payload passed to the SDK at session start.
 - `run_manifest.yaml` — Quark's workflow manifest (inputs, outputs, exec phases).
@@ -122,23 +129,22 @@ can read these directly:
 - `source_eval.md`, `quantized_eval.md` — raw `quark-torch-llm-eval` Markdown.
 - `eval_report.json` — synthesized eval summary (`source_score`,
   `quantized_score`, `relative_gap`, `within_threshold`).
-- `eval_gap_threshold.txt` — resolved acceptable gap (single float).
+- `eval_gap_threshold.txt` — the acceptable gap the prompt stated (single
+  float); it applies to this run only.
 - `last_phase.txt` — current Quark phase ID (used for classification).
 - `fix_hypothesis_attempt_N.md` — diagnosis + concrete fix (precondition for
-  retry N+1). A run starts by deleting the ones an earlier run left, so it
-  retries only on hypotheses its own attempts wrote. Retries are counted per
-  run: every `quantize_via_prompt` call gets its own `max_requantize_attempts`.
+  retry N+1). Retries are counted per run: every `quantize_via_prompt` call
+  gets its own `max_requantize_attempts`.
 - `blocked.md` — present when the SDK aborted; may carry `outcome_id: <id>`
   to short-circuit classification.
-- `<marker>.attempt_N` — the Nth archived set of markers in this workspace: the
+- `<marker>.attempt_N` — the Nth archived set of markers in this run: the
   `blocked.md`, `last_phase.txt`, `eval_report.json` and `eval_skipped.txt` an
-  earlier attempt or an earlier run left, renamed before the next attempt
-  starts so that attempt is judged on its own files. An attempt on a workspace
-  holding any such archive that stops without writing its own `blocked.md`,
-  `eval_report.json` or `eval_skipped.txt` is judged only on the error it
-  raised (`unclassified_failure` when it raised none, or when the error maps to
-  an auto-recover outcome), never on the earlier model and reports left on
-  disk, so it fails the run rather than ending it `partial`.
+  earlier attempt left, renamed before the next attempt starts so that attempt
+  is judged on its own files. An attempt that stops without writing its own
+  `blocked.md`, `eval_report.json` or `eval_skipped.txt` is judged only on the
+  error it raised (`unclassified_failure` when it raised none, or when the
+  error maps to an auto-recover outcome), never on a model and reports an
+  earlier attempt left, and never as a clean success, so it fails the run.
 
 ## Environment knobs
 
