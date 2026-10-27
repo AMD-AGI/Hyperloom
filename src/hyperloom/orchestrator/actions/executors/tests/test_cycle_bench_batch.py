@@ -218,6 +218,32 @@ def test_a_session_batch_refuses_a_session_without_a_baseline_workspace(tmp_path
         cba.session_batch(state, [], out_dir=tmp_path / "o", port=1)
 
 
+def test_a_session_batch_runs_the_current_best_stack_once_a_round_moved_it(tmp_path):
+    decode = "[t TP0] Decode batch, #running-req: {n}, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
+    state = _workspace(tmp_path, decode.format(n=1), {"effective_argv": ["base"], "effective_env": {"HL_A": "0"}})
+    best = tmp_path / "runs" / "explore" / "v00" / "benchmark_sglang_2"
+    best.mkdir(parents=True)
+    launch = {"effective_argv": ["kept"], "effective_env": {"HL_A": "1"}}
+    (best / "agentx_server_launch.json").write_text(json.dumps(launch), encoding="utf-8")
+    (best / "server.log").write_text(decode.format(n=4), encoding="utf-8")
+    state.current_best = {"workspace": str(best)}
+
+    spec = cba.session_batch(state, [], out_dir=tmp_path / "o", port=1)
+
+    assert (spec.argv, spec.env, spec.weights) == (["kept"], {"HL_A": "1"}, {1: 0.0, 2: 0.0, 4: 1.0})
+
+
+def test_a_session_batch_refuses_a_current_best_without_its_launch_rather_than_bench_the_baseline(tmp_path):
+    decode = "[t TP0] Decode batch, #running-req: 1, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
+    state = _workspace(tmp_path, decode, {"effective_argv": ["base"]})
+    best = tmp_path / "runs" / "integrate" / "benchmark_sglang_3"
+    best.mkdir(parents=True)
+    state.current_best = {"workspace": str(best)}
+
+    with pytest.raises(FileNotFoundError, match="no agentx_server_launch.json under the current best"):
+        cba.session_batch(state, [], out_dir=tmp_path / "o", port=1)
+
+
 def test_a_session_batch_runs_the_launchs_effective_env_over_its_runtime_env(tmp_path):
     decode = "[t TP0] Decode batch, #running-req: 1, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
     launch = {

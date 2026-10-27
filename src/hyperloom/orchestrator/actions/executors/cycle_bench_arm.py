@@ -75,13 +75,18 @@ def cycle_arms(levers: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, out_dir: Path, port: int) -> BatchSpec:
-    """A batch on the session baseline's own launch, weighted by where its replay ran and fed its corpus length."""
-    root = str(getattr(state, "baseline_workspace", "") or "")
+    """A batch on the current best's own launch, weighted by where its replay ran and fed its corpus length.
+
+    Until a round moves the current best that is the baseline's; after, the kept stack is what a candidate joins.
+    """
+    best = str((getattr(state, "current_best", None) or {}).get("workspace") or "")
+    root = best or str(getattr(state, "baseline_workspace", "") or "")
     if not root:
         raise FileNotFoundError("the session has no baseline workspace to take the bench launch from")
     launch_file = next(iter(sorted(Path(root).rglob("agentx_server_launch.json"))), None)
     if launch_file is None:
-        raise FileNotFoundError(f"no agentx_server_launch.json under the baseline workspace {root}")
+        where = "the current best" if best else "the baseline workspace"
+        raise FileNotFoundError(f"no agentx_server_launch.json under {where} {root}")
     launch = json.loads(launch_file.read_text(encoding=_ENCODING))
     log = (launch_file.parent / _SERVER_LOG).read_text(encoding=_ENCODING, errors="ignore").splitlines()
     weights = cb.batch_weights(log, grid=BATCH_GRID)
