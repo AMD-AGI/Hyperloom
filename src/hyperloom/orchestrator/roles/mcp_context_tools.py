@@ -9,16 +9,16 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from hyperloom.orchestrator.measurement.runtime_findings import render_runtime_findings
+from hyperloom.orchestrator.mcp_tool_names import (
+    CONTEXT_MCP_SERVER_NAME as MCP_SERVER_NAME,
+)
+from hyperloom.orchestrator.mcp_tool_names import (
+    CONTEXT_TOOL_NAMES,
+    CONTEXT_TOOL_QUALIFIED_NAMES,
+    qualified_context_tool_name,
+)
 
 log = logging.getLogger(__name__)
-
-
-MCP_SERVER_NAME = "inference_optimizer_context"
-
-
-def _qualified(tool_name: str) -> str:
-    """Return the fully-qualified MCP tool name."""
-    return f"mcp__{MCP_SERVER_NAME}__{tool_name}"
 
 
 @dataclass
@@ -305,31 +305,11 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "optionally filtered to a single task_id.  Each entry is a JSON "
         "object with failure_id, variant_name, stage, error_class, "
         "error_excerpt, server_log_path, and workspace.  Use this to find "
-        "failure_ids you can then inspect with get_failure.",
+        f"failure_ids you can then inspect with {qualified_context_tool_name('get_failure')}.",
         _VARIANT_FAILURES_SCHEMA,
         "get_variant_failures",
     ),
 )
-
-
-CONTEXT_TOOL_NAMES: tuple[str, ...] = tuple(s[0] for s in CONTEXT_TOOL_SPECS)
-CONTEXT_TOOL_QUALIFIED_NAMES: tuple[str, ...] = tuple(_qualified(n) for n in CONTEXT_TOOL_NAMES)
-
-
-def qualified_context_tool_name(tool_name: str) -> str:
-    """Return the name the runtime registers for a context tool, for prompts.
-
-    This module owns the ``mcp__<server>__<tool>`` naming, so anything that
-    shows a context tool to an agent asks for the name here instead of
-    spelling it out; a bare name in a prompt names a tool the agent cannot
-    call.
-
-    Raises:
-        KeyError: if ``tool_name`` is not one of :data:`CONTEXT_TOOL_NAMES`.
-    """
-    if tool_name not in CONTEXT_TOOL_NAMES:
-        raise KeyError(f"unknown context tool: {tool_name!r}")
-    return _qualified(tool_name)
 
 
 def _resolve_sdk(sdk_module: Any | None) -> Any | None:

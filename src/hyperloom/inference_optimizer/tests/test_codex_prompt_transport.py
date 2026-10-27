@@ -30,12 +30,14 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 from hyperloom.orchestrator.roles.agent_role import _ORCHESTRATION_INTENTS, default_role_registry
 from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed, RetryPolicy
 from hyperloom.orchestrator.roles.codex import CodexBackend
-from hyperloom.orchestrator.roles.mcp_context_tools import (
+from hyperloom.orchestrator.mcp_tool_names import (
     CONTEXT_TOOL_NAMES,
     CONTEXT_TOOL_QUALIFIED_NAMES,
+    EMIT_INTENT_TOOL_NAME,
+    EMIT_INTENT_TOOL_QUALIFIED,
     qualified_context_tool_name,
 )
-from hyperloom.orchestrator.roles.mcp_emit_intent import EMIT_INTENT_TOOL_NAME, EMIT_INTENT_TOOL_QUALIFIED
+from hyperloom.orchestrator.roles.mcp_context_tools import CONTEXT_TOOL_SPECS
 from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir, asset_system_prompts_dir
 
 
@@ -121,6 +123,12 @@ def _assert_mcp_tools_named_as_registered(text: str, where: str) -> None:
 def test_tool_prompt_names_every_mcp_tool_under_its_registered_name() -> None:
     """A bare MCP name in the prompt advertises a tool the agent cannot call."""
     _assert_mcp_tools_named_as_registered(_prompt(TRANSPORT_TOOLS), "the tools prompt")
+
+
+def test_tool_descriptions_name_every_mcp_tool_under_its_registered_name() -> None:
+    """The SDK shows these beside the allow-list; a bare name there misroutes the call."""
+    for tool_name, description, _schema, _method in CONTEXT_TOOL_SPECS:
+        _assert_mcp_tools_named_as_registered(description, f"the {tool_name} description")
 
 
 def test_reference_docs_name_every_mcp_tool_under_its_registered_name() -> None:

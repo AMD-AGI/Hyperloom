@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
+from hyperloom.orchestrator.mcp_tool_names import qualified_context_tool_name
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import (
     EXTEND_LEASE_MAX_SEC,
@@ -334,6 +335,8 @@ def test_gate_extend_lease_bounds_hint_states_the_step_cap(gate):
     assert exc.value.rule == "extend_lease_bounds"
     assert f"at most {EXTEND_LEASE_MAX_SEC}s per call" in exc.value.hint
     assert "while the task runs" in exc.value.hint
+    # The tool the hint sends the agent back to is named the way the runtime registers it.
+    assert qualified_context_tool_name("get_running_tasks") in exc.value.hint
 
 
 def test_gate_orchestration_prune_branch_requires_family(gate):

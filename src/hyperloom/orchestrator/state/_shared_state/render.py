@@ -12,6 +12,7 @@ from typing import Any, NamedTuple
 from hyperloom.common.env import env_bool
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
+from ...mcp_tool_names import qualified_context_tool_name
 from . import gap_rows, proposal_scores, variant_line, warm_start
 from .attempt_audit import _AUDIT_ACTIONS
 from .phase_state import GAP_SEVERITY_RANK
@@ -711,10 +712,11 @@ class _RenderMixin:
         # By default point at the show_analysis_md tool; set INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE=1 to inline
         # the verbatim md.
         if not env_bool("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE"):
+            show_analysis_md = qualified_context_tool_name("show_analysis_md")
             return (
                 f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
                 "full report not inlined; see profiler_digest above or call the "
-                "show_analysis_md context tool for the verbatim analysis.md.)"
+                f"{show_analysis_md} context tool for the verbatim analysis.md.)"
             )
         return (
             f"\n=== TraceLens Analysis (snapshot #{snap}, "

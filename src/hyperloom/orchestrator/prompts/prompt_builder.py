@@ -30,6 +30,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
 )
 from hyperloom.common.perf_metric import graded_metric_key, is_agentx_mode
+from ..mcp_tool_names import qualified_context_tool_name
 from . import read_rules_fragment as _read_rules_fragment
 from .agentx_context import corpus_lines, grading_lines, launch_ownership_lines
 from .transport import TRANSPORTS, TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
@@ -736,8 +737,6 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
     Returns:
         list[str]: Markdown lines for the failure-recovery block.
     """
-    from ..roles.mcp_context_tools import qualified_context_tool_name
-
     baseline_scoped = _renders_in(phase, _BASELINE_RECOVERY_PHASES)
     read_reference = qualified_context_tool_name("read_reference")
     detail = (
@@ -1043,8 +1042,6 @@ def _section_reference_index(
     Returns:
         Markdown lines, or ``[]`` when the directory is absent or empty.
     """
-    from ..roles.mcp_context_tools import qualified_context_tool_name
-
     if not references_dir.is_dir():
         return []
     # Only filter AgentX-only docs when a concrete mode is set; unscoped renders all.
