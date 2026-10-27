@@ -17,6 +17,7 @@ import zlib
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 
+from hyperloom.common.coerce import to_int
 from hyperloom.common.url_safety import require_http_url as _base_require_http_url
 
 from .types import BaselineQuery
@@ -97,14 +98,6 @@ def _fetch_raw(url: str) -> bytes:
 def base_url() -> str:
     """Public accessor for the resolved API base URL (honours env override)."""
     return _base_url()
-
-
-def _to_int(value: object) -> int | None:
-    """Best-effort integer coercion used by dimension filtering."""
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
 
 
 def fetch_rows(model_api_name: str) -> list[dict] | None:
@@ -221,8 +214,8 @@ def find_reference_rows(rows: list[dict], query: BaselineQuery) -> list[dict]:
             for r in matched
             if isl is not None
             and osl is not None
-            and _to_int(r.get("isl")) == int(isl)
-            and _to_int(r.get("osl")) == int(osl)
+            and to_int(r.get("isl")) == int(isl)
+            and to_int(r.get("osl")) == int(osl)
         ]
     prec = str(query.precision or "").strip().casefold()
     if prec:

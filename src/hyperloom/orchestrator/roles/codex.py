@@ -28,6 +28,7 @@ from ..prompts.transport import TRANSPORT_STRUCTURED_OUTPUT
 from hyperloom.inference_optimizer.trace.llm_trace import new_call_id
 from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
 from hyperloom.common.llm_config import DEFAULT_CODEX_MODEL
+from hyperloom.common.coerce import to_int
 from .base import (
     BackendError,
     BackendTurnResult,
@@ -35,7 +36,6 @@ from .base import (
     RetryPolicy,
     parse_call_timeout_env,
     retry_with_backoff,
-    safe_int,
 )
 from .mcp_emit_intent import (
     build_intent_envelope_schema,
@@ -189,10 +189,10 @@ class CodexBackend:
             raise LLMCallFailed("Codex Agent SDK turn failed: " + redact_secret_values(sdk_result.error))
 
         usage = dict(sdk_result.usage or {})
-        input_tokens = safe_int(usage.get("input_tokens"))
-        output_tokens = safe_int(usage.get("output_tokens"))
-        cache_read_tokens = safe_int(usage.get("cache_read_input_tokens"))
-        reasoning_tokens = safe_int(usage.get("reasoning_output_tokens"))
+        input_tokens = to_int(usage.get("input_tokens"), 0)
+        output_tokens = to_int(usage.get("output_tokens"), 0)
+        cache_read_tokens = to_int(usage.get("cache_read_input_tokens"), 0)
+        reasoning_tokens = to_int(usage.get("reasoning_output_tokens"), 0)
         self.calls.append(
             {
                 "model": self.model,
@@ -221,7 +221,7 @@ class CodexBackend:
             "context_tokens_peak": input_tokens + cache_read_tokens,
             # Stated by Codex per turn, and better than any table this side keeps: the compaction trigger is a
             # fraction of it.
-            "model_context_window": safe_int(usage.get("model_context_window")),
+            "model_context_window": to_int(usage.get("model_context_window"), 0),
             # Full conversation text for conversations.jsonl, handed up for the caller to persist.
             "prompt": prompt,
             "response": sdk_result.text,

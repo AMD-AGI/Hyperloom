@@ -22,7 +22,6 @@ from hyperloom.common.coerce import to_float, to_int
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import build_benchmark_env
 
-from . import bypass_analysis
 from . import bypass_engine
 from . import bypass_report
 from . import bypass_scriptable
@@ -56,37 +55,27 @@ def _tokenize_extra_args(bench_envs: dict[str, Any], framework: str) -> list[str
         return raw.split()
 
 
-#: Phase that answers only "does this combo boot and serve": boot, hold,
-#: health, one short completion, tear down. No benchmark client.
-
 # Reuse verdicts for a persistent lifecycle server (see _server_reusable).
 _REUSE = "reuse"  # healthy port + our pid/meta present -> attach a client round
 _BOOT = "boot"  # port not up -> this round boots the server
 _FOREIGN = "foreign"  # healthy port but no pid/meta -> not ours; refuse
 
-# A round that only boots the server and leaves it up: --phase on the command line, or MAGPIE_RUN_PHASE in
-# benchmark.envs, which is where run_grid puts it.
+# A round that only boots the server and leaves it up: MAGPIE_RUN_PHASE in benchmark.envs, which is where run_grid
+# puts it.
 _PHASE_SERVER = "server"
 
 
-def _server_reusable(base_url: str, pid_dir: str | None, framework: str, port: int) -> str:
+def _server_reusable(base_url: str, pid_dir: str, framework: str, port: int) -> str:
     """Classify whether a persistent lifecycle server can be reused."""
     if not bypass_engine.server_health_ok(base_url):
         return _BOOT
-    if pid_dir and bypass_engine.lifecycle_files_present(pid_dir, framework, port):
+    if bypass_engine.lifecycle_files_present(pid_dir, framework, port):
         return _REUSE
     return _FOREIGN
 
 
-def run_benchmark(
-    config_path: Path,
-    output_dir: Path,
-    *,
-    phase: str = "all",
-    pid_dir: str | None = None,
-    cleanup: bool = True,
-) -> int:
-    """Run a benchmark, optionally as a lifecycle phase."""
+def run_benchmark(config_path: Path, output_dir: Path) -> int:
+    """Run a benchmark, as a server_lifecycle round when the config enables one."""
     spec = _read_bench_spec(config_path)
 
     # Scriptable (server-less) frameworks (e.g. xDiT diffusion): no server, no HTTP client.
@@ -126,19 +115,10 @@ def run_benchmark(
         start = time.time()
         return r.finalize(start, dataclasses.replace(r, base_url=remote_base_url).run_client())
 
-    if phase == _PHASE_SERVER:
-        if not pid_dir:
-            r.report_failure(time.time(), "phase=server requires pid_dir")
-            return 2
-        return _run_server_phase(r, pid_dir=pid_dir)
-
-    if phase == "client":
-        return _run_client_phase(r, pid_dir=pid_dir, cleanup=cleanup, start=time.time())
-
-    if phase == "all" and bool(spec.lifecycle.get("enabled")):
+    if bool(spec.lifecycle.get("enabled")):
         return _run_lifecycle_round(r, spec.lifecycle)
 
-    # phase == "all": start server, run client, always teardown.
+    # Start server, run client, always teardown.
     start = time.time()
     proc = r.boot(start)
     if isinstance(proc, int):
@@ -338,7 +318,7 @@ class _Round:
         _write_report(self.workspace, self.subject, bypass_report.RunOutcome(False, [reason]), start)
 
     def finalize(self, start: float, rc: int) -> int:
-        """Parse raw result, build analysis, write report; return exit code."""
+        """Parse raw result, write report; return exit code."""
         raw = _load_raw_result(self.workspace)
         eval_rc = _read_eval_returncode(self.workspace)
         success = rc == 0 and eval_rc == 0 and raw is not None
@@ -351,17 +331,10 @@ class _Round:
             errors.append(f"benchmark client exited {rc}")
         if raw is None:
             errors.append("inferencex_result.json not produced")
-        analysis = bypass_analysis.build_analysis(
-            workspace=self.workspace,
-            server_log=self.server_log,
-            success=success,
-            stderr_text=_read_log(self.workspace / "client_stderr.log"),
-            run_eval=_run_eval_enabled(self.bench_envs),
-        )
         _write_report(
             self.workspace,
             self.subject,
-            bypass_report.RunOutcome(success, errors, raw_result=raw, analysis=analysis),
+            bypass_report.RunOutcome(success, errors, raw_result=raw),
             start,
         )
         if success:
@@ -379,24 +352,13 @@ def _run_server_phase(r: _Round, *, pid_dir: str) -> int:
     return 0
 
 
-def _run_client_phase(r: _Round, *, pid_dir: str | None, cleanup: bool, start: float) -> int:
-    """Reuse a running server; run client (+eval); teardown when cleanup."""
-    if not pid_dir:
-        r.report_failure(start, "phase=client requires pid_dir")
-        return 1
-    verdict = _server_reusable(r.base_url, pid_dir, r.framework, r.port)
-    if verdict != _REUSE:
-        r.report_failure(
-            start,
-            "no healthy server to reuse"
-            if verdict == _BOOT
-            else f"port {r.port} in use by a non-bypass server (no lifecycle pid/meta)",
-        )
-        return 1
+def _run_client_phase(r: _Round, *, pid_dir: str, cleanup: bool) -> int:
+    """Run client (+eval) against the reused server; teardown when cleanup."""
+    start = time.time()
     try:
         rc = r.run_client()
     finally:
-        if cleanup and pid_dir:
+        if cleanup:
             from ._server_lifecycle import teardown_lifecycle_server
 
             teardown_lifecycle_server(pid_dir=pid_dir, framework=r.framework, port=r.port)
@@ -416,7 +378,7 @@ def _run_lifecycle_round(r: _Round, sl: dict[str, Any]) -> int:
     cleanup = bool(sl.get("cleanup", True))
     if verdict == _REUSE:
         # A persistent server from a prior round is up AND ours: reuse it.
-        return _run_client_phase(r, pid_dir=pid_dir, cleanup=cleanup, start=time.time())
+        return _run_client_phase(r, pid_dir=pid_dir, cleanup=cleanup)
     return _run_lifecycle_all(r, pid_dir=pid_dir, cleanup=cleanup)
 
 
@@ -641,14 +603,6 @@ def _write_report(
     bypass_report.write_report(workspace, report)
 
 
-def _read_log(path: Path) -> str:
-    """Read a log file for analysis, tolerating absence (best-effort)."""
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-
-
 def _emit_failure(output_dir: Path, framework: str, model: str, error: str) -> None:
     """Emit a failing report + workspace for an error found before the round's workspace exists."""
     _write_report(
@@ -667,32 +621,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     bench.add_argument("--benchmark-config", required=True)
     bench.add_argument("--output-dir", required=True)
     bench.add_argument("--run-mode", default="local")
-    bench.add_argument("--phase", default="all", choices=["all", "server", "client"])
-    bench.add_argument("--server-lifecycle-pid-dir", default=None)
-    bench.add_argument("--server-lifecycle-cleanup", default="true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     args = _build_arg_parser().parse_args(argv)
-    if args.mode != "benchmark":
-        print(f"unsupported mode: {args.mode}", file=sys.stderr)
-        return 2
     if args.run_mode != "local":
         print(
             f"bypass runner supports --run-mode local only, got {args.run_mode}",
             file=sys.stderr,
         )
         return 2
-    cleanup = is_truthy(getattr(args, "server_lifecycle_cleanup", "true"), default=True)
-    return run_benchmark(
-        Path(args.benchmark_config),
-        Path(args.output_dir),
-        phase=args.phase,
-        pid_dir=args.server_lifecycle_pid_dir,
-        cleanup=cleanup,
-    )
+    return run_benchmark(Path(args.benchmark_config), Path(args.output_dir))
 
 
 if __name__ == "__main__":

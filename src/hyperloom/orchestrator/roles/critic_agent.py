@@ -27,6 +27,7 @@ from hyperloom.common.llm_config import (
     build_http_timeout,
     get_async_openai_client,
 )
+from hyperloom.common.coerce import to_int
 from hyperloom.common.jsonio import extract_first_json_with_key
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
@@ -35,7 +36,6 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir, manifest_path
 from hyperloom.common.token_usage import uncached_input_tokens
-from hyperloom.inference_optimizer.trace._row_utils import coerce_optional_int
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tokens
@@ -974,8 +974,8 @@ class CriticAgentBackend:
         """Fold one OpenAI ``resp.usage`` into the running token accumulator."""
         if usage is None:
             return
-        cached = coerce_optional_int(getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", None))
-        prompt = coerce_optional_int(getattr(usage, "prompt_tokens", None))
+        cached = to_int(getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", None))
+        prompt = to_int(getattr(usage, "prompt_tokens", None))
         acc["input_tokens"] += uncached_input_tokens(prompt, cached) or 0
         if cached is not None:
             acc["cache_read_input_tokens"] = acc.get("cache_read_input_tokens", 0) + cached

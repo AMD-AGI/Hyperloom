@@ -368,7 +368,7 @@ def test_the_section_records_the_setup_script_beside_its_verdict(tmp_path):
     out = stack.write()
     state = {"enablement": {"last_specialist_task_id": "spec-1", "environment_closure": stack.en.environment_closure}}
 
-    section = collect_enablement(stack.session, state, [])
+    section = collect_enablement(stack.session, state)
 
     assert section["replay_sufficiency"]["status"] == "insufficient"
     assert section["setup_script"] == {

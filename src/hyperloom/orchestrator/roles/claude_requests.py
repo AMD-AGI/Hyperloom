@@ -30,7 +30,7 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
     new_span_id,
     record_event,
 )
-from .base import safe_int
+from hyperloom.common.coerce import to_int
 
 TIMING_STREAM = "stream_events"
 TIMING_ASSISTANT_MESSAGE = "assistant_message"
@@ -47,7 +47,7 @@ def _usage_counts(usage: Any) -> dict[str, int]:
     """The canonical counters a usage mapping reports (absent keys are left out, so a later delta cannot zero them)."""
     if not isinstance(usage, dict):
         return {}
-    return {key: safe_int(usage.get(key)) for key in _USAGE_KEYS if usage.get(key) is not None}
+    return {key: to_int(usage.get(key), 0) for key in _USAGE_KEYS if usage.get(key) is not None}
 
 
 def _mapping(value: Any) -> dict[str, Any]:

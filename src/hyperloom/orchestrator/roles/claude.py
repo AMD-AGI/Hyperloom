@@ -30,6 +30,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 from ..prompts.transport import TRANSPORT_TOOLS
 from hyperloom.inference_optimizer.trace.llm_trace import new_call_id
 from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
+from hyperloom.common.coerce import to_int
 from .base import (
     BackendError,
     BackendTurnResult,
@@ -37,7 +38,6 @@ from .base import (
     RetryPolicy,
     parse_call_timeout_env,
     retry_with_backoff,
-    safe_int,
 )
 from .claude_requests import ClaudeRequestTracker
 from .mcp_context_tools import (
@@ -68,9 +68,9 @@ log = logging.getLogger(__name__)
 def _input_side_total(usage: dict[str, Any]) -> int:
     """Total input-side tokens (fresh + cache read + cache creation) of a usage dict."""
     return (
-        safe_int(usage.get("input_tokens"))
-        + safe_int(usage.get("cache_read_input_tokens"))
-        + safe_int(usage.get("cache_creation_input_tokens"))
+        to_int(usage.get("input_tokens"), 0)
+        + to_int(usage.get("cache_read_input_tokens"), 0)
+        + to_int(usage.get("cache_creation_input_tokens"), 0)
     )
 
 
@@ -533,10 +533,10 @@ class ClaudeBackend:
             self._active_turn_diagnostic["session_id_hash"] = self._session_hash(collected.session_id)
         raw_text = collected.raw_text
         usage = collected.usage
-        cache_creation = safe_int(usage.get("cache_creation_input_tokens") if usage else None)
-        cache_read = safe_int(usage.get("cache_read_input_tokens") if usage else None)
-        input_tokens = safe_int(usage.get("input_tokens") if usage else None)
-        output_tokens = safe_int(usage.get("output_tokens") if usage else None)
+        cache_creation = to_int(usage.get("cache_creation_input_tokens") if usage else None, 0)
+        cache_read = to_int(usage.get("cache_read_input_tokens") if usage else None, 0)
+        input_tokens = to_int(usage.get("input_tokens") if usage else None, 0)
+        output_tokens = to_int(usage.get("output_tokens") if usage else None, 0)
         if self._active_turn_diagnostic is not None:
             self._active_turn_diagnostic["usage"] = {
                 "cache_creation_input_tokens": cache_creation,
@@ -573,7 +573,7 @@ class ClaudeBackend:
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 # Per-request context size; the counters above sum the call's internal turns and are spend, not size.
-                "context_tokens_peak": safe_int(usage.get("context_tokens_peak") if usage else None),
+                "context_tokens_peak": to_int(usage.get("context_tokens_peak") if usage else None, 0),
                 # Full conversation text so the caller (which holds the session_dir / component / tick context the
                 # stateless backend lacks) can persist it to conversations.jsonl.
                 "prompt": full_prompt,
