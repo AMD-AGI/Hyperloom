@@ -224,7 +224,11 @@ def test_supervisor_api_failure_is_not_parsed_or_repaired(
         )
 
     assert calls == 1
-    assert (tmp_path / "forge_experiments" / "supervisor").exists() is False
+    supervisor_dir = tmp_path / "forge_experiments" / "supervisor"
+    record = (supervisor_dir / "intervention_iter_004.md").read_text(encoding="utf-8")
+    assert "(failed — SupervisorBackendFailure: gateway unavailable)" in record
+    assert "SDK error text" not in record
+    assert not (supervisor_dir / "latest.md").exists()
 
 
 def test_supervisor_provider_switch_clears_backend_specific_runtime(

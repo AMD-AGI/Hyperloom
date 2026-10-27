@@ -76,21 +76,23 @@ class SupervisorInteraction:
     reply: str
     backend: str
     model: str
+    failure: str = ""
 
 
 def _persist_interaction(workspace: str, interaction: SupervisorInteraction) -> None:
-    """Save one supervisor intervention (prompt + reply) for later inspection."""
+    """Save one supervisor intervention (prompt + reply, or why it failed) for later inspection."""
     iteration, reason, reply = interaction.iteration, interaction.reason, interaction.reply
     system, user, backend, model = interaction.system, interaction.user, interaction.backend, interaction.model
     try:
         d = Path(workspace) / "forge_experiments" / "supervisor"
         d.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        reply_txt = (
-            reply
-            if reply and reply.strip()
-            else "(empty — the supervisor returned no directions, e.g. a backend failure)"
-        )
+        if interaction.failure:
+            reply_txt = f"(failed — {interaction.failure})"
+        elif reply and reply.strip():
+            reply_txt = reply
+        else:
+            reply_txt = "(empty — the supervisor returned no directions)"
         body = (
             f"# Supervisor intervention — iteration {iteration}\n\n"
             f"- timestamp: {ts}\n"
@@ -248,17 +250,8 @@ def make_supervisor_fn(
             gpu_target,
             evidence_context=evidence_context,
         )
-        if selected_backend is None:
-            selected_backend = create_registered_backend(runtime)
-            setattr(supervisor_fn, "backend_name", selected_backend.name)
-            setattr(
-                supervisor_fn,
-                "backend_model",
-                selected_backend.runtime.model,
-            )
-        deadline = time.monotonic() + timeout_sec
 
-        async def run_once(user_prompt: str) -> str:
+        async def run_once(user_prompt: str, deadline: float) -> str:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise asyncio.TimeoutError
@@ -294,7 +287,32 @@ def make_supervisor_fn(
                 raise SupervisorBackendFailure(detail)
             return result.text or ""
 
-        reply = await run_once(task)
+        try:
+            if selected_backend is None:
+                selected_backend = create_registered_backend(runtime)
+                setattr(supervisor_fn, "backend_name", selected_backend.name)
+                setattr(
+                    supervisor_fn,
+                    "backend_model",
+                    selected_backend.runtime.model,
+                )
+            reply = await run_once(task, time.monotonic() + timeout_sec)
+        except Exception as error:
+            # Every attempt leaves its record, a failed one included; the runner's boundary records the error.
+            _persist_interaction(
+                workspace,
+                SupervisorInteraction(
+                    iteration,
+                    reason,
+                    _SUPERVISOR_ROLE,
+                    task,
+                    "",
+                    backend=selected_backend.name if selected_backend is not None else runtime.provider,
+                    model=selected_backend.runtime.model if selected_backend is not None else runtime.model,
+                    failure=f"{type(error).__name__}: {error}",
+                ),
+            )
+            raise
         _persist_interaction(
             workspace,
             SupervisorInteraction(
