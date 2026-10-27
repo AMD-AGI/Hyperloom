@@ -32,6 +32,7 @@ def prepare_benchmark_runtime(config_path: Path, env: dict[str, str]) -> Prepara
     )
     from ._inferencex_patcher import (
         ensure_benchmark_lib_eval_start_patched,
+        ensure_benchmark_serving_seed_patched,
         ensure_eval_probe_patched,
         ensure_eval_unbound_outputs_patched,
         eval_probe_targets_exist,
@@ -58,6 +59,9 @@ def prepare_benchmark_runtime(config_path: Path, env: dict[str, str]) -> Prepara
     # The generation bounds + pathology probe are asserted whether or not ``$INFERENCEX_PATH`` is set: unset falls
     # back to the same env discovery the baseline arm uses ($MAGPIE_PATH/InferenceX).
     probe_root = Path(inferencex_path) if inferencex_path else None
+    # Best-effort: without it a warmup round pre-fills the measured round's prefix cache, which inflates the number
+    # but never breaks the round.
+    ensure_benchmark_serving_seed_patched(probe_root)
     # Best-effort, unlike the probe below: a missing guard only costs the reason a failed round reports.
     ensure_eval_unbound_outputs_patched(probe_root)
     if not ensure_eval_probe_patched(probe_root) and not materialized_run_eval_disabled(config_path):
@@ -80,3 +84,19 @@ def prepare_benchmark_runtime(config_path: Path, env: dict[str, str]) -> Prepara
         log.error("%s; failing this benchmark", _agx_err)
         return PreparationFailure(AGENTX_PREFLIGHT_RETURNCODE, _agx_err)
     return None
+
+
+def apply_benchmark_round_seed(config_path: Path, env: dict[str, str], *, warmup: bool) -> None:
+    """Reseed a discarded warmup round's client so it cannot pre-fill the measured round's prefix cache.
+
+    Native AgentX replays its own workload through Magpie and is left exactly as it was.
+
+    Args:
+        config_path: The round's materialized Magpie YAML.
+        env: The benchmark subprocess env, edited in place.
+        warmup: Whether the round's result is discarded.
+    """
+    from ._inferencex_patcher import apply_round_seed
+    from .magpie_agentx import native_config
+
+    apply_round_seed(env, warmup=warmup and not native_config(config_path))

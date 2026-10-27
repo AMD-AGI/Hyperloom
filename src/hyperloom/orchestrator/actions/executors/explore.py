@@ -1295,7 +1295,12 @@ class _ExploreRound:
             grid=[run_gv],
             output_root=warmup_slot,
             recipe=self._recipe(),
-            launch=GridLaunch(result_dir=self.result_dir, serving_lease=self.lease, server_lifecycle=lifecycle),
+            launch=GridLaunch(
+                result_dir=self.result_dir,
+                serving_lease=self.lease,
+                server_lifecycle=lifecycle,
+                warmup_round=True,
+            ),
             stop=GridStop(
                 session_deadline_sec=self.session_deadline_sec, variant_expected_sec=self.warmup_expected_sec
             ),
