@@ -17,6 +17,9 @@ import hyperloom
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.recipe import PatchRef
 from hyperloom_multibranch.scheduling.tests.child_sessions import (
+    AGENTX_BENCHMARK,
+    AGENTX_RUN_PERF,
+    AGENTX_RUN_SECONDS,
     BASE_SHA,
     BASELINE_TPUT,
     COMPLETED_STOP_REASON,
@@ -26,12 +29,14 @@ from hyperloom_multibranch.scheduling.tests.child_sessions import (
     framework_checkout,
     head_of,
     state_document,
+    with_agentx_baseline_run,
     with_roofline_profile,
     write_child_session,
 )
 
 from hyperloom_multibranch.scheduling.prelude_reader import (
     MB_LATEST_STATE_SCHEMA_VERSION,
+    ChildBaselineRun,
     MB_TRACE_FILE_GLOB,
     ChildProfile,
     PreludeArtifacts,
@@ -311,3 +316,86 @@ def test_harness_flags_are_stripped_and_unexpressed_launch_controls_are_named(tm
     assert artifacts.launch.server_args == "--mem-fraction-static 0.8"
     assert artifacts.unexpressed == ("remove_args", "unset_envs", "args_mode")
     assert root_recipe(artifacts, "sglang", None, (), IMAGE).unexpressed == ("args_mode", "remove_args", "unset_envs")
+
+
+def _with_state(session: Path, **fields: object) -> Path:
+    state = json.loads((session / "state.json").read_text())
+    return write_child_session(session, {**state, **fields})
+
+
+def test_the_baseline_run_is_the_one_the_childs_anchor_was_promoted_from(tmp_path: Path) -> None:
+    child = child_with_patch(tmp_path)
+    run = with_agentx_baseline_run(child)
+
+    artifacts = read_prelude(child)
+
+    assert artifacts.baseline_run == ChildBaselineRun(
+        run_dir=run,
+        benchmark_dir=run / AGENTX_BENCHMARK,
+        point_config=run / "baseline_config.with_envs.yaml",
+        wall_seconds=AGENTX_RUN_SECONDS,
+        p50=AGENTX_RUN_PERF["e2e_norm_intvty_p50"],
+    )
+    assert artifacts.baseline_run_refusal == ""
+
+
+def test_after_a_successful_enablement_only_its_revalidation_measured_the_root(tmp_path: Path) -> None:
+    child = child_with_patch(tmp_path)
+    revalidated = with_agentx_baseline_run(child, extras={"baseline_tput": BASELINE_TPUT, "is_revalidation": True})
+    state = json.loads((child / "state.json").read_text())
+    _with_state(child, enablement={**state["enablement"], "succeeded": True})
+
+    run = read_prelude(child).baseline_run
+
+    assert run is not None and run.run_dir == revalidated
+
+
+@pytest.mark.parametrize(
+    ("anchor", "state", "refusal"),
+    [
+        ({"status": "failed"}, {}, "promoted no baseline that succeeded"),
+        ({"extras": {"baseline_tput": BASELINE_TPUT / 2}}, {}, "not the anchor's baseline_tput"),
+        ({}, {"baseline_measure_round_dropped": True}, "cold start"),
+        ({}, {"baseline_runtime_sec": None}, "no baseline_runtime_sec"),
+    ],
+)
+def test_a_baseline_run_that_cannot_stand_for_the_root_is_refused_with_its_reason(
+    tmp_path: Path, anchor: dict[str, object], state: dict[str, object], refusal: str
+) -> None:
+    child = child_with_patch(tmp_path)
+    with_agentx_baseline_run(child, **anchor)
+    _with_state(child, **state)
+
+    artifacts = read_prelude(child)
+
+    assert artifacts.baseline_run is None and refusal in artifacts.baseline_run_refusal
+
+
+def test_an_anchor_promoted_before_the_enablement_succeeded_is_refused(tmp_path: Path) -> None:
+    child = child_with_patch(tmp_path)
+    with_agentx_baseline_run(child)
+    state = json.loads((child / "state.json").read_text())
+    _with_state(child, enablement={**state["enablement"], "succeeded": True})
+
+    artifacts = read_prelude(child)
+
+    assert artifacts.baseline_run is None and "after the anchor was promoted" in artifacts.baseline_run_refusal
+
+
+def test_a_boot_origin_anchor_that_closed_the_enablement_lane_measured_the_root(tmp_path: Path) -> None:
+    child = child_with_patch(tmp_path)
+    extras = {"baseline_tput": BASELINE_TPUT, "is_revalidation": False, "enablement_succeeded": True}
+    anchored = with_agentx_baseline_run(child, extras=extras)
+    state = json.loads((child / "state.json").read_text())
+    _with_state(child, enablement={**state["enablement"], "succeeded": True})
+
+    run = read_prelude(child).baseline_run
+
+    assert run is not None and run.run_dir == anchored
+
+
+def test_a_child_without_a_baseline_run_is_still_read(tmp_path: Path) -> None:
+    artifacts = read_prelude(child_with_patch(tmp_path))
+
+    assert artifacts.succeeded and artifacts.baseline_run is None
+    assert artifacts.baseline_run_refusal == "the child promoted no baseline that succeeded"

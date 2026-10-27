@@ -19,7 +19,9 @@ launch config alone is checked in its place, and one acceptance has not answered
 is anchored to is measured through the toolbox in a second step, once the caller has put the integration branch on the
 roster and given the toolbox its K: as many tests of the root as the rule gate asks for, from which the gate writes the
 baseline and its bar. The longest of those tests, start to finish, is how long one test of this workload takes;
-it is FINAL's reserve.
+it is FINAL's reserve. A gate that asks for none (AgentX, whose test takes over an hour) is given the child's own run of
+the root instead: its report and per-request export are copied to ``MB-prelude/baseline/``, the toolbox reads the copy
+as it reads a test's round, and that run's wall time is the reserve.
 
 Right after the root is committed, the toolbox is asked for the TraceLens report of the child's latest roofline
 profile, so the root has operator shares in the notebook; PRELUDE does not wait for it, and a child without a profile
@@ -30,15 +32,17 @@ A session given the PRELUDE of an earlier one (:func:`reused_prelude`) starts no
 that PRELUDE rooted on, which it only reads, the same way. The warm-start leads are read again, as their replays' files
 go to this session's blob store, and the baseline is measured as ever.
 
-The child's own measurements never reach the notebook, and nothing records the card time they took, so the session
-keeps an upper bound of it under its own name: the child's wall time from spawn to exit times the workload's TP,
-which counts the child's time off the cards as well.
+Apart from that AgentX baseline the child's measurements never reach the notebook, and nothing records the card time
+they took, so the session keeps an upper bound of it under its own name: the child's wall time from spawn to exit
+times the workload's TP, which counts the child's time off the cards as well.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import math
 import shutil
 import sys
 from collections.abc import Iterable, Mapping
@@ -48,13 +52,14 @@ from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.jsonio import read_json_strict
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
-from hyperloom.contracts.measurement import Purpose, TestKind, TestResult
+from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
 from hyperloom.contracts.recipe import PatchRef, Recipe
 from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
 from hyperloom.measure.compile import BlobError, BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
-from hyperloom_multibranch.contracts.gate import NotMeasured, SessionGate
+from hyperloom_multibranch.contracts.gate import NotMeasured, PreludeMeasurement, SessionGate
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent, SessionProfile
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
@@ -76,6 +81,7 @@ from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.manifest import read_workload
 from hyperloom_multibranch.scheduling.prelude_reader import (
+    ChildBaselineRun,
     ChildProfile,
     PreludeArtifacts,
     PreludeReadError,
@@ -119,6 +125,16 @@ ROOT_COMMITTED = "root committed"
 CHILD_REUSED = "child reused"
 ROOT_PROFILE_STARTED = "root profile started"
 ROOT_PROFILE_NOT_STARTED = "root profile not started"
+BASELINE_ESTABLISHED = "baseline established"
+#: Where the child's baseline run is copied, below ``MB-prelude/``, and the files of it the toolbox reads.
+PRELUDE_BASELINE_DIR = "baseline"
+CHILD_REPORT = "benchmark_report.json"
+CHILD_EXPORT = Path("aiperf_artifacts") / "profile_export.jsonl"
+#: Read by the prefix-cache check; a run without one is left to the check, which then reads the point config alone.
+CHILD_SERVER_LOG = "server.log"
+#: How far the P50 read from the copy may sit from the child's own record of it: the same report, so rounding only.
+CHILD_P50_REL_TOLERANCE = 1e-6
+_HASH_CHUNK = 1 << 20
 #: The workload fields a reused PRELUDE must match: all of them but the kernel optimizer, which only scopes the
 #: session's recipes, so a field added to :class:`Workload` has to match as well.
 CHILD_WORKLOAD_FIELDS = tuple(field.name for field in fields(Workload) if field.name != "kernel_optimizer")
@@ -245,6 +261,7 @@ class Prelude:
         self._toolbox = services.toolbox
         self._decisions = context.decisions
         self._clock = context.clock
+        self._child_baseline: tuple[ChildBaselineRun | None, str] = (None, "PRELUDE committed no root")
 
     async def root(
         self, workload: Workload, budget: SessionBudget, hard_stop: HardStop, base_image_digest: str
@@ -311,6 +328,7 @@ class Prelude:
                 },
             )
         )
+        self._child_baseline = (artifacts.baseline_run, artifacts.baseline_run_refusal)
         await self._start_root_profile(root, artifacts.profile)
         return PreludeResult(root, profile, await self._warm_start(profile, recipe, root), child_gpu_seconds)
 
@@ -455,11 +473,17 @@ class Prelude:
     async def measure_baseline(self, root: str) -> float:
         """Measure the baseline on ``root`` through the toolbox and have the rule gate anchor it; return the longest
         wall time, in seconds, of the root tests it anchored on. Raises :class:`PreludeFailed` when a baseline test is
-        refused, which takes back the ones accepted before it, or the baseline anchors nothing."""
+        refused, which takes back the ones accepted before it, or the baseline anchors nothing.
 
+        A gate that asks for no root test anchors on the child's own run of the root (:meth:`_anchor_on_child_run`).
+        """
+
+        count = await self._gate.baseline_test_count()
+        if count == 0:
+            return await self._anchor_on_child_run(root)
         request = integration_test_request(TestKind.TEST, Purpose.BASELINE, root)
         try:
-            request_ids = [await self._tests.submit(request) for _ in range(await self._gate.baseline_test_count())]
+            request_ids = [await self._tests.submit(request) for _ in range(count)]
         except RequestRejected as exc:
             await self._tests.withdraw_integration(BASELINE_REFUSED)
             raise PreludeFailed(f"the toolbox refused the baseline test: {exc}") from exc
@@ -472,12 +496,110 @@ class Prelude:
         self._decisions.record(
             Decision(
                 DecisionKind.PRELUDE,
-                "baseline established",
+                BASELINE_ESTABLISHED,
                 INTEGRATION_BRANCH,
                 {"request_ids": list(baseline.request_ids), "longest_test_seconds": longest},
             )
         )
         return longest
+
+    async def _anchor_on_child_run(self, root: str) -> float:
+        """Have the gate anchor the baseline on the child's run of the root; return that run's wall time.
+
+        The run is read from copies in the session, hashed as they are read, so the gate can tell they still hold what
+        it was read from. The P50 read must be the one the child recorded for that run, or the copy is not the anchor.
+        """
+
+        run, refusal = self._child_baseline
+        if run is None:
+            raise PreludeFailed(f"the child's baseline run cannot stand for the root: {refusal}")
+        try:
+            copy = await asyncio.to_thread(self._copy_child_run, run)
+        except OSError as exc:
+            raise PreludeFailed(f"cannot copy the child's baseline run {run.run_dir}: {exc}") from exc
+        request_id = f"prelude-child:{run.run_dir.name}"
+        result = await self._toolbox.read_prelude_baseline(copy.run_dir, copy.point_config, request_id=request_id)
+        _check_child_p50(result, run)
+        measured = PreludeMeasurement(
+            result,
+            str(run.run_dir),
+            str(copy.report),
+            copy.report_sha256,
+            str(copy.export),
+            copy.export_sha256,
+            run.wall_seconds,
+        )
+        try:
+            baseline = await self._gate.establish_prelude_baseline(root, measured)
+        except NotMeasured as exc:
+            raise PreludeFailed(f"the child's baseline run anchors nothing: {exc}") from exc
+        self._decisions.record(
+            Decision(
+                DecisionKind.PRELUDE,
+                BASELINE_ESTABLISHED,
+                INTEGRATION_BRANCH,
+                {"request_ids": [], "source": baseline.source, "longest_test_seconds": run.wall_seconds},
+            )
+        )
+        return run.wall_seconds
+
+    def _copy_child_run(self, run: ChildBaselineRun) -> _ChildRunCopy:
+        """The report, export, server log and point config of ``run`` copied under ``MB-prelude/baseline/``, in the
+        layout the toolbox reads a round from; raises OSError when the report or export is missing or changed while it
+        was copied. Blocks."""
+
+        target = self._layout.prelude / PRELUDE_BASELINE_DIR / run.run_dir.name
+        benchmark = target / run.benchmark_dir.name
+        (benchmark / CHILD_EXPORT).parent.mkdir(parents=True, exist_ok=True)
+        point_config = Path(shutil.copy2(run.point_config, target / run.point_config.name))
+        if (run.benchmark_dir / CHILD_SERVER_LOG).is_file():
+            shutil.copy2(run.benchmark_dir / CHILD_SERVER_LOG, benchmark / CHILD_SERVER_LOG)
+        report, report_sha = _copied(run.benchmark_dir / CHILD_REPORT, benchmark / CHILD_REPORT)
+        export, export_sha = _copied(run.benchmark_dir / CHILD_EXPORT, benchmark / CHILD_EXPORT)
+        return _ChildRunCopy(target, point_config, report, report_sha, export, export_sha)
+
+
+@dataclass(frozen=True)
+class _ChildRunCopy:
+    run_dir: Path
+    point_config: Path
+    report: Path
+    report_sha256: str
+    export: Path
+    export_sha256: str
+
+
+def _copied(source: Path, target: Path) -> tuple[Path, str]:
+    """``source`` copied to ``target``, and the sha256 both hold; OSError when they differ. Blocks."""
+
+    before = _sha256(source)
+    shutil.copyfile(source, target)
+    after = _sha256(target)
+    if after != before:
+        raise OSError(f"{source} changed while it was copied (sha256 {before}, the copy {after})")
+    return target, after
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(_HASH_CHUNK):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _check_child_p50(result: TestResult, run: ChildBaselineRun) -> None:
+    """A measured copy must read the P50 the child recorded for the run; one that did not measure is the gate's."""
+
+    if result.validity is not Validity.SUCCEEDED:
+        return
+    read = [value.metrics.get(GRADED_INTVTY_P50) for value in result.rounds]
+    if run.p50 is None or len(read) != 1 or read[0] is None:
+        raise PreludeFailed(f"the child's baseline run {run.run_dir} has no P50 to check its copy against: {read}")
+    if not math.isclose(read[0], run.p50, rel_tol=CHILD_P50_REL_TOLERANCE):
+        raise PreludeFailed(
+            f"the copy of the child's baseline run reads P50 {read[0]}, the child recorded {run.p50} for {run.run_dir}"
+        )
 
 
 def _longest_wall_seconds(results: Iterable[TestResult]) -> float:

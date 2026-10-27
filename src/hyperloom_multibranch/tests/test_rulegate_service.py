@@ -151,24 +151,11 @@ async def test_prelude_with_one_root_test_measured_sets_no_bar(tmp_path):
     await session.toolbox.close()
 
 
-async def test_an_agentx_prelude_anchors_on_its_one_root_test(tmp_path):
+async def test_an_agentx_prelude_asks_for_no_root_test(tmp_path):
     session = _Session(tmp_path / "notebook", agentx=True)
-    ids = await session.root_tests()
 
-    record = await session.gate.establish_baseline(ROOT, ids)
-
-    assert len(ids) == 1 and record.request_ids == tuple(ids)
-    assert record.dispersion_pct == {}
-    assert record.threshold_pct == {GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT}
-    await session.toolbox.close()
-
-
-async def test_an_agentx_prelude_whose_root_test_did_not_measure_sets_no_bar(tmp_path):
-    session = _Session(tmp_path / "notebook", agentx=True)
-    ids = await session.root_tests(failing=1)
-
-    with pytest.raises(NotMeasured, match="0 of 1 root tests measured"):
-        await session.gate.establish_baseline(ROOT, ids)
+    assert await session.gate.baseline_test_count() == 0
+    assert await session.root_tests() == []
     await session.toolbox.close()
 
 

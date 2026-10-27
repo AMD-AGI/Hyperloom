@@ -107,12 +107,13 @@ class InferenceXRule(Rule):
 class AgentXRule(Rule):
     """P50 interactivity with its guards; the error rate the run reports is its accuracy.
 
-    The bar is fixed rather than drawn from the root's spread, so one root test is enough to anchor the parent values.
+    The bar is fixed rather than drawn from the root's spread, so the PRELUDE child's own run of the root anchors the
+    parent values and PRELUDE submits no root test: one takes 75 to 90 minutes.
     """
 
     accuracy_round = False
-    baseline_tests = 1
-    min_baselines = 1
+    baseline_tests = 0
+    min_baselines = 0
 
     async def baseline(self, store: GateRecords, root_commit: str, records: Sequence[TestRecord]) -> BaselineRecord:
         return await write_agentx_baseline(store, root_commit, records)

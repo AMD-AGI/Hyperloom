@@ -570,7 +570,8 @@ class RecordingToolbox(FakeToolbox):
     without one it goes with the toolbox. ``repo`` is the bench's experiment repository, which acceptance reads each
     parent's recipe from as the real toolbox does, so a delta onto a head that already pins a component is accepted
     without naming its upstream again. ``root_profiles`` holds every :meth:`analyze_root_profile` call, which
-    raises ``refusal`` when one is set. Not a placeholder: the fake is the toolbox owner's own, which has no
+    raises ``refusal`` when one is set, and ``prelude_baselines`` every run directory :meth:`read_prelude_baseline`
+    read. Not a placeholder: the fake is the toolbox owner's own, which has no
     ``analyze_root_profile`` of its own yet.
     """
 
@@ -602,6 +603,7 @@ class RecordingToolbox(FakeToolbox):
         self.closed = 0
         self.root_profiles: list[RootProfileCall] = []
         self.refusal: RequestRejected | None = None
+        self.prelude_baselines: list[Path] = []
 
     async def start(self) -> None:
         """Starts once: the fake also starts itself on its first use, which may come after the session's start."""
@@ -614,6 +616,10 @@ class RecordingToolbox(FakeToolbox):
             raise self.refusal
         self.root_profiles.append(RootProfileCall(commit_id, trace_dir, point_config, source_id))
         return f"prelude:{source_id}"
+
+    async def read_prelude_baseline(self, run_dir: Path, point_config: Path, *, request_id: str) -> TestResult:
+        self.prelude_baselines.append(run_dir)
+        return await super().read_prelude_baseline(run_dir, point_config, request_id=request_id)
 
     async def set_policy(self, policy: QueuePolicy) -> None:
         self.policies.append(policy)

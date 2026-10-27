@@ -168,9 +168,10 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     specialist_runtime,
     tagged,
 )
-from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_patch
+from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_patch, with_agentx_baseline_run
 from hyperloom_multibranch.tests.fakes import RecordingVerifier
 from hyperloom_multibranch.toolbox.attempts import TestJob
+from hyperloom_multibranch.toolbox.fake_model import DEFAULT_BASELINE
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.prompts import prompt_versions
@@ -185,6 +186,8 @@ WORKLOAD = Workload(
 )
 #: The same workload as an AgentX trace replay.
 AGENTX = replace(WORKLOAD, inferencex=None)
+#: The PRELUDE child's AgentX baseline run, launch to exit, which FINAL keeps in reserve.
+AGENTX_CHILD_RUN_SECONDS = 600.0
 #: What the session's image check finds: one fact of the rule pack that does not hold here, under the default mode.
 IMAGE_CHECK = ImageCheckReport(
     ImageCheckMode.WARN,
@@ -677,13 +680,21 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
 
 
 async def test_an_agentx_session_is_judged_on_p50_interactivity_and_validated_at_its_conc_alone(tmp_path: Path) -> None:
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    child = child_with_patch(tmp_path)
+    run = with_agentx_baseline_run(child, DEFAULT_BASELINE, runtime_seconds=AGENTX_CHILD_RUN_SECONDS)
+    stage = _stage(tmp_path, child=child)
     stage.settings = replace(SETTINGS, workload=AGENTX)
     stage.scripts = SCRIPTS
 
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
+    assert not [request for request in stage.toolbox.requests.values() if request.purpose is Purpose.BASELINE]
+    baseline = await stage.handle(Role.OBSERVER).baseline()
+    assert (baseline.request_ids, baseline.values[GRADED_INTVTY_P50]) == ((), DEFAULT_BASELINE[GRADED_INTVTY_P50])
+    assert baseline.source.startswith(f"prelude-child:{run} ")
+    [established] = [row for row in _decisions(stage) if row["reason"] == "baseline established"]
+    assert established["detail"]["longest_test_seconds"] == AGENTX_CHILD_RUN_SECONDS
     observer = stage.handle(Role.OBSERVER)
     profile = await observer.session_profile()
     assert (profile.isl, profile.osl, dict(profile.roofline_ceiling)) == (None, None, {})

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -46,6 +47,7 @@ from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.rulegate.inferencex import FLOOR_PCT
+from hyperloom_multibranch.rulegate.rules import AgentXRule, Rule
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling import prelude as prelude_module
 from hyperloom_multibranch.scheduling.prelude import (
@@ -73,12 +75,17 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
 )
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig
 from hyperloom_multibranch.scheduling.tests.child_sessions import (
+    AGENTX_BENCHMARK,
+    AGENTX_RUN_ID,
+    AGENTX_RUN_PERF,
+    AGENTX_RUN_SECONDS,
     PATCH_TEXT,
     POINT_CONFIG,
     ROOFLINE_PEAK,
     ROOFLINE_RUN_ID,
     TRACE_FILE,
     child_with_patch,
+    with_agentx_baseline_run,
     with_roofline_profile,
     write_child_session,
 )
@@ -124,15 +131,17 @@ async def _instant(seconds: float) -> None:
     await asyncio.sleep(0)
 
 
-def _peers(layout: SessionLayout, accuracy: float | None = None) -> PreludePeers:
-    """``accuracy`` is the eval score every baseline test measures, the fake's own when ``None``."""
+def _peers(layout: SessionLayout, accuracy: float | None = None, rule: Rule | None = None) -> PreludePeers:
+    """``accuracy`` is the eval score every baseline test measures, the fake's own when ``None``; ``rule`` is the
+    gate's, InferenceX's when ``None``."""
 
     scores = {} if accuracy is None else {RecipeDelta().fingerprint(): accuracy}
     toolbox_notebook = LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, "toolbox"), clock=_clock().now)
     repo = GitExperimentRepo(layout.repo, LocalBlobStore(layout.blobs))
     toolbox = RecordingToolbox(toolbox_notebook, accuracy=scores, conc=WORKLOAD.conc, repo=repo)
     tests = SessionTests(toolbox, Clock(now=_clock().now, sleep=_instant))
-    gate = session_gate(LocalNotebook(layout.notebook, Writer(Role.GATE, "gate"), clock=_clock().now), toolbox)
+    gate_notebook = LocalNotebook(layout.notebook, Writer(Role.GATE, "gate"), clock=_clock().now)
+    gate = session_gate(gate_notebook, toolbox, rule)
     return PreludePeers(repo, toolbox, tests, gate)
 
 
@@ -777,3 +786,86 @@ async def test_a_reused_prelude_starts_the_root_profile_from_the_earlier_childs_
     assert (call.trace_dir / TRACE_FILE).is_file()
     reasons = [entry["reason"] for entry in _logged(layout)]
     assert reasons[:3] == ["child reused", "root committed", "root profile started"]
+
+
+async def _agentx_baseline(tmp_path: Path, child: Path) -> tuple[SessionLayout, PreludePeers, Prelude, PreludeResult]:
+    """PRELUDE of an AgentX session on ``child``, rooted and ready to anchor the baseline."""
+
+    layout = _layout(tmp_path)
+    peers = _peers(layout, rule=AgentXRule())
+    prelude = _prelude(layout, _registry(layout, child), peers)
+    budget = SessionBudget.from_hours(2.0, NOW)
+    result = await prelude.root(AGENTX, budget, HardStop(budget, _clock()), IMAGE)
+    return layout, peers, prelude, result
+
+
+async def test_an_agentx_baseline_is_the_childs_own_run_and_no_root_test_is_submitted(tmp_path: Path) -> None:
+    child = child_with_patch(tmp_path)
+    run = with_agentx_baseline_run(child)
+    layout, peers, prelude, result = await _agentx_baseline(tmp_path, child)
+
+    reserve = await prelude.measure_baseline(result.root_commit)
+
+    assert peers.toolbox.requests == {}
+    assert reserve == AGENTX_RUN_SECONDS
+    copy = layout.prelude / "baseline" / AGENTX_RUN_ID
+    assert peers.toolbox.prelude_baselines == [copy]
+    report = copy / AGENTX_BENCHMARK / "benchmark_report.json"
+    assert report.read_bytes() == (run / AGENTX_BENCHMARK / "benchmark_report.json").read_bytes()
+    baseline = await _notebook(layout).baseline()
+    assert (baseline.root_commit, baseline.request_ids, baseline.wall_seconds) == (result.root_commit, (), reserve)
+    assert {key: baseline.values[key] for key in AGENTX_RUN_PERF} == pytest.approx(AGENTX_RUN_PERF)
+    assert baseline.source.startswith(f"prelude-child:{run} sha256:")
+    [established] = [entry for entry in _logged(layout) if entry["reason"] == "baseline established"]
+    assert established["detail"] == {"request_ids": [], "source": baseline.source, "longest_test_seconds": reserve}
+
+
+@pytest.mark.parametrize(
+    ("anchor", "state", "refusal"),
+    [
+        ({"decision": "discarded"}, {}, "promoted no baseline that succeeded"),
+        ({"extras": {"baseline_tput": 1.0}}, {}, "not the anchor's baseline_tput"),
+        ({}, {"enablement": {"succeeded": True}}, "after the anchor was promoted"),
+        ({}, {"baseline_measure_round_dropped": True}, "cold start"),
+        ({}, {"baseline_perf": {**AGENTX_RUN_PERF, "e2e_norm_intvty_p50": 120.0}}, "the child recorded 120.0"),
+    ],
+)
+async def test_an_agentx_baseline_the_childs_run_cannot_stand_for_fails_prelude(
+    tmp_path: Path, anchor: dict[str, Any], state: dict[str, Any], refusal: str
+) -> None:
+    child = child_with_patch(tmp_path)
+    with_agentx_baseline_run(child, **anchor)
+    document = json.loads((child / "state.json").read_text())
+    write_child_session(child, {**document, **state})
+    layout, peers, prelude, result = await _agentx_baseline(tmp_path, child)
+
+    with pytest.raises(PreludeFailed, match=refusal):
+        await prelude.measure_baseline(result.root_commit)
+
+    assert peers.toolbox.requests == {}
+    assert not [entry for entry in _logged(layout) if entry["reason"] == "baseline established"]
+
+
+async def test_an_agentx_baseline_whose_run_is_gone_fails_prelude(tmp_path: Path) -> None:
+    child = child_with_patch(tmp_path)
+    run = with_agentx_baseline_run(child)
+    layout, peers, prelude, result = await _agentx_baseline(tmp_path, child)
+    shutil.rmtree(run)
+
+    with pytest.raises(PreludeFailed, match="cannot copy the child's baseline run"):
+        await prelude.measure_baseline(result.root_commit)
+
+
+async def test_a_reused_prelude_anchors_an_agentx_baseline_on_the_earlier_childs_run(tmp_path: Path) -> None:
+    child = child_with_patch(tmp_path)
+    run = with_agentx_baseline_run(child)
+    earlier = await _rooted_session(tmp_path / "earlier", child)
+    layout = create_session(tmp_path / "later", WORKLOAD.model_basename, _clock())
+    peers = _peers(layout, rule=AgentXRule())
+    prelude = _prelude(layout, _registry(layout, None), peers)
+    result = await prelude.reuse(reused_prelude(earlier.root, WORKLOAD, IMAGE), WORKLOAD, IMAGE)
+
+    assert await prelude.measure_baseline(result.root_commit) == AGENTX_RUN_SECONDS
+
+    assert peers.toolbox.requests == {}
+    assert (await _notebook(layout).baseline()).source.startswith(f"prelude-child:{run} ")

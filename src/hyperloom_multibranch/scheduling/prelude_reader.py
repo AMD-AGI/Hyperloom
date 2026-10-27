@@ -11,7 +11,9 @@ recipe cannot express yet, a kept patch outside the framework's git checkout amo
 ``enablement.accepted_config``, the source the main flow writes ``reports/enablement/enablement_setting.sh`` from;
 that script is not parsed, only located (:attr:`PreludeArtifacts.setup_script`), so the setup the root recipe leaves
 out can be traced to it. The child's latest roofline profile is located on disk (:attr:`PreludeArtifacts.profile`), not
-through ``state.json``: the main flow records its trace only once its own analysis of it succeeded.
+through ``state.json``: the main flow records its trace only once its own analysis of it succeeded. The run that
+measured the child's anchoring baseline is located through ``state.json`` (:attr:`PreludeArtifacts.baseline_run`), so an
+AgentX session can take it as its baseline instead of measuring the root again.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.jsonio import read_json_strict
-from hyperloom.common.perf_metric import GRADED_OUTPUT
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, PatchRef, Recipe, RecipeError, with_unexpressed
 from hyperloom.inference_optimizer.breakdown.stop_reasons import outcome_status
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
@@ -61,6 +63,10 @@ MB_UNEXPRESSED_ENABLEMENT = ("setup_commands", "kept_artifacts", "active_runtime
 MB_UNEXPRESSED_LAUNCH = ("remove_args", "unset_envs")
 #: The unexpressed kind of a non-default ``args_mode`` and of a kept patch outside the framework checkout.
 ARGS_MODE_KIND = "args_mode"
+#: How the main flow marks the baseline attempt that became the anchor
+#: (src/hyperloom/orchestrator/loop/_baseline_promotion.py), and the attempt status of one that measured.
+MB_PROMOTED = "promoted"
+MB_SUCCEEDED = "succeeded"
 PATCH_KIND = "patch"
 DEFAULT_REMOTE = "origin"
 
@@ -101,6 +107,20 @@ class ChildProfile:
 
 
 @dataclass(frozen=True)
+class ChildBaselineRun:
+    """The child's run that measured its anchoring baseline of the root: ``run_dir`` is its ``runs/baseline/<id>``,
+    ``benchmark_dir`` the benchmark directory below it that holds the report, ``point_config`` the point config it ran.
+    ``wall_seconds`` is the run's time from launch to exit, boot included, and ``p50`` the P50 interactivity the child
+    recorded for it."""
+
+    run_dir: Path
+    benchmark_dir: Path
+    point_config: Path
+    wall_seconds: float
+    p50: float | None
+
+
+@dataclass(frozen=True)
 class PreludeArtifacts:
     """What the baseline prelude left behind, as the root recipe and the session profile need it.
 
@@ -110,7 +130,8 @@ class PreludeArtifacts:
     as recipe ``unexpressed`` entries, the foreign patches and whatever else enablement kept that a recipe cannot
     express yet. ``roofline_ceiling`` is keyed by the metric it bounds. ``setup_script`` is the child's
     ``enablement_setting.sh``, ``None`` when it wrote none. ``profile`` is the child's latest roofline profile, ``None``
-    when it profiled nothing.
+    when it profiled nothing. ``baseline_run`` is the run of the child's anchoring baseline, ``None`` with the reason in
+    ``baseline_run_refusal`` when it cannot stand for the root recipe: only an AgentX session needs it.
     """
 
     session_dir: Path
@@ -126,6 +147,8 @@ class PreludeArtifacts:
     unexpressed: tuple[str, ...]
     setup_script: Path | None
     profile: ChildProfile | None
+    baseline_run: ChildBaselineRun | None = None
+    baseline_run_refusal: str = ""
 
     @property
     def succeeded(self) -> bool:
@@ -164,6 +187,7 @@ def read_prelude(session_dir: Path) -> PreludeArtifacts:
     patches = _kept_patches(session_dir, enablement, framework_root)
     kept = tuple(patch for patch in patches if checkout is not None and _checkout(patch.root) == checkout)
     foreign = tuple(patch for patch in patches if patch not in kept)
+    baseline_run, refusal = _baseline_run(state, enablement)
     return PreludeArtifacts(
         session_dir=session_dir,
         stop_reason=str(state.get("stop_reason") or ""),
@@ -178,7 +202,61 @@ def read_prelude(session_dir: Path) -> PreludeArtifacts:
         unexpressed=(*_unexpressed(enablement, accepted), *(patch.unexpressed for patch in foreign)),
         setup_script=session_dir / MB_SETUP_SCRIPT if (session_dir / MB_SETUP_SCRIPT).is_file() else None,
         profile=_latest_profile(session_dir),
+        baseline_run=baseline_run,
+        baseline_run_refusal=refusal,
     )
+
+
+def _baseline_run(state: Mapping[str, object], enablement: Mapping[str, object]) -> tuple[ChildBaselineRun | None, str]:
+    """The run of the child's anchoring baseline, or why there is none that measured the root recipe.
+
+    The anchor is the last promoted baseline that succeeded, and it must be the one ``baseline_tput`` came from. After
+    a successful enablement the anchor must carry ``enablement_succeeded``: the main flow stamps it after settling the
+    lane in the same promotion, so a revalidation and a boot-origin anchor that closed the lane both carry it, while an
+    anchor promoted before the lane succeeded measured the config before it. A dropped measure round means the value is
+    a cold start's.
+    """
+
+    attempts = state.get("baseline_attempts")
+    promoted = [
+        attempt
+        for attempt in (attempts if isinstance(attempts, list) else [])
+        if isinstance(attempt, Mapping)
+        and attempt.get("decision") == MB_PROMOTED
+        and attempt.get("status") == MB_SUCCEEDED
+    ]
+    if not promoted:
+        return None, "the child promoted no baseline that succeeded"
+    anchor = promoted[-1]
+    extras = _mapping(anchor.get("extras"), "baseline_attempts[].extras")
+    if extras.get("baseline_tput") != state.get("baseline_tput"):
+        return None, (
+            f"the last promoted baseline measured {extras.get('baseline_tput')!r}, not the anchor's "
+            f"baseline_tput {state.get('baseline_tput')!r}"
+        )
+    if enablement.get("succeeded") and not (
+        extras.get("enablement_succeeded") is True or extras.get("is_revalidation") is True
+    ):
+        return None, "enablement succeeded after the anchor was promoted, so the anchor measured the config before it"
+    if state.get("baseline_measure_round_dropped"):
+        return None, "the anchor's measure round was dropped, so its value is a cold start's"
+    runtime = state.get("baseline_runtime_sec")
+    if isinstance(runtime, bool) or not isinstance(runtime, (int, float)) or runtime <= 0:
+        return None, f"the child recorded no baseline_runtime_sec ({runtime!r})"
+    workspace = anchor.get("workspace")
+    if not isinstance(workspace, str) or not workspace:
+        return None, "the anchor names no workspace"
+    benchmark_dir = Path(workspace)
+    run_dir = benchmark_dir.parent
+    perf = _mapping(state.get("baseline_perf"), "baseline_perf")
+    p50 = perf.get(GRADED_INTVTY_P50)
+    return ChildBaselineRun(
+        run_dir=run_dir,
+        benchmark_dir=benchmark_dir,
+        point_config=run_dir / MB_POINT_CONFIG_FILE,
+        wall_seconds=float(runtime),
+        p50=float(p50) if isinstance(p50, (int, float)) and not isinstance(p50, bool) else None,
+    ), ""
 
 
 def _latest_profile(session_dir: Path) -> ChildProfile | None:
@@ -401,6 +479,7 @@ def _git(root: Path, *args: str) -> str:
 
 __all__ = [
     "MB_LATEST_STATE_SCHEMA_VERSION",
+    "ChildBaselineRun",
     "ChildProfile",
     "KeptPatch",
     "PreludeArtifacts",

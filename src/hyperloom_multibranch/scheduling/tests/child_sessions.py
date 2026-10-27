@@ -2,13 +2,23 @@
 # SPDX-License-Identifier: MIT
 
 """Builders of a baseline-prelude child's session for the scheduling tests: a framework git checkout, the
-``state.json`` of a completed child with one kept patch on it, and a roofline profile."""
+``state.json`` of a completed child with one kept patch on it, a roofline profile, and an AgentX baseline run."""
 
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
+
+from hyperloom.common.perf_metric import (
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
+    GRADED_INTVTY,
+    GRADED_INTVTY_P50,
+    GRADED_OUTPUT,
+)
 
 from hyperloom_multibranch.scheduling.prelude_reader import MB_LATEST_STATE_SCHEMA_VERSION
 
@@ -22,6 +32,19 @@ SETUP_SCRIPT = "#!/bin/bash\npip install x\n"
 ROOFLINE_RUN_ID = "5f3e583beda4475e841f4bb7bacc9e4b"
 TRACE_FILE = "1785743528.38-TP-0.trace.json.gz"
 POINT_CONFIG = "benchmark:\n  envs:\n    CONC: 16\n    OSL: 1024\n"
+#: The toolbox's copy of a real child's AgentX baseline run (GLM-5.3, TP4, CONC 10), its export cut to seven requests.
+AGENTX_RUN_DATA = Path(__file__).parents[2] / "toolbox" / "tests" / "data" / "agentx_child_baseline"
+AGENTX_RUN_ID = "fece9a47d3e148c4bc390eb760c5f4f4"
+AGENTX_BENCHMARK = "benchmark_sglang_20261026_075016"
+AGENTX_RUN_SECONDS = 5287.67
+#: The values that run's report holds, as the child's ``baseline_perf`` records them.
+AGENTX_RUN_PERF = {
+    GRADED_INTVTY_P50: 132.1028,
+    GRADED_INTVTY: 81.72424,
+    GRADED_OUTPUT: 442.30405,
+    GRADED_DURATION: 3601.52025,
+    GRADED_ERROR_RATE: 0.06925207756232687,
+}
 
 
 def _git(root: Path, *args: str) -> str:
@@ -101,3 +124,49 @@ def with_roofline_profile(session: Path, run_id: str = ROOFLINE_RUN_ID) -> Path:
     (trace_dir / "capture_traces" / "bs_8_rank0.json.gz").write_bytes(b"capture")
     (run / "baseline_config.with_envs.yaml").write_text(POINT_CONFIG)
     return trace_dir
+
+
+def with_agentx_baseline_run(
+    session: Path,
+    perf: Mapping[str, float] | None = None,
+    *,
+    runtime_seconds: float = AGENTX_RUN_SECONDS,
+    **anchor: object,
+) -> Path:
+    """Add to the child ``session`` the AgentX baseline run its anchor was promoted from; return the run directory.
+
+    ``perf`` rewrites the run's report to hold those values instead of :data:`AGENTX_RUN_PERF`, and the child records
+    them as its ``baseline_perf``; ``anchor`` sets fields of the promoted attempt, its ``extras`` included.
+    """
+
+    run = session / "runs" / "baseline" / AGENTX_RUN_ID
+    shutil.copytree(AGENTX_RUN_DATA, run)
+    values = dict(AGENTX_RUN_PERF if perf is None else perf)
+    if perf is not None:
+        _rewrite_report(run / AGENTX_BENCHMARK / "benchmark_report.json", values)
+    state = json.loads((session / "state.json").read_text())
+    attempt: dict[str, object] = {
+        "task_id": AGENTX_RUN_ID,
+        "decision": "promoted",
+        "status": "succeeded",
+        "workspace": str(run / AGENTX_BENCHMARK),
+        "extras": {"baseline_tput": state["baseline_tput"], "is_revalidation": False},
+    }
+    attempt.update(anchor)
+    state["baseline_attempts"] = [attempt]
+    state["baseline_runtime_sec"] = runtime_seconds
+    state["baseline_measure_round_dropped"] = False
+    state["baseline_perf"] = values
+    write_child_session(session, state)
+    return run
+
+
+def _rewrite_report(report: Path, values: Mapping[str, float]) -> None:
+    document = json.loads(report.read_text())
+    metrics = document["agentx_metrics"]
+    metrics["latency_seconds"]["e2e_norm_intvty"].update(p50=values[GRADED_INTVTY_P50], p90=values[GRADED_INTVTY])
+    metrics["throughput"].update(
+        output_tokens_per_second=values[GRADED_OUTPUT], duration_seconds=values[GRADED_DURATION]
+    )
+    metrics["requests"]["error_rate"] = values[GRADED_ERROR_RATE] / 100
+    report.write_text(json.dumps(document))
