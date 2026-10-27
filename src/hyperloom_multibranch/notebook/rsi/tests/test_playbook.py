@@ -23,6 +23,7 @@ from hyperloom_multibranch.notebook.rsi.playbook import (
     H0,
     MAX_RULES,
     PLAYBOOK_KEY,
+    PLAYBOOK_LABEL,
     SAFETY_ENVELOPE,
     Crowned,
     Governs,
@@ -35,6 +36,7 @@ from hyperloom_multibranch.notebook.rsi.playbook import (
     Retired,
     changes,
     envelope_breaches,
+    playbook_label,
     problems,
     replaced,
     session_playbook,
@@ -102,6 +104,21 @@ def test_a_playbook_changes_one_thing_of_its_parent() -> None:
     assert problems(LONGER, H0) == ()
     assert problems(both, H0) == ("it changes stall_tests, grace_tests, rules of h0; a playbook changes one thing",)
     assert problems(Playbook("same"), H0) == ("it changes nothing of h0; a playbook changes one thing",)
+
+
+@pytest.mark.parametrize(
+    ("text", "label"),
+    [
+        ("probation_share 0.25 -> 0.5", "probation_share-0.25-0.5"),
+        ("  Stall 5! ", "stall-5"),
+        ("5 tests", "p-5-tests"),
+        ("H0", ""),
+        ("!!!", ""),
+    ],
+)
+def test_any_text_becomes_a_label_the_pool_takes_or_none(text: str, label: str) -> None:
+    assert playbook_label(text) == label
+    assert not label or PLAYBOOK_LABEL.fullmatch(label)
 
 
 def test_the_pool_keeps_each_playbook_once_and_refuses_another_under_its_label(tmp_path: Path) -> None:

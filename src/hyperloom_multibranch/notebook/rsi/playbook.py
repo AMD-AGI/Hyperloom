@@ -469,6 +469,18 @@ def replaced(playbook: Playbook, **numbers: float | int | None) -> Playbook:
     return dataclasses.replace(playbook, numbers=dataclasses.replace(playbook.numbers, **numbers))
 
 
+def playbook_label(text: str) -> str:
+    """``text`` as a label the pool takes (:data:`PLAYBOOK_LABEL`): in lower case, each run of characters other than
+    letters, digits, ``.`` and ``_`` one ``-``, starting with a letter; ``""`` when none is left, or only
+    :data:`H0_LABEL`."""
+
+    slug = re.sub(r"[^a-z0-9._]+", "-", text.strip().lower()).strip("-._")
+    if slug and not slug[0].isalpha():
+        slug = f"p-{slug}"
+    slug = slug[:64].rstrip("-._")
+    return slug if PLAYBOOK_LABEL.fullmatch(slug) and slug != H0_LABEL else ""
+
+
 __all__ = [
     "BOUNDS",
     "CROWNED_FORMAT",
@@ -495,6 +507,7 @@ __all__ = [
     "changes",
     "envelope_breaches",
     "held_by",
+    "playbook_label",
     "problems",
     "replaced",
     "session_playbook",

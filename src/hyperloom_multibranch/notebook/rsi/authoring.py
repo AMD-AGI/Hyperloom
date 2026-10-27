@@ -33,6 +33,7 @@ from hyperloom_multibranch.notebook.rsi.playbook import (
     PlaybookPool,
     PlaybookRule,
     changes,
+    playbook_label,
     problems,
 )
 from hyperloom_multibranch.notebook.rsi.replay import REPLAYED_NUMBERS
@@ -68,7 +69,8 @@ names no branch, session or model. The safety envelope stands whatever the playb
 Answer with one JSON object and nothing else, either
 {{"label": "...", "change": {{"number": "<name>", "value": <number or null>}}, "hypothesis": "...", "measure": "..."}},
 with "change" instead {{"add_rule": {{"governs": "stop" | "k" | "open", "text": "..."}}}} or {{"remove_rule": <its
-number>}}, and "measure" one of {", ".join(MEASURES)}; or {{"none": "<why nothing is worth trying>"}}."""
+number>}}, and "measure" one of {", ".join(MEASURES)}; or {{"none": "<why nothing is worth trying>"}}. The label is a
+short name in lower case, such as stall-5 or probation-share-0.5."""
 
 
 def _number_line(name: str, champion: Playbook) -> str:
@@ -185,6 +187,9 @@ def read_change(
     label, hypothesis = document.get("label"), document.get("hypothesis")
     if not isinstance(change, Mapping) or not isinstance(label, str) or not isinstance(hypothesis, str):
         return None, "a change names its label, the change and its hypothesis"
+    named = playbook_label(label)
+    if not named:
+        return None, f"{label!r} gives no label a playbook may take"
     if measure not in MEASURES:
         return None, f"{measure!r} is no decision measure; one of {', '.join(MEASURES)}"
     try:
@@ -193,7 +198,7 @@ def read_change(
     except (TypeError, ValueError) as exc:
         return None, str(exc)
     proposed = Playbook(
-        label.strip(),
+        named,
         numbers,
         rules,
         parent=champion.label,

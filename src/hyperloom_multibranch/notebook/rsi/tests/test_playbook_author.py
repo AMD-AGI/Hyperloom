@@ -72,12 +72,19 @@ def test_an_answer_gives_one_change_to_the_champion_as_a_playbook_on_trial() -> 
     assert removed is not None and (removed.rules, removed.parent) == ((), "ruled")
 
 
+def test_an_answer_labelled_as_the_pool_would_refuse_is_registered_under_a_label_it_takes() -> None:
+    proposed, why = read_change(_answer(**{**LATER, "label": "Stall 0.25 -> 8"}, measure="stop_value"), H0, WHO, 1.0)
+
+    assert why == "" and proposed is not None and proposed.label == "stall-0.25-8"
+
+
 @pytest.mark.parametrize(
     ("answer", "why"),
     [
         (_answer(none="the audit shows no stop to regret"), f"{NO_CHANGE}: the audit shows no stop to regret"),
         ("no JSON here", "the answer holds no JSON object"),
         (" \n", "the answer is empty"),
+        (_answer(**{**LATER, "label": "!!!"}, measure="stop_value"), "'!!!' gives no label"),
         (_answer(**LATER, measure="gain"), "'gain' is no decision measure"),
         (
             _answer(**{**LATER, "change": {"number": "stall_tests", "value": 12}}, measure="stop_value"),
