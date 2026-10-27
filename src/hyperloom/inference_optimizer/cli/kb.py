@@ -128,8 +128,8 @@ def _bootstrap_recipe_kb(
     try:
         if kb is None:
             from hyperloom.orchestrator.knowledge.remote_recipe import (
-                HyperloomRemoteKB,
                 RecipeScope,
+                RemoteRecipeClient,
                 RemoteRecipeValidationError,
                 RemoteWarmRecipeAdapter,
             )
@@ -144,7 +144,7 @@ def _bootstrap_recipe_kb(
                 )
                 args.kb_degraded_reason = getattr(args, "kb_degraded_reason", None) or "recipe_scope_invalid"
                 return kb
-            t0_kb = RemoteWarmRecipeAdapter(HyperloomRemoteKB.from_env(), warm_start_dir, recipe_scope)
+            t0_kb = RemoteWarmRecipeAdapter(RemoteRecipeClient.from_env(), warm_start_dir, recipe_scope)
             _publish_section_dirs(session_dir, warm_start_dir)
         else:
             _attach_recipe_audit_hook(kb, session_dir)

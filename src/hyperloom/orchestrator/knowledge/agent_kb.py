@@ -109,9 +109,8 @@ class DraftArtifactSink:
         self._sources[source_key] = ref
         return ref
 
-    def write(self, text: str, *, rel: str, kind: str) -> str:
+    def write(self, text: str, *, rel: str) -> str:
         """Stage a document the builder synthesised rather than found on disk."""
-        del kind  # the ref already carries the column and kind
         self._members[rel] = text.encode("utf-8")
         return rel
 

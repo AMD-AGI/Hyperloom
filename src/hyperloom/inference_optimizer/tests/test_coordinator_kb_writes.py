@@ -652,7 +652,7 @@ def test_finalize_recipe_is_skipped_under_agentx(native_benchmark, tmp_path, mon
         raise AssertionError("AgentX finalize reached a Recipe KB sink")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
+        "hyperloom.orchestrator.knowledge.remote_recipe.RemoteRecipeClient.from_env",
         _must_not_run,
     )
     out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
@@ -679,22 +679,19 @@ def test_finalize_recipe_reaches_agentx_remote_kb(native_benchmark, tmp_path, mo
 
     calls = []
 
-    class _Remote:
-        def write(self, canonical_id, state, *, session_id):
-            calls.append((canonical_id, state, session_id))
-            return SimpleNamespace(
-                status="written",
-                reason="",
-                canonical_id=canonical_id,
-                session_id=session_id,
-                primary_metric="interactivity_gain_pct",
-                primary_value=20.0,
-            )
+    def _write(state, canonical_id, session_id, *, client):
+        calls.append((canonical_id, state, session_id))
+        return SimpleNamespace(
+            status="written",
+            reason="",
+            canonical_id=canonical_id,
+            session_id=session_id,
+            primary_metric="interactivity_gain_pct",
+            primary_value=20.0,
+        )
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
-        lambda: _Remote(),
-    )
+    monkeypatch.setattr("hyperloom.orchestrator.knowledge.remote_recipe.RemoteRecipeClient.from_env", lambda: object())
+    monkeypatch.setattr("hyperloom.orchestrator.knowledge.remote_recipe.write_final_remote_recipe", _write)
     out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
     assert out["status"] == "written"
     assert calls and calls[0][0].startswith("agentx:")
@@ -738,7 +735,7 @@ def test_agentx_remote_kb_never_receives_a_gain_measured_for_an_older_recipe(
         raise AssertionError("an unvalidated AgentX stack reached the remote KB")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
+        "hyperloom.orchestrator.knowledge.remote_recipe.RemoteRecipeClient.from_env",
         _must_not_write,
     )
 
@@ -764,21 +761,18 @@ def test_agentx_remote_skip_audit_does_not_invent_throughput_metric(native_bench
         kb_disabled=False,
     )
 
-    class _Remote:
-        def write(self, canonical_id, state, *, session_id):
-            return SimpleNamespace(
-                status="skipped",
-                reason="no_new_keep_or_pure_warm_replay",
-                canonical_id=canonical_id,
-                session_id=session_id,
-                primary_metric="",
-                primary_value=0.0,
-            )
+    def _write(state, canonical_id, session_id, *, client):
+        return SimpleNamespace(
+            status="skipped",
+            reason="no_new_keep_or_pure_warm_replay",
+            canonical_id=canonical_id,
+            session_id=session_id,
+            primary_metric="",
+            primary_value=0.0,
+        )
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
-        lambda: _Remote(),
-    )
+    monkeypatch.setattr("hyperloom.orchestrator.knowledge.remote_recipe.RemoteRecipeClient.from_env", lambda: object())
+    monkeypatch.setattr("hyperloom.orchestrator.knowledge.remote_recipe.write_final_remote_recipe", _write)
     out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
     assert out["status"] == "skipped"
 

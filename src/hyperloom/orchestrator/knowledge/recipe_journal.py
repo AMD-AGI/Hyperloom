@@ -54,7 +54,6 @@ _SEVERITY_REGRESS: str = "regress"
 # Use an exact lookup so a reason token cannot collide with the same text inside
 # an exception name or explanatory message.
 _REMOTE_RESULT_TYPES: dict[str, str] = {
-    "KB_STORE_URL/TOKEN not configured": _close_out.RESULT_KB_DISABLED,
     "no_new_keep_or_pure_warm_replay": _close_out.RESULT_NO_NEW_KEEP,
     "nonfinite_optimized_throughput": _close_out.RESULT_INVALID_THROUGHPUT,
     "missing_optimized_throughput": _close_out.RESULT_MISSING_THROUGHPUT,
@@ -997,11 +996,11 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         session_id = str(state.recipe_kb_session_id or state.session_id or self.session_dir.name)
         canonical_id = ""
-        from ..knowledge.remote_recipe import HyperloomRemoteKB, KBStoreError
+        from ..knowledge.remote_recipe import KBStoreError, RemoteRecipeClient, write_final_remote_recipe
 
         try:
             canonical_id = self.workload_canonical_id()
-            written = HyperloomRemoteKB.from_env().write(canonical_id, state, session_id=session_id)
+            written = write_final_remote_recipe(state, canonical_id, session_id, client=RemoteRecipeClient.from_env())
         except (KBStoreError, OSError, ValueError) as exc:
             self._record_remote_recipe_audit(
                 source,

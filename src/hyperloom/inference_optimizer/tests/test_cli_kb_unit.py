@@ -127,7 +127,7 @@ def test_bootstrap_recipe_kb_remote_stores_metadata_not_replay_payload(
             }
 
     monkeypatch.setattr(
-        remote_recipe.HyperloomRemoteKB,
+        remote_recipe.RemoteRecipeClient,
         "from_env",
         classmethod(lambda cls: _Remote()),
     )
